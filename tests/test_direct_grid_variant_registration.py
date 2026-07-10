@@ -2217,18 +2217,23 @@ def _mo_snapshot_live_basin(
 
     Returns a dict with the active model row hash, the active-station-set
     row hashes (sorted for order-stability), and the identifying fields the
-    receipt needs (``active_model_id``, ``active_station_count``). Uses the
-    ``geom::text`` WKB projection so the hash captures the PostGIS point
-    identity byte-for-byte across the before/after boundary.
+    receipt needs (``active_model_id``, ``active_station_count``). Uses
+    ``to_jsonb(row.*)`` on the server so the hash covers **every** column
+    (including columns like ``rshud_code_version`` / ``autoshud_code_version``
+    / ``container_image`` / ``created_at`` on ``core.model_instance`` and
+    ``created_at`` on ``met.met_station`` that were previously invisible to
+    a hand-maintained column list). ``json.loads`` + ``sort_keys=True`` on
+    the Python side canonicalises key ordering so the resulting sha256 is
+    stable across PostgreSQL jsonb serialization variants.
     """
 
     with connection.cursor() as cursor:
         cursor.execute(
             """
-            SELECT model_id, basin_version_id, river_network_version_id,
-                   mesh_version_id, calibration_version_id, shud_code_version,
-                   model_package_uri, active_flag, lifecycle_state, resource_profile
-            FROM core.model_instance
+            SELECT
+                model_id::text AS model_id,
+                to_jsonb(m.*)::text AS full_row_json
+            FROM core.model_instance m
             WHERE basin_version_id = %s
               AND active_flag = true
               AND lifecycle_state = 'active'
@@ -2240,28 +2245,32 @@ def _mo_snapshot_live_basin(
             f"live-analog basin {basin_version_id!r} has no active model"
         )
         active_model_dict = dict(active_model)
+        active_model_row = json.loads(active_model_dict["full_row_json"])
 
         cursor.execute(
             """
-            SELECT station_id, basin_version_id, station_name,
-                   ST_AsText(geom) AS geom_wkt, elevation_m, station_role,
-                   active_flag, properties_json, grid_snapshot_id
-            FROM met.met_station
+            SELECT
+                station_id::text AS station_id,
+                to_jsonb(s.*)::text AS full_row_json
+            FROM met.met_station s
             WHERE basin_version_id = %s
               AND active_flag = true
             ORDER BY station_id
             """,
             (basin_version_id,),
         )
-        active_stations = [dict(row) for row in cursor.fetchall()]
+        active_station_rows = [dict(row) for row in cursor.fetchall()]
 
-    station_hashes = sorted(_mo_row_hash(row) for row in active_stations)
+    active_station_payloads = [
+        json.loads(row["full_row_json"]) for row in active_station_rows
+    ]
+    station_hashes = sorted(_mo_row_hash(row) for row in active_station_payloads)
     stations_agg_hash = _mo_row_hash({"station_hashes": station_hashes})
     return {
         "basin_version_id": basin_version_id,
         "active_model_id": str(active_model_dict["model_id"]),
-        "active_model_hash": _mo_row_hash(active_model_dict),
-        "active_station_count": len(active_stations),
+        "active_model_hash": _mo_row_hash(active_model_row),
+        "active_station_count": len(active_station_payloads),
         "active_stations_hash": stations_agg_hash,
     }
 
@@ -2729,6 +2738,21 @@ def test_mechanism_only_live_basins_undisturbed(
         finally:
             connection.close()
 
+    # --- Fixture invariant: synthetic ∩ live basin_version_ids = ∅ ---------
+    #
+    # Guards against a future rename or index-arithmetic refactor accidentally
+    # colliding a synthetic scope onto a live-analog scope, which would make
+    # the before/after byte-equality assertion trivially pass while actually
+    # touching live rows. Enforced at the receipt-shape boundary so a broken
+    # fixture cannot ship a green receipt.
+    synthetic_basin_version_ids = {
+        reg["basin_version_id"] for reg in synthetic_registrations
+    }
+    assert set(live_basin_version_ids) & synthetic_basin_version_ids == set(), (
+        "fixture defect: synthetic basin_version_ids overlap live-analog scopes "
+        f"(overlap={set(live_basin_version_ids) & synthetic_basin_version_ids!r})"
+    )
+
     # --- After snapshot ----------------------------------------------------
     connection = psycopg2.connect(
         integration_database_url, cursor_factory=RealDictCursor
@@ -2807,15 +2831,25 @@ def test_mechanism_only_live_basins_undisturbed(
         "test_id": "test_mechanism_only_live_basins_undisturbed",
         "live_basin_count": _MECHANISM_ONLY_LIVE_BASIN_COUNT,
         "synthetic_variant_count": _MECHANISM_ONLY_SYNTHETIC_VARIANT_COUNT,
+        # §5.1 mandates a "before/after" receipt: emit both hashes + both
+        # station counts per live basin so a downstream verifier reading the
+        # JSON alone can cross-check byte-identity without re-running the test.
+        # Zipped strict=True: any length mismatch would already have tripped
+        # the pytest assertion above, but strict= guards receipt shape too.
         "live_basins": [
             {
-                "basin_version_id": snap["basin_version_id"],
-                "active_model_id": snap["active_model_id"],
-                "active_model_hash": snap["active_model_hash"],
-                "active_station_count": snap["active_station_count"],
-                "active_stations_hash": snap["active_stations_hash"],
+                "basin_version_id": before["basin_version_id"],
+                "active_model_id": before["active_model_id"],
+                "before_active_model_hash": before["active_model_hash"],
+                "after_active_model_hash": after["active_model_hash"],
+                "before_active_station_count": before["active_station_count"],
+                "after_active_station_count": after["active_station_count"],
+                "before_active_stations_hash": before["active_stations_hash"],
+                "after_active_stations_hash": after["active_stations_hash"],
             }
-            for snap in after_snapshots
+            for before, after in zip(
+                before_snapshots, after_snapshots, strict=True
+            )
         ],
         "registered_synthetic_variants": [
             {
