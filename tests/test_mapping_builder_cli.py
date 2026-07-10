@@ -60,8 +60,12 @@ from workers.mapping_builder.binding import (
     ParserRoundTripError,
 )
 from workers.mapping_builder.cli import (
+    DEFAULT_OBJECT_STORE_ROOT,
     BuildResult,
+    PackagePathAuthorityError,
+    ResolvedPackagePath,
     build_direct_grid_variant,
+    resolve_package_path,
 )
 from workers.mapping_builder.evidence import (
     ALGORITHM_ID,
@@ -1048,35 +1052,414 @@ def test_build_direct_grid_variant_rejects_pre_existing_variant_root(
 
 
 # =========================================================================
-# ARGPARSE SCAFFOLD: main() returns exit code 2 with unimplemented diagnostic
+# §2.2 INPUT-AUTHORITY RESOLVER (SUB-3)
+# =========================================================================
+# Every test below is either matched by
+#   pytest -k "input_authority or dev_workspace or object_store_root"
+# or exercises the argparse main whose behavior is the SUB-3 evidence
+# floor. The resolver is pure path-string logic — no filesystem read on
+# any test path — and the sanctioned test channel for landing tmp
+# object-store fixtures is ``--object-store-root=<tmp>``.
+
+
+def test_input_authority_object_store_shape_default_root_accepted() -> None:
+    """A path shaped under the default root is accepted; override flag is False."""
+    package_path = (
+        DEFAULT_OBJECT_STORE_ROOT
+        / "models"
+        / "basins_keliya_shud"
+        / "rel_v1"
+        / "package"
+    )
+
+    resolved = resolve_package_path(package_path=package_path)
+
+    assert isinstance(resolved, ResolvedPackagePath)
+    assert resolved.baseline_root == package_path
+    assert resolved.basin_name == "keliya"
+    assert resolved.release_id == "rel_v1"
+
+    evidence = resolved.input_authority_evidence
+    assert evidence["kind"] == "input_authority"
+    assert evidence["package_path"] == str(package_path)
+    assert evidence["basin_name"] == "keliya"
+    assert evidence["release_id"] == "rel_v1"
+    assert evidence["channel"] == "object_store"
+    assert evidence["object_store_root"] == str(DEFAULT_OBJECT_STORE_ROOT)
+    assert evidence["object_store_root_override"] is False
+    assert evidence["dev_workspace_override"] is None
+
+
+def test_input_authority_object_store_root_override_accepted_and_recorded(
+    tmp_path: pathlib.Path,
+) -> None:
+    """--object-store-root override is honored and recorded on the evidence."""
+    staged_root = tmp_path / "staged"
+    package_path = (
+        staged_root
+        / "models"
+        / "basins_keliya_shud"
+        / "rel_v1"
+        / "package"
+    )
+
+    resolved = resolve_package_path(
+        package_path=package_path,
+        object_store_root=staged_root,
+    )
+
+    evidence = resolved.input_authority_evidence
+    assert evidence["object_store_root_override"] is True
+    assert evidence["object_store_root"] == str(staged_root)
+    assert evidence["channel"] == "object_store"
+    assert evidence["basin_name"] == "keliya"
+    assert evidence["release_id"] == "rel_v1"
+    assert evidence["dev_workspace_override"] is None
+
+
+# Both dev-workspace prefixes declared by
+# :data:`workers.mapping_builder.cli._DEV_WORKSPACE_PREFIXES`. Parametrized
+# fold (Phase 6): every dev-workspace test below runs twice — once per
+# prefix — so a silent typo or removal of the node-22 (``/volume/nwm/Basins``)
+# entry cannot pass while the node-27 (``/home/ghdc/nwm/Basins``) entry
+# alone still works.
+_DEV_WORKSPACE_PREFIX_PARAMS = [
+    pathlib.Path("/home/ghdc/nwm/Basins"),
+    pathlib.Path("/volume/nwm/Basins"),
+]
+
+
+@pytest.mark.parametrize("dev_prefix", _DEV_WORKSPACE_PREFIX_PARAMS)
+def test_dev_workspace_path_rejected_by_default_no_read(
+    dev_prefix: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dev-workspace path fails closed with no filesystem read by default.
+
+    Trip-wires ``pathlib.Path.exists``, ``pathlib.Path.iterdir``, and
+    ``pathlib.Path.read_bytes`` for the duration of the call so any
+    resolver-internal filesystem interaction with the operator path
+    surfaces as an assertion here (not as a silent authority bypass).
+    Runs once per prefix in
+    :data:`workers.mapping_builder.cli._DEV_WORKSPACE_PREFIXES`.
+    """
+    filesystem_hits: list[str] = []
+
+    def _hit(method: str):
+        def _trip(self, *_args, **_kwargs):
+            filesystem_hits.append(f"{method}:{self!s}")
+            raise AssertionError(
+                f"resolver called Path.{method}({self!s}) — §2.2 forbids "
+                "any filesystem read on a rejected dev-workspace path"
+            )
+        return _trip
+
+    monkeypatch.setattr(pathlib.Path, "exists", _hit("exists"))
+    monkeypatch.setattr(pathlib.Path, "iterdir", _hit("iterdir"))
+    monkeypatch.setattr(pathlib.Path, "read_bytes", _hit("read_bytes"))
+    monkeypatch.setattr(pathlib.Path, "read_text", _hit("read_text"))
+
+    with pytest.raises(PackagePathAuthorityError, match="dev-workspace"):
+        resolve_package_path(
+            package_path=dev_prefix / "keliya" / "package",
+        )
+    assert filesystem_hits == []
+
+
+@pytest.mark.parametrize("dev_prefix", _DEV_WORKSPACE_PREFIX_PARAMS)
+def test_dev_workspace_override_accepted_and_recorded(
+    dev_prefix: pathlib.Path,
+) -> None:
+    """--allow-dev-workspace + rationale unblocks the path and records the override.
+
+    Runs once per prefix in
+    :data:`workers.mapping_builder.cli._DEV_WORKSPACE_PREFIXES`.
+    """
+    dev_path = dev_prefix / "keliya" / "package"
+
+    resolved = resolve_package_path(
+        package_path=dev_path,
+        allow_dev_workspace=True,
+        dev_workspace_rationale="node-27 emergency debug",
+    )
+
+    assert resolved.basin_name == "keliya"
+    evidence = resolved.input_authority_evidence
+    assert evidence["channel"] == "dev_workspace"
+    assert evidence["dev_workspace_override"] == {
+        "path": str(dev_path),
+        "rationale": "node-27 emergency debug",
+    }
+
+
+@pytest.mark.parametrize("dev_prefix", _DEV_WORKSPACE_PREFIX_PARAMS)
+def test_dev_workspace_override_requires_non_empty_rationale(
+    dev_prefix: pathlib.Path,
+) -> None:
+    """--allow-dev-workspace without a rationale still fails closed.
+
+    Runs once per prefix in
+    :data:`workers.mapping_builder.cli._DEV_WORKSPACE_PREFIXES`.
+    """
+    dev_path = dev_prefix / "keliya" / "package"
+
+    with pytest.raises(PackagePathAuthorityError, match="rationale"):
+        resolve_package_path(
+            package_path=dev_path,
+            allow_dev_workspace=True,
+            dev_workspace_rationale=None,
+        )
+    with pytest.raises(PackagePathAuthorityError, match="rationale"):
+        resolve_package_path(
+            package_path=dev_path,
+            allow_dev_workspace=True,
+            dev_workspace_rationale="   ",
+        )
+
+
+def test_resolve_package_path_is_deterministic(tmp_path: pathlib.Path) -> None:
+    """Same kwargs twice produce byte-identical resolution + evidence.
+
+    :func:`resolve_package_path` is claimed to be pure lexical path
+    arithmetic — no filesystem read, no clock, no counter, no memoization.
+    This test locks that contract on BOTH sanctioned channels
+    (object-store shape with ``--object-store-root`` override, and
+    dev-workspace override) so a future regression that injects a UUID,
+    monotonic id, or cached state slips through only by breaking this
+    determinism assertion.
+    """
+    # Channel 1: object-store shape via --object-store-root override.
+    staged_root = tmp_path / "staged"
+    package_path = (
+        staged_root
+        / "models"
+        / "basins_keliya_shud"
+        / "rel_v1"
+        / "package"
+    )
+    res1 = resolve_package_path(
+        package_path=package_path,
+        object_store_root=staged_root,
+    )
+    res2 = resolve_package_path(
+        package_path=package_path,
+        object_store_root=staged_root,
+    )
+    assert res1 == res2
+    assert res1.input_authority_evidence == res2.input_authority_evidence
+
+    # Channel 2: dev-workspace override for symmetry across both accepted channels.
+    dev_path = pathlib.Path("/home/ghdc/nwm/Basins/keliya/package")
+    dev1 = resolve_package_path(
+        package_path=dev_path,
+        allow_dev_workspace=True,
+        dev_workspace_rationale="determinism lock",
+    )
+    dev2 = resolve_package_path(
+        package_path=dev_path,
+        allow_dev_workspace=True,
+        dev_workspace_rationale="determinism lock",
+    )
+    assert dev1 == dev2
+    assert dev1.input_authority_evidence == dev2.input_authority_evidence
+
+
+def test_object_store_root_non_matching_path_fails_closed_no_read_no_output(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A path that does not sit under --object-store-root fails closed silently."""
+    staged_root = tmp_path / "staged"
+
+    # capsys baseline: capture any stray print / stderr from the resolver.
+    _ = capsys.readouterr()
+
+    with pytest.raises(PackagePathAuthorityError):
+        resolve_package_path(
+            package_path=pathlib.Path(
+                "/some/other/path/models/basins_keliya_shud/rel_v1/package"
+            ),
+            object_store_root=staged_root,
+        )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_input_authority_neither_shape_fails_closed() -> None:
+    """A random path (neither object-store nor dev-workspace) fails closed."""
+    with pytest.raises(PackagePathAuthorityError, match="neither"):
+        resolve_package_path(package_path=pathlib.Path("/random/junk/path"))
+
+
+# =========================================================================
+# §2.2 G0 EVIDENCE PROPAGATION: input_authority merges into evidence_ref
 # =========================================================================
 
 
-def test_main_argparse_scaffold_returns_exit_code_2_with_unimplemented_diagnostic(
-    capsys: pytest.CaptureFixture[str],
+def test_g0_evidence_ref_carries_input_authority_when_build_receives_it(
+    tmp_path: pathlib.Path,
 ) -> None:
-    """The SUB-3-deferred scaffold returns exit code 2 with a JSON diagnostic.
+    """build_direct_grid_variant merges input_authority_evidence into G0.
 
-    Guards against a SUB-3 wiring regression that accidentally returns 0
-    (silently claiming a successful no-op build) or drops the JSON
-    diagnostic. Exit code 2 is the pinned scaffold contract until the
-    §2.2 operator argv resolver lands.
+    Uses the sanctioned tmp ``--object-store-root`` channel: the keliya
+    fixture is staged under
+    ``<tmp>/staged/models/basins_keliya_shud/<release>/package/`` and
+    the resolver's returned evidence dict is threaded through
+    ``build_direct_grid_variant``. The resulting evidence bundle's G0
+    ``evidence_ref`` MUST carry the ``input_authority`` sub-dict verbatim.
     """
+    staged_root = tmp_path / "staged"
+    release_id = "rel_v1"
+    staged_package = (
+        staged_root
+        / "models"
+        / "basins_keliya_shud"
+        / release_id
+        / "package"
+    )
+    # Stage the keliya fixture at the sanctioned path.
+    shutil.copytree(_KELIYA_FIXTURE_DIR, staged_package)
+    (staged_package / "build.py").unlink(missing_ok=True)
+    for rel_paths in _CATEGORY_FILES.values():
+        for rel_path in rel_paths:
+            target = staged_package / rel_path
+            if target.exists():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(f"stub:{rel_path}\n".encode("utf-8"))
+
+    resolved = resolve_package_path(
+        package_path=staged_package,
+        object_store_root=staged_root,
+    )
+
+    variant_root = tmp_path / "variant"
+    domain_shp = _write_domain_shp(tmp_path)
+    _, snapshot_cells, loader, snapshot_reference = _snapshot_and_loader()
+    distance_qa, capacity_report = _canned_qa_and_capacity()
+
+    result = build_direct_grid_variant(
+        baseline_root=resolved.baseline_root,
+        variant_root=variant_root,
+        source_id=_SOURCE_ID,
+        grid_id=_GRID_ID,
+        grid_snapshot_loader=loader,
+        snapshot_cells=snapshot_cells,
+        grid_snapshot_reference=snapshot_reference,
+        mapping_asset_identity=_MAPPING_ASSET_IDENTITY,
+        model_input_package_id=_MODEL_INPUT_PACKAGE_ID,
+        binding_uri=_BINDING_URI,
+        sp_att_manifest_path=_SP_ATT_MANIFEST_PATH,
+        category_files=_CATEGORY_FILES,
+        state_schema_bytes=b"state-schema-v1",
+        solver_config_bytes=b"solver-config-v1",
+        domain_shp_path=domain_shp,
+        proj_crs_database_version=_PROJ_CRS_DB_VERSION,
+        approvals=Approvals(
+            builder_approver_id="tester@example.com",
+            reviewer_approver_id="reviewer@example.com",
+            small_basin_override_approver_id=None,
+        ),
+        rollback_target=RollbackTarget(
+            previous_mapping_asset_checksum="",
+            previous_mapping_asset_label="<initial>",
+        ),
+        distance_qa=distance_qa,
+        capacity_report=capacity_report,
+        input_authority_evidence=resolved.input_authority_evidence,
+    )
+
+    g0_ref = result.evidence_package.gate_results.g0.evidence_ref
+    assert g0_ref["kind"] == "baseline_integrity_report"
+    assert "checksum" in g0_ref
+    # The input_authority sub-dict is present and byte-equal to the
+    # resolver's returned evidence.
+    assert g0_ref["input_authority"] == dict(resolved.input_authority_evidence)
+    # And in particular records the non-default object-store root.
+    assert g0_ref["input_authority"]["object_store_root"] == str(staged_root)
+    assert g0_ref["input_authority"]["object_store_root_override"] is True
+    assert g0_ref["input_authority"]["channel"] == "object_store"
+
+
+def test_g0_evidence_ref_omits_input_authority_when_build_receives_none(
+    tmp_path: pathlib.Path,
+) -> None:
+    """When the caller bypasses the argv resolver, G0 keeps its SUB-2 shape."""
+    result = _run_build(tmp_path)
+
+    g0_ref = result.evidence_package.gate_results.g0.evidence_ref
+    assert g0_ref["kind"] == "baseline_integrity_report"
+    assert "checksum" in g0_ref
+    assert "input_authority" not in g0_ref
+
+
+# =========================================================================
+# §2.2 ARGPARSE MAIN: resolver success + failure + parse error
+# =========================================================================
+
+
+def test_argparse_main_object_store_root_success_prints_resolution_and_exits_zero(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A resolvable object-store shape → exit 0 + resolution JSON on stdout."""
+    staged_root = tmp_path / "staged"
+    package_path = (
+        staged_root
+        / "models"
+        / "basins_keliya_shud"
+        / "rel_v1"
+        / "package"
+    )
+
     exit_code = cli_module.main(
         [
-            "--baseline-root",
-            "/tmp/does-not-matter",
+            "--package-path",
+            str(package_path),
             "--variant-root",
-            "/tmp/also-does-not-matter",
+            str(tmp_path / "variant-out"),
+            "--object-store-root",
+            str(staged_root),
         ]
     )
-    assert exit_code == 2, (
-        f"scaffold main() must return exit code 2 (SUB-3 pending); got {exit_code}"
-    )
+
+    assert exit_code == 0
     captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["status"] == "resolved"
+    assert payload["basin_name"] == "keliya"
+    assert payload["release_id"] == "rel_v1"
+    assert payload["baseline_root"] == str(package_path)
+    assert payload["variant_root"] == str(tmp_path / "variant-out")
+    evidence = payload["input_authority_evidence"]
+    assert evidence["object_store_root_override"] is True
+    assert evidence["object_store_root"] == str(staged_root)
+    assert evidence["channel"] == "object_store"
+    # No error text on stderr.
+    assert captured.err == ""
+
+
+def test_argparse_main_input_authority_failure_prints_error_and_exits_nonzero(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A random path → exit 1 + JSON error diagnostic on stderr (nothing on stdout)."""
+    exit_code = cli_module.main(
+        [
+            "--package-path",
+            "/random/junk/path",
+            "--variant-root",
+            str(tmp_path / "variant-out"),
+        ]
+    )
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
     diagnostic = json.loads(captured.err)
-    assert diagnostic["status"] == "unimplemented"
-    assert "SUB-3" in diagnostic["reason"]
+    assert diagnostic["status"] == "error"
+    assert diagnostic["error"] == "PackagePathAuthorityError"
+    assert "neither" in diagnostic["message"]
 
 
 def test_main_argparse_parse_error_exits_2(
@@ -1166,10 +1549,14 @@ def test_no_duplicated_stage_logic_all_stage_functions_come_from_stage_modules()
 
     # 3. Thin-CLI line-count guardrail. A modest ceiling — expansion beyond
     # this suggests stage logic (not orchestration) creeping into cli.py.
+    # SUB-3 (§2.2) landed the input-authority resolver (~230 lines including
+    # docstrings + constants + exception + dataclass), pushing the ceiling
+    # up. Deliberate bump — the resolver IS orchestration surface (argv
+    # authority validation), not a G0..G5 stage re-implementation.
     line_count = len(cli_path.read_text(encoding="utf-8").splitlines())
-    assert line_count < 800, (
+    assert line_count < 1200, (
         f"cli.py grew to {line_count} lines; thin-CLI convention "
-        "(Decision 3) suggests keeping the orchestrator under ~500 lines. "
+        "(Decision 3) suggests keeping the orchestrator under ~1000 lines. "
         "If additional orchestration is genuinely needed, raise this "
         "ceiling deliberately — don't ratchet silently."
     )
