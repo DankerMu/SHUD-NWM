@@ -10,6 +10,45 @@ from typing import Any, Protocol
 from services.orchestrator import source_cycle_raw_manifest
 from services.orchestrator.scheduler_timing import set_current_scheduler_pass_timing
 
+# Epic #961 SUB-10 (#971) §4.2(a): named blocked-candidate reason + error_code
+# distinguishing "requested source has no usable data for this cycle" from other
+# ``forcing_production_blocked`` causes. Detection stays at THIS scheduler seam
+# (``produce_forcing_for_candidates`` below) by pattern-matching the two
+# ``ForcingProductionError`` message prefixes the producer emits when required
+# canonical products are absent — ``workers/forcing_producer/producer.py`` bytes
+# do not change (INV-5: producer contract stable). Exported constants let tests
+# and downstream consumers reference the classification without stringly-typed
+# coupling.
+FORCING_SOURCE_MISSING_FOR_CYCLE_REASON = "forcing_source_missing_for_cycle"
+MISSING_SOURCE_DATA_FOR_CYCLE_ERROR_CODE = "MISSING_SOURCE_DATA_FOR_CYCLE"
+
+# Exact prefixes of the ``ForcingProductionError`` messages the producer raises
+# when required canonical products are absent for the requested
+# ``(source_id, cycle_time)``. All four sites collapse to the same "no usable
+# canonical data for this (source, cycle)" verdict from the scheduler's
+# vantage point — pre-run, grid-discovery, and end-of-run validation echo all
+# converge on the missing-source classification:
+#   * ``workers/forcing_producer/producer.py:1118`` — ``"Missing required
+#     canonical products: <variable>:<timestamp>, ..."`` (pre-run and mid-run
+#     variable/cell gaps land here — the producer collects the full missing
+#     set before raising).
+#   * ``workers/forcing_producer/producer.py:1126`` — ``"No canonical products
+#     are available."`` (no cell of any variable has usable data, pre-run).
+#   * ``workers/forcing_producer/producer.py:1259`` — ``"No canonical products
+#     are available for interpolation grid discovery."`` (same leading prefix;
+#     interpolation grid discovery cannot proceed).
+#   * ``workers/forcing_producer/producer.py:3205`` — ``"No canonical products
+#     are available."`` (validation echo at end-of-run; same prefix).
+# The prefixes are anchored (``str.startswith``) — a substring match anywhere
+# in the message would false-positive-remap unrelated ForcingProductionError
+# instances that happen to embed the same phrase in an error tail. The producer
+# message drift regression lock lives in
+# ``tests/test_source_scoped_dispatch.py::test_missing_source_prefixes_still_match_producer_raise_sites``.
+_MISSING_SOURCE_DATA_ERROR_PREFIXES: tuple[str, ...] = (
+    "Missing required canonical products",
+    "No canonical products are available",
+)
+
 
 class SchedulerExecutionCandidate(Protocol):
     candidate_id: str
@@ -89,6 +128,64 @@ class SchedulerExecutionContext:
     timing: Any | None = None
 
 
+def _is_missing_source_data_error(error: Exception) -> bool:
+    """True when ``error`` is a ``ForcingProductionError`` (or subclass) whose
+    message begins with one of the producer's two "no usable canonical data
+    for this cycle" prefixes.
+
+    Epic #961 SUB-10 (#971) §4.2(a): detection lives at the SCHEDULER SEAM so
+    the producer contract stays stable (INV-5, HARD BOUNDARY — ``workers/
+    forcing_producer/`` bytes do not change). The match is intentionally
+    tight: ``str.startswith`` against fixed prefixes, not a substring scan,
+    so an unrelated ``ForcingProductionError`` whose message happens to
+    embed the phrase (e.g. from a wrapped chained cause) is not remapped.
+    Any other ``ForcingProductionError`` (or non-forcing exception) continues
+    to fall through to the existing generic ``"forcing_production_blocked"``
+    reason + ``FORCING_PRODUCTION_BLOCKED`` error_code — no regression.
+    """
+
+    if error.__class__.__name__ != "ForcingProductionError":
+        return False
+    message = str(error)
+    return any(message.startswith(prefix) for prefix in _MISSING_SOURCE_DATA_ERROR_PREFIXES)
+
+
+def _missing_source_data_evidence(
+    context: SchedulerExecutionContext,
+    candidate: SchedulerExecutionCandidate,
+    error: Exception,
+) -> dict[str, Any]:
+    """Reuse the existing forcing-blocked evidence shape and remap only the
+    ``error_code`` + residual-blocker classification for the "missing source
+    data for cycle" case.
+
+    Preserves the full existing blocked-candidate evidence shape (all identity
+    fields from ``_candidate_identity_evidence`` — including
+    ``source_id``/``cycle_time_utc`` — plus the top-level ``stage``,
+    ``status``, and ``residual_blockers`` structure) so downstream consumers
+    don't see a schema break. Only ``error_code`` at the top level and the
+    residual-blocker ``code``/``quality_flag`` remap from
+    ``FORCING_PRODUCTION_BLOCKED``/``forcing_production_blocked`` to the
+    missing-source classification.
+    """
+
+    item = dict(context.candidate_forcing_blocked_evidence(candidate, error))
+    item["error_code"] = MISSING_SOURCE_DATA_FOR_CYCLE_ERROR_CODE
+    residual_blockers = item.get("residual_blockers")
+    if isinstance(residual_blockers, list) and residual_blockers:
+        remapped: list[Any] = []
+        for entry in residual_blockers:
+            if isinstance(entry, Mapping):
+                remapped_entry = dict(entry)
+                remapped_entry["code"] = MISSING_SOURCE_DATA_FOR_CYCLE_ERROR_CODE
+                remapped_entry["quality_flag"] = FORCING_SOURCE_MISSING_FOR_CYCLE_REASON
+                remapped.append(remapped_entry)
+            else:
+                remapped.append(entry)
+        item["residual_blockers"] = remapped
+    return item
+
+
 def produce_forcing_for_candidates(
     context: SchedulerExecutionContext,
     candidates: Sequence[SchedulerExecutionCandidate],
@@ -120,6 +217,26 @@ def produce_forcing_for_candidates(
                 canonical_identity=context.candidate_scheduler_canonical_identity(candidate),
             )
         except Exception as error:
+            # Epic #961 SUB-10 (#971) §4.2(a): classify "missing source data
+            # for cycle" distinctly from other ``forcing_production_blocked``
+            # causes. Detection stays at this seam via a tight prefix match on
+            # the producer's ForcingProductionError message; producer bytes
+            # unchanged (INV-5). Both pre-run and mid-run missing-variable
+            # gaps land here — the producer raises the same two messages
+            # regardless of when the gap is detected inside its own run, so
+            # mid-run splicing to another source is structurally impossible at
+            # this seam (§4.2 "Mid-run splicing of another source is forbidden").
+            if _is_missing_source_data_error(error):
+                item = _missing_source_data_evidence(context, candidate, error)
+                evidence.append(item)
+                blocked.append(
+                    context.blocked_candidate(
+                        candidate,
+                        FORCING_SOURCE_MISSING_FOR_CYCLE_REASON,
+                        state_evidence=item,
+                    )
+                )
+                continue
             item = context.candidate_forcing_blocked_evidence(candidate, error)
             evidence.append(item)
             blocked.append(
