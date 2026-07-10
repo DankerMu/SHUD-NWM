@@ -59,8 +59,10 @@ from services.orchestrator import scheduler_execution as scheduler_execution_mod
 from services.orchestrator.scheduler import ProductionScheduler as _RealProductionScheduler
 from services.orchestrator.scheduler import ProductionSchedulerConfig
 from services.orchestrator.scheduler_execution import (
+    _MISSING_SOURCE_DATA_ERROR_PREFIXES,
     FORCING_SOURCE_MISSING_FOR_CYCLE_REASON,
     MISSING_SOURCE_DATA_FOR_CYCLE_ERROR_CODE,
+    _missing_source_data_evidence,
 )
 from workers.data_adapters.base import CycleDiscovery
 from workers.forcing_producer.producer import ForcingProductionError
@@ -821,6 +823,15 @@ _LEGACY_COMPAT_SYMBOL_TOKENS: tuple[str, ...] = (
     "legacy_package_selector",
     "legacy_compat",
     "idw_fallback",
+    # Snake-case module vectors: a future refactor that adds e.g.
+    # ``from workers.legacy_forcing_compat import LegacyIDW`` would collapse
+    # (after ``.replace("_", "")``) to ``workers.legacyforcingcompat.legacyidw``
+    # -- the tokens below catch that normalized form. See
+    # ``test_no_legacy_compat_detector_catches_snake_case_module`` for the
+    # detector's own regression lock.
+    "legacyforcingcompat",
+    "legacyforcing",
+    "legacycompat",
 )
 
 
@@ -851,20 +862,66 @@ def test_no_legacy_compat_scheduler_execution_import_graph(
     layer is consulted".
 
     The check walks ``services.orchestrator.scheduler_execution``'s imports
-    and asserts none contain the forbidden tokens. If a future refactor
-    reintroduces such a layer, this test fails at import graph.
+    and asserts none contain the forbidden tokens in either raw form (catches
+    ``LegacyForcingCompat`` / ``legacy_compat``) or normalized form with all
+    ``_`` stripped (catches ``legacy_forcing_compat`` -> ``legacyforcingcompat``,
+    which no single raw substring token would match because the mid-segment
+    ``_forcing_`` breaks up ``legacy_compat``).
     """
 
     module_path = Path(scheduler_execution_module.__file__)
     imports = _iter_module_imports(module_path)
 
-    for dotted in imports:
-        lower = dotted.lower()
+    for dotted_raw in imports:
+        dotted_lower = dotted_raw.lower()
+        dotted_normalized = dotted_lower.replace("_", "")
         for token in _LEGACY_COMPAT_SYMBOL_TOKENS:
-            assert token.lower() not in lower, (
-                f"scheduler_execution imports {dotted!r} -- contains forbidden "
-                f"legacy-compat token {token!r} (§4.2 no_legacy_compat regression)."
+            token_lower = token.lower()
+            assert token_lower not in dotted_lower, (
+                f"scheduler_execution imports {dotted_raw!r} -- contains forbidden "
+                f"legacy-compat token {token!r} in raw form (§4.2 no_legacy_compat "
+                f"regression)."
             )
+            assert token_lower not in dotted_normalized, (
+                f"scheduler_execution imports {dotted_raw!r} -- contains forbidden "
+                f"legacy-compat token {token!r} in underscore-normalized form "
+                f"(§4.2 no_legacy_compat regression; a snake_case module vector "
+                f"like ``legacy_forcing_compat`` collapses to "
+                f"``legacyforcingcompat`` here)."
+            )
+
+
+def test_no_legacy_compat_detector_catches_snake_case_module() -> None:
+    """Negative-sanity: the underscore-normalized substring detector actually
+    catches snake_case module vectors that a raw substring check misses.
+
+    Locks the detector's own semantics — if a future refactor weakens the
+    normalization back to raw substring, this test fails, protecting the
+    guarantee that
+    ``test_no_legacy_compat_scheduler_execution_import_graph`` gives.
+    """
+
+    forbidden_dotted_names = [
+        "workers.legacy_forcing_compat.LegacyIDW",
+        "workers.legacy_compat.IDW",
+        "packages.legacy_forcing_compat",
+    ]
+
+    for dotted_raw in forbidden_dotted_names:
+        dotted_lower = dotted_raw.lower()
+        dotted_normalized = dotted_lower.replace("_", "")
+        matched = False
+        for token in _LEGACY_COMPAT_SYMBOL_TOKENS:
+            token_lower = token.lower()
+            if token_lower in dotted_lower or token_lower in dotted_normalized:
+                matched = True
+                break
+        assert matched, (
+            f"snake_case-module vector {dotted_raw!r} slipped past the "
+            "no_legacy_compat detector -- expected at least one token from "
+            "_LEGACY_COMPAT_SYMBOL_TOKENS to match either the raw or "
+            "underscore-stripped form."
+        )
 
 
 def test_no_legacy_compat_producer_not_reinvoked_with_other_source(
@@ -966,3 +1023,165 @@ def test_availability_is_display_concern_no_cross_source_merged_candidate(
     # Evidence contains one entry per candidate (2 items) -- no synthetic
     # third "cross-source-merged" evidence row.
     assert len(evidence) == 2
+
+
+# ---- base blocked-candidate evidence shape preservation ----------------
+
+
+def test_missing_source_no_run_preserves_base_forcing_blocked_evidence_shape(
+    tmp_path: Path,
+) -> None:
+    """The missing-source remap preserves the FULL base
+    ``_candidate_forcing_blocked_evidence`` shape -- it only rewrites
+    ``error_code`` at the top level and ``code`` + ``quality_flag`` on each
+    residual-blocker entry.
+
+    Regression-locks §4.2 evidence-shape stability: if a future refactor of
+    ``services/orchestrator/scheduler_candidate_execution_evidence.py::
+    _candidate_forcing_blocked_evidence`` drops or renames one of the ~14
+    base-shape fields (``stage``, ``production_stage``, ``status``,
+    ``submitted``, ``slurm_submit_called``, ``execution_attempted``,
+    ``forcing_producer_called``, ``mutation_outcome``, ``mutation_occurred``,
+    ``met_result_table_write``, ``hydro_result_table_write``,
+    ``pipeline_status_writes_proven_absent``,
+    ``pipeline_event_writes_proven_absent``, ``qhh_script_invoked``,
+    ``rshud_runtime_called``), missing-source evidence would silently
+    propagate the change. Asserting key-set equality here forces the two to
+    stay locked.
+    """
+
+    scheduler = _TestProductionScheduler(_config(tmp_path))
+    model = _direct_grid_model(
+        model_id="model_direct_gfs_only",
+        applicable_source_ids=["GFS"],
+    )
+    candidates, _bblocked, _skipped, _dups, _slurm = scheduler._build_candidates(
+        models=[model],
+        cycles=[_cycle_for("gfs")],
+    )
+    assert len(candidates) == 1
+    candidate = candidates[0]
+
+    error = ForcingProductionError("No canonical products are available.")
+    context = scheduler._scheduler_execution_context()
+
+    base = dict(context.candidate_forcing_blocked_evidence(candidate, error))
+    remapped = _missing_source_data_evidence(context, candidate, error)
+
+    # Full key set matches -- a field-add/rename regression on the base
+    # blocked-evidence surface would fail this immediately.
+    assert set(remapped.keys()) == set(base.keys())
+
+    # Every top-level field EXCEPT the two remap targets is unchanged.
+    remap_targets = {"error_code", "residual_blockers"}
+    assert {k: v for k, v in remapped.items() if k not in remap_targets} == {
+        k: v for k, v in base.items() if k not in remap_targets
+    }
+
+    # Per-blocker preservation: everything except ``code``/``quality_flag``
+    # is byte-identical to the base residual-blocker rows.
+    base_residuals = base["residual_blockers"]
+    remapped_residuals = remapped["residual_blockers"]
+    assert isinstance(base_residuals, list) and base_residuals
+    assert isinstance(remapped_residuals, list) and remapped_residuals
+    assert len(base_residuals) == len(remapped_residuals)
+    blocker_remap_targets = {"code", "quality_flag"}
+    for i, base_entry in enumerate(base_residuals):
+        remapped_entry = remapped_residuals[i]
+        assert isinstance(base_entry, Mapping)
+        assert isinstance(remapped_entry, Mapping)
+        assert set(base_entry.keys()) == set(remapped_entry.keys())
+        assert {
+            k: v for k, v in remapped_entry.items() if k not in blocker_remap_targets
+        } == {k: v for k, v in base_entry.items() if k not in blocker_remap_targets}
+
+    # The remap targets carry the missing-source classification, not the
+    # generic forcing-blocked default.
+    assert remapped["error_code"] == MISSING_SOURCE_DATA_FOR_CYCLE_ERROR_CODE
+    for entry in remapped_residuals:
+        assert entry["code"] == MISSING_SOURCE_DATA_FOR_CYCLE_ERROR_CODE
+        assert entry["quality_flag"] == FORCING_SOURCE_MISSING_FOR_CYCLE_REASON
+
+
+# ---- producer message drift lock ---------------------------------------
+
+
+def _producer_forcing_production_error_messages() -> list[str]:
+    """AST-walk ``workers/forcing_producer/producer.py`` and return every
+    string literal (or leading string-constant part of an f-string) passed
+    as the FIRST positional argument to a ``ForcingProductionError(...)``
+    call. Used by the drift-lock below to prove the detector prefixes still
+    match at least one real producer raise site.
+    """
+
+    producer_path = Path("workers/forcing_producer/producer.py")
+    if not producer_path.is_absolute():
+        # Resolve relative to this test file's repo root so the test is
+        # invocation-directory-independent.
+        producer_path = (
+            Path(__file__).resolve().parent.parent / "workers" / "forcing_producer" / "producer.py"
+        )
+    tree = ast.parse(producer_path.read_text())
+    messages: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name):
+            name = func.id
+        elif isinstance(func, ast.Attribute):
+            name = func.attr
+        else:
+            continue
+        if name != "ForcingProductionError":
+            continue
+        if not node.args:
+            continue
+        first = node.args[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            messages.append(first.value)
+            continue
+        if isinstance(first, ast.JoinedStr):
+            # Take the leading run of constant string parts -- that's the
+            # prefix a ``str.startswith`` check would test against. Stop at
+            # the first ``FormattedValue`` (interpolated ``{...}`` slot).
+            leading_parts: list[str] = []
+            for part in first.values:
+                if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                    leading_parts.append(part.value)
+                else:
+                    break
+            if leading_parts:
+                messages.append("".join(leading_parts))
+    return messages
+
+
+def test_missing_source_prefixes_still_match_producer_raise_sites() -> None:
+    """AST-walk producer.py, collect every ``ForcingProductionError(...)``
+    first-positional message (including the leading-constant portion of any
+    f-string form), and assert every detector prefix in
+    ``_MISSING_SOURCE_DATA_ERROR_PREFIXES`` matches at least ONE real
+    producer message.
+
+    Regression-locks §4.2 producer message drift: if a future producer refactor
+    renames ``"Missing required canonical products: ..."`` to
+    ``"Missing canonical products required: ..."``, the parametrize + detector
+    would both keep mirroring the OLD wording and this test would catch the
+    drift instead of letting production silently regress to the generic reason.
+    """
+
+    producer_messages = _producer_forcing_production_error_messages()
+    assert producer_messages, (
+        "AST walk found no ForcingProductionError(...) calls in producer.py; "
+        "the walker regressed or producer.py moved."
+    )
+
+    for prefix in _MISSING_SOURCE_DATA_ERROR_PREFIXES:
+        assert any(
+            msg.startswith(prefix) for msg in producer_messages
+        ), (
+            f"Detector prefix {prefix!r} does not match any "
+            f"ForcingProductionError message in producer.py. Either the "
+            f"producer wording drifted or the detector prefix drifted -- "
+            f"both must move together."
+        )

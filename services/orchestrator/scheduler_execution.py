@@ -22,18 +22,28 @@ from services.orchestrator.scheduler_timing import set_current_scheduler_pass_ti
 FORCING_SOURCE_MISSING_FOR_CYCLE_REASON = "forcing_source_missing_for_cycle"
 MISSING_SOURCE_DATA_FOR_CYCLE_ERROR_CODE = "MISSING_SOURCE_DATA_FOR_CYCLE"
 
-# Exact prefixes of the two ``ForcingProductionError`` messages the producer
-# raises when required canonical products are absent for the requested
-# ``(source_id, cycle_time)``:
+# Exact prefixes of the ``ForcingProductionError`` messages the producer raises
+# when required canonical products are absent for the requested
+# ``(source_id, cycle_time)``. All four sites collapse to the same "no usable
+# canonical data for this (source, cycle)" verdict from the scheduler's
+# vantage point — pre-run, grid-discovery, and end-of-run validation echo all
+# converge on the missing-source classification:
 #   * ``workers/forcing_producer/producer.py:1118`` — ``"Missing required
 #     canonical products: <variable>:<timestamp>, ..."`` (pre-run and mid-run
 #     variable/cell gaps land here — the producer collects the full missing
 #     set before raising).
 #   * ``workers/forcing_producer/producer.py:1126`` — ``"No canonical products
-#     are available."`` (no cell of any variable has usable data).
+#     are available."`` (no cell of any variable has usable data, pre-run).
+#   * ``workers/forcing_producer/producer.py:1259`` — ``"No canonical products
+#     are available for interpolation grid discovery."`` (same leading prefix;
+#     interpolation grid discovery cannot proceed).
+#   * ``workers/forcing_producer/producer.py:3205`` — ``"No canonical products
+#     are available."`` (validation echo at end-of-run; same prefix).
 # The prefixes are anchored (``str.startswith``) — a substring match anywhere
 # in the message would false-positive-remap unrelated ForcingProductionError
-# instances that happen to embed the same phrase in an error tail.
+# instances that happen to embed the same phrase in an error tail. The producer
+# message drift regression lock lives in
+# ``tests/test_source_scoped_dispatch.py::test_missing_source_prefixes_still_match_producer_raise_sites``.
 _MISSING_SOURCE_DATA_ERROR_PREFIXES: tuple[str, ...] = (
     "Missing required canonical products",
     "No canonical products are available",
