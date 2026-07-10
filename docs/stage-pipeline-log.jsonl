@@ -14,3 +14,4 @@
 {"date":"2026-07-10","change":"source-specific-model-variant-routing","grill_gate":"passed","rounds":2,"gate_net_catch":2,"p0":{"in":9,"resolved":9,"residual":0},"p1":{"resolved":10},"regressions":1,"approx_subagent_calls":12,"verdict":"clean"}
 {"date":"2026-07-10","change":"direct-grid-build-enablement","grill_gate":"passed","rounds":1,"gate_net_catch":0,"p0":{"in":6,"resolved":6,"residual":0},"p1":{"resolved":12},"regressions":0,"approx_subagent_calls":10,"verdict":"clean"}
 {"date":"2026-07-10","change":"mapping-variant-state-compatibility","grill_gate":"passed","rounds":1,"gate_net_catch":0,"p0":{"in":7,"resolved":7,"residual":0},"p1":{"resolved":16},"regressions":0,"approx_subagent_calls":8,"verdict":"clean"}
+{"date":"2026-07-10","change":"direct-grid-display-cutover","grill_gate":"passed","rounds":1,"gate_net_catch":0,"p0":{"in":9,"resolved":9,"residual":0},"p1":{"resolved":10},"regressions":0,"approx_subagent_calls":8,"verdict":"clean"}
