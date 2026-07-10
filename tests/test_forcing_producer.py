@@ -5247,7 +5247,14 @@ class _MemoryInterpWeightRepository(PsycopgForcingRepository):
                 if existing is None:
                     pending_rows.append(station)
                 else:
+                    # §D2 (§1.4) preserve-on-update: mirror the DB's ON CONFLICT
+                    # DO UPDATE which intentionally OMITS `active_flag` from the
+                    # SET list. Capture the existing flag before update and
+                    # restore it after, matching `_ProducerFakeStore`'s pattern
+                    # (test_direct_grid_variant_registration.py::_ProducerFakeStore).
+                    preserved_flag = existing.get("active_flag", False)
                     existing.update(station)
+                    existing["active_flag"] = preserved_flag
             self.met_station_rows = pending_rows
             return
         assert delete_statement is not None
