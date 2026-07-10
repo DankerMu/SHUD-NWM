@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import json
 import pathlib
 import shutil
 import struct
@@ -53,6 +54,7 @@ from workers.forcing_producer.direct_grid_contract import (
     load_forcing_mapping_contract_from_manifest,
 )
 from workers.mapping_builder import cli as cli_module
+from workers.mapping_builder.algorithm import GridSignatureMismatchError
 from workers.mapping_builder.binding import (
     BindingArtifactError,
     ParserRoundTripError,
@@ -62,6 +64,7 @@ from workers.mapping_builder.cli import (
     build_direct_grid_variant,
 )
 from workers.mapping_builder.evidence import (
+    ALGORITHM_ID,
     Approvals,
     CapacityReport,
     DistanceQA,
@@ -264,11 +267,40 @@ def test_end_to_end_g0_through_g5_produces_variant_tree(tmp_path: pathlib.Path) 
     assert len(result.manifest.station_bindings) == 8
     assert len(result.binding_artifact.station_bindings) == 8
 
+    # Ownership evidence covers every keliya element (484 rows).
+    assert len(result.evidence_package.ownership_table) == 484
+
+    # Grid snapshot reference is threaded through unchanged.
+    _, _snapshot_cells, _loader, snapshot_reference = _snapshot_and_loader()
+    assert (
+        result.evidence_package.grid_snapshot_reference.grid_signature
+        == snapshot_reference.grid_signature
+    )
+
+    # Per-gate evidence_ref shape assertions (kind + key presence).
+    gate_results = result.evidence_package.gate_results
+    g0_ref = gate_results.g0.evidence_ref
+    assert g0_ref["kind"] == "baseline_integrity_report"
+    assert "checksum" in g0_ref
+    g1_ref = gate_results.g1.evidence_ref
+    assert g1_ref["kind"] == "g1_non_degenerate"
+    assert g1_ref["element_count"] == 484
+    g2_ref = gate_results.g2.evidence_ref
+    assert g2_ref["kind"] == "ownership_algorithm"
+    assert g2_ref["algorithm"] == ALGORITHM_ID
+    g3_ref = gate_results.g3.evidence_ref
+    assert g3_ref["kind"] == "hydrologic_core_fingerprint_equal"
+    assert "fingerprint_hash" in g3_ref
+    g4_ref = gate_results.g4.evidence_ref
+    assert g4_ref["kind"] == "sp_att_rewrite"
+    assert g4_ref["rewritten_row_count"] == 484
+    assert g4_ref["used_cell_count"] == 8
+
     # G5 evidence_ref carries the z-policy provenance.
-    g5_ref = result.evidence_package.gate_results.g5.evidence_ref
+    g5_ref = gate_results.g5.evidence_ref
     assert g5_ref["kind"] == "binding_g5"
     assert g5_ref["binding_checksum"] == result.binding_artifact.checksum
-    assert g5_ref["sampler_rule_id"] == "nearest_mesh_node_elevation_v1"
+    assert g5_ref["sampler_rule_id"] == SAMPLER_RULE_ID
     assert g5_ref["verdict_resolution"]["verified_sha256"] == EXPECTED_VERDICT_FILE_SHA256
     assert g5_ref["verdict_resolution"]["override_used"] is False
     assert g5_ref["verdict_resolution"]["resolved_path"].endswith(
@@ -287,15 +319,35 @@ def test_end_to_end_g0_through_g5_produces_variant_tree(tmp_path: pathlib.Path) 
 def test_stage_order_matches_g0_through_g5(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Monkeypatch each library stage import to a tracker; assert G0..G5 order."""
+    """Monkeypatch every library stage import to a tracker; assert G0..G5 order.
+
+    Covers all 19 stage functions asserted by
+    :func:`test_no_duplicated_stage_logic_all_stage_functions_come_from_stage_modules`
+    so adjacent-swap regressions (e.g. reordering
+    ``derive_used_cell_subset`` and ``assign_shud_forcing_index``, or the
+    SUB-1 ``resolve_verdict -> build_z_policy -> sample_per_cell_z``
+    contract) surface as an assertion failure here rather than silently.
+    """
     calls: list[str] = []
     tracked_names = [
         "verify_g0_baseline",
         "verify_g1_non_degenerate_triangles",
         "verify_package_crs",
         "nearest_cell_barycenter_geodesic_v1",
+        "derive_used_cell_subset",
+        "assign_shud_forcing_index",
+        "verify_small_basin_gate",
+        "resolve_verdict",
+        "build_z_policy",
+        "sample_per_cell_z",
         "copy_and_rewrite_sp_att_forc",
+        "verify_non_forc_columns_unchanged",
+        "verify_non_sp_att_checksums_equal",
+        "verify_hydrologic_core_fingerprint_equal",
+        "verify_no_legacy_weather_path_in_active_tree",
         "emit_direct_grid_manifest_and_binding",
+        "verify_no_forbidden_runtime_producer_artifacts",
+        "render_ownership_images",
         "assemble_evidence_package",
     ]
     for name in tracked_names:
@@ -335,6 +387,13 @@ def test_g0_checksum_mismatch_fails_closed_no_variant_written(
     corrupted[2] = "\t".join(tokens)
     sp_att.write_text("\n".join(corrupted) + "\n")
 
+    # Snapshot the corrupted baseline tree so we can verify the failed
+    # build did not mutate the baseline in place.
+    pre_baseline_files = {
+        p.relative_to(baseline_root)
+        for p in baseline_root.rglob("*")
+        if p.is_file()
+    }
     variant_root = tmp_path / "variant"
     domain_shp = _write_domain_shp(tmp_path)
     _, snapshot_cells, loader, snapshot_reference = _snapshot_and_loader()
@@ -374,6 +433,15 @@ def test_g0_checksum_mismatch_fails_closed_no_variant_written(
     # No-partial-output: final variant absent + tmp .building absent.
     assert not variant_root.exists()
     assert not variant_root.with_name(variant_root.name + ".building").exists()
+    # And the baseline tree is unchanged (byte-for-byte equal file set).
+    post_baseline_files = {
+        p.relative_to(baseline_root)
+        for p in baseline_root.rglob("*")
+        if p.is_file()
+    }
+    assert post_baseline_files == pre_baseline_files, (
+        "baseline tree was mutated by a failed build"
+    )
 
 
 # =========================================================================
@@ -381,10 +449,19 @@ def test_g0_checksum_mismatch_fails_closed_no_variant_written(
 # =========================================================================
 
 
-def test_g5_contract_mismatch_fails_closed_no_variant_written(
+def test_g5_emitter_raise_triggers_cleanup_and_no_variant(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Monkeypatch G5 emitter to raise; assert no variant / .building remnant."""
+    """Scaffold-cleanup proof: any emitter raise -> no variant / no ``.building``.
+
+    Monkeypatch-driven — proves that when the G5 emitter raises
+    :class:`BindingArtifactError` (here a :class:`ParserRoundTripError`
+    subclass, the canonical contract-mismatch shape), the orchestrator's
+    try/except cleanup runs and no partial artifact remains. The
+    companion :func:`test_g5_contract_mismatch_fails_closed_data_driven`
+    proves the same fail-closed contract via a real gate mismatch with no
+    injected raise.
+    """
     def _boom(**_kwargs):
         raise ParserRoundTripError(
             parser_error_message=(
@@ -395,6 +472,11 @@ def test_g5_contract_mismatch_fails_closed_no_variant_written(
     monkeypatch.setattr(cli_module, "emit_direct_grid_manifest_and_binding", _boom)
 
     baseline_root = _prepared_baseline(tmp_path)
+    pre_baseline_files = {
+        p.relative_to(baseline_root)
+        for p in baseline_root.rglob("*")
+        if p.is_file()
+    }
     variant_root = tmp_path / "variant"
     domain_shp = _write_domain_shp(tmp_path)
     _, snapshot_cells, loader, snapshot_reference = _snapshot_and_loader()
@@ -433,6 +515,111 @@ def test_g5_contract_mismatch_fails_closed_no_variant_written(
 
     assert not variant_root.exists()
     assert not variant_root.with_name(variant_root.name + ".building").exists()
+    post_baseline_files = {
+        p.relative_to(baseline_root)
+        for p in baseline_root.rglob("*")
+        if p.is_file()
+    }
+    assert post_baseline_files == pre_baseline_files, (
+        "baseline tree was mutated by a failed build"
+    )
+
+
+def test_g5_contract_mismatch_fails_closed_data_driven(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Real-gate proof: signature mismatch surfaces from library code.
+
+    The G2 gate's :func:`verify_grid_identity_precondition` recomputes
+    the ``grid_signature`` from the loaded cells and compares it against
+    the stored snapshot value. Wiring the snapshot with a
+    ``grid_signature_override`` that DIFFERS from what
+    :func:`grid_signature_hash` produces triggers
+    :class:`GridSignatureMismatchError` from real library code — no
+    monkeypatch, no injected raise. Task §2.1 frames this under "G5
+    contract mismatch"; the ACTUAL fail-closed invariant is "any gate
+    mismatch -> no partial output", proven here at the earliest gate
+    that catches signature drift so no artifact ever reaches disk.
+    """
+    baseline_root = _prepared_baseline(tmp_path)
+    pre_baseline_files = {
+        p.relative_to(baseline_root)
+        for p in baseline_root.rglob("*")
+        if p.is_file()
+    }
+    variant_root = tmp_path / "variant"
+    domain_shp = _write_domain_shp(tmp_path)
+    distance_qa, capacity_report = _canned_qa_and_capacity()
+
+    # Build cells + snapshot with a deliberately-wrong grid_signature.
+    cells = make_regular_grid_cells(
+        lon0=_GRID_LON0,
+        lat0=_GRID_LAT0,
+        lon_step=_GRID_STEP,
+        lat_step=_GRID_STEP,
+        lon_count=_GRID_LON_COUNT,
+        lat_count=_GRID_LAT_COUNT,
+    )
+    tampered_snapshot = make_snapshot(
+        source_id=_SOURCE_ID,
+        grid_id=_GRID_ID,
+        cells=cells,
+        bbox_pad=0.5,
+        grid_signature_override="deadbeef" * 8,  # 64-char hex, invalid recompute
+    )
+    tampered_loader = InMemoryGridSnapshotLoader(
+        source_id=_SOURCE_ID,
+        grid_id=_GRID_ID,
+        snapshot=tampered_snapshot,
+        cells=cells,
+    )
+    tampered_reference = GridSnapshotReference(
+        snapshot_id=str(tampered_snapshot.grid_snapshot_id),
+        grid_signature=tampered_snapshot.grid_signature,
+        snapshot_checksum=tampered_snapshot.grid_definition_checksum,
+    )
+
+    with pytest.raises(GridSignatureMismatchError):
+        build_direct_grid_variant(
+            baseline_root=baseline_root,
+            variant_root=variant_root,
+            source_id=_SOURCE_ID,
+            grid_id=_GRID_ID,
+            grid_snapshot_loader=tampered_loader,
+            snapshot_cells=cells,
+            grid_snapshot_reference=tampered_reference,
+            mapping_asset_identity=_MAPPING_ASSET_IDENTITY,
+            model_input_package_id=_MODEL_INPUT_PACKAGE_ID,
+            binding_uri=_BINDING_URI,
+            sp_att_manifest_path=_SP_ATT_MANIFEST_PATH,
+            category_files=_CATEGORY_FILES,
+            state_schema_bytes=b"state-schema-v1",
+            solver_config_bytes=b"solver-config-v1",
+            domain_shp_path=domain_shp,
+            proj_crs_database_version=_PROJ_CRS_DB_VERSION,
+            approvals=Approvals(
+                builder_approver_id="tester@example.com",
+                reviewer_approver_id="reviewer@example.com",
+                small_basin_override_approver_id=None,
+            ),
+            rollback_target=RollbackTarget(
+                previous_mapping_asset_checksum="",
+                previous_mapping_asset_label="<initial>",
+            ),
+            distance_qa=distance_qa,
+            capacity_report=capacity_report,
+        )
+
+    assert not variant_root.exists()
+    assert not variant_root.with_name(variant_root.name + ".building").exists()
+    post_baseline_files = {
+        p.relative_to(baseline_root)
+        for p in baseline_root.rglob("*")
+        if p.is_file()
+    }
+    assert post_baseline_files == pre_baseline_files, (
+        "baseline tree was mutated by a failed build"
+    )
 
 
 # =========================================================================
@@ -443,7 +630,13 @@ def test_g5_contract_mismatch_fails_closed_no_variant_written(
 def test_g5_cross_consistency_binding_checksum_equals_sha256_of_binding_bytes(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Standalone binding artifact bytes hash to the manifest's binding_checksum."""
+    """Standalone binding artifact bytes hash to the manifest's binding_checksum.
+
+    Cross-checks the ON-DISK bytes (not the in-memory dataclass) so a
+    regression in the file-write path — e.g. wrong serializer or a
+    truncated write — surfaces here instead of hiding behind the shared
+    in-memory objects.
+    """
     result = _run_build(tmp_path)
 
     binding_bytes = (result.variant_root / "direct_grid_binding.json").read_bytes()
@@ -451,16 +644,25 @@ def test_g5_cross_consistency_binding_checksum_equals_sha256_of_binding_bytes(
     # And the in-memory artifact bytes match the on-disk bytes.
     assert result.binding_artifact.bytes == binding_bytes
 
-    # Station rows equal element-for-element between manifest and standalone binding.
-    manifest_rows = {
-        b.station_id: (b.grid_cell_id, b.shud_forcing_index)
-        for b in result.manifest.station_bindings
+    # Parse both artifacts back from disk and cross-check station rows so
+    # a persistence-only regression (empty write, missing field, wrong
+    # serializer) fails here rather than passing under a library-level
+    # invariant check. The manifest is nested under the outer
+    # ``resource_profile.direct_grid_forcing`` section per docs §7.1.
+    manifest_disk = json.loads(
+        (result.variant_root / "manifest.json").read_bytes()
+    )
+    manifest_section = manifest_disk["direct_grid_forcing"]
+    binding_disk = json.loads(binding_bytes)
+    manifest_rows_disk = {
+        b["station_id"]: (b["grid_cell_id"], b["shud_forcing_index"])
+        for b in manifest_section["station_bindings"]
     }
-    binding_rows = {
-        b.station_id: (b.grid_cell_id, b.shud_forcing_index)
-        for b in result.binding_artifact.station_bindings
+    binding_rows_disk = {
+        b["station_id"]: (b["grid_cell_id"], b["shud_forcing_index"])
+        for b in binding_disk["station_bindings"]
     }
-    assert manifest_rows == binding_rows
+    assert manifest_rows_disk == binding_rows_disk
 
 
 # =========================================================================
@@ -471,10 +673,17 @@ def test_g5_cross_consistency_binding_checksum_equals_sha256_of_binding_bytes(
 def test_emitted_manifest_round_trips_through_direct_grid_contract_parser(
     tmp_path: pathlib.Path,
 ) -> None:
-    """The emitted manifest.json parses cleanly through the contract entrypoint."""
+    """The emitted manifest.json parses cleanly through the contract entrypoint.
+
+    Reads the manifest bytes back from disk (rather than passing the
+    in-memory :class:`DirectGridManifest`) so a regression in the file
+    persistence path — stale dict, empty write, wrong serializer — fails
+    here rather than passing on the pre-serialization dataclass.
+    """
     result = _run_build(tmp_path)
 
-    profile = result.manifest.to_resource_profile_dict()
+    manifest_path = result.variant_root / "manifest.json"
+    profile = json.loads(manifest_path.read_bytes())
     contract = load_forcing_mapping_contract_from_manifest(profile, source_id=_SOURCE_ID)
 
     assert isinstance(contract, DirectGridForcingContract)
@@ -502,6 +711,389 @@ def test_evidence_g5_records_sampler_rule_id_and_verdict_resolution(
     resolved = pathlib.Path(g5_ref["verdict_resolution"]["resolved_path"])
     assert resolved.is_absolute()
     assert resolved.name == "z-policy-solver-audit-verdict.md"
+
+
+# =========================================================================
+# REGRESSION: FORC column is header-located, not hardcoded to index 4
+# =========================================================================
+
+
+def test_ownership_row_old_forc_reads_forc_column_not_hardcoded_index(
+    tmp_path: pathlib.Path,
+) -> None:
+    """OwnershipRow.old_forc is read via the FORC header token, not tokens[4].
+
+    Regression proof for the previous ``_read_baseline_forc_by_element``
+    behavior that hardcoded ``int(tokens[4])`` as the FORC column. A
+    legal ``.sp.att`` with FORC permuted to a non-canonical column index
+    would silently record the SOIL / GEOL / LC value at index 4 as
+    ``old_forc`` on every :class:`OwnershipRow`. Here we swap the
+    ``SOIL`` and ``FORC`` columns (moving FORC to index 1) and assert
+    the evidence bundle records each element's real FORC value.
+    """
+    baseline_root = _prepared_baseline(tmp_path)
+    sp_att = baseline_root / "keliya.sp.att"
+    lines = sp_att.read_text().splitlines()
+    # Original header: INDEX SOIL GEOL LC FORC MF BC SS LAKE (FORC at 4).
+    # Permuted header: INDEX FORC GEOL LC SOIL MF BC SS LAKE (FORC at 1).
+    orig_header = lines[1].split()
+    assert orig_header[1] == "SOIL" and orig_header[4] == "FORC", (
+        "keliya fixture header changed; regression permutation needs "
+        f"SOIL@1 + FORC@4 as its swap axis (got {orig_header!r})"
+    )
+    permuted_header = list(orig_header)
+    permuted_header[1], permuted_header[4] = permuted_header[4], permuted_header[1]
+    lines[1] = "\t".join(permuted_header)
+    # Record the original values so we can assert the evidence bundle
+    # picked up the real FORC (index 1 after swap) rather than SOIL
+    # (index 4 after swap).
+    forc_by_element: dict[int, int] = {}
+    soil_by_element: dict[int, int] = {}
+    for i in range(2, len(lines)):
+        tokens = lines[i].split()
+        if not tokens:
+            continue
+        element_id = int(tokens[0])
+        soil_by_element[element_id] = int(tokens[1])
+        forc_by_element[element_id] = int(tokens[4])
+        tokens[1], tokens[4] = tokens[4], tokens[1]
+        lines[i] = "\t".join(tokens)
+    sp_att.write_text("\n".join(lines) + "\n")
+
+    variant_root = tmp_path / "variant"
+    domain_shp = _write_domain_shp(tmp_path)
+    _, snapshot_cells, loader, snapshot_reference = _snapshot_and_loader()
+    distance_qa, capacity_report = _canned_qa_and_capacity()
+
+    result = build_direct_grid_variant(
+        baseline_root=baseline_root,
+        variant_root=variant_root,
+        source_id=_SOURCE_ID,
+        grid_id=_GRID_ID,
+        grid_snapshot_loader=loader,
+        snapshot_cells=snapshot_cells,
+        grid_snapshot_reference=snapshot_reference,
+        mapping_asset_identity=_MAPPING_ASSET_IDENTITY,
+        model_input_package_id=_MODEL_INPUT_PACKAGE_ID,
+        binding_uri=_BINDING_URI,
+        sp_att_manifest_path=_SP_ATT_MANIFEST_PATH,
+        category_files=_CATEGORY_FILES,
+        state_schema_bytes=b"state-schema-v1",
+        solver_config_bytes=b"solver-config-v1",
+        domain_shp_path=domain_shp,
+        proj_crs_database_version=_PROJ_CRS_DB_VERSION,
+        approvals=Approvals(
+            builder_approver_id="tester@example.com",
+            reviewer_approver_id="reviewer@example.com",
+            small_basin_override_approver_id=None,
+        ),
+        rollback_target=RollbackTarget(
+            previous_mapping_asset_checksum="",
+            previous_mapping_asset_label="<initial>",
+        ),
+        distance_qa=distance_qa,
+        capacity_report=capacity_report,
+    )
+
+    # Only elements where FORC != SOIL after swap distinguish the two
+    # code paths (a hardcoded-index reader returns SOIL; a header-located
+    # reader returns FORC). Assert at least one such element exists so
+    # this regression test carries a meaningful signal.
+    distinguishing_elements = [
+        eid for eid, forc in forc_by_element.items()
+        if forc != soil_by_element[eid]
+    ]
+    assert distinguishing_elements, (
+        "keliya fixture has no row where FORC != SOIL after swap; the "
+        "regression test cannot distinguish header-located FORC from a "
+        "hardcoded tokens[4] fallback"
+    )
+
+    ownership_by_element = {
+        row.element_id: row
+        for row in result.evidence_package.ownership_table
+    }
+    for element_id in distinguishing_elements:
+        expected_forc = forc_by_element[element_id]
+        row = ownership_by_element[element_id]
+        assert row.old_forc == str(expected_forc), (
+            f"element {element_id}: expected old_forc={expected_forc!s}, "
+            f"got old_forc={row.old_forc!r}; the CLI is reading the wrong "
+            "column (hardcoded index rather than header-located FORC)"
+        )
+
+
+# =========================================================================
+# REGRESSION: Elevation column is header-located, not hardcoded to index 4
+# =========================================================================
+
+
+def test_parse_mesh_nodes_permuted_column_order_correctly_reads_elevation(
+    tmp_path: pathlib.Path,
+) -> None:
+    """_parse_mesh_nodes reads Elevation via the header token, not tokens[4].
+
+    The canonical keliya node header is ``ID X Y AqDepth Elevation`` (so
+    ``Elevation`` sits at index 4). A permuted-but-legal header
+    ``ID X Y Elevation AqDepth`` places Elevation at index 3 — a
+    hardcoded ``tokens[4]`` reader would silently read ``AqDepth`` as
+    the elevation and feed it into the z-policy sampler. Here we permute
+    the columns AND stamp distinct sentinel values so a wrong-column
+    read is visible in ``result.manifest.z_policy.per_cell_z``.
+    """
+    baseline_root = _prepared_baseline(tmp_path)
+    sp_mesh = baseline_root / "keliya.sp.mesh"
+    text_lines = sp_mesh.read_text().splitlines()
+    # Element count from line 0 to locate the node block.
+    n_elements = int(text_lines[0].split()[0])
+    node_header_line = 1 + 1 + n_elements  # element count + element cols + rows
+    n_nodes = int(text_lines[node_header_line].split()[0])
+    node_col_header_line = node_header_line + 1
+    orig_node_header = text_lines[node_col_header_line].split()
+    assert orig_node_header == ["ID", "X", "Y", "AqDepth", "Elevation"], (
+        "keliya .sp.mesh node header changed; regression permutation "
+        f"expects canonical ID/X/Y/AqDepth/Elevation (got {orig_node_header!r})"
+    )
+    # Permute to ID X Y Elevation AqDepth (Elevation now at index 3).
+    permuted_header = ["ID", "X", "Y", "Elevation", "AqDepth"]
+    text_lines[node_col_header_line] = "\t".join(permuted_header)
+    # Stamp sentinel values across every node row: Elevation = 777.0,
+    # AqDepth = 111.0 — distinct enough that a wrong-column read
+    # (AqDepth as Elevation) surfaces as a per_cell_z value of 111.0.
+    node_data_start = node_col_header_line + 1
+    for i in range(node_data_start, node_data_start + n_nodes):
+        tokens = text_lines[i].split()
+        # Rewrite: ID X Y Elevation(777) AqDepth(111).
+        text_lines[i] = "\t".join([tokens[0], tokens[1], tokens[2], "777.0", "111.0"])
+    sp_mesh.write_text("\n".join(text_lines) + "\n")
+
+    variant_root = tmp_path / "variant"
+    domain_shp = _write_domain_shp(tmp_path)
+    _, snapshot_cells, loader, snapshot_reference = _snapshot_and_loader()
+    distance_qa, capacity_report = _canned_qa_and_capacity()
+
+    result = build_direct_grid_variant(
+        baseline_root=baseline_root,
+        variant_root=variant_root,
+        source_id=_SOURCE_ID,
+        grid_id=_GRID_ID,
+        grid_snapshot_loader=loader,
+        snapshot_cells=snapshot_cells,
+        grid_snapshot_reference=snapshot_reference,
+        mapping_asset_identity=_MAPPING_ASSET_IDENTITY,
+        model_input_package_id=_MODEL_INPUT_PACKAGE_ID,
+        binding_uri=_BINDING_URI,
+        sp_att_manifest_path=_SP_ATT_MANIFEST_PATH,
+        category_files=_CATEGORY_FILES,
+        state_schema_bytes=b"state-schema-v1",
+        solver_config_bytes=b"solver-config-v1",
+        domain_shp_path=domain_shp,
+        proj_crs_database_version=_PROJ_CRS_DB_VERSION,
+        approvals=Approvals(
+            builder_approver_id="tester@example.com",
+            reviewer_approver_id="reviewer@example.com",
+            small_basin_override_approver_id=None,
+        ),
+        rollback_target=RollbackTarget(
+            previous_mapping_asset_checksum="",
+            previous_mapping_asset_label="<initial>",
+        ),
+        distance_qa=distance_qa,
+        capacity_report=capacity_report,
+    )
+
+    # Every station's z value is sampled from _parse_mesh_nodes elevations
+    # via the SUB-1 nearest_mesh_node_elevation_v1 sampler. With uniform
+    # 777.0 sentinels on every mesh node, every station.z MUST equal 777.0.
+    # A hardcoded tokens[4] elevation read would surface 111.0 here after
+    # column permutation.
+    station_bindings = result.manifest.station_bindings
+    assert station_bindings, "expected non-empty station_bindings"
+    for station in station_bindings:
+        assert station.z == pytest.approx(777.0), (
+            f"station {station.station_id}: expected z=777.0 (Elevation "
+            f"sentinel), got z={station.z!r}; _parse_mesh_nodes is reading "
+            "the wrong column (hardcoded index rather than header-located "
+            "Elevation)"
+        )
+
+
+# =========================================================================
+# REGRESSION: mid-copytree failure leaves no ``.building`` residue
+# =========================================================================
+
+
+def test_copytree_failure_mid_copy_leaves_no_building_residue(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``shutil.copytree`` mid-copy failure MUST leave no partial ``.building``.
+
+    Previously ``shutil.copytree`` ran outside the try/except so a mid-
+    copy failure (disk full / EIO / KeyboardInterrupt) left the partial
+    ``<variant_root>.building`` directory on disk, violating the
+    docstring's atomic-rename promise. This regression stubs
+    ``shutil.copytree`` to create a partial tmp dir and then raise, and
+    asserts the wrapper's cleanup runs.
+    """
+    # Prepare the baseline + snapshot BEFORE monkeypatching (both use
+    # shutil.copytree internally for fixture setup); the fake copytree
+    # only replaces the CLI's own call inside build_direct_grid_variant.
+    baseline_root = _prepared_baseline(tmp_path)
+    variant_root = tmp_path / "variant"
+    domain_shp = _write_domain_shp(tmp_path)
+    _, snapshot_cells, loader, snapshot_reference = _snapshot_and_loader()
+    distance_qa, capacity_report = _canned_qa_and_capacity()
+
+    def _fake_copytree(src, dst, *_args, **_kwargs):
+        dst_path = pathlib.Path(dst)
+        dst_path.mkdir(parents=True)
+        (dst_path / "partial.dat").write_bytes(b"stale mid-copy residue")
+        raise OSError("simulated disk full during copytree")
+
+    monkeypatch.setattr(cli_module.shutil, "copytree", _fake_copytree)
+
+    with pytest.raises(OSError, match="simulated disk full"):
+        build_direct_grid_variant(
+            baseline_root=baseline_root,
+            variant_root=variant_root,
+            source_id=_SOURCE_ID,
+            grid_id=_GRID_ID,
+            grid_snapshot_loader=loader,
+            snapshot_cells=snapshot_cells,
+            grid_snapshot_reference=snapshot_reference,
+            mapping_asset_identity=_MAPPING_ASSET_IDENTITY,
+            model_input_package_id=_MODEL_INPUT_PACKAGE_ID,
+            binding_uri=_BINDING_URI,
+            sp_att_manifest_path=_SP_ATT_MANIFEST_PATH,
+            category_files=_CATEGORY_FILES,
+            state_schema_bytes=b"state-schema-v1",
+            solver_config_bytes=b"solver-config-v1",
+            domain_shp_path=domain_shp,
+            proj_crs_database_version=_PROJ_CRS_DB_VERSION,
+            approvals=Approvals(
+                builder_approver_id="tester@example.com",
+                reviewer_approver_id="reviewer@example.com",
+                small_basin_override_approver_id=None,
+            ),
+            rollback_target=RollbackTarget(
+                previous_mapping_asset_checksum="",
+                previous_mapping_asset_label="<initial>",
+            ),
+            distance_qa=distance_qa,
+            capacity_report=capacity_report,
+        )
+
+    assert not variant_root.exists()
+    assert not variant_root.with_name(variant_root.name + ".building").exists()
+
+
+# =========================================================================
+# GUARD: build_direct_grid_variant rejects a pre-existing variant_root
+# =========================================================================
+
+
+def test_build_direct_grid_variant_rejects_pre_existing_variant_root(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A pre-existing ``variant_root`` fails fast with ``ValueError``.
+
+    The atomic-rename discipline requires that the caller supply a
+    fresh, non-existent path. A collision must fail closed BEFORE any
+    file is copied so the caller's existing tree is not mutated.
+    """
+    baseline_root = _prepared_baseline(tmp_path)
+    variant_root = tmp_path / "variant"
+    variant_root.mkdir()
+    sentinel = variant_root / "sentinel.txt"
+    sentinel.write_bytes(b"user-owned content")
+
+    domain_shp = _write_domain_shp(tmp_path)
+    _, snapshot_cells, loader, snapshot_reference = _snapshot_and_loader()
+    distance_qa, capacity_report = _canned_qa_and_capacity()
+
+    with pytest.raises(ValueError, match="already exists"):
+        build_direct_grid_variant(
+            baseline_root=baseline_root,
+            variant_root=variant_root,
+            source_id=_SOURCE_ID,
+            grid_id=_GRID_ID,
+            grid_snapshot_loader=loader,
+            snapshot_cells=snapshot_cells,
+            grid_snapshot_reference=snapshot_reference,
+            mapping_asset_identity=_MAPPING_ASSET_IDENTITY,
+            model_input_package_id=_MODEL_INPUT_PACKAGE_ID,
+            binding_uri=_BINDING_URI,
+            sp_att_manifest_path=_SP_ATT_MANIFEST_PATH,
+            category_files=_CATEGORY_FILES,
+            state_schema_bytes=b"state-schema-v1",
+            solver_config_bytes=b"solver-config-v1",
+            domain_shp_path=domain_shp,
+            proj_crs_database_version=_PROJ_CRS_DB_VERSION,
+            approvals=Approvals(
+                builder_approver_id="tester@example.com",
+                reviewer_approver_id="reviewer@example.com",
+                small_basin_override_approver_id=None,
+            ),
+            rollback_target=RollbackTarget(
+                previous_mapping_asset_checksum="",
+                previous_mapping_asset_label="<initial>",
+            ),
+            distance_qa=distance_qa,
+            capacity_report=capacity_report,
+        )
+
+    # Sentinel file MUST still be intact — nothing was mutated.
+    assert sentinel.is_file()
+    assert sentinel.read_bytes() == b"user-owned content"
+
+
+# =========================================================================
+# ARGPARSE SCAFFOLD: main() returns exit code 2 with unimplemented diagnostic
+# =========================================================================
+
+
+def test_main_argparse_scaffold_returns_exit_code_2_with_unimplemented_diagnostic(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The SUB-3-deferred scaffold returns exit code 2 with a JSON diagnostic.
+
+    Guards against a SUB-3 wiring regression that accidentally returns 0
+    (silently claiming a successful no-op build) or drops the JSON
+    diagnostic. Exit code 2 is the pinned scaffold contract until the
+    §2.2 operator argv resolver lands.
+    """
+    exit_code = cli_module.main(
+        [
+            "--baseline-root",
+            "/tmp/does-not-matter",
+            "--variant-root",
+            "/tmp/also-does-not-matter",
+        ]
+    )
+    assert exit_code == 2, (
+        f"scaffold main() must return exit code 2 (SUB-3 pending); got {exit_code}"
+    )
+    captured = capsys.readouterr()
+    diagnostic = json.loads(captured.err)
+    assert diagnostic["status"] == "unimplemented"
+    assert "SUB-3" in diagnostic["reason"]
+
+
+def test_main_argparse_parse_error_exits_2(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An unknown argparse flag surfaces as ``SystemExit(2)`` (argparse default).
+
+    Guards against a downstream wrapper that swallows argparse errors
+    into a zero exit — the operator must see a non-zero exit for any
+    malformed invocation.
+    """
+    with pytest.raises(SystemExit) as excinfo:
+        cli_module.main(["--nonexistent-flag"])
+    assert excinfo.value.code == 2
+    # argparse writes its own diagnostic to stderr; only verify presence.
+    captured = capsys.readouterr()
+    assert captured.err != ""
 
 
 # =========================================================================
@@ -534,6 +1126,7 @@ def test_no_duplicated_stage_logic_all_stage_functions_come_from_stage_modules()
         "assign_shud_forcing_index": "workers.mapping_builder.algorithm",
         "verify_small_basin_gate": "workers.mapping_builder.algorithm",
         "copy_and_rewrite_sp_att_forc": "workers.mapping_builder.rewrite",
+        "parse_sp_att_forc_rows": "workers.mapping_builder.rewrite",
         "verify_non_forc_columns_unchanged": "workers.mapping_builder.rewrite",
         "verify_non_sp_att_checksums_equal": "workers.mapping_builder.rewrite",
         "verify_hydrologic_core_fingerprint_equal": "workers.mapping_builder.rewrite",

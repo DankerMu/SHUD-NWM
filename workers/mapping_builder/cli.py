@@ -97,6 +97,7 @@ from workers.mapping_builder.integrity import (
 from workers.mapping_builder.rewrite import (
     SpAttRewriteReport,
     copy_and_rewrite_sp_att_forc,
+    parse_sp_att_forc_rows,
     verify_hydrologic_core_fingerprint_equal,
     verify_no_legacy_weather_path_in_active_tree,
     verify_non_forc_columns_unchanged,
@@ -166,13 +167,22 @@ def _parse_mesh_nodes(baseline_root: pathlib.Path) -> tuple[MeshNode, ...]:
 
     Reuses :func:`workers.mapping_builder.integrity.read_sp_mesh_geometry`
     for the ``(elements, node_xy)`` geometry contract (the SUB-4 public
-    parser). The G1 helper returns ``(x, y)`` only; per-node ``Elevation``
-    is not surfaced by any existing public helper (each existing consumer
-    needs only the X/Y coordinates), so the CLI reads it here from the
-    node-table columns directly. The node-table column order is fixed by
-    the SHUD ``.sp.mesh`` convention (``ID X Y AqDepth Elevation``) and
-    is validated by the same header-tokens gate that
-    :func:`read_sp_mesh_geometry` runs against every node row.
+    parser). The G1 helper validates the header row's first three columns
+    (``ID X Y``) and surfaces ``(x, y)`` only; per-node ``Elevation`` is
+    not surfaced by any existing public helper (each existing consumer
+    needs only the X/Y coordinates). The CLI reads Elevation here by
+    locating the ``Elevation`` column via the header row rather than by
+    hardcoded index, so a permuted-but-legal column order (e.g.
+    ``ID X Y Elevation AqDepth``) is handled correctly instead of
+    silently reading ``AqDepth`` values as elevations.
+
+    Tech debt (deferred, out of §2.1 scope): the header locator here
+    duplicates the layout traversal that
+    :func:`_parse_sp_mesh_g1_geometry` already performs internally.
+    Extracting a public ``read_sp_mesh_node_columns`` helper in
+    ``integrity.py`` would let the CLI drop the private-suffix helper
+    import and the manual line-index arithmetic — tracked as a follow-up
+    against the integrity module.
     """
     _elements, node_xy = read_sp_mesh_geometry(baseline_root)
 
@@ -187,6 +197,15 @@ def _parse_mesh_nodes(baseline_root: pathlib.Path) -> tuple[MeshNode, ...]:
     node_header_index = 1 + 1 + n_elements
     node_header_counts = lines[node_header_index].split()
     n_nodes = int(node_header_counts[0])
+    node_column_header = lines[node_header_index + 1]
+    node_column_tokens = node_column_header.split()
+    try:
+        elevation_col_index = node_column_tokens.index("Elevation")
+    except ValueError as exc:
+        raise ValueError(
+            f"{mesh_path.name}: node header missing 'Elevation' column; "
+            f"got columns {node_column_tokens!r}"
+        ) from exc
     node_data_start = node_header_index + 2  # skip header count + column names
 
     nodes: list[MeshNode] = []
@@ -199,7 +218,7 @@ def _parse_mesh_nodes(baseline_root: pathlib.Path) -> tuple[MeshNode, ...]:
                 node_id=node_id,
                 x=float(x),
                 y=float(y),
-                elevation=float(tokens[4]),
+                elevation=float(tokens[elevation_col_index]),
             )
         )
     return tuple(nodes)
@@ -217,29 +236,6 @@ def _adapt_used_cells_for_sampler(
         )
         for cell in used_cells
     )
-
-
-def _read_baseline_forc_by_element(sp_att_path: pathlib.Path) -> dict[int, int]:
-    """Return ``{element_id: original_FORC}`` from the baseline ``.sp.att``.
-
-    The .sp.att is the standard SHUD attribute table: first line is a
-    row/column header count, second line is the column-name row, then N
-    element rows whose columns are ``INDEX SOIL GEOL LC FORC ...``. The
-    caller uses the returned mapping to fill ``old_forc`` on each
-    :class:`OwnershipRow` for the evidence bundle.
-    """
-    text = sp_att_path.read_text(encoding="utf-8")
-    lines = text.splitlines()
-    result: dict[int, int] = {}
-    # Skip the two header rows; every subsequent row is one element.
-    for line in lines[2:]:
-        tokens = line.split()
-        if not tokens:
-            continue
-        element_id = int(tokens[0])
-        forc = int(tokens[4])
-        result[element_id] = forc
-    return result
 
 
 def _build_ownership_rows(
@@ -394,13 +390,14 @@ def build_direct_grid_variant(
         # never the ``variant_root`` (the atomic rename would have moved it).
         shutil.rmtree(tmp_variant_root)
 
-    # Copy the baseline tree in one shot so every non-.sp.att category
-    # file exists at the same relative path under the variant root —
-    # the §3.3 equality gate hashes per-relative-path bytes on both
-    # sides, and a full copy makes them byte-identical by construction.
-    shutil.copytree(baseline_root, tmp_variant_root)
-
     try:
+        # Copy the baseline tree in one shot so every non-.sp.att category
+        # file exists at the same relative path under the variant root —
+        # the §3.3 equality gate hashes per-relative-path bytes on both
+        # sides, and a full copy makes them byte-identical by construction.
+        # Included inside the try/except so a mid-copy failure (disk full /
+        # EIO / KeyboardInterrupt) leaves no ``.building`` residue behind.
+        shutil.copytree(baseline_root, tmp_variant_root)
         result = _run_gates_and_emit(
             baseline_root=baseline_root,
             tmp_variant_root=tmp_variant_root,
@@ -569,7 +566,13 @@ def _run_gates_and_emit(
     forbidden_scan = _forbidden_output_scan(tmp_variant_root)
 
     # --- Evidence assembly --------------------------------------------
-    baseline_forc_by_element = _read_baseline_forc_by_element(baseline_sp_att)
+    # Reuse the header-verified library parser so the ownership evidence
+    # bundle records the true FORC column even when the .sp.att carries a
+    # legal but non-canonical column order (e.g. FORC not at index 4).
+    baseline_forc_rows = parse_sp_att_forc_rows(baseline_sp_att)
+    baseline_forc_by_element: dict[int, int] = {
+        row.element_id: row.forc for row in baseline_forc_rows
+    }
     ownership_rows = _build_ownership_rows(
         ownerships=ownerships,
         shud_forcing_index=shud_forcing_index,
