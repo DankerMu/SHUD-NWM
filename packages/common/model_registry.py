@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any, Literal
@@ -179,10 +179,147 @@ def _format_point(point: Any) -> str:
 
 
 @dataclass(frozen=True)
+class ModelActivationContext:
+    """Context payload delivered to every pre-activation hook.
+
+    §2.1 (Epic #961, `source-specific-model-variant-routing`) defines the
+    ordered pre-activation extension-point contract. Hooks receive this
+    frozen container inside the lifecycle transaction, before the
+    supersede+activate swap runs; a raising hook aborts the whole
+    transaction.
+
+    Fields:
+        basin_version_id: The scope (`core.model_instance.basin_version_id`)
+            whose active model is being swapped.
+        previous_active_model: The row that will be superseded (or ``None``
+            when no prior active model exists for the scope).
+        target_model: The row that will become active as a result of the
+            transition. For ``rollback_version`` this is the RESTORED
+            ``previous_model``, not the addressed model, matching the
+            preflight's own ``restored_model`` semantics (D5).
+        source_scope: Normalized ``applicable_source_ids`` extracted from
+            ``target_model.resource_profile.direct_grid_forcing`` when the
+            target carries a direct-grid contract; ``None`` for a legacy
+            IDW model. Kept as a tuple so hooks cannot mutate the scope.
+    """
+
+    basin_version_id: str
+    previous_active_model: Mapping[str, Any] | None
+    target_model: Mapping[str, Any]
+    source_scope: tuple[str, ...] | None
+
+
+PreActivationHook = Callable[[Any, ModelActivationContext], None]
+
+
+# Ordered mount points reserved for later changes in this Epic.
+# Order is declaration order in this tuple: ``state_clone`` (Change 5,
+# fingerprint-gated state clone) runs before ``station_flag_flip``
+# (Change 8, `met.met_station.active_flag` atomic flip). Both mount here
+# WITHOUT re-opening the lifecycle transaction (D7).
+PRE_ACTIVATION_HOOK_MOUNT_POINTS: tuple[str, ...] = ("state_clone", "station_flag_flip")
+
+
+def _default_no_op_hook(cursor: Any, ctx: ModelActivationContext) -> None:  # noqa: ARG001
+    """Default hook: no-op. Preserves prior lifecycle behavior byte-for-byte."""
+    return None
+
+
+def _extract_source_scope(target_model: Mapping[str, Any]) -> tuple[str, ...] | None:
+    """Read ``applicable_source_ids`` from the target's direct-grid contract.
+
+    Returns the ids as a tuple (immutable), preserving declaration order.
+    Returns ``None`` when the target is a legacy IDW model with no
+    ``direct_grid_forcing`` block.
+    """
+    resource_profile = _json_mapping(target_model.get("resource_profile"))
+    direct_grid = resource_profile.get("direct_grid_forcing")
+    if not isinstance(direct_grid, Mapping):
+        return None
+    source_ids = direct_grid.get("applicable_source_ids")
+    if not isinstance(source_ids, (list, tuple)):
+        return None
+    return tuple(str(source_id) for source_id in source_ids)
+
+
+def _would_be_already_current(
+    model: Mapping[str, Any],
+    operation: ModelLifecycleOperation,
+) -> bool:
+    """Mirror ``_apply_model_lifecycle_transition``'s already-current check.
+
+    Kept in sync with the swap logic (§2.1 hooks skip when no swap will
+    occur). For ``activate``/``switch_version`` an already-active target
+    short-circuits at ``_apply_model_lifecycle_transition:2266-2268``.
+    For ``rollback_version``, the idempotent-rollback-retry short-circuit
+    upstream in ``model_lifecycle_operation`` handles the already-current
+    return path, so this predicate stays False for rollback (any rollback
+    that reaches the hook site is a real swap).
+    """
+    if operation not in {"activate", "switch_version"}:
+        return False
+    lifecycle_state = str(
+        model.get("lifecycle_state") or ("active" if model.get("active_flag") else "inactive")
+    )
+    return lifecycle_state == "active" and bool(model.get("active_flag"))
+
+
+@dataclass(frozen=True)
 class PsycopgModelRegistryStore:
     database_url: str
     audit_actor: str = "nhms-api"
     audit_actor_role: str = "model-registry"
+
+    def __post_init__(self) -> None:
+        # Seed the ordered pre-activation hook chain (§2.1). Each reserved
+        # mount point starts as a no-op so existing lifecycle behavior is
+        # preserved byte-for-byte until Change 5 (state clone) or Change 8
+        # (station flag flip) registers a real hook. Bypasses the frozen
+        # constraint via ``object.__setattr__`` because hook membership is
+        # instance-scoped runtime state, not part of dataclass identity.
+        object.__setattr__(
+            self,
+            "_pre_activation_hooks",
+            {name: _default_no_op_hook for name in PRE_ACTIVATION_HOOK_MOUNT_POINTS},
+        )
+
+    def register_pre_activation_hook(self, mount_point: str, hook: PreActivationHook) -> None:
+        """Register a hook at a reserved mount point (§2.1).
+
+        Raises ``InvalidPayloadError`` for an unknown mount point so a
+        typo cannot silently install a hook that never fires.
+        """
+        if mount_point not in PRE_ACTIVATION_HOOK_MOUNT_POINTS:
+            raise InvalidPayloadError(
+                f"Unknown pre-activation mount point: {mount_point!r}; "
+                f"valid mount points are {PRE_ACTIVATION_HOOK_MOUNT_POINTS}"
+            )
+        # ``_pre_activation_hooks`` is a mutable dict on the instance
+        # (seeded in ``__post_init__``); mutating it is compatible with
+        # the ``frozen=True`` dataclass because we mutate the dict, not
+        # reassign the field.
+        self._pre_activation_hooks[mount_point] = hook
+
+    def _dispatch_pre_activation_hooks(
+        self,
+        cursor: Any,
+        activation_context: ModelActivationContext,
+    ) -> None:
+        """Run the ordered hook chain inside the lifecycle transaction.
+
+        Iterates ``PRE_ACTIVATION_HOOK_MOUNT_POINTS`` in declared order;
+        a raising hook propagates so the whole transaction rolls back
+        (fail-closed, no "activated but hooks not run" intermediate
+        state — D7).
+        """
+        # Defensive lookup: instances constructed via unusual paths that
+        # skip ``__post_init__`` still get the default chain.
+        hooks: Mapping[str, PreActivationHook] = getattr(
+            self, "_pre_activation_hooks", {}
+        )
+        for mount_point in PRE_ACTIVATION_HOOK_MOUNT_POINTS:
+            hook = hooks.get(mount_point, _default_no_op_hook)
+            hook(cursor, activation_context)
 
     @classmethod
     def from_env(cls) -> PsycopgModelRegistryStore:
@@ -1601,6 +1738,44 @@ class PsycopgModelRegistryStore:
                         "preflight": preflight,
                         "audit_reference": {"entity_type": "model_instance", "entity_id": model_id, "log_id": audit_id},
                     }
+
+                # §2.1: run the ordered pre-activation hook chain inside
+                # the same transaction, BEFORE the supersede+activate
+                # swap, so a raising hook rolls back both the swap and
+                # the audit-row insert (fail-closed, D7). Hooks fire only
+                # for the three activation-class operations that produce
+                # a real swap; ``deactivate``/``supersede``/``deprecate``
+                # skip hooks because no clone/flip target exists.
+                #
+                # Additional gate: skip when the target is already
+                # current — that path returns ``already_current`` from
+                # ``_apply_model_lifecycle_transition`` with no state
+                # mutation (mirrors the check at
+                # ``_apply_model_lifecycle_transition:2266-2268``), so
+                # there is nothing for a clone/flip hook to act on.
+                # The ``rollback_version`` already-current path is the
+                # idempotent-rollback-retry short-circuit above, which
+                # returned before reaching this point.
+                if operation in {"activate", "switch_version", "rollback_version"} and not _would_be_already_current(
+                    model, operation
+                ):
+                    hook_target = previous if operation == "rollback_version" else model
+                    if hook_target is None:
+                        # rollback_version without a previous model is a
+                        # preflight blocker (ROLLBACK_HISTORY_MISSING),
+                        # so this branch is unreachable. Guard for the
+                        # invariant so a future preflight refactor cannot
+                        # silently pass None into a hook.
+                        raise InvalidPayloadError(
+                            "rollback_version reached the hook dispatch site with no previous_model."
+                        )
+                    activation_context = ModelActivationContext(
+                        basin_version_id=str(hook_target["basin_version_id"]),
+                        previous_active_model=(dict(current_active) if current_active is not None else None),
+                        target_model=dict(hook_target),
+                        source_scope=_extract_source_scope(hook_target),
+                    )
+                    self._dispatch_pre_activation_hooks(cursor, activation_context)
 
                 transition = self._apply_model_lifecycle_transition(
                     cursor,
