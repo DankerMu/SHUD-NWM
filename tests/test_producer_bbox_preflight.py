@@ -33,6 +33,14 @@ Runs only under the ``-k "match or mismatch or missing or superseded or
 safe_path"`` filter documented in
 ``openspec/changes/direct-grid-build-enablement/tasks.md``
 §3.1 Evidence Floor; each name matches at least one of those keywords.
+
+Tests 9-11 cover tasks.md §3.2 (SUB-7): delegation to the pinned
+``verify_download_bbox_matches_registry`` guard + longitude-convention
+(-180..180 canonical) fail-closed landing per Decision 7. Cross-convention
+``east=200`` (0..360) vs registered -180..180 snapshot fails closed with
+``BboxMismatchError`` rather than clipping a shifted region. They run under
+the ``-k "delegates or convention"`` filter documented in the §3.2 Evidence
+Floor.
 """
 
 from __future__ import annotations
@@ -45,7 +53,11 @@ from typing import Any
 
 import pytest
 
-from packages.common.grid_registry_bbox_guard import BboxMismatchError
+from packages.common import grid_registry_bbox_guard as _guard_module
+from packages.common.grid_registry_bbox_guard import (
+    BboxMismatchError,
+    RegisteredBboxSnapshotProtocol,
+)
 from tests.test_forcing_producer import (
     _build_direct_grid_repository,
     _direct_grid_manifest_for_default_grid,
@@ -56,6 +68,7 @@ from workers.forcing_producer import (
     ForcingProducerConfig,
     parse_direct_grid_forcing_contract,
 )
+from workers.forcing_producer import producer as _producer_module
 from workers.forcing_producer.producer import (
     ForcingProductionError,
     MissingRegisteredGridSnapshotError,
@@ -508,4 +521,192 @@ def test_safe_path_component_ValueError_inside_outer_try_is_still_wrapped_as_For
     # Zero direct-grid writes AND the cycle is marked failed by the outer
     # ``except Exception`` -> ``_mark_failed`` path.
     _assert_zero_direct_grid_production_writes(repository, tmp_path)
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
+
+
+# ---------------------------------------------------------------------------
+# 8. §3.2 SUB-7: delegation to the pinned shared guard (no producer-local
+#    re-implementation) — Requirement 1 in
+#    ``openspec/changes/direct-grid-build-enablement/specs/producer-bbox-preflight/spec.md``
+#    §"The preflight reuses the pinned guard, not a re-implementation".
+# ---------------------------------------------------------------------------
+
+
+def test_preflight_delegates_to_shared_guard_module(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§3.2 Requirement 1: the producer preflight delegates to the pinned
+    ``packages.common.grid_registry_bbox_guard.verify_download_bbox_matches_registry``
+    and does not re-implement bbox comparison, finiteness checks, or the
+    mismatch error. Locks two invariants:
+
+    1. Identity — the module attribute
+       ``workers.forcing_producer.producer.verify_download_bbox_matches_registry``
+       IS the same object as
+       ``packages.common.grid_registry_bbox_guard.verify_download_bbox_matches_registry``.
+       Any producer-local re-implementation would rebind the symbol and
+       break this identity assertion.
+    2. Delegation call-site — when ``produce`` runs the preflight, the
+       shared guard is called EXACTLY once, with the resolved snapshot as
+       the first positional arg (satisfying ``RegisteredBboxSnapshotProtocol``)
+       and no ``env_reader`` kwarg (so the guard's pinned default
+       ``china_buffered_bbox_from_env`` remains the env resolver when the
+       producer is built without a test-injected ``env_reader``).
+    """
+    # Identity invariant — assert BEFORE any monkey-patch so the check
+    # reflects the shipped import wiring, not a spy substitute.
+    assert (
+        _producer_module.verify_download_bbox_matches_registry
+        is _guard_module.verify_download_bbox_matches_registry
+    ), (
+        "producer must import the pinned guard symbol; a producer-local "
+        "re-implementation would break bbox-match ⟺ same canonical_grid_key."
+    )
+
+    _contract, store, repository = _make_direct_grid_setup(tmp_path, monkeypatch)
+
+    # Spy records the call, then delegates to the real guard so the happy
+    # path still lands ``forcing_ready``.
+    calls: list[dict[str, Any]] = []
+    real_guard = _guard_module.verify_download_bbox_matches_registry
+
+    def spy(*args: Any, **kwargs: Any) -> None:
+        calls.append({"args": args, "kwargs": kwargs})
+        return real_guard(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer.verify_download_bbox_matches_registry",
+        spy,
+    )
+
+    producer = _build_producer_with_env_reader(tmp_path, repository, store)
+    result = producer.produce(
+        source_id="gfs", cycle_time="2026050700", model_id="demo_model"
+    )
+
+    assert result.status == "forcing_ready"
+    assert len(calls) == 1, f"expected exactly one guard call, got {len(calls)}"
+    call = calls[0]
+    assert len(call["args"]) == 1
+    snapshot_arg = call["args"][0]
+    assert isinstance(snapshot_arg, RegisteredBboxSnapshotProtocol), (
+        "first positional arg must satisfy RegisteredBboxSnapshotProtocol"
+    )
+    # Producer built with env_reader=None → producer.py:1091-1092 takes the
+    # default branch and calls the guard without an ``env_reader`` kwarg.
+    assert "env_reader" not in call["kwargs"]
+
+
+# ---------------------------------------------------------------------------
+# 9. §3.2 SUB-7: in-convention (-180..180) env bbox matches the registered
+#    snapshot → preflight passes — Requirement 2 Scenario 1 in
+#    ``openspec/changes/direct-grid-build-enablement/specs/producer-bbox-preflight/spec.md``
+#    §"The producer owns the deployment-bbox longitude convention".
+# ---------------------------------------------------------------------------
+
+
+def test_in_convention_env_bbox_minus_180_180_matches_snapshot_and_preflight_passes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§3.2 Requirement 2 Scenario 1: an in-convention (-180..180) env bbox
+    equal to the registered -180..180 snapshot bbox lets the preflight pass
+    and production proceed. Sets ``NHMS_DOWNLOAD_BBOX_WEST=70.0`` /
+    ``NHMS_DOWNLOAD_BBOX_EAST=140.0`` (both -180..180) with a snapshot that
+    mirrors those values on the west/east corners and the default south/north
+    corners.
+    """
+    monkeypatch.setenv("NHMS_DOWNLOAD_BBOX_WEST", "70.0")
+    monkeypatch.setenv("NHMS_DOWNLOAD_BBOX_EAST", "140.0")
+
+    def snapshot_row_factory(
+        *, source_id: str, grid_id: str, grid_signature: str
+    ) -> tuple[float, float, float, float, uuid.UUID, Any]:
+        del source_id, grid_id, grid_signature
+        return (
+            _DEFAULT_ENV_BBOX.south,
+            _DEFAULT_ENV_BBOX.north,
+            70.0,
+            140.0,
+            _REGISTERED_SNAPSHOT_ID,
+            None,
+        )
+
+    _contract, store, repository = _make_direct_grid_setup(
+        tmp_path, monkeypatch, snapshot_row_factory=snapshot_row_factory
+    )
+    producer = _build_producer_with_env_reader(tmp_path, repository, store)
+    result = producer.produce(
+        source_id="gfs", cycle_time="2026050700", model_id="demo_model"
+    )
+
+    assert result.status == "forcing_ready"
+    # Writes DID land — proves the in-convention env bbox passed the guard.
+    assert repository.direct_grid_station_ensure_count == 1
+    assert repository.interp_weight_upsert_count == 1
+    assert repository.upsert_count == 1
+    assert repository.cycle_updates[-1]["status"] == "forcing_ready"
+
+
+# ---------------------------------------------------------------------------
+# 10. §3.2 SUB-7: cross-convention 0..360 env longitude vs registered
+#     -180..180 snapshot → fail closed rather than silently clip — Requirement 2
+#     Scenario 2 in
+#     ``openspec/changes/direct-grid-build-enablement/specs/producer-bbox-preflight/spec.md``
+#     §"The producer owns the deployment-bbox longitude convention".
+# ---------------------------------------------------------------------------
+
+
+def test_cross_convention_east_200_versus_registered_minus_180_180_snapshot_fails_closed_with_BboxMismatchError(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§3.2 Requirement 2 Scenario 2: a 0..360-style deployment ``east=200``
+    that does not equal the registered -180..180 snapshot ``east=140`` MUST
+    fail closed via :class:`BboxMismatchError` rather than silently clipping
+    a shifted region.
+
+    ``GeoBBox.__post_init__`` at ``workers/data_adapters/region.py:41-49``
+    tolerates ``east`` up to 360, so ``east=200`` constructs a valid GeoBBox
+    (0..360 convention) — the mismatch is caught by the guard's bit-exact
+    equality check against the snapshot's -180..180 ``east=140``, not by env
+    parsing.
+
+    Non-goal per tasks.md §3.2: no change to the guard's signed-zero /
+    finiteness compare semantics; this test only exercises the
+    longitude-convention landing.
+    """
+    monkeypatch.setenv("NHMS_DOWNLOAD_BBOX_EAST", "200.0")
+
+    def snapshot_row_factory(
+        *, source_id: str, grid_id: str, grid_signature: str
+    ) -> tuple[float, float, float, float, uuid.UUID, Any]:
+        del source_id, grid_id, grid_signature
+        return (
+            _DEFAULT_ENV_BBOX.south,
+            _DEFAULT_ENV_BBOX.north,
+            _DEFAULT_ENV_BBOX.west,
+            140.0,  # registered snapshot east in the canonical -180..180 form
+            _REGISTERED_SNAPSHOT_ID,
+            None,
+        )
+
+    _contract, store, repository = _make_direct_grid_setup(
+        tmp_path, monkeypatch, snapshot_row_factory=snapshot_row_factory
+    )
+    producer = _build_producer_with_env_reader(tmp_path, repository, store)
+
+    with pytest.raises(BboxMismatchError) as excinfo:
+        producer.produce(
+            source_id="gfs", cycle_time="2026050700", model_id="demo_model"
+        )
+
+    # Env side carries the 0..360 east=200; snapshot side carries -180..180
+    # east=140 — the guard surfaces both in the mismatch payload so the
+    # operator can see the convention mix-up directly.
+    assert excinfo.value.expected_bbox["east"] == 200.0
+    assert excinfo.value.actual_bbox["east"] == 140.0
+    _assert_zero_direct_grid_production_writes(repository, tmp_path)
+    # Symmetry with tests 2/3/4/5/6/7 — fail-closed status marker.
     assert repository.cycle_updates[-1]["status"] == "failed_forcing"
