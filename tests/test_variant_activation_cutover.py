@@ -838,6 +838,10 @@ def test_manifest_republished_on_switch_version_commit(
     assert published.operation_type == "switch_version"
     assert published.target_model_id == "direct_grid_m1"
     assert published.basin_version_id == BASIN_VERSION_ID
+    # Lock the scope carried on switch_version so a future refactor that
+    # passes the wrong model (e.g. ``current_active`` instead of the
+    # activated target) is caught in-place.
+    assert published.source_scope == ("gfs", "IFS")
 
 
 def test_manifest_republished_on_rollback_version_commit(
@@ -868,6 +872,12 @@ def test_manifest_republished_on_rollback_version_commit(
     # For rollback, the target_model_id is the RESTORED previous model.
     assert published.target_model_id == "restored_previous"
     assert published.basin_version_id == BASIN_VERSION_ID
+    # Lock the scope on rollback: the publisher reads from ``transition["model"]``
+    # which is the RESTORED previous model. ``restored_previous`` has no
+    # ``direct_grid_forcing`` block, so the extracted scope is None. This
+    # catches a future refactor that mistakenly extracts scope from the
+    # superseded ``current_active`` instead of the restored previous.
+    assert published.source_scope is None
 
 
 def test_manifest_republished_on_deactivate_of_active_commit(
@@ -902,6 +912,11 @@ def test_manifest_republished_on_deactivate_of_active_commit(
     assert published.operation_type == "deactivate"
     assert published.target_model_id == "legacy_m0"
     assert published.basin_version_id == BASIN_VERSION_ID
+    # Lock the scope on deactivate: ``legacy_m0`` is a legacy IDW baseline
+    # with no ``direct_grid_forcing`` block, so the extracted scope is
+    # None. Catches a refactor that leaks a stale scope into the publisher
+    # context for the pause-production lever.
+    assert published.source_scope is None
 
 
 # --- Group B: negative `manifest_not_republished` cases --------------------
@@ -1029,6 +1044,88 @@ def test_manifest_not_republished_on_supersede_of_active_blocked(
     # No state changes committed.
     assert store._state_updates == []
     # No manifest re-publish.
+    assert stub.call_count == 0
+
+
+class _AllowedDeactivateHarnessStore(_HarnessStore):
+    """Harness variant that forces ``deactivate`` to land ``outcome='allowed'``.
+
+    The natural harness path for deactivating a
+    ``lifecycle_state='inactive', active_flag=False`` row lands
+    ``outcome='already_current'``
+    (`_apply_model_lifecycle_transition:2631-2632`) — the §2.2 predicate
+    then rejects the operation via its ``transition_outcome in {'allowed',
+    'rollback'}`` short-circuit before ever reaching the
+    ``current_active_before.model_id == model.model_id`` guard that this
+    negative test is trying to lock. This subclass forces the deactivate
+    branch to return ``outcome='allowed'`` so the predicate's own guard is
+    the decisive gate at the integration seam.
+    """
+
+    def _apply_model_lifecycle_transition(
+        self,
+        cursor: Any,
+        *,
+        model: Mapping[str, Any],
+        current_active: Mapping[str, Any] | None,
+        operation: ModelLifecycleOperation,
+        previous_model: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        if operation == "deactivate":
+            updated = self._update_model_lifecycle_state(
+                cursor, str(model["model_id"]), "inactive"
+            )
+            return {"outcome": "allowed", "model": updated, "previous_model": current_active}
+        return super()._apply_model_lifecycle_transition(
+            cursor,
+            model=model,
+            current_active=current_active,
+            operation=operation,
+            previous_model=previous_model,
+        )
+
+
+def test_manifest_not_republished_on_deactivate_of_non_active_model(
+    two_models: list[dict[str, Any]],
+) -> None:
+    """Deactivating a NON-currently-active model does NOT invoke the publisher.
+
+    ``two_models`` seeds ``legacy_m0`` as the currently-active dispatch
+    target and ``direct_grid_m1`` as inactive. Deactivating
+    ``direct_grid_m1`` — a row that is NOT the current dispatch target —
+    does not change the dispatch set, so §2.2's contract requires no
+    re-publish. This test locks the
+    ``current_active_before.model_id == model.model_id`` guard in
+    :func:`_should_publish_manifest_after_commit` at the integration
+    seam: if that guard is deleted, the predicate returns True on
+    ``outcome='allowed'`` regardless of which model was deactivated, the
+    publisher fires, and this test's ``stub.call_count == 0`` assertion
+    fails.
+
+    Uses :class:`_AllowedDeactivateHarnessStore` so the transition lands
+    ``outcome='allowed'`` rather than the natural
+    ``outcome='already_current'`` (which the predicate rejects via its
+    earlier ``transition_outcome`` check, bypassing the guard we want to
+    lock).
+    """
+    store = _AllowedDeactivateHarnessStore(two_models)
+    stub = _ManifestPublisherStub()
+    store.register_post_commit_manifest_publisher(stub)
+
+    result = store.model_lifecycle_operation(
+        "direct_grid_m1",  # NOT the currently-active model in scope
+        operation="deactivate",
+        policy_decision=_decision("models.deactivate", "direct_grid_m1"),
+        request_id="req-manifest-deactivate-non-active",
+    )
+
+    assert result["status"] == "allowed"
+    # Sanity: preflight resolved current active as legacy_m0 (the actual
+    # dispatch target), while the deactivate targeted direct_grid_m1.
+    # The predicate's guard rejects this combination.
+    assert store._models["legacy_m0"]["active_flag"] is True
+    assert store._models["legacy_m0"]["lifecycle_state"] == "active"
+    # Publisher must NOT fire — direct_grid_m1 was not the dispatch target.
     assert stub.call_count == 0
 
 
