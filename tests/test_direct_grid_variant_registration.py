@@ -74,12 +74,22 @@ evidence line).
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
 from workers.forcing_producer.direct_grid_contract import (
     load_forcing_mapping_contract_from_manifest,
+)
+from workers.forcing_producer.direct_grid_contract import (
+    parse_direct_grid_forcing_contract as _parse_direct_grid_contract,
+)
+from workers.forcing_producer.store import (
+    DIRECT_GRID_CACHE_STATION_ROLE,
+    MetStoreError,
+    PsycopgForcingRepository,
 )
 from workers.model_registry.direct_grid_variant_registration import (
     DirectGridBaselineModelInputs,
@@ -1664,3 +1674,496 @@ def test_idempotent_different_binding_checksum_new_row_prior_mirror_retained(
     assert prime_station_ids
     assert prime_station_ids.isdisjoint(m1_station_ids_before)
     assert result_prime.mirror_stations_written == len(prime_station_ids)
+
+
+# --- §1.4 / SUB-4: producer mirror `active_flag` ownership LOCKS -----------
+#
+# These tests LOCK the §D2 flag-ownership boundary at the runtime producer
+# plane (`workers/forcing_producer/store.py:ensure_direct_grid_met_stations`,
+# `workers/forcing_producer/file_store.py:_handoff_station_rows`, and the
+# ingest path in `packages/common/forcing_domain_handoff_apply.py:_upsert_met_stations`).
+#
+# After #965, none of these paths may:
+#   * insert `active_flag=true` on a fresh mirror row, or
+#   * escalate an existing row's `active_flag` from `false` to `true`.
+# Mirror activation belongs exclusively to Change 8's cutover flip. The
+# fail-closed derived-cache collision predicate is retained unchanged.
+#
+# Test infrastructure:
+#   * `_ProducerFakeStore` — minimal `PsycopgForcingRepository` subclass that
+#     overrides `_replace_values` to accumulate `execute_values` calls and
+#     simulate the DO UPDATE against an in-memory station table with the
+#     producer's exact WHERE predicate (fail-closed on identity drift, flag
+#     preservation on match). Kept scoped to §1.4 because the producer path
+#     uses `execute_values` (multi-row batch), while the registration surface
+#     uses per-row `cursor.execute` — the two SQL shapes diverge enough that
+#     extending `_FakeCursor` to host both would obscure both.
+#   * `_producer_contract_from_payload` — parses a §1.2/SUB-2 payload into
+#     the runtime `DirectGridForcingContract` the producer expects.
+
+class _ProducerFakeStore(PsycopgForcingRepository):
+    """Minimal producer-side fake for `ensure_direct_grid_met_stations`.
+
+    The producer plane calls `_replace_values(..., execute_values-style)`,
+    not per-row `cursor.execute`. This fake intercepts that call, captures
+    the raw SQL for shape assertions, and simulates the mirror upsert
+    against an in-memory `station_id -> row` dict:
+
+    * Fresh station_id -> INSERT lands with `active_flag=False` (matching
+      the production INSERT template's literal `false`).
+    * Existing station_id with matching derived-cache identity -> DO UPDATE
+      that PRESERVES the existing `active_flag` (matching the SET clause
+      that no longer touches `active_flag`).
+    * Existing station_id with non-matching identity -> the affected-row
+      count would be 0; the fake raises `MetStoreError` with the producer's
+      conflict message, matching `_replace_values`'s `expected_insert_count`
+      check.
+    """
+
+    def __init__(self, station_rows: list[dict[str, Any]] | None = None) -> None:
+        super().__init__(database_url="memory://producer-fake")
+        # `frozen=True` on the base dataclass prevents normal assignment.
+        object.__setattr__(self, "station_rows", list(station_rows or []))
+        object.__setattr__(self, "sql_calls", [])
+        object.__setattr__(self, "insert_statements", [])
+
+    def _replace_values(
+        self,
+        pre_delete_statement: str | None,
+        pre_delete_parameters: tuple[Any, ...],
+        delete_statement: str | None,
+        delete_parameters: tuple[Any, ...],
+        insert_statement: str,
+        rows: Any,
+        *,
+        template: str | None = None,
+        expected_insert_count: int | None = None,
+        conflict_error: str | None = None,
+    ) -> None:
+        assert pre_delete_statement is None
+        assert delete_statement is None
+        row_list = [tuple(row) for row in rows]
+        self.sql_calls.append(
+            {"insert_statement": insert_statement, "template": template, "rows": row_list}
+        )
+        self.insert_statements.append(insert_statement)
+
+        matched = 0
+        pending = [dict(row) for row in self.station_rows]
+        for row in row_list:
+            (
+                station_id,
+                basin_version_id,
+                station_name,
+                longitude,
+                latitude,
+                elevation_m,
+                station_role,
+                properties_wrapped,
+            ) = row
+            properties = _adapt(properties_wrapped)
+            new_record = {
+                "station_id": station_id,
+                "basin_version_id": basin_version_id,
+                "station_name": station_name,
+                "longitude": longitude,
+                "latitude": latitude,
+                "elevation_m": elevation_m,
+                "station_role": station_role,
+                "properties_json": dict(properties),
+            }
+            existing = next(
+                (item for item in pending if item["station_id"] == station_id), None
+            )
+            if existing is None:
+                # Fresh INSERT lands with active_flag=False literal.
+                pending.append({**new_record, "active_flag": False})
+                matched += 1
+                continue
+            if not _producer_predicate_matches(existing, new_record):
+                # WHERE predicate rejects this row -> rowcount=0 for it,
+                # which the caller catches as MetStoreError.
+                continue
+            # DO UPDATE reconciles same-value fields; active_flag is PRESERVED
+            # (registration/cutover ownership, §D2).
+            preserved_flag = existing["active_flag"]
+            existing.update(new_record)
+            existing["active_flag"] = preserved_flag
+            matched += 1
+
+        if expected_insert_count is not None and matched != expected_insert_count:
+            raise MetStoreError(
+                conflict_error or "Forcing database write affected an unexpected row count."
+            )
+        object.__setattr__(self, "station_rows", pending)
+
+
+def _adapt(value: Any) -> Any:
+    return getattr(value, "adapted", value)
+
+
+def _producer_predicate_matches(
+    existing: Mapping[str, Any], incoming: Mapping[str, Any]
+) -> bool:
+    """Model the store.py DO UPDATE WHERE predicate for the fake."""
+
+    existing_props = existing.get("properties_json") or {}
+    incoming_props = incoming.get("properties_json") or {}
+    return (
+        existing.get("basin_version_id") == incoming.get("basin_version_id")
+        and existing.get("station_role") == DIRECT_GRID_CACHE_STATION_ROLE
+        and existing_props.get("derived_cache") is True
+        and existing_props.get("forcing_mapping_mode") == "direct_grid"
+        and existing_props.get("binding_checksum") == incoming_props.get("binding_checksum")
+        and existing_props.get("model_input_package_id")
+        == incoming_props.get("model_input_package_id")
+        and existing_props.get("grid_signature") == incoming_props.get("grid_signature")
+        and existing_props.get("contract_grid_id") == incoming_props.get("contract_grid_id")
+        and existing_props.get("grid_id") == incoming_props.get("grid_id")
+    )
+
+
+def _producer_contract(payload: dict[str, Any]):
+    """Parse a §1.2/SUB-2-shaped payload into the runtime producer contract."""
+
+    return _parse_direct_grid_contract(payload, source_id="GFS")
+
+
+def _seed_registered_mirror(
+    store: _ProducerFakeStore,
+    *,
+    payload: dict[str, Any],
+    basin_version_id: str = BASIN_VERSION_ID,
+    active_flag: bool = False,
+) -> list[dict[str, Any]]:
+    """Seed the fake store's in-memory table with post-registration mirror rows.
+
+    Mirrors the shape the §1.2 registration surface persists (`derived_cache:true`,
+    `forcing_mapping_mode:'direct_grid'`, etc.) so a subsequent producer upsert
+    hits the DO UPDATE path (identity matches, WHERE predicate returns TRUE).
+    ``active_flag`` defaults to ``False`` (fresh registration) but callers may
+    seed ``True`` to simulate the post-cutover state (Change 8 flip).
+    """
+
+    contract = _producer_contract(payload)
+    rows: list[dict[str, Any]] = []
+    for station in contract.stations:
+        properties = {
+            **dict(station.properties),
+            "derived_cache": True,
+            "forcing_mapping_mode": "direct_grid",
+            "direct_grid": True,
+            "manifest_authority": True,
+            "binding_checksum": contract.binding_checksum,
+            "binding_uri": contract.binding_uri,
+            "model_input_package_id": contract.model_input_package_id,
+            "sp_att_path": contract.sp_att_path,
+            "sp_att_checksum": contract.sp_att_checksum,
+            "grid_id": station.grid_id,
+            "contract_grid_id": contract.grid_id,
+            "grid_cell_id": station.grid_cell_id,
+            "grid_signature": contract.grid_signature,
+            "shud_forcing_index": station.shud_forcing_index,
+            "forcing_filename": station.forcing_filename,
+            "x": station.x,
+            "y": station.y,
+            "z": station.z,
+        }
+        row = {
+            "station_id": station.station_id,
+            "basin_version_id": basin_version_id,
+            "station_name": f"Direct-grid station {station.shud_forcing_index}",
+            "longitude": station.longitude,
+            "latitude": station.latitude,
+            "elevation_m": station.z,
+            "station_role": DIRECT_GRID_CACHE_STATION_ROLE,
+            "active_flag": active_flag,
+            "properties_json": properties,
+        }
+        rows.append(row)
+    object.__setattr__(store, "station_rows", store.station_rows + rows)
+    return rows
+
+
+# --- §1.4 Group A: producer preserves the registration-owned active_flag --
+
+
+def test_producer_preserves_registration_flag_false_on_registered_variant_pre_cutover() -> None:
+    """Producer upsert against a registered mirror never escalates `false` -> `true`.
+
+    Seeds two mirror rows the registration surface wrote (`active_flag=false`,
+    §1.2). Invokes the runtime producer's `ensure_direct_grid_met_stations`
+    with the same asset identity so the DO UPDATE path fires. Locks two
+    invariants:
+
+    1. Every mirror row still has ``active_flag=False`` afterwards
+       (registration-owned inactivity survives a pre-cutover shadow run).
+    2. The producer's INSERT template carries `active_flag` as literal
+       ``false`` and the DO UPDATE SET clause omits `active_flag` entirely
+       (SQL-shape lock so a future edit that adds `active_flag = true`
+       back into SET trips this test).
+    """
+
+    payload = _mirror_ready_payload()
+    store = _ProducerFakeStore()
+    seeded = _seed_registered_mirror(store, payload=payload, active_flag=False)
+    assert all(row["active_flag"] is False for row in seeded)
+
+    store.ensure_direct_grid_met_stations(
+        basin_version_id=BASIN_VERSION_ID, contract=_producer_contract(payload)
+    )
+
+    # Row-level invariant: every mirror row stayed inactive.
+    for row in store.station_rows:
+        assert row["active_flag"] is False, (
+            f"producer must preserve registration-owned inactivity for {row['station_id']!r}"
+        )
+
+    # SQL-shape invariant: the producer INSERT template lands `false` literally
+    # and the DO UPDATE SET clause never touches active_flag.
+    insert_sql = store.insert_statements[-1]
+    template = store.sql_calls[-1]["template"] or ""
+    assert " false, " in template, (
+        "producer INSERT template must carry active_flag=false as a literal (§D2)"
+    )
+    set_clause = insert_sql.split("DO UPDATE SET", 1)[1].split("WHERE", 1)[0]
+    assert "active_flag" not in set_clause, (
+        "producer DO UPDATE SET must not touch active_flag (§D2 flag ownership)"
+    )
+
+
+def test_producer_preserves_registration_flag_true_stays_true() -> None:
+    """A row already flipped `true` by Change 8's cutover stays `true`.
+
+    Locks the "never de-escalates" half of §D2 flag preservation: after the
+    cutover flip, subsequent producer runs must not silently reset a live
+    mirror row back to inactive. Seeds mirror rows with ``active_flag=True``,
+    runs the producer's DO UPDATE, and asserts every row is still ``True``.
+    """
+
+    payload = _mirror_ready_payload()
+    store = _ProducerFakeStore()
+    _seed_registered_mirror(store, payload=payload, active_flag=True)
+
+    store.ensure_direct_grid_met_stations(
+        basin_version_id=BASIN_VERSION_ID, contract=_producer_contract(payload)
+    )
+
+    for row in store.station_rows:
+        assert row["active_flag"] is True, (
+            f"producer must never de-escalate active_flag; {row['station_id']!r} regressed"
+        )
+
+
+def test_producer_preserves_registration_flag_file_plane_handoff_carries_no_forced_true() -> None:
+    """The DB-free file plane emits mirror rows without `active_flag=true`.
+
+    Locks the §D2 boundary at the file plane
+    (`workers/forcing_producer/file_store.py:_handoff_station_rows`): the
+    emitted station-inventory row dict either omits `active_flag` entirely
+    OR carries `False`. It MUST NOT carry `True`. Direct method call
+    against a bare `FileForcingRepository` shell (the method touches only
+    `self._stations_by_basin_version`, which stays empty for this test).
+    """
+
+    from workers.forcing_producer.file_store import FileForcingRepository
+    from workers.forcing_producer.producer import ForcingTimeseriesRow
+
+    # Bypass the dataclass __init__ (which requires an object_store) — the
+    # method under test doesn't touch object_store. Set the caches to empty.
+    repo = object.__new__(FileForcingRepository)
+    object.__setattr__(repo, "object_store", None)
+    object.__setattr__(repo, "registry_manifest", None)
+    object.__setattr__(repo, "_registry_cache", None)
+    object.__setattr__(repo, "_model_manifest_cache", {})
+    object.__setattr__(repo, "_stations_by_basin_version", {})
+    object.__setattr__(repo, "_weights_by_scope", {})
+    object.__setattr__(repo, "_forcing_versions", {})
+    object.__setattr__(repo, "_forcing_components", {})
+    object.__setattr__(repo, "_forcing_timeseries_summary", {})
+    object.__setattr__(repo, "_forcing_timeseries_rows", {})
+
+    package_manifest = {
+        "station_order": [
+            {
+                "station_id": "qhh_forc_001",
+                "shud_forcing_index": 1,
+                "forcing_filename": "X100.125Y38.25.csv",
+                "longitude": 100.125,
+                "latitude": 38.25,
+                "elevation_m": 3280.0,
+            }
+        ]
+    }
+    row = ForcingTimeseriesRow(
+        forcing_version_id="fv-1",
+        basin_version_id="basins_qhh_v2026_06",
+        station_id="qhh_forc_001",
+        valid_time=datetime(2026, 6, 20, 12, tzinfo=UTC),
+        source_id="gfs",
+        variable="PRCP",
+        value=0.0,
+        unit="kg m-2 s-1",
+        native_resolution="1h",
+    )
+    record = {
+        "forcing_version_id": "fv-1",
+        "source_id": "gfs",
+        "cycle_time": row.valid_time,
+        "model_id": "basins_qhh_shud",
+    }
+
+    emitted = repo._handoff_station_rows(
+        record=record,
+        package_manifest=package_manifest,
+        rows=[row],
+        basin_id="basins_qhh",
+        basin_version_id="basins_qhh_v2026_06",
+        model_id="basins_qhh_shud",
+    )
+
+    assert len(emitted) == 1
+    emitted_row = emitted[0]
+    # The row MUST NOT carry `active_flag=True`. It may be missing OR False.
+    assert emitted_row.get("active_flag") is not True, (
+        "file-plane handoff must not force active_flag=true (§D2)"
+    )
+    # Prefer explicit False (the ingest apply requires a bool, so absence
+    # would fail parse-time validation upstream). Lock the explicit-False
+    # form so a future edit that switches to "drop the key" fails loudly.
+    assert emitted_row["active_flag"] is False, (
+        "file-plane handoff must emit active_flag=False (registration-owned)"
+    )
+
+
+# --- §1.4 Group B: end-to-end production run mirror stays inactive --------
+
+
+def test_production_run_mirror_stays_inactive_end_to_end(
+    db: _InMemoryDb, cursor: _FakeCursor
+) -> None:
+    """A full registration -> producer upsert -> ingest apply run leaves mirror inactive.
+
+    Integrated end-to-end proof of §D2 across the three planes touched by
+    #965:
+
+    1. Registration writes mirror rows with `active_flag=false` (§1.2).
+    2. The runtime producer's DO UPDATE runs against the same identity
+       (§1.4 flip: no `active_flag=true` in SET; INSERT lands `false`).
+    3. The ingest apply's `_upsert_met_stations` template lands the literal
+       `false` and drops `active_flag` from the identity predicate.
+
+    Locks the shadow-window display invariant: pre-cutover production
+    cannot create a mixed display because every mirror row ends
+    `active_flag=false`, so the MVT single-track query still returns only
+    the legacy track.
+    """
+
+    # --- Plane 1: registration writes the mirror rows inactive ---
+    payload = _mirror_ready_payload()
+    result = register_direct_grid_variant(
+        cursor, _make_input(payload=payload, grid_snapshot_id=GRID_SNAPSHOT_ID)
+    )
+    assert result.inserted is True
+    assert result.mirror_stations_written == 2
+    for row in db.met_stations.values():
+        assert row["active_flag"] is False
+
+    # --- Plane 2: runtime producer's mirror upsert against the same identity ---
+    producer_store = _ProducerFakeStore(
+        station_rows=[
+            {**dict(row), "properties_json": dict(row["properties_json"])}
+            for row in db.met_stations.values()
+        ]
+    )
+    producer_store.ensure_direct_grid_met_stations(
+        basin_version_id=BASIN_VERSION_ID, contract=_producer_contract(payload)
+    )
+    for row in producer_store.station_rows:
+        assert row["active_flag"] is False
+
+    # --- Plane 3: ingest apply's _upsert_met_stations SQL-shape check ---
+    # Simulate the ingest apply's `execute_values` call by inspecting the
+    # module's SQL. The template must land a literal `false` and the ON
+    # CONFLICT identity predicate must NOT include `active_flag`.
+    import inspect as _inspect
+
+    from packages.common import forcing_domain_handoff_apply as _apply_module
+
+    apply_source = _inspect.getsource(_apply_module._upsert_met_stations)
+    assert "false, %s)" in apply_source, (
+        "ingest apply INSERT template must land active_flag=false literal (§D2)"
+    )
+    conflict_predicate = apply_source.split("ON CONFLICT", 1)[1]
+    assert "active_flag = EXCLUDED.active_flag" not in conflict_predicate, (
+        "ingest apply ON CONFLICT predicate must NOT gate on active_flag (§D2)"
+    )
+
+    # MVT single-track invariant: no mirror row is active anywhere.
+    mirror_active_rows = [
+        row for row in db.met_stations.values() if row["active_flag"] is True
+    ]
+    assert mirror_active_rows == [], (
+        "pre-cutover production must not create any active mirror row (single-track invariant)"
+    )
+
+
+# --- §1.4 Group C: producer collision still fails closed ------------------
+
+
+def test_producer_collision_still_fails_closed_on_non_matching_station_id() -> None:
+    """The producer's derived-cache collision predicate is untouched by §1.4.
+
+    Regression lock: the flag ownership change relaxes NOTHING about the
+    fail-closed identity predicate. Seeds a foreign row on the same
+    station_id with a DIFFERENT `binding_checksum` (identity mismatch);
+    runs the producer's `ensure_direct_grid_met_stations`; asserts it
+    raises `MetStoreError` with the producer's mirror-conflict message.
+
+    This is the §1.2 collision policy retained verbatim; §1.4 does not
+    change the WHERE predicate on the DO UPDATE — only removes the
+    `active_flag = true` SET term.
+    """
+
+    payload = _mirror_ready_payload(
+        binding_checksum="sha256:mirror-binding-INCOMING",
+    )
+    contract = _producer_contract(payload)
+    foreign_station_id = contract.stations[0].station_id
+
+    store = _ProducerFakeStore(
+        station_rows=[
+            {
+                "station_id": foreign_station_id,
+                "basin_version_id": BASIN_VERSION_ID,
+                "station_name": "Foreign station",
+                "longitude": 99.99,
+                "latitude": 35.55,
+                "elevation_m": 1234.5,
+                "station_role": DIRECT_GRID_CACHE_STATION_ROLE,
+                # Even active_flag=false — the collision is on IDENTITY, not
+                # on the flag. §1.4 removes active_flag from the SET clause;
+                # it does NOT relax the identity WHERE predicate.
+                "active_flag": False,
+                "properties_json": {
+                    "derived_cache": True,
+                    "forcing_mapping_mode": "direct_grid",
+                    # A DIFFERENT binding_checksum than the incoming producer contract.
+                    "binding_checksum": "sha256:FOREIGN-binding-not-INCOMING",
+                    "model_input_package_id": contract.model_input_package_id,
+                    "grid_signature": contract.grid_signature,
+                    "contract_grid_id": contract.grid_id,
+                    "grid_id": contract.stations[0].grid_id,
+                },
+            }
+        ]
+    )
+    foreign_before = json.loads(json.dumps(store.station_rows))
+
+    with pytest.raises(MetStoreError, match="mirror conflicts"):
+        store.ensure_direct_grid_met_stations(
+            basin_version_id=BASIN_VERSION_ID, contract=contract
+        )
+
+    # Fail-closed: the foreign row is byte-identical afterwards.
+    assert json.loads(json.dumps(store.station_rows)) == foreign_before

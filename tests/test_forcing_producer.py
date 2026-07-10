@@ -5224,7 +5224,10 @@ class _MemoryInterpWeightRepository(PsycopgForcingRepository):
                     "latitude": row[4],
                     "elevation_m": row[5],
                     "station_role": row[6],
-                    "active_flag": True,
+                    # §D2 (§1.4): the DB template lands `active_flag` as a literal
+                    # `false`; the fake mirrors that ownership so simulated storage
+                    # reflects registration-owned inactivity by default.
+                    "active_flag": False,
                     "properties_json": dict(row[7].adapted),
                 }
                 existing = next(
@@ -5339,7 +5342,17 @@ def test_store_ensures_direct_grid_met_station_mirror_rows_before_interp_weights
     assert "INSERT INTO met.met_station" in station_insert[1]
     assert "ST_SetSRID(ST_MakePoint" in str(station_insert[3])
     assert "ON CONFLICT (station_id) DO UPDATE SET" in station_insert[1]
-    assert "active_flag = true" in station_insert[1]
+    # §D2 (§1.4): the direct-grid mirror upsert lands rows inactive (`false` literal
+    # in the VALUES template) and MUST NOT touch `active_flag` in DO UPDATE SET.
+    # Mirror activation ownership belongs to registration (`false` land) and
+    # Change 8's cutover flip (`true`); the producer preserves whichever is in place.
+    set_clause = station_insert[1].split("DO UPDATE SET", 1)[1].split("WHERE", 1)[0]
+    assert "active_flag" not in set_clause, (
+        "direct-grid producer DO UPDATE SET must not touch active_flag (§D2)"
+    )
+    assert " false, %s)" in str(station_insert[3]), (
+        "direct-grid producer INSERT template must land active_flag as literal `false`"
+    )
     assert station_insert[3] is not None
     station_rows = station_insert[2]
     assert [row[0] for row in station_rows] == ["qhh_forc_001", "qhh_forc_002"]

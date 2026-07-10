@@ -723,6 +723,11 @@ def _fake_execute_values(
 
 def _upsert_fake_stations(table: list[dict[str, Any]], rows: list[tuple[Any, ...]]) -> list[tuple[str]]:
     returned: list[tuple[str]] = []
+    # §D2 flag ownership (§1.4): the production INSERT template now lands `active_flag`
+    # as a literal `false` and drops the field from the row tuple entirely. The fake
+    # models the same shape — 8 keys — and stamps `active_flag=False` on the fresh
+    # record after the zip so existing test assertions on stored `active_flag` still
+    # see the SQL literal, while a DO UPDATE preserves the existing row's flag.
     keys = (
         "station_id",
         "basin_version_id",
@@ -731,12 +736,12 @@ def _upsert_fake_stations(table: list[dict[str, Any]], rows: list[tuple[Any, ...
         "latitude",
         "elevation_m",
         "station_role",
-        "active_flag",
         "properties_json",
     )
     for row in rows:
         record = dict(zip(keys, row, strict=True))
         record["properties_json"] = _unwrap_json(record["properties_json"])
+        record["active_flag"] = False
         record["geom"] = {
             "type": "Point",
             "srid": 4490,
@@ -753,6 +758,8 @@ def _upsert_fake_stations(table: list[dict[str, Any]], rows: list[tuple[Any, ...
 
 
 def _fake_station_compatible(existing: Mapping[str, Any], record: Mapping[str, Any]) -> bool:
+    # §D2: `active_flag` is intentionally NOT part of the identity compatibility
+    # predicate — flag ownership is registration/cutover, not identity drift.
     existing_select = _station_select_row(existing)
     return (
         existing_select["basin_version_id"] == record["basin_version_id"]
@@ -761,7 +768,6 @@ def _fake_station_compatible(existing: Mapping[str, Any], record: Mapping[str, A
         and existing_select["latitude"] == record["latitude"]
         and existing_select["elevation_m"] == record["elevation_m"]
         and existing_select["station_role"] == record["station_role"]
-        and existing_select["active_flag"] == record["active_flag"]
     )
 
 

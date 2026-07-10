@@ -403,7 +403,6 @@ class PsycopgForcingRepository:
                 geom = EXCLUDED.geom,
                 elevation_m = EXCLUDED.elevation_m,
                 station_role = EXCLUDED.station_role,
-                active_flag = true,
                 properties_json = EXCLUDED.properties_json
             WHERE met.met_station.basin_version_id = EXCLUDED.basin_version_id
               AND met.met_station.station_role = 'direct_grid_cache'
@@ -420,7 +419,7 @@ class PsycopgForcingRepository:
             template=(
                 "(%s, %s, %s, "
                 "ST_SetSRID(ST_MakePoint(%s, %s), 4490), "
-                "%s, %s, true, %s)"
+                "%s, %s, false, %s)"
             ),
             expected_insert_count=len(rows),
             conflict_error=(
