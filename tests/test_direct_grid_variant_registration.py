@@ -2167,3 +2167,671 @@ def test_producer_collision_still_fails_closed_on_non_matching_station_id() -> N
 
     # Fail-closed: the foreign row is byte-identical afterwards.
     assert json.loads(json.dumps(store.station_rows)) == foreign_before
+
+
+# --- §5.1 mechanism-only invariant proof (real DB) ------------------------
+#
+# Epic #961 SUB-11 (#972): registering direct-grid variants for SYNTHETIC
+# basins leaves the 13 live basins' active models and station sets byte-for-
+# byte unchanged, and every registered synthetic variant lands
+# `lifecycle_state='inactive'` / `active_flag=false`. This proof runs on
+# node-27's real Postgres (the data oracle per project convention); the
+# session-scoped `integration_database_url` fixture provisions a scratch DB
+# and `apply_migrations_from_zero` brings it up from zero — deliberately
+# NOT reusing `sub5_migrated_database` (module-scoped, coupled to grid
+# snapshot tests) so this test owns its full DB lifecycle.
+#
+# Receipt: on pass, the test writes
+# `artifacts/mechanism-only-receipts/receipt-<UTC-timestamp>.json` with a
+# per-basin before-hash / after-hash record so the orchestrator can compare
+# receipts across runs and archive them as PR evidence.
+
+
+_MECHANISM_ONLY_LIVE_BASIN_COUNT = 13
+_MECHANISM_ONLY_SYNTHETIC_VARIANT_COUNT = 3
+_MECHANISM_ONLY_STATIONS_PER_BASIN = 4
+_MECHANISM_ONLY_PREFIX = "mo972"
+_MECHANISM_ONLY_SOURCE_ID = "gfs"
+
+
+def _mo_row_hash(row: Mapping[str, Any]) -> str:
+    """Byte-stable sha256 over a row dict (sorted keys, default str coercion).
+
+    Uses ``sort_keys=True`` so key ordering can never influence the hash, and
+    ``default=str`` so JSON-unserializable types (``uuid.UUID``, ``datetime``,
+    ``Decimal``, ``memoryview`` for PostGIS geom, etc.) fall through to their
+    ``str()`` form deterministically. The hash is the byte-identity oracle
+    for before/after snapshots of the 13 live-analog basins.
+    """
+
+    import hashlib
+
+    payload = json.dumps(dict(row), sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _mo_snapshot_live_basin(
+    connection: Any, basin_version_id: str
+) -> dict[str, Any]:
+    """Snapshot ONE live-analog basin's active model + active station set.
+
+    Returns a dict with the active model row hash, the active-station-set
+    row hashes (sorted for order-stability), and the identifying fields the
+    receipt needs (``active_model_id``, ``active_station_count``). Uses the
+    ``geom::text`` WKB projection so the hash captures the PostGIS point
+    identity byte-for-byte across the before/after boundary.
+    """
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT model_id, basin_version_id, river_network_version_id,
+                   mesh_version_id, calibration_version_id, shud_code_version,
+                   model_package_uri, active_flag, lifecycle_state, resource_profile
+            FROM core.model_instance
+            WHERE basin_version_id = %s
+              AND active_flag = true
+              AND lifecycle_state = 'active'
+            """,
+            (basin_version_id,),
+        )
+        active_model = cursor.fetchone()
+        assert active_model is not None, (
+            f"live-analog basin {basin_version_id!r} has no active model"
+        )
+        active_model_dict = dict(active_model)
+
+        cursor.execute(
+            """
+            SELECT station_id, basin_version_id, station_name,
+                   ST_AsText(geom) AS geom_wkt, elevation_m, station_role,
+                   active_flag, properties_json, grid_snapshot_id
+            FROM met.met_station
+            WHERE basin_version_id = %s
+              AND active_flag = true
+            ORDER BY station_id
+            """,
+            (basin_version_id,),
+        )
+        active_stations = [dict(row) for row in cursor.fetchall()]
+
+    station_hashes = sorted(_mo_row_hash(row) for row in active_stations)
+    stations_agg_hash = _mo_row_hash({"station_hashes": station_hashes})
+    return {
+        "basin_version_id": basin_version_id,
+        "active_model_id": str(active_model_dict["model_id"]),
+        "active_model_hash": _mo_row_hash(active_model_dict),
+        "active_station_count": len(active_stations),
+        "active_stations_hash": stations_agg_hash,
+    }
+
+
+def _mo_seed_live_basin(cursor: Any, index: int) -> str:
+    """Seed one live-analog basin: basin/version/network/mesh + active model + stations.
+
+    Returns the ``basin_version_id``. Each basin gets a unique ``basin_id``
+    keyed on ``index`` so 13 rows can be inserted without collision, an
+    ``active_flag=true``/``lifecycle_state='active'`` model row (proxying the
+    legacy IDW model), and N=``_MECHANISM_ONLY_STATIONS_PER_BASIN`` mirror
+    stations with ``active_flag=true`` so the assertion has enough surface
+    to catch even a single-row drift.
+    """
+
+    from psycopg2.extras import Json
+
+    basin_id = f"{_MECHANISM_ONLY_PREFIX}_basin_{index:02d}"
+    basin_version_id = f"{_MECHANISM_ONLY_PREFIX}_bv_{index:02d}"
+    rnv_id = f"{_MECHANISM_ONLY_PREFIX}_rnv_{index:02d}"
+    mesh_id = f"{_MECHANISM_ONLY_PREFIX}_mesh_{index:02d}"
+    model_id = f"{_MECHANISM_ONLY_PREFIX}_active_model_{index:02d}"
+
+    # Offset the basin envelope by index so each basin has a distinct bbox —
+    # PostGIS constraints don't require it, but keeping bboxes disjoint makes
+    # the fixture read as "13 different basins" if a maintainer inspects the
+    # scratch DB during a debug session.
+    lon_offset = 100.0 + index * 0.5
+    lat_offset = 30.0 + index * 0.2
+
+    cursor.execute(
+        """
+        INSERT INTO core.basin (basin_id, basin_name, basin_group, description)
+        VALUES (%s, %s, 'mechanism-only-live-analog', %s)
+        """,
+        (basin_id, f"Live-analog basin {index:02d}", f"Proxy for live basin #{index:02d}"),
+    )
+    cursor.execute(
+        """
+        INSERT INTO core.basin_version (
+            basin_version_id, basin_id, version_label, geom, active_flag,
+            source_uri, checksum
+        )
+        VALUES (
+            %s, %s, 'v1',
+            ST_Multi(ST_MakeEnvelope(%s, %s, %s, %s, 4490)),
+            true, 'mechanism-only://live-analog', %s
+        )
+        """,
+        (
+            basin_version_id,
+            basin_id,
+            lon_offset,
+            lat_offset,
+            lon_offset + 0.4,
+            lat_offset + 0.4,
+            f"live-basin-{index:02d}-sha",
+        ),
+    )
+    cursor.execute(
+        """
+        INSERT INTO core.river_network_version (
+            river_network_version_id, basin_version_id, version_label,
+            segment_count, source_uri, checksum
+        )
+        VALUES (%s, %s, 'v1', 1, 'mechanism-only://rnv', 'live-rnv-sha')
+        """,
+        (rnv_id, basin_version_id),
+    )
+    cursor.execute(
+        """
+        INSERT INTO core.mesh_version (
+            mesh_version_id, basin_version_id, version_label, mesh_uri,
+            checksum, properties_json
+        )
+        VALUES (%s, %s, 'v1', 'mechanism-only://mesh', 'live-mesh-sha', %s)
+        """,
+        (mesh_id, basin_version_id, Json({"cell_count": 1})),
+    )
+    # Active legacy model row: `active_flag=true` + `lifecycle_state='active'`
+    # so the SUB-9 partial unique index (`model_instance_active_basin_version_uidx`)
+    # and the consistency CHECK (`model_instance_active_lifecycle_consistency_chk`)
+    # from migration 000022 are both satisfied on insert.
+    cursor.execute(
+        """
+        INSERT INTO core.model_instance (
+            model_id, basin_version_id, river_network_version_id,
+            mesh_version_id, calibration_version_id, shud_code_version,
+            model_package_uri, active_flag, lifecycle_state, resource_profile
+        )
+        VALUES (%s, %s, %s, %s, 'calib-v1', 'shud-v1',
+                'mechanism-only://live-active-package/', true, 'active', %s)
+        """,
+        (
+            model_id,
+            basin_version_id,
+            rnv_id,
+            mesh_id,
+            Json({"lineage": "mechanism_only_live_analog"}),
+        ),
+    )
+    # N legacy-shape (``station_role='forcing_proxy'``) active mirror stations
+    # per basin — every one MUST land `active_flag=true` so the MVT-style
+    # `basin_version_id=… AND active_flag=true` query returns them and so the
+    # before/after byte-identity assertion has real substance.
+    for station_index in range(_MECHANISM_ONLY_STATIONS_PER_BASIN):
+        station_id = f"{_MECHANISM_ONLY_PREFIX}_live_{index:02d}_st_{station_index:02d}"
+        # Deterministic per-station coordinate offset inside the basin envelope.
+        st_lon = lon_offset + 0.05 + station_index * 0.05
+        st_lat = lat_offset + 0.05 + station_index * 0.05
+        cursor.execute(
+            """
+            INSERT INTO met.met_station (
+                station_id, basin_version_id, station_name, geom,
+                elevation_m, station_role, active_flag, properties_json
+            )
+            VALUES (
+                %s, %s, %s,
+                ST_SetSRID(ST_MakePoint(%s, %s), 4490),
+                %s, 'forcing_proxy', true, %s
+            )
+            """,
+            (
+                station_id,
+                basin_version_id,
+                f"Live station {station_index:02d} of basin {index:02d}",
+                st_lon,
+                st_lat,
+                1000.0 + station_index,
+                Json({"lineage": "mechanism_only_live_analog", "index": station_index}),
+            ),
+        )
+    return basin_version_id
+
+
+def _mo_seed_synthetic_basin(cursor: Any, index: int) -> tuple[str, str, str, str]:
+    """Seed a SYNTHETIC basin for a direct-grid variant registration.
+
+    Returns ``(basin_version_id, river_network_version_id, mesh_version_id,
+    model_package_uri)`` so the caller can hand them to
+    ``DirectGridBaselineModelInputs``. Deliberately DISJOINT from the live-
+    analog basin id space (different prefix suffix) so a bug that lets the
+    registration surface mutate the wrong basin would blow the byte-identity
+    assertion loudly instead of silently overlapping.
+    """
+
+    from psycopg2.extras import Json
+
+    basin_id = f"{_MECHANISM_ONLY_PREFIX}_synbasin_{index:02d}"
+    basin_version_id = f"{_MECHANISM_ONLY_PREFIX}_synbv_{index:02d}"
+    rnv_id = f"{_MECHANISM_ONLY_PREFIX}_synrnv_{index:02d}"
+    mesh_id = f"{_MECHANISM_ONLY_PREFIX}_synmesh_{index:02d}"
+    model_package_uri = f"mechanism-only://synthetic-{index:02d}/package/"
+
+    lon_offset = 120.0 + index * 0.5
+    lat_offset = 40.0 + index * 0.2
+
+    cursor.execute(
+        """
+        INSERT INTO core.basin (basin_id, basin_name, basin_group, description)
+        VALUES (%s, %s, 'mechanism-only-synthetic', 'Synthetic basin for direct-grid variant registration')
+        """,
+        (basin_id, f"Synthetic basin {index:02d}"),
+    )
+    cursor.execute(
+        """
+        INSERT INTO core.basin_version (
+            basin_version_id, basin_id, version_label, geom, active_flag,
+            source_uri, checksum
+        )
+        VALUES (
+            %s, %s, 'v1',
+            ST_Multi(ST_MakeEnvelope(%s, %s, %s, %s, 4490)),
+            false, 'mechanism-only://synthetic', %s
+        )
+        """,
+        (
+            basin_version_id,
+            basin_id,
+            lon_offset,
+            lat_offset,
+            lon_offset + 0.4,
+            lat_offset + 0.4,
+            f"syn-basin-{index:02d}-sha",
+        ),
+    )
+    cursor.execute(
+        """
+        INSERT INTO core.river_network_version (
+            river_network_version_id, basin_version_id, version_label,
+            segment_count, source_uri, checksum
+        )
+        VALUES (%s, %s, 'v1', 1, 'mechanism-only://synrnv', 'syn-rnv-sha')
+        """,
+        (rnv_id, basin_version_id),
+    )
+    cursor.execute(
+        """
+        INSERT INTO core.mesh_version (
+            mesh_version_id, basin_version_id, version_label, mesh_uri,
+            checksum, properties_json
+        )
+        VALUES (%s, %s, 'v1', 'mechanism-only://synmesh', 'syn-mesh-sha', %s)
+        """,
+        (mesh_id, basin_version_id, Json({"cell_count": 2})),
+    )
+    return basin_version_id, rnv_id, mesh_id, model_package_uri
+
+
+def _mo_seed_data_source(cursor: Any) -> None:
+    """Seed the ``gfs`` data source so the canonical_grid_snapshot FK holds."""
+
+    from psycopg2.extras import Json
+
+    cursor.execute(
+        """
+        INSERT INTO met.data_source (
+            source_id, source_name, source_type, status, native_format,
+            adapter_name, config_json
+        )
+        VALUES (%s, 'GFS mechanism-only source', 'forecast', 'mock',
+                'netcdf', 'gfs', %s)
+        ON CONFLICT (source_id) DO NOTHING
+        """,
+        (_MECHANISM_ONLY_SOURCE_ID, Json({"mechanism_only": True})),
+    )
+
+
+def _mo_seed_snapshot(cursor: Any, index: int) -> tuple[str, str]:
+    """Seed a canonical_grid_snapshot row; return ``(grid_snapshot_id, canonical_grid_key)``."""
+
+    import uuid as _uuid
+
+    grid_snapshot_id = str(_uuid.uuid4())
+    canonical_grid_key = f"mo972_canonical_key_{index:02d}"
+    grid_id = f"mo972_grid_{index:02d}"
+    grid_signature = f"sha256:mo972-sig-{index:02d}"
+    grid_definition_uri = f"mechanism-only://grid/{index:02d}/grid.json"
+    grid_definition_checksum = f"{index:064x}"
+
+    cursor.execute(
+        """
+        INSERT INTO met.canonical_grid_snapshot (
+            grid_snapshot_id, canonical_grid_key, source_id, grid_id,
+            grid_signature, grid_definition_uri, grid_definition_checksum,
+            longitude_convention, latitude_order, flatten_order,
+            native_resolution, bbox_south, bbox_north, bbox_west, bbox_east,
+            converter_version, valid_from, valid_to, applicable_source_ids
+        )
+        VALUES (
+            %s, %s, %s, %s, %s, %s, %s,
+            '[-180,180)', 'descending', 'y_major_lat_then_lon',
+            0.25, 8.0, 64.0, 63.0, 145.0,
+            'converter-v1', %s, NULL, %s
+        )
+        """,
+        (
+            grid_snapshot_id,
+            canonical_grid_key,
+            _MECHANISM_ONLY_SOURCE_ID,
+            grid_id,
+            grid_signature,
+            grid_definition_uri,
+            grid_definition_checksum,
+            datetime(2026, 1, 1, tzinfo=UTC),
+            [_MECHANISM_ONLY_SOURCE_ID],
+        ),
+    )
+    # Canonical grid cells: the direct-grid parser doesn't consult them for
+    # the registration path, but keeping ordinals present makes the fixture
+    # closer to the production shape.
+    cursor.execute(
+        """
+        INSERT INTO met.canonical_grid_cell (
+            grid_snapshot_id, grid_cell_id, longitude, latitude,
+            canonical_ordinal
+        ) VALUES (%s, %s, %s, %s, %s), (%s, %s, %s, %s, %s)
+        """,
+        (
+            grid_snapshot_id, f"cell-{index:02d}-001", 100.95, 36.25, 1,
+            grid_snapshot_id, f"cell-{index:02d}-002", 101.05, 36.25, 2,
+        ),
+    )
+    return grid_snapshot_id, canonical_grid_key
+
+
+def _mo_synthetic_payload(index: int, grid_id: str, grid_signature: str) -> dict[str, Any]:
+    """Build a parser-valid direct-grid payload disjoint from live-basin ids."""
+
+    mai = f"mo972_mai_{index:02d}"
+    return {
+        "forcing_mapping_mode": "direct_grid",
+        "binding_uri": f"mechanism-only://synthetic/{index:02d}/binding.json",
+        "binding_checksum": f"sha256:mo972-binding-{index:02d}",
+        "model_input_package_id": f"mo972_mip_{index:02d}",
+        "sp_att_path": f"input/mo972-{index:02d}.sp.att",
+        "sp_att_checksum": f"sha256:mo972-spatt-{index:02d}",
+        "applicable_source_ids": [_MECHANISM_ONLY_SOURCE_ID],
+        "grid_id": grid_id,
+        "grid_signature": grid_signature,
+        "station_bindings": [
+            {
+                "station_id": f"{mai}::cell:cell-{index:02d}-001",
+                "shud_forcing_index": 1,
+                "forcing_filename": "X100.95Y36.25.csv",
+                "longitude": 100.95,
+                "latitude": 36.25,
+                "x": 1,
+                "y": 2,
+                "z": 3657,
+                "grid_id": grid_id,
+                "grid_cell_id": f"cell-{index:02d}-001",
+            },
+            {
+                "station_id": f"{mai}::cell:cell-{index:02d}-002",
+                "shud_forcing_index": 2,
+                "forcing_filename": "X101.05Y36.25.csv",
+                "longitude": 101.05,
+                "latitude": 36.25,
+                "x": 2,
+                "y": 3,
+                "z": 3600,
+                "grid_id": grid_id,
+                "grid_cell_id": f"cell-{index:02d}-002",
+            },
+        ],
+    }
+
+
+@pytest.mark.integration
+def test_mechanism_only_live_basins_undisturbed(
+    integration_database_url: str,
+    tmp_path: Any,
+) -> None:
+    """§5.1 mechanism-only invariant: variant registration is INERT for live basins.
+
+    Applies the migrations from zero (session-scoped fixture provisions a
+    fresh scratch DB per node-27 project convention), seeds
+    ``_MECHANISM_ONLY_LIVE_BASIN_COUNT`` (=13) live-analog basins each with
+    an ``active_flag=true`` legacy model + N ``active_flag=true`` mirror
+    stations, snapshots each basin's active-model row and active-station
+    row-set as sha256 byte-hashes, then registers
+    ``_MECHANISM_ONLY_SYNTHETIC_VARIANT_COUNT`` (=3) direct-grid variants on
+    SYNTHETIC other ``basin_version_id`` scopes, and re-snapshots the 13
+    live basins. Asserts:
+
+    1. Every live basin's active-model row hash is byte-identical before
+       and after — no writes on any live scope.
+    2. Every live basin's active-station-set hash is byte-identical before
+       and after — no writes on any live scope's ``met.met_station`` rows.
+    3. Every registered synthetic variant lands
+       ``lifecycle_state='inactive'`` and ``active_flag=false`` (mechanism
+       is inactive by construction).
+
+    Emits an ``artifacts/mechanism-only-receipts/receipt-<UTC>.json``
+    receipt with the per-basin before/after hashes and the synthetic-variant
+    identities so the orchestrator can archive it as PR evidence.
+    """
+
+    import pathlib
+    import uuid as _uuid
+
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+
+    from tests.integration_helpers import apply_migrations_from_zero
+
+    apply_migrations_from_zero(integration_database_url)
+
+    # Register psycopg2's UUID adapter so grid_snapshot_id UUID columns return
+    # as `uuid.UUID` and the byte-hash routines see a stable canonical form.
+    import psycopg2.extras as _pg_extras
+
+    _pg_extras.register_uuid()
+
+    live_basin_version_ids: list[str] = []
+    synthetic_registrations: list[dict[str, Any]] = []
+
+    # --- Seed phase (single tx, autocommit=False, one commit at end) --------
+    connection = psycopg2.connect(
+        integration_database_url, cursor_factory=RealDictCursor
+    )
+    connection.autocommit = False
+    try:
+        with connection.cursor() as seed_cursor:
+            _mo_seed_data_source(seed_cursor)
+            for basin_index in range(1, _MECHANISM_ONLY_LIVE_BASIN_COUNT + 1):
+                live_basin_version_ids.append(
+                    _mo_seed_live_basin(seed_cursor, basin_index)
+                )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+    # --- Before snapshot ----------------------------------------------------
+    connection = psycopg2.connect(
+        integration_database_url, cursor_factory=RealDictCursor
+    )
+    connection.autocommit = True
+    try:
+        before_snapshots = [
+            _mo_snapshot_live_basin(connection, basin_version_id)
+            for basin_version_id in live_basin_version_ids
+        ]
+    finally:
+        connection.close()
+
+    # --- Register synthetic variants ---------------------------------------
+    #
+    # Each registration commits inside its own transaction so a mid-loop
+    # failure surfaces at the offending index. This mirrors the caller
+    # contract (register_direct_grid_variant borrows the caller's cursor;
+    # here the caller is the test).
+    for variant_index in range(1, _MECHANISM_ONLY_SYNTHETIC_VARIANT_COUNT + 1):
+        connection = psycopg2.connect(
+            integration_database_url, cursor_factory=RealDictCursor
+        )
+        connection.autocommit = False
+        try:
+            with connection.cursor() as reg_cursor:
+                syn_bv, syn_rnv, syn_mesh, syn_pkg_uri = _mo_seed_synthetic_basin(
+                    reg_cursor, variant_index
+                )
+                grid_snapshot_id, canonical_grid_key = _mo_seed_snapshot(
+                    reg_cursor, variant_index
+                )
+                grid_id = f"mo972_grid_{variant_index:02d}"
+                grid_signature = f"sha256:mo972-sig-{variant_index:02d}"
+                payload = _mo_synthetic_payload(
+                    variant_index, grid_id=grid_id, grid_signature=grid_signature
+                )
+                registration_input = DirectGridVariantRegistrationInput(
+                    basin_version_id=syn_bv,
+                    direct_grid_forcing=payload,
+                    baseline=DirectGridBaselineModelInputs(
+                        river_network_version_id=syn_rnv,
+                        mesh_version_id=syn_mesh,
+                        calibration_version_id=f"mo972-calib-{variant_index:02d}",
+                        shud_code_version="mo972-shud-v1",
+                        model_package_uri=syn_pkg_uri,
+                    ),
+                    grid_snapshot_id=grid_snapshot_id,
+                )
+                result = register_direct_grid_variant(reg_cursor, registration_input)
+                assert result.inserted is True
+                assert result.canonical_grid_key == canonical_grid_key
+                # UUID adapter → `grid_snapshot_id` may return as `uuid.UUID`;
+                # normalize to str for the string equality check.
+                assert str(result.grid_snapshot_id) == str(grid_snapshot_id)
+                synthetic_registrations.append(
+                    {
+                        "basin_version_id": syn_bv,
+                        "model_id": str(result.model_id),
+                        "canonical_grid_key": canonical_grid_key,
+                        "grid_snapshot_id": str(grid_snapshot_id),
+                    }
+                )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    # --- After snapshot ----------------------------------------------------
+    connection = psycopg2.connect(
+        integration_database_url, cursor_factory=RealDictCursor
+    )
+    connection.autocommit = True
+    try:
+        after_snapshots = [
+            _mo_snapshot_live_basin(connection, basin_version_id)
+            for basin_version_id in live_basin_version_ids
+        ]
+
+        # --- Assert 1 + 2: byte-identical before/after per live basin -----
+        assert len(before_snapshots) == _MECHANISM_ONLY_LIVE_BASIN_COUNT
+        assert len(after_snapshots) == _MECHANISM_ONLY_LIVE_BASIN_COUNT
+        for before, after in zip(before_snapshots, after_snapshots, strict=True):
+            assert before["basin_version_id"] == after["basin_version_id"]
+            assert before["active_model_id"] == after["active_model_id"], (
+                f"live basin {before['basin_version_id']!r} lost its active model"
+            )
+            assert before["active_model_hash"] == after["active_model_hash"], (
+                f"live basin {before['basin_version_id']!r} active model row drifted "
+                f"(before={before['active_model_hash']}, after={after['active_model_hash']})"
+            )
+            assert before["active_station_count"] == after["active_station_count"], (
+                f"live basin {before['basin_version_id']!r} active station count changed "
+                f"(before={before['active_station_count']}, after={after['active_station_count']})"
+            )
+            assert before["active_stations_hash"] == after["active_stations_hash"], (
+                f"live basin {before['basin_version_id']!r} active station set drifted "
+                f"(before={before['active_stations_hash']}, after={after['active_stations_hash']})"
+            )
+
+        # --- Assert 3: every synthetic variant is inactive ----------------
+        with connection.cursor() as verify_cursor:
+            for reg in synthetic_registrations:
+                verify_cursor.execute(
+                    """
+                    SELECT model_id, active_flag, lifecycle_state
+                    FROM core.model_instance
+                    WHERE model_id = %s
+                    """,
+                    (reg["model_id"],),
+                )
+                row = verify_cursor.fetchone()
+                assert row is not None, (
+                    f"registered variant {reg['model_id']!r} is missing from core.model_instance"
+                )
+                row_dict = dict(row)
+                assert row_dict["active_flag"] is False, (
+                    f"registered variant {reg['model_id']!r} has active_flag=true "
+                    "(mechanism must land inactive by construction)"
+                )
+                assert row_dict["lifecycle_state"] == "inactive", (
+                    f"registered variant {reg['model_id']!r} has "
+                    f"lifecycle_state={row_dict['lifecycle_state']!r} (expected 'inactive')"
+                )
+                reg["lifecycle_state"] = row_dict["lifecycle_state"]
+                reg["active_flag"] = row_dict["active_flag"]
+    finally:
+        connection.close()
+
+    # --- Emit receipt to `artifacts/mechanism-only-receipts/` --------------
+    #
+    # Path is `artifacts/<subdir>/receipt-<UTC>.json` under the REPO ROOT so
+    # the orchestrator can archive the file without extracting from the
+    # pytest scratch dir. `artifacts/` is already gitignored (top-level).
+    repo_root = pathlib.Path(__file__).resolve().parent.parent
+    receipt_dir = repo_root / "artifacts" / "mechanism-only-receipts"
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+    timestamp_utc = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    receipt_path = (
+        receipt_dir / f"receipt-{timestamp_utc}-{_uuid.uuid4().hex[:8]}.json"
+    )
+    receipt = {
+        "timestamp_utc": datetime.now(UTC).isoformat(),
+        "test_id": "test_mechanism_only_live_basins_undisturbed",
+        "live_basin_count": _MECHANISM_ONLY_LIVE_BASIN_COUNT,
+        "synthetic_variant_count": _MECHANISM_ONLY_SYNTHETIC_VARIANT_COUNT,
+        "live_basins": [
+            {
+                "basin_version_id": snap["basin_version_id"],
+                "active_model_id": snap["active_model_id"],
+                "active_model_hash": snap["active_model_hash"],
+                "active_station_count": snap["active_station_count"],
+                "active_stations_hash": snap["active_stations_hash"],
+            }
+            for snap in after_snapshots
+        ],
+        "registered_synthetic_variants": [
+            {
+                "basin_version_id": reg["basin_version_id"],
+                "model_id": reg["model_id"],
+                "lifecycle_state": reg["lifecycle_state"],
+                "active_flag": reg["active_flag"],
+                "canonical_grid_key": reg["canonical_grid_key"],
+                "grid_snapshot_id": reg["grid_snapshot_id"],
+            }
+            for reg in synthetic_registrations
+        ],
+        "verdict": (
+            f"{_MECHANISM_ONLY_LIVE_BASIN_COUNT} live-analog basins byte-identical "
+            f"before/after; all {_MECHANISM_ONLY_SYNTHETIC_VARIANT_COUNT} synthetic "
+            "variants lifecycle_state=inactive."
+        ),
+    }
+    receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True), encoding="utf-8")
