@@ -57,6 +57,8 @@ from workers.mapping_builder import cli as cli_module
 from workers.mapping_builder.algorithm import GridSignatureMismatchError
 from workers.mapping_builder.binding import (
     BindingArtifactError,
+    ForbiddenOutputClass,
+    ForbiddenRuntimeProducerArtifactError,
     ParserRoundTripError,
 )
 from workers.mapping_builder.cli import (
@@ -76,6 +78,11 @@ from workers.mapping_builder.evidence import (
     RollbackTarget,
 )
 from workers.mapping_builder.integrity import BaselineIntegrityError
+from workers.mapping_builder.rewrite import (
+    LEGACY_CYCLE_TSD_FORC_PATTERN,
+    LEGACY_STATION_LONLAT_CSV_PATTERN,
+    LEGACY_STATION_NUMBERED_CSV_PATTERN,
+)
 from workers.mapping_builder.z_policy_verdict import (
     EXPECTED_VERDICT_FILE_SHA256,
     SAMPLER_RULE_ID,
@@ -1477,6 +1484,322 @@ def test_main_argparse_parse_error_exits_2(
     # argparse writes its own diagnostic to stderr; only verify presence.
     captured = capsys.readouterr()
     assert captured.err != ""
+
+
+# =========================================================================
+# §2.3 SUB-4 FORBIDDEN-OUTPUT SCAN + READ-ONLY BASELINE INVARIANTS
+# =========================================================================
+# The three tests below cover the required
+#   pytest -k "forbidden_output or read_only or zero_write"
+# Evidence Floor filter. All exercise ``build_direct_grid_variant``
+# through the same keliya fixture the SUB-2 tests use, so a §2.3
+# regression surfaces alongside the existing G0..G5 chain tests.
+
+
+def _snapshot_baseline_byte_set(
+    baseline_root: pathlib.Path,
+) -> dict[str, str]:
+    """Return ``{relpath: sha256_hex}`` for every file under ``baseline_root``.
+
+    Sorted by rel-path for deterministic iteration; per-file SHA-256 is
+    the same primitive :func:`_compute_per_file_checksums` uses so a
+    read-only invariant assertion is byte-equivalent to the library
+    :class:`BaselineIntegrityReport`'s per-file checksums.
+    """
+    entries: dict[str, str] = {}
+    for path in sorted(baseline_root.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(baseline_root).as_posix()
+        entries[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return entries
+
+
+def test_forbidden_output_written_tree_clean_after_happy_path_build(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The happy-path variant tree contains zero §8.1 forbidden runtime artifacts.
+
+    Enumerates every file the CLI wrote under ``variant_root`` and
+    asserts none matches the three §8.1 filename regexes (cycle-dated
+    ``.tsd.forc``, ``X<lon>Y<lat>.csv``, ``X<n>.csv``), and that the
+    evidence bundle's :class:`ForbiddenOutputScanResult` records
+    ``passed=True`` with all three offending tuples empty. This is the
+    §2.3 written-tree scan on the clean set — companion to the two
+    fail-closed injection tests below.
+    """
+    result = _run_build(tmp_path)
+
+    variant_root = result.variant_root
+    written_files = [p for p in variant_root.rglob("*") if p.is_file()]
+    assert written_files, "expected non-empty variant tree from happy build"
+
+    # No filename matches any of the three §8.1 forbidden-runtime patterns.
+    for path in written_files:
+        name = path.name
+        assert not LEGACY_CYCLE_TSD_FORC_PATTERN.fullmatch(name), (
+            f"variant carries a cycle-dated .tsd.forc {path!s}; "
+            "§8.1 boundary says the runtime producer owns cycle .tsd.forc"
+        )
+        assert not LEGACY_STATION_LONLAT_CSV_PATTERN.fullmatch(name), (
+            f"variant carries a legacy X<lon>Y<lat>.csv {path!s}; "
+            "§8.1 boundary says the runtime producer owns station weather CSVs"
+        )
+        assert not LEGACY_STATION_NUMBERED_CSV_PATTERN.fullmatch(name), (
+            f"variant carries a legacy X<n>.csv {path!s}; "
+            "§8.1 boundary says the runtime producer owns station weather CSVs"
+        )
+
+    # And the active-forcing subtree (``input/``) carries no legacy CMFD
+    # weather CSV either — belt-and-suspenders against the §3.5 gate.
+    active_forcing_dir = variant_root / "input"
+    if active_forcing_dir.is_dir():
+        for path in active_forcing_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            name = path.name
+            assert not LEGACY_STATION_LONLAT_CSV_PATTERN.fullmatch(name)
+            assert not LEGACY_STATION_NUMBERED_CSV_PATTERN.fullmatch(name)
+            assert not LEGACY_CYCLE_TSD_FORC_PATTERN.fullmatch(name)
+
+    # And the evidence bundle records the §8.1 scan verdict as PASSED
+    # with every offending tuple empty (no path / no DB write / no
+    # cycle-lineage record).
+    scan = result.evidence_package.forbidden_output_scan
+    assert scan.passed is True
+    assert scan.offending_paths == ()
+    assert scan.offending_db_writes == ()
+    assert scan.cycle_lineage_records == ()
+    # And the scan actually walked the written tree — a zero
+    # ``scanned_path_count`` would be an empty-artifact-set false PASS.
+    assert scan.scanned_path_count == len(written_files)
+
+
+def test_forbidden_output_injected_tsd_forc_in_baseline_fails_closed_no_variant(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Injected cycle-dated ``.tsd.forc`` fails closed via §8.1; no variant survives.
+
+    Renames the keliya fixture's ``keliya.tsd.forc`` to
+    ``20240101.tsd.forc`` so G0's single-``.tsd.forc`` invariant still
+    holds (else G0's ``UnparseableAttError`` would fire before §8.1)
+    while the resulting variant tree would carry a cycle-dated
+    ``.tsd.forc`` at root. The CLI's §8.1 scan
+    (:func:`_forbidden_output_scan`) MUST raise
+    :class:`ForbiddenRuntimeProducerArtifactError`, the outer
+    try/except MUST remove the ``.building`` staging directory, and the
+    baseline byte-set MUST be unchanged.
+    """
+    baseline_root = _prepared_baseline(tmp_path)
+    # Rename baseline .tsd.forc -> cycle-dated name so §8.1 fires at
+    # line 812 in cli.py (not G0's multiple-.tsd.forc rejection nor
+    # the §3.5 active-tree gate which only scans ``input/``).
+    original_tsd_forc = baseline_root / "keliya.tsd.forc"
+    injected_tsd_forc = baseline_root / "20240101.tsd.forc"
+    original_tsd_forc.rename(injected_tsd_forc)
+    # Sanity: the injected name actually matches the §8.1 pattern.
+    assert LEGACY_CYCLE_TSD_FORC_PATTERN.fullmatch(injected_tsd_forc.name)
+
+    pre_baseline_bytes = _snapshot_baseline_byte_set(baseline_root)
+    variant_root = tmp_path / "variant"
+    domain_shp = _write_domain_shp(tmp_path)
+    _, snapshot_cells, loader, snapshot_reference = _snapshot_and_loader()
+    distance_qa, capacity_report = _canned_qa_and_capacity()
+
+    with pytest.raises(ForbiddenRuntimeProducerArtifactError) as excinfo:
+        build_direct_grid_variant(
+            baseline_root=baseline_root,
+            variant_root=variant_root,
+            source_id=_SOURCE_ID,
+            grid_id=_GRID_ID,
+            grid_snapshot_loader=loader,
+            snapshot_cells=snapshot_cells,
+            grid_snapshot_reference=snapshot_reference,
+            mapping_asset_identity=_MAPPING_ASSET_IDENTITY,
+            model_input_package_id=_MODEL_INPUT_PACKAGE_ID,
+            binding_uri=_BINDING_URI,
+            sp_att_manifest_path=_SP_ATT_MANIFEST_PATH,
+            category_files=_CATEGORY_FILES,
+            state_schema_bytes=b"state-schema-v1",
+            solver_config_bytes=b"solver-config-v1",
+            domain_shp_path=domain_shp,
+            proj_crs_database_version=_PROJ_CRS_DB_VERSION,
+            approvals=Approvals(
+                builder_approver_id="tester@example.com",
+                reviewer_approver_id="reviewer@example.com",
+                small_basin_override_approver_id=None,
+            ),
+            rollback_target=RollbackTarget(
+                previous_mapping_asset_checksum="",
+                previous_mapping_asset_label="<initial>",
+            ),
+            distance_qa=distance_qa,
+            capacity_report=capacity_report,
+        )
+
+    # The exception surfaces the offending class + evidence so operators
+    # can trace which §8.1 category fired without re-running the scan.
+    assert (
+        excinfo.value.offending_class
+        == ForbiddenOutputClass.CYCLE_DATED_TSD_FORC.value
+    )
+    assert pathlib.Path(excinfo.value.offending_evidence).name == injected_tsd_forc.name
+    # The scan_summary carries the same 4-class breakdown the pass path
+    # exposes on the evidence bundle.
+    scan_summary = excinfo.value.scan_summary
+    assert scan_summary.passed is False
+    assert len(scan_summary.offending_paths) >= 1
+    assert scan_summary.offending_paths[0][0] == (
+        ForbiddenOutputClass.CYCLE_DATED_TSD_FORC.value
+    )
+
+    # No-partial-output: final variant absent + tmp ``.building`` absent.
+    assert not variant_root.exists()
+    assert not variant_root.with_name(variant_root.name + ".building").exists()
+
+    # Read-only baseline: every file's SHA-256 is byte-identical.
+    post_baseline_bytes = _snapshot_baseline_byte_set(baseline_root)
+    assert post_baseline_bytes == pre_baseline_bytes, (
+        "baseline tree was mutated by a failed build — SUB-4 zero-write "
+        "invariant is broken"
+    )
+
+
+def test_forbidden_output_injected_station_weather_csv_fails_closed_no_variant(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Injected ``X<lon>Y<lat>.csv`` at baseline root fails closed via §8.1.
+
+    Plants ``X100Y37.csv`` at the baseline root (NOT under ``input/``, so
+    the §3.5 active-tree gate — which only walks the active forcing
+    subdir — is bypassed and the §8.1 written-tree scan is what catches
+    the violation). Companion to the ``.tsd.forc`` injection test — the
+    two together exercise the two on-disk §8.1 forbidden classes
+    (``cycle_dated_tsd_forc`` + ``station_weather_csv``) via the CLI's
+    written-tree scan.
+    """
+    baseline_root = _prepared_baseline(tmp_path)
+    injected_csv = baseline_root / "X100Y37.csv"
+    injected_csv.write_bytes(b"stub legacy CMFD station weather CSV\n")
+    # Sanity: the injected name actually matches the §8.2 clause-A pattern.
+    assert LEGACY_STATION_LONLAT_CSV_PATTERN.fullmatch(injected_csv.name)
+
+    pre_baseline_bytes = _snapshot_baseline_byte_set(baseline_root)
+    variant_root = tmp_path / "variant"
+    domain_shp = _write_domain_shp(tmp_path)
+    _, snapshot_cells, loader, snapshot_reference = _snapshot_and_loader()
+    distance_qa, capacity_report = _canned_qa_and_capacity()
+
+    with pytest.raises(ForbiddenRuntimeProducerArtifactError) as excinfo:
+        build_direct_grid_variant(
+            baseline_root=baseline_root,
+            variant_root=variant_root,
+            source_id=_SOURCE_ID,
+            grid_id=_GRID_ID,
+            grid_snapshot_loader=loader,
+            snapshot_cells=snapshot_cells,
+            grid_snapshot_reference=snapshot_reference,
+            mapping_asset_identity=_MAPPING_ASSET_IDENTITY,
+            model_input_package_id=_MODEL_INPUT_PACKAGE_ID,
+            binding_uri=_BINDING_URI,
+            sp_att_manifest_path=_SP_ATT_MANIFEST_PATH,
+            category_files=_CATEGORY_FILES,
+            state_schema_bytes=b"state-schema-v1",
+            solver_config_bytes=b"solver-config-v1",
+            domain_shp_path=domain_shp,
+            proj_crs_database_version=_PROJ_CRS_DB_VERSION,
+            approvals=Approvals(
+                builder_approver_id="tester@example.com",
+                reviewer_approver_id="reviewer@example.com",
+                small_basin_override_approver_id=None,
+            ),
+            rollback_target=RollbackTarget(
+                previous_mapping_asset_checksum="",
+                previous_mapping_asset_label="<initial>",
+            ),
+            distance_qa=distance_qa,
+            capacity_report=capacity_report,
+        )
+
+    assert (
+        excinfo.value.offending_class
+        == ForbiddenOutputClass.STATION_WEATHER_CSV.value
+    )
+    assert pathlib.Path(excinfo.value.offending_evidence).name == injected_csv.name
+
+    assert not variant_root.exists()
+    assert not variant_root.with_name(variant_root.name + ".building").exists()
+
+    post_baseline_bytes = _snapshot_baseline_byte_set(baseline_root)
+    assert post_baseline_bytes == pre_baseline_bytes
+
+
+def test_zero_write_baseline_files_read_only_pre_post_checksums_unchanged(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Happy build never mutates baseline files — pre/post SHA-256s are equal.
+
+    Snapshots per-file SHA-256 of every regular file under
+    ``baseline_root`` BEFORE and AFTER a green
+    :func:`build_direct_grid_variant` run. The two byte-sets MUST be
+    dict-equal so the SUB-4 §2.3 zero-production-writes invariant is
+    proved. The CLI's ``shutil.copytree`` copies FROM the baseline, and
+    every subsequent write lands in ``variant_root`` — this test
+    guarantees no downstream code silently writes back into the
+    baseline.
+    """
+    baseline_root = _prepared_baseline(tmp_path)
+    pre_baseline_bytes = _snapshot_baseline_byte_set(baseline_root)
+    assert pre_baseline_bytes, "expected non-empty baseline for the invariant lock"
+
+    variant_root = tmp_path / "variant"
+    domain_shp = _write_domain_shp(tmp_path)
+    _, snapshot_cells, loader, snapshot_reference = _snapshot_and_loader()
+    distance_qa, capacity_report = _canned_qa_and_capacity()
+
+    result = build_direct_grid_variant(
+        baseline_root=baseline_root,
+        variant_root=variant_root,
+        source_id=_SOURCE_ID,
+        grid_id=_GRID_ID,
+        grid_snapshot_loader=loader,
+        snapshot_cells=snapshot_cells,
+        grid_snapshot_reference=snapshot_reference,
+        mapping_asset_identity=_MAPPING_ASSET_IDENTITY,
+        model_input_package_id=_MODEL_INPUT_PACKAGE_ID,
+        binding_uri=_BINDING_URI,
+        sp_att_manifest_path=_SP_ATT_MANIFEST_PATH,
+        category_files=_CATEGORY_FILES,
+        state_schema_bytes=b"state-schema-v1",
+        solver_config_bytes=b"solver-config-v1",
+        domain_shp_path=domain_shp,
+        proj_crs_database_version=_PROJ_CRS_DB_VERSION,
+        approvals=Approvals(
+            builder_approver_id="tester@example.com",
+            reviewer_approver_id="reviewer@example.com",
+            small_basin_override_approver_id=None,
+        ),
+        rollback_target=RollbackTarget(
+            previous_mapping_asset_checksum="",
+            previous_mapping_asset_label="<initial>",
+        ),
+        distance_qa=distance_qa,
+        capacity_report=capacity_report,
+    )
+
+    # Baseline byte-set is byte-identical post-build.
+    post_baseline_bytes = _snapshot_baseline_byte_set(baseline_root)
+    assert post_baseline_bytes == pre_baseline_bytes, (
+        "SUB-4 §2.3 zero-write invariant broken: baseline files were "
+        "mutated during a happy build"
+    )
+    # Sanity: the write path did commit — variant_root exists and holds
+    # the emitted artifacts, so the equality above proves "baseline
+    # untouched despite a green build", not "no build happened at all".
+    assert result.variant_root == variant_root
+    assert variant_root.is_dir()
+    assert (variant_root / "manifest.json").is_file()
+    assert (variant_root / "direct_grid_binding.json").is_file()
 
 
 # =========================================================================

@@ -83,7 +83,9 @@ from workers.mapping_builder.binding import (
     CycleLineageSpy,
     DbWriteSpy,
     DirectGridManifest,
+    ForbiddenOutputClass,
     ForbiddenOutputScanResult,
+    ForbiddenRuntimeProducerArtifactError,
     ZPolicy,
     emit_direct_grid_manifest_and_binding,
     verify_no_forbidden_runtime_producer_artifacts,
@@ -501,10 +503,13 @@ def _forbidden_output_scan(variant_root: pathlib.Path) -> ForbiddenOutputScanRes
     DB rows and no cycle-lineage records by design, so the empty spies
     are the honest boundary-monitor proof.
 
-    The full §8.1 written-tree scan (SUB-4, §2.3) will land the
-    injected-forbidden-artifact negative path; here we only run the
-    gate on the clean set so SUB-2's stage chain has the required
-    :class:`ForbiddenOutputScanResult` for the evidence bundle.
+    SUB-4 (§2.3) lands the injected-forbidden-artifact negative path
+    alongside the happy-path scan: any offending on-disk file surfaces
+    via the library's own
+    :class:`ForbiddenRuntimeProducerArtifactError` (raised inline
+    before this function returns), and the caller's outer try/except
+    catches it and removes ``<variant_root>.building`` so no partial
+    variant is committed.
     """
     emitted = sorted(
         (p for p in variant_root.rglob("*") if p.is_file()),
@@ -514,6 +519,43 @@ def _forbidden_output_scan(variant_root: pathlib.Path) -> ForbiddenOutputScanRes
         emitted,
         db_write_spy=DbWriteSpy(),
         cycle_lineage_spy=CycleLineageSpy(),
+    )
+
+
+def _raise_forbidden_output_from_scan_result(
+    scan_result: ForbiddenOutputScanResult,
+) -> None:
+    """Re-raise the §8.1 fail-closed exception from a red scan result.
+
+    Reserved for the defense-in-depth branch in
+    :func:`_run_gates_and_emit`: if a future refactor of
+    :func:`verify_no_forbidden_runtime_producer_artifacts` returns
+    ``passed=False`` without raising, this helper reconstructs the
+    same :class:`ForbiddenRuntimeProducerArtifactError` the library
+    would have raised, picking the first offender across the three
+    non-empty tuples for a concrete diagnostic. The full 4-class
+    breakdown remains on :attr:`ForbiddenOutputScanResult` for
+    downstream evidence.
+    """
+    if scan_result.offending_paths:
+        first_class, first_path = scan_result.offending_paths[0]
+        raise ForbiddenRuntimeProducerArtifactError(
+            offending_class=first_class,
+            offending_evidence=first_path,
+            scan_summary=scan_result,
+        )
+    if scan_result.offending_db_writes:
+        first_table, first_row = scan_result.offending_db_writes[0]
+        raise ForbiddenRuntimeProducerArtifactError(
+            offending_class=ForbiddenOutputClass.MET_ROW_WRITE.value,
+            offending_evidence=(first_table, first_row),
+            scan_summary=scan_result,
+        )
+    # cycle_lineage_records — the only remaining path.
+    raise ForbiddenRuntimeProducerArtifactError(
+        offending_class=ForbiddenOutputClass.CYCLE_LINEAGE_RECORD.value,
+        offending_evidence=scan_result.cycle_lineage_records[0],
+        scan_summary=scan_result,
     )
 
 
@@ -810,6 +852,20 @@ def _run_gates_and_emit(
 
     # --- §8.1 forbidden-output scan on the written tree ---------------
     forbidden_scan = _forbidden_output_scan(tmp_variant_root)
+    # Defense-in-depth SUB-4 (§2.3) fail-closed re-raise. The library
+    # :func:`verify_no_forbidden_runtime_producer_artifacts` already
+    # raises :class:`ForbiddenRuntimeProducerArtifactError` on any
+    # violation before returning — so ``forbidden_scan.passed`` is
+    # always ``True`` here today. This explicit check guards against a
+    # future library refactor that returns ``passed=False`` without
+    # raising: the CLI's §2.3 promise (no variant + no `.building`
+    # residue when any forbidden runtime-producer artifact appears in
+    # the written tree) MUST NOT depend on whether the library raises
+    # inline or returns a red result. The raise falls into the outer
+    # try/except in :func:`build_direct_grid_variant` which removes
+    # ``<variant_root>.building`` before the exception propagates.
+    if forbidden_scan.passed is False:
+        _raise_forbidden_output_from_scan_result(forbidden_scan)
 
     # --- Evidence assembly --------------------------------------------
     # Reuse the header-verified library parser so the ownership evidence
