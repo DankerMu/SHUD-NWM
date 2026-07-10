@@ -490,6 +490,72 @@ def test_classifier_returns_invalid_direct_grid_for_malformed_block() -> None:
     assert _classify_forcing_mapping_mode(model) == "invalid_direct_grid"
 
 
+def test_classifier_recognizes_direct_grid_contract_alt_section_key() -> None:
+    """Alt section key ``direct_grid_contract`` must classify symmetrically.
+
+    ``load_forcing_mapping_contract_from_manifest`` accepts any of
+    ``direct_grid_forcing`` / ``direct_grid_contract`` /
+    ``forcing_mapping_contract``. The classifier delegates and must NOT
+    short-circuit on the specific key name — otherwise a model persisted
+    with the alt key would be silently mis-classified as legacy and past
+    activations would be silently NOT armed by the audit-log guard.
+    """
+    model = _model_row(
+        model_id="alt_dgc",
+        resource_profile={
+            "direct_grid_contract": _valid_direct_grid_forcing_block(model_id="alt_dgc"),
+        },
+    )
+    assert _classify_forcing_mapping_mode(model) == "direct_grid"
+
+
+def test_classifier_recognizes_forcing_mapping_contract_alt_section_key() -> None:
+    """Alt section key ``forcing_mapping_contract`` must classify symmetrically.
+
+    Same symmetry invariant as ``direct_grid_contract``: any recognized
+    parser section key must classify as ``"direct_grid"`` when the contract
+    parses cleanly.
+    """
+    model = _model_row(
+        model_id="alt_fmc",
+        resource_profile={
+            "forcing_mapping_contract": _valid_direct_grid_forcing_block(model_id="alt_fmc"),
+        },
+    )
+    assert _classify_forcing_mapping_mode(model) == "direct_grid"
+
+
+def test_classifier_recognizes_root_level_forcing_mapping_mode_direct_grid() -> None:
+    """Root-level ``forcing_mapping_mode='direct_grid'`` classifies symmetrically.
+
+    The parser (``allow_root_direct_grid=True`` default) accepts a manifest
+    whose ``forcing_mapping_mode='direct_grid'`` sits at the root, using
+    the manifest itself as the contract payload when no nested section is
+    present. The classifier must delegate and honor that acceptance —
+    ``"direct_grid"`` when the parser returns a valid contract.
+    """
+    root_contract = _valid_direct_grid_forcing_block(model_id="root_dg")
+    model = _model_row(
+        model_id="root_dg",
+        resource_profile=root_contract,
+    )
+    assert _classify_forcing_mapping_mode(model) == "direct_grid"
+
+
+def test_classifier_returns_legacy_for_resource_profile_without_direct_grid_declaration() -> None:
+    """A resource_profile that never declares direct-grid classifies as legacy.
+
+    Unchanged fail-closed default: absent any ``forcing_mapping_mode`` at
+    root and any of the recognized parser section keys, the classifier
+    returns ``"legacy"``.
+    """
+    model = _model_row(
+        model_id="no_intent",
+        resource_profile={"unrelated_field": "irrelevant"},
+    )
+    assert _classify_forcing_mapping_mode(model) == "legacy"
+
+
 # ============================================================================
 # §3.1 evidence line 1: activate/switch/rollback refusals + no-override
 # ============================================================================

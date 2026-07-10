@@ -19,6 +19,8 @@ from packages.common.auth_policy import (
 )
 from packages.common.forecast_store import QHH_LATEST_READY_RUN_STATUSES
 from workers.forcing_producer.direct_grid_contract import (
+    DIRECT_GRID_MODE,
+    DIRECT_GRID_SECTION_KEYS,
     DirectGridContractError,
     load_forcing_mapping_contract_from_manifest,
 )
@@ -350,38 +352,72 @@ def _classify_forcing_mapping_mode(
 ) -> ForcingMappingClassification:
     """Classify a model as direct-grid, invalid-direct-grid, or legacy.
 
-    The §3.1 legacy-reactivation guard uses ONE classifier everywhere and
-    delegates to the direct-grid contract parser
-    (``workers.forcing_producer.direct_grid_contract.load_forcing_mapping_contract_from_manifest``)
-    over the model's ``resource_profile``. Return value:
+    This classifier delegates to
+    ``workers.forcing_producer.direct_grid_contract.load_forcing_mapping_contract_from_manifest``
+    — the single source of truth for direct-grid recognition. Any section
+    key recognized by the parser (``direct_grid_forcing``,
+    ``direct_grid_contract``, ``forcing_mapping_contract``, or root-level
+    ``forcing_mapping_mode='direct_grid'``) is treated symmetrically: the
+    classifier never short-circuits on a specific key name.
 
-    - ``"direct_grid"``: the resource profile carries a ``direct_grid_forcing``
-      block that parses cleanly with ``forcing_mapping_mode='direct_grid'``.
-    - ``"invalid_direct_grid"``: a ``direct_grid_forcing`` block declares
-      ``forcing_mapping_mode='direct_grid'`` but fails the parser (missing or
-      malformed fields). This is a fail-closed classification that stays
-      distinct from ``"legacy"`` so the caller can emit a distinct blocker
-      code (an operator can tell "broken fix-forward candidate" from
-      "genuine legacy target").
-    - ``"legacy"``: no ``direct_grid_forcing`` block, or the block resolves
-      to a non-direct forcing mapping mode (e.g. IDW). This is the
-      fail-closed default for anything the parser doesn't confirm as a
-      valid direct-grid contract.
+    Return value:
+
+    - ``"direct_grid"``: the parser returns a valid contract from the
+      resource profile.
+    - ``"invalid_direct_grid"``: the resource profile DECLARED direct-grid
+      intent (via root-level ``forcing_mapping_mode='direct_grid'`` or via
+      a ``forcing_mapping_mode='direct_grid'`` field inside any recognized
+      section) but the parser raised ``DirectGridContractError``. This
+      fail-closed classification stays distinct from ``"legacy"`` so the
+      caller can emit a distinct blocker code (an operator can tell "broken
+      fix-forward candidate" from "genuine legacy target").
+    - ``"legacy"``: the parser did not confirm direct-grid — either it
+      returned ``None`` (no direct-grid section, or mode is IDW) or it
+      raised on a resource profile that never declared direct-grid intent
+      (e.g. a truly malformed non-direct manifest). Fail-closed default.
     """
     if model is None:
         return "legacy"
     resource_profile = _json_mapping(model.get("resource_profile"))
-    if resource_profile.get("direct_grid_forcing") is None:
-        # No direct-grid block at all — legacy-mapping.
-        return "legacy"
     try:
         contract = load_forcing_mapping_contract_from_manifest(resource_profile)
     except DirectGridContractError:
-        return "invalid_direct_grid"
+        # Parser rejected the manifest. Only classify as "invalid_direct_grid"
+        # when the profile explicitly declared direct-grid intent — otherwise
+        # a broken non-direct manifest would spuriously get the fix-forward
+        # blocker code.
+        if _declares_direct_grid_intent(resource_profile):
+            return "invalid_direct_grid"
+        return "legacy"
     if contract is None:
-        # Block resolved to a non-direct mode (e.g. IDW) — legacy-mapping.
+        # Parser judged non-direct (e.g. IDW mode or no recognized section).
         return "legacy"
     return "direct_grid"
+
+
+def _declares_direct_grid_intent(resource_profile: Mapping[str, Any]) -> bool:
+    """Return True if the resource profile declares ``forcing_mapping_mode='direct_grid'``.
+
+    Intent is declared when either:
+
+    * the root-level ``forcing_mapping_mode`` equals ``'direct_grid'``, or
+    * any recognized direct-grid section
+      (``direct_grid_forcing`` / ``direct_grid_contract`` /
+      ``forcing_mapping_contract``) is a mapping whose
+      ``forcing_mapping_mode`` equals ``'direct_grid'``.
+
+    Mirrors the section keys enumerated by
+    ``workers.forcing_producer.direct_grid_contract.DIRECT_GRID_SECTION_KEYS``
+    so the classifier stays symmetric with the parser without duplicating
+    parse semantics.
+    """
+    if resource_profile.get("forcing_mapping_mode") == DIRECT_GRID_MODE:
+        return True
+    for key in DIRECT_GRID_SECTION_KEYS:
+        section = resource_profile.get(key)
+        if isinstance(section, Mapping) and section.get("forcing_mapping_mode") == DIRECT_GRID_MODE:
+            return True
+    return False
 
 
 def _would_be_already_current(
