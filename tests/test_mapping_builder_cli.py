@@ -1117,8 +1117,23 @@ def test_input_authority_object_store_root_override_accepted_and_recorded(
     assert evidence["dev_workspace_override"] is None
 
 
+# Both dev-workspace prefixes declared by
+# :data:`workers.mapping_builder.cli._DEV_WORKSPACE_PREFIXES`. Parametrized
+# fold (Phase 6): every dev-workspace test below runs twice — once per
+# prefix — so a silent typo or removal of the node-22 (``/volume/nwm/Basins``)
+# entry cannot pass while the node-27 (``/home/ghdc/nwm/Basins``) entry
+# alone still works.
+_DEV_WORKSPACE_PREFIX_PARAMS = [
+    pathlib.Path("/home/ghdc/nwm/Basins"),
+    pathlib.Path("/volume/nwm/Basins"),
+]
+
+
+@pytest.mark.parametrize("dev_prefix", _DEV_WORKSPACE_PREFIX_PARAMS)
 def test_dev_workspace_path_rejected_by_default_no_read(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    dev_prefix: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A dev-workspace path fails closed with no filesystem read by default.
 
@@ -1126,6 +1141,8 @@ def test_dev_workspace_path_rejected_by_default_no_read(
     ``pathlib.Path.read_bytes`` for the duration of the call so any
     resolver-internal filesystem interaction with the operator path
     surfaces as an assertion here (not as a silent authority bypass).
+    Runs once per prefix in
+    :data:`workers.mapping_builder.cli._DEV_WORKSPACE_PREFIXES`.
     """
     filesystem_hits: list[str] = []
 
@@ -1145,14 +1162,21 @@ def test_dev_workspace_path_rejected_by_default_no_read(
 
     with pytest.raises(PackagePathAuthorityError, match="dev-workspace"):
         resolve_package_path(
-            package_path=pathlib.Path("/home/ghdc/nwm/Basins/keliya/package"),
+            package_path=dev_prefix / "keliya" / "package",
         )
     assert filesystem_hits == []
 
 
-def test_dev_workspace_override_accepted_and_recorded() -> None:
-    """--allow-dev-workspace + rationale unblocks the path and records the override."""
-    dev_path = pathlib.Path("/home/ghdc/nwm/Basins/keliya/package")
+@pytest.mark.parametrize("dev_prefix", _DEV_WORKSPACE_PREFIX_PARAMS)
+def test_dev_workspace_override_accepted_and_recorded(
+    dev_prefix: pathlib.Path,
+) -> None:
+    """--allow-dev-workspace + rationale unblocks the path and records the override.
+
+    Runs once per prefix in
+    :data:`workers.mapping_builder.cli._DEV_WORKSPACE_PREFIXES`.
+    """
+    dev_path = dev_prefix / "keliya" / "package"
 
     resolved = resolve_package_path(
         package_path=dev_path,
@@ -1169,9 +1193,16 @@ def test_dev_workspace_override_accepted_and_recorded() -> None:
     }
 
 
-def test_dev_workspace_override_requires_non_empty_rationale() -> None:
-    """--allow-dev-workspace without a rationale still fails closed."""
-    dev_path = pathlib.Path("/home/ghdc/nwm/Basins/keliya/package")
+@pytest.mark.parametrize("dev_prefix", _DEV_WORKSPACE_PREFIX_PARAMS)
+def test_dev_workspace_override_requires_non_empty_rationale(
+    dev_prefix: pathlib.Path,
+) -> None:
+    """--allow-dev-workspace without a rationale still fails closed.
+
+    Runs once per prefix in
+    :data:`workers.mapping_builder.cli._DEV_WORKSPACE_PREFIXES`.
+    """
+    dev_path = dev_prefix / "keliya" / "package"
 
     with pytest.raises(PackagePathAuthorityError, match="rationale"):
         resolve_package_path(
@@ -1185,6 +1216,53 @@ def test_dev_workspace_override_requires_non_empty_rationale() -> None:
             allow_dev_workspace=True,
             dev_workspace_rationale="   ",
         )
+
+
+def test_resolve_package_path_is_deterministic(tmp_path: pathlib.Path) -> None:
+    """Same kwargs twice produce byte-identical resolution + evidence.
+
+    :func:`resolve_package_path` is claimed to be pure lexical path
+    arithmetic — no filesystem read, no clock, no counter, no memoization.
+    This test locks that contract on BOTH sanctioned channels
+    (object-store shape with ``--object-store-root`` override, and
+    dev-workspace override) so a future regression that injects a UUID,
+    monotonic id, or cached state slips through only by breaking this
+    determinism assertion.
+    """
+    # Channel 1: object-store shape via --object-store-root override.
+    staged_root = tmp_path / "staged"
+    package_path = (
+        staged_root
+        / "models"
+        / "basins_keliya_shud"
+        / "rel_v1"
+        / "package"
+    )
+    res1 = resolve_package_path(
+        package_path=package_path,
+        object_store_root=staged_root,
+    )
+    res2 = resolve_package_path(
+        package_path=package_path,
+        object_store_root=staged_root,
+    )
+    assert res1 == res2
+    assert res1.input_authority_evidence == res2.input_authority_evidence
+
+    # Channel 2: dev-workspace override for symmetry across both accepted channels.
+    dev_path = pathlib.Path("/home/ghdc/nwm/Basins/keliya/package")
+    dev1 = resolve_package_path(
+        package_path=dev_path,
+        allow_dev_workspace=True,
+        dev_workspace_rationale="determinism lock",
+    )
+    dev2 = resolve_package_path(
+        package_path=dev_path,
+        allow_dev_workspace=True,
+        dev_workspace_rationale="determinism lock",
+    )
+    assert dev1 == dev2
+    assert dev1.input_authority_evidence == dev2.input_authority_evidence
 
 
 def test_object_store_root_non_matching_path_fails_closed_no_read_no_output(
