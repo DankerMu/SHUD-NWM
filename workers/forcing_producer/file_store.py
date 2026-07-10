@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -337,6 +338,25 @@ class FileForcingRepository:
             "error_message": error_message,
             "repository_backend": "file",
         }
+
+    def find_registered_snapshot_bbox_by_identity(
+        self,
+        *,
+        source_id: str,
+        grid_id: str,
+        grid_signature: str,
+    ) -> tuple[float, float, float, float, uuid.UUID, datetime | None] | None:
+        """File-store stub: file backend does not model ``canonical_grid_snapshot``.
+
+        Direct-grid producer preflight expects a DB-owned registry row. The
+        file backend is used for DB-free tests / dev flows that predate the
+        SUB-6 preflight; returning ``None`` here surfaces as
+        :class:`MissingRegisteredGridSnapshotError` in the producer, i.e. the
+        file backend is fail-closed by construction for direct-grid runs
+        until an object-store canonical_grid_snapshot manifest is defined.
+        """
+        del source_id, grid_id, grid_signature
+        return None
 
     def _registry(self) -> Mapping[str, Any]:
         if self._registry_cache is None:

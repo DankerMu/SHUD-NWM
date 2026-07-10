@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import uuid
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -8,6 +9,7 @@ from datetime import datetime
 from typing import Any
 
 from packages.common.met_store import MetStoreError, default_database_url
+from packages.common.source_identity import normalize_source_id
 
 from .direct_grid_contract import (
     DirectGridContractError,
@@ -765,6 +767,52 @@ class PsycopgForcingRepository:
             VALUES %s
             """,
             value_rows,
+        )
+
+    def find_registered_snapshot_bbox_by_identity(
+        self,
+        *,
+        source_id: str,
+        grid_id: str,
+        grid_signature: str,
+    ) -> tuple[float, float, float, float, uuid.UUID, datetime | None] | None:
+        """Return ``(bbox_south, bbox_north, bbox_west, bbox_east,
+        grid_snapshot_id, superseded_at)`` for the identity, or ``None``.
+
+        The caller (SUB-6 producer bbox preflight) distinguishes "missing row"
+        from "superseded row" via the returned ``superseded_at`` field, so the
+        query DOES NOT filter ``superseded_at IS NULL`` here — that's the
+        preflight's fail-closed responsibility. ``source_id`` is normalized to
+        mirror :meth:`packages.common.grid_registry_store.PsycopgGridRegistryStore.find_snapshot_by_identity`.
+        Most-recently-created row wins when duplicates ever exist.
+        """
+        normalized_source = normalize_source_id(source_id)
+        row = self._fetch_optional(
+            """
+            SELECT bbox_south,
+                   bbox_north,
+                   bbox_west,
+                   bbox_east,
+                   grid_snapshot_id,
+                   superseded_at
+            FROM met.canonical_grid_snapshot
+            WHERE source_id = %s
+              AND grid_id = %s
+              AND grid_signature = %s
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (normalized_source, grid_id, grid_signature),
+        )
+        if row is None:
+            return None
+        return (
+            float(row["bbox_south"]),
+            float(row["bbox_north"]),
+            float(row["bbox_west"]),
+            float(row["bbox_east"]),
+            uuid.UUID(str(row["grid_snapshot_id"])),
+            row["superseded_at"],
         )
 
     def update_forecast_cycle(

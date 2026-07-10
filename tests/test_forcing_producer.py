@@ -435,6 +435,36 @@ class FakeForcingRepository:
             raise RuntimeError("forecast cycle ready update failed")
         return dict(kwargs)
 
+    def find_registered_snapshot_bbox_by_identity(
+        self,
+        *,
+        source_id: str,
+        grid_id: str,
+        grid_signature: str,
+    ) -> tuple[float, float, float, float, Any, Any] | None:
+        # §3.1 default: return an env-matching bbox so existing direct-grid
+        # tests keep passing. The env reader is called dynamically so the
+        # fake automatically tracks any monkeypatch of NHMS_DOWNLOAD_BBOX_*.
+        # Tests exercising the fail-closed paths (bbox_preflight suite)
+        # override this method or set the class attribute directly.
+        from uuid import NAMESPACE_URL, uuid5
+
+        from workers.data_adapters.region import china_buffered_bbox_from_env
+
+        bbox = china_buffered_bbox_from_env()
+        snapshot_id = uuid5(
+            NAMESPACE_URL,
+            f"grid_snapshot:{source_id}:{grid_id}:{grid_signature}",
+        )
+        return (
+            bbox.south,
+            bbox.north,
+            bbox.west,
+            bbox.east,
+            snapshot_id,
+            None,
+        )
+
 
 class FailingWriteObjectStore(LocalObjectStore):
     def __init__(self, root: Path, *, fail_key_suffix: str) -> None:

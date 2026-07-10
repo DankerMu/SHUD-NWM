@@ -7,12 +7,17 @@ import logging
 import math
 import os
 import re
-from collections.abc import Mapping, Sequence
+import uuid
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import AbstractSet, Any, Protocol
 
+from packages.common.grid_registry_bbox_guard import (
+    BboxMismatchError,
+    verify_download_bbox_matches_registry,
+)
 from packages.common.grid_signature import (
     _json_bytes,
     _json_default,
@@ -27,6 +32,7 @@ from packages.common.met_store import PsycopgMetStore
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
 from packages.common.source_identity import normalize_source_id
 from workers.canonical_converter.converter import canonical_product_is_forcing_usable
+from workers.data_adapters.region import GeoBBox
 from workers.forcing_producer.direct_grid_contract import (
     DIRECT_GRID_MODE,
     IDW_MODE,
@@ -110,6 +116,97 @@ ERA5_LATENCY_FALLBACK_REASON = "era5_latency"
 
 class ForcingProductionError(RuntimeError):
     """Raised when forcing production cannot complete."""
+
+
+class MissingRegisteredGridSnapshotError(ForcingProductionError):
+    """Raised when the direct-grid identity has no registered snapshot.
+
+    Fail-closed producer preflight (§3.1): the direct-grid producer MUST NOT
+    invent a snapshot. Absent snapshot for
+    ``(source_id, grid_id, grid_signature)`` blocks production before any
+    direct-grid repository write.
+    """
+
+    def __init__(self, *, source_id: str, grid_id: str, grid_signature: str) -> None:
+        super().__init__(
+            "No registered canonical_grid_snapshot for direct-grid identity "
+            f"source_id={source_id!r} grid_id={grid_id!r} grid_signature={grid_signature!r}."
+        )
+        self.source_id = source_id
+        self.grid_id = grid_id
+        self.grid_signature = grid_signature
+
+
+class SupersededGridSnapshotError(ForcingProductionError):
+    """Raised when the resolved snapshot has ``superseded_at`` non-NULL.
+
+    Per cross-change contract ``grid-drift-lifecycle`` §"Consumers of a
+    superseded snapshot fail closed": the producer preflight MUST fail closed
+    when the registered snapshot is superseded — never silently produce direct
+    -grid forcing bound to a stale grid identity.
+    """
+
+    def __init__(
+        self,
+        *,
+        source_id: str,
+        grid_id: str,
+        grid_signature: str,
+        grid_snapshot_id: uuid.UUID | None,
+        superseded_at: datetime,
+    ) -> None:
+        super().__init__(
+            f"Registered canonical_grid_snapshot for source_id={source_id!r} "
+            f"grid_id={grid_id!r} grid_signature={grid_signature!r} "
+            f"(grid_snapshot_id={grid_snapshot_id}) is superseded at {superseded_at!r}; "
+            "direct-grid producer MUST fail closed on superseded snapshots "
+            "(cross-change contract grid-drift-lifecycle "
+            "§\"Consumers of a superseded snapshot fail closed\")."
+        )
+        self.source_id = source_id
+        self.grid_id = grid_id
+        self.grid_signature = grid_signature
+        self.grid_snapshot_id = grid_snapshot_id
+        self.superseded_at = superseded_at
+
+
+class _PreflightValueErrorPropagate(RuntimeError):
+    """Internal marker: preflight raised a raw :class:`ValueError` from the
+    env_reader / guard finiteness gate; the outer ``produce`` wrap MUST let the
+    original :class:`ValueError` escape un-swallowed per §3.1.
+
+    Narrower than the previous ``isinstance(error, ValueError) and not
+    isinstance(error, DirectGridContractError)`` catch, which incidentally
+    passed through *every* :class:`ValueError` inside the outer try block
+    (e.g. :func:`_safe_path_component`'s ``ValueError("Invalid path
+    component.")``). That leak would strip the ``ForcingProductionError``
+    wrapping expected by callers such as
+    :func:`services.production_closure.met_validation._run_forcing_production`
+    and mislabel bbox-preflight ``ValueError`` at
+    :mod:`workers.forcing_producer.cli` as ``INVALID_SOURCE_ID``. This marker
+    restricts the "un-swallowed ValueError" contract to EXACTLY the preflight.
+    """
+
+    def __init__(self, original: ValueError) -> None:
+        super().__init__(str(original))
+        self.original = original
+
+
+@dataclass(frozen=True)
+class _RegisteredSnapshotBboxView:
+    """Duck-typed view over the four bbox corners + ``grid_snapshot_id``.
+
+    Structural match for
+    :class:`packages.common.grid_registry_bbox_guard.RegisteredBboxSnapshotProtocol`
+    without importing the Protocol at runtime. Used only by the SUB-6 producer
+    preflight to hand the guard exactly the fields it reads.
+    """
+
+    bbox_south: float
+    bbox_north: float
+    bbox_west: float
+    bbox_east: float
+    grid_snapshot_id: uuid.UUID | None
 
 
 @dataclass(frozen=True)
@@ -308,6 +405,14 @@ class ForcingRepository(Protocol):
         error_message: str | None = None,
     ) -> dict[str, Any] | None: ...
 
+    def find_registered_snapshot_bbox_by_identity(
+        self,
+        *,
+        source_id: str,
+        grid_id: str,
+        grid_signature: str,
+    ) -> tuple[float, float, float, float, uuid.UUID, datetime | None] | None: ...
+
 
 @dataclass(frozen=True)
 class ForcingProducerConfig:
@@ -345,6 +450,7 @@ class ForcingProducer:
         config: ForcingProducerConfig | None = None,
         repository: ForcingRepository | None = None,
         object_store: LocalObjectStore | None = None,
+        env_reader: Callable[[], GeoBBox] | None = None,
     ) -> None:
         self.config = config or ForcingProducerConfig()
         self.repository = repository
@@ -352,6 +458,10 @@ class ForcingProducer:
             self.config.object_store_root,
             object_store_prefix=self.config.object_store_prefix,
         )
+        # §3.1 producer bbox preflight: when None, the guard's pinned default
+        # ``china_buffered_bbox_from_env`` is used. Tests inject a fake reader
+        # to prove the ValueError propagation contract without mutating env.
+        self._env_reader = env_reader
 
     @classmethod
     def from_env(cls) -> ForcingProducer:
@@ -456,6 +566,16 @@ class ForcingProducer:
                     model_id=model_id,
                     basin_version_id=resolved_basin_version_id,
                     products_by_variable=products_by_variable,
+                )
+                # §3.1 bbox preflight — MUST run before every direct-grid
+                # repository write (station mirror / interp weights / forcing
+                # version) and before the cache-hit early-return, so a bbox
+                # mismatch / missing / superseded snapshot fails closed with
+                # zero production side effects.
+                self._preflight_direct_grid_bbox(
+                    source_id=resolved_source_id,
+                    grid_id=forcing_mapping_contract.grid_id,
+                    grid_signature=direct_grid_signature,
                 )
                 self._enforce_limit(
                     "station_count",
@@ -681,6 +801,22 @@ class ForcingProducer:
             self._mark_failed(resolved_source_id, parsed_cycle_time, error)
             if isinstance(error, ForcingProductionError):
                 raise
+            # §3.1 fail-closed contract: BboxMismatchError from the pinned
+            # guard, and raw ValueError from the preflight env_reader /
+            # finiteness gate MUST propagate un-swallowed so the caller sees
+            # the shape-integrity or mismatch identity rather than a generic
+            # production error. The un-swallowed ValueError contract is
+            # narrowed to EXACTLY the preflight via the private sentinel
+            # ``_PreflightValueErrorPropagate`` — every other ValueError
+            # inside the try block (e.g. ``_safe_path_component``'s
+            # ``ValueError("Invalid path component.")``) stays wrapped as
+            # ``ForcingProductionError`` so downstream callers such as
+            # ``services.production_closure.met_validation`` still see the
+            # ``ForcingProductionError`` shape they catch.
+            if isinstance(error, BboxMismatchError):
+                raise
+            if isinstance(error, _PreflightValueErrorPropagate):
+                raise error.original
             raise ForcingProductionError(str(error)) from error
 
     def _resolve_model_identity(self, *, model_id: str) -> Mapping[str, Any]:
@@ -896,6 +1032,77 @@ class ForcingProducer:
             valid_indexes={station.shud_forcing_index for station in contract.stations},
         )
         return grid_signature
+
+    def _preflight_direct_grid_bbox(
+        self,
+        *,
+        source_id: str,
+        grid_id: str,
+        grid_signature: str,
+    ) -> None:
+        """§3.1 producer bbox preflight — fail closed before any direct-grid write.
+
+        Reads the four bbox corners + ``superseded_at`` for
+        ``(source_id, grid_id, grid_signature)`` from the repository, then
+        hands the resolved snapshot to the pinned
+        :func:`packages.common.grid_registry_bbox_guard.verify_download_bbox_matches_registry`
+        (default ``env_reader=china_buffered_bbox_from_env`` unless a producer
+        -level override was injected for tests). Raises:
+
+        * :class:`MissingRegisteredGridSnapshotError` — no row for the identity.
+        * :class:`SupersededGridSnapshotError` — row with ``superseded_at``
+          non-NULL (cross-change contract ``grid-drift-lifecycle``).
+        * :class:`BboxMismatchError` — bbox disagreement (raised by the guard).
+        * :class:`ValueError` — from the env reader or the guard's finiteness
+          gate; propagated un-swallowed per SUB-4 policy.
+        """
+        assert self.repository is not None
+        lookup = getattr(self.repository, "find_registered_snapshot_bbox_by_identity", None)
+        if not callable(lookup):
+            raise MissingRegisteredGridSnapshotError(
+                source_id=source_id, grid_id=grid_id, grid_signature=grid_signature
+            )
+        snapshot_row = lookup(
+            source_id=source_id, grid_id=grid_id, grid_signature=grid_signature
+        )
+        if snapshot_row is None:
+            raise MissingRegisteredGridSnapshotError(
+                source_id=source_id, grid_id=grid_id, grid_signature=grid_signature
+            )
+        bbox_south, bbox_north, bbox_west, bbox_east, grid_snapshot_id, superseded_at = snapshot_row
+        if superseded_at is not None:
+            raise SupersededGridSnapshotError(
+                source_id=source_id,
+                grid_id=grid_id,
+                grid_signature=grid_signature,
+                grid_snapshot_id=grid_snapshot_id,
+                superseded_at=superseded_at,
+            )
+        snapshot_view = _RegisteredSnapshotBboxView(
+            bbox_south=bbox_south,
+            bbox_north=bbox_north,
+            bbox_west=bbox_west,
+            bbox_east=bbox_east,
+            grid_snapshot_id=grid_snapshot_id,
+        )
+        try:
+            if self._env_reader is not None:
+                verify_download_bbox_matches_registry(snapshot_view, env_reader=self._env_reader)
+            else:
+                verify_download_bbox_matches_registry(snapshot_view)
+        except BboxMismatchError:
+            # SUB-6 fail-closed: mismatch identity must reach the caller.
+            raise
+        except ValueError as raw_value_error:
+            # SUB-6 fail-closed: wrap raw ValueError from env_reader /
+            # finiteness gate in a private sentinel so the outer ``produce``
+            # except handler re-raises the ORIGINAL ValueError while every
+            # other ValueError inside the try block stays wrapped as
+            # ``ForcingProductionError``. The pinned guard only raises
+            # ``ValueError`` from those two disjoint sources (see
+            # ``packages/common/grid_registry_bbox_guard.py:167-179`` docstring)
+            # — no ``DirectGridContractError`` reaches here from that call.
+            raise _PreflightValueErrorPropagate(raw_value_error) from raw_value_error
 
     def _validate_direct_grid_product_grids(
         self,
