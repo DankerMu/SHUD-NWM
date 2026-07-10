@@ -615,19 +615,81 @@ def test_state_snapshot_clone_provenance_migration_is_column_only_forward_upgrad
     ):
         assert expected in migration, f"{migration_name} must contain: {expected}"
 
-    # Column-only ALTER — no destructive or data-touching statements.
-    for forbidden in (
-        "DROP INDEX",
-        "DROP CONSTRAINT",
-        "CREATE INDEX",
-        "CREATE UNIQUE INDEX",
-        "UPDATE ",
-        "INSERT ",
-        "DELETE ",
-    ):
-        assert forbidden not in migration.upper(), (
-            f"{migration_name} must not contain '{forbidden}' — it is column-only NULL-default add"
+    # Column-only ALTER — no destructive, data-touching, or scope-widening
+    # statements. Fixture rule: a DB migration on a live table with pre-existing
+    # rows must be guarded even at low severity levels, because a silent typo
+    # (DROP COLUMN, UPDATE, TRUNCATE, ALTER COLUMN, …) can destroy or rewrite
+    # data that the mechanism relies on. Word-boundary regex is used (not raw
+    # substring) so operator-adjacent whitespace (TAB, newline, table name)
+    # cannot slip past the check, and so descriptive words like "SUPDATED" or
+    # "REDROP" cannot falsely trigger it. Comments are stripped first so header
+    # prose that legitimately mentions "no drop of the existing index" or
+    # similar does not need to dodge the guard.
+    code_lines = [
+        line
+        for line in migration.splitlines()
+        if not line.lstrip().startswith("--")
+    ]
+    code_body = "\n".join(code_lines)
+    forbidden_token_patterns = (
+        r"\bDROP\s+INDEX\b",
+        r"\bDROP\s+CONSTRAINT\b",
+        r"\bDROP\s+COLUMN\b",
+        r"\bDROP\s+TABLE\b",
+        r"\bDROP\s+TRIGGER\b",
+        r"\bCREATE\s+INDEX\b",
+        r"\bCREATE\s+UNIQUE\s+INDEX\b",
+        r"\bCREATE\s+TABLE\b",
+        r"\bCREATE\s+TRIGGER\b",
+        r"\bCREATE\s+FUNCTION\b",
+        r"\bALTER\s+COLUMN\b",
+        r"\bALTER\s+INDEX\b",
+        r"\bTRUNCATE\b",
+        r"\bRENAME\b",
+        r"\bGRANT\b",
+        r"\bREVOKE\b",
+        r"\bUPDATE\b",
+        r"\bINSERT\b",
+        r"\bDELETE\b",
+        r"\bCOMMENT\s+ON\b",
+    )
+    for token_pattern in forbidden_token_patterns:
+        matches = [
+            line
+            for line in code_lines
+            if re.search(token_pattern, line, re.IGNORECASE)
+        ]
+        assert not matches, (
+            f"Forbidden DDL matching {token_pattern!r} found in {migration_name}: {matches}"
         )
+
+    # Exactly three ADD COLUMN / ALTER TABLE statements — one per provenance
+    # column. Guards against a future edit that quietly duplicates or omits a
+    # column and still passes the presence assertions above. Counted on the
+    # comment-stripped body so header prose cannot inflate the count.
+    add_column_stmts = re.findall(r"\bADD\s+COLUMN\b", code_body, re.IGNORECASE)
+    assert len(add_column_stmts) == 3, (
+        f"Migration {migration_name} must add exactly 3 columns, "
+        f"found {len(add_column_stmts)}"
+    )
+    alter_table_stmts = re.findall(r"\bALTER\s+TABLE\b", code_body, re.IGNORECASE)
+    assert len(alter_table_stmts) == 3, (
+        f"Migration {migration_name} must have exactly 3 ALTER TABLE statements, "
+        f"found {len(alter_table_stmts)}"
+    )
+
+    # Scope-boundary lock: every ALTER TABLE must target ONLY
+    # hydro.state_snapshot. A stray edit that adds "ALTER TABLE hydro.other …"
+    # in the same migration would silently widen the change surface without
+    # this assertion. Captured against the comment-stripped body for the same
+    # reason as the counts above.
+    altered_tables = re.findall(
+        r"\bALTER\s+TABLE\s+(\S+)", code_body, re.IGNORECASE
+    )
+    assert altered_tables == ["hydro.state_snapshot"] * 3, (
+        f"Migration {migration_name} must ONLY touch hydro.state_snapshot, "
+        f"found altered tables: {altered_tables}"
+    )
 
     # The (model_id, COALESCE(source_id, ''), valid_time) unique index MUST NOT be
     # altered by this migration. The name may appear in the header comment as
