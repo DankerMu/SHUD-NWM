@@ -1,6 +1,6 @@
-"""§2.1 mapping builder CLI: chain G0-G5 stages, no partial output.
+"""§2.1 + §2.2 mapping builder CLI: chain G0-G5 stages + input-authority resolver.
 
-Thin operator entrypoint (Epic #973 SUB-2, OpenSpec change
+Thin operator entrypoint (Epic #973 SUB-2 and SUB-3, OpenSpec change
 ``direct-grid-build-enablement``). Chains the existing
 ``workers.mapping_builder`` library stages plus the SUB-1
 :mod:`workers.mapping_builder.z_policy_verdict` module. This module
@@ -8,12 +8,31 @@ NEVER re-implements any G0..G5 stage; every gate is delegated to the
 library import. The import-site + no-local-def guardrail is enforced
 by ``tests/test_mapping_builder_cli.py::test_no_duplicated_stage_logic_all_stage_functions_come_from_stage_modules``.
 
-Deferred: SUB-3 (§2.2 operator argv path resolver), SUB-4 (§2.3 written-
-tree forbidden-output scan), SUB-5 (§2.4 keliya deterministic 2-run
-byte compare routed through the SUB-3 resolver). The argparse ``main``
-here is a scaffold that returns exit code 2; the operator-facing shape
-lands in SUB-3. Programmatic callers (tests, downstream orchestrators)
-invoke :func:`build_direct_grid_variant` directly.
+SUB-3 (§2.2) adds an operator-argv input-authority resolver
+(:func:`resolve_package_path`) that validates the operator-supplied
+``--package-path`` against the object-store release-frozen shape
+``<object-store-root>/models/basins_<basin>_shud/<release>/package/``
+(root defaults to ``/home/ghdc/nwm/object-store`` and is overridable
+via ``--object-store-root``) and refuses dev-workspace paths (node-27
+``/home/ghdc/nwm/Basins/...`` and node-22 ``/volume/nwm/Basins/...``)
+unless ``--allow-dev-workspace`` is set with a non-empty
+``--dev-workspace-rationale``. Any override is recorded on the
+returned :class:`ResolvedPackagePath.input_authority_evidence`
+mapping, which the caller merges into G0's ``evidence_ref`` via
+:func:`build_direct_grid_variant`'s ``input_authority_evidence``
+kwarg. No filesystem read happens during resolution — a rejected
+path fails closed with no read and no output. The resolver validates
+the path shape/authority only; it does not re-implement package
+loading (SUB-4/SUB-5 keep that boundary).
+
+Deferred: SUB-4 (§2.3 written-tree forbidden-output scan) and SUB-5
+(§2.4 keliya deterministic 2-run byte compare routed through the
+SUB-3 resolver). The SUB-3 argparse ``main`` resolves the path and
+emits the resolution JSON on stdout — it does NOT drive a build (the
+full ``build_direct_grid_variant`` invocation from argv is SUB-5
+territory once the keliya fixture is staged under a tmp
+``--object-store-root``). Programmatic callers (tests, downstream
+orchestrators) invoke :func:`build_direct_grid_variant` directly.
 
 No-partial-output pattern: caller supplies a target ``variant_root`` that
 MUST NOT already exist; the orchestrator stages writes into a sibling
@@ -42,6 +61,7 @@ import shutil
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from packages.common.grid_registry_store import CanonicalGridCell
 from packages.common.grid_signature import canonical_json_bytes
@@ -116,6 +136,217 @@ from workers.mapping_builder.z_policy_verdict import (
 
 _MANIFEST_FILENAME = "manifest.json"
 _BINDING_FILENAME = "direct_grid_binding.json"
+
+# --- §2.2 input-authority resolver constants -------------------------------
+
+#: Default object-store root under which operator-supplied package paths must
+#: sit unless ``--object-store-root`` overrides. Hardcoded at the node-27
+#: production layout; does not exist on local/CI runners — tests point the
+#: root at a tmp directory via the sanctioned ``--object-store-root`` channel.
+DEFAULT_OBJECT_STORE_ROOT = pathlib.Path("/home/ghdc/nwm/object-store")
+
+#: Recognized dev-workspace path prefixes that :func:`resolve_package_path`
+#: REJECTS by default. ``/home/ghdc/nwm/Basins`` is the node-27 dev tree;
+#: ``/volume/nwm/Basins`` is the node-22 dev tree. Only unblocked when the
+#: operator opts in via ``--allow-dev-workspace`` with a non-empty rationale.
+_DEV_WORKSPACE_PREFIXES: tuple[pathlib.Path, ...] = (
+    pathlib.Path("/home/ghdc/nwm/Basins"),
+    pathlib.Path("/volume/nwm/Basins"),
+)
+
+
+# --- §2.2 input-authority resolver ----------------------------------------
+
+
+class PackagePathAuthorityError(RuntimeError):
+    """Raised when the operator-supplied package path fails §2.2 authority validation.
+
+    Distinct root (not a subclass of any G0..G5 or z-policy exception
+    family) — path-authority failures come from the argv resolver, not
+    from any downstream gate. The resolver fails closed with NO
+    filesystem read and NO output written; the caller can catch this
+    error to emit a top-level operator diagnostic without leaking any
+    partial artifact.
+    """
+
+
+@dataclass(frozen=True)
+class ResolvedPackagePath:
+    """Return record from :func:`resolve_package_path`.
+
+    Attributes
+    ----------
+    baseline_root:
+        The validated package path (identical to the operator-supplied
+        ``package_path``). Returned as a distinct field so downstream
+        callers see a clearly-named "baseline_root" boundary rather than
+        threading the raw operator argv value through gate calls.
+    basin_name:
+        Basin identifier extracted from the ``basins_<basin>_shud``
+        segment for object-store shapes, or the first path segment
+        under the dev-workspace prefix.
+    release_id:
+        Release identifier from the object-store shape's ``<release>``
+        segment. For dev-workspace overrides this is the sentinel
+        ``"dev-workspace"`` (no release channel exists in the dev tree).
+    input_authority_evidence:
+        Structured pointer to the input-authority decision, mergeable
+        into G0's ``evidence_ref`` via
+        :func:`build_direct_grid_variant`'s ``input_authority_evidence``
+        kwarg. Contains ``kind``, ``package_path``, ``basin_name``,
+        ``release_id``, ``channel`` (``"object_store"`` or
+        ``"dev_workspace"``), ``object_store_root``,
+        ``object_store_root_override`` (bool), and
+        ``dev_workspace_override`` (``None`` or ``{"path": ...,
+        "rationale": ...}``).
+    """
+
+    baseline_root: pathlib.Path
+    basin_name: str
+    release_id: str
+    input_authority_evidence: Mapping[str, Any]
+
+
+def resolve_package_path(
+    *,
+    package_path: pathlib.Path,
+    object_store_root: pathlib.Path | None = None,
+    allow_dev_workspace: bool = False,
+    dev_workspace_rationale: str | None = None,
+) -> ResolvedPackagePath:
+    """Validate operator-supplied package path against §2.2 input-authority discipline.
+
+    Accepted shapes:
+
+    * Object-store release-frozen:
+      ``<effective_root>/models/basins_<basin>_shud/<release>/package``
+      where ``effective_root`` is ``object_store_root`` if supplied, else
+      :data:`DEFAULT_OBJECT_STORE_ROOT`. A non-default root is recorded
+      on the evidence as ``object_store_root_override=True``.
+    * Dev-workspace path under any prefix in :data:`_DEV_WORKSPACE_PREFIXES`
+      — REJECTED unless ``allow_dev_workspace`` is True AND
+      ``dev_workspace_rationale`` is a non-empty string; the override
+      path + rationale are recorded on the evidence.
+
+    Any other path fails closed with :class:`PackagePathAuthorityError`
+    and NO filesystem read (the resolver only inspects path segments).
+
+    Parameters
+    ----------
+    package_path:
+        Operator-supplied package path (typically from ``--package-path``).
+    object_store_root:
+        Override for :data:`DEFAULT_OBJECT_STORE_ROOT`. When ``None``,
+        the default is used; when non-``None``, the override is recorded
+        on the returned evidence dict.
+    allow_dev_workspace:
+        Whether to accept dev-workspace paths. Defaults to ``False``.
+    dev_workspace_rationale:
+        Required non-empty string when ``allow_dev_workspace`` is True.
+
+    Raises
+    ------
+    PackagePathAuthorityError:
+        On any path that is neither object-store-shaped under the
+        configured root nor a recognized dev-workspace path; on a
+        dev-workspace path when ``allow_dev_workspace`` is not set; on
+        a dev-workspace override without a non-empty rationale.
+    """
+    effective_root = (
+        object_store_root
+        if object_store_root is not None
+        else DEFAULT_OBJECT_STORE_ROOT
+    )
+    is_override = object_store_root is not None
+    effective_root_str = str(effective_root)
+
+    # Object-store shape check via pathlib parts (no regex, no filesystem read).
+    try:
+        rel = package_path.relative_to(effective_root)
+    except ValueError:
+        rel = None
+
+    if rel is not None:
+        parts = rel.parts
+        # Expected relative shape: ("models", "basins_<basin>_shud", "<release>", "package")
+        if (
+            len(parts) == 4
+            and parts[0] == "models"
+            and parts[1].startswith("basins_")
+            and parts[1].endswith("_shud")
+            and len(parts[1]) > len("basins__shud")  # non-empty basin name
+            and parts[3] == "package"
+        ):
+            basin_name = parts[1][len("basins_"):-len("_shud")]
+            release_id = parts[2]
+            evidence = {
+                "kind": "input_authority",
+                "package_path": str(package_path),
+                "basin_name": basin_name,
+                "release_id": release_id,
+                "channel": "object_store",
+                "object_store_root": effective_root_str,
+                "object_store_root_override": is_override,
+                "dev_workspace_override": None,
+            }
+            return ResolvedPackagePath(
+                baseline_root=package_path,
+                basin_name=basin_name,
+                release_id=release_id,
+                input_authority_evidence=evidence,
+            )
+
+    # Dev-workspace check.
+    for prefix in _DEV_WORKSPACE_PREFIXES:
+        try:
+            rel_dev = package_path.relative_to(prefix)
+        except ValueError:
+            continue
+        # Path is under a dev-workspace prefix — authority decision below.
+        if not allow_dev_workspace:
+            raise PackagePathAuthorityError(
+                f"package_path {package_path!s}: dev-workspace paths under "
+                f"{prefix!s} are rejected by default; supply "
+                "--allow-dev-workspace with --dev-workspace-rationale to "
+                "override (the override is recorded on the evidence bundle)"
+            )
+        if dev_workspace_rationale is None or not dev_workspace_rationale.strip():
+            raise PackagePathAuthorityError(
+                f"package_path {package_path!s}: --allow-dev-workspace "
+                "requires a non-empty --dev-workspace-rationale so the "
+                "override is auditable on the evidence bundle"
+            )
+        basin_name = rel_dev.parts[0] if rel_dev.parts else ""
+        release_id = "dev-workspace"
+        evidence = {
+            "kind": "input_authority",
+            "package_path": str(package_path),
+            "basin_name": basin_name,
+            "release_id": release_id,
+            "channel": "dev_workspace",
+            "object_store_root": effective_root_str,
+            "object_store_root_override": is_override,
+            "dev_workspace_override": {
+                "path": str(package_path),
+                "rationale": dev_workspace_rationale,
+            },
+        }
+        return ResolvedPackagePath(
+            baseline_root=package_path,
+            basin_name=basin_name,
+            release_id=release_id,
+            input_authority_evidence=evidence,
+        )
+
+    # Neither shape — fail closed with no read, no output.
+    raise PackagePathAuthorityError(
+        f"package_path {package_path!s}: is neither an object-store "
+        f"release-frozen path under "
+        f"{effective_root_str}/models/basins_<basin>_shud/<release>/package/ "
+        f"nor a recognized dev-workspace path under "
+        f"{tuple(str(p) for p in _DEV_WORKSPACE_PREFIXES)!r}; §2.2 fails "
+        "closed with no read, no output"
+    )
 
 
 # --- return record --------------------------------------------------------
@@ -335,6 +566,7 @@ def build_direct_grid_variant(
     active_forcing_subdir: str = "input",
     small_basin_approval: SmallBasinApproval | None = None,
     z_policy_verdict_path: pathlib.Path | None = None,
+    input_authority_evidence: Mapping[str, Any] | None = None,
 ) -> BuildResult:
     """Chain G0..G5 mapping stages, emit the variant, and assemble evidence.
 
@@ -375,6 +607,18 @@ def build_direct_grid_variant(
     :class:`LegacyWeatherPathInActiveTreeError`, G5
     :class:`BindingArtifactError` (and subclasses). See each stage
     module's own docstring for the full contract.
+
+    Parameters
+    ----------
+    input_authority_evidence:
+        Optional §2.2 input-authority record (produced by
+        :func:`resolve_package_path`). When supplied, its contents are
+        merged into G0's ``evidence_ref`` under the ``"input_authority"``
+        key so the evidence bundle carries the operator's argv-path
+        decision (channel, object-store root override, dev-workspace
+        override) alongside the baseline integrity checksum. When
+        ``None`` (programmatic callers that bypass the argv resolver),
+        the G0 evidence_ref keeps its SUB-2 shape unchanged.
     """
     if variant_root.exists():
         raise ValueError(
@@ -423,6 +667,7 @@ def build_direct_grid_variant(
             active_forcing_subdir=active_forcing_subdir,
             small_basin_approval=small_basin_approval,
             z_policy_verdict_path=z_policy_verdict_path,
+            input_authority_evidence=input_authority_evidence,
         )
     except BaseException:
         # No-partial-output: any raise (including KeyboardInterrupt /
@@ -466,6 +711,7 @@ def _run_gates_and_emit(
     active_forcing_subdir: str,
     small_basin_approval: SmallBasinApproval | None,
     z_policy_verdict_path: pathlib.Path | None,
+    input_authority_evidence: Mapping[str, Any] | None,
 ) -> BuildResult:
     """Run every gate and emit artifacts into ``tmp_variant_root``.
 
@@ -586,14 +832,22 @@ def _run_gates_and_emit(
         sp_mesh_sha256_hex=_sha256_file(g0_report.sp_mesh_path),
     )
 
+    # G0 evidence_ref: merge SUB-3 §2.2 input-authority record when the
+    # caller resolved the path via :func:`resolve_package_path`. When
+    # ``input_authority_evidence`` is None (programmatic tests that
+    # bypass argv), the evidence_ref keeps its SUB-2 shape.
+    g0_evidence_ref: dict[str, Any] = {
+        "kind": "baseline_integrity_report",
+        "checksum": g0_report.package_checksum,
+    }
+    if input_authority_evidence is not None:
+        g0_evidence_ref["input_authority"] = dict(input_authority_evidence)
+
     gate_results = GateResults(
         g0=GateResult(
             gate_id="G0",
             passed=True,
-            evidence_ref={
-                "kind": "baseline_integrity_report",
-                "checksum": g0_report.package_checksum,
-            },
+            evidence_ref=g0_evidence_ref,
         ),
         g1=GateResult(
             gate_id="G1",
@@ -681,52 +935,107 @@ def _run_gates_and_emit(
     )
 
 
-# --- argparse scaffold ----------------------------------------------------
+# --- §2.2 argparse entrypoint (SUB-3) -------------------------------------
 
 
 def _argparse_main(argv: Sequence[str] | None = None) -> int:
-    """Argparse scaffold — full operator surface lands in SUB-3.
+    """Argparse main — SUB-3 (§2.2) input-authority resolver + JSON emission.
 
-    This scaffold parses the future operator flag surface so a callsite
-    smoke-invocation returns a stable exit code + JSON diagnostic rather
-    than crashing with an argparse abort. The actual snapshot-loader
-    wiring + object-store path resolver are §2.2 (SUB-3) scope; this
-    scaffold refuses to attempt a build until that lands.
+    Parses the operator argv surface, drives :func:`resolve_package_path`,
+    and emits the resolution decision as JSON on stdout. Does NOT drive
+    a build — the full ``build_direct_grid_variant`` invocation from
+    argv (loader wiring, snapshot construction, approvals) lands in
+    SUB-5 alongside the keliya deterministic 2-run fixture. The
+    resolution JSON stdout stream is the contract SUB-5 consumes when
+    it drives builds through this same argv surface.
+
+    Exit codes
+    ----------
+    0
+        Path resolution succeeded; JSON payload on stdout carries the
+        resolved basin, release, effective object-store root, and the
+        ``input_authority_evidence`` dict ready to be merged into G0.
+    1
+        Path resolution failed (:class:`PackagePathAuthorityError`);
+        JSON diagnostic on stderr carries the error class + message.
+    2
+        Argparse itself rejected the argv (unknown flag, missing
+        required flag). argparse writes its own diagnostic to stderr.
     """
     parser = argparse.ArgumentParser(
         prog="nhms-mapping-build",
         description=(
             "Direct-grid mapping-asset builder CLI. "
-            "The operator argv surface lands in SUB-3 (§2.2 path resolver)."
+            "§2.2 input-authority resolver: validates --package-path "
+            "against the object-store release-frozen shape "
+            "<object-store-root>/models/basins_<basin>_shud/<release>/package."
         ),
     )
-    parser.add_argument("--baseline-root", required=False, default=None)
-    parser.add_argument("--variant-root", required=False, default=None)
-    parser.add_argument("--object-store-root", required=False, default=None)
-    parser.add_argument("--allow-dev-workspace", action="store_true")
+    parser.add_argument("--package-path", required=True, type=pathlib.Path)
+    parser.add_argument("--variant-root", required=True, type=pathlib.Path)
+    parser.add_argument(
+        "--object-store-root",
+        required=False,
+        default=None,
+        type=pathlib.Path,
+        help=(
+            "Override the default object-store root "
+            f"({DEFAULT_OBJECT_STORE_ROOT!s}); non-default use is recorded "
+            "on the evidence bundle."
+        ),
+    )
+    parser.add_argument(
+        "--allow-dev-workspace",
+        action="store_true",
+        help=(
+            "Accept a dev-workspace package path (node-27 "
+            "/home/ghdc/nwm/Basins/... or node-22 /volume/nwm/Basins/...); "
+            "requires --dev-workspace-rationale."
+        ),
+    )
+    parser.add_argument(
+        "--dev-workspace-rationale",
+        required=False,
+        default=None,
+        help=(
+            "Non-empty rationale string recorded on the evidence bundle "
+            "when --allow-dev-workspace is set."
+        ),
+    )
     args = parser.parse_args(argv)
 
-    diagnostic = {
-        "status": "unimplemented",
-        "reason": (
-            "operator argv path-authority resolver + snapshot-loader "
-            "wiring are deferred to SUB-3 (§2.2). Direct invocation of "
-            "the library orchestration function "
-            "`workers.mapping_builder.cli.build_direct_grid_variant` is "
-            "available for programmatic callers."
-        ),
-        "received": {
-            "baseline_root": args.baseline_root,
-            "variant_root": args.variant_root,
-            "object_store_root": args.object_store_root,
-            "allow_dev_workspace": args.allow_dev_workspace,
-        },
+    try:
+        resolved = resolve_package_path(
+            package_path=args.package_path,
+            object_store_root=args.object_store_root,
+            allow_dev_workspace=args.allow_dev_workspace,
+            dev_workspace_rationale=args.dev_workspace_rationale,
+        )
+    except PackagePathAuthorityError as error:
+        print(
+            json.dumps(
+                {
+                    "status": "error",
+                    "error": type(error).__name__,
+                    "message": str(error),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 1
+
+    resolution_payload = {
+        "status": "resolved",
+        "baseline_root": str(resolved.baseline_root),
+        "basin_name": resolved.basin_name,
+        "release_id": resolved.release_id,
+        "variant_root": str(args.variant_root),
+        "input_authority_evidence": dict(resolved.input_authority_evidence),
     }
-    print(
-        json.dumps(diagnostic, ensure_ascii=False, sort_keys=True),
-        file=sys.stderr,
-    )
-    return 2
+    print(json.dumps(resolution_payload, ensure_ascii=False, sort_keys=True))
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -734,15 +1043,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     The typed exception families raised by :func:`build_direct_grid_variant`
     surface here with a non-zero exit code + JSON stderr diagnostic once
-    SUB-3 wires the operator argv path.
+    SUB-5 wires the argv path all the way through a build. Today SUB-3's
+    argparse main handles :class:`PackagePathAuthorityError` inline
+    (returning 1); the reserved catches here remain for the future
+    build-driving wiring.
     """
     try:
         return _argparse_main(argv)
     except (VerdictResolutionError, BindingArtifactError) as error:
         # Reserved catches — VerdictResolutionError is the SUB-1 error
         # family; BindingArtifactError is representative of the G5 family.
-        # SUB-3 will extend this to include the full G0..G4 error families
-        # once the argv wiring lands.
+        # SUB-5 will extend this to include the full G0..G4 error families
+        # once the argv wiring drives a full build.
         print(
             json.dumps(
                 {"status": "error", "error": type(error).__name__, "message": str(error)},
@@ -754,5 +1066,5 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
 
-if __name__ == "__main__":  # pragma: no cover — scaffold for SUB-3
+if __name__ == "__main__":  # pragma: no cover — driven by SUB-5 fixture
     raise SystemExit(main())
