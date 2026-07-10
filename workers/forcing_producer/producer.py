@@ -170,6 +170,28 @@ class SupersededGridSnapshotError(ForcingProductionError):
         self.superseded_at = superseded_at
 
 
+class _PreflightValueErrorPropagate(RuntimeError):
+    """Internal marker: preflight raised a raw :class:`ValueError` from the
+    env_reader / guard finiteness gate; the outer ``produce`` wrap MUST let the
+    original :class:`ValueError` escape un-swallowed per §3.1.
+
+    Narrower than the previous ``isinstance(error, ValueError) and not
+    isinstance(error, DirectGridContractError)`` catch, which incidentally
+    passed through *every* :class:`ValueError` inside the outer try block
+    (e.g. :func:`_safe_path_component`'s ``ValueError("Invalid path
+    component.")``). That leak would strip the ``ForcingProductionError``
+    wrapping expected by callers such as
+    :func:`services.production_closure.met_validation._run_forcing_production`
+    and mislabel bbox-preflight ``ValueError`` at
+    :mod:`workers.forcing_producer.cli` as ``INVALID_SOURCE_ID``. This marker
+    restricts the "un-swallowed ValueError" contract to EXACTLY the preflight.
+    """
+
+    def __init__(self, original: ValueError) -> None:
+        super().__init__(str(original))
+        self.original = original
+
+
 @dataclass(frozen=True)
 class _RegisteredSnapshotBboxView:
     """Duck-typed view over the four bbox corners + ``grid_snapshot_id``.
@@ -780,15 +802,21 @@ class ForcingProducer:
             if isinstance(error, ForcingProductionError):
                 raise
             # §3.1 fail-closed contract: BboxMismatchError from the pinned
-            # guard, and raw ValueError from the env_reader / finiteness gate
-            # (both distinct from DirectGridContractError which the manifest
-            # parser wraps into ForcingProductionError upstream), MUST
-            # propagate un-swallowed so the caller sees the shape-integrity
-            # or mismatch identity rather than a generic production error.
+            # guard, and raw ValueError from the preflight env_reader /
+            # finiteness gate MUST propagate un-swallowed so the caller sees
+            # the shape-integrity or mismatch identity rather than a generic
+            # production error. The un-swallowed ValueError contract is
+            # narrowed to EXACTLY the preflight via the private sentinel
+            # ``_PreflightValueErrorPropagate`` — every other ValueError
+            # inside the try block (e.g. ``_safe_path_component``'s
+            # ``ValueError("Invalid path component.")``) stays wrapped as
+            # ``ForcingProductionError`` so downstream callers such as
+            # ``services.production_closure.met_validation`` still see the
+            # ``ForcingProductionError`` shape they catch.
             if isinstance(error, BboxMismatchError):
                 raise
-            if isinstance(error, ValueError) and not isinstance(error, DirectGridContractError):
-                raise
+            if isinstance(error, _PreflightValueErrorPropagate):
+                raise error.original
             raise ForcingProductionError(str(error)) from error
 
     def _resolve_model_identity(self, *, model_id: str) -> Mapping[str, Any]:
@@ -1057,10 +1085,24 @@ class ForcingProducer:
             bbox_east=bbox_east,
             grid_snapshot_id=grid_snapshot_id,
         )
-        if self._env_reader is not None:
-            verify_download_bbox_matches_registry(snapshot_view, env_reader=self._env_reader)
-        else:
-            verify_download_bbox_matches_registry(snapshot_view)
+        try:
+            if self._env_reader is not None:
+                verify_download_bbox_matches_registry(snapshot_view, env_reader=self._env_reader)
+            else:
+                verify_download_bbox_matches_registry(snapshot_view)
+        except BboxMismatchError:
+            # SUB-6 fail-closed: mismatch identity must reach the caller.
+            raise
+        except ValueError as raw_value_error:
+            # SUB-6 fail-closed: wrap raw ValueError from env_reader /
+            # finiteness gate in a private sentinel so the outer ``produce``
+            # except handler re-raises the ORIGINAL ValueError while every
+            # other ValueError inside the try block stays wrapped as
+            # ``ForcingProductionError``. The pinned guard only raises
+            # ``ValueError`` from those two disjoint sources (see
+            # ``packages/common/grid_registry_bbox_guard.py:167-179`` docstring)
+            # — no ``DirectGridContractError`` reaches here from that call.
+            raise _PreflightValueErrorPropagate(raw_value_error) from raw_value_error
 
     def _validate_direct_grid_product_grids(
         self,

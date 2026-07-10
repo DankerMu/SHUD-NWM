@@ -15,9 +15,23 @@ the pinned §3.1 contract:
 5. :class:`ValueError` from ``env_reader`` (malformed
    ``NHMS_DOWNLOAD_BBOX_*``) or the guard's finiteness gate propagates
    un-swallowed (zero writes).
+6. Cache-hit + mismatched bbox still fails closed BEFORE the "return
+   existing ready" early-return, proving the ordering promised by the
+   ``_preflight_direct_grid_bbox`` call-site docstring at
+   ``workers/forcing_producer/producer.py`` §"preflight … runs before every
+   direct-grid repository write AND before the cache-hit early-return".
+7. Non-preflight :class:`ValueError` inside the outer try (e.g.
+   :func:`_safe_path_component`'s ``ValueError("Invalid path component.")``)
+   MUST still be wrapped as :class:`ForcingProductionError` so callers such
+   as :mod:`services.production_closure.met_validation`, which only catch
+   :class:`ForcingProductionError`, still see the wrapped shape. The
+   un-swallowed ValueError contract is narrowed to EXACTLY the preflight
+   env_reader / finiteness gate via the private
+   ``_PreflightValueErrorPropagate`` sentinel.
 
-Runs only under the ``-k "match or mismatch or missing or superseded"``
-filter documented in ``openspec/changes/direct-grid-build-enablement/tasks.md``
+Runs only under the ``-k "match or mismatch or missing or superseded or
+safe_path"`` filter documented in
+``openspec/changes/direct-grid-build-enablement/tasks.md``
 §3.1 Evidence Floor; each name matches at least one of those keywords.
 """
 
@@ -43,6 +57,7 @@ from workers.forcing_producer import (
     parse_direct_grid_forcing_contract,
 )
 from workers.forcing_producer.producer import (
+    ForcingProductionError,
     MissingRegisteredGridSnapshotError,
     SupersededGridSnapshotError,
 )
@@ -338,6 +353,8 @@ def test_env_reader_ValueError_before_bbox_match_check_propagates_un_swallowed(
 
     # No direct-grid writes and no ForcingProductionError wrapper.
     _assert_zero_direct_grid_production_writes(repository, tmp_path)
+    # Symmetric with tests 2/3/4: the cycle status must be marked failed.
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
 
 
 def test_finiteness_gate_ValueError_on_snapshot_bbox_matches_env_bit_exactly_propagates_un_swallowed(
@@ -374,6 +391,8 @@ def test_finiteness_gate_ValueError_on_snapshot_bbox_matches_env_bit_exactly_pro
         )
 
     _assert_zero_direct_grid_production_writes(repository, tmp_path)
+    # Symmetric with tests 2/3/4: the cycle status must be marked failed.
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
     # Sanity-check that the NaN really was picked up (not spuriously matching
     # some other ValueError path in produce()).
     assert math.isnan(
@@ -383,3 +402,110 @@ def test_finiteness_gate_ValueError_on_snapshot_bbox_matches_env_bit_exactly_pro
             grid_signature="sha256:grid-signature-actual",
         )[0]
     )
+
+
+# ---------------------------------------------------------------------------
+# 6. Cache-hit + mismatched bbox → preflight still fails closed BEFORE the
+#    "return existing ready" early-return.
+# ---------------------------------------------------------------------------
+
+
+def test_cache_hit_with_mismatched_bbox_still_fails_closed_before_returning_existing_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ``_preflight_direct_grid_bbox`` call-site docstring at
+    ``workers/forcing_producer/producer.py`` promises the preflight fires
+    BEFORE every direct-grid repository write AND before the cache-hit
+    early-return. This test locks that ordering: even when the cache-hit
+    branch would otherwise return an existing ready result, a mismatched
+    snapshot bbox MUST still raise :class:`BboxMismatchError` and NOT return
+    the cached record.
+    """
+    # Mismatch: shift the snapshot south corner so the guard's bit-exact
+    # comparator fails on that field.
+    mismatch_south = _DEFAULT_ENV_BBOX.south + 1.0
+
+    def snapshot_row_factory(
+        *, source_id: str, grid_id: str, grid_signature: str
+    ) -> tuple[float, float, float, float, uuid.UUID, Any]:
+        del source_id, grid_id, grid_signature
+        return (
+            mismatch_south,
+            _DEFAULT_ENV_BBOX.north,
+            _DEFAULT_ENV_BBOX.west,
+            _DEFAULT_ENV_BBOX.east,
+            _REGISTERED_SNAPSHOT_ID,
+            None,
+        )
+
+    _contract, store, repository = _make_direct_grid_setup(
+        tmp_path, monkeypatch, snapshot_row_factory=snapshot_row_factory
+    )
+    producer = _build_producer_with_env_reader(tmp_path, repository, store)
+
+    # Force the cache-hit branch to be "currently valid" so, absent the
+    # preflight, ``produce`` WOULD take the early-return path. If the
+    # preflight ran AFTER the cache-hit check, this monkeypatch would mask
+    # the mismatch and the test would fail because ``produce`` would return
+    # an existing ready result instead of raising ``BboxMismatchError``.
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer.ForcingProducer._existing_forcing_version_is_current",
+        lambda *_args, **_kwargs: True,
+    )
+
+    with pytest.raises(BboxMismatchError) as excinfo:
+        producer.produce(
+            source_id="gfs", cycle_time="2026050700", model_id="demo_model"
+        )
+
+    assert excinfo.value.grid_snapshot_id == _REGISTERED_SNAPSHOT_ID
+    # No cache-hit return happened: no direct-grid writes, no forcing
+    # versions, and the last cycle status is the fail-closed marker.
+    _assert_zero_direct_grid_production_writes(repository, tmp_path)
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
+
+
+# ---------------------------------------------------------------------------
+# 7. Regression lock for Fix A (SUB-6 Phase 6): non-preflight ValueError
+#    inside the outer try MUST still be wrapped as ForcingProductionError.
+# ---------------------------------------------------------------------------
+
+
+def test_safe_path_component_ValueError_inside_outer_try_is_still_wrapped_as_ForcingProductionError(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fix A regression: the un-swallowed ValueError contract is narrowed to
+    EXACTLY the preflight env_reader / finiteness gate via the private
+    ``_PreflightValueErrorPropagate`` sentinel. A ``ValueError`` from
+    :func:`_safe_path_component` on ``resolved_basin_version_id`` inside the
+    outer ``produce`` try block MUST still be wrapped as
+    :class:`ForcingProductionError` so downstream callers such as
+    :func:`services.production_closure.met_validation._run_forcing_production`,
+    which only catch :class:`ForcingProductionError`, keep observing the
+    wrapped shape. Regression against the previous broad
+    ``isinstance(error, ValueError) and not isinstance(error,
+    DirectGridContractError)`` catch, which incidentally leaked the raw
+    ``ValueError("Invalid path component.")``.
+    """
+    _contract, store, repository = _make_direct_grid_setup(tmp_path, monkeypatch)
+    # Poison the resolved basin_version_id so ``_safe_path_component`` at
+    # the top of the outer try raises the raw ValueError("Invalid path
+    # component.") that Fix A must re-wrap as ``ForcingProductionError``.
+    repository.model_identity_by_model["demo_model"] = {
+        "basin_id": "basin_a",
+        "basin_version_id": "invalid/basin",
+        "river_network_version_id": "rivnet_v1",
+    }
+    producer = _build_producer_with_env_reader(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="Invalid path component"):
+        producer.produce(
+            source_id="gfs", cycle_time="2026050700", model_id="demo_model"
+        )
+
+    # Zero direct-grid writes AND the cycle is marked failed by the outer
+    # ``except Exception`` -> ``_mark_failed`` path.
+    _assert_zero_direct_grid_production_writes(repository, tmp_path)
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
