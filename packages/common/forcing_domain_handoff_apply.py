@@ -614,6 +614,11 @@ def _upsert_forcing_version(cursor: Any, row: Mapping[str, Any], parser_envelope
 
 
 def _upsert_met_stations(cursor: Any, stations: Sequence[Mapping[str, Any]]) -> None:
+    # §D2 flag ownership: `active_flag` is intentionally OMITTED from the row tuple.
+    # The INSERT template lands a literal `false` (fresh mirror rows land inactive) and
+    # the ON CONFLICT DO UPDATE keeps the sentinel no-op SET, so an existing row's
+    # `active_flag` is preserved — registration owns `false`, Change 8's cutover owns
+    # the flip to `true`.
     rows = [
         (
             station["station_id"],
@@ -623,7 +628,6 @@ def _upsert_met_stations(cursor: Any, stations: Sequence[Mapping[str, Any]]) -> 
             station["latitude"],
             station["elevation_m"],
             station["station_role"],
-            station["active_flag"],
             Json(dict(station["properties_json"])),
         )
         for station in stations
@@ -631,6 +635,14 @@ def _upsert_met_stations(cursor: Any, stations: Sequence[Mapping[str, Any]]) -> 
     if not rows:
         return
     tolerance_sql = f"{STATION_COORDINATE_TOLERANCE:.12f}"
+    # §D2 mirror flag ownership: registration owns the `false` landing and Change 8's
+    # cutover owns the flip to `true`. The ingest apply MUST land fresh rows inactive
+    # (literal `false` in the VALUES template) and MUST NOT treat `active_flag` as an
+    # identity conflict on DO UPDATE — otherwise a post-cutover reingest whose payload
+    # still carries `false` would collide with a legitimate `true` in the DB. The
+    # DO UPDATE SET remains a no-op sentinel (`station_id = met.met_station.station_id`)
+    # so no existing column value drifts; every other identity predicate term stays
+    # unchanged so legacy `forcing_proxy` handoffs continue to fail closed on real drift.
     returned = execute_values(
         cursor,
         f"""
@@ -653,12 +665,11 @@ def _upsert_met_stations(cursor: Any, stations: Sequence[Mapping[str, Any]]) -> 
           AND ABS(ST_Y(met.met_station.geom) - ST_Y(EXCLUDED.geom)) <= {tolerance_sql}
           AND met.met_station.elevation_m IS NOT DISTINCT FROM EXCLUDED.elevation_m
           AND met.met_station.station_role = EXCLUDED.station_role
-          AND met.met_station.active_flag = EXCLUDED.active_flag
         RETURNING station_id
         """,
         rows,
         template=(
-            "(%s, %s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4490), %s, %s, %s, %s)"
+            "(%s, %s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4490), %s, %s, false, %s)"
         ),
         page_size=5000,
         fetch=True,
@@ -844,6 +855,12 @@ def _row_value(row: Any, key: str, index: int) -> Any:
 
 
 def _station_rows_compatible(existing: Mapping[str, Any], station: Mapping[str, Any]) -> bool:
+    # §D2 flag ownership: `active_flag` is intentionally EXCLUDED from the identity
+    # compatibility check. Registration owns the `false` landing and Change 8's cutover
+    # owns the flip to `true`; a post-cutover reingest whose payload still carries
+    # `false` MUST NOT be rejected as an identity conflict against a legitimate `true`.
+    # Every other identity term stays intact so legacy `forcing_proxy` handoffs continue
+    # to fail closed on real drift (basin/name/coords/elevation/role).
     return (
         existing.get("basin_version_id") == station.get("basin_version_id")
         and existing.get("station_name") == station.get("station_name")
@@ -851,7 +868,6 @@ def _station_rows_compatible(existing: Mapping[str, Any], station: Mapping[str, 
         and _numbers_close(existing.get("latitude"), station.get("latitude"))
         and _numbers_close(existing.get("elevation_m"), station.get("elevation_m"))
         and existing.get("station_role") == station.get("station_role")
-        and existing.get("active_flag") == station.get("active_flag")
     )
 
 

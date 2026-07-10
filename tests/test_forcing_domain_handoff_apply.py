@@ -357,6 +357,75 @@ def test_existing_station_with_richer_metadata_is_preserved() -> None:
     )
 
 
+def test_apply_preserves_existing_active_flag_true_when_payload_carries_false() -> None:
+    """§D2 flag ownership: ingest apply MUST preserve existing `active_flag` on upsert.
+
+    Failure scenario the older textual `inspect.getsource` SQL-shape lock (Plane 3
+    in `test_direct_grid_variant_registration.py::test_producer_preserves_registration_flag_across_planes`)
+    cannot catch: someone reformats the SQL past the string check, or semantically
+    reintroduces `active_flag` into the ON CONFLICT identity predicate — the textual
+    match misses it; this functional apply test catches it.
+
+    Post-#965 the runtime producer's file-plane emits `active_flag=false` per
+    `station_inventory.json` row. Post-Change 8 cutover, the DB row for the same
+    station identity has `active_flag=true`. The ingest apply MUST (a) succeed
+    (NOT raise `REASON_APPLY_STATION_CONFLICT`), and (b) leave the existing DB
+    row's `active_flag` untouched — the ON CONFLICT DO UPDATE sentinel
+    `station_id = met.met_station.station_id` is a no-op, and `active_flag` is
+    intentionally EXCLUDED from the identity predicate so preserve applies
+    uniformly across both existing-True and existing-False rows.
+
+    OpenSpec §1.4 evidence key: apply-plane-preserve-active-flag-on-payload-false.
+    Cross-reference: `test_direct_grid_variant_registration.py::test_producer_preserves_registration_flag_across_planes`
+    exercises registration + producer planes with a textual SQL-shape check on the
+    ingest apply module; this test locks the ingest apply plane FUNCTIONALLY.
+    """
+    envelope = copy.deepcopy(_parse_complete())
+    # Post-#965 file-plane payload: the producer emits inactive.
+    for row in envelope["parsed"]["met.met_station"]:
+        row["active_flag"] = False
+
+    connection = _FakeConnection()
+    # Station 0 (qhh_forc_001): post-Change 8 cutover state — flipped to True in DB.
+    existing_true = copy.deepcopy(envelope["parsed"]["met.met_station"][0])
+    existing_true["active_flag"] = True
+    existing_true["geom"] = {
+        "type": "Point",
+        "srid": 4490,
+        "coordinates": [existing_true["longitude"], existing_true["latitude"]],
+    }
+    connection.tables["met.met_station"].append(existing_true)
+    # Station 1 (qhh_forc_002): pre-cutover state — still False in DB. Paired
+    # assertion for the "existing False + payload False -> still False" leg.
+    existing_false = copy.deepcopy(envelope["parsed"]["met.met_station"][1])
+    existing_false["active_flag"] = False
+    existing_false["geom"] = {
+        "type": "Point",
+        "srid": 4490,
+        "coordinates": [existing_false["longitude"], existing_false["latitude"]],
+    }
+    connection.tables["met.met_station"].append(existing_false)
+
+    report = apply_module.apply_forcing_domain_handoff(envelope, connection=connection)
+
+    # (a) Applied, not REASON_APPLY_STATION_CONFLICT — flag mismatch alone must
+    # NOT be treated as an identity conflict.
+    assert report["status"] == "applied"
+    assert report["row_counts"] == EXPECTED_COUNTS
+    assert connection.commits == 1
+    assert connection.rollbacks == 0
+    assert len(connection.tables["met.met_station"]) == 2
+
+    stored = {row["station_id"]: row for row in connection.tables["met.met_station"]}
+    # (b) Preserve-on-update sentinel: existing True stays True even though the
+    # payload carries False (the primary regression: no `false`->`false` overwrite
+    # of a legitimately-flipped row).
+    assert stored["qhh_forc_001"]["active_flag"] is True
+    # Paired assertion: existing False + payload False stays False (uniform
+    # preserve, no accidental `true` leak from the preserve branch).
+    assert stored["qhh_forc_002"]["active_flag"] is False
+
+
 def test_station_upsert_returning_shortfall_rolls_back_without_overwrite() -> None:
     envelope = _parse_complete()
     existing_station = copy.deepcopy(envelope["parsed"]["met.met_station"][0])
@@ -723,6 +792,11 @@ def _fake_execute_values(
 
 def _upsert_fake_stations(table: list[dict[str, Any]], rows: list[tuple[Any, ...]]) -> list[tuple[str]]:
     returned: list[tuple[str]] = []
+    # §D2 flag ownership (§1.4): the production INSERT template now lands `active_flag`
+    # as a literal `false` and drops the field from the row tuple entirely. The fake
+    # models the same shape — 8 keys — and stamps `active_flag=False` on the fresh
+    # record after the zip so existing test assertions on stored `active_flag` still
+    # see the SQL literal, while a DO UPDATE preserves the existing row's flag.
     keys = (
         "station_id",
         "basin_version_id",
@@ -731,12 +805,12 @@ def _upsert_fake_stations(table: list[dict[str, Any]], rows: list[tuple[Any, ...
         "latitude",
         "elevation_m",
         "station_role",
-        "active_flag",
         "properties_json",
     )
     for row in rows:
         record = dict(zip(keys, row, strict=True))
         record["properties_json"] = _unwrap_json(record["properties_json"])
+        record["active_flag"] = False
         record["geom"] = {
             "type": "Point",
             "srid": 4490,
@@ -753,6 +827,8 @@ def _upsert_fake_stations(table: list[dict[str, Any]], rows: list[tuple[Any, ...
 
 
 def _fake_station_compatible(existing: Mapping[str, Any], record: Mapping[str, Any]) -> bool:
+    # §D2: `active_flag` is intentionally NOT part of the identity compatibility
+    # predicate — flag ownership is registration/cutover, not identity drift.
     existing_select = _station_select_row(existing)
     return (
         existing_select["basin_version_id"] == record["basin_version_id"]
@@ -761,7 +837,6 @@ def _fake_station_compatible(existing: Mapping[str, Any], record: Mapping[str, A
         and existing_select["latitude"] == record["latitude"]
         and existing_select["elevation_m"] == record["elevation_m"]
         and existing_select["station_role"] == record["station_role"]
-        and existing_select["active_flag"] == record["active_flag"]
     )
 
 

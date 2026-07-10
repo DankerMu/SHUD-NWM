@@ -756,7 +756,10 @@ class FileForcingRepository:
                     "latitude": latitude,
                     "elevation_m": elevation_m,
                     "station_role": station.station_role if station is not None else "forcing_grid",
-                    "active_flag": True,
+                    # §D2 flag ownership: mirror activation belongs to Change 8's cutover flip,
+                    # not the runtime producer/file plane. Emit `False` so the ingest lands fresh
+                    # rows inactive and the ON CONFLICT DO UPDATE preserves an existing flip.
+                    "active_flag": False,
                     "properties_json": _json_safe(properties),
                 }
             )
