@@ -1025,6 +1025,7 @@ Evidence package 必须不可变，并与 mapping asset checksum 互相绑定。
 - 源级隔离：dispatch/staging 层按 `applicable_source_ids` fail-closed（源不在列表 → 拒跑，INV-4 延伸）；
 - 计算层零跨源替代：一轮 run 全程单源、禁 mid-run 拼接、禁 legacy 包兼容层；某源某 cycle 缺数据 = 该源该轮无 run（记录原因），跨源可用性仍由 display best-available-selection 负责；
 - lifecycle 硬 guard：basin 有 direct-grid 激活史后，activate(legacy-mapping) 一律 REFUSE；direct→direct′ fix-forward 换活允许（§11）；
+- 旧 variant 下线语义（显式 spec 化）：M1 激活即 M0 同事务 superseded 并退出 dispatch 候选——调度消费面本就按 `lifecycle_state=='active'` 过滤（`scheduler_file_providers.py`），此行为升级为 spec requirement + 回归测试锁定；配合硬 guard 构成**永久下线**，杜绝不同格点来回切换引入的误差；M0 保留为不可变谱系（历史产品/指纹门 clone 来源/离线 calibration-replay），下线不等于销毁；
 - cutover 事务 owner：lifecycle op 定义显式扩展点，供 Change 5（state clone）与 Change 8（station flag 翻转）按序挂载。
 
 ## Change 4.5：`direct-grid-build-enablement`
