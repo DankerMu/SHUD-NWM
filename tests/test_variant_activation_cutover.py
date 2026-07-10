@@ -217,6 +217,20 @@ class _HarnessStore(PsycopgModelRegistryStore):
     ) -> dict[str, Any] | None:
         return None
 
+    def _fetch_direct_grid_activation_history(
+        self,
+        cursor: Any,  # noqa: ARG002
+        *,
+        basin_version_id: str,  # noqa: ARG002
+        current_active: Mapping[str, Any] | None,  # noqa: ARG002
+    ) -> dict[str, Any] | None:
+        # SUB-5/6/7 hook + manifest tests do not exercise the §3.1
+        # legacy-reactivation guard; keep the guard disarmed here so
+        # this harness stays scoped to the SUB-5/6/7 contracts. The
+        # dedicated §3.1 test file (`test_legacy_reactivation_guard.py`)
+        # overrides this method with a real history predicate.
+        return None
+
     # ---- write helpers ---------------------------------------------------
 
     def _update_model_lifecycle_state(

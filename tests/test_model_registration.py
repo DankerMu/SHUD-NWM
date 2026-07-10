@@ -2664,6 +2664,13 @@ def test_rollback_preflight_lineage_uses_restored_model_mesh_properties(
         "_fetch_idempotent_rollback_retry_history",
         lambda *_args, **_kwargs: None,
     )
+    # §3.1 legacy-reactivation guard fetch: disarm for this rollback lineage
+    # test which is orthogonal to direct-grid history classification.
+    monkeypatch.setattr(
+        PsycopgModelRegistryStore,
+        "_fetch_direct_grid_activation_history",
+        lambda *_args, **_kwargs: None,
+    )
     store = PsycopgModelRegistryStore("postgresql://example")
     decision = evaluate_policy(
         AuthContext(
@@ -3910,6 +3917,13 @@ def test_model_lifecycle_operation_response_populates_basin_id(
     monkeypatch.setattr(
         PsycopgModelRegistryStore,
         "_fetch_trustworthy_rollback_history",
+        lambda *_args, **_kwargs: None,
+    )
+    # §3.1 legacy-reactivation guard fetch: disarm for this basin_id
+    # projection test which is orthogonal to direct-grid classification.
+    monkeypatch.setattr(
+        PsycopgModelRegistryStore,
+        "_fetch_direct_grid_activation_history",
         lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(PsycopgModelRegistryStore, "_update_model_lifecycle_state", update_lifecycle_state)
