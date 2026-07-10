@@ -316,7 +316,7 @@ class ProductionSlurmConfig:
             ),
             model_id=os.getenv("NHMS_PRODUCTION_SLURM_MODEL_ID", "basins_qhh_shud"),
             model_package_uri=os.getenv("NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI", ""),
-            solver_binary=os.getenv("SHUD_EXECUTABLE", os.getenv("NHMS_PRODUCTION_SLURM_SOLVER_BINARY", "shud_omp")),
+            solver_binary=os.getenv("SHUD_EXECUTABLE", os.getenv("NHMS_PRODUCTION_SLURM_SOLVER_BINARY", "shud")),
             solver_module=os.getenv("NHMS_PRODUCTION_SLURM_SOLVER_MODULE", ""),
             walltime=os.getenv("NHMS_PRODUCTION_SLURM_WALLTIME", "00:30:00"),
             nodes=_positive_int_env("NHMS_PRODUCTION_SLURM_NODES", 1, maximum=RESOURCE_LIMITS["nodes"]),
@@ -650,7 +650,7 @@ def _shud_executable_blockers(solver_binary: str, *, live_submit: bool) -> list[
     every mode so a deterministic fixture lane can never imply a runnable solver.
     The full binary-dependency validation (existence, exec bit, shared libraries,
     bounded SHUD version/help signal) only runs for a live submit because the
-    deterministic placeholder ``shud_omp`` is not expected to exist off node-22.
+    deterministic placeholder ``shud`` is not expected to exist off node-22.
     """
 
     result = check_shud_executable(

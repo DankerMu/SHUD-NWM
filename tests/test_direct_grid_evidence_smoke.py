@@ -114,7 +114,7 @@ def test_sp_att_forc_subset_of_tsd_forc_ids() -> None:
     # Non-goal for §2.3: this test hand-parses .sp.att / .tsd.forc rather than calling
     # workers/shud_runtime/runtime._read_sp_att_forcing_ids. The real runtime oracle for
     # the FORC⊆tsd invariant is exercised in §2.4 (node-27 real-DB smoke) and §2.5
-    # (node-22 shud_omp staging); this smoke's FORC check is a fixture pre-flight only.
+    # (node-22 shud staging); this smoke's FORC check is a fixture pre-flight only.
     root = _gate_or_skip()
     sp_att = (root / "input_dir/synth-basin/synth-basin.sp.att").read_text(
         encoding="utf-8"

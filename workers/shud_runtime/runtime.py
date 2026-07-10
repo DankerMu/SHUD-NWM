@@ -71,7 +71,7 @@ class SHUDRuntimeConfig:
     workspace_root: Path | str
     object_store_root: Path | str
     object_store_prefix: str = ""
-    shud_executable: str = "shud_omp"
+    shud_executable: str = "shud"
     command_style: str = "cfg"
     output_interval_minutes: int = 1440
     timeout_seconds: int = 3600
@@ -82,7 +82,7 @@ class SHUDRuntimeConfig:
     def __post_init__(self, executable: str | None) -> None:
         object.__setattr__(self, "workspace_root", Path(self.workspace_root).expanduser().resolve())
         object.__setattr__(self, "object_store_root", Path(self.object_store_root).expanduser().resolve())
-        if executable is not None and self.shud_executable == "shud_omp":
+        if executable is not None and self.shud_executable == "shud":
             object.__setattr__(self, "shud_executable", executable)
 
     @classmethod
@@ -92,7 +92,7 @@ class SHUDRuntimeConfig:
             workspace_root=workspace_root,
             object_store_root=os.getenv("OBJECT_STORE_ROOT", workspace_root),
             object_store_prefix=os.getenv("OBJECT_STORE_PREFIX", ""),
-            shud_executable=os.getenv("SHUD_EXECUTABLE", "shud_omp"),
+            shud_executable=os.getenv("SHUD_EXECUTABLE", "shud"),
             command_style=os.getenv("SHUD_COMMAND_STYLE", "cfg"),
             output_interval_minutes=int(os.getenv("MODEL_OUTPUT_INTERVAL", "1440")),
             timeout_seconds=int(os.getenv("SHUD_TIMEOUT_SECONDS", "3600")),
