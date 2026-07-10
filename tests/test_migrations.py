@@ -589,6 +589,67 @@ def test_pipeline_reservation_partial_unique_index_matches_runtime_orm() -> None
     assert "PipelineJob.idempotency_key.is_not(None)" in persistence_source
 
 
+def test_state_snapshot_clone_provenance_migration_is_column_only_forward_upgrade() -> None:
+    migration_sql = dict(_migration_sql())
+    migration_names = [path.name for path in sorted(MIGRATIONS_DIR.glob("*.sql"))]
+    migration_name = "000046_state_snapshot_clone_provenance.sql"
+
+    assert migration_name in migration_sql, (
+        f"{migration_name} must exist as the clone-provenance migration for the "
+        "mapping-variant-state-compatibility change"
+    )
+    assert migration_names.index("000045_hydro_run_type_hindcast.sql") < migration_names.index(migration_name)
+
+    migration = migration_sql[migration_name]
+
+    # Non-empty SQL with column-only ALTER form.
+    normalized = migration.strip()
+    assert normalized, f"{migration_name} is empty"
+    assert normalized.lower().endswith(";"), f"{migration_name} should end with a SQL terminator"
+
+    # Exactly the three nullable provenance columns are added, all TEXT DEFAULT NULL.
+    for expected in (
+        "ADD COLUMN IF NOT EXISTS cloned_from_state_id TEXT DEFAULT NULL",
+        "ADD COLUMN IF NOT EXISTS cloned_from_model_id TEXT DEFAULT NULL",
+        "ADD COLUMN IF NOT EXISTS clone_gate_fingerprint TEXT DEFAULT NULL",
+    ):
+        assert expected in migration, f"{migration_name} must contain: {expected}"
+
+    # Column-only ALTER — no destructive or data-touching statements.
+    for forbidden in (
+        "DROP INDEX",
+        "DROP CONSTRAINT",
+        "CREATE INDEX",
+        "CREATE UNIQUE INDEX",
+        "UPDATE ",
+        "INSERT ",
+        "DELETE ",
+    ):
+        assert forbidden not in migration.upper(), (
+            f"{migration_name} must not contain '{forbidden}' — it is column-only NULL-default add"
+        )
+
+    # The (model_id, COALESCE(source_id, ''), valid_time) unique index MUST NOT be
+    # altered by this migration. The name may appear in the header comment as
+    # explicit documentation of what stays intact, but no DDL statement may act
+    # on it. Guard: no ALTER INDEX / DROP INDEX line references the index name.
+    for line in migration.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("--"):
+            continue
+        if "state_snapshot_model_source_valid_time_key" in stripped:
+            raise AssertionError(
+                f"{migration_name} must never touch state_snapshot_model_source_valid_time_key in DDL; "
+                f"offending line: {line!r}"
+            )
+
+    # No references to future migration objects (000047..000099).
+    for future in [f"{n:06d}" for n in range(47, 100)]:
+        assert future not in migration, (
+            f"{migration_name} must not reference future migration {future}"
+        )
+
+
 def _index_columns(migration: str, schema: str, table: str) -> tuple[str, ...]:
     match = re.search(rf"ON {schema}\.{table} \(([^)]+)\)", migration)
     assert match is not None
