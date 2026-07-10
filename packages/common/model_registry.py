@@ -18,6 +18,10 @@ from packages.common.auth_policy import (
     trusted_internal_policy_decision,
 )
 from packages.common.forecast_store import QHH_LATEST_READY_RUN_STATUSES
+from workers.forcing_producer.direct_grid_contract import (
+    DirectGridContractError,
+    load_forcing_mapping_contract_from_manifest,
+)
 
 
 class ModelRegistryError(RuntimeError):
@@ -336,6 +340,48 @@ def _extract_source_scope(target_model: Mapping[str, Any]) -> tuple[str, ...] | 
     if not isinstance(source_ids, (list, tuple)):
         return None
     return tuple(str(source_id) for source_id in source_ids)
+
+
+ForcingMappingClassification = Literal["direct_grid", "invalid_direct_grid", "legacy"]
+
+
+def _classify_forcing_mapping_mode(
+    model: Mapping[str, Any] | None,
+) -> ForcingMappingClassification:
+    """Classify a model as direct-grid, invalid-direct-grid, or legacy.
+
+    The §3.1 legacy-reactivation guard uses ONE classifier everywhere and
+    delegates to the direct-grid contract parser
+    (``workers.forcing_producer.direct_grid_contract.load_forcing_mapping_contract_from_manifest``)
+    over the model's ``resource_profile``. Return value:
+
+    - ``"direct_grid"``: the resource profile carries a ``direct_grid_forcing``
+      block that parses cleanly with ``forcing_mapping_mode='direct_grid'``.
+    - ``"invalid_direct_grid"``: a ``direct_grid_forcing`` block declares
+      ``forcing_mapping_mode='direct_grid'`` but fails the parser (missing or
+      malformed fields). This is a fail-closed classification that stays
+      distinct from ``"legacy"`` so the caller can emit a distinct blocker
+      code (an operator can tell "broken fix-forward candidate" from
+      "genuine legacy target").
+    - ``"legacy"``: no ``direct_grid_forcing`` block, or the block resolves
+      to a non-direct forcing mapping mode (e.g. IDW). This is the
+      fail-closed default for anything the parser doesn't confirm as a
+      valid direct-grid contract.
+    """
+    if model is None:
+        return "legacy"
+    resource_profile = _json_mapping(model.get("resource_profile"))
+    if resource_profile.get("direct_grid_forcing") is None:
+        # No direct-grid block at all — legacy-mapping.
+        return "legacy"
+    try:
+        contract = load_forcing_mapping_contract_from_manifest(resource_profile)
+    except DirectGridContractError:
+        return "invalid_direct_grid"
+    if contract is None:
+        # Block resolved to a non-direct mode (e.g. IDW) — legacy-mapping.
+        return "legacy"
+    return "direct_grid"
 
 
 def _would_be_already_current(
@@ -1713,6 +1759,18 @@ class PsycopgModelRegistryStore:
                 if operation == "rollback_version"
                 else None
             )
+            # §3.1 (Epic #961) legacy-reactivation guard: fetch direct-grid
+            # activation history for the scope only when the operation is
+            # activation-class (the only path the guard scopes to).
+            direct_grid_history = (
+                self._fetch_direct_grid_activation_history(
+                    cursor,
+                    basin_version_id=str(model["basin_version_id"]),
+                    current_active=active,
+                )
+                if operation in {"activate", "switch_version", "rollback_version"}
+                else None
+            )
         preflight = self._build_model_operation_preflight(
             model=model,
             current_active=active,
@@ -1725,6 +1783,7 @@ class PsycopgModelRegistryStore:
             override_missing_active=override_missing_active,
             reason=reason,
             actor_roles=decision.roles,
+            direct_grid_history=direct_grid_history,
         )
         if idempotent_rollback_history is not None:
             _apply_idempotent_rollback_preflight(preflight, idempotent_rollback_history)
@@ -1835,6 +1894,18 @@ class PsycopgModelRegistryStore:
                     if operation == "rollback_version"
                     else None
                 )
+                # §3.1 (Epic #961) legacy-reactivation guard: fetch direct-grid
+                # activation history for the scope only when the operation is
+                # activation-class (the only path the guard scopes to).
+                direct_grid_history = (
+                    self._fetch_direct_grid_activation_history(
+                        cursor,
+                        basin_version_id=str(model["basin_version_id"]),
+                        current_active=current_active,
+                    )
+                    if operation in {"activate", "switch_version", "rollback_version"}
+                    else None
+                )
                 preflight = self._build_model_operation_preflight(
                     model=model,
                     current_active=current_active,
@@ -1847,6 +1918,7 @@ class PsycopgModelRegistryStore:
                     override_missing_active=override_missing_active,
                     reason=reason,
                     actor_roles=decision.roles,
+                    direct_grid_history=direct_grid_history,
                 )
                 if idempotent_rollback_history is not None:
                     _apply_idempotent_rollback_preflight(preflight, idempotent_rollback_history)
@@ -2394,6 +2466,72 @@ class PsycopgModelRegistryStore:
             row["stale_reason"] = "latest_current_epoch_previous_mismatch"
         return row
 
+    def _fetch_direct_grid_activation_history(
+        self,
+        cursor: Any,
+        *,
+        basin_version_id: str,
+        current_active: Mapping[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Return direct-grid activation evidence for a basin scope, or None.
+
+        §3.1 (Epic #961) legacy-reactivation guard predicate. History is
+        APPEND-ONLY, derived from either
+
+          * the scope's currently-active model classifying as direct-grid, OR
+          * an ``ops.audit_log`` record of a successful activation-class
+            transition (``action IN ('models.activate',
+            'models.switch_version', 'models.rollback_version')``, ``details
+            ->> 'outcome' IN ('allowed', 'rollback')``) whose resulting-active
+            model (``details -> 'updated_model' ->> 'model_id'`` joined to
+            ``core.model_instance``) classifies as direct-grid.
+
+        Returns ``None`` when neither source is armed. Later
+        ``deactivate`` / ``deprecate`` / ``supersede`` cannot erase the
+        audit-log arm — the history predicate is one-way.
+        """
+        if current_active is not None:
+            if _classify_forcing_mapping_mode(current_active) == "direct_grid":
+                return {
+                    "source": "current_active",
+                    "model_id": str(current_active.get("model_id")),
+                    "basin_version_id": basin_version_id,
+                }
+        cursor.execute(
+            """
+            SELECT
+                al.log_id,
+                al.details -> 'updated_model' ->> 'model_id' AS updated_model_id,
+                mi.resource_profile AS updated_resource_profile
+            FROM ops.audit_log al
+            JOIN core.model_instance mi
+              ON mi.model_id = (al.details -> 'updated_model' ->> 'model_id')
+            WHERE al.entity_type = 'model_instance'
+              AND al.action IN (
+                'models.activate',
+                'models.switch_version',
+                'models.rollback_version'
+              )
+              AND al.details ->> 'outcome' IN ('allowed', 'rollback')
+              AND al.details ->> 'basin_version_id' = %s
+            ORDER BY al.created_at ASC, al.log_id ASC
+            """,
+            (basin_version_id,),
+        )
+        rows = cursor.fetchall()
+        for row in rows:
+            classification = _classify_forcing_mapping_mode(
+                {"resource_profile": row.get("updated_resource_profile")}
+            )
+            if classification == "direct_grid":
+                return {
+                    "source": "audit_log",
+                    "log_id": row.get("log_id"),
+                    "model_id": row.get("updated_model_id"),
+                    "basin_version_id": basin_version_id,
+                }
+        return None
+
     def _fetch_idempotent_rollback_retry_history(
         self,
         cursor: Any,
@@ -2456,6 +2594,7 @@ class PsycopgModelRegistryStore:
         override_missing_active: bool,
         reason: str | None,
         actor_roles: Sequence[str],
+        direct_grid_history: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         restored_model = previous_model if operation == "rollback_version" else model
         resource_profile = _json_mapping(restored_model.get("resource_profile")) if restored_model else {}
@@ -2544,6 +2683,41 @@ class PsycopgModelRegistryStore:
                     _preflight_blocker(
                         "ROLLBACK_CURRENT_STALE",
                         "Rollback history is stale for the current active epoch.",
+                    )
+                )
+
+        # §3.1 (Epic #961) legacy-reactivation guard. Fail-closed, no
+        # override: once a basin has direct-grid activation history the
+        # only permitted activation-class target is another direct-grid
+        # variant (fix-forward, direct → direct'). The predicate classifies
+        # ``restored_model`` — the row that would become ``active`` after
+        # commit — so ``rollback_version`` is judged on the RESTORED
+        # previous model, not on the addressed currently-active model.
+        # A target that declares ``forcing_mapping_mode='direct_grid'`` but
+        # fails the parser is refused with a DISTINCT blocker code so an
+        # operator can tell a broken fix-forward candidate from a genuine
+        # legacy target.
+        if (
+            activation_class_operation
+            and direct_grid_history is not None
+            and restored_model is not None
+        ):
+            target_classification = _classify_forcing_mapping_mode(restored_model)
+            if target_classification == "invalid_direct_grid":
+                blockers.append(
+                    _preflight_blocker(
+                        "DIRECT_GRID_CONTRACT_INVALID",
+                        "Target declares direct-grid forcing but its contract failed the "
+                        "parser; the legacy-reactivation guard refuses broken fix-forward "
+                        "candidates on a basin with direct-grid activation history.",
+                    )
+                )
+            elif target_classification == "legacy":
+                blockers.append(
+                    _preflight_blocker(
+                        "LEGACY_REACTIVATION_BLOCKED",
+                        "Legacy-mapping reactivation is refused for a basin that has "
+                        "direct-grid activation history (fail-closed, no override).",
                     )
                 )
 
