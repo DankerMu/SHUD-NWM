@@ -525,7 +525,7 @@ def test_safe_path_component_ValueError_inside_outer_try_is_still_wrapped_as_For
 
 
 # ---------------------------------------------------------------------------
-# 8. §3.2 SUB-7: delegation to the pinned shared guard (no producer-local
+# 9. §3.2 SUB-7: delegation to the pinned shared guard (no producer-local
 #    re-implementation) — Requirement 1 in
 #    ``openspec/changes/direct-grid-build-enablement/specs/producer-bbox-preflight/spec.md``
 #    §"The preflight reuses the pinned guard, not a re-implementation".
@@ -599,26 +599,48 @@ def test_preflight_delegates_to_shared_guard_module(
 
 
 # ---------------------------------------------------------------------------
-# 9. §3.2 SUB-7: in-convention (-180..180) env bbox matches the registered
-#    snapshot → preflight passes — Requirement 2 Scenario 1 in
-#    ``openspec/changes/direct-grid-build-enablement/specs/producer-bbox-preflight/spec.md``
-#    §"The producer owns the deployment-bbox longitude convention".
+# 10. §3.2 SUB-7: in-convention (-180..180) env bbox matches the registered
+#     snapshot → preflight passes — Requirement 2 Scenario 1 in
+#     ``openspec/changes/direct-grid-build-enablement/specs/producer-bbox-preflight/spec.md``
+#     §"The producer owns the deployment-bbox longitude convention".
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "west_value,east_value,case_id",
+    [
+        (70.0, 140.0, "positive_only_both_conventions_identical"),
+        (-10.0, 140.0, "negative_west_locks_minus_180_180_canonicality"),
+    ],
+)
 def test_in_convention_env_bbox_minus_180_180_matches_snapshot_and_preflight_passes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    west_value: float,
+    east_value: float,
+    case_id: str,
 ) -> None:
-    """§3.2 Requirement 2 Scenario 1: an in-convention (-180..180) env bbox
-    equal to the registered -180..180 snapshot bbox lets the preflight pass
-    and production proceed. Sets ``NHMS_DOWNLOAD_BBOX_WEST=70.0`` /
-    ``NHMS_DOWNLOAD_BBOX_EAST=140.0`` (both -180..180) with a snapshot that
-    mirrors those values on the west/east corners and the default south/north
-    corners.
+    """§3.2 Requirement 2 Scenario 1 (spec.md:40-42) — in-convention env bbox
+    matches snapshot passes.
+
+    Parametrized to include a negative-west case (``west=-10.0``) that:
+
+    * Is a valid -180..180 value (``GeoBBox`` tolerates ``-180 <= west <= 360``
+      per ``workers/data_adapters/region.py:44``).
+    * Would move to ``350.0`` if a producer-local ``% 360`` normalization were
+      introduced. Under a normalized-then-compared regression the guard's
+      bit-exact comparator would see ``350.0 != -10.0`` and fire — this test
+      would then fail, locking the -180..180 canonicality anchor named at
+      ``spec.md:41`` (§"The producer owns the deployment-bbox longitude
+      convention").
+    * The positive-only case (``west=70.0`` / ``east=140.0``) is
+      bit-identical in -180..180 and 0..360 conventions, so on its own it
+      only proves "matching positive-longitude values pass" — not the
+      canonicality invariant. The two cases together lock both.
     """
-    monkeypatch.setenv("NHMS_DOWNLOAD_BBOX_WEST", "70.0")
-    monkeypatch.setenv("NHMS_DOWNLOAD_BBOX_EAST", "140.0")
+    del case_id  # documented in the parametrize id; no behavior branch on it.
+    monkeypatch.setenv("NHMS_DOWNLOAD_BBOX_WEST", str(west_value))
+    monkeypatch.setenv("NHMS_DOWNLOAD_BBOX_EAST", str(east_value))
 
     def snapshot_row_factory(
         *, source_id: str, grid_id: str, grid_signature: str
@@ -627,8 +649,8 @@ def test_in_convention_env_bbox_minus_180_180_matches_snapshot_and_preflight_pas
         return (
             _DEFAULT_ENV_BBOX.south,
             _DEFAULT_ENV_BBOX.north,
-            70.0,
-            140.0,
+            west_value,
+            east_value,
             _REGISTERED_SNAPSHOT_ID,
             None,
         )
@@ -650,7 +672,7 @@ def test_in_convention_env_bbox_minus_180_180_matches_snapshot_and_preflight_pas
 
 
 # ---------------------------------------------------------------------------
-# 10. §3.2 SUB-7: cross-convention 0..360 env longitude vs registered
+# 11. §3.2 SUB-7: cross-convention 0..360 env longitude vs registered
 #     -180..180 snapshot → fail closed rather than silently clip — Requirement 2
 #     Scenario 2 in
 #     ``openspec/changes/direct-grid-build-enablement/specs/producer-bbox-preflight/spec.md``
@@ -707,6 +729,10 @@ def test_cross_convention_east_200_versus_registered_minus_180_180_snapshot_fail
     # operator can see the convention mix-up directly.
     assert excinfo.value.expected_bbox["east"] == 200.0
     assert excinfo.value.actual_bbox["east"] == 140.0
+    # Symmetric with test 2 mismatch-identity lock: the mismatch payload must
+    # also carry the snapshot's grid_snapshot_id so downstream logging can pin
+    # the exact registered row that failed the compare.
+    assert excinfo.value.grid_snapshot_id == _REGISTERED_SNAPSHOT_ID
     _assert_zero_direct_grid_production_writes(repository, tmp_path)
     # Symmetry with tests 2/3/4/5/6/7 — fail-closed status marker.
     assert repository.cycle_updates[-1]["status"] == "failed_forcing"
