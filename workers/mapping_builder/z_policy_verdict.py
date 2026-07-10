@@ -103,8 +103,14 @@ EXPECTED_VERDICT_FILE_SHA256: str = (
 SAMPLER_RULE_ID: str = "nearest_mesh_node_elevation_v1"
 
 #: Default active-change path for the committed verdict evidence file.
-#: Kept as a relative path so it resolves against the repository root
-#: (the same convention as the other openspec artifacts).
+#: Kept as a **relative** path (documented API + backward compatibility
+#: for any external callers that read the constant). Internally the
+#: resolver joins it with :data:`_REPO_ROOT` before existence checks and
+#: SHA computation, so ``resolve_verdict`` works from any invocation cwd
+#: (see the ``_discover_repo_root`` walk below). The §2 CLI subprocess
+#: relies on this cwd-independence — if a subprocess is launched with
+#: ``cwd=/some/other/path`` the resolver must still find the evidence
+#: file from the module's own filesystem location, not from the cwd.
 DEFAULT_VERDICT_PATH: pathlib.Path = pathlib.Path(
     "openspec/changes/direct-grid-build-enablement/evidence/"
     "z-policy-solver-audit-verdict.md"
@@ -126,6 +132,32 @@ ARCHIVE_VERDICT_GLOB: str = (
 _VERDICT_LINE_RE: re.Pattern[str] = re.compile(
     r"^\s*verdict\s*=\s*(\S+)\s*$", re.MULTILINE
 )
+
+
+def _discover_repo_root() -> pathlib.Path:
+    """Walk up from this module's file until a directory containing both
+    ``openspec/`` and ``.git/`` is found; fall back to :func:`pathlib.Path.cwd`
+    if the walk exhausts (unusual — e.g. the module was extracted from
+    its source tree).
+
+    Both markers must be present so we don't accidentally lock onto a
+    parent directory that happens to have an ``openspec/`` folder but is
+    not the NWM repo root. The fall-back to ``Path.cwd`` preserves the
+    prior cwd-relative behavior in edge cases (imported from a wheel,
+    tested in isolation) and never crashes at import time.
+    """
+    current = pathlib.Path(__file__).resolve().parent
+    for parent in [current, *current.parents]:
+        if (parent / "openspec").is_dir() and (parent / ".git").exists():
+            return parent
+    return pathlib.Path.cwd()
+
+
+#: Repo root discovered at import time — used to anchor
+#: :data:`DEFAULT_VERDICT_PATH` and :data:`ARCHIVE_VERDICT_GLOB` so the
+#: resolver is cwd-independent (see the constants' docstrings for the
+#: §2 CLI motivation).
+_REPO_ROOT: pathlib.Path = _discover_repo_root()
 
 
 # --- exception ------------------------------------------------------------
@@ -310,11 +342,12 @@ def _verify_verdict_value(text: str) -> str:
 def _resolve_default_verdict_path() -> pathlib.Path:
     """Return the default verdict path (active change) or the archive fallback.
 
-    Resolution order:
+    Resolution order (paths are anchored on :data:`_REPO_ROOT`, discovered
+    at import time — the resolver works from any invocation cwd):
 
-    1. :data:`DEFAULT_VERDICT_PATH` (active-change location) if the file
-       exists.
-    2. :data:`ARCHIVE_VERDICT_GLOB` matched against the repository root;
+    1. :data:`DEFAULT_VERDICT_PATH` joined with :data:`_REPO_ROOT`
+       (active-change location) if the file exists.
+    2. :data:`ARCHIVE_VERDICT_GLOB` matched against :data:`_REPO_ROOT`;
        returns the lexically-largest match so the most recent archive
        relocation wins.
 
@@ -324,14 +357,16 @@ def _resolve_default_verdict_path() -> pathlib.Path:
         Neither the active-change path nor any archive-glob match
         exists on disk.
     """
-    if DEFAULT_VERDICT_PATH.exists():
-        return DEFAULT_VERDICT_PATH
-    matches = sorted(pathlib.Path(".").glob(ARCHIVE_VERDICT_GLOB))
+    default_absolute = _REPO_ROOT / DEFAULT_VERDICT_PATH
+    if default_absolute.exists():
+        return default_absolute
+    matches = sorted(_REPO_ROOT.glob(ARCHIVE_VERDICT_GLOB))
     if matches:
         return matches[-1]
     raise VerdictResolutionError(
-        f"verdict evidence file not found at {DEFAULT_VERDICT_PATH!s} "
-        f"nor via archive glob {ARCHIVE_VERDICT_GLOB!r}"
+        f"verdict evidence file not found at {default_absolute!s} "
+        f"nor via archive glob {ARCHIVE_VERDICT_GLOB!r} "
+        f"under repo root {_REPO_ROOT!s}"
     )
 
 

@@ -118,7 +118,33 @@ def test_resolve_verdict_pinned_default_path_matches_checksum(monkeypatch):
     assert resolution.sampler_rule_id == SAMPLER_RULE_ID
     assert resolution.override_used is False
     assert resolution.override_path is None
-    assert resolution.resolved_path == DEFAULT_VERDICT_PATH
+    # Resolver anchors on the discovered repo root, not on cwd, so the
+    # resolved path is absolute (repo root joined with the relative
+    # DEFAULT_VERDICT_PATH constant).
+    assert resolution.resolved_path == _REPO_ROOT / DEFAULT_VERDICT_PATH
+
+
+def test_resolve_verdict_works_from_arbitrary_cwd(tmp_path, monkeypatch):
+    """Regression lock: §2 CLI subprocess must be able to resolve the verdict
+    from any working directory, not just the repo root.
+
+    Before the path-anchoring fix, ``DEFAULT_VERDICT_PATH.exists()`` and
+    ``pathlib.Path('.').glob(...)`` were cwd-relative — a subprocess
+    launched with ``cwd=/some/other/path`` would fall through both
+    resolution steps and raise ``VerdictResolutionError``. After the fix,
+    the resolver anchors on the discovered repo root, so any cwd works.
+    """
+    monkeypatch.chdir(tmp_path)  # NOT the repo root
+
+    resolution = resolve_verdict()
+
+    assert resolution.verified_sha256 == EXPECTED_VERDICT_FILE_SHA256
+    assert resolution.override_used is False
+    assert resolution.override_path is None
+    # Resolved path is absolute + points at the committed evidence file
+    # under the discovered repo root.
+    assert resolution.resolved_path.is_absolute()
+    assert resolution.resolved_path.name == "z-policy-solver-audit-verdict.md"
 
 
 def test_resolve_verdict_missing_file_raises(tmp_path):
@@ -265,6 +291,22 @@ def test_sample_per_cell_z_matches_keliya_fixture_including_outside_hull():
     assert all(node.elevation == 100.0 for node in nodes)
 
     projection = PackageProjection.from_prj_wkt(_KELIYA_PRJ.read_text())
+
+    # Runtime lock on the docstring claim that ``south_of_hull`` transforms
+    # OUTSIDE the mesh y-range envelope. If a future rebase of the keliya
+    # fixture shifts the mesh southward and this cell ends up inside the
+    # hull, coverage silently degrades — surface it here rather than in a
+    # downstream consumer.
+    _, south_cy = projection.to_package_xy(100.24, 35.50)
+    node_y_min = min(node.y for node in nodes)
+    node_y_max = max(node.y for node in nodes)
+    assert south_cy < node_y_min or south_cy > node_y_max, (
+        f"south_of_hull cell must transform outside the mesh y-range "
+        f"[{node_y_min}, {node_y_max}]; got cy={south_cy}. "
+        "Docstring claims this cell is outside hull; if fixture changed, "
+        "update coords."
+    )
+
     used = [
         UsedCell(cell_id="in_hull", wgs84_lon=100.25, wgs84_lat=36.15),
         UsedCell(cell_id="south_of_hull", wgs84_lon=100.24, wgs84_lat=35.50),
@@ -297,6 +339,66 @@ def test_sample_per_cell_z_matches_keliya_fixture_including_outside_hull():
 
     assert _independent_winner(100.25, 36.15) == 127
     assert _independent_winner(100.24, 35.50) == 9
+
+
+def test_sample_per_cell_z_distinct_elevations_via_keliya_prj_detects_wrong_node():
+    """Regression lock: uniform keliya elevations (all 100.0) can't distinguish
+    which node the sampler picked.
+
+    Every keliya mesh node carries ``Elevation = 100.0`` by construction,
+    so the numeric-oracle test above can't tell a wrong-node bug apart
+    from a right-node pick. This test builds a small synthetic mesh with
+    DISTINCT elevations, transforms a WGS84 cell center through the REAL
+    keliya ``keliya.prj`` transformer, and asserts the sampler picks the
+    unambiguously-nearer node. If the axis order flipped in
+    ``PackageProjection.to_package_xy`` (e.g. lon/lat swapped), or the
+    nearest-node selection logic broke, the elevation would come back as
+    the wrong value (222.0 instead of 111.0) and this test would fail.
+
+    Distance calculation for the pinned coordinates
+    -----------------------------------------------
+    WGS84 ``(100.20, 36.05)`` transforms to
+    ``(cx, cy) ≈ (-424469.1, 3863712.8)`` under the keliya Albers prj.
+
+    * Node 1 at ``(-424000.0, 3864000.0)`` -> dist² ≈ 3.0e5
+    * Node 2 at ``(-400000.0, 3900000.0)`` -> dist² ≈ 1.9e9
+
+    Node 1 wins by ~4 orders of magnitude — no ambiguity.
+    """
+    prj_text = _KELIYA_PRJ.read_text(encoding="utf-8")
+    projection = PackageProjection.from_prj_wkt(prj_text)
+    # Two synthetic mesh nodes in package CRS with distinct elevations.
+    # Coordinates chosen so WGS84 (100.20, 36.05) transforms nearer to
+    # node 1 than to node 2 under the real keliya prj (verified: dist1²
+    # ≈ 3.0e5 vs dist2² ≈ 1.9e9).
+    nodes = (
+        MeshNode(node_id=1, x=-424000.0, y=3864000.0, elevation=111.0),
+        MeshNode(node_id=2, x=-400000.0, y=3900000.0, elevation=222.0),
+    )
+    used_cells = (
+        UsedCell(cell_id="near_1", wgs84_lon=100.20, wgs84_lat=36.05),
+    )
+
+    # Sanity: recompute the distance ordering independently so the test's
+    # premise is verified before the sampler is exercised. If a future
+    # pyproj upgrade changes the axis convention or transform accuracy
+    # enough to flip the ordering, this pre-check fails before the main
+    # assertion, giving a targeted diagnostic.
+    cx, cy = projection.to_package_xy(100.20, 36.05)
+    d1_sq = (nodes[0].x - cx) ** 2 + (nodes[0].y - cy) ** 2
+    d2_sq = (nodes[1].x - cx) ** 2 + (nodes[1].y - cy) ** 2
+    assert d1_sq < d2_sq, (
+        f"Test premise violated: node 1 should be closer to "
+        f"WGS84 (100.20, 36.05); got dist1²={d1_sq}, dist2²={d2_sq}"
+    )
+
+    result = sample_per_cell_z(used_cells, nodes, projection)
+
+    assert result == {"near_1": 111.0}, (
+        f"Expected sampler to pick node 1 (elevation 111.0); got {result}. "
+        "If this test fails, either the axis order flipped in "
+        "PackageProjection.to_package_xy or nearest-node selection changed."
+    )
 
 
 def test_sample_per_cell_z_distance_tie_selects_smallest_node_id():
