@@ -27,6 +27,17 @@ from services.orchestrator.scheduler_state import (
     _format_utc,
 )
 from workers.data_adapters.base import CycleDiscovery, cycle_id_for
+from workers.forcing_producer.direct_grid_contract import (
+    DirectGridContractError,
+    load_forcing_mapping_contract_from_manifest,
+)
+
+# Source-scope fail-closed reason codes (Epic #961, §4.1). Inline sentinels — no
+# module-level enum: the codes appear only at the two raise/append sites below
+# and on the evidence keys under state_evidence.
+_DIRECT_GRID_SOURCE_OUT_OF_SCOPE_REASON = "direct_grid_source_out_of_scope"
+_DIRECT_GRID_CONTRACT_INVALID_REASON = "direct_grid_contract_invalid"
+_DIRECT_GRID_SOURCE_SCOPE_ERROR_MESSAGE = "Direct-grid contract does not apply to the current source."
 
 MAX_CANDIDATES = 10000
 UNKNOWN_AFTER_ATTEMPT = "unknown_after_attempt"
@@ -199,6 +210,10 @@ def build_candidates(
                         state_evidence=_source_blocked_evidence(candidate, discovery),
                     )
                 )
+                continue
+            direct_grid_scope_block = _direct_grid_source_scope_block(candidate, discovery)
+            if direct_grid_scope_block is not None:
+                blocked.append(direct_grid_scope_block)
                 continue
             if has_active_orchestration is None:
                 has_active_orchestration = bool(
@@ -891,6 +906,83 @@ def _source_blocked_evidence(candidate: SchedulerCandidateLike, discovery: Cycle
     if discovery.evidence:
         evidence["source_discovery"] = _source_discovery_evidence_safe(discovery.evidence)
     return _evidence_safe(evidence)
+
+
+def _direct_grid_source_scope_block(
+    candidate: SchedulerCandidateLike,
+    discovery: CycleDiscovery,
+) -> SchedulerCandidateLike | None:
+    """Fail-closed source-scope precondition (Epic #961, §4.1, INV-4/INV-5).
+
+    Legacy IDW candidates (no ``resource_profile.direct_grid_forcing``) are
+    passed through unchanged. When a direct-grid contract is present, invoke
+    the shared parser with the requested ``source_id``: the parser's own
+    membership check raises when the source is outside
+    ``applicable_source_ids``. That out-of-scope error blocks the candidate
+    with a distinct reason code; any other parser failure indicates a
+    malformed contract row and is blocked under a separate reason code.
+    The candidate never reaches ``forcing_producer.produce`` (INV-5).
+    """
+
+    resource_profile = candidate.resource_profile
+    direct_grid_section = (
+        resource_profile.get("direct_grid_forcing")
+        if isinstance(resource_profile, Mapping)
+        else None
+    )
+    if direct_grid_section is None:
+        return None
+    manifest = {
+        "forcing_mapping_mode": "direct_grid",
+        "direct_grid_forcing": direct_grid_section,
+    }
+    try:
+        load_forcing_mapping_contract_from_manifest(manifest, source_id=discovery.source_id)
+    except DirectGridContractError as error:
+        if str(error) == _DIRECT_GRID_SOURCE_SCOPE_ERROR_MESSAGE:
+            return _blocked_candidate(
+                candidate,
+                _DIRECT_GRID_SOURCE_OUT_OF_SCOPE_REASON,
+                state_evidence=_direct_grid_source_out_of_scope_evidence(discovery, error),
+            )
+        return _blocked_candidate(
+            candidate,
+            _DIRECT_GRID_CONTRACT_INVALID_REASON,
+            state_evidence=_direct_grid_contract_invalid_evidence(discovery, error),
+        )
+    return None
+
+
+def _direct_grid_source_out_of_scope_evidence(
+    discovery: CycleDiscovery,
+    error: DirectGridContractError,
+) -> dict[str, Any]:
+    payload = error.to_dict()
+    applicable = payload.get("applicable_source_ids") or ()
+    return {
+        "direct_grid_source_scope": {
+            "code": _DIRECT_GRID_SOURCE_OUT_OF_SCOPE_REASON,
+            "requested_source_id": discovery.source_id,
+            "normalized_source_id": error.source_id,
+            "applicable_source_ids": list(applicable),
+            "message": str(error),
+        }
+    }
+
+
+def _direct_grid_contract_invalid_evidence(
+    discovery: CycleDiscovery,
+    error: DirectGridContractError,
+) -> dict[str, Any]:
+    return {
+        "direct_grid_contract": {
+            "code": _DIRECT_GRID_CONTRACT_INVALID_REASON,
+            "requested_source_id": discovery.source_id,
+            "field": error.field,
+            "message": str(error),
+            "error": error.to_dict(),
+        }
+    }
 
 
 def _reason_code(reason: str) -> str:
