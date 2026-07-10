@@ -42,6 +42,20 @@ surface (`core.model_instance` insert + `met.met_station` mirror upsert):
   or station weather CSV — only the `core.model_instance` variant row and
   the `met.met_station` mirror.
 
+* §1.3 evidence
+  `-k "legacy_retained or legacy_stays_active or idempotent"`
+  proves legacy-row retention (INV-1: the legacy IDW `core.model_instance`
+  row is byte-identical before/after registration) and that the currently
+  active legacy model stays active across variant registration, and that
+  re-registration idempotency keys on the `(model_input_package_id,
+  binding_checksum)` built-asset identity: same asset returns the existing
+  `model_id` with no duplicate row and no duplicate mirror (emit-always
+  self-heal reports `mirror_stations_written == 2` with byte-identical
+  mirror rows post-reconciliation), while a different
+  `model_input_package_id` OR a different `binding_checksum` alone mints a
+  NEW row with the prior generation's row + mirror rows byte-identical
+  (fix-forward not swallowed by idempotency).
+
 * Parser round-trip: the emitted ``resource_profile.direct_grid_forcing``
   block round-trips through
   ``workers.forcing_producer.direct_grid_contract.load_forcing_mapping_contract_from_manifest``
@@ -1277,3 +1291,376 @@ def test_no_forbidden_runtime_rows_written_during_registration(
             assert forbidden not in normalized, (
                 f"forbidden target {forbidden!r} appeared in statement: {statement!r}"
             )
+
+
+# --- §1.3 / SUB-3: legacy retention + idempotency LOCKS -------------------
+#
+# These tests LOCK three §1.3 evidence claims from tasks.md:
+#
+# * legacy_retained  — the legacy IDW `core.model_instance` row is byte-identical
+#   before and after registration (INV-1: legacy row is retained forever, never
+#   mutated). Enforcement mechanism: `_lookup_existing_variant` filters on
+#   `resource_profile->>'canonical_grid_key'` and
+#   `resource_profile->'direct_grid_forcing'->>'model_input_package_id'`/
+#   `binding_checksum`, all of which are NULL on a legacy row (whose
+#   `resource_profile` is the `basins_registry_import._resource_profile`
+#   shape). NULL = <string> is NULL (not TRUE) → legacy rows fall out of the
+#   grain query without a per-row exclusion clause. The INSERT/mirror legs
+#   only mutate their own new rows, so INV-1 holds by construction.
+#
+# * legacy_stays_active — a legacy row with `active_flag=true` /
+#   `lifecycle_state='active'` remains so after variant registration, and
+#   the newly-registered variant lands inactive (§D2 flag ownership plus
+#   the "Registration does not deactivate the currently active legacy
+#   model" scenario).
+#
+# * idempotent — three sub-cases:
+#   - Same-asset re-registration returns the existing `model_id`, appends
+#     no duplicate `core.model_instance` row, appends no duplicate
+#     `met.met_station` row, and (this is the SUB-3-scoped mirror
+#     retention lock that Phase 4.5 REFUTED from PR #1004) reports
+#     `mirror_stations_written == 2` on the emit-always self-heal path
+#     while every mirror row remains byte-identical after the DO UPDATE
+#     reconciliation.
+#   - A different `model_input_package_id` for the SAME grain registers as
+#     a NEW row (fix-forward not swallowed by idempotency); the prior
+#     generation's variant row AND its mirror rows are byte-identical
+#     afterwards, and the successor's mirror rows land alongside on
+#     disjoint station_ids.
+#   - A different `binding_checksum` alone also mints a new row, proving
+#     the identity is `(model_input_package_id, binding_checksum)` — not
+#     `model_input_package_id` alone.
+
+
+def _seed_legacy_model_instance(
+    db: _InMemoryDb,
+    *,
+    model_id: str = "legacy_idw_m0",
+    basin_version_id: str = BASIN_VERSION_ID,
+    active_flag: bool = False,
+    lifecycle_state: str = "inactive",
+    model_package_uri: str = "s3://nhms/models/legacy/idw/",
+) -> None:
+    """Seed a pre-existing legacy IDW ``core.model_instance`` row.
+
+    The ``resource_profile`` shape mirrors
+    ``workers/model_registry/basins_registry_import.py:_resource_profile``:
+    it has NO ``canonical_grid_key`` at the top level and NO
+    ``direct_grid_forcing`` block, so the direct-grid registration's JSONB
+    grain query (``resource_profile->>'canonical_grid_key' = %s AND
+    resource_profile->'direct_grid_forcing'->>'model_input_package_id' = %s
+    AND ...``) yields NULL on every path and skips the legacy row without a
+    per-row exclusion clause.
+    """
+
+    db.model_instances.append(
+        {
+            "model_id": model_id,
+            "basin_version_id": basin_version_id,
+            "river_network_version_id": "rnv_v01",
+            "mesh_version_id": "mesh_v01",
+            "calibration_version_id": "cal_v01",
+            "shud_code_version": "basins-shud",
+            "model_package_uri": model_package_uri,
+            "active_flag": active_flag,
+            "lifecycle_state": lifecycle_state,
+            "resource_profile": {
+                "scheduler": "slurm",
+                "partition": "standard",
+                "nodes": 1,
+                "ntasks": 1,
+                "cpus_per_task": 4,
+                "memory_mb": 8192,
+                "walltime_minutes": 720,
+                "lineage": "basins_registry_import",
+                "basin_slug": "demo-legacy",
+                "shud_input_name": "demo_legacy_input",
+            },
+        }
+    )
+
+
+def test_legacy_retained_row_bytes_identical_after_register(
+    db: _InMemoryDb, cursor: _FakeCursor
+) -> None:
+    """INV-1 lock: the legacy IDW row is byte-identical after registration.
+
+    Seeds an inactive legacy row (matching the `basins_registry_import`
+    shape) alongside the snapshot fixture, snapshots the row's fields via
+    `json.dumps`/`json.loads` deep-copy, registers a direct-grid variant,
+    and asserts the legacy row's `model_id`, `active_flag`,
+    `lifecycle_state`, `model_package_uri`, and `resource_profile` are
+    byte-identical after registration — the spec scenario "Legacy row is
+    untouched by variant registration".
+    """
+
+    _seed_legacy_model_instance(
+        db,
+        model_id="legacy_idw_m0",
+        active_flag=False,
+        lifecycle_state="inactive",
+        model_package_uri="s3://nhms/models/legacy/idw-v0/",
+    )
+    legacy_before = json.loads(
+        json.dumps(next(row for row in db.model_instances if row["model_id"] == "legacy_idw_m0"))
+    )
+
+    payload = _mirror_ready_payload()
+    result = register_direct_grid_variant(
+        cursor,
+        _make_input(payload=payload, grid_snapshot_id=GRID_SNAPSHOT_ID),
+    )
+
+    assert result.inserted is True
+    # Legacy row still exists and is byte-identical field-by-field.
+    legacy_after_row = next(
+        row for row in db.model_instances if row["model_id"] == "legacy_idw_m0"
+    )
+    legacy_after = json.loads(json.dumps(legacy_after_row))
+    assert legacy_after == legacy_before
+    # Per-field explicit assertions per §1.3 evidence line 14.
+    assert legacy_after["model_id"] == legacy_before["model_id"]
+    assert legacy_after["active_flag"] == legacy_before["active_flag"]
+    assert legacy_after["lifecycle_state"] == legacy_before["lifecycle_state"]
+    assert legacy_after["model_package_uri"] == legacy_before["model_package_uri"]
+    assert legacy_after["resource_profile"] == legacy_before["resource_profile"]
+    # The newly-registered variant is a DIFFERENT row.
+    assert result.model_id != "legacy_idw_m0"
+    assert len(db.model_instances) == 2
+
+
+def test_legacy_stays_active_across_variant_register(
+    db: _InMemoryDb, cursor: _FakeCursor
+) -> None:
+    """An `active` legacy model stays active after variant registration.
+
+    Locks the "Registration does not deactivate the currently active
+    legacy model" scenario: seeding an active legacy row and registering a
+    direct-grid variant leaves the legacy row `active_flag=True`,
+    `lifecycle_state='active'`, and the new variant lands
+    `active_flag=False` / `lifecycle_state='inactive'` (no accidental
+    activation, no accidental supersede).
+    """
+
+    _seed_legacy_model_instance(
+        db,
+        model_id="legacy_idw_active",
+        active_flag=True,
+        lifecycle_state="active",
+    )
+
+    payload = _mirror_ready_payload()
+    result = register_direct_grid_variant(
+        cursor,
+        _make_input(payload=payload, grid_snapshot_id=GRID_SNAPSHOT_ID),
+    )
+
+    assert result.inserted is True
+    legacy_after = next(
+        row for row in db.model_instances if row["model_id"] == "legacy_idw_active"
+    )
+    assert legacy_after["active_flag"] is True
+    assert legacy_after["lifecycle_state"] == "active"
+    # The newly-registered variant is inactive — no accidental activation.
+    variant_row = next(row for row in db.model_instances if row["model_id"] == result.model_id)
+    assert variant_row["active_flag"] is False
+    assert variant_row["lifecycle_state"] == "inactive"
+    # Exactly two rows: legacy + new variant, no duplicate legacy row minted.
+    assert len(db.model_instances) == 2
+
+
+def test_idempotent_same_asset_returns_existing_identity_no_duplicate_mirror(
+    db: _InMemoryDb, cursor: _FakeCursor
+) -> None:
+    """Second registration of the SAME asset is idempotent end-to-end.
+
+    Locks the SUB-3 emit-always self-heal contract:
+
+    * The second call returns the SAME `model_id` the first call minted
+      (identity is stable across re-registration).
+    * No duplicate `core.model_instance` row lands (grain-level dedup).
+    * No duplicate `met.met_station` row lands (mirror-level dedup — same
+      station_id reconciled via ``ON CONFLICT (station_id) DO UPDATE``).
+    * The second `RegistrationResult.mirror_stations_written` is 2, NOT 0
+      — the SUB-3-scoped mirror-emit-always self-heal fix that Phase 4.5
+      REFUTED from PR #1004 (`inserted=False` runs the mirror leg because
+      a prior partial run's mirror row could still be missing).
+    * Every `met.met_station` row is byte-identical before-vs-after the
+      second call: DO UPDATE reconciliation touched only same-value
+      identity fields, and `active_flag` is preserved (not in the SET
+      list), so the row image doesn't drift.
+    """
+
+    _seed_legacy_model_instance(db, model_id="legacy_idw_m0")
+    legacy_instance_count = len(db.model_instances)
+
+    payload = _mirror_ready_payload()
+    first = register_direct_grid_variant(
+        cursor,
+        _make_input(payload=payload, grid_snapshot_id=GRID_SNAPSHOT_ID),
+    )
+    # After first call: legacy + 1 variant = 2 model_instance rows.
+    assert first.inserted is True
+    assert first.mirror_stations_written == 2
+    assert len(db.model_instances) == legacy_instance_count + 1
+    assert len(db.met_stations) == 2
+    met_stations_before = json.loads(json.dumps(db.met_stations))
+    instances_before = json.loads(json.dumps(db.model_instances))
+
+    # Byte-identical input on the second call.
+    second = register_direct_grid_variant(
+        cursor,
+        _make_input(payload=_mirror_ready_payload(), grid_snapshot_id=GRID_SNAPSHOT_ID),
+    )
+
+    # Same identity returned — not a re-mint.
+    assert second.model_id == first.model_id
+    assert second.inserted is False
+    # Emit-always self-heal: mirror leg re-runs and reports 2 rows written
+    # (matching-identity DO UPDATE reconciliation, per §D2 self-heal).
+    assert second.mirror_stations_written == 2
+    # No duplicate rows appended anywhere.
+    assert len(db.model_instances) == legacy_instance_count + 1
+    assert len(db.met_stations) == 2
+    # Byte-identical row images post-reconciliation.
+    assert json.loads(json.dumps(db.met_stations)) == met_stations_before
+    assert json.loads(json.dumps(db.model_instances)) == instances_before
+
+
+def test_idempotent_different_model_input_package_new_row_prior_mirror_retained(
+    db: _InMemoryDb, cursor: _FakeCursor
+) -> None:
+    """Different `model_input_package_id` → new row; M1's row + mirror byte-identical.
+
+    Locks the "fix-forward not swallowed by idempotency" contract at the
+    §1.3-scoped mirror-retention granularity (the assertion Phase 4.5
+    REFUTED from PR #1004): registering M1' with a DIFFERENT
+    `model_input_package_id` at the same
+    `(basin_version_id, canonical_grid_key)` grain mints a NEW `model_id`,
+    while M1's `core.model_instance` row AND all of M1's mirror rows are
+    byte-identical afterwards, and M1''s mirror rows land alongside on
+    disjoint station_ids (upstream `mapping_asset_identity` differs per
+    §11.2 fix-forward).
+    """
+
+    payload_m1 = _direct_grid_payload(
+        model_input_package_id="mai-pkg-m1-v1",
+        binding_checksum="sha256:m1-binding",
+    )
+    _rebind_station_ids(payload_m1, "mai_m1")
+    payload_m1_prime = _direct_grid_payload(
+        model_input_package_id="mai-pkg-m1-v2",  # DIFFERENT package id
+        binding_checksum="sha256:m1-binding",     # SAME binding checksum
+    )
+    _rebind_station_ids(payload_m1_prime, "mai_m1_prime")
+
+    result_m1 = register_direct_grid_variant(
+        cursor, _make_input(payload=payload_m1, grid_snapshot_id=GRID_SNAPSHOT_ID)
+    )
+    # Snapshot M1's persisted model_instance row + all M1 mirror rows.
+    m1_instance_before = json.loads(
+        json.dumps(next(row for row in db.model_instances if row["model_id"] == result_m1.model_id))
+    )
+    m1_station_ids_before = {
+        station_id for station_id in db.met_stations if station_id.startswith("mai_m1::cell:")
+    }
+    assert m1_station_ids_before, "M1 mirror rows must be seeded before fix-forward"
+    m1_stations_before = json.loads(
+        json.dumps({sid: db.met_stations[sid] for sid in m1_station_ids_before})
+    )
+
+    result_prime = register_direct_grid_variant(
+        cursor, _make_input(payload=payload_m1_prime, grid_snapshot_id=GRID_SNAPSHOT_ID)
+    )
+
+    # Fix-forward: new identity, not idempotent short-circuit.
+    assert result_prime.inserted is True
+    assert result_prime.model_id != result_m1.model_id
+    assert len(db.model_instances) == 2
+
+    # M1's model_instance row is byte-identical after M1''s registration.
+    m1_instance_after = next(
+        row for row in db.model_instances if row["model_id"] == result_m1.model_id
+    )
+    assert json.loads(json.dumps(m1_instance_after)) == m1_instance_before
+
+    # M1's mirror rows are still present + byte-identical.
+    m1_stations_after = {
+        sid: db.met_stations[sid] for sid in m1_station_ids_before if sid in db.met_stations
+    }
+    assert set(m1_stations_after.keys()) == m1_station_ids_before, (
+        "M1 mirror rows must not be deleted by M1' registration"
+    )
+    assert json.loads(json.dumps(m1_stations_after)) == m1_stations_before
+
+    # M1' mirror rows exist alongside on DISJOINT station_ids.
+    prime_station_ids = {
+        station_id for station_id in db.met_stations if station_id.startswith("mai_m1_prime::cell:")
+    }
+    assert prime_station_ids, "M1' mirror rows must be written"
+    assert prime_station_ids.isdisjoint(m1_station_ids_before)
+    assert result_prime.mirror_stations_written == len(prime_station_ids)
+
+
+def test_idempotent_different_binding_checksum_new_row_prior_mirror_retained(
+    db: _InMemoryDb, cursor: _FakeCursor
+) -> None:
+    """Different `binding_checksum` alone also mints a new row.
+
+    The identity is `(model_input_package_id, binding_checksum)` — NOT
+    `model_input_package_id` alone. Same package with a different binding
+    checksum (e.g. a rebuilt binding for the same asset id) registers as
+    a new row with the prior row + prior mirror rows byte-identical.
+    Symmetric proof to the `model_input_package_id`-varies case.
+    """
+
+    payload_m1 = _direct_grid_payload(
+        model_input_package_id="mai-pkg-shared",
+        binding_checksum="sha256:binding-v1",
+    )
+    _rebind_station_ids(payload_m1, "mai_bc_v1")
+    payload_m1_prime = _direct_grid_payload(
+        model_input_package_id="mai-pkg-shared",         # SAME package id
+        binding_checksum="sha256:binding-v2-fixforward",  # DIFFERENT checksum
+    )
+    _rebind_station_ids(payload_m1_prime, "mai_bc_v2")
+
+    result_m1 = register_direct_grid_variant(
+        cursor, _make_input(payload=payload_m1, grid_snapshot_id=GRID_SNAPSHOT_ID)
+    )
+    m1_instance_before = json.loads(
+        json.dumps(next(row for row in db.model_instances if row["model_id"] == result_m1.model_id))
+    )
+    m1_station_ids_before = {
+        station_id for station_id in db.met_stations if station_id.startswith("mai_bc_v1::cell:")
+    }
+    assert m1_station_ids_before
+    m1_stations_before = json.loads(
+        json.dumps({sid: db.met_stations[sid] for sid in m1_station_ids_before})
+    )
+
+    result_prime = register_direct_grid_variant(
+        cursor, _make_input(payload=payload_m1_prime, grid_snapshot_id=GRID_SNAPSHOT_ID)
+    )
+
+    assert result_prime.inserted is True
+    assert result_prime.model_id != result_m1.model_id
+    assert len(db.model_instances) == 2
+
+    m1_instance_after = next(
+        row for row in db.model_instances if row["model_id"] == result_m1.model_id
+    )
+    assert json.loads(json.dumps(m1_instance_after)) == m1_instance_before
+
+    m1_stations_after = {
+        sid: db.met_stations[sid] for sid in m1_station_ids_before if sid in db.met_stations
+    }
+    assert set(m1_stations_after.keys()) == m1_station_ids_before
+    assert json.loads(json.dumps(m1_stations_after)) == m1_stations_before
+
+    prime_station_ids = {
+        station_id for station_id in db.met_stations if station_id.startswith("mai_bc_v2::cell:")
+    }
+    assert prime_station_ids
+    assert prime_station_ids.isdisjoint(m1_station_ids_before)
+    assert result_prime.mirror_stations_written == len(prime_station_ids)
