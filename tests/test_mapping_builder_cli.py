@@ -36,6 +36,7 @@ the resolver is SUB-5's territory.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import hashlib
 import json
 import pathlib
@@ -1884,6 +1885,43 @@ def test_build_direct_grid_variant_is_deterministic_across_two_runs_raw_byte_ide
     assert result_a.evidence_package.build_timestamp is None
     assert result_b.evidence_package.build_timestamp is None
 
+    # Evidence-category byte-identity lock: the on-disk artifact loop above
+    # only compares manifest.json / direct_grid_binding.json / .sp.att, but
+    # the §2.4 "byte-identical …/evidence compared raw with no field masking"
+    # contract extends to the full in-memory ``EvidencePackage``. A
+    # non-determinism regression that leaks into a non-manifest evidence
+    # field (e.g., a wall-clock stamped into
+    # ``forbidden_output_scan.wall_clock_recorded_at``, a random UUID in
+    # ``ownership_row``, or non-deterministic ``ownership_images`` SVG
+    # bytes) would slip past the on-disk loop but MUST fail here.
+    #
+    # 1. Primary lock: the SHA-256 over all checksum-tracked fields
+    # (:data:`workers.mapping_builder.evidence.EVIDENCE_CHECKSUM_EXCLUDED_FIELDS`
+    # excludes only ``build_timestamp``, which is ``None`` on both runs).
+    assert (
+        result_a.evidence_package.evidence_checksum
+        == result_b.evidence_package.evidence_checksum
+    ), (
+        f"evidence_checksum diverged across two identical-input runs: "
+        f"a={result_a.evidence_package.evidence_checksum} vs "
+        f"b={result_b.evidence_package.evidence_checksum} — a non-manifest "
+        "evidence field carries caller-side non-determinism"
+    )
+    # 2. "No field masking" literal contract: full deep-equality of the
+    # dataclass tree. Catches any field that the checksum computation
+    # intentionally excludes by design but which SHOULD still be
+    # deterministic across identical-input builds. Safe here because the
+    # only excluded field, ``build_timestamp``, is ``None`` on both runs
+    # (asserted immediately above), so this deep-equality carries no
+    # masking-shaped false positive.
+    assert dataclasses.asdict(result_a.evidence_package) == dataclasses.asdict(
+        result_b.evidence_package
+    ), (
+        "EvidencePackage deep-equality failed across two identical-input "
+        "runs — a field outside the checksum-tracked set (or an excluded "
+        "field other than the None build_timestamp) carries non-determinism"
+    )
+
 
 def test_deterministic_cli_emits_evidence_with_build_timestamp_unset_no_wall_clock(
     tmp_path: pathlib.Path,
@@ -2040,15 +2078,32 @@ def test_keliya_end_to_end_cli_build_via_object_store_root_resolver_channel(
     # Fixture-shape invariants: 484 elements / 32 raw stations / 8 used cells.
     # ``ownership_table`` covers every element (mesh oracle = 484).
     assert len(result.evidence_package.ownership_table) == 484
-    # 32 raw stations pre-reduction is recorded on the caller-supplied
-    # capacity report (fed into the harness at
-    # :func:`_canned_qa_and_capacity`, matching the keliya .tsd.forc count).
-    assert result.evidence_package.capacity_report.before_station_count == 32
+    # 32 raw stations pre-reduction is derived from the keliya fixture's
+    # ``.tsd.forc`` header (line 1 = ``<station_count> <cycle_date>``) so a
+    # real fixture-shape change from 32 -> some other value would fire
+    # here — NOT a tautology round-tripping ``_canned_qa_and_capacity``'s
+    # 32 back through the capacity report unchanged.
+    forcing_header = (
+        (_KELIYA_FIXTURE_DIR / "keliya.tsd.forc")
+        .read_text(encoding="utf-8")
+        .splitlines()[0]
+    )
+    expected_pre_reduction_station_count = int(forcing_header.split()[0])
+    assert (
+        result.evidence_package.capacity_report.before_station_count
+        == expected_pre_reduction_station_count
+    ), (
+        "capacity_report.before_station_count does not match keliya "
+        f".tsd.forc header count ({expected_pre_reduction_station_count})"
+    )
     # After ``derive_used_cell_subset``: 8 used cells → 8 station bindings
-    # (surfaced both on the manifest and on the standalone binding).
+    # (surfaced both on the manifest and on the standalone binding — those
+    # are the derived-from-algorithm invariants; the previous
+    # ``capacity_report.after_station_count == 8`` assertion round-tripped
+    # ``_canned_qa_and_capacity``'s literal 8 back through the report and
+    # was tautological, so we rely on the two length locks below).
     assert len(result.manifest.station_bindings) == 8
     assert len(result.binding_artifact.station_bindings) == 8
-    assert result.evidence_package.capacity_report.after_station_count == 8
 
     # G0..G5 all passed.
     gate_results = result.evidence_package.gate_results
