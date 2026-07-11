@@ -87,9 +87,14 @@ from packages.common.object_store_forcing import (
 # mutations like ``active_model_default``, ``fallback_active_model_id``,
 # ``pick_active_model``, ``pin_current_model``, ``derive_active_model_for_basin``,
 # and ``current_model_for_basin`` all evaded the tuple check. The regex
-# closes those escape hatches by tokenizing on ``\b`` and matching any
-# ``<qualifier>[_-]?model...`` identifier where ``<qualifier>`` is one of
-# the semantically dangerous prefixes.
+# closes those escape hatches by boundary-anchoring on
+# ``(?<![A-Za-z0-9])`` (NOT ``\b`` — ``\b`` treats ``_`` as a word char
+# and so would MISS ``resolve_active_model`` / ``get_active_model`` /
+# ``fallback_active_model_id`` where the dangerous prefix sits after an
+# underscore-separated stem) and matching any
+# ``<qualifier>[_-]?(?:active[_-]?|current[_-]?|latest[_-]?)?model...``
+# identifier where ``<qualifier>`` is one of the semantically dangerous
+# prefixes.
 #
 # Verified against the SUT surface at authoring time — the regex matches
 # NO existing legitimate identifier in ``apps/api/routes/data_sources.py``,
@@ -100,8 +105,11 @@ from packages.common.object_store_forcing import (
 # and ``station_source_version`` are all unaffected). The single incidental
 # match in ``object_store_forcing.py`` is the string ``active-model`` in a
 # spec-name comment — handled by ``_strip_comments_and_docstrings`` below.
+# Positive-lock and negative-lock parametrized tests below bind the
+# docstring-claimed mutation list to the regex so any future weakening
+# fails loudly.
 BANNED_ACTIVE_MODEL_RESOLVER_REGEX = re.compile(
-    r"\b(?:active|current|default|fallback|latest|pick|pin|derive)[_-]?model\w*\b",
+    r"(?<![A-Za-z0-9])(?:active|current|default|fallback|latest|pick|pin|derive|resolve|get|fetch|infer|choose)[_-]?(?:active[_-]?|current[_-]?|latest[_-]?)?model[A-Za-z0-9_-]*",
     re.IGNORECASE,
 )
 
@@ -564,3 +572,65 @@ def test_object_store_forcing_never_calls_active_model_resolver() -> None:
             f"{target.__qualname__}: {banned_match.group(0)!r} — the "
             "backend read path must keep model_id caller-supplied"
         )
+
+
+# =========================================================================
+# Regex-lock — bind the docstring claim to the executable check
+# =========================================================================
+
+
+@pytest.mark.parametrize(
+    "identifier",
+    [
+        # Pre-fold literal tuple (must remain caught)
+        "resolve_active_model",
+        "active_model_for_basin",
+        "latest_active_model",
+        "resolve_current_model",
+        "get_active_model",
+        # Docstring-claimed mutations (broadened regex must catch these too)
+        "active_model_default",
+        "fallback_active_model_id",
+        "pick_active_model",
+        "pin_current_model",
+        "derive_active_model_for_basin",
+        "current_model_for_basin",
+    ],
+)
+def test_banned_active_model_resolver_regex_matches_known_mutation_names(identifier: str) -> None:
+    """Positive-lock: docstring-claimed mutations MUST match the broadened regex.
+
+    Reviewer P1 (Phase 6.5) found the pre-fix regex used ``\\b`` boundaries
+    which treat ``_`` as a word char — so ``active_model_default`` etc. evaded.
+    This parametrized positive test binds the docstring claim to the code:
+    every identifier in this list MUST be caught by the regex, or the fold
+    contract is broken.
+    """
+    fabricated_source = f"def route(): x = {identifier}('basin_x'); return x\n"
+    assert BANNED_ACTIVE_MODEL_RESOLVER_REGEX.search(fabricated_source) is not None, (
+        f"BANNED_ACTIVE_MODEL_RESOLVER_REGEX failed to catch known-name mutation {identifier!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "identifier",
+    [
+        "model_id",
+        "model_instance",
+        "PsycopgStationLookup",
+        "read_station_forcing_csv",
+        "station_source_version",
+        "model_registry",
+        "grid_snapshot_id",
+    ],
+)
+def test_banned_active_model_resolver_regex_does_not_match_legitimate_identifiers(identifier: str) -> None:
+    """Negative-lock: legitimate SUT identifiers MUST NOT trip the regex.
+
+    Verifies the ``(?<![A-Za-z0-9])`` boundary does not create false positives
+    on symbols that legitimately appear in production SUT sources.
+    """
+    fabricated_source = f"def route(): x = {identifier}('basin_x'); return x\n"
+    assert BANNED_ACTIVE_MODEL_RESOLVER_REGEX.search(fabricated_source) is None, (
+        f"BANNED_ACTIVE_MODEL_RESOLVER_REGEX unexpectedly matched legitimate identifier {identifier!r}"
+    )
