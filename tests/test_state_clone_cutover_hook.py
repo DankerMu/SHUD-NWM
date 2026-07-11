@@ -1,0 +1,881 @@
+"""Tests for the pre-activation state-clone hook (Epic #982 SUB-4 §3.1).
+
+Covers the OpenSpec ``atomic-cutover-transaction`` acceptance criteria
+pinned in ``openspec/changes/mapping-variant-state-compatibility/tasks.md``
+section 3.1 (a)-(g):
+
+* (a) Activation + clone commit atomically on the happy path: the hook
+  runs to completion, writes one ``(M1, source, t*)`` clone row per
+  source in scope, and never raises.
+* (b) Clone failure rolls back: an engaged clone that gets refused
+  causes the hook to raise ``StateCloneCutoverRefusedError`` so the
+  Change 4 dispatcher aborts the whole transaction.
+* (c) No intermediate ``activated-but-not-transferred`` state observable
+  mid-transaction: after a rollback simulated on the fake cursor no
+  clone row is present for ANY source in scope, including sources
+  processed before the refusing one.
+* (d) Dual-source scope ``[gfs, ifs]``: happy-path variant writes two
+  clone rows; unqualified-one-source variant refuses whole scope and
+  the audit record names the blocking source id.
+* (e) Fresh basin path: ``previous_active_model=None`` short-circuits
+  to a ``no_previous_active_model`` skip with no clone attempt, no
+  raise, and no writes.
+* (f) Legacy target path: ``source_scope=None`` short-circuits to a
+  ``target_not_direct_grid`` skip with no clone attempt, no raise, and
+  no writes.
+* (g) Already-current short-circuit is owned by Change 4's dispatcher
+  (``_would_be_already_current`` in ``model_registry.py``); this test
+  module documents the boundary by NOT invoking the hook for that path.
+  See ``test_hook_boundary_documented_for_already_current``.
+
+The hook is exercised entirely against an in-memory ``_FakeCursor`` +
+``_FakeAuditRecorder``; live-DB validation lives in SUB-9's node-27
+receipt scope.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from packages.common.model_registry import ModelActivationContext
+from packages.common.state_clone import STATE_CLONE_COLD_START_APPROVAL_REQUIRED
+from packages.common.state_clone_hook import (
+    SKIP_REASON_NO_PREVIOUS_ACTIVE_MODEL,
+    SKIP_REASON_TARGET_NOT_DIRECT_GRID,
+    StateCloneCutoverRefusedError,
+    StateCloneFingerprintInputs,
+    _CursorBoundStateSnapshotRepository,
+    build_state_clone_cutover_hook,
+)
+from packages.common.state_manager import StateSnapshot, state_snapshot_id
+from tests.test_state_clone import (
+    _DEFAULT_NON_SP_ATT_STUBS,
+    CUTOVER_VALID_TIME,
+    CYCLE_ID,
+    DEFAULT_SOLVER_CONFIG_BYTES,
+    DEFAULT_STATE_SCHEMA_BYTES,
+    M0_MODEL_ID,
+    M0_PACKAGE_CHECKSUM,
+    M0_PACKAGE_VERSION,
+    M1_MODEL_ID,
+    M1_PACKAGE_CHECKSUM,
+    M1_PACKAGE_VERSION,
+    SOURCE_ID,
+    _default_category_files,
+    _make_source_snapshot,
+    _write_package,
+    _write_sp_att,
+)
+from workers.data_adapters.base import cycle_id_for
+from workers.mapping_builder.rewrite import compute_hydrologic_core_fingerprint
+
+# --- Local package fixtures (duplicated cleanly from tests.test_state_clone) ---
+#
+# ``pytest`` does not treat a module-level ``from tests.test_state_clone
+# import m0_m1_equal_packages`` as a fixture registration — the imported
+# name collides with the function-parameter name in every consumer. We
+# duplicate the two fixture *bodies* here and reuse the private helpers
+# to avoid drift with the SUB-2 fixture definitions.
+
+
+@pytest.fixture
+def m0_m1_equal_packages(tmp_path: Path) -> dict[str, Any]:
+    """Two byte-equal packages so ``verify_...equal`` returns a shared hash."""
+    m0_root = _write_package(tmp_path / "m0")
+    m1_root = _write_package(tmp_path / "m1")
+    m0_sp_att = _write_sp_att(m0_root / "basin.sp.att", forc_values=(1, 2, 3, 4))
+    m1_sp_att = _write_sp_att(m1_root / "basin.sp.att", forc_values=(4, 3, 2, 1))
+    fp = compute_hydrologic_core_fingerprint(
+        m0_root,
+        sp_att_path=m0_sp_att,
+        category_files=_default_category_files(),
+        state_schema_bytes=DEFAULT_STATE_SCHEMA_BYTES,
+        solver_config_bytes=DEFAULT_SOLVER_CONFIG_BYTES,
+    )
+    return {
+        "m0_root": m0_root,
+        "m1_root": m1_root,
+        "m0_sp_att": m0_sp_att,
+        "m1_sp_att": m1_sp_att,
+        "category_files": _default_category_files(),
+        "fingerprint_hash": fp.hash,
+    }
+
+
+@pytest.fixture
+def m0_m1_unequal_packages(tmp_path: Path) -> dict[str, Any]:
+    """Two packages differing on ONE non-FORC surface — fingerprint drifts."""
+    drifted = dict(_DEFAULT_NON_SP_ATT_STUBS)
+    drifted["soil"] = ("basin.soil", b"soil-payload-v2-drifted\n")
+    m0_root = _write_package(tmp_path / "m0")
+    m1_root = _write_package(tmp_path / "m1", stubs=drifted)
+    m0_sp_att = _write_sp_att(m0_root / "basin.sp.att")
+    m1_sp_att = _write_sp_att(m1_root / "basin.sp.att")
+    m0_fp = compute_hydrologic_core_fingerprint(
+        m0_root,
+        sp_att_path=m0_sp_att,
+        category_files=_default_category_files(),
+        state_schema_bytes=DEFAULT_STATE_SCHEMA_BYTES,
+        solver_config_bytes=DEFAULT_SOLVER_CONFIG_BYTES,
+    )
+    return {
+        "m0_root": m0_root,
+        "m1_root": m1_root,
+        "m0_sp_att": m0_sp_att,
+        "m1_sp_att": m1_sp_att,
+        "category_files": _default_category_files(),
+        # The unequal-fingerprint refusal path fires before the evidence
+        # cross-check runs, so any hash suffices here.
+        "fingerprint_hash": m0_fp.hash,
+    }
+
+
+# --- FakeCursor with transaction-like staging ------------------------------
+
+
+class _FakeCursor:
+    """In-memory cursor that mirrors psycopg RealDictCursor semantics.
+
+    Recognizes the three SQL statements the
+    ``_CursorBoundStateSnapshotRepository`` adapter emits (point-lookup
+    SELECT, source-scoped ``latest-before`` SELECT, and the ``INSERT ...
+    ON CONFLICT ... RETURNING *`` upsert) and dispatches each to an in-
+    memory ``hydro.state_snapshot`` model keyed on the same
+    ``(model_id, COALESCE(source_id, ''), valid_time)`` tuple as the
+    production unique index.
+
+    Adds ``commit`` / ``rollback`` seams the tests use to simulate the
+    Change 4 lifecycle transaction's atomic-rollback guarantee — writes
+    land in a ``_staged`` map first, ``commit`` promotes them into
+    ``_committed``, and ``rollback`` discards ``_staged``. Without this
+    the "no intermediate state observable" property in acceptance test
+    (c) would be untestable against a fake.
+    """
+
+    def __init__(self, initial_rows: Sequence[Mapping[str, Any]] | None = None) -> None:
+        self._committed: dict[tuple[str, str, datetime], dict[str, Any]] = {}
+        for row in initial_rows or ():
+            self._committed[self._key(row)] = dict(row)
+        self._staged: dict[tuple[str, str, datetime], dict[str, Any]] = {}
+        self._last_row: dict[str, Any] | None = None
+        self.executed: list[tuple[str, tuple[Any, ...]]] = []
+
+    # --- transaction-boundary hooks tests drive explicitly ----------------
+
+    def commit(self) -> None:
+        self._committed.update(self._staged)
+        self._staged.clear()
+
+    def rollback(self) -> None:
+        self._staged.clear()
+
+    # --- row-visibility helpers used by test assertions -------------------
+
+    def all_committed_rows(self) -> list[dict[str, Any]]:
+        return list(self._committed.values())
+
+    def all_staged_rows(self) -> list[dict[str, Any]]:
+        return list(self._staged.values())
+
+    def all_rows(self) -> list[dict[str, Any]]:
+        merged = {**self._committed, **self._staged}
+        return list(merged.values())
+
+    # --- psycopg-compatible surface ---------------------------------------
+
+    def execute(self, sql: str, params: Sequence[Any]) -> None:
+        normalized = " ".join(sql.split())
+        self.executed.append((normalized, tuple(params)))
+        if normalized.startswith("INSERT INTO hydro.state_snapshot"):
+            self._handle_upsert(tuple(params))
+            return
+        if "AND valid_time <" in normalized and "ORDER BY valid_time DESC" in normalized:
+            self._handle_latest_before(tuple(params))
+            return
+        if "AND source_id = %s" in normalized and "AND valid_time = %s" in normalized:
+            self._handle_point_select_with_source(tuple(params))
+            return
+        if "AND valid_time = %s" in normalized:
+            self._handle_point_select_no_source(tuple(params))
+            return
+        raise NotImplementedError(f"FakeCursor: unsupported SQL: {sql!r}")
+
+    def fetchone(self) -> dict[str, Any] | None:
+        return self._last_row
+
+    # --- SQL handlers -----------------------------------------------------
+
+    def _handle_upsert(self, params: tuple[Any, ...]) -> None:
+        row = {
+            "state_id": params[0],
+            "model_id": params[1],
+            "run_id": params[2],
+            "valid_time": _ensure_utc(params[3]),
+            "state_uri": params[4],
+            "checksum": params[5],
+            "usable_flag": bool(params[6]),
+            "source_id": params[7],
+            "cycle_id": params[8],
+            "lead_hours": params[9],
+            "model_package_version": params[10],
+            "model_package_checksum": params[11],
+            "original_shud_filename": params[12],
+            "cloned_from_state_id": params[13],
+            "cloned_from_model_id": params[14],
+            "clone_gate_fingerprint": params[15],
+            "created_at": datetime(2026, 7, 10, 0, 0, tzinfo=UTC),
+        }
+        self._staged[self._key(row)] = row
+        self._last_row = row
+
+    def _handle_point_select_with_source(self, params: tuple[Any, ...]) -> None:
+        model_id, source_id, valid_time = params
+        key = (str(model_id), _source_key(source_id), _ensure_utc(valid_time))
+        merged = {**self._committed, **self._staged}
+        self._last_row = merged.get(key)
+
+    def _handle_point_select_no_source(self, params: tuple[Any, ...]) -> None:
+        model_id, valid_time = params
+        wanted_time = _ensure_utc(valid_time)
+        candidates = [
+            row
+            for row in {**self._committed, **self._staged}.values()
+            if row["model_id"] == model_id
+            and _ensure_utc(row["valid_time"]) == wanted_time
+        ]
+        self._last_row = candidates[0] if candidates else None
+
+    def _handle_latest_before(self, params: tuple[Any, ...]) -> None:
+        model_id, source_id, before_time = params
+        wanted_source = _source_key(source_id)
+        wanted_before = _ensure_utc(before_time)
+        candidates = [
+            row
+            for row in {**self._committed, **self._staged}.values()
+            if row["model_id"] == model_id
+            and _source_key(row.get("source_id")) == wanted_source
+            and _ensure_utc(row["valid_time"]) < wanted_before
+        ]
+        if not candidates:
+            self._last_row = None
+            return
+        self._last_row = max(
+            candidates,
+            key=lambda row: _ensure_utc(row["valid_time"]),
+        )
+
+    # --- helpers ----------------------------------------------------------
+
+    @staticmethod
+    def _key(row: Mapping[str, Any]) -> tuple[str, str, datetime]:
+        return (
+            str(row["model_id"]),
+            _source_key(row.get("source_id")),
+            _ensure_utc(row["valid_time"]),
+        )
+
+
+def _ensure_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _source_key(source_id: Any) -> str:
+    return "" if source_id in (None, "") else str(source_id)
+
+
+# --- Fake audit recorder ---------------------------------------------------
+
+
+class _FakeAuditRecorder:
+    """Records skip + refusal events from both the hook and the SUB-2 core.
+
+    The hook forwards this recorder into
+    ``fingerprint_gated_state_clone`` (which invokes ``record_refusal``)
+    and calls ``record_skip`` itself on the two applicability-predicate
+    misses, so a single instance sees the full audit stream.
+    """
+
+    def __init__(self) -> None:
+        self.skips: list[dict[str, Any]] = []
+        self.refusals: list[dict[str, Any]] = []
+
+    def record_skip(self, reason: str, ctx: ModelActivationContext) -> None:
+        self.skips.append(
+            {
+                "reason": reason,
+                "basin_version_id": ctx.basin_version_id,
+                "target_model_id": ctx.target_model.get("model_id"),
+            }
+        )
+
+    def record_refusal(self, record: Mapping[str, Any]) -> None:
+        self.refusals.append(dict(record))
+
+
+# --- Provider + activation-context builders --------------------------------
+
+
+BASIN_VERSION_ID = "basin_v1"
+
+
+def _target_model_row() -> dict[str, Any]:
+    return {"model_id": M1_MODEL_ID, "model_package_version": M1_PACKAGE_VERSION}
+
+
+def _previous_active_row() -> dict[str, Any]:
+    return {"model_id": M0_MODEL_ID, "model_package_version": M0_PACKAGE_VERSION}
+
+
+def _make_ctx(
+    *,
+    source_scope: tuple[str, ...] | None,
+    previous_active_model: Mapping[str, Any] | None,
+) -> ModelActivationContext:
+    return ModelActivationContext(
+        basin_version_id=BASIN_VERSION_ID,
+        previous_active_model=previous_active_model,
+        target_model=_target_model_row(),
+        source_scope=source_scope,
+    )
+
+
+def _make_fingerprint_inputs(
+    pkg: Mapping[str, Any],
+    *,
+    m1_recorded_hydrologic_core_fingerprint: str | None = None,
+    state_schema_bytes: bytes = DEFAULT_STATE_SCHEMA_BYTES,
+    solver_config_bytes: bytes = DEFAULT_SOLVER_CONFIG_BYTES,
+) -> StateCloneFingerprintInputs:
+    return StateCloneFingerprintInputs(
+        m0_model_id=M0_MODEL_ID,
+        m1_model_id=M1_MODEL_ID,
+        m1_model_package_version=M1_PACKAGE_VERSION,
+        m1_model_package_checksum=M1_PACKAGE_CHECKSUM,
+        m0_package_root=pkg["m0_root"],
+        m1_package_root=pkg["m1_root"],
+        m0_sp_att_path=pkg["m0_sp_att"],
+        m1_sp_att_path=pkg["m1_sp_att"],
+        m1_category_files=pkg["category_files"],
+        m1_recorded_hydrologic_core_fingerprint=(
+            m1_recorded_hydrologic_core_fingerprint or pkg["fingerprint_hash"]
+        ),
+        state_schema_bytes=state_schema_bytes,
+        solver_config_bytes=solver_config_bytes,
+        cutover_valid_time=CUTOVER_VALID_TIME,
+    )
+
+
+def _snapshot_row_dict(snapshot: StateSnapshot) -> dict[str, Any]:
+    """Convert a StateSnapshot into a dict shaped like a RealDictCursor row."""
+    return {
+        "state_id": snapshot.state_id,
+        "model_id": snapshot.model_id,
+        "run_id": snapshot.run_id,
+        "valid_time": _ensure_utc(snapshot.valid_time),
+        "state_uri": snapshot.state_uri,
+        "checksum": snapshot.checksum,
+        "usable_flag": snapshot.usable_flag,
+        "created_at": snapshot.created_at or datetime(2026, 7, 1, 0, 0, tzinfo=UTC),
+        "source_id": snapshot.source_id,
+        "cycle_id": snapshot.cycle_id,
+        "lead_hours": snapshot.lead_hours,
+        "model_package_version": snapshot.model_package_version,
+        "model_package_checksum": snapshot.model_package_checksum,
+        "original_shud_filename": snapshot.original_shud_filename,
+        "cloned_from_state_id": snapshot.cloned_from_state_id,
+        "cloned_from_model_id": snapshot.cloned_from_model_id,
+        "clone_gate_fingerprint": snapshot.clone_gate_fingerprint,
+    }
+
+
+def _seed_source_snapshot(
+    *,
+    source_id: str = SOURCE_ID,
+    valid_time: datetime = CUTOVER_VALID_TIME,
+    usable_flag: bool = True,
+) -> dict[str, Any]:
+    cycle = cycle_id_for(source_id, valid_time - timedelta(hours=12))
+    snapshot = replace(
+        _make_source_snapshot(valid_time=valid_time, usable_flag=usable_flag),
+        state_id=state_snapshot_id(
+            M0_MODEL_ID,
+            valid_time,
+            source_id=source_id,
+            cycle_id=cycle,
+            lead_hours=12,
+        ),
+        source_id=source_id,
+        cycle_id=cycle,
+        state_uri=f"states/{source_id}/{M0_MODEL_ID}/2026061506/state.cfg.ic",
+    )
+    return _snapshot_row_dict(snapshot)
+
+
+# --- (a) atomic commit -----------------------------------------------------
+
+
+def test_a_happy_path_commits_source_row_plus_clone_row(
+    m0_m1_equal_packages: dict[str, Any],
+) -> None:
+    """Hook writes one clone row per source without raising; commit persists."""
+
+    cursor = _FakeCursor(initial_rows=[_seed_source_snapshot(source_id="gfs")])
+    audit = _FakeAuditRecorder()
+    hook = build_state_clone_cutover_hook(
+        audit_recorder=audit,
+        fingerprint_inputs_provider=lambda _ctx, _source: _make_fingerprint_inputs(
+            m0_m1_equal_packages
+        ),
+    )
+    ctx = _make_ctx(source_scope=("gfs",), previous_active_model=_previous_active_row())
+
+    hook(cursor, ctx)
+    cursor.commit()
+
+    committed = cursor.all_committed_rows()
+    # Original M0 source row + one M1 clone row are both persisted.
+    assert len(committed) == 2
+    m0_rows = [row for row in committed if row["model_id"] == M0_MODEL_ID]
+    m1_rows = [row for row in committed if row["model_id"] == M1_MODEL_ID]
+    assert len(m0_rows) == 1
+    assert len(m1_rows) == 1
+    clone = m1_rows[0]
+    assert clone["source_id"] == "gfs"
+    assert clone["state_uri"] == m0_rows[0]["state_uri"]
+    assert clone["checksum"] == m0_rows[0]["checksum"]
+    assert clone["cloned_from_model_id"] == M0_MODEL_ID
+    assert clone["cloned_from_state_id"] == m0_rows[0]["state_id"]
+    assert clone["clone_gate_fingerprint"] == m0_m1_equal_packages["fingerprint_hash"]
+    # No skip and no refusal emitted on the engaged happy path.
+    assert audit.skips == []
+    assert audit.refusals == []
+
+
+# --- (b) clone failure raises + rolls back --------------------------------
+
+
+def test_b_unequal_fingerprint_raises_refused_error_no_row_committed(
+    m0_m1_unequal_packages: dict[str, Any],
+) -> None:
+    """An engaged clone refusal surfaces as StateCloneCutoverRefusedError."""
+
+    cursor = _FakeCursor(initial_rows=[_seed_source_snapshot(source_id="gfs")])
+    audit = _FakeAuditRecorder()
+    hook = build_state_clone_cutover_hook(
+        audit_recorder=audit,
+        fingerprint_inputs_provider=lambda _ctx, _source: _make_fingerprint_inputs(
+            m0_m1_unequal_packages
+        ),
+    )
+    ctx = _make_ctx(source_scope=("gfs",), previous_active_model=_previous_active_row())
+
+    with pytest.raises(StateCloneCutoverRefusedError) as raised:
+        hook(cursor, ctx)
+    cursor.rollback()
+
+    assert raised.value.source_id == "gfs"
+    assert raised.value.refusal_scope == "unequal_fingerprint"
+    assert raised.value.refusal_code == STATE_CLONE_COLD_START_APPROVAL_REQUIRED
+    # No clone row committed or staged; the source row remains untouched.
+    assert cursor.all_staged_rows() == []
+    assert all(row["model_id"] == M0_MODEL_ID for row in cursor.all_committed_rows())
+    # SUB-2 core recorded the refusal before raising propagated up.
+    assert audit.refusals == [
+        {
+            "refusal_code": STATE_CLONE_COLD_START_APPROVAL_REQUIRED,
+            "refusal_scope": "unequal_fingerprint",
+            "m0_model_id": M0_MODEL_ID,
+            "m1_model_id": M1_MODEL_ID,
+            "source_id": "gfs",
+            "cutover_valid_time": CUTOVER_VALID_TIME,
+        }
+    ]
+    assert audit.skips == []
+
+
+# --- (c) no intermediate state observable mid-transaction -----------------
+
+
+def test_c_mid_transaction_refusal_leaves_no_clone_row_persisted(
+    m0_m1_equal_packages: dict[str, Any],
+) -> None:
+    """After a refusal in a multi-source scope no clone row commits for any source.
+
+    Scenario: scope=[gfs, ifs]. gfs is qualified (clone succeeds and
+    stages a clone row). ifs is missing (clone refuses on the second
+    iteration). Because the hook raises after the first failure, the
+    Change 4 dispatcher rolls back the transaction — modeled here by
+    ``cursor.rollback()`` — and the staged gfs clone row is discarded.
+    """
+
+    cursor = _FakeCursor(initial_rows=[_seed_source_snapshot(source_id="gfs")])
+    audit = _FakeAuditRecorder()
+    hook = build_state_clone_cutover_hook(
+        audit_recorder=audit,
+        fingerprint_inputs_provider=lambda _ctx, _source: _make_fingerprint_inputs(
+            m0_m1_equal_packages
+        ),
+    )
+    ctx = _make_ctx(
+        source_scope=("gfs", "ifs"),
+        previous_active_model=_previous_active_row(),
+    )
+
+    with pytest.raises(StateCloneCutoverRefusedError) as raised:
+        hook(cursor, ctx)
+    # Simulate the Change 4 dispatcher rolling back the transaction on
+    # the raised exception; no committed row appears for either source.
+    cursor.rollback()
+
+    assert raised.value.source_id == "ifs"
+    assert raised.value.refusal_scope == "missing_qualified_source"
+    committed = cursor.all_committed_rows()
+    # Only the pre-existing M0 gfs source row is committed; no clone row
+    # for gfs or ifs made it through the transaction boundary.
+    assert len(committed) == 1
+    assert committed[0]["model_id"] == M0_MODEL_ID
+    assert cursor.all_staged_rows() == []
+    # Refusal audit names the blocking source (ifs).
+    assert audit.refusals == [
+        {
+            "refusal_code": STATE_CLONE_COLD_START_APPROVAL_REQUIRED,
+            "refusal_scope": "missing_qualified_source",
+            "m0_model_id": M0_MODEL_ID,
+            "m1_model_id": M1_MODEL_ID,
+            "source_id": "ifs",
+            "cutover_valid_time": CUTOVER_VALID_TIME,
+        }
+    ]
+
+
+# --- (d) dual-source scope: happy + blocked -------------------------------
+
+
+def test_d1_dual_source_scope_writes_two_clone_rows_atomically(
+    m0_m1_equal_packages: dict[str, Any],
+) -> None:
+    """scope=[gfs, ifs] with both qualified: two clone rows commit atomically."""
+
+    cursor = _FakeCursor(
+        initial_rows=[
+            _seed_source_snapshot(source_id="gfs"),
+            _seed_source_snapshot(source_id="ifs"),
+        ]
+    )
+    audit = _FakeAuditRecorder()
+    hook = build_state_clone_cutover_hook(
+        audit_recorder=audit,
+        fingerprint_inputs_provider=lambda _ctx, _source: _make_fingerprint_inputs(
+            m0_m1_equal_packages
+        ),
+    )
+    ctx = _make_ctx(
+        source_scope=("gfs", "ifs"),
+        previous_active_model=_previous_active_row(),
+    )
+
+    hook(cursor, ctx)
+    cursor.commit()
+
+    m1_rows = [row for row in cursor.all_committed_rows() if row["model_id"] == M1_MODEL_ID]
+    assert {row["source_id"] for row in m1_rows} == {"gfs", "ifs"}
+    assert all(row["cloned_from_model_id"] == M0_MODEL_ID for row in m1_rows)
+    assert all(
+        row["clone_gate_fingerprint"] == m0_m1_equal_packages["fingerprint_hash"]
+        for row in m1_rows
+    )
+    assert audit.skips == []
+    assert audit.refusals == []
+
+
+def test_d2_dual_source_scope_with_blocking_source_rolls_back(
+    m0_m1_equal_packages: dict[str, Any],
+) -> None:
+    """scope=[gfs, ifs] with ifs unqualified: whole scope rolls back and audit names ifs."""
+
+    cursor = _FakeCursor(initial_rows=[_seed_source_snapshot(source_id="gfs")])
+    audit = _FakeAuditRecorder()
+    hook = build_state_clone_cutover_hook(
+        audit_recorder=audit,
+        fingerprint_inputs_provider=lambda _ctx, _source: _make_fingerprint_inputs(
+            m0_m1_equal_packages
+        ),
+    )
+    ctx = _make_ctx(
+        source_scope=("gfs", "ifs"),
+        previous_active_model=_previous_active_row(),
+    )
+
+    with pytest.raises(StateCloneCutoverRefusedError) as raised:
+        hook(cursor, ctx)
+    cursor.rollback()
+
+    assert raised.value.source_id == "ifs"
+    assert raised.value.refusal_scope == "missing_qualified_source"
+    committed = cursor.all_committed_rows()
+    assert len(committed) == 1
+    assert committed[0]["model_id"] == M0_MODEL_ID
+    # Audit refusal explicitly names ifs — operator sees exactly which
+    # source needs remediation.
+    assert audit.refusals[-1]["source_id"] == "ifs"
+
+
+# --- (e) fresh basin: no previous active model ----------------------------
+
+
+def test_e_no_previous_active_model_skips_without_engaging_clone(
+    m0_m1_equal_packages: dict[str, Any],
+) -> None:
+    """Fresh basin activation: hook records skip and returns without any writes."""
+
+    cursor = _FakeCursor()
+    audit = _FakeAuditRecorder()
+
+    def _never_called_provider(
+        _ctx: ModelActivationContext, _source: str
+    ) -> StateCloneFingerprintInputs:
+        raise AssertionError(
+            "fingerprint_inputs_provider must not be invoked on the skip path"
+        )
+
+    hook = build_state_clone_cutover_hook(
+        audit_recorder=audit,
+        fingerprint_inputs_provider=_never_called_provider,
+    )
+    ctx = _make_ctx(source_scope=("gfs",), previous_active_model=None)
+
+    hook(cursor, ctx)  # Must NOT raise.
+
+    assert cursor.all_staged_rows() == []
+    assert cursor.all_committed_rows() == []
+    # No SQL was executed at all — no repository was ever built.
+    assert cursor.executed == []
+    assert audit.skips == [
+        {
+            "reason": SKIP_REASON_NO_PREVIOUS_ACTIVE_MODEL,
+            "basin_version_id": BASIN_VERSION_ID,
+            "target_model_id": M1_MODEL_ID,
+        }
+    ]
+    assert audit.refusals == []
+
+
+# --- (f) legacy target: source_scope is None ------------------------------
+
+
+def test_f_legacy_target_skips_without_engaging_clone(
+    m0_m1_equal_packages: dict[str, Any],
+) -> None:
+    """Legacy IDW target (source_scope=None): hook records skip and returns."""
+
+    cursor = _FakeCursor()
+    audit = _FakeAuditRecorder()
+
+    def _never_called_provider(
+        _ctx: ModelActivationContext, _source: str
+    ) -> StateCloneFingerprintInputs:
+        raise AssertionError(
+            "fingerprint_inputs_provider must not be invoked on the skip path"
+        )
+
+    hook = build_state_clone_cutover_hook(
+        audit_recorder=audit,
+        fingerprint_inputs_provider=_never_called_provider,
+    )
+    ctx = _make_ctx(source_scope=None, previous_active_model=_previous_active_row())
+
+    hook(cursor, ctx)
+
+    assert cursor.all_staged_rows() == []
+    assert cursor.all_committed_rows() == []
+    assert cursor.executed == []
+    assert audit.skips == [
+        {
+            "reason": SKIP_REASON_TARGET_NOT_DIRECT_GRID,
+            "basin_version_id": BASIN_VERSION_ID,
+            "target_model_id": M1_MODEL_ID,
+        }
+    ]
+    assert audit.refusals == []
+
+
+# --- (g) already-current boundary documentation ---------------------------
+
+
+def test_hook_boundary_documented_for_already_current(
+    m0_m1_equal_packages: dict[str, Any],
+) -> None:
+    """Change 4's dispatcher owns the already-current short-circuit.
+
+    The pre-activation hook chain is invoked from
+    ``PsycopgModelRegistryStore._dispatch_pre_activation_hooks``; upstream
+    of that, ``_apply_model_lifecycle_transition`` (activate/switch_version)
+    and ``model_lifecycle_operation`` (rollback_version) short-circuit
+    an activation whose target is already active and never call the
+    dispatcher — so this hook is not invoked in the already-current
+    path (docs §Decision D7). This test documents the boundary: SUB-4
+    does not need to add special handling for that case; the assertion
+    below is a boundary-pin, not an execution of the short-circuit.
+    """
+
+    # The hook is a plain callable — its own contract does not detect
+    # or handle already-current; that is Change 4's contract. If we
+    # DID invoke the hook against an already-active target with a
+    # populated source scope, it would engage the clone loop like any
+    # other activation. Confirming that behaviour without touching
+    # model_registry.py is intentional: SUB-4's scope stops at the
+    # extension-point boundary. Change 4's tests
+    # (`_would_be_already_current`) own the short-circuit path.
+    cursor = _FakeCursor(initial_rows=[_seed_source_snapshot(source_id="gfs")])
+    audit = _FakeAuditRecorder()
+    hook = build_state_clone_cutover_hook(
+        audit_recorder=audit,
+        fingerprint_inputs_provider=lambda _ctx, _source: _make_fingerprint_inputs(
+            m0_m1_equal_packages
+        ),
+    )
+    already_active_target = {
+        "model_id": M1_MODEL_ID,
+        "active_flag": True,
+        "lifecycle_state": "active",
+    }
+    ctx = ModelActivationContext(
+        basin_version_id=BASIN_VERSION_ID,
+        previous_active_model=_previous_active_row(),
+        target_model=already_active_target,
+        source_scope=("gfs",),
+    )
+
+    # If Change 4 ever routes an already-current activation into the
+    # hook chain in the future, this hook would still engage (SUB-4
+    # scope). This is the current behavior of the SUB-4 module; the
+    # short-circuit protection lives in Change 4.
+    hook(cursor, ctx)
+    assert any(
+        row["model_id"] == M1_MODEL_ID and row["source_id"] == "gfs"
+        for row in cursor.all_staged_rows()
+    )
+
+
+# --- Adapter contract: cursor-bound SQL round-trip ------------------------
+
+
+def test_cursor_bound_adapter_round_trips_source_snapshot_row(
+    m0_m1_equal_packages: dict[str, Any],
+) -> None:
+    """Adapter's SELECT + UPSERT round-trip through the fake cursor.
+
+    Verifies the ``_CursorBoundStateSnapshotRepository`` SQL statements
+    are shaped to match ``_snapshot_from_row``'s dict contract: a
+    round-tripped read yields the same identity, and a persist of the
+    result reproduces every column. Guards against a future SQL edit
+    silently dropping one of the SUB-1 provenance columns.
+    """
+
+    cursor = _FakeCursor(initial_rows=[_seed_source_snapshot(source_id="gfs")])
+    repository = _CursorBoundStateSnapshotRepository(cursor)
+
+    fetched = repository.get_state_snapshot_by_model_time(
+        model_id=M0_MODEL_ID,
+        valid_time=CUTOVER_VALID_TIME,
+        source_id="gfs",
+        lead_hours=12,
+    )
+    assert fetched is not None
+    assert fetched.model_id == M0_MODEL_ID
+    assert fetched.source_id == "gfs"
+    assert fetched.checksum
+    assert fetched.model_package_version == M0_PACKAGE_VERSION
+    assert fetched.model_package_checksum == M0_PACKAGE_CHECKSUM
+    assert fetched.cycle_id == cycle_id_for(
+        "gfs", CUTOVER_VALID_TIME - timedelta(hours=12)
+    )
+    assert fetched.lead_hours == 12
+
+    stale = repository.get_latest_state_before(
+        model_id=M0_MODEL_ID,
+        source_id="gfs",
+        before_time=CUTOVER_VALID_TIME,
+    )
+    # No earlier row is seeded, so the ``latest-before`` lookup is None.
+    assert stale is None
+
+    # Upsert a synthetic clone row through the adapter and prove
+    # RETURNING * hydrates back to the same StateSnapshot.
+    synthetic_clone = replace(
+        fetched,
+        state_id=state_snapshot_id(
+            M1_MODEL_ID,
+            fetched.valid_time,
+            source_id=fetched.source_id,
+            cycle_id=fetched.cycle_id,
+            lead_hours=fetched.lead_hours,
+        ),
+        model_id=M1_MODEL_ID,
+        model_package_version=M1_PACKAGE_VERSION,
+        model_package_checksum=M1_PACKAGE_CHECKSUM,
+        cloned_from_state_id=fetched.state_id,
+        cloned_from_model_id=M0_MODEL_ID,
+        clone_gate_fingerprint="f" * 64,
+    )
+    persisted = repository.upsert_state_snapshot(synthetic_clone)
+    assert persisted.state_id == synthetic_clone.state_id
+    assert persisted.model_id == M1_MODEL_ID
+    assert persisted.cloned_from_state_id == fetched.state_id
+    assert persisted.cloned_from_model_id == M0_MODEL_ID
+    assert persisted.clone_gate_fingerprint == "f" * 64
+    assert cursor.all_staged_rows(), "upsert must land in the staging area"
+
+
+# --- Regression pin: legacy-target skip does NOT touch DB -----------------
+
+
+def test_legacy_target_skip_never_opens_a_repository(
+    m0_m1_equal_packages: dict[str, Any],
+) -> None:
+    """The skip paths must run before ``repository_factory`` is invoked.
+
+    If the applicability predicate ever regressed to build the adapter
+    before the skip check, a legacy-target activation would briefly hold
+    a cursor-bound repository — harmless in practice but wasted work
+    that also complicates future factory injection. Pin the ordering by
+    injecting a factory that raises when called.
+    """
+
+    def _factory_that_must_not_be_called(_cursor: Any) -> Any:
+        raise AssertionError("repository_factory must not run on the skip path")
+
+    cursor = _FakeCursor()
+    audit = _FakeAuditRecorder()
+
+    hook = build_state_clone_cutover_hook(
+        audit_recorder=audit,
+        fingerprint_inputs_provider=lambda _ctx, _source: _make_fingerprint_inputs(
+            m0_m1_equal_packages
+        ),
+        repository_factory=_factory_that_must_not_be_called,
+    )
+    ctx = _make_ctx(source_scope=None, previous_active_model=_previous_active_row())
+    hook(cursor, ctx)  # must NOT raise
+    assert audit.skips[0]["reason"] == SKIP_REASON_TARGET_NOT_DIRECT_GRID
+
+
+# --- Module import guard for CYCLE_ID (used only in docstrings) -----------
+
+
+def test_module_imports_shared_constants() -> None:
+    """Sanity: the fixtures share the same constants as SUB-2 tests.
+
+    Guarding this trivial re-export catches an accidental rename that
+    would silently divert this test module from the SUB-2 fixtures.
+    """
+    assert isinstance(CYCLE_ID, str) and CYCLE_ID
+    assert isinstance(Path(str(CUTOVER_VALID_TIME)), Path)
