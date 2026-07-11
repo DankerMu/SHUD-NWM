@@ -112,19 +112,35 @@ class StationForcingFileNotFoundError(ObjectStoreForcingError):
         source_id: str,
         cycle_time: datetime,
         model_id: str,
+        active_flag: bool | None = None,
     ) -> None:
-        super().__init__(
-            status_code=404,
-            code="STATION_FORCING_FILE_NOT_FOUND",
-            message=f"Station forcing file not found: {expected_path}",
-            details={
+        # B4 leak fix (Change `direct-grid-display-cutover` §3.2 /
+        # `active-model-dynamic-resolution`): for an inactive / evidence-only
+        # station row the disk-miss response keeps the stable
+        # `STATION_FORCING_FILE_NOT_FOUND` code but desensitizes both the
+        # details and the message so it cannot enumerate the object-store-root-
+        # relative storage key (`expected_path`) or the
+        # `(basin_version_id, model_id, source_id, cycle_time)` tuple.
+        # Active-station behavior (``active_flag`` is True or unknown/None) is
+        # unchanged — the full 6-field details block is preserved.
+        if active_flag is False:
+            message = f"Station forcing file not found: {station_id}"
+            details: dict[str, Any] = {"station_id": station_id}
+        else:
+            message = f"Station forcing file not found: {expected_path}"
+            details = {
                 "station_id": station_id,
                 "expected_path": str(expected_path),
                 "basin_version_id": basin_version_id,
                 "source_id": source_id,
                 "cycle_time": _format_time(cycle_time),
                 "model_id": model_id,
-            },
+            }
+        super().__init__(
+            status_code=404,
+            code="STATION_FORCING_FILE_NOT_FOUND",
+            message=message,
+            details=details,
         )
 
 
@@ -400,6 +416,7 @@ def read_station_forcing_csv(
         source_id=source_normalized,
         cycle_time=cycle_time_utc,
         model_id=model_id,
+        active_flag=station.active_flag,
     )
     lines = _read_csv_lines(
         expected_path,
@@ -410,6 +427,7 @@ def read_station_forcing_csv(
         source_id=source_normalized,
         cycle_time=cycle_time_utc,
         model_id=model_id,
+        active_flag=station.active_flag,
     )
     parsed_tuples = _parse_station_csv(
         lines,
@@ -479,6 +497,7 @@ def _read_csv_lines(
     source_id: str,
     cycle_time: datetime,
     model_id: str,
+    active_flag: bool | None = None,
 ) -> list[str]:
     try:
         file_fd = open_file_no_follow(expected_path, containment_root=object_store_root)
@@ -527,6 +546,7 @@ def _read_csv_lines(
             source_id=source_id,
             cycle_time=cycle_time,
             model_id=model_id,
+            active_flag=active_flag,
         ) from error
     except (OSError, SafeFilesystemError, ValueError) as error:
         raise StationForcingFileMalformedError(
@@ -546,6 +566,7 @@ def _ensure_path_under_object_store_root(
     source_id: str,
     cycle_time: datetime,
     model_id: str,
+    active_flag: bool | None = None,
 ) -> None:
     root = _absolute_path_without_resolving_symlinks(object_store_root)
     checked_path = _absolute_path_without_resolving_symlinks(expected_path)
@@ -559,6 +580,7 @@ def _ensure_path_under_object_store_root(
             source_id=source_id,
             cycle_time=cycle_time,
             model_id=model_id,
+            active_flag=active_flag,
         ) from error
 
 
