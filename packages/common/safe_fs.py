@@ -17,12 +17,7 @@ class SafeFilesystemError(RuntimeError):
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 _FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-_READ_FLAGS = (
-    os.O_RDONLY
-    | getattr(os, "O_NOFOLLOW", 0)
-    | getattr(os, "O_CLOEXEC", 0)
-    | getattr(os, "O_NONBLOCK", 0)
-)
+_READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
 
 
 def verify_directory_no_follow(path: Path) -> Path:
@@ -80,17 +75,27 @@ def atomic_write_bytes_no_follow(
     *,
     containment_root: Path | None = None,
     temp_suffix: str = "tmp",
+    mode: int | None = None,
+    require_durable_replace: bool = False,
 ) -> Path:
-    """Atomically replace a file without following symlinked parents or targets."""
+    """Atomically replace a file without following symlinked parents or targets.
+
+    ``require_durable_replace`` opts callers into a strict post-replace directory
+    fsync and parent-identity check.  The default retains the helper's historical
+    best-effort directory-fsync error model for existing callers.
+    """
 
     target = _expand_path(path)
     parent_fd, parent_path = _open_parent_dir(target, containment_root=containment_root, create=True)
     temp_name = f".{target.name}.{uuid.uuid4().hex}.{temp_suffix}"
     file_fd: int | None = None
+    replaced = False
     try:
         _verify_fd_matches_path(parent_fd, parent_path)
         _reject_existing_symlink(parent_fd, target.name, target)
-        file_fd = os.open(temp_name, _FILE_FLAGS, 0o666, dir_fd=parent_fd)
+        file_fd = os.open(temp_name, _FILE_FLAGS, 0o666 if mode is None else mode, dir_fd=parent_fd)
+        if mode is not None:
+            os.fchmod(file_fd, mode)
         view = memoryview(content)
         while view:
             written = os.write(file_fd, view)
@@ -100,21 +105,71 @@ def atomic_write_bytes_no_follow(
         file_fd = None
         _verify_fd_matches_path(parent_fd, parent_path)
         os.replace(temp_name, target.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-        try:
-            os.fsync(parent_fd)
-        except OSError:
-            pass
+        replaced = True
+        if require_durable_replace:
+            try:
+                os.fsync(parent_fd)
+            except OSError as error:
+                raise SafeFilesystemError(
+                    f"Atomic replacement for {target} completed but directory fsync failed: {error}",
+                    kind="indeterminate",
+                ) from error
+            try:
+                _verify_fd_matches_path(parent_fd, parent_path)
+            except SafeFilesystemError as error:
+                raise SafeFilesystemError(
+                    f"Atomic replacement for {target} completed but parent identity changed: {error}",
+                    kind="indeterminate",
+                ) from error
+        else:
+            try:
+                os.fsync(parent_fd)
+            except OSError:
+                pass
     except SafeFilesystemError:
         _close_file_fd(file_fd)
-        _unlink_temp(parent_fd, temp_name)
+        if not replaced:
+            _unlink_temp(parent_fd, temp_name)
         raise
     except OSError as error:
         _close_file_fd(file_fd)
-        _unlink_temp(parent_fd, temp_name)
-        raise SafeFilesystemError(f"Failed to write {target}: {error}", kind="io") from error
+        if not replaced:
+            _unlink_temp(parent_fd, temp_name)
+        kind = "indeterminate" if replaced else "io"
+        raise SafeFilesystemError(f"Failed to write {target}: {error}", kind=kind) from error
     finally:
         os.close(parent_fd)
     return target
+
+
+def open_directory_no_follow(path: Path, *, containment_root: Path | None = None) -> int:
+    """Open and pin a directory beneath an optional containment root without following symlinks."""
+
+    target = _expand_path(path)
+    root, parts = _anchor_for(target, containment_root=containment_root)
+    root_fd = _open_directory_no_follow(root)
+    fd = root_fd
+    try:
+        for part in parts:
+            next_fd = _open_child_dir(fd, part, target)
+            if fd != root_fd:
+                os.close(fd)
+            fd = next_fd
+        directory_fd = os.dup(root_fd) if fd == root_fd else fd
+        if fd != root_fd:
+            fd = -1
+        try:
+            _verify_fd_matches_path(directory_fd, target)
+            return directory_fd
+        except Exception:
+            os.close(directory_fd)
+            raise
+    except Exception:
+        if fd != -1 and fd != root_fd:
+            os.close(fd)
+        raise
+    finally:
+        os.close(root_fd)
 
 
 def write_bytes_no_follow_exclusive(
@@ -233,7 +288,14 @@ def read_bytes_limited_no_follow(path: Path, *, max_bytes: int, containment_root
 
     file_fd = open_file_no_follow(path, containment_root=containment_root)
     try:
-        return os.read(file_fd, max_bytes + 1)
+        content = bytearray()
+        limit = max_bytes + 1
+        while len(content) < limit:
+            chunk = os.read(file_fd, limit - len(content))
+            if not chunk:
+                break
+            content.extend(chunk)
+        return bytes(content)
     except OSError as error:
         raise SafeFilesystemError(f"Failed to read {path}: {error}", kind="io") from error
     finally:
@@ -302,6 +364,8 @@ def _list_directory_no_follow(
                 if max_entries is not None and len(names) > max_entries:
                     break
         return names
+    except FileNotFoundError:
+        raise
     except OSError as error:
         raise SafeFilesystemError(f"Failed to list directory {target}: {error}", kind="io") from error
     finally:
