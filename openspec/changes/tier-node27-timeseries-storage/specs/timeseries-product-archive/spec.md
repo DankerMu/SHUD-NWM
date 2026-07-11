@@ -239,7 +239,11 @@ reported as indeterminate publication and SHALL NOT report `published`.
 Failures before replace preserve the old receipt byte-for-byte; after-replace
 failures must fail closed rather than falsely claim either successful
 publication or preservation. The configured parent is therefore an
-operator-controlled, non-rotating namespace during publication. Failure
+operator-controlled, non-rotating namespace during publication. A fully
+validated, file-fsynced receipt may already be visible after an indeterminate
+post-replace failure; the later retention consumer SHALL independently apply
+the exactly-two-receipt content gates and SHALL NOT add producer exit status,
+a sidecar marker or systemd state as a third gate. Failure
 diagnostics go to stderr and never replace the gate receipt. Strict
 post-replace durability/identity checks SHALL be explicitly enabled for this
 receipt and SHALL NOT silently change the shared helper's default contract for

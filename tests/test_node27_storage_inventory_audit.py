@@ -198,6 +198,29 @@ def test_product_archive_checksum_mismatch_is_absent_and_reported(tmp_path: Path
     assert "mismatch" in receipt["windows"][0]["evidence"][0]
 
 
+def test_product_and_hot_manifests_enforce_actual_cap_plus_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setattr(audit, "MAX_MANIFEST_BYTES", 4)
+
+    subject = _subject()
+    paths = audit.archive_provenance_paths(config.archive_root, identity=subject.archive_identity)
+    paths.archive.parent.mkdir(parents=True)
+    paths.archive.write_bytes(b"x")
+    paths.manifest.write_bytes(b"12345")
+    with pytest.raises(audit.AuditBlocked, match=r"manifest exceeds 4 bytes"):
+        audit.verify_product_archive(subject, config.archive_root)
+
+    key = "forcing/gfs/2026050100/basin-a/model-a"
+    package = config.object_store_root / key
+    package.mkdir(parents=True)
+    (package / "forcing_package.json").write_bytes(b"12345")
+    hot_subject = replace(subject, hot_uri=f"s3://nhms/{key}")
+    with pytest.raises(audit.AuditBlocked, match=r"manifest exceeds 4 bytes"):
+        audit.verify_hot(hot_subject, config)
+
+
 def test_missing_archive_root_is_ordinary_absence(tmp_path: Path) -> None:
     assert audit.verify_product_archive(_subject(), tmp_path / "missing") is None
     assert audit.discover_salvage(tmp_path / "missing") == ()
@@ -433,6 +456,54 @@ def test_salvage_total_entry_cap_is_global(tmp_path: Path, monkeypatch: pytest.M
         lambda _fd, _label, _max: [str(index) for index in range(audit.MAX_SALVAGE_ENTRIES + 1)],
     )
     with pytest.raises(audit.AuditBlocked, match="total entries"):
+        audit.discover_salvage(config.archive_root)
+
+
+def test_salvage_fd_manifest_enforces_actual_cap_plus_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    manifest = config.archive_root / "db-export/a/manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_bytes(b"12345")
+    monkeypatch.setattr(audit, "MAX_MANIFEST_BYTES", 4)
+
+    with pytest.raises(audit.AuditBlocked, match=r"manifest exceeds 4 bytes"):
+        audit.discover_salvage(config.archive_root)
+
+
+def test_salvage_manifest_count_cap_is_independent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    for identifier in ("a", "b"):
+        content = identifier.encode()
+        object_path = config.archive_root / f"db-export/{identifier}/data.csv.zst"
+        object_path.parent.mkdir(parents=True)
+        object_path.write_bytes(content)
+        subject = _subject(identifier=f"forcing-{identifier}")
+        manifest = {
+            "schema_version": "1.0",
+            "provenance": "db-export",
+            "generated_at": audit._time(NOW),
+            "source_database": {"database": "nhms", "instance_id": "node27"},
+            "exports": [
+                {
+                    "selector": subject.selector,
+                    "exported_row_count": 1,
+                    "columns": ["forcing_version_id"],
+                    "object": {
+                        "path": object_path.relative_to(config.archive_root).as_posix(),
+                        "sha256": hashlib.sha256(content).hexdigest(),
+                        "size_bytes": len(content),
+                    },
+                }
+            ],
+        }
+        (object_path.parent / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    monkeypatch.setattr(audit, "MAX_SALVAGE_MANIFESTS", 1)
+    with pytest.raises(audit.AuditBlocked, match=r"exceeds 1 manifests"):
         audit.discover_salvage(config.archive_root)
 
 
@@ -776,20 +847,66 @@ def test_empty_inventory_and_partial_clone_provenance_are_blocked() -> None:
         audit.load_inventory(_Connection([[{"audit_time": NOW}], [], [], [state]]))
 
 
+def test_inventory_subject_cap_precedes_field_parsing_and_accepts_exact_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(audit, "MAX_SUBJECTS", 2)
+    with pytest.raises(audit.AuditBlocked, match=r"exceeds 2 subjects"):
+        audit.load_inventory(
+            _Connection(
+                [
+                    [{"audit_time": NOW}],
+                    [{"invalid_forcing_row": True}],
+                    [{"invalid_run_row": True}],
+                    [{"invalid_state_row": True}],
+                ]
+            )
+        )
+
+    forcing = {
+        "forcing_version_id": "forcing-a",
+        "model_id": "model-a",
+        "source_id": "gfs",
+        "cycle_time": START,
+        "start_time": START,
+        "end_time": END,
+        "forcing_package_uri": "missing",
+        "checksum": "a" * 64,
+        "basin_version_id": "basin-a",
+    }
+    run = {
+        "run_id": "run-a",
+        "model_id": "model-a",
+        "basin_version_id": "basin-a",
+        "source_id": "gfs",
+        "cycle_time": START,
+        "start_time": START,
+        "end_time": END,
+        "run_manifest_uri": "s3://nhms/runs/run-a/input/manifest.json",
+        "output_uri": "s3://nhms/runs/run-a/output/",
+        "detail_present": 1,
+    }
+    _audit_time, subjects = audit.load_inventory(
+        _Connection([[{"audit_time": NOW}], [forcing], [run], []])
+    )
+    assert [subject.stable_key for subject in subjects] == [("forcing", "forcing-a"), ("runs", "run-a")]
+
+
 def test_publish_is_mode_0600_atomic_and_preserves_old_on_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "receipt.json"
-    path.write_bytes(b"old")
-    receipt = _receipt([_subject()])
-    audit.publish_receipt(path, receipt)
-    assert json.loads(path.read_text()) == receipt
+    old_receipt = _receipt([_subject(identifier="forcing-old")])
+    new_receipt = _receipt([_subject(identifier="forcing-new")])
+    audit.publish_receipt(path, old_receipt)
+    assert json.loads(path.read_text()) == old_receipt
     assert path.stat().st_mode & 0o777 == 0o600
     before = path.read_bytes()
     monkeypatch.setattr(os, "replace", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("boom")))
     with pytest.raises(audit.AuditBlocked, match="boom"):
-        audit.publish_receipt(path, receipt)
+        audit.publish_receipt(path, new_receipt)
     assert path.read_bytes() == before
+    assert json.loads(path.read_text()) == old_receipt
     assert not list(tmp_path.glob(".*.tmp"))
 
 
@@ -818,7 +935,9 @@ def test_publish_parent_swap_after_replace_is_indeterminate(
 
 def test_publish_directory_fsync_eio_is_indeterminate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "receipt.json"
-    path.write_bytes(b"old")
+    old_receipt = _receipt([_subject(identifier="forcing-old")])
+    new_receipt = _receipt([_subject(identifier="forcing-new")])
+    audit.publish_receipt(path, old_receipt)
     original_fsync = os.fsync
 
     def fail_directory_fsync(fd: int) -> None:
@@ -828,7 +947,12 @@ def test_publish_directory_fsync_eio_is_indeterminate(tmp_path: Path, monkeypatc
 
     monkeypatch.setattr(safe_fs.os, "fsync", fail_directory_fsync)
     with pytest.raises(audit.PublicationIndeterminate, match="indeterminate.*directory fsync failed"):
-        audit.publish_receipt(path, _receipt([_subject()]))
+        audit.publish_receipt(path, new_receipt)
+    published = json.loads(path.read_text(encoding="utf-8"))
+    assert published == new_receipt
+    schema = json.loads(Path("schemas/archive_completeness_receipt.schema.json").read_text())
+    jsonschema.Draft7Validator(schema, format_checker=jsonschema.FormatChecker()).validate(published)
+    audit.validate_receipt_semantics(published, [_subject(identifier="forcing-new")])
 
 
 def test_default_atomic_writer_keeps_legacy_best_effort_directory_fsync(

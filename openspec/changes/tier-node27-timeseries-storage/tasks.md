@@ -172,7 +172,7 @@ Order is load-bearing:
 
 ## 2. Inventory audit and product archive lane (`timeseries-product-archive`)
 
-- [ ] 2.1 Build the inventory audit
+- [x] 2.1 Build the inventory audit
   (`scripts/node27_storage_inventory_audit.py`) emitting the
   archive-completeness receipt.
   Evidence floor: compares DB coverage (`hydro_run` cycles,
@@ -292,8 +292,11 @@ Order is load-bearing:
   no pathname protocol can linearize against a privileged rename after its
   final identity check. Failures before replace preserve the old receipt
   byte-for-byte; failures discovered after replace are reported as an
-  indeterminate publication that retention must refuse, never as successful
-  preservation. These strict post-replace checks are an explicit receipt-only
+  indeterminate publication, never as successful preservation. Because
+  replace may already have made a fully validated, file-fsynced payload
+  visible, #855 independently evaluates the currently configured receipt by
+  its own no-follow/schema/freshness/coverage rules; neither producer exit
+  status nor a sidecar/systemd marker becomes a third gate. These strict post-replace checks are an explicit receipt-only
   mode of the shared atomic-write helper; its default behavior remains
   compatible for existing non-receipt callers that have not adopted the
   indeterminate/possibly-committed error model. Failure diagnostics are emitted as JSON to stderr, never as
@@ -404,7 +407,9 @@ Order is load-bearing:
     identity check and `os.replace`, or directory fsync returns `EIO`.
     Expected: post-replace parent verification/fsync blocks `published` and
     reports indeterminate publication; no write follows the replacement
-    parent pathname and retention cannot consume this run as fresh evidence.
+    parent pathname. The configured target may already contain the new
+    file-fsynced receipt, and #855 later accepts or rejects only the currently
+    readable two receipt contents, not this producer's exit status.
   - Input: forcing/run metadata has a non-zero UTC minute, second or
     microsecond in `cycle_time`.
     Expected: inventory blocks before archive lookup instead of truncating to
@@ -453,6 +458,15 @@ Order is load-bearing:
     exact salvage with valid product archive.
     Expected: verdict remains complete through the valid copy, while evidence
     retains the corrupt sibling's size/checksum mismatch in both directions.
+  Implementation evidence (#847): local focused audit suite 92 passed and
+  the broader audit/storage/schema/object-store/state/journal regression set
+  627 passed; ruff, strict OpenSpec validation, lock check and diff check
+  passed. On node-27 at exact candidate `d3e74f5a`, the read-only forcing and
+  run plans completed in 36.364 ms and 26.274 ms with identity-leading
+  Timescale chunk `Index Only Scan` nodes and no detail full scan/hash
+  aggregate. The isolated non-production audit emitted a schema/semantic
+  valid mode-0600 receipt for 1,585 subjects (733 forcing, 852 runs): 1,357
+  complete hot-object-store, 228 gaps, and exactly 228 salvage selectors.
   Node-27 oracle for #847 is limited to the read-only transaction/query plan,
   real forcing/run URI shapes, and a non-publishing temporary audit run.
   Current `state_snapshot` inventory is empty, so provider/legacy/clone state
