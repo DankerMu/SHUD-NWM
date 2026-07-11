@@ -431,7 +431,7 @@ def test_state_reference_factory_normalizes_equivalent_aware_hour_to_utc() -> No
             "legacy-unqualified",
             "model-v1",
             datetime(2026, 7, 11, tzinfo=UTC),
-            "derived only from source_id=None",
+            "derived only from source_id None or an empty string",
         ),
         ("gfs", "../unsafe", datetime(2026, 7, 11, tzinfo=UTC), "unsafe archive identity component"),
     ],

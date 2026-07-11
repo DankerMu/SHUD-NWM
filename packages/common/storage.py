@@ -264,7 +264,8 @@ def archive_identity_for_state_reference(
         source = LEGACY_UNQUALIFIED_ARCHIVE_SOURCE
     elif source_id == LEGACY_UNQUALIFIED_ARCHIVE_SOURCE:
         raise ArchiveConfigurationError(
-            f"state reference source {LEGACY_UNQUALIFIED_ARCHIVE_SOURCE!r} is derived only from source_id=None"
+            f"state reference source {LEGACY_UNQUALIFIED_ARCHIVE_SOURCE!r} "
+            "is derived only from source_id None or an empty string"
         )
     else:
         source = source_id
