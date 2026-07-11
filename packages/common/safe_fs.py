@@ -76,8 +76,14 @@ def atomic_write_bytes_no_follow(
     containment_root: Path | None = None,
     temp_suffix: str = "tmp",
     mode: int | None = None,
+    require_durable_replace: bool = False,
 ) -> Path:
-    """Atomically replace a file without following symlinked parents or targets."""
+    """Atomically replace a file without following symlinked parents or targets.
+
+    ``require_durable_replace`` opts callers into a strict post-replace directory
+    fsync and parent-identity check.  The default retains the helper's historical
+    best-effort directory-fsync error model for existing callers.
+    """
 
     target = _expand_path(path)
     parent_fd, parent_path = _open_parent_dir(target, containment_root=containment_root, create=True)
@@ -100,20 +106,26 @@ def atomic_write_bytes_no_follow(
         _verify_fd_matches_path(parent_fd, parent_path)
         os.replace(temp_name, target.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
         replaced = True
-        try:
-            os.fsync(parent_fd)
-        except OSError as error:
-            raise SafeFilesystemError(
-                f"Atomic replacement for {target} completed but directory fsync failed: {error}",
-                kind="indeterminate",
-            ) from error
-        try:
-            _verify_fd_matches_path(parent_fd, parent_path)
-        except SafeFilesystemError as error:
-            raise SafeFilesystemError(
-                f"Atomic replacement for {target} completed but parent identity changed: {error}",
-                kind="indeterminate",
-            ) from error
+        if require_durable_replace:
+            try:
+                os.fsync(parent_fd)
+            except OSError as error:
+                raise SafeFilesystemError(
+                    f"Atomic replacement for {target} completed but directory fsync failed: {error}",
+                    kind="indeterminate",
+                ) from error
+            try:
+                _verify_fd_matches_path(parent_fd, parent_path)
+            except SafeFilesystemError as error:
+                raise SafeFilesystemError(
+                    f"Atomic replacement for {target} completed but parent identity changed: {error}",
+                    kind="indeterminate",
+                ) from error
+        else:
+            try:
+                os.fsync(parent_fd)
+            except OSError:
+                pass
     except SafeFilesystemError:
         _close_file_fd(file_fd)
         if not replaced:

@@ -194,7 +194,9 @@ requires a schema-valid salvage manifest plus size/sha256 verification of the
 exact selector's object; discovery under the archive `db-export/` namespace
 SHALL be bounded and symlink-safe: at most 10,000 manifests, at most eight
 levels and 100,000 total entries beneath `db-export/`, and at most 16 MiB per
-manifest. Inventory SHALL be capped at 100,000 subjects; exceeding any bound
+manifest. Directory enumeration, entry stat, child open, manifest read and
+referenced-object hash SHALL use one held descriptor-bound `db-export` tree;
+the audit SHALL NOT reopen stored manifest paths after traversal. Inventory SHALL be capped at 100,000 subjects; exceeding any bound
 blocks publication.
 Run output traversal SHALL inspect at most 10,000 entries and eight levels per
 run, failing closed on overflow while still checking all bounded siblings.
@@ -238,7 +240,10 @@ Failures before replace preserve the old receipt byte-for-byte; after-replace
 failures must fail closed rather than falsely claim either successful
 publication or preservation. The configured parent is therefore an
 operator-controlled, non-rotating namespace during publication. Failure
-diagnostics go to stderr and never replace the gate receipt. Runtime schema validation SHALL
+diagnostics go to stderr and never replace the gate receipt. Strict
+post-replace durability/identity checks SHALL be explicitly enabled for this
+receipt and SHALL NOT silently change the shared helper's default contract for
+unmigrated non-receipt callers. Runtime schema validation SHALL
 use a direct production dependency.
 Archive minimum age SHALL reuse the shared 30-day retention safety invariant
 and SHALL reject explicit zero/below-30 inputs rather than falling back.

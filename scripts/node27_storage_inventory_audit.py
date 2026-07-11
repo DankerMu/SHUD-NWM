@@ -281,55 +281,193 @@ def discover_salvage(
 ) -> tuple[dict[str, Any], ...]:
     """Return verified exact selectors from a bounded, symlink-safe namespace scan."""
     base = archive_root / "db-export"
+    schema = _load_schema(SALVAGE_SCHEMA_PATH)
     try:
-        base_names = sorted(_list_directory(base, archive_root, MAX_SALVAGE_ENTRIES))
+        base_fd = open_directory_no_follow(base, containment_root=archive_root)
     except FileNotFoundError:
         return ()
-    manifests: list[Path] = []
+    except (OSError, SafeFilesystemError) as error:
+        raise AuditBlocked(f"cannot open salvage namespace safely {base}: {error}") from error
+    found: dict[str, dict[str, Any]] = {}
+    seen: set[str] = set()
     scanned_entries = 0
-    stack: list[tuple[Path, int, list[str] | None]] = [(base, 0, base_names)]
-    while stack:
-        directory, depth, prefetched = stack.pop()
-        names = (
-            prefetched
-            if prefetched is not None
-            else sorted(_list_directory(directory, archive_root, MAX_SALVAGE_ENTRIES - scanned_entries))
+    manifest_count = 0
+
+    def walk(directory_fd: int, directory: Path, depth: int) -> None:
+        nonlocal manifest_count, scanned_entries
+        names = _list_salvage_directory_fd(
+            directory_fd, directory, MAX_SALVAGE_ENTRIES - scanned_entries
         )
         if scanned_entries + len(names) > MAX_SALVAGE_ENTRIES:
             raise AuditBlocked(f"salvage scan exceeds {MAX_SALVAGE_ENTRIES} total entries")
         scanned_entries += len(names)
         for name in names:
             entry = directory / name
-            info = _safe_stat(entry, archive_root)
+            info = _stat_salvage_entry(directory_fd, name, entry)
+            if stat.S_ISLNK(info.st_mode):
+                raise AuditBlocked(f"unsafe salvage symlink: {entry}")
             if stat.S_ISDIR(info.st_mode):
                 if depth >= MAX_SALVAGE_DEPTH:
                     raise AuditBlocked(f"salvage scan exceeds depth {MAX_SALVAGE_DEPTH}: {entry}")
-                stack.append((entry, depth + 1, None))
-            elif entry.name == "manifest.json" and stat.S_ISREG(info.st_mode):
-                manifests.append(entry)
-                if len(manifests) > MAX_SALVAGE_MANIFESTS:
+                child_fd = _open_salvage_child_dir(directory_fd, name, entry, info)
+                try:
+                    walk(child_fd, entry, depth + 1)
+                finally:
+                    os.close(child_fd)
+            elif name == "manifest.json" and stat.S_ISREG(info.st_mode):
+                manifest_count += 1
+                if manifest_count > MAX_SALVAGE_MANIFESTS:
                     raise AuditBlocked(f"salvage scan exceeds {MAX_SALVAGE_MANIFESTS} manifests")
-    schema = _load_schema(SALVAGE_SCHEMA_PATH)
-    found: dict[str, dict[str, Any]] = {}
-    seen: set[str] = set()
-    for path in manifests:
-        manifest = _read_json(path, archive_root)
-        _validate_schema(manifest, schema, str(path))
-        for export in manifest["exports"]:
-            selector = export["selector"]
-            key = _canonical(selector)
-            if key in seen:
-                raise AuditBlocked(f"duplicate/conflicting salvage selector: {key}")
-            seen.add(key)
-            obj = export["object"]
-            target = archive_root / obj["path"]
-            size, digest = _size_sha256(target, archive_root)
-            if size != obj["size_bytes"] or digest != obj["sha256"]:
-                if mismatch_evidence is not None:
-                    mismatch_evidence[key] = "db-export object size/sha256 mismatch"
-                continue
-            found[key] = selector
+                manifest_fd = _open_salvage_regular_file(directory_fd, name, entry, info)
+                try:
+                    manifest = _read_json_fd(manifest_fd, entry)
+                finally:
+                    os.close(manifest_fd)
+                _validate_schema(manifest, schema, str(entry))
+                for export in manifest["exports"]:
+                    selector = export["selector"]
+                    key = _canonical(selector)
+                    if key in seen:
+                        raise AuditBlocked(f"duplicate/conflicting salvage selector: {key}")
+                    seen.add(key)
+                    obj = export["object"]
+                    object_fd = _open_salvage_object(base_fd, obj["path"], base)
+                    try:
+                        object_label = base / Path(obj["path"]).relative_to("db-export")
+                        size, digest = _size_sha256_fd(object_fd, object_label)
+                    finally:
+                        os.close(object_fd)
+                    if size != obj["size_bytes"] or digest != obj["sha256"]:
+                        if mismatch_evidence is not None:
+                            mismatch_evidence[key] = "db-export object size/sha256 mismatch"
+                        continue
+                    found[key] = selector
+
+    try:
+        walk(base_fd, base, 0)
+    finally:
+        os.close(base_fd)
     return tuple(found[key] for key in sorted(found))
+
+
+def _list_salvage_directory_fd(directory_fd: int, label: Path, max_entries: int) -> list[str]:
+    names: list[str] = []
+    try:
+        with os.scandir(directory_fd) as entries:
+            for entry in entries:
+                names.append(entry.name)
+                if len(names) > max_entries:
+                    break
+    except OSError as error:
+        raise AuditBlocked(f"cannot list salvage directory safely {label}: {error}") from error
+    return sorted(names)
+
+
+def _stat_salvage_entry(directory_fd: int, name: str, label: Path) -> os.stat_result:
+    try:
+        return os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError as error:
+        raise AuditBlocked(f"salvage namespace changed during traversal: {label}") from error
+    except OSError as error:
+        raise AuditBlocked(f"cannot stat salvage entry safely {label}: {error}") from error
+
+
+def _open_salvage_child_dir(
+    directory_fd: int, name: str, label: Path, expected: os.stat_result
+) -> int:
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        child_fd = os.open(name, flags, dir_fd=directory_fd)
+    except OSError as error:
+        raise AuditBlocked(f"cannot open salvage directory safely {label}: {error}") from error
+    try:
+        opened = os.fstat(child_fd)
+    except OSError as error:
+        os.close(child_fd)
+        raise AuditBlocked(f"cannot verify salvage directory safely {label}: {error}") from error
+    if opened.st_dev != expected.st_dev or opened.st_ino != expected.st_ino:
+        os.close(child_fd)
+        raise AuditBlocked(f"salvage directory changed while being opened: {label}")
+    return child_fd
+
+
+def _open_salvage_regular_file(
+    directory_fd: int, name: str, label: Path, expected: os.stat_result
+) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        file_fd = os.open(name, flags, dir_fd=directory_fd)
+    except OSError as error:
+        raise AuditBlocked(f"cannot open salvage file safely {label}: {error}") from error
+    try:
+        opened = os.fstat(file_fd)
+    except OSError as error:
+        os.close(file_fd)
+        raise AuditBlocked(f"cannot verify salvage file safely {label}: {error}") from error
+    if not stat.S_ISREG(opened.st_mode):
+        os.close(file_fd)
+        raise AuditBlocked(f"salvage object is not a regular file: {label}")
+    if opened.st_dev != expected.st_dev or opened.st_ino != expected.st_ino:
+        os.close(file_fd)
+        raise AuditBlocked(f"salvage file changed while being opened: {label}")
+    return file_fd
+
+
+def _open_salvage_object(base_fd: int, relative_path: str, base_label: Path) -> int:
+    path = Path(relative_path)
+    parts = path.parts
+    if not parts or parts[0] != "db-export" or len(parts) < 2:
+        raise AuditBlocked(f"salvage object is outside db-export namespace: {relative_path}")
+    current_fd = os.dup(base_fd)
+    try:
+        current_label = base_label
+        for part in parts[1:-1]:
+            current_label /= part
+            expected = _stat_salvage_entry(current_fd, part, current_label)
+            if not stat.S_ISDIR(expected.st_mode):
+                raise AuditBlocked(f"salvage object parent is not a directory: {current_label}")
+            child_fd = _open_salvage_child_dir(current_fd, part, current_label, expected)
+            os.close(current_fd)
+            current_fd = child_fd
+        label = current_label / parts[-1]
+        expected = _stat_salvage_entry(current_fd, parts[-1], label)
+        if not stat.S_ISREG(expected.st_mode):
+            raise AuditBlocked(f"salvage object is not a regular file: {label}")
+        return _open_salvage_regular_file(current_fd, parts[-1], label, expected)
+    finally:
+        os.close(current_fd)
+
+
+def _read_json_fd(file_fd: int, label: Path) -> dict[str, Any]:
+    content = bytearray()
+    try:
+        while len(content) <= MAX_MANIFEST_BYTES:
+            chunk = os.read(file_fd, MAX_MANIFEST_BYTES + 1 - len(content))
+            if not chunk:
+                break
+            content.extend(chunk)
+        if len(content) > MAX_MANIFEST_BYTES:
+            raise AuditBlocked(f"manifest exceeds {MAX_MANIFEST_BYTES} bytes: {label}")
+        value = json.loads(content)
+    except AuditBlocked:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AuditBlocked(f"cannot read JSON evidence {label}: {error}") from error
+    if not isinstance(value, dict):
+        raise AuditBlocked(f"JSON evidence must be an object: {label}")
+    return value
+
+
+def _size_sha256_fd(file_fd: int, label: Path) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        while chunk := os.read(file_fd, 1024 * 1024):
+            size += len(chunk)
+            digest.update(chunk)
+    except OSError as error:
+        raise AuditBlocked(f"cannot checksum evidence {label}: {error}") from error
+    return size, digest.hexdigest()
 
 
 def verify_product_archive(
@@ -646,7 +784,13 @@ def publish_receipt(path: Path, receipt: Mapping[str, Any]) -> None:
     path = _validate_output_path(path)
     payload = (_canonical(receipt) + "\n").encode()
     try:
-        atomic_write_bytes_no_follow(path, payload, containment_root=path.parent, mode=0o600)
+        atomic_write_bytes_no_follow(
+            path,
+            payload,
+            containment_root=path.parent,
+            mode=0o600,
+            require_durable_replace=True,
+        )
     except SafeFilesystemError as error:
         if error.kind == "indeterminate":
             raise PublicationIndeterminate(f"receipt publication is indeterminate: {error}") from error

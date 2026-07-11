@@ -14,6 +14,7 @@ import jsonschema
 import pytest
 
 from packages.common import safe_fs
+from packages.common.object_store import LocalObjectStore
 from scripts import node27_storage_inventory_audit as audit
 
 NOW = datetime(2026, 7, 11, 12, tzinfo=UTC)
@@ -428,11 +429,67 @@ def test_salvage_total_entry_cap_is_global(tmp_path: Path, monkeypatch: pytest.M
     (config.archive_root / "db-export").mkdir()
     monkeypatch.setattr(
         audit,
-        "_list_directory",
-        lambda _path, _root, _max: [str(index) for index in range(audit.MAX_SALVAGE_ENTRIES + 1)],
+        "_list_salvage_directory_fd",
+        lambda _fd, _label, _max: [str(index) for index in range(audit.MAX_SALVAGE_ENTRIES + 1)],
     )
     with pytest.raises(audit.AuditBlocked, match="total entries"):
         audit.discover_salvage(config.archive_root)
+
+
+def test_salvage_root_swap_after_listing_stays_on_held_fd_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    base = config.archive_root / "db-export"
+    replacement = tmp_path / "replacement-db-export"
+
+    def write_export(root: Path, selector: dict[str, object], content: bytes) -> None:
+        object_path = root / "good/data.csv.zst"
+        object_path.parent.mkdir(parents=True)
+        object_path.write_bytes(content)
+        manifest = {
+            "schema_version": "1.0",
+            "provenance": "db-export",
+            "generated_at": audit._time(NOW),
+            "source_database": {"database": "nhms", "instance_id": "node27"},
+            "exports": [
+                {
+                    "selector": selector,
+                    "exported_row_count": 1,
+                    "columns": ["forcing_version_id"],
+                    "object": {
+                        "path": "db-export/good/data.csv.zst",
+                        "sha256": hashlib.sha256(content).hexdigest(),
+                        "size_bytes": len(content),
+                    },
+                }
+            ],
+        }
+        (object_path.parent / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    original_selector = _subject(identifier="forcing-original").selector
+    replacement_selector = _subject(identifier="forcing-replacement").selector
+    write_export(base, original_selector, b"original")
+    write_export(replacement, replacement_selector, b"replacement")
+    for name in ("extra-a", "extra-b", "extra-c"):
+        (replacement / name).mkdir()
+
+    original_list = audit._list_salvage_directory_fd
+    swapped = False
+
+    def list_then_swap(directory_fd: int, label: Path, max_entries: int) -> list[str]:
+        nonlocal swapped
+        names = original_list(directory_fd, label, max_entries)
+        if label == base and not swapped:
+            swapped = True
+            base.rename(config.archive_root / "db-export-held")
+            replacement.rename(base)
+        return names
+
+    monkeypatch.setattr(audit, "MAX_SALVAGE_ENTRIES", 3)
+    monkeypatch.setattr(audit, "_list_salvage_directory_fd", list_then_swap)
+    assert audit.discover_salvage(config.archive_root) == (original_selector,)
+    assert swapped
 
 
 def test_limited_no_follow_read_loops_across_short_reads_and_returns_sentinel(
@@ -772,6 +829,23 @@ def test_publish_directory_fsync_eio_is_indeterminate(tmp_path: Path, monkeypatc
     monkeypatch.setattr(safe_fs.os, "fsync", fail_directory_fsync)
     with pytest.raises(audit.PublicationIndeterminate, match="indeterminate.*directory fsync failed"):
         audit.publish_receipt(path, _receipt([_subject()]))
+
+
+def test_default_atomic_writer_keeps_legacy_best_effort_directory_fsync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = LocalObjectStore(tmp_path / "objects")
+    original_fsync = os.fsync
+
+    def fail_directory_fsync(fd: int) -> None:
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EIO, "injected directory fsync failure")
+        original_fsync(fd)
+
+    monkeypatch.setattr(safe_fs.os, "fsync", fail_directory_fsync)
+    uri = store.write_bytes_atomic("forcing/gfs/2026050100/basin-a/model-a/data.csv", b"rows")
+    assert uri.endswith("forcing/gfs/2026050100/basin-a/model-a/data.csv")
+    assert store.read_bytes("forcing/gfs/2026050100/basin-a/model-a/data.csv") == b"rows"
 
 
 def test_publish_rejects_relative_or_symlinked_paths(tmp_path: Path) -> None:

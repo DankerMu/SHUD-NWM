@@ -241,6 +241,11 @@ Order is load-bearing:
   and duplicate/conflicting exact selectors block publication. Discovery is
   capped at 10,000 manifests, 100,000 total namespace entries and eight
   directory levels beneath `db-export/`; exceeding any bound is a blocker.
+  The salvage walk holds one descriptor-bound `db-export` tree for directory
+  enumeration, entry stat, child open, manifest bounded read and referenced
+  object streaming hash. It never stores a manifest `Path` and reopens it
+  after traversal, so a real-directory rename/swap cannot mix namespaces or
+  bypass the global entry cap.
   Inventory is capped at 100,000 subjects, and exceeding the cap blocks
   publication.
   Run-output discovery is likewise capped at 10,000 entries and eight
@@ -288,7 +293,10 @@ Order is load-bearing:
   final identity check. Failures before replace preserve the old receipt
   byte-for-byte; failures discovered after replace are reported as an
   indeterminate publication that retention must refuse, never as successful
-  preservation. Failure diagnostics are emitted as JSON to stderr, never as
+  preservation. These strict post-replace checks are an explicit receipt-only
+  mode of the shared atomic-write helper; its default behavior remains
+  compatible for existing non-receipt callers that have not adopted the
+  indeterminate/possibly-committed error model. Failure diagnostics are emitted as JSON to stderr, never as
   a replacement gate receipt. Runtime schema
   validation uses `jsonschema` as a direct production dependency, not a dev
   transitive dependency.
@@ -420,6 +428,15 @@ Order is load-bearing:
     as `NULL` versus empty string in either direction.
     Expected: provenance validation canonicalizes both to
     `legacy-unqualified`; provider-versus-legacy remains a drift blocker.
+  - Input: `db-export` is replaced after directory enumeration but before
+    child stat, manifest read or referenced-object hash; the replacement has
+    extra entries beyond the configured global cap.
+    Expected: one held FD tree supplies every operation, so evidence cannot
+    mix namespaces and replacement entries cannot bypass cap accounting.
+  - Input: directory fsync fails after replace for the inventory receipt and
+    for an existing non-receipt atomic-write caller.
+    Expected: the receipt explicitly opts into and reports indeterminate;
+    the legacy caller retains the shared helper's prior default error model.
   - Input: pinned completeness example plus a mixed forcing-gap/state-gap
     receipt.
     Expected: examples pass both JSON Schema and runtime set invariants; the
