@@ -474,6 +474,16 @@ def test_unqualified_row_at_cutover_refuses_missing_scope(
     assert result.refused is True
     assert result.refusal_scope == "missing_qualified_source"
     assert repo.upserted == []
+    assert audit.records == [
+        {
+            "refusal_code": STATE_CLONE_COLD_START_APPROVAL_REQUIRED,
+            "refusal_scope": "missing_qualified_source",
+            "m0_model_id": M0_MODEL_ID,
+            "m1_model_id": M1_MODEL_ID,
+            "source_id": SOURCE_ID,
+            "cutover_valid_time": CUTOVER_VALID_TIME,
+        }
+    ]
 
 
 # --- (d) stale latest snapshot ---------------------------------------------
@@ -537,6 +547,16 @@ def test_empty_state_schema_bytes_refused_fail_closed(
     assert result.refusal_code == STATE_CLONE_COLD_START_APPROVAL_REQUIRED
     assert result.refusal_scope == "degenerate_gate_inputs"
     assert repo.upserted == []
+    assert audit.records == [
+        {
+            "refusal_code": STATE_CLONE_COLD_START_APPROVAL_REQUIRED,
+            "refusal_scope": "degenerate_gate_inputs",
+            "m0_model_id": M0_MODEL_ID,
+            "m1_model_id": M1_MODEL_ID,
+            "source_id": SOURCE_ID,
+            "cutover_valid_time": CUTOVER_VALID_TIME,
+        }
+    ]
 
 
 def test_empty_solver_config_bytes_refused_fail_closed(
@@ -559,6 +579,16 @@ def test_empty_solver_config_bytes_refused_fail_closed(
     assert result.refused is True
     assert result.refusal_scope == "degenerate_gate_inputs"
     assert repo.upserted == []
+    assert audit.records == [
+        {
+            "refusal_code": STATE_CLONE_COLD_START_APPROVAL_REQUIRED,
+            "refusal_scope": "degenerate_gate_inputs",
+            "m0_model_id": M0_MODEL_ID,
+            "m1_model_id": M1_MODEL_ID,
+            "source_id": SOURCE_ID,
+            "cutover_valid_time": CUTOVER_VALID_TIME,
+        }
+    ]
 
 
 def test_recomputed_fingerprint_mismatches_evidence_refuses_fail_closed(
@@ -589,6 +619,88 @@ def test_recomputed_fingerprint_mismatches_evidence_refuses_fail_closed(
     assert result.refusal_code == STATE_CLONE_COLD_START_APPROVAL_REQUIRED
     assert result.refusal_scope == "evidence_fingerprint_mismatch"
     assert repo.upserted == []
+    assert audit.records == [
+        {
+            "refusal_code": STATE_CLONE_COLD_START_APPROVAL_REQUIRED,
+            "refusal_scope": "evidence_fingerprint_mismatch",
+            "m0_model_id": M0_MODEL_ID,
+            "m1_model_id": M1_MODEL_ID,
+            "source_id": SOURCE_ID,
+            "cutover_valid_time": CUTOVER_VALID_TIME,
+        }
+    ]
+
+
+def test_clone_scope_is_single_source_only(
+    m0_m1_equal_packages: dict[str, Any],
+) -> None:
+    """Per-source scope: cloning for source_A must not touch source_B rows.
+
+    spec.md pins "The clone executes per source across the activation source
+    scope" — the SUB-2 function takes ONE source_id and the caller (SUB-4)
+    iterates. Seed two qualified `(M0, source, t*)` snapshots differing only
+    on source_id; invoke the clone with source_A; assert only the source_A
+    (M1, source_A, t*) row appears and source_B remains a single (M0) row
+    with no (M1) row created and no repository upsert touching source_B.
+    """
+
+    source_a = "gfs"
+    source_b = "ifs"
+    source_a_snapshot = replace(
+        _make_source_snapshot(),
+        state_id=state_snapshot_id(
+            M0_MODEL_ID,
+            CUTOVER_VALID_TIME,
+            source_id=source_a,
+            cycle_id=cycle_id_for(source_a, CUTOVER_VALID_TIME - timedelta(hours=12)),
+            lead_hours=12,
+        ),
+        source_id=source_a,
+        cycle_id=cycle_id_for(source_a, CUTOVER_VALID_TIME - timedelta(hours=12)),
+    )
+    source_b_snapshot = replace(
+        _make_source_snapshot(),
+        state_id=state_snapshot_id(
+            M0_MODEL_ID,
+            CUTOVER_VALID_TIME,
+            source_id=source_b,
+            cycle_id=cycle_id_for(source_b, CUTOVER_VALID_TIME - timedelta(hours=12)),
+            lead_hours=12,
+        ),
+        source_id=source_b,
+        cycle_id=cycle_id_for(source_b, CUTOVER_VALID_TIME - timedelta(hours=12)),
+    )
+    repo = _FakeCloneRepository()
+    repo.add(source_a_snapshot)
+    repo.add(source_b_snapshot)
+    audit = _FakeAuditRecorder()
+
+    kwargs = _default_clone_kwargs(m0_m1_equal_packages)
+    kwargs["source_id"] = source_a
+
+    result = fingerprint_gated_state_clone(
+        repository=repo,
+        audit_recorder=audit,
+        **kwargs,
+    )
+
+    assert result.refused is False
+    assert result.cloned_row is not None
+    assert result.cloned_row.source_id == source_a
+
+    # Exactly one upsert, and it targets source_a.
+    assert len(repo.upserted) == 1
+    assert repo.upserted[0].source_id == source_a
+    assert repo.upserted[0].model_id == M1_MODEL_ID
+
+    # source_b remains a single M0 row with no (M1) sibling.
+    source_b_rows = [s for s in repo.snapshots.values() if s.source_id == source_b]
+    assert len(source_b_rows) == 1
+    assert source_b_rows[0].model_id == M0_MODEL_ID
+    assert not any(
+        s.source_id == source_b and s.model_id == M1_MODEL_ID
+        for s in repo.snapshots.values()
+    )
 
 
 # --- Integration: strict warm-start acceptance on BOTH planes --------------
