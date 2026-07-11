@@ -119,6 +119,10 @@ class StateSnapshotRepository(Protocol):
 
     def get_latest_usable_state(self, *, model_id: str, before_time: datetime) -> StateSnapshot | None: ...
 
+    def get_latest_snapshot_for_model_source(
+        self, *, model_id: str, source_id: str
+    ) -> StateSnapshot | None: ...
+
     def list_state_snapshots(
         self,
         *,
@@ -743,6 +747,35 @@ class PsycopgStateSnapshotRepository:
             LIMIT 1
             """,
             (model_id, _ensure_utc(before_time)),
+        )
+        return _snapshot_from_row(row) if row is not None else None
+
+    def get_latest_snapshot_for_model_source(
+        self, *, model_id: str, source_id: str
+    ) -> StateSnapshot | None:
+        """Return the newest ``hydro.state_snapshot`` row for a ``(model_id, source_id)`` pair.
+
+        Read-only consumer added for Epic #982 SUB-6 §3.3: the state-clone
+        index publisher walks the committed clone rows for the newly-
+        activated ``M1`` scope and republishes each into the scheduler
+        file state index. The just-committed clone row is the newest
+        ``(M1, source_id)`` row on the ``hydro.state_snapshot`` table by
+        ``(valid_time, created_at)`` — clone-time is the cutover ``t*``
+        which is always at or beyond any prior clone/QC row for the same
+        pair. No usable-flag / lineage filter here: the publisher's job
+        is to mirror the DB row verbatim into the file state index; the
+        DB's write-side ``upsert_state_snapshot`` is the source of truth.
+        """
+        row = self._fetch_optional(
+            """
+            SELECT *
+            FROM hydro.state_snapshot
+            WHERE model_id = %s
+              AND source_id = %s
+            ORDER BY valid_time DESC, created_at DESC
+            LIMIT 1
+            """,
+            (model_id, source_id),
         )
         return _snapshot_from_row(row) if row is not None else None
 
