@@ -711,4 +711,90 @@ describe('M11StationForcingPopup', () => {
     expect(screen.queryByTestId('m11-station-variable-PRCP-GFS-truncated')).not.toBeInTheDocument()
     expect(screen.queryByTestId('m11-station-variable-PRCP-IFS-truncated')).not.toBeInTheDocument()
   })
+
+  // Epic #992 SUB-6 §3.1 (P4) — the frontend resolves the live `model_id`
+  // from the currently selected latest product at request time
+  // (`stationSeriesProductIdentity` uses `product.model_id`). After a
+  // cutover, a live (latest-product) request carries the newly active
+  // `model_id`, not the pre-cutover one.
+  it('carries the newly active model_id in the live station-series request after a cutover', async () => {
+    vi.mocked(fetchHydroMetLatestProduct).mockImplementation(async (request) => {
+      const cycle = request.cycle ?? DEFAULT_CYCLE
+      return product({
+        source_id: request.source,
+        cycle_time: cycle,
+        run_id: `run-${request.source.toLowerCase()}-latest`,
+        forcing_version_id: forcingVersionFor(request.source, cycle),
+        available_issue_times: [DEFAULT_CYCLE],
+        model_id: 'm-new-post-cutover',
+      })
+    })
+    mockSeriesBySource()
+
+    render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
+    await screen.findByTestId('m11-station-popup-loaded')
+
+    const queries = vi.mocked(client.GET).mock.calls.map(([, init]) => getSeriesQuery(init))
+    expect(queries).toHaveLength(2)
+    expect(queries.map((query) => query.source_id).sort()).toEqual(['GFS', 'IFS'])
+    for (const query of queries) {
+      // The live request carries the newly active model_id sourced from
+      // fetchHydroMetLatestProduct at request time.
+      expect(query.model_id).toBe('m-new-post-cutover')
+      // Negative: the pre-cutover default (`m-1` from `product()`) MUST
+      // NOT leak — a cached / captured pin would fail this check.
+      expect(query.model_id).not.toBe('m-1')
+    }
+  })
+
+  // Epic #992 SUB-6 §3.1 (P5) — the popup does not reuse a pre-cutover
+  // `model_id` across two live station-series requests when the latest
+  // product changes (there is no client-side cache; each loadSource
+  // executes a fresh `fetchHydroMetLatestProduct`).
+  it('does not reuse a pre-cutover model_id across two live station-series requests when the latest product changes', async () => {
+    const user = userEvent.setup()
+    const cycles = [DEFAULT_CYCLE, RETAINED_OUT_CYCLE]
+    vi.mocked(fetchHydroMetLatestProduct).mockImplementation(async (request) => {
+      const cycle = request.cycle ?? DEFAULT_CYCLE
+      // Simulate a cutover across the two cycles: DEFAULT_CYCLE resolves
+      // to the pre-cutover model, RETAINED_OUT_CYCLE resolves to the
+      // post-cutover model. The point is that the popup requests each
+      // model_id fresh from the latest product per loadSource cycle.
+      const modelId = cycle === RETAINED_OUT_CYCLE ? 'm-new' : 'm-old'
+      return product({
+        source_id: request.source,
+        cycle_time: cycle,
+        run_id: `run-${request.source.toLowerCase()}-${cycle === RETAINED_OUT_CYCLE ? 'new' : 'old'}`,
+        forcing_version_id: forcingVersionFor(request.source, cycle),
+        available_issue_times: cycles,
+        model_id: modelId,
+      })
+    })
+    mockSeriesBySource()
+
+    render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
+    await screen.findByTestId('m11-station-popup-loaded')
+
+    const preFlipQueries = vi.mocked(client.GET).mock.calls.map(([, init]) => getSeriesQuery(init))
+    expect(preFlipQueries).toHaveLength(2)
+    for (const query of preFlipQueries) {
+      expect(query.model_id).toBe('m-old')
+      expect(query.cycle_time).toBe(DEFAULT_CYCLE)
+    }
+
+    vi.mocked(client.GET).mockClear()
+    await user.click(screen.getByTestId('m11-popup-issue-time'))
+    await user.click(screen.getByRole('option', { name: formatIssueTime(RETAINED_OUT_CYCLE) }))
+
+    await waitFor(() => expect(client.GET).toHaveBeenCalledTimes(2))
+    const postFlipQueries = vi.mocked(client.GET).mock.calls.map(([, init]) => getSeriesQuery(init))
+    for (const query of postFlipQueries) {
+      // The second loadSource cycle carries the NEW model_id — the
+      // popup did not reuse the pre-cutover `m-old` value from the
+      // earlier request.
+      expect(query.model_id).toBe('m-new')
+      expect(query.cycle_time).toBe(RETAINED_OUT_CYCLE)
+      expect(query.model_id).not.toBe('m-old')
+    }
+  })
 })
