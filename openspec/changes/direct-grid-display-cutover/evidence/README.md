@@ -289,6 +289,20 @@ evidence/
   exists to sample. The deferral is a recorded absence of evidence, not a
   certification gap; it is bound to backfill at the pilot's first real
   cutover.
+- **SUB-8 disposition on §4.4 screenshot bounded residual (accepted)**:
+  Epic #992 SUB-8 (#1000, tasks §5.1 + §5.2 close) formally **ACCEPTS**
+  the bounded gap per `screenshot-gap-explanation.md` §5. Rationale: the
+  retention-empty-state DOM contract is regression-locked at code level
+  by SUB-3's T1/T2/T3 tests (`apps/frontend/src/components/map/__tests__/M11StationForcingPopup.test.tsx:808-997`),
+  and the display-plane API input flip is proven live by the MVT
+  source-identity SQL diff (`2bfc915b79ad9dbe` → `f03703b827fc1462`).
+  Closing the gap would require a `VITE_ENABLE_DEBUG_HANDLES`-gated debug
+  hook in `M11MapLibreSurface.tsx` plus a synthetic `basin_boundary`
+  polygon — disproportionate scope creep for a receipt already covered
+  by two orthogonal regression locks. The gap is a "recorded absence of
+  evidence" (spec-consistent language), not a certification gap; it is
+  not bound to backfill because the SUB-3 unit lock is a stronger form
+  of the same property proof.
 
 ## 7. Phase B invocation
 
