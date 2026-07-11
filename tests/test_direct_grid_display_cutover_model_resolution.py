@@ -4,8 +4,8 @@ Change: ``direct-grid-display-cutover`` — Epic #992 SUB-6 (§3.1 /
 ``active-model-dynamic-resolution`` ADDED requirement "No display surface
 pins or caches ``model_id`` across a cutover").
 
-This suite closes the five ``model_id`` propagation paths identified by
-the SUB-6 audit and locks each with a regression test. There is NO
+This suite closes the ``model_id`` propagation paths identified by the
+SUB-6 audit and locks each with a regression test. There is NO
 server-side active-model resolution on the station-series path by design
 — ``model_id`` is a required client-supplied filter — and this suite
 locks that property rather than inventing a server-side resolver.
@@ -21,21 +21,40 @@ Path 2 — MVT tile cache key derivation
     the tile cache key exclusively from the ``active_flag=true`` station
     source identity — the SQL literal references no ``model_id`` column
     and the key self-invalidates when the SUB-1 flip flips
-    ``active_flag``.
+    ``active_flag``. The runtime lock is parametrized across the SQLite
+    dev branch and the PostGIS prod branch, and across a row-filtered
+    swap (Case A) and a same-count identity swap (Case B) — the latter
+    catches constant-digest evasions that would still pass Case A.
 
 Path 3 — explicit historical ``(cycle, model_id)`` route
-    An explicit per-request ``model_id`` still resolves the immutable
-    historical asset (mirror of the SUB-5 answerability contract, framed
-    here on the "explicit legal historical model_id" scenario).
+    Covered by SUB-5's
+    ``tests/test_direct_grid_display_cutover_history.py::
+    test_active_station_with_pre_cutover_file_serves_series`` and
+    ``::test_inactive_m0_legacy_station_with_pre_cutover_file_serves_series``
+    (both lock the "explicit legal historical ``model_id``" answerability
+    scenario). Not duplicated here.
 
 Path 4 / Path 5 — frontend live ``model_id`` resolution and no-pin
     Frontend claims are closed by the extended
     ``M11StationForcingPopup.test.tsx`` suite (``product.model_id`` at
     request time; no reuse across two live requests when the latest
-    product changes). Backend guardrail here: the object-store read path
-    and the ``PsycopgStationLookup`` MUST NOT reference any
-    "active-model resolver" identifier — the frontend is the sole owner
-    of live ``model_id`` sourcing.
+    product changes) plus the ``bootstrap.test.ts`` suite (identity
+    cache invalidator + bounded TTL constant lock). Backend guardrail
+    here: the object-store read path and the ``PsycopgStationLookup``
+    MUST NOT reference any "active-model resolver" identifier — the
+    frontend is the sole owner of live ``model_id`` sourcing.
+
+Path 6 — frontend ``latestProductIdentityCache`` bounded closure
+    ``apps/frontend/src/pages/hydroMet/bootstrap.ts`` runs a 120s
+    TTL identity cache keyed on ``(basinId, source, cycle)``. Locked in
+    the frontend suite (TTL constant byte-shape lock + explicit
+    invalidator end-to-end proof + positive in-TTL coalescing baseline).
+
+Path 7 — ``/api/v1/mvp/qhh/latest-product`` route
+    ``apps/api/routes/forecast.py::get_qhh_latest_product`` takes
+    ``model_id`` as an optional Query for the strict-identity handoff.
+    Byte-shape locked below with the shared broadened regex — no
+    server-side active-model resolver may sneak onto this route.
 """
 
 from __future__ import annotations
@@ -49,25 +68,64 @@ from typing import Any
 import pytest
 
 from apps.api.routes import data_sources as data_sources_module
+from apps.api.routes import forecast as forecast_module
 from apps.api.routes.data_sources import get_met_station_series
+from apps.api.routes.forecast import get_qhh_latest_product
 from apps.api.routes.hydro_display import _station_source_version
 from packages.common.forecast_store import ForecastStoreError
 from packages.common.object_store_forcing import (
     PsycopgStationLookup,
     StationMetadata,
-    _compute_cycle_compact,
-    _normalize_source_id,
-    _resolve_disk_path,
     raise_station_not_found,
     read_station_forcing_csv,
 )
+
+# --- shared regression-lock helpers ---------------------------------------
+
+# Broadened banned-identifier surface. The Phase 4 test-coverage review
+# flagged the earlier five-name literal list as too narrow: plausible
+# mutations like ``active_model_default``, ``fallback_active_model_id``,
+# ``pick_active_model``, ``pin_current_model``, ``derive_active_model_for_basin``,
+# and ``current_model_for_basin`` all evaded the tuple check. The regex
+# closes those escape hatches by tokenizing on ``\b`` and matching any
+# ``<qualifier>[_-]?model...`` identifier where ``<qualifier>`` is one of
+# the semantically dangerous prefixes.
+#
+# Verified against the SUT surface at authoring time — the regex matches
+# NO existing legitimate identifier in ``apps/api/routes/data_sources.py``,
+# ``apps/api/routes/forecast.py``, ``apps/api/routes/hydro_display.py``,
+# ``packages/common/object_store_forcing.py::read_station_forcing_csv``,
+# or ``PsycopgStationLookup._lookup_with_cursor`` (``model_id``,
+# ``model_instance``, ``PsycopgStationLookup``, ``read_station_forcing_csv``,
+# and ``station_source_version`` are all unaffected). The single incidental
+# match in ``object_store_forcing.py`` is the string ``active-model`` in a
+# spec-name comment — handled by ``_strip_comments_and_docstrings`` below.
+BANNED_ACTIVE_MODEL_RESOLVER_REGEX = re.compile(
+    r"\b(?:active|current|default|fallback|latest|pick|pin|derive)[_-]?model\w*\b",
+    re.IGNORECASE,
+)
+
+
+def _strip_comments_and_docstrings(source: str) -> str:
+    """Strip ``#`` comments and triple-double-quoted docstrings from source.
+
+    Test-coverage review pointed out that a naive ``re.search`` on raw
+    Python source will trip on tokens that appear only inside comments
+    or docstrings (e.g. ``# does not filter by model_id``, or the
+    incidental ``active-model`` string in a spec-name comment in
+    ``object_store_forcing.py``). Stripping both surfaces gives an
+    honest byte-shape check that reflects executable identifiers only.
+    """
+    stripped = re.sub(r'"""(?:.|\n)*?"""', "", source)
+    stripped = re.sub(r"#.*", "", stripped)
+    return stripped
+
 
 # --- fixtures shared across paths -----------------------------------------
 
 HISTORICAL_STATION_ID = "m0_legacy_forc_042"
 HISTORICAL_BASIN_VERSION_ID = "basins_heihe_vbasins"
 HISTORICAL_SOURCE_ID = "ifs"
-HISTORICAL_MODEL_ID = "basins_heihe_shud_v0"
 HISTORICAL_CYCLE_TIME = datetime(2026, 5, 15, 0, tzinfo=UTC)
 HISTORICAL_FORCING_FILENAME = "X100.75Y37.65.csv"
 
@@ -101,25 +159,6 @@ def _historical_station(*, active_flag: bool | None) -> StationMetadata:
         active_flag=active_flag,
         properties_json={"forcing_filename": HISTORICAL_FORCING_FILENAME},
     )
-
-
-def _write_historical_csv_at(root: Path, *, station: StationMetadata) -> Path:
-    path = _resolve_disk_path(
-        root,
-        _normalize_source_id(HISTORICAL_SOURCE_ID),
-        _compute_cycle_compact(HISTORICAL_CYCLE_TIME),
-        station.basin_version_id,
-        HISTORICAL_MODEL_ID,
-        station.forcing_filename or HISTORICAL_FORCING_FILENAME,
-    )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "1\t6\t20260515\t20260522\n"
-        "Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n"
-        "0\t2.500\t273.150\t0.620\t3.200\t180.000\n",
-        encoding="utf-8",
-    )
-    return path
 
 
 # =========================================================================
@@ -167,11 +206,15 @@ def test_data_sources_route_has_no_server_side_active_model_default_for_model_id
     body MUST NOT resolve ``model_id`` from an "active-model" lookup and
     MUST NOT set a server-side default. Any future refactor that
     introduces ``resolve_active_model`` / ``active_model_for_basin`` /
-    ``latest_active_model`` on this route would silently pin the display
-    to a captured ``model_id`` across a cutover and break the SUB-6
-    invariant.
+    ``latest_active_model`` / ``active_model_default`` /
+    ``fallback_active_model_id`` / ``pick_active_model`` /
+    ``derive_active_model_for_basin`` / ``current_model_for_basin`` on
+    this route would silently pin the display to a captured
+    ``model_id`` across a cutover and break the SUB-6 invariant. The
+    regex (defined once at module scope) tokenizes on ``\\b`` so any
+    ``<qualifier>[_-]?model...`` identifier trips it.
     """
-    source = inspect.getsource(get_met_station_series)
+    source = _strip_comments_and_docstrings(inspect.getsource(get_met_station_series))
 
     # Query default lock — the exact ``model_id: str | None = Query(default=None``
     # signature the route currently carries.
@@ -185,32 +228,68 @@ def test_data_sources_route_has_no_server_side_active_model_default_for_model_id
     )
 
     # Negative predicate: no "active-model" resolver identifier appears
-    # anywhere in the route body. Case-insensitive so an uppercase-
-    # mutated identifier does not evade the check.
-    banned_identifier_patterns = (
-        r"\bresolve_active_model\b",
-        r"\bactive_model_for_basin\b",
-        r"\blatest_active_model\b",
-        r"\bresolve_current_model\b",
-        r"\bget_active_model\b",
+    # anywhere in the route body. The broadened regex covers the five
+    # original literal names plus every plausible mutation surfaced by
+    # the Phase 4 test-coverage review (see BANNED_ACTIVE_MODEL_RESOLVER_REGEX
+    # docstring above).
+    banned_match = BANNED_ACTIVE_MODEL_RESOLVER_REGEX.search(source)
+    assert banned_match is None, (
+        f"forbidden active-model resolver identifier in "
+        f"get_met_station_series: {banned_match.group(0)!r} — the route "
+        "must keep model_id a required client-supplied filter"
     )
-    for pattern in banned_identifier_patterns:
-        assert re.search(pattern, source, re.IGNORECASE) is None, (
-            f"forbidden active-model resolver identifier in "
-            f"get_met_station_series: {pattern!r} — the route must keep "
-            "model_id a required client-supplied filter"
-        )
 
     # Sibling lock: the module-level identifier surface also does not
     # import an "active-model" resolver. A local ``from ... import
     # resolve_active_model`` inside a nested helper would sneak past the
     # function-source check; the module-source check closes that hole.
-    module_source = inspect.getsource(data_sources_module)
-    for pattern in banned_identifier_patterns:
-        assert re.search(pattern, module_source, re.IGNORECASE) is None, (
-            f"forbidden active-model resolver identifier imported into "
-            f"apps/api/routes/data_sources.py: {pattern!r}"
-        )
+    module_source = _strip_comments_and_docstrings(inspect.getsource(data_sources_module))
+    banned_module_match = BANNED_ACTIVE_MODEL_RESOLVER_REGEX.search(module_source)
+    assert banned_module_match is None, (
+        f"forbidden active-model resolver identifier imported into "
+        f"apps/api/routes/data_sources.py: {banned_module_match.group(0)!r}"
+    )
+
+
+def test_forecast_latest_product_route_has_no_server_side_active_model_default_for_model_id() -> None:
+    """(P7) ``get_qhh_latest_product`` keeps ``model_id`` client-supplied.
+
+    ``apps/api/routes/forecast.py::get_qhh_latest_product`` accepts
+    ``model_id: str | None = Query(default=None, ...)`` as the strict
+    identity handoff parameter. Same byte-shape contract as P1: the
+    route MUST NOT introduce any "active-model" resolver that silently
+    swaps a client-supplied ``model_id`` for a server-side "current"
+    value — that would pin the ``/mvp/qhh/latest-product`` display to a
+    captured ``model_id`` across a cutover and break the SUB-6
+    invariant on the first-class model_id-carrying display surface.
+    """
+    source = _strip_comments_and_docstrings(inspect.getsource(get_qhh_latest_product))
+
+    # Query default lock — the strict-identity ``model_id`` parameter
+    # carries a literal ``None`` default and no server-side fallback.
+    assert re.search(
+        r"model_id:\s*str\s*\|\s*None\s*=\s*Query\(\s*\n?\s*default=None",
+        source,
+    ) is not None, (
+        "expected 'model_id: str | None = Query(default=None, ...)' on "
+        "get_qhh_latest_product — a server-side default would pin the "
+        "latest-product display to a captured model_id across a cutover"
+    )
+
+    banned_match = BANNED_ACTIVE_MODEL_RESOLVER_REGEX.search(source)
+    assert banned_match is None, (
+        f"forbidden active-model resolver identifier in "
+        f"get_qhh_latest_product: {banned_match.group(0)!r} — the "
+        "latest-product route must keep model_id caller-supplied"
+    )
+
+    # Sibling module lock, same rationale as the P1 module-source check.
+    module_source = _strip_comments_and_docstrings(inspect.getsource(forecast_module))
+    banned_module_match = BANNED_ACTIVE_MODEL_RESOLVER_REGEX.search(module_source)
+    assert banned_module_match is None, (
+        f"forbidden active-model resolver identifier imported into "
+        f"apps/api/routes/forecast.py: {banned_module_match.group(0)!r}"
+    )
 
 
 # =========================================================================
@@ -234,23 +313,25 @@ def test_station_source_version_sql_does_not_reference_model_id() -> None:
     to lowercase at parse time, so an uppercase form would compile but
     would evade a case-sensitive substring check).
     """
-    source = inspect.getsource(_station_source_version)
+    raw_source = inspect.getsource(_station_source_version)
 
-    # Positive anchor: both branches (SQLite dev + PostGIS prod) still
-    # resolve from ``met.met_station`` keyed by ``basin_version_id``.
-    # This surfaces a SUT rename rather than silently passing.
-    assert "met.met_station" in source, (
+    # Positive anchors run against the RAW source so a rename hiding in
+    # unusual formatting cannot slip past.
+    assert "met.met_station" in raw_source, (
         "expected _station_source_version to query met.met_station "
         "(SUT anchor moved?)"
     )
-    assert "basin_version_id = :basin_version_id" in source, (
+    assert "basin_version_id = :basin_version_id" in raw_source, (
         "expected _station_source_version to key on basin_version_id "
         "(SUT anchor moved?)"
     )
 
-    # Negative predicate: no ``model_id`` reference anywhere in the
-    # function body — column, projection, WHERE clause, or bind param.
-    assert re.search(r"model_id", source, re.IGNORECASE) is None, (
+    # Negative predicate on executable source only — strip docstrings +
+    # ``#`` comments so a defensive comment like
+    # ``# tile cache key omits model_id on purpose`` cannot trip the
+    # check (Phase 4 test-coverage review Fold 6).
+    executable_source = _strip_comments_and_docstrings(raw_source)
+    assert re.search(r"model_id", executable_source, re.IGNORECASE) is None, (
         "_station_source_version must not reference model_id — the tile "
         "cache key is derived from station inventory identity alone "
         "(SUB-6 §3.1: 'MVT tile cache key derived from active_flag=true "
@@ -271,13 +352,24 @@ class _FakeSessionResult:
         return list(self._rows)
 
 
+class _FakeDialect:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
 class _FakeBind:
-    """Minimal ``session.get_bind()`` returning a dialect stub."""
+    """Minimal ``session.get_bind()`` returning a dialect stub.
 
-    class _Dialect:
-        name = "sqlite"
+    Parametrized so the same fake can drive both the SQLite dev branch
+    (``dialect.name == "sqlite"``) and the PostGIS prod branch of
+    ``_station_source_version``. The SQL text differs between branches
+    but the fake ``execute`` returns the constructor-supplied rows
+    verbatim, so the test author is responsible for supplying rows that
+    already reflect the branch's WHERE-clause filtering.
+    """
 
-    dialect = _Dialect()
+    def __init__(self, dialect_name: str = "sqlite") -> None:
+        self.dialect = _FakeDialect(dialect_name)
 
 
 class _FakeSession:
@@ -288,11 +380,12 @@ class _FakeSession:
     We satisfy both surfaces and return the constructor-supplied rows.
     """
 
-    def __init__(self, rows: list[dict[str, Any]]) -> None:
+    def __init__(self, rows: list[dict[str, Any]], dialect_name: str = "sqlite") -> None:
         self._rows = rows
+        self._dialect_name = dialect_name
 
     def get_bind(self) -> _FakeBind:
-        return _FakeBind()
+        return _FakeBind(self._dialect_name)
 
     def execute(self, _stmt: Any, _params: Any) -> _FakeSessionResult:
         return _FakeSessionResult(self._rows)
@@ -315,94 +408,130 @@ def _station_row(
     }
 
 
-def test_station_source_version_key_self_invalidates_when_active_flag_flips() -> None:
+@pytest.mark.parametrize("dialect_name", ["sqlite", "postgresql"])
+@pytest.mark.parametrize(
+    ("scenario", "pre_rows_factory", "post_rows_factory", "expected_pre_len", "expected_post_len"),
+    [
+        pytest.param(
+            "row_filtered_flip",
+            lambda: [
+                _station_row(station_id="alpha", active_flag=1),
+                _station_row(station_id="beta", active_flag=1),
+            ],
+            # Post-flip: "beta" was flipped to inactive; the SUT WHERE
+            # clause filters ``active_flag = 1`` (SQLite) / ``= true``
+            # (PostGIS), so the fake ``execute`` MUST already reflect
+            # the WHERE-filtered rows — post-set is just [alpha].
+            lambda: [
+                _station_row(station_id="alpha", active_flag=1),
+            ],
+            2,
+            1,
+            id="case_a_row_filtered",
+        ),
+        pytest.param(
+            "same_count_identity_swap",
+            lambda: [
+                _station_row(station_id="alpha", active_flag=1),
+                _station_row(station_id="beta", active_flag=1),
+            ],
+            # Same row count, different station identity — the real
+            # production cutover swap where a beta station is deactivated
+            # AND a gamma station is activated in the same flip. A
+            # constant-digest mutation (e.g. hashing only
+            # ``basin_version_id``) would still pass Case A because the
+            # ``:<len>`` suffix would differ, but MUST NOT pass Case B:
+            # only the digest carries the row identity change here.
+            lambda: [
+                _station_row(station_id="alpha", active_flag=1),
+                _station_row(station_id="gamma", active_flag=1),
+            ],
+            2,
+            2,
+            id="case_b_same_count_swap",
+        ),
+    ],
+)
+def test_station_source_version_key_self_invalidates_when_active_flag_flips(
+    dialect_name: str,
+    scenario: str,
+    pre_rows_factory: Any,
+    post_rows_factory: Any,
+    expected_pre_len: int,
+    expected_post_len: int,
+) -> None:
     """(P2) Tile cache key changes when the station-source inventory flips.
 
-    The SUT hashes the projected row set; two inventories that differ
-    ONLY in the ``active_flag`` column of one row MUST produce different
-    cache-key strings. This is the runtime lock on the "self-invalidates
-    on flip" property; combined with the byte-shape test above, it
-    closes the P2 claim end-to-end.
-    """
-    # Pre-flip: two rows active (identity == "before")
-    pre_flip_rows = [
-        _station_row(station_id="alpha", active_flag=1),
-        _station_row(station_id="beta", active_flag=1),
-    ]
-    # Post-flip: same rows, but "beta" has been flipped to inactive. The
-    # ``_station_source_version`` SQL WHERE clause filters
-    # ``active_flag = 1`` (SQLite branch), so the fake ``execute`` MUST
-    # already reflect the WHERE-filtered rows. That means the post-flip
-    # row set is just [alpha] — the whole point of the test.
-    post_flip_rows = [
-        _station_row(station_id="alpha", active_flag=1),
-    ]
+    Parametrized runtime lock covering:
 
+    * Case A — a ``beta`` station is deactivated; the WHERE clause drops
+      it from the projected row set. The row-count suffix differs on its
+      own, but so should the digest.
+    * Case B — a ``beta`` deactivation is paired with a ``gamma``
+      activation. The projected row count is unchanged; only the digest
+      encodes the identity change. This case catches constant-digest
+      evasions (e.g. a mutation to
+      ``hashlib.sha256(basin_version_id.encode()).hexdigest()[:16]``
+      that would still pass Case A).
+
+    Each case runs against BOTH the SQLite dev branch and the PostGIS
+    prod branch, closing the branch-coverage gap flagged in the Phase 4
+    test-coverage review.
+    """
     pre_key = _station_source_version(
-        _FakeSession(pre_flip_rows), HISTORICAL_BASIN_VERSION_ID  # type: ignore[arg-type]
+        _FakeSession(pre_rows_factory(), dialect_name=dialect_name),  # type: ignore[arg-type]
+        HISTORICAL_BASIN_VERSION_ID,
     )
     post_key = _station_source_version(
-        _FakeSession(post_flip_rows), HISTORICAL_BASIN_VERSION_ID  # type: ignore[arg-type]
+        _FakeSession(post_rows_factory(), dialect_name=dialect_name),  # type: ignore[arg-type]
+        HISTORICAL_BASIN_VERSION_ID,
     )
 
     assert pre_key != post_key, (
-        "expected tile cache key to change when the station-source "
-        "inventory flips (self-invalidates on flip); a stable key would "
-        "serve stale tiles across a cutover"
+        f"[{dialect_name}/{scenario}] expected tile cache key to change "
+        "when the station-source inventory flips (self-invalidates on "
+        "flip); a stable key would serve stale tiles across a cutover"
     )
-    # The key prefix and basin scope survive the flip — only the digest
-    # and row-count segments should differ. This proves the key format
-    # is still ``met-stations:<digest>:<basin_version_id>:<len>``.
-    assert pre_key.startswith("met-stations:")
-    assert post_key.startswith("met-stations:")
-    assert pre_key.endswith(f":{HISTORICAL_BASIN_VERSION_ID}:2")
-    assert post_key.endswith(f":{HISTORICAL_BASIN_VERSION_ID}:1")
+
+    # Key format lock — ``met-stations:<digest>:<basin_version_id>:<len>``.
+    pre_parts = pre_key.split(":")
+    post_parts = post_key.split(":")
+    assert pre_parts[0] == "met-stations" == post_parts[0]
+    assert pre_parts[2] == HISTORICAL_BASIN_VERSION_ID == post_parts[2]
+    assert int(pre_parts[3]) == expected_pre_len
+    assert int(post_parts[3]) == expected_post_len
+
+    # Digest-segment lock — the substantive claim is that the digest
+    # itself carries the inventory identity, not that the length suffix
+    # happens to change. Even in Case B where the length is stable, the
+    # digest segment MUST differ; this catches a mutation that only
+    # varies the ``:<len>`` suffix.
+    assert pre_parts[1] != post_parts[1], (
+        f"[{dialect_name}/{scenario}] expected digest segment to differ; "
+        f"pre={pre_parts[1]} post={post_parts[1]}. A constant-digest "
+        "mutation would still pass Case A on row-count change but "
+        "silently serve stale tiles across a same-count identity swap."
+    )
 
 
 # =========================================================================
 # Path 3 — explicit historical ``(cycle, model_id)`` route
 # =========================================================================
-
-
-def test_explicit_historical_model_id_still_resolves_via_read_path(
-    tmp_path: Path,
-) -> None:
-    """(P3) Explicit per-request ``model_id`` resolves the immutable historical asset.
-
-    Mirror of the SUB-5 answerability contract, framed here on the
-    SUB-6 "explicit legal historical ``model_id``" scenario: a client
-    passing an old ``model_id`` on a pre-cutover cycle MUST resolve the
-    historical file (which was written by the pre-cutover producer).
-    This is the "legal immutable-asset resolution" branch — the
-    non-goal in tasks.md §3.1 explicitly preserves this path.
-    """
-    active_station = _historical_station(active_flag=True)
-    _write_historical_csv_at(tmp_path, station=active_station)
-
-    response = read_station_forcing_csv(
-        station_lookup=_FakeStationLookup(active_station),
-        object_store_root=tmp_path,
-        station_id=HISTORICAL_STATION_ID,
-        model_id=HISTORICAL_MODEL_ID,
-        source_id=HISTORICAL_SOURCE_ID,
-        cycle_time=HISTORICAL_CYCLE_TIME,
-    )
-
-    # The response echoes the requested ``model_id`` — the read path
-    # does NOT rewrite the caller's ``model_id`` to some resolved
-    # "active" value. This is the SUB-6 P3 lock.
-    assert response["model_id"] == HISTORICAL_MODEL_ID
-    assert response["station_id"] == HISTORICAL_STATION_ID
-    assert response["cycle_time"] == HISTORICAL_CYCLE_TIME.isoformat().replace(
-        "+00:00", "Z"
-    ) or response["cycle_time"] == HISTORICAL_CYCLE_TIME
-    assert len(response["series"]) >= 1
-    assert sum(len(item["points"]) for item in response["series"]) >= 1
+#
+# Deliberately not covered in this file. SUB-5 already locks the
+# "explicit legal historical ``model_id`` resolves the immutable
+# pre-cutover asset" contract end-to-end via
+# ``tests/test_direct_grid_display_cutover_history.py``:
+#   * ``test_active_station_with_pre_cutover_file_serves_series``
+#   * ``test_inactive_m0_legacy_station_with_pre_cutover_file_serves_series``
+# Re-asserting it here would duplicate the SUB-5 fixture/contract without
+# adding new regression surface.
 
 
 # =========================================================================
 # Path 4 / Path 5 — backend guardrail (frontend claims live in
-# apps/frontend/src/components/map/__tests__/M11StationForcingPopup.test.tsx)
+# apps/frontend/src/components/map/__tests__/M11StationForcingPopup.test.tsx
+# and apps/frontend/src/pages/hydroMet/__tests__/bootstrap.test.ts)
 # =========================================================================
 
 
@@ -411,29 +540,27 @@ def test_object_store_forcing_never_calls_active_model_resolver() -> None:
 
     The frontend is the sole owner of live ``model_id`` sourcing (via
     ``fetchHydroMetLatestProduct`` at request time — locked by the
-    extended M11StationForcingPopup suite). The backend read path MUST
-    keep ``model_id`` a caller-supplied argument and MUST NOT introduce
-    an "active-model resolver" that would silently pin a captured value
-    across a cutover.
+    extended M11StationForcingPopup suite plus the bootstrap.test.ts
+    identity-cache locks). The backend read path MUST keep ``model_id``
+    a caller-supplied argument and MUST NOT introduce an "active-model
+    resolver" that would silently pin a captured value across a cutover.
 
-    Case-insensitive matching guards against uppercase-mutated
-    identifiers. The exact set of banned identifiers mirrors the P1
-    Query-default lock — any name here would represent server-side
-    active-model resolution and break the SUB-6 invariant.
+    Tokenized boundary: the banned-identifier scope is now regex-based
+    (see ``BANNED_ACTIVE_MODEL_RESOLVER_REGEX`` at module scope), so
+    plausible mutations that a five-name literal tuple would miss
+    (``active_model_default``, ``fallback_active_model_id``,
+    ``pick_active_model``, ``pin_current_model``,
+    ``derive_active_model_for_basin``, ``current_model_for_basin``, …)
+    all trip the lock. Comments and docstrings are stripped before the
+    check so a spec-name reference in a comment (e.g. the
+    ``active-model-dynamic-resolution`` change-name mentioned elsewhere
+    in the module) cannot cause a false positive.
     """
-    banned_identifier_patterns = (
-        r"\bresolve_active_model\b",
-        r"\bactive_model_for_basin\b",
-        r"\blatest_active_model\b",
-        r"\bresolve_current_model\b",
-        r"\bget_active_model\b",
-    )
-
     for target in (read_station_forcing_csv, PsycopgStationLookup._lookup_with_cursor):
-        source = inspect.getsource(target)
-        for pattern in banned_identifier_patterns:
-            assert re.search(pattern, source, re.IGNORECASE) is None, (
-                f"forbidden active-model resolver identifier in "
-                f"{target.__qualname__}: {pattern!r} — the backend read "
-                "path must keep model_id caller-supplied"
-            )
+        source = _strip_comments_and_docstrings(inspect.getsource(target))
+        banned_match = BANNED_ACTIVE_MODEL_RESOLVER_REGEX.search(source)
+        assert banned_match is None, (
+            f"forbidden active-model resolver identifier in "
+            f"{target.__qualname__}: {banned_match.group(0)!r} — the "
+            "backend read path must keep model_id caller-supplied"
+        )

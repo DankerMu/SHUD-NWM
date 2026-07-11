@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs'
+import { resolve as pathResolve } from 'node:path'
+
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { client } from '@/api/client'
@@ -597,6 +600,109 @@ describe('fetchHydroMetLatestProduct', () => {
     expect(client.GET).toHaveBeenCalledWith('/api/v1/mvp/qhh/latest-product', {
       params: { query: { source: 'GFS', identity_only: true, basin_id: 'basins_qhh' } },
     })
+  })
+
+  // -----------------------------------------------------------------
+  // SUB-6 P6 — bounded closure of the latestProductIdentityCache.
+  // -----------------------------------------------------------------
+  // The Phase 4 correctness reviewer noted that bootstrap.ts maintains
+  // a 120s TTL identity cache keyed on ``(basinId, source, cycle)`` —
+  // ``model_id`` is NOT in the key. Within 120s of a cutover a live
+  // latest-product fetch may return a pre-cutover product (with its
+  // stale ``model_id``). Rather than pretend that residual doesn't
+  // exist, these three tests document the bounded closure honestly:
+  //   * the TTL constant is byte-locked against silent bumps
+  //   * ``_clearHydroMetLatestProductIdentityCache`` is a real
+  //     invalidator wired to production callsites (cutover-adjacent
+  //     flush knob)
+  //   * within-TTL coalescing is the current documented behavior
+  // A stronger cutover-signaled invalidation is out of SUB-6 scope.
+  it('P6: HYDRO_MET_LATEST_PRODUCT_IDENTITY_CACHE_TTL_MS is byte-locked at 120_000', () => {
+    // Byte-shape lock against the ``bootstrap.ts`` source. The constant
+    // is module-local (not exported), so an ``fs.readFileSync`` check
+    // is the honest way to prove the TTL literal has not silently been
+    // bumped upward (which would widen the residual staleness window
+    // without a corresponding cutover-invalidation contract). Vitest
+    // runs from ``apps/frontend/`` so ``process.cwd()`` resolves to the
+    // frontend package root — the source path is stable relative to
+    // that root regardless of test file location.
+    const bootstrapPath = pathResolve(process.cwd(), 'src/pages/hydroMet/bootstrap.ts')
+    const source = readFileSync(bootstrapPath, 'utf-8')
+
+    expect(source).toMatch(
+      /const\s+HYDRO_MET_LATEST_PRODUCT_IDENTITY_CACHE_TTL_MS\s*=\s*120_000\b/,
+    )
+  })
+
+  it('P6: _clearHydroMetLatestProductIdentityCache invalidates cached identity end-to-end', async () => {
+    // Two sequential live responses with different ``model_id`` values
+    // simulate a mid-cutover swap. Without a flush the second fetch
+    // would return the cached (pre-cutover) product; the explicit
+    // ``_clearHydroMetLatestProductIdentityCache()`` call between the
+    // fetches proves the invalidator wires end-to-end.
+    vi.mocked(client.GET)
+      .mockResolvedValueOnce({
+        data: success(latestProduct({ model_id: 'basins_qhh_shud_v1' })),
+        error: undefined,
+      } as never)
+      .mockResolvedValueOnce({
+        data: success(latestProduct({ model_id: 'basins_qhh_shud_v2' })),
+        error: undefined,
+      } as never)
+
+    const first = await fetchHydroMetLatestProduct({
+      source: 'GFS',
+      cycle: null,
+      basinId: 'basins_qhh',
+    })
+    expect(first.model_id).toBe('basins_qhh_shud_v1')
+
+    _clearHydroMetLatestProductIdentityCache()
+
+    const second = await fetchHydroMetLatestProduct({
+      source: 'GFS',
+      cycle: null,
+      basinId: 'basins_qhh',
+    })
+    expect(second.model_id).toBe('basins_qhh_shud_v2')
+    expect(second).not.toBe(first)
+    expect(client.GET).toHaveBeenCalledTimes(2)
+  })
+
+  it('P6: within-TTL same-key repeat returns the cached identity (bounded residual)', async () => {
+    // Positive baseline documenting the bounded residual: within the
+    // TTL window a same-key repeat coalesces on the first response,
+    // even if the underlying live endpoint would now return a
+    // different (post-cutover) product. This is the residual the P6
+    // audit records — not a bug to lock against, but the honest
+    // scope boundary. A stronger cutover-signaled invalidation is
+    // out of SUB-6 scope; the invalidator test above covers the
+    // manual flush knob available today.
+    vi.mocked(client.GET)
+      .mockResolvedValueOnce({
+        data: success(latestProduct({ model_id: 'basins_qhh_shud_v1' })),
+        error: undefined,
+      } as never)
+      .mockResolvedValueOnce({
+        data: success(latestProduct({ model_id: 'basins_qhh_shud_v2' })),
+        error: undefined,
+      } as never)
+
+    const first = await fetchHydroMetLatestProduct({
+      source: 'GFS',
+      cycle: null,
+      basinId: 'basins_qhh',
+    })
+    const second = await fetchHydroMetLatestProduct({
+      source: 'GFS',
+      cycle: null,
+      basinId: 'basins_qhh',
+    })
+
+    expect(first.model_id).toBe('basins_qhh_shud_v1')
+    expect(second).toBe(first)
+    expect(second.model_id).toBe('basins_qhh_shud_v1')
+    expect(client.GET).toHaveBeenCalledTimes(1)
   })
 
   it('prefetches only GFS and IFS latest-product identities for a basin and cycle', async () => {
