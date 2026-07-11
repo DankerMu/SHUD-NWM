@@ -76,6 +76,7 @@ from tests.test_state_clone import (
     SOURCE_ID,
     _default_category_files,
     _make_source_snapshot,
+    _make_valid_direct_grid_manifest,
     _write_package,
     _write_sp_att,
 )
@@ -340,7 +341,21 @@ BASIN_VERSION_ID = "basin_v1"
 
 
 def _target_model_row() -> dict[str, Any]:
-    return {"model_id": M1_MODEL_ID, "model_package_version": M1_PACKAGE_VERSION}
+    # SUB-7 §4.1: the M1 target must classify as direct-grid under
+    # Change 4's single classifier for the no-reverse-clone guard at the
+    # clone signature to admit the clone. `resource_profile.direct_grid_forcing`
+    # carries the same shape ``tests.test_state_clone._make_valid_direct_grid_manifest``
+    # returns — a manifest that passes ``load_forcing_mapping_contract_from_manifest``
+    # cleanly.
+    return {
+        "model_id": M1_MODEL_ID,
+        "model_package_version": M1_PACKAGE_VERSION,
+        "resource_profile": {
+            "direct_grid_forcing": _make_valid_direct_grid_manifest(
+                applicable_source_ids=("gfs", "ifs"),
+            ),
+        },
+    }
 
 
 def _previous_active_row() -> dict[str, Any]:
@@ -759,6 +774,14 @@ def test_hook_boundary_documented_for_already_current(
         "model_id": M1_MODEL_ID,
         "active_flag": True,
         "lifecycle_state": "active",
+        # SUB-7 §4.1: target must classify as direct-grid so the guard
+        # admits the clone — the already-current short-circuit is Change 4's
+        # job; the SUB-4 hook still engages here.
+        "resource_profile": {
+            "direct_grid_forcing": _make_valid_direct_grid_manifest(
+                applicable_source_ids=("gfs", "ifs"),
+            ),
+        },
     }
     ctx = ModelActivationContext(
         basin_version_id=BASIN_VERSION_ID,

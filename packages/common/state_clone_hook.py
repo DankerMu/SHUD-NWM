@@ -276,6 +276,15 @@ def build_state_clone_cutover_hook(
 
         repository = factory(cursor)
 
+        # SUB-7 §4.1: extract the M1 target's forcing-mapping manifest
+        # once per hook invocation so every per-source clone call carries
+        # the same input to the no-reverse-clone guard at the clone
+        # signature. Missing `resource_profile` or `direct_grid_forcing`
+        # collapses to `{}` — the guard will refuse fail-closed inside
+        # the clone core with `reverse_clone_target_not_direct_grid`,
+        # which is the correct behavior (target is not direct-grid).
+        m1_forcing_mapping_manifest = _extract_target_direct_grid_manifest(ctx.target_model)
+
         # An explicit cold-start approval (SUB-5 task 3.2) unconditionally
         # covers the sources it names — those sources are skipped without
         # invoking the fingerprint gate, and the approval is recorded on
@@ -320,6 +329,7 @@ def build_state_clone_cutover_hook(
                 m1_recorded_hydrologic_core_fingerprint=inputs.m1_recorded_hydrologic_core_fingerprint,
                 state_schema_bytes=inputs.state_schema_bytes,
                 solver_config_bytes=inputs.solver_config_bytes,
+                m1_forcing_mapping_manifest=m1_forcing_mapping_manifest,
             )
             if result.refused:
                 # ``fingerprint_gated_state_clone`` already emitted a
@@ -335,6 +345,28 @@ def build_state_clone_cutover_hook(
                 )
 
     return _hook
+
+
+def _extract_target_direct_grid_manifest(
+    target_model: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Return the M1 target's ``direct_grid_forcing`` manifest, or ``{}``.
+
+    SUB-7 §4.1 defense-in-depth guard input. Reads
+    ``target_model["resource_profile"]["direct_grid_forcing"]`` and returns
+    it as a plain dict; returns ``{}`` when either level is missing or is
+    not a mapping. The clone core's guard then classifies the manifest
+    through Change 4's single classifier and refuses fail-closed with
+    ``reverse_clone_target_not_direct_grid`` when the classifier does not
+    return a valid direct-grid contract.
+    """
+    resource_profile = target_model.get("resource_profile")
+    if not isinstance(resource_profile, Mapping):
+        return {}
+    direct_grid = resource_profile.get("direct_grid_forcing")
+    if not isinstance(direct_grid, Mapping):
+        return {}
+    return dict(direct_grid)
 
 
 def _build_approval_record(

@@ -21,8 +21,16 @@ Refusal contract
 Every rejection surfaces the stable error code
 ``state_clone_cold_start_approval_required`` (docs §11.3 clause 2) and
 records a compact refusal audit record whose ``refusal_scope`` names WHY
-the clone was blocked. The five distinguished refusal scopes are:
+the clone was blocked. The six distinguished refusal scopes are:
 
+* ``reverse_clone_target_not_direct_grid`` — defense-in-depth guard at
+  the clone function's own signature (Epic #982 SUB-7 §4.1). The target
+  ``M1`` model does NOT classify as direct-grid under Change 4's single
+  classifier (``workers.forcing_producer.direct_grid_contract.load_forcing_mapping_contract_from_manifest``);
+  the contract is absent, malformed, or non-``direct_grid``. Enforces the
+  one-way channel invariant (state flows legacy → direct-grid but NEVER
+  direct-grid → legacy) at the clone signature so no future caller can
+  bypass Change 4's legacy-reactivation guard. Fail-closed, no override.
 * ``degenerate_gate_inputs`` — ``state_schema_bytes`` or
   ``solver_config_bytes`` is empty. Prevents a symmetric-empty degenerate
   fingerprint from false-passing the equality gate.
@@ -31,7 +39,9 @@ the clone was blocked. The five distinguished refusal scopes are:
   exists but the ``valid_time == t*`` row does not (Gate G10 condition 4;
   the strict validator would reject a stale checkpoint anyway).
 * ``unequal_fingerprint`` — ``verify_hydrologic_core_fingerprint_equal``
-  raises ``HydrologicCoreFingerprintMismatchError``.
+  raises ``HydrologicCoreFingerprintMismatchError``. Fingerprint-unequal
+  ``M1 → M1'`` fix-forward candidates surface here; docs §11.3 clause 2
+  routes this stable code into the explicit cold-start approval path.
 * ``evidence_fingerprint_mismatch`` — the recomputed ``M1`` fingerprint
   passes the equality gate but does NOT match the value recorded in the
   ``M1`` mapping evidence package, so the core-invariance claim the clone
@@ -70,6 +80,10 @@ from packages.common.state_manager import (
     StateSnapshot,
     state_snapshot_id,
 )
+from workers.forcing_producer.direct_grid_contract import (
+    DirectGridContractError,
+    load_forcing_mapping_contract_from_manifest,
+)
 from workers.mapping_builder.rewrite import (
     HydrologicCoreFingerprintMismatchError,
     verify_hydrologic_core_fingerprint_equal,
@@ -92,6 +106,11 @@ STATE_CLONE_COLD_START_APPROVAL_REQUIRED = "state_clone_cold_start_approval_requ
 # Gate G10 condition 4: the qualified source snapshot is the +12h successor
 # checkpoint. Pinned here so the qualification check cannot silently drift.
 _QUALIFIED_LEAD_HOURS = 12
+
+# SUB-7 §4.1 defense-in-depth refusal scope. Kept as a module-level
+# constant so downstream audit-consumer tests can key on the exact literal
+# and cannot silently diverge on typo.
+_REVERSE_CLONE_TARGET_NOT_DIRECT_GRID = "reverse_clone_target_not_direct_grid"
 
 
 class StateCloneRepository(Protocol):
@@ -147,7 +166,7 @@ class StateCloneResult:
     is ``False``. On refusal ``cloned_row`` is ``None``, ``refused`` is
     ``True``, ``refusal_code`` is
     :data:`STATE_CLONE_COLD_START_APPROVAL_REQUIRED`, and
-    ``refusal_scope`` names one of the five distinguished scopes
+    ``refusal_scope`` names one of the six distinguished scopes
     documented in this module's docstring.
     """
 
@@ -173,6 +192,7 @@ def fingerprint_gated_state_clone(
     m1_recorded_hydrologic_core_fingerprint: str,
     state_schema_bytes: bytes,
     solver_config_bytes: bytes,
+    m1_forcing_mapping_manifest: Mapping[str, Any],
     repository: StateCloneRepository,
     audit_recorder: StateCloneAuditRecorder,
 ) -> StateCloneResult:
@@ -230,6 +250,21 @@ def fingerprint_gated_state_clone(
     with ``refused=True`` and ``refusal_code`` set to
     :data:`STATE_CLONE_COLD_START_APPROVAL_REQUIRED` (docs §11.3 clause 2
     routes this into the explicit cold-start approval path).
+
+    No-reverse-clone guard (SUB-7 §4.1)
+    -----------------------------------
+    The ``m1_forcing_mapping_manifest`` kwarg is the ``M1`` target's
+    forcing-mapping manifest / resource-profile ``direct_grid_forcing``
+    section. Before any other check, this function classifies the target
+    through Change 4's single classifier
+    (``workers.forcing_producer.direct_grid_contract.load_forcing_mapping_contract_from_manifest``);
+    if the classifier returns ``None`` or raises
+    :class:`DirectGridContractError` — i.e. the contract is absent,
+    malformed, or non-``direct_grid`` — the clone refuses fail-closed
+    with ``refusal_scope='reverse_clone_target_not_direct_grid'`` and no
+    override. This defense-in-depth check at the clone signature
+    guarantees that no future caller can bypass Change 4's
+    legacy-reactivation guard by driving the clone at a legacy target.
     """
 
     audit_context = _build_audit_context(
@@ -238,6 +273,26 @@ def fingerprint_gated_state_clone(
         source_id=source_id,
         cutover_valid_time=cutover_valid_time,
     )
+
+    # 0. No-reverse-clone guard (SUB-7 §4.1). Classify the M1 target
+    #    through Change 4's single classifier BEFORE any other gate check
+    #    so the one-way channel invariant (state legacy → direct-grid,
+    #    NEVER direct-grid → legacy) is enforced at the clone function's
+    #    own signature. Absent, malformed, or non-`direct_grid` classifies
+    #    as legacy-mapping — refuse fail-closed with no override so no
+    #    future caller can bypass Change 4's legacy-reactivation guard.
+    try:
+        classified_contract = load_forcing_mapping_contract_from_manifest(
+            dict(m1_forcing_mapping_manifest)
+        )
+    except DirectGridContractError:
+        classified_contract = None
+    if classified_contract is None:
+        return _refuse(
+            audit_recorder,
+            audit_context,
+            scope=_REVERSE_CLONE_TARGET_NOT_DIRECT_GRID,
+        )
 
     # 1. Degenerate gate inputs. Empty state_schema_bytes / solver_config_bytes
     #    on both sides would collapse to a shared trivial hash (SHA-256 of
