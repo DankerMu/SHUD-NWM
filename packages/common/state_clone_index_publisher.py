@@ -38,10 +38,19 @@ Byte-boundary
 Read-only consumer of the SUB-2/3/4/5 clone-write side. Does not touch
 ``packages/common/state_clone.py`` or ``packages/common/state_clone_hook.py``;
 they stay byte-frozen. Uses
-:meth:`packages.common.state_manager.PsycopgStateSnapshotRepository.get_latest_snapshot_for_model_source`
+:meth:`packages.common.state_manager.PsycopgStateSnapshotRepository.get_latest_clone_row_for_model_source`
 — the newly-added minimal read method — to fetch the committed clone
 row for each source without needing to thread ``cutover_valid_time``
 through the hook path.
+
+Shadow-proof lookup (SUB-6 Round-1 fold): the read method filters by
+``clone_gate_fingerprint IS NOT NULL`` so prior SHUD forecast /
+save-state rows (which never populate ``clone_gate_fingerprint``)
+cannot shadow a fresh clone written at a backdated ``t*``. Clone rows
+ALWAYS carry a non-NULL ``clone_gate_fingerprint`` (SUB-2 core write
+path); non-clone rows ALWAYS carry NULL. The filter isolates clone
+lineage unambiguously without threading ``cutover_valid_time`` through
+:class:`PostCommitPublishContext`.
 """
 
 from __future__ import annotations
@@ -115,10 +124,13 @@ def build_default_state_index_publisher(
     ----------
     state_snapshot_repo
         Read side of ``hydro.state_snapshot``. The publisher uses
-        :meth:`get_latest_snapshot_for_model_source` — the newest row
-        for ``(target_model_id, source_id)`` is the just-committed
-        clone row (its ``valid_time`` is the cutover ``t*``, at or
-        beyond any prior clone/QC row for the same pair).
+        :meth:`get_latest_clone_row_for_model_source` — the newest
+        CLONE row (``clone_gate_fingerprint IS NOT NULL``) for
+        ``(target_model_id, source_id)`` is the just-committed clone
+        row. The clone-provenance filter guarantees that prior
+        forecast / save-state rows at higher ``valid_time`` cannot
+        shadow a fresh clone written at a backdated ``t*`` (SUB-6
+        Round-1 fold — shadow-proof lookup).
     file_state_index_repo
         Write side of the scheduler file state index.
         :meth:`upsert_state_snapshot` is the exact seam node-22 reads
@@ -141,7 +153,7 @@ def build_default_state_index_publisher(
         if ctx.source_scope is None:
             return
         for source_id in ctx.source_scope:
-            snapshot = state_snapshot_repo.get_latest_snapshot_for_model_source(
+            snapshot = state_snapshot_repo.get_latest_clone_row_for_model_source(
                 model_id=ctx.target_model_id,
                 source_id=source_id,
             )
