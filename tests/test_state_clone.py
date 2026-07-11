@@ -703,6 +703,163 @@ def test_clone_scope_is_single_source_only(
     )
 
 
+# --- SUB-3 (§2.2 / §2.3): clone-row identity + cloned_from provenance ------
+
+
+def test_equal_fingerprint_clone_populates_all_three_provenance_columns(
+    m0_m1_equal_packages: dict[str, Any],
+) -> None:
+    """Green path: successful clone writes the three provenance columns.
+
+    Epic #982 SUB-3 §2.2: the clone row's ``cloned_from_state_id`` /
+    ``cloned_from_model_id`` name the M0 origin, and the
+    ``clone_gate_fingerprint`` records the shared hash the equality gate
+    accepted on (the same value returned by
+    ``verify_hydrologic_core_fingerprint_equal``). The clone row's
+    ``state_id`` still uses the ``state_snapshot_id`` convention under M1
+    and differs from the source row's ``state_id`` (docs §Decision 2).
+    ``run_id`` remains the M0 producing run's id (docs §Decision 3).
+    """
+
+    source = _make_source_snapshot()
+    repo = _FakeCloneRepository()
+    repo.add(source)
+    audit = _FakeAuditRecorder()
+
+    result = fingerprint_gated_state_clone(
+        repository=repo,
+        audit_recorder=audit,
+        **_default_clone_kwargs(m0_m1_equal_packages),
+    )
+
+    assert result.refused is False
+    assert result.cloned_row is not None
+    clone = result.cloned_row
+
+    # All three provenance columns populated with the pinned values.
+    assert clone.cloned_from_state_id == source.state_id
+    assert clone.cloned_from_model_id == M0_MODEL_ID
+    assert clone.clone_gate_fingerprint == m0_m1_equal_packages["fingerprint_hash"]
+
+    # Identity: state_id follows the convention under M1 and differs from source.
+    assert clone.state_id != source.state_id
+    assert clone.state_id == state_snapshot_id(
+        M1_MODEL_ID,
+        source.valid_time,
+        source_id=source.source_id,
+        cycle_id=source.cycle_id,
+        lead_hours=source.lead_hours,
+    )
+
+    # M0 producing run's id is preserved on the clone row (Decision 3).
+    assert clone.run_id == source.run_id
+
+
+def test_attribution_rule_attributes_to_m1_via_model_id_not_run_id(
+    m0_m1_equal_packages: dict[str, Any],
+) -> None:
+    """MUST-level attribution: model_id + cloned_from_* — never run_id alone.
+
+    Encodes the Epic #982 SUB-3 attribution invariant: a warm-start-lineage
+    reader that keys on ``clone.model_id`` sees the M1 target identity; a
+    reader that keys on ``clone.run_id`` still sees the M0 producing run's
+    id. The two legitimately diverge, and the caller MUST NOT use
+    ``run_id`` alone for model attribution — the audit trail is
+    ``model_id`` + ``cloned_from_model_id`` + ``cloned_from_state_id``.
+    """
+
+    source = _make_source_snapshot()
+    repo = _FakeCloneRepository()
+    repo.add(source)
+    audit = _FakeAuditRecorder()
+
+    result = fingerprint_gated_state_clone(
+        repository=repo,
+        audit_recorder=audit,
+        **_default_clone_kwargs(m0_m1_equal_packages),
+    )
+
+    assert result.refused is False
+    assert result.cloned_row is not None
+    clone = result.cloned_row
+
+    # Snapshot attributes to M1 via model_id...
+    assert clone.model_id == M1_MODEL_ID
+    # ...while run_id still points at the M0 producing run.
+    assert clone.run_id == source.run_id
+    # ...and the audit trail names M0 explicitly via cloned_from_model_id.
+    assert clone.cloned_from_model_id == M0_MODEL_ID
+
+    # Encoded MUST tuple: (attribution model, origin model, producer prefix).
+    assert (
+        clone.model_id,
+        clone.cloned_from_model_id,
+        clone.run_id.startswith("fcst_"),
+    ) == (M1_MODEL_ID, M0_MODEL_ID, True)
+
+    # Defensive contrast: reading run_id alone would mis-attribute to M0.
+    # The clone.run_id embeds M0_MODEL_ID (it is the M0 producing run's id),
+    # so a run_id-only reader cannot recover the M1 target identity — the
+    # ``model_id`` + ``cloned_from_*`` columns exist precisely for this.
+    assert M0_MODEL_ID in clone.run_id
+    assert M1_MODEL_ID not in clone.run_id
+
+
+def test_pre_clone_and_legacy_rows_keep_null_provenance_and_remain_selectable(
+    m0_m1_equal_packages: dict[str, Any],
+) -> None:
+    """Legacy rows without provenance stay selectable and NULL on all three.
+
+    Epic #982 SUB-3 §2.2 non-goal: no data backfill. Rows persisted before
+    migration ``000046`` have ``NULL`` in the three provenance columns.
+    The unchanged warm-start lookup (SUB-2 preserved the query shape) must
+    still return them, and the three provenance fields must read as
+    ``None`` from the ``StateSnapshot`` dataclass.
+    """
+
+    # Legacy source row — constructed WITHOUT any of the three provenance
+    # kwargs, exercising the dataclass defaults.
+    legacy = StateSnapshot(
+        state_id=state_snapshot_id(
+            M0_MODEL_ID,
+            CUTOVER_VALID_TIME,
+            source_id=SOURCE_ID,
+            cycle_id=CYCLE_ID,
+            lead_hours=12,
+        ),
+        model_id=M0_MODEL_ID,
+        run_id=f"fcst_{SOURCE_ID}_{CYCLE_ID}_{M0_MODEL_ID}",
+        valid_time=CUTOVER_VALID_TIME,
+        state_uri="states/gfs/basin_v1_m0/2026061506/state.cfg.ic",
+        checksum="sha256:legacy-state",
+        usable_flag=True,
+        source_id=SOURCE_ID,
+        cycle_id=CYCLE_ID,
+        lead_hours=12,
+        model_package_version=M0_PACKAGE_VERSION,
+        model_package_checksum=M0_PACKAGE_CHECKSUM,
+        original_shud_filename="run.cfg.ic",
+    )
+    assert legacy.cloned_from_state_id is None
+    assert legacy.cloned_from_model_id is None
+    assert legacy.clone_gate_fingerprint is None
+
+    repo = _FakeCloneRepository()
+    repo.add(legacy)
+
+    # The unchanged SUB-2 lookup still returns the legacy row.
+    fetched = repo.get_state_snapshot_by_model_time(
+        model_id=M0_MODEL_ID,
+        valid_time=CUTOVER_VALID_TIME,
+        source_id=SOURCE_ID,
+        lead_hours=12,
+    )
+    assert fetched is legacy
+    assert fetched.cloned_from_state_id is None
+    assert fetched.cloned_from_model_id is None
+    assert fetched.clone_gate_fingerprint is None
+
+
 # --- Integration: strict warm-start acceptance on BOTH planes --------------
 
 

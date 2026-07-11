@@ -44,9 +44,18 @@ Provenance columns
 ------------------
 The three ``hydro.state_snapshot`` columns added by migration ``000046`` —
 ``cloned_from_state_id``, ``cloned_from_model_id``, ``clone_gate_fingerprint``
-— stay ``NULL`` on this write. Populating them is the SUB-3 task per Epic
-#982; SUB-2's contract is the fingerprint gate + column-disposition write
-only.
+— are populated on a successful clone (Epic #982 SUB-3, §2.2):
+
+* ``cloned_from_state_id`` = the source ``M0`` snapshot ``state_id``.
+* ``cloned_from_model_id`` = the source ``M0`` ``model_id``.
+* ``clone_gate_fingerprint`` = the ``hydrologic_core_fingerprint`` hash the
+  equality gate accepted on for this clone (docs §Gate G10 authority).
+
+The MUST-level attribution rule: a warm-start-lineage read attributes the
+state to ``M1`` via ``model_id`` + ``cloned_from_*`` — never via
+``run_id`` alone, because ``run_id`` still points at the ``M0`` producing
+run (docs §Decision 3). See ``tests/test_state_clone.py`` for the
+attribution-rule test.
 """
 
 from __future__ import annotations
@@ -210,9 +219,12 @@ def fingerprint_gated_state_clone(
       ``M1`` identity + preserved lineage inputs, so the clone row's ID
       embeds the new model identity and cannot collide with the source
       row's ID.
-    * Left ``NULL`` in this SUB: ``cloned_from_state_id``,
-      ``cloned_from_model_id``, ``clone_gate_fingerprint`` — provenance
-      write is SUB-3's contract per Epic #982.
+    * Populated per Epic #982 SUB-3: ``cloned_from_state_id`` = source
+      ``M0`` ``state_id``; ``cloned_from_model_id`` = ``M0`` ``model_id``;
+      ``clone_gate_fingerprint`` = the accepted equality-gate
+      ``hydrologic_core_fingerprint`` hash. Attribution to ``M1`` reads
+      ``model_id`` + ``cloned_from_*``, never ``run_id`` alone (docs
+      §Decision 3).
 
     Refusal paths write no row and return a :class:`StateCloneResult`
     with ``refused=True`` and ``refusal_code`` set to
@@ -303,6 +315,7 @@ def fingerprint_gated_state_clone(
         m1_model_id=m1_model_id,
         m1_model_package_version=m1_model_package_version,
         m1_model_package_checksum=m1_model_package_checksum,
+        clone_gate_fingerprint=shared_fingerprint.hash,
     )
     persisted = repository.upsert_state_snapshot(clone_row)
     return StateCloneResult(
@@ -342,14 +355,18 @@ def _build_clone_row(
     m1_model_id: str,
     m1_model_package_version: str,
     m1_model_package_checksum: str,
+    clone_gate_fingerprint: str,
 ) -> StateSnapshot:
     """Compose the ``(M1, source, t*)`` row with the pinned column disposition.
 
     ``state_id`` uses the ``state_snapshot_id`` convention under ``M1``'s
     identity + the preserved lineage inputs so the ID embeds ``M1`` and
-    is collision-free against the source row's ID. The provenance columns
-    added by migration ``000046`` remain ``NULL`` on this write (SUB-3
-    populates them).
+    is collision-free against the source row's ID. The three provenance
+    columns added by migration ``000046`` are populated per Epic #982
+    SUB-3: ``cloned_from_state_id`` / ``cloned_from_model_id`` name the
+    ``M0`` origin row + model, and ``clone_gate_fingerprint`` records the
+    accepted equality-gate hash so downstream audit can pin exactly which
+    ``hydrologic_core_fingerprint`` proved core-invariance for this row.
     """
 
     return StateSnapshot(
@@ -373,6 +390,9 @@ def _build_clone_row(
         model_package_version=m1_model_package_version,
         model_package_checksum=m1_model_package_checksum,
         original_shud_filename=source_snapshot.original_shud_filename,
+        cloned_from_state_id=source_snapshot.state_id,
+        cloned_from_model_id=source_snapshot.model_id,
+        clone_gate_fingerprint=clone_gate_fingerprint,
     )
 
 

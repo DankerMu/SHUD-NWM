@@ -68,6 +68,11 @@ class StateSnapshot:
     model_package_version: str | None = None
     model_package_checksum: str | None = None
     original_shud_filename: str | None = None
+    # Clone provenance (Epic #982 SUB-1 migration 000046). All optional,
+    # default None for backward compatibility with pre-clone / legacy rows.
+    cloned_from_state_id: str | None = None
+    cloned_from_model_id: str | None = None
+    clone_gate_fingerprint: str | None = None
 
 
 @dataclass(frozen=True)
