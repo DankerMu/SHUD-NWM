@@ -185,6 +185,44 @@ def _format_point(point: Any) -> str:
 
 
 @dataclass(frozen=True)
+class ColdStartApprovalInput:
+    """Explicit cold-start approval carried on an activation request.
+
+    Epic #982 SUB-5 (``mapping-variant-state-compatibility`` task 3.2):
+    an operator with sys_admin authority may override a fingerprint
+    refusal by naming the exact ``covered_source_ids`` they authorize
+    to cold-start alongside a human-legible ``reason``. The approval
+    is unconditional grant for the named sources — the state-clone hook
+    skips the fingerprint gate for each covered source and records the
+    approval in ``ops.audit_log`` in the SAME transaction as the
+    supersede + activate swap, so no covered cutover can ship without
+    the audit obligation.
+
+    The approval carries the spin-up-distortion public-announcement
+    obligation (docs §11.3 clause 3) via the marker literal on the audit
+    record and the activation result; that literal is written by the
+    hook and by :meth:`PsycopgModelRegistryStore.model_lifecycle_operation`
+    respectively and is imported from ``packages.common.state_clone_hook``
+    so both sites stay in lockstep.
+
+    Fields:
+        approver: Human-legible identity of the operator granting the
+            approval — surfaces on the audit record.
+        reason: Free-text justification the operator supplied. Stored
+            verbatim; never redacted (approvals are auditable evidence,
+            not sensitive payload).
+        covered_source_ids: Exact tuple of ``source_id``s this approval
+            covers. A source outside this tuple is NOT covered — the
+            fingerprint gate still runs and can still refuse. Approvals
+            never widen beyond their named sources.
+    """
+
+    approver: str
+    reason: str
+    covered_source_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class ModelActivationContext:
     """Context payload delivered to every pre-activation hook.
 
@@ -207,12 +245,20 @@ class ModelActivationContext:
             ``target_model.resource_profile.direct_grid_forcing`` when the
             target carries a direct-grid contract; ``None`` for a legacy
             IDW model. Kept as a tuple so hooks cannot mutate the scope.
+        cold_start_approval: Optional explicit cold-start approval
+            (SUB-5 task 3.2). When present, the state-clone hook skips
+            the fingerprint gate for the sources named in
+            ``cold_start_approval.covered_source_ids`` and records the
+            approval on the activation cursor. ``None`` means no
+            approval — every source in ``source_scope`` runs the
+            fingerprint gate unchanged.
     """
 
     basin_version_id: str
     previous_active_model: Mapping[str, Any] | None
     target_model: Mapping[str, Any]
     source_scope: tuple[str, ...] | None
+    cold_start_approval: ColdStartApprovalInput | None = None
 
 
 PreActivationHook = Callable[[Any, ModelActivationContext], None]
@@ -325,6 +371,72 @@ def _should_publish_manifest_after_commit(
             and str(current_active_before.get("model_id")) == str(model.get("model_id"))
         )
     return False
+
+
+def _build_activation_result_approval_block(
+    activation_context: ModelActivationContext | None,
+) -> dict[str, Any] | None:
+    """Return the ``cold_start_approval`` result block, or ``None``.
+
+    SUB-5 task 3.2: when the activation carries an explicit approval
+    covering at least one source in scope, the activation result must
+    surface the approver + reason + covered sources plus the
+    spin-up-distortion-announcement obligation marker (docs §11.3
+    clause 3) so the caller sees the same obligation clause that
+    landed on the audit record inside the hook.
+
+    Returns ``None`` — i.e. the activation result carries NO obligation
+    marker — whenever the state-clone hook would have skipped BEFORE
+    reaching its per-source approval-consumption loop. The hook takes a
+    skip path (``no_previous_active_model`` or ``target_not_direct_grid``)
+    when ``previous_active_model is None`` OR ``source_scope is None``,
+    and in both cases no ``record_approval`` audit call fires. Mirroring
+    those short-circuits here keeps the result-side marker in lockstep
+    with the audit-record side: no marker on the result unless the hook
+    actually consumed the approval on the audit stream (fold-at-intro
+    from Epic #982 SUB-5 round-1 correctness review).
+
+    Also returns ``None`` when the approval was absent OR when none of
+    the covered sources intersect the actual ``source_scope`` (a stray
+    approval that covers no in-scope source records no obligation on
+    the result — the hook never fires ``record_approval`` in that case
+    either, so the two sites stay symmetric).
+    """
+    if activation_context is None:
+        return None
+    approval = activation_context.cold_start_approval
+    if approval is None:
+        return None
+    # Symmetry with the state-clone hook's applicability predicates
+    # (packages/common/state_clone_hook.py::_hook): the hook records a
+    # skip WITHOUT invoking ``record_approval`` when the previous active
+    # model is absent (fresh basin) or the target is not direct-grid.
+    # Emitting the marker here in either case would attach an obligation
+    # clause to the activation result with no matching audit row.
+    if activation_context.previous_active_model is None:
+        return None
+    if activation_context.source_scope is None:
+        return None
+    scope = activation_context.source_scope
+    covered_in_scope = tuple(
+        source_id for source_id in scope if source_id in approval.covered_source_ids
+    )
+    if not covered_in_scope:
+        return None
+    # Local import mirrors :meth:`_record_state_clone_refusal_audit` — the
+    # marker literal lives with the hook so both sites stay in lockstep.
+    from packages.common.state_clone_hook import (
+        STATE_CLONE_SPIN_UP_DISTORTION_ANNOUNCEMENT_MARKER,
+    )
+
+    return {
+        "approver": approval.approver,
+        "reason": approval.reason,
+        "covered_source_ids": list(covered_in_scope),
+        "spin_up_distortion_announcement_obligation": (
+            STATE_CLONE_SPIN_UP_DISTORTION_ANNOUNCEMENT_MARKER
+        ),
+    }
 
 
 def _extract_source_scope(target_model: Mapping[str, Any]) -> tuple[str, ...] | None:
@@ -1836,6 +1948,7 @@ class PsycopgModelRegistryStore:
         previous_model_id: str | None = None,
         override_missing_active: bool = False,
         reason: str | None = None,
+        cold_start_approval: ColdStartApprovalInput | None = None,
     ) -> dict[str, Any]:
         if operation not in MODEL_LIFECYCLE_ACTIONS:
             raise InvalidPayloadError(f"Unsupported model lifecycle operation: {operation}")
@@ -1872,6 +1985,18 @@ class PsycopgModelRegistryStore:
         # committed DB state, matching the tasks.md §2.2 "uniform
         # post-commit tail" contract.
         publish_context: PostCommitPublishContext | None = None
+
+        # SUB-5 task 3.2: hoisted so the outside-tx state-clone refusal
+        # handler can read the target model / basin scope after the
+        # lifecycle transaction has rolled back.
+        activation_context: ModelActivationContext | None = None
+
+        # Local import to avoid a module-level cycle: ``state_clone_hook``
+        # imports :class:`ColdStartApprovalInput` and
+        # :class:`ModelActivationContext` from this module, so importing
+        # the hook at module scope would deadlock. The specific exception
+        # type is stable and light — resolving it once per call is fine.
+        from packages.common.state_clone_hook import StateCloneCutoverRefusedError
 
         try:
             with self._transaction() as cursor:
@@ -2033,6 +2158,7 @@ class PsycopgModelRegistryStore:
                         previous_active_model=(dict(current_active) if current_active is not None else None),
                         target_model=dict(hook_target),
                         source_scope=_extract_source_scope(hook_target),
+                        cold_start_approval=cold_start_approval,
                     )
                     self._dispatch_pre_activation_hooks(cursor, activation_context)
 
@@ -2097,8 +2223,42 @@ class PsycopgModelRegistryStore:
                     "preflight": preflight,
                     "audit_reference": {"entity_type": "model_instance", "entity_id": model_id, "log_id": audit_id},
                 }
+                # SUB-5 task 3.2: if an explicit cold-start approval
+                # covered any source actually in scope, surface the
+                # approval + spin-up-distortion-announcement obligation
+                # marker on the activation result so the operator sees
+                # the same obligation clause that landed on the audit
+                # record inside the hook.
+                approval_block = _build_activation_result_approval_block(
+                    activation_context
+                )
+                if approval_block is not None:
+                    result["cold_start_approval"] = approval_block
         except ModelLifecycleAuditPersistenceError as error:
             return error.result
+        except StateCloneCutoverRefusedError as refusal:
+            # SUB-5 task 3.2: the state-clone hook refused a source
+            # without an approval covering it. The lifecycle transaction
+            # has already rolled back on the raised exception (via the
+            # ``_PsycopgTransaction.__exit__`` path), so the refusal
+            # audit record is written on a FRESH transaction below —
+            # PostgreSQL does not support autonomous transactions, so an
+            # in-tx write would have been discarded along with the
+            # supersede + activate swap.
+            if activation_context is None:  # pragma: no cover - defensive
+                # A refusal can only be raised from
+                # ``_dispatch_pre_activation_hooks``, which runs after
+                # ``activation_context`` is bound. Guard defensively so
+                # a future refactor cannot silently strip the invariant.
+                raise
+            return self._record_state_clone_refusal_audit(
+                activation_context=activation_context,
+                refusal=refusal,
+                policy_decision=decision,
+                request_id=request_id,
+                operation=operation,
+                preflight=preflight,
+            )
 
         # §2.2 post-commit tail: fire the manifest publisher ONLY on a
         # committed dispatch-set-changing transition. All non-committing
@@ -3044,6 +3204,108 @@ class PsycopgModelRegistryStore:
                 self._json(details),
             ),
         )
+
+    def _record_state_clone_refusal_audit(
+        self,
+        *,
+        activation_context: ModelActivationContext,
+        refusal: Any,
+        policy_decision: PolicyDecision,
+        request_id: str | None,
+        operation: ModelLifecycleOperation,
+        preflight: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Persist the state-clone refusal audit record on a fresh tx.
+
+        SUB-5 task 3.2: the pre-activation clone hook refused a source
+        with no ``cold_start_approval`` covering it, so the lifecycle
+        transaction rolled back. This helper opens a fresh transaction
+        and writes an ``ops.audit_log`` row whose ``action`` is the
+        stable code ``state_clone_cold_start_approval_required`` and
+        whose ``details`` name the blocked ``(basin_version_id,
+        source_id)`` scope and the refusal cause; the row survives the
+        prior rollback because it is written on a NEW transaction (not
+        an autonomous sub-transaction, which PostgreSQL does not
+        support).
+
+        The returned result mirrors the shape of the ``blocked``
+        activation return so downstream callers key uniformly off
+        ``status`` and ``audit_reference``; the stable error code is
+        also surfaced under ``error.code`` for API consumers.
+
+        ``refusal`` is typed loosely as ``Any`` to avoid a module-level
+        import cycle from ``state_clone_hook`` — the caller resolves the
+        exception type locally and passes the instance in.
+        """
+        from packages.common.state_clone import (
+            STATE_CLONE_COLD_START_APPROVAL_REQUIRED,
+        )
+
+        target_model = activation_context.target_model
+        target_model_id = str(target_model.get("model_id"))
+        details = {
+            "basin_version_id": activation_context.basin_version_id,
+            "source_id": getattr(refusal, "source_id", None),
+            "refusal_scope": getattr(refusal, "refusal_scope", None),
+            "refusal_code": getattr(
+                refusal, "refusal_code", STATE_CLONE_COLD_START_APPROVAL_REQUIRED
+            ),
+            "target_model_id": target_model_id,
+            "operation": operation,
+            "request_id": request_id,
+        }
+        details = redact_audit_payload(details)
+
+        with self._transaction() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO ops.audit_log (
+                    actor,
+                    actor_role,
+                    action,
+                    entity_type,
+                    entity_id,
+                    details
+                )
+                VALUES (%s, %s, %s, 'model_instance', %s, %s)
+                RETURNING log_id
+                """,
+                (
+                    policy_decision.actor_id,
+                    ",".join(policy_decision.roles),
+                    STATE_CLONE_COLD_START_APPROVAL_REQUIRED,
+                    target_model_id,
+                    self._json(details),
+                ),
+            )
+            audit_id = int(cursor.fetchone()["log_id"])
+
+        return {
+            "status": "refused",
+            "operation": operation,
+            "model": _model_public_projection(target_model),
+            "preflight": preflight,
+            "error": {
+                "code": STATE_CLONE_COLD_START_APPROVAL_REQUIRED,
+                "message": (
+                    f"state clone refused for source_id="
+                    f"{getattr(refusal, 'source_id', None)!r} "
+                    f"scope={getattr(refusal, 'refusal_scope', None)!r}; "
+                    "explicit cold-start approval required "
+                    "(docs §11.3 clause 2)."
+                ),
+                "details": {
+                    "basin_version_id": activation_context.basin_version_id,
+                    "source_id": getattr(refusal, "source_id", None),
+                    "refusal_scope": getattr(refusal, "refusal_scope", None),
+                },
+            },
+            "audit_reference": {
+                "entity_type": "model_instance",
+                "entity_id": target_model_id,
+                "log_id": audit_id,
+            },
+        }
 
     def _transaction(self) -> Any:
         return _PsycopgTransaction(self.database_url)
