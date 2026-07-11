@@ -144,6 +144,13 @@ def _write_pre_cutover_csv_at(root: Path, *, station: StationMetadata) -> Path:
 
 
 # --- Claim 1: station/forcing timeseries by old model_id ------------------
+#
+# Scope note: The fixture models the M0-legacy path
+# (``station_role='forcing_grid'``); the direct_grid_cache post-flip row's
+# answerability is covered structurally by Claim 3 (flow-plane orthogonal
+# to any ``station_role``) and empirically by SUB-4. Parameterizing Claim 1
+# across ``station_role in ("forcing_grid", "direct_grid_cache")`` is a
+# deliberate systemic scope-limit consistent with the SUB-4 exemplar.
 
 
 def test_inactive_m0_legacy_station_with_pre_cutover_file_serves_series(
@@ -315,6 +322,8 @@ _FORECAST_STORE_FLOW_PRODUCT_METHODS = (
     PsycopgForecastStore._latest_analysis_issue_time,
     PsycopgForecastStore._fetch_analysis_segment_rows,
     PsycopgForecastStore._fetch_forecast_segment_rows,
+    PsycopgForecastStore._latest_run_type_valid_time,
+    PsycopgForecastStore._fetch_run_type_segment_rows,
 )
 
 
@@ -329,48 +338,68 @@ def test_forecast_store_flow_product_sql_does_not_join_met_station() -> None:
     model)``.
 
     This is asserted method-by-method so a future refactor that touches
-    only one path is still caught.
+    only one path is still caught. Case-insensitive matching: PostgreSQL
+    folds unquoted identifiers to lowercase at parse time, so an
+    uppercase-mutated ``JOIN MET.MET_STATION`` would compile identically
+    but would evade a case-sensitive substring check.
     """
     offenders: list[str] = []
     for method in _FORECAST_STORE_FLOW_PRODUCT_METHODS:
         source = inspect.getsource(method)
-        if "met.met_station" in source:
+        if re.search(r"met\.met_station", source, re.IGNORECASE) is not None:
             offenders.append(f"{method.__qualname__} references met.met_station")
         # Also lock the "no active_flag predicate leaked in" property. The
         # flow-product SQL has no legitimate reason to reference
         # ``active_flag`` at all (it's not projected either).
-        if "active_flag" in source:
+        if re.search(r"active_flag", source, re.IGNORECASE) is not None:
             offenders.append(f"{method.__qualname__} references active_flag")
 
     assert not offenders, "; ".join(offenders)
 
 
 def test_hydro_display_flow_product_route_sql_does_not_join_met_station() -> None:
-    """Display-plane run-row resolver must not join ``met.met_station``.
+    """Display-plane flow-product resolvers must not join ``met.met_station``.
 
     ``apps/api/routes/hydro_display.py::_run_row`` is where the display
     plane dispatches a run-id -> flow-product resolution (identified via
     ``grep 'FROM hydro.hydro_run' apps/api/routes/hydro_display.py``).
-    It resolves via ``hydro.hydro_run LEFT JOIN core.model_instance``
-    only; it MUST NOT join ``met.met_station``, which would couple the
-    flow-product route to ``active_flag`` and break Claim 3.
-    """
-    source = inspect.getsource(hydro_display._run_row)
+    It resolves via ``hydro.hydro_run LEFT JOIN core.model_instance`` only.
 
-    # The run-row query anchors on hydro.hydro_run (positive assertion so
-    # the test surfaces a rename of the SUT, not just a silent pass).
-    assert "FROM hydro.hydro_run" in source, (
-        "_run_row must resolve from hydro.hydro_run (SUT anchor moved?)"
-    )
-    assert "met.met_station" not in source, (
-        "apps/api/routes/hydro_display.py::_run_row must not join "
-        "met.met_station — the flow-product route stays orthogonal to the "
-        "active_flag flip"
-    )
-    assert "active_flag" not in source, (
-        "apps/api/routes/hydro_display.py::_run_row must not reference "
-        "active_flag — it resolves by (run_id) alone"
-    )
+    ``apps/api/routes/hydro_display.py::_require_hydro_mvt_source_identity``
+    is the sibling MVT source-identity guard that resolves flow-plane rows
+    from ``hydro.river_timeseries`` keyed by ``(run_id, basin_version_id,
+    river_network_version_id, variable, valid_time)``.
+
+    Both resolvers MUST NOT join ``met.met_station`` and MUST NOT reference
+    ``active_flag``; either would couple the flow-product route to the
+    ``active_flag`` flip and break Claim 3. Negative checks are case-
+    insensitive: PostgreSQL folds unquoted identifiers to lowercase at
+    parse time, so an uppercase-mutated ``JOIN MET.MET_STATION`` would
+    compile identically but would evade a case-sensitive substring check.
+    """
+    for resolver, positive_anchor in (
+        (hydro_display._run_row, "FROM hydro.hydro_run"),
+        (
+            hydro_display._require_hydro_mvt_source_identity,
+            "FROM hydro.river_timeseries",
+        ),
+    ):
+        source = inspect.getsource(resolver)
+
+        # Positive anchor: the resolver still resolves from its named flow-
+        # plane table (surfaces a SUT rename rather than silently passing).
+        assert positive_anchor in source, (
+            f"{resolver.__qualname__} must resolve from {positive_anchor!r} "
+            "(SUT anchor moved?)"
+        )
+        assert re.search(r"met\.met_station", source, re.IGNORECASE) is None, (
+            f"{resolver.__qualname__} must not join met.met_station — the "
+            "flow-product route stays orthogonal to the active_flag flip"
+        )
+        assert re.search(r"active_flag", source, re.IGNORECASE) is None, (
+            f"{resolver.__qualname__} must not reference active_flag — it "
+            "resolves by flow-plane keys alone"
+        )
 
 
 # --- Claim 4: flip is UPDATE-only, deletes/hides no historical row --------
@@ -381,11 +410,12 @@ def test_station_flag_flip_sut_is_update_only_no_delete_or_history_writes() -> N
 
     Spec scenario "flip does not delete or hide historical products":
     ``packages/common/station_set_flip.py`` MUST NOT contain any
-    ``DELETE`` / ``TRUNCATE``, and MUST NOT write to
-    ``hydro.river_timeseries`` / ``hydro.hydro_run`` /
-    ``met.forcing_station_timeseries``. The hook has exactly TWO
-    ``UPDATE met.met_station SET active_flag = ...`` statements (the
-    deterministic turn-off and the target-identity turn-on).
+    ``DELETE`` / ``TRUNCATE`` / ``INSERT INTO``, and every
+    ``UPDATE <schema>.<table>`` write in the module MUST target only
+    ``met.met_station``. The hook has exactly TWO named module-level SQL
+    constants — ``_TURN_OFF_ALL_SQL`` (deterministic turn-off) and
+    ``_TURN_ON_TARGET_SQL`` (target-identity turn-on) — both of which
+    ``UPDATE met.met_station SET active_flag = ...``.
 
     Asserting on the WHOLE SUT module (``inspect.getfile``) closes the
     hole where a helper defined outside the closure could sneak in a
@@ -395,30 +425,23 @@ def test_station_flag_flip_sut_is_update_only_no_delete_or_history_writes() -> N
         encoding="utf-8"
     )
 
-    # Positive anchor: the two UPDATE statements exist in the SUT (SUT
-    # structure has not silently changed). Match each SET active_flag =
-    # <bool> shape. The SUT module docstring also describes the two
-    # statements verbatim as documentation, so the file-level count is
-    # >=1 for each shape, not exactly 1 — the load-bearing invariant this
-    # test locks is the ABSENCE of DELETE/TRUNCATE/INSERT, not the exact
-    # UPDATE count.
-    turn_off_matches = re.findall(
-        r"UPDATE\s+met\.met_station\s+SET\s+active_flag\s*=\s*false",
-        module_source,
-        re.IGNORECASE,
+    # Positive anchor: the two module-level SQL constants exist. Anchor
+    # on the identifier NAMES (not on the ``UPDATE met.met_station SET
+    # active_flag = ...`` string). Rationale: the SUT module docstring
+    # cites the ``UPDATE met.met_station SET active_flag = ...`` shape
+    # verbatim as documentation, so a text-match anchor would remain
+    # green even if the SQL literals were moved out of the module
+    # constants. The identifier-presence anchor names the module surface
+    # directly and breaks if either constant is renamed or inlined.
+    # Uses ``\b`` word-boundary matching so a suffix-append rename (e.g.
+    # ``_TURN_OFF_ALL_SQL_LEGACY``) does NOT silently match the prefix.
+    assert re.search(r"\b_TURN_OFF_ALL_SQL\b", module_source) is not None, (
+        "expected _TURN_OFF_ALL_SQL module-level SQL constant in "
+        "station_set_flip.py (deterministic turn-off identifier moved?)"
     )
-    turn_on_matches = re.findall(
-        r"UPDATE\s+met\.met_station\s+SET\s+active_flag\s*=\s*true",
-        module_source,
-        re.IGNORECASE,
-    )
-    assert turn_off_matches, (
-        "expected 'UPDATE met.met_station SET active_flag = false' statement "
-        "in station_set_flip.py (SUT structure moved?)"
-    )
-    assert turn_on_matches, (
-        "expected 'UPDATE met.met_station SET active_flag = true' statement "
-        "in station_set_flip.py (SUT structure moved?)"
+    assert re.search(r"\b_TURN_ON_TARGET_SQL\b", module_source) is not None, (
+        "expected _TURN_ON_TARGET_SQL module-level SQL constant in "
+        "station_set_flip.py (target-identity turn-on identifier moved?)"
     )
 
     # Byte-level forbidden-token lock: SQL keywords/tokens that would let
@@ -435,16 +458,24 @@ def test_station_flag_flip_sut_is_update_only_no_delete_or_history_writes() -> N
             "— the flip must never delete/truncate/insert (UPDATE-only)"
         )
 
-    # History-plane tables the flip must never write to. A JOIN or a
-    # subquery mention would still be a red flag here (the hook has no
-    # legitimate reason to touch these tables at all).
-    forbidden_tables = (
-        "hydro.river_timeseries",
-        "hydro.hydro_run",
-        "met.forcing_station_timeseries",
+    # UPDATE whitelist: every ``UPDATE <schema>.<table>`` write in the
+    # module MUST target only ``met.met_station``. Rationale: a blacklist
+    # (``hydro.river_timeseries`` / ``hydro.hydro_run`` /
+    # ``met.forcing_station_timeseries``) is silent on ``UPDATE
+    # met.canonical_met_product``, ``UPDATE met.forcing_version``,
+    # ``UPDATE core.model_lifecycle_audit``, or any other history-plane
+    # table. The whitelist proves ONLY ``met.met_station`` is written.
+    update_targets = re.findall(
+        r"\bUPDATE\s+([a-z_]+\.[a-z_]+)", module_source, re.IGNORECASE
     )
-    for table in forbidden_tables:
-        assert table not in module_source, (
-            f"station_set_flip.py must not reference {table} — the flip must "
-            "not touch history-plane tables (deletes/hides no historical row)"
+    assert update_targets, (
+        "expected at least one 'UPDATE <schema>.<table>' write in "
+        "station_set_flip.py (SUT structure moved?)"
+    )
+    for target in update_targets:
+        assert target.lower() == "met.met_station", (
+            f"station_set_flip.py must not UPDATE {target} — only "
+            "'UPDATE met.met_station' is permitted (the flip writes only "
+            "the station active_flag; touching any other table would "
+            "delete/hide historical rows or write history-plane state)"
         )
