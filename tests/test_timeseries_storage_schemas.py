@@ -20,7 +20,7 @@ SCHEMA_BASES = (
 def _validator() -> str:
     validator = shutil.which("check-jsonschema")
     if validator is None:
-        pytest.skip("check-jsonschema is not installed in this environment")
+        raise RuntimeError("check-jsonschema is required; run `uv sync --all-extras --dev`")
     return validator
 
 
@@ -76,12 +76,245 @@ def test_product_archive_manifest_rejects_row_count(tmp_path: Path) -> None:
     assert result.returncode != 0
 
 
+@pytest.mark.parametrize(
+    ("identity", "parent"),
+    [
+        (
+            {
+                "lane": "forcing",
+                "source": "gfs",
+                "cycle_identity": "2026053100",
+                "cycle_time": "2026-05-31T00:00:00Z",
+                "basin_version_id": "yangtze-v1",
+                "model_id": "yangtze-shud-v12",
+            },
+            "forcing/gfs/2026053100/yangtze-v1/yangtze-shud-v12",
+        ),
+        (
+            {
+                "lane": "runs",
+                "source": "gfs",
+                "cycle_identity": "2026053100",
+                "cycle_time": "2026-05-31T00:00:00Z",
+                "run_id": "run-42",
+            },
+            "runs/gfs/2026053100/run-42",
+        ),
+        (
+            {
+                "lane": "states",
+                "source": "gfs",
+                "cycle_identity": "2026053100",
+                "cycle_time": "2026-05-31T00:00:00Z",
+                "model_id": "model-v1",
+            },
+            "states/gfs/2026053100/model-v1",
+        ),
+    ],
+)
+def test_product_archive_manifest_accepts_each_lane_identity(
+    tmp_path: Path,
+    identity: dict[str, str],
+    parent: str,
+) -> None:
+    document = _document("product_archive_manifest")
+    document["identity"] = identity
+    document["archive"]["path"] = f"{parent}/archive.tar.zst"
+    document["archive"]["manifest_path"] = f"{parent}/manifest.json"
+
+    result = _validate_document(tmp_path, "product_archive_manifest", document)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        {
+            "lane": "forcing",
+            "source": "gfs",
+            "cycle_identity": "2026053100",
+            "cycle_time": "2026-05-31T00:00:00Z",
+            "model_id": "model-v1",
+        },
+        {
+            "lane": "forcing",
+            "source": "gfs/ifs",
+            "cycle_identity": "2026053100",
+            "cycle_time": "2026-05-31T00:00:00Z",
+            "basin_version_id": "basin-v1",
+            "model_id": "model-v1",
+        },
+        {
+            "lane": "forcing",
+            "source": "gfs",
+            "cycle_identity": "2026053100",
+            "cycle_time": "2026-05-31T00:00:00Z",
+            "basin_version_id": "basin-v1",
+            "model_id": "model-v1",
+            "run_id": "run-42",
+        },
+        {
+            "lane": "runs",
+            "source": "gfs",
+            "cycle_identity": "2026053100",
+            "cycle_time": "2026-05-31T00:00:00Z",
+            "model_id": "model-v1",
+        },
+        {
+            "lane": "states",
+            "source": "gfs",
+            "cycle_identity": "2026053100",
+            "cycle_time": "2026-05-31T00:00:00Z",
+            "model_id": "model-v1",
+            "run_id": "run-42",
+        },
+    ],
+)
+def test_product_archive_manifest_rejects_unsafe_missing_or_cross_lane_identity(
+    tmp_path: Path,
+    identity: dict[str, str],
+) -> None:
+    document = _document("product_archive_manifest")
+    document["identity"] = identity
+
+    result = _validate_document(tmp_path, "product_archive_manifest", document)
+    assert result.returncode != 0
+
+
+@pytest.mark.parametrize("cycle_time", [None, "not-a-time", "2026-05-31T08:00:00+08:00"])
+def test_product_archive_manifest_rejects_missing_invalid_or_non_utc_cycle_time(
+    tmp_path: Path,
+    cycle_time: str | None,
+) -> None:
+    document = _document("product_archive_manifest")
+    if cycle_time is None:
+        del document["identity"]["cycle_time"]
+    else:
+        document["identity"]["cycle_time"] = cycle_time
+
+    result = _validate_document(tmp_path, "product_archive_manifest", document)
+    assert result.returncode != 0
+
+
 def test_salvage_manifest_requires_exported_row_count(tmp_path: Path) -> None:
     document = _document("salvage_manifest")
     del document["exports"][0]["exported_row_count"]
 
     result = _validate_document(tmp_path, "salvage_manifest", document)
     assert result.returncode != 0
+
+
+def _selector(table: str, identity: dict[str, str]) -> dict[str, Any]:
+    return {
+        "table": table,
+        "identity": identity,
+        "window": {"start": "2026-05-28T00:00:00Z", "end": "2026-05-29T00:00:00Z"},
+    }
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        _selector("met.forcing_station_timeseries", {"forcing_version_id": "forcing-v1"}),
+        _selector("hydro.river_timeseries", {"run_id": "run-42"}),
+    ],
+)
+@pytest.mark.parametrize("base", ["archive_completeness_receipt", "salvage_manifest"])
+def test_completeness_and_salvage_selectors_accept_identical_exact_contracts(
+    tmp_path: Path,
+    base: str,
+    selector: dict[str, Any],
+) -> None:
+    document = _document(base)
+    if base == "archive_completeness_receipt":
+        document["salvage_selectors"] = [selector]
+    else:
+        document["exports"][0]["selector"] = selector
+
+    result = _validate_document(tmp_path, base, document)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        _selector("met.forcing_station_timeseries", {"forcing_verison_id": "forcing-v1"}),
+        _selector("met.forcing_station_timeseries", {"forcing_version_id": "forcing-v1", "extra": "x"}),
+        _selector("met.forcing_station_timeseries", {"run_id": "run-42"}),
+        _selector("hydro.river_timeseries", {"forcing_version_id": "forcing-v1"}),
+        _selector("hydro.unknown_timeseries", {"run_id": "run-42"}),
+    ],
+)
+@pytest.mark.parametrize("base", ["archive_completeness_receipt", "salvage_manifest"])
+def test_completeness_and_salvage_selectors_reject_identical_invalid_contracts(
+    tmp_path: Path,
+    base: str,
+    selector: dict[str, Any],
+) -> None:
+    document = _document(base)
+    if base == "archive_completeness_receipt":
+        document["salvage_selectors"] = [selector]
+    else:
+        document["exports"][0]["selector"] = selector
+
+    result = _validate_document(tmp_path, base, document)
+    assert result.returncode != 0
+
+
+@pytest.mark.parametrize(
+    ("base", "field", "unsafe_path"),
+    [
+        ("product_archive_manifest", "archive", "/forcing/gfs/cycle/archive.tar.zst"),
+        ("product_archive_manifest", "archive", "C:/forcing/gfs/cycle/archive.tar.zst"),
+        ("product_archive_manifest", "archive", "forcing/gfs/../cycle/archive.tar.zst"),
+        ("product_archive_manifest", "archive", "forcing/gfs/./cycle/archive.tar.zst"),
+        ("product_archive_manifest", "archive", "forcing/gfs//cycle/archive.tar.zst"),
+        ("product_archive_manifest", "archive", "forcing\\gfs\\cycle\\archive.tar.zst"),
+        ("product_archive_manifest", "archive", "forcing/gfs/\u0001cycle/archive.tar.zst"),
+        ("product_archive_manifest", "archive", "other/gfs/cycle/archive.tar.zst"),
+        ("product_archive_manifest", "file", "/nested/file.csv"),
+        ("product_archive_manifest", "file", "nested/../file.csv"),
+        ("product_archive_manifest", "file", "nested/./file.csv"),
+        ("product_archive_manifest", "file", "nested//file.csv"),
+        ("product_archive_manifest", "file", "nested\\file.csv"),
+        ("product_archive_manifest", "file", "nested/\u0001file.csv"),
+        ("salvage_manifest", "object", "/db-export/forcing/data.csv.zst"),
+        ("salvage_manifest", "object", "C:/db-export/forcing/data.csv.zst"),
+        ("salvage_manifest", "object", "db-export/forcing/../data.csv.zst"),
+        ("salvage_manifest", "object", "db-export/forcing/./data.csv.zst"),
+        ("salvage_manifest", "object", "db-export//data.csv.zst"),
+        ("salvage_manifest", "object", "db-export\\forcing\\data.csv.zst"),
+        ("salvage_manifest", "object", "db-export/forcing/\u0001data.csv.zst"),
+        ("salvage_manifest", "object", "other/forcing/data.csv.zst"),
+    ],
+)
+def test_archive_schema_paths_reject_absolute_traversal_or_unsafe_segments(
+    tmp_path: Path,
+    base: str,
+    field: str,
+    unsafe_path: str,
+) -> None:
+    document = _document(base)
+    if field == "archive":
+        document["archive"]["path"] = unsafe_path
+    elif field == "file":
+        document["files"][0]["path"] = unsafe_path
+    else:
+        document["exports"][0]["object"]["path"] = unsafe_path
+
+    result = _validate_document(tmp_path, base, document)
+    assert result.returncode != 0
+
+
+def test_archive_schema_paths_accept_nested_root_relative_paths(tmp_path: Path) -> None:
+    product = _document("product_archive_manifest")
+    product["files"][0]["path"] = "nested/stations/X110.0Y30.0.csv"
+    salvage = _document("salvage_manifest")
+    salvage["exports"][0]["object"]["path"] = "db-export/forcing/version-v1/nested/data.csv.zst"
+
+    for base, document in (("product_archive_manifest", product), ("salvage_manifest", salvage)):
+        result = _validate_document(tmp_path, base, document)
+        assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize(
@@ -121,6 +354,15 @@ def test_drill_fail_with_per_item_differences_is_valid(tmp_path: Path) -> None:
     document["verdict"] = "FAIL"
     del document["comparisons"]
     document["differences"] = [{"item": "run-42:river_stage", "expected": 24, "actual": 23}]
+
+    result = _validate_document(tmp_path, "archive_rebuild_drill_receipt", document)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_product_only_drill_pass_accepts_required_empty_selector_list(tmp_path: Path) -> None:
+    document = _document("archive_rebuild_drill_receipt")
+    document["coverage"] = [item for item in document["coverage"] if item["source"] != "db-export"]
+    document["comparisons"]["selectors"] = []
 
     result = _validate_document(tmp_path, "archive_rebuild_drill_receipt", document)
     assert result.returncode == 0, result.stdout + result.stderr

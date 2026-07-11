@@ -33,7 +33,7 @@
             "additionalProperties": false,
             "required": ["path", "sha256", "size_bytes"],
             "properties": {
-              "path": {"type": "string", "minLength": 1},
+              "path": {"allOf": [{"$ref": "#/definitions/safe_relative_path"}, {"pattern": "^db-export/.+"}]},
               "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
               "size_bytes": {"type": "integer", "minimum": 0}
             }
@@ -44,22 +44,51 @@
   },
   "definitions": {
     "selector": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["table", "identity", "window"],
-      "properties": {
-        "table": {"enum": ["hydro.river_timeseries", "met.forcing_station_timeseries"]},
-        "identity": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string", "minLength": 1}},
-        "window": {
+      "oneOf": [
+        {
           "type": "object",
           "additionalProperties": false,
-          "required": ["start", "end"],
+          "required": ["table", "identity", "window"],
           "properties": {
-            "start": {"type": "string", "format": "date-time"},
-            "end": {"type": "string", "format": "date-time"}
+            "table": {"const": "met.forcing_station_timeseries"},
+            "identity": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["forcing_version_id"],
+              "properties": {"forcing_version_id": {"type": "string", "minLength": 1}}
+            },
+            "window": {"$ref": "#/definitions/window"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["table", "identity", "window"],
+          "properties": {
+            "table": {"const": "hydro.river_timeseries"},
+            "identity": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["run_id"],
+              "properties": {"run_id": {"type": "string", "minLength": 1}}
+            },
+            "window": {"$ref": "#/definitions/window"}
           }
         }
+      ]
+    },
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": {"type": "string", "format": "date-time"},
+        "end": {"type": "string", "format": "date-time"}
       }
+    },
+    "safe_relative_path": {
+      "type": "string",
+      "pattern": "^(?!/)(?![A-Za-z]:/)(?!.*(?:^|/)(?:\\.{1,2})(?:/|$))(?!.*//)(?!.*[\\\\\\u0000-\\u001F\\u007F])[^/]+(?:/[^/]+)*$"
     }
   }
 }

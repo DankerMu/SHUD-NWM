@@ -248,9 +248,10 @@ Invariant Matrix:
 - Regression: shared root only and shared+override -> shared resolution then override precedence.
 - Regression: archive root contains/is contained by cleanup target, or age 20 with retention 30 -> named validation error before mutation.
 - Regression: equal/aliased/symlink-resolved archive and cleanup roots -> normalized overlap rejection; caller supplies its complete cleanup-root set.
-- Regression: safe forcing/runs/states identity -> deterministic sibling `archive.tar.zst` + `manifest.json`; unsafe lane/component -> error before access.
+- Regression: source-qualified, lane-typed forcing/runs/states identity with bound ISO `cycle_time` + compact `cycle_identity` -> deterministic sibling `archive.tar.zst` + `manifest.json`, with distinct paths across sources; unsafe/missing/cross-lane/time-mismatched identity or manifest/path mismatch -> error before access.
 - Regression: valid examples -> schema PASS; missing completeness verdict or salvage row count -> schema FAIL.
-- Regression: product manifest row count, incomplete drill verdict details, or incomplete retention outcome details -> schema FAIL.
+- Regression: product manifest row count/unsafe paths, invalid table-selector key, incomplete drill verdict details, or incomplete retention outcome details -> schema FAIL.
+- Regression: product-only drill with empty selector list -> schema PASS; clean default test environment executes all schema negatives with zero skip.
 - Regression: unchanged display import/call graph -> no archive resolver dependency and existing disk-only not-found semantics.
 - Regression: unchanged `validate_object_path` and raw-retention/governance env aliases -> existing results and precedence remain stable.
 

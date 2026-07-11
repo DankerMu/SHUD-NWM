@@ -52,16 +52,23 @@ Order is load-bearing:
     env list.
   - Input: `NHMS_ARCHIVE_MIN_AGE_DAYS=20` with the 30-day retention window.
     Expected: validation error before any mutation.
-  - Input: archive identity `(lane=forcing|runs|states, cycle_identity,
-    optional ordered basin/run scope components)` with every component a
-    non-empty safe path segment.
+  - Input: canonical archive identity `(lane=forcing|runs|states, source,
+    cycle_identity, cycle_time, lane-specific fields)`, where ISO-8601 UTC
+    `cycle_time` must correspond to the compact path `cycle_identity`, with forcing requiring
+    `basin_version_id + model_id`, runs requiring `run_id`, and states
+    requiring `model_id`; every component is a non-empty safe path segment.
     Expected: deterministic paths under
-    `<archive-root>/<lane>/<cycle-identity>/<scope...>/archive.tar.zst` and
-    the same directory's `manifest.json`; repeated lookup is identical for
-    all three lanes.
+    `<archive-root>/<lane>/<source>/<cycle-identity>/<lane-scope...>/archive.tar.zst`
+    and the same directory's `manifest.json`; repeated lookup is identical,
+    while different sources with the same cycle/scope resolve distinctly.
   - Input: identity with an unknown lane, empty/dot/dot-dot component, path
-    separator, or absolute component.
+    separator, absolute component, missing lane-required field, or field from
+    the wrong lane.
     Expected: stable validation error before any filesystem access.
+  - Input: product manifest whose identity or declared archive path differs
+    from the canonical identity-derived path.
+    Expected: shared manifest-binding preflight rejects it before any
+    idempotency skip, completeness verdict, rebuild selection, or deletion.
   - Input: existing `validate_object_path` callers and the established
     `NODE27_RAW_RETENTION_OBJECT_STORE_ROOT` /
     `NODE27_GOVERNANCE_OBJECT_STORE_ROOT` precedence behavior.
@@ -100,9 +107,27 @@ Order is load-bearing:
     salvage-backed windows field (which may be an empty list).
     Expected: schema validation fails for each missing outcome-specific
     requirement.
+  - Input: completeness/salvage selector with a typo, unknown identity key,
+    or forcing/river table-key mismatch.
+    Expected: both schemas reject it; forcing requires exactly
+    `forcing_version_id`, river requires exactly `run_id`.
+  - Input: product-only drill PASS with forcing/runs coverage and an empty
+    required `comparisons.selectors` array.
+    Expected: schema validation passes; a non-empty selector becomes a
+    runtime semantic requirement only when `db-export` coverage is present.
+  - Input: product archive/file or salvage object path that is absolute,
+    contains an empty/dot/dot-dot segment, backslash, or control character.
+    Expected: schema validation fails; ordinary nested root-relative paths
+    with the correct archive lane / `db-export` prefix pass.
+  - Input: clean default dev/test environment after dependency sync.
+    Expected: every schema positive/negative pytest executes with zero skip;
+    missing `check-jsonschema` is a test failure, not a skipped contract gate.
   Implementation evidence (#846): all five examples and schemas pass the CI
   `check-jsonschema` example + metaschema loops; focused negative-schema tests
-  reject every missing or forbidden contract field above.
+  reject every missing or forbidden contract field above. Invariant closure
+  adds source-qualified lane identities, manifest/path binding, exact typed
+  selectors, safe relative paths, product-only drill PASS, and a default
+  dependency-backed zero-skip negative-contract gate.
 
 ## 2. Inventory audit and product archive lane (`timeseries-product-archive`)
 

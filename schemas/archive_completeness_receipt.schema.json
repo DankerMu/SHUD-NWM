@@ -39,14 +39,38 @@
       }
     },
     "selector": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["table", "identity", "window"],
-      "properties": {
-        "table": {"enum": ["hydro.river_timeseries", "met.forcing_station_timeseries"]},
-        "identity": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string", "minLength": 1}},
-        "window": {"$ref": "#/definitions/window"}
-      }
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["table", "identity", "window"],
+          "properties": {
+            "table": {"const": "met.forcing_station_timeseries"},
+            "identity": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["forcing_version_id"],
+              "properties": {"forcing_version_id": {"type": "string", "minLength": 1}}
+            },
+            "window": {"$ref": "#/definitions/window"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["table", "identity", "window"],
+          "properties": {
+            "table": {"const": "hydro.river_timeseries"},
+            "identity": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["run_id"],
+              "properties": {"run_id": {"type": "string", "minLength": 1}}
+            },
+            "window": {"$ref": "#/definitions/window"}
+          }
+        }
+      ]
     }
   }
 }

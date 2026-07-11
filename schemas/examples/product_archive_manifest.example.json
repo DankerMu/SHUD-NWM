@@ -7,11 +7,11 @@
     "cycle_identity": "2026053100",
     "cycle_time": "2026-05-31T00:00:00Z",
     "basin_version_id": "yangtze-v1",
-    "model_id": "yangtze-shud-v12",
-    "scope_components": ["yangtze-v1", "yangtze-shud-v12"]
+    "model_id": "yangtze-shud-v12"
   },
   "archive": {
-    "path": "forcing/2026053100/yangtze-v1/yangtze-shud-v12/archive.tar.zst",
+    "path": "forcing/gfs/2026053100/yangtze-v1/yangtze-shud-v12/archive.tar.zst",
+    "manifest_path": "forcing/gfs/2026053100/yangtze-v1/yangtze-shud-v12/manifest.json",
     "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "size_bytes": 1048576
   },

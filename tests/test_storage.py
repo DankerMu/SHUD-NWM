@@ -5,11 +5,13 @@ import pytest
 from packages.common.storage import (
     VALID_PREFIX_PATTERNS,
     ArchiveConfigurationError,
+    ArchiveIdentity,
     archive_provenance_paths,
     resolve_archive_root,
     resolve_archive_storage_config,
     validate_archive_configuration,
     validate_object_path,
+    validate_product_archive_manifest_binding,
 )
 from scripts import node27_raw_retention, node27_resource_governance
 
@@ -140,52 +142,260 @@ def test_resolve_archive_root_shared_and_per_script_precedence(tmp_path: Path) -
     ) == override.resolve()
 
 
-@pytest.mark.parametrize("lane", ["forcing", "runs", "states"])
-def test_archive_provenance_paths_are_deterministic(tmp_path: Path, lane: str) -> None:
-    first = archive_provenance_paths(
-        tmp_path / "archive",
-        lane=lane,
-        cycle_identity="2026071100",
-        scope_components=("basin-v1", "run-42"),
-    )
-    second = archive_provenance_paths(
-        tmp_path / "archive",
-        lane=lane,
-        cycle_identity="2026071100",
-        scope_components=("basin-v1", "run-42"),
-    )
+@pytest.mark.parametrize(
+    ("script_name", "env", "error_fragment"),
+    [
+        (None, {"NHMS_ARCHIVE_ROOT": "relative/archive"}, "archive root must be absolute"),
+        (
+            "product_archive",
+            {
+                "NHMS_ARCHIVE_ROOT": "/absolute/shared",
+                "NODE27_PRODUCT_ARCHIVE_ARCHIVE_ROOT": "relative/override",
+            },
+            "archive root must be absolute",
+        ),
+    ],
+)
+def test_resolve_archive_root_rejects_relative_shared_and_override(
+    script_name: str | None,
+    env: dict[str, str],
+    error_fragment: str,
+) -> None:
+    with pytest.raises(ArchiveConfigurationError, match=error_fragment):
+        resolve_archive_root(script_name, env=env)
 
-    expected_parent = (tmp_path / "archive" / lane / "2026071100" / "basin-v1" / "run-42").resolve()
+
+@pytest.mark.parametrize(
+    ("identity", "relative_parent"),
+    [
+        (
+            ArchiveIdentity(
+                lane="forcing",
+                source="gfs",
+                cycle_identity="2026071100",
+                cycle_time="2026-07-11T00:00:00Z",
+                basin_version_id="basin-v1",
+                model_id="model-v1",
+            ),
+            Path("forcing/gfs/2026071100/basin-v1/model-v1"),
+        ),
+        (
+            ArchiveIdentity(
+                lane="runs",
+                source="gfs",
+                cycle_identity="2026071100",
+                cycle_time="2026-07-11T00:00:00Z",
+                run_id="run-42",
+            ),
+            Path("runs/gfs/2026071100/run-42"),
+        ),
+        (
+            ArchiveIdentity(
+                lane="states",
+                source="gfs",
+                cycle_identity="2026071100",
+                cycle_time="2026-07-11T00:00:00Z",
+                model_id="model-v1",
+            ),
+            Path("states/gfs/2026071100/model-v1"),
+        ),
+    ],
+)
+def test_archive_provenance_paths_use_canonical_lane_identity(
+    tmp_path: Path,
+    identity: ArchiveIdentity,
+    relative_parent: Path,
+) -> None:
+    first = archive_provenance_paths(tmp_path / "archive", identity=identity)
+    second = archive_provenance_paths(tmp_path / "archive", identity=identity)
+
+    expected_parent = (tmp_path / "archive" / relative_parent).resolve()
     assert first == second
     assert first.archive == expected_parent / "archive.tar.zst"
     assert first.manifest == expected_parent / "manifest.json"
 
 
+def test_archive_provenance_distinguishes_sources(tmp_path: Path) -> None:
+    common = {
+        "lane": "forcing",
+        "cycle_identity": "2026071100",
+        "cycle_time": "2026-07-11T00:00:00Z",
+        "basin_version_id": "basin-v1",
+        "model_id": "model-v1",
+    }
+
+    gfs = archive_provenance_paths(tmp_path / "archive", identity=ArchiveIdentity(source="gfs", **common))
+    ifs = archive_provenance_paths(tmp_path / "archive", identity=ArchiveIdentity(source="ifs", **common))
+
+    assert gfs != ifs
+    assert "/forcing/gfs/" in gfs.archive.as_posix()
+    assert "/forcing/ifs/" in ifs.archive.as_posix()
+
+
 @pytest.mark.parametrize(
-    ("lane", "cycle", "scope"),
+    "identity_mapping",
     [
-        ("raw", "2026071100", ()),
-        ("forcing", "", ()),
-        ("forcing", "   ", ()),
-        ("forcing", ".", ()),
-        ("forcing", "..", ()),
-        ("runs", "2026071100", ("a/b",)),
-        ("runs", "2026071100", ("a\\b",)),
-        ("states", "/absolute", ()),
+        {
+            "lane": "raw",
+            "source": "gfs",
+            "cycle_identity": "2026071100",
+            "cycle_time": "2026-07-11T00:00:00Z",
+        },
+        {
+            "lane": "forcing",
+            "source": "",
+            "cycle_identity": "2026071100",
+            "cycle_time": "2026-07-11T00:00:00Z",
+            "basin_version_id": "basin-v1",
+            "model_id": "model-v1",
+        },
+        {
+            "lane": "forcing",
+            "source": "gfs/../../ifs",
+            "cycle_identity": "2026071100",
+            "cycle_time": "2026-07-11T00:00:00Z",
+            "basin_version_id": "basin-v1",
+            "model_id": "model-v1",
+        },
+        {
+            "lane": "forcing",
+            "source": "gfs",
+            "cycle_identity": "2026071100",
+            "cycle_time": "2026-07-11T00:00:00Z",
+            "model_id": "model-v1",
+        },
+        {
+            "lane": "runs",
+            "source": "gfs",
+            "cycle_identity": "2026071100",
+            "cycle_time": "2026-07-11T00:00:00Z",
+            "model_id": "model-v1",
+        },
+        {
+            "lane": "states",
+            "source": "gfs",
+            "cycle_identity": "2026071100",
+            "cycle_time": "2026-07-11T00:00:00Z",
+            "model_id": "model-v1",
+            "run_id": "run-42",
+        },
     ],
 )
-def test_archive_provenance_rejects_unsafe_identity_before_root_resolution(
+def test_archive_identity_rejects_unsafe_missing_or_cross_lane_fields_before_root_resolution(
     monkeypatch: pytest.MonkeyPatch,
-    lane: str,
-    cycle: str,
-    scope: tuple[str, ...],
+    identity_mapping: dict[str, str],
 ) -> None:
     def unexpected_resolve(*args: object, **kwargs: object) -> None:
         raise AssertionError("filesystem resolution must not happen for invalid identity")
 
     monkeypatch.setattr(Path, "resolve", unexpected_resolve)
-    with pytest.raises(ArchiveConfigurationError, match="archive lane|unsafe archive identity"):
-        archive_provenance_paths("/unused", lane=lane, cycle_identity=cycle, scope_components=scope)
+    with pytest.raises(ArchiveConfigurationError):
+        identity = ArchiveIdentity.from_mapping(identity_mapping)
+        archive_provenance_paths("/unused", identity=identity)
+
+
+@pytest.mark.parametrize(
+    "cycle_fields",
+    [
+        {},
+        {"cycle_time": "not-a-time"},
+        {"cycle_time": "2026-07-11T08:00:00+08:00"},
+        {"cycle_time": "2026-07-11T06:00:00Z"},
+    ],
+)
+def test_archive_identity_rejects_missing_invalid_non_utc_or_mismatched_cycle_time_before_root_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+    cycle_fields: dict[str, str],
+) -> None:
+    identity_mapping = {
+        "lane": "runs",
+        "source": "gfs",
+        "cycle_identity": "2026071100",
+        "run_id": "run-42",
+        **cycle_fields,
+    }
+
+    def unexpected_resolve(*args: object, **kwargs: object) -> None:
+        raise AssertionError("filesystem resolution must not happen for invalid time identity")
+
+    monkeypatch.setattr(Path, "resolve", unexpected_resolve)
+    with pytest.raises(ArchiveConfigurationError, match="cycle_time"):
+        identity = ArchiveIdentity.from_mapping(identity_mapping)
+        archive_provenance_paths("/unused", identity=identity)
+
+
+def _product_manifest(identity: dict[str, str], archive_path: str, manifest_path: str) -> dict[str, object]:
+    return {
+        "identity": identity,
+        "archive": {"path": archive_path, "manifest_path": manifest_path},
+    }
+
+
+def test_product_manifest_binding_accepts_canonical_identity_and_siblings(tmp_path: Path) -> None:
+    relative_parent = "forcing/gfs/2026071100/basin-v1/model-v1"
+    manifest = _product_manifest(
+        {
+            "lane": "forcing",
+            "source": "gfs",
+            "cycle_identity": "2026071100",
+            "cycle_time": "2026-07-11T00:00:00Z",
+            "basin_version_id": "basin-v1",
+            "model_id": "model-v1",
+        },
+        f"{relative_parent}/archive.tar.zst",
+        f"{relative_parent}/manifest.json",
+    )
+
+    paths = validate_product_archive_manifest_binding(tmp_path / "archive", manifest)
+
+    assert paths.archive == (tmp_path / "archive" / relative_parent / "archive.tar.zst").resolve()
+    assert paths.manifest == (tmp_path / "archive" / relative_parent / "manifest.json").resolve()
+
+
+def test_product_manifest_binding_rejects_drifting_cycle_time_identity(tmp_path: Path) -> None:
+    relative_parent = "runs/gfs/2026071100/run-42"
+    manifest = _product_manifest(
+        {
+            "lane": "runs",
+            "source": "gfs",
+            "cycle_identity": "2026071100",
+            "cycle_time": "2026-07-11T06:00:00Z",
+            "run_id": "run-42",
+        },
+        f"{relative_parent}/archive.tar.zst",
+        f"{relative_parent}/manifest.json",
+    )
+
+    with pytest.raises(ArchiveConfigurationError, match="cycle_time does not match cycle_identity"):
+        validate_product_archive_manifest_binding(tmp_path / "archive", manifest)
+
+
+@pytest.mark.parametrize("mismatch", ["identity", "archive-path", "manifest-sibling"])
+def test_product_manifest_binding_rejects_identity_path_or_sibling_mismatch(
+    tmp_path: Path,
+    mismatch: str,
+) -> None:
+    identity = {
+        "lane": "runs",
+        "source": "gfs",
+        "cycle_identity": "2026071100",
+        "cycle_time": "2026-07-11T00:00:00Z",
+        "run_id": "run-42",
+    }
+    archive_path = "runs/gfs/2026071100/run-42/archive.tar.zst"
+    manifest_path = "runs/gfs/2026071100/run-42/manifest.json"
+    if mismatch == "identity":
+        identity["run_id"] = "run-43"
+    elif mismatch == "archive-path":
+        archive_path = "runs/gfs/2026071100/run-43/archive.tar.zst"
+    else:
+        manifest_path = "runs/gfs/2026071100/run-43/manifest.json"
+
+    with pytest.raises(ArchiveConfigurationError, match="canonical identity|canonical archive sibling"):
+        validate_product_archive_manifest_binding(
+            tmp_path / "archive",
+            _product_manifest(identity, archive_path, manifest_path),
+        )
 
 
 @pytest.mark.parametrize("relation", ["equal", "archive-parent", "cleanup-parent"])
@@ -225,6 +435,44 @@ def test_validate_archive_configuration_normalizes_aliases_and_symlinks(
             archive_root="~/shared/../shared/archive",
             cleanup_roots={"rotation": alias},
         )
+
+
+def test_validate_archive_configuration_rejects_relative_cleanup_root(tmp_path: Path) -> None:
+    with pytest.raises(ArchiveConfigurationError, match="cleanup root raw-retention must be absolute"):
+        validate_archive_configuration(
+            archive_root=tmp_path / "archive",
+            cleanup_roots={"raw-retention": "relative/object-store"},
+        )
+
+
+def test_validate_archive_configuration_rejects_relative_archive_root(tmp_path: Path) -> None:
+    with pytest.raises(ArchiveConfigurationError, match="archive root must be absolute"):
+        validate_archive_configuration(
+            archive_root="relative/archive",
+            cleanup_roots={"raw-retention": tmp_path / "object-store"},
+        )
+
+
+def test_validate_archive_configuration_canonicalizes_absolute_dotdot_path(tmp_path: Path) -> None:
+    config = validate_archive_configuration(
+        archive_root=tmp_path / "archive-parent" / ".." / "archive",
+        cleanup_roots={"raw-retention": tmp_path / "object-store"},
+    )
+
+    assert config.archive_root == (tmp_path / "archive").resolve()
+
+
+def test_archive_provenance_rejects_relative_root_before_lookup() -> None:
+    identity = ArchiveIdentity(
+        lane="runs",
+        source="gfs",
+        cycle_identity="2026071100",
+        cycle_time="2026-07-11T00:00:00Z",
+        run_id="run-42",
+    )
+
+    with pytest.raises(ArchiveConfigurationError, match="archive root must be absolute"):
+        archive_provenance_paths("relative/archive", identity=identity)
 
 
 def test_archive_configuration_requires_explicit_cleanup_set(tmp_path: Path) -> None:

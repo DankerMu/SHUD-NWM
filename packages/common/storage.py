@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping, Sequence
+from typing import Mapping
 from urllib.parse import urlparse
 
 
@@ -34,6 +35,46 @@ class ArchiveProvenancePaths:
 
     archive: Path
     manifest: Path
+
+
+@dataclass(frozen=True)
+class ArchiveIdentity:
+    """Canonical source-qualified identity for one archived product."""
+
+    lane: str
+    source: str
+    cycle_identity: str
+    cycle_time: str
+    basin_version_id: str | None = None
+    model_id: str | None = None
+    run_id: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_archive_identity(self)
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> ArchiveIdentity:
+        """Build a canonical identity from a strict manifest mapping."""
+        lane = _required_mapping_string(value, "lane", label="archive identity")
+        allowed = {
+            "forcing": {"lane", "source", "cycle_identity", "cycle_time", "basin_version_id", "model_id"},
+            "runs": {"lane", "source", "cycle_identity", "cycle_time", "run_id"},
+            "states": {"lane", "source", "cycle_identity", "cycle_time", "model_id"},
+        }.get(lane)
+        if allowed is None:
+            raise ArchiveConfigurationError(f"archive lane must be one of {sorted(ARCHIVE_LANES)}: {lane!r}")
+        unexpected = sorted(set(value) - allowed)
+        if unexpected:
+            raise ArchiveConfigurationError(f"archive identity contains fields invalid for {lane}: {unexpected}")
+        return cls(
+            lane=lane,
+            source=_required_mapping_string(value, "source", label="archive identity"),
+            cycle_identity=_required_mapping_string(value, "cycle_identity", label="archive identity"),
+            cycle_time=_required_mapping_string(value, "cycle_time", label="archive identity"),
+            basin_version_id=_optional_mapping_string(value, "basin_version_id", label="archive identity"),
+            model_id=_optional_mapping_string(value, "model_id", label="archive identity"),
+            run_id=_optional_mapping_string(value, "run_id", label="archive identity"),
+        )
 
 
 @dataclass(frozen=True)
@@ -176,22 +217,55 @@ def validate_archive_configuration(
 def archive_provenance_paths(
     archive_root: str | os.PathLike[str],
     *,
-    lane: str,
-    cycle_identity: str,
-    scope_components: Sequence[str] = (),
+    identity: ArchiveIdentity,
 ) -> ArchiveProvenancePaths:
     """Map a safe archive identity to its tarball and sibling manifest."""
-    if lane not in ARCHIVE_LANES:
-        raise ArchiveConfigurationError(f"archive lane must be one of {sorted(ARCHIVE_LANES)}: {lane!r}")
-    components = (cycle_identity, *scope_components)
-    for component in components:
-        _validate_identity_component(component)
+    _validate_archive_identity(identity)
     root = _normalized_filesystem_path(archive_root, label="archive root")
-    parent = root.joinpath(lane, *components)
+    parent = root.joinpath(*_archive_identity_path_components(identity))
     return ArchiveProvenancePaths(
         archive=parent / "archive.tar.zst",
         manifest=parent / "manifest.json",
     )
+
+
+def validate_product_archive_manifest_binding(
+    archive_root: str | os.PathLike[str],
+    manifest: Mapping[str, object],
+) -> ArchiveProvenancePaths:
+    """Require manifest identity and declared sibling paths to bind canonically."""
+    identity_value = manifest.get("identity")
+    if not isinstance(identity_value, Mapping):
+        raise ArchiveConfigurationError("product archive manifest identity must be an object")
+    identity = ArchiveIdentity.from_mapping(identity_value)
+
+    archive_value = manifest.get("archive")
+    if not isinstance(archive_value, Mapping):
+        raise ArchiveConfigurationError("product archive manifest archive must be an object")
+    declared_archive = _required_mapping_string(archive_value, "path", label="product archive manifest archive")
+    declared_manifest = _required_mapping_string(
+        archive_value,
+        "manifest_path",
+        label="product archive manifest archive",
+    )
+    _validate_root_relative_path(declared_archive, label="product archive path")
+    _validate_root_relative_path(declared_manifest, label="product manifest path")
+
+    paths = archive_provenance_paths(archive_root, identity=identity)
+    root = _normalized_filesystem_path(archive_root, label="archive root")
+    expected_archive = paths.archive.relative_to(root).as_posix()
+    expected_manifest = paths.manifest.relative_to(root).as_posix()
+    if declared_archive != expected_archive:
+        raise ArchiveConfigurationError(
+            "product archive path does not match canonical identity: "
+            f"declared={declared_archive}; expected={expected_archive}"
+        )
+    if declared_manifest != expected_manifest:
+        raise ArchiveConfigurationError(
+            "product manifest path is not the canonical archive sibling: "
+            f"declared={declared_manifest}; expected={expected_manifest}"
+        )
+    return paths
 
 
 def _archive_override_name(script_name: str) -> str:
@@ -205,7 +279,10 @@ def _normalized_filesystem_path(path: str | os.PathLike[str], *, label: str) -> 
     raw = os.fspath(path).strip()
     if not raw:
         raise ArchiveConfigurationError(f"{label} must be non-empty")
-    return Path(raw).expanduser().resolve(strict=False)
+    expanded = Path(raw).expanduser()
+    if not expanded.is_absolute():
+        raise ArchiveConfigurationError(f"{label} must be absolute: {raw}")
+    return expanded.resolve(strict=False)
 
 
 def _paths_overlap(left: Path, right: Path) -> bool:
@@ -217,8 +294,98 @@ def _validate_identity_component(component: str) -> None:
         raise ArchiveConfigurationError("archive identity components must be strings")
     if component != component.strip() or component in {"", ".", ".."}:
         raise ArchiveConfigurationError(f"unsafe archive identity component: {component!r}")
-    if Path(component).is_absolute() or "/" in component or "\\" in component:
+    if (
+        Path(component).is_absolute()
+        or "/" in component
+        or "\\" in component
+        or any(ord(character) < 32 or ord(character) == 127 for character in component)
+    ):
         raise ArchiveConfigurationError(f"unsafe archive identity component: {component!r}")
+
+
+def _validate_archive_identity(identity: ArchiveIdentity) -> None:
+    if identity.lane not in ARCHIVE_LANES:
+        raise ArchiveConfigurationError(f"archive lane must be one of {sorted(ARCHIVE_LANES)}: {identity.lane!r}")
+    _validate_identity_component(identity.source)
+    _validate_identity_component(identity.cycle_identity)
+    try:
+        parsed_cycle_time = datetime.strptime(identity.cycle_time, "%Y-%m-%dT%H:00:00Z")
+    except ValueError as error:
+        raise ArchiveConfigurationError(
+            "archive identity cycle_time must be a valid canonical UTC hourly timestamp (YYYY-MM-DDTHH:00:00Z)"
+        ) from error
+    canonical_cycle_time = parsed_cycle_time.strftime("%Y-%m-%dT%H:00:00Z")
+    if identity.cycle_time != canonical_cycle_time:
+        raise ArchiveConfigurationError(
+            "archive identity cycle_time must use canonical UTC hourly form: "
+            f"declared={identity.cycle_time}; canonical={canonical_cycle_time}"
+        )
+    expected_cycle_identity = parsed_cycle_time.strftime("%Y%m%d%H")
+    if identity.cycle_identity != expected_cycle_identity:
+        raise ArchiveConfigurationError(
+            "archive identity cycle_time does not match cycle_identity: "
+            f"cycle_time={identity.cycle_time}; cycle_identity={identity.cycle_identity}; "
+            f"expected={expected_cycle_identity}"
+        )
+    fields = {
+        "basin_version_id": identity.basin_version_id,
+        "model_id": identity.model_id,
+        "run_id": identity.run_id,
+    }
+    required = {
+        "forcing": {"basin_version_id", "model_id"},
+        "runs": {"run_id"},
+        "states": {"model_id"},
+    }[identity.lane]
+    supplied = {name for name, value in fields.items() if value is not None}
+    missing = sorted(required - supplied)
+    invalid = sorted(supplied - required)
+    if missing:
+        raise ArchiveConfigurationError(f"archive identity for {identity.lane} is missing fields: {missing}")
+    if invalid:
+        raise ArchiveConfigurationError(f"archive identity contains fields invalid for {identity.lane}: {invalid}")
+    for name in sorted(required):
+        value = fields[name]
+        if value is None:
+            raise AssertionError("required archive identity field unexpectedly absent")
+        _validate_identity_component(value)
+
+
+def _archive_identity_path_components(identity: ArchiveIdentity) -> tuple[str, ...]:
+    base = (identity.lane, identity.source, identity.cycle_identity)
+    if identity.lane == "forcing":
+        assert identity.basin_version_id is not None and identity.model_id is not None
+        return (*base, identity.basin_version_id, identity.model_id)
+    if identity.lane == "runs":
+        assert identity.run_id is not None
+        return (*base, identity.run_id)
+    assert identity.model_id is not None
+    return (*base, identity.model_id)
+
+
+def _required_mapping_string(value: Mapping[str, object], field: str, *, label: str) -> str:
+    raw = value.get(field)
+    if not isinstance(raw, str) or not raw:
+        raise ArchiveConfigurationError(f"{label} field {field} must be a non-empty string")
+    return raw
+
+
+def _optional_mapping_string(value: Mapping[str, object], field: str, *, label: str) -> str | None:
+    if field not in value:
+        return None
+    return _required_mapping_string(value, field, label=label)
+
+
+def _validate_root_relative_path(value: str, *, label: str) -> None:
+    components = value.split("/")
+    if (
+        value.startswith("/")
+        or (len(value) >= 3 and value[0].isalpha() and value[1:3] == ":/")
+        or any(component in {"", ".", ".."} for component in components)
+        or "\\" in value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ArchiveConfigurationError(f"{label} must be a safe root-relative path: {value!r}")
 
 
 def validate_object_path(path: str) -> ObjectPathValidation:
