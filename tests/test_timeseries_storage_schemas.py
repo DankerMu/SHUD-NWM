@@ -367,6 +367,54 @@ def test_product_archive_manifest_accepts_canonical_source_ids(tmp_path: Path, s
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_product_archive_manifest_accepts_legacy_unqualified_state_source(tmp_path: Path) -> None:
+    document = _document("product_archive_manifest")
+    parent = "states/legacy-unqualified/2026053100/model-v1"
+    document["identity"] = {
+        "lane": "states",
+        "source": "legacy-unqualified",
+        "cycle_identity": "2026053100",
+        "cycle_time": "2026-05-31T00:00:00Z",
+        "model_id": "model-v1",
+    }
+    document["archive"]["path"] = f"{parent}/archive.tar.zst"
+    document["archive"]["manifest_path"] = f"{parent}/manifest.json"
+
+    result = _validate_document(tmp_path, "product_archive_manifest", document)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        {
+            "lane": "forcing",
+            "source": "legacy-unqualified",
+            "cycle_identity": "2026053100",
+            "cycle_time": "2026-05-31T00:00:00Z",
+            "basin_version_id": "basin-v1",
+            "model_id": "model-v1",
+        },
+        {
+            "lane": "runs",
+            "source": "legacy-unqualified",
+            "cycle_identity": "2026053100",
+            "cycle_time": "2026-05-31T00:00:00Z",
+            "run_id": "run-42",
+        },
+    ],
+)
+def test_product_archive_manifest_rejects_legacy_unqualified_non_state_source(
+    tmp_path: Path,
+    identity: dict[str, str],
+) -> None:
+    document = _document("product_archive_manifest")
+    document["identity"] = identity
+
+    result = _validate_document(tmp_path, "product_archive_manifest", document)
+    assert result.returncode != 0
+
+
 @pytest.mark.parametrize("cycle_time", [None, "not-a-time", "2026-05-31T08:00:00+08:00"])
 def test_product_archive_manifest_rejects_missing_invalid_or_non_utc_cycle_time(
     tmp_path: Path,

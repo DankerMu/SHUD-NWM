@@ -64,7 +64,12 @@ Order is load-bearing:
     Manifest `source` uses the shared canonical storage IDs (`gfs`, `ERA5`,
     `IFS`); the filesystem `source-segment` is the corresponding lowercase
     object-store segment. Case-insensitive aliases normalize to the same
-    identity/path, while an unknown source fails closed.
+    identity/path, while an unknown source fails closed. The states lane also
+    has one exact reserved canonical source, `legacy-unqualified`, for valid
+    source-less `state_snapshot` rows/object paths; it is forbidden for
+    forcing/runs and never inferred as a real provider. Its cycle identity is
+    derived from the row's required `valid_time`, giving a deterministic,
+    collision-disjoint `states/legacy-unqualified/...` archive path.
   - Input: identity with an unknown lane, empty/dot/dot-dot component, path
     separator, absolute component, missing lane-required field, or field from
     the wrong lane.
@@ -79,6 +84,13 @@ Order is load-bearing:
     Expected: schema and semantic manifest-binding preflight both reject it;
     direct operator/lookup identities still normalize aliases before a
     canonical manifest is produced.
+  - Input: a valid source-less legacy state reference
+    `states/<model>/<valid-time>/...` with `source_id = NULL`.
+    Expected: it maps explicitly to the states-only
+    `legacy-unqualified` identity using `valid_time` for canonical cycle
+    identity/time; manifest/path binding round-trips deterministically and
+    cannot collide with provider-qualified states. Forcing/runs reject the
+    sentinel and no provider is synthesized.
   - Input: existing `validate_object_path` callers and the established
     `NODE27_RAW_RETENTION_OBJECT_STORE_ROOT` /
     `NODE27_GOVERNANCE_OBJECT_STORE_ROOT` precedence behavior.
@@ -185,6 +197,11 @@ Order is load-bearing:
     manifest.
     Expected: treated as absent (`pending-archive`/`gap`); mismatch reported
     in the receipt.
+  - Input: a source-less legacy `state_snapshot` row and its existing
+    `states/<model>/<valid-time>/...` hot object.
+    Expected: inventory uses the explicit `legacy-unqualified` archive
+    identity; a verified legacy archive can yield `complete`, while a
+    missing legacy object remains a non-salvageable `gap`.
 - [ ] 2.2 Build the archive mover (`scripts/node27_product_archive.py` +
   `_once.sh`).
   Evidence floor: per-cycle `tar.zst` + `manifest.json` with sha256 (no row
@@ -197,6 +214,10 @@ Order is load-bearing:
   - Input: aged fixture cycle, enforce mode.
     Expected: verified tarball + manifest at the final path; source removed
     only after verification passes.
+  - Input: an aged source-less `states/<model>/<valid-time>/...` fixture.
+    Expected: archived under the collision-disjoint
+    `states/legacy-unqualified/...` path with no provider inference and the
+    same verify-before-delete guarantees.
   - Input: tarball sha256 mismatch during verification.
     Expected: source untouched; non-zero exit; failure recorded in receipt.
   - Input: re-run over a cycle with a verified existing object.

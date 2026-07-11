@@ -285,6 +285,76 @@ def test_archive_identity_rejects_unknown_source_before_root_resolution(monkeypa
         )
 
 
+def test_legacy_unqualified_state_identity_has_deterministic_reserved_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_provider_normalization(source: str) -> str:
+        raise AssertionError(f"legacy source must not use provider normalization: {source}")
+
+    monkeypatch.setattr("packages.common.storage.normalize_source_id", unexpected_provider_normalization)
+    identity = ArchiveIdentity(
+        lane="states",
+        source="legacy-unqualified",
+        cycle_identity="2026071100",
+        cycle_time="2026-07-11T00:00:00Z",
+        model_id="model-v1",
+    )
+
+    paths = archive_provenance_paths(tmp_path / "archive", identity=identity)
+
+    expected_parent = (tmp_path / "archive/states/legacy-unqualified/2026071100/model-v1").resolve()
+    assert paths.archive == expected_parent / "archive.tar.zst"
+    assert paths.manifest == expected_parent / "manifest.json"
+
+
+@pytest.mark.parametrize(
+    "identity_mapping",
+    [
+        {
+            "lane": "forcing",
+            "source": "legacy-unqualified",
+            "cycle_identity": "2026071100",
+            "cycle_time": "2026-07-11T00:00:00Z",
+            "basin_version_id": "basin-v1",
+            "model_id": "model-v1",
+        },
+        {
+            "lane": "runs",
+            "source": "legacy-unqualified",
+            "cycle_identity": "2026071100",
+            "cycle_time": "2026-07-11T00:00:00Z",
+            "run_id": "run-42",
+        },
+    ],
+)
+def test_legacy_unqualified_source_is_forbidden_outside_states(identity_mapping: dict[str, str]) -> None:
+    with pytest.raises(ArchiveConfigurationError, match="reserved for the states lane"):
+        ArchiveIdentity.from_mapping(identity_mapping)
+
+
+def test_legacy_unqualified_and_provider_state_paths_do_not_collide(tmp_path: Path) -> None:
+    common = {
+        "lane": "states",
+        "cycle_identity": "2026071100",
+        "cycle_time": "2026-07-11T00:00:00Z",
+        "model_id": "model-v1",
+    }
+
+    legacy = archive_provenance_paths(
+        tmp_path / "archive",
+        identity=ArchiveIdentity(source="legacy-unqualified", **common),
+    )
+    providers = [
+        archive_provenance_paths(tmp_path / "archive", identity=ArchiveIdentity(source=source, **common))
+        for source in ("gfs", "ERA5", "IFS")
+    ]
+
+    assert all(legacy != provider for provider in providers)
+    assert "/states/legacy-unqualified/" in legacy.archive.as_posix()
+    assert {provider.archive.parts[-4] for provider in providers} == {"gfs", "era5", "ifs"}
+
+
 @pytest.mark.parametrize(
     "identity_mapping",
     [
@@ -442,7 +512,93 @@ def test_product_manifest_binding_rejects_alias_or_unknown_source_id(tmp_path: P
         f"{relative_parent}/manifest.json",
     )
 
-    with pytest.raises(ArchiveConfigurationError, match="manifest source"):
+    with pytest.raises(ArchiveConfigurationError, match="product archive manifest"):
+        validate_product_archive_manifest_binding(tmp_path / "archive", manifest)
+
+
+def test_product_manifest_binding_accepts_canonical_legacy_unqualified_state(tmp_path: Path) -> None:
+    relative_parent = "states/legacy-unqualified/2026071100/model-v1"
+    manifest = _product_manifest(
+        {
+            "lane": "states",
+            "source": "legacy-unqualified",
+            "cycle_identity": "2026071100",
+            "cycle_time": "2026-07-11T00:00:00Z",
+            "model_id": "model-v1",
+        },
+        f"{relative_parent}/archive.tar.zst",
+        f"{relative_parent}/manifest.json",
+    )
+
+    paths = validate_product_archive_manifest_binding(tmp_path / "archive", manifest)
+
+    assert paths.archive == (tmp_path / "archive" / relative_parent / "archive.tar.zst").resolve()
+
+
+@pytest.mark.parametrize(
+    ("identity", "relative_parent"),
+    [
+        (
+            {
+                "lane": "forcing",
+                "source": "legacy-unqualified",
+                "cycle_identity": "2026071100",
+                "cycle_time": "2026-07-11T00:00:00Z",
+                "basin_version_id": "basin-v1",
+                "model_id": "model-v1",
+            },
+            "forcing/legacy-unqualified/2026071100/basin-v1/model-v1",
+        ),
+        (
+            {
+                "lane": "runs",
+                "source": "legacy-unqualified",
+                "cycle_identity": "2026071100",
+                "cycle_time": "2026-07-11T00:00:00Z",
+                "run_id": "run-42",
+            },
+            "runs/legacy-unqualified/2026071100/run-42",
+        ),
+    ],
+)
+def test_product_manifest_binding_rejects_legacy_unqualified_non_state_lane(
+    tmp_path: Path,
+    identity: dict[str, str],
+    relative_parent: str,
+) -> None:
+    manifest = _product_manifest(
+        identity,
+        f"{relative_parent}/archive.tar.zst",
+        f"{relative_parent}/manifest.json",
+    )
+
+    with pytest.raises(ArchiveConfigurationError, match="reserved for the states lane"):
+        validate_product_archive_manifest_binding(tmp_path / "archive", manifest)
+
+
+@pytest.mark.parametrize(
+    ("source", "path_source"),
+    [("legacy-unqualified", "gfs"), ("gfs", "legacy-unqualified")],
+)
+def test_state_manifest_binding_rejects_legacy_provider_inference_drift(
+    tmp_path: Path,
+    source: str,
+    path_source: str,
+) -> None:
+    relative_parent = f"states/{path_source}/2026071100/model-v1"
+    manifest = _product_manifest(
+        {
+            "lane": "states",
+            "source": source,
+            "cycle_identity": "2026071100",
+            "cycle_time": "2026-07-11T00:00:00Z",
+            "model_id": "model-v1",
+        },
+        f"{relative_parent}/archive.tar.zst",
+        f"{relative_parent}/manifest.json",
+    )
+
+    with pytest.raises(ArchiveConfigurationError, match="canonical identity"):
         validate_product_archive_manifest_binding(tmp_path / "archive", manifest)
 
 

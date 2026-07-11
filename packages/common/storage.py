@@ -53,10 +53,17 @@ class ArchiveIdentity:
 
     def __post_init__(self) -> None:
         _validate_identity_component(self.source)
-        try:
-            canonical_source = normalize_source_id(self.source)
-        except ValueError as error:
-            raise ArchiveConfigurationError(f"invalid archive source: {self.source!r}") from error
+        if self.source == LEGACY_UNQUALIFIED_ARCHIVE_SOURCE:
+            if self.lane != "states":
+                raise ArchiveConfigurationError(
+                    f"archive source {LEGACY_UNQUALIFIED_ARCHIVE_SOURCE!r} is reserved for the states lane"
+                )
+            canonical_source = LEGACY_UNQUALIFIED_ARCHIVE_SOURCE
+        else:
+            try:
+                canonical_source = normalize_source_id(self.source)
+            except ValueError as error:
+                raise ArchiveConfigurationError(f"invalid archive source: {self.source!r}") from error
         object.__setattr__(self, "source", canonical_source)
         _validate_archive_identity(self)
 
@@ -99,6 +106,7 @@ class ArchiveConfigurationError(ValueError):
 
 
 ARCHIVE_LANES = frozenset({"forcing", "runs", "states"})
+LEGACY_UNQUALIFIED_ARCHIVE_SOURCE = "legacy-unqualified"
 DEFAULT_ARCHIVE_MIN_AGE_DAYS = 45
 DEFAULT_DB_RETENTION_DAYS = 30
 
@@ -247,15 +255,14 @@ def validate_product_archive_manifest_binding(
         raise ArchiveConfigurationError("product archive manifest identity must be an object")
     declared_source = _required_mapping_string(identity_value, "source", label="product archive manifest identity")
     try:
-        canonical_source = normalize_source_id(declared_source)
-    except ValueError as error:
-        raise ArchiveConfigurationError(f"invalid product archive manifest source: {declared_source!r}") from error
-    if declared_source != canonical_source:
+        identity = ArchiveIdentity.from_mapping(identity_value)
+    except ArchiveConfigurationError as error:
+        raise ArchiveConfigurationError(f"invalid product archive manifest identity: {error}") from error
+    if declared_source != identity.source:
         raise ArchiveConfigurationError(
             "product archive manifest source must use its canonical storage ID: "
-            f"declared={declared_source!r}; canonical={canonical_source!r}"
+            f"declared={declared_source!r}; canonical={identity.source!r}"
         )
-    identity = ArchiveIdentity.from_mapping(identity_value)
 
     archive_value = manifest.get("archive")
     if not isinstance(archive_value, Mapping):

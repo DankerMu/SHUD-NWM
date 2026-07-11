@@ -26,6 +26,18 @@ per-file sha256 checksums, file sizes, tarball sha256, and identity fields
   `tar.zst` object plus `manifest.json` under `NHMS_ARCHIVE_ROOT` with
   recorded checksums and identity fields, verified before source deletion
 
+#### Scenario: Source-less legacy state snapshot remains archivable
+
+- **WHEN** a valid state row has `source_id = NULL` and references the legacy
+  `states/<model>/<valid-time>/...` object layout
+- **THEN** archive provenance MUST use the explicit states-only canonical
+  source `legacy-unqualified`, with cycle time derived from the required
+  state `valid_time`
+- **AND** its archive path MUST be deterministic and collision-disjoint from
+  provider-qualified state paths
+- **AND** forcing/runs MUST reject that sentinel and no provider identity may
+  be synthesized
+
 #### Scenario: Archive root is exempt from rotation
 
 - **WHEN** any retention or cleanup tool (including raw retention) resolves

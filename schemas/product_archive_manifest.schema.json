@@ -53,7 +53,7 @@
           "required": ["lane", "source", "cycle_identity", "cycle_time", "basin_version_id", "model_id"],
           "properties": {
             "lane": {"const": "forcing"},
-            "source": {"$ref": "#/definitions/canonical_source"},
+            "source": {"$ref": "#/definitions/provider_source"},
             "cycle_identity": {"$ref": "#/definitions/safe_segment"},
             "cycle_time": {"$ref": "#/definitions/utc_hourly_cycle_time"},
             "basin_version_id": {"$ref": "#/definitions/safe_segment"},
@@ -66,7 +66,7 @@
           "required": ["lane", "source", "cycle_identity", "cycle_time", "run_id"],
           "properties": {
             "lane": {"const": "runs"},
-            "source": {"$ref": "#/definitions/canonical_source"},
+            "source": {"$ref": "#/definitions/provider_source"},
             "cycle_identity": {"$ref": "#/definitions/safe_segment"},
             "cycle_time": {"$ref": "#/definitions/utc_hourly_cycle_time"},
             "run_id": {"$ref": "#/definitions/safe_segment"}
@@ -78,7 +78,7 @@
           "required": ["lane", "source", "cycle_identity", "cycle_time", "model_id"],
           "properties": {
             "lane": {"const": "states"},
-            "source": {"$ref": "#/definitions/canonical_source"},
+            "source": {"$ref": "#/definitions/state_source"},
             "cycle_identity": {"$ref": "#/definitions/safe_segment"},
             "cycle_time": {"$ref": "#/definitions/utc_hourly_cycle_time"},
             "model_id": {"$ref": "#/definitions/safe_segment"}
@@ -86,8 +86,11 @@
         }
       ]
     },
-    "canonical_source": {
+    "provider_source": {
       "enum": ["gfs", "ERA5", "IFS"]
+    },
+    "state_source": {
+      "enum": ["gfs", "ERA5", "IFS", "legacy-unqualified"]
     },
     "utc_hourly_cycle_time": {
       "type": "string",
