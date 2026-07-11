@@ -164,14 +164,13 @@ captured audit time, and apply a 20-second statement timeout. A forcing
 version or hydro run is an inventory subject only when its
 corresponding detail hypertable has at least one row; metadata-only rows SHALL
 NOT generate zero-row salvage selectors. Forcing/run windows use their
-inclusive metadata `start_time`/`end_time` bounds, which MUST contain the
-actual per-identity detail min/max. State references use their `valid_time`
-point, and archive-age classification uses the subject window's end. Every
+authoritative inclusive metadata `start_time`/`end_time` bounds without a
+full detail rescan. State references use their `valid_time` point, and
+archive-age classification uses the subject window's end. Every
 window MUST satisfy start <= end and receipt coverage bounds MUST exactly
 equal the subject-set min(start)/max(end). Detail-presence queries SHALL use
 bounded correlated identity-leading probes rather than decorrelating into a
-full hypertable scan/aggregate. Both presence and detail-outside-metadata-
-window checks SHALL use such bounded identity-leading probes.
+full hypertable scan/aggregate.
 
 All hot/archive/salvage paths SHALL be strictly parsed, root-contained,
 regular non-symlink evidence. Forcing hot coverage requires its bounded

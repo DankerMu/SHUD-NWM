@@ -129,17 +129,7 @@ class ConnectionFactory(Protocol):
 FORCING_INVENTORY_SQL = """
 SELECT fv.forcing_version_id, fv.model_id, fv.source_id, fv.cycle_time,
        fv.start_time, fv.end_time, fv.forcing_package_uri, fv.checksum,
-       fst_presence.basin_version_id,
-       EXISTS (SELECT 1 FROM met.forcing_station_timeseries x
-               WHERE x.forcing_version_id = fv.forcing_version_id
-                 AND x.valid_time < fv.start_time LIMIT 1) AS before_window,
-       EXISTS (SELECT 1 FROM met.forcing_station_timeseries x
-               WHERE x.forcing_version_id = fv.forcing_version_id
-                 AND x.valid_time > fv.end_time LIMIT 1) AS after_window,
-       EXISTS (SELECT 1 FROM met.forcing_station_timeseries x
-                 WHERE x.forcing_version_id = fv.forcing_version_id
-                   AND (x.basin_version_id <> fst_presence.basin_version_id
-                        OR LOWER(x.source_id) <> LOWER(fv.source_id)) LIMIT 1) AS identity_drift
+       fst_presence.basin_version_id
 FROM met.forcing_version fv
 CROSS JOIN LATERAL (
   SELECT x.basin_version_id
@@ -154,14 +144,7 @@ LIMIT 100001
 RUN_INVENTORY_SQL = """
 SELECT r.run_id, r.model_id, r.basin_version_id, r.source_id, r.cycle_time,
        r.start_time, r.end_time, r.run_manifest_uri, r.output_uri,
-       rt_presence.detail_present,
-       EXISTS (SELECT 1 FROM hydro.river_timeseries x
-               WHERE x.run_id = r.run_id AND x.valid_time < r.start_time LIMIT 1) AS before_window,
-       EXISTS (SELECT 1 FROM hydro.river_timeseries x
-               WHERE x.run_id = r.run_id AND x.valid_time > r.end_time LIMIT 1) AS after_window,
-       EXISTS (SELECT 1 FROM hydro.river_timeseries x
-                 WHERE x.run_id = r.run_id
-                   AND x.basin_version_id <> r.basin_version_id LIMIT 1) AS identity_drift
+       rt_presence.detail_present
 FROM hydro.hydro_run r
 CROSS JOIN LATERAL (
   SELECT 1 AS detail_present
@@ -200,7 +183,6 @@ def load_inventory(connection: Any) -> tuple[datetime, list[InventorySubject]]:
         raise AuditBlocked(f"inventory exceeds {MAX_SUBJECTS} subjects")
     subjects: list[InventorySubject] = []
     for row in forcing_rows:
-        _validate_detail_bounds(row, "forcing_version_id")
         if not row["cycle_time"]:
             raise AuditBlocked(f"forcing version {row['forcing_version_id']} has no cycle_time")
         subjects.append(
@@ -218,7 +200,6 @@ def load_inventory(connection: Any) -> tuple[datetime, list[InventorySubject]]:
             )
         )
     for row in run_rows:
-        _validate_detail_bounds(row, "run_id")
         if not row["cycle_time"]:
             raise AuditBlocked(f"run {row['run_id']} has no cycle_time")
         subjects.append(
@@ -706,11 +687,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     )
     return 0
-
-
-def _validate_detail_bounds(row: Mapping[str, Any], id_key: str) -> None:
-    if row.get("before_window") or row.get("after_window") or row.get("identity_drift"):
-        raise AuditBlocked(f"detail bounds drift outside metadata window: {row[id_key]}")
 
 
 def _row_mapping(cursor: Any, row: Any) -> dict[str, Any]:

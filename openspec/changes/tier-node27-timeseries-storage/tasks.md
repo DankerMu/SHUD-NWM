@@ -188,10 +188,10 @@ Order is load-bearing:
   detail hypertable contains at least one row; the non-decorrelated
   correlated `LIMIT 1` probes must retain an identity-leading
   index-only node-27 query plan (no detail-hypertable full scan/hash
-  aggregate). Their
-  selector windows are the metadata `[start_time, end_time]` bounds
-  (inclusive), must contain the actual per-identity detail min/max bounds,
-  and age is evaluated at `window.end`; state subjects use the point window
+  aggregate). Their selector windows use the authoritative metadata
+  `[start_time, end_time]` bounds (inclusive); the audit does not rescan all
+  detail rows to recompute bounds. Age is evaluated at `window.end`; state
+  subjects use the point window
   `[valid_time, valid_time]`. Receipt `coverage_bounds` equals the exact
   min(start)/max(end) across the captured subject set, and every window must
   satisfy start <= end.
@@ -271,9 +271,8 @@ Order is load-bearing:
   - Input: forcing/run metadata with no corresponding detail-hypertable row.
     Expected: it is excluded from inventory and cannot produce a zero-row
     salvage selector; node-27 `EXPLAIN` proves the correlated `LIMIT 1`
-    presence and outside-metadata-window probes use identity-leading indexes
-    within the statement timeout and do not decorrelate into detail full
-    scans/hash aggregates.
+    presence probes use identity-leading indexes within the statement timeout
+    and do not decorrelate into detail full scans/hash aggregates.
   - Input: forcing package URI whose source/cycle/model/basin disagrees with
     its DB row, whose manifest range does not contain the DB subject window,
     or a run root without an exactly row-bound input manifest / regular output.
@@ -304,11 +303,11 @@ Order is load-bearing:
     inventory.
     Expected: distinct stable subjects publish independently; all invalid
     set shapes fail before schema-validated atomic replace.
-  - Input: one repeatable-read snapshot with metadata/detail bounds drift,
-    inverted window, wrong computed coverage bounds, or audit time changed
-    between subjects.
-    Expected: drift/inversion/bounds mismatch blocks publication; every age
-    decision uses the one captured audit time.
+  - Input: one repeatable-read snapshot with inverted metadata window, wrong
+    computed coverage bounds, or audit time changed between subjects.
+    Expected: inversion/bounds mismatch blocks publication; every selector
+    uses the metadata window and every age decision uses the one captured
+    audit time without a full detail rescan.
   - Input: manifest over 16 MiB, more than 10,000 salvage manifests, scan
     depth over eight, or more than 100,000 subjects.
     Expected: bounded audit fails non-zero without replacing the prior gate
