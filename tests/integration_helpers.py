@@ -372,6 +372,19 @@ def _clear_issue_126_rows(connection: Any) -> None:
         )
         cursor.execute("DELETE FROM met.forcing_version WHERE forcing_version_id LIKE %s", (f"{ISSUE_126_PREFIX}%",))
         cursor.execute("DELETE FROM met.forecast_cycle WHERE cycle_id = %s", (CYCLE_ID,))
+        # canonical_grid_snapshot is referenced by three nullable FKs
+        # (canonical_met_product.grid_snapshot_id, met_station.grid_snapshot_id,
+        # interp_weight.grid_snapshot_id) that do NOT cascade (000043). Null those
+        # references first, then delete the snapshots, then the data_source parent.
+        # canonical_grid_cell rides the ON DELETE CASCADE on canonical_grid_snapshot.
+        for table in ("canonical_met_product", "met_station", "interp_weight"):
+            cursor.execute(
+                f"UPDATE met.{table} SET grid_snapshot_id = NULL "
+                f"WHERE grid_snapshot_id IN "
+                f"(SELECT grid_snapshot_id FROM met.canonical_grid_snapshot WHERE source_id = %s)",
+                (SOURCE_ID,),
+            )
+        cursor.execute("DELETE FROM met.canonical_grid_snapshot WHERE source_id = %s", (SOURCE_ID,))
         cursor.execute("DELETE FROM met.data_source WHERE source_id = %s", (SOURCE_ID,))
         cursor.execute("DELETE FROM core.model_instance WHERE model_id = %s", (MODEL_ID,))
         cursor.execute("DELETE FROM core.mesh_version WHERE mesh_version_id = %s", (MESH_VERSION_ID,))

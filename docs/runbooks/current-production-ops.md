@@ -746,8 +746,8 @@ Symptoms:
 
 Safe online mitigation:
 
-1. Keep node-22 compute-only. Do not reconnect the archived local PostgreSQL
-   `:55433`.
+1. Keep node-22 compute-only. Node-22 local PostgreSQL `:55433` is historical,
+   archived, and stopped — do not connect it as a current runtime dependency.
 2. Restore the missing forcing package from preserved workspace products only
    when the preserved files match the affected source/cycle/model identity.
    Copy both the staging object-store path and shared NFS copyback root, then
