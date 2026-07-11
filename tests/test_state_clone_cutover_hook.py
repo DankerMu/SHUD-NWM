@@ -46,6 +46,8 @@ import pytest
 from packages.common.model_registry import (
     ColdStartApprovalInput,
     ModelActivationContext,
+    PsycopgModelRegistryStore,
+    _build_activation_result_approval_block,
 )
 from packages.common.state_clone import STATE_CLONE_COLD_START_APPROVAL_REQUIRED
 from packages.common.state_clone_hook import (
@@ -1147,6 +1149,442 @@ def test_approval_scoped_to_named_sources_only_gfs_still_clones(
             ),
         }
     ]
+
+
+# --- SUB-5 §3.2 fold-at-intro: activation-result marker predicate ---------
+#
+# Round-1 review found the activation-result marker (built by
+# ``_build_activation_result_approval_block`` in ``model_registry.py``)
+# would emit whenever an in-scope covered source existed, but the
+# state-clone hook actually SKIPS its per-source approval-consumption
+# loop (via ``no_previous_active_model`` / ``target_not_direct_grid``)
+# whenever ``previous_active_model is None`` OR ``source_scope is None``.
+# The asymmetry meant a fresh-basin or legacy-target activation could
+# ship the ``spin_up_distortion_announcement_obligation`` marker on the
+# result WITHOUT any backing ``record_approval`` audit row — an
+# unauditable obligation. The fold tightens the predicate to match the
+# hook and locks it here on both sides (result + hook).
+
+
+def _happy_path_approval_ctx() -> ModelActivationContext:
+    """Fully engaged activation ctx: prior active + direct-grid + approval."""
+    approval = ColdStartApprovalInput(
+        approver="ops.operator@example.org",
+        reason="M1 rolls out onto a new soil layer; cold-start acknowledged.",
+        covered_source_ids=("gfs",),
+    )
+    return _make_ctx_with_approval(
+        source_scope=("gfs",),
+        previous_active_model=_previous_active_row(),
+        approval=approval,
+    )
+
+
+def test_build_activation_result_approval_block_emits_marker_on_result_side_happy_path() -> (
+    None
+):
+    """Happy path: the block is emitted with the exact obligation shape.
+
+    Locks the result-side contract: when the hook engages (prior active
+    row present, direct-grid target, approval covers an in-scope
+    source), the activation result carries approver + reason +
+    covered_source_ids + the spin-up-distortion-announcement obligation
+    marker. This is the only shape API consumers key off.
+    """
+
+    block = _build_activation_result_approval_block(_happy_path_approval_ctx())
+
+    assert block == {
+        "approver": "ops.operator@example.org",
+        "reason": "M1 rolls out onto a new soil layer; cold-start acknowledged.",
+        "covered_source_ids": ["gfs"],
+        "spin_up_distortion_announcement_obligation": (
+            STATE_CLONE_SPIN_UP_DISTORTION_ANNOUNCEMENT_MARKER
+        ),
+    }
+
+
+def test_build_activation_result_approval_block_fresh_basin_returns_none() -> None:
+    """Fresh basin (previous_active_model is None) suppresses the marker.
+
+    The hook takes the ``no_previous_active_model`` skip path BEFORE its
+    approval loop, so no ``record_approval`` audit row is written. The
+    result-side marker must mirror that: no marker on the result when
+    the hook would not have recorded the approval.
+
+    Fold-at-intro P2 (Epic #982 SUB-5 round-1 correctness review).
+    """
+
+    approval = ColdStartApprovalInput(
+        approver="ops.operator@example.org",
+        reason="cold-start acknowledged.",
+        covered_source_ids=("gfs",),
+    )
+    ctx = _make_ctx_with_approval(
+        source_scope=("gfs",),
+        previous_active_model=None,  # fresh basin
+        approval=approval,
+    )
+
+    assert _build_activation_result_approval_block(ctx) is None
+
+
+def test_build_activation_result_approval_block_legacy_target_returns_none() -> None:
+    """Legacy target (source_scope is None) suppresses the marker.
+
+    The hook takes the ``target_not_direct_grid`` skip path BEFORE its
+    approval loop, so no ``record_approval`` audit row is written.
+    Result-side marker must mirror that suppression symmetrically.
+
+    Fold-at-intro P2 (Epic #982 SUB-5 round-1 correctness review).
+    """
+
+    approval = ColdStartApprovalInput(
+        approver="ops.operator@example.org",
+        reason="cold-start acknowledged.",
+        covered_source_ids=("gfs",),
+    )
+    ctx = _make_ctx_with_approval(
+        source_scope=None,  # legacy IDW target
+        previous_active_model=_previous_active_row(),
+        approval=approval,
+    )
+
+    assert _build_activation_result_approval_block(ctx) is None
+
+
+def test_build_activation_result_approval_block_stray_approval_covers_no_in_scope_source_returns_none() -> (
+    None
+):
+    """Stray approval that covers no in-scope source suppresses the marker.
+
+    The hook only fires ``record_approval`` for a source that BOTH
+    appears in ``source_scope`` AND is named by
+    ``approval.covered_source_ids``. An approval whose covered set does
+    not intersect the scope records nothing on the audit stream, so
+    the result must not surface an obligation marker either.
+    """
+
+    approval = ColdStartApprovalInput(
+        approver="ops.operator@example.org",
+        reason="ifs cold-start acknowledged — but ifs is not in scope here.",
+        covered_source_ids=("ifs",),
+    )
+    ctx = _make_ctx_with_approval(
+        source_scope=("gfs",),
+        previous_active_model=_previous_active_row(),
+        approval=approval,
+    )
+
+    assert _build_activation_result_approval_block(ctx) is None
+
+
+def test_hook_stray_approval_covers_no_in_scope_source_records_no_approval(
+    m0_m1_equal_packages: dict[str, Any],
+) -> None:
+    """Hook-side pairing: stray approval + qualifying gate produces no approval.
+
+    Same ctx as
+    ``test_build_activation_result_approval_block_stray_approval_covers_no_in_scope_source_returns_none``,
+    but driven through the hook: the fingerprint gate for ``gfs`` passes
+    (equal packages), one clone row commits, the stray approval for
+    ``ifs`` never crosses the scope, and ``audit.approvals`` stays
+    empty. Locks the hook↔result symmetry from the hook side.
+    """
+
+    cursor = _FakeCursor(initial_rows=[_seed_source_snapshot(source_id="gfs")])
+    audit = _FakeAuditRecorder()
+
+    hook = build_state_clone_cutover_hook(
+        audit_recorder=audit,
+        fingerprint_inputs_provider=lambda _ctx, _source: _make_fingerprint_inputs(
+            m0_m1_equal_packages
+        ),
+    )
+    approval = ColdStartApprovalInput(
+        approver="ops.operator@example.org",
+        reason="ifs cold-start acknowledged — but ifs is not in scope here.",
+        covered_source_ids=("ifs",),
+    )
+    ctx = _make_ctx_with_approval(
+        source_scope=("gfs",),
+        previous_active_model=_previous_active_row(),
+        approval=approval,
+    )
+
+    hook(cursor, ctx)  # Must NOT raise — gfs qualifies through the gate.
+    cursor.commit()
+
+    m1_rows = [
+        row for row in cursor.all_committed_rows() if row["model_id"] == M1_MODEL_ID
+    ]
+    assert len(m1_rows) == 1
+    assert m1_rows[0]["source_id"] == "gfs"
+
+    # Stray approval never crossed the scope — nothing recorded.
+    assert audit.approvals == []
+    assert audit.refusals == []
+    assert audit.skips == []
+
+
+def test_hook_fresh_basin_with_stray_approval_still_records_only_skip() -> None:
+    """Fresh basin + non-None approval records ONLY the applicability skip.
+
+    Applicability gate 1 (``no_previous_active_model``) fires BEFORE the
+    approval loop. Even with a non-None approval on ctx, no
+    ``record_approval`` call must be issued; only the ``skip`` audit
+    record for the fresh-basin reason. This pins the applicability-
+    before-approval ordering that the result-side predicate now mirrors.
+    """
+
+    cursor = _FakeCursor()
+    audit = _FakeAuditRecorder()
+
+    def _never_called_provider(
+        _ctx: ModelActivationContext, _source: str
+    ) -> StateCloneFingerprintInputs:
+        raise AssertionError(
+            "fingerprint_inputs_provider must not be invoked on the skip path"
+        )
+
+    hook = build_state_clone_cutover_hook(
+        audit_recorder=audit,
+        fingerprint_inputs_provider=_never_called_provider,
+    )
+    approval = ColdStartApprovalInput(
+        approver="ops.operator@example.org",
+        reason="cold-start acknowledged.",
+        covered_source_ids=("gfs",),
+    )
+    ctx = _make_ctx_with_approval(
+        source_scope=("gfs",),
+        previous_active_model=None,  # fresh basin — skip fires first
+        approval=approval,
+    )
+
+    hook(cursor, ctx)  # Must NOT raise.
+
+    # No SQL executed — the repository was never built.
+    assert cursor.executed == []
+    assert cursor.all_staged_rows() == []
+    assert cursor.all_committed_rows() == []
+    # Applicability-before-approval: only the skip fires; approval loop
+    # is unreachable when previous_active_model is None.
+    assert audit.skips == [
+        {
+            "reason": SKIP_REASON_NO_PREVIOUS_ACTIVE_MODEL,
+            "basin_version_id": BASIN_VERSION_ID,
+            "target_model_id": M1_MODEL_ID,
+        }
+    ]
+    assert audit.approvals == []
+    assert audit.refusals == []
+
+
+# --- SUB-5 §3.2 fold-at-intro: outside-tx refusal audit unit coverage -----
+
+
+class _RecordingRefusalCursor:
+    """Cursor stand-in that captures INSERT params and returns a log_id."""
+
+    def __init__(self, log_id: int) -> None:
+        self._log_id = log_id
+        self.statements: list[tuple[str, tuple[Any, ...]]] = []
+
+    def execute(self, sql: str, params: Sequence[Any]) -> None:
+        self.statements.append((sql, tuple(params)))
+
+    def fetchone(self) -> dict[str, Any]:
+        # Mirrors psycopg2 RealDictCursor: dict-shaped row with the
+        # RETURNING column name as key.
+        return {"log_id": self._log_id}
+
+
+class _RecordingRefusalTransactionContext:
+    """Context manager that yields a ``_RecordingRefusalCursor``."""
+
+    def __init__(self, cursor: _RecordingRefusalCursor) -> None:
+        self._cursor = cursor
+        self.entered = False
+        self.exited = False
+
+    def __enter__(self) -> _RecordingRefusalCursor:
+        self.entered = True
+        return self._cursor
+
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        _exc: BaseException | None,
+        _tb: Any,
+    ) -> bool:
+        self.exited = True
+        return False
+
+
+class _RefusalCaptureStore(PsycopgModelRegistryStore):
+    """Store harness that captures every ``_transaction()`` open.
+
+    Overrides ``_transaction()`` alone so the SUT's own
+    ``_record_state_clone_refusal_audit`` control flow runs verbatim
+    against an in-memory cursor. The list of yielded transactions
+    proves the outside-tx invariant: exactly ONE new transaction opens
+    to persist the refusal audit row (autonomous sub-tx are unavailable
+    in PostgreSQL, so this fresh tx is the only durability path).
+    """
+
+    def __init__(self) -> None:
+        super().__init__("postgresql://harness")
+        object.__setattr__(self, "opened_transactions", [])
+        object.__setattr__(self, "refusal_log_id", 424242)
+
+    def _transaction(self) -> _RecordingRefusalTransactionContext:
+        cursor = _RecordingRefusalCursor(log_id=self.refusal_log_id)
+        ctx = _RecordingRefusalTransactionContext(cursor)
+        self.opened_transactions.append(ctx)
+        return ctx
+
+
+def _refusal_policy_decision() -> Any:
+    from packages.common.auth_policy import PolicyDecision
+
+    return PolicyDecision(
+        action_id="model.activate",
+        decision="permit",
+        required_roles=("sys_admin",),
+        matched_roles=("sys_admin",),
+        actor_id="ops.operator@example.org",
+        target_type="model_instance",
+        target_id=M1_MODEL_ID,
+        reason="matched sys_admin",
+        reason_code="policy.matched",
+        roles=("sys_admin",),
+        execution_mode="backend_route_executed",
+        no_mutation_expected=False,
+        auth_mode="live_idp",
+        live_backend_auth_executed=True,
+        provider_metadata=None,
+        role_mapping_result=None,
+    )
+
+
+def _refusal_from_hook() -> StateCloneCutoverRefusedError:
+    """Refusal shaped like the hook's raise on an unequal-fingerprint gate."""
+    return StateCloneCutoverRefusedError(
+        source_id="gfs",
+        refusal_scope="unequal_fingerprint",
+        refusal_code=STATE_CLONE_COLD_START_APPROVAL_REQUIRED,
+    )
+
+
+def test_record_state_clone_refusal_audit_writes_outside_tx_and_returns_stable_code_result() -> (
+    None
+):
+    """Locks the outside-tx refusal-audit contract at the helper boundary.
+
+    ``PsycopgModelRegistryStore._record_state_clone_refusal_audit`` is
+    invoked from ``model_lifecycle_operation`` AFTER the lifecycle
+    transaction has already rolled back (StateCloneCutoverRefusedError
+    propagated out of ``_dispatch_pre_activation_hooks``). It must:
+
+    * open exactly ONE fresh transaction (PostgreSQL has no autonomous
+      sub-transactions, so this fresh tx is the only durability path);
+    * emit an ``INSERT INTO ops.audit_log`` with the stable action code
+      ``state_clone_cold_start_approval_required``, the target model
+      as ``entity_id``, and details naming the blocked scope;
+    * return a refused-shape result whose ``error.code`` /
+      ``error.details`` / ``audit_reference.log_id`` mirror the audit
+      row so downstream API consumers key uniformly off ``status``.
+
+    Fold-at-intro (Epic #982 SUB-5 round-1 test-coverage note 1): the
+    outside-tx audit surface was previously only exercised through the
+    hook boundary; this test locks the helper's return-shape contract
+    and the fresh-tx invariant directly.
+    """
+
+    store = _RefusalCaptureStore()
+    ctx = _make_ctx_with_approval(
+        source_scope=("gfs",),
+        previous_active_model=_previous_active_row(),
+        approval=None,
+    )
+    refusal = _refusal_from_hook()
+    policy_decision = _refusal_policy_decision()
+    preflight = {"prior_audit_log_id": 999}
+
+    result = store._record_state_clone_refusal_audit(
+        activation_context=ctx,
+        refusal=refusal,
+        policy_decision=policy_decision,
+        request_id="req-abc-123",
+        operation="activate",
+        preflight=preflight,
+    )
+
+    # Outside-tx invariant: exactly ONE fresh _transaction() opened AND
+    # entered AND exited. Proves the "PostgreSQL has no autonomous
+    # sub-transactions, so open a new tx after the rollback" contract.
+    assert len(store.opened_transactions) == 1
+    tx = store.opened_transactions[0]
+    assert tx.entered is True
+    assert tx.exited is True
+
+    # The audit INSERT hit the fresh cursor with the expected stable
+    # code and target identity. We assert on the audit_log INSERT
+    # keywords rather than exact SQL text to keep the assertion robust
+    # against whitespace / formatting drift.
+    executed = tx._cursor.statements  # noqa: SLF001 - test introspection
+    assert len(executed) == 1
+    sql_text, params = executed[0]
+    normalized = " ".join(sql_text.split())
+    assert "INSERT INTO ops.audit_log" in normalized
+    assert "RETURNING log_id" in normalized
+
+    (
+        actor_id,
+        actor_role,
+        action_code,
+        entity_id,
+        details_json,
+    ) = params
+    assert actor_id == policy_decision.actor_id
+    assert actor_role == "sys_admin"
+    assert action_code == STATE_CLONE_COLD_START_APPROVAL_REQUIRED
+    assert entity_id == M1_MODEL_ID
+    # Details are wrapped in psycopg2's Json adapter; render via str().
+    from psycopg2.extras import Json as _Json
+
+    assert isinstance(details_json, _Json)
+    details_text = str(details_json)
+    for expected in (
+        BASIN_VERSION_ID,
+        "gfs",
+        "unequal_fingerprint",
+        STATE_CLONE_COLD_START_APPROVAL_REQUIRED,
+        M1_MODEL_ID,
+    ):
+        assert expected in details_text, (
+            f"expected {expected!r} inside audit details JSON, got {details_text!r}"
+        )
+
+    # Returned result: refused-shape, stable code on error.code,
+    # blocked scope on error.details, audit_reference.log_id present
+    # and matching the RETURNING row.
+    assert result["status"] == "refused"
+    assert result["operation"] == "activate"
+    assert result["error"]["code"] == STATE_CLONE_COLD_START_APPROVAL_REQUIRED
+    assert result["error"]["message"]  # non-empty message
+    assert result["error"]["details"] == {
+        "basin_version_id": BASIN_VERSION_ID,
+        "source_id": "gfs",
+        "refusal_scope": "unequal_fingerprint",
+    }
+    assert result["audit_reference"] == {
+        "entity_type": "model_instance",
+        "entity_id": M1_MODEL_ID,
+        "log_id": store.refusal_log_id,
+    }
+    assert result["preflight"] is preflight
 
 
 # --- Module import guard for CYCLE_ID (used only in docstrings) -----------

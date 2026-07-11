@@ -385,8 +385,19 @@ def _build_activation_result_approval_block(
     clause 3) so the caller sees the same obligation clause that
     landed on the audit record inside the hook.
 
-    Returns ``None`` when the approval was absent OR when none of the
-    covered sources intersect the actual ``source_scope`` (a stray
+    Returns ``None`` — i.e. the activation result carries NO obligation
+    marker — whenever the state-clone hook would have skipped BEFORE
+    reaching its per-source approval-consumption loop. The hook takes a
+    skip path (``no_previous_active_model`` or ``target_not_direct_grid``)
+    when ``previous_active_model is None`` OR ``source_scope is None``,
+    and in both cases no ``record_approval`` audit call fires. Mirroring
+    those short-circuits here keeps the result-side marker in lockstep
+    with the audit-record side: no marker on the result unless the hook
+    actually consumed the approval on the audit stream (fold-at-intro
+    from Epic #982 SUB-5 round-1 correctness review).
+
+    Also returns ``None`` when the approval was absent OR when none of
+    the covered sources intersect the actual ``source_scope`` (a stray
     approval that covers no in-scope source records no obligation on
     the result — the hook never fires ``record_approval`` in that case
     either, so the two sites stay symmetric).
@@ -396,7 +407,17 @@ def _build_activation_result_approval_block(
     approval = activation_context.cold_start_approval
     if approval is None:
         return None
-    scope = activation_context.source_scope or ()
+    # Symmetry with the state-clone hook's applicability predicates
+    # (packages/common/state_clone_hook.py::_hook): the hook records a
+    # skip WITHOUT invoking ``record_approval`` when the previous active
+    # model is absent (fresh basin) or the target is not direct-grid.
+    # Emitting the marker here in either case would attach an obligation
+    # clause to the activation result with no matching audit row.
+    if activation_context.previous_active_model is None:
+        return None
+    if activation_context.source_scope is None:
+        return None
+    scope = activation_context.source_scope
     covered_in_scope = tuple(
         source_id for source_id in scope if source_id in approval.covered_source_ids
     )
