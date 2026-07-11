@@ -87,8 +87,14 @@ REHEARSAL_REASON = "Epic #992 SUB-7 direct-grid-display-cutover rehearsal on nod
 RESTORE_REASON = "Epic #992 SUB-7 rehearsal restore"
 
 # Screenshot handoff window in seconds. playwright-capture.sh runs in parallel;
-# 30 seconds keeps the window explicit but bounded.
-SCREENSHOT_WINDOW_SECONDS = 30
+# 300 seconds (5 minutes) gives the Playwright test enough headroom to complete
+# its own 240s waitFor timeout plus the click-through sequence (basin toggle ->
+# station click -> issue-time picker -> retention miss). Phase B (30 s) was
+# shorter than the Playwright test's own 60 s timeout, so rehearse.py committed
+# the deactivate transaction before the test could reach the popup — this Phase
+# C fix opens the window wide enough that the Playwright test drives to
+# completion before the restore fires.
+SCREENSHOT_WINDOW_SECONDS = 300
 
 
 # --- Audit recorder implementation ---------------------------------------
