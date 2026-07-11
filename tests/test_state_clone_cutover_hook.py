@@ -43,11 +43,16 @@ from typing import Any
 
 import pytest
 
-from packages.common.model_registry import ModelActivationContext
+from packages.common.model_registry import (
+    ColdStartApprovalInput,
+    ModelActivationContext,
+)
 from packages.common.state_clone import STATE_CLONE_COLD_START_APPROVAL_REQUIRED
 from packages.common.state_clone_hook import (
     SKIP_REASON_NO_PREVIOUS_ACTIVE_MODEL,
     SKIP_REASON_TARGET_NOT_DIRECT_GRID,
+    STATE_CLONE_APPROVAL_ACTION,
+    STATE_CLONE_SPIN_UP_DISTORTION_ANNOUNCEMENT_MARKER,
     StateCloneCutoverRefusedError,
     StateCloneFingerprintInputs,
     _CursorBoundStateSnapshotRepository,
@@ -295,17 +300,20 @@ def _source_key(source_id: Any) -> str:
 
 
 class _FakeAuditRecorder:
-    """Records skip + refusal events from both the hook and the SUB-2 core.
+    """Records skip / refusal / approval events from hook + SUB-2 core.
 
     The hook forwards this recorder into
-    ``fingerprint_gated_state_clone`` (which invokes ``record_refusal``)
-    and calls ``record_skip`` itself on the two applicability-predicate
-    misses, so a single instance sees the full audit stream.
+    ``fingerprint_gated_state_clone`` (which invokes ``record_refusal``),
+    calls ``record_skip`` itself on the two applicability-predicate
+    misses, and calls ``record_approval`` on each source skipped through
+    the explicit cold-start approval route (SUB-5 task 3.2), so a single
+    instance sees the full audit stream.
     """
 
     def __init__(self) -> None:
         self.skips: list[dict[str, Any]] = []
         self.refusals: list[dict[str, Any]] = []
+        self.approvals: list[dict[str, Any]] = []
 
     def record_skip(self, reason: str, ctx: ModelActivationContext) -> None:
         self.skips.append(
@@ -318,6 +326,9 @@ class _FakeAuditRecorder:
 
     def record_refusal(self, record: Mapping[str, Any]) -> None:
         self.refusals.append(dict(record))
+
+    def record_approval(self, record: Mapping[str, Any]) -> None:
+        self.approvals.append(dict(record))
 
 
 # --- Provider + activation-context builders --------------------------------
@@ -866,6 +877,276 @@ def test_legacy_target_skip_never_opens_a_repository(
     ctx = _make_ctx(source_scope=None, previous_active_model=_previous_active_row())
     hook(cursor, ctx)  # must NOT raise
     assert audit.skips[0]["reason"] == SKIP_REASON_TARGET_NOT_DIRECT_GRID
+
+
+# --- SUB-5 §3.2: explicit cold-start approval route -----------------------
+
+
+def _make_ctx_with_approval(
+    *,
+    source_scope: tuple[str, ...],
+    previous_active_model: Mapping[str, Any] | None,
+    approval: ColdStartApprovalInput | None,
+) -> ModelActivationContext:
+    return ModelActivationContext(
+        basin_version_id=BASIN_VERSION_ID,
+        previous_active_model=previous_active_model,
+        target_model=_target_model_row(),
+        source_scope=source_scope,
+        cold_start_approval=approval,
+    )
+
+
+def test_refusal_without_approval_rolls_back_and_records_stable_code_in_audit(
+    m0_m1_unequal_packages: dict[str, Any],
+) -> None:
+    """SUB-5 §3.2 (a): refusal-without-approval surfaces the stable code + audit.
+
+    An engaged clone refusal without a covering ``cold_start_approval``
+    on the activation context must:
+
+    * raise :class:`StateCloneCutoverRefusedError` so Change 4's
+      dispatcher rolls the whole transaction back (no clone row committed);
+    * carry the stable error code
+      ``state_clone_cold_start_approval_required`` on the raised
+      exception (the code the outside-tx audit-log write in
+      ``PsycopgModelRegistryStore.model_lifecycle_operation`` keys off);
+    * emit a refusal audit record naming the blocked ``source_id`` and
+      the refusal cause (``refusal_scope``);
+    * emit NO approval audit record.
+
+    This locks §3.2 clause "an engaged-clone refusal surfaces the stable
+    error code ... plus an ops.audit_log record naming the blocked
+    scope and cause" at the hook boundary. The outside-tx persistence is
+    exercised by the model_registry-level integration test.
+    """
+
+    cursor = _FakeCursor(initial_rows=[_seed_source_snapshot(source_id="gfs")])
+    audit = _FakeAuditRecorder()
+    hook = build_state_clone_cutover_hook(
+        audit_recorder=audit,
+        fingerprint_inputs_provider=lambda _ctx, _source: _make_fingerprint_inputs(
+            m0_m1_unequal_packages
+        ),
+    )
+    # Approval explicitly absent — SUB-4 default preserved.
+    ctx = _make_ctx_with_approval(
+        source_scope=("gfs",),
+        previous_active_model=_previous_active_row(),
+        approval=None,
+    )
+
+    with pytest.raises(StateCloneCutoverRefusedError) as raised:
+        hook(cursor, ctx)
+    cursor.rollback()
+
+    # Stable code surfaces on the exception — the outside-tx audit write
+    # in ``PsycopgModelRegistryStore.model_lifecycle_operation`` keys off
+    # exactly this constant.
+    assert raised.value.refusal_code == STATE_CLONE_COLD_START_APPROVAL_REQUIRED
+    assert raised.value.source_id == "gfs"
+    assert raised.value.refusal_scope == "unequal_fingerprint"
+
+    # No clone row committed and none staged — the transaction rolled
+    # back completely, matching §3.2 clause "rolls back and surfaces the
+    # stable code".
+    assert cursor.all_staged_rows() == []
+    assert all(row["model_id"] == M0_MODEL_ID for row in cursor.all_committed_rows())
+
+    # Refusal audit record present and shape-locked. The SUB-2 clone
+    # core populates the record before returning, so the hook sees the
+    # blocked source id + refusal cause verbatim.
+    assert audit.refusals == [
+        {
+            "refusal_code": STATE_CLONE_COLD_START_APPROVAL_REQUIRED,
+            "refusal_scope": "unequal_fingerprint",
+            "m0_model_id": M0_MODEL_ID,
+            "m1_model_id": M1_MODEL_ID,
+            "source_id": "gfs",
+            "cutover_valid_time": CUTOVER_VALID_TIME,
+        }
+    ]
+    # No approval fired on the refusal path.
+    assert audit.approvals == []
+
+
+def test_approval_committed_skips_covered_sources_and_records_marker(
+    m0_m1_unequal_packages: dict[str, Any],
+) -> None:
+    """SUB-5 §3.2 (b): approval-covered source is skipped with obligation marker.
+
+    An activation request carrying a ``cold_start_approval`` whose
+    ``covered_source_ids`` names the only source in scope must:
+
+    * NOT raise (the fingerprint gate is bypassed for covered sources);
+    * NOT write a clone row for the covered source (approval = cold
+      start; no lineage carries over);
+    * NOT invoke the fingerprint-inputs provider for the covered source
+      (bypassing the gate means we never read package roots either);
+    * record the approval on the audit recorder with the exact shape
+      pinned by SUB-5: ``action``, ``approver``, ``reason``,
+      ``covered_source_ids``, and the spin-up-distortion-announcement
+      obligation marker (docs §11.3 clause 3).
+
+    The unequal-fingerprint fixture is used deliberately — it guarantees
+    the fingerprint gate WOULD refuse this source if the hook fell
+    through to it; a passing test proves the approval short-circuit
+    fires BEFORE the gate.
+    """
+
+    cursor = _FakeCursor(initial_rows=[_seed_source_snapshot(source_id="gfs")])
+    audit = _FakeAuditRecorder()
+
+    def _never_called_provider(
+        _ctx: ModelActivationContext, _source: str
+    ) -> StateCloneFingerprintInputs:
+        raise AssertionError(
+            "fingerprint_inputs_provider must not be invoked for approval-covered sources"
+        )
+
+    hook = build_state_clone_cutover_hook(
+        audit_recorder=audit,
+        fingerprint_inputs_provider=_never_called_provider,
+    )
+    approval = ColdStartApprovalInput(
+        approver="ops.operator@example.org",
+        reason="M1 rolls out onto a new soil layer; cold-start acknowledged.",
+        covered_source_ids=("gfs",),
+    )
+    ctx = _make_ctx_with_approval(
+        source_scope=("gfs",),
+        previous_active_model=_previous_active_row(),
+        approval=approval,
+    )
+
+    hook(cursor, ctx)  # Must NOT raise — approval covers gfs.
+    cursor.commit()
+
+    # No clone row committed for the covered source — approval = cold
+    # start, no lineage carries over.
+    m1_rows = [
+        row for row in cursor.all_committed_rows() if row["model_id"] == M1_MODEL_ID
+    ]
+    assert m1_rows == []
+    # The pre-existing M0 source row is untouched.
+    assert all(row["model_id"] == M0_MODEL_ID for row in cursor.all_committed_rows())
+
+    # No refusal fired — approval short-circuited before the fingerprint
+    # gate would have refused.
+    assert audit.refusals == []
+    # No SKIP fired either — the hook engaged (previous active model
+    # present, target is direct-grid).
+    assert audit.skips == []
+
+    # Approval record shape-locked. The obligation marker constant is a
+    # module literal both here and in the hook, so a silent rename would
+    # break this assertion (that is the point).
+    assert audit.approvals == [
+        {
+            "action": STATE_CLONE_APPROVAL_ACTION,
+            "basin_version_id": BASIN_VERSION_ID,
+            "source_id": "gfs",
+            "target_model_id": M1_MODEL_ID,
+            "approver": "ops.operator@example.org",
+            "reason": "M1 rolls out onto a new soil layer; cold-start acknowledged.",
+            "covered_source_ids": ("gfs",),
+            "spin_up_distortion_announcement_obligation": (
+                STATE_CLONE_SPIN_UP_DISTORTION_ANNOUNCEMENT_MARKER
+            ),
+        }
+    ]
+
+
+def test_approval_scoped_to_named_sources_only_gfs_still_clones(
+    m0_m1_equal_packages: dict[str, Any],
+) -> None:
+    """SUB-5 §3.2 (c): approval scope is exact — uncovered sources still gate.
+
+    Scope is ``(gfs, ifs)``. Approval covers ONLY ``ifs``. The hook must:
+
+    * clone ``gfs`` through the fingerprint gate normally (equal-fingerprint
+      fixture guarantees the gate passes);
+    * skip ``ifs`` with an approval audit record + obligation marker;
+    * emit no refusal;
+    * write ONE clone row (for gfs) — none for ifs.
+
+    Locks §3.2 clause "the approval is scoped to its named sources only".
+    An approval never widens beyond its ``covered_source_ids`` — this is
+    the operator's contract, not the hook's discretion.
+    """
+
+    # Both sources have M0 rows seeded so the fingerprint gate for gfs
+    # can find its qualified snapshot; ifs is present but the approval
+    # bypasses it before the gate touches it.
+    cursor = _FakeCursor(
+        initial_rows=[
+            _seed_source_snapshot(source_id="gfs"),
+            _seed_source_snapshot(source_id="ifs"),
+        ]
+    )
+    audit = _FakeAuditRecorder()
+
+    provider_calls: list[str] = []
+
+    def _spy_provider(
+        _ctx: ModelActivationContext, source_id: str
+    ) -> StateCloneFingerprintInputs:
+        # Approval-covered sources never touch the provider; unapproved
+        # sources do. Recording the call list lets us prove exactly one
+        # call, for ``gfs``.
+        provider_calls.append(source_id)
+        return _make_fingerprint_inputs(m0_m1_equal_packages)
+
+    hook = build_state_clone_cutover_hook(
+        audit_recorder=audit,
+        fingerprint_inputs_provider=_spy_provider,
+    )
+    approval = ColdStartApprovalInput(
+        approver="ops.operator@example.org",
+        reason="ifs feed rebuilt from scratch — cold-start acknowledged.",
+        covered_source_ids=("ifs",),
+    )
+    ctx = _make_ctx_with_approval(
+        source_scope=("gfs", "ifs"),
+        previous_active_model=_previous_active_row(),
+        approval=approval,
+    )
+
+    hook(cursor, ctx)  # Must NOT raise — gfs qualifies, ifs is approved.
+    cursor.commit()
+
+    # Exactly one clone row committed — for gfs.
+    m1_rows = [
+        row for row in cursor.all_committed_rows() if row["model_id"] == M1_MODEL_ID
+    ]
+    assert len(m1_rows) == 1
+    assert m1_rows[0]["source_id"] == "gfs"
+    assert m1_rows[0]["cloned_from_model_id"] == M0_MODEL_ID
+    assert m1_rows[0]["clone_gate_fingerprint"] == m0_m1_equal_packages["fingerprint_hash"]
+
+    # Provider was invoked exactly once, for gfs — approval-covered
+    # sources bypass the gate before the provider is asked.
+    assert provider_calls == ["gfs"]
+
+    # No refusal; no applicability skip.
+    assert audit.refusals == []
+    assert audit.skips == []
+
+    # Exactly one approval record — for ifs. Shape-locked as in (b).
+    assert audit.approvals == [
+        {
+            "action": STATE_CLONE_APPROVAL_ACTION,
+            "basin_version_id": BASIN_VERSION_ID,
+            "source_id": "ifs",
+            "target_model_id": M1_MODEL_ID,
+            "approver": "ops.operator@example.org",
+            "reason": "ifs feed rebuilt from scratch — cold-start acknowledged.",
+            "covered_source_ids": ("ifs",),
+            "spin_up_distortion_announcement_obligation": (
+                STATE_CLONE_SPIN_UP_DISTORTION_ANNOUNCEMENT_MARKER
+            ),
+        }
+    ]
 
 
 # --- Module import guard for CYCLE_ID (used only in docstrings) -----------

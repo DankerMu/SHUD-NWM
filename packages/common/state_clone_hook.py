@@ -53,6 +53,18 @@ the SAME cursor Change 4 handed us. On the first refusal the hook raises
 transaction rolls back (D7). No intermediate ``(M1, source, t*)`` row is
 committed for any source in scope.
 
+Explicit cold-start approval route (SUB-5 task 3.2)
+---------------------------------------------------
+An activation request may carry an explicit ``ColdStartApprovalInput``
+(``approver``, ``reason``, ``covered_source_ids``) on the activation
+context. For each source in ``covered_source_ids``, the hook skips the
+fingerprint gate unconditionally and records the approval on the
+activation cursor with the spin-up-distortion-announcement obligation
+marker (docs §11.3 clause 3) so a covered cutover cannot silently ship
+without the accompanying public announcement obligation. Sources
+outside the approval still run through the fingerprint gate and can
+still refuse — an approval never widens beyond its named sources.
+
 Testability notes
 -----------------
 The hook takes an ``audit_recorder`` and a
@@ -75,6 +87,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from packages.common.model_registry import (
+    ColdStartApprovalInput,
     ModelActivationContext,
     PreActivationHook,
 )
@@ -92,6 +105,8 @@ from packages.common.state_manager import (
 __all__ = [
     "SKIP_REASON_NO_PREVIOUS_ACTIVE_MODEL",
     "SKIP_REASON_TARGET_NOT_DIRECT_GRID",
+    "STATE_CLONE_APPROVAL_ACTION",
+    "STATE_CLONE_SPIN_UP_DISTORTION_ANNOUNCEMENT_MARKER",
     "FingerprintInputsProvider",
     "StateCloneCutoverRefusedError",
     "StateCloneFingerprintInputs",
@@ -105,6 +120,25 @@ __all__ = [
 # import them and cannot silently diverge on typo.
 SKIP_REASON_NO_PREVIOUS_ACTIVE_MODEL = "no_previous_active_model"
 SKIP_REASON_TARGET_NOT_DIRECT_GRID = "target_not_direct_grid"
+
+
+# Stable ``ops.audit_log.action`` name for a source skipped through the
+# explicit cold-start approval route (SUB-5 task 3.2). Kept as a module
+# constant so downstream evidence and change-verification tests key off
+# the same literal.
+STATE_CLONE_APPROVAL_ACTION = "state_clone_cold_start_approved"
+
+
+# The spin-up-distortion public-announcement obligation marker (§11.3
+# clause 3). A committed cold-start approval carries this marker on
+# BOTH the audit record and the activation result so the operator
+# cannot silently ship a covered cutover without the accompanying
+# public announcement of first-cycle distortion risk. The literal is
+# self-locating on purpose — grep-hits the docs clause and the SUB-5
+# fixture unambiguously — and is never user-facing.
+STATE_CLONE_SPIN_UP_DISTORTION_ANNOUNCEMENT_MARKER = (
+    "spin_up_distortion_public_announcement_required__docs_11_3_clause_3"
+)
 
 
 class StateCloneCutoverRefusedError(RuntimeError):
@@ -167,20 +201,34 @@ class StateCloneFingerprintInputs:
 
 
 class StateCloneHookAuditRecorder(Protocol):
-    """Sink for skip + refusal audit records the hook emits.
+    """Sink for skip / refusal / approval audit records the hook emits.
 
     Deliberately a superset of
     :class:`packages.common.state_clone.StateCloneAuditRecorder` — the
     same recorder instance is forwarded to the SUB-2 clone core (which
-    calls ``record_refusal``), and the hook calls ``record_skip`` on the
-    two applicability-predicate misses. Wiring this to ``ops.audit_log``
-    is the caller's responsibility (Change 4 owns transaction plumbing);
-    this module only emits records.
+    calls ``record_refusal``), and the hook itself calls:
+
+    * ``record_skip`` on the two applicability-predicate misses
+      (fresh-basin path, legacy-mapping target);
+    * ``record_approval`` on a source covered by an explicit cold-start
+      approval (SUB-5 task 3.2). The approval record carries the
+      spin-up-distortion-announcement obligation marker (docs §11.3
+      clause 3) so no covered cutover can silently ship without the
+      accompanying public announcement obligation;
+    * ``record_refusal`` — invoked BY the SUB-2 clone core when the
+      fingerprint gate refuses a source; the hook does not call it
+      directly.
+
+    Wiring this to ``ops.audit_log`` is the caller's responsibility
+    (Change 4 owns transaction plumbing); this module only emits
+    records.
     """
 
     def record_skip(self, reason: str, ctx: ModelActivationContext) -> None: ...
 
     def record_refusal(self, record: Mapping[str, Any]) -> None: ...
+
+    def record_approval(self, record: Mapping[str, Any]) -> None: ...
 
 
 FingerprintInputsProvider = Callable[
@@ -228,11 +276,32 @@ def build_state_clone_cutover_hook(
 
         repository = factory(cursor)
 
+        # An explicit cold-start approval (SUB-5 task 3.2) unconditionally
+        # covers the sources it names — those sources are skipped without
+        # invoking the fingerprint gate, and the approval is recorded on
+        # the activation transaction cursor so the audit row commits with
+        # the swap. Sources NOT covered still run through the fingerprint
+        # gate below; a refusal on any uncovered source still raises and
+        # rolls back the whole transaction.
+        approval = ctx.cold_start_approval
+        covered_source_ids: frozenset[str] = (
+            frozenset(approval.covered_source_ids) if approval is not None else frozenset()
+        )
+
         # Engage the clone per source in declaration order. On the first
         # refusal we raise so Change 4's dispatcher rolls back the whole
         # transaction; no ``(M1, source, t*)`` row commits for any
         # source in scope.
         for source_id in ctx.source_scope:
+            if approval is not None and source_id in covered_source_ids:
+                audit_recorder.record_approval(
+                    _build_approval_record(
+                        ctx=ctx,
+                        source_id=source_id,
+                        approval=approval,
+                    )
+                )
+                continue
             inputs = fingerprint_inputs_provider(ctx, source_id)
             result = fingerprint_gated_state_clone(
                 repository=repository,
@@ -266,6 +335,36 @@ def build_state_clone_cutover_hook(
                 )
 
     return _hook
+
+
+def _build_approval_record(
+    *,
+    ctx: ModelActivationContext,
+    source_id: str,
+    approval: ColdStartApprovalInput,
+) -> dict[str, Any]:
+    """Return the audit-record mapping for a source skipped via approval.
+
+    The shape is stable — downstream evidence and change-verification
+    tests import :data:`STATE_CLONE_APPROVAL_ACTION` and
+    :data:`STATE_CLONE_SPIN_UP_DISTORTION_ANNOUNCEMENT_MARKER` to key
+    off these literals and would break on any silent rename. The
+    ``covered_source_ids`` field is materialized as a ``tuple`` so a
+    consumer that logs it does not observe a mutable list mid-flight.
+    """
+
+    return {
+        "action": STATE_CLONE_APPROVAL_ACTION,
+        "basin_version_id": ctx.basin_version_id,
+        "source_id": source_id,
+        "target_model_id": ctx.target_model.get("model_id"),
+        "approver": approval.approver,
+        "reason": approval.reason,
+        "covered_source_ids": tuple(approval.covered_source_ids),
+        "spin_up_distortion_announcement_obligation": (
+            STATE_CLONE_SPIN_UP_DISTORTION_ANNOUNCEMENT_MARKER
+        ),
+    }
 
 
 # --- Cursor-bound repository adapter ---------------------------------------
