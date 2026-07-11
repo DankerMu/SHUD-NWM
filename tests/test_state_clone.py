@@ -69,6 +69,46 @@ DEFAULT_STATE_SCHEMA_BYTES = b"state_schema:v1\nfields=[soil_moisture,swe,gw]\n"
 DEFAULT_SOLVER_CONFIG_BYTES = b"solver_config:v1\ndt=3600\ntol=1e-6\n"
 
 
+def _make_valid_direct_grid_manifest(
+    *,
+    applicable_source_ids: Sequence[str] = ("gfs",),
+) -> dict[str, Any]:
+    """Return a ``direct_grid_forcing`` manifest that classifies as direct-grid.
+
+    Shape mirrors ``tests.test_forcing_producer._direct_grid_manifest`` and
+    passes ``workers.forcing_producer.direct_grid_contract.load_forcing_mapping_contract_from_manifest``
+    cleanly — so the SUB-7 §4.1 no-reverse-clone guard admits an ``M1``
+    target that carries this manifest. Callers that want to exercise the
+    guard-refuse path pass a different fixture (``{}`` or a manifest with
+    ``forcing_mapping_mode='direct_grid'`` but a required field missing).
+    """
+    return {
+        "forcing_mapping_mode": "direct_grid",
+        "binding_uri": "s3://nhms/models/basin_v1_m1/direct-grid/binding.json",
+        "binding_checksum": "sha256:binding-m1",
+        "model_input_package_id": "model-input-basin-v1-m1",
+        "sp_att_path": "input/basin.sp.att",
+        "sp_att_checksum": "sha256:sp-att-m1",
+        "applicable_source_ids": list(applicable_source_ids),
+        "grid_id": "grid_a",
+        "grid_signature": "sha256:grid-signature-m1",
+        "station_bindings": [
+            {
+                "station_id": "s001",
+                "shud_forcing_index": 1,
+                "forcing_filename": "X100.00Y36.00.csv",
+                "longitude": 100.0,
+                "latitude": 36.0,
+                "x": 1.0,
+                "y": 2.0,
+                "z": 3.0,
+                "grid_id": "grid_a",
+                "grid_cell_id": "cell-001",
+            },
+        ],
+    }
+
+
 def _default_category_files() -> dict[str, tuple[str, ...]]:
     return {c: (f,) for c, (f, _p) in _DEFAULT_NON_SP_ATT_STUBS.items()}
 
@@ -296,6 +336,7 @@ def _default_clone_kwargs(pkg: dict[str, Any]) -> dict[str, Any]:
         "m1_recorded_hydrologic_core_fingerprint": pkg["fingerprint_hash"],
         "state_schema_bytes": DEFAULT_STATE_SCHEMA_BYTES,
         "solver_config_bytes": DEFAULT_SOLVER_CONFIG_BYTES,
+        "m1_forcing_mapping_manifest": _make_valid_direct_grid_manifest(),
     }
 
 
@@ -966,6 +1007,336 @@ def test_production_serializers_round_trip_all_three_provenance_columns() -> Non
     assert legacy_rehydrated.cloned_from_state_id is None
     assert legacy_rehydrated.cloned_from_model_id is None
     assert legacy_rehydrated.clone_gate_fingerprint is None
+
+
+# --- SUB-7 (§4.1): no-reverse-clone guard + fix-forward routing -----------
+
+
+def test_reverse_clone_targeting_legacy_m0_refused_fail_closed_no_row(
+    m0_m1_equal_packages: dict[str, Any],
+) -> None:
+    """SUB-7 §4.1 (a): target with absent contract refuses fail-closed.
+
+    A reverse clone whose ``M1`` target has NO direct-grid contract
+    (manifest ``{}``) classifies as legacy-mapping under Change 4's single
+    classifier — the parser returns ``None``. The clone signature refuses
+    fail-closed with ``refusal_scope='reverse_clone_target_not_direct_grid'``,
+    the stable code ``state_clone_cold_start_approval_required``, and no
+    clone row is written. This is defense-in-depth at the clone signature
+    against Change 4's legacy-reactivation guard being bypassed.
+    """
+
+    source = _make_source_snapshot()
+    repo = _FakeCloneRepository()
+    repo.add(source)
+    audit = _FakeAuditRecorder()
+
+    kwargs = _default_clone_kwargs(m0_m1_equal_packages)
+    kwargs["m1_forcing_mapping_manifest"] = {}
+
+    result = fingerprint_gated_state_clone(
+        repository=repo,
+        audit_recorder=audit,
+        **kwargs,
+    )
+
+    assert result.refused is True
+    assert result.cloned_row is None
+    assert result.refusal_code == STATE_CLONE_COLD_START_APPROVAL_REQUIRED
+    assert result.refusal_scope == "reverse_clone_target_not_direct_grid"
+    assert repo.upserted == []
+    # Source row still the only row under (M0, source, t*) — no M1 row.
+    assert len(repo.snapshots) == 1
+    assert not any(s.model_id == M1_MODEL_ID for s in repo.snapshots.values())
+    assert audit.records == [
+        {
+            "refusal_code": STATE_CLONE_COLD_START_APPROVAL_REQUIRED,
+            "refusal_scope": "reverse_clone_target_not_direct_grid",
+            "m0_model_id": M0_MODEL_ID,
+            "m1_model_id": M1_MODEL_ID,
+            "source_id": SOURCE_ID,
+            "cutover_valid_time": CUTOVER_VALID_TIME,
+        }
+    ]
+
+
+def test_reverse_clone_target_declaring_direct_grid_but_malformed_contract_refused(
+    m0_m1_equal_packages: dict[str, Any],
+) -> None:
+    """SUB-7 §4.1 (b): malformed direct-grid manifest refuses fail-closed.
+
+    A target that DECLARES ``forcing_mapping_mode='direct_grid'`` but whose
+    contract fails Change 4's parser (here: missing ``binding_checksum``)
+    classifies as legacy-mapping — the parser raises
+    ``DirectGridContractError``. The guard treats absent, malformed, and
+    non-``direct_grid`` symmetrically, all fail-closed. Mirrors Change 4's
+    single-classifier behavior so a broken fix-forward candidate cannot
+    silently reactivate a legacy plane.
+    """
+
+    source = _make_source_snapshot()
+    repo = _FakeCloneRepository()
+    repo.add(source)
+    audit = _FakeAuditRecorder()
+
+    # Declares direct-grid intent but is missing the required
+    # `binding_checksum` field — parser raises DirectGridContractError.
+    malformed = _make_valid_direct_grid_manifest()
+    del malformed["binding_checksum"]
+
+    kwargs = _default_clone_kwargs(m0_m1_equal_packages)
+    kwargs["m1_forcing_mapping_manifest"] = malformed
+
+    result = fingerprint_gated_state_clone(
+        repository=repo,
+        audit_recorder=audit,
+        **kwargs,
+    )
+
+    assert result.refused is True
+    assert result.cloned_row is None
+    assert result.refusal_code == STATE_CLONE_COLD_START_APPROVAL_REQUIRED
+    assert result.refusal_scope == "reverse_clone_target_not_direct_grid"
+    assert repo.upserted == []
+    assert audit.records == [
+        {
+            "refusal_code": STATE_CLONE_COLD_START_APPROVAL_REQUIRED,
+            "refusal_scope": "reverse_clone_target_not_direct_grid",
+            "m0_model_id": M0_MODEL_ID,
+            "m1_model_id": M1_MODEL_ID,
+            "source_id": SOURCE_ID,
+            "cutover_valid_time": CUTOVER_VALID_TIME,
+        }
+    ]
+
+
+def test_reverse_clone_guard_wins_over_degenerate_gate_inputs_when_both_bad(
+    m0_m1_equal_packages: dict[str, Any],
+) -> None:
+    """SUB-7 §4.1: guard-ordering invariant — classifier runs BEFORE degenerate check.
+
+    Locks the sequencing at ``packages/common/state_clone.py`` step 0
+    (no-reverse-clone classifier) preceding step 1 (degenerate gate
+    inputs). Constructs a call where BOTH inputs are simultaneously bad:
+
+    - ``m1_forcing_mapping_manifest={}`` — Change 4's single classifier
+      returns ``None`` -> would trigger
+      ``reverse_clone_target_not_direct_grid``.
+    - ``state_schema_bytes=b""`` AND ``solver_config_bytes=b""`` — either
+      alone would trigger ``degenerate_gate_inputs``.
+
+    The classifier MUST win: the one-way channel invariant (state legacy
+    -> direct-grid, never direct-grid -> legacy) is defense-in-depth for
+    Change 4 and cannot be bypassed by any callable-side condition. A
+    future "cheap check first" regression that swaps steps 0 and 1 would
+    refuse with ``degenerate_gate_inputs`` (wrong scope), silently
+    downgrading the audit signal from a legacy-reactivation attempt to a
+    contract-hygiene mishap. This test breaks under any such swap.
+    """
+
+    source = _make_source_snapshot()
+    repo = _FakeCloneRepository()
+    repo.add(source)
+    audit = _FakeAuditRecorder()
+
+    kwargs = _default_clone_kwargs(m0_m1_equal_packages)
+    # Both categories of bad input simultaneously:
+    kwargs["m1_forcing_mapping_manifest"] = {}  # classifier -> None (legacy)
+    kwargs["state_schema_bytes"] = b""  # would also trip degenerate gate
+    kwargs["solver_config_bytes"] = b""  # would also trip degenerate gate
+
+    result = fingerprint_gated_state_clone(
+        repository=repo,
+        audit_recorder=audit,
+        **kwargs,
+    )
+
+    # Classifier wins: the reverse-clone scope MUST be reported, not the
+    # degenerate-inputs scope. Swap step 0 and 1 in state_clone.py and this
+    # test fails with refusal_scope == 'degenerate_gate_inputs'.
+    assert result.refused is True
+    assert result.cloned_row is None
+    assert result.refusal_code == STATE_CLONE_COLD_START_APPROVAL_REQUIRED
+    assert result.refusal_scope == "reverse_clone_target_not_direct_grid"
+    assert repo.upserted == []
+    # No M1 row ever written; source row untouched.
+    assert len(repo.snapshots) == 1
+    assert not any(s.model_id == M1_MODEL_ID for s in repo.snapshots.values())
+    # Exact-shape audit record under the reverse-clone scope.
+    assert audit.records == [
+        {
+            "refusal_code": STATE_CLONE_COLD_START_APPROVAL_REQUIRED,
+            "refusal_scope": "reverse_clone_target_not_direct_grid",
+            "m0_model_id": M0_MODEL_ID,
+            "m1_model_id": M1_MODEL_ID,
+            "source_id": SOURCE_ID,
+            "cutover_valid_time": CUTOVER_VALID_TIME,
+        }
+    ]
+
+
+def test_fix_forward_equal_fingerprint_m1_to_m1_prime_clones_with_m1_as_cloned_from(
+    m0_m1_equal_packages: dict[str, Any],
+) -> None:
+    """SUB-7 §4.1 (c): FORC/binding-only fix-forward M1→M1′ clones on equal fingerprint.
+
+    A fingerprint-equal ``M1 → M1'`` fix-forward (hydrologic core
+    unchanged; e.g. FORC or binding-only fix) clones through the same
+    G10 gate as an ``M0 → M1`` cutover — SUB-2 does not distinguish the
+    source's provenance, so an equal fingerprint passes regardless of
+    whether the source model is legacy or a previous direct-grid variant.
+    The clone row records ``M1`` (not ``M0``) as ``cloned_from_model_id``.
+    """
+
+    m1_prime_model_id = "basin_v1_m1_prime"
+    m1_prime_package_version = "s3://nhms/models/basin_v1_m1_prime/package/"
+    m1_prime_package_checksum = "sha256:pkg-m1-prime"
+
+    # Seed the source row as (M1, source, t*) — a previous direct-grid
+    # variant's qualified checkpoint, not the legacy M0. Build the run_id
+    # under the M1 identity so the source is semantically an M1-authored
+    # producing run — the M0-embedded run_id from ``_make_source_snapshot``
+    # would misdescribe the fix-forward source's provenance.
+    m1_source = replace(
+        _make_source_snapshot(),
+        state_id=state_snapshot_id(
+            M1_MODEL_ID,
+            CUTOVER_VALID_TIME,
+            source_id=SOURCE_ID,
+            cycle_id=CYCLE_ID,
+            lead_hours=12,
+        ),
+        model_id=M1_MODEL_ID,
+        run_id=f"fcst_{SOURCE_ID}_{CYCLE_ID}_{M1_MODEL_ID}",
+        model_package_version=M1_PACKAGE_VERSION,
+        model_package_checksum=M1_PACKAGE_CHECKSUM,
+    )
+    repo = _FakeCloneRepository()
+    repo.add(m1_source)
+    audit = _FakeAuditRecorder()
+
+    kwargs = _default_clone_kwargs(m0_m1_equal_packages)
+    # Fix-forward: source is M1, target is M1'.
+    kwargs["m0_model_id"] = M1_MODEL_ID  # source model on this clone call
+    kwargs["m1_model_id"] = m1_prime_model_id
+    kwargs["m1_model_package_version"] = m1_prime_package_version
+    kwargs["m1_model_package_checksum"] = m1_prime_package_checksum
+
+    result = fingerprint_gated_state_clone(
+        repository=repo,
+        audit_recorder=audit,
+        **kwargs,
+    )
+
+    assert result.refused is False
+    assert result.refusal_code is None
+    assert result.refusal_scope is None
+    assert result.cloned_row is not None
+    assert audit.records == []
+    clone = result.cloned_row
+
+    # Clone is under the M1' identity with M1' package version + checksum.
+    assert clone.model_id == m1_prime_model_id
+    assert clone.model_package_version == m1_prime_package_version
+    assert clone.model_package_checksum == m1_prime_package_checksum
+
+    # cloned_from names M1 (the previous direct-grid variant), NOT M0.
+    assert clone.cloned_from_state_id == m1_source.state_id
+    assert clone.cloned_from_model_id == M1_MODEL_ID
+    # clone_gate_fingerprint records the equal hash that opened the gate.
+    assert clone.clone_gate_fingerprint == m0_m1_equal_packages["fingerprint_hash"]
+
+    # Physical provenance (docs §Decision 3): the source's producing
+    # run_id is preserved on the clone. For M1->M1' the source is M1, so
+    # the clone MUST carry the M1-shaped run_id verbatim — this locks the
+    # attribution rule on the fix-forward direction, symmetric to the
+    # M0->M1 preservation asserted at line ~380 above.
+    assert clone.run_id == m1_source.run_id
+
+    # state_id follows the convention under M1' and differs from source.
+    assert clone.state_id != m1_source.state_id
+    assert clone.state_id == state_snapshot_id(
+        m1_prime_model_id,
+        m1_source.valid_time,
+        source_id=m1_source.source_id,
+        cycle_id=m1_source.cycle_id,
+        lead_hours=m1_source.lead_hours,
+    )
+
+    # State bytes reused verbatim: physical file not copied (INV-2).
+    assert clone.state_uri == m1_source.state_uri
+    assert clone.checksum == m1_source.checksum
+
+
+def test_fix_forward_unequal_fingerprint_routes_to_cold_start_approval_not_cloned(
+    m0_m1_unequal_packages: dict[str, Any],
+) -> None:
+    """SUB-7 §4.1 (d): fingerprint-unequal M1→M1′ routes to cold-start approval.
+
+    A fingerprint-unequal fix-forward candidate is a NEW model per docs
+    §Decision 2 — the hydrologic core drifted so no state can be safely
+    cloned. SUB-2 refuses with ``refusal_scope='unequal_fingerprint'``
+    and the stable code ``state_clone_cold_start_approval_required``.
+    That stable code IS the cold-start approval route trigger (docs §11.3
+    clause 2 routes it into the explicit cold-start approval path — see
+    SUB-5 §3.2). No clone row written; the operator must approve a cold
+    start with the spin-up-distortion-announcement obligation marker.
+    """
+
+    m1_prime_model_id = "basin_v1_m1_prime_drifted"
+
+    # Seed the source row as (M1, source, t*) — previous direct-grid variant.
+    m1_source = replace(
+        _make_source_snapshot(),
+        state_id=state_snapshot_id(
+            M1_MODEL_ID,
+            CUTOVER_VALID_TIME,
+            source_id=SOURCE_ID,
+            cycle_id=CYCLE_ID,
+            lead_hours=12,
+        ),
+        model_id=M1_MODEL_ID,
+        model_package_version=M1_PACKAGE_VERSION,
+        model_package_checksum=M1_PACKAGE_CHECKSUM,
+    )
+    repo = _FakeCloneRepository()
+    repo.add(m1_source)
+    audit = _FakeAuditRecorder()
+
+    kwargs = _default_clone_kwargs(m0_m1_unequal_packages)
+    kwargs["m0_model_id"] = M1_MODEL_ID
+    kwargs["m1_model_id"] = m1_prime_model_id
+
+    result = fingerprint_gated_state_clone(
+        repository=repo,
+        audit_recorder=audit,
+        **kwargs,
+    )
+
+    # This is the cold-start approval route: stable code fires and NO row
+    # is written. The operator must supply an explicit ColdStartApprovalInput
+    # (SUB-5 §3.2) at the activation-request level for the cutover to
+    # proceed — the clone plane cannot silently splice mismatched cores.
+    assert result.refused is True
+    assert result.cloned_row is None
+    assert result.refusal_code == STATE_CLONE_COLD_START_APPROVAL_REQUIRED
+    assert result.refusal_scope == "unequal_fingerprint"
+    assert repo.upserted == []
+    # No (M1', source, t*) row created.
+    assert not any(
+        s.model_id == m1_prime_model_id and _ensure_utc(s.valid_time) == CUTOVER_VALID_TIME
+        for s in repo.snapshots.values()
+    )
+    assert audit.records == [
+        {
+            "refusal_code": STATE_CLONE_COLD_START_APPROVAL_REQUIRED,
+            "refusal_scope": "unequal_fingerprint",
+            "m0_model_id": M1_MODEL_ID,
+            "m1_model_id": m1_prime_model_id,
+            "source_id": SOURCE_ID,
+            "cutover_valid_time": CUTOVER_VALID_TIME,
+        }
+    ]
 
 
 # --- Integration: strict warm-start acceptance on BOTH planes --------------
