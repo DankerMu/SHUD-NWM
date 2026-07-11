@@ -5,7 +5,7 @@
   "model_input_package_id": "synth-mip-m1-v2",
   "sp_att_path": "input_dir/synth-basin-m1-v2/synth-basin-m1-v2.sp.att",
   "sp_att_checksum": "b7a6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6",
-  "applicable_source_ids": ["cmfd"],
+  "applicable_source_ids": ["gfs"],
   "grid_id": "synth-grid-p0.2-m1-v2",
   "grid_signature": "e2c0bf1a8d6c4f5b9a7f3e1d0c8b6a4f2d7e5c3b1a9f8d6c4b2a0f9e7d5c3b1a9",
   "station_bindings": [

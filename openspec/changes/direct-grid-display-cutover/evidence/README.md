@@ -15,9 +15,10 @@ Phase status:
 
 - **Phase A (harness authoring on macOS)**: the scripts and templates below are
   authored and statically validated. No mutating action taken on node-27.
-- **Phase B (live execution on node-27)**: to be run by the operator via
-  `rehearse/run-on-node27.sh`; timing window and pass logs are appended into
-  this receipt on completion.
+- **Phase B (live execution on node-27)**: **COMPLETED 2026-07-11**. The
+  `run-on-node27.sh` chain fired end-to-end, `rehearse.py` returned rc=0,
+  and all zero-impact assertions passed. Timing-window record + pass log
+  references are in §4 below.
 
 ## 1. Executive summary
 
@@ -32,10 +33,11 @@ The rehearsal proves — on node-27 live PostgreSQL — that:
    version string differs between the pre-cutover baseline (legacy synthetic
    station set) and the committed target set (M1 mirror rows).
 3. The change touches **zero** production rows: the 13 production basins'
-   `met.met_station.active_flag` counts stay unchanged, and the count of
-   `active` `core.model_instance` rows **excluding** `model_id LIKE 'model__evidence%'`
-   equals **13** at both the during-window observation point and the
-   post-restore observation point.
+   `met.met_station.active_flag` counts stay unchanged (6290 rows total
+   across 13 basin_version_ids before, during, and after the window),
+   and the count of `active` `core.model_instance` rows **excluding**
+   `basin_version_id LIKE 'basin__evidence%'` equals **13** at both the
+   during-window observation point and the post-restore observation point.
 4. The scheduler plane stays clean: no `hydro.hydro_run` row is created for
    any `model__evidence%` model during the window (the rehearsal is timed
    between scheduler cycle boundaries), and the post-restore active-model set
@@ -50,7 +52,7 @@ The rehearsal proves — on node-27 live PostgreSQL — that:
 | Real path exercised end-to-end                              | Recorded bypass (SQL-provisioned)                                  |
 |-------------------------------------------------------------|--------------------------------------------------------------------|
 | Change 4 activation preflight on the synthetic M1 target    | Baseline previous-active model (`model__evidence_cmfd_p02_synth__v1`) provisioned `active` via SQL — the rehearsed lifecycle op is the cutover, not the baseline. |
-| Change 5 state-clone pre-activation hook engaged, sanctioned approved-skip path (per-source approval covers `cmfd`; hook records `state_clone_cold_start_approved` in `ops.audit_log`) | Positive clone body (`fingerprint_gated_state_clone` with real snapshot rows) — stays owned by Change 5's own verification; here the approval covers `cmfd` so the fingerprint gate is skipped without invoking. |
+| Change 5 state-clone pre-activation hook engaged, sanctioned approved-skip path (per-source approval covers `gfs`; hook records `state_clone_cold_start_approved` in `ops.audit_log`) | Positive clone body (`fingerprint_gated_state_clone` with real snapshot rows) — stays owned by Change 5's own verification; here the approval covers `gfs` so the fingerprint gate is skipped without invoking. `gfs` is used instead of `cmfd` because `workers/forcing_producer/direct_grid_contract.py::_applicable_source_ids` only accepts source_ids that `packages.common.source_identity.normalize_source_id` normalizes (GFS/ERA5/IFS); the `cmfd` narrative is preserved in basin/model/run IDs. |
 | Station-flag flip pre-activation hook engaged, two-step re-point (`active_flag=false` for the basin then `=true` for target's mirror by mapping-asset identity), in the same transaction as the supersede+activate swap | Baseline synthetic station rows (`synth-station-001..003`) provisioned `active_flag=true` via SQL — they become the "before" display set the flip re-points off. |
 | Supersede + activate swap on `core.model_instance`          | —                                                                  |
 | Same-tx `ops.audit_log` writes (lifecycle audit row + `state_clone_cold_start_approved` approval row) | —                                                                  |
@@ -69,27 +71,104 @@ and after restore (see `rehearse/production-scoped-assertions.during.log` and
   pre-rehearsal baseline remain unchanged; no `active_flag=false` production
   row is flipped `true`; no `active_flag=true` production row is flipped `false`.
 - **Non-evidence `core.model_instance` active count = 13.** SQL:
-  `SELECT count(*) FROM core.model_instance WHERE active_flag=true AND model_id NOT LIKE 'model__evidence%'`
-  returns 13.
+  `SELECT count(*) FROM core.model_instance WHERE active_flag=true AND basin_version_id NOT LIKE 'basin__evidence%'`
+  returns 13. Note the exclusion predicate scopes by `basin_version_id`
+  (not `model_id`) because `register_direct_grid_variant` mints the M1
+  target's id as a SHA-256-derived `dg_<hex>` string that does NOT carry
+  the `model__evidence` prefix; filtering by evidence basin_version_id
+  correctly excludes the M1 target while preserving the production count.
 - **Transient global active count = 14 during the committed window** is a
   recorded expected state, not a violation. Composition during the window:
   13 production + 0 evidence baseline (superseded by the M1 activation) +
   1 M1 target (activated) = 14. This is the whole-set atomic-flip contract.
 - **Global active count returns to 13 after restore.** Composition after
   restore: 13 production + 0 evidence baseline (deactivated) + 0 M1 target
-  (deactivated) = 13.
+  (deactivated) = 13. Total row count after restore is **15** = 13 production
+  + 1 M0 baseline row (`model__evidence_cmfd_p02_synth__v1`, retained inactive
+  as evidence per archived readiness change) + 1 M1 target row
+  (`dg_10d27a62b35b39cb5a6f9d10f7fff6e9`, retained inactive per
+  `restore/README.md` retention policy).
 
 ## 4. Timing window (Phase B)
 
-Populated by Phase B on completion. The window MUST be timed between scheduler
-cycle boundaries so no `hydro.hydro_run` row is created for any synthetic
-model during it.
+- **Rehearsal window UTC start: 2026-07-11T14:24:11.623292Z** (from
+  `rehearse/rehearse.node-27.pass.log` `REHEARSAL_WINDOW_UTC_START`).
+- **Rehearsal window UTC end:   2026-07-11T14:24:42.309507Z**   (from
+  `rehearse/rehearse.node-27.pass.log` `REHEARSAL_WINDOW_UTC_END`).
+- **Verified between scheduler cycle boundaries: yes.** On node-27 there is
+  no fast-cadence NWM scheduler timer running as a systemd unit or crontab;
+  the only recurring timers on the host (`phpsessionclean.timer`,
+  `logrotate.timer`, `certbot.timer`, `apt-daily.timer`, `plocate-updatedb`,
+  etc.) are OS-level maintenance jobs unrelated to the ingest / forecast
+  pipeline. The rehearsal captured `MAX(hydro.hydro_run.created_at)` BEFORE
+  the window (2026-07-11 14:24:11.043725+00) and confirmed 0 evidence-model
+  `hydro_run` rows created during the window (see the post-restore
+  assertion at `rehearse/production-scoped-assertions.after-restore.log`
+  key `new_evidence_hydro_run_rows_during_window`).
+- **Nearest scheduler cycle boundary before start:** N/A (no active NWM
+  scheduler cadence on node-27 at the time of the rehearsal).
+- **Nearest scheduler cycle boundary after end:**    N/A (same rationale).
 
-- Rehearsal window UTC start: **`<pending Phase B>`**
-- Rehearsal window UTC end:   **`<pending Phase B>`**
-- Verified between scheduler cycle boundaries: **`<pending Phase B>`**
-- Nearest scheduler cycle boundary before start: **`<pending Phase B>`**
-- Nearest scheduler cycle boundary after end:    **`<pending Phase B>`**
+### 4.1 Real path exercised end-to-end
+
+The `rehearse.node-27.pass.log` demonstrates every leg of the recorded
+"Real path exercised" column in §2:
+
+- **Change 4 activation preflight** on the M1 target
+  (`dg_10d27a62b35b39cb5a6f9d10f7fff6e9`) returned
+  `preflight.status='ready'`, `blockers=[]`, `roles=['sys_admin']`,
+  `override_missing_active=false`, `basin_version_id='basin__evidence_cmfd_p02_synth__v1'`.
+- **Change 5 state-clone hook (approved-skip)** fired inside the activation
+  transaction (audit log id 9 recorded via same-tx `ops.audit_log`
+  writes; approval covered `covered_source_ids=['gfs']`).
+- **Station-flag flip hook** re-pointed the display set in the same
+  transaction: legacy `synth-station-001..003` flipped to `active_flag=false`;
+  M1 mirror rows (`synth-mip-m1-v2::cell:cell-*`, `station_role='direct_grid_cache'`)
+  flipped to `active_flag=true`.
+- **Supersede + activate swap** on `core.model_instance`: previous active
+  `model__evidence_cmfd_p02_synth__v1` -> inactive; M1 target -> active.
+- **Same-tx `ops.audit_log`** writes: one lifecycle audit row + one
+  `state_clone_cold_start_approved` approval row (both under audit log id 9).
+- **Post-commit manifest re-publish trigger**: the harness derives the
+  equivalent from `core.model_instance WHERE active_flag=true` post-restore
+  and emits `scheduler-manifest.post-restore.json` — 13 production models,
+  0 evidence models, matching what `publish_scheduler_registry_manifest`
+  would have written.
+- **Restore via Change 4 `deactivate`** with `trusted_internal=True` and
+  the auto-applied `override_missing_active=True` succeeded (log entry
+  `RESTORE step 1 ok: M1 target deactivated via Change 4 lifecycle op`).
+- **Frontend retention empty-state**: Playwright ran against
+  `https://test.nwm.ac.cn` during the screenshot window but the empty-state
+  render did not settle within the 30 s test timeout, so the .png was NOT
+  captured on this attempt. The rehearse.py transaction and restore
+  succeeded independently (rc=0), so the DB / receipt evidence is intact.
+  See §4.3 below for the recorded gap.
+
+### 4.2 Recorded bypasses actually taken
+
+Recorded bypasses (§2 right column) that were exercised as SQL provisioning
+on node-27:
+
+- Baseline `model__evidence_cmfd_p02_synth__v1` flipped to `active_flag=true, lifecycle_state='active'` via `provisioning/00-baseline-and-stations.sql` (recorded pre-rehearsal, restored post-rehearsal).
+- `synth-station-001..003` flipped to `active_flag=true` via the same file (restored to `false` post-rehearsal).
+- `core.mesh_version` placeholder row for `mesh__evidence_cmfd_p02_synth__v1` was inserted (idempotent) — this was NOT part of the original Phase A recorded-bypass surface but was needed so `_fetch_model_lifecycle_row`'s INNER JOIN against `core.mesh_version` could resolve during the Change 4 activate op (the archived readiness change inserted `core.model_instance` with a `mesh_version_id` that had no matching `core.mesh_version` row; production model_instance rows carry a matching mesh_version row from their normal registration path). This placeholder is retained post-rehearsal as inactive evidence data.
+
+### 4.3 Screenshot gap on this attempt
+
+Playwright emitted a 30-second test timeout with
+`page.screenshot: Target page, context or browser has been closed` before
+the retention-empty-state page finished laying out. The failure is
+independent of the rehearsal transaction (the rehearse.py rc=0 was
+recorded before the wait on the Playwright background job). Because the
+brief permits continuing the rehearsal on a Playwright miss and the DB /
+audit-trail evidence is the load-bearing certification, the receipt is
+issued with a **recorded screenshot gap** rather than being blocked. The
+next Phase B re-run (or a targeted Playwright-only retry against the same
+seeded run) can backfill the .png without re-doing the DB transaction; the
+seeded `run__evidence_cmfd_p02_synth__rehearsal_pre_cutover_v1` row was
+cleaned up by restore, so any Playwright-only retry must re-provision it
+via `03-seeded-forecast-run.sql`. This gap is captured in
+`rehearsal-summary.md`.
 
 ## 5. File map
 
@@ -119,7 +198,8 @@ evidence/
     production-scoped-assertions.after-restore.log (populated by Phase B)
     mvt-source-identity.before.txt                 (populated by Phase B)
     mvt-source-identity.after.txt                  (populated by Phase B)
-    retention-empty-state.png                      (populated by Phase B)
+    retention-empty-state.png                      (NOT populated on this attempt — see §4.3)
+    baseline.node-27.pre.log                       (populated by Phase B)
     scheduler-manifest.post-restore.json           (populated by Phase B)
   restore/
     README.md                                      (provisioning ↔ cleanup mapping)
@@ -133,9 +213,13 @@ evidence/
 ## 6. Certification note
 
 - **Tasks 4.1 + 4.2**: certified by the Phase B pass logs and assertion
-  outputs referenced above. On Phase B completion, the pass logs and PNG
-  become the on-file evidence for the `openspec/changes/direct-grid-display-cutover/tasks.md`
-  §4.1 and §4.2 checkboxes.
+  outputs referenced above. The pass logs
+  (`rehearse/rehearse.node-27.pass.log`, the two
+  `production-scoped-assertions.*.log`, and
+  `scheduler-manifest.post-restore.json`) are the on-file evidence for
+  the `openspec/changes/direct-grid-display-cutover/tasks.md` §4.1 and
+  §4.2 checkboxes. The retention-empty-state screenshot is a **recorded
+  gap** for this attempt (§4.3); DB-side certification is unaffected.
 - **Task 4.3**: the flow-curve cross-cutover continuity receipt is
   **DEFERRED-to-pilot**, recorded in `flow-curve-deferral.md`. No production
   basin is activated in this rehearsal, so no real cross-cutover flow curve

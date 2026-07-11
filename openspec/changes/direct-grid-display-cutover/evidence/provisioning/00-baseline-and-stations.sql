@@ -22,6 +22,23 @@
 
 BEGIN;
 
+-- Ensure the JOIN dependency `core.mesh_version` row exists for the M0 evidence
+-- baseline. The archived readiness change inserted `core.model_instance` with
+-- `mesh_version_id='mesh__evidence_cmfd_p02_synth__v1'` but did NOT insert a
+-- matching `core.mesh_version` row (the model_instance table has no FK on
+-- mesh_version_id). The lifecycle op's `_fetch_model_lifecycle_row`
+-- (`packages/common/model_registry.py:2608`) INNER JOINs on `core.mesh_version`
+-- so the M1 target activation cannot resolve without this placeholder row.
+-- Idempotent on model_id; matches basin_version FK.
+INSERT INTO core.mesh_version (
+    mesh_version_id, basin_version_id, version_label, mesh_uri
+) VALUES (
+    'mesh__evidence_cmfd_p02_synth__v1',
+    'basin__evidence_cmfd_p02_synth__v1',
+    'evidence-only-v1',
+    'https://github.com/DankerMu/SHUD-NWM/tree/master/openspec/changes/direct-grid-display-cutover/evidence/provisioning/synthetic-package'
+) ON CONFLICT (mesh_version_id) DO NOTHING;
+
 -- Pre-check: baseline state must be exactly the readiness archive snapshot.
 DO $$
 BEGIN

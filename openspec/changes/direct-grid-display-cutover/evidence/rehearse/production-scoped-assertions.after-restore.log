@@ -1,0 +1,107 @@
+{
+  "active_model_snapshot": [
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_heihe_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_heihe_shud"
+    },
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_hetianhe_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_hetianhe_shud"
+    },
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_kashigeer_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_kashigeer_shud"
+    },
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_keliya_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_keliya_shud"
+    },
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_qhh_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_qhh_shud"
+    },
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_qinyijiang_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_qinyijiang_shud"
+    },
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_tailanhe_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_tailanhe_shud"
+    },
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_weiganhe_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_weiganhe_shud"
+    },
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_xinanjiang_upstream_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_xinanjiang_upstream_shud"
+    },
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_zhaochen_bst_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_zhaochen_bst_shud"
+    },
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_zhaochen_hhy_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_zhaochen_hhy_shud"
+    },
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_zhaochen_mc_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_zhaochen_mc_shud"
+    },
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_zhaochen_wem_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_zhaochen_wem_shud"
+    }
+  ],
+  "actual": {
+    "non_evidence_active_model_instance": 13,
+    "per_basin_active_station_count": {
+      "basins_heihe_vbasins": 1709,
+      "basins_hetianhe_vbasins": 581,
+      "basins_kashigeer_vbasins": 941,
+      "basins_keliya_vbasins": 32,
+      "basins_qhh_vbasins": 386,
+      "basins_qinyijiang_vbasins": 93,
+      "basins_tailanhe_vbasins": 37,
+      "basins_weiganhe_vbasins": 401,
+      "basins_xinanjiang_upstream_vbasins": 50,
+      "basins_zhaochen_bst_vbasins": 626,
+      "basins_zhaochen_hhy_vbasins": 1420,
+      "basins_zhaochen_mc_vbasins": 9,
+      "basins_zhaochen_wem_vbasins": 5
+    }
+  },
+  "checked_at_utc": "2026-07-11T14:24:42.307997+00:00",
+  "expected_active_non_evidence": 13,
+  "expected_global_active_count": 13,
+  "global_active_count": 13,
+  "mvt_source_identity_post_restore": "MVT_SOURCE_IDENTITY_NOT_FOUND",
+  "new_evidence_hydro_run_rows_during_window": 0,
+  "phase": "after-restore"
+}

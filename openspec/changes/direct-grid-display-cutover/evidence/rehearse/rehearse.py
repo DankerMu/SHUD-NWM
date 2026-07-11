@@ -78,7 +78,9 @@ BASELINE_MODEL_ID = "model__evidence_cmfd_p02_synth__v1"
 MAPPING_ASSET_IDENTITY = "synth-mip-m1-v2"
 BINDING_CHECKSUM = "d1e2c3b4a5968778869574a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3"
 SEEDED_RUN_ID = "run__evidence_cmfd_p02_synth__rehearsal_pre_cutover_v1"
-COVERED_SOURCE_IDS = ("cmfd",)
+COVERED_SOURCE_IDS = ("gfs",)  # Must match the M1 contract's applicable_source_ids
+# (parser only accepts GFS/ERA5/IFS per `packages/common/source_identity.py`); the
+# `cmfd` evidence narrative lives in basin/model/run IDs, not in this scope.
 
 APPROVER = "rehearsal-operator"
 REHEARSAL_REASON = "Epic #992 SUB-7 direct-grid-display-cutover rehearsal on node-27"
@@ -155,7 +157,7 @@ def _fingerprint_inputs_provider_stub(ctx, source_id: str):  # noqa: ARG001
     The state-clone hook (`packages/common/state_clone_hook.py:304-345`)
     consults `fingerprint_inputs_provider` only for sources NOT covered by
     `cold_start_approval.covered_source_ids`. Our rehearsal's approval
-    covers `('cmfd',)` which is the only source in the M1 target's
+    covers `('gfs',)` which is the only source in the M1 target's
     `applicable_source_ids`, so this callable is never invoked.
     Raise loudly if it ever is — that indicates a rehearsal-fixture drift.
     """
@@ -189,7 +191,15 @@ def _setup_logger(log_path: Path) -> logging.Logger:
 
 
 def _production_baseline_assert(cursor, expected_active_non_evidence: int = 13) -> dict[str, int]:
-    """13 production active model_instance rows; nothing under model__evidence% counted.
+    """13 production active model_instance rows; nothing under basin__evidence% counted.
+
+    The exclusion predicate scopes by ``basin_version_id`` (the evidence basin
+    identifier) rather than ``model_id`` because the M1 target is minted with
+    a SHA-256-derived id (``dg_<hex>``) by ``register_direct_grid_variant``,
+    which does not carry the ``model__evidence`` prefix. Filtering by the
+    evidence basin_version_id excludes ALL rows attached to that basin —
+    including the SHA-minted M1 target — while leaving production rows
+    (attached to production basin_version_ids) unchanged.
 
     Additionally captures per-basin active_flag counts across all 13
     production basins so the during-window / after-restore assertions can
@@ -200,7 +210,7 @@ def _production_baseline_assert(cursor, expected_active_non_evidence: int = 13) 
         SELECT count(*) AS n
         FROM core.model_instance
         WHERE active_flag = true
-          AND model_id NOT LIKE 'model__evidence%'
+          AND basin_version_id NOT LIKE 'basin__evidence%'
         """
     )
     non_evidence_active = int(cursor.fetchone()["n"])
@@ -575,14 +585,18 @@ def main() -> int:
                 )
             # No new hydro.hydro_run row for any evidence model created
             # during the window (rehearsal is timed between scheduler cycles).
+            # psycopg v3 interprets any `%` in the SQL text as a placeholder;
+            # bind the LIKE pattern as a parameter so `%` in the literal is
+            # not misparsed. (The other assert queries above use only integer
+            # counts / basin filters, so they don't trip this.)
             cursor.execute(
                 """
                 SELECT count(*) AS n
                 FROM hydro.hydro_run
-                WHERE model_id LIKE 'model__evidence%'
+                WHERE model_id LIKE %s
                   AND (%s = '' OR created_at::text > %s)
                 """,
-                (max_created_at_before, max_created_at_before),
+                ("model__evidence%", max_created_at_before, max_created_at_before),
             )
             evidence_new_runs = int(cursor.fetchone()["n"])
             if evidence_new_runs != 0:
@@ -608,10 +622,13 @@ def main() -> int:
                     f"post-restore global active count = {len(after_active_snapshot)}, expected 13"
                 )
             # Scheduler-manifest equivalent assertion: the derived active
-            # set contains no model__evidence% model.
+            # set contains no evidence-basin model (M1 target `dg_<hex>`
+            # is on the evidence basin_version_id but not `model__evidence`
+            # prefixed, so filter by basin_version_id).
             evidence_active_rows = [
                 r for r in after_active_snapshot
-                if str(r["model_id"]).startswith("model__evidence")
+                if str(r.get("basin_version_id", "")).startswith("basin__evidence")
+                or str(r["model_id"]).startswith("model__evidence")
             ]
             if evidence_active_rows:
                 raise AssertionError(

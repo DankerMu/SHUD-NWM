@@ -1,0 +1,85 @@
+{
+  "evidence_model_count": 0,
+  "generated_at": "2026-07-11T14:24:42.308746+00:00",
+  "models": [
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_heihe_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_heihe_shud"
+    },
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_hetianhe_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_hetianhe_shud"
+    },
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_kashigeer_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_kashigeer_shud"
+    },
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_keliya_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_keliya_shud"
+    },
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_qhh_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_qhh_shud"
+    },
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_qinyijiang_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_qinyijiang_shud"
+    },
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_tailanhe_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_tailanhe_shud"
+    },
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_weiganhe_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_weiganhe_shud"
+    },
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_xinanjiang_upstream_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_xinanjiang_upstream_shud"
+    },
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_zhaochen_bst_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_zhaochen_bst_shud"
+    },
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_zhaochen_hhy_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_zhaochen_hhy_shud"
+    },
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_zhaochen_mc_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_zhaochen_mc_shud"
+    },
+    {
+      "active_flag": true,
+      "basin_version_id": "basins_zhaochen_wem_vbasins",
+      "lifecycle_state": "active",
+      "model_id": "basins_zhaochen_wem_shud"
+    }
+  ],
+  "note": "Derived-from-DB scheduler registry manifest equivalent. Constructed by reading core.model_instance WHERE active_flag=true post-restore. Semantically equivalent to the manifest publish_scheduler_registry_manifest would emit."
+}

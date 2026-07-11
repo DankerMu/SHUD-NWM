@@ -9,13 +9,17 @@
 -- source_id choice
 -- ----------------
 -- `met.canonical_grid_snapshot.source_id` is a HARD FK to `met.data_source`;
--- node-27 only has `IFS`/`gfs` rows in `met.data_source` (no `cmfd`). We
--- therefore use `source_id='gfs'` here. Identity continuity with the
--- readiness registration is preserved via `applicable_source_ids=['cmfd']`,
--- which matches the M1 target's direct-grid contract `applicable_source_ids`.
--- The clone hook's per-source dispatch iterates over the contract's
--- `applicable_source_ids` (source_scope on the activation context), not the
--- snapshot's `source_id`.
+-- node-27 only has `IFS`/`gfs` rows in `met.data_source` (no `cmfd`).
+-- Additionally, `workers/forcing_producer/direct_grid_contract.py::
+-- _applicable_source_ids` normalizes each contract source_id via
+-- `packages.common.source_identity.normalize_source_id`, which only accepts
+-- {GFS, ERA5, IFS} — `cmfd` is rejected as unsupported. We therefore use
+-- `source_id='gfs'` here AND declare `applicable_source_ids=['gfs']`.
+-- The `cmfd` narrative is preserved in the basin_version_id / baseline
+-- model_id / seeded run_id identifiers, not in the parser-touched source
+-- scope. The clone hook's per-source dispatch iterates over the M1 target's
+-- stored `applicable_source_ids` (source_scope on the activation context),
+-- so the target's contract must declare a normalize_source_id-accepted value.
 
 BEGIN;
 
@@ -70,7 +74,7 @@ INSERT INTO met.canonical_grid_snapshot (
   100.6,
   'evidence-only-v1',
   now(),
-  ARRAY['cmfd']::TEXT[]
+  ARRAY['gfs']::TEXT[]
 );
 
 -- Post-check: exactly 1 new grid snapshot row for the rehearsal identity.

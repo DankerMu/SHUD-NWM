@@ -37,8 +37,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[5]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-import psycopg  # noqa: E402
-from psycopg.rows import dict_row  # noqa: E402
+# Use psycopg2 (matches the codebase-wide convention; `workers.model_registry
+# .direct_grid_variant_registration._json` requires psycopg2 `Json` adapter for
+# the resource_profile jsonb bind, so the cursor MUST be a psycopg2 cursor).
+import psycopg2  # noqa: E402
+from psycopg2.extras import RealDictCursor  # noqa: E402
 
 from workers.model_registry.direct_grid_variant_registration import (  # noqa: E402
     DirectGridBaselineModelInputs,
@@ -72,7 +75,7 @@ def _database_url() -> str:
     return os.environ.get("DATABASE_URL", "postgresql://nhms:nhms_dev@127.0.0.1:55432/nhms")
 
 
-def _grid_snapshot_id(cursor: psycopg.Cursor[dict]) -> str:
+def _grid_snapshot_id(cursor) -> str:
     override = os.environ.get("GRID_SNAPSHOT_ID", "").strip()
     if override:
         return override
@@ -93,7 +96,7 @@ def _grid_snapshot_id(cursor: psycopg.Cursor[dict]) -> str:
     return str(row["grid_snapshot_id"])
 
 
-def _baseline_from_evidence_row(cursor: psycopg.Cursor[dict]) -> DirectGridBaselineModelInputs:
+def _baseline_from_evidence_row(cursor) -> DirectGridBaselineModelInputs:
     """Read the NOT NULL baseline fields from the M0 evidence model_instance row.
 
     Ensures the M1 target inherits river_network / mesh / calibration /
@@ -186,7 +189,16 @@ def _build_direct_grid_contract(grid_snapshot_id: str) -> dict[str, object]:
         "model_input_package_id": MAPPING_ASSET_IDENTITY,
         "sp_att_path": "input_dir/synth-basin-m1-v2/synth-basin-m1-v2.sp.att",
         "sp_att_checksum": "b7a6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6",
-        "applicable_source_ids": ["cmfd"],
+        # The direct-grid contract parser (`workers/forcing_producer/
+        # direct_grid_contract.py::_applicable_source_ids`) validates each
+        # entry via `packages.common.source_identity.normalize_source_id`,
+        # which only accepts {GFS, ERA5, IFS}. `cmfd` — the evidence-lineage
+        # name reflected in basin/model/run IDs — is NOT parser-supported.
+        # We therefore declare `gfs` as the M1 target's applicable source,
+        # matching the canonical_grid_snapshot's `source_id='gfs'` in
+        # 01-canonical-grid-snapshot.sql. The `cmfd` narrative is preserved
+        # in the basin_version_id / baseline model_id identity strings.
+        "applicable_source_ids": ["gfs"],
         "grid_id": "synth-grid-p0.2-m1-v2",
         "grid_signature": "e2c0bf1a8d6c4f5b9a7f3e1d0c8b6a4f2d7e5c3b1a9f8d6c4b2a0f9e7d5c3b1a9",
         "station_bindings": stations,
@@ -194,7 +206,7 @@ def _build_direct_grid_contract(grid_snapshot_id: str) -> dict[str, object]:
 
 
 def _existing_target_model_id(
-    cursor: psycopg.Cursor[dict], grid_snapshot_id: str
+    cursor, grid_snapshot_id: str
 ) -> str | None:
     """Look up an already-registered M1 target by its built-asset identity."""
     cursor.execute(
@@ -215,7 +227,7 @@ def _existing_target_model_id(
     return str(row["model_id"])
 
 
-def _patch_resource_profile(cursor: psycopg.Cursor[dict], model_id: str) -> None:
+def _patch_resource_profile(cursor, model_id: str) -> None:
     """Patch the M1 target's resource_profile with preflight verification markers."""
     cursor.execute(
         """
@@ -227,7 +239,7 @@ def _patch_resource_profile(cursor: psycopg.Cursor[dict], model_id: str) -> None
     )
 
 
-def _report_mirror_state(cursor: psycopg.Cursor[dict], model_id: str) -> None:
+def _report_mirror_state(cursor, model_id: str) -> None:
     """Print the M1 mirror rows for the pass log."""
     cursor.execute(
         """
@@ -252,8 +264,8 @@ def _report_mirror_state(cursor: psycopg.Cursor[dict], model_id: str) -> None:
 def main() -> int:
     url = _database_url()
     print(f"[02-register] connecting to {url.split('@')[-1]}")
-    with psycopg.connect(url, autocommit=False, row_factory=dict_row) as conn:
-        with conn.cursor() as cursor:
+    with psycopg2.connect(url) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
             grid_snapshot_id = _grid_snapshot_id(cursor)
             print(f"[02-register] resolved grid_snapshot_id={grid_snapshot_id}")
 
