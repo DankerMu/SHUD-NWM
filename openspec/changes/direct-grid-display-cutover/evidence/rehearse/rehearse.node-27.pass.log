@@ -1,0 +1,307 @@
+2026-07-11T22:43:57Z INFO === Epic #992 SUB-7 rehearsal start ===
+2026-07-11T22:43:57Z INFO DATABASE target: 127.0.0.1:55432/nhms
+2026-07-11T22:43:57Z INFO BASIN_VERSION_ID=basin__evidence_cmfd_p02_synth__v1
+2026-07-11T22:43:57Z INFO MAPPING_ASSET_IDENTITY=synth-mip-m1-v2
+2026-07-11T22:43:57Z INFO STATE_CLONE_APPROVAL_ACTION=state_clone_cold_start_approved
+2026-07-11T22:43:57Z INFO STATE_CLONE_SPIN_UP_DISTORTION_ANNOUNCEMENT_MARKER=spin_up_distortion_public_announcement_required__docs_11_3_clause_3
+2026-07-11T22:43:57Z INFO REHEARSAL_WINDOW_UTC_START=2026-07-11T14:43:57.018877+00:00
+2026-07-11T22:43:57Z INFO CAPTURE BEFORE: production-scoped baseline assertion
+2026-07-11T22:43:57Z INFO baseline production summary: {'non_evidence_active_model_instance': 13, 'per_basin_active_station_count': {'basins_heihe_vbasins': 1709, 'basins_hetianhe_vbasins': 581, 'basins_kashigeer_vbasins': 941, 'basins_keliya_vbasins': 32, 'basins_qhh_vbasins': 386, 'basins_qinyijiang_vbasins': 93, 'basins_tailanhe_vbasins': 37, 'basins_weiganhe_vbasins': 401, 'basins_xinanjiang_upstream_vbasins': 50, 'basins_zhaochen_bst_vbasins': 626, 'basins_zhaochen_hhy_vbasins': 1420, 'basins_zhaochen_mc_vbasins': 9, 'basins_zhaochen_wem_vbasins': 5}}
+2026-07-11T22:43:57Z INFO resolved M1 target model_id=dg_10d27a62b35b39cb5a6f9d10f7fff6e9
+2026-07-11T22:43:57Z INFO MVT source identity BEFORE: met-stations:2bfc915b79ad9dbe:basin__evidence_cmfd_p02_synth__v1:3
+2026-07-11T22:43:57Z INFO hydro.hydro_run MAX(created_at) BEFORE='2026-07-11 14:43:56.567693+00'
+2026-07-11T22:43:57Z INFO REGISTER HOOKS + ACTIVATE: constructing PsycopgModelRegistryStore
+2026-07-11T22:43:57Z INFO ACTIVATE: model_lifecycle_operation activate model_id=dg_10d27a62b35b39cb5a6f9d10f7fff6e9 covered_source_ids=('gfs',)
+2026-07-11T22:43:57Z INFO ACTIVATE result: {
+  "audit_reference": {
+    "entity_id": "dg_10d27a62b35b39cb5a6f9d10f7fff6e9",
+    "entity_type": "model_instance",
+    "log_id": 12
+  },
+  "cold_start_approval": {
+    "approver": "rehearsal-operator",
+    "covered_source_ids": [
+      "gfs"
+    ],
+    "reason": "Epic #992 SUB-7 direct-grid-display-cutover rehearsal on node-27",
+    "spin_up_distortion_announcement_obligation": "spin_up_distortion_public_announcement_required__docs_11_3_clause_3"
+  },
+  "model": {
+    "active_flag": true,
+    "autoshud_code_version": null,
+    "basin_checksum": null,
+    "basin_id": "basin__evidence_cmfd_p02_synth",
+    "basin_name": "CMFD P0.2 Synthetic Evidence Basin",
+    "basin_version_id": "basin__evidence_cmfd_p02_synth__v1",
+    "calibration_version_id": "calib__evidence_cmfd_p02_synth__v1",
+    "container_image": null,
+    "created_at": "2026-07-11 14:24:09.143997+00:00",
+    "lifecycle_state": "active",
+    "mesh_checksum": null,
+    "mesh_properties_json": {},
+    "mesh_uri": "https://github.com/DankerMu/SHUD-NWM/tree/master/openspec/changes/direct-grid-display-cutover/evidence/provisioning/synthetic-package",
+    "mesh_version_id": "mesh__evidence_cmfd_p02_synth__v1",
+    "model_id": "dg_10d27a62b35b39cb5a6f9d10f7fff6e9",
+    "model_package_uri": "https://github.com/DankerMu/SHUD-NWM/tree/master/openspec/changes/direct-grid-display-cutover/evidence/provisioning/synthetic-package",
+    "resource_profile": {
+      "canonical_grid_key": "canonical__evidence_cmfd_p02_synth__m1_v2",
+      "copied_root_status": "present",
+      "direct_grid_forcing": {
+        "applicable_source_ids": [
+          "gfs"
+        ],
+        "binding_checksum": null,
+        "binding_uri": "synth://direct-grid-display-cutover/m1/v2",
+        "forcing_mapping_mode": "direct_grid",
+        "grid_id": "synth-grid-p0.2-m1-v2",
+        "grid_signature": "e2c0bf1a8d6c4f5b9a7f3e1d0c8b6a4f2d7e5c3b1a9f8d6c4b2a0f9e7d5c3b1a9",
+        "model_input_package_id": "synth-mip-m1-v2",
+        "sp_att_checksum": null,
+        "sp_att_path": "input_dir/synth-basin-m1-v2/synth-basin-m1-v2.sp.att",
+        "station_bindings": [
+          {
+            "forcing_filename": "station-001.csv",
+            "grid_cell_id": "cell-0100.00-0030.00",
+            "grid_id": "synth-grid-p0.2-m1-v2",
+            "latitude": 30.0,
+            "longitude": 100.0,
+            "shud_forcing_index": 1,
+            "station_id": "synth-mip-m1-v2::cell:cell-0100.00-0030.00",
+            "x": 1,
+            "y": 1,
+            "z": 100
+          },
+          {
+            "forcing_filename": "station-002.csv",
+            "grid_cell_id": "cell-0100.50-0030.00",
+            "grid_id": "synth-grid-p0.2-m1-v2",
+            "latitude": 30.0,
+            "longitude": 100.5,
+            "shud_forcing_index": 2,
+            "station_id": "synth-mip-m1-v2::cell:cell-0100.50-0030.00",
+            "x": 2,
+            "y": 1,
+            "z": 150
+          },
+          {
+            "forcing_filename": "station-003.csv",
+            "grid_cell_id": "cell-0100.00-0030.50",
+            "grid_id": "synth-grid-p0.2-m1-v2",
+            "latitude": 30.5,
+            "longitude": 100.0,
+            "shud_forcing_index": 3,
+            "station_id": "synth-mip-m1-v2::cell:cell-0100.00-0030.50",
+            "x": 1,
+            "y": 2,
+            "z": 200
+          }
+        ]
+      },
+      "evidence_rehearsal": "epic__992__sub_7__display_cutover",
+      "grid_snapshot_id": "4aeae132-7ba7-4873-887d-87356c527f19",
+      "lineage": "direct_grid_variant_registration",
+      "package_checksum": null,
+      "package_checksum_verified": true
+    },
+    "river_network_checksum": null,
+    "river_network_version_id": "rnw__evidence_cmfd_p02_synth__v1",
+    "rshud_code_version": null,
+    "segment_count": 0,
+    "shud_code_version": "basins-shud"
+  },
+  "operation": "activate",
+  "preflight": {
+    "action_id": "models.activate",
+    "actor_id": "trusted-internal:model-registry",
+    "basin_id": "basin__evidence_cmfd_p02_synth",
+    "basin_version_id": "basin__evidence_cmfd_p02_synth__v1",
+    "blockers": [],
+    "current_active_model_id": "model__evidence_cmfd_p02_synth__v1",
+    "impact": {
+      "active_scope": {
+        "basin_id": "basin__evidence_cmfd_p02_synth",
+        "basin_version_id": "basin__evidence_cmfd_p02_synth__v1"
+      },
+      "downstream_surfaces": [
+        "forecast-routing",
+        "model-assets-api",
+        "operator-audit"
+      ],
+      "segment_count": 0
+    },
+    "lineage": {
+      "basin_checksum": "[redacted]",
+      "copied_root_status": "present",
+      "manifest_uri": null,
+      "mesh_checksum": null,
+      "mesh_properties": {},
+      "object_uri": "[redacted]",
+      "package_checksum": "[redacted]",
+      "river_network_checksum": null,
+      "source_inventory_checksum": null
+    },
+    "mesh_version_id": "mesh__evidence_cmfd_p02_synth__v1",
+    "model_id": "dg_10d27a62b35b39cb5a6f9d10f7fff6e9",
+    "object_uri_prefix": {
+      "status": "valid",
+      "uri": "https://github.com/DankerMu/SHUD-NWM/tree/master/openspec/changes/direct-grid-display-cutover/evidence/provisioning/synthetic-package"
+    },
+    "operation": "activate",
+    "override_missing_active": false,
+    "previous_model_id": null,
+    "prior_audit_log_id": null,
+    "reason": "[redacted]",
+    "request_id": "51a16138-2d58-42c9-a677-c5bfad0d6276",
+    "restored_model_id": "dg_10d27a62b35b39cb5a6f9d10f7fff6e9",
+    "river_network_version_id": "rnw__evidence_cmfd_p02_synth__v1",
+    "roles": [
+      "sys_admin"
+    ],
+    "rollback_history": null,
+    "schema": "nhms.model_operation_preflight.v1",
+    "status": "ready",
+    "warnings": []
+  },
+  "previous_model": {
+    "active_flag": true,
+    "autoshud_code_version": null,
+    "basin_checksum": null,
+    "basin_id": "basin__evidence_cmfd_p02_synth",
+    "basin_name": "CMFD P0.2 Synthetic Evidence Basin",
+    "basin_version_id": "basin__evidence_cmfd_p02_synth__v1",
+    "calibration_version_id": "calib__evidence_cmfd_p02_synth__v1",
+    "container_image": null,
+    "created_at": "2026-07-07 02:03:49.158577+00:00",
+    "lifecycle_state": "active",
+    "mesh_checksum": null,
+    "mesh_properties_json": {},
+    "mesh_uri": "https://github.com/DankerMu/SHUD-NWM/tree/master/openspec/changes/direct-grid-display-cutover/evidence/provisioning/synthetic-package",
+    "mesh_version_id": "mesh__evidence_cmfd_p02_synth__v1",
+    "model_id": "model__evidence_cmfd_p02_synth__v1",
+    "model_package_uri": "https://github.com/DankerMu/SHUD-NWM/tree/master/openspec/changes/cmfd-direct-grid-platform-readiness/evidence/synthetic-package",
+    "resource_profile": {
+      "direct_grid_forcing": {
+        "applicable_source_ids": [
+          "cmfd"
+        ],
+        "binding_checksum": null,
+        "binding_uri": "synth://cmfd-p0.2-direct-grid-evidence/v1",
+        "forcing_mapping_mode": "direct_grid",
+        "grid_id": "synth-grid-p0.2-v1",
+        "grid_signature": "afafe1c814ad6b7a212455c2c8f25d6abaa22f3dd991f232d3749ff7f7d48449",
+        "model_input_package_id": "synth-basin-v1",
+        "sp_att_checksum": null,
+        "sp_att_path": "input_dir/synth-basin/synth-basin.sp.att",
+        "station_bindings": [
+          {
+            "forcing_filename": "station-001.csv",
+            "grid_cell_id": "cell-0100.00-0030.00",
+            "grid_id": "synth-grid-p0.2-v1",
+            "latitude": 30.0,
+            "longitude": 100.0,
+            "shud_forcing_index": 1,
+            "station_id": "synth-station-001",
+            "x": 1,
+            "y": 1,
+            "z": 100
+          },
+          {
+            "forcing_filename": "station-002.csv",
+            "grid_cell_id": "cell-0100.50-0030.00",
+            "grid_id": "synth-grid-p0.2-v1",
+            "latitude": 30.0,
+            "longitude": 100.5,
+            "shud_forcing_index": 2,
+            "station_id": "synth-station-002",
+            "x": 2,
+            "y": 1,
+            "z": 150
+          },
+          {
+            "forcing_filename": "station-003.csv",
+            "grid_cell_id": "cell-0100.00-0030.50",
+            "grid_id": "synth-grid-p0.2-v1",
+            "latitude": 30.5,
+            "longitude": 100.0,
+            "shud_forcing_index": 3,
+            "station_id": "synth-station-003",
+            "x": 1,
+            "y": 2,
+            "z": 200
+          }
+        ]
+      }
+    },
+    "river_network_checksum": null,
+    "river_network_version_id": "rnw__evidence_cmfd_p02_synth__v1",
+    "rshud_code_version": null,
+    "segment_count": 0,
+    "shud_code_version": "basins-shud"
+  },
+  "status": "allowed"
+}
+2026-07-11T22:43:57Z INFO CAPTURE DURING WINDOW: reading M1 mirror + legacy state
+2026-07-11T22:43:57Z INFO post-flip synthetic-basin station state: [
+  {
+    "active_flag": true,
+    "binding_checksum": "d1e2c3b4a5968778869574a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3",
+    "grid_snapshot_id": "4aeae132-7ba7-4873-887d-87356c527f19",
+    "mip": "synth-mip-m1-v2",
+    "station_id": "synth-mip-m1-v2::cell:cell-0100.00-0030.00",
+    "station_role": "direct_grid_cache"
+  },
+  {
+    "active_flag": true,
+    "binding_checksum": "d1e2c3b4a5968778869574a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3",
+    "grid_snapshot_id": "4aeae132-7ba7-4873-887d-87356c527f19",
+    "mip": "synth-mip-m1-v2",
+    "station_id": "synth-mip-m1-v2::cell:cell-0100.00-0030.50",
+    "station_role": "direct_grid_cache"
+  },
+  {
+    "active_flag": true,
+    "binding_checksum": "d1e2c3b4a5968778869574a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3",
+    "grid_snapshot_id": "4aeae132-7ba7-4873-887d-87356c527f19",
+    "mip": "synth-mip-m1-v2",
+    "station_id": "synth-mip-m1-v2::cell:cell-0100.50-0030.00",
+    "station_role": "direct_grid_cache"
+  },
+  {
+    "active_flag": false,
+    "binding_checksum": null,
+    "grid_snapshot_id": null,
+    "mip": null,
+    "station_id": "synth-station-001",
+    "station_role": "forcing_proxy"
+  },
+  {
+    "active_flag": false,
+    "binding_checksum": null,
+    "grid_snapshot_id": null,
+    "mip": null,
+    "station_id": "synth-station-002",
+    "station_role": "forcing_proxy"
+  },
+  {
+    "active_flag": false,
+    "binding_checksum": null,
+    "grid_snapshot_id": null,
+    "mip": null,
+    "station_id": "synth-station-003",
+    "station_role": "forcing_proxy"
+  }
+]
+2026-07-11T22:43:57Z INFO MVT source identity AFTER: met-stations:f03703b827fc1462:basin__evidence_cmfd_p02_synth__v1:3
+2026-07-11T22:43:57Z INFO during-window production-scoped assertion PASS; transient global active=14
+2026-07-11T22:43:57Z INFO SCREENSHOT_WINDOW_OPEN
+2026-07-11T22:48:57Z INFO SCREENSHOT_WINDOW_CLOSE
+2026-07-11T22:48:57Z INFO RESTORE: starting restore of synthetic display state
+2026-07-11T22:48:57Z INFO RESTORE step 1 ok: M1 target deactivated via Change 4 lifecycle op
+2026-07-11T22:48:57Z INFO RESTORE step 2 ok: baseline evidence model_instance -> inactive
+2026-07-11T22:48:57Z INFO RESTORE step 3 ok: synthetic met_station rows -> active_flag=false
+2026-07-11T22:48:57Z INFO RESTORE step 4 ok: seeded pre-cutover hydro_run -> deleted
+2026-07-11T22:48:57Z INFO RESTORE: done
+2026-07-11T22:48:57Z INFO MVT source identity POST-RESTORE: MVT_SOURCE_IDENTITY_NOT_FOUND
+2026-07-11T22:48:57Z INFO after-restore production-scoped assertion PASS; global active=13; no evidence models
+2026-07-11T22:48:57Z INFO REHEARSAL_WINDOW_UTC_END=2026-07-11T14:48:57.362292+00:00
+2026-07-11T22:48:57Z INFO === rehearsal COMPLETE ===

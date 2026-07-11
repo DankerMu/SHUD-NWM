@@ -1,0 +1,112 @@
+=== Epic #992 SUB-7 rehearsal pre-baseline (node-27) ===
+RECORDED_AT_UTC=2026-07-11T14:07:19Z
+HEAD= ca501fc222311ab6438b5da4e3023be7410221b7
+BRANCH= feat/issue-999-node27-rehearsal-receipt
+
+--- core.model_instance active + total ---
+ active | total 
+--------+-------
+     13 |    14
+(1 row)
+
+--- evidence model_instances ---
+              model_id              |          basin_version_id          | active_flag | lifecycle_state 
+------------------------------------+------------------------------------+-------------+-----------------
+ model__evidence_cmfd_p02_synth__v1 | basin__evidence_cmfd_p02_synth__v1 | f           | inactive
+(1 row)
+
+--- synth met_station ---
+    station_id     |          basin_version_id          | active_flag | station_role  
+-------------------+------------------------------------+-------------+---------------
+ synth-station-001 | basin__evidence_cmfd_p02_synth__v1 | f           | forcing_proxy
+ synth-station-002 | basin__evidence_cmfd_p02_synth__v1 | f           | forcing_proxy
+ synth-station-003 | basin__evidence_cmfd_p02_synth__v1 | f           | forcing_proxy
+(3 rows)
+
+--- production active met_station (ZERO-IMPACT ANCHOR) ---
+ prod_active_total | prod_active_basins 
+-------------------+--------------------
+              6290 |                 13
+(1 row)
+
+--- per-basin active count (production) ---
+          basin_version_id          | active_stations 
+------------------------------------+-----------------
+ basins_heihe_vbasins               |            1709
+ basins_hetianhe_vbasins            |             581
+ basins_kashigeer_vbasins           |             941
+ basins_keliya_vbasins              |              32
+ basins_qhh_vbasins                 |             386
+ basins_qinyijiang_vbasins          |              93
+ basins_tailanhe_vbasins            |              37
+ basins_weiganhe_vbasins            |             401
+ basins_xinanjiang_upstream_vbasins |              50
+ basins_zhaochen_bst_vbasins        |             626
+ basins_zhaochen_hhy_vbasins        |            1420
+ basins_zhaochen_mc_vbasins         |               9
+ basins_zhaochen_wem_vbasins        |               5
+(13 rows)
+
+--- canonical_grid_snapshot ---
+           grid_snapshot_id           |                        canonical_grid_key                        | source_id | grid_id  
+--------------------------------------+------------------------------------------------------------------+-----------+----------
+ 350f62a9-b897-4929-a7fc-d8e696509b79 | 10a00f25fa26c56bcace76caeeee126e1dcf4f1fa6a840728688809a715e0abf | IFS       | ifs_0p25
+ fbb5417c-72a0-44e7-b7a9-679818e05ef9 | 10a00f25fa26c56bcace76caeeee126e1dcf4f1fa6a840728688809a715e0abf | gfs       | gfs_0p25
+(2 rows)
+
+--- MAX(hydro.hydro_run.created_at) BEFORE ---
+        max_created_at         
+-------------------------------
+ 2026-07-07 16:48:51.286536+00
+(1 row)
+
+--- synthetic package placement (object-store/raw) ---
+total 28
+drwxrwxr-x 2 nwm nwm 4096 Jul 11 22:06 .
+drwxrwxr-x 3 nwm nwm 4096 Jul 11 22:06 ..
+-rw-rw-r-- 1 nwm nwm 1605 Jul 11 22:06 binding-manifest.json
+-rw-rw-r-- 1 nwm nwm  124 Jul 11 22:06 package.manifest.sha256
+-rw-rw-r-- 1 nwm nwm  272 Jul 11 22:06 synth-basin-m1-v2.calib
+-rw-rw-r-- 1 nwm nwm  264 Jul 11 22:06 synth-basin-m1-v2.mesh
+-rw-rw-r-- 1 nwm nwm  269 Jul 11 22:06 synth-basin-m1-v2.para
+--- ---
+=== Epic #992 SUB-7 rehearsal pre-baseline (node-27) — RETRY-2 ===
+RECORDED_AT_UTC=2026-07-11T14:13:16Z
+HEAD= ca501fc222311ab6438b5da4e3023be7410221b7
+BRANCH= feat/issue-999-node27-rehearsal-receipt
+NOTE: Phase A source_id fix (cmfd -> gfs) applied via direct file copy; commit pending Phase B completion.
+
+--- core.model_instance active + total ---
+ active | total 
+--------+-------
+     13 |    14
+(1 row)
+
+--- evidence model_instances ---
+              model_id              | active_flag | lifecycle_state 
+------------------------------------+-------------+-----------------
+ model__evidence_cmfd_p02_synth__v1 | f           | inactive
+(1 row)
+
+--- synth met_station ---
+    station_id     | active_flag 
+-------------------+-------------
+ synth-station-001 | f
+ synth-station-002 | f
+ synth-station-003 | f
+(3 rows)
+
+--- production active met_station (ZERO-IMPACT ANCHOR) ---
+ prod_active_total | prod_active_basins 
+-------------------+--------------------
+              6290 |                 13
+(1 row)
+
+--- canonical_grid_snapshot (2 rows expected: IFS, gfs) ---
+           grid_snapshot_id           | source_id | grid_id  
+--------------------------------------+-----------+----------
+ 350f62a9-b897-4929-a7fc-d8e696509b79 | IFS       | ifs_0p25
+ fbb5417c-72a0-44e7-b7a9-679818e05ef9 | gfs       | gfs_0p25
+(2 rows)
+
+--- ---
