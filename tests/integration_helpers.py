@@ -372,6 +372,7 @@ def _clear_issue_126_rows(connection: Any) -> None:
         )
         cursor.execute("DELETE FROM met.forcing_version WHERE forcing_version_id LIKE %s", (f"{ISSUE_126_PREFIX}%",))
         cursor.execute("DELETE FROM met.forecast_cycle WHERE cycle_id = %s", (CYCLE_ID,))
+        cursor.execute("DELETE FROM met.canonical_grid_snapshot WHERE source_id = %s", (SOURCE_ID,))
         cursor.execute("DELETE FROM met.data_source WHERE source_id = %s", (SOURCE_ID,))
         cursor.execute("DELETE FROM core.model_instance WHERE model_id = %s", (MODEL_ID,))
         cursor.execute("DELETE FROM core.mesh_version WHERE mesh_version_id = %s", (MESH_VERSION_ID,))

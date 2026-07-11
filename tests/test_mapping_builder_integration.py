@@ -150,15 +150,31 @@ from workers.mapping_builder import (
     verify_small_basin_gate,
 )
 
+
 # Epic #886 readiness manifest — the SUB-13 adapter's canonical input source.
-_EPIC_886_READINESS_MANIFEST = (
-    pathlib.Path(__file__).resolve().parent.parent
-    / "openspec"
-    / "changes"
-    / "cmfd-direct-grid-platform-readiness"
-    / "evidence"
-    / "readiness-manifest.v1.json"
-)
+# The change may live either as a live change or an archived one; the test
+# accepts whichever path resolves first so archival is not a coupled edit.
+def _resolve_epic_886_readiness_manifest() -> pathlib.Path:
+    openspec_root = pathlib.Path(__file__).resolve().parent.parent / "openspec"
+    live = (
+        openspec_root
+        / "changes"
+        / "cmfd-direct-grid-platform-readiness"
+        / "evidence"
+        / "readiness-manifest.v1.json"
+    )
+    if live.exists():
+        return live
+    archive_dir = openspec_root / "changes" / "archive"
+    if archive_dir.exists():
+        for archived in sorted(archive_dir.glob("*-cmfd-direct-grid-platform-readiness")):
+            candidate = archived / "evidence" / "readiness-manifest.v1.json"
+            if candidate.exists():
+                return candidate
+    return live
+
+
+_EPIC_886_READINESS_MANIFEST = _resolve_epic_886_readiness_manifest()
 
 # --- fixture constants -----------------------------------------------------
 
