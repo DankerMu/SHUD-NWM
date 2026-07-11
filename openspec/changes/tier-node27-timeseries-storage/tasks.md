@@ -194,7 +194,9 @@ Order is load-bearing:
   subjects use the point window
   `[valid_time, valid_time]`. Receipt `coverage_bounds` equals the exact
   min(start)/max(end) across the captured subject set, and every window must
-  satisfy start <= end.
+  satisfy start <= end. Forcing/run `cycle_time` must resolve to an exact UTC
+  hour (`minute == second == microsecond == 0`); a non-hour metadata row is a
+  blocker and must never be truncated into another cycle's archive identity.
 
   Product references are strict, root-contained object-store URIs. Forcing
   hot coverage requires `forcing_package.json` as a bounded regular file,
@@ -211,7 +213,10 @@ Order is load-bearing:
   clone provenance is present and the physical model segment matches
   `cloned_from_model_id`; its stable receipt subject remains the clone
   `state_id`, while archive/hot coverage follows the shared physical
-  artifact. Any malformed URI, containment escape, symlink, permission or
+  artifact. Legacy clone origin comparison canonicalizes both `NULL` and the
+  existing empty-string representation to the same `legacy-unqualified`
+  source while keeping every provider distinct. Any malformed URI,
+  containment escape, symlink, permission or
   I/O error is an audit blocker, not ordinary absence.
 
   Forcing archive basin identity comes from authoritative
@@ -240,7 +245,10 @@ Order is load-bearing:
   publication.
   Run-output discovery is likewise capped at 10,000 entries and eight
   directory levels per run; it still inspects every bounded sibling so a
-  valid file cannot hide a later unsafe entry.
+  valid file cannot hide a later unsafe entry. Enumeration, entry stat and
+  child-directory opens for the complete traversal stay bound to the same
+  held directory-FD tree; a pathname directory replacement cannot substitute
+  different siblings between list and stat.
 
   All evidence access and output publication is descriptor-bound: walk from
   a trusted root directory FD with `openat`-style `dir_fd` calls and
@@ -271,8 +279,17 @@ Order is load-bearing:
   parent and every parent component must resolve to a non-symlink directory.
   Publication writes a mode-0600 same-directory exclusive temporary file,
   flushes + fsyncs it, uses atomic `os.replace`, fsyncs the directory, and
-  removes temporary residue on failure. Failure diagnostics are emitted as
-  JSON to stderr, never as a replacement gate receipt. Runtime schema
+  re-verifies after replacement that the pinned parent FD still names the
+  configured parent path. Any directory-fsync error or observed parent
+  namespace replacement is a blocker and MUST NOT report `published`;
+  temporary residue is removed on pre-replace failure. The receipt parent is
+  an operator-controlled, non-rotating namespace during publication because
+  no pathname protocol can linearize against a privileged rename after its
+  final identity check. Failures before replace preserve the old receipt
+  byte-for-byte; failures discovered after replace are reported as an
+  indeterminate publication that retention must refuse, never as successful
+  preservation. Failure diagnostics are emitted as JSON to stderr, never as
+  a replacement gate receipt. Runtime schema
   validation uses `jsonschema` as a direct production dependency, not a dev
   transitive dependency.
   Archive minimum age is parsed without truthiness fallback and validated
@@ -280,7 +297,10 @@ Order is load-bearing:
   values below 30 (including zero) fail before DB/filesystem audit work.
   Every readable size/checksum mismatch discovered for a subject is appended
   to its evidence before coverage precedence is selected, so a valid fallback
-  copy never erases evidence of a corrupt sibling.
+  copy never erases evidence of a corrupt sibling. This includes readable hot
+  forcing manifest/member and state-file checksum mismatches: they are absent
+  coverage with retained evidence, while malformed identity, unsafe type,
+  permission and I/O failures remain blockers.
   Test rows:
   - Input: window with a checksum-verified archive object.
     Expected: verdict `complete`; not in the salvage list.
@@ -372,6 +392,34 @@ Order is load-bearing:
     Expected: non-zero JSON diagnostic on stderr, old receipt byte-identical,
     and no readable temporary residue. A valid receipt is mode 0600 and
     atomically replaces the prior file.
+  - Input: the receipt parent is renamed/replaced between the last pre-replace
+    identity check and `os.replace`, or directory fsync returns `EIO`.
+    Expected: post-replace parent verification/fsync blocks `published` and
+    reports indeterminate publication; no write follows the replacement
+    parent pathname and retention cannot consume this run as fresh evidence.
+  - Input: forcing/run metadata has a non-zero UTC minute, second or
+    microsecond in `cycle_time`.
+    Expected: inventory blocks before archive lookup instead of truncating to
+    a neighboring canonical hourly identity.
+  - Input: provider, legacy and clone state archive fixtures whose manifest
+    member paths are independent literal expectations, exercised through
+    `run_audit` with a real object-store prefix.
+    Expected: the production prefix wiring yields product-archive coverage;
+    a wrong prefix or wrong literal member fails closed.
+  - Input: run-output directory is atomically replaced after enumeration but
+    before a child stat, with an unsafe sibling in the originally opened tree.
+    Expected: the held directory FD still observes and rejects the original
+    unsafe sibling; the replacement tree cannot manufacture hot coverage.
+  - Input: readable forcing/state hot checksum mismatch together with valid
+    product-archive or salvage fallback, and the same mismatch without a
+    fallback.
+    Expected: fallback precedence continues safely and every receipt verdict
+    retains the mismatch evidence; no fallback yields gap rather than an
+    audit blocker.
+  - Input: a legacy clone/origin pair stores equivalent source-less identity
+    as `NULL` versus empty string in either direction.
+    Expected: provenance validation canonicalizes both to
+    `legacy-unqualified`; provider-versus-legacy remains a drift blocker.
   - Input: pinned completeness example plus a mixed forcing-gap/state-gap
     receipt.
     Expected: examples pass both JSON Schema and runtime set invariants; the

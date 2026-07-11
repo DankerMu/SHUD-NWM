@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
+import stat
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -150,6 +152,20 @@ def test_inverted_subject_window_is_blocked() -> None:
         _subject(start=END, end=START)
 
 
+@pytest.mark.parametrize("lane", ["forcing", "runs"])
+@pytest.mark.parametrize(
+    "cycle_time",
+    [
+        START + timedelta(minutes=1),
+        START + timedelta(seconds=1),
+        START + timedelta(microseconds=1),
+    ],
+)
+def test_forcing_and_run_cycle_identity_rejects_non_utc_hour(lane: str, cycle_time: datetime) -> None:
+    with pytest.raises(audit.AuditBlocked, match="exact UTC hour"):
+        _subject(lane, f"{lane}-a", cycle_time=cycle_time)
+
+
 def test_product_archive_checksum_mismatch_is_absent_and_reported(tmp_path: Path) -> None:
     config = _config(tmp_path)
     subject = _subject()
@@ -228,7 +244,11 @@ def _write_state_product_archive(config: audit.AuditConfig, subject: audit.Inven
         "cycle_time": identity.cycle_time,
         "model_id": identity.model_id,
     }
-    member = audit._state_archive_member_path(subject, config.object_store_prefix)
+    member = {
+        "provider-state": "cycle-gfs/lead-006/state.cfg.ic",
+        "legacy-state": "legacy/state.cfg.ic",
+        "clone-state": "cycle-gfs/lead-006/state.cfg.ic",
+    }[subject.subject_id]
     entry = {"path": member, "sha256": subject.checksum, "size_bytes": 5}
     if mutation in {"missing", "wrong-path"}:
         files = [{**entry, "path": "other/state.cfg.ic"}]
@@ -273,6 +293,32 @@ def test_state_product_archive_rejects_unbound_member(kind: str, mutation: str, 
     _write_state_product_archive(config, subject, mutation=mutation)
     with pytest.raises(audit.AuditBlocked, match="exactly one bound member|checksum differs"):
         audit.verify_product_archive(subject, config.archive_root, config.object_store_prefix)
+
+
+def test_run_audit_wires_object_store_prefix_into_state_archive_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    subject = replace(
+        _state_archive_subject("provider"),
+        hot_uri="s3://nhms/states/gfs/model-a/2026050100/cycle-gfs/lead-006/state.cfg.ic",
+    )
+    _write_state_product_archive(config, subject, mutation="valid")
+
+    class _ConnectionWithClose:
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(audit, "load_inventory", lambda _connection: (NOW, [subject]))
+    monkeypatch.setattr(audit, "discover_salvage", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(audit, "verify_hot", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(audit, "publish_receipt", lambda *_args, **_kwargs: None)
+    receipt = audit.run_audit(config, connect=lambda _dsn: _ConnectionWithClose())
+    assert receipt["windows"][0]["coverage"] == "product-archive"
+
+    wrong_prefix = replace(config, object_store_prefix="s3://other")
+    with pytest.raises(audit.AuditBlocked, match="outside configured prefix"):
+        audit.run_audit(wrong_prefix, connect=lambda _dsn: _ConnectionWithClose())
 
 
 def test_forcing_and_run_archive_identity_is_fully_bound_without_state_member_assumption(tmp_path: Path) -> None:
@@ -433,6 +479,67 @@ def test_forcing_hot_binds_manifest_and_files(tmp_path: Path) -> None:
         audit.verify_hot(bad, config)
 
 
+def test_hot_forcing_checksum_mismatch_is_gap_evidence_and_survives_archive_fallback(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    key = "forcing/gfs/2026050100/basin-a/model-a"
+    package = config.object_store_root / key
+    package.mkdir(parents=True)
+    data = b"forcing"
+    (package / "data.csv").write_bytes(data)
+    manifest = {
+        "forcing_version_id": "forcing-a",
+        "source_id": "gfs",
+        "cycle_time": audit._time(START),
+        "start_time": audit._time(START),
+        "end_time": audit._time(END),
+        "model_id": "model-a",
+        "basin_version_id": "basin-a",
+        "files": [{"uri": f"s3://nhms/{key}/data.csv", "checksum": "0" * 64}],
+    }
+    raw = json.dumps(manifest).encode()
+    (package / "forcing_package.json").write_bytes(raw)
+    subject = _subject(hot_uri=f"s3://nhms/{key}", checksum=hashlib.sha256(raw).hexdigest())
+    hot = audit.verify_hot(subject, config)
+    assert hot is not None and hot.mechanism == "none" and "member checksum mismatch" in hot.evidence[0]
+
+    gap = _receipt([subject], hot={subject.stable_key: hot})
+    assert gap["windows"][0]["coverage"] == "none"
+    assert hot.evidence[0] in gap["windows"][0]["evidence"]
+    fallback = _receipt(
+        [subject],
+        product={subject.stable_key: audit.Coverage("product-archive", ("product valid",))},
+        hot={subject.stable_key: hot},
+    )
+    assert fallback["windows"][0]["coverage"] == "product-archive"
+    assert hot.evidence[0] in fallback["windows"][0]["evidence"]
+
+
+def test_hot_forcing_manifest_checksum_mismatch_is_absent_evidence(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    key = "forcing/gfs/2026050100/basin-a/model-a"
+    package = config.object_store_root / key
+    package.mkdir(parents=True)
+    data = b"forcing"
+    (package / "data.csv").write_bytes(data)
+    manifest = {
+        "forcing_version_id": "forcing-a",
+        "source_id": "gfs",
+        "cycle_time": audit._time(START),
+        "start_time": audit._time(START),
+        "end_time": audit._time(END),
+        "model_id": "model-a",
+        "basin_version_id": "basin-a",
+        "files": [
+            {"uri": f"s3://nhms/{key}/data.csv", "checksum": hashlib.sha256(data).hexdigest()}
+        ],
+    }
+    (package / "forcing_package.json").write_text(json.dumps(manifest), encoding="utf-8")
+    subject = _subject(hot_uri=f"s3://nhms/{key}", checksum="0" * 64)
+    assert audit.verify_hot(subject, config) == audit.Coverage(
+        "none", ("hot forcing manifest checksum mismatch",)
+    )
+
+
 def test_run_hot_requires_row_bound_manifest_and_output(tmp_path: Path) -> None:
     config = _config(tmp_path)
     subject = _subject("runs", "run-a")
@@ -494,6 +601,27 @@ def test_provider_legacy_and_clone_state_identity(tmp_path: Path) -> None:
     assert audit.verify_hot(clone, config).mechanism == "hot-object-store"
     with pytest.raises(audit.AuditBlocked, match="identity mismatch"):
         audit.verify_hot(replace(clone, cloned_from_model_id="model-c"), config)
+
+
+def test_hot_state_checksum_mismatch_is_gap_evidence_and_survives_archive_fallback(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    subject = _subject("states", "state-a", checksum="0" * 64)
+    path = config.object_store_root / subject.hot_uri
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"state")
+    hot = audit.verify_hot(subject, config)
+    assert hot == audit.Coverage("none", ("hot state checksum mismatch: state-a",))
+
+    gap = _receipt([subject], hot={subject.stable_key: hot})
+    assert gap["windows"][0]["coverage"] == "none"
+    assert hot.evidence[0] in gap["windows"][0]["evidence"]
+    fallback = _receipt(
+        [subject],
+        product={subject.stable_key: audit.Coverage("product-archive", ("product valid",))},
+        hot={subject.stable_key: hot},
+    )
+    assert fallback["windows"][0]["coverage"] == "product-archive"
+    assert hot.evidence[0] in fallback["windows"][0]["evidence"]
 
 
 def test_state_provider_path_preserves_canonical_source_case(tmp_path: Path) -> None:
@@ -608,6 +736,44 @@ def test_publish_is_mode_0600_atomic_and_preserves_old_on_failure(
     assert not list(tmp_path.glob(".*.tmp"))
 
 
+def test_publish_parent_swap_after_replace_is_indeterminate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "receipts"
+    parent.mkdir()
+    path = parent / "receipt.json"
+    path.write_bytes(b"old")
+    moved = tmp_path / "receipts-moved"
+    original_replace = os.replace
+
+    def replace_then_swap(src, dst, *args, **kwargs):
+        result = original_replace(src, dst, *args, **kwargs)
+        original_replace(parent, moved)
+        parent.mkdir()
+        return result
+
+    monkeypatch.setattr(safe_fs.os, "replace", replace_then_swap)
+    with pytest.raises(audit.PublicationIndeterminate, match="indeterminate.*parent identity changed"):
+        audit.publish_receipt(path, _receipt([_subject()]))
+    assert not path.exists()
+    assert json.loads((moved / "receipt.json").read_text()) == _receipt([_subject()])
+
+
+def test_publish_directory_fsync_eio_is_indeterminate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "receipt.json"
+    path.write_bytes(b"old")
+    original_fsync = os.fsync
+
+    def fail_directory_fsync(fd: int) -> None:
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EIO, "injected directory fsync failure")
+        original_fsync(fd)
+
+    monkeypatch.setattr(safe_fs.os, "fsync", fail_directory_fsync)
+    with pytest.raises(audit.PublicationIndeterminate, match="indeterminate.*directory fsync failed"):
+        audit.publish_receipt(path, _receipt([_subject()]))
+
+
 def test_publish_rejects_relative_or_symlinked_paths(tmp_path: Path) -> None:
     receipt = _receipt([_subject()])
     with pytest.raises(audit.AuditBlocked, match="absolute"):
@@ -638,6 +804,22 @@ def test_main_redacts_dsn_from_runtime_error(
     assert audit.main([]) == 1
     captured = capsys.readouterr()
     assert dsn not in captured.err and "[DATABASE_URL]" in captured.err
+
+
+def test_main_reports_post_replace_failure_as_indeterminate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(
+        audit,
+        "run_audit",
+        lambda _config: (_ for _ in ()).throw(audit.PublicationIndeterminate("directory fsync failed")),
+    )
+    assert audit.main([]) == 1
+    diagnostic = json.loads(capsys.readouterr().err)
+    assert diagnostic["status"] == "indeterminate"
+    assert diagnostic["error_type"] == "PublicationIndeterminate"
 
 
 def test_symlinked_object_root_blocks_without_path_walk_loop(tmp_path: Path) -> None:
@@ -770,6 +952,26 @@ def test_valid_clone_origin_keeps_clone_stable_subject() -> None:
 
 
 @pytest.mark.parametrize(
+    ("clone_source", "origin_source"),
+    [(None, ""), ("", None)],
+)
+def test_legacy_clone_null_and_empty_source_are_equivalent(clone_source: object, origin_source: object) -> None:
+    row = _clone_row(source_id=clone_source, origin_source_id=origin_source)
+    _captured, subjects = audit.load_inventory(_Connection([[{"audit_time": NOW}], [], [], [row]]))
+    assert subjects[0].source_id is None
+
+
+@pytest.mark.parametrize(
+    ("clone_source", "origin_source"),
+    [("gfs", None), (None, "gfs")],
+)
+def test_provider_and_legacy_clone_source_drift_still_blocks(clone_source: object, origin_source: object) -> None:
+    row = _clone_row(source_id=clone_source, origin_source_id=origin_source)
+    with pytest.raises(audit.AuditBlocked, match="source_id drift"):
+        audit.load_inventory(_Connection([[{"audit_time": NOW}], [], [], [row]]))
+
+
+@pytest.mark.parametrize(
     ("override", "message"),
     [
         ({"origin_state_id": None}, "does not exist"),
@@ -820,8 +1022,8 @@ def test_run_output_entry_and_depth_caps_fail_closed(tmp_path: Path, monkeypatch
     output.mkdir(parents=True)
     monkeypatch.setattr(
         audit,
-        "_list_directory",
-        lambda _path, _root, _max: [str(index) for index in range(audit.MAX_RUN_OUTPUT_ENTRIES + 1)],
+        "_list_run_output_fd",
+        lambda _fd, _path, _max: [str(index) for index in range(audit.MAX_RUN_OUTPUT_ENTRIES + 1)],
     )
     with pytest.raises(audit.AuditBlocked, match="entries"):
         audit._directory_has_regular_file(output, config.object_store_root)
@@ -837,6 +1039,33 @@ def test_run_output_depth_cap_fails_closed_after_inspecting_bounded_tree(tmp_pat
         current.mkdir()
     with pytest.raises(audit.AuditBlocked, match="depth"):
         audit._directory_has_regular_file(config.object_store_root / "runs/run-a/output", config.object_store_root)
+
+
+def test_run_output_traversal_stays_on_held_directory_tree_during_path_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    output = config.object_store_root / "runs/run-a/output"
+    output.mkdir(parents=True)
+    outside = tmp_path / "outside-output"
+    outside.mkdir()
+    (output / "unsafe").symlink_to(outside, target_is_directory=True)
+    original_tree = output.parent / "output-original"
+    original_stat = audit._stat_run_output_entry
+    swapped = False
+
+    def swap_before_stat(directory_fd: int, name: str, path_label: Path):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            output.rename(original_tree)
+            output.mkdir()
+            (output / "safe.csv").write_text("replacement", encoding="utf-8")
+        return original_stat(directory_fd, name, path_label)
+
+    monkeypatch.setattr(audit, "_stat_run_output_entry", swap_before_stat)
+    with pytest.raises(audit.AuditBlocked, match="unsafe non-regular"):
+        audit._directory_has_regular_file(output, config.object_store_root)
 
 
 def test_missing_leaf_is_absent_but_intermediate_symlink_blocks_each_lane(tmp_path: Path) -> None:

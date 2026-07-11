@@ -83,6 +83,7 @@ def atomic_write_bytes_no_follow(
     parent_fd, parent_path = _open_parent_dir(target, containment_root=containment_root, create=True)
     temp_name = f".{target.name}.{uuid.uuid4().hex}.{temp_suffix}"
     file_fd: int | None = None
+    replaced = False
     try:
         _verify_fd_matches_path(parent_fd, parent_path)
         _reject_existing_symlink(parent_fd, target.name, target)
@@ -98,21 +99,65 @@ def atomic_write_bytes_no_follow(
         file_fd = None
         _verify_fd_matches_path(parent_fd, parent_path)
         os.replace(temp_name, target.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        replaced = True
         try:
             os.fsync(parent_fd)
-        except OSError:
-            pass
+        except OSError as error:
+            raise SafeFilesystemError(
+                f"Atomic replacement for {target} completed but directory fsync failed: {error}",
+                kind="indeterminate",
+            ) from error
+        try:
+            _verify_fd_matches_path(parent_fd, parent_path)
+        except SafeFilesystemError as error:
+            raise SafeFilesystemError(
+                f"Atomic replacement for {target} completed but parent identity changed: {error}",
+                kind="indeterminate",
+            ) from error
     except SafeFilesystemError:
         _close_file_fd(file_fd)
-        _unlink_temp(parent_fd, temp_name)
+        if not replaced:
+            _unlink_temp(parent_fd, temp_name)
         raise
     except OSError as error:
         _close_file_fd(file_fd)
-        _unlink_temp(parent_fd, temp_name)
-        raise SafeFilesystemError(f"Failed to write {target}: {error}", kind="io") from error
+        if not replaced:
+            _unlink_temp(parent_fd, temp_name)
+        kind = "indeterminate" if replaced else "io"
+        raise SafeFilesystemError(f"Failed to write {target}: {error}", kind=kind) from error
     finally:
         os.close(parent_fd)
     return target
+
+
+def open_directory_no_follow(path: Path, *, containment_root: Path | None = None) -> int:
+    """Open and pin a directory beneath an optional containment root without following symlinks."""
+
+    target = _expand_path(path)
+    root, parts = _anchor_for(target, containment_root=containment_root)
+    root_fd = _open_directory_no_follow(root)
+    fd = root_fd
+    try:
+        for part in parts:
+            next_fd = _open_child_dir(fd, part, target)
+            if fd != root_fd:
+                os.close(fd)
+            fd = next_fd
+        directory_fd = os.dup(root_fd) if fd == root_fd else fd
+        if fd != root_fd:
+            fd = -1
+        try:
+            _verify_fd_matches_path(directory_fd, target)
+            return directory_fd
+        except Exception:
+            os.close(directory_fd)
+            raise
+    except Exception:
+        if fd != -1 and fd != root_fd:
+            os.close(fd)
+        raise
+    finally:
+        os.close(root_fd)
 
 
 def write_bytes_no_follow_exclusive(

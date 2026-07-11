@@ -170,7 +170,9 @@ archive-age classification uses the subject window's end. Every
 window MUST satisfy start <= end and receipt coverage bounds MUST exactly
 equal the subject-set min(start)/max(end). Detail-presence queries SHALL use
 bounded correlated identity-leading probes rather than decorrelating into a
-full hypertable scan/aggregate.
+full hypertable scan/aggregate. Forcing and run cycle times MUST resolve to an
+exact UTC hour; non-zero minutes, seconds or microseconds SHALL block the
+audit rather than be truncated into another cycle's archive identity.
 
 All hot/archive/salvage paths SHALL be strictly parsed, root-contained,
 regular non-symlink evidence. Forcing hot coverage requires its bounded
@@ -196,12 +198,17 @@ manifest. Inventory SHALL be capped at 100,000 subjects; exceeding any bound
 blocks publication.
 Run output traversal SHALL inspect at most 10,000 entries and eight levels per
 run, failing closed on overflow while still checking all bounded siblings.
+Enumeration, entry stat and child-directory opens SHALL remain bound to the
+same held directory-FD tree so a pathname replacement cannot swap the
+namespace between list and stat.
 
 Forcing basin identity SHALL come from the referenced model instance, not an
 arbitrary detail row. A clone state SHALL be bound in the same repeatable-read
 snapshot to its existing origin state: origin model/source/time/URI/checksum
 must match the declared shared artifact and the clone fingerprint must be
-canonical lowercase sha256.
+canonical lowercase sha256. Source-less legacy clone comparison SHALL treat
+the existing `NULL` and empty-string representations as the same
+`legacy-unqualified` source without equating any provider identity.
 
 Evidence path traversal/read/hash and receipt temp/replace SHALL remain
 anchored to trusted directory file descriptors with no-follow component
@@ -223,13 +230,23 @@ inventory or any blocker SHALL exit non-zero without overwriting a previous
 valid retention-gating receipt. The output path is an absolute CLI/env
 contract, all parent components are non-symlink directories, and publication
 uses a mode-0600 same-directory temporary file with flush/fsync, atomic
-replace, directory fsync, and failure cleanup. Failure diagnostics go to
-stderr and never replace the gate receipt. Runtime schema validation SHALL
+replace, mandatory directory fsync, post-replace verification that the pinned
+parent FD still names the configured parent, and pre-replace failure cleanup.
+Directory-fsync failure or an observed parent namespace replacement SHALL be
+reported as indeterminate publication and SHALL NOT report `published`.
+Failures before replace preserve the old receipt byte-for-byte; after-replace
+failures must fail closed rather than falsely claim either successful
+publication or preservation. The configured parent is therefore an
+operator-controlled, non-rotating namespace during publication. Failure
+diagnostics go to stderr and never replace the gate receipt. Runtime schema validation SHALL
 use a direct production dependency.
 Archive minimum age SHALL reuse the shared 30-day retention safety invariant
 and SHALL reject explicit zero/below-30 inputs rather than falling back.
 Evidence for every readable corrupt sibling SHALL be retained regardless of
-which valid coverage mechanism wins precedence.
+which valid coverage mechanism wins precedence. Readable hot forcing
+manifest/member and state-file checksum mismatches are absent coverage with
+retained evidence; malformed identity, unsafe type, permission and I/O
+failures remain publication blockers.
 
 #### Scenario: Verified archive coverage yields a complete verdict
 
@@ -348,3 +365,10 @@ which valid coverage mechanism wins precedence.
   checksum
 - **THEN** the audit MUST block publication rather than mark the state
   subject complete
+
+#### Scenario: Receipt publication loses its parent or durability proof
+
+- **WHEN** the configured parent is replaced during atomic publication or
+  directory fsync fails after replacement
+- **THEN** the audit MUST fail closed with an indeterminate-publication
+  diagnostic and MUST NOT report a fresh published receipt

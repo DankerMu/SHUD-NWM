@@ -22,6 +22,7 @@ from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
     list_directory_no_follow_limited,
+    open_directory_no_follow,
     open_file_no_follow,
     read_bytes_limited_no_follow,
     stat_no_follow,
@@ -56,6 +57,10 @@ class AuditBlocked(RuntimeError):
     """Raised when evidence is unsafe or the gate receipt cannot be proved."""
 
 
+class PublicationIndeterminate(AuditBlocked):
+    """Raised after replacement when receipt durability or namespace identity is unknown."""
+
+
 @dataclass(frozen=True)
 class InventorySubject:
     lane: str
@@ -80,6 +85,9 @@ class InventorySubject:
             raise AuditBlocked("subject identity fields must be non-empty")
         for value in (self.cycle_time, self.start, self.end):
             _require_aware(value)
+        cycle = _require_aware(self.cycle_time)
+        if self.lane in {"forcing", "runs"} and (cycle.minute or cycle.second or cycle.microsecond):
+            raise AuditBlocked(f"{self.lane} cycle_time must be an exact UTC hour: {self.cycle_time!r}")
         if self.start > self.end:
             raise AuditBlocked(f"inverted subject window: {self.stable_key}")
 
@@ -394,8 +402,9 @@ def _verify_forcing_hot(subject: InventorySubject, config: AuditConfig) -> Cover
     if manifest_result is None:
         return None
     manifest, _size, manifest_digest = manifest_result
+    mismatch_evidence: list[str] = []
     if not subject.checksum or manifest_digest != subject.checksum:
-        raise AuditBlocked(f"forcing manifest checksum mismatch for {subject.subject_id}")
+        mismatch_evidence.append("hot forcing manifest checksum mismatch")
     identity = {
         "forcing_version_id": subject.subject_id,
         "source_id": subject.source_id,
@@ -432,8 +441,15 @@ def _verify_forcing_hot(subject: InventorySubject, config: AuditConfig) -> Cover
         if not file_key.startswith(expected + "/"):
             raise AuditBlocked(f"forcing file escapes package: {file_key}")
         path = config.object_store_root / file_key
-        if _sha256(path, config.object_store_root) != entry["checksum"]:
-            raise AuditBlocked(f"forcing file checksum mismatch: {file_key}")
+        try:
+            digest = _sha256(path, config.object_store_root)
+        except FileNotFoundError:
+            mismatch_evidence.append(f"hot forcing member missing: {file_key}")
+            continue
+        if digest != entry["checksum"]:
+            mismatch_evidence.append(f"hot forcing member checksum mismatch: {file_key}")
+    if mismatch_evidence:
+        return Coverage("none", tuple(mismatch_evidence))
     return Coverage("hot-object-store", ("row-bound forcing package and files checksum-verified",))
 
 
@@ -507,7 +523,7 @@ def _verify_state_hot(subject: InventorySubject, config: AuditConfig) -> Coverag
     if digest is None:
         return None
     if digest != subject.checksum:
-        raise AuditBlocked(f"state checksum mismatch: {subject.subject_id}")
+        return Coverage("none", (f"hot state checksum mismatch: {subject.subject_id}",))
     return Coverage("hot-object-store", ("state artifact checksum-verified",))
 
 
@@ -533,11 +549,14 @@ def build_receipt(
     for subject in sorted(subjects, key=lambda value: value.stable_key):
         evidence: list[str] = []
         product = product_coverage.get(subject.stable_key)
+        hot = hot_coverage.get(subject.stable_key)
         selector_key = _canonical(subject.selector) if subject.selector is not None else None
         if product and product.mechanism != "product-archive":
             evidence.extend(product.evidence)
         if selector_key is not None and salvage_mismatches and selector_key in salvage_mismatches:
             evidence.append(salvage_mismatches[selector_key])
+        if hot and hot.mechanism != "hot-object-store":
+            evidence.extend(hot.evidence)
         if product and product.mechanism == "product-archive":
             coverage, verdict = "product-archive", "complete"
             evidence.extend(product.evidence)
@@ -545,7 +564,6 @@ def build_receipt(
             coverage, verdict = "db-export", "complete"
             evidence.append("checksum-verified exact db-export selector present")
         else:
-            hot = hot_coverage.get(subject.stable_key)
             if hot and hot.mechanism == "hot-object-store":
                 coverage = "hot-object-store"
                 if subject.end > audit_time - timedelta(days=archive_min_age_days):
@@ -630,6 +648,8 @@ def publish_receipt(path: Path, receipt: Mapping[str, Any]) -> None:
     try:
         atomic_write_bytes_no_follow(path, payload, containment_root=path.parent, mode=0o600)
     except SafeFilesystemError as error:
+        if error.kind == "indeterminate":
+            raise PublicationIndeterminate(f"receipt publication is indeterminate: {error}") from error
         raise AuditBlocked(f"failed to publish receipt safely: {error}") from error
 
 
@@ -717,8 +737,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         message = str(error)
         if config is not None and config.database_url:
             message = message.replace(config.database_url, "[DATABASE_URL]")
+        status = "indeterminate" if isinstance(error, PublicationIndeterminate) else "blocked"
         print(
-            _canonical({"status": "blocked", "error_type": type(error).__name__, "message": message}),
+            _canonical({"status": status, "error_type": type(error).__name__, "message": message}),
             file=sys.stderr,
         )
         return 1
@@ -746,7 +767,6 @@ def _validate_clone_provenance(row: Mapping[str, Any]) -> None:
     checks = (
         (row.get("origin_state_id"), row.get("cloned_from_state_id"), "state_id"),
         (row.get("origin_model_id"), row.get("cloned_from_model_id"), "model_id"),
-        (row.get("origin_source_id"), row.get("source_id"), "source_id"),
         (row.get("origin_valid_time"), row.get("valid_time"), "valid_time"),
         (row.get("origin_state_uri"), row.get("state_uri"), "state_uri"),
         (row.get("origin_checksum"), row.get("checksum"), "checksum"),
@@ -754,6 +774,17 @@ def _validate_clone_provenance(row: Mapping[str, Any]) -> None:
     for actual, expected, field in checks:
         if actual != expected:
             raise AuditBlocked(f"state {state_id} clone origin {field} drift")
+    if _clone_source_identity(row.get("origin_source_id")) != _clone_source_identity(row.get("source_id")):
+        raise AuditBlocked(f"state {state_id} clone origin source_id drift")
+
+
+def _clone_source_identity(value: Any) -> str:
+    if value in (None, ""):
+        return "legacy-unqualified"
+    try:
+        return normalize_source_id(str(value))
+    except ValueError as error:
+        raise AuditBlocked(f"invalid clone source identity: {value!r}") from error
 
 
 def _load_schema(path: Path) -> dict[str, Any]:
@@ -828,25 +859,80 @@ def _list_directory(path: Path, root: Path, max_entries: int) -> list[str]:
 def _directory_has_regular_file(directory: Path, root: Path) -> bool:
     found = False
     seen = 0
-    stack = [(directory, 0)]
-    while stack:
-        current, depth = stack.pop()
-        names = _list_directory(current, root, MAX_RUN_OUTPUT_ENTRIES - seen)
-        if seen + len(names) > MAX_RUN_OUTPUT_ENTRIES:
-            raise AuditBlocked(f"run output exceeds {MAX_RUN_OUTPUT_ENTRIES} entries")
-        seen += len(names)
-        for name in names:
-            entry = current / name
-            info = _safe_stat(entry, root)
-            if stat.S_ISDIR(info.st_mode):
-                if depth >= MAX_RUN_OUTPUT_DEPTH:
-                    raise AuditBlocked(f"run output exceeds depth {MAX_RUN_OUTPUT_DEPTH}: {entry}")
-                stack.append((entry, depth + 1))
-            elif stat.S_ISREG(info.st_mode):
-                found = True
-            else:
-                raise AuditBlocked(f"unsafe non-regular run output: {entry}")
-    return found
+    try:
+        root_fd = open_directory_no_follow(directory, containment_root=root)
+    except FileNotFoundError:
+        raise
+    except (OSError, SafeFilesystemError) as error:
+        raise AuditBlocked(f"cannot open run output safely {directory}: {error}") from error
+    stack: list[tuple[int, Path, int]] = [(root_fd, directory, 0)]
+    try:
+        while stack:
+            current_fd, current, depth = stack.pop()
+            try:
+                names = _list_run_output_fd(current_fd, current, MAX_RUN_OUTPUT_ENTRIES - seen)
+                if seen + len(names) > MAX_RUN_OUTPUT_ENTRIES:
+                    raise AuditBlocked(f"run output exceeds {MAX_RUN_OUTPUT_ENTRIES} entries")
+                seen += len(names)
+                for name in names:
+                    entry = current / name
+                    info = _stat_run_output_entry(current_fd, name, entry)
+                    if stat.S_ISDIR(info.st_mode):
+                        if depth >= MAX_RUN_OUTPUT_DEPTH:
+                            raise AuditBlocked(f"run output exceeds depth {MAX_RUN_OUTPUT_DEPTH}: {entry}")
+                        child_fd = _open_run_output_child(current_fd, name, entry, info)
+                        stack.append((child_fd, entry, depth + 1))
+                    elif stat.S_ISREG(info.st_mode):
+                        found = True
+                    else:
+                        raise AuditBlocked(f"unsafe non-regular run output: {entry}")
+            finally:
+                os.close(current_fd)
+        return found
+    finally:
+        for pending_fd, _path, _depth in stack:
+            os.close(pending_fd)
+
+
+def _list_run_output_fd(directory_fd: int, path_label: Path, max_entries: int) -> list[str]:
+    names: list[str] = []
+    try:
+        with os.scandir(directory_fd) as entries:
+            for entry in entries:
+                names.append(entry.name)
+                if len(names) > max_entries:
+                    break
+    except OSError as error:
+        raise AuditBlocked(f"cannot list run output safely {path_label}: {error}") from error
+    return sorted(names)
+
+
+def _stat_run_output_entry(directory_fd: int, name: str, path_label: Path) -> os.stat_result:
+    try:
+        return os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError as error:
+        raise AuditBlocked(f"run output changed during traversal: {path_label}") from error
+    except OSError as error:
+        raise AuditBlocked(f"cannot stat run output safely {path_label}: {error}") from error
+
+
+def _open_run_output_child(
+    directory_fd: int, name: str, path_label: Path, expected: os.stat_result
+) -> int:
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        child_fd = os.open(name, flags, dir_fd=directory_fd)
+    except OSError as error:
+        raise AuditBlocked(f"cannot open run output directory safely {path_label}: {error}") from error
+    try:
+        opened = os.fstat(child_fd)
+    except OSError as error:
+        os.close(child_fd)
+        raise AuditBlocked(f"cannot verify run output directory safely {path_label}: {error}") from error
+    if opened.st_dev != expected.st_dev or opened.st_ino != expected.st_ino:
+        os.close(child_fd)
+        raise AuditBlocked(f"run output directory changed while being opened: {path_label}")
+    return child_fd
 
 
 def _directory_has_regular_file_optional(directory: Path, root: Path) -> bool | None:
