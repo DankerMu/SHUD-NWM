@@ -6,16 +6,21 @@ description: >-
   "check repo health", "assess control plane", "entropy audit for
   the control system", "check what's missing for agents", or wants
   to know what's missing in their instruction files, rules, and
-  verification infrastructure. Do NOT use for code review (use review),
+  verification infrastructure. Also use for the write modes: "bootstrap
+  the control plane", "set up this repo for agents", "init AGENTS.md
+  and guardrails", or fixing gaps from a prior audit (bootstrap/repair).
+  Do NOT use for code review (use review),
   full-repo code/entropy scan (use repo-entropy-audit), general
   documentation work (use project-documentation), or reviewing a
   specific PR or diff (use review or entropy-review).
+disable-model-invocation: true
 invocation_posture: manual-first
+version: 0.4.0
 ---
 
 # Control Plane Auditor
 
-Audit a repository's control plane — instruction files, rules, guards, verification infrastructure, and governance posture — across a seven-layer model. Produce a structured report with coverage status, gaps, and prioritized improvement recommendations.
+Audit a repository's control plane — instruction files, rules, guards, verification infrastructure, and governance posture — across a seven-layer model. Produce a structured report with coverage status, gaps, and prioritized improvement recommendations. In its write modes (bootstrap/repair, Phase 0), it also turns those gaps into the control plane itself: spec-previewed, authorized artifacts only, validated by guardrail self-test.
 
 This skill examines the **control system** — memory, invariants, protocols, permissions, sensors, GC, governance — in depth. Its relationship to `repo-entropy-audit` is depth-vs-breadth on the context, protocol, and control axes: this skill is the deep-dive of those three axes, while `repo-entropy-audit` covers all six axes at breadth. The structure, semantics, and behavior of the CODE itself remain `repo-entropy-audit`'s territory. For PR-level consistency checks, use `entropy-review`.
 
@@ -25,15 +30,27 @@ This skill examines the **control system** — memory, invariants, protocols, pe
 - User wants to know what instruction files, rules, or infrastructure are missing
 - User is setting up a new project for agent-driven development and wants a gap analysis
 - User asks "what should I add to make this repo work better with agents?"
+- User explicitly asks to bootstrap or repair the control plane (write modes — see Phase 0)
 
 ## When Not To Use
 
 - Reviewing a specific PR or diff → `review` or `entropy-review`
+- Writing or aligning the project's root CLAUDE.md/AGENTS.md as such (post-pack-install alignment, shared-source generation) → `project-instruction-bootstrap`; in write modes this skill only decides control-plane section content and delegates instruction-file mechanics to it when present (see the Bootstrap Playbook ownership split)
 - Restructuring the docs/ directory → `project-documentation`
 - Designing the AI tool setup → `agent-architect`
 - Breadth scan across all six entropy axes (code structure, semantics, behavior) → `repo-entropy-audit`
 
 ---
+
+## Phase 0 — Mode
+
+Default is **audit** (read-only). Enter a write mode only when the user explicitly asks for it:
+
+- **audit** — grade the control plane and report. Read-only; the default for every run.
+- **bootstrap** — greenfield or sparse control plane (no root instruction file, no unified command entries, no guards): scaffold the initial control plane.
+- **repair** — an existing control plane with known gaps (typically a prior audit's Priority Actions): fix the named gaps only.
+
+Mode selection facts come from Phase 1's scan, not assumption: a repo with a substantive root instruction file and working command entries is never `bootstrap`. Announce the selected mode. Write modes still run Phases 1–3 first — the report is the input that authorizes writes — then continue with Phase 4 (spec preview + write) and Phase 5 (validate) per the [Bootstrap Playbook](references/bootstrap-playbook.md).
 
 ## Phase 1 — Scan
 
@@ -200,6 +217,14 @@ For each dimension: report present/partial/missing, quality notes, and file loca
 
 Canonical dimension definitions: references/methodology/agents-md-spec.md
 
+### Enforcement Classification (No Phantom Enforcement)
+
+For every documented rule found in instruction files and conventions, classify its enforcement:
+
+- **mechanical** — cite the real config, command, hook, or CI gate that enforces it (file path or workflow name).
+- **review-only** — nothing mechanical enforces it; it holds only through review attention. Legitimate, but labeled.
+- **phantom** — the rule claims or implies a gate that does not exist. Report phantom rules as their own gap class: they are worse than review-only rules because they teach agents that stated gates can be ignored.
+
 ### Priority Actions
 
 Rank the top 3–5 improvement actions by impact on **future agent correct-change cost**. The most impactful actions are typically:
@@ -218,6 +243,22 @@ Based on gaps found, recommend which other skills can help:
 - `repo-entropy-audit` — for code-level entropy scanning, including whole-repo structural dependency scans
 - `project-documentation` — for docs/ tree restructuring
 - `review` — for general code review
+
+---
+
+## Phase 4 — Bootstrap / Repair (write modes only)
+
+Never write anything in audit mode. In a write mode, follow the [Bootstrap Playbook](references/bootstrap-playbook.md):
+
+1. **Spec preview first**: present the deliverables list (files to create/modify and the gate each wires into), non-goals, and the readiness gaps that will remain. Wait for user confirmation before writing anything.
+2. **Write only authorized artifacts** from the confirmed preview. Fix in place; never create parallel `_v2`/`_new`/`_backup` variants.
+3. **No phantom enforcement**: every rule written must point to a real config, command, hook, or CI gate — or carry an explicit review-only label.
+
+## Phase 5 — Validate (write modes only)
+
+- Run the command entry points recorded in the scaffold (at minimum the check/test entries) and capture outcomes.
+- Guardrail self-test: trigger each newly wired guard once where safe and confirm it actually blocks with the expected fed-back reason.
+- Report evidence per deliverable. No completion claim without evidence; whatever remains open is listed as a readiness gap, not silently dropped.
 
 ---
 
@@ -240,10 +281,11 @@ Treat this as directional orientation; the layer model and the axis model are de
 - [Seven-Layer Checklist](references/methodology/seven-layer-checklist.md) — layer assessment criteria
 - [AGENTS.md Spec](references/methodology/agents-md-spec.md) — constraint dimension definitions
 - [Metric Definitions](references/methodology/metric-definitions.md) — proxy metrics
+- [Bootstrap Playbook](references/bootstrap-playbook.md) — write-mode procedure: spec preview, instruction-file scaffold, guardrail wiring, self-test
 
 ## Caveats
 
-- This skill is read-only. It does not modify the target repository.
+- Audit mode is read-only and is the default. Bootstrap/repair modes write only the artifacts authorized in the confirmed Phase 4 spec preview.
 - Governance Layer is informational only — autonomy decisions require human judgment.
 - The seven-layer model is a diagnostic tool, not a maturity ladder. Layers can be built independently.
 - Quality assessment of instruction file content involves judgment; coverage counts alone can be misleading (a 100-line boilerplate AGENTS.md may be less useful than a 20-line directive one).

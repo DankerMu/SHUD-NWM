@@ -22,6 +22,8 @@ Every deep implementation plan should make these sections easy to find:
 
 The plan should be grounded in real repository or system evidence, not hypothetical architecture.
 
+Order phases decision-dense first within dependency constraints: data models, type interfaces, and user-visible flows are the parts most likely to be adjusted by a human, so they belong in early phases where review attention is highest; mechanical refactors and low-judgment work go last. Mark each phase's review attention so consumers know where to look.
+
 ## Recommended Template
 
 ```markdown
@@ -59,6 +61,7 @@ The plan should be grounded in real repository or system evidence, not hypotheti
 - Steps:
 - Verify:
 - Depends on:
+- Review attention: [decision-dense — review closely / mechanical — skim]
 
 ### Phase 2: [Name]
 - Outcome:
@@ -66,6 +69,7 @@ The plan should be grounded in real repository or system evidence, not hypotheti
 - Steps:
 - Verify:
 - Depends on:
+- Review attention: [decision-dense — review closely / mechanical — skim]
 
 ## Risks
 - Risk:

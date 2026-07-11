@@ -3,7 +3,7 @@
   "name": "future-aware-architecture",
   "displayName": "Future-Aware Architecture",
   "description": "Manual-first architecture methodology for system design and technology selection using problem-first framing, stack-agnostic trade-offs, uncertainty handling, future-aware decision lenses, and context-aware grounding.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "maturity": "experimental",
   "categories": [
     "design",

@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "name": "control-plane-auditor",
+  "displayName": "Control Plane Auditor",
+  "description": "Audit a repository's control plane health across seven layers (memory, invariant, protocol, permission, sensorium, evaluation, governance) and produce an actionable improvement report. Covers instruction-file completeness, rule enforcement coverage (mechanical / review-only / phantom), doc freshness, test infrastructure, and agent readiness. Explicit bootstrap/repair write modes turn audit gaps into the control plane itself: spec-previewed scaffolding of instruction files, command entry points, verification matrix, and guardrails, validated by guardrail self-test.",
+  "version": "0.4.0",
+  "maturity": "experimental",
+  "categories": [
+    "workflow",
+    "documentation",
+    "review"
+  ],
+  "tags": [
+    "entropy",
+    "control-plane",
+    "audit",
+    "agents-md",
+    "repo-health",
+    "invariant",
+    "governance",
+    "bootstrap"
+  ],
+  "authors": [
+    {
+      "name": "Qiongyu Li"
+    }
+  ],
+  "entrypoints": {
+    "skillDoc": "SKILL.md",
+    "changelog": "CHANGELOG.md"
+  },
+  "requirements": {
+    "tools": [
+      "git"
+    ]
+  },
+  "capabilities": {
+    "shell": true,
+    "filesystemRead": true,
+    "filesystemWrite": true
+  }
+}

@@ -2,7 +2,7 @@
 name: gh-create-issue
 description: Create GitHub issues from PRDs, requirements, or feature descriptions, choosing between a single issue and an epic plus sub-issues using gh CLI labels and dependencies.
 invocation_posture: hybrid
-version: 0.2.0
+version: 0.3.1
 ---
 
 # GitHub Issue Creation
@@ -62,6 +62,16 @@ Call gh-create-issue skill with:
 - any cross-issue dependency exists.
 
 Otherwise create a **single issue**. When the signals are borderline or the split is unclear, ask the user rather than guessing.
+
+## Wide Refactor Slicing
+
+A **wide refactor** is one mechanical change — renaming a column, retyping a shared symbol — whose blast radius fans across the whole codebase, so no single-module issue can land green on its own. Don't force it into the standard epic decomposition; sequence it as **expand–contract**:
+
+1. **Expand**: one issue adds the new form beside the old, so nothing breaks.
+2. **Migrate**: move call sites over in batches sized by blast radius (per package / per directory), each batch its own issue with `Depends on #<expand>`. CI stays green batch to batch because the old form still exists.
+3. **Contract**: one final issue deletes the old form once no caller remains, with a `Depends on` line for every migrate batch.
+
+When even the batches can't stay green alone, keep the same issue sequence but state in each issue that the batches share an integration branch, all feeding a final integrate-and-verify issue — green is promised only there.
 
 ## Return Format
 
@@ -127,47 +137,7 @@ Depends on #102
 
 ## Issue Templates
 
-**Epic:**
-```markdown
-## Overview
-<feature description>
-
-## Sub-tasks
-- [ ] #101 Task 1
-- [ ] #102 Task 2
-
-## Milestones
-<phase goals>
-```
-
-**Sub-issue:**
-```markdown
-Part of #<epic_number>
-
-Implementation Ready: yes
-
-**Module / Scope:** <single module, package, service, or directory boundary>
-
-Depends on #<dep1>
-Depends on #<dep2>
-
-**OpenSpec change:** <change-name>   <!-- optional; required when driven by stage-change-pipeline -->
-
-## In Scope
-- <behavior, files, or deliverables this issue includes>
-
-## Out of Scope
-- <adjacent modules or follow-up work explicitly excluded>
-
-## Description
-<task details>
-
-## Acceptance Criteria
-- [ ] Criterion 1
-- [ ] Criterion 2
-
-**PR Boundary:** <expected change surface; adjacent modules explicitly not touched>
-```
+Full Epic and Sub-issue body templates live in [references/issue-templates.md](references/issue-templates.md) — read it before composing issue bodies.
 
 **Required vs optional fields.** When issues feed an automated implementation workflow (`stage-change-pipeline` Stage 5 → `subagent-workflow`), the following are **required** — the issue must be implementation-ready with no product decisions or requirement clarification deferred to the implementer:
 
@@ -192,101 +162,13 @@ For standalone, manually-tracked issues these fields are optional — keep only 
 | `needs-followup` | Unresolved P0/P1 items carried into the issue body (e.g. when a pipeline review loop hits its cap) |
 | `<stage_label>` | Milestone/phase passthrough (from the `stage_label` parameter, e.g. `m0`, `p1`) |
 
-Bootstrap the labels before creating issues; `--force` makes it idempotent (creates, or updates color/description if the label already exists):
-
-```bash
-gh label create epic           --color 6f42c1 --description "Epic-level task" --force
-gh label create sub-task       --color 0e8a16 --description "Sub-task of an epic" --force
-gh label create feature        --color a2eeef --description "New feature" --force
-gh label create bug            --color d73a4a --description "Bug fix" --force
-gh label create priority:high  --color d93f0b --description "Important, do first" --force
-gh label create needs-followup --color fbca04 --description "Unresolved items carried in body" --force
-# Optional stage/phase passthrough label
-[ -n "$STAGE_LABEL" ] && gh label create "$STAGE_LABEL" --color ededed --description "Pipeline stage/phase" --force
-```
+Bootstrap commands (idempotent `--force`): step 1 of [references/command-reference.md](references/command-reference.md).
 
 ## Command Reference
 
 All creation uses the `gh` CLI. Order matters: bootstrap labels, create the epic, capture its number, then create sub-issues that reference it, and finally backfill the epic checklist.
 
-**1. Bootstrap labels** — see the block in the [Labels](#labels) section (idempotent with `--force`).
-
-**2. Create the epic and capture its number.** `gh issue create` prints the new issue URL as its last line; parse the trailing number:
-
-```bash
-EPIC_NUM=$(gh issue create \
-  --title "[Epic] User Authentication Module" \
-  --label epic --label feature \
-  --body-file - <<'EOF' | grep -oE '[0-9]+$'
-## Overview
-<feature description>
-
-## Sub-tasks
-- [ ] (backfilled after sub-issues exist)
-
-## Milestones
-<phase goals>
-EOF
-)
-```
-
-**3. Create a sub-issue referencing the epic.** Use `<<EOF` (unquoted) so `$EPIC_NUM` and `$STAGE_LABEL` expand:
-
-```bash
-SUB_NUM=$(gh issue create \
-  --title "Login API implementation" \
-  --label sub-task --label priority:high ${STAGE_LABEL:+--label "$STAGE_LABEL"} \
-  --body-file - <<EOF | grep -oE '[0-9]+$'
-Part of #$EPIC_NUM
-
-Implementation Ready: yes
-
-**Module / Scope:** services/auth
-
-Depends on #101
-
-## In Scope
-- POST /login endpoint, credential validation
-
-## Out of Scope
-- Token refresh (separate issue)
-
-## Acceptance Criteria
-- [ ] Returns 200 + JWT on valid credentials
-- [ ] Returns 401 on invalid credentials
-
-**PR Boundary:** services/auth only; no UI changes
-EOF
-)
-```
-
-**4. Confirm the created number** (alternative to parsing `create` output):
-
-```bash
-gh issue view "$SUB_NUM" --json number -q .number
-```
-
-**5. Backfill the epic's `## Sub-tasks` checklist** with the real sub-issue numbers:
-
-```bash
-gh issue edit "$EPIC_NUM" --body-file - <<EOF
-## Overview
-<feature description>
-
-## Sub-tasks
-- [ ] #$SUB_NUM Login API implementation
-
-## Milestones
-<phase goals>
-EOF
-```
-
-**6. Optional — add issues to a GitHub Project:**
-
-```bash
-gh project item-add "$PROJECT_NUM" --owner "@me" \
-  --url "$(gh issue view "$SUB_NUM" --json url -q .url)"
-```
+The step-by-step recipes — label bootstrap, epic creation with number capture, heredoc sub-issues, checklist backfill, optional project add — live in [references/command-reference.md](references/command-reference.md). Read it before creating issues.
 
 ## Prerequisites
 

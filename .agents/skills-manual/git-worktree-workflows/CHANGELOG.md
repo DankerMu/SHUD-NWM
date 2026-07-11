@@ -5,6 +5,18 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-11
+
+- Compress When Not To Use into one-line arrows (slimming batch 4); all boundaries and redirect targets preserved.
+
+## [0.2.1] - 2026-07-11
+
+- Remove the body `## Example Prompts` section — dead weight once the skill is already invoked; git history keeps the prompts as trigger-eval candidates.
+- Remove the manual-first-posture bullet from the design-bias list; posture lives in frontmatter/description.
+
+## [0.2.0] - 2026-07-11
+- Mark the skill user-invoked: SKILL.md frontmatter now sets `disable-model-invocation: true`, enforcing the manual-first posture at the platform level. Claude Code drops the description from standing context and only explicit `/git-worktree-workflows` invocation reaches it; the Codex projection/install target moves to `.agents/skills-manual/` (skill-lifecycle-manager 0.10.0 tooling). Discoverability lives in the `ask-danker` router.
+
 ## [0.1.5] - 2026-07-02
 
 ### Added

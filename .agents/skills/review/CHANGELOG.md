@@ -5,6 +5,25 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-07-11
+
+- Tighten the hybrid trigger description from 679 to 485 characters (slimming batch 6), eval-gated by the new cross-skill routing suite (`skill-lifecycle-manager/eval/cross-skill-routing-cases.json`): three A/B runs, zero per-case routing regressions, candidate 27/27 on the final run (deepseek-v4-pro-guan judge via dmxapi). All negative redirects preserved.
+
+## [0.6.2] - 2026-07-11
+
+- Compress When Not To Activate into arrow form (slimming batch 4); all boundaries and redirect targets preserved, including the redirect targets that previously sat in the trailing paragraph.
+
+## [0.6.1] - 2026-07-11
+
+- Remove the body invocation-posture restatement; posture lives in frontmatter/description.
+- Remove the maintainer-facing `## Validation And Evaluation` note from the runtime body; eval suites remain canonical under `eval/`.
+
+## [0.6.0] - 2026-07-11
+
+### Added
+- Spec-conformance as a second review axis, adapted from `mattpocock/skills` v1.1.0 `code-review`: Phase 1e locates the originating spec (linked issue/PRD → user-passed path → `docs/`/`specs/`/`openspec/` match; skip the axis honestly when none exists), Phase 2 checks missing/partial, unrequested (scope creep), and implemented-but-wrong against the quoted spec line, and Phase 3 enforces "two axes, no masking" — spec findings report under their own group with a worst-finding-per-axis summary, never merged or reranked against standards findings.
+- Testing checklist (`references/code-checklist.md`): tautological-test anti-pattern (assertion recomputes the expected value the way the code does — expected values must come from an independent source of truth) and seam discipline (tests belong at public boundaries, not internals or side channels), adapted from the upstream `tdd` skill.
+
 ## [0.5.1] - 2026-07-02
 
 ### Added

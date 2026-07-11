@@ -3,7 +3,7 @@
   "name": "gh-create-issue",
   "displayName": "GitHub Issue Creation",
   "description": "Create GitHub issues from PRDs, requirements, or feature descriptions, choosing between a single issue and an epic plus sub-issues using gh CLI labels and dependencies.",
-  "version": "0.2.0",
+  "version": "0.3.1",
   "maturity": "experimental",
   "categories": [
     "workflow",

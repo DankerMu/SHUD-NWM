@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "name": "review",
   "displayName": "Review",
-  "description": "Perform structured, agent-oriented reviews of PRs, diffs, commits, code, tests, frontend, docs, API specs, design docs, migrations, and infrastructure/config changes with severity-graded findings, behavioral-change checks, and actionable fix directions.",
-  "version": "0.5.1",
+  "description": "Structured review of concrete artifacts: PRs, diffs, commits, branches, staged changes, named files, docs, API specs, database migrations, or infrastructure config. Activate on explicit, artifact-scoped review requests — \"code review\", \"review my changes\", \"find bugs in\", \"security review\". Produces severity-graded findings with fix directions. Do NOT activate for brainstorming, open-ended design feedback, governance/library audits, or whether-an-approach-seems-good conversations.",
+  "version": "0.6.3",
   "maturity": "experimental",
   "categories": [
     "review",

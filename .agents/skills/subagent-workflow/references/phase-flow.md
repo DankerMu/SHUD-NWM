@@ -25,9 +25,9 @@ Run only when `openspec/project-profile.md` is missing. The shared
 example templates to copy from; the active profile is project-local and survives
 skill reinstalls because it lives under `openspec/`, not inside the skill.
 
-1. Scan the repo for risk-bearing structure: primary language/build system, public entrypoints (CLI, API, services), data schemas/formats/serializers, external integrations and credentials, persisted/shared state, and shared helper roots.
+1. Scan the repo for risk-bearing structure: primary language/build system, public entrypoints (CLI, API, services), data schemas/formats/serializers, external integrations and credentials, persisted/shared state, and shared helper roots — plus the command entry points (package scripts, Makefile/justfile targets, CI workflow steps) for setup/check/lint/typecheck/test/build.
 2. Match against `project-profiles.md`. If an example profile fits (e.g. an AutoSHUD repo), copy it as the starting point; otherwise start from Generic. A pure-Generic bootstrap (nothing project-specific inferred) still produces a file: stamp it as Generic with a one-line note that nothing project-specific was found.
-3. Always write `openspec/project-profile.md` with the six profile fields: entry surfaces, contracts, risk axes, typical evidence, domain risk packs, domain expanded-triggers. Respect the size budget in `project-profiles.md`: short bullets not prose, never restate core packs/triggers, and stay under ~25 lines for a simple project or ~60 for a broad multi-subsystem system. Over-budget means it restates core or the repo should split into narrower profiles.
+3. Always write `openspec/project-profile.md` with the eight profile fields: entry surfaces, contracts, risk axes, typical evidence, command entry points, verification matrix (surface -> command -> evidence), domain risk packs, domain expanded-triggers. Respect the size budget in `project-profiles.md`: short bullets not prose, never restate core packs/triggers, and stay under ~25 lines for a simple project or ~60 for a broad multi-subsystem system. Over-budget means it restates core or the repo should split into narrower profiles.
 4. Note in the file that it is a living artifact maintained in Phase 0.5 as the project evolves.
 
 The profile is a living document, not a one-shot. It does not change per issue, but it is updated whenever the project grows a new risk surface (see Phase 0.5 profile-gap maintenance).
@@ -35,7 +35,7 @@ The profile is a living document, not a one-shot. It does not change per issue, 
 ## Phase 0.5: Risk Triage + OpenSpec Fixture
 
 1. Create a short triage from issue, repo context, expected change surface, and the active project profile (`openspec/project-profile.md`).
-   - Profile-gap maintenance: if the issue touches an entry surface, contract, risk axis, or domain pack the profile does not yet describe, update `openspec/project-profile.md` before continuing. Keep the profile a living artifact; do not edit it for ordinary issues that already fit it.
+   - Profile-gap maintenance: if the issue touches an entry surface, contract, risk axis, domain pack, or verification-matrix surface the profile does not yet describe, update `openspec/project-profile.md` before continuing. Keep the profile a living artifact; do not edit it for ordinary issues that already fit it.
 2. Assign fixture level: `none`, `compact`, or `expanded`. Mandatory expanded triggers live in `issue-risk-contract.md`.
 3. Assign repair intensity:
    - `low`: isolated, low blast-radius change; focused fixes are acceptable.
@@ -95,6 +95,7 @@ The profile is a living document, not a one-shot. It does not change per issue, 
    - Full `tasks.md` test/evidence section.
    - Project verification commands.
    - Instruction to list changed files and verification results.
+   - Instruction to report every deviation from the plan (fixture, `tasks.md`, or this brief) as one line each — what changed, why, which surfaces it touches: unexpected upstream/API behavior, a component that could not be reused as planned, a switched implementation path, or a constraint discovered mid-implementation. "No deviations" must be stated explicitly; an omitted deviation report is an incomplete result.
    - For high or broad-expanded work, instruction to report shared helper/boundary surfaces inspected, which were changed, and which were intentionally left unchanged with rationale.
    - For high or broad-expanded work, instruction to report regression evidence for every `Invariant Matrix` row, or explain why a row is out of scope only by citing the fixture.
 5. Spawn either a single `implementer` subagent or the parallel worktree delegation defined by `parallel-worktree-delegation.md`, passing the implementation brief built above and the repository root as the working directory (Claude Code: a Task subagent; Codex: a subagent).
@@ -102,7 +103,7 @@ The profile is a living document, not a one-shot. It does not change per issue, 
 
 ## Phase 2: Orchestrator Verification Only
 
-Run the local CI-equivalent pipeline for the project. Examples:
+Run the local CI-equivalent pipeline for the project as recorded in the active profile's command entry points and verification matrix (`openspec/project-profile.md`): execute the matrix rows mapped to the surfaces this change touches, plus the default build+test row. Fall back to discovering commands only when the profile predates the matrix or a row is missing — and then update the profile (Phase 0.5 profile-gap maintenance) so the next run consumes it instead of re-deriving. Example full pipelines:
 
 - Node: `npm run build`, `npm test`
 - Android: `cd packages/android && ./gradlew detekt ktlintMainSourceSetCheck ktlintTestSourceSetCheck ktlintAndroidTestSourceSetCheck testDebugUnitTest assembleDebug`
@@ -124,7 +125,7 @@ If any issue is found, create a precise Phase 6 style fix prompt. Do not patch i
 2. Stage specific files only; never use `git add -A`.
 3. Commit with conventional format: `feat(<scope>): <desc> (#<issue>)`.
 4. Push branch.
-5. Create PR. Leave Agent Review section empty until Phase 8.
+5. Create PR. Leave Agent Review section empty until Phase 8. Seed a `偏离记录` section in the PR description from the implementer's reported deviations (write `无偏离` when none); Phase 6 fix passes append to this section so it stays the single running log of plan departures.
 
 ## Phase 4: Risk-Adaptive Cross-Review
 
@@ -136,14 +137,14 @@ Select reviewers from fixture level:
 - `high` or `broad-expanded`: use all 4 standard reviewers (Correctness, Integration, Security/Performance, Test & Evidence Coverage). Escalate to 6 reviewers when the PR touches DB-backed state, retry/cancellation, publish/delete/rollback, schema/evidence contracts, security boundaries, production config, or shared helper/state-machine roots. The two additional reviewers are `Spec Compliance` and `Invariant / State Machine / Compatibility`.
 - Initial round only: if repository policy requires a fixed number of evidence comments, follow it only when it does not conflict with the 6-review high-risk escalation in `SKILL.md`; otherwise post a consolidated evidence bundle rather than reducing reviewer coverage.
 
-Use `phase-4-cross-review.md` to build the parallel reviewer-subagent briefs. Prefer spawning the full reviewer set as parallel subagents in one batch (Claude Code: multiple Task calls in one message; Codex: parallel subagents). Reviewer subagents are read-only and return their complete reports as their final messages; the orchestrator collects each returned report and persists it to `<REVIEW_DIR>/<report file>` (default `<REVIEW_DIR>` = `.workplans/<issue-or-pr>/review/`). Do not post PR comments in this phase.
+Include the PR description's `偏离记录` section in every reviewer brief: deviations are where the implementer made choices the plan did not cover, so review attention goes there first. Use `phase-4-cross-review.md` to build the parallel reviewer-subagent briefs. Prefer spawning the full reviewer set as parallel subagents in one batch (Claude Code: multiple Task calls in one message; Codex: parallel subagents). Reviewer subagents are read-only and return their complete reports as their final messages; the orchestrator collects each returned report and persists it to `<REVIEW_DIR>/<report file>` (default `<REVIEW_DIR>` = `.workplans/<issue-or-pr>/review/`). Do not post PR comments in this phase.
 
 Review rounds:
 
 - Round 1 uses the risk-adaptive reviewer count above.
 - After a Phase 6 fix pass, rerun cross-review before Phase 7 using the same risk-adaptive reviewer count and reviewer mix as Phase 4 on the current head.
 - Do not narrow follow-up rounds to only the risk areas touched by the fix. A prior round can miss issues outside the fix area, so each post-fix round must be a comprehensive review of the updated PR diff and OpenSpec fixture before Phase 7.
-- A cross-review round is clean only when it has no actionable findings. Critical/major findings and test coverage gaps always return to Phase 5-6. Minor findings must be fixed or explicitly deferred with issue/OpenSpec/user-instruction basis.
+- A cross-review round is clean only when it has no actionable findings. Critical/major findings and test coverage gaps always return to Phase 5-6. Minor findings must be fixed or explicitly deferred with issue/OpenSpec/user-instruction basis. When the `issue-scribe` agent is installed, "deferred with issue basis" means delegating the deferred finding to `issue-scribe` (it verifies, dedups, and files the tracked issue) and recording the returned issue URL in the evidence bundle; a deferral with neither an issue URL nor a recorded reason is not a valid deferral.
 - When a comprehensive cross-review round comes back clean, record `Last clean reviewed SHA: <sha>` in the evidence bundle. This recorded SHA — not the frozen final HEAD — is the rollback anchor the Phase 8 pre-merge gate resets to if a later fix round corrupts a clean reviewed state.
 - A finding is actionable only if it satisfies the finding contract defined in the `risk-adaptive-cross-review` skill (`finding-contract.md`): severity, failure class, violated invariant/contract, concrete scenario, evidence, fix direction, required test/proof, sibling surfaces, and blocking status. Treat vague concerns, style preferences, and untestable possibilities as non-blocking notes unless the orchestrator can complete the missing fields from the diff and fixture.
 - If a follow-up round finds the same failure class in another module, helper, or sibling surface, treat that as an invariant miss, not as a new isolated finding. Trigger Phase 6.2 before issuing the next fix prompt.
@@ -333,7 +334,10 @@ Test: <new or changed test case>
 After all changes: <build+lint+test command>
 All must pass. Do not break existing tests.
 List changed files and verification results.
+Report any deviation from this fix list (what/why/impact); state "no deviations" explicitly.
 ```
+
+Append reported deviations to the PR description's `偏离记录` section before the next review round.
 
 For pattern escalation or high-risk classes, replace the narrow fix list with an invariant-closure prompt:
 
@@ -449,7 +453,7 @@ git diff HEAD origin/<branch> --stat
 FULL_SHA=$(git rev-parse HEAD)
 ```
 
-Wait for non-evidence CI checks. Use long quiet waits calibrated to the repo's normal CI duration; do not repeatedly poll or stream `gh run watch` output into the chat. Prefer sparse checks such as a long `gh run watch --exit-status --interval 60` wait with low output, or a quiet sleep loop that prints only final success/failure.
+Wait for non-evidence CI checks. Use long quiet waits calibrated to the repo's normal CI duration; do not repeatedly poll or stream `gh run watch` output into the chat. Prefer sparse checks such as a long `gh run watch --exit-status --interval 60` wait with low output, or a quiet sleep loop that prints only final success/failure. When the `monitor` agent is installed, delegate the wait instead: spawn one `monitor` subagent with the concrete run/check IDs; it performs a single quiet blocking wait and returns only the terminal state (or a timeout report), keeping the orchestrator loop free of polling output.
 
 If CI fails, fetch the failing job logs once and classify the repair:
 
@@ -513,6 +517,9 @@ Post Chinese work-summary comment before the merge gate or pre-authorized auto-m
 ### 本次具体改动
 - <按模块/文件/行为列出主要改动>
 
+### 计划偏离
+- <汇总 PR 描述 `偏离记录` section：每条 偏离点/原因/影响面；全程无偏离则写"无偏离">
+
 ### 测试与验证
 - <本地 build/lint/test/check 命令和结果>
 - <手工验证、真实数据验证、CI 状态，如适用>
@@ -523,7 +530,7 @@ Post Chinese work-summary comment before the merge gate or pre-authorized auto-m
 
 ### 兼容性、风险与已知限制
 - <API/数据格式/迁移兼容性>
-- <剩余风险或明确不覆盖范围>
+- <剩余风险或明确不覆盖范围：每条附 follow-up issue 链接（issue-scribe 产出），或一行不落 issue 的理由>
 
 ### 维护者关注点
 - <需要人工重点看的点；没有则写“无额外关注点”>
@@ -541,7 +548,8 @@ Before requesting merge approval or running a pre-authorized auto-merge, verify 
   - **(b) "review not required" record**: the fixture risk tier is `none` and the Phase 2 audit found no risk, and that fact is persisted in the evidence bundle against the frozen `FULL_SHA`. This is the only path that legitimately skips Phase 4/4.5/7 (see Phase 4 `none` handling and the Phase 2 audit).
   - Missing both (a) and (b) is a skip block: do not merge, and record it for the accountability log.
 - No posted evidence presents stale findings as current.
-- **Completion self-audit (premature-completion guard)**: re-derive each issue acceptance criterion and each selected `tasks.md` item and confirm the diff/tests actually satisfy it — not "the agent said done". Confirm no leftover edge/error path the fixture required is unhandled, and that the final changes are internally consistent (no two fixes that contradict each other). Any uncovered criterion blocks the merge and returns to Phase 5-6; it does not become a silent deferral.
+- **Deferral routing**: every explicitly deferred finding and every 剩余风险/已知限制 entry in the work summary carries either a tracked issue URL (delegated to `issue-scribe` when installed) or a recorded one-line reason why no issue is filed. An unrouted deferral is a gate failure, not a silent drop.
+- **Completion self-audit (premature-completion guard)**: re-derive each issue acceptance criterion and each selected `tasks.md` item and confirm the diff/tests actually satisfy it — not "the agent said done". Use the project profile's verification matrix to map each touched surface to its verification command and expected evidence; a matrix row for a touched surface that was never executed on the final head counts as an uncovered criterion. Confirm no leftover edge/error path the fixture required is unhandled, and that the final changes are internally consistent (no two fixes that contradict each other). Any uncovered criterion blocks the merge and returns to Phase 5-6; it does not become a silent deferral.
 - **Oracle integrity**: confirm the OpenSpec fixture, acceptance criteria, existing tests, and CI gates were not weakened, deleted, or rewritten to make the gate pass (`risk-adaptive-cross-review` → `finding-contract.md` Oracle Integrity). A test/spec change is legitimate only when it tracks a real contract change recorded in the OpenSpec change, never to silence a failure.
 
 This gate mixes deterministic and judgment-based checks. The SHA-match and artifact-presence clauses above are deterministic: they either hold against the frozen final HEAD or they do not. The completion self-audit and oracle-integrity clauses are mandatory checkable procedures — enumerate each acceptance criterion and selected task and confirm the diff/tests satisfy it, and diff the test/spec/CI files against the reviewed baseline — that still require reviewer judgment. A failure of any clause, deterministic or judgment-based, blocks the merge rather than producing a "probably fine" pass.

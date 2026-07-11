@@ -7,8 +7,9 @@ description: >
   inspect, compare, clean up, or repair worktrees safely. Do not use for
   ordinary single-branch Git help, repo bootstrap tasks, or broader
   advanced-Git sessions where worktrees are only incidental.
+disable-model-invocation: true
 invocation_posture: manual-first
-version: 0.1.5
+version: 0.2.2
 ---
 
 # Git Worktree Workflows
@@ -18,7 +19,6 @@ Turn `git worktree` usage into a small set of safe workflows instead of one-off 
 The design bias is:
 
 - Use **official Git semantics** as the source of truth
-- Use **manual-first posture** so the skill activates only on clear worktree signals
 - Use **repo conventions as overlays**, not as universal defaults
 
 ## Outputs
@@ -32,13 +32,11 @@ Depending on the request, produce one or more of:
 
 ## When Not To Use
 
-Do not use this skill when:
-
-- The task is ordinary branch switching, rebasing, or PR work and no extra checkout is needed
-- The request is really about repo bootstrap, such as copying `.env*`, linking `.venv`, installing dependencies, or trusting local tool configs, unless the repository already documents those as project conventions
-- The user only needs general Git advice and has not asked about worktrees or parallel checkouts
-- Worktree use would add more overhead than value, such as a tiny one-file change on a clean branch with no context-switching pressure
-- Worktrees are a minor part of a broader advanced Git session that also involves rebasing, bisect, or reflog; in that case treat the request as broader advanced Git guidance unless worktree operations become the primary concern
+- Ordinary branch switching, rebasing, or PR work with no extra checkout needed
+- Repo bootstrap (copying `.env*`, linking `.venv`, installing dependencies) — unless the repository documents those as worktree conventions
+- General Git advice with no worktree or parallel-checkout angle
+- Overhead exceeds value — e.g. a tiny one-file change on a clean branch with no context-switching pressure
+- Worktrees are a minor part of a broader advanced Git session (rebase, bisect, reflog) — answer as general Git guidance unless worktrees become the primary concern
 
 ## Route First
 
@@ -295,11 +293,3 @@ Before finishing:
 - show the exact commands or explain why a worktree is unnecessary
 - call out any destructive risk or repo-convention assumption
 - end with the next obvious step, such as `cd` into the new worktree, run `git worktree list`, or clean up stale metadata
-
-## Example Prompts
-
-- Show me the safest way to create a worktree for a hotfix while my feature branch has uncommitted changes.
-- I got "branch is already checked out at ..." when trying to add a worktree. What should I do?
-- Help me compare two branches side by side with worktrees and selectively keep only one file.
-- I manually deleted a worktree folder. How do I clean up Git's metadata correctly?
-- Should I use a worktree here, or is a normal branch switch enough?

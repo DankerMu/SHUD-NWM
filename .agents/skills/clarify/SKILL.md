@@ -1,21 +1,19 @@
 ---
 name: clarify
 description: >
-  Hybrid workflow for turning ambiguous implementation requests into actionable scope before
-  execution. Use explicitly when the user asks to clarify requirements, disambiguate a request,
-  or spec a change before building it. Activate automatically only when an implementation-oriented
-  request contains direct contradictions, missing acceptance criteria that would materially change
-  the build, or an explicit request to proceed with documented assumptions. Do not activate for
-  open-ended direction-finding, brainstorming, or already-specific actionable tasks.
+  Turn ambiguous implementation requests into actionable scope before execution. Use when asked
+  to clarify requirements, disambiguate a request, or spec a change before building.
+  Auto-activate only when an implementation request contains direct contradictions, is missing
+  acceptance criteria that would materially change the build, or asks to proceed on documented
+  assumptions. Not for direction-finding or brainstorming, nor for already-specific actionable
+  tasks.
 invocation_posture: hybrid
-version: 1.2.1
+version: 1.2.3
 ---
 
 # Clarify
 
 Resolve ambiguity before action. This skill turns vague, incomplete, or contradictory implementation requests into precise, actionable scope through structured clarification or documented assumptions.
-
-**Invocation posture:** `hybrid`. Prefer explicit invocation. Automatic activation should stay limited to high-confidence implementation ambiguity, not general idea exploration.
 
 ## When To Activate
 
@@ -52,7 +50,6 @@ Produce the smallest clarification artifact that unblocks execution:
 5. **Document decisions.** Every resolved ambiguity should be traceable to evidence, best practice, user choice, or explicit assumption.
 6. **Stay out of brainstorming territory.** If the real issue is choosing a direction rather than clarifying requirements, hand off to `brainstorming`.
 7. **Match the user's tempo.** If they say "proceed" or "don't ask," switch to autonomous clarification and record assumptions instead of interrogating them.
-8. **Follow the user's language.** User-facing questions, summaries, and assumptions logs should use the user's language.
 
 ---
 

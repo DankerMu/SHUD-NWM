@@ -3,7 +3,7 @@
   "name": "repo-entropy-audit",
   "displayName": "Repo Entropy Audit",
   "description": "Scan an entire repository for entropy across six axes (structure, semantics, behavior, context, protocol, control) and produce a module-level heatmap, trend comparison against baseline, and prioritized cleanup targets. Use for periodic health checks or before major releases.",
-  "version": "0.3.0",
+  "version": "0.4.1",
   "maturity": "experimental",
   "categories": [
     "workflow",

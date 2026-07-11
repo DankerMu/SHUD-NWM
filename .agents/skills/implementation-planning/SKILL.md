@@ -1,13 +1,9 @@
 ---
 name: implementation-planning
 description: >
-  Manual-first heavy planning protocol for complex technical implementation work. Use when the
-  user or the planner agent explicitly needs a deep executable plan for a feature, refactor,
-  migration, or architecture change after the direction is already chosen. Do not use for
-  brainstorming, choosing between competing directions, requirements clarification, business
-  planning, generic project management, or code execution.
+  Deep executable planning for complex implementation work — phases, dependencies, verification, rollback — after the direction is chosen. Invoke explicitly: by the user, the planner agent, or stage-change-pipeline.
 invocation_posture: manual-first
-version: 0.1.5
+version: 0.2.2
 ---
 
 # Implementation Planning
@@ -78,9 +74,6 @@ Use the platform's native user-input mechanism when one is available and appropr
 current environment. If the surface does not expose a structured question tool, ask concise
 questions directly in chat and wait for the user's reply. Do not make the workflow depend on one
 specific tool name.
-
-**Language**: Respond in the same language the user uses. User-facing output should match the
-user's language even if internal workflow labels stay in English.
 
 ## Core Principles
 
@@ -175,7 +168,7 @@ Use `references/plan-structure.md` for the required sections and the deep-plan s
 Build the plan top-down:
 
 1. Identify the phases or workstreams.
-2. Order them by dependency.
+2. Order them by dependency. Within dependency constraints, front-load decision-dense phases — data models, type interfaces, user-visible flows — and push mechanical refactors and low-judgment work to late phases. The parts most likely to be adjusted by a human belong where review attention is highest: phase ordering is a review-attention allocation, not just a build order.
 3. Mark risk points and review gates.
 4. Add concrete files, components, services, or interfaces when the evidence supports that level of specificity.
 5. Add verification for each substantial phase.
@@ -237,11 +230,3 @@ At minimum, every plan produced by this skill should include:
 - Risks
 - Rollback or containment
 - Next step
-
-## Example Prompts
-
-- Use implementation-planning for this auth migration. The direction is chosen; now make the deep execution plan.
-- Draft a deep implementation plan for this cross-cutting refactor before we touch code.
-- Turn this architecture change into phased implementation work with verification and rollback.
-- The planner already gathered context. Now write the heavy plan, not code.
-- Should this route to implementation-planning, or do we still need brainstorming first?

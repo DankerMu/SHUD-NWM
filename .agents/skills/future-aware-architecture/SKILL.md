@@ -7,7 +7,7 @@ description: >
   architecture direction or selection decisions; do not use for pure
   implementation planning, narrow stack research, or review-only tasks.
 invocation_posture: manual-first
-version: 0.3.0
+version: 0.3.1
 ---
 
 # Future-Aware Architecture
@@ -49,19 +49,6 @@ Do not use this skill when:
 - The user mainly wants current facts, source-backed comparison, or latest-status research without an architecture decision workflow. Use `deep-research`.
 - The task is to review an existing design, PR, or document for defects or regressions. Use `review`.
 - The user already knows the exact change to build and simply wants implementation.
-
-## Invocation Posture
-
-Treat this skill as `manual-first`.
-
-Why:
-
-- Architecture work is cross-cutting and high-impact
-- False positives are expensive because the workflow can trigger research, trade-off analysis, and durable artifacts
-- Users usually know when they want architecture design or technology selection help
-
-The trigger should stay precise and boundary-heavy. Do not activate just because
-the word "architecture" appears casually.
 
 ## Hard Rules
 

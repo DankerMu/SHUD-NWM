@@ -5,6 +5,21 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-11
+- Mark the skill user-invoked: SKILL.md frontmatter now sets `disable-model-invocation: true`, enforcing the manual-first posture at the platform level. Claude Code drops the description from standing context and only explicit `/control-plane-auditor` invocation reaches it; the Codex projection/install target moves to `.agents/skills-manual/` (skill-lifecycle-manager 0.10.0 tooling). Discoverability lives in the `ask-danker` router.
+
+## [0.3.0] - 2026-07-06
+
+### Added
+- **Bootstrap/repair write modes** (eng-init alignment): new Phase 0 mode gate (audit remains the read-only default; write modes require the user's explicit request and still run Phases 1–3 first), Phase 4 (spec preview listing deliverables/gates/non-goals/remaining gaps, user confirmation before any write, authorized artifacts only, fix-in-place — no `_v2`/`_new`/`_backup` variants), and Phase 5 (run recorded command entry points, guardrail self-test, evidence per deliverable — no completion claim without evidence). Procedure, mode-decision table, root-instruction-file scaffold (Project Snapshot / Command Entry Points / Verification Matrix / Boundaries & Forbidden Actions / Human Gates), and guardrail-wiring guidance live in the new `references/bootstrap-playbook.md`.
+- **Enforcement Classification in the audit report (No Phantom Enforcement)**: every documented rule is classified `mechanical` (cites the real config/command/hook/CI gate), `review-only` (legitimate but unenforced), or `phantom` (claims a gate that does not exist — its own gap class, worse than review-only).
+- Verification-matrix placement rule: canonical home is `openspec/project-profile.md` when the OpenSpec delivery flow is present (template owned by `subagent-workflow`'s `project-profiles.md`); otherwise inline in the instruction file. No duplicated rows.
+- Ownership split with `project-instruction-bootstrap`: this skill decides control-plane section content; that skill owns instruction-file write mechanics (shared-source generation, do-not-edit markers, incremental diff-before-write). Write modes respect generated-file markers, edit source fragments instead, and delegate the file write when the skill is present; direct writes only when neither applies.
+
+### Changed
+- `skill.json`: `capabilities.filesystemWrite` true (write modes), description covers the write modes and enforcement classification, tag `bootstrap` added.
+- Caveats: "read-only" narrowed to audit mode; write modes write only spec-preview-authorized artifacts.
+
 ## [0.2.0] - 2026-07-02
 
 ### Added

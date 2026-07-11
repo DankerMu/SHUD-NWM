@@ -5,6 +5,10 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-11
+
+- Tighten the hybrid trigger description from 489 to 387 characters (slimming batch 6), eval-gated by the new cross-skill routing suite (`skill-lifecycle-manager/eval/cross-skill-routing-cases.json`): three A/B runs, zero per-case routing regressions, candidate 27/27 on the final run (deepseek-v4-pro-guan judge via dmxapi). All negative redirects preserved.
+
 ## [0.4.0] - 2026-07-02
 - Add a **Severity Crosswalk** section to `finding-contract.md` mapping sibling pack vocabularies into the canonical P0/P1/P2/Note: `review` P0/P1/P2 map 1:1 and P3/Nit → Note; `entropy-review` E0 → P1 (P0 when it breaks a selected risk-pack invariant), E1 → P2, E2 → P2, E3 → Note; plus a dimension→failure-class map (naming drift → `conventions`, error-model fork → `contract`, state split → `state-transition`, duplication → `reuse`, dependency-direction violation → `altitude`). Lets consumers fold sibling grades into this contract without re-deriving them.
 - Add `invocation_posture: hybrid` to `SKILL.md` frontmatter, matching the sibling `review` and `entropy-review` skills.

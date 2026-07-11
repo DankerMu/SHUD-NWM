@@ -1,17 +1,14 @@
 ---
 name: review
 description: >
-  Structured review skill for PRs, diffs, commits, staged changes, code,
-  documentation, API specs, database migrations, infrastructure config, and design
-  documents. Activate for explicit, artifact-scoped review requests such as reviewing
-  a PR, diff, commit, branch, staged changes, or named files, or phrases like
-  "code review", "review my changes", "find bugs in", or "security review".
-  Produces severity-graded findings with content-aware analysis, behavioral-change
-  checks, and actionable fix directions.
-  Do NOT activate for brainstorming, open-ended design feedback, governance/library
-  audits, or general conversations about whether an approach seems good.
+  Structured review of concrete artifacts: PRs, diffs, commits, branches, staged changes, named
+  files, docs, API specs, database migrations, or infrastructure config. Activate on explicit,
+  artifact-scoped review requests — "code review", "review my changes", "find bugs in",
+  "security review". Produces severity-graded findings with fix directions. Do NOT activate for
+  brainstorming, open-ended design feedback, governance/library audits, or
+  whether-an-approach-seems-good conversations.
 invocation_posture: hybrid
-version: 0.5.1
+version: 0.6.3
 ---
 
 # Review
@@ -19,8 +16,6 @@ version: 0.5.1
 Unified review skill for agent-performed reviews. Auto-detects content types in a change set, applies the appropriate review dimensions, and delivers severity-graded findings with actionable fixes.
 
 ## When to Activate
-
-**Invocation posture: hybrid** — auto-trigger only on unmistakable, artifact-scoped review requests. For ambiguous requests, explicit invocation is preferred.
 
 Activate when the user:
 - Asks to review a PR, diff, branch, commit, staged changes, or specific files
@@ -31,15 +26,13 @@ Activate when the user:
 ## When Not To Activate
 
 Do not activate for:
-- Open-ended design or architecture discussions ("what do you think about this approach?")
-- Brainstorming, option comparison, or solution ideation
-- Governance or library-audit requests about skills, agents, or repository hygiene
-- Requests to teach review culture, reviewer communication, or mentoring practices
-- General quality feedback without a concrete artifact or change set to inspect
-- Multi-perspective, high-risk, or risk-adaptive-depth reviews (parallel reviewer packs, invariant/state-machine focus) → use `risk-adaptive-cross-review`
-- Consistency, drift, or pattern-duplication-only concerns (naming drift, error-model splits) → use `entropy-review`
 
-Use `brainstorming`, `skill-lifecycle-manager`, or a general design discussion instead when the user wants exploration rather than a structured review protocol.
+- Open-ended design/architecture discussion, brainstorming, option comparison, or ideation → `brainstorming` or plain discussion
+- Governance or library-audit requests about skills, agents, or repository hygiene → `skill-lifecycle-manager`
+- Teaching review culture, reviewer communication, or mentoring practices
+- General quality feedback without a concrete artifact or change set to inspect
+- Multi-perspective, high-risk, or risk-adaptive-depth reviews (parallel reviewer packs, invariant/state-machine focus) → `risk-adaptive-cross-review`
+- Consistency, drift, or pattern-duplication-only concerns (naming drift, error-model splits) → `entropy-review`
 
 ## Review Modes
 
@@ -100,6 +93,16 @@ Each changed file maps to one or more content types. The Dimensions column below
 
 For the detailed checklist of each content type, read the relevant reference file.
 
+### 1e. Locate the originating spec
+
+The review runs on two axes: **standards** (does the change follow this repo's conventions and quality bar — the checklists above) and **spec** (does the change do what was asked). For the spec axis, locate the originating requirements, in order:
+
+1. Issues/PRDs linked from the PR description or commit messages (`#123`, `Closes #45`)
+2. A spec path the user passed with the request
+3. A PRD/spec/OpenSpec change under `docs/`, `specs/`, or `openspec/` matching the branch or feature name
+
+If nothing turns up, ask the user once; if there is no spec, skip the spec axis and say so in the output. Do not reconstruct an imagined spec from the diff.
+
 > **Canonical-source note**: For `subagent-workflow` Phase 4 (parallel reviewer packs), `reviewer-packages.md` in `risk-adaptive-cross-review` is the canonical checklist source. This skill's per-type checklists serve standalone single-pass reviews.
 
 ---
@@ -123,6 +126,16 @@ Beyond the per-type checklists, always check these regardless of content type:
 - **Code-doc consistency**: If code and docs changed in the same PR, do the docs reflect the new behavior?
 - **Missing companions**: New API endpoint with no tests? New feature with no docs? Schema change with no migration?
 - **Changelog**: User-facing changes should have a changelog entry (if the project uses one).
+
+### Spec conformance (second axis)
+
+When a spec was located in 1e, check the diff against it as its own axis, separate from the checklists:
+
+- **Missing or partial**: requirements the spec asks for that the change does not deliver
+- **Unrequested**: behavior in the diff the spec never asked for — scope creep; flag it, don't assume it's wrong
+- **Implemented but wrong**: requirements that look addressed but whose implementation contradicts the spec's wording
+
+Quote the spec line for each finding. Spec findings carry severities like any other (a missing Must requirement is typically P1), but they report under their own group — see Phase 3.
 
 ### Non-findings
 
@@ -199,6 +212,8 @@ Every `P0`, `P1`, and `P2` finding must include:
 - **Fix direction**: the expected repair direction, not just "please fix"
 
 Questions supplement findings; they do not replace clear findings. Do not report formatter noise, import ordering, or lint-only issues unless they reveal a real behavioral or policy risk.
+
+**Two axes, no masking.** Standards findings and spec-conformance findings answer different questions — "is the code good" vs "is it the right change" — and a change can pass one axis while failing the other. Spec findings get their own `#### Spec conformance` group in the output (never folded into the content-type groups), and the summary names the worst finding per axis. A clean standards pass must not soften a spec miss, or vice versa.
 
 ### Output by mode
 
@@ -306,15 +321,6 @@ Flag for senior review instead of resolving yourself:
 - New external dependencies (security-sensitive)
 - Infrastructure changes affecting production
 - Architecture decisions with long-term consequences
-
-## Validation And Evaluation
-
-Authoring note for maintainers of the canonical skill package:
-
-- Validate structural changes with local authoring tooling before release.
-- Evaluate trigger boundaries with the canonical `eval/trigger-posture-cases.json` suite.
-- Evaluate realistic review behavior with the canonical `eval/eval-cases.json` suite.
-- Keep authoring-only assets such as `eval/` out of runtime projections.
 
 ## Caveats
 

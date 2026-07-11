@@ -18,6 +18,8 @@ A profile contributes:
 - contracts (what callers/consumers depend on)
 - risk axes (how this kind of project breaks)
 - typical evidence (what proves a change is safe)
+- command entry points (the repo's real setup/check/lint/typecheck/test/build commands)
+- a verification matrix (surface -> command -> evidence) consumed by Phase 2 and the Phase 8 completion self-audit
 - optional domain risk packs (added to the core packs)
 - optional domain expanded-triggers (added to the core triggers)
 
@@ -31,6 +33,8 @@ build system, directory layout, manifests). Record it in the fixture as
 - Contracts: public API/function signatures, CLI flags, config keys, data schema/format, return shapes, persisted state.
 - Risk axes: input validation, error/rollback paths, backward compatibility, concurrency/ordering, resource bounds, security/path safety.
 - Typical evidence: build/lint, unit plus integration tests on touched modules, boundary/failure-case tests, unchanged-consumer regression.
+- Command entry points: discover the real commands from package scripts, Makefile/justfile targets, or CI workflow steps; record them, not generic placeholders.
+- Verification matrix: one `<surface> -> <command> -> <evidence>` row per major surface, plus one row for the default build+test pipeline. Evidence names what proves the run (exit code, test report, produced artifact, log line).
 - Domain risk packs: none beyond the core packs.
 - Domain expanded-triggers: none beyond the core triggers.
 
@@ -79,7 +83,7 @@ the core Risk Packs only when the active profile lists them.
 
 For a new project, do not edit this shared file. Instead, Phase 0.0 bootstrap
 writes `openspec/project-profile.md` for that project, copying the closest
-template below (or Generic) and filling the six fields from a repo scan:
+template below (or Generic) and filling the eight fields from a repo scan:
 
 ```text
 Project profile: <name>
@@ -87,6 +91,9 @@ Entry surfaces: <where changes/risk concentrate>
 Contracts: <what callers/consumers depend on>
 Risk axes: <how this project breaks>
 Typical evidence: <what proves a change is safe>
+Command entry points: <setup/check/lint/typecheck/test/build -> real commands, or "none">
+Verification matrix:
+- <surface> -> <command> -> <evidence type>
 Domain risk packs: <added packs, or "none">
 Domain expanded-triggers: <added trigger keywords, or "none">
 ```
@@ -105,7 +112,7 @@ rules:
 - **Do not restate core**: record only surfaces, packs, and triggers that the
   core risk packs and triggers in `issue-risk-contract.md` do not already cover.
   Restating core is the main source of bloat — delete it.
-- **Short bullets, not prose**: each of the six fields is a short bulleted list.
+- **Short bullets, not prose**: each of the eight fields is a short bulleted list. Verification-matrix rows are one line per surface, covering the repo's real surfaces, not hypothetical ones; the rows count toward the budget.
 
 Soft size targets (excluding the short header note):
 

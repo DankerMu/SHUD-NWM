@@ -106,6 +106,8 @@ Priority order — check the highest-impact items first:
 - Edge cases untested (null, empty, boundary values)
 - Tests that pass but don't assert meaningful behavior ("happy path only")
 - Fragile tests coupled to implementation details (testing private methods, asserting exact strings)
+- Tautological tests: the assertion recomputes the expected value the same way the code does (`expect(add(a, b)).toBe(a + b)`, a hand-derived snapshot built by the same procedure) — passes by construction, zero confidence. Expected values must come from an independent source of truth: a known-good literal, a worked example, the spec.
+- Tests placed against internals instead of seams: tests belong at public boundaries (the interfaces the change's consumers actually use), not at private helpers or side channels (e.g. querying the database instead of going through the interface)
 - Tests depending on external services without mocks
 - Tests depending on execution order
 - Bug fixes: is there a test that reproduces the original bug?

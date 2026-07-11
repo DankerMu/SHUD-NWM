@@ -1,15 +1,13 @@
 ---
 name: risk-adaptive-cross-review
 description: >
-  Run multi-perspective risk-adaptive reviews for PRs, diffs, branches, OpenSpec
-  changes, or stage-change artifacts. Use when the user asks for a risk-adaptive
-  review, multi-review, parallel review, cross-review, high-risk PR review, or
-  wants reviewers split across correctness, integration, security/performance,
-  test evidence, spec compliance, or invariant/state-machine compatibility. Do
-  not use for ordinary quick review unless the user asks for multi-perspective
-  or risk-adaptive depth.
+  Multi-perspective, risk-adaptive review for PRs, diffs, branches, OpenSpec changes, or stage
+  artifacts — reviewers split across correctness, integration, security/performance, test
+  evidence, spec compliance, or invariant/state-machine compatibility. Use on explicit asks for
+  risk-adaptive, multi-perspective, parallel, cross-review, or high-risk PR review. Not for
+  ordinary quick review.
 invocation_posture: hybrid
-version: 0.4.0
+version: 0.4.1
 ---
 
 # Risk-Adaptive Cross Review

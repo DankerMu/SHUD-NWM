@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "name": "clarify",
   "displayName": "Clarify",
-  "description": "Hybrid workflow for turning ambiguous implementation requests into actionable scope before execution. Use explicitly for clarification/spec requests, or automatically for direct contradictions or missing acceptance criteria that would materially change the build. Not for open-ended brainstorming or already-specific tasks.",
-  "version": "1.2.1",
+  "description": "Turn ambiguous implementation requests into actionable scope before execution. Use when asked to clarify requirements, disambiguate a request, or spec a change before building. Auto-activate only when an implementation request contains direct contradictions, is missing acceptance criteria that would materially change the build, or asks to proceed on documented assumptions. Not for direction-finding or brainstorming, nor for already-specific actionable tasks.",
+  "version": "1.2.3",
   "maturity": "experimental",
   "categories": [
     "workflow",

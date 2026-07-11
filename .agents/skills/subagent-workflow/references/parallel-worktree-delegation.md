@@ -85,6 +85,28 @@ git worktree add .worktrees/pr-<N>-<worker-id> HEAD
 
 If two workers need different starting commits, record that explicitly in the manifest. Do not create worker worktrees from stale local branches unless the manifest explains why.
 
+## Worktree Guard Hook (mechanical fence)
+
+When the `worktree-guard` hook is installed in the host project, bracket every worktree-delegation window with its manifest file so out-of-root writes are denied mechanically instead of by prompt discipline:
+
+1. **Entry** — immediately after creating the worker worktrees and persisting the parallel worktree manifest, write `.worktree-guard.json` at the project root. `allowedRoots` lists every delegated worktree plus the roots the orchestrator legitimately writes during the window (evidence and spec directories):
+
+```json
+{
+  "enabled": true,
+  "allowedRoots": [
+    ".worktrees/pr-<N>-<worker-id>",
+    ".workplans/",
+    "openspec/"
+  ]
+}
+```
+
+2. **Exit** — after integration and worktree cleanup (`git worktree prune`), delete `.worktree-guard.json`. Never leave it behind: a stale guard file blocks normal work in the next session.
+3. **Session restart / context compaction** — if `.worktree-guard.json` exists at session start, the workflow is mid-delegation: reload the parallel worktree manifest before writing any file. This is exactly the drift the hook exists to stop.
+
+Scope notes: the hook guards file-edit tools only (`Edit|Write|MultiEdit|NotebookEdit` on Claude Code, `apply_patch` on Codex). Patch integration via `git apply` in the shell is unaffected, and shell-level `mv`/`cp`/redirects are not covered — the manifest inspection rules above still apply. Without the hook installed, this entire section is a no-op and the discipline stays orchestrator-enforced.
+
 ## Worker Prompt Boundary
 
 Every parallel code-writing worker brief must include the Required Subagent Boundary from `SKILL.md` plus this parallel-worktree boundary:
@@ -140,6 +162,8 @@ git -C .worktrees/pr-<N>-<worker-id> status --short
 git worktree remove .worktrees/pr-<N>-<worker-id>
 git worktree prune
 ```
+
+If the worktree-guard protocol is active, delete `.worktree-guard.json` after the last worktree is removed (see "Worktree Guard Hook" above).
 
 Only remove a worktree after confirming that its useful diff has been integrated, rejected, or superseded. If removal fails because the worktree has uncommitted work, inspect it and either integrate, save a patch to the evidence directory, or document why it is intentionally discarded.
 

@@ -7,14 +7,12 @@ description: >
   触发词："improve architecture"、"找重构机会"、"合并紧耦合模块"、"让代码更可测"、"架构评审"、"把重构拆成 issue"。
   不用于纯需求澄清（用 clarify）或纯方向选型（用 future-aware-architecture）。
 invocation_posture: hybrid
-version: 0.3.0
+version: 0.3.1
 ---
 
 # Improve Codebase Architecture
 
 暴露 architecture friction，并提出 **deepening opportunities**——把 shallow modules 变成 deep modules 的 refactors。目标是 testability 和 AI-navigability。
-
-**Invocation posture:** `hybrid`。优先显式调用；自动触发限于明确的"架构改进 / 找重构机会 / 让代码更可测"意图。
 
 ## Glossary
 
