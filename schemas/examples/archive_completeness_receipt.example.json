@@ -1,0 +1,30 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-07-11T12:05:00Z",
+  "coverage_bounds": {"start": "2026-05-28T00:00:00Z", "end": "2026-07-11T00:00:00Z"},
+  "windows": [
+    {
+      "lane": "forcing",
+      "subject": {"forcing_version_id": "forc-gfs-2026052800-yangtze"},
+      "window": {"start": "2026-05-28T00:00:00Z", "end": "2026-06-16T00:00:00Z"},
+      "coverage": "none",
+      "verdict": "gap",
+      "evidence": ["database rows present; no verified product archive"]
+    },
+    {
+      "lane": "forcing",
+      "subject": {"forcing_version_id": "forc-gfs-2026052800-pearl"},
+      "window": {"start": "2026-05-28T00:00:00Z", "end": "2026-06-16T00:00:00Z"},
+      "coverage": "product-archive",
+      "verdict": "complete",
+      "evidence": ["checksum-verified product archive present"]
+    }
+  ],
+  "salvage_selectors": [
+    {
+      "table": "met.forcing_station_timeseries",
+      "identity": {"forcing_version_id": "forc-gfs-2026052800-yangtze"},
+      "window": {"start": "2026-05-28T00:00:00Z", "end": "2026-05-29T00:00:00Z"}
+    }
+  ]
+}

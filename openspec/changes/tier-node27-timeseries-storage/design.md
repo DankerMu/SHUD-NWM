@@ -26,8 +26,9 @@ hygiene checks, flock, receipts directory, systemd user timer).
 
 - Make node-22-produced cycle products the durable, checksum-verified,
   rotation-exempt full-history source of truth (archive tier).
-- Salvage the DB-only windows (sole copies) into the archive before any
-  deletion machinery exists.
+- Salvage the DB-only forcing/river timeseries windows (sole copies) into the
+  archive before any deletion machinery exists; missing state artifacts are
+  non-salvageable and keep retention fail-closed.
 - Cut the two hypertables' footprint with native TimescaleDB compression on
   terminal chunks.
 - Bound DB size permanently with gated, receipted `drop_chunks` retention
@@ -121,7 +122,8 @@ windows, `state_snapshot.state_uri` references) against checksum-verified
 archive objects + hot object-store presence, and emits the
 **archive-completeness receipt**: per-window verdicts
 (`complete`/`pending-archive`/`gap`), coverage bounds, `generated_at`, and
-the exact salvage selector list (expected: forcing station series before
+the exact salvageable forcing/river timeseries selector list (expected:
+forcing station series before
 2026-06-16; river only if gaps are found). That one receipt is both the
 salvage scope source and retention gate (a); it runs from its own systemd
 timer so freshness holds at every retention tick. The exporter consumes the
@@ -162,7 +164,8 @@ Order is load-bearing (each step gates the next):
 2. Archive mover live for `forcing/` + `runs/` + `states/` (state products
    enumerated via the audit's `state_snapshot.state_uri` inventory, per ADR
    0002 decision 1); first enforce receipt.
-3. One-time salvage export of DB-only windows; receipt. Salvage coverage
+3. One-time salvage export of DB-only forcing/river timeseries windows;
+   receipt. Salvage coverage
    folds into the audit's completeness verdicts — there is no separate
    salvage gate.
 4. Compression: migration for settings + initial terminal-chunk compression;
@@ -197,3 +200,72 @@ metadata/coverage rows are never dropped.
   receipt, out of scope here.
 - TimescaleDB upgrade (2.10 → 2.13+ would allow compressed-chunk DML and
   lighten D5) — revisit before national scale.
+
+## Workflow Fixture: Issue #846 Storage Foundation
+
+Fixture level: expanded. Repair intensity: high. Project profile: NHMS.
+
+Change surface:
+
+- `packages/common/storage.py`, focused unit tests, five JSON Schemas, and their examples.
+- No scripts, systemd, migration, display route, or production mutation in this PR.
+
+Must preserve:
+
+- Existing object-path validation and the raw-retention/resource-governance env override convention.
+- ADR 0001 display routes remain disk-only and do not import or call archive resolution.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: selected — shared helper contract is consumed by later scripts; no CLI is added here.
+- Config / project setup: selected — env precedence, minimum-age, and root-overlap validation are the feature.
+- File IO / path safety / overwrite: selected — archive and cleanup roots must be disjoint before any later mutation.
+- Schema / columns / units / field names: selected — five schemas are cross-script format authorities.
+- Auth / permissions / secrets: not selected — no credentials, roles, or permission boundary changes.
+- Concurrency / shared state / ordering: not selected — no runner or mutation is implemented in #846.
+- Resource limits / large input / discovery: not selected — no archive scanning or receipt ingestion is implemented in #846.
+- Legacy compatibility / examples: selected — existing env aliases and object-path callers must remain compatible.
+- Error handling / rollback / partial outputs: selected — invalid overlap/age must fail before mutation-capable callers proceed.
+- Release / packaging / dependency compatibility: not selected — no runtime dependency or packaging change.
+- Documentation / migration notes: not selected — runbooks and environment examples belong to later issues.
+- Geospatial / CRS / basin geometry: not selected — no geometry surface.
+- Hydro-met time series / forcing windows: selected — receipt coverage bounds and selectors describe forcing/river windows.
+- SHUD numerical runtime / conservation / NaN: not selected — no solver behavior.
+- PostGIS / TimescaleDB domain behavior: not selected — schemas describe evidence only; no DB access/migration.
+- Slurm production lifecycle / mock-vs-real parity: not selected — node-22 remains untouched.
+- External hydro-met providers / snapshot reproducibility: not selected — no provider discovery or fetch.
+- Run manifest / QC provenance: selected — archive/salvage manifests must bind checksums, identities, selectors, and counts.
+- Published NHMS artifacts / display identity: selected — archive provenance is non-display-only and must not alter display lookup identity.
+
+Invariant Matrix:
+
+- Governing invariant: later archive/retention tools can act only with a valid, non-overlapping archive configuration and schema-conformant provenance, while display remains disk-only.
+- Source of truth: resolved archive root/minimum age plus the five schemas under `schemas/`.
+- Producers: schema examples only in #846; runtime producers are later issues.
+- Validators/preflight: `packages/common/storage.py` configuration and provenance lookup helpers.
+- Storage/cache/query: filesystem path values only; no DB/cache access.
+- Public routes/entrypoints: later node-27 scripts consume the helper; display routes are unchanged siblings.
+- Frontend/downstream consumers: later audit/archive/salvage/drill/retention scripts; display is explicitly excluded.
+- Failure paths/rollback/stale state: overlap and too-small age fail before action; lookup of a cycle returns deterministic archive object/manifest paths.
+- Evidence/audit/readiness: focused pytest, schema examples plus negative documents, ruff, and strict OpenSpec validation.
+- Regression: shared root only and shared+override -> shared resolution then override precedence.
+- Regression: archive root contains/is contained by cleanup target, or age 20 with retention 30 -> named validation error before mutation.
+- Regression: equal/aliased/symlink-resolved archive and cleanup roots -> normalized overlap rejection; caller supplies its complete cleanup-root set.
+- Regression: source-qualified, lane-typed forcing/runs/states identity with bound ISO `cycle_time` + compact `cycle_identity` -> deterministic sibling `archive.tar.zst` + `manifest.json`; shared source aliases normalize to canonical manifest IDs and lowercase object-store/archive path segments, different providers remain distinct, and unknown sources or unsafe/missing/cross-lane/time-mismatched identity or manifest/path mismatch fail before access.
+- Regression: every completeness verdict binds a lane-discriminated stable inventory subject (`forcing_version_id`, `run_id`, or `state_id`) independently of its coverage mechanism; equal-window sibling subjects remain distinguishable, while missing/cross-lane subjects fail schema validation and later inventory runtime must reject duplicate or omitted subjects.
+- Regression: `db-export` completeness is legal only for forcing/runs timeseries subjects; state subjects require product/hot-object coverage or remain a non-salvageable `gap` that blocks retention.
+- Regression: persisted product manifests accept only canonical source IDs at both schema and semantic-binding boundaries; alias normalization remains available only before manifest production.
+- Regression: valid source-less legacy state references (`source_id` NULL or the existing equivalent empty string) map explicitly to the same states-only reserved `legacy-unqualified` identity, using required `valid_time` as canonical cycle time; their archive paths are deterministic and disjoint from provider-qualified states, while forcing/runs reject the sentinel, whitespace/unknown sources fail, and no provider is invented.
+- Regression: salvage object paths are safe root-relative `db-export/.../*.csv.zst`; other suffixes fail schema validation.
+- Regression: valid examples -> schema PASS; missing completeness verdict or salvage row count -> schema FAIL.
+- Regression: product manifest row count/unsafe paths, invalid table-selector key, incomplete drill verdict details, or incomplete retention outcome details -> schema FAIL.
+- Regression: product-only drill with empty selector list -> schema PASS; clean default test environment executes all schema negatives with zero skip.
+- Regression: unchanged display import/call graph -> no archive resolver dependency and existing disk-only not-found semantics.
+- Regression: unchanged `validate_object_path` and raw-retention/governance env aliases -> existing results and precedence remain stable.
+
+Boundary-surface checklist:
+
+- Shared helper root: `packages/common/storage.py`; read-only path derivation and validation only.
+- Public entrypoints: none added; later scripts are consumers, and display entrypoints remain unchanged.
+- Producer/consumer evidence boundary: each example names one schema; manifest fields distinguish product archive from `db-export` salvage.
+- Stale-state/idempotency and write/delete/publish boundaries: out of scope until the corresponding runner issues.

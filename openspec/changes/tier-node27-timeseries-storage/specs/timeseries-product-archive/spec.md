@@ -26,6 +26,19 @@ per-file sha256 checksums, file sizes, tarball sha256, and identity fields
   `tar.zst` object plus `manifest.json` under `NHMS_ARCHIVE_ROOT` with
   recorded checksums and identity fields, verified before source deletion
 
+#### Scenario: Source-less legacy state snapshot remains archivable
+
+- **WHEN** a valid state row has `source_id = NULL` (or the existing
+  equivalent empty-string representation) and references the legacy
+  `states/<model>/<valid-time>/...` object layout
+- **THEN** archive provenance MUST use the explicit states-only canonical
+  source `legacy-unqualified`, with cycle time derived from the required
+  state `valid_time`
+- **AND** its archive path MUST be deterministic and collision-disjoint from
+  provider-qualified state paths
+- **AND** forcing/runs MUST reject that sentinel and no provider identity may
+  be synthesized
+
 #### Scenario: Archive root is exempt from rotation
 
 - **WHEN** any retention or cleanup tool (including raw retention) resolves
@@ -126,13 +139,20 @@ The inventory audit SHALL compare DB coverage — `hydro_run` cycles,
 `forcing_version` windows, and `state_snapshot.state_uri` references —
 against checksum-verified archive objects and hot object-store presence, and
 emit a JSON **archive-completeness receipt** recording: `generated_at`, the
-inventoried coverage bounds, a per-window verdict, and the salvage selector
-list. The verdict per window SHALL be `complete` when it is covered by a
+inventoried coverage bounds, a verdict for every inventoried subject, and the
+salvage selector list. Each verdict SHALL bind exactly one lane-discriminated
+stable subject (`forcing_version_id`, `run_id`, or `state_id`) so subjects
+sharing a time window remain distinguishable; the coverage mechanism SHALL
+be recorded separately from the subject lane. The verdict per subject SHALL
+be `complete` when it is covered by a
 checksum-verified product archive object or a verified `db-export` salvage
 object, or when its products are present in the hot object-store and the
 window is not yet past the archive minimum age; `pending-archive` when past
 the minimum age with hot-object-store-only products; and `gap` when no copy
-exists (every `gap` window appears in the salvage selector list). This
+exists. Every salvageable forcing/river timeseries `gap` appears in the
+salvage selector list. A state subject MUST NOT claim `db-export` coverage:
+its missing product remains a non-salvageable `gap` that blocks retention
+until product coverage is restored. This
 receipt is the single artifact named "archive completeness receipt" consumed
 by the `timeseries-db-retention` enforce gate and the scope source consumed
 by `db-export-salvage`. The audit SHALL run recurringly from a node-27
@@ -154,9 +174,26 @@ list, so a fresh receipt is available to each retention tick.
   NOT satisfy the retention gate's completeness check for any drop window
   containing it
 
-#### Scenario: DB-only window is a gap with salvage selectors
+#### Scenario: Salvageable DB-only timeseries window is a gap with selectors
 
-- **WHEN** the audit finds DB rows whose upstream products exist in neither
-  the hot object-store nor the archive
+- **WHEN** the audit finds forcing or river timeseries rows whose upstream
+  products exist in neither the hot object-store nor the archive
 - **THEN** the receipt MUST mark that window `gap` and include its exact
   selectors in the salvage selector list
+
+#### Scenario: Missing state artifacts cannot use DB-export salvage
+
+- **WHEN** a `state_snapshot` reference is absent from both the hot object
+  store and verified product archive
+- **THEN** its subject verdict MUST remain `gap`
+- **AND** the receipt MUST NOT claim `db-export` coverage or fabricate a
+  timeseries salvage selector for that state
+
+#### Scenario: Equal-window subjects remain independently auditable
+
+- **WHEN** two inventory subjects share the same time window but have
+  different identities or coverage outcomes
+- **THEN** the receipt MUST carry distinct subject-bound verdicts for both
+- **AND** a missing or cross-lane subject identity MUST fail schema validation
+- **AND** the runtime audit MUST reject duplicate or omitted inventory
+  subjects before publishing a retention-gating receipt

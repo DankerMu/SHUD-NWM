@@ -17,7 +17,7 @@ Order is load-bearing:
 
 ## 1. Storage config foundation (`runtime-storage-source-canonicalization`)
 
-- [ ] 1.1 Canonicalize `NHMS_ARCHIVE_ROOT` and extend the shared
+- [x] 1.1 Canonicalize `NHMS_ARCHIVE_ROOT` and extend the shared
   storage-path helper used by the new scripts.
   Evidence floor: the helper resolves the archive root from
   `NHMS_ARCHIVE_ROOT`, with per-script `NODE27_<SCRIPT>_ARCHIVE_ROOT`
@@ -41,9 +41,67 @@ Order is load-bearing:
   - Input: archive root nested under (or containing) a raw-retention or
     cleanup target root.
     Expected: validation error naming both roots; no tool can run enforce.
+  - Input: archive and cleanup roots that are equal, contain `..` or `~`
+    aliases resolving to overlap, or reach the same/ancestor directory via
+    an existing symlink.
+    Expected: compare `expanduser()` + resolved filesystem identities,
+    reject equality or ancestry in either direction, and name the normalized
+    archive and cleanup roots. The helper accepts the complete cleanup-root
+    set explicitly so every later mutation-capable caller must supply all of
+    its retention/cleanup targets rather than relying on a hidden partial
+    env list.
   - Input: `NHMS_ARCHIVE_MIN_AGE_DAYS=20` with the 30-day retention window.
     Expected: validation error before any mutation.
-- [ ] 1.2 Pin the manifest/receipt JSON Schemas under `schemas/`.
+  - Input: canonical archive identity `(lane=forcing|runs|states, source,
+    cycle_identity, cycle_time, lane-specific fields)`, where ISO-8601 UTC
+    `cycle_time` must correspond to the compact path `cycle_identity`, with forcing requiring
+    `basin_version_id + model_id`, runs requiring `run_id`, and states
+    requiring `model_id`; every component is a non-empty safe path segment.
+    Expected: deterministic paths under
+    `<archive-root>/<lane>/<source-segment>/<cycle-identity>/<lane-scope...>/archive.tar.zst`
+    and the same directory's `manifest.json`; repeated lookup is identical,
+    while different sources with the same cycle/scope resolve distinctly.
+    Manifest `source` uses the shared canonical storage IDs (`gfs`, `ERA5`,
+    `IFS`); the filesystem `source-segment` is the corresponding lowercase
+    object-store segment. Case-insensitive aliases normalize to the same
+    identity/path, while an unknown source fails closed. The states lane also
+    has one exact reserved canonical source, `legacy-unqualified`, for valid
+    source-less `state_snapshot` rows/object paths (`source_id` NULL or the
+    existing equivalent empty-string representation); it is forbidden for
+    forcing/runs and never inferred as a real provider. Its cycle identity is
+    derived from the row's required `valid_time`, giving a deterministic,
+    collision-disjoint `states/legacy-unqualified/...` archive path.
+  - Input: identity with an unknown lane, empty/dot/dot-dot component, path
+    separator, absolute component, missing lane-required field, or field from
+    the wrong lane.
+    Expected: stable validation error before any filesystem access.
+  - Input: product manifest whose identity or declared archive path differs
+    from the canonical identity-derived path.
+    Expected: shared manifest-binding preflight rejects it before any
+    idempotency skip, completeness verdict, rebuild selection, or deletion.
+  - Input: product manifest using a known but non-canonical source alias
+    (`GFS`, `era5`, or `ifs`) even when its path uses the lowercase storage
+    segment.
+    Expected: schema and semantic manifest-binding preflight both reject it;
+    direct operator/lookup identities still normalize aliases before a
+    canonical manifest is produced.
+  - Input: a valid source-less legacy state reference
+    `states/<model>/<valid-time>/...` with `source_id = NULL` or `""`.
+    Expected: it maps explicitly to the states-only
+    same `legacy-unqualified` identity using `valid_time` for canonical cycle
+    identity/time; manifest/path binding round-trips deterministically and
+    cannot collide with provider-qualified states. Forcing/runs reject the
+    sentinel and no provider is synthesized.
+  - Input: existing `validate_object_path` callers and the established
+    `NODE27_RAW_RETENTION_OBJECT_STORE_ROOT` /
+    `NODE27_GOVERNANCE_OBJECT_STORE_ROOT` precedence behavior.
+    Expected: unchanged results and override behavior; archive helpers add no
+    display import/call dependency.
+  Implementation evidence (#846): focused storage, raw-retention,
+  resource-governance, display-boundary, and schema contract tests pass;
+  unsafe identities fail before root resolution and normalized overlap / age
+  checks fail closed.
+- [x] 1.2 Pin the manifest/receipt JSON Schemas under `schemas/`.
   Evidence floor: JSON Schemas + `schemas/examples/` documents exist for the
   archive manifest, archive-completeness receipt, salvage manifest, drill
   receipt, and retention receipt; they pass the json-schema-validate CI gate
@@ -52,14 +110,65 @@ Order is load-bearing:
   file-derived); the salvage manifest schema **requires** per-selector
   exported row counts; the drill receipt schema requires declared
   (source, window) coverage tuples; the completeness receipt schema requires
-  per-window verdicts, the salvage selector list, coverage bounds, and
-  `generated_at`.
+  per-inventoried-subject verdicts, the salvage selector list, coverage
+  bounds, and `generated_at`. Every verdict is bound to exactly one
+  lane-discriminated stable subject (`forcing_version_id`, `run_id`, or
+  `state_id`) even when multiple subjects share one time window; the
+  coverage mechanism is represented separately from the subject lane.
   Test rows:
   - Input: each schema's example document.
     Expected: validates in the json-schema-validate CI gate.
   - Input: a completeness receipt missing per-window verdicts, or a salvage
     manifest missing row counts.
     Expected: schema validation fails.
+  - Input: a product-archive manifest carrying any row-count field.
+    Expected: schema validation fails; product parity remains file-derived.
+  - Input: drill PASS without compared cycles/selectors/counts, staging
+    schema/database identity, or declared `(source, window)` coverage; drill
+    FAIL without a per-item diff.
+    Expected: schema validation fails for each missing verdict-specific
+    requirement.
+  - Input: retention refusal without a refusal reason, or successful enforce
+    without per-dropped-chunk name/freed bytes, deferred remainder, and the
+    salvage-backed windows field (which may be an empty list).
+    Expected: schema validation fails for each missing outcome-specific
+    requirement.
+  - Input: completeness/salvage selector with a typo, unknown identity key,
+    or forcing/river table-key mismatch.
+    Expected: both schemas reject it; forcing requires exactly
+    `forcing_version_id`, river requires exactly `run_id`.
+  - Input: product-only drill PASS with forcing/runs coverage and an empty
+    required `comparisons.selectors` array.
+    Expected: schema validation passes; a non-empty selector becomes a
+    runtime semantic requirement only when `db-export` coverage is present.
+  - Input: product archive/file or salvage object path that is absolute,
+    contains an empty/dot/dot-dot segment, backslash, or control character.
+    Expected: schema validation fails; ordinary nested root-relative paths
+    with the correct archive lane / `db-export` prefix pass.
+  - Input: salvage object path under `db-export/` whose filename does not end
+    in `.csv.zst`.
+    Expected: schema validation fails; an ordinary nested
+    `db-export/.../data.csv.zst` path passes.
+  - Input: two forcing versions sharing the same time window, one complete
+    and one gap; or a verdict with a missing/cross-lane subject identity.
+    Expected: the receipt represents the two subjects distinctly and rejects
+    the missing/cross-lane identity. Runtime inventory coverage (task 2.1)
+    must later prove exactly one verdict per inventoried subject and exact
+    `gap` to salvage-selector correspondence.
+  - Input: a state subject declaring `coverage: db-export` and
+    `verdict: complete`.
+    Expected: schema validation fails because DB-export salvage covers only
+    forcing/river timeseries; a state gap remains fail-closed and cannot be
+    converted into a salvage selector.
+  - Input: clean default dev/test environment after dependency sync.
+    Expected: every schema positive/negative pytest executes with zero skip;
+    missing `check-jsonschema` is a test failure, not a skipped contract gate.
+  Implementation evidence (#846): all five examples and schemas pass the CI
+  `check-jsonschema` example + metaschema loops; focused negative-schema tests
+  reject every missing or forbidden contract field above. Invariant closure
+  adds source-qualified lane identities, manifest/path binding, exact typed
+  selectors, safe relative paths, product-only drill PASS, and a default
+  dependency-backed zero-skip negative-contract gate.
 
 ## 2. Inventory audit and product archive lane (`timeseries-product-archive`)
 
@@ -81,10 +190,19 @@ Order is load-bearing:
     Expected: verdict `pending-archive`.
   - Input: DB rows whose products exist in neither object-store nor archive.
     Expected: verdict `gap`; exact selectors appear in the salvage list.
+  - Input: a `state_snapshot` reference whose state artifact exists in
+    neither object-store nor archive.
+    Expected: verdict `gap`; no DB-export selector is fabricated, and the
+    receipt cannot satisfy retention until product coverage is restored.
   - Input: final-path archive object whose tarball sha256 mismatches its
     manifest.
     Expected: treated as absent (`pending-archive`/`gap`); mismatch reported
     in the receipt.
+  - Input: a source-less legacy `state_snapshot` row and its existing
+    `states/<model>/<valid-time>/...` hot object.
+    Expected: inventory uses the explicit `legacy-unqualified` archive
+    identity; a verified legacy archive can yield `complete`, while a
+    missing legacy object remains a non-salvageable `gap`.
 - [ ] 2.2 Build the archive mover (`scripts/node27_product_archive.py` +
   `_once.sh`).
   Evidence floor: per-cycle `tar.zst` + `manifest.json` with sha256 (no row
@@ -97,6 +215,10 @@ Order is load-bearing:
   - Input: aged fixture cycle, enforce mode.
     Expected: verified tarball + manifest at the final path; source removed
     only after verification passes.
+  - Input: an aged source-less `states/<model>/<valid-time>/...` fixture.
+    Expected: archived under the collision-disjoint
+    `states/legacy-unqualified/...` path with no provider inference and the
+    same verify-before-delete guarantees.
   - Input: tarball sha256 mismatch during verification.
     Expected: source untouched; non-zero exit; failure recorded in receipt.
   - Input: re-run over a cycle with a verified existing object.
@@ -165,11 +287,14 @@ Order is load-bearing:
   3), and is cross-linked from the retention runbook section (6.2).
 - [ ] 3.3 node-27 live: execute salvage for the audit-derived DB-only
   windows.
-  Evidence floor: committed salvage receipt covering every `gap` window from
-  the live completeness receipt (expected: forcing before 2026-06-16);
+  Evidence floor: committed salvage receipt covering every audit-emitted
+  salvage selector / salvageable forcing or river `gap` from the live
+  completeness receipt (expected: forcing before 2026-06-16);
   per-selector manifest row count equals the DB row count at export time; a
-  follow-up audit run marks those windows `complete` via verified salvage
-  objects and emits an empty salvage list.
+  follow-up audit run marks those salvageable subjects `complete` via
+  verified salvage objects and emits an empty salvage list. Any
+  non-salvageable state gap remains `gap` and keeps retention fail-closed
+  until product coverage is restored.
 
 ## 4. Hypertable compression (`hypertable-compression`)
 

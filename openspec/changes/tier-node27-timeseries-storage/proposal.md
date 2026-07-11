@@ -52,7 +52,8 @@ destroy sole-copy data. Decision record: `docs/adr/0002-node27-timeseries-hot-co
   capacity watermark, and the recurring inventory audit that emits the
   archive-completeness receipt consumed by the retention gate and the
   salvage lane.
-- `db-export-salvage`: one-time export of DB-only windows to `csv.zst` +
+- `db-export-salvage`: one-time export of DB-only forcing/river timeseries
+  windows to `csv.zst` +
   manifest with `db-export` provenance; scope fixed by the inventory audit's
   archive-completeness receipt; restore is a documented manual `COPY FROM`
   runbook procedure only.

@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0",
+  "provenance": "db-export",
+  "generated_at": "2026-07-11T12:10:00Z",
+  "source_database": {"database": "nhms", "instance_id": "node27-primary-pg15"},
+  "exports": [
+    {
+      "selector": {
+        "table": "met.forcing_station_timeseries",
+        "identity": {"forcing_version_id": "forc-gfs-2026052800-yangtze"},
+        "window": {"start": "2026-05-28T00:00:00Z", "end": "2026-05-29T00:00:00Z"}
+      },
+      "exported_row_count": 86400,
+      "columns": ["forcing_version_id", "station_id", "variable", "valid_time", "value"],
+      "object": {
+        "path": "db-export/forcing/forc-gfs-2026052800-yangtze/data.csv.zst",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "size_bytes": 524288
+      }
+    }
+  ]
+}

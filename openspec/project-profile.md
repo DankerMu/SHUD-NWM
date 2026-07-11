@@ -49,6 +49,22 @@ Active profile for `codex-codeagent-workflow`. It supplements
 - Local lint/unit/OpenSpec checks are necessary but do not substitute for
   required node-27 live DB/display receipts.
 
+## Command entry points
+
+- Setup: `uv sync --all-extras --dev`; frontend `CI=true corepack pnpm install --frozen-lockfile`.
+- Backend: `uv run ruff check .`; `uv run pytest -q`; focused `uv run pytest -q tests/<file>.py`.
+- Contracts: `openspec validate <change> --strict --no-interactive`; JSON schemas use the `check-jsonschema` loop in `.github/workflows/ci.yml`.
+- Frontend: `cd apps/frontend && corepack pnpm test && corepack pnpm build`.
+
+## Verification matrix
+
+- Python/shared helper -> focused pytest + `uv run ruff check .` -> passing tests and zero lint findings.
+- JSON Schema/examples -> CI `check-jsonschema` metaschema/example loop -> every example validates against its named schema.
+- OpenSpec -> `openspec validate <change> --strict --no-interactive` -> strict-valid change.
+- DB migration/Timescale behavior -> node-27 real-DB pytest/catalog query -> committed live receipt or captured query output.
+- Display/API/frontend -> node-27 live receipt + frontend test/build -> C1-C4 receipt and passing build.
+- Slurm/SHUD scheduling -> node-22 runtime receipt -> terminal Slurm/SHUD evidence; only when scheduling/runtime changes.
+
 ## Domain risk packs
 
 - Geospatial / CRS / basin geometry
