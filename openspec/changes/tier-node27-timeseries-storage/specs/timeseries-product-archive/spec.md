@@ -209,6 +209,11 @@ opens. `ENOENT` is ordinary absence only after every existing parent has been
 verified as a real directory. JSON bytes, size and sha256 SHALL come from the
 same opened inode; a pre-existing or raced symlink/non-directory/permission
 error is a blocker.
+For a state subject, including a clone, archive coverage SHALL additionally
+require exactly one manifest file entry whose path is the strict physical
+state URI relative to its provider/legacy state root and whose sha256 equals
+the origin-bound DB checksum. A tarball with only lane/model/time identity is
+not proof that the referenced state artifact is preserved.
 
 The emitted receipt SHALL contain every inventoried stable subject exactly
 once, deterministically ordered. Its forcing/run gaps and salvage selectors
@@ -335,3 +340,11 @@ which valid coverage mechanism wins precedence.
 - **THEN** descriptor-bound no-follow access MUST block publication
 - **AND** manifest parsing and checksum verification MUST refer to the same
   opened inode
+
+#### Scenario: State archive binds the referenced member
+
+- **WHEN** a provider, legacy, or clone state archive tarball verifies but its
+  manifest lacks a unique member matching the physical state URI and DB
+  checksum
+- **THEN** the audit MUST block publication rather than mark the state
+  subject complete

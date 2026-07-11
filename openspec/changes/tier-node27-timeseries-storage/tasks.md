@@ -250,6 +250,12 @@ Order is load-bearing:
   an existing intermediate symlink are blockers. JSON parsing and checksum
   verification MUST consume the same bytes/inode, and output temp creation +
   atomic replace MUST stay anchored to the pinned receipt-parent FD.
+  For a state subject (including clones), product-archive coverage additionally
+  requires exactly one manifest `files` entry whose path is the physical
+  `state_uri` relative to its strict provider/legacy state root and whose
+  sha256 equals the DB/origin state checksum. Missing, duplicate, wrong-path
+  or wrong-checksum state members block publication; tarball identity alone
+  is never state preservation proof.
 
   Classification precedence is fixed: verified product archive;
   verified exact `db-export` selector (forcing/runs only); hot object-store
@@ -320,6 +326,10 @@ Order is load-bearing:
     Expected: the repeatable-read self-join blocks publication; a valid clone
     retains its own `state_id` subject while sharing only the exact origin
     artifact coverage.
+  - Input: provider, legacy, or clone state archive with a valid tarball but
+    no unique manifest member matching the physical state URI and DB checksum.
+    Expected: publication blocks; a unique correct member yields verified
+    `complete/product-archive` for that stable state subject.
   - Input: missing archive root or absent canonical archive siblings.
     Expected: archive coverage is absent and classification continues via
     salvage/hot/gap; no configuration crash.

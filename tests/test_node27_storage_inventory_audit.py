@@ -186,6 +186,108 @@ def test_missing_archive_root_is_ordinary_absence(tmp_path: Path) -> None:
     assert audit.discover_salvage(tmp_path / "missing") == ()
 
 
+def _state_archive_subject(kind: str) -> audit.InventorySubject:
+    checksum = "c" * 64
+    if kind == "provider":
+        return _subject(
+            "states",
+            "provider-state",
+            hot_uri="states/gfs/model-a/2026050100/cycle-gfs/lead-006/state.cfg.ic",
+            checksum=checksum,
+        )
+    if kind == "legacy":
+        return _subject(
+            "states",
+            "legacy-state",
+            source_id=None,
+            hot_uri="states/model-a/2026050100/legacy/state.cfg.ic",
+            checksum=checksum,
+        )
+    return _subject(
+        "states",
+        "clone-state",
+        model_id="model-b",
+        hot_uri="states/gfs/model-a/2026050100/cycle-gfs/lead-006/state.cfg.ic",
+        checksum=checksum,
+        cloned_from_state_id="origin-state",
+        cloned_from_model_id="model-a",
+        clone_gate_fingerprint="f" * 64,
+    )
+
+
+def _write_state_product_archive(config: audit.AuditConfig, subject: audit.InventorySubject, *, mutation: str) -> None:
+    paths = audit.archive_provenance_paths(config.archive_root, identity=subject.archive_identity)
+    paths.archive.parent.mkdir(parents=True)
+    archive_content = b"state archive"
+    paths.archive.write_bytes(archive_content)
+    identity = subject.archive_identity
+    identity_payload = {
+        "lane": "states",
+        "source": identity.source,
+        "cycle_identity": identity.cycle_identity,
+        "cycle_time": identity.cycle_time,
+        "model_id": identity.model_id,
+    }
+    member = audit._state_archive_member_path(subject, config.object_store_prefix)
+    entry = {"path": member, "sha256": subject.checksum, "size_bytes": 5}
+    if mutation in {"missing", "wrong-path"}:
+        files = [{**entry, "path": "other/state.cfg.ic"}]
+    elif mutation == "duplicate":
+        files = [entry, dict(entry)]
+    elif mutation == "wrong-checksum":
+        files = [{**entry, "sha256": "d" * 64}]
+    else:
+        files = [entry]
+    manifest = {
+        "schema_version": "1.0",
+        "provenance": "product-archive",
+        "identity": identity_payload,
+        "archive": {
+            "path": paths.archive.relative_to(config.archive_root).as_posix(),
+            "manifest_path": paths.manifest.relative_to(config.archive_root).as_posix(),
+            "sha256": hashlib.sha256(archive_content).hexdigest(),
+            "size_bytes": len(archive_content),
+        },
+        "files": files,
+        "created_at": audit._time(NOW),
+        "tool_version": "test/1",
+    }
+    paths.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+
+
+@pytest.mark.parametrize("kind", ["provider", "legacy", "clone"])
+def test_state_product_archive_binds_exact_physical_member(kind: str, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    subject = _state_archive_subject(kind)
+    _write_state_product_archive(config, subject, mutation="valid")
+    coverage = audit.verify_product_archive(subject, config.archive_root, config.object_store_prefix)
+    assert coverage == audit.Coverage("product-archive", ("checksum-verified product archive present",))
+    assert subject.stable_key == ("states", f"{kind}-state")
+
+
+@pytest.mark.parametrize("kind", ["provider", "legacy", "clone"])
+@pytest.mark.parametrize("mutation", ["missing", "wrong-path", "duplicate", "wrong-checksum"])
+def test_state_product_archive_rejects_unbound_member(kind: str, mutation: str, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    subject = _state_archive_subject(kind)
+    _write_state_product_archive(config, subject, mutation=mutation)
+    with pytest.raises(audit.AuditBlocked, match="exactly one bound member|checksum differs"):
+        audit.verify_product_archive(subject, config.archive_root, config.object_store_prefix)
+
+
+def test_forcing_and_run_archive_identity_is_fully_bound_without_state_member_assumption(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    forcing = _subject()
+    run = _subject("runs", "run-a")
+    forcing_paths = audit.archive_provenance_paths(config.archive_root, identity=forcing.archive_identity)
+    run_paths = audit.archive_provenance_paths(config.archive_root, identity=run.archive_identity)
+    assert forcing.archive_identity.basin_version_id == "basin-a"
+    assert forcing.archive_identity.model_id == "model-a"
+    assert "forcing/gfs/2026050100/basin-a/model-a" in forcing_paths.archive.as_posix()
+    assert run.archive_identity.run_id == "run-a"
+    assert "runs/gfs/2026050100/run-a" in run_paths.archive.as_posix()
+
+
 def test_salvage_discovery_verifies_object_and_rejects_duplicate(tmp_path: Path) -> None:
     config = _config(tmp_path)
     subject = _subject()

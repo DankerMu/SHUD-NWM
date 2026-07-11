@@ -324,7 +324,9 @@ def discover_salvage(
     return tuple(found[key] for key in sorted(found))
 
 
-def verify_product_archive(subject: InventorySubject, archive_root: Path) -> Coverage | None:
+def verify_product_archive(
+    subject: InventorySubject, archive_root: Path, object_store_prefix: str = ""
+) -> Coverage | None:
     paths = archive_provenance_paths(archive_root, identity=subject.archive_identity)
     manifest_result = _read_json_with_digest_optional(paths.manifest, archive_root)
     archive_result = _size_sha256_optional(paths.archive, archive_root)
@@ -340,11 +342,36 @@ def verify_product_archive(subject: InventorySubject, archive_root: Path) -> Cov
         raise AuditBlocked(str(error)) from error
     if expected != paths:
         raise AuditBlocked(f"archive path binding differs for {subject.stable_key}")
+    if subject.lane == "states":
+        member_path = _state_archive_member_path(subject, object_store_prefix)
+        members = [entry for entry in manifest["files"] if entry["path"] == member_path]
+        if len(members) != 1:
+            raise AuditBlocked(
+                f"state archive manifest must contain exactly one bound member {member_path!r}: {subject.subject_id}"
+            )
+        if members[0]["sha256"] != subject.checksum:
+            raise AuditBlocked(f"state archive member checksum differs from state provenance: {subject.subject_id}")
     size, digest = archive_result
     declared = manifest["archive"]
     if size != declared["size_bytes"] or digest != declared["sha256"]:
         return Coverage("none", ("product archive size/sha256 mismatch",))
     return Coverage("product-archive", ("checksum-verified product archive present",))
+
+
+def _state_archive_member_path(subject: InventorySubject, object_store_prefix: str) -> str:
+    key = _object_key(subject.hot_uri, object_store_prefix)
+    physical_model = subject.cloned_from_model_id or subject.model_id
+    cycle = subject.cycle_time.astimezone(UTC).strftime("%Y%m%d%H")
+    if subject.source_id:
+        state_root = f"states/{normalize_source_id(subject.source_id)}/{physical_model}/{cycle}/"
+    else:
+        state_root = f"states/{physical_model}/{cycle}/"
+    if not key.startswith(state_root):
+        raise AuditBlocked(f"state URI does not bind to archive physical identity: {subject.subject_id}")
+    member_path = key[len(state_root) :]
+    if not member_path or any(part in {"", ".", ".."} for part in member_path.split("/")):
+        raise AuditBlocked(f"state URI has no safe archive member path: {subject.subject_id}")
+    return member_path
 
 
 def verify_hot(subject: InventorySubject, config: AuditConfig) -> Coverage | None:
@@ -622,7 +649,7 @@ def run_audit(config: AuditConfig, *, connect: ConnectionFactory | None = None) 
     product: dict[tuple[str, str], Coverage | None] = {}
     hot: dict[tuple[str, str], Coverage | None] = {}
     for subject in subjects:
-        product[subject.stable_key] = verify_product_archive(subject, config.archive_root)
+        product[subject.stable_key] = verify_product_archive(subject, config.archive_root, config.object_store_prefix)
         hot[subject.stable_key] = verify_hot(subject, config)
     receipt = build_receipt(
         subjects,
