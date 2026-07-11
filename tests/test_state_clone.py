@@ -37,6 +37,10 @@ from packages.common.state_clone import (
 from packages.common.state_manager import (
     FileStateSnapshotIndexRepository,
     StateSnapshot,
+    _snapshot_from_row,
+    _snapshot_to_dict,
+    _state_index_entry_from_snapshot,
+    _state_snapshot_from_index_entry,
     publish_state_snapshot_index,
     state_snapshot_id,
 )
@@ -702,6 +706,15 @@ def test_clone_scope_is_single_source_only(
         for s in repo.snapshots.values()
     )
 
+    # SUB-3 provenance columns are source-scoped: `cloned_from_state_id` on the
+    # source_a clone references source_a's origin row, NOT source_b's. A future
+    # cross-source lookup drift (e.g. dropping source_id from the query filter)
+    # would silently attribute a source_a clone to source_b's `(M0, source_b, t*)`
+    # origin, breaking Decision 3's per-source attribution.
+    assert result.cloned_row.cloned_from_state_id == source_a_snapshot.state_id
+    assert result.cloned_row.cloned_from_state_id != source_b_snapshot.state_id
+    assert result.cloned_row.cloned_from_model_id == M0_MODEL_ID
+
 
 # --- SUB-3 (§2.2 / §2.3): clone-row identity + cloned_from provenance ------
 
@@ -858,6 +871,101 @@ def test_pre_clone_and_legacy_rows_keep_null_provenance_and_remain_selectable(
     assert fetched.cloned_from_state_id is None
     assert fetched.cloned_from_model_id is None
     assert fetched.clone_gate_fingerprint is None
+
+
+def test_production_serializers_round_trip_all_three_provenance_columns() -> None:
+    """SUB-3 fold: production write path must persist and read back provenance.
+
+    The SUB-2 fake `_FakeCloneRepository` stores the dataclass verbatim via
+    ``dataclasses.replace``, so unit tests silently pass even if the four
+    production-side serializer helpers drop the three new provenance columns.
+    Under compact + state-clone-core inherent risk (production business
+    continuity), a silent write-path drop would degrade every real clone row
+    to a legacy-shaped row (Python-side always None), defeating the MUST
+    attribution audit trail. This test round-trips a clone snapshot through
+    each of the four production helpers and asserts all 3 provenance columns
+    survive.
+    """
+
+    clone = StateSnapshot(
+        state_id="clone_state_1",
+        model_id=M1_MODEL_ID,
+        run_id="fcst_gfs_2026061418_basin_v1_m0",
+        valid_time=CUTOVER_VALID_TIME,
+        state_uri="states/gfs/basin_v1_m0/2026061506/state.cfg.ic",
+        checksum="sha256:clone-payload",
+        usable_flag=True,
+        source_id=SOURCE_ID,
+        cycle_id=CYCLE_ID,
+        lead_hours=12,
+        model_package_version=M1_PACKAGE_VERSION,
+        model_package_checksum=M1_PACKAGE_CHECKSUM,
+        original_shud_filename="run.cfg.ic",
+        cloned_from_state_id="source_state_m0",
+        cloned_from_model_id=M0_MODEL_ID,
+        clone_gate_fingerprint="a" * 64,
+    )
+
+    # 1. Psycopg row-hydration helper (used by upsert_state_snapshot RETURNING).
+    row_dict = {
+        "state_id": clone.state_id,
+        "model_id": clone.model_id,
+        "run_id": clone.run_id,
+        "valid_time": clone.valid_time,
+        "state_uri": clone.state_uri,
+        "checksum": clone.checksum,
+        "usable_flag": clone.usable_flag,
+        "created_at": _dt("2026-06-15T07:00:00Z"),
+        "source_id": clone.source_id,
+        "cycle_id": clone.cycle_id,
+        "lead_hours": clone.lead_hours,
+        "model_package_version": clone.model_package_version,
+        "model_package_checksum": clone.model_package_checksum,
+        "original_shud_filename": clone.original_shud_filename,
+        "cloned_from_state_id": clone.cloned_from_state_id,
+        "cloned_from_model_id": clone.cloned_from_model_id,
+        "clone_gate_fingerprint": clone.clone_gate_fingerprint,
+    }
+    hydrated = _snapshot_from_row(row_dict)
+    assert hydrated.cloned_from_state_id == clone.cloned_from_state_id
+    assert hydrated.cloned_from_model_id == clone.cloned_from_model_id
+    assert hydrated.clone_gate_fingerprint == clone.clone_gate_fingerprint
+
+    # 2. Snapshot dict serializer.
+    serialized = _snapshot_to_dict(clone)
+    assert serialized["cloned_from_state_id"] == clone.cloned_from_state_id
+    assert serialized["cloned_from_model_id"] == clone.cloned_from_model_id
+    assert serialized["clone_gate_fingerprint"] == clone.clone_gate_fingerprint
+
+    # 3. File-state-index entry emit + hydrate (Task 3.3 substrate).
+    index_entry = _state_index_entry_from_snapshot(clone)
+    assert index_entry["cloned_from_state_id"] == clone.cloned_from_state_id
+    assert index_entry["cloned_from_model_id"] == clone.cloned_from_model_id
+    assert index_entry["clone_gate_fingerprint"] == clone.clone_gate_fingerprint
+
+    rehydrated = _state_snapshot_from_index_entry(index_entry)
+    assert rehydrated.cloned_from_state_id == clone.cloned_from_state_id
+    assert rehydrated.cloned_from_model_id == clone.cloned_from_model_id
+    assert rehydrated.clone_gate_fingerprint == clone.clone_gate_fingerprint
+
+    # 4. Legacy row (all provenance None) still hydrates without KeyError.
+    legacy_row = dict(row_dict)
+    legacy_row.pop("cloned_from_state_id")
+    legacy_row.pop("cloned_from_model_id")
+    legacy_row.pop("clone_gate_fingerprint")
+    legacy_hydrated = _snapshot_from_row(legacy_row)
+    assert legacy_hydrated.cloned_from_state_id is None
+    assert legacy_hydrated.cloned_from_model_id is None
+    assert legacy_hydrated.clone_gate_fingerprint is None
+
+    legacy_entry = dict(index_entry)
+    legacy_entry.pop("cloned_from_state_id")
+    legacy_entry.pop("cloned_from_model_id")
+    legacy_entry.pop("clone_gate_fingerprint")
+    legacy_rehydrated = _state_snapshot_from_index_entry(legacy_entry)
+    assert legacy_rehydrated.cloned_from_state_id is None
+    assert legacy_rehydrated.cloned_from_model_id is None
+    assert legacy_rehydrated.clone_gate_fingerprint is None
 
 
 # --- Integration: strict warm-start acceptance on BOTH planes --------------
