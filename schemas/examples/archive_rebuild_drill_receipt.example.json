@@ -1,0 +1,16 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-07-11T12:20:00Z",
+  "verdict": "PASS",
+  "staging_database": {"database": "nhms", "schema": "archive_drill_20260711", "instance_id": "node27-primary-pg15"},
+  "coverage": [
+    {"source": "forcing", "window": {"start": "2026-05-28T00:00:00Z", "end": "2026-05-29T00:00:00Z"}},
+    {"source": "runs", "window": {"start": "2026-05-31T00:00:00Z", "end": "2026-06-01T00:00:00Z"}},
+    {"source": "db-export", "window": {"start": "2026-05-28T00:00:00Z", "end": "2026-05-29T00:00:00Z"}}
+  ],
+  "comparisons": {
+    "cycles": ["gfs-2026053100-yangtze"],
+    "selectors": ["forcing_version_id=forc-gfs-2026052800-yangtze"],
+    "counts": [{"item": "forc-gfs-2026052800-yangtze", "expected": 86400, "actual": 86400}]
+  }
+}

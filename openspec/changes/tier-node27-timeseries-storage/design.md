@@ -197,3 +197,66 @@ metadata/coverage rows are never dropped.
   receipt, out of scope here.
 - TimescaleDB upgrade (2.10 → 2.13+ would allow compressed-chunk DML and
   lighten D5) — revisit before national scale.
+
+## Workflow Fixture: Issue #846 Storage Foundation
+
+Fixture level: expanded. Repair intensity: high. Project profile: NHMS.
+
+Change surface:
+
+- `packages/common/storage.py`, focused unit tests, five JSON Schemas, and their examples.
+- No scripts, systemd, migration, display route, or production mutation in this PR.
+
+Must preserve:
+
+- Existing object-path validation and the raw-retention/resource-governance env override convention.
+- ADR 0001 display routes remain disk-only and do not import or call archive resolution.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: selected — shared helper contract is consumed by later scripts; no CLI is added here.
+- Config / project setup: selected — env precedence, minimum-age, and root-overlap validation are the feature.
+- File IO / path safety / overwrite: selected — archive and cleanup roots must be disjoint before any later mutation.
+- Schema / columns / units / field names: selected — five schemas are cross-script format authorities.
+- Auth / permissions / secrets: not selected — no credentials, roles, or permission boundary changes.
+- Concurrency / shared state / ordering: not selected — no runner or mutation is implemented in #846.
+- Resource limits / large input / discovery: not selected — no archive scanning or receipt ingestion is implemented in #846.
+- Legacy compatibility / examples: selected — existing env aliases and object-path callers must remain compatible.
+- Error handling / rollback / partial outputs: selected — invalid overlap/age must fail before mutation-capable callers proceed.
+- Release / packaging / dependency compatibility: not selected — no runtime dependency or packaging change.
+- Documentation / migration notes: not selected — runbooks and environment examples belong to later issues.
+- Geospatial / CRS / basin geometry: not selected — no geometry surface.
+- Hydro-met time series / forcing windows: selected — receipt coverage bounds and selectors describe forcing/river windows.
+- SHUD numerical runtime / conservation / NaN: not selected — no solver behavior.
+- PostGIS / TimescaleDB domain behavior: not selected — schemas describe evidence only; no DB access/migration.
+- Slurm production lifecycle / mock-vs-real parity: not selected — node-22 remains untouched.
+- External hydro-met providers / snapshot reproducibility: not selected — no provider discovery or fetch.
+- Run manifest / QC provenance: selected — archive/salvage manifests must bind checksums, identities, selectors, and counts.
+- Published NHMS artifacts / display identity: selected — archive provenance is non-display-only and must not alter display lookup identity.
+
+Invariant Matrix:
+
+- Governing invariant: later archive/retention tools can act only with a valid, non-overlapping archive configuration and schema-conformant provenance, while display remains disk-only.
+- Source of truth: resolved archive root/minimum age plus the five schemas under `schemas/`.
+- Producers: schema examples only in #846; runtime producers are later issues.
+- Validators/preflight: `packages/common/storage.py` configuration and provenance lookup helpers.
+- Storage/cache/query: filesystem path values only; no DB/cache access.
+- Public routes/entrypoints: later node-27 scripts consume the helper; display routes are unchanged siblings.
+- Frontend/downstream consumers: later audit/archive/salvage/drill/retention scripts; display is explicitly excluded.
+- Failure paths/rollback/stale state: overlap and too-small age fail before action; lookup of a cycle returns deterministic archive object/manifest paths.
+- Evidence/audit/readiness: focused pytest, schema examples plus negative documents, ruff, and strict OpenSpec validation.
+- Regression: shared root only and shared+override -> shared resolution then override precedence.
+- Regression: archive root contains/is contained by cleanup target, or age 20 with retention 30 -> named validation error before mutation.
+- Regression: equal/aliased/symlink-resolved archive and cleanup roots -> normalized overlap rejection; caller supplies its complete cleanup-root set.
+- Regression: safe forcing/runs/states identity -> deterministic sibling `archive.tar.zst` + `manifest.json`; unsafe lane/component -> error before access.
+- Regression: valid examples -> schema PASS; missing completeness verdict or salvage row count -> schema FAIL.
+- Regression: product manifest row count, incomplete drill verdict details, or incomplete retention outcome details -> schema FAIL.
+- Regression: unchanged display import/call graph -> no archive resolver dependency and existing disk-only not-found semantics.
+- Regression: unchanged `validate_object_path` and raw-retention/governance env aliases -> existing results and precedence remain stable.
+
+Boundary-surface checklist:
+
+- Shared helper root: `packages/common/storage.py`; read-only path derivation and validation only.
+- Public entrypoints: none added; later scripts are consumers, and display entrypoints remain unchanged.
+- Producer/consumer evidence boundary: each example names one schema; manifest fields distinguish product archive from `db-export` salvage.
+- Stale-state/idempotency and write/delete/publish boundaries: out of scope until the corresponding runner issues.

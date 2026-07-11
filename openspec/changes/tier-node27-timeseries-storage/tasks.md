@@ -17,7 +17,7 @@ Order is load-bearing:
 
 ## 1. Storage config foundation (`runtime-storage-source-canonicalization`)
 
-- [ ] 1.1 Canonicalize `NHMS_ARCHIVE_ROOT` and extend the shared
+- [x] 1.1 Canonicalize `NHMS_ARCHIVE_ROOT` and extend the shared
   storage-path helper used by the new scripts.
   Evidence floor: the helper resolves the archive root from
   `NHMS_ARCHIVE_ROOT`, with per-script `NODE27_<SCRIPT>_ARCHIVE_ROOT`
@@ -41,9 +41,37 @@ Order is load-bearing:
   - Input: archive root nested under (or containing) a raw-retention or
     cleanup target root.
     Expected: validation error naming both roots; no tool can run enforce.
+  - Input: archive and cleanup roots that are equal, contain `..` or `~`
+    aliases resolving to overlap, or reach the same/ancestor directory via
+    an existing symlink.
+    Expected: compare `expanduser()` + resolved filesystem identities,
+    reject equality or ancestry in either direction, and name the normalized
+    archive and cleanup roots. The helper accepts the complete cleanup-root
+    set explicitly so every later mutation-capable caller must supply all of
+    its retention/cleanup targets rather than relying on a hidden partial
+    env list.
   - Input: `NHMS_ARCHIVE_MIN_AGE_DAYS=20` with the 30-day retention window.
     Expected: validation error before any mutation.
-- [ ] 1.2 Pin the manifest/receipt JSON Schemas under `schemas/`.
+  - Input: archive identity `(lane=forcing|runs|states, cycle_identity,
+    optional ordered basin/run scope components)` with every component a
+    non-empty safe path segment.
+    Expected: deterministic paths under
+    `<archive-root>/<lane>/<cycle-identity>/<scope...>/archive.tar.zst` and
+    the same directory's `manifest.json`; repeated lookup is identical for
+    all three lanes.
+  - Input: identity with an unknown lane, empty/dot/dot-dot component, path
+    separator, or absolute component.
+    Expected: stable validation error before any filesystem access.
+  - Input: existing `validate_object_path` callers and the established
+    `NODE27_RAW_RETENTION_OBJECT_STORE_ROOT` /
+    `NODE27_GOVERNANCE_OBJECT_STORE_ROOT` precedence behavior.
+    Expected: unchanged results and override behavior; archive helpers add no
+    display import/call dependency.
+  Implementation evidence (#846): focused storage, raw-retention,
+  resource-governance, display-boundary, and schema contract tests pass;
+  unsafe identities fail before root resolution and normalized overlap / age
+  checks fail closed.
+- [x] 1.2 Pin the manifest/receipt JSON Schemas under `schemas/`.
   Evidence floor: JSON Schemas + `schemas/examples/` documents exist for the
   archive manifest, archive-completeness receipt, salvage manifest, drill
   receipt, and retention receipt; they pass the json-schema-validate CI gate
@@ -60,6 +88,21 @@ Order is load-bearing:
   - Input: a completeness receipt missing per-window verdicts, or a salvage
     manifest missing row counts.
     Expected: schema validation fails.
+  - Input: a product-archive manifest carrying any row-count field.
+    Expected: schema validation fails; product parity remains file-derived.
+  - Input: drill PASS without compared cycles/selectors/counts, staging
+    schema/database identity, or declared `(source, window)` coverage; drill
+    FAIL without a per-item diff.
+    Expected: schema validation fails for each missing verdict-specific
+    requirement.
+  - Input: retention refusal without a refusal reason, or successful enforce
+    without per-dropped-chunk name/freed bytes, deferred remainder, and the
+    salvage-backed windows field (which may be an empty list).
+    Expected: schema validation fails for each missing outcome-specific
+    requirement.
+  Implementation evidence (#846): all five examples and schemas pass the CI
+  `check-jsonschema` example + metaschema loops; focused negative-schema tests
+  reject every missing or forbidden contract field above.
 
 ## 2. Inventory audit and product archive lane (`timeseries-product-archive`)
 

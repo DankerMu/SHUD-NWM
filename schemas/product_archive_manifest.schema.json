@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NHMS Product Archive Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "provenance", "identity", "archive", "files", "created_at", "tool_version"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "provenance": {"const": "product-archive"},
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lane", "source", "cycle_identity", "cycle_time", "scope_components"],
+      "properties": {
+        "lane": {"enum": ["forcing", "runs", "states"]},
+        "source": {"type": "string", "minLength": 1},
+        "cycle_identity": {"type": "string", "minLength": 1},
+        "cycle_time": {"type": "string", "format": "date-time"},
+        "basin_version_id": {"type": "string", "minLength": 1},
+        "model_id": {"type": "string", "minLength": 1},
+        "run_id": {"type": "string", "minLength": 1},
+        "scope_components": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "archive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "size_bytes"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "size_bytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256", "size_bytes"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "size_bytes": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "created_at": {"type": "string", "format": "date-time"},
+    "tool_version": {"type": "string", "minLength": 1}
+  }
+}

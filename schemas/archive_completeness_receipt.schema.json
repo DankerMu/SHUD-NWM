@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NHMS Archive Completeness Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "generated_at", "coverage_bounds", "windows", "salvage_selectors"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "coverage_bounds": {"$ref": "#/definitions/window"},
+    "windows": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "window", "verdict"],
+        "properties": {
+          "source": {"enum": ["forcing", "runs", "states", "db-export"]},
+          "window": {"$ref": "#/definitions/window"},
+          "verdict": {"enum": ["complete", "pending-archive", "gap"]},
+          "evidence": {"type": "array", "items": {"type": "string", "minLength": 1}}
+        }
+      }
+    },
+    "salvage_selectors": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/selector"}
+    }
+  },
+  "definitions": {
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": {"type": "string", "format": "date-time"},
+        "end": {"type": "string", "format": "date-time"}
+      }
+    },
+    "selector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["table", "identity", "window"],
+      "properties": {
+        "table": {"enum": ["hydro.river_timeseries", "met.forcing_station_timeseries"]},
+        "identity": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string", "minLength": 1}},
+        "window": {"$ref": "#/definitions/window"}
+      }
+    }
+  }
+}

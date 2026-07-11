@@ -1,0 +1,70 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NHMS Timeseries Retention Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "generated_at", "mode", "outcome"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "mode": {"enum": ["dry-run", "enforce"]},
+    "outcome": {"enum": ["dry-run", "refused", "enforced"]},
+    "refusal_reason": {"type": "string", "minLength": 1},
+    "candidate_chunks": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "dropped_chunks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "freed_bytes"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "freed_bytes": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "deferred_remainder": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "salvage_backed_windows": {"type": "array", "items": {"$ref": "#/definitions/window"}}
+  },
+  "definitions": {
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": {"type": "string", "format": "date-time"},
+        "end": {"type": "string", "format": "date-time"}
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {"mode": {"const": "dry-run"}, "outcome": {"const": "dry-run"}},
+      "required": ["candidate_chunks", "deferred_remainder"],
+      "not": {
+        "anyOf": [
+          {"required": ["refusal_reason"]},
+          {"required": ["dropped_chunks"]},
+          {"required": ["salvage_backed_windows"]}
+        ]
+      }
+    },
+    {
+      "properties": {"mode": {"const": "enforce"}, "outcome": {"const": "refused"}},
+      "required": ["refusal_reason"],
+      "not": {
+        "anyOf": [
+          {"required": ["candidate_chunks"]},
+          {"required": ["dropped_chunks"]},
+          {"required": ["deferred_remainder"]},
+          {"required": ["salvage_backed_windows"]}
+        ]
+      }
+    },
+    {
+      "properties": {"mode": {"const": "enforce"}, "outcome": {"const": "enforced"}},
+      "required": ["dropped_chunks", "deferred_remainder", "salvage_backed_windows"],
+      "not": {"anyOf": [{"required": ["refusal_reason"]}, {"required": ["candidate_chunks"]}]}
+    }
+  ]
+}
