@@ -357,9 +357,13 @@ def test_legacy_unqualified_and_provider_state_paths_do_not_collide(tmp_path: Pa
     assert {provider.archive.parts[-4] for provider in providers} == {"gfs", "era5", "ifs"}
 
 
-def test_state_reference_factory_maps_null_source_to_exact_legacy_identity_and_path(tmp_path: Path) -> None:
+@pytest.mark.parametrize("source_id", [None, ""])
+def test_state_reference_factory_maps_unqualified_source_to_exact_legacy_identity_and_path(
+    tmp_path: Path,
+    source_id: str | None,
+) -> None:
     identity = archive_identity_for_state_reference(
-        source_id=None,
+        source_id=source_id,
         model_id="model-v1",
         valid_time=datetime(2026, 7, 11, tzinfo=UTC),
     )
@@ -422,6 +426,7 @@ def test_state_reference_factory_normalizes_equivalent_aware_hour_to_utc() -> No
         ("gfs", "model-v1", datetime(2026, 7, 11), "timezone-aware"),
         ("gfs", "model-v1", datetime(2026, 7, 11, 0, 1, tzinfo=UTC), "UTC hourly instant"),
         ("unknown-provider", "model-v1", datetime(2026, 7, 11, tzinfo=UTC), "invalid archive source"),
+        (" ", "model-v1", datetime(2026, 7, 11, tzinfo=UTC), "unsafe archive identity component"),
         (
             "legacy-unqualified",
             "model-v1",
@@ -445,7 +450,7 @@ def test_state_reference_factory_rejects_invalid_time_source_or_model(
         )
 
 
-@pytest.mark.parametrize("source_id", [None, "GFS", "era5", "IfS"])
+@pytest.mark.parametrize("source_id", [None, "", "GFS", "era5", "IfS"])
 def test_state_reference_factory_round_trips_through_strict_manifest_binding(
     tmp_path: Path,
     source_id: str | None,

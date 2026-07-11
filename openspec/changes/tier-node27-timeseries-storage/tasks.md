@@ -66,7 +66,8 @@ Order is load-bearing:
     object-store segment. Case-insensitive aliases normalize to the same
     identity/path, while an unknown source fails closed. The states lane also
     has one exact reserved canonical source, `legacy-unqualified`, for valid
-    source-less `state_snapshot` rows/object paths; it is forbidden for
+    source-less `state_snapshot` rows/object paths (`source_id` NULL or the
+    existing equivalent empty-string representation); it is forbidden for
     forcing/runs and never inferred as a real provider. Its cycle identity is
     derived from the row's required `valid_time`, giving a deterministic,
     collision-disjoint `states/legacy-unqualified/...` archive path.
@@ -85,9 +86,9 @@ Order is load-bearing:
     direct operator/lookup identities still normalize aliases before a
     canonical manifest is produced.
   - Input: a valid source-less legacy state reference
-    `states/<model>/<valid-time>/...` with `source_id = NULL`.
+    `states/<model>/<valid-time>/...` with `source_id = NULL` or `""`.
     Expected: it maps explicitly to the states-only
-    `legacy-unqualified` identity using `valid_time` for canonical cycle
+    same `legacy-unqualified` identity using `valid_time` for canonical cycle
     identity/time; manifest/path binding round-trips deterministically and
     cannot collide with provider-qualified states. Forcing/runs reject the
     sentinel and no provider is synthesized.

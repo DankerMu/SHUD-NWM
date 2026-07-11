@@ -28,7 +28,8 @@ per-file sha256 checksums, file sizes, tarball sha256, and identity fields
 
 #### Scenario: Source-less legacy state snapshot remains archivable
 
-- **WHEN** a valid state row has `source_id = NULL` and references the legacy
+- **WHEN** a valid state row has `source_id = NULL` (or the existing
+  equivalent empty-string representation) and references the legacy
   `states/<model>/<valid-time>/...` object layout
 - **THEN** archive provenance MUST use the explicit states-only canonical
   source `legacy-unqualified`, with cycle time derived from the required

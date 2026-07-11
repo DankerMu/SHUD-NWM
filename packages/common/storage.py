@@ -260,7 +260,7 @@ def archive_identity_for_state_reference(
     if any((valid_time_utc.minute, valid_time_utc.second, valid_time_utc.microsecond)):
         raise ArchiveConfigurationError("state reference valid_time must resolve to a canonical UTC hourly instant")
 
-    if source_id is None:
+    if source_id is None or source_id == "":
         source = LEGACY_UNQUALIFIED_ARCHIVE_SOURCE
     elif source_id == LEGACY_UNQUALIFIED_ARCHIVE_SOURCE:
         raise ArchiveConfigurationError(
