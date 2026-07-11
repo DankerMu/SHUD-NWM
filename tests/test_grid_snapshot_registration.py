@@ -1558,6 +1558,16 @@ def sub5_migrated_database(integration_database_url: str) -> Iterator[str]:
     connection.autocommit = True
     try:
         with connection.cursor() as cursor:
+            # Null the three nullable non-cascading FKs pointing at the seeded
+            # snapshots (canonical_met_product, met_station, interp_weight —
+            # see 000043 lines 66/74/83) before deleting the snapshots.
+            for table in ("canonical_met_product", "met_station", "interp_weight"):
+                cursor.execute(
+                    f"UPDATE met.{table} SET grid_snapshot_id = NULL "
+                    f"WHERE grid_snapshot_id IN ("
+                    f"SELECT grid_snapshot_id FROM met.canonical_grid_snapshot "
+                    f"WHERE source_id IN ('IFS', 'gfs', 'ERA5'))"
+                )
             cursor.execute(
                 """
                 DELETE FROM met.canonical_grid_snapshot
