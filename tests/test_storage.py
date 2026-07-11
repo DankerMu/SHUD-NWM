@@ -405,12 +405,14 @@ def test_product_manifest_binding_accepts_canonical_identity_and_siblings(tmp_pa
     assert paths.manifest == (tmp_path / "archive" / relative_parent / "manifest.json").resolve()
 
 
-def test_product_manifest_binding_normalizes_source_alias_to_canonical_path_segment(tmp_path: Path) -> None:
-    relative_parent = "runs/ifs/2026071100/run-42"
+@pytest.mark.parametrize("source", ["gfs", "ERA5", "IFS"])
+def test_product_manifest_binding_accepts_each_canonical_source_id(tmp_path: Path, source: str) -> None:
+    source_segment = source.lower()
+    relative_parent = f"runs/{source_segment}/2026071100/run-42"
     manifest = _product_manifest(
         {
             "lane": "runs",
-            "source": "ifs",
+            "source": source,
             "cycle_identity": "2026071100",
             "cycle_time": "2026-07-11T00:00:00Z",
             "run_id": "run-42",
@@ -422,6 +424,26 @@ def test_product_manifest_binding_normalizes_source_alias_to_canonical_path_segm
     paths = validate_product_archive_manifest_binding(tmp_path / "archive", manifest)
 
     assert paths.archive == (tmp_path / "archive" / relative_parent / "archive.tar.zst").resolve()
+
+
+@pytest.mark.parametrize("source", ["GFS", "era5", "ifs", "IfS", "unknown-provider"])
+def test_product_manifest_binding_rejects_alias_or_unknown_source_id(tmp_path: Path, source: str) -> None:
+    source_segment = source.lower()
+    relative_parent = f"runs/{source_segment}/2026071100/run-42"
+    manifest = _product_manifest(
+        {
+            "lane": "runs",
+            "source": source,
+            "cycle_identity": "2026071100",
+            "cycle_time": "2026-07-11T00:00:00Z",
+            "run_id": "run-42",
+        },
+        f"{relative_parent}/archive.tar.zst",
+        f"{relative_parent}/manifest.json",
+    )
+
+    with pytest.raises(ArchiveConfigurationError, match="manifest source"):
+        validate_product_archive_manifest_binding(tmp_path / "archive", manifest)
 
 
 def test_product_manifest_binding_rejects_drifting_cycle_time_identity(tmp_path: Path) -> None:

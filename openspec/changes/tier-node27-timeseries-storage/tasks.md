@@ -73,6 +73,12 @@ Order is load-bearing:
     from the canonical identity-derived path.
     Expected: shared manifest-binding preflight rejects it before any
     idempotency skip, completeness verdict, rebuild selection, or deletion.
+  - Input: product manifest using a known but non-canonical source alias
+    (`GFS`, `era5`, or `ifs`) even when its path uses the lowercase storage
+    segment.
+    Expected: schema and semantic manifest-binding preflight both reject it;
+    direct operator/lookup identities still normalize aliases before a
+    canonical manifest is produced.
   - Input: existing `validate_object_path` callers and the established
     `NODE27_RAW_RETENTION_OBJECT_STORE_ROOT` /
     `NODE27_GOVERNANCE_OBJECT_STORE_ROOT` precedence behavior.
@@ -136,6 +142,11 @@ Order is load-bearing:
     the missing/cross-lane identity. Runtime inventory coverage (task 2.1)
     must later prove exactly one verdict per inventoried subject and exact
     `gap` to salvage-selector correspondence.
+  - Input: a state subject declaring `coverage: db-export` and
+    `verdict: complete`.
+    Expected: schema validation fails because DB-export salvage covers only
+    forcing/river timeseries; a state gap remains fail-closed and cannot be
+    converted into a salvage selector.
   - Input: clean default dev/test environment after dependency sync.
     Expected: every schema positive/negative pytest executes with zero skip;
     missing `check-jsonschema` is a test failure, not a skipped contract gate.
@@ -166,6 +177,10 @@ Order is load-bearing:
     Expected: verdict `pending-archive`.
   - Input: DB rows whose products exist in neither object-store nor archive.
     Expected: verdict `gap`; exact selectors appear in the salvage list.
+  - Input: a `state_snapshot` reference whose state artifact exists in
+    neither object-store nor archive.
+    Expected: verdict `gap`; no DB-export selector is fabricated, and the
+    receipt cannot satisfy retention until product coverage is restored.
   - Input: final-path archive object whose tarball sha256 mismatches its
     manifest.
     Expected: treated as absent (`pending-archive`/`gap`); mismatch reported

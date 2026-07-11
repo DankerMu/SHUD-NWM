@@ -187,6 +187,51 @@ def test_completeness_receipt_rejects_contradictory_coverage_verdict_pairs(
     assert result.returncode != 0
 
 
+@pytest.mark.parametrize(
+    ("coverage", "verdict"),
+    [
+        ("product-archive", "complete"),
+        ("hot-object-store", "complete"),
+        ("hot-object-store", "pending-archive"),
+        ("none", "gap"),
+    ],
+)
+def test_state_completeness_receipt_accepts_non_salvage_coverage_pairs(
+    tmp_path: Path,
+    coverage: str,
+    verdict: str,
+) -> None:
+    document = _document("archive_completeness_receipt")
+    document["windows"] = [document["windows"][0]]
+    document["windows"][0].update(
+        {
+            "lane": "states",
+            "subject": {"state_id": "state-42"},
+            "coverage": coverage,
+            "verdict": verdict,
+        }
+    )
+
+    result = _validate_document(tmp_path, "archive_completeness_receipt", document)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_state_completeness_receipt_rejects_db_export_coverage(tmp_path: Path) -> None:
+    document = _document("archive_completeness_receipt")
+    document["windows"] = [document["windows"][0]]
+    document["windows"][0].update(
+        {
+            "lane": "states",
+            "subject": {"state_id": "state-42"},
+            "coverage": "db-export",
+            "verdict": "complete",
+        }
+    )
+
+    result = _validate_document(tmp_path, "archive_completeness_receipt", document)
+    assert result.returncode != 0
+
+
 def test_product_archive_manifest_rejects_row_count(tmp_path: Path) -> None:
     document = _document("product_archive_manifest")
     document["row_count"] = 100

@@ -245,6 +245,16 @@ def validate_product_archive_manifest_binding(
     identity_value = manifest.get("identity")
     if not isinstance(identity_value, Mapping):
         raise ArchiveConfigurationError("product archive manifest identity must be an object")
+    declared_source = _required_mapping_string(identity_value, "source", label="product archive manifest identity")
+    try:
+        canonical_source = normalize_source_id(declared_source)
+    except ValueError as error:
+        raise ArchiveConfigurationError(f"invalid product archive manifest source: {declared_source!r}") from error
+    if declared_source != canonical_source:
+        raise ArchiveConfigurationError(
+            "product archive manifest source must use its canonical storage ID: "
+            f"declared={declared_source!r}; canonical={canonical_source!r}"
+        )
     identity = ArchiveIdentity.from_mapping(identity_value)
 
     archive_value = manifest.get("archive")

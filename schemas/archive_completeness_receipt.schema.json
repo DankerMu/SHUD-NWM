@@ -62,7 +62,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "allOf": [{"$ref": "#/definitions/coverage_verdict_contract"}],
+          "allOf": [{"$ref": "#/definitions/state_coverage_verdict_contract"}],
           "required": ["lane", "subject", "window", "coverage", "verdict"],
           "properties": {
             "lane": {"const": "states"},
@@ -89,6 +89,31 @@
           "required": ["coverage", "verdict"],
           "properties": {
             "coverage": {"enum": ["product-archive", "db-export", "hot-object-store"]},
+            "verdict": {"const": "complete"}
+          }
+        },
+        {
+          "required": ["coverage", "verdict"],
+          "properties": {
+            "coverage": {"const": "hot-object-store"},
+            "verdict": {"const": "pending-archive"}
+          }
+        },
+        {
+          "required": ["coverage", "verdict"],
+          "properties": {
+            "coverage": {"const": "none"},
+            "verdict": {"const": "gap"}
+          }
+        }
+      ]
+    },
+    "state_coverage_verdict_contract": {
+      "oneOf": [
+        {
+          "required": ["coverage", "verdict"],
+          "properties": {
+            "coverage": {"enum": ["product-archive", "hot-object-store"]},
             "verdict": {"const": "complete"}
           }
         },

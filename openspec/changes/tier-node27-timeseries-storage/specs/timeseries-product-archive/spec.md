@@ -136,7 +136,10 @@ checksum-verified product archive object or a verified `db-export` salvage
 object, or when its products are present in the hot object-store and the
 window is not yet past the archive minimum age; `pending-archive` when past
 the minimum age with hot-object-store-only products; and `gap` when no copy
-exists (every `gap` window appears in the salvage selector list). This
+exists. Every salvageable forcing/river timeseries `gap` appears in the
+salvage selector list. A state subject MUST NOT claim `db-export` coverage:
+its missing product remains a non-salvageable `gap` that blocks retention
+until product coverage is restored. This
 receipt is the single artifact named "archive completeness receipt" consumed
 by the `timeseries-db-retention` enforce gate and the scope source consumed
 by `db-export-salvage`. The audit SHALL run recurringly from a node-27
@@ -164,6 +167,14 @@ list, so a fresh receipt is available to each retention tick.
   the hot object-store nor the archive
 - **THEN** the receipt MUST mark that window `gap` and include its exact
   selectors in the salvage selector list
+
+#### Scenario: Missing state artifacts cannot use DB-export salvage
+
+- **WHEN** a `state_snapshot` reference is absent from both the hot object
+  store and verified product archive
+- **THEN** its subject verdict MUST remain `gap`
+- **AND** the receipt MUST NOT claim `db-export` coverage or fabricate a
+  timeseries salvage selector for that state
 
 #### Scenario: Equal-window subjects remain independently auditable
 
