@@ -862,6 +862,15 @@ describe('M11StationForcingPopup', () => {
     // retention cycle (GFS + IFS). Any DB/archive/history/synthetic-points
     // fallback would show up as extra client.GET calls here.
     await waitFor(() => expect(client.GET).toHaveBeenCalledTimes(2))
+    // Endpoint-path allow-list: a same-count mutation that swaps one series
+    // request for a DB/archive fallback (e.g.
+    // `/api/v1/history/station-archive`) would keep count=2 but hit a
+    // different path. Assert every call targets the station-series endpoint.
+    const paths = vi.mocked(client.GET).mock.calls.map(([path]) => path)
+    expect(paths).toEqual([
+      '/api/v1/met/stations/{station_id}/series',
+      '/api/v1/met/stations/{station_id}/series',
+    ])
     const queries = vi.mocked(client.GET).mock.calls.map(([, init]) => getSeriesQuery(init))
     expect(queries.map((query) => query.source_id).sort()).toEqual(['GFS', 'IFS'])
     for (const query of queries) {
@@ -937,7 +946,16 @@ describe('M11StationForcingPopup', () => {
       const { unmount } = render(
         <M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />,
       )
+      // Settle initial chart render (drains any userEvent/Radix internal
+      // setItem noise from the mount phase) before establishing the delta
+      // baseline for the retention click.
       await screen.findByTestId('m11-station-variable-PRCP-chart')
+
+      // Delta baseline: reset the setItem call log so any subsequent call
+      // MUST come from the retention path itself. A persistence mutation
+      // using a generic cache key (e.g. `nhms-popup-cache-v3`) that would
+      // evade a keyword filter is caught by this bare-count assertion.
+      storageSetItem.mockClear()
 
       await user.click(screen.getByTestId('m11-popup-issue-time'))
       await user.click(screen.getByRole('option', { name: formatIssueTime(RETAINED_OUT_CYCLE) }))
@@ -946,18 +964,19 @@ describe('M11StationForcingPopup', () => {
       const empty = await screen.findByTestId('m11-station-popup-empty')
       expect(empty).toHaveTextContent('磁盘保留窗口内')
 
-      // Filter incidental setItem calls (from userEvent/Radix internals) to
-      // those referencing retention / cycle / station keys — the retention
-      // path itself must add none.
-      const persistedRetentionKeys = storageSetItem.mock.calls.filter(([key]) =>
-        typeof key === 'string' && /retain|retention|retained_out|cycle|station_id|qhh_forc_001/i.test(key),
-      )
-      expect(persistedRetentionKeys).toEqual([])
+      // Bare delta assertion: the retention path itself writes NO storage
+      // (any key — retention-related or otherwise).
+      expect(storageSetItem).not.toHaveBeenCalled()
 
       // Unmount and remount for the SAME station: the retained-out marking
       // must NOT carry over. The fresh mount defaults to the catalog latest
       // cycle (DEFAULT_CYCLE) and does NOT render the retention empty state.
       unmount()
+
+      // Second delta baseline: any remount-triggered setItem must come from
+      // fresh mount logic, not carry state through storage — bare-count
+      // assertion catches persistence via any key.
+      storageSetItem.mockClear()
 
       render(
         <M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />,
@@ -969,11 +988,9 @@ describe('M11StationForcingPopup', () => {
       // clicked retained-out cycle.
       expect(screen.getByTestId('m11-popup-issue-time')).toHaveTextContent(formatIssueTime(DEFAULT_CYCLE))
 
-      // Post-remount, the retention-related storage set is still empty.
-      const persistedRetentionKeysAfterRemount = storageSetItem.mock.calls.filter(([key]) =>
-        typeof key === 'string' && /retain|retention|retained_out|cycle|station_id|qhh_forc_001/i.test(key),
-      )
-      expect(persistedRetentionKeysAfterRemount).toEqual([])
+      // Post-remount, no storage was written at all — the retention marking
+      // truly does not persist via ANY key.
+      expect(storageSetItem).not.toHaveBeenCalled()
     } finally {
       storageSetItem.mockRestore()
     }
