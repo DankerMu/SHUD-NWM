@@ -1,0 +1,3 @@
+# SHUD calibration evidence-only placeholder for the direct-grid-display-cutover rehearsal M1 target.
+# Suffix '.calib' is what workers/model_registry/validator.py REQUIRED_SUFFIXES checks.
+# Content is not inspected by the validator; single non-empty line is sufficient.
