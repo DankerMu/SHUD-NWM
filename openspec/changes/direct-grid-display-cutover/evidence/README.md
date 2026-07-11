@@ -18,7 +18,20 @@ Phase status:
 - **Phase B (live execution on node-27)**: **COMPLETED 2026-07-11**. The
   `run-on-node27.sh` chain fired end-to-end, `rehearse.py` returned rc=0,
   and all zero-impact assertions passed. Timing-window record + pass log
-  references are in §4 below.
+  references are in §4 below. The retention-empty-state screenshot was
+  NOT captured in Phase B due to a timing-race + never-clicked-anything
+  bug in the Playwright spec.
+- **Phase C (screenshot retry on node-27)**: **COMPLETED 2026-07-11**. The
+  timing race was fixed (`SCREENSHOT_WINDOW_SECONDS` 30 → 300) and the
+  Playwright spec was rewritten to attempt a real UI click sequence.
+  `rehearse.py` again returned rc=0, all zero-impact assertions held,
+  and a page-composition PNG was captured — but the retention popup did
+  not open under the click sequence because react-map-gl does not expose
+  the maplibre map instance to `page.evaluate` and the synthetic basin
+  has no boundary geometry. See §4.4 below and `screenshot-gap-explanation.md`
+  for the bounded gap. Certification is unaffected — the retention path
+  is regression-locked by SUB-3 T1/T2/T3 unit tests and by the MVT
+  source-identity SQL diff.
 
 ## 1. Executive summary
 
@@ -89,12 +102,21 @@ and after restore (see `rehearse/production-scoped-assertions.during.log` and
   (`dg_10d27a62b35b39cb5a6f9d10f7fff6e9`, retained inactive per
   `restore/README.md` retention policy).
 
-## 4. Timing window (Phase B)
+## 4. Timing window (Phase C — supersedes Phase B)
 
-- **Rehearsal window UTC start: 2026-07-11T14:24:11.623292Z** (from
+Phase C is the current on-file window (the Phase C run superseded the
+Phase B logs — the `rehearse/*.log` files below are the Phase C
+captures). The Phase B run is described in the git history
+(commit `eb58bb39`) as a background reference.
+
+- **Rehearsal window UTC start: 2026-07-11T14:43:57.018877+00:00** (from
   `rehearse/rehearse.node-27.pass.log` `REHEARSAL_WINDOW_UTC_START`).
-- **Rehearsal window UTC end:   2026-07-11T14:24:42.309507Z**   (from
+- **Rehearsal window UTC end:   2026-07-11T14:48:57.362292+00:00**   (from
   `rehearse/rehearse.node-27.pass.log` `REHEARSAL_WINDOW_UTC_END`).
+- **Window duration:** 300 s (matches the Phase C `SCREENSHOT_WINDOW_SECONDS`
+  fix; Phase B was 30 s, which was shorter than the Playwright test's own
+  60 s timeout — that timing race was the primary reason Phase B failed
+  to capture the retention screenshot).
 - **Verified between scheduler cycle boundaries: yes.** On node-27 there is
   no fast-cadence NWM scheduler timer running as a systemd unit or crontab;
   the only recurring timers on the host (`phpsessionclean.timer`,
@@ -138,11 +160,11 @@ The `rehearse.node-27.pass.log` demonstrates every leg of the recorded
   the auto-applied `override_missing_active=True` succeeded (log entry
   `RESTORE step 1 ok: M1 target deactivated via Change 4 lifecycle op`).
 - **Frontend retention empty-state**: Playwright ran against
-  `https://test.nwm.ac.cn` during the screenshot window but the empty-state
-  render did not settle within the 30 s test timeout, so the .png was NOT
-  captured on this attempt. The rehearse.py transaction and restore
-  succeeded independently (rc=0), so the DB / receipt evidence is intact.
-  See §4.3 below for the recorded gap.
+  `https://test.nwm.ac.cn` during the Phase C screenshot window and
+  emitted a page-composition PNG (`rehearse/retention-empty-state.png`
+  ~384 KB). The specific retention popup (`m11-station-popup-empty`)
+  did NOT open under the click sequence — see §4.4 below and
+  `screenshot-gap-explanation.md` for the bounded gap.
 
 ### 4.2 Recorded bypasses actually taken
 
@@ -153,22 +175,60 @@ on node-27:
 - `synth-station-001..003` flipped to `active_flag=true` via the same file (restored to `false` post-rehearsal).
 - `core.mesh_version` placeholder row for `mesh__evidence_cmfd_p02_synth__v1` was inserted (idempotent) — this was NOT part of the original Phase A recorded-bypass surface but was needed so `_fetch_model_lifecycle_row`'s INNER JOIN against `core.mesh_version` could resolve during the Change 4 activate op (the archived readiness change inserted `core.model_instance` with a `mesh_version_id` that had no matching `core.mesh_version` row; production model_instance rows carry a matching mesh_version row from their normal registration path). This placeholder is retained post-rehearsal as inactive evidence data.
 
-### 4.3 Screenshot gap on this attempt
+### 4.3 Phase B screenshot gap (background — Phase C supersedes)
 
-Playwright emitted a 30-second test timeout with
-`page.screenshot: Target page, context or browser has been closed` before
-the retention-empty-state page finished laying out. The failure is
-independent of the rehearsal transaction (the rehearse.py rc=0 was
-recorded before the wait on the Playwright background job). Because the
-brief permits continuing the rehearsal on a Playwright miss and the DB /
-audit-trail evidence is the load-bearing certification, the receipt is
-issued with a **recorded screenshot gap** rather than being blocked. The
-next Phase B re-run (or a targeted Playwright-only retry against the same
-seeded run) can backfill the .png without re-doing the DB transaction; the
-seeded `run__evidence_cmfd_p02_synth__rehearsal_pre_cutover_v1` row was
-cleaned up by restore, so any Playwright-only retry must re-provision it
-via `03-seeded-forecast-run.sql`. This gap is captured in
-`rehearsal-summary.md`.
+Phase B's Playwright spec never actually clicked a station pin — it
+only navigated to `/` and awaited two testids that would surface only
+if the popup had already been opened by a user. Compounded by
+`SCREENSHOT_WINDOW_SECONDS=30` (shorter than the 60 s Playwright test
+timeout), rehearse.py's restore committed before the test could complete.
+Phase C (§4.4) supersedes this by fixing both the timing race and the
+never-clicked bug.
+
+### 4.4 Phase C screenshot residual gap
+
+Phase C fixed the timing race (`SCREENSHOT_WINDOW_SECONDS` 30 → 300) and
+rewrote the spec to attempt a real UI click sequence: neutral mount at
+`/` (to prevent the first-mount basinId strip), then history-push to
+`/?basinId=basin__evidence_cmfd_p02_synth&metStations=1`, then locate
+the maplibre canvas and dispatch synthetic click events at the synth
+station (100.0, 30.0) lng/lat via `map.project`. The Playwright test
+completed cleanly and emitted `rehearse/retention-empty-state.png`
+(~384 KB, full-page).
+
+However, the `rehearsal-observation-summary.json` attachment records
+`click_result.reason = "map-instance-not-found"` — react-map-gl v7 does
+not expose the maplibre-gl map on the `.maplibregl-canvas-container`
+DOM slots in production bundles, so `page.evaluate` could not obtain
+`map.project` to compute canvas coordinates. Even if the map instance
+were reachable, the synthetic basin has no `basin_boundary` geometry
+so BasinDetailMode would render with a fallback CHINA_VIEW camera and
+the synth stations would be off-screen. The captured PNG therefore shows
+the national overview at flip moment (a valid page-composition receipt
+that the frontend continued to render all 13 production basins,
+met-stations layer switcher, and the discharge legend during the
+committed cutover window), but NOT the retention popup.
+
+This is a **bounded residual gap**, not a certification miss. The
+retention path is regression-locked by two orthogonal receipts:
+
+1. **SUB-3 T1/T2/T3 unit tests** (`apps/frontend/src/components/map/__tests__/M11StationForcingPopup.test.tsx`
+   lines 808-997) lock the exact retention DOM / network contract:
+   `m11-station-popup-empty` renders with `已不在当前磁盘保留窗口内`
+   when both GFS + IFS return `STATION_FORCING_FILE_NOT_FOUND`, no
+   fallback endpoint is hit, no synthetic cycle is added to the picker,
+   no storage write persists the marking.
+2. **MVT source-identity SQL diff** (`rehearse/mvt-source-identity.before.txt`
+   / `.after.txt`) records the pre-flip vs. post-flip
+   `_station_source_version` (`met-stations:2bfc915b79ad9dbe:...:3` →
+   `met-stations:f03703b827fc1462:...:3`), which is the exact input the
+   display API hashes into the tile version string — so the frontend's
+   TileJSON cache self-invalidates on flip and any new M1 pin on a
+   pre-cutover cycle enters the retention path (the same code path
+   SUB-3 T1 asserts on).
+
+See `screenshot-gap-explanation.md` for the full analysis and the
+recommendation for SUB-8 (Epic close): ACCEPT the bounded gap.
 
 ## 5. File map
 
@@ -198,7 +258,7 @@ evidence/
     production-scoped-assertions.after-restore.log (populated by Phase B)
     mvt-source-identity.before.txt                 (populated by Phase B)
     mvt-source-identity.after.txt                  (populated by Phase B)
-    retention-empty-state.png                      (NOT populated on this attempt — see §4.3)
+    retention-empty-state.png                      (populated by Phase C — page composition, see §4.4)
     baseline.node-27.pre.log                       (populated by Phase B)
     scheduler-manifest.post-restore.json           (populated by Phase B)
   restore/
@@ -208,18 +268,21 @@ evidence/
   mvt-source-identity/
     compute.py                                     (standalone MVT source-identity computer)
   flow-curve-deferral.md                           (task 4.3 recorded deferral)
+  screenshot-gap-explanation.md                    (task 4.2 Phase C residual gap analysis)
 ```
 
 ## 6. Certification note
 
-- **Tasks 4.1 + 4.2**: certified by the Phase B pass logs and assertion
+- **Tasks 4.1 + 4.2**: certified by the Phase C pass logs and assertion
   outputs referenced above. The pass logs
   (`rehearse/rehearse.node-27.pass.log`, the two
   `production-scoped-assertions.*.log`, and
   `scheduler-manifest.post-restore.json`) are the on-file evidence for
   the `openspec/changes/direct-grid-display-cutover/tasks.md` §4.1 and
-  §4.2 checkboxes. The retention-empty-state screenshot is a **recorded
-  gap** for this attempt (§4.3); DB-side certification is unaffected.
+  §4.2 checkboxes. The retention-empty-state screenshot is a
+  **page-composition receipt** with a **bounded residual gap** on the
+  specific retention popup (§4.4 + `screenshot-gap-explanation.md`);
+  DB-side + display-plane-input certification is unaffected.
 - **Task 4.3**: the flow-curve cross-cutover continuity receipt is
   **DEFERRED-to-pilot**, recorded in `flow-curve-deferral.md`. No production
   basin is activated in this rehearsal, so no real cross-cutover flow curve

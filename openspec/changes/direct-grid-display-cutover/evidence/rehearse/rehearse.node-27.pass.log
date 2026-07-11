@@ -1,22 +1,22 @@
-2026-07-11T22:24:11Z INFO === Epic #992 SUB-7 rehearsal start ===
-2026-07-11T22:24:11Z INFO DATABASE target: 127.0.0.1:55432/nhms
-2026-07-11T22:24:11Z INFO BASIN_VERSION_ID=basin__evidence_cmfd_p02_synth__v1
-2026-07-11T22:24:11Z INFO MAPPING_ASSET_IDENTITY=synth-mip-m1-v2
-2026-07-11T22:24:11Z INFO STATE_CLONE_APPROVAL_ACTION=state_clone_cold_start_approved
-2026-07-11T22:24:11Z INFO STATE_CLONE_SPIN_UP_DISTORTION_ANNOUNCEMENT_MARKER=spin_up_distortion_public_announcement_required__docs_11_3_clause_3
-2026-07-11T22:24:11Z INFO REHEARSAL_WINDOW_UTC_START=2026-07-11T14:24:11.623192+00:00
-2026-07-11T22:24:11Z INFO CAPTURE BEFORE: production-scoped baseline assertion
-2026-07-11T22:24:11Z INFO baseline production summary: {'non_evidence_active_model_instance': 13, 'per_basin_active_station_count': {'basins_heihe_vbasins': 1709, 'basins_hetianhe_vbasins': 581, 'basins_kashigeer_vbasins': 941, 'basins_keliya_vbasins': 32, 'basins_qhh_vbasins': 386, 'basins_qinyijiang_vbasins': 93, 'basins_tailanhe_vbasins': 37, 'basins_weiganhe_vbasins': 401, 'basins_xinanjiang_upstream_vbasins': 50, 'basins_zhaochen_bst_vbasins': 626, 'basins_zhaochen_hhy_vbasins': 1420, 'basins_zhaochen_mc_vbasins': 9, 'basins_zhaochen_wem_vbasins': 5}}
-2026-07-11T22:24:11Z INFO resolved M1 target model_id=dg_10d27a62b35b39cb5a6f9d10f7fff6e9
-2026-07-11T22:24:11Z INFO MVT source identity BEFORE: met-stations:2bfc915b79ad9dbe:basin__evidence_cmfd_p02_synth__v1:3
-2026-07-11T22:24:11Z INFO hydro.hydro_run MAX(created_at) BEFORE='2026-07-11 14:24:11.043725+00'
-2026-07-11T22:24:11Z INFO REGISTER HOOKS + ACTIVATE: constructing PsycopgModelRegistryStore
-2026-07-11T22:24:11Z INFO ACTIVATE: model_lifecycle_operation activate model_id=dg_10d27a62b35b39cb5a6f9d10f7fff6e9 covered_source_ids=('gfs',)
-2026-07-11T22:24:12Z INFO ACTIVATE result: {
+2026-07-11T22:43:57Z INFO === Epic #992 SUB-7 rehearsal start ===
+2026-07-11T22:43:57Z INFO DATABASE target: 127.0.0.1:55432/nhms
+2026-07-11T22:43:57Z INFO BASIN_VERSION_ID=basin__evidence_cmfd_p02_synth__v1
+2026-07-11T22:43:57Z INFO MAPPING_ASSET_IDENTITY=synth-mip-m1-v2
+2026-07-11T22:43:57Z INFO STATE_CLONE_APPROVAL_ACTION=state_clone_cold_start_approved
+2026-07-11T22:43:57Z INFO STATE_CLONE_SPIN_UP_DISTORTION_ANNOUNCEMENT_MARKER=spin_up_distortion_public_announcement_required__docs_11_3_clause_3
+2026-07-11T22:43:57Z INFO REHEARSAL_WINDOW_UTC_START=2026-07-11T14:43:57.018877+00:00
+2026-07-11T22:43:57Z INFO CAPTURE BEFORE: production-scoped baseline assertion
+2026-07-11T22:43:57Z INFO baseline production summary: {'non_evidence_active_model_instance': 13, 'per_basin_active_station_count': {'basins_heihe_vbasins': 1709, 'basins_hetianhe_vbasins': 581, 'basins_kashigeer_vbasins': 941, 'basins_keliya_vbasins': 32, 'basins_qhh_vbasins': 386, 'basins_qinyijiang_vbasins': 93, 'basins_tailanhe_vbasins': 37, 'basins_weiganhe_vbasins': 401, 'basins_xinanjiang_upstream_vbasins': 50, 'basins_zhaochen_bst_vbasins': 626, 'basins_zhaochen_hhy_vbasins': 1420, 'basins_zhaochen_mc_vbasins': 9, 'basins_zhaochen_wem_vbasins': 5}}
+2026-07-11T22:43:57Z INFO resolved M1 target model_id=dg_10d27a62b35b39cb5a6f9d10f7fff6e9
+2026-07-11T22:43:57Z INFO MVT source identity BEFORE: met-stations:2bfc915b79ad9dbe:basin__evidence_cmfd_p02_synth__v1:3
+2026-07-11T22:43:57Z INFO hydro.hydro_run MAX(created_at) BEFORE='2026-07-11 14:43:56.567693+00'
+2026-07-11T22:43:57Z INFO REGISTER HOOKS + ACTIVATE: constructing PsycopgModelRegistryStore
+2026-07-11T22:43:57Z INFO ACTIVATE: model_lifecycle_operation activate model_id=dg_10d27a62b35b39cb5a6f9d10f7fff6e9 covered_source_ids=('gfs',)
+2026-07-11T22:43:57Z INFO ACTIVATE result: {
   "audit_reference": {
     "entity_id": "dg_10d27a62b35b39cb5a6f9d10f7fff6e9",
     "entity_type": "model_instance",
-    "log_id": 9
+    "log_id": 12
   },
   "cold_start_approval": {
     "approver": "rehearsal-operator",
@@ -151,7 +151,7 @@
     "previous_model_id": null,
     "prior_audit_log_id": null,
     "reason": "[redacted]",
-    "request_id": "c858bb39-6429-4b7f-a735-5c3178563cc6",
+    "request_id": "51a16138-2d58-42c9-a677-c5bfad0d6276",
     "restored_model_id": "dg_10d27a62b35b39cb5a6f9d10f7fff6e9",
     "river_network_version_id": "rnw__evidence_cmfd_p02_synth__v1",
     "roles": [
@@ -240,8 +240,8 @@
   },
   "status": "allowed"
 }
-2026-07-11T22:24:12Z INFO CAPTURE DURING WINDOW: reading M1 mirror + legacy state
-2026-07-11T22:24:12Z INFO post-flip synthetic-basin station state: [
+2026-07-11T22:43:57Z INFO CAPTURE DURING WINDOW: reading M1 mirror + legacy state
+2026-07-11T22:43:57Z INFO post-flip synthetic-basin station state: [
   {
     "active_flag": true,
     "binding_checksum": "d1e2c3b4a5968778869574a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3",
@@ -291,17 +291,17 @@
     "station_role": "forcing_proxy"
   }
 ]
-2026-07-11T22:24:12Z INFO MVT source identity AFTER: met-stations:f03703b827fc1462:basin__evidence_cmfd_p02_synth__v1:3
-2026-07-11T22:24:12Z INFO during-window production-scoped assertion PASS; transient global active=14
-2026-07-11T22:24:12Z INFO SCREENSHOT_WINDOW_OPEN
-2026-07-11T22:24:42Z INFO SCREENSHOT_WINDOW_CLOSE
-2026-07-11T22:24:42Z INFO RESTORE: starting restore of synthetic display state
-2026-07-11T22:24:42Z INFO RESTORE step 1 ok: M1 target deactivated via Change 4 lifecycle op
-2026-07-11T22:24:42Z INFO RESTORE step 2 ok: baseline evidence model_instance -> inactive
-2026-07-11T22:24:42Z INFO RESTORE step 3 ok: synthetic met_station rows -> active_flag=false
-2026-07-11T22:24:42Z INFO RESTORE step 4 ok: seeded pre-cutover hydro_run -> deleted
-2026-07-11T22:24:42Z INFO RESTORE: done
-2026-07-11T22:24:42Z INFO MVT source identity POST-RESTORE: MVT_SOURCE_IDENTITY_NOT_FOUND
-2026-07-11T22:24:42Z INFO after-restore production-scoped assertion PASS; global active=13; no evidence models
-2026-07-11T22:24:42Z INFO REHEARSAL_WINDOW_UTC_END=2026-07-11T14:24:42.309507+00:00
-2026-07-11T22:24:42Z INFO === rehearsal COMPLETE ===
+2026-07-11T22:43:57Z INFO MVT source identity AFTER: met-stations:f03703b827fc1462:basin__evidence_cmfd_p02_synth__v1:3
+2026-07-11T22:43:57Z INFO during-window production-scoped assertion PASS; transient global active=14
+2026-07-11T22:43:57Z INFO SCREENSHOT_WINDOW_OPEN
+2026-07-11T22:48:57Z INFO SCREENSHOT_WINDOW_CLOSE
+2026-07-11T22:48:57Z INFO RESTORE: starting restore of synthetic display state
+2026-07-11T22:48:57Z INFO RESTORE step 1 ok: M1 target deactivated via Change 4 lifecycle op
+2026-07-11T22:48:57Z INFO RESTORE step 2 ok: baseline evidence model_instance -> inactive
+2026-07-11T22:48:57Z INFO RESTORE step 3 ok: synthetic met_station rows -> active_flag=false
+2026-07-11T22:48:57Z INFO RESTORE step 4 ok: seeded pre-cutover hydro_run -> deleted
+2026-07-11T22:48:57Z INFO RESTORE: done
+2026-07-11T22:48:57Z INFO MVT source identity POST-RESTORE: MVT_SOURCE_IDENTITY_NOT_FOUND
+2026-07-11T22:48:57Z INFO after-restore production-scoped assertion PASS; global active=13; no evidence models
+2026-07-11T22:48:57Z INFO REHEARSAL_WINDOW_UTC_END=2026-07-11T14:48:57.362292+00:00
+2026-07-11T22:48:57Z INFO === rehearsal COMPLETE ===
