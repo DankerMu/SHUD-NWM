@@ -952,6 +952,14 @@ def test_legacy_target_activation_legacy_noop_with_target_not_direct_grid_skip_r
     # No SQL was ever issued against met.met_station on the skip path.
     cursor = store._transactions[-1]["cursor"]
     assert cursor.executed == []
+    # Positive lifecycle-commit assertion (fold Note 1): the skip must be
+    # a hook-level NO-OP inside a SUCCESSFUL transaction — the target still
+    # transitioned to ``active`` and the previous active model was
+    # ``superseded``. Sharpens the "no-op vs abort" distinction beyond the
+    # ``status == "allowed"`` check.
+    assert ("legacy_m0_next", "active", True) in store._state_updates
+    assert ("legacy_m0", "superseded", False) in store._state_updates
+    assert store._transactions[-1]["committed"] is True
 
 
 # ============================================================================
@@ -1011,6 +1019,13 @@ def test_no_previous_active_model_no_ops_with_no_previous_active_model_skip_reas
     ]
     cursor = store._transactions[-1]["cursor"]
     assert cursor.executed == []
+    # Positive lifecycle-commit assertion (fold Note 1): fresh-basin
+    # activation is a hook-skip WITHIN a successful transaction — the
+    # target still transitions to ``active``. No previous active model
+    # exists, so no ``superseded`` update is expected. This sharpens the
+    # "hook no-op vs whole-op abort" distinction.
+    assert ("direct_grid_m1", "active", True) in store._state_updates
+    assert store._transactions[-1]["committed"] is True
 
 
 # ============================================================================
@@ -1039,9 +1054,15 @@ def test_station_mvt_source_query_unchanged() -> None:
     # source, but the on-disk read catches a future refactor that
     # renames / relocates the function to a place ``inspect`` still
     # dereferences — the file path is pinned by design.
-    disk_source = Path(
-        "apps/api/routes/hydro_display.py"
-    ).read_text(encoding="utf-8")
+    # Resolve the on-disk path relative to this test file so pytest can
+    # be invoked from any working directory (repo root, subdir, or an
+    # unrelated cwd used by CI). ``parents[1]`` is the repo root:
+    # ``tests/test_direct_grid_display_cutover_flip.py`` -> ``parents[0]``
+    # is ``tests/`` and ``parents[1]`` is the repo root.
+    repo_root = Path(__file__).resolve().parents[1]
+    disk_source = (repo_root / "apps/api/routes/hydro_display.py").read_text(
+        encoding="utf-8"
+    )
     assert "def _station_source_version" in disk_source
 
     # Positive structural predicates: both required filters are present.
@@ -1064,13 +1085,102 @@ def test_station_mvt_source_query_unchanged() -> None:
 
 
 # ============================================================================
+# (9) Fail-closed rowcount==0 end-to-end: direct-grid target with NO
+# registered mirror rows raises StationFlagFlipError and rolls back the
+# whole activation transaction (no state updates, station rows unchanged).
+# ============================================================================
+
+
+def test_direct_grid_target_with_no_registered_mirrors_raises_station_flag_flip_error_and_rolls_back() -> (  # noqa: E501
+    None
+):
+    """§1.1 fail-closed evidence: rowcount==0 on step 2 aborts the whole tx.
+
+    Setup: a legacy M0 is currently active (so the hook engages — the
+    ``no_previous_active_model`` skip does NOT fire), and a direct-grid
+    M1 target is registered with a well-formed
+    ``resource_profile.direct_grid_forcing`` (so the classifier engages —
+    the ``target_not_direct_grid`` skip does NOT fire). However, ZERO
+    mirror rows exist for M1's ``(model_input_package_id,
+    binding_checksum, grid_snapshot_id)`` triple; the only rows are
+    legacy ``forcing_proxy`` rows.
+
+    Under this contract, step 1 (``UPDATE ... SET active_flag=false``)
+    turns off the legacy rows, and step 2 (``UPDATE ... SET
+    active_flag=true`` matched against the target identity) matches zero
+    rows. The hook MUST raise :class:`StationFlagFlipError`; Change 4's
+    dispatcher lets it propagate; the whole transaction rolls back and
+    the pre-tx station rows are restored byte-for-byte. No
+    ``_state_updates`` fire (the transition never runs), and the audit
+    row never commits.
+
+    This is the end-to-end lock on the "no empty-display window ever
+    commits" invariant — a direct-grid target with no registered mirrors
+    is a Change-4 registration invariant violation (Epic #961 SUB-2
+    registers mirrors atomically with the ``core.model_instance`` row
+    insert), and this test proves the pre-activation transaction
+    fail-closes fully on it.
+    """
+    inventory = _StationInventory(
+        [
+            _legacy_row(station_id="synth-station-001", active_flag=True),
+            _legacy_row(station_id="synth-station-002", active_flag=True),
+            # Intentionally NO ``direct_grid_cache`` mirror rows for M1 —
+            # this is the Change-4 registration invariant violation the
+            # hook fail-closes on.
+        ]
+    )
+    pre_tx_snapshot = inventory.snapshot()
+    store = _FlipHarnessStore(
+        [
+            _legacy_active_model(),
+            _direct_grid_variant(
+                model_id="direct_grid_m1",
+                model_input_package_id=M1_MODEL_INPUT_PACKAGE_ID,
+                binding_checksum=M1_BINDING_CHECKSUM,
+            ),
+        ],
+        inventory,
+    )
+    audit = _register_hook(store)
+
+    with pytest.raises(StationFlagFlipError) as exc_info:
+        store.model_lifecycle_operation(
+            "direct_grid_m1",
+            operation="activate",
+            policy_decision=_decision("models.activate", "direct_grid_m1"),
+            request_id="req-flip-rowcount-zero",
+        )
+
+    # The error carries basin_version_id + target model id + the 3
+    # identity discriminators the module docstring pins.
+    err = exc_info.value
+    assert err.basin_version_id == BASIN_VERSION_ID
+    assert err.target_model_id == "direct_grid_m1"
+    assert err.model_input_package_id == M1_MODEL_INPUT_PACKAGE_ID
+    assert err.binding_checksum == M1_BINDING_CHECKSUM
+    assert err.grid_snapshot_id == GRID_SNAPSHOT_ID
+
+    # Atomic rollback: station rows are byte-for-byte the pre-tx snapshot
+    # (step 1's turn-off has been undone by the transaction rollback).
+    assert inventory.snapshot() == pre_tx_snapshot
+    # Lifecycle transition never ran — the hook aborted the tx BEFORE
+    # ``_apply_model_lifecycle_transition`` was called, so no supersede+
+    # activate swap fired.
+    assert store._state_updates == []
+    # Transaction observed the exception and did not commit.
+    assert store._transactions[-1]["committed"] is False
+    # The engaged path emits no audit skip (skip is only for gates 1 & 2
+    # — the classifier engaged and the previous-active-model was present).
+    assert audit.skips == []
+
+
+# ============================================================================
 # Defensive: the module also exposes StationFlagFlipError for the
 # fail-closed rowcount branch (invoked when a direct-grid target has no
 # registered mirror rows — a Change-4 registration invariant violation).
-# We do not force a rowcount==0 through the lifecycle here (Change 4
-# preflight ensures the target model exists; mirror-row absence is out
-# of the flip hook's directly-testable scope), but we lock the module
-# contract so downstream tests can import the exception.
+# Test (9) above locks the end-to-end rollback behavior; this test locks
+# the public module contract so downstream tests can import the exception.
 # ============================================================================
 
 
