@@ -214,6 +214,15 @@ Order is load-bearing:
   artifact. Any malformed URI, containment escape, symlink, permission or
   I/O error is an audit blocker, not ordinary absence.
 
+  Forcing archive basin identity comes from authoritative
+  `core.model_instance.basin_version_id`, not an arbitrary detail row; the
+  detail LATERAL remains a boolean presence probe. Clone provenance is bound
+  in the same repeatable-read snapshot by self-joining
+  `cloned_from_state_id`: the origin must exist and its model/source/
+  `valid_time`/`state_uri`/checksum must match the clone's declared shared
+  artifact, while `cloned_from_model_id` names that origin model and the
+  fingerprint is canonical 64-character lowercase hex.
+
   Manifest JSON reads are capped at 16 MiB. A product archive verifies only
   when regular non-symlink manifest/tarball siblings are contained under the
   archive root, the bounded manifest is
@@ -225,9 +234,22 @@ Order is load-bearing:
   `<archive-root>/db-export/**/manifest.json`; every manifest and referenced
   object must pass the pinned schema, containment, size and sha256 checks,
   and duplicate/conflicting exact selectors block publication. Discovery is
-  capped at 10,000 manifests and eight directory levels beneath
-  `db-export/`; exceeding either bound is a blocker. Inventory is capped at
-  100,000 subjects, and exceeding the cap blocks publication.
+  capped at 10,000 manifests, 100,000 total namespace entries and eight
+  directory levels beneath `db-export/`; exceeding any bound is a blocker.
+  Inventory is capped at 100,000 subjects, and exceeding the cap blocks
+  publication.
+  Run-output discovery is likewise capped at 10,000 entries and eight
+  directory levels per run; it still inspects every bounded sibling so a
+  valid file cannot hide a later unsafe entry.
+
+  All evidence access and output publication is descriptor-bound: walk from
+  a trusted root directory FD with `openat`-style `dir_fd` calls and
+  `O_NOFOLLOW`, distinguish `ENOENT` on an already verified directory chain
+  from symlink/non-directory/permission/I/O blockers, and perform fstat/read/
+  parse/size/sha256 on the same opened file descriptor. Missing leaves behind
+  an existing intermediate symlink are blockers. JSON parsing and checksum
+  verification MUST consume the same bytes/inode, and output temp creation +
+  atomic replace MUST stay anchored to the pinned receipt-parent FD.
 
   Classification precedence is fixed: verified product archive;
   verified exact `db-export` selector (forcing/runs only); hot object-store
@@ -247,6 +269,12 @@ Order is load-bearing:
   JSON to stderr, never as a replacement gate receipt. Runtime schema
   validation uses `jsonschema` as a direct production dependency, not a dev
   transitive dependency.
+  Archive minimum age is parsed without truthiness fallback and validated
+  against the shared 30-day DB retention invariant; explicit or environment
+  values below 30 (including zero) fail before DB/filesystem audit work.
+  Every readable size/checksum mismatch discovered for a subject is appended
+  to its evidence before coverage precedence is selected, so a valid fallback
+  copy never erases evidence of a corrupt sibling.
   Test rows:
   - Input: window with a checksum-verified archive object.
     Expected: verdict `complete`; not in the salvage list.
@@ -273,6 +301,11 @@ Order is load-bearing:
     salvage selector; node-27 `EXPLAIN` proves the correlated `LIMIT 1`
     presence probes use identity-leading indexes within the statement timeout
     and do not decorrelate into detail full scans/hash aggregates.
+  - Input: a forcing version whose detail rows contain a wrong/multiple basin
+    while its model has one authoritative basin.
+    Expected: inventory identity uses `core.model_instance.basin_version_id`;
+    the presence probe never projects an arbitrary detail basin and remains
+    index-only on node-27.
   - Input: forcing package URI whose source/cycle/model/basin disagrees with
     its DB row, whose manifest range does not contain the DB subject window,
     or a run root without an exactly row-bound input manifest / regular output.
@@ -282,6 +315,11 @@ Order is load-bearing:
     Expected: normal rows bind row and URI identity; the clone keeps its own
     `state_id` subject but shares the physical artifact coverage. An
     undeclared model alias or source/time drift blocks publication.
+  - Input: clone provenance naming a missing origin state, invalid fingerprint,
+    or origin model/source/time/URI/checksum drift.
+    Expected: the repeatable-read self-join blocks publication; a valid clone
+    retains its own `state_id` subject while sharing only the exact origin
+    artifact coverage.
   - Input: missing archive root or absent canonical archive siblings.
     Expected: archive coverage is absent and classification continues via
     salvage/hot/gap; no configuration crash.
@@ -294,6 +332,12 @@ Order is load-bearing:
     is known-invalid coverage: record the mismatch in subject evidence,
     treat that copy as absent, and safely continue to another coverage source
     or `pending-archive`/`gap`.
+  - Input: an intermediate evidence component swapped to a symlink before
+    open, a missing leaf behind a pre-existing symlink, or a regular file
+    replaced between path validation and read/hash.
+    Expected: root-anchored no-follow FD access blocks every escape/race;
+    parse, size and checksum come from one inode, and the old gate receipt is
+    preserved.
   - Input: verified salvage object whose selector exactly matches a
     forcing/run subject, and a near-match with different identity/window.
     Expected: exact match is `complete/db-export`; near-match is ignored for
@@ -308,8 +352,9 @@ Order is load-bearing:
     Expected: inversion/bounds mismatch blocks publication; every selector
     uses the metadata window and every age decision uses the one captured
     audit time without a full detail rescan.
-  - Input: manifest over 16 MiB, more than 10,000 salvage manifests, scan
-    depth over eight, or more than 100,000 subjects.
+  - Input: manifest over 16 MiB, more than 10,000 salvage manifests or
+    100,000 total salvage namespace entries, scan depth over eight, more than
+    100,000 subjects, or a run output tree over 10,000 entries/eight levels.
     Expected: bounded audit fails non-zero without replacing the prior gate
     receipt.
   - Input: missing/relative receipt path, symlinked parent/target, atomic
@@ -325,6 +370,14 @@ Order is load-bearing:
   - Input: production dependency install without dev extras.
     Expected: importing the audit module and runtime `jsonschema` validation
     succeeds.
+  - Input: archive minimum age 20 or explicit CLI zero, with/without an env
+    fallback; and legal CLI 30 overriding an invalid env value.
+    Expected: 20/zero always fail without fallback, while explicit legal CLI
+    wins and shares the foundation retention-age invariant.
+  - Input: corrupt product archive with valid exact salvage, and corrupt
+    exact salvage with valid product archive.
+    Expected: verdict remains complete through the valid copy, while evidence
+    retains the corrupt sibling's size/checksum mismatch in both directions.
   Node-27 oracle for #847 is limited to the read-only transaction/query plan,
   real forcing/run URI shapes, and a non-publishing temporary audit run.
   Current `state_snapshot` inventory is empty, so provider/legacy/clone state

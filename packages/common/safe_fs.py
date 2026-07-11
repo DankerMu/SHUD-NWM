@@ -17,12 +17,7 @@ class SafeFilesystemError(RuntimeError):
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 _FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-_READ_FLAGS = (
-    os.O_RDONLY
-    | getattr(os, "O_NOFOLLOW", 0)
-    | getattr(os, "O_CLOEXEC", 0)
-    | getattr(os, "O_NONBLOCK", 0)
-)
+_READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
 
 
 def verify_directory_no_follow(path: Path) -> Path:
@@ -80,6 +75,7 @@ def atomic_write_bytes_no_follow(
     *,
     containment_root: Path | None = None,
     temp_suffix: str = "tmp",
+    mode: int | None = None,
 ) -> Path:
     """Atomically replace a file without following symlinked parents or targets."""
 
@@ -90,7 +86,9 @@ def atomic_write_bytes_no_follow(
     try:
         _verify_fd_matches_path(parent_fd, parent_path)
         _reject_existing_symlink(parent_fd, target.name, target)
-        file_fd = os.open(temp_name, _FILE_FLAGS, 0o666, dir_fd=parent_fd)
+        file_fd = os.open(temp_name, _FILE_FLAGS, 0o666 if mode is None else mode, dir_fd=parent_fd)
+        if mode is not None:
+            os.fchmod(file_fd, mode)
         view = memoryview(content)
         while view:
             written = os.write(file_fd, view)
@@ -233,7 +231,14 @@ def read_bytes_limited_no_follow(path: Path, *, max_bytes: int, containment_root
 
     file_fd = open_file_no_follow(path, containment_root=containment_root)
     try:
-        return os.read(file_fd, max_bytes + 1)
+        content = bytearray()
+        limit = max_bytes + 1
+        while len(content) < limit:
+            chunk = os.read(file_fd, limit - len(content))
+            if not chunk:
+                break
+            content.extend(chunk)
+        return bytes(content)
     except OSError as error:
         raise SafeFilesystemError(f"Failed to read {path}: {error}", kind="io") from error
     finally:
@@ -302,6 +307,8 @@ def _list_directory_no_follow(
                 if max_entries is not None and len(names) > max_entries:
                     break
         return names
+    except FileNotFoundError:
+        raise
     except OSError as error:
         raise SafeFilesystemError(f"Failed to list directory {target}: {error}", kind="io") from error
     finally:

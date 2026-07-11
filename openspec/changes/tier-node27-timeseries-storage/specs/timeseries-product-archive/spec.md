@@ -191,8 +191,24 @@ classification safely continues to another copy or pending/gap. DB-export covera
 requires a schema-valid salvage manifest plus size/sha256 verification of the
 exact selector's object; discovery under the archive `db-export/` namespace
 SHALL be bounded and symlink-safe: at most 10,000 manifests, at most eight
-levels beneath `db-export/`, and at most 16 MiB per manifest. Inventory SHALL
-be capped at 100,000 subjects; exceeding any bound blocks publication.
+levels and 100,000 total entries beneath `db-export/`, and at most 16 MiB per
+manifest. Inventory SHALL be capped at 100,000 subjects; exceeding any bound
+blocks publication.
+Run output traversal SHALL inspect at most 10,000 entries and eight levels per
+run, failing closed on overflow while still checking all bounded siblings.
+
+Forcing basin identity SHALL come from the referenced model instance, not an
+arbitrary detail row. A clone state SHALL be bound in the same repeatable-read
+snapshot to its existing origin state: origin model/source/time/URI/checksum
+must match the declared shared artifact and the clone fingerprint must be
+canonical lowercase sha256.
+
+Evidence path traversal/read/hash and receipt temp/replace SHALL remain
+anchored to trusted directory file descriptors with no-follow component
+opens. `ENOENT` is ordinary absence only after every existing parent has been
+verified as a real directory. JSON bytes, size and sha256 SHALL come from the
+same opened inode; a pre-existing or raced symlink/non-directory/permission
+error is a blocker.
 
 The emitted receipt SHALL contain every inventoried stable subject exactly
 once, deterministically ordered. Its forcing/run gaps and salvage selectors
@@ -205,6 +221,10 @@ uses a mode-0600 same-directory temporary file with flush/fsync, atomic
 replace, directory fsync, and failure cleanup. Failure diagnostics go to
 stderr and never replace the gate receipt. Runtime schema validation SHALL
 use a direct production dependency.
+Archive minimum age SHALL reuse the shared 30-day retention safety invariant
+and SHALL reject explicit zero/below-30 inputs rather than falling back.
+Evidence for every readable corrupt sibling SHALL be retained regardless of
+which valid coverage mechanism wins precedence.
 
 #### Scenario: Verified archive coverage yields a complete verdict
 
@@ -299,3 +319,19 @@ use a direct production dependency.
 - **WHEN** metadata/detail coverage changes while an audit is running
 - **THEN** all subjects, bounds, and age decisions MUST reflect the one
   repeatable-read snapshot and captured audit time
+
+#### Scenario: Clone provenance binds to an existing origin state
+
+- **WHEN** a clone references no origin or its origin model/source/time/URI/
+  checksum or fingerprint disagrees with the clone provenance
+- **THEN** the audit MUST block publication
+- **AND** a valid clone MUST retain its own subject ID while sharing only the
+  exact origin artifact coverage
+
+#### Scenario: Evidence reads resist path replacement
+
+- **WHEN** an evidence component is a symlink, becomes a symlink/inode after
+  discovery, or a missing leaf is reached through an unsafe parent
+- **THEN** descriptor-bound no-follow access MUST block publication
+- **AND** manifest parsing and checksum verification MUST refer to the same
+  opened inode

@@ -7,9 +7,9 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import stat
 import sys
-import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -18,8 +18,18 @@ from urllib.parse import unquote, urlparse
 
 import jsonschema
 
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    atomic_write_bytes_no_follow,
+    list_directory_no_follow_limited,
+    open_file_no_follow,
+    read_bytes_limited_no_follow,
+    stat_no_follow,
+    verify_directory_no_follow,
+)
 from packages.common.source_identity import normalize_source_id
 from packages.common.storage import (
+    DEFAULT_DB_RETENTION_DAYS,
     ArchiveConfigurationError,
     ArchiveIdentity,
     archive_identity_for_state_reference,
@@ -29,8 +39,11 @@ from packages.common.storage import (
 
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_SALVAGE_MANIFESTS = 10_000
+MAX_SALVAGE_ENTRIES = 100_000
 MAX_SALVAGE_DEPTH = 8
 MAX_SUBJECTS = 100_000
+MAX_RUN_OUTPUT_ENTRIES = 10_000
+MAX_RUN_OUTPUT_DEPTH = 8
 STATEMENT_TIMEOUT_MS = 20_000
 SCHEMA_VERSION = "1.0"
 _ROOT = Path(__file__).resolve().parents[1]
@@ -129,10 +142,11 @@ class ConnectionFactory(Protocol):
 FORCING_INVENTORY_SQL = """
 SELECT fv.forcing_version_id, fv.model_id, fv.source_id, fv.cycle_time,
        fv.start_time, fv.end_time, fv.forcing_package_uri, fv.checksum,
-       fst_presence.basin_version_id
+       mi.basin_version_id
 FROM met.forcing_version fv
+JOIN core.model_instance mi ON mi.model_id = fv.model_id
 CROSS JOIN LATERAL (
-  SELECT x.basin_version_id
+  SELECT 1 AS detail_present
   FROM met.forcing_station_timeseries x
   WHERE x.forcing_version_id = fv.forcing_version_id
   LIMIT 1
@@ -157,10 +171,14 @@ LIMIT 100001
 """
 
 STATE_INVENTORY_SQL = """
-SELECT state_id, model_id, run_id, source_id, valid_time, state_uri, checksum,
-       cloned_from_state_id, cloned_from_model_id, clone_gate_fingerprint
-FROM hydro.state_snapshot
-ORDER BY state_id
+SELECT ss.state_id, ss.model_id, ss.run_id, ss.source_id, ss.valid_time, ss.state_uri, ss.checksum,
+       ss.cloned_from_state_id, ss.cloned_from_model_id, ss.clone_gate_fingerprint,
+       origin.state_id AS origin_state_id, origin.model_id AS origin_model_id,
+       origin.source_id AS origin_source_id, origin.valid_time AS origin_valid_time,
+       origin.state_uri AS origin_state_uri, origin.checksum AS origin_checksum
+FROM hydro.state_snapshot ss
+LEFT JOIN hydro.state_snapshot origin ON origin.state_id = ss.cloned_from_state_id
+ORDER BY ss.state_id
 LIMIT 100001
 """
 
@@ -219,8 +237,11 @@ def load_inventory(connection: Any) -> tuple[datetime, list[InventorySubject]]:
         clone_values = [
             row.get(name) for name in ("cloned_from_state_id", "cloned_from_model_id", "clone_gate_fingerprint")
         ]
-        if any(clone_values) and not all(clone_values):
+        clone_presence = [value is not None for value in clone_values]
+        if any(clone_presence) and not all(clone_presence):
             raise AuditBlocked(f"state {row['state_id']} has incomplete clone provenance")
+        if all(clone_presence):
+            _validate_clone_provenance(row)
         subjects.append(
             InventorySubject(
                 lane="states",
@@ -252,23 +273,30 @@ def discover_salvage(
 ) -> tuple[dict[str, Any], ...]:
     """Return verified exact selectors from a bounded, symlink-safe namespace scan."""
     base = archive_root / "db-export"
-    if archive_root.is_symlink() or base.is_symlink():
-        raise AuditBlocked("archive/db-export root must not be a symlink")
-    if not archive_root.exists() or not base.exists():
+    try:
+        base_names = sorted(_list_directory(base, archive_root, MAX_SALVAGE_ENTRIES))
+    except FileNotFoundError:
         return ()
-    _require_directory(base, archive_root)
     manifests: list[Path] = []
-    stack = [(base, 0)]
+    scanned_entries = 0
+    stack: list[tuple[Path, int, list[str] | None]] = [(base, 0, base_names)]
     while stack:
-        directory, depth = stack.pop()
-        for entry in sorted(directory.iterdir(), key=lambda path: path.name):
-            info = entry.lstat()
-            if stat.S_ISLNK(info.st_mode):
-                raise AuditBlocked(f"symlink in salvage namespace: {entry}")
+        directory, depth, prefetched = stack.pop()
+        names = (
+            prefetched
+            if prefetched is not None
+            else sorted(_list_directory(directory, archive_root, MAX_SALVAGE_ENTRIES - scanned_entries))
+        )
+        if scanned_entries + len(names) > MAX_SALVAGE_ENTRIES:
+            raise AuditBlocked(f"salvage scan exceeds {MAX_SALVAGE_ENTRIES} total entries")
+        scanned_entries += len(names)
+        for name in names:
+            entry = directory / name
+            info = _safe_stat(entry, archive_root)
             if stat.S_ISDIR(info.st_mode):
                 if depth >= MAX_SALVAGE_DEPTH:
                     raise AuditBlocked(f"salvage scan exceeds depth {MAX_SALVAGE_DEPTH}: {entry}")
-                stack.append((entry, depth + 1))
+                stack.append((entry, depth + 1, None))
             elif entry.name == "manifest.json" and stat.S_ISREG(info.st_mode):
                 manifests.append(entry)
                 if len(manifests) > MAX_SALVAGE_MANIFESTS:
@@ -286,8 +314,8 @@ def discover_salvage(
                 raise AuditBlocked(f"duplicate/conflicting salvage selector: {key}")
             seen.add(key)
             obj = export["object"]
-            target = _contained_file(archive_root / obj["path"], archive_root)
-            size, digest = _size_sha256(target)
+            target = archive_root / obj["path"]
+            size, digest = _size_sha256(target, archive_root)
             if size != obj["size_bytes"] or digest != obj["sha256"]:
                 if mismatch_evidence is not None:
                     mismatch_evidence[key] = "db-export object size/sha256 mismatch"
@@ -298,13 +326,13 @@ def discover_salvage(
 
 def verify_product_archive(subject: InventorySubject, archive_root: Path) -> Coverage | None:
     paths = archive_provenance_paths(archive_root, identity=subject.archive_identity)
-    if archive_root.is_symlink() or paths.manifest.is_symlink() or paths.archive.is_symlink():
-        raise AuditBlocked(f"symlink in product archive evidence: {subject.stable_key}")
-    if not archive_root.exists() or (not paths.manifest.exists() and not paths.archive.exists()):
+    manifest_result = _read_json_with_digest_optional(paths.manifest, archive_root)
+    archive_result = _size_sha256_optional(paths.archive, archive_root)
+    if manifest_result is None and archive_result is None:
         return None
-    if paths.manifest.exists() != paths.archive.exists():
+    if manifest_result is None or archive_result is None:
         return None
-    manifest = _read_json(paths.manifest, archive_root)
+    manifest = manifest_result[0]
     _validate_schema(manifest, _load_schema(PRODUCT_SCHEMA_PATH), str(paths.manifest))
     try:
         expected = validate_product_archive_manifest_binding(archive_root, manifest)
@@ -312,8 +340,7 @@ def verify_product_archive(subject: InventorySubject, archive_root: Path) -> Cov
         raise AuditBlocked(str(error)) from error
     if expected != paths:
         raise AuditBlocked(f"archive path binding differs for {subject.stable_key}")
-    target = _contained_file(paths.archive, archive_root)
-    size, digest = _size_sha256(target)
+    size, digest = archive_result
     declared = manifest["archive"]
     if size != declared["size_bytes"] or digest != declared["sha256"]:
         return Coverage("none", ("product archive size/sha256 mismatch",))
@@ -336,12 +363,11 @@ def _verify_forcing_hot(subject: InventorySubject, config: AuditConfig) -> Cover
     if key != expected:
         raise AuditBlocked(f"forcing URI identity mismatch for {subject.subject_id}: {key}")
     manifest_path = config.object_store_root / key / "forcing_package.json"
-    if manifest_path.is_symlink():
-        raise AuditBlocked(f"forcing manifest is a symlink: {subject.subject_id}")
-    if not manifest_path.exists():
+    manifest_result = _read_json_with_digest_optional(manifest_path, config.object_store_root)
+    if manifest_result is None:
         return None
-    manifest = _read_json(manifest_path, config.object_store_root)
-    if not subject.checksum or _sha256(manifest_path) != subject.checksum:
+    manifest, _size, manifest_digest = manifest_result
+    if not subject.checksum or manifest_digest != subject.checksum:
         raise AuditBlocked(f"forcing manifest checksum mismatch for {subject.subject_id}")
     identity = {
         "forcing_version_id": subject.subject_id,
@@ -378,8 +404,8 @@ def _verify_forcing_hot(subject: InventorySubject, config: AuditConfig) -> Cover
         file_key = _object_key(entry["uri"], config.object_store_prefix)
         if not file_key.startswith(expected + "/"):
             raise AuditBlocked(f"forcing file escapes package: {file_key}")
-        path = _contained_file(config.object_store_root / file_key, config.object_store_root)
-        if _sha256(path) != entry["checksum"]:
+        path = config.object_store_root / file_key
+        if _sha256(path, config.object_store_root) != entry["checksum"]:
             raise AuditBlocked(f"forcing file checksum mismatch: {file_key}")
     return Coverage("hot-object-store", ("row-bound forcing package and files checksum-verified",))
 
@@ -397,11 +423,13 @@ def _verify_run_hot(subject: InventorySubject, config: AuditConfig) -> Coverage 
         raise AuditBlocked(f"run URI identity mismatch for {subject.subject_id}")
     manifest_path = config.object_store_root / manifest_key
     output_path = config.object_store_root / output_key
-    if manifest_path.is_symlink() or output_path.is_symlink():
-        raise AuditBlocked(f"run evidence is a symlink: {subject.subject_id}")
-    if not manifest_path.exists() and not output_path.exists():
+    manifest_result = _read_json_with_digest_optional(manifest_path, config.object_store_root)
+    output_has_regular = _directory_has_regular_file_optional(output_path, config.object_store_root)
+    if manifest_result is None and output_has_regular is None:
         return None
-    manifest = _read_json(manifest_path, config.object_store_root)
+    if manifest_result is None:
+        raise AuditBlocked(f"run output exists without input manifest: {subject.subject_id}")
+    manifest = manifest_result[0]
     expected = {
         "run_id": subject.subject_id,
         "source_id": normalize_source_id(subject.source_id or ""),
@@ -430,8 +458,9 @@ def _verify_run_hot(subject: InventorySubject, config: AuditConfig) -> Coverage 
         or _object_key(str(outputs.get("output_uri") or ""), config.object_store_prefix).rstrip("/") != expected_output
     ):
         raise AuditBlocked(f"run manifest row identity mismatch: {subject.subject_id}")
-    _require_directory(output_path, config.object_store_root)
-    if not _directory_has_regular_file(output_path, config.object_store_root):
+    if output_has_regular is None:
+        raise AuditBlocked(f"run input manifest exists without output directory: {subject.subject_id}")
+    if not output_has_regular:
         raise AuditBlocked(f"run output has no regular product: {subject.subject_id}")
     return Coverage("hot-object-store", ("row-bound input manifest and run output present",))
 
@@ -447,12 +476,10 @@ def _verify_state_hot(subject: InventorySubject, config: AuditConfig) -> Coverag
     if not key.startswith(expected_prefix):
         raise AuditBlocked(f"state URI row/provenance identity mismatch: {subject.subject_id}")
     path = config.object_store_root / key
-    if path.is_symlink():
-        raise AuditBlocked(f"state evidence is a symlink: {subject.subject_id}")
-    if not path.exists():
+    digest = _sha256_optional(path, config.object_store_root)
+    if digest is None:
         return None
-    target = _contained_file(path, config.object_store_root)
-    if _sha256(target) != subject.checksum:
+    if digest != subject.checksum:
         raise AuditBlocked(f"state checksum mismatch: {subject.subject_id}")
     return Coverage("hot-object-store", ("state artifact checksum-verified",))
 
@@ -480,6 +507,10 @@ def build_receipt(
         evidence: list[str] = []
         product = product_coverage.get(subject.stable_key)
         selector_key = _canonical(subject.selector) if subject.selector is not None else None
+        if product and product.mechanism != "product-archive":
+            evidence.extend(product.evidence)
+        if selector_key is not None and salvage_mismatches and selector_key in salvage_mismatches:
+            evidence.append(salvage_mismatches[selector_key])
         if product and product.mechanism == "product-archive":
             coverage, verdict = "product-archive", "complete"
             evidence.extend(product.evidence)
@@ -487,10 +518,6 @@ def build_receipt(
             coverage, verdict = "db-export", "complete"
             evidence.append("checksum-verified exact db-export selector present")
         else:
-            if product:
-                evidence.extend(product.evidence)
-            if selector_key is not None and salvage_mismatches and selector_key in salvage_mismatches:
-                evidence.append(salvage_mismatches[selector_key])
             hot = hot_coverage.get(subject.stable_key)
             if hot and hot.mechanism == "hot-object-store":
                 coverage = "hot-object-store"
@@ -573,29 +600,10 @@ def validate_receipt_semantics(receipt: Mapping[str, Any], subjects: Sequence[In
 def publish_receipt(path: Path, receipt: Mapping[str, Any]) -> None:
     path = _validate_output_path(path)
     payload = (_canonical(receipt) + "\n").encode()
-    temporary: Path | None = None
-    descriptor: int | None = None
     try:
-        descriptor, raw = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-        temporary = Path(raw)
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "wb", closefd=True) as stream:
-            descriptor = None
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        temporary = None
-        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
+        atomic_write_bytes_no_follow(path, payload, containment_root=path.parent, mode=0o600)
+    except SafeFilesystemError as error:
+        raise AuditBlocked(f"failed to publish receipt safely: {error}") from error
 
 
 def run_audit(config: AuditConfig, *, connect: ConnectionFactory | None = None) -> dict[str, Any]:
@@ -639,13 +647,19 @@ def config_from_args(args: argparse.Namespace) -> AuditConfig:
     receipt_path = _absolute(args.receipt_path or os.getenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH"), "receipt_path")
     if not database_url:
         raise AuditBlocked("DATABASE_URL is required")
-    raw_age = args.archive_min_age_days or os.getenv("NHMS_ARCHIVE_MIN_AGE_DAYS") or "45"
+    raw_age: int | str = (
+        args.archive_min_age_days
+        if args.archive_min_age_days is not None
+        else os.getenv("NHMS_ARCHIVE_MIN_AGE_DAYS", "45")
+    )
     try:
         age = int(raw_age)
     except ValueError as error:
         raise AuditBlocked("NHMS_ARCHIVE_MIN_AGE_DAYS must be an integer") from error
-    if age < 1:
-        raise AuditBlocked("NHMS_ARCHIVE_MIN_AGE_DAYS must be positive")
+    if age < DEFAULT_DB_RETENTION_DAYS:
+        raise AuditBlocked(
+            f"NHMS_ARCHIVE_MIN_AGE_DAYS must be at least DB retention ({DEFAULT_DB_RETENTION_DAYS} days)"
+        )
     return AuditConfig(
         database_url,
         object_root,
@@ -695,6 +709,26 @@ def _row_mapping(cursor: Any, row: Any) -> dict[str, Any]:
     return {column[0]: value for column, value in zip(cursor.description, row, strict=True)}
 
 
+def _validate_clone_provenance(row: Mapping[str, Any]) -> None:
+    state_id = row["state_id"]
+    fingerprint = row.get("clone_gate_fingerprint")
+    if not isinstance(fingerprint, str) or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None:
+        raise AuditBlocked(f"state {state_id} has non-canonical clone fingerprint")
+    if row.get("origin_state_id") is None:
+        raise AuditBlocked(f"state {state_id} clone origin does not exist")
+    checks = (
+        (row.get("origin_state_id"), row.get("cloned_from_state_id"), "state_id"),
+        (row.get("origin_model_id"), row.get("cloned_from_model_id"), "model_id"),
+        (row.get("origin_source_id"), row.get("source_id"), "source_id"),
+        (row.get("origin_valid_time"), row.get("valid_time"), "valid_time"),
+        (row.get("origin_state_uri"), row.get("state_uri"), "state_uri"),
+        (row.get("origin_checksum"), row.get("checksum"), "checksum"),
+    )
+    for actual, expected, field in checks:
+        if actual != expected:
+            raise AuditBlocked(f"state {state_id} clone origin {field} drift")
+
+
 def _load_schema(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -709,84 +743,90 @@ def _validate_schema(instance: Any, schema: Mapping[str, Any], label: str) -> No
 
 
 def _read_json(path: Path, root: Path) -> dict[str, Any]:
-    target = _contained_file(path, root)
-    if target.stat().st_size > MAX_MANIFEST_BYTES:
-        raise AuditBlocked(f"manifest exceeds {MAX_MANIFEST_BYTES} bytes: {target}")
-    try:
-        with target.open("rb") as stream:
-            content = stream.read(MAX_MANIFEST_BYTES + 1)
-        if len(content) > MAX_MANIFEST_BYTES:
-            raise AuditBlocked(f"manifest exceeds {MAX_MANIFEST_BYTES} bytes: {target}")
-        value = json.loads(content)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise AuditBlocked(f"cannot read JSON evidence {target}: {error}") from error
-    if not isinstance(value, dict):
-        raise AuditBlocked(f"JSON evidence must be an object: {target}")
+    value, _size, _digest = _read_json_with_digest(path, root)
     return value
 
 
-def _contained_file(path: Path, root: Path) -> Path:
+def _read_json_with_digest(path: Path, root: Path) -> tuple[dict[str, Any], int, str]:
     try:
-        resolved_root = root.resolve(strict=True)
-        resolved = path.resolve(strict=True)
-        resolved.relative_to(resolved_root)
-        info = path.lstat()
-    except (OSError, ValueError) as error:
+        content = read_bytes_limited_no_follow(path, max_bytes=MAX_MANIFEST_BYTES, containment_root=root)
+        if len(content) > MAX_MANIFEST_BYTES:
+            raise AuditBlocked(f"manifest exceeds {MAX_MANIFEST_BYTES} bytes: {path}")
+        value = json.loads(content)
+    except FileNotFoundError:
+        raise
+    except (OSError, SafeFilesystemError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AuditBlocked(f"cannot read JSON evidence {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise AuditBlocked(f"JSON evidence must be an object: {path}")
+    return value, len(content), hashlib.sha256(content).hexdigest()
+
+
+def _read_json_with_digest_optional(path: Path, root: Path) -> tuple[dict[str, Any], int, str] | None:
+    try:
+        return _read_json_with_digest(path, root)
+    except FileNotFoundError:
+        return None
+
+
+def _safe_stat(path: Path, root: Path) -> os.stat_result:
+    try:
+        path.absolute().relative_to(root.absolute())
+        return stat_no_follow(path, containment_root=root)
+    except FileNotFoundError:
+        raise
+    except (OSError, SafeFilesystemError, ValueError) as error:
         raise AuditBlocked(f"unsafe or unreadable evidence path {path}: {error}") from error
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        raise AuditBlocked(f"evidence is not a regular non-symlink file: {path}")
-    _assert_no_symlink_components(path)
-    return resolved
 
 
-def _require_directory(path: Path, root: Path) -> Path:
+def _directory_present(path: Path, root: Path) -> bool:
     try:
-        resolved_root = root.resolve(strict=True)
-        resolved = path.resolve(strict=True)
-        resolved.relative_to(resolved_root)
-        info = path.lstat()
-    except (OSError, ValueError) as error:
-        raise AuditBlocked(f"unsafe or unreadable directory {path}: {error}") from error
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-        raise AuditBlocked(f"not a regular non-symlink directory: {path}")
-    _assert_no_symlink_components(path)
-    return resolved
+        info = _safe_stat(path, root)
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISDIR(info.st_mode):
+        raise AuditBlocked(f"evidence is not a directory: {path}")
+    return True
 
 
-def _assert_no_symlink_components(path: Path) -> None:
-    current = path.absolute()
-    while True:
-        if current.is_symlink():
-            raise AuditBlocked(f"symlink path component: {current}")
-        if current == current.parent:
-            return
-        current = current.parent
+def _list_directory(path: Path, root: Path, max_entries: int) -> list[str]:
+    try:
+        return list_directory_no_follow_limited(path, max_entries=max_entries, containment_root=root)
+    except FileNotFoundError:
+        raise
+    except (OSError, SafeFilesystemError) as error:
+        raise AuditBlocked(f"cannot list directory safely {path}: {error}") from error
 
 
 def _directory_has_regular_file(directory: Path, root: Path) -> bool:
     found = False
-    stack = [directory]
+    seen = 0
+    stack = [(directory, 0)]
     while stack:
-        current = stack.pop()
-        try:
-            entries = list(current.iterdir())
-        except OSError as error:
-            raise AuditBlocked(f"cannot read run output directory {current}: {error}") from error
-        for entry in entries:
-            try:
-                info = entry.lstat()
-                entry.resolve(strict=True).relative_to(root.resolve(strict=True))
-            except (OSError, ValueError) as error:
-                raise AuditBlocked(f"unsafe run output entry {entry}: {error}") from error
-            if stat.S_ISLNK(info.st_mode):
-                raise AuditBlocked(f"symlink in run output: {entry}")
+        current, depth = stack.pop()
+        names = _list_directory(current, root, MAX_RUN_OUTPUT_ENTRIES - seen)
+        if seen + len(names) > MAX_RUN_OUTPUT_ENTRIES:
+            raise AuditBlocked(f"run output exceeds {MAX_RUN_OUTPUT_ENTRIES} entries")
+        seen += len(names)
+        for name in names:
+            entry = current / name
+            info = _safe_stat(entry, root)
             if stat.S_ISDIR(info.st_mode):
-                stack.append(entry)
+                if depth >= MAX_RUN_OUTPUT_DEPTH:
+                    raise AuditBlocked(f"run output exceeds depth {MAX_RUN_OUTPUT_DEPTH}: {entry}")
+                stack.append((entry, depth + 1))
             elif stat.S_ISREG(info.st_mode):
                 found = True
             else:
                 raise AuditBlocked(f"unsafe non-regular run output: {entry}")
     return found
+
+
+def _directory_has_regular_file_optional(directory: Path, root: Path) -> bool | None:
+    try:
+        return _directory_has_regular_file(directory, root)
+    except FileNotFoundError:
+        return None
 
 
 def _object_key(uri: str, prefix: str) -> str:
@@ -825,27 +865,22 @@ def _validate_output_path(path: Path) -> Path:
     if not path.is_absolute():
         raise AuditBlocked(f"receipt path must be absolute: {path}")
     parent = path.parent
-    if not parent.exists():
-        raise AuditBlocked(f"receipt parent does not exist: {parent}")
-    _require_directory(parent, Path(path.anchor))
-    if path.is_symlink():
-        raise AuditBlocked(f"receipt target is a symlink: {path}")
+    try:
+        verify_directory_no_follow(parent)
+        stat_no_follow(path, containment_root=parent)
+    except FileNotFoundError:
+        pass
+    except SafeFilesystemError as error:
+        raise AuditBlocked(f"unsafe receipt path {path}: {error}") from error
     return path
 
 
 def _validate_audit_roots(config: AuditConfig) -> None:
-    _require_directory(config.object_store_root, Path(config.object_store_root.anchor))
-    if config.archive_root.is_symlink():
-        raise AuditBlocked(f"archive root is a symlink: {config.archive_root}")
-    if config.archive_root.exists():
-        _require_directory(config.archive_root, Path(config.archive_root.anchor))
-    else:
-        current = config.archive_root.parent
-        while not current.exists():
-            if current == current.parent:
-                raise AuditBlocked(f"archive root has no existing parent: {config.archive_root}")
-            current = current.parent
-        _require_directory(current, Path(current.anchor))
+    try:
+        verify_directory_no_follow(config.object_store_root)
+    except (OSError, SafeFilesystemError) as error:
+        raise AuditBlocked(f"unsafe object-store root: {error}") from error
+    _directory_present(config.archive_root, Path(config.archive_root.anchor))
     _validate_output_path(config.receipt_path)
 
 
@@ -881,21 +916,39 @@ def _canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def _sha256(path: Path) -> str:
-    return _size_sha256(path)[1]
+def _sha256(path: Path, root: Path) -> str:
+    return _size_sha256(path, root)[1]
 
 
-def _size_sha256(path: Path) -> tuple[int, str]:
+def _size_sha256(path: Path, root: Path) -> tuple[int, str]:
     digest = hashlib.sha256()
     size = 0
+    file_fd: int | None = None
     try:
-        with path.open("rb") as stream:
-            while chunk := stream.read(1024 * 1024):
-                size += len(chunk)
-                digest.update(chunk)
-    except OSError as error:
+        file_fd = open_file_no_follow(path, containment_root=root)
+        while chunk := os.read(file_fd, 1024 * 1024):
+            size += len(chunk)
+            digest.update(chunk)
+    except FileNotFoundError:
+        raise
+    except (OSError, SafeFilesystemError) as error:
         raise AuditBlocked(f"cannot checksum evidence {path}: {error}") from error
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
     return size, digest.hexdigest()
+
+
+def _size_sha256_optional(path: Path, root: Path) -> tuple[int, str] | None:
+    try:
+        return _size_sha256(path, root)
+    except FileNotFoundError:
+        return None
+
+
+def _sha256_optional(path: Path, root: Path) -> str | None:
+    result = _size_sha256_optional(path, root)
+    return None if result is None else result[1]
 
 
 if __name__ == "__main__":

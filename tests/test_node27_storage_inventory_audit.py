@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -10,6 +11,7 @@ from pathlib import Path
 import jsonschema
 import pytest
 
+from packages.common import safe_fs
 from scripts import node27_storage_inventory_audit as audit
 
 NOW = datetime(2026, 7, 11, 12, tzinfo=UTC)
@@ -273,6 +275,34 @@ def test_salvage_symlink_and_depth_are_blocked(tmp_path: Path) -> None:
         audit.discover_salvage(config.archive_root)
 
 
+def test_salvage_total_entry_cap_is_global(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _config(tmp_path)
+    (config.archive_root / "db-export").mkdir()
+    monkeypatch.setattr(
+        audit,
+        "_list_directory",
+        lambda _path, _root, _max: [str(index) for index in range(audit.MAX_SALVAGE_ENTRIES + 1)],
+    )
+    with pytest.raises(audit.AuditBlocked, match="total entries"):
+        audit.discover_salvage(config.archive_root)
+
+
+def test_limited_no_follow_read_loops_across_short_reads_and_returns_sentinel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "short-read.bin"
+    path.write_bytes(b"0123456789oversized")
+    original_read = os.read
+
+    def short_read(fd: int, size: int) -> bytes:
+        return original_read(fd, min(size, 3))
+
+    monkeypatch.setattr(safe_fs.os, "read", short_read)
+    content = safe_fs.read_bytes_limited_no_follow(path, max_bytes=10, containment_root=tmp_path)
+    assert content == b"0123456789o"
+    assert len(content) == 11
+
+
 def test_forcing_hot_binds_manifest_and_files(tmp_path: Path) -> None:
     config = _config(tmp_path)
     key = "forcing/gfs/2026050100/basin-a/model-a"
@@ -469,8 +499,8 @@ def test_publish_is_mode_0600_atomic_and_preserves_old_on_failure(
     assert json.loads(path.read_text()) == receipt
     assert path.stat().st_mode & 0o777 == 0o600
     before = path.read_bytes()
-    monkeypatch.setattr(os, "replace", lambda *_args: (_ for _ in ()).throw(OSError("boom")))
-    with pytest.raises(OSError, match="boom"):
+    monkeypatch.setattr(os, "replace", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("boom")))
+    with pytest.raises(audit.AuditBlocked, match="boom"):
         audit.publish_receipt(path, receipt)
     assert path.read_bytes() == before
     assert not list(tmp_path.glob(".*.tmp"))
@@ -484,7 +514,7 @@ def test_publish_rejects_relative_or_symlinked_paths(tmp_path: Path) -> None:
     real.mkdir()
     linked = tmp_path / "linked"
     linked.symlink_to(real, target_is_directory=True)
-    with pytest.raises(audit.AuditBlocked, match="symlink"):
+    with pytest.raises(audit.AuditBlocked, match="unsafe|not a directory"):
         audit.publish_receipt(linked / "receipt.json", receipt)
 
 
@@ -516,8 +546,8 @@ def test_symlinked_object_root_blocks_without_path_walk_loop(tmp_path: Path) -> 
     target = real / "states/gfs/model-a/2026050100/state.cfg.ic"
     target.parent.mkdir(parents=True)
     target.write_bytes(b"state")
-    with pytest.raises(audit.AuditBlocked, match="symlink path component"):
-        audit._contained_file(linked / "states/gfs/model-a/2026050100/state.cfg.ic", linked)
+    with pytest.raises(audit.AuditBlocked, match="unsafe|not a directory"):
+        audit._sha256_optional(linked / "states/gfs/model-a/2026050100/state.cfg.ic", linked)
 
 
 def test_pinned_example_passes_schema_and_runtime_invariants() -> None:
@@ -547,12 +577,20 @@ def test_sql_has_only_one_identity_leading_presence_probe() -> None:
         assert "ORDER BY x.valid_time" not in sql
         assert "MIN(" not in sql.upper() and "MAX(" not in sql.upper()
         assert "GROUP BY" not in sql.upper()
+    assert "JOIN core.model_instance mi ON mi.model_id = fv.model_id" in audit.FORCING_INVENTORY_SQL
+    assert "mi.basin_version_id" in audit.FORCING_INVENTORY_SQL
+    assert "SELECT x.basin_version_id" not in audit.FORCING_INVENTORY_SQL
+    assert (
+        "LEFT JOIN hydro.state_snapshot origin ON origin.state_id = ss.cloned_from_state_id"
+        in audit.STATE_INVENTORY_SQL
+    )
 
 
 def test_constants_are_fixed() -> None:
     assert audit.STATEMENT_TIMEOUT_MS == 20_000
     assert audit.MAX_MANIFEST_BYTES == 16 * 1024 * 1024
     assert audit.MAX_SALVAGE_MANIFESTS == 10_000
+    assert audit.MAX_SALVAGE_ENTRIES == 100_000
     assert audit.MAX_SALVAGE_DEPTH == 8
     assert audit.MAX_SUBJECTS == 100_000
     assert "LIMIT 100001" in audit.FORCING_INVENTORY_SQL
@@ -566,5 +604,185 @@ def test_audit_root_preflight_rejects_symlink_object_root(tmp_path: Path) -> Non
     real.mkdir()
     config.object_store_root.rmdir()
     config.object_store_root.symlink_to(real, target_is_directory=True)
-    with pytest.raises(audit.AuditBlocked, match="symlink"):
+    with pytest.raises(audit.AuditBlocked, match="unsafe|not a directory"):
         audit._validate_audit_roots(config)
+
+
+def _args(tmp_path: Path, *, age: int | None) -> argparse.Namespace:
+    object_root = tmp_path / "objects-config"
+    archive_root = tmp_path / "archive-config"
+    object_root.mkdir(exist_ok=True)
+    archive_root.mkdir(exist_ok=True)
+    return argparse.Namespace(
+        database_url="postgresql://redacted",
+        object_store_root=str(object_root),
+        object_store_prefix="s3://nhms",
+        archive_root=str(archive_root),
+        archive_min_age_days=age,
+        receipt_path=str(tmp_path / "receipt-config.json"),
+    )
+
+
+def test_archive_age_cli_zero_does_not_fall_through_to_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NHMS_ARCHIVE_MIN_AGE_DAYS", "45")
+    with pytest.raises(audit.AuditBlocked, match="at least DB retention"):
+        audit.config_from_args(_args(tmp_path, age=0))
+
+
+def test_archive_age_cli_overrides_env_and_env_below_retention_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NHMS_ARCHIVE_MIN_AGE_DAYS", "0")
+    assert audit.config_from_args(_args(tmp_path, age=30)).archive_min_age_days == 30
+    with pytest.raises(audit.AuditBlocked, match="at least DB retention"):
+        audit.config_from_args(_args(tmp_path, age=None))
+
+
+def _clone_row(**overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "state_id": "clone",
+        "model_id": "model-b",
+        "run_id": "run-b",
+        "source_id": "gfs",
+        "valid_time": START,
+        "state_uri": "states/gfs/model-a/2026050100/state.cfg.ic",
+        "checksum": "a" * 64,
+        "cloned_from_state_id": "origin",
+        "cloned_from_model_id": "model-a",
+        "clone_gate_fingerprint": "f" * 64,
+        "origin_state_id": "origin",
+        "origin_model_id": "model-a",
+        "origin_source_id": "gfs",
+        "origin_valid_time": START,
+        "origin_state_uri": "states/gfs/model-a/2026050100/state.cfg.ic",
+        "origin_checksum": "a" * 64,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_valid_clone_origin_keeps_clone_stable_subject() -> None:
+    _captured, subjects = audit.load_inventory(_Connection([[{"audit_time": NOW}], [], [], [_clone_row()]]))
+    assert subjects[0].stable_key == ("states", "clone")
+    assert subjects[0].cloned_from_model_id == "model-a"
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"origin_state_id": None}, "does not exist"),
+        ({"origin_model_id": "wrong"}, "model_id drift"),
+        ({"origin_source_id": None}, "source_id drift"),
+        ({"origin_valid_time": END}, "valid_time drift"),
+        ({"origin_state_uri": "states/other"}, "state_uri drift"),
+        ({"origin_checksum": "b" * 64}, "checksum drift"),
+        ({"clone_gate_fingerprint": "F" * 64}, "non-canonical"),
+        ({"clone_gate_fingerprint": "f" * 63}, "non-canonical"),
+    ],
+)
+def test_clone_origin_drift_or_invalid_fingerprint_blocks(override: dict[str, object], message: str) -> None:
+    with pytest.raises(audit.AuditBlocked, match=message):
+        audit.load_inventory(_Connection([[{"audit_time": NOW}], [], [], [_clone_row(**override)]]))
+
+
+def test_product_and_salvage_mismatch_evidence_survives_precedence() -> None:
+    subject = _subject()
+    selector_key = audit._canonical(subject.selector)
+    receipt = audit.build_receipt(
+        [subject],
+        audit_time=NOW,
+        archive_min_age_days=45,
+        product_coverage={subject.stable_key: audit.Coverage("none", ("product mismatch",))},
+        salvage_selectors=[subject.selector],
+        hot_coverage={},
+        salvage_mismatches={},
+    )
+    assert receipt["windows"][0]["coverage"] == "db-export"
+    assert "product mismatch" in receipt["windows"][0]["evidence"]
+    receipt = audit.build_receipt(
+        [subject],
+        audit_time=NOW,
+        archive_min_age_days=45,
+        product_coverage={subject.stable_key: audit.Coverage("product-archive", ("product valid",))},
+        salvage_selectors=[],
+        hot_coverage={},
+        salvage_mismatches={selector_key: "salvage mismatch"},
+    )
+    assert receipt["windows"][0]["coverage"] == "product-archive"
+    assert receipt["windows"][0]["evidence"] == ["salvage mismatch", "product valid"]
+
+
+def test_run_output_entry_and_depth_caps_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _config(tmp_path)
+    output = config.object_store_root / "runs/run-a/output"
+    output.mkdir(parents=True)
+    monkeypatch.setattr(
+        audit,
+        "_list_directory",
+        lambda _path, _root, _max: [str(index) for index in range(audit.MAX_RUN_OUTPUT_ENTRIES + 1)],
+    )
+    with pytest.raises(audit.AuditBlocked, match="entries"):
+        audit._directory_has_regular_file(output, config.object_store_root)
+
+
+def test_run_output_depth_cap_fails_closed_after_inspecting_bounded_tree(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    current = config.object_store_root / "runs/run-a/output"
+    current.mkdir(parents=True)
+    (current / "valid.csv").write_text("valid", encoding="utf-8")
+    for index in range(audit.MAX_RUN_OUTPUT_DEPTH + 1):
+        current = current / str(index)
+        current.mkdir()
+    with pytest.raises(audit.AuditBlocked, match="depth"):
+        audit._directory_has_regular_file(config.object_store_root / "runs/run-a/output", config.object_store_root)
+
+
+def test_missing_leaf_is_absent_but_intermediate_symlink_blocks_each_lane(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    forcing = _subject(hot_uri="forcing/gfs/2026050100/basin-a/model-a")
+    run = _subject("runs", "run-a")
+    state = _subject("states", "state-a")
+    assert audit.verify_hot(forcing, config) is None
+    assert audit.verify_hot(run, config) is None
+    assert audit.verify_hot(state, config) is None
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    for component in ("forcing", "runs", "states"):
+        link = config.object_store_root / component
+        link.symlink_to(outside, target_is_directory=True)
+        subject = {"forcing": forcing, "runs": run, "states": state}[component]
+        with pytest.raises(audit.AuditBlocked, match="unsafe|not a directory"):
+            audit.verify_hot(subject, config)
+        link.unlink()
+
+
+def test_product_archive_intermediate_symlink_blocks_while_true_missing_is_absent(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    subject = _subject()
+    assert audit.verify_product_archive(subject, config.archive_root) is None
+    outside = tmp_path / "outside-product"
+    outside.mkdir()
+    (config.archive_root / "forcing").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(audit.AuditBlocked, match="unsafe|not a directory"):
+        audit.verify_product_archive(subject, config.archive_root)
+
+
+def test_descriptor_bound_json_read_detects_leaf_swap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "root-race"
+    root.mkdir()
+    target = root / "manifest.json"
+    target.write_text('{"version":1}', encoding="utf-8")
+    original_open = os.open
+    swapped = False
+
+    def swap_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if path == "manifest.json" and kwargs.get("dir_fd") is not None and not swapped:
+            swapped = True
+            target.replace(root / "old.json")
+            target.write_text('{"version":2}', encoding="utf-8")
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swap_open)
+    with pytest.raises(audit.AuditBlocked, match="changed while being opened"):
+        audit._read_json(target, root)
