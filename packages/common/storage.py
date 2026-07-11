@@ -8,6 +8,8 @@ from types import MappingProxyType
 from typing import Mapping
 from urllib.parse import urlparse
 
+from packages.common.source_identity import normalize_source_id
+
 
 @dataclass(frozen=True)
 class ObjectPathValidation:
@@ -50,6 +52,12 @@ class ArchiveIdentity:
     run_id: str | None = None
 
     def __post_init__(self) -> None:
+        _validate_identity_component(self.source)
+        try:
+            canonical_source = normalize_source_id(self.source)
+        except ValueError as error:
+            raise ArchiveConfigurationError(f"invalid archive source: {self.source!r}") from error
+        object.__setattr__(self, "source", canonical_source)
         _validate_archive_identity(self)
 
     @classmethod
@@ -352,7 +360,8 @@ def _validate_archive_identity(identity: ArchiveIdentity) -> None:
 
 
 def _archive_identity_path_components(identity: ArchiveIdentity) -> tuple[str, ...]:
-    base = (identity.lane, identity.source, identity.cycle_identity)
+    source_segment = identity.source.lower()
+    base = (identity.lane, source_segment, identity.cycle_identity)
     if identity.lane == "forcing":
         assert identity.basin_version_id is not None and identity.model_id is not None
         return (*base, identity.basin_version_id, identity.model_id)

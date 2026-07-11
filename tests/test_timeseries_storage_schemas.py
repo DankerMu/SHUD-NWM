@@ -68,6 +68,125 @@ def test_completeness_receipt_requires_each_window_verdict(tmp_path: Path) -> No
     assert result.returncode != 0
 
 
+def test_completeness_receipt_distinguishes_equal_window_sibling_subjects(tmp_path: Path) -> None:
+    document = _document("archive_completeness_receipt")
+    first, second = document["windows"]
+
+    assert first["window"] == second["window"]
+    assert first["subject"] != second["subject"]
+    assert first["verdict"] == "gap"
+    assert second["verdict"] == "complete"
+    result = _validate_document(tmp_path, "archive_completeness_receipt", document)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("lane", "subject"),
+    [
+        ("forcing", {"forcing_version_id": "forcing-v1"}),
+        ("runs", {"run_id": "run-42"}),
+        ("states", {"state_id": "state-42"}),
+    ],
+)
+def test_completeness_receipt_accepts_each_lane_subject(
+    tmp_path: Path,
+    lane: str,
+    subject: dict[str, str],
+) -> None:
+    document = _document("archive_completeness_receipt")
+    document["windows"] = [document["windows"][0]]
+    document["windows"][0]["lane"] = lane
+    document["windows"][0]["subject"] = subject
+
+    result = _validate_document(tmp_path, "archive_completeness_receipt", document)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("lane", "subject"),
+    [
+        ("forcing", None),
+        ("forcing", {"run_id": "run-42"}),
+        ("runs", {"forcing_version_id": "forcing-v1"}),
+        ("states", {"run_id": "run-42"}),
+        ("unknown", {"state_id": "state-42"}),
+    ],
+)
+def test_completeness_receipt_rejects_missing_or_cross_lane_subject(
+    tmp_path: Path,
+    lane: str,
+    subject: dict[str, str] | None,
+) -> None:
+    document = _document("archive_completeness_receipt")
+    window = document["windows"][0]
+    window["lane"] = lane
+    if subject is None:
+        del window["subject"]
+    else:
+        window["subject"] = subject
+
+    result = _validate_document(tmp_path, "archive_completeness_receipt", document)
+    assert result.returncode != 0
+
+
+def test_completeness_receipt_requires_coverage_mechanism_separate_from_lane(tmp_path: Path) -> None:
+    document = _document("archive_completeness_receipt")
+    del document["windows"][0]["coverage"]
+
+    result = _validate_document(tmp_path, "archive_completeness_receipt", document)
+    assert result.returncode != 0
+
+
+@pytest.mark.parametrize(
+    ("coverage", "verdict"),
+    [
+        ("product-archive", "complete"),
+        ("db-export", "complete"),
+        ("hot-object-store", "complete"),
+        ("hot-object-store", "pending-archive"),
+        ("none", "gap"),
+    ],
+)
+def test_completeness_receipt_accepts_valid_coverage_verdict_pairs(
+    tmp_path: Path,
+    coverage: str,
+    verdict: str,
+) -> None:
+    document = _document("archive_completeness_receipt")
+    document["windows"] = [document["windows"][0]]
+    document["windows"][0]["coverage"] = coverage
+    document["windows"][0]["verdict"] = verdict
+
+    result = _validate_document(tmp_path, "archive_completeness_receipt", document)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("coverage", "verdict"),
+    [
+        ("product-archive", "pending-archive"),
+        ("product-archive", "gap"),
+        ("db-export", "pending-archive"),
+        ("db-export", "gap"),
+        ("hot-object-store", "gap"),
+        ("none", "complete"),
+        ("none", "pending-archive"),
+    ],
+)
+def test_completeness_receipt_rejects_contradictory_coverage_verdict_pairs(
+    tmp_path: Path,
+    coverage: str,
+    verdict: str,
+) -> None:
+    document = _document("archive_completeness_receipt")
+    document["windows"] = [document["windows"][0]]
+    document["windows"][0]["coverage"] = coverage
+    document["windows"][0]["verdict"] = verdict
+
+    result = _validate_document(tmp_path, "archive_completeness_receipt", document)
+    assert result.returncode != 0
+
+
 def test_product_archive_manifest_rejects_row_count(tmp_path: Path) -> None:
     document = _document("product_archive_manifest")
     document["row_count"] = 100
@@ -179,6 +298,28 @@ def test_product_archive_manifest_rejects_unsafe_missing_or_cross_lane_identity(
 
     result = _validate_document(tmp_path, "product_archive_manifest", document)
     assert result.returncode != 0
+
+
+@pytest.mark.parametrize("source", ["GFS", "era5", "ifs", "unknown-provider"])
+def test_product_archive_manifest_rejects_noncanonical_source_ids(tmp_path: Path, source: str) -> None:
+    document = _document("product_archive_manifest")
+    document["identity"]["source"] = source
+
+    result = _validate_document(tmp_path, "product_archive_manifest", document)
+    assert result.returncode != 0
+
+
+@pytest.mark.parametrize("source", ["gfs", "ERA5", "IFS"])
+def test_product_archive_manifest_accepts_canonical_source_ids(tmp_path: Path, source: str) -> None:
+    document = _document("product_archive_manifest")
+    document["identity"]["source"] = source
+    source_segment = source.lower()
+    parent = f"forcing/{source_segment}/2026053100/yangtze-v1/yangtze-shud-v12"
+    document["archive"]["path"] = f"{parent}/archive.tar.zst"
+    document["archive"]["manifest_path"] = f"{parent}/manifest.json"
+
+    result = _validate_document(tmp_path, "product_archive_manifest", document)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("cycle_time", [None, "not-a-time", "2026-05-31T08:00:00+08:00"])
@@ -315,6 +456,22 @@ def test_archive_schema_paths_accept_nested_root_relative_paths(tmp_path: Path) 
     for base, document in (("product_archive_manifest", product), ("salvage_manifest", salvage)):
         result = _validate_document(tmp_path, base, document)
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "object_path",
+    [
+        "db-export/forcing/data.json",
+        "db-export/forcing/data.csv",
+        "db-export/forcing/data.tar.zst",
+    ],
+)
+def test_salvage_manifest_rejects_non_csv_zst_object_suffix(tmp_path: Path, object_path: str) -> None:
+    document = _document("salvage_manifest")
+    document["exports"][0]["object"]["path"] = object_path
+
+    result = _validate_document(tmp_path, "salvage_manifest", document)
+    assert result.returncode != 0
 
 
 @pytest.mark.parametrize(

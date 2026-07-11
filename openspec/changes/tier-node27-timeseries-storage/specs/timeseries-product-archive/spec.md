@@ -126,8 +126,12 @@ The inventory audit SHALL compare DB coverage — `hydro_run` cycles,
 `forcing_version` windows, and `state_snapshot.state_uri` references —
 against checksum-verified archive objects and hot object-store presence, and
 emit a JSON **archive-completeness receipt** recording: `generated_at`, the
-inventoried coverage bounds, a per-window verdict, and the salvage selector
-list. The verdict per window SHALL be `complete` when it is covered by a
+inventoried coverage bounds, a verdict for every inventoried subject, and the
+salvage selector list. Each verdict SHALL bind exactly one lane-discriminated
+stable subject (`forcing_version_id`, `run_id`, or `state_id`) so subjects
+sharing a time window remain distinguishable; the coverage mechanism SHALL
+be recorded separately from the subject lane. The verdict per subject SHALL
+be `complete` when it is covered by a
 checksum-verified product archive object or a verified `db-export` salvage
 object, or when its products are present in the hot object-store and the
 window is not yet past the archive minimum age; `pending-archive` when past
@@ -160,3 +164,12 @@ list, so a fresh receipt is available to each retention tick.
   the hot object-store nor the archive
 - **THEN** the receipt MUST mark that window `gap` and include its exact
   selectors in the salvage selector list
+
+#### Scenario: Equal-window subjects remain independently auditable
+
+- **WHEN** two inventory subjects share the same time window but have
+  different identities or coverage outcomes
+- **THEN** the receipt MUST carry distinct subject-bound verdicts for both
+- **AND** a missing or cross-lane subject identity MUST fail schema validation
+- **AND** the runtime audit MUST reject duplicate or omitted inventory
+  subjects before publishing a retention-gating receipt

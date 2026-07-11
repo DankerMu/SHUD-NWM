@@ -58,9 +58,13 @@ Order is load-bearing:
     `basin_version_id + model_id`, runs requiring `run_id`, and states
     requiring `model_id`; every component is a non-empty safe path segment.
     Expected: deterministic paths under
-    `<archive-root>/<lane>/<source>/<cycle-identity>/<lane-scope...>/archive.tar.zst`
+    `<archive-root>/<lane>/<source-segment>/<cycle-identity>/<lane-scope...>/archive.tar.zst`
     and the same directory's `manifest.json`; repeated lookup is identical,
     while different sources with the same cycle/scope resolve distinctly.
+    Manifest `source` uses the shared canonical storage IDs (`gfs`, `ERA5`,
+    `IFS`); the filesystem `source-segment` is the corresponding lowercase
+    object-store segment. Case-insensitive aliases normalize to the same
+    identity/path, while an unknown source fails closed.
   - Input: identity with an unknown lane, empty/dot/dot-dot component, path
     separator, absolute component, missing lane-required field, or field from
     the wrong lane.
@@ -87,8 +91,11 @@ Order is load-bearing:
   file-derived); the salvage manifest schema **requires** per-selector
   exported row counts; the drill receipt schema requires declared
   (source, window) coverage tuples; the completeness receipt schema requires
-  per-window verdicts, the salvage selector list, coverage bounds, and
-  `generated_at`.
+  per-inventoried-subject verdicts, the salvage selector list, coverage
+  bounds, and `generated_at`. Every verdict is bound to exactly one
+  lane-discriminated stable subject (`forcing_version_id`, `run_id`, or
+  `state_id`) even when multiple subjects share one time window; the
+  coverage mechanism is represented separately from the subject lane.
   Test rows:
   - Input: each schema's example document.
     Expected: validates in the json-schema-validate CI gate.
@@ -119,6 +126,16 @@ Order is load-bearing:
     contains an empty/dot/dot-dot segment, backslash, or control character.
     Expected: schema validation fails; ordinary nested root-relative paths
     with the correct archive lane / `db-export` prefix pass.
+  - Input: salvage object path under `db-export/` whose filename does not end
+    in `.csv.zst`.
+    Expected: schema validation fails; an ordinary nested
+    `db-export/.../data.csv.zst` path passes.
+  - Input: two forcing versions sharing the same time window, one complete
+    and one gap; or a verdict with a missing/cross-lane subject identity.
+    Expected: the receipt represents the two subjects distinctly and rejects
+    the missing/cross-lane identity. Runtime inventory coverage (task 2.1)
+    must later prove exactly one verdict per inventoried subject and exact
+    `gap` to salvage-selector correspondence.
   - Input: clean default dev/test environment after dependency sync.
     Expected: every schema positive/negative pytest executes with zero skip;
     missing `check-jsonschema` is a test failure, not a skipped contract gate.

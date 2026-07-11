@@ -33,7 +33,7 @@
             "additionalProperties": false,
             "required": ["path", "sha256", "size_bytes"],
             "properties": {
-              "path": {"allOf": [{"$ref": "#/definitions/safe_relative_path"}, {"pattern": "^db-export/.+"}]},
+              "path": {"allOf": [{"$ref": "#/definitions/safe_relative_path"}, {"pattern": "^db-export/(?:[^/]+/)*[^/]+\\.csv\\.zst$"}]},
               "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
               "size_bytes": {"type": "integer", "minimum": 0}
             }

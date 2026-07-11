@@ -248,7 +248,9 @@ Invariant Matrix:
 - Regression: shared root only and shared+override -> shared resolution then override precedence.
 - Regression: archive root contains/is contained by cleanup target, or age 20 with retention 30 -> named validation error before mutation.
 - Regression: equal/aliased/symlink-resolved archive and cleanup roots -> normalized overlap rejection; caller supplies its complete cleanup-root set.
-- Regression: source-qualified, lane-typed forcing/runs/states identity with bound ISO `cycle_time` + compact `cycle_identity` -> deterministic sibling `archive.tar.zst` + `manifest.json`, with distinct paths across sources; unsafe/missing/cross-lane/time-mismatched identity or manifest/path mismatch -> error before access.
+- Regression: source-qualified, lane-typed forcing/runs/states identity with bound ISO `cycle_time` + compact `cycle_identity` -> deterministic sibling `archive.tar.zst` + `manifest.json`; shared source aliases normalize to canonical manifest IDs and lowercase object-store/archive path segments, different providers remain distinct, and unknown sources or unsafe/missing/cross-lane/time-mismatched identity or manifest/path mismatch fail before access.
+- Regression: every completeness verdict binds a lane-discriminated stable inventory subject (`forcing_version_id`, `run_id`, or `state_id`) independently of its coverage mechanism; equal-window sibling subjects remain distinguishable, while missing/cross-lane subjects fail schema validation and later inventory runtime must reject duplicate or omitted subjects.
+- Regression: salvage object paths are safe root-relative `db-export/.../*.csv.zst`; other suffixes fail schema validation.
 - Regression: valid examples -> schema PASS; missing completeness verdict or salvage row count -> schema FAIL.
 - Regression: product manifest row count/unsafe paths, invalid table-selector key, incomplete drill verdict details, or incomplete retention outcome details -> schema FAIL.
 - Regression: product-only drill with empty selector list -> schema PASS; clean default test environment executes all schema negatives with zero skip.

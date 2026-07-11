@@ -233,6 +233,59 @@ def test_archive_provenance_distinguishes_sources(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("alias", "canonical_source", "source_segment"),
+    [
+        ("GFS", "gfs", "gfs"),
+        ("era5", "ERA5", "era5"),
+        ("IfS", "IFS", "ifs"),
+    ],
+)
+def test_archive_identity_normalizes_shared_source_aliases_and_path_segments(
+    tmp_path: Path,
+    alias: str,
+    canonical_source: str,
+    source_segment: str,
+) -> None:
+    identity = ArchiveIdentity(
+        lane="runs",
+        source=alias,
+        cycle_identity="2026071100",
+        cycle_time="2026-07-11T00:00:00Z",
+        run_id="run-42",
+    )
+
+    paths = archive_provenance_paths(tmp_path / "archive", identity=identity)
+    canonical_identity = ArchiveIdentity(
+        lane="runs",
+        source=canonical_source,
+        cycle_identity="2026071100",
+        cycle_time="2026-07-11T00:00:00Z",
+        run_id="run-42",
+    )
+    canonical_paths = archive_provenance_paths(tmp_path / "archive", identity=canonical_identity)
+
+    assert identity.source == canonical_source
+    assert identity == canonical_identity
+    assert paths == canonical_paths
+    assert f"/runs/{source_segment}/2026071100/" in paths.archive.as_posix()
+
+
+def test_archive_identity_rejects_unknown_source_before_root_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unexpected_resolve(*args: object, **kwargs: object) -> None:
+        raise AssertionError("filesystem resolution must not happen for an unknown source")
+
+    monkeypatch.setattr(Path, "resolve", unexpected_resolve)
+    with pytest.raises(ArchiveConfigurationError, match="invalid archive source"):
+        ArchiveIdentity(
+            lane="runs",
+            source="unknown-provider",
+            cycle_identity="2026071100",
+            cycle_time="2026-07-11T00:00:00Z",
+            run_id="run-42",
+        )
+
+
+@pytest.mark.parametrize(
     "identity_mapping",
     [
         {
@@ -350,6 +403,25 @@ def test_product_manifest_binding_accepts_canonical_identity_and_siblings(tmp_pa
 
     assert paths.archive == (tmp_path / "archive" / relative_parent / "archive.tar.zst").resolve()
     assert paths.manifest == (tmp_path / "archive" / relative_parent / "manifest.json").resolve()
+
+
+def test_product_manifest_binding_normalizes_source_alias_to_canonical_path_segment(tmp_path: Path) -> None:
+    relative_parent = "runs/ifs/2026071100/run-42"
+    manifest = _product_manifest(
+        {
+            "lane": "runs",
+            "source": "ifs",
+            "cycle_identity": "2026071100",
+            "cycle_time": "2026-07-11T00:00:00Z",
+            "run_id": "run-42",
+        },
+        f"{relative_parent}/archive.tar.zst",
+        f"{relative_parent}/manifest.json",
+    )
+
+    paths = validate_product_archive_manifest_binding(tmp_path / "archive", manifest)
+
+    assert paths.archive == (tmp_path / "archive" / relative_parent / "archive.tar.zst").resolve()
 
 
 def test_product_manifest_binding_rejects_drifting_cycle_time_identity(tmp_path: Path) -> None:

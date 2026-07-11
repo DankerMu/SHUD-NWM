@@ -11,17 +11,7 @@
     "windows": {
       "type": "array",
       "minItems": 1,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["source", "window", "verdict"],
-        "properties": {
-          "source": {"enum": ["forcing", "runs", "states", "db-export"]},
-          "window": {"$ref": "#/definitions/window"},
-          "verdict": {"enum": ["complete", "pending-archive", "gap"]},
-          "evidence": {"type": "array", "items": {"type": "string", "minLength": 1}}
-        }
-      }
+      "items": {"$ref": "#/definitions/subject_verdict"}
     },
     "salvage_selectors": {
       "type": "array",
@@ -29,6 +19,102 @@
     }
   },
   "definitions": {
+    "subject_verdict": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "allOf": [{"$ref": "#/definitions/coverage_verdict_contract"}],
+          "required": ["lane", "subject", "window", "coverage", "verdict"],
+          "properties": {
+            "lane": {"const": "forcing"},
+            "subject": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["forcing_version_id"],
+              "properties": {"forcing_version_id": {"type": "string", "minLength": 1}}
+            },
+            "window": {"$ref": "#/definitions/window"},
+            "coverage": {"$ref": "#/definitions/coverage_mechanism"},
+            "verdict": {"$ref": "#/definitions/verdict"},
+            "evidence": {"$ref": "#/definitions/evidence"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "allOf": [{"$ref": "#/definitions/coverage_verdict_contract"}],
+          "required": ["lane", "subject", "window", "coverage", "verdict"],
+          "properties": {
+            "lane": {"const": "runs"},
+            "subject": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["run_id"],
+              "properties": {"run_id": {"type": "string", "minLength": 1}}
+            },
+            "window": {"$ref": "#/definitions/window"},
+            "coverage": {"$ref": "#/definitions/coverage_mechanism"},
+            "verdict": {"$ref": "#/definitions/verdict"},
+            "evidence": {"$ref": "#/definitions/evidence"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "allOf": [{"$ref": "#/definitions/coverage_verdict_contract"}],
+          "required": ["lane", "subject", "window", "coverage", "verdict"],
+          "properties": {
+            "lane": {"const": "states"},
+            "subject": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["state_id"],
+              "properties": {"state_id": {"type": "string", "minLength": 1}}
+            },
+            "window": {"$ref": "#/definitions/window"},
+            "coverage": {"$ref": "#/definitions/coverage_mechanism"},
+            "verdict": {"$ref": "#/definitions/verdict"},
+            "evidence": {"$ref": "#/definitions/evidence"}
+          }
+        }
+      ]
+    },
+    "coverage_mechanism": {
+      "enum": ["product-archive", "db-export", "hot-object-store", "none"]
+    },
+    "coverage_verdict_contract": {
+      "oneOf": [
+        {
+          "required": ["coverage", "verdict"],
+          "properties": {
+            "coverage": {"enum": ["product-archive", "db-export", "hot-object-store"]},
+            "verdict": {"const": "complete"}
+          }
+        },
+        {
+          "required": ["coverage", "verdict"],
+          "properties": {
+            "coverage": {"const": "hot-object-store"},
+            "verdict": {"const": "pending-archive"}
+          }
+        },
+        {
+          "required": ["coverage", "verdict"],
+          "properties": {
+            "coverage": {"const": "none"},
+            "verdict": {"const": "gap"}
+          }
+        }
+      ]
+    },
+    "verdict": {
+      "enum": ["complete", "pending-archive", "gap"]
+    },
+    "evidence": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
     "window": {
       "type": "object",
       "additionalProperties": false,
