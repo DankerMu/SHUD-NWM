@@ -331,6 +331,28 @@ def _default_no_op_manifest_publisher(ctx: PostCommitPublishContext) -> None:  #
     return None
 
 
+# Epic #982 SUB-6 (§3.3) — state clone index publisher seam. Runs on the
+# post-commit tail BEFORE the manifest publisher; a raise here holds
+# back the manifest re-publish so node-22 (DB-free) never observes
+# ``M1``-active in the manifest without ``M1``'s successor checkpoint on
+# the file state index (D7 fact anchor A-i).
+PostCommitStateIndexPublisher = Callable[[PostCommitPublishContext], None]
+
+
+def _default_no_op_state_index_publisher(  # noqa: ARG001
+    ctx: PostCommitPublishContext,
+) -> None:
+    """Default state-index publisher: no-op.
+
+    Preserves prior lifecycle behavior byte-for-byte until the production
+    wiring registers the real
+    :func:`packages.common.state_clone_index_publisher.build_default_state_index_publisher`
+    bridge. Tests bind a recording / raising stub via
+    :meth:`PsycopgModelRegistryStore.register_post_commit_state_index_publisher`.
+    """
+    return None
+
+
 def _should_publish_manifest_after_commit(
     *,
     operation: ModelLifecycleOperation,
@@ -582,6 +604,19 @@ class PsycopgModelRegistryStore:
             "_post_commit_manifest_publisher",
             _default_no_op_manifest_publisher,
         )
+        # SUB-6 (§3.3): seed the post-commit state-index publisher. Runs
+        # BEFORE the manifest publisher on the post-commit tail so a
+        # raising index publisher holds back the manifest re-publish —
+        # node-22 (DB-free) never observes ``M1``-active without ``M1``'s
+        # successor checkpoint on the file state index (D7 fact anchor
+        # A-i). Defaults to no-op so the byte-for-byte-preserved
+        # lifecycle behavior stays intact until production wiring
+        # registers the real publisher.
+        object.__setattr__(
+            self,
+            "_post_commit_state_index_publisher",
+            _default_no_op_state_index_publisher,
+        )
 
     def register_pre_activation_hook(self, mount_point: str, hook: PreActivationHook) -> None:
         """Register a hook at a reserved mount point (§2.1).
@@ -651,6 +686,49 @@ class PsycopgModelRegistryStore:
         """
         publisher: PostCommitManifestPublisher = getattr(
             self, "_post_commit_manifest_publisher", _default_no_op_manifest_publisher
+        )
+        publisher(publish_context)
+
+    def register_post_commit_state_index_publisher(
+        self, publisher: PostCommitStateIndexPublisher
+    ) -> None:
+        """Register the post-commit state-index publisher (SUB-6 §3.3).
+
+        Overrides the default no-op with a real callable that receives
+        every committed dispatch-set-changing transition. Production
+        wiring binds this to
+        :func:`packages.common.state_clone_index_publisher.build_default_state_index_publisher`;
+        tests bind a recording / raising stub. Only one publisher is
+        supported — the post-commit tail is a single seam per role, not
+        an ordered chain.
+
+        Ordering invariant enforced by the post-commit tail: the state-
+        index publisher fires BEFORE the manifest publisher. A raising
+        state-index publisher propagates BEFORE the manifest fires so
+        the previous manifest remains the compute-plane authority
+        (node-22, DB-free) and never routes to ``M1`` while the file
+        state index still lacks ``M1``'s successor checkpoint (D7 fact
+        anchor A-i).
+        """
+        object.__setattr__(self, "_post_commit_state_index_publisher", publisher)
+
+    def _dispatch_post_commit_state_index_publish(
+        self, publish_context: PostCommitPublishContext
+    ) -> None:
+        """Invoke the post-commit state-index publisher.
+
+        Called AFTER the lifecycle transaction commits and BEFORE
+        :meth:`_dispatch_post_commit_manifest_publish`. A raising
+        publisher propagates so the caller's post-commit tail short-
+        circuits BEFORE the manifest re-publish — the previous manifest
+        stays the compute-plane authority, node-22 never observes
+        ``M1``-active in the manifest without the successor checkpoint
+        on the index.
+        """
+        publisher: PostCommitStateIndexPublisher = getattr(
+            self,
+            "_post_commit_state_index_publisher",
+            _default_no_op_state_index_publisher,
         )
         publisher(publish_context)
 
@@ -2260,13 +2338,23 @@ class PsycopgModelRegistryStore:
                 preflight=preflight,
             )
 
-        # §2.2 post-commit tail: fire the manifest publisher ONLY on a
-        # committed dispatch-set-changing transition. All non-committing
-        # paths (preflight-blocked / already-current / hook-aborted /
-        # audit-persistence-failed) either early-returned above or left
-        # ``publish_context`` as None because the trigger was set only
-        # right before the successful return.
+        # §2.2 + SUB-6 (§3.3) post-commit tail: fire publishers ONLY on
+        # a committed dispatch-set-changing transition. All non-
+        # committing paths (preflight-blocked / already-current / hook-
+        # aborted / audit-persistence-failed) either early-returned
+        # above or left ``publish_context`` as None because the trigger
+        # was set only right before the successful return.
+        #
+        # Ordering invariant (D7 fact anchor A-i): the state-index
+        # publisher runs FIRST. A raise here holds back the manifest re-
+        # publish — the previous manifest remains the compute-plane
+        # authority (node-22, DB-free) so node-22 never observes
+        # ``M1``-active in the manifest without ``M1``'s successor
+        # checkpoint on the file state index. The manifest publisher
+        # runs SECOND only after the state-index publisher returns
+        # without raising.
         if publish_context is not None:
+            self._dispatch_post_commit_state_index_publish(publish_context)
             self._dispatch_post_commit_manifest_publish(publish_context)
         return result
 

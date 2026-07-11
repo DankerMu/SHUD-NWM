@@ -119,6 +119,10 @@ class StateSnapshotRepository(Protocol):
 
     def get_latest_usable_state(self, *, model_id: str, before_time: datetime) -> StateSnapshot | None: ...
 
+    def get_latest_clone_row_for_model_source(
+        self, *, model_id: str, source_id: str
+    ) -> StateSnapshot | None: ...
+
     def list_state_snapshots(
         self,
         *,
@@ -743,6 +747,53 @@ class PsycopgStateSnapshotRepository:
             LIMIT 1
             """,
             (model_id, _ensure_utc(before_time)),
+        )
+        return _snapshot_from_row(row) if row is not None else None
+
+    def get_latest_clone_row_for_model_source(
+        self, *, model_id: str, source_id: str
+    ) -> StateSnapshot | None:
+        """Return the newest CLONE ``hydro.state_snapshot`` row for a ``(model_id, source_id)`` pair.
+
+        Read-only consumer added for Epic #982 SUB-6 §3.3: the state-clone
+        index publisher walks the committed clone rows for the newly-
+        activated ``M1`` scope and republishes each into the scheduler
+        file state index.
+
+        Shadow-proof filter (SUB-6 Round-1 fold): rows written by SHUD
+        forecast / save-state paths (``clone_gate_fingerprint IS NULL``)
+        are excluded. Only rows produced by the state-clone hook
+        (``clone_gate_fingerprint IS NOT NULL``, populated by SUB-2's
+        write path) are considered. This isolates clone rows unambiguously
+        so a re-activation with a backdated ``t*`` cannot be shadowed by
+        prior forecast/save-state rows at higher ``valid_time`` values
+        under the same ``(model_id, source_id)`` pair — the publisher
+        would otherwise upsert the stale forecast row into the file state
+        index and ``strict_warm_start_evidence(M1, source, t*)`` would
+        miss because the index key uses the stale ``valid_time``.
+
+        Among clone rows the newest by ``(valid_time, created_at)`` is
+        the just-committed clone row. No usable-flag / lineage filter:
+        the publisher's job is to mirror the DB clone row verbatim into
+        the file state index; the DB's write-side
+        ``upsert_state_snapshot`` is the source of truth.
+
+        Returns ``None`` when no clone row exists for the pair —
+        approved cold-start (SUB-5 task 3.2), hook-skipped fresh basin,
+        or legacy target — so the caller skips publish for that source
+        (never fabricates an index entry).
+        """
+        row = self._fetch_optional(
+            """
+            SELECT *
+            FROM hydro.state_snapshot
+            WHERE model_id = %s
+              AND source_id = %s
+              AND clone_gate_fingerprint IS NOT NULL
+            ORDER BY valid_time DESC, created_at DESC
+            LIMIT 1
+            """,
+            (model_id, source_id),
         )
         return _snapshot_from_row(row) if row is not None else None
 
