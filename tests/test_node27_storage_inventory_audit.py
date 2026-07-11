@@ -429,10 +429,9 @@ def test_inventory_transaction_filters_zero_detail_by_lateral_and_checks_bounds(
         "forcing_package_uri": "missing",
         "checksum": "a" * 64,
         "basin_version_id": "basin-a",
-        "detail_min": START,
-        "detail_max": END,
         "before_window": False,
         "after_window": False,
+        "identity_drift": False,
     }
     connection = _Connection([[{"audit_time": NOW}], [forcing], [], []])
     captured, subjects = audit.load_inventory(connection)
@@ -535,10 +534,24 @@ def test_pinned_example_passes_schema_and_runtime_invariants() -> None:
 
 
 def test_sql_has_identity_leading_presence_and_outside_probes() -> None:
-    for sql, identity in ((audit.FORCING_INVENTORY_SQL, "forcing_version_id"), (audit.RUN_INVENTORY_SQL, "run_id")):
+    cases = (
+        (audit.FORCING_INVENTORY_SQL, "forcing_version_id", ") fst_presence"),
+        (audit.RUN_INVENTORY_SQL, "run_id", ") rt_presence"),
+    )
+    for sql, identity, presence_alias in cases:
         assert sql.count(f"x.{identity} =") >= 4
         assert sql.count("LIMIT 1") >= 4
         assert "valid_time <" in sql and "valid_time >" in sql
+        assert sql.count("CROSS JOIN LATERAL (") == 1
+        presence_probe = sql.split("CROSS JOIN LATERAL (", maxsplit=1)[1].split(presence_alias, maxsplit=1)[0]
+        assert f"x.{identity} =" in presence_probe
+        assert "LIMIT 1" in presence_probe
+        assert "ORDER BY" not in presence_probe
+        assert "valid_time" not in presence_probe
+        assert "detail_min" not in sql and "detail_max" not in sql
+        assert "ORDER BY x.valid_time" not in sql
+        assert "MIN(" not in sql.upper() and "MAX(" not in sql.upper()
+        assert "GROUP BY" not in sql.upper()
 
 
 def test_constants_are_fixed() -> None:

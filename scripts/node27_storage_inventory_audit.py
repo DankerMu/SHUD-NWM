@@ -129,7 +129,7 @@ class ConnectionFactory(Protocol):
 FORCING_INVENTORY_SQL = """
 SELECT fv.forcing_version_id, fv.model_id, fv.source_id, fv.cycle_time,
        fv.start_time, fv.end_time, fv.forcing_package_uri, fv.checksum,
-       fst_first.basin_version_id, fst_first.detail_min, fst_last.detail_max,
+       fst_presence.basin_version_id,
        EXISTS (SELECT 1 FROM met.forcing_station_timeseries x
                WHERE x.forcing_version_id = fv.forcing_version_id
                  AND x.valid_time < fv.start_time LIMIT 1) AS before_window,
@@ -138,21 +138,15 @@ SELECT fv.forcing_version_id, fv.model_id, fv.source_id, fv.cycle_time,
                  AND x.valid_time > fv.end_time LIMIT 1) AS after_window,
        EXISTS (SELECT 1 FROM met.forcing_station_timeseries x
                  WHERE x.forcing_version_id = fv.forcing_version_id
-                   AND (x.basin_version_id <> fst_first.basin_version_id
+                   AND (x.basin_version_id <> fst_presence.basin_version_id
                         OR LOWER(x.source_id) <> LOWER(fv.source_id)) LIMIT 1) AS identity_drift
 FROM met.forcing_version fv
 CROSS JOIN LATERAL (
-  SELECT x.basin_version_id, x.valid_time AS detail_min
+  SELECT x.basin_version_id
   FROM met.forcing_station_timeseries x
   WHERE x.forcing_version_id = fv.forcing_version_id
-  ORDER BY x.valid_time ASC LIMIT 1
-) fst_first
-CROSS JOIN LATERAL (
-  SELECT x.valid_time AS detail_max
-  FROM met.forcing_station_timeseries x
-  WHERE x.forcing_version_id = fv.forcing_version_id
-  ORDER BY x.valid_time DESC LIMIT 1
-) fst_last
+  LIMIT 1
+) fst_presence
 ORDER BY fv.forcing_version_id
 LIMIT 100001
 """
@@ -160,7 +154,7 @@ LIMIT 100001
 RUN_INVENTORY_SQL = """
 SELECT r.run_id, r.model_id, r.basin_version_id, r.source_id, r.cycle_time,
        r.start_time, r.end_time, r.run_manifest_uri, r.output_uri,
-       rt_first.detail_min, rt_last.detail_max,
+       rt_presence.detail_present,
        EXISTS (SELECT 1 FROM hydro.river_timeseries x
                WHERE x.run_id = r.run_id AND x.valid_time < r.start_time LIMIT 1) AS before_window,
        EXISTS (SELECT 1 FROM hydro.river_timeseries x
@@ -170,13 +164,11 @@ SELECT r.run_id, r.model_id, r.basin_version_id, r.source_id, r.cycle_time,
                    AND x.basin_version_id <> r.basin_version_id LIMIT 1) AS identity_drift
 FROM hydro.hydro_run r
 CROSS JOIN LATERAL (
-  SELECT x.valid_time AS detail_min FROM hydro.river_timeseries x
-  WHERE x.run_id = r.run_id ORDER BY x.valid_time ASC LIMIT 1
-) rt_first
-CROSS JOIN LATERAL (
-  SELECT x.valid_time AS detail_max FROM hydro.river_timeseries x
-  WHERE x.run_id = r.run_id ORDER BY x.valid_time DESC LIMIT 1
-) rt_last
+  SELECT 1 AS detail_present
+  FROM hydro.river_timeseries x
+  WHERE x.run_id = r.run_id
+  LIMIT 1
+) rt_presence
 ORDER BY r.run_id
 LIMIT 100001
 """
@@ -717,13 +709,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _validate_detail_bounds(row: Mapping[str, Any], id_key: str) -> None:
-    if (
-        row.get("before_window")
-        or row.get("after_window")
-        or row.get("identity_drift")
-        or row["detail_min"] < row["start_time"]
-        or row["detail_max"] > row["end_time"]
-    ):
+    if row.get("before_window") or row.get("after_window") or row.get("identity_drift"):
         raise AuditBlocked(f"detail bounds drift outside metadata window: {row[id_key]}")
 
 
