@@ -68,6 +68,11 @@ class StateSnapshot:
     model_package_version: str | None = None
     model_package_checksum: str | None = None
     original_shud_filename: str | None = None
+    # Clone provenance (Epic #982 SUB-1 migration 000046). All optional,
+    # default None for backward compatibility with pre-clone / legacy rows.
+    cloned_from_state_id: str | None = None
+    cloned_from_model_id: str | None = None
+    clone_gate_fingerprint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -669,9 +674,12 @@ class PsycopgStateSnapshotRepository:
                 lead_hours,
                 model_package_version,
                 model_package_checksum,
-                original_shud_filename
+                original_shud_filename,
+                cloned_from_state_id,
+                cloned_from_model_id,
+                clone_gate_fingerprint
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (model_id, (COALESCE(source_id, ''::text)), valid_time) DO UPDATE SET
                 state_id = EXCLUDED.state_id,
                 run_id = EXCLUDED.run_id,
@@ -684,6 +692,9 @@ class PsycopgStateSnapshotRepository:
                 model_package_version = EXCLUDED.model_package_version,
                 model_package_checksum = EXCLUDED.model_package_checksum,
                 original_shud_filename = EXCLUDED.original_shud_filename,
+                cloned_from_state_id = EXCLUDED.cloned_from_state_id,
+                cloned_from_model_id = EXCLUDED.cloned_from_model_id,
+                clone_gate_fingerprint = EXCLUDED.clone_gate_fingerprint,
                 created_at = now()
             RETURNING *
             """,
@@ -701,6 +712,9 @@ class PsycopgStateSnapshotRepository:
                 snapshot.model_package_version,
                 snapshot.model_package_checksum,
                 snapshot.original_shud_filename,
+                snapshot.cloned_from_state_id,
+                snapshot.cloned_from_model_id,
+                snapshot.clone_gate_fingerprint,
             ),
         )
         return _snapshot_from_row(row)
@@ -1654,6 +1668,9 @@ def _state_index_entry_from_snapshot(snapshot: StateSnapshot) -> dict[str, Any]:
         "model_package_version": snapshot.model_package_version,
         "model_package_checksum": snapshot.model_package_checksum,
         "original_shud_filename": snapshot.original_shud_filename,
+        "cloned_from_state_id": snapshot.cloned_from_state_id,
+        "cloned_from_model_id": snapshot.cloned_from_model_id,
+        "clone_gate_fingerprint": snapshot.clone_gate_fingerprint,
     }
 
 
@@ -1678,6 +1695,9 @@ def _state_snapshot_from_index_entry(entry: Mapping[str, Any]) -> StateSnapshot:
         model_package_version=_optional_str(entry.get("model_package_version")),
         model_package_checksum=_optional_str(entry.get("model_package_checksum")),
         original_shud_filename=_optional_str(entry.get("original_shud_filename")),
+        cloned_from_state_id=_optional_str(entry.get("cloned_from_state_id")),
+        cloned_from_model_id=_optional_str(entry.get("cloned_from_model_id")),
+        clone_gate_fingerprint=_optional_str(entry.get("clone_gate_fingerprint")),
     )
 
 
@@ -2528,6 +2548,9 @@ def _snapshot_from_row(row: Mapping[str, Any]) -> StateSnapshot:
         model_package_version=_optional_str(row.get("model_package_version")),
         model_package_checksum=_optional_str(row.get("model_package_checksum")),
         original_shud_filename=_optional_str(row.get("original_shud_filename")),
+        cloned_from_state_id=_optional_str(row.get("cloned_from_state_id")),
+        cloned_from_model_id=_optional_str(row.get("cloned_from_model_id")),
+        clone_gate_fingerprint=_optional_str(row.get("clone_gate_fingerprint")),
     )
 
 
@@ -2547,6 +2570,9 @@ def _snapshot_to_dict(snapshot: StateSnapshot) -> dict[str, Any]:
         "model_package_version": snapshot.model_package_version,
         "model_package_checksum": snapshot.model_package_checksum,
         "original_shud_filename": snapshot.original_shud_filename,
+        "cloned_from_state_id": snapshot.cloned_from_state_id,
+        "cloned_from_model_id": snapshot.cloned_from_model_id,
+        "clone_gate_fingerprint": snapshot.clone_gate_fingerprint,
     }
 
 
