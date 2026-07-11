@@ -149,7 +149,7 @@ class StateCloneAuditRecorder(Protocol):
     """Sink for refusal audit records.
 
     A single ``record_refusal(mapping)`` entry point keeps the shape stable
-    across the five refusal scopes. Wiring this to ``ops.audit_log`` is
+    across the six refusal scopes. Wiring this to ``ops.audit_log`` is
     the caller's responsibility (SUB-4 / atomic-cutover-transaction owns
     the transaction plumbing); this module only emits records.
     """

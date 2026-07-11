@@ -1110,6 +1110,71 @@ def test_reverse_clone_target_declaring_direct_grid_but_malformed_contract_refus
     ]
 
 
+def test_reverse_clone_guard_wins_over_degenerate_gate_inputs_when_both_bad(
+    m0_m1_equal_packages: dict[str, Any],
+) -> None:
+    """SUB-7 §4.1: guard-ordering invariant — classifier runs BEFORE degenerate check.
+
+    Locks the sequencing at ``packages/common/state_clone.py`` step 0
+    (no-reverse-clone classifier) preceding step 1 (degenerate gate
+    inputs). Constructs a call where BOTH inputs are simultaneously bad:
+
+    - ``m1_forcing_mapping_manifest={}`` — Change 4's single classifier
+      returns ``None`` -> would trigger
+      ``reverse_clone_target_not_direct_grid``.
+    - ``state_schema_bytes=b""`` AND ``solver_config_bytes=b""`` — either
+      alone would trigger ``degenerate_gate_inputs``.
+
+    The classifier MUST win: the one-way channel invariant (state legacy
+    -> direct-grid, never direct-grid -> legacy) is defense-in-depth for
+    Change 4 and cannot be bypassed by any callable-side condition. A
+    future "cheap check first" regression that swaps steps 0 and 1 would
+    refuse with ``degenerate_gate_inputs`` (wrong scope), silently
+    downgrading the audit signal from a legacy-reactivation attempt to a
+    contract-hygiene mishap. This test breaks under any such swap.
+    """
+
+    source = _make_source_snapshot()
+    repo = _FakeCloneRepository()
+    repo.add(source)
+    audit = _FakeAuditRecorder()
+
+    kwargs = _default_clone_kwargs(m0_m1_equal_packages)
+    # Both categories of bad input simultaneously:
+    kwargs["m1_forcing_mapping_manifest"] = {}  # classifier -> None (legacy)
+    kwargs["state_schema_bytes"] = b""  # would also trip degenerate gate
+    kwargs["solver_config_bytes"] = b""  # would also trip degenerate gate
+
+    result = fingerprint_gated_state_clone(
+        repository=repo,
+        audit_recorder=audit,
+        **kwargs,
+    )
+
+    # Classifier wins: the reverse-clone scope MUST be reported, not the
+    # degenerate-inputs scope. Swap step 0 and 1 in state_clone.py and this
+    # test fails with refusal_scope == 'degenerate_gate_inputs'.
+    assert result.refused is True
+    assert result.cloned_row is None
+    assert result.refusal_code == STATE_CLONE_COLD_START_APPROVAL_REQUIRED
+    assert result.refusal_scope == "reverse_clone_target_not_direct_grid"
+    assert repo.upserted == []
+    # No M1 row ever written; source row untouched.
+    assert len(repo.snapshots) == 1
+    assert not any(s.model_id == M1_MODEL_ID for s in repo.snapshots.values())
+    # Exact-shape audit record under the reverse-clone scope.
+    assert audit.records == [
+        {
+            "refusal_code": STATE_CLONE_COLD_START_APPROVAL_REQUIRED,
+            "refusal_scope": "reverse_clone_target_not_direct_grid",
+            "m0_model_id": M0_MODEL_ID,
+            "m1_model_id": M1_MODEL_ID,
+            "source_id": SOURCE_ID,
+            "cutover_valid_time": CUTOVER_VALID_TIME,
+        }
+    ]
+
+
 def test_fix_forward_equal_fingerprint_m1_to_m1_prime_clones_with_m1_as_cloned_from(
     m0_m1_equal_packages: dict[str, Any],
 ) -> None:
@@ -1128,7 +1193,10 @@ def test_fix_forward_equal_fingerprint_m1_to_m1_prime_clones_with_m1_as_cloned_f
     m1_prime_package_checksum = "sha256:pkg-m1-prime"
 
     # Seed the source row as (M1, source, t*) — a previous direct-grid
-    # variant's qualified checkpoint, not the legacy M0.
+    # variant's qualified checkpoint, not the legacy M0. Build the run_id
+    # under the M1 identity so the source is semantically an M1-authored
+    # producing run — the M0-embedded run_id from ``_make_source_snapshot``
+    # would misdescribe the fix-forward source's provenance.
     m1_source = replace(
         _make_source_snapshot(),
         state_id=state_snapshot_id(
@@ -1139,6 +1207,7 @@ def test_fix_forward_equal_fingerprint_m1_to_m1_prime_clones_with_m1_as_cloned_f
             lead_hours=12,
         ),
         model_id=M1_MODEL_ID,
+        run_id=f"fcst_{SOURCE_ID}_{CYCLE_ID}_{M1_MODEL_ID}",
         model_package_version=M1_PACKAGE_VERSION,
         model_package_checksum=M1_PACKAGE_CHECKSUM,
     )
@@ -1174,6 +1243,15 @@ def test_fix_forward_equal_fingerprint_m1_to_m1_prime_clones_with_m1_as_cloned_f
     # cloned_from names M1 (the previous direct-grid variant), NOT M0.
     assert clone.cloned_from_state_id == m1_source.state_id
     assert clone.cloned_from_model_id == M1_MODEL_ID
+    # clone_gate_fingerprint records the equal hash that opened the gate.
+    assert clone.clone_gate_fingerprint == m0_m1_equal_packages["fingerprint_hash"]
+
+    # Physical provenance (docs §Decision 3): the source's producing
+    # run_id is preserved on the clone. For M1->M1' the source is M1, so
+    # the clone MUST carry the M1-shaped run_id verbatim — this locks the
+    # attribution rule on the fix-forward direction, symmetric to the
+    # M0->M1 preservation asserted at line ~380 above.
+    assert clone.run_id == m1_source.run_id
 
     # state_id follows the convention under M1' and differs from source.
     assert clone.state_id != m1_source.state_id
