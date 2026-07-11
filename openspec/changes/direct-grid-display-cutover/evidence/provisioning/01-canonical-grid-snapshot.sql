@@ -25,6 +25,12 @@ BEGIN;
 
 -- Pre-check: expect exactly 2 canonical_grid_snapshot rows on node-27 (IFS + gfs).
 -- Idempotent skip if this rehearsal grid snapshot already exists.
+--
+-- Phase C hardening: a PL/pgSQL `RETURN` from a DO block exits the block, NOT
+-- the surrounding transaction. Phase B's DO+RETURN idiom therefore did NOT
+-- prevent the INSERT below from firing on re-runs; the second re-run tripped
+-- `uq_canonical_grid_snapshot_identity_active`. Route the INSERT through a
+-- `WHERE NOT EXISTS` guard so it is a true no-op on re-run.
 DO $$
 BEGIN
   IF EXISTS (
@@ -33,12 +39,13 @@ BEGIN
        AND grid_signature = 'e2c0bf1a8d6c4f5b9a7f3e1d0c8b6a4f2d7e5c3b1a9f8d6c4b2a0f9e7d5c3b1a9'
   ) THEN
     RAISE NOTICE 'IDEMPOTENT SKIP: rehearsal canonical_grid_snapshot already exists.';
-    RETURN;
   END IF;
 END $$;
 
 -- Insert the synthetic M1 grid snapshot. Tiny bbox matches the synthetic
 -- basin polygon (99.9 29.9, 100.6 30.6) from register-synth-p02.sql line 31.
+-- Wrapped in an `INSERT ... SELECT ... WHERE NOT EXISTS` so re-runs are true
+-- no-ops (the unique constraint is on (source_id, grid_id, grid_signature)).
 INSERT INTO met.canonical_grid_snapshot (
   canonical_grid_key,
   source_id,
@@ -57,7 +64,8 @@ INSERT INTO met.canonical_grid_snapshot (
   converter_version,
   valid_from,
   applicable_source_ids
-) VALUES (
+)
+SELECT
   'canonical__evidence_cmfd_p02_synth__m1_v2',
   'gfs',
   'synth-grid-p0.2-m1-v2',
@@ -75,6 +83,10 @@ INSERT INTO met.canonical_grid_snapshot (
   'evidence-only-v1',
   now(),
   ARRAY['gfs']::TEXT[]
+WHERE NOT EXISTS (
+  SELECT 1 FROM met.canonical_grid_snapshot
+   WHERE grid_id = 'synth-grid-p0.2-m1-v2'
+     AND grid_signature = 'e2c0bf1a8d6c4f5b9a7f3e1d0c8b6a4f2d7e5c3b1a9f8d6c4b2a0f9e7d5c3b1a9'
 );
 
 -- Post-check: exactly 1 new grid snapshot row for the rehearsal identity.
