@@ -44,11 +44,11 @@
 
 ## 5. Verification
 
-- [ ] 5.1 Run the full change verification suite.
+- [x] 5.1 Run the full change verification suite.
   - Required evidence: `uv run pytest -q tests/test_direct_grid_display_cutover_flip.py tests/test_direct_grid_display_cutover_history.py tests/test_direct_grid_display_cutover_model_resolution.py tests/test_direct_grid_display_cutover_b4_leak.py` passes.
   - Required evidence: `uv run ruff check .` reports `All checks passed!`.
   - Required evidence: `cd apps/frontend && pnpm test` and `cd apps/frontend && pnpm exec tsc --noEmit` pass.
   - Non-goal for 5.1: node-27 live receipt is covered by group 4, not re-run here.
-- [ ] 5.2 Validate the OpenSpec change.
+- [x] 5.2 Validate the OpenSpec change.
   - Required evidence: `openspec validate direct-grid-display-cutover --strict --no-interactive` reports `Change 'direct-grid-display-cutover' is valid`.
   - Non-goal for 5.2: no archive; the change is inert mechanism until `direct-grid-batch-rollout` (Change 7) references it.
