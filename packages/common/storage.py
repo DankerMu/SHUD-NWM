@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
@@ -242,6 +242,38 @@ def archive_provenance_paths(
     return ArchiveProvenancePaths(
         archive=parent / "archive.tar.zst",
         manifest=parent / "manifest.json",
+    )
+
+
+def archive_identity_for_state_reference(
+    *,
+    source_id: str | None,
+    model_id: str,
+    valid_time: datetime,
+) -> ArchiveIdentity:
+    """Derive the canonical archive identity for a persisted state reference."""
+    if not isinstance(valid_time, datetime):
+        raise ArchiveConfigurationError("state reference valid_time must be a datetime")
+    if valid_time.tzinfo is None or valid_time.utcoffset() is None:
+        raise ArchiveConfigurationError("state reference valid_time must be timezone-aware")
+    valid_time_utc = valid_time.astimezone(UTC)
+    if any((valid_time_utc.minute, valid_time_utc.second, valid_time_utc.microsecond)):
+        raise ArchiveConfigurationError("state reference valid_time must resolve to a canonical UTC hourly instant")
+
+    if source_id is None:
+        source = LEGACY_UNQUALIFIED_ARCHIVE_SOURCE
+    elif source_id == LEGACY_UNQUALIFIED_ARCHIVE_SOURCE:
+        raise ArchiveConfigurationError(
+            f"state reference source {LEGACY_UNQUALIFIED_ARCHIVE_SOURCE!r} is derived only from source_id=None"
+        )
+    else:
+        source = source_id
+    return ArchiveIdentity(
+        lane="states",
+        source=source,
+        cycle_identity=valid_time_utc.strftime("%Y%m%d%H"),
+        cycle_time=valid_time_utc.strftime("%Y-%m-%dT%H:00:00Z"),
+        model_id=model_id,
     )
 
 

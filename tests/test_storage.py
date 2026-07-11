@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -6,6 +7,7 @@ from packages.common.storage import (
     VALID_PREFIX_PATTERNS,
     ArchiveConfigurationError,
     ArchiveIdentity,
+    archive_identity_for_state_reference,
     archive_provenance_paths,
     resolve_archive_root,
     resolve_archive_storage_config,
@@ -353,6 +355,139 @@ def test_legacy_unqualified_and_provider_state_paths_do_not_collide(tmp_path: Pa
     assert all(legacy != provider for provider in providers)
     assert "/states/legacy-unqualified/" in legacy.archive.as_posix()
     assert {provider.archive.parts[-4] for provider in providers} == {"gfs", "era5", "ifs"}
+
+
+def test_state_reference_factory_maps_null_source_to_exact_legacy_identity_and_path(tmp_path: Path) -> None:
+    identity = archive_identity_for_state_reference(
+        source_id=None,
+        model_id="model-v1",
+        valid_time=datetime(2026, 7, 11, tzinfo=UTC),
+    )
+
+    paths = archive_provenance_paths(tmp_path / "archive", identity=identity)
+
+    assert identity == ArchiveIdentity(
+        lane="states",
+        source="legacy-unqualified",
+        cycle_identity="2026071100",
+        cycle_time="2026-07-11T00:00:00Z",
+        model_id="model-v1",
+    )
+    assert paths.archive == (
+        tmp_path / "archive/states/legacy-unqualified/2026071100/model-v1/archive.tar.zst"
+    ).resolve()
+
+
+@pytest.mark.parametrize(
+    ("source_alias", "canonical_source", "source_segment"),
+    [("GFS", "gfs", "gfs"), ("era5", "ERA5", "era5"), ("IfS", "IFS", "ifs")],
+)
+def test_state_reference_factory_normalizes_provider_alias_and_lowercase_path(
+    tmp_path: Path,
+    source_alias: str,
+    canonical_source: str,
+    source_segment: str,
+) -> None:
+    identity = archive_identity_for_state_reference(
+        source_id=source_alias,
+        model_id="model-v1",
+        valid_time=datetime(2026, 7, 11, tzinfo=UTC),
+    )
+
+    paths = archive_provenance_paths(tmp_path / "archive", identity=identity)
+
+    assert identity.source == canonical_source
+    assert f"/states/{source_segment}/2026071100/model-v1/" in paths.archive.as_posix()
+
+
+def test_state_reference_factory_normalizes_equivalent_aware_hour_to_utc() -> None:
+    utc_identity = archive_identity_for_state_reference(
+        source_id="gfs",
+        model_id="model-v1",
+        valid_time=datetime(2026, 7, 11, tzinfo=UTC),
+    )
+    offset_identity = archive_identity_for_state_reference(
+        source_id="gfs",
+        model_id="model-v1",
+        valid_time=datetime(2026, 7, 11, 8, tzinfo=timezone(timedelta(hours=8))),
+    )
+
+    assert offset_identity == utc_identity
+
+
+@pytest.mark.parametrize(
+    ("source_id", "model_id", "valid_time", "error_fragment"),
+    [
+        ("gfs", "model-v1", "2026-07-11T00:00:00Z", "must be a datetime"),
+        ("gfs", "model-v1", datetime(2026, 7, 11), "timezone-aware"),
+        ("gfs", "model-v1", datetime(2026, 7, 11, 0, 1, tzinfo=UTC), "UTC hourly instant"),
+        ("unknown-provider", "model-v1", datetime(2026, 7, 11, tzinfo=UTC), "invalid archive source"),
+        (
+            "legacy-unqualified",
+            "model-v1",
+            datetime(2026, 7, 11, tzinfo=UTC),
+            "derived only from source_id=None",
+        ),
+        ("gfs", "../unsafe", datetime(2026, 7, 11, tzinfo=UTC), "unsafe archive identity component"),
+    ],
+)
+def test_state_reference_factory_rejects_invalid_time_source_or_model(
+    source_id: str | None,
+    model_id: str,
+    valid_time: object,
+    error_fragment: str,
+) -> None:
+    with pytest.raises(ArchiveConfigurationError, match=error_fragment):
+        archive_identity_for_state_reference(
+            source_id=source_id,
+            model_id=model_id,
+            valid_time=valid_time,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("source_id", [None, "GFS", "era5", "IfS"])
+def test_state_reference_factory_round_trips_through_strict_manifest_binding(
+    tmp_path: Path,
+    source_id: str | None,
+) -> None:
+    identity = archive_identity_for_state_reference(
+        source_id=source_id,
+        model_id="model-v1",
+        valid_time=datetime(2026, 7, 11, tzinfo=UTC),
+    )
+    paths = archive_provenance_paths(tmp_path / "archive", identity=identity)
+    root = (tmp_path / "archive").resolve()
+    manifest = _product_manifest(
+        {
+            "lane": identity.lane,
+            "source": identity.source,
+            "cycle_identity": identity.cycle_identity,
+            "cycle_time": identity.cycle_time,
+            "model_id": identity.model_id or "",
+        },
+        paths.archive.relative_to(root).as_posix(),
+        paths.manifest.relative_to(root).as_posix(),
+    )
+
+    bound = validate_product_archive_manifest_binding(root, manifest)
+
+    assert bound == paths
+
+
+def test_state_reference_factory_keeps_legacy_and_provider_namespaces_disjoint(tmp_path: Path) -> None:
+    common = {"model_id": "model-v1", "valid_time": datetime(2026, 7, 11, tzinfo=UTC)}
+    legacy = archive_provenance_paths(
+        tmp_path / "archive",
+        identity=archive_identity_for_state_reference(source_id=None, **common),
+    )
+    provider = archive_provenance_paths(
+        tmp_path / "archive",
+        identity=archive_identity_for_state_reference(source_id="gfs", **common),
+    )
+
+    assert legacy != provider
+    assert "/states/legacy-unqualified/" in legacy.archive.as_posix()
+    assert "/states/gfs/" in provider.archive.as_posix()
 
 
 @pytest.mark.parametrize(

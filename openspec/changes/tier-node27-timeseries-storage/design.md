@@ -26,8 +26,9 @@ hygiene checks, flock, receipts directory, systemd user timer).
 
 - Make node-22-produced cycle products the durable, checksum-verified,
   rotation-exempt full-history source of truth (archive tier).
-- Salvage the DB-only windows (sole copies) into the archive before any
-  deletion machinery exists.
+- Salvage the DB-only forcing/river timeseries windows (sole copies) into the
+  archive before any deletion machinery exists; missing state artifacts are
+  non-salvageable and keep retention fail-closed.
 - Cut the two hypertables' footprint with native TimescaleDB compression on
   terminal chunks.
 - Bound DB size permanently with gated, receipted `drop_chunks` retention
@@ -121,7 +122,8 @@ windows, `state_snapshot.state_uri` references) against checksum-verified
 archive objects + hot object-store presence, and emits the
 **archive-completeness receipt**: per-window verdicts
 (`complete`/`pending-archive`/`gap`), coverage bounds, `generated_at`, and
-the exact salvage selector list (expected: forcing station series before
+the exact salvageable forcing/river timeseries selector list (expected:
+forcing station series before
 2026-06-16; river only if gaps are found). That one receipt is both the
 salvage scope source and retention gate (a); it runs from its own systemd
 timer so freshness holds at every retention tick. The exporter consumes the
@@ -162,7 +164,8 @@ Order is load-bearing (each step gates the next):
 2. Archive mover live for `forcing/` + `runs/` + `states/` (state products
    enumerated via the audit's `state_snapshot.state_uri` inventory, per ADR
    0002 decision 1); first enforce receipt.
-3. One-time salvage export of DB-only windows; receipt. Salvage coverage
+3. One-time salvage export of DB-only forcing/river timeseries windows;
+   receipt. Salvage coverage
    folds into the audit's completeness verdicts — there is no separate
    salvage gate.
 4. Compression: migration for settings + initial terminal-chunk compression;

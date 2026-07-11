@@ -699,7 +699,12 @@ def test_retention_enforce_requires_outcome_details(tmp_path: Path, missing: str
 
 def test_display_api_has_no_archive_resolver_dependency() -> None:
     display_sources = (ROOT / "apps" / "api").rglob("*.py")
-    forbidden = ("resolve_archive_root", "resolve_archive_storage_config", "archive_provenance_paths")
+    forbidden = (
+        "resolve_archive_root",
+        "resolve_archive_storage_config",
+        "archive_provenance_paths",
+        "archive_identity_for_state_reference",
+    )
 
     for source in display_sources:
         content = source.read_text(encoding="utf-8")

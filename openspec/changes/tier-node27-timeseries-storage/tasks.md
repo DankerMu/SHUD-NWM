@@ -286,11 +286,14 @@ Order is load-bearing:
   3), and is cross-linked from the retention runbook section (6.2).
 - [ ] 3.3 node-27 live: execute salvage for the audit-derived DB-only
   windows.
-  Evidence floor: committed salvage receipt covering every `gap` window from
-  the live completeness receipt (expected: forcing before 2026-06-16);
+  Evidence floor: committed salvage receipt covering every audit-emitted
+  salvage selector / salvageable forcing or river `gap` from the live
+  completeness receipt (expected: forcing before 2026-06-16);
   per-selector manifest row count equals the DB row count at export time; a
-  follow-up audit run marks those windows `complete` via verified salvage
-  objects and emits an empty salvage list.
+  follow-up audit run marks those salvageable subjects `complete` via
+  verified salvage objects and emits an empty salvage list. Any
+  non-salvageable state gap remains `gap` and keeps retention fail-closed
+  until product coverage is restored.
 
 ## 4. Hypertable compression (`hypertable-compression`)
 

@@ -173,10 +173,10 @@ list, so a fresh receipt is available to each retention tick.
   NOT satisfy the retention gate's completeness check for any drop window
   containing it
 
-#### Scenario: DB-only window is a gap with salvage selectors
+#### Scenario: Salvageable DB-only timeseries window is a gap with selectors
 
-- **WHEN** the audit finds DB rows whose upstream products exist in neither
-  the hot object-store nor the archive
+- **WHEN** the audit finds forcing or river timeseries rows whose upstream
+  products exist in neither the hot object-store nor the archive
 - **THEN** the receipt MUST mark that window `gap` and include its exact
   selectors in the salvage selector list
 
