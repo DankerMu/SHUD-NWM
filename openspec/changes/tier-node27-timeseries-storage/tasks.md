@@ -182,6 +182,71 @@ Order is load-bearing:
   (`complete` / `pending-archive` / `gap`), the salvage selector list,
   coverage bounds, and `generated_at`; an archive object counts as present
   only when checksum-verified; unit tests for the classification logic.
+  The DB transaction is `REPEATABLE READ READ ONLY`, captures one audit time,
+  and applies a 20-second statement timeout. Forcing/run subjects are
+  included only when the corresponding
+  detail hypertable contains at least one row; the non-decorrelated
+  correlated `LIMIT 1` probes must retain an identity-leading
+  index-only node-27 query plan (no detail-hypertable full scan/hash
+  aggregate). Their
+  selector windows are the metadata `[start_time, end_time]` bounds
+  (inclusive), must contain the actual per-identity detail min/max bounds,
+  and age is evaluated at `window.end`; state subjects use the point window
+  `[valid_time, valid_time]`. Receipt `coverage_bounds` equals the exact
+  min(start)/max(end) across the captured subject set, and every window must
+  satisfy start <= end.
+
+  Product references are strict, root-contained object-store URIs. Forcing
+  hot coverage requires `forcing_package.json` as a bounded regular file,
+  its sha256 equal to `met.forcing_version.checksum`, its source/cycle/model/
+  basin identity equal to the row/URI, its manifest time range contain the DB
+  subject `[start_time,end_time]` (the DB range remains the receipt/selector
+  authority), and every manifest-listed file be regular, contained and
+  checksum-valid. Run hot coverage requires the
+  row's bounded input manifest as a regular file with run/source/cycle/model/
+  basin identity bound to the row plus at least one contained regular file
+  below the row's output directory. State hot coverage requires the
+  referenced regular file and sha256 equality with `state_snapshot.checksum`.
+  A clone state may alias its authoritative source artifact only when
+  clone provenance is present and the physical model segment matches
+  `cloned_from_model_id`; its stable receipt subject remains the clone
+  `state_id`, while archive/hot coverage follows the shared physical
+  artifact. Any malformed URI, containment escape, symlink, permission or
+  I/O error is an audit blocker, not ordinary absence.
+
+  Manifest JSON reads are capped at 16 MiB. A product archive verifies only
+  when regular non-symlink manifest/tarball siblings are contained under the
+  archive root, the bounded manifest is
+  schema-valid and passes shared semantic identity/path binding, and actual
+  tarball size + streaming sha256 match the manifest. A missing archive root
+  or missing canonical siblings means no archive coverage; unreadable or
+  malformed existing evidence blocks receipt publication. Verified salvage
+  coverage is discovered by a bounded, symlink-safe scan of
+  `<archive-root>/db-export/**/manifest.json`; every manifest and referenced
+  object must pass the pinned schema, containment, size and sha256 checks,
+  and duplicate/conflicting exact selectors block publication. Discovery is
+  capped at 10,000 manifests and eight directory levels beneath
+  `db-export/`; exceeding either bound is a blocker. Inventory is capped at
+  100,000 subjects, and exceeding the cap blocks publication.
+
+  Classification precedence is fixed: verified product archive;
+  verified exact `db-export` selector (forcing/runs only); hot object-store
+  coverage before the minimum-age cutoff; aged hot-only pending archive;
+  otherwise gap. Every salvageable forcing/run gap has exactly one selector
+  identical in identity/window to its subject, while state gaps have none.
+  Before atomic replace, the receipt must be schema-valid, deterministically
+  ordered, contain every inventoried subject exactly once, contain no
+  duplicate subject, and prove the forcing/run gap-selector bijection. Empty
+  inventory or any blocker exits non-zero and never overwrites the previous
+  valid gate receipt. The stable output interface is required absolute
+  `--receipt-path` or `NODE27_STORAGE_INVENTORY_RECEIPT_PATH`; its existing
+  parent and every parent component must resolve to a non-symlink directory.
+  Publication writes a mode-0600 same-directory exclusive temporary file,
+  flushes + fsyncs it, uses atomic `os.replace`, fsyncs the directory, and
+  removes temporary residue on failure. Failure diagnostics are emitted as
+  JSON to stderr, never as a replacement gate receipt. Runtime schema
+  validation uses `jsonschema` as a direct production dependency, not a dev
+  transitive dependency.
   Test rows:
   - Input: window with a checksum-verified archive object.
     Expected: verdict `complete`; not in the salvage list.
@@ -203,6 +268,68 @@ Order is load-bearing:
     Expected: inventory uses the explicit `legacy-unqualified` archive
     identity; a verified legacy archive can yield `complete`, while a
     missing legacy object remains a non-salvageable `gap`.
+  - Input: forcing/run metadata with no corresponding detail-hypertable row.
+    Expected: it is excluded from inventory and cannot produce a zero-row
+    salvage selector; node-27 `EXPLAIN` proves the correlated `LIMIT 1`
+    presence and outside-metadata-window probes use identity-leading indexes
+    within the statement timeout and do not decorrelate into detail full
+    scans/hash aggregates.
+  - Input: forcing package URI whose source/cycle/model/basin disagrees with
+    its DB row, whose manifest range does not contain the DB subject window,
+    or a run root without an exactly row-bound input manifest / regular output.
+    Expected: audit fails closed and does not publish a gate receipt.
+  - Input: provider-qualified and legacy state URIs, plus a clone state whose
+    URI aliases its provenance-declared source model.
+    Expected: normal rows bind row and URI identity; the clone keeps its own
+    `state_id` subject but shares the physical artifact coverage. An
+    undeclared model alias or source/time drift blocks publication.
+  - Input: missing archive root or absent canonical archive siblings.
+    Expected: archive coverage is absent and classification continues via
+    salvage/hot/gap; no configuration crash.
+  - Input: archive/salvage evidence with permission error, symlink,
+    containment escape, malformed/oversized manifest, size mismatch,
+    checksum mismatch, or duplicate exact selector.
+    Expected: permission/I/O/unsafe/malformed/oversized/conflicting evidence
+    is a blocker and no previous receipt is replaced. A fully readable
+    product archive or salvage object whose declared size/checksum mismatches
+    is known-invalid coverage: record the mismatch in subject evidence,
+    treat that copy as absent, and safely continue to another coverage source
+    or `pending-archive`/`gap`.
+  - Input: verified salvage object whose selector exactly matches a
+    forcing/run subject, and a near-match with different identity/window.
+    Expected: exact match is `complete/db-export`; near-match is ignored for
+    coverage and cannot satisfy or steal another subject.
+  - Input: equal-window distinct subjects, duplicate/omitted subject,
+    selector without a matching gap, gap without its selector, or empty
+    inventory.
+    Expected: distinct stable subjects publish independently; all invalid
+    set shapes fail before schema-validated atomic replace.
+  - Input: one repeatable-read snapshot with metadata/detail bounds drift,
+    inverted window, wrong computed coverage bounds, or audit time changed
+    between subjects.
+    Expected: drift/inversion/bounds mismatch blocks publication; every age
+    decision uses the one captured audit time.
+  - Input: manifest over 16 MiB, more than 10,000 salvage manifests, scan
+    depth over eight, or more than 100,000 subjects.
+    Expected: bounded audit fails non-zero without replacing the prior gate
+    receipt.
+  - Input: missing/relative receipt path, symlinked parent/target, atomic
+    replace failure, or output schema/semantic validation failure.
+    Expected: non-zero JSON diagnostic on stderr, old receipt byte-identical,
+    and no readable temporary residue. A valid receipt is mode 0600 and
+    atomically replaces the prior file.
+  - Input: pinned completeness example plus a mixed forcing-gap/state-gap
+    receipt.
+    Expected: examples pass both JSON Schema and runtime set invariants; the
+    forcing gap selector identity/window exactly equals its subject, while
+    the state gap has no selector.
+  - Input: production dependency install without dev extras.
+    Expected: importing the audit module and runtime `jsonschema` validation
+    succeeds.
+  Node-27 oracle for #847 is limited to the read-only transaction/query plan,
+  real forcing/run URI shapes, and a non-publishing temporary audit run.
+  Current `state_snapshot` inventory is empty, so provider/legacy/clone state
+  coverage is unit-test evidence only and MUST NOT be claimed as live proof.
 - [ ] 2.2 Build the archive mover (`scripts/node27_product_archive.py` +
   `_once.sh`).
   Evidence floor: per-cycle `tar.zst` + `manifest.json` with sha256 (no row

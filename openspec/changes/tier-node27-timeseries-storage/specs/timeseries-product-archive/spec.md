@@ -159,6 +159,54 @@ by `db-export-salvage`. The audit SHALL run recurringly from a node-27
 user-level systemd timer registered in the resource-governance audit unit
 list, so a fresh receipt is available to each retention tick.
 
+The inventory transaction SHALL be `REPEATABLE READ READ ONLY`, use one
+captured audit time, and apply a 20-second statement timeout. A forcing
+version or hydro run is an inventory subject only when its
+corresponding detail hypertable has at least one row; metadata-only rows SHALL
+NOT generate zero-row salvage selectors. Forcing/run windows use their
+inclusive metadata `start_time`/`end_time` bounds, which MUST contain the
+actual per-identity detail min/max. State references use their `valid_time`
+point, and archive-age classification uses the subject window's end. Every
+window MUST satisfy start <= end and receipt coverage bounds MUST exactly
+equal the subject-set min(start)/max(end). Detail-presence queries SHALL use
+bounded correlated identity-leading probes rather than decorrelating into a
+full hypertable scan/aggregate. Both presence and detail-outside-metadata-
+window checks SHALL use such bounded identity-leading probes.
+
+All hot/archive/salvage paths SHALL be strictly parsed, root-contained,
+regular non-symlink evidence. Forcing hot coverage requires its bounded
+`forcing_package.json`, DB manifest checksum, row/URI identity, a manifest
+time range containing the authoritative DB subject window, and every
+manifest-listed file checksum to agree. Run hot coverage requires its bounded
+input manifest identity plus at least one contained regular output file.
+State hot coverage requires the referenced regular file to match the DB
+checksum. Existing permission/I/O failures, malformed
+URIs/manifests, containment escapes, or conflicting selector evidence SHALL
+block publication rather than be treated as absence. A missing archive root
+or absent canonical archive siblings is ordinary absence. Product archive
+coverage requires a schema-valid, semantic-binding-valid manifest whose
+declared tarball size and sha256 match the regular tarball. A fully readable
+archive/salvage object with a size or checksum mismatch is known-invalid
+coverage: it SHALL be reported in subject evidence and treated as absent so
+classification safely continues to another copy or pending/gap. DB-export coverage
+requires a schema-valid salvage manifest plus size/sha256 verification of the
+exact selector's object; discovery under the archive `db-export/` namespace
+SHALL be bounded and symlink-safe: at most 10,000 manifests, at most eight
+levels beneath `db-export/`, and at most 16 MiB per manifest. Inventory SHALL
+be capped at 100,000 subjects; exceeding any bound blocks publication.
+
+The emitted receipt SHALL contain every inventoried stable subject exactly
+once, deterministically ordered. Its forcing/run gaps and salvage selectors
+SHALL form an exact bijection; state gaps SHALL have no selector. The complete
+receipt SHALL pass the pinned schema before atomic replacement. Empty
+inventory or any blocker SHALL exit non-zero without overwriting a previous
+valid retention-gating receipt. The output path is an absolute CLI/env
+contract, all parent components are non-symlink directories, and publication
+uses a mode-0600 same-directory temporary file with flush/fsync, atomic
+replace, directory fsync, and failure cleanup. Failure diagnostics go to
+stderr and never replace the gate receipt. Runtime schema validation SHALL
+use a direct production dependency.
+
 #### Scenario: Verified archive coverage yields a complete verdict
 
 - **WHEN** the audit inventories a window whose products exist as
@@ -197,3 +245,58 @@ list, so a fresh receipt is available to each retention tick.
 - **AND** a missing or cross-lane subject identity MUST fail schema validation
 - **AND** the runtime audit MUST reject duplicate or omitted inventory
   subjects before publishing a retention-gating receipt
+
+#### Scenario: Metadata without detail rows is not salvage scope
+
+- **WHEN** a forcing version or hydro run has no row in its detail hypertable
+- **THEN** it MUST NOT become an inventory subject or salvage selector
+
+#### Scenario: Unknown or unsafe evidence state blocks publication
+
+- **WHEN** a referenced hot object or existing archive/salvage artifact is
+  unreadable, unsafe, malformed, or conflicting
+- **THEN** the audit MUST fail non-zero and preserve the previous valid
+  receipt
+
+#### Scenario: Readable checksum mismatch is absent coverage
+
+- **WHEN** an otherwise readable product archive or salvage object fails its
+  declared size or checksum
+- **THEN** that copy MUST NOT count as verified coverage
+- **AND** the mismatch MUST be recorded in the subject evidence while the
+  audit continues to another verified copy, hot coverage, or pending/gap
+
+#### Scenario: Missing archive namespace is ordinary absence
+
+- **WHEN** the archive root or a subject's canonical archive siblings do not
+  yet exist
+- **THEN** the audit MUST continue classification using verified salvage,
+  hot object-store presence, or `gap`
+
+#### Scenario: Clone state shares its authoritative physical artifact
+
+- **WHEN** a clone state row has complete clone provenance and its state URI
+  names the provenance-declared physical source model
+- **THEN** the receipt MUST retain the clone `state_id` as its stable subject
+- **AND** hot/archive coverage MUST follow the shared physical artifact
+- **AND** an undeclared model alias or source/time drift MUST block
+  publication
+
+#### Scenario: Receipt publish is all-or-nothing
+
+- **WHEN** the subject set is empty, duplicated, incomplete, has a
+  gap-selector mismatch, fails schema validation, or encounters any audit
+  blocker
+- **THEN** no new gate receipt may replace the previous valid receipt
+
+#### Scenario: Audit resource bounds are enforced
+
+- **WHEN** the inventory, manifest size, salvage manifest count, or discovery
+  depth exceeds its fixed safety bound
+- **THEN** the audit MUST fail non-zero without replacing the prior receipt
+
+#### Scenario: Receipt uses one consistent database snapshot
+
+- **WHEN** metadata/detail coverage changes while an audit is running
+- **THEN** all subjects, bounds, and age decisions MUST reflect the one
+  repeatable-read snapshot and captured audit time

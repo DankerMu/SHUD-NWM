@@ -38,6 +38,7 @@ dependencies = [
     "pyyaml>=6.0",
     "pyshp>=2.3.1",
     "pyproj>=3.7.2",
+    "jsonschema>=4.23.0",
 ]
 
 [project.scripts]

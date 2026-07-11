@@ -257,6 +257,10 @@ Invariant Matrix:
 - Regression: persisted product manifests accept only canonical source IDs at both schema and semantic-binding boundaries; alias normalization remains available only before manifest production.
 - Regression: valid source-less legacy state references (`source_id` NULL or the existing equivalent empty string) map explicitly to the same states-only reserved `legacy-unqualified` identity, using required `valid_time` as canonical cycle time; their archive paths are deterministic and disjoint from provider-qualified states, while forcing/runs reject the sentinel, whitespace/unknown sources fail, and no provider is invented.
 - Regression: salvage object paths are safe root-relative `db-export/.../*.csv.zst`; other suffixes fail schema validation.
+- Regression: #847 DB inventory is repeatable-read/read-only with a 20-second timeout and one captured audit time; non-decorrelated correlated probes include only forcing/run metadata with detail rows without full hypertable scans; `[start_time,end_time]` contains actual detail bounds, is the exact inclusive selector window, and `window.end` owns age classification.
+- Regression: strict forcing/run/state URI parsing binds row identity to physical artifacts; forcing manifests may extend beyond but must contain the authoritative DB subject window, run manifests bind exactly, and clone states may share only provenance-declared physical artifacts while retaining distinct `state_id` subjects.
+- Regression: missing archive namespaces are ordinary absence; existing unsafe/unreadable/malformed/conflicting evidence blocks publication, while a fully readable size/checksum mismatch is recorded and treated as absent coverage so the safe pending/gap receipt can still publish.
+- Regression: final completeness receipts are deterministic, schema-valid, atomically replaced, cover every subject exactly once, and enforce an exact forcing/run gap-selector bijection; empty inventory or any blocker preserves the previous valid receipt.
 - Regression: valid examples -> schema PASS; missing completeness verdict or salvage row count -> schema FAIL.
 - Regression: product manifest row count/unsafe paths, invalid table-selector key, incomplete drill verdict details, or incomplete retention outcome details -> schema FAIL.
 - Regression: product-only drill with empty selector list -> schema PASS; clean default test environment executes all schema negatives with zero skip.
@@ -266,6 +270,6 @@ Invariant Matrix:
 Boundary-surface checklist:
 
 - Shared helper root: `packages/common/storage.py`; read-only path derivation and validation only.
-- Public entrypoints: none added; later scripts are consumers, and display entrypoints remain unchanged.
-- Producer/consumer evidence boundary: each example names one schema; manifest fields distinguish product archive from `db-export` salvage.
-- Stale-state/idempotency and write/delete/publish boundaries: out of scope until the corresponding runner issues.
+- Public entrypoint: #847 adds `scripts/node27_storage_inventory_audit.py`, a DB/filesystem read-only audit whose only write is its configured gate receipt; display entrypoints remain unchanged.
+- Producer/consumer evidence boundary: the audit is the sole archive-completeness receipt producer; #850 salvage consumes its exact selectors and #855 retention consumes its subject coverage. Product archive and `db-export` provenance remain distinguishable.
+- Publish boundary: validated receipts use same-directory mode-0600 temporary files plus atomic replace/fsync; any blocker or validation failure preserves the previous receipt and cleans temporary residue. Product/archive deletion and other mutations remain out of scope.
