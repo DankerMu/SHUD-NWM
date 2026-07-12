@@ -943,7 +943,7 @@ Order is load-bearing:
   - Input: run without the enforce flag, or with the flock already held.
     Expected: nothing compressed; dry-run candidate list or lock-skip
     receipt emitted.
-- [ ] 4.3 Add the fail-closed compressed-chunk write guard to all three
+- [x] 4.3 Add the fail-closed compressed-chunk write guard to all three
   hypertable write paths.
   Evidence floor: one shared pre-write helper detects compressed-chunk
   targets and aborts before any row mutation with an error naming the chunk

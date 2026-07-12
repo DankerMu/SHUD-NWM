@@ -290,6 +290,134 @@ Related documents:
   When #855 lands section 6.2, it MUST cross-link back to this section
   3.2.
 
+## 4. Hypertable compression
+
+Native TimescaleDB compression is the sole mechanism this milestone applies
+to shrink the two hot hypertables (`hydro.river_timeseries` and
+`met.forcing_station_timeseries`). Compression is applied to terminal chunks
+only (age older than the configurable lag, default 7 d) by the receipted
+runner (`scripts/node27_timeseries_compression.py`, `#851`), never to the
+active write-target chunk. This section covers the fail-closed write guard
+and the manual decompress procedure that pairs with it.
+
+### 4.1 Write guard overview
+
+The three ingest write paths —
+`workers/output_parser/parser.py::upsert_river_timeseries`,
+`workers/forcing_producer/store.py::replace_forcing_timeseries`, and
+`packages/common/forcing_domain_handoff_apply.py::
+_replace_forcing_station_timeseries` — each call the shared helper
+`packages.common.timescale_write_guard.check_batch_targets_uncompressed`
+BEFORE their identity-scoped DELETE. The guard runs one catalog lookup
+against `timescaledb_information.chunks` bounded by
+`SET LOCAL statement_timeout = '5s'`, checking whether any compressed chunk
+overlaps the batch's `[min(valid_time), max(valid_time)]` window. On
+overlap, the guard raises `CompressedChunkWriteError` naming the chunk and
+this runbook's decompress anchor. On catalog error, it fails closed with
+`CompressedChunkGuardError` — no silent permit.
+
+The guard is intentionally scoped to `hydro.river_timeseries` and
+`met.forcing_station_timeseries` only. The archive rebuild drill (`#854`)
+writes to an isolated staging schema and never trips the guard.
+
+### 4.2 Residual reingest window mismatch
+
+The guard's semantic scope is the batch time window, not the identity's
+full history. A batch whose `valid_time` range is fully outside compressed
+chunks BUT whose identity-scoped DELETE (`WHERE forcing_version_id = %s`
+or `WHERE run_id = %s AND river_network_version_id = %s AND variable = %s`)
+would touch older compressed rows falls through to TimescaleDB's raw
+`cannot update/delete rows from chunk … as it is compressed` error. This
+is a documented residual — not a guard bug. The response is identical to
+the guarded case: use the decompress procedure below on the specific
+chunk(s) TimescaleDB names.
+
+### 4.3 Decompress procedure
+
+#### 4.3.1 Operator triage codes
+
+The compressed-chunk write guard surfaces via four caller-observable string
+codes. Every one of them routes to the decompress procedure below. Grep
+the DB / stderr / receipt surface for these literals when triaging a
+reingest failure:
+
+| Code (literal string) | Where produced | How to observe |
+|---|---|---|
+| `HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED` | `packages/common/forcing_domain_handoff_apply.py::apply_forcing_domain_handoff` — attached as `unavailable_report.unavailable_reasons[].code` (from `REASON_APPLY_COMPRESSED_CHUNK_BLOCKED`) when the guard raises inside `_replace_forcing_station_timeseries`. | Persisted on the apply report (DB or API response) that the caller inspects. |
+| `OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED` | `workers/output_parser/parser.py::OutputParser.parse_run` — stamped on `hydro.hydro_run.error_code` via `mark_run_failed`, and emitted as the stderr prefix by `workers/output_parser/cli.py` when the guard escapes. | `hydro.hydro_run.error_code` column; parser CLI stderr line `OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED: ...`. |
+| `FORCING_PRODUCE_COMPRESSED_CHUNK_BLOCKED` | `workers/forcing_producer/cli.py` stderr prefix — emitted when `ForcingProducer.produce()` re-raises a `CompressedChunkGuardError` un-wrapped. | Forcing producer CLI stderr line `FORCING_PRODUCE_COMPRESSED_CHUNK_BLOCKED: ...`. |
+| `FORCING_COMPRESSED_CHUNK_BLOCKED` | `workers/forcing_producer/producer.py::ForcingProducer._mark_failed` — stamped on `met.forecast_cycle.error_code` when the dedicated `except CompressedChunkGuardError` arm fires. | `met.forecast_cycle.error_code` column (with `status = 'failed_forcing'`). |
+
+For every code above, the operator response is the decompress procedure
+in §4.3.2 below (identify chunk from the structured error message → run
+`decompress_chunk(...)` → re-run ingest). Route on the code; do NOT paper
+over with a generic ingest retry.
+
+#### 4.3.2 Manual decompress steps
+
+When a reingest surfaces `CompressedChunkWriteError` or TimescaleDB's raw
+compressed-chunk error, follow this manual procedure. Do NOT introduce an
+automated decompress-on-demand lane (ADR 0002 decision 3 — the manual
+escape hatch is intentional; automated decompress-on-demand would
+re-introduce write amplification the compression tier is meant to
+prevent).
+
+1. Identify the offending chunk from the error message. Example structured
+   error:
+
+   ```
+   Reingest targets compressed chunk _timescaledb_internal._hyper_1_1_chunk
+   in hydro.river_timeseries; run decompress procedure per
+   docs/runbooks/tier-node27-timeseries-storage.md#43-decompress-procedure
+   before retrying.
+   ```
+
+2. On node-27, connect to the active primary PG as a role authorized to
+   decompress. Example:
+
+   ```
+   psql "postgres://nhms_owner@127.0.0.1:55432/nhms"
+   ```
+
+3. Confirm the chunk is currently compressed (belt-and-suspenders — the
+   error already asserted this, but a manual re-run may already have
+   decompressed it):
+
+   ```
+   SELECT chunk_schema, chunk_name, hypertable_schema, hypertable_name,
+          is_compressed, range_start, range_end
+   FROM timescaledb_information.chunks
+   WHERE chunk_schema = '_timescaledb_internal'
+     AND chunk_name = '_hyper_1_1_chunk';
+   ```
+
+4. Decompress the chunk:
+
+   ```
+   SELECT decompress_chunk('_timescaledb_internal._hyper_1_1_chunk'::regclass);
+   ```
+
+   `decompress_chunk` returns the fully-qualified chunk relation on
+   success. If it errors with "chunk … is not compressed", the chunk was
+   already decompressed by a prior manual step; move on.
+
+5. Re-run the ingest / reingest that failed. The guard's next lookup on the
+   same chunk range will now find `is_compressed = false` and permit the
+   DELETE + INSERT.
+
+6. After the reingest succeeds, plan a re-compression pass. The scheduled
+   compression runner (`nhms-node27-timeseries-compression.timer`, cadence
+   documented in `#851`) will pick the chunk up on its next tick provided
+   the chunk's `range_end` is older than the configured lag. If the chunk
+   is inside the lag window (i.e. still "warm"), let it age; do not force
+   an out-of-cadence compression.
+
+Rollback: none required — `decompress_chunk` is idempotent and can be
+undone by the scheduled compression runner. If the reingest itself
+completes but the operator wants to abandon the decompress state, force a
+compression pass with the runner's enforce flag once the chunk falls
+outside the lag window.
+
 ## Rollback (unit-level, not data-level)
 
 Both units are read-mostly (audit is read-only; mover's writes are already

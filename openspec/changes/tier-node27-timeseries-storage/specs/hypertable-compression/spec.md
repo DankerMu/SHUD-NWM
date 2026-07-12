@@ -76,12 +76,31 @@ archive rebuild drill never triggers it because the drill writes only its
 isolated staging schema (see `archive-rebuild-drill`), an exemption by
 isolation, not a bypass of the guard.
 
+Scope carve-out — batch-time-range only: The guard's semantic scope is the
+batch's `[min(valid_time), max(valid_time)]` window. The identity-scoped
+older-history residual — where an identity-scoped DELETE hits older
+compressed chunks OUTSIDE the batch valid_time window because the identity
+has historical data older than the batch — is OUT OF SCOPE for this
+requirement; operators handle it via the runbook §4.2 residual procedure.
+The guard passing on this case is not a bypass: TimescaleDB's own raw error
+still blocks the write, and the runbook covers the decompress + retry
+sequence.
+
 #### Scenario: Reingest targets a compressed window
 
 - **WHEN** a reingest operation would write rows into a compressed chunk
 - **THEN** the operation MUST abort with the fail-closed error before any
   row mutation
 - **AND** the error MUST reference the runbook decompress procedure
+
+#### Non-Scenario: Older-history residual outside the batch window
+
+- **WHEN** the batch's `valid_time` window is entirely outside any compressed
+  chunk, but the identity-scoped DELETE would hit older compressed chunks
+  outside that window
+- **THEN** the guard MUST NOT block; TimescaleDB's own raw error on the
+  DELETE remains the enforcement layer; operators recover via the runbook
+  §4.2 residual procedure
 
 ### Requirement: Initial compression produces a size receipt
 

@@ -482,6 +482,66 @@ def test_direct_grid_method_case_is_canonicalized_before_insert() -> None:
     assert {row["method"] for row in connection.tables["met.interp_weight"]} == {"direct_grid"}
 
 
+def test_compressed_chunk_write_error_produces_dedicated_reason_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E2: A ``CompressedChunkWriteError`` during ``_replace_forcing_station_timeseries``
+    surfaces via :data:`REASON_APPLY_COMPRESSED_CHUNK_BLOCKED`, not the generic
+    SQL-failure bucket. Operators route on this code to the runbook decompress
+    procedure. Both transaction-ownership branches roll back exactly once.
+    """
+    from packages.common.timescale_write_guard import CompressedChunkWriteError
+
+    def _raise_compressed_chunk(cursor: Any, forcing_version_id: str, rows: Any) -> None:
+        raise CompressedChunkWriteError(
+            chunk_schema="_timescaledb_internal",
+            chunk_name="_hyper_42_1_chunk",
+            hypertable_schema="met",
+            hypertable_name="forcing_station_timeseries",
+        )
+
+    monkeypatch.setattr(
+        apply_module,
+        "_replace_forcing_station_timeseries",
+        _raise_compressed_chunk,
+    )
+
+    # (a) owns_transaction=True: connection.rollback() branch.
+    connection = _FakeConnection()
+    report = apply_module.apply_forcing_domain_handoff(_parse_complete(), connection=connection)
+    assert report["status"] == "failed"
+    assert report["available"] is False
+    assert report["writes_performed"] is False
+    assert len(report["unavailable_reasons"]) == 1
+    reason = report["unavailable_reasons"][0]
+    assert reason["code"] == apply_module.REASON_APPLY_COMPRESSED_CHUNK_BLOCKED
+    assert reason["exception_type"] == "CompressedChunkWriteError"
+    assert "_hyper_42_1_chunk" in reason["detail"]
+    assert connection.rollbacks == 1
+    assert connection.commits == 0
+
+    # (b) caller_owned cursor: savepoint rollback branch.
+    caller_connection = _FakeConnection()
+    caller_cursor = caller_connection.cursor()
+    caller_report = apply_module.apply_forcing_domain_handoff(
+        _parse_complete(), cursor=caller_cursor
+    )
+    assert caller_report["status"] == "failed"
+    caller_reason = caller_report["unavailable_reasons"][0]
+    assert caller_reason["code"] == apply_module.REASON_APPLY_COMPRESSED_CHUNK_BLOCKED
+    # Caller retains ownership: helper MUST NOT commit / rollback the connection.
+    assert caller_connection.commits == 0
+    assert caller_connection.rollbacks == 0
+    # Savepoint was released via ROLLBACK TO SAVEPOINT + RELEASE — verify at
+    # least one such statement fired in the caller_owned branch.
+    savepoint_rollbacks = [
+        stmt
+        for _, stmt, _ in caller_connection.executions
+        if "rollback to savepoint" in stmt.lower()
+    ]
+    assert len(savepoint_rollbacks) == 1
+
+
 @pytest.mark.parametrize(
     "stage",
     ["forcing_version", "met_station", "station_timeseries", "interp_weight"],
@@ -617,6 +677,18 @@ class _FakeCursor:
     def execute(self, statement: str, parameters: tuple[Any, ...] = ()) -> None:
         self.connection.executions.append(("execute", statement, tuple(parameters)))
         normalized = " ".join(statement.lower().split())
+        if normalized.startswith("set local statement_timeout"):
+            # Compressed-chunk write guard bounds its own catalog lookup with a
+            # transaction-scoped SET LOCAL. The fake connection has no such
+            # concept; accept it as a no-op so the guard runs to its SELECT.
+            return
+        if normalized.startswith("select chunk_schema, chunk_name from timescaledb_information.chunks"):
+            # Guard's catalog lookup. Fixture has no compressed chunks — return
+            # no row so the guard passes and the wrapped DELETE + INSERT run
+            # byte-identical to the pre-guard path.
+            self._fetchone = None
+            self._fetchall = []
+            return
         if normalized.startswith("savepoint "):
             name = normalized.split()[1]
             self.connection._savepoints[name] = copy.deepcopy(self.connection.state)

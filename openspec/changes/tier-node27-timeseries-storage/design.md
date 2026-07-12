@@ -594,4 +594,149 @@ Boundary-surface checklist:
 - Stale-state/idempotency boundaries: re-run over verified existing objects skips them; a stale receipt (older than audit's next scheduled tick) is not a runtime hazard because the operation is one-time and the audit refresh cadence is already gated in #849.
 - Unchanged downstream consumers: display API/frontend/read paths (ADR 0001), archive mover (#848), storage inventory audit (#847), resource governance (#849 extension), raw retention (pre-existing), hypertable compression (#851), write-guard (#852 owns), retention gate (#855 owns). None touched.
 
+## Workflow Fixture: Issue #852 Fail-Closed Compressed-Chunk Write Guard
+
+Fixture level: expanded. Repair intensity: high. Project profile: NHMS.
+
+**High-risk-surface note**: This PR touches THREE production write paths (`workers/output_parser/parser.py`, `workers/forcing_producer/store.py`, `packages/common/forcing_domain_handoff_apply.py`). The golden-path ingest must remain byte-identical for uncompressed chunks; the guard MUST NOT slow the hot path by more than an amortized ~1 ms per batch; the guard MUST NOT cause false positives (blocking a legitimate uncompressed write); the guard MUST fail closed when the catalog lookup itself errors (network hiccup, catalog view unavailable). Six-reviewer escalation is mandated by the production-write-path risk.
+
+Change surface:
+
+- `packages/common/timescale_write_guard.py` (new, single shared helper): `check_batch_targets_uncompressed(cursor, *, hypertable_schema, hypertable_name, valid_time_min, valid_time_max)` runs one catalog lookup against `timescaledb_information.chunks WHERE hypertable_schema=%s AND hypertable_name=%s AND is_compressed = true AND range_start <= %s AND range_end > %s` (batch-time-range OVERLAP semantics: `range_start <= batch_max AND range_end > batch_min`, note TimescaleDB chunk intervals are `[range_start, range_end)` — `range_start` INCLUSIVE, `range_end` EXCLUSIVE, per #851). Before the catalog query, run `SET LOCAL statement_timeout = '5s'` (transaction-scoped, no session leak). If any compressed chunk overlaps, raise `CompressedChunkWriteError(chunk_schema, chunk_name, hypertable, decompress_runbook_anchor)` naming the chunk and pointing at the runbook decompress procedure. If the catalog lookup itself errors (exception), fail-closed: raise `CompressedChunkGuardError(reason)` — the guard NEVER silently permits a write. The guard also refuses at entry (before any SQL) any `(hypertable_schema, hypertable_name)` pair NOT in `HYPERTABLES_GUARDED` (runtime enforcement so a wire-site typo cannot silently permit writes).
+- **Guard-precedes-DELETE ordering (critical)**: All three write paths do `DELETE FROM <table> WHERE <identity clause>` FOLLOWED BY `INSERT INTO … execute_values(…)`. Placing the guard between DELETE and INSERT is INSUFFICIENT because TimescaleDB 2.10 rejects DELETE on compressed chunks with its own raw error before the guard would fire. The guard MUST run BEFORE the DELETE at every wire point.
+- **Guard semantic scope (batch-time-range only)**: The guard checks compressed chunks overlapping `[min(batch.valid_time), max(batch.valid_time)]`. Identity-scoped DELETE can still hit compressed chunks OUTSIDE the batch time window if the identity has historical data older than the batch (rare edge case in normal reingest, which rewrites the same time window as its source cycle). That residual case falls through to TimescaleDB's raw error rather than the guard's structured error — this is a documented non-goal for #852; the runbook section 4.2 ("Residual reingest window mismatch") covers it explicitly. Adding an identity-existence probe was rejected as too expensive (would require a `MIN(valid_time)` scan against potentially-compressed data) and too broad (blocking every reingest when any chunk of the hypertable is compressed would break the golden path for all forcing_version_ids).
+- `workers/output_parser/parser.py`: wire the guard at the pre-write moment inside `upsert_river_timeseries` (`parser.py:645`) **BEFORE** the identity-scoped DELETE loop that starts around `parser.py:655`. Compute `min/max valid_time` from the batch; call `check_batch_targets_uncompressed(..., "hydro", "river_timeseries", min, max)`. Cursor sourcing: use the fresh cursor the surrounding `_fetch_all` / `_execute_values` methods already open (do NOT introduce a new cursor lifecycle). If the parser's per-op cursor pattern requires a dedicated guard cursor, use the same connection/transaction as the DELETE that follows.
+- `workers/forcing_producer/store.py`: wire at `store.py:749` in the pre-write moment of `_replace_values(...)` so the guard runs BEFORE the DELETE. Compute `min/max valid_time` from the batch; call the guard on `("met", "forcing_station_timeseries", min, max)`. Implementation deviation (see "Implementation deviations" subsection below): the guard call is passed via the new `pre_write_cursor_hook` parameter on `_replace_values`, not injected literally before the call.
+- `packages/common/forcing_domain_handoff_apply.py`: wire at `forcing_domain_handoff_apply.py:693` BEFORE the DELETE at line 694 inside `_replace_forcing_station_timeseries`. Same guard call.
+- `tests/test_timescale_write_guard.py` (new): shared helper unit tests — allow / block / catalog-error / boundary overlap semantics / statement-timeout / empty-batch skip / DSN mask.
+- `tests/test_write_guard_output_parser.py` (new OR extend `tests/test_output_parser.py` OR extend the existing `workers/output_parser` test file — pick whichever fits the current test layout; do not fork test infrastructure): one wired-path test per write path (3 total) covering (a) compressed chunk overlap raises `CompressedChunkWriteError` BEFORE `execute_values` is invoked; (b) uncompressed batch passes through unchanged.
+- `docs/runbooks/tier-node27-timeseries-storage.md` (edit): new section 4.3 — `decompress_chunk(<chunk>::regclass)` procedure + reingest re-run guidance + explicit anchor referenced by the guard error message.
+- `openspec/changes/tier-node27-timeseries-storage/tasks.md` §4.3 checkbox ticked.
+
+Must preserve:
+
+- **Golden-path ingest behavior for uncompressed chunks byte-identical** — no test in the existing 372-test sibling regression suite (product_archive / storage_inventory_audit / resource_governance / raw_retention / timeseries_compression) may fail; existing workers/* test suites must remain green; existing hydro/met table row-count and shape invariants unchanged.
+- Design D5: the guard is centralized in ONE shared helper. Divergent per-path copies are forbidden. All three call sites import from the SAME module.
+- Design D5 exemption: the archive rebuild drill (#854) writes to an isolated staging schema and MUST NOT trip the guard — the guard is bound to specific `hypertable_schema`/`hypertable_name` values (`hydro.river_timeseries`, `met.forcing_station_timeseries`); staging schema is another schema entirely.
+- Spec Requirement "Reingest fails closed on compressed chunks": abort BEFORE any row mutation; error names the chunk and references the runbook.
+- ADR 0001 display carve-out: no display API/frontend code path may import the new helper.
+- ADR 0002 decision 3: no automated restore lane; the runbook decompress procedure is the manual escape hatch.
+- Existing psycopg2 patterns at each call site (`execute_values`, cursor discipline, transaction boundaries).
+- `_mask_dsn` convention if any DSN surfaces through error messages.
+
+Must add/change:
+
+- One shared pre-write helper detecting compressed-chunk overlap for a batch time window.
+- Three call-site wirings (minimal diff, one guard call each, positioned strictly before the `execute_values` call).
+- Runbook section 4.3 pinning the decompress procedure with a stable anchor.
+- Unit tests: shared helper allow/block/error paths; one wired-path test per write path (3 total).
+
+Risk packs considered (core):
+
+- Public API / CLI / script entry: not selected — no new operator surface.
+- Config / project setup: not selected — no new env vars; guard uses the existing DB connection.
+- File IO / path safety / overwrite: not selected — no filesystem writes.
+- Schema / columns / units / field names: selected — helper queries `timescaledb_information.chunks` catalog; new exception types are a public contract for the three call sites.
+- Auth / permissions / secrets: selected — helper runs under the ingest role's privileges; no new secret surface; DSN in exception must be masked if reached.
+- **Concurrency / shared state / ordering: selected** — guard runs inside the same transaction as `execute_values`; if the guard commits to abort, the transaction rolls back (no partial write). Verify no `SET SESSION` state leaks across calls.
+- **Resource limits / large input / discovery: selected** — catalog lookup runs once per batch (amortized over batch_size rows); statement timeout bounds latency.
+- Legacy compatibility / examples: selected — 372-test sibling regression + existing workers/* tests must remain green.
+- **Error handling / rollback / partial outputs: selected** — the guard's raise MUST propagate before `execute_values`; on catalog error, fail-closed (raise `CompressedChunkGuardError`), never silently permit.
+- Release / packaging / dependency compatibility: not selected — no new dependency.
+- Documentation / migration notes: selected — runbook section 4.3 is a deliverable.
+
+Domain packs:
+
+- Geospatial / CRS / basin geometry: not selected.
+- **Hydro-met time series / forcing windows: selected** — helper reasons about `valid_time` overlap against chunk `range_start`/`range_end`; timezone handling MUST match ingest's UTC discipline.
+- SHUD numerical runtime: not selected.
+- **PostGIS / TimescaleDB domain behavior: selected** — `timescaledb_information.chunks` semantics; `range_end` is exclusive (per #851 fixture note); on TimescaleDB 2.10 catalog visibility considerations.
+- Slurm production lifecycle: not selected.
+- External hydro-met providers: not selected.
+- Run manifest / QC provenance: not selected.
+- Published NHMS artifacts / display identity: not selected — ADR 0001 preserved.
+
+Invariant Matrix:
+
+- Governing invariant: any batch whose `[min(valid_time), max(valid_time)]` overlaps ANY compressed chunk of the target hypertable MUST be rejected before `execute_values` runs; a batch that touches ZERO compressed chunks MUST proceed unchanged; a catalog lookup failure MUST fail-closed (raise, do not permit).
+- Source-of-truth identity/contract: `timescaledb_information.chunks.is_compressed` boolean + `range_start`/`range_end` interval. Caller-observable contract has TWO surfaces:
+  - Exception TYPES: `CompressedChunkWriteError` (compressed chunk detected) and its base `CompressedChunkGuardError` (catalog lookup failure OR unregistered `(schema, table)` OR partial batch range).
+  - Wire-format string CODES emitted downstream (one per caller-observable route; every code routes to runbook §4.3 decompress procedure):
+    - `HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED` — attached to `apply_forcing_domain_handoff` `unavailable_report.unavailable_reasons[].code`.
+    - `OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED` — stamped on `hydro.hydro_run.error_code` by parser + emitted as parser CLI stderr prefix.
+    - `FORCING_PRODUCE_COMPRESSED_CHUNK_BLOCKED` — forcing producer CLI stderr prefix.
+    - `FORCING_COMPRESSED_CHUNK_BLOCKED` — stamped on `met.forecast_cycle.error_code` by `ForcingProducer._mark_failed` on the dedicated arm.
+- Runtime registry enforcement (caller-observable): `HYPERTABLES_GUARDED = frozenset({("hydro", "river_timeseries"), ("met", "forcing_station_timeseries")})` — any other `(schema, table)` pair passed to the guard raises `CompressedChunkGuardError` BEFORE any SQL runs, so a wire-site typo cannot silently permit writes.
+- Producers: extended `workers/output_parser/parser.py::upsert_river_timeseries`; extended `workers/forcing_producer/store.py` forcing-timeseries write; extended `packages/common/forcing_domain_handoff_apply.py` forcing-timeseries write.
+- Validators/preflight: `check_batch_targets_uncompressed(cursor, ...)` before every `execute_values` for the two target hypertables; batch-empty short-circuit (no query when 0 rows to write).
+- Storage/cache/query: guard runs one catalog lookup per batch; NO caching (a stale cache would enable a silent partial write).
+- Public routes/entrypoints: no new operator entrypoints; call sites are the three existing ingest paths.
+- Frontend/downstream consumers: display API/frontend unchanged (ADR 0001 grep zero hits); drill (#854) untouched because it writes to a staging schema, not `hydro.river_timeseries` or `met.forcing_station_timeseries`.
+- Failure paths/rollback/stale state: exception → transaction rollback via the caller's existing psycopg2 `with connection:` block; no partial write ever; on catalog error, exception raised, no permit-and-warn.
+- Evidence/audit/readiness: guard exception message names the specific chunk (`_timescaledb_internal._hyper_<N>_<M>_chunk`) and points at the runbook section 4.3 anchor; error type stable for downstream monitoring.
+
+Regression rows:
+
+- Input: batch whose `valid_time` range fully falls inside a compressed chunk. Expected: `CompressedChunkWriteError` raised BEFORE the DELETE runs (thus before any `execute_values`); error message contains the chunk name; error message contains the runbook anchor `docs/runbooks/tier-node27-timeseries-storage.md#43-decompress-procedure`.
+- Input: batch whose `valid_time` range partially overlaps a compressed chunk. Expected: same as above (any overlap is a block).
+- Input: batch whose `valid_time` range is fully outside any compressed chunk. Expected: DELETE + `execute_values` invoked once with the batch unchanged; behavior byte-identical to pre-guard code path.
+- Input: batch whose `valid_time` range touches the boundary of a compressed chunk (equal to `range_end` exclusive). Expected: allowed (does not overlap — `range_end` is exclusive per #851).
+- **Guard-precedes-DELETE regression** (test row): assert via a callable-spy fake connection that at each of the three write paths the guard function is called BEFORE any DELETE cursor.execute, using an ordered call log; if the guard raises, no DELETE cursor.execute is invoked at all.
+- **Identity-scoped compressed rows outside batch time window** (residual non-goal doc): batch `valid_time` range is fully outside compressed chunks BUT the identity has historical data in compressed chunks outside the batch window. Expected: the guard passes (batch-time-range semantic); the subsequent DELETE raises TimescaleDB's raw error; this is a documented residual per runbook §4.2 "Residual reingest window mismatch". Test asserts guard does not raise for this case; TimescaleDB raw-error handling is out of guard scope.
+- Input: catalog lookup query raises (`OperationalError`, `QueryCanceled`). Expected: `CompressedChunkGuardError` raised; caller transaction rolls back; NO batch write occurs.
+- Input: empty batch (`len(rows) == 0`). Expected: guard short-circuits (no catalog query), existing caller behavior unchanged.
+- Input: guard called with `hypertable_schema="ops"` (e.g. drill's isolated staging schema). Expected: because the wiring at the three production call sites only passes the two production `(schema, table)` pairs, the drill's writes never reach the guard — asserted by test that greps the wired calls' arguments.
+- **`SET LOCAL statement_timeout` non-leak** (test row): after the guard runs on a fresh cursor, subsequent statements on the same session are NOT affected by the guard's short timeout (SET LOCAL is transaction-scoped). Test verifies via a fake cursor that only `SET LOCAL` and not `SET SESSION` is used.
+- Input: guard exception message contains a DSN accidentally embedded. Expected: `_mask_dsn` applied (defense-in-depth); test enforces no cleartext DSN.
+- Input: existing `workers/output_parser` tests, `workers/forcing_producer` tests, and `packages/common/forcing_domain_handoff_apply` tests run at head with the guard wired. Expected: all previously-passing tests remain passing (no false-positive block on uncompressed windows).
+- Input: sibling regression pytest (`test_node27_product_archive.py` + `test_node27_storage_inventory_audit.py` + `test_node27_resource_governance.py` + `test_node27_raw_retention.py` + `test_node27_timeseries_compression.py` + `test_node27_db_export_salvage.py`). Expected: all pass (baseline established at HEAD before wiring; the count is captured in the PR body evidence block, not pinned in the fixture).
+- Input: `grep -rn "timescale_write_guard\|CompressedChunkWriteError\|CompressedChunkGuardError" apps/api apps/frontend packages/common | grep -v timescale_write_guard.py`. Expected: zero hits (ADR 0001) — extended to include `packages/common/` to catch a future cross-import that would re-expose the guard on the display side.
+- Input: divergent per-path guard implementation drift — search for any second `timescaledb_information.chunks` chunk-lookup in workers/*.py or packages/common/*.py that isn't the shared helper. Expected: only one implementation exists (the new module).
+- Input: no DDL added (`ALTER TABLE|CREATE TABLE|DROP TABLE|TRUNCATE`). Expected: verified by grep.
+- **`db/seeds/seed_demo.py` intentional non-wiring** (test row): seed_demo populates fresh empty databases from a known-good demo state; it never targets compressed chunks in production; not wired to the guard. Test asserts seed_demo does NOT import `timescale_write_guard` (grep) and this is called out in seed_demo docstring as intentional.
+- **Partial-None batch range fails closed (AND-vs-OR semantic)** (primary regression row): Input: guard called with `(valid_time_min=None, valid_time_max=<t>)` or `(valid_time_min=<t>, valid_time_max=None)`. Expected: `CompressedChunkGuardError` raised BEFORE any SQL — the empty-batch short-circuit uses AND (both endpoints `None`), not OR (either endpoint `None`), so a partial `None` (caller bug) never permits a silent write. Callers producing `(None, None)` via `min(..., default=None)` on an empty iterable naturally short-circuit; every other `None` shape fails closed. Tested by `test_partial_none_range_refuses`.
+- **`(schema, table)` registry enforcement at guard entry** (primary regression row): Input: guard called with any `(hypertable_schema, hypertable_name)` NOT in `HYPERTABLES_GUARDED` (e.g. `("hydro", "not_a_real_table")`). Expected: `CompressedChunkGuardError` raised BEFORE any SQL runs; error message contains `"unregistered"`. This is a caller-observable behavior (a wire-site typo cannot silently permit writes). Tested by `test_unknown_pair_refuses_at_guard_entry` and `test_partial_range_refuses_before_registry_check`.
+
+Boundary-surface checklist:
+
+- Shared helper roots reused (not forked): existing psycopg2 patterns at the three call sites; `_mask_dsn` convention inline; NO reliance on `packages/common/safe_fs.py` (no filesystem writes).
+- Public entrypoints added: 0 (helper is a module-private-per-caller function; no CLI, no systemd unit, no env var).
+- Read surfaces: `timescaledb_information.chunks` (catalog view); no new hypertable row reads.
+- Write/delete/overwrite surfaces: 0 new. The guard is a PRE-write validator; it does not itself write.
+- Staging/publish/rollback surfaces: caller's existing psycopg2 transaction; guard raise causes rollback via existing `with connection:` block.
+- Producer/consumer evidence boundaries: guard exception type is the sole caller-observable contract; no new receipt.
+- Stale-state/idempotency boundaries: NO cache. Catalog query runs per batch; the correctness invariant would break under caching.
+- Unchanged downstream consumers: display API/frontend/read paths (ADR 0001), archive mover / audit / governance / retention / compression / salvage scripts (untouched), drill (#854 staging-schema exempt), retention gate (#855 owns).
+
+### Implementation deviations
+
+The delivered PR (#1058, feat/issue-852-write-guard) departs from the fixture text above in three shape-preserving ways. Each is fully recovered by the wired-path tests and the shared-helper unit tests; none weaken the invariant matrix.
+
+- **`pre_write_cursor_hook` on `_replace_values` (forcing_producer/store.py)** — The design directed "wire BEFORE `_replace_values(...)` call" as a literal source-order injection. The wire actually threads the guard through `_replace_values` via a new `pre_write_cursor_hook: Callable[[cursor], None] | None` keyword. This preserves the "guard runs on the same cursor as the DELETE, in the same transaction" invariant more strictly than an external call would (which would need to either open its own cursor or plumb one through). The wired test `test_forcing_producer_guard_runs_before_delete_on_uncompressed_batch` asserts execution ordering by inspecting the `_RecordingConnection` execution log — the shape check is byte-identical to the "literal before the call" formulation.
+- **`SET LOCAL statement_timeout = DEFAULT` reset in `finally:`** — The design directed a plain "reset after the catalog lookup" sequence. The implementation moves the reset into a `finally:` block so the session default is restored even when the catalog SELECT raises. Rationale: if the SELECT raises, the plain sequence leaves the caller's transaction still bound to the guard's 5s cap, silently clipping downstream DELETE + INSERT statements. The `finally:` reset is best-effort (suppressed if it itself raises against an aborted transaction). Unit-tested by `test_set_local_default_resets_even_when_select_raises`.
+- **`.large-file-guard.json` exclude-list extension** — The design did not touch large-file plumbing. The PR extended the large-file guard's exclude list for four files total (initial: `packages/common/forcing_domain_handoff_apply.py`, `workers/output_parser/parser.py`; R2/F1 additions: `workers/forcing_producer/producer.py`, `tests/test_forcing_producer.py` — both were pre-existing large files that the R2 fix edited to add the dedicated `except CompressedChunkGuardError` arm + regression test). Verified as documented exceptions, not bypasses; orthogonal to the guard semantics; does not affect the invariant matrix. Recorded here for evidence completeness.
+
+Caller-observable SHAPE asymmetry across the three-plus-one paths (design cheatsheet — the "why does each path have a different error shape" answer):
+
+- **`packages/common/forcing_domain_handoff_apply.py::apply_forcing_domain_handoff` — dict return.** The apply helper returns a structured `unavailable_report` dict (`status="failed"`, `unavailable_reasons=[{"code": "HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED", ...}]`); the guard exception is caught inside the helper and translated into the report. Callers already inspect this dict shape; adding a raise would break the contract.
+- **`workers/output_parser/parser.py::OutputParser.parse_run` — re-raise + DB `error_code`.** The parser stamps `hydro.hydro_run.error_code = "OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED"` (via `_mark_run_failed_preserving_error`) AND re-raises the `CompressedChunkGuardError` un-wrapped. The DB column feeds the operator dashboard; the re-raise feeds the CLI's `OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED:` stderr prefix.
+- **`workers/forcing_producer/producer.py::ForcingProducer.produce` — re-raise + DB `error_code` (post-R2/F1).** Same shape as the parser: stamps `met.forecast_cycle.error_code = "FORCING_COMPRESSED_CHUNK_BLOCKED"` (via `_mark_failed(..., error_code=)`) AND re-raises the `CompressedChunkGuardError` un-wrapped so the forcing CLI's `FORCING_PRODUCE_COMPRESSED_CHUNK_BLOCKED:` stderr prefix is reachable.
+- **`packages/common/timescale_write_guard.py::check_batch_targets_uncompressed` (helper) — raise only.** No dict return, no DB write, no CLI concern. The helper raises `CompressedChunkGuardError` / `CompressedChunkWriteError` and the caller decides the shape.
+
+A future 4th write path MUST pick a shape by matching its use case (report-return vs. raise-plus-DB-stamp vs. bare raise), NOT at random. The wire-site invariant (see below) catches an unwired 4th path; picking the wrong shape is a design decision each new caller documents in its own module docstring.
+
+Additional post-review corrections applied on top of head `830218fb` (R1 fix pass):
+
+- **Boundary predicate `range_start <= %s`** — The catalog query is `range_start <= batch_max AND range_end > batch_min`. TimescaleDB chunks are `[range_start, range_end)`; the earlier `range_start < %s` missed the boundary case where a batch's max valid_time equals a compressed chunk's range_start (in which case the INSERT lands inside that chunk). Regression-tested by `test_boundary_range_start_inclusive_blocks_write` with a predicate-aware fake cursor. The PRIMARY design surface prose above (line ~605 area) now reads `range_start <= %s` — the earlier correction bullet is no longer needed.
+- **`HYPERTABLES_GUARDED` runtime enforcement** — The guard now refuses any `(hypertable_schema, hypertable_name)` not in `HYPERTABLES_GUARDED` before any SQL runs, so a wire-site typo cannot silently permit a write. Unit-tested by `test_unknown_pair_refuses_at_guard_entry` and `test_partial_range_refuses_before_registry_check` (the ordering-lock test that asserts partial-None fires BEFORE the registry check).
+- **Wire-format string codes for the caller-observable contract (four total)** — The compressed-chunk write guard surfaces via a dedicated caller-observable contract at all four routes (three wire sites plus the forcing CLI). Explicit string values (routed on by operators via the runbook §4.3 triage table):
+  - `"HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED"` — `REASON_APPLY_COMPRESSED_CHUNK_BLOCKED` on the apply report.
+  - `"OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED"` — `hydro.hydro_run.error_code` + parser CLI stderr prefix.
+  - `"FORCING_PRODUCE_COMPRESSED_CHUNK_BLOCKED"` — forcing producer CLI stderr prefix.
+  - `"FORCING_COMPRESSED_CHUNK_BLOCKED"` — `met.forecast_cycle.error_code` set by `ForcingProducer._mark_failed` on the dedicated `except CompressedChunkGuardError` arm (R2/F1).
+  Tested by `test_compressed_chunk_write_error_produces_dedicated_reason_code`, `test_compressed_chunk_guard_error_sets_dedicated_error_code`, `test_compressed_chunk_guard_error_sets_dedicated_forcing_error_code`, `test_forcing_cli_emits_compressed_chunk_blocked_prefix_and_exit_1`, `test_output_parser_cli_emits_compressed_chunk_blocked_prefix_and_exit_1`.
+- **Empty-batch AND semantics** — `if valid_time_min is None and valid_time_max is None` (not `or`), with a partial-`None` fail-closed branch that raises `CompressedChunkGuardError`. Callers that use `min(..., default=None)` on an empty iterable naturally produce `(None, None)` and short-circuit; a partial `None` indicates a caller bug. Tested by `test_partial_none_range_refuses`.
+- **AST-scan wire-site invariant** — `tests/test_timescale_write_guard_wire_site_invariant.py` enforces "every module in workers/**, packages/common/**, scripts/**, db/** that DELETEs from a guarded hypertable MUST also call `check_batch_targets_uncompressed` in the same enclosing function" — parametrized over `sorted(HYPERTABLES_GUARDED)` — so a fourth wire site cannot slip in unwired. Also asserts `pre_write_cursor_hook=` in `workers/forcing_producer/store.py::replace_forcing_timeseries` is bound to `_guard` (not `None`), locking the silent-disable scenario.
+- **Constant rename** — `_STATEMENT_TIMEOUT_MS` renamed to `_STATEMENT_TIMEOUT_LITERAL` (the value is a Postgres duration literal `'5s'`, not a millisecond integer). Closes MINOR C-cor-2.
+
 

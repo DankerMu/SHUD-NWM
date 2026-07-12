@@ -1837,6 +1837,41 @@ def test_forcing_version_checksum_is_finalized_after_child_rows(tmp_path: Path) 
     ]
 
 
+def test_compressed_chunk_guard_error_sets_dedicated_forcing_error_code(tmp_path: Path) -> None:
+    """F4: ``CompressedChunkGuardError`` inside ``produce()`` routes to a
+    dedicated ``forecast_cycle.error_code`` bucket
+    (``FORCING_COMPRESSED_CHUNK_BLOCKED``) and re-raises un-wrapped so the
+    CLI's ``except CompressedChunkGuardError`` arm is reachable.
+
+    Before R2/F1, the generic ``except Exception`` in ``produce()`` swallowed
+    the guard error and wrapped it as ``ForcingProductionError`` — the CLI
+    arm was dead code, and every guard failure landed in the generic
+    ``FORCING_FAILED`` bucket. The dedicated ``except CompressedChunkGuardError``
+    arm was added upstream of ``except Exception`` to close the pattern.
+    """
+    from packages.common.timescale_write_guard import CompressedChunkGuardError
+
+    store, repository = _build_repository(tmp_path)
+    producer = _build_producer(tmp_path, repository, store)
+
+    def _raise_guard(*_args: Any, **_kwargs: Any) -> None:
+        raise CompressedChunkGuardError(
+            "Reingest targets compressed chunk _timescaledb_internal._hyper_2_5_chunk"
+        )
+
+    repository.replace_forcing_timeseries = _raise_guard  # type: ignore[method-assign]
+
+    with pytest.raises(CompressedChunkGuardError) as exc_info:
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    # Un-wrapped: propagates as the raw guard error, NOT ForcingProductionError.
+    assert not isinstance(exc_info.value, ForcingProductionError)
+    # Dedicated bucket on forecast_cycle.error_code.
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
+    assert repository.cycle_updates[-1]["error_code"] == "FORCING_COMPRESSED_CHUNK_BLOCKED"
+    assert "_hyper_2_5_chunk" in repository.cycle_updates[-1]["error_message"]
+
+
 def test_failed_child_write_leaves_forcing_version_incomplete_and_retry_finalizes(tmp_path: Path) -> None:
     store, repository = _build_repository(tmp_path, fail_next_timeseries_replace=True)
     producer = _build_producer(tmp_path, repository, store)

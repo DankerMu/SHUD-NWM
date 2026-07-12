@@ -14,6 +14,10 @@ from packages.common.forcing_domain_handoff import (
 )
 from packages.common.redaction import redact_payload, redact_text
 from packages.common.source_identity import normalize_source_id
+from packages.common.timescale_write_guard import (
+    CompressedChunkGuardError,
+    check_batch_targets_uncompressed,
+)
 
 APPLY_MODE = "object_store_forcing_domain_handoff"
 APPLY_SAVEPOINT_NAME = "nhms_forcing_domain_handoff_apply"
@@ -27,6 +31,7 @@ REASON_APPLY_STATION_COORDINATE_MISMATCH = "HANDOFF_APPLY_STATION_COORDINATE_MIS
 REASON_APPLY_STATION_CONFLICT = "HANDOFF_APPLY_STATION_CONFLICT"
 REASON_APPLY_FORCING_VERSION_CONFLICT = "HANDOFF_APPLY_FORCING_VERSION_CONFLICT"
 REASON_APPLY_SQL_FAILURE = "HANDOFF_APPLY_SQL_FAILURE"
+REASON_APPLY_COMPRESSED_CHUNK_BLOCKED = "HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED"
 
 TARGET_TABLES = (
     "met.forcing_version",
@@ -164,6 +169,29 @@ def apply_forcing_domain_handoff(
         return _unavailable_report(
             status="failed",
             reasons=[error.reason],
+            parser_envelope=parser_envelope,
+            identity=prepared["identity"],
+            writes_performed=False,
+        )
+    except CompressedChunkGuardError as error:
+        # Dedicated caller-observable contract for the compressed-chunk write
+        # guard: operators route on this reason code to the runbook decompress
+        # procedure rather than the generic SQL failure bucket. Rollback is
+        # symmetric with the SQL failure branch — owns_transaction vs.
+        # savepoint mirrors the existing psycopg2 discipline.
+        if owns_transaction:
+            connection.rollback()
+        else:
+            _rollback_apply_savepoint(cursor)
+        return _unavailable_report(
+            status="failed",
+            reasons=[
+                _reason(
+                    REASON_APPLY_COMPRESSED_CHUNK_BLOCKED,
+                    detail=redact_text(str(error)),
+                    exception_type=type(error).__name__,
+                )
+            ],
             parser_envelope=parser_envelope,
             identity=prepared["identity"],
             writes_performed=False,
@@ -690,6 +718,15 @@ def _replace_forcing_station_timeseries(
     forcing_version_id: str,
     rows: Sequence[Mapping[str, Any]],
 ) -> None:
+    valid_time_min = min((row["valid_time"] for row in rows), default=None)
+    valid_time_max = max((row["valid_time"] for row in rows), default=None)
+    check_batch_targets_uncompressed(
+        cursor,
+        hypertable_schema="met",
+        hypertable_name="forcing_station_timeseries",
+        valid_time_min=valid_time_min,
+        valid_time_max=valid_time_max,
+    )
     cursor.execute(
         "DELETE FROM met.forcing_station_timeseries WHERE forcing_version_id = %s",
         (forcing_version_id,),

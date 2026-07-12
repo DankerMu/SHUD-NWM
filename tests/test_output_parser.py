@@ -316,6 +316,41 @@ def test_output_parser_db_free_writes_object_store_artifacts(
     assert parse_result["rows_written"] == 2
 
 
+def test_compressed_chunk_guard_error_sets_dedicated_error_code(tmp_path: Path) -> None:
+    """E3: ``CompressedChunkGuardError`` from the guard becomes
+    ``OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED`` on ``hydro_run.error_code`` and
+    the exception re-raises so the CLI (and callers) see the structured
+    exception rather than a generic runtime bucket.
+    """
+    from packages.common.timescale_write_guard import CompressedChunkGuardError
+
+    store, parser, repository = _build_parser(tmp_path)
+    store.write_bytes_atomic(
+        "runs/run_001/output/demo.rivqdown",
+        ("time,seg_a,seg_b\n2026-05-01T00:00:00Z,86400,172800\n").encode("utf-8"),
+    )
+
+    original_upsert = repository.upsert_river_timeseries
+
+    def _raise_guard(rows: Any, *, batch_size: int) -> None:
+        # Preserve batch_size handshake so the assertion in the fake still fires.
+        del rows, batch_size
+        raise CompressedChunkGuardError(
+            "guard raised: chunk _hyper_1_1_chunk in hydro.river_timeseries"
+        )
+
+    repository.upsert_river_timeseries = _raise_guard  # type: ignore[method-assign]
+
+    with pytest.raises(CompressedChunkGuardError):
+        parser.parse_run("run_001")
+
+    assert repository.statuses == ["failed"]
+    assert repository.failures[0][0] == "OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED"
+    assert "hydro.river_timeseries" in repository.failures[0][1]
+    # Restore for hygiene in case the fixture is reused.
+    repository.upsert_river_timeseries = original_upsert  # type: ignore[method-assign]
+
+
 def test_s3_output_uri_must_match_configured_bucket_and_prefix(tmp_path: Path) -> None:
     store, parser, repository = _build_parser(tmp_path, object_store_prefix="s3://nhms/prod")
     store.write_bytes_atomic(
