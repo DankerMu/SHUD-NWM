@@ -427,25 +427,37 @@ def build_receipt(
     # ``after_bytes``. If nothing was compressed we keep the dry-run
     # convention of ``after_bytes = null`` (schema allows it).
     saw_after = {key: False for key in totals}
-    # cand-H: sticky poison flag. If ANY chunk in the table hits an
-    # after-side failure, the per-table ``after_bytes`` sum is a partial
-    # aggregate (chunks_compressed still counts the compressed-but-unmeasured
-    # chunk), so we MUST null it. The end-of-loop pass honors this even when
-    # a later chunk in the same table succeeds — poison is one-way.
+    # Universal per-table invariant (rounds 1-3 closure). For every hypertable T:
+    #   chunks_compressed = count of chunks that reached the compressed state
+    #                       (compress_chunk succeeded), regardless of whether
+    #                       after-measurement succeeded.
+    #   before_bytes      = sum(chunk.before for those same chunks) — never
+    #                       includes chunks whose before-measure or
+    #                       compress_chunk failed (those chunks never reached
+    #                       the compressed state and MUST NOT inflate the
+    #                       denominator of a (before-after)/before ratio).
+    #   after_bytes       = sum(chunk.after) if every chunk in the table
+    #                       succeeded end-to-end, else null. Any failure on
+    #                       any chunk in the table (before / compress / after)
+    #                       poisons after_bytes to null so a partial sum can
+    #                       never masquerade as the true compressed footprint.
     after_poisoned = {key: False for key in totals}
     selected_descriptors: list[dict[str, Any]] = []
     any_errors = False
     for chunk in selected_rows:
-        # cand-F: symmetrical per-chunk isolation. Measurement failures on
-        # either side of the compress_chunk call MUST NOT abort the whole
-        # loop; each chunk records its own error string in the descriptor
-        # and the top-level outcome becomes ``partial``.
+        # Symmetrical per-chunk isolation. Any failure on this chunk is
+        # recorded in the descriptor, poisons the table's after_bytes, and the
+        # top-level outcome becomes ``partial`` — but does not abort the loop.
         try:
             before = int(measure_chunk_bytes(config.database_url, chunk))
         except Exception as error:
             descriptor = _descriptor(chunk, before=0, after=None)
             descriptor["error"] = f"measure_chunk_bytes(before) failed: {error}"
             any_errors = True
+            # Chunk never reached compressed state — do NOT contribute to any
+            # totals — but poison after_bytes so successful siblings in the
+            # same table cannot masquerade as the whole table's savings.
+            after_poisoned[chunk.hypertable_key] = True
             selected_descriptors.append(descriptor)
             continue
         descriptor: dict[str, Any]
@@ -458,7 +470,13 @@ def build_receipt(
                 descriptor = _descriptor(chunk, before=before, after=None)
                 descriptor["error"] = f"compress_chunk failed: {error}"
                 any_errors = True
-                totals[chunk.hypertable_key]["before_bytes"] += before
+                # Chunk never reached compressed state — do NOT contribute to
+                # chunks_compressed OR before_bytes (round-3 closure R3-01:
+                # including a failed chunk's before while excluding it from
+                # chunks_compressed would inflate the (before-after)/before
+                # savings ratio computed by any downstream consumer). Poison
+                # after_bytes so successful siblings cannot masquerade either.
+                after_poisoned[chunk.hypertable_key] = True
                 selected_descriptors.append(descriptor)
                 continue
             try:
@@ -467,14 +485,12 @@ def build_receipt(
                 descriptor = _descriptor(chunk, before=before, after=None)
                 descriptor["error"] = f"measure_chunk_bytes(after) failed: {error}"
                 any_errors = True
-                # The compression itself did succeed; record before_bytes so
-                # the per-table roll-up reflects the pre-compression footprint
-                # of the chunk that got compressed.
+                # The compression itself did succeed, so the chunk reached the
+                # compressed state — record chunks_compressed + before_bytes.
+                # Only the after side is unknown, so poison the table's
+                # after_bytes to null (partial sum would misreport footprint).
                 totals[chunk.hypertable_key]["before_bytes"] += before
                 totals[chunk.hypertable_key]["chunks_compressed"] += 1
-                # cand-H: poison this table's after_bytes — chunks_compressed
-                # just grew but the after side is unknown, so any partial sum
-                # over other chunks would misrepresent compressed footprint.
                 after_poisoned[chunk.hypertable_key] = True
                 selected_descriptors.append(descriptor)
                 continue
@@ -490,10 +506,11 @@ def build_receipt(
         selected_descriptors.append(descriptor)
 
     # Nullify after_bytes for tables where nothing was compressed (matches
-    # dry-run convention: absence of measurement, not zero-size) OR where any
-    # after-side measurement failed (cand-H sticky poison — preserves the
-    # invariant that per-table after_bytes is either the exact aggregate over
-    # ``chunks_compressed`` or null, never a partial sum).
+    # dry-run convention: absence of measurement, not zero-size) OR where ANY
+    # chunk in the table hit ANY failure (before-fail, compress-fail, or
+    # after-fail — sticky poison preserving the invariant that per-table
+    # after_bytes is either the exact aggregate over ``chunks_compressed`` or
+    # null, never a partial sum).
     for key in totals:
         if not saw_after[key] or after_poisoned[key]:
             totals[key]["after_bytes"] = None

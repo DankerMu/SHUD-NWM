@@ -232,6 +232,14 @@ def test_enforce_calls_compress_for_each_selected(tmp_path: Path, monkeypatch: p
 
 
 def test_per_chunk_failure_isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Universal invariant (R3-01): compress-fail on chunk B in one hypertable.
+
+    B did not reach compressed state, so it must contribute NOTHING to
+    ``chunks_compressed`` or ``before_bytes`` (round-3 closure — including
+    B's before while excluding it from chunks_compressed would inflate the
+    (before-after)/before savings ratio a consumer computes). And it must
+    poison ``after_bytes`` to null even though sibling A succeeded end-to-end.
+    """
     env = _base_env(tmp_path)
     config = compression.config_from_args(_args(enforce=True), env)
     chunks = [
@@ -257,8 +265,17 @@ def test_per_chunk_failure_isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert "error" not in by_name["good"]
     assert by_name["good"]["after_bytes"] == 100
     assert "error" in by_name["bad"]
+    assert by_name["bad"]["error"].startswith("compress_chunk failed:")
     assert by_name["bad"]["after_bytes"] is None
     assert receipt["outcome"] == "partial"
+    river = receipt["per_table_totals"]["hydro.river_timeseries"]
+    # Only A reached compressed state; B contributes nothing to either total.
+    assert river["chunks_compressed"] == 1
+    assert river["before_bytes"] == 100
+    # B's compress-fail poisons the whole table's after_bytes.
+    assert river["after_bytes"] is None
+    # F-INVSTATE-02: partial-outcome receipts stay schema-conformant.
+    jsonschema.validate(receipt, _load_schema())
 
 
 def test_measure_after_failure_isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -300,6 +317,8 @@ def test_measure_after_failure_isolated(tmp_path: Path, monkeypatch: pytest.Monk
     # per-table after_bytes to null — a partial sum over successful chunks
     # would mislead the (before-after)/before savings computation.
     assert river["after_bytes"] is None
+    # F-INVSTATE-02: partial-outcome receipts stay schema-conformant.
+    jsonschema.validate(receipt, _load_schema())
 
 
 def test_after_fail_poisons_per_table_after_bytes(
@@ -344,10 +363,71 @@ def test_after_fail_poisons_per_table_after_bytes(
     assert river["before_bytes"] == 400 + 800
     assert river["after_bytes"] is None
     assert receipt["outcome"] == "partial"
+    # F-INVSTATE-02: partial-outcome receipts stay schema-conformant.
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_compress_fail_poisons_per_table_after_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-3 R3-01: mixed success + compress-fail in one hypertable.
+
+    Direct analog of ``test_after_fail_poisons_per_table_after_bytes`` but for
+    the compress_chunk failure path. Two chunks in ``hydro.river_timeseries``:
+    A (700 before, 200 after) succeeds; B fails inside compress_chunk. The
+    per-table roll-up MUST show:
+      * ``chunks_compressed = 1`` — B never reached compressed state
+      * ``before_bytes = 700`` — B's before is NOT summed (round-3 closure)
+      * ``after_bytes = None`` — poisoned by B's failure
+    so a downstream consumer computing ``(before-after)/before`` sees either
+    the true savings from A alone or nothing, never an inflated hybrid.
+    """
+    env = _base_env(tmp_path)
+    config = compression.config_from_args(_args(enforce=True), env)
+    chunk_a = _chunk("hydro", "river_timeseries", "mixed-A", delta_days=10)
+    chunk_b = _chunk("hydro", "river_timeseries", "mixed-B", delta_days=11)
+
+    def fake_fetch(dsn: str) -> list[compression.ChunkRow]:
+        return [chunk_a, chunk_b]
+
+    def fake_measure(dsn: str, chunk: compression.ChunkRow, *, after: bool = False) -> int:
+        if not after:
+            return 700 if chunk.chunk_name == "mixed-A" else 900
+        # after=True path — only reached for A.
+        return 200
+
+    def fake_compress(dsn: str, chunk: compression.ChunkRow) -> None:
+        if chunk.chunk_name == "mixed-B":
+            raise RuntimeError("simulated compress_chunk failure on mixed-B")
+
+    receipt = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=fake_fetch,
+        measure_chunk_bytes=fake_measure,
+        compress_chunk=fake_compress,
+    )
+    river = receipt["per_table_totals"]["hydro.river_timeseries"]
+    assert river["chunks_compressed"] == 1
+    assert river["before_bytes"] == 700
+    assert river["after_bytes"] is None
+    by_name = {d["chunk_name"]: d for d in receipt["selected"]}
+    assert by_name["mixed-A"]["after_bytes"] == 200
+    assert by_name["mixed-B"]["after_bytes"] is None
+    assert by_name["mixed-B"]["error"].startswith("compress_chunk failed:")
+    assert receipt["outcome"] == "partial"
+    # F-INVSTATE-02: partial-outcome receipts stay schema-conformant.
+    jsonschema.validate(receipt, _load_schema())
 
 
 def test_measure_before_failure_isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """cand-F: before-measurement failure MUST not cascade or leak partial roll-up."""
+    """Universal invariant: before-fail MUST not cascade AND MUST poison after_bytes.
+
+    The failed chunk never reached compressed state, so it contributes nothing
+    to per-table ``chunks_compressed`` or ``before_bytes``. But the failure
+    still poisons per-table ``after_bytes`` to null so a successful sibling
+    cannot silently masquerade as the whole table's savings.
+    """
     env = _base_env(tmp_path)
     config = compression.config_from_args(_args(enforce=True), env)
     chunks = [
@@ -379,6 +459,91 @@ def test_measure_before_failure_isolated(tmp_path: Path, monkeypatch: pytest.Mon
     assert by_name["before-fail"]["after_bytes"] is None
     assert compressed_names == ["good"]
     assert receipt["outcome"] == "partial"
+    river = receipt["per_table_totals"]["hydro.river_timeseries"]
+    # Only "good" reached compressed state; "before-fail" contributes nothing.
+    assert river["chunks_compressed"] == 1
+    assert river["before_bytes"] == 300
+    # "before-fail" poisons the whole table's after_bytes.
+    assert river["after_bytes"] is None
+    # F-INVSTATE-02: partial-outcome receipts stay schema-conformant.
+    jsonschema.validate(receipt, _load_schema())
+
+
+# ---------------------------------------------------------------------------
+# Universal invariant regression (round-3 closure)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("failure_path", ["before-fail", "compress-fail", "after-fail"])
+def test_partial_receipt_totals_stay_locked_across_all_failure_paths(
+    tmp_path: Path, failure_path: str
+) -> None:
+    """One high-level invariant test across all three per-chunk failure paths.
+
+    For every failure path (before-measurement, compress_chunk, after-measurement)
+    in a hypertable with one success + one failure, the per-table roll-up must
+    satisfy the universal invariant:
+
+    * ``before_bytes`` = sum(descriptor.before for d in selected where
+      d has NO error, OR d.error starts with "measure_chunk_bytes(after)")
+      — chunks that never reached the compressed state contribute nothing.
+    * ``after_bytes`` is None — any failure on any chunk in the table poisons
+      the roll-up so a partial sum can never masquerade as the whole table's
+      compressed footprint.
+    * ``chunks_compressed`` = count of selected with (no error OR after-measure
+      error) — matches the "reached compressed state" set.
+    """
+    env = _base_env(tmp_path)
+    config = compression.config_from_args(_args(enforce=True), env)
+    success = _chunk("hydro", "river_timeseries", "success", delta_days=10)
+    victim = _chunk("hydro", "river_timeseries", "victim", delta_days=11)
+
+    def fake_fetch(dsn: str) -> list[compression.ChunkRow]:
+        return [success, victim]
+
+    def fake_measure(dsn: str, chunk: compression.ChunkRow, *, after: bool = False) -> int:
+        if not after:
+            if failure_path == "before-fail" and chunk.chunk_name == "victim":
+                raise RuntimeError("simulated before-measure failure")
+            return 500
+        # after=True
+        if failure_path == "after-fail" and chunk.chunk_name == "victim":
+            raise RuntimeError("simulated after-measure failure")
+        return 120
+
+    def fake_compress(dsn: str, chunk: compression.ChunkRow) -> None:
+        if failure_path == "compress-fail" and chunk.chunk_name == "victim":
+            raise RuntimeError("simulated compress_chunk failure")
+
+    receipt = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=fake_fetch,
+        measure_chunk_bytes=fake_measure,
+        compress_chunk=fake_compress,
+    )
+    river = receipt["per_table_totals"]["hydro.river_timeseries"]
+
+    # Compute the invariant expectations from the descriptor stream itself, so
+    # the assertion is spec-shape rather than a per-path magic number.
+    def _reached_compressed(descriptor: dict) -> bool:
+        error = descriptor.get("error")
+        return error is None or error.startswith("measure_chunk_bytes(after)")
+
+    reached = [d for d in receipt["selected"] if _reached_compressed(d)]
+    expected_before = sum(int(d["before_bytes"]) for d in reached)
+    expected_chunks_compressed = len(reached)
+
+    assert river["before_bytes"] == expected_before
+    assert river["chunks_compressed"] == expected_chunks_compressed
+    # All three failure paths poison the whole-table after_bytes.
+    assert river["after_bytes"] is None
+    assert receipt["outcome"] == "partial"
+    # Sanity: exactly one victim chunk carries an error, the other does not.
+    errors = [d.get("error") for d in receipt["selected"] if d.get("error")]
+    assert len(errors) == 1
+    # Schema still holds for partial-outcome receipts.
+    jsonschema.validate(receipt, _load_schema())
 
 
 # ---------------------------------------------------------------------------
