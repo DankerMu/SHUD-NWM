@@ -471,7 +471,7 @@ Order is load-bearing:
   real forcing/run URI shapes, and a non-publishing temporary audit run.
   Current `state_snapshot` inventory is empty, so provider/legacy/clone state
   coverage is unit-test evidence only and MUST NOT be claimed as live proof.
-- [ ] 2.2 Build the archive mover (`scripts/node27_product_archive.py` +
+- [x] 2.2 Build the archive mover (`scripts/node27_product_archive.py` +
   `_once.sh`).
   Evidence floor: per-cycle `tar.zst` + `manifest.json` with sha256 (no row
   counts), same-volume staging + atomic rename only after re-read checksum
@@ -833,6 +833,22 @@ Order is load-bearing:
     Expected: equality remains hot; invalid age/caps/unreadable fail closed;
     lock contention does not overwrite the holder receipt and emits only its
     structured skip diagnostic.
+
+  Implementation evidence (#848, candidate `36531b0960bb1810e7225ff2fc1353af4bfcdbd9`):
+  - local macOS: the mover/storage/schema/inventory/object-store/state/journal
+    target set passed `799` tests; `uv run ruff check .`, strict OpenSpec,
+    `uv lock --check`, wrapper shell syntax and `git diff --check` passed.
+  - node-27 isolated worktree at the exact candidate passed the same `799`
+    tests plus targeted ruff. A read-only copy of a real production forcing
+    leaf was enforced only inside the isolated oracle directory with real
+    `/usr/bin/zstd`: `41` exact members archived, source copy retired, durable
+    guard/claim residue cleaned, and the DB-subject-equivalent inventory check
+    returned member-verified `product-archive` coverage.
+  - a production-shape run manifest with trailing-slash `output_uri` passed the
+    mode-0600 wrapper dry-run and emitted the two-phase receipt with one
+    validated attempt. Production `/home/ghdc/nwm` ACL/archive-root provisioning
+    and first real-lane enforce remain explicitly owned by tasks 2.3/2.5; no
+    live state candidate was claimed because current state inventory is empty.
 - [ ] 2.3 Add systemd units + env + governance registration for the mover
   and the recurring audit.
   Evidence floor: `infra/systemd/nhms-node27-product-archive.{service,timer}`
