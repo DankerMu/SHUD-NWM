@@ -18,6 +18,16 @@ per-file sha256 checksums, file sizes, tarball sha256, and identity fields
 - **THEN** a `tar.zst` object and `manifest.json` MUST exist under
   `NHMS_ARCHIVE_ROOT` with recorded checksums and identity fields
 
+The mover SHALL discover filesystem-only archive units by strict lane shape:
+one forcing basin/model leaf, one whole run-id tree whose bounded input
+manifest is authoritative for source/cycle/model/basin, or one physical state
+valid-time tree. Provider-qualified and `legacy-unqualified` state identities
+SHALL remain collision-disjoint. Historical run-id spelling SHALL NOT replace
+manifest identity validation, and the mover SHALL NOT access the database or
+fabricate clone-target archives for a shared physical state artifact. Run
+top-level identity, nested model identity and output URIs SHALL use the same
+authority as the inventory audit; duplicated `identity.*` values SHALL agree.
+
 #### Scenario: State snapshot products are archived
 
 - **WHEN** the archive mover archives an aged state product from
@@ -55,6 +65,44 @@ checksums have been verified by re-reading the written tarball; it SHALL NOT
 remove source product files until that verification has passed. An object at
 the final path counts as present — for idempotency skips and for the
 archive-completeness receipt — only when it verifies against its manifest.
+Re-reading SHALL decompress the staged/final tar and prove an exact bijection
+with the manifest's deterministic regular-file list, including safe relative
+path, size and sha256. Duplicate, missing, extra, path-traversing, symlink,
+hardlink, device or FIFO members SHALL fail verification even when the
+tarball-level sha256 matches.
+
+The verified tarball and manifest SHALL be published as one dirfd-bound,
+no-replace atomic leaf directory, followed by complete durability fsync and
+final-path re-verification. Both staged files and their directory SHALL be
+fsynced before rename; created ancestors and every source/destination parent
+affected by publish, quarantine, tombstone or tombstone removal SHALL be
+fsynced. A raced destination SHALL never be overwritten. A corrupt,
+partial or unexpected final leaf SHALL be atomically quarantined whole on the
+same archive device before fresh staging; dry-run only reports that plan. A
+verified existing archive is idempotent only when any still-present source
+tree is member-for-member identical; drift preserves both and fails rather
+than overwriting valid historical evidence.
+
+Source/archive discovery, tar reads and retirement SHALL remain
+descriptor-bound with no-follow component opens, fixed-root-device checks and
+bounded traversal. Every opened FD SHALL match the pinned Linux mount ID as
+well as device, so same-filesystem bind mounts and cross-device descendants
+fail closed; production inability to prove FD mount identity is a blocker.
+Traversal SHALL hold only the bounded directory stack plus one regular file
+FD, with before/after fstat around the same tar/hash byte stream and a complete
+second tree comparison. Immediately before
+retirement the pinned source tree SHALL still equal the archived preimage.
+The exact source leaf SHALL then be atomically renamed by held parent FDs into
+a same-device delete tombstone and only that pinned inode tree recursively
+removed after another tombstone comparison. A replacement at the original
+pathname, observed late write/entry change, cross-device rename, fsync or
+namespace-identity failure SHALL block deletion and SHALL NOT report the
+candidate archived. Aged manifest-complete product trees are an immutable
+producer contract; writes through an already-open FD after the final check are
+an explicit producer violation that no rename protocol can prevent. Failures
+before tombstone rename preserve the original source path; failures after
+rename/unlink begins SHALL truthfully report complete/partial tombstone residue
+and SHALL NOT claim the source path was untouched or automatically restored.
 
 #### Scenario: Checksum verification fails
 
@@ -67,8 +115,11 @@ archive-completeness receipt — only when it verifies against its manifest.
 
 - **WHEN** the mover encounters a cycle whose verified archive object already
   exists
-- **THEN** it MUST skip re-archiving without duplicating objects and record
-  the skip in the receipt
+- **THEN** it MUST avoid duplication; an identical present source is planned
+  for retirement in dry-run and `retired-from-existing` in enforce
+- **AND** a drifted present source is a conflict that preserves both
+- **AND** archive-only identities with no source are not mover candidates and
+  remain the inventory audit's responsibility
 
 #### Scenario: Residual unverified object at the final path
 
@@ -94,17 +145,57 @@ hot object-store window — which is also the ADR 0001 display disk window for
 station forcing CSVs — is never shorter than the DB hot window. Cycles
 rotated after the minimum age are thereafter reachable only via the archive
 tier (display routes return their ADR 0001 not-found for them).
+The Python entrypoint SHALL acquire the non-blocking flock itself before
+discovery/mutation. One UTC now SHALL drive strict
+`cycle_time < now - minimum_age` eligibility; equality remains hot. Candidate
+selection SHALL be deterministic and record all eligible work beyond the
+positive tick bound as deferred. Discovery and each tree SHALL have explicit
+candidate/entry/depth/manifest-size, per-file/source/tar/uncompressed-byte,
+compressor-timeout and stderr limits; unsafe, unreadable, malformed or
+over-limit evidence is a failure rather than a skip. The compression
+executable SHALL resolve to a configured absolute regular non-symlink path
+(node-27 default `/usr/bin/zstd`) and run with fixed argv and `shell=False`.
+Malformed/unreadable entries that cannot form canonical identity SHALL be
+separate deterministic discovery failures keyed by lane hint + safe
+root-relative locator; they count toward discovery/overall failure but never
+enter the canonical selected/deferred partition or processing bound.
+
+The lock file is absolute mode-0600 safe coordination metadata opened from a
+trusted dirfd with no-follow; existing files are fstat-bound without
+truncation and first creation is exclusive plus parent-fsynced. Only the lock holder
+may publish the shared receipt; a contender emits one structured JSON skip to
+stderr and never overwrites the active holder's receipt. The JSON receipt SHALL
+validate against `product_archive_receipt.schema.json`, use an absolute
+configured path and the #847 strict dirfd/no-follow mode-0600 publication
+protocol: exclusive temp, file fsync, atomic replace, directory fsync and
+post-replace parent check; pre-replace failure preserves the old receipt and
+post-replace uncertainty is indeterminate. It SHALL record the captured now/cutoff, mode/bound,
+candidate/selected/deferred identities, one terminal outcome per selected
+identity, ordered side events, disjoint locator-keyed discovery failures,
+bytes and reasons. Legacy skipped/quarantined action arrays SHALL NOT be
+alternate terminal representations. Runtime set invariants require exact valid
+candidate = selected + deferred partitioning. Each selected identity has one
+terminal outcome and zero or more ordered side events (including quarantine);
+locator-keyed discovery failures remain disjoint. Ordering is deterministic,
+bytes are non-negative and overall outcome matches terminal/discovery failures.
+Lock metadata plus the receipt are the only writes allowed during dry-run.
+Enforce requires an explicit flag, may continue
+over bounded independent candidates, and exits non-zero if any candidate
+failed or publication/retirement became indeterminate.
 
 #### Scenario: Previous run still active
 
 - **WHEN** a tick starts while the flock is held
 - **THEN** the new tick MUST exit without mutating and note the skip
+- **AND** it MUST emit a structured JSON diagnostic without touching the
+  lock holder's stable receipt
 
 #### Scenario: Dry-run lists without mutating
 
 - **WHEN** the mover runs without the enforce flag
 - **THEN** it MUST emit the candidate list and planned actions in the receipt
-  and perform no filesystem mutation
+  and perform no source/archive/staging/quarantine mutation; atomic receipt
+  publication and safe lock metadata are the sole permitted writes
 
 #### Scenario: Cycle younger than the minimum age is not archived
 
