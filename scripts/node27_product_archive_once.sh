@@ -45,6 +45,10 @@ do
     *) echo '{"status":"failed","reason":"required runtime paths must be configured and absolute"}' >&2; exit 1 ;;
   esac
 done
+case "${OBJECT_STORE_PREFIX:-}" in
+  s3://?*/*|s3://?*) ;;
+  *) echo '{"status":"failed","reason":"canonical object-store prefix must be configured"}' >&2; exit 1 ;;
+esac
 case "$ZSTD" in /*) ;; *) echo '{"status":"failed","reason":"zstd path must be absolute"}' >&2; exit 1 ;; esac
 [ -x "$ZSTD" ] && [ -f "$ZSTD" ] && [ ! -L "$ZSTD" ] || {
   echo '{"status":"failed","reason":"zstd executable is unavailable or unsafe"}' >&2

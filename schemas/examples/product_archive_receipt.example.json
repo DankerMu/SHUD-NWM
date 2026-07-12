@@ -11,19 +11,22 @@
       "identity": {"lane": "forcing", "source": "gfs", "cycle_identity": "2026010100", "cycle_time": "2026-01-01T00:00:00Z", "basin_version_id": "basin-a", "model_id": "model-a"},
       "source_path": "forcing/gfs/2026010100/basin-a/model-a",
       "archive_path": "forcing/gfs/2026010100/basin-a/model-a/archive.tar.zst",
-      "source_bytes": 10
+      "source_bytes": 10,
+      "eligibility_end": "2026-01-01T00:00:00Z"
     },
     {
       "identity": {"lane": "runs", "source": "ERA5", "cycle_identity": "2026010100", "cycle_time": "2026-01-01T00:00:00Z", "run_id": "run-a"},
       "source_path": "runs/run-a",
       "archive_path": "runs/era5/2026010100/run-a/archive.tar.zst",
-      "source_bytes": 20
+      "source_bytes": 20,
+      "eligibility_end": "2026-01-02T00:00:00Z"
     },
     {
       "identity": {"lane": "states", "source": "IFS", "cycle_identity": "2026010100", "cycle_time": "2026-01-01T00:00:00Z", "model_id": "model-c"},
       "source_path": "states/IFS/model-c/2026010100",
       "archive_path": "states/ifs/2026010100/model-c/archive.tar.zst",
-      "source_bytes": 30
+      "source_bytes": 30,
+      "eligibility_end": "2026-01-01T00:00:00Z"
     }
   ],
   "selected": [
@@ -31,13 +34,15 @@
       "identity": {"lane": "forcing", "source": "gfs", "cycle_identity": "2026010100", "cycle_time": "2026-01-01T00:00:00Z", "basin_version_id": "basin-a", "model_id": "model-a"},
       "source_path": "forcing/gfs/2026010100/basin-a/model-a",
       "archive_path": "forcing/gfs/2026010100/basin-a/model-a/archive.tar.zst",
-      "source_bytes": 10
+      "source_bytes": 10,
+      "eligibility_end": "2026-01-01T00:00:00Z"
     },
     {
       "identity": {"lane": "runs", "source": "ERA5", "cycle_identity": "2026010100", "cycle_time": "2026-01-01T00:00:00Z", "run_id": "run-a"},
       "source_path": "runs/run-a",
       "archive_path": "runs/era5/2026010100/run-a/archive.tar.zst",
-      "source_bytes": 20
+      "source_bytes": 20,
+      "eligibility_end": "2026-01-02T00:00:00Z"
     }
   ],
   "deferred": [
@@ -45,7 +50,8 @@
       "identity": {"lane": "states", "source": "IFS", "cycle_identity": "2026010100", "cycle_time": "2026-01-01T00:00:00Z", "model_id": "model-c"},
       "source_path": "states/IFS/model-c/2026010100",
       "archive_path": "states/ifs/2026010100/model-c/archive.tar.zst",
-      "source_bytes": 30
+      "source_bytes": 30,
+      "eligibility_end": "2026-01-01T00:00:00Z"
     }
   ],
   "terminals": [

@@ -27,6 +27,9 @@ manifest identity validation, and the mover SHALL NOT access the database or
 fabricate clone-target archives for a shared physical state artifact. Run
 top-level identity, nested model identity and output URIs SHALL use the same
 authority as the inventory audit; duplicated `identity.*` values SHALL agree.
+Run output URIs SHALL bind configured S3 scheme/bucket/optional prefix and
+reject wrong authority/prefix, query/fragment, encoded traversal, backslash or
+unsupported schemes.
 
 #### Scenario: State snapshot products are archived
 
@@ -69,7 +72,9 @@ Re-reading SHALL decompress the staged/final tar and prove an exact bijection
 with the manifest's deterministic regular-file list, including safe relative
 path, size and sha256. Duplicate, missing, extra, path-traversing, symlink,
 hardlink, device or FIFO members SHALL fail verification even when the
-tarball-level sha256 matches.
+tarball-level sha256 matches. Actual member count/name/type/declared size and
+depth SHALL be checked at each header before body extraction; unexpected or
+oversize members fail immediately, with cumulative payload limits enforced.
 
 The verified tarball and manifest SHALL be published as one dirfd-bound,
 no-replace atomic leaf directory, followed by complete durability fsync and
@@ -81,7 +86,12 @@ partial or unexpected final leaf SHALL be atomically quarantined whole on the
 same archive device before fresh staging; dry-run only reports that plan. A
 verified existing archive is idempotent only when any still-present source
 tree is member-for-member identical; drift preserves both and fails rather
-than overwriting valid historical evidence.
+than overwriting valid historical evidence. Member comparison is a unique
+path -> (size, sha256) map and is independent of manifest array order.
+Only typed deterministic structural/schema/identity/member/checksum invalidity
+permits quarantine. Operational verification failure (timeout, tool, I/O,
+mount proof) preserves canonical final + source and fails; conflict is a
+separate typed outcome.
 
 Source/archive discovery, tar reads and retirement SHALL remain
 descriptor-bound with no-follow component opens, fixed-root-device checks and
@@ -103,6 +113,10 @@ an explicit producer violation that no rename protocol can prevent. Failures
 before tombstone rename preserve the original source path; failures after
 rename/unlink begins SHALL truthfully report complete/partial tombstone residue
 and SHALL NOT claim the source path was untouched or automatically restored.
+Before any tombstone child unlink the pinned final tar+manifest pair SHALL be
+fully re-verified. Removal SHALL follow the archived preimage's exact
+path/inode/signature allowlist; extra, missing or drifted entries preserve
+residue and fail rather than being enumerated and deleted.
 
 #### Scenario: Checksum verification fails
 
@@ -147,7 +161,11 @@ rotated after the minimum age are thereafter reachable only via the archive
 tier (display routes return their ADR 0001 not-found for them).
 The Python entrypoint SHALL acquire the non-blocking flock itself before
 discovery/mutation. One UTC now SHALL drive strict
-`cycle_time < now - minimum_age` eligibility; equality remains hot. Candidate
+`eligibility_end < now - minimum_age`; equality remains hot. Forcing/run
+eligibility end is authoritative non-inverted manifest `end_time`, matching
+the inventory/DB/display hot window, while state uses valid-time point.
+Canonical archive identity/order remains cycle-time based and receipts also
+bind eligibility end. Candidate
 selection SHALL be deterministic and record all eligible work beyond the
 positive tick bound as deferred. Discovery and each tree SHALL have explicit
 candidate/entry/depth/manifest-size, per-file/source/tar/uncompressed-byte,

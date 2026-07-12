@@ -496,6 +496,9 @@ Order is load-bearing:
     `model.basin_version_id` and `outputs.{run_manifest_uri,output_uri}` are
     authoritative as in #847; any duplicated `identity.*` run/source/cycle/
     model/basin/window value must agree rather than silently override them.
+    Output URIs bind the configured canonical `OBJECT_STORE_PREFIX`, including
+    scheme, bucket and optional key prefix; wrong authority/prefix,
+    query/fragment, encoded traversal, backslash or non-S3 scheme fails closed.
   - state candidates are whole physical valid-time trees. Provider-qualified
     layout is `states/<source>/<physical_model>/<valid_time>/...`; legacy
     layout is `states/<physical_model>/<valid_time>/...` and maps only to
@@ -505,7 +508,11 @@ Order is load-bearing:
     archive, and this mover performs no DB access.
 
   One UTC `now` is captured. Eligibility is strict
-  `cycle_time < now - minimum_age`; equality is not eligible. Explicit CLI
+  `eligibility_end < now - minimum_age`; equality is not eligible. Forcing
+  and runs use their authoritative non-inverted manifest `end_time`, matching
+  #847 receipt/DB/display hot-window age; states use point `valid_time`.
+  Canonical archive identity/order remains cycle-time based, while candidate
+  and receipt also bind eligibility end. Explicit CLI
   zero/invalid age never truthiness-falls back. Candidate order is stable
   `(cycle_time,lane,canonical identity)`; at most the configured positive
   bound is selected and every remaining eligible candidate is recorded as
@@ -559,6 +566,13 @@ Order is load-bearing:
   renames fsync both parents; recursive tombstone removal fsyncs its parent.
   A raced destination is never overwritten; if no native no-replace rename is
   available the mutation fails closed.
+  Existing-final verification is typed: only deterministic schema,
+  identity/path, member-set, size or checksum invalidity is `corrupt` and may
+  quarantine. Timeout, tool spawn/read/I/O or mount-proof failure is
+  operational/indeterminate, preserves canonical final + source and never
+  triggers quarantine. Conflict is a separate typed outcome, not string
+  matching. A verified manifest compares source members by unique
+  path -> (size, sha256), never by array input order.
 
   Immediately before retirement the still-pinned source root and complete
   tree must equal the archived preimage (inode/type/path/size/mtime and
@@ -579,6 +593,12 @@ Order is load-bearing:
   rename/unlink begins, failure may leave a complete or partial tombstone and
   no original pathname, which must be reported precisely rather than falsely
   claiming `source untouched` or automatic rollback.
+  Before any tombstone child unlink, the still-pinned final archive pair is
+  completely re-verified (manifest + tar exact members/checksums), and the
+  tombstone is compared to the archived preimage. Recursive removal is driven
+  by the exact expected path/inode/signature allowlist, not by deleting every
+  newly enumerated name; an extra/missing/drifted file or directory preserves
+  residue and fails non-zero.
 
   The Python entrypoint itself owns a non-blocking flock before discovery or
   mutation, so direct invocation cannot bypass single-instance behavior; the
@@ -632,6 +652,10 @@ Order is load-bearing:
     the receipt; source untouched until the replacement verifies.
   - Input: cycle younger than the minimum age.
     Expected: not selected as a candidate; remains in the hot object-store.
+  - Input: forcing/run cycle is old but authoritative end_time is equal to or
+    newer than cutoff, then end_time becomes older.
+    Expected: first remains hot; only second is eligible. Missing/inverted
+    windows fail discovery; state eligibility remains valid-time point.
   - Input: more candidates than the per-tick bound.
     Expected: bound respected; deferred remainder listed in the receipt.
   - Input: one forcing source cycle with two basin/model leaves, one valid and
@@ -643,6 +667,10 @@ Order is load-bearing:
     whose `input/manifest.json` declares another identity.
     Expected: identity drift blocks; run-id spelling is not authoritative;
     conflicting duplicated `identity.*` fields also block.
+  - Input: run output URI has wrong bucket/prefix, query/fragment, encoded
+    traversal, backslash or unsupported scheme.
+    Expected: strict configured object-store authority binding blocks before
+    candidate selection or source mutation.
   - Input: provider state, source-less legacy state and a clone target model
     that references the provider physical artifact.
     Expected: provider/legacy paths are collision-disjoint; only the physical
@@ -655,6 +683,11 @@ Order is load-bearing:
     boundaries.
     Expected: observed drift preserves the changed/replacement source or
     tombstone; the aged producer-immutability precondition is explicit.
+  - Input: final tar/manifest is replaced after final verify but before
+    tombstone rename, or an extra child appears after tombstone recheck but
+    before recursive removal.
+    Expected: full final-pair and expected-allowlist validation blocks child
+    unlink, preserves source/tombstone residue and returns non-zero.
   - Input: verified final pair plus identical source, and verified final pair
     plus drifted source.
     Expected: identical is recorded idempotent without duplicate and may
@@ -672,6 +705,15 @@ Order is load-bearing:
     Expected: one terminal outcome plus ordered quarantine event(s); strict
     receipt publication preserves old content pre-replace and reports
     indeterminate post-replace; unsafe coordination paths block.
+  - Input: existing-final verify reports deterministic corruption versus
+    timeout/tool/read/mount operational error; and a valid manifest reverses
+    its `files` array.
+    Expected: only deterministic corruption quarantines; operational failure
+    preserves final+source; reversed valid order remains idempotent.
+  - Input: tar begins with an unexpected member, declared-size mismatch or
+    more members than manifest/tree cap.
+    Expected: reject at the offending header before streaming its body;
+    member-count, size, cumulative payload and depth caps are fail-fast.
   - Input: cutoff equality, CLI age zero/20, candidate/tree/depth/manifest/
     file/source/tar/uncompressed/timeout/stderr cap overflow, unreadable state
     directory, relative/bare zstd path, and lock contention.

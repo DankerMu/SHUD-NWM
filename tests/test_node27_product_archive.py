@@ -55,6 +55,7 @@ def _config(tmp_path: Path, *, enforce: bool, bound: int = 10) -> archive.MoverC
     (tmp_path / "archive").mkdir(exist_ok=True)
     return archive.MoverConfig(
         object_store_root=store,
+        object_store_prefix="s3://nhms",
         archive_root=tmp_path / "archive",
         receipt_path=tmp_path / "logs" / "receipt.json",
         lock_path=tmp_path / "locks" / "archive.lock",
@@ -96,6 +97,8 @@ def _forcing(config: archive.MoverConfig, cycle: str = "2026010100") -> Path:
             {
                 "source_id": "gfs",
                 "cycle_time": f"{cycle[:4]}-{cycle[4:6]}-{cycle[6:8]}T{cycle[8:]}:00:00Z",
+                "start_time": f"{cycle[:4]}-{cycle[4:6]}-{cycle[6:8]}T{cycle[8:]}:00:00Z",
+                "end_time": f"{cycle[:4]}-{cycle[4:6]}-{cycle[6:8]}T{cycle[8:]}:00:00Z",
                 "basin_version_id": "basin-a",
                 "model_id": "model-a",
             }
@@ -121,7 +124,7 @@ def _run(config: archive.MoverConfig, run_id: str = "opaque-run") -> Path:
                 "model": {"model_id": "model-b", "basin_version_id": "basin-b"},
                 "outputs": {
                     "run_manifest_uri": f"s3://nhms/runs/{run_id}/input/manifest.json",
-                    "output_uri": f"s3://nhms/runs/{run_id}/output",
+                    "output_uri": f"s3://nhms/runs/{run_id}/output/",
                 },
             }
         ),
@@ -208,6 +211,126 @@ def test_cutoff_comparison_preserves_captured_now_microseconds(tmp_path: Path) -
     )
     assert len(candidates) == 1
     assert failures == []
+
+
+def test_forcing_and_run_eligibility_uses_authoritative_end_time(tmp_path: Path) -> None:
+    config = _config(tmp_path, enforce=False)
+    forcing = _forcing(config)
+    forcing_manifest = forcing / "forcing_package.json"
+    forcing_value = json.loads(forcing_manifest.read_text())
+    forcing_value["end_time"] = "2026-07-10T00:00:00Z"
+    forcing_manifest.write_text(json.dumps(forcing_value), encoding="utf-8")
+    run = _run(config)
+    run_manifest = run / "input/manifest.json"
+    run_value = json.loads(run_manifest.read_text())
+    run_value["end_time"] = "2026-07-10T00:00:00Z"
+    run_manifest.write_text(json.dumps(run_value), encoding="utf-8")
+
+    candidates, failures = archive.discover_candidates(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+    )
+    assert candidates == []
+    assert failures == []
+
+
+def test_inverted_forcing_window_is_discovery_failure(tmp_path: Path) -> None:
+    config = _config(tmp_path, enforce=False)
+    forcing = _forcing(config)
+    manifest_path = forcing / "forcing_package.json"
+    value = json.loads(manifest_path.read_text())
+    value["start_time"] = "2026-01-02T00:00:00Z"
+    manifest_path.write_text(json.dumps(value), encoding="utf-8")
+    candidates, failures = archive.discover_candidates(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+    )
+    assert candidates == []
+    assert "window is inverted" in failures[0].reason
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "s3://other/runs/opaque-run/output",
+        "s3://nhms/wrong/runs/opaque-run/output",
+        "s3://nhms/runs/opaque-run/output?x=1",
+        "s3://nhms/runs/opaque-run/output#fragment",
+        "s3://nhms/runs/%2e%2e/output",
+        "s3://nhms/runs\\opaque-run/output",
+        "https://nhms/runs/opaque-run/output",
+    ],
+)
+def test_run_output_uri_must_bind_configured_s3_prefix(tmp_path: Path, uri: str) -> None:
+    config = _config(tmp_path, enforce=False)
+    leaf = _run(config)
+    manifest_path = leaf / "input/manifest.json"
+    value = json.loads(manifest_path.read_text())
+    value["outputs"]["output_uri"] = uri
+    manifest_path.write_text(json.dumps(value), encoding="utf-8")
+    candidates, failures = archive.discover_candidates(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+    )
+    assert candidates == []
+    assert failures
+
+
+def test_run_output_uri_without_trailing_slash_remains_compatible(tmp_path: Path) -> None:
+    config = _config(tmp_path, enforce=False)
+    leaf = _run(config)
+    manifest_path = leaf / "input/manifest.json"
+    value = json.loads(manifest_path.read_text())
+    value["outputs"]["output_uri"] = "s3://nhms/runs/opaque-run/output"
+    manifest_path.write_text(json.dumps(value), encoding="utf-8")
+    candidates, failures = archive.discover_candidates(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+    )
+    assert len(candidates) == 1
+    assert failures == []
+
+
+@pytest.mark.parametrize(
+    ("field", "uri"),
+    [
+        ("output_uri", "s3://nhms/runs/opaque-run/output//"),
+        ("run_manifest_uri", "s3://nhms/runs/opaque-run/input/manifest.json/"),
+    ],
+)
+def test_run_output_uris_reject_noncanonical_trailing_slashes(tmp_path: Path, field: str, uri: str) -> None:
+    config = _config(tmp_path, enforce=False)
+    leaf = _run(config)
+    manifest_path = leaf / "input/manifest.json"
+    value = json.loads(manifest_path.read_text())
+    value["outputs"][field] = uri
+    manifest_path.write_text(json.dumps(value), encoding="utf-8")
+    candidates, failures = archive.discover_candidates(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+    )
+    assert candidates == []
+    assert failures
+
+
+def test_bad_shallow_forcing_and_state_siblings_do_not_hide_valid_leaves(tmp_path: Path) -> None:
+    config = _config(tmp_path, enforce=False)
+    _forcing(config)
+    _state(config, provider=True)
+    (config.object_store_root / "forcing/bad-source").write_text("bad", encoding="utf-8")
+    (config.object_store_root / "states/bad-state").write_text("bad", encoding="utf-8")
+    candidates, failures = archive.discover_candidates(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+    )
+    assert {candidate.identity.lane for candidate in candidates} == {"forcing", "states"}
+    assert {failure.locator for failure in failures} == {"forcing/bad-source", "states/bad-state"}
 
 
 def test_malformed_sibling_is_failure_but_valid_leaf_remains_candidate(tmp_path: Path) -> None:
@@ -325,6 +448,8 @@ def test_existing_verified_archive_is_idempotently_retired(tmp_path: Path) -> No
             {
                 "source_id": "gfs",
                 "cycle_time": "2026-01-01T00:00:00Z",
+                "start_time": "2026-01-01T00:00:00Z",
+                "end_time": "2026-01-01T00:00:00Z",
                 "basin_version_id": "basin-a",
                 "model_id": "model-a",
             }
@@ -359,6 +484,8 @@ def test_existing_verified_archive_is_not_quarantined_when_source_retirement_fai
             {
                 "source_id": "gfs",
                 "cycle_time": "2026-01-01T00:00:00Z",
+                "start_time": "2026-01-01T00:00:00Z",
+                "end_time": "2026-01-01T00:00:00Z",
                 "basin_version_id": "basin-a",
                 "model_id": "model-a",
             }
@@ -395,6 +522,136 @@ def test_existing_verified_archive_is_not_quarantined_when_source_retirement_fai
         zstd_path=config.zstd_path,
         mount_id_provider=_mount_id,
     )
+
+
+def test_existing_manifest_file_order_is_irrelevant(tmp_path: Path) -> None:
+    config = _config(tmp_path, enforce=True)
+    _forcing(config)
+    first, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 0
+    final = config.archive_root / Path(first["candidates"][0]["archive_path"]).parent
+    manifest_path = final / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["files"].reverse()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    source = _forcing(config)
+    second, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 0
+    assert second["terminals"][0]["status"] == "retired-from-existing"
+    assert not source.exists()
+
+
+def test_operational_existing_verify_failure_never_quarantines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    _forcing(config)
+    first, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 0
+    final = config.archive_root / Path(first["candidates"][0]["archive_path"]).parent
+    source = _forcing(config)
+
+    def timeout(*args, **kwargs):
+        raise archive.ArchiveOperationalError("decompressor timed out")
+
+    monkeypatch.setattr(archive, "verify_archive_pair", timeout)
+    second, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 1
+    assert second["terminals"][0]["status"] == "indeterminate"
+    assert second["events"] == []
+    assert final.exists() and source.exists()
+
+
+def test_existing_final_internal_swap_before_retirement_preserves_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    _forcing(config)
+    first, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 0
+    final = config.archive_root / Path(first["candidates"][0]["archive_path"]).parent
+    source = _forcing(config)
+    original_same = archive._same_snapshot
+    calls = 0
+
+    def swap_after_source_recheck(candidate, source_fd, provider):
+        nonlocal calls
+        result = original_same(candidate, source_fd, provider)
+        calls += 1
+        if calls == 2:
+            (final / "manifest.json").write_text("{}", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(archive, "_same_snapshot", swap_after_source_recheck)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 1
+    assert receipt["terminals"][0]["status"] == "failed"
+    assert source.exists()
+    assert not list(source.parent.glob(".archive-delete-*"))
+
+
+def test_fresh_final_internal_swap_before_retirement_preserves_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    source = _forcing(config)
+    original_retire = archive._retire_source
+
+    def swap_then_retire(candidate, mover_config, source_fd, events, identity, provider, rename_impl, archive_guard):
+        _guard_fd, final_leaf, _archive_root = archive_guard
+        (final_leaf / "manifest.json").write_text("{}", encoding="utf-8")
+        return original_retire(
+            candidate,
+            mover_config,
+            source_fd,
+            events,
+            identity,
+            provider,
+            rename_impl,
+            archive_guard,
+        )
+
+    monkeypatch.setattr(archive, "_retire_source", swap_then_retire)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 1
+    assert receipt["terminals"][0]["status"] == "failed"
+    assert source.exists()
+    assert not list(source.parent.glob(".archive-delete-*"))
 
 
 def test_corrupt_final_is_planned_for_quarantine_in_dry_run(tmp_path: Path) -> None:
@@ -512,6 +769,37 @@ def test_internal_tar_verification_rejects_invalid_member_even_with_matching_out
         )
 
 
+@pytest.mark.parametrize("fault", ["unexpected", "declared-size"])
+def test_tar_header_limits_fail_before_member_body(tmp_path: Path, fault: str) -> None:
+    config = _config(tmp_path, enforce=True)
+    _forcing(config)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 0
+    final = config.archive_root / Path(receipt["candidates"][0]["archive_path"]).parent
+    manifest_path = final / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    info = tarfile.TarInfo("unexpected.bin" if fault == "unexpected" else manifest["files"][0]["path"])
+    info.size = archive.MAX_FILE_BYTES + 1
+    raw = info.tobuf(format=tarfile.PAX_FORMAT)
+    (final / "archive.tar.zst").write_bytes(raw)
+    manifest["archive"]["size_bytes"] = len(raw)
+    manifest["archive"]["sha256"] = hashlib.sha256(raw).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    expected = "unexpected tar member" if fault == "unexpected" else "declared size differs"
+    with pytest.raises(archive.ArchiveCorruptError, match=expected):
+        archive.verify_archive_pair(
+            final,
+            config.archive_root,
+            zstd_path=config.zstd_path,
+            mount_id_provider=_mount_id,
+        )
+
+
 def test_archive_leaf_mount_id_mismatch_fails_verification(tmp_path: Path) -> None:
     config = _config(tmp_path, enforce=True)
     _forcing(config)
@@ -594,6 +882,34 @@ def test_tombstone_recheck_preserves_late_write_and_reports_residue(tmp_path: Pa
     assert terminal["residue"] and ".archive-delete-" in terminal["residue"][0]
     assert not source.exists()
     assert (config.object_store_root / terminal["residue"][0]).exists()
+
+
+def test_late_extra_tombstone_entry_blocks_every_unlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    _forcing(config)
+    original_remove = archive._remove_tree_contents_fd
+
+    def add_extra(directory_fd: int, label: str, **kwargs) -> None:
+        extra_fd = os.open("late-extra", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory_fd)
+        os.close(extra_fd)
+        original_remove(directory_fd, label, **kwargs)
+
+    monkeypatch.setattr(archive, "_remove_tree_contents_fd", add_extra)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 1
+    terminal = receipt["terminals"][0]
+    assert terminal["status"] == "indeterminate"
+    tombstone = config.object_store_root / terminal["residue"][0]
+    assert (tombstone / "late-extra").exists()
+    assert (tombstone / "payload.csv").exists()
+    assert (tombstone / "forcing_package.json").exists()
 
 
 def test_tombstone_removal_refuses_cross_mount_descendant(tmp_path: Path) -> None:

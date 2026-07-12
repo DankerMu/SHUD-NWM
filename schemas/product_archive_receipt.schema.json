@@ -36,8 +36,8 @@
     },
     "candidate": {
       "type": "object", "additionalProperties": false,
-      "required": ["identity", "source_path", "archive_path", "source_bytes"],
-      "properties": {"identity": {"$ref": "#/definitions/identity"}, "source_path": {"allOf": [{"$ref": "#/definitions/safe_relative_path"}, {"pattern": "^(?:forcing|runs|states)/"}]}, "archive_path": {"allOf": [{"$ref": "#/definitions/safe_relative_path"}, {"pattern": "^(?:forcing|runs|states)/.+/archive\\.tar\\.zst$"}]}, "source_bytes": {"type": "integer", "minimum": 0}}
+      "required": ["identity", "source_path", "archive_path", "source_bytes", "eligibility_end"],
+      "properties": {"identity": {"$ref": "#/definitions/identity"}, "source_path": {"allOf": [{"$ref": "#/definitions/safe_relative_path"}, {"pattern": "^(?:forcing|runs|states)/"}]}, "archive_path": {"allOf": [{"$ref": "#/definitions/safe_relative_path"}, {"pattern": "^(?:forcing|runs|states)/.+/archive\\.tar\\.zst$"}]}, "source_bytes": {"type": "integer", "minimum": 0}, "eligibility_end": {"type": "string", "format": "date-time"}}
     },
     "terminal": {
       "type": "object", "additionalProperties": false,
