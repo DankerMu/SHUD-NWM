@@ -1919,6 +1919,14 @@ class _TarStreamContext:
             assert self.process.stderr is not None
             self.process.stderr.close()
             os.lseek(self.archive_fd, self.archive_position, os.SEEK_SET)
+            if self.timed_out:
+                raise ArchiveOperationalError(
+                    f"decompressor timed out after {TOOL_TIMEOUT_SECONDS}s"
+                ) from error
+            if self.stderr_overflow:
+                raise ArchiveOperationalError(
+                    f"compression stderr exceeds {MAX_STDERR_BYTES} bytes"
+                ) from error
             if return_code and not killed_for_parser:
                 message = self.stderr.decode("utf-8", "replace")
                 raise ArchiveOperationalError(f"decompressor failed ({return_code}): {message}") from error
@@ -2797,22 +2805,24 @@ def _retire_source_destructive(
     events.append(
         _event(len(events), identity, "tombstoned", tombstone_relative, "source leaf renamed to delete tombstone")
     )
-    tomb_fd = open_directory_no_follow(tombstone, containment_root=config.object_store_root)
     claim_root = tombstone.parent / f".archive-claims-{candidate.source_path.name}-{uuid.uuid4().hex}"
-    claim_parent_fd = open_directory_no_follow(tombstone.parent, containment_root=config.object_store_root)
-    try:
-        os.mkdir(claim_root.name, 0o700, dir_fd=claim_parent_fd)
-        os.fsync(claim_parent_fd)
-    except OSError as error:
-        os.close(claim_parent_fd)
-        os.close(tomb_fd)
-        raise ArchiveMoverError(
-            f"cannot create mover-exclusive claim namespace: {error}", residue=(tombstone_relative,)
-        ) from error
-    claim_fd = open_directory_no_follow(claim_root, containment_root=config.object_store_root)
     claim_relative = claim_root.relative_to(config.object_store_root).as_posix()
+    tomb_fd: int | None = None
+    claim_parent_fd: int | None = None
+    claim_fd: int | None = None
     root_claim_relative: str | None = None
+    tombstone_live = True
+    claim_root_live = False
+    retirement_failed = False
     try:
+        tomb_fd = open_directory_no_follow(tombstone, containment_root=config.object_store_root)
+        claim_parent_fd = open_directory_no_follow(
+            tombstone.parent, containment_root=config.object_store_root
+        )
+        os.mkdir(claim_root.name, 0o700, dir_fd=claim_parent_fd)
+        claim_root_live = True
+        os.fsync(claim_parent_fd)
+        claim_fd = open_directory_no_follow(claim_root, containment_root=config.object_store_root)
         renamed = os.fstat(tomb_fd)
         original = os.fstat(source_fd)
         if (renamed.st_dev, renamed.st_ino) != (original.st_dev, original.st_ino):
@@ -2860,7 +2870,15 @@ def _retire_source_destructive(
             )
             root_claim = f"root-{uuid.uuid4().hex}"
             root_claim_relative = f"{claim_relative}/{root_claim}"
-            rename_impl(parent_fd, tombstone.name, claim_fd, root_claim)
+            try:
+                rename_impl(parent_fd, tombstone.name, claim_fd, root_claim)
+            except Exception:
+                try:
+                    os.stat(tombstone.name, dir_fd=parent_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    tombstone_live = False
+                raise
+            tombstone_live = False
             os.fsync(parent_fd)
             os.fsync(claim_fd)
             claimed_root = os.stat(root_claim, dir_fd=claim_fd, follow_symlinks=False)
@@ -2873,23 +2891,29 @@ def _retire_source_destructive(
             os.rmdir(root_claim, dir_fd=claim_fd)
             os.fsync(claim_fd)
             os.rmdir(claim_root.name, dir_fd=parent_fd)
+            claim_root_live = False
             os.fsync(parent_fd)
         finally:
             os.close(parent_fd)
     except Exception as error:
+        retirement_failed = True
         if isinstance(error, ArchiveMoverError) and error.indeterminate:
             message = str(error)
         else:
             message = f"tombstone removal incomplete: {tombstone}: {error}"
         actual_residue = list(error.residue if isinstance(error, ArchiveMoverError) else ())
+        if tombstone_live and tombstone_relative not in actual_residue:
+            actual_residue.append(tombstone_relative)
+        if claim_root_live and claim_relative not in actual_residue:
+            actual_residue.append(claim_relative)
         for path in (root_claim_relative, tombstone_relative, claim_relative):
             if path is None or path in actual_residue:
                 continue
             try:
                 if _lexists_no_follow(config.object_store_root / path, config.object_store_root):
                     actual_residue.append(path)
-            except ArchiveMoverError:
-                actual_residue.append(path)
+            except (OSError, ArchiveMoverError):
+                pass
         raise ArchiveMoverError(
             message,
             indeterminate=True,
@@ -2897,22 +2921,27 @@ def _retire_source_destructive(
             kind=error.kind if isinstance(error, ArchiveMoverError) else "safety",
         ) from error
     finally:
-        os.close(tomb_fd)
-        try:
-            if not _safe_names(claim_fd, claim_relative, remaining=1):
-                try:
-                    os.rmdir(claim_root.name, dir_fd=claim_parent_fd)
-                    os.fsync(claim_parent_fd)
-                except FileNotFoundError:
-                    pass
-                except OSError:
-                    # Preserve the already-classified retirement failure; the
-                    # live claim namespace was recorded by the exception path.
-                    pass
-        except ArchiveMoverError:
-            pass
-        os.close(claim_fd)
-        os.close(claim_parent_fd)
+        if tomb_fd is not None:
+            os.close(tomb_fd)
+        if claim_fd is not None and not retirement_failed:
+            try:
+                if not _safe_names(claim_fd, claim_relative, remaining=1):
+                    try:
+                        assert claim_parent_fd is not None
+                        os.rmdir(claim_root.name, dir_fd=claim_parent_fd)
+                        os.fsync(claim_parent_fd)
+                    except FileNotFoundError:
+                        pass
+                    except OSError:
+                        # Preserve the already-classified retirement failure; the
+                        # live claim namespace was recorded by the exception path.
+                        pass
+            except ArchiveMoverError:
+                pass
+        if claim_fd is not None:
+            os.close(claim_fd)
+        if claim_parent_fd is not None:
+            os.close(claim_parent_fd)
     events.append(
         _event(len(events), identity, "retired", candidate.source_relative, "verified tombstone recursively removed")
     )

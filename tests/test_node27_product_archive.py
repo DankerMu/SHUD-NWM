@@ -5,7 +5,9 @@ import importlib.util
 import io
 import json
 import os
+import shlex
 import stat
+import subprocess
 import sys
 import tarfile
 import time
@@ -90,6 +92,120 @@ def test_compressor_protocol_uses_stdin_only_and_restores_input_offset(tmp_path:
         os.close(output_fd)
         os.close(source_fd)
     assert output.read_bytes() == payload
+
+
+@pytest.mark.parametrize(
+    ("case", "body", "reason"),
+    [
+        ("timeout", "exec sleep 5\n", "timed out"),
+        ("output", "printf '0123456789abcdef'\n", "output exceeds"),
+        ("stderr", "printf '0123456789abcdef' >&2\n", "stderr exceeds"),
+    ],
+)
+def test_compressor_resource_failures_reap_process_and_restore_input_offset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    body: str,
+    reason: str,
+) -> None:
+    tool = tmp_path / f"compressor-{case}"
+    tool.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+    tool.chmod(0o700)
+    source = tmp_path / "source.tar"
+    output = tmp_path / "archive.tar.zst"
+    source.write_bytes(b"input-data")
+    source_fd = os.open(source, os.O_RDONLY)
+    output_fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    processes: list[subprocess.Popen[bytes]] = []
+    real_popen = subprocess.Popen
+
+    def tracked_popen(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", tracked_popen)
+    monkeypatch.setattr(archive, "TOOL_TIMEOUT_SECONDS", 0.1 if case == "timeout" else 2)
+    monkeypatch.setattr(archive, "MAX_STDERR_BYTES", 8)
+    try:
+        os.lseek(source_fd, 3, os.SEEK_SET)
+        with pytest.raises(archive.ArchiveMoverError, match=reason):
+            archive._run_tool(
+                [str(tool)],
+                input_fd=source_fd,
+                stdout_fd=output_fd,
+                max_output_bytes=8,
+            )
+        assert os.lseek(source_fd, 0, os.SEEK_CUR) == 3
+        assert processes and all(process.poll() is not None for process in processes)
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+        os.close(output_fd)
+        os.close(source_fd)
+
+
+@pytest.mark.parametrize(
+    ("case", "reason"),
+    [
+        ("timeout", "timed out"),
+        ("stderr", "stderr exceeds"),
+        ("tar-cap", "decompressed tar exceeds"),
+    ],
+)
+def test_decompressor_resource_failures_reap_process_and_restore_archive_offset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    reason: str,
+) -> None:
+    tar_path = tmp_path / "payload.tar"
+    with tarfile.open(tar_path, mode="w") as payload:
+        info = tarfile.TarInfo("payload.bin")
+        info.size = 32
+        payload.addfile(info, io.BytesIO(b"x" * info.size))
+    tool = tmp_path / f"decompressor-{case}"
+    if case == "timeout":
+        body = "exec sleep 5\n"
+    elif case == "stderr":
+        body = f"printf '0123456789abcdef' >&2\nexec /bin/cat {shlex.quote(str(tar_path))}\n"
+    else:
+        body = f"exec /bin/cat {shlex.quote(str(tar_path))}\n"
+    tool.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+    tool.chmod(0o700)
+    compressed = tmp_path / "archive.tar.zst"
+    compressed.write_bytes(b"input")
+    archive_fd = os.open(compressed, os.O_RDONLY)
+    processes: list[subprocess.Popen[bytes]] = []
+    real_popen = subprocess.Popen
+
+    def tracked_popen(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", tracked_popen)
+    monkeypatch.setattr(archive, "TOOL_TIMEOUT_SECONDS", 0.1 if case == "timeout" else 2)
+    monkeypatch.setattr(archive, "MAX_STDERR_BYTES", 8)
+    if case == "tar-cap":
+        monkeypatch.setattr(archive, "MAX_TAR_BYTES", 512)
+    try:
+        os.lseek(archive_fd, 2, os.SEEK_SET)
+        expected = archive.ArchiveOperationalError if case != "tar-cap" else archive.ArchiveMoverError
+        with pytest.raises(expected, match=reason):
+            with archive._TarStreamContext(archive_fd, tool) as payload:
+                list(payload)
+        assert os.lseek(archive_fd, 0, os.SEEK_CUR) == 2
+        assert processes and all(process.poll() is not None for process in processes)
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+        os.close(archive_fd)
 
 
 @pytest.mark.parametrize("evidence", ["missing", "invalid", "unavailable"])
@@ -1143,6 +1259,35 @@ def test_corrupt_final_is_quarantined_then_replaced_in_enforce(tmp_path: Path) -
     )
 
 
+def test_fresh_staging_verification_failure_never_publishes_or_retires_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    source = _forcing(config)
+    original_verify = archive.verify_archive_pair
+
+    def fail_staging(*args, **kwargs):
+        if kwargs.get("require_canonical_location") is False:
+            raise archive.ArchiveCorruptError("injected fresh staging verification failure")
+        return original_verify(*args, **kwargs)
+
+    monkeypatch.setattr(archive, "verify_archive_pair", fail_staging)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 1
+    assert source.exists()
+    final = config.archive_root / Path(receipt["candidates"][0]["archive_path"]).parent
+    assert not final.exists()
+    assert receipt["terminals"][0]["status"] == "failed"
+    assert all(event["kind"] != "published" for event in receipt["events"])
+    assert config.receipt_path.exists()
+    assert config.receipt_path.stat().st_mode & 0o777 == 0o600
+
+
 def test_corrupt_final_namespace_swap_is_restored_without_quarantine_event(tmp_path: Path) -> None:
     config = _config(tmp_path, enforce=True)
     source = _forcing(config)
@@ -1956,6 +2101,54 @@ def test_root_claim_failure_receipt_tracks_only_live_namespace(
     assert source_residue, terminal
     assert all((config.object_store_root / item).exists() for item in source_residue)
     assert not any(".archive-delete-" in item for item in terminal["residue"])
+
+
+@pytest.mark.parametrize("fault", ["claim-parent-open", "claim-open"])
+def test_post_tombstone_claim_setup_fault_is_indeterminate_without_fd_leak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    source = _forcing(config)
+    source_parent = source.parent
+    original_open = archive.open_directory_no_follow
+
+    def fail_claim_setup(path, *args, **kwargs):
+        candidate = Path(path)
+        tombstoned = not source.exists() and any(
+            item.name.startswith(f".archive-delete-{source.name}-")
+            for item in source_parent.iterdir()
+        )
+        if fault == "claim-parent-open" and tombstoned and candidate == source_parent:
+            raise OSError("injected claim parent open failure")
+        if fault == "claim-open" and candidate.name.startswith(f".archive-claims-{source.name}-"):
+            raise OSError("injected claim directory open failure")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(archive, "open_directory_no_follow", fail_claim_setup)
+    before_fds = len(os.listdir("/dev/fd"))
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    after_fds = len(os.listdir("/dev/fd"))
+    assert code == 1
+    assert before_fds == after_fds
+    terminal = receipt["terminals"][0]
+    assert terminal["status"] == "indeterminate"
+    assert not source.exists()
+    source_residue = [
+        item
+        for item in terminal["residue"]
+        if ".archive-delete-" in item or ".archive-claims-" in item
+    ]
+    assert any(".archive-delete-" in item for item in source_residue)
+    if fault == "claim-open":
+        assert any(".archive-claims-" in item for item in source_residue)
+    else:
+        assert not any(".archive-claims-" in item for item in source_residue)
+    assert all((config.object_store_root / item).exists() for item in source_residue)
 
 
 def test_tombstone_removal_refuses_cross_mount_descendant(tmp_path: Path) -> None:
