@@ -324,3 +324,30 @@ def test_recommendations_skip_archive_when_status_not_ok() -> None:
     receipt = _base_receipt(archive=archive_payload)
     codes = {item["code"] for item in governance._recommendations(receipt, governance.AuditThresholds())}
     assert not any(code.startswith("ARCHIVE_") for code in codes)
+
+
+def test_env_examples_declare_shared_archive_watermarks() -> None:
+    """All three env examples must declare NHMS_ARCHIVE_ROOT and the
+    free-space watermark pair so governance/mover/audit observe the same
+    values. The wrappers source only their own env file, so drift across
+    these three files is a governance blind-spot bug (governance may report
+    a different band than the mover actually enforces). See #849."""
+    required_keys = (
+        "NHMS_ARCHIVE_ROOT",
+        "NHMS_ARCHIVE_FREE_SPACE_WARN_BYTES",
+        "NHMS_ARCHIVE_FREE_SPACE_REFUSE_BYTES",
+    )
+    envs = (
+        "infra/env/node27-product-archive.example",
+        "infra/env/node27-storage-inventory-audit.example",
+        "infra/env/node27-resource-governance.example",
+    )
+    root = Path(__file__).resolve().parents[1]
+    for env_path in envs:
+        text = (root / env_path).read_text(encoding="utf-8")
+        for key in required_keys:
+            assert f"\n{key}=" in "\n" + text, (
+                f"{env_path} is missing shared archive env {key}; "
+                "the three env files must stay synchronized so "
+                "governance/mover/audit observe the same watermarks."
+            )

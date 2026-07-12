@@ -43,6 +43,14 @@ system-level (root) units for this lane.
    need write access and the receipt runbook must reject the file if the
    role is not read-only.
 
+   The governance env now shares three archive vars with the mover and
+   audit envs — `NHMS_ARCHIVE_ROOT`, `NHMS_ARCHIVE_FREE_SPACE_WARN_BYTES`,
+   and `NHMS_ARCHIVE_FREE_SPACE_REFUSE_BYTES`. All three env files MUST
+   declare identical values; the wrappers source only their own env file,
+   so drift means governance reports a different band than the mover
+   actually enforces. See "Free-space watermark tuning" below for the
+   band semantics.
+
 3. Install the four user units and enable the timers. Order matters only
    because the audit timer must see the mover's latest final leaves:
 
@@ -52,11 +60,19 @@ system-level (root) units for this lane.
    systemctl --user enable --now nhms-node27-storage-inventory-audit.timer
    ```
 
-4. Register the four new units with `nhms-node27-resource-governance` via
-   the shared `DEFAULT_SERVICES` list — no action required beyond deploying
-   the updated `scripts/node27_resource_governance.py`. The next governance
-   audit tick will report their service/timer state alongside the archive
-   root free-space band.
+4. Copy or update `infra/env/node27-resource-governance.env` from the
+   extended `.example` so it declares `NHMS_ARCHIVE_ROOT` and the two
+   `NHMS_ARCHIVE_FREE_SPACE_*_BYTES` vars — matching the mover and audit
+   env files verbatim. Without this the governance receipt will report
+   `archive_root.status = "skipped"` and the archive band will not
+   appear. Then register the four new units with
+   `nhms-node27-resource-governance` via the shared `DEFAULT_SERVICES`
+   list — no code action required beyond deploying the updated
+   `scripts/node27_resource_governance.py`. The next governance audit
+   tick will report their service/timer state, and — once the governance
+   env carries the shared archive vars — the archive root free-space
+   band as well. See "Free-space watermark tuning" for band semantics
+   and "Refuse-threshold behavior" for what a `refuse` band triggers.
 
 ## Timer cadence order (UTC)
 
