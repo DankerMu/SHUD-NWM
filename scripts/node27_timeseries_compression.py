@@ -130,7 +130,7 @@ def config_from_args(
     lag_seconds = _parse_positive_int(
         env.get("NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS"),
         name="NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS",
-        minimum=0,
+        minimum=1,
     )
     per_tick_bound = _parse_positive_int(
         env.get("NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND"),
@@ -262,9 +262,15 @@ def _iso(value: datetime) -> str:
 
 
 # Function signatures for DB interaction — injectable so unit tests can
-# replace them without a live database.
+# replace them without a live database. ``measure_chunk_bytes`` accepts an
+# ``after`` keyword: when True, the default implementation resolves the
+# compressed relation name from ``timescaledb_information.chunks`` (which
+# ``compress_chunk`` populates) and measures THAT relation. Measuring the
+# origin chunk after compression would report ~0 bytes because the origin
+# is truncated when its rows are moved to the compressed sibling — that is
+# the semantic bug cand-A hardens against.
 FetchChunks = Callable[[str], list[ChunkRow]]
-MeasureChunkBytes = Callable[[str, ChunkRow], int]
+MeasureChunkBytes = Callable[..., int]
 CompressChunk = Callable[[str, ChunkRow], None]
 
 
@@ -283,7 +289,9 @@ def _default_fetch_chunks(database_url: str) -> list[ChunkRow]:
         connection.close()
 
 
-def _default_measure_chunk_bytes(database_url: str, chunk: ChunkRow) -> int:
+def _default_measure_chunk_bytes(
+    database_url: str, chunk: ChunkRow, *, after: bool = False
+) -> int:
     import psycopg2  # type: ignore[import-untyped]
 
     connection = psycopg2.connect(database_url)
@@ -291,9 +299,31 @@ def _default_measure_chunk_bytes(database_url: str, chunk: ChunkRow) -> int:
         with connection:
             with connection.cursor() as cursor:
                 cursor.execute(f"SET statement_timeout = {_QUERY_TIMEOUT_MS}")
+                target_schema = chunk.chunk_schema
+                target_name = chunk.chunk_name
+                if after:
+                    # Re-query the catalog for the compressed sibling that
+                    # compress_chunk() populated. Fall back to the origin
+                    # chunk when the compressed relation is not yet visible
+                    # (race, or no-op path) — matches pre-fix behavior for
+                    # that edge case without leaking a stale 0-byte number.
+                    cursor.execute(
+                        """
+                        SELECT compressed_chunk_schema, compressed_chunk_name
+                        FROM timescaledb_information.chunks
+                        WHERE chunk_schema = %s AND chunk_name = %s
+                        """,
+                        (chunk.chunk_schema, chunk.chunk_name),
+                    )
+                    row = cursor.fetchone()
+                    if row is not None:
+                        compressed_schema, compressed_name = row
+                        if compressed_schema and compressed_name:
+                            target_schema = compressed_schema
+                            target_name = compressed_name
                 cursor.execute(
                     "SELECT pg_total_relation_size(%s::regclass)",
-                    (f"{chunk.chunk_schema}.{chunk.chunk_name}",),
+                    (f"{target_schema}.{target_name}",),
                 )
                 (bytes_value,) = cursor.fetchone()
                 return int(bytes_value or 0)
@@ -392,7 +422,18 @@ def build_receipt(
     selected_descriptors: list[dict[str, Any]] = []
     any_errors = False
     for chunk in selected_rows:
-        before = int(measure_chunk_bytes(config.database_url, chunk))
+        # cand-F: symmetrical per-chunk isolation. Measurement failures on
+        # either side of the compress_chunk call MUST NOT abort the whole
+        # loop; each chunk records its own error string in the descriptor
+        # and the top-level outcome becomes ``partial``.
+        try:
+            before = int(measure_chunk_bytes(config.database_url, chunk))
+        except Exception as error:
+            descriptor = _descriptor(chunk, before=0, after=None)
+            descriptor["error"] = f"measure_chunk_bytes(before) failed: {error}"
+            any_errors = True
+            selected_descriptors.append(descriptor)
+            continue
         descriptor: dict[str, Any]
         if not config.enforce:
             descriptor = _descriptor(chunk, before=before, after=None)
@@ -406,7 +447,19 @@ def build_receipt(
                 totals[chunk.hypertable_key]["before_bytes"] += before
                 selected_descriptors.append(descriptor)
                 continue
-            after = int(measure_chunk_bytes(config.database_url, chunk))
+            try:
+                after = int(measure_chunk_bytes(config.database_url, chunk, after=True))
+            except Exception as error:
+                descriptor = _descriptor(chunk, before=before, after=None)
+                descriptor["error"] = f"measure_chunk_bytes(after) failed: {error}"
+                any_errors = True
+                # The compression itself did succeed; record before_bytes so
+                # the per-table roll-up reflects the pre-compression footprint
+                # of the chunk that got compressed.
+                totals[chunk.hypertable_key]["before_bytes"] += before
+                totals[chunk.hypertable_key]["chunks_compressed"] += 1
+                selected_descriptors.append(descriptor)
+                continue
             descriptor = _descriptor(chunk, before=before, after=after)
             key = chunk.hypertable_key
             totals[key]["chunks_compressed"] += 1

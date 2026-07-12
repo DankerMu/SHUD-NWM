@@ -82,6 +82,7 @@ def _chunk(
     ("override", "match"),
     [
         ({"NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS": ""}, "LAG_SECONDS"),
+        ({"NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS": "0"}, "LAG_SECONDS"),
         ({"NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS": "-1"}, "LAG_SECONDS"),
         ({"NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS": "not-a-number"}, "LAG_SECONDS"),
         ({"NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS": None}, "LAG_SECONDS"),
@@ -148,15 +149,26 @@ def test_classify_respects_per_tick_bound() -> None:
 # ---------------------------------------------------------------------------
 
 
+# Byte-size shape for the shared stubs. before returns 1 GiB per chunk, after
+# returns 512 MiB — the delta proves the runner routes ``after=True`` to a
+# distinct catalog lookup (cand-A). Tests that don't distinguish should assert
+# on ``before_bytes`` only.
+_STUB_BEFORE_BYTES = 1_073_741_824  # 1 GiB
+_STUB_AFTER_BYTES = 536_870_912  # 512 MiB
+
+
 def _install_stubs(monkeypatch: pytest.MonkeyPatch, *, chunks: list[compression.ChunkRow]) -> dict[str, list]:
-    calls: dict[str, list] = {"compress": [], "measure": []}
+    calls: dict[str, list] = {"compress": [], "measure": [], "measure_after": []}
 
     def fake_fetch(dsn: str) -> list[compression.ChunkRow]:
         return list(chunks)
 
-    def fake_measure(dsn: str, chunk: compression.ChunkRow) -> int:
+    def fake_measure(dsn: str, chunk: compression.ChunkRow, *, after: bool = False) -> int:
+        if after:
+            calls["measure_after"].append(chunk.chunk_name)
+            return _STUB_AFTER_BYTES
         calls["measure"].append(chunk.chunk_name)
-        return 1_073_741_824  # 1 GiB per measurement
+        return _STUB_BEFORE_BYTES
 
     def fake_compress(dsn: str, chunk: compression.ChunkRow) -> None:
         calls["compress"].append(chunk.chunk_name)
@@ -197,14 +209,25 @@ def test_enforce_calls_compress_for_each_selected(tmp_path: Path, monkeypatch: p
         fetch_chunks=fake_fetch, measure_chunk_bytes=fake_measure, compress_chunk=fake_compress,
     )
     assert calls["compress"] == ["old-a", "old-b", "old-c"]
+    # cand-A: the second measure call must be routed with after=True so that
+    # the default DB implementation would query the compressed sibling
+    # relation instead of the truncated origin chunk.
+    assert calls["measure_after"] == ["old-a", "old-b", "old-c"]
     river = receipt["per_table_totals"]["hydro.river_timeseries"]
     forcing = receipt["per_table_totals"]["met.forcing_station_timeseries"]
     assert river["chunks_compressed"] == 2
     assert forcing["chunks_compressed"] == 1
-    assert river["before_bytes"] == 2 * 1_073_741_824
-    assert forcing["before_bytes"] == 1_073_741_824
-    assert river["after_bytes"] == 2 * 1_073_741_824
-    assert forcing["after_bytes"] == 1_073_741_824
+    assert river["before_bytes"] == 2 * _STUB_BEFORE_BYTES
+    assert forcing["before_bytes"] == _STUB_BEFORE_BYTES
+    # after_bytes reflects the (fake) compressed footprint, not the origin.
+    assert river["after_bytes"] == 2 * _STUB_AFTER_BYTES
+    assert forcing["after_bytes"] == _STUB_AFTER_BYTES
+    assert river["after_bytes"] < river["before_bytes"]
+    assert forcing["after_bytes"] < forcing["before_bytes"]
+    # And each per-chunk descriptor must carry the compressed after size.
+    for descriptor in receipt["selected"]:
+        assert descriptor["after_bytes"] == _STUB_AFTER_BYTES
+        assert descriptor["before_bytes"] == _STUB_BEFORE_BYTES
     assert receipt["outcome"] == "clean"
 
 
@@ -219,7 +242,7 @@ def test_per_chunk_failure_isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     def fake_fetch(dsn: str) -> list[compression.ChunkRow]:
         return list(chunks)
 
-    def fake_measure(dsn: str, chunk: compression.ChunkRow) -> int:
+    def fake_measure(dsn: str, chunk: compression.ChunkRow, *, after: bool = False) -> int:
         return 100
 
     def fake_compress(dsn: str, chunk: compression.ChunkRow) -> None:
@@ -235,6 +258,78 @@ def test_per_chunk_failure_isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert by_name["good"]["after_bytes"] == 100
     assert "error" in by_name["bad"]
     assert by_name["bad"]["after_bytes"] is None
+    assert receipt["outcome"] == "partial"
+
+
+def test_measure_after_failure_isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """cand-F: after-measurement failure MUST not cascade to other chunks."""
+    env = _base_env(tmp_path)
+    config = compression.config_from_args(_args(enforce=True), env)
+    chunks = [
+        _chunk("hydro", "river_timeseries", "good", delta_days=10),
+        _chunk("hydro", "river_timeseries", "measure-failure", delta_days=11),
+    ]
+
+    def fake_fetch(dsn: str) -> list[compression.ChunkRow]:
+        return list(chunks)
+
+    def fake_measure(dsn: str, chunk: compression.ChunkRow, *, after: bool = False) -> int:
+        if after and chunk.chunk_name == "measure-failure":
+            raise RuntimeError("simulated pg_total_relation_size timeout")
+        return 200 if not after else 50
+
+    def fake_compress(dsn: str, chunk: compression.ChunkRow) -> None:
+        return None
+
+    receipt = compression.build_receipt(
+        config, now_utc=_NOW,
+        fetch_chunks=fake_fetch, measure_chunk_bytes=fake_measure, compress_chunk=fake_compress,
+    )
+    by_name = {d["chunk_name"]: d for d in receipt["selected"]}
+    assert "error" not in by_name["good"]
+    assert by_name["good"]["after_bytes"] == 50
+    assert by_name["measure-failure"]["after_bytes"] is None
+    assert "measure_chunk_bytes(after) failed" in by_name["measure-failure"]["error"]
+    assert receipt["outcome"] == "partial"
+    # The compressed chunk still counts in the roll-up so operators can see
+    # that the mutation happened, even though after_bytes is unknown.
+    river = receipt["per_table_totals"]["hydro.river_timeseries"]
+    assert river["chunks_compressed"] == 2
+    assert river["before_bytes"] == 200 + 200
+
+
+def test_measure_before_failure_isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """cand-F: before-measurement failure MUST not cascade or leak partial roll-up."""
+    env = _base_env(tmp_path)
+    config = compression.config_from_args(_args(enforce=True), env)
+    chunks = [
+        _chunk("hydro", "river_timeseries", "good", delta_days=10),
+        _chunk("hydro", "river_timeseries", "before-fail", delta_days=11),
+    ]
+    compressed_names: list[str] = []
+
+    def fake_fetch(dsn: str) -> list[compression.ChunkRow]:
+        return list(chunks)
+
+    def fake_measure(dsn: str, chunk: compression.ChunkRow, *, after: bool = False) -> int:
+        if not after and chunk.chunk_name == "before-fail":
+            raise RuntimeError("simulated catalog probe error")
+        return 300 if not after else 60
+
+    def fake_compress(dsn: str, chunk: compression.ChunkRow) -> None:
+        compressed_names.append(chunk.chunk_name)
+
+    receipt = compression.build_receipt(
+        config, now_utc=_NOW,
+        fetch_chunks=fake_fetch, measure_chunk_bytes=fake_measure, compress_chunk=fake_compress,
+    )
+    by_name = {d["chunk_name"]: d for d in receipt["selected"]}
+    # Failing chunk carries the error and never entered compress_chunk.
+    assert "error" in by_name["before-fail"]
+    assert "measure_chunk_bytes(before) failed" in by_name["before-fail"]["error"]
+    assert by_name["before-fail"]["before_bytes"] == 0
+    assert by_name["before-fail"]["after_bytes"] is None
+    assert compressed_names == ["good"]
     assert receipt["outcome"] == "partial"
 
 
@@ -321,6 +416,55 @@ def test_example_validates_against_schema() -> None:
 
 
 # ---------------------------------------------------------------------------
+# cand-C: negative schema coverage — receipts violating the fresh contract
+# rows in design.md (fixture Receipt schema) MUST be rejected.
+# ---------------------------------------------------------------------------
+
+
+def _example_receipt() -> dict:
+    return json.loads(
+        (_ROOT / "schemas/examples/timeseries_compression_receipt.example.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+
+def test_schema_rejects_selected_entry_without_chunk_name() -> None:
+    receipt = _example_receipt()
+    del receipt["selected"][0]["chunk_name"]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(receipt, _load_schema())
+
+
+def test_schema_rejects_per_table_total_missing_chunks_compressed() -> None:
+    receipt = _example_receipt()
+    del receipt["per_table_totals"]["hydro.river_timeseries"]["chunks_compressed"]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(receipt, _load_schema())
+
+
+def test_schema_rejects_invalid_mode_enum() -> None:
+    receipt = _example_receipt()
+    receipt["mode"] = "compress"
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(receipt, _load_schema())
+
+
+def test_schema_rejects_unknown_top_level_key() -> None:
+    receipt = _example_receipt()
+    receipt["unknown_field"] = "x"
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(receipt, _load_schema())
+
+
+def test_schema_rejects_per_table_totals_missing_forcing_key() -> None:
+    receipt = _example_receipt()
+    del receipt["per_table_totals"]["met.forcing_station_timeseries"]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(receipt, _load_schema())
+
+
+# ---------------------------------------------------------------------------
 # Migration text guardrails
 # ---------------------------------------------------------------------------
 
@@ -353,14 +497,35 @@ def test_migration_alter_statements_are_disjoint_and_order_independent() -> None
     assert set(alters) == {"hydro.river_timeseries", "met.forcing_station_timeseries"}
 
 
+def test_migration_has_no_transaction_wrapper() -> None:
+    """cand-D: partial-apply idempotency assumes each ALTER runs standalone.
+
+    A ``DO $$``/``BEGIN``/``END $$`` block would collapse both statements
+    into one transaction and break the "re-run the migration after a partial
+    apply completes the second statement" guarantee that the header prose
+    (and design D3) promises.
+    """
+    text = _MIGRATION_PATH.read_text(encoding="utf-8")
+    executable = "\n".join(line for line in text.splitlines() if not line.startswith("--"))
+    forbidden = re.search(
+        r"\bDO\s*\$\$|\bBEGIN\b|\bEND\s*\$\$", executable, flags=re.IGNORECASE
+    )
+    assert forbidden is None, (
+        f"migration must not wrap ALTERs in a transaction block; matched: {forbidden.group(0)!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Runner source: catalog-only guard
 # ---------------------------------------------------------------------------
 
 
 def test_chunk_query_filters_out_already_compressed_chunks() -> None:
-    source = _RUNNER_SOURCE_PATH.read_text(encoding="utf-8")
-    assert "is_compressed = false" in source
+    # cand-E: assert on the runtime constant so refactors that move the
+    # literal into a comment or unrelated docstring can't accidentally
+    # silence the guard.
+    query = compression._CHUNK_QUERY
+    assert "is_compressed = false" in query
 
 
 def test_chunk_query_does_not_scan_detail_hypertables() -> None:
