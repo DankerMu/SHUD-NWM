@@ -11,16 +11,25 @@ points at the runbook decompress procedure.
 
 Semantics:
 
-* Overlap: any compressed chunk where ``range_start < batch_valid_time_max``
+* Overlap: any compressed chunk where ``range_start <= batch_valid_time_max``
   AND ``range_end > batch_valid_time_min`` blocks the write. ``range_end`` is
-  exclusive per the TimescaleDB chunk model (see
-  ``openspec/changes/tier-node27-timeseries-storage`` fixture #851).
-* Empty batch / unset window: short-circuit — no catalog query, no raise.
+  exclusive and ``range_start`` is inclusive per the TimescaleDB chunk model
+  ``[range_start, range_end)`` (see
+  ``openspec/changes/tier-node27-timeseries-storage`` fixture #851 / design.md).
+* Empty batch / unset window: short-circuit — no catalog query, no raise. AND
+  semantics: BOTH endpoints must be ``None`` (a partial ``None`` is a caller
+  bug and raises ``CompressedChunkGuardError``).
 * Statement timeout: ``SET LOCAL statement_timeout = '5s'`` bounds the
-  catalog query latency and does not leak across the transaction.
+  catalog query latency and does not leak across the transaction. The reset
+  to ``DEFAULT`` fires in ``finally:`` so a raised catalog error still
+  restores the session default.
 * Fail-closed on catalog error: the guard NEVER silently permits a write. Any
   exception from the lookup wraps into ``CompressedChunkGuardError`` and
   propagates to the caller's transaction, which rolls back.
+* Runtime registry enforcement: the guard refuses any ``(schema, table)``
+  pair outside :data:`HYPERTABLES_GUARDED` (raising
+  ``CompressedChunkGuardError`` before any SQL runs) so a wire-site typo
+  cannot silently permit writes.
 
 The guard is a shared helper (design D5); the three production write paths
 (``workers/output_parser/parser.py::upsert_river_timeseries``,
@@ -58,12 +67,12 @@ therefore never trips the guard; this constant is asserted by tests to catch
 accidental additions/removals.
 """
 
-_STATEMENT_TIMEOUT_MS = "5s"
+_STATEMENT_TIMEOUT_LITERAL = "5s"
 _COMPRESSED_CHUNK_QUERY = (
     "SELECT chunk_schema, chunk_name FROM timescaledb_information.chunks "
     "WHERE hypertable_schema = %s AND hypertable_name = %s "
     "AND is_compressed = true "
-    "AND range_start < %s AND range_end > %s "
+    "AND range_start <= %s AND range_end > %s "
     "ORDER BY range_start "
     "LIMIT 1"
 )
@@ -121,37 +130,74 @@ def check_batch_targets_uncompressed(
 
     Raises ``CompressedChunkWriteError`` if any compressed chunk overlaps the
     batch time range. Raises ``CompressedChunkGuardError`` if the catalog
-    lookup itself fails. Returns ``None`` on pass (or on empty/unset window).
+    lookup itself fails, if the guard is called for an unregistered
+    ``(schema, table)`` pair (see :data:`HYPERTABLES_GUARDED`), or if only one
+    of ``valid_time_min`` / ``valid_time_max`` is ``None`` (partial batch
+    window). Returns ``None`` on pass (or on empty/unset window where BOTH
+    endpoints are ``None``).
 
     The cursor MUST share the same connection/transaction as the DELETE that
     follows so ``SET LOCAL statement_timeout`` scopes to the correct
     transaction. The catalog lookup runs once per batch (amortized over
     batch_size rows) and has no module-level cache — a stale cache would
     permit a silent partial write.
-    """
-    if valid_time_min is None or valid_time_max is None:
-        return
 
-    try:
-        cursor.execute(f"SET LOCAL statement_timeout = '{_STATEMENT_TIMEOUT_MS}'")
-        cursor.execute(
-            _COMPRESSED_CHUNK_QUERY,
-            (hypertable_schema, hypertable_name, valid_time_max, valid_time_min),
+    Empty-batch semantics: BOTH endpoints must be ``None``. Callers computing
+    ``min(... , default=None)`` on an empty iterable naturally produce
+    ``(None, None)``; a partial ``None`` indicates a caller bug (see
+    ``workers/forcing_producer/store.py::replace_forcing_timeseries`` and
+    ``packages/common/forcing_domain_handoff_apply.py::
+    _replace_forcing_station_timeseries``) and fails closed rather than
+    silently short-circuiting.
+    """
+    # Empty batch short-circuit — BEFORE the registry check, since an empty
+    # batch is a no-op regardless of which table would have been written to.
+    if valid_time_min is None and valid_time_max is None:
+        return
+    if valid_time_min is None or valid_time_max is None:
+        raise CompressedChunkGuardError(
+            "guard called with partial batch range (one endpoint None); "
+            "callers MUST pass both endpoints or both None for empty batch"
         )
-        row = cursor.fetchone()
+
+    # Wire-site typo guard: refuse any unregistered pair BEFORE any SQL runs.
+    if (hypertable_schema, hypertable_name) not in HYPERTABLES_GUARDED:
+        raise CompressedChunkGuardError(
+            f"guard called with unregistered hypertable "
+            f"{hypertable_schema}.{hypertable_name}; expected one of "
+            f"{sorted(HYPERTABLES_GUARDED)}"
+        )
+
+    row: Any = None
+    try:
+        try:
+            cursor.execute(f"SET LOCAL statement_timeout = '{_STATEMENT_TIMEOUT_LITERAL}'")
+            cursor.execute(
+                _COMPRESSED_CHUNK_QUERY,
+                (hypertable_schema, hypertable_name, valid_time_max, valid_time_min),
+            )
+            row = cursor.fetchone()
+        except CompressedChunkWriteError:
+            raise
+        except Exception as error:
+            reason = (
+                "compressed-chunk guard catalog lookup failed on "
+                f"{hypertable_schema}.{hypertable_name}: {type(error).__name__}: "
+                f"{redact_text(str(error))}"
+            )
+            raise CompressedChunkGuardError(_mask_dsn(reason)) from error
+    finally:
         # Restore the session's default statement_timeout so the guard's short
         # timeout does not apply to the DELETE + INSERT that follow in the same
-        # transaction. Golden-path behavior for uncompressed batches MUST stay
-        # byte-identical regardless of guard-imposed limits.
-        cursor.execute("SET LOCAL statement_timeout = DEFAULT")
-    except CompressedChunkWriteError:
-        raise
-    except Exception as error:
-        reason = (
-            "compressed-chunk guard catalog lookup failed on "
-            f"{hypertable_schema}.{hypertable_name}: {type(error).__name__}"
-        )
-        raise CompressedChunkGuardError(_mask_dsn(reason)) from error
+        # transaction. This MUST fire even when the SELECT raised — otherwise
+        # the caller inherits the guard's 5s cap on their own writes. Best
+        # effort: if the reset itself raises (e.g. transaction already aborted
+        # by the SELECT error), suppress and let the caller's rollback path
+        # handle it.
+        try:
+            cursor.execute("SET LOCAL statement_timeout = DEFAULT")
+        except Exception:
+            pass
 
     if row is None:
         return

@@ -7,6 +7,7 @@ from typing import Sequence
 
 from packages.common.manifest_index import ManifestValidationError, load_manifest_entry, resolve_task_id
 from packages.common.source_identity import normalize_source_id
+from packages.common.timescale_write_guard import CompressedChunkGuardError
 
 from .producer import ForcingProducer
 
@@ -101,6 +102,9 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         except ValueError as error:
             click.echo(f"INVALID_SOURCE_ID: {error}", err=True)
             raise SystemExit(1) from error
+        except CompressedChunkGuardError as error:
+            click.echo(f"FORCING_PRODUCE_COMPRESSED_CHUNK_BLOCKED: {error}", err=True)
+            raise SystemExit(1) from error
 
     cli.main(args=list(argv) if argv is not None else None, standalone_mode=True)
     return 0
@@ -134,6 +138,9 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
             return 1
         except ValueError as error:
             print(f"INVALID_SOURCE_ID: {error}", file=sys.stderr)
+            return 1
+        except CompressedChunkGuardError as error:
+            print(f"FORCING_PRODUCE_COMPRESSED_CHUNK_BLOCKED: {error}", file=sys.stderr)
             return 1
         return 0
     parser.error(f"Unsupported command: {args.command}")

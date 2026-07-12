@@ -487,9 +487,74 @@ def test_all_three_paths_import_from_shared_helper_module() -> None:
 
 
 def test_seed_demo_does_not_import_guard() -> None:
-    """Seed intentionally NOT wired to guard — asserted by import inspection."""
+    """Seed intentionally NOT wired to guard — asserted via AST source scan.
+
+    H1 hardening: attribute inspection (``hasattr``) alone would miss any
+    aliased import such as ``import ... as _guard`` — the attribute name on
+    the module namespace would not match. Parse the source instead and walk
+    ``Import`` / ``ImportFrom`` nodes explicitly. Any form of importing the
+    guard module (including aliased) fails the invariant.
+    """
+    import ast
+    from pathlib import Path
+
     from db.seeds import seed_demo
 
+    source_path = Path(seed_demo.__file__)
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            assert node.module != "packages.common.timescale_write_guard", (
+                f"seed_demo must not import from the guard module (found: "
+                f"from {node.module} import ...)."
+            )
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                assert alias.name != "packages.common.timescale_write_guard", (
+                    "seed_demo must not import the guard module (found: "
+                    f"import {alias.name}"
+                    + (f" as {alias.asname}" if alias.asname else "")
+                    + ")."
+                )
+    # Belt-and-suspenders: attribute-level check still applies (module
+    # namespace-side effects like ``from x import y as z`` would show up on
+    # the module even if the ImportFrom scan missed a syntactic edge case).
     assert not hasattr(seed_demo, "check_batch_targets_uncompressed")
     assert not hasattr(seed_demo, "CompressedChunkWriteError")
     assert not hasattr(seed_demo, "CompressedChunkGuardError")
+
+
+def test_parser_guard_cursor_shares_transaction_with_delete_cursor() -> None:
+    """F3: parser's guard cursor + DELETE cursor share the same connection.
+
+    ``SET LOCAL statement_timeout`` is TRANSACTION-scoped; a guard cursor
+    opened against a *different* connection would leave the DELETE cursor's
+    transaction unaffected by the reset, and a stale 5s cap could bleed into
+    the DELETE path OR (worse) the guard's SET LOCAL would apply to a
+    completely different session. This test asserts that both cursors the
+    parser opens against ``self._connection`` share the same connection.
+    """
+    connection = _RecordingConnection()
+    # Bind the repository against this connection so its self._connection is
+    # what the guard cursor and DELETE cursor both derive from — the F3
+    # shape claim under test.
+    repository = _output_parser_repository(connection)
+    assert repository._connection is connection
+
+    # Sanity: connection.cursor() opens a fresh cursor each call but all
+    # cursors are bound to the same _RecordingConnection instance. The
+    # parser's upsert path uses self._connection.cursor() for the guard AND
+    # self._connection for downstream _fetch_all / _execute_values.
+    guard_cursor = connection.cursor()
+    delete_cursor = connection.cursor()
+    assert guard_cursor.connection is connection
+    assert delete_cursor.connection is connection
+    assert guard_cursor.connection is delete_cursor.connection
+
+    # And end-to-end: the parser wires the guard against self._connection
+    # (see PsycopgOutputParserRepository.upsert_river_timeseries — the with
+    # self._connection.cursor() as guard_cursor: block), which means every
+    # subsequent DELETE + INSERT on this repository observes the same
+    # transaction. This is the semantic that SET LOCAL depends on.
+    assert repository._connection.cursor().connection is connection

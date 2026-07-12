@@ -14,7 +14,10 @@ from typing import Any, Protocol
 
 from packages.common.object_store import LocalObjectStore
 from packages.common.storage import validate_object_path
-from packages.common.timescale_write_guard import check_batch_targets_uncompressed
+from packages.common.timescale_write_guard import (
+    CompressedChunkGuardError,
+    check_batch_targets_uncompressed,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -203,6 +206,16 @@ class OutputParser:
             self._mark_run_failed_preserving_error(
                 context.run_id,
                 "OUTPUT_PARSE_OS_ERROR",
+                _runtime_error_message(error),
+            )
+            raise
+        except CompressedChunkGuardError as error:
+            # Dedicated error_code so operators route on the runbook decompress
+            # procedure rather than the generic runtime error bucket. Re-raise
+            # so the caller (CLI, test) sees the structured exception.
+            self._mark_run_failed_preserving_error(
+                context.run_id,
+                "OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED",
                 _runtime_error_message(error),
             )
             raise

@@ -3,15 +3,22 @@
 Covers the shared helper's requirement scenarios per the fixture in
 ``openspec/changes/tier-node27-timeseries-storage/design.md``:
 
-* Empty batch short-circuit.
+* Empty batch short-circuit (AND semantics on ``valid_time_min``/``max``).
+* Partial-None batch range refuses (caller bug fails closed).
 * Uncompressed batch allowed.
 * Compressed chunk overlap raises the named error.
 * Catalog lookup exceptions (``OperationalError``, ``QueryCanceled``, generic)
   fail-closed with ``CompressedChunkGuardError``.
-* ``range_end`` exclusive boundary.
-* ``SET LOCAL statement_timeout`` used, ``SET SESSION`` never used.
-* DSN masking in error messages.
-* ``HYPERTABLES_GUARDED`` matches the two production hypertables only.
+* ``range_end`` exclusive AND ``range_start`` inclusive boundaries (a batch
+  whose ``valid_time_max == compressed_chunk.range_start`` blocks).
+* ``SET LOCAL statement_timeout`` used, ``SET SESSION`` never used; the
+  ``DEFAULT`` reset fires in ``finally:`` even when the catalog SELECT
+  raised.
+* DSN masking in error messages via ``redact_text`` on the actual
+  DSN-carrying content (``str(error)``).
+* ``HYPERTABLES_GUARDED`` matches the two production hypertables only, and
+  the guard refuses any unregistered pair before running SQL.
+* Query text asserts ``is_compressed = true`` predicate (drift guard).
 """
 
 from __future__ import annotations
@@ -22,6 +29,7 @@ from typing import Any
 import pytest
 
 from packages.common.timescale_write_guard import (
+    _COMPRESSED_CHUNK_QUERY,
     HYPERTABLES_GUARDED,
     RUNBOOK_ANCHOR,
     CompressedChunkGuardError,
@@ -67,12 +75,64 @@ class _FakeOperationalError(Exception):
     """Stand-in for ``psycopg2.OperationalError`` — the guard catches by base ``Exception``."""
 
 
-class _FakeQueryCanceled(Exception):
-    """Stand-in for ``psycopg2.errors.QueryCanceled``."""
-
-
 def _t(hour: int) -> datetime:
     return datetime(2026, 6, 1, hour, tzinfo=UTC)
+
+
+def _tday(day: int, hour: int = 0) -> datetime:
+    return datetime(2026, 6, day, hour, tzinfo=UTC)
+
+
+class _PredicateAwareFakeCursor:
+    """Cursor that evaluates the guard's SQL predicate against a modeled chunk row.
+
+    Unlike ``_FakeCursor`` (which returns a caller-configured row unconditionally
+    regardless of the query's WHERE clause), this cursor parses the guard's
+    ``(hypertable_schema, hypertable_name, valid_time_max, valid_time_min)``
+    parameter tuple and evaluates ``range_start <= batch_max AND
+    range_end > batch_min`` against each modeled chunk row — mirroring the
+    real TimescaleDB catalog behavior at the boundary. This is the
+    fake-oracle repair (D2 / D3): boundary tests must exercise the
+    predicate, not just the param binding.
+    """
+
+    def __init__(
+        self,
+        *,
+        chunks: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.executed: list[tuple[str, tuple[Any, ...]]] = []
+        # Each modeled chunk row is a dict with keys:
+        #   hypertable_schema, hypertable_name, chunk_schema, chunk_name,
+        #   is_compressed (bool), range_start (datetime), range_end (datetime).
+        self._chunks = list(chunks or [])
+        self._last_row: dict[str, Any] | None = None
+
+    def execute(self, statement: str, parameters: tuple[Any, ...] = ()) -> None:
+        self.executed.append((statement, parameters))
+        if statement.startswith("SET LOCAL"):
+            return
+        if "timescaledb_information.chunks" not in statement:
+            return
+        # Guard binds params as (schema, name, batch_max, batch_min).
+        hypertable_schema, hypertable_name, batch_max, batch_min = parameters
+        matching = [
+            chunk
+            for chunk in self._chunks
+            if chunk["hypertable_schema"] == hypertable_schema
+            and chunk["hypertable_name"] == hypertable_name
+            and chunk["is_compressed"] is True
+            and chunk["range_start"] <= batch_max
+            and chunk["range_end"] > batch_min
+        ]
+        # ORDER BY range_start LIMIT 1
+        matching.sort(key=lambda chunk: chunk["range_start"])
+        self._last_row = matching[0] if matching else None
+
+    def fetchone(self) -> Any:
+        if self._last_row is None:
+            return None
+        return (self._last_row["chunk_schema"], self._last_row["chunk_name"])
 
 
 def test_empty_batch_short_circuits() -> None:
@@ -155,7 +215,18 @@ def test_catalog_lookup_error_raises_guard_error() -> None:
 
 
 def test_query_cancelled_raises_guard_error() -> None:
-    cursor = _FakeCursor(raise_on_query=_FakeQueryCanceled("statement timeout"))
+    """Use the real ``psycopg2.errors.QueryCanceled`` if psycopg2 is present.
+
+    Closes MINOR C-te-5: the previous ``_FakeQueryCanceled(Exception)`` was a
+    stand-in whose semantics diverged from the real class. Use the actual
+    exception type so the guard's ``except Exception`` catch is exercised
+    against the type it will see in production. Skip the test if psycopg2 is
+    not importable in the test env.
+    """
+    psycopg2 = pytest.importorskip("psycopg2")
+    from psycopg2 import errors as psycopg2_errors
+
+    cursor = _FakeCursor(raise_on_query=psycopg2_errors.QueryCanceled("statement timeout"))
     with pytest.raises(CompressedChunkGuardError) as exc_info:
         check_batch_targets_uncompressed(
             cursor,
@@ -166,6 +237,9 @@ def test_query_cancelled_raises_guard_error() -> None:
         )
     assert not isinstance(exc_info.value, CompressedChunkWriteError)
     assert "met.forcing_station_timeseries" in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, psycopg2_errors.QueryCanceled)
+    # Silence the linter: psycopg2 alias is only used for the importorskip.
+    del psycopg2
 
 
 def test_boundary_range_end_exclusive_allows_write() -> None:
@@ -271,3 +345,205 @@ def test_timeout_error_before_query_also_wraps() -> None:
             valid_time_min=_t(0),
             valid_time_max=_t(1),
         )
+
+
+# ---------------------------------------------------------------------------
+# A2 — Boundary at ``range_start`` (inclusive) blocks
+# ---------------------------------------------------------------------------
+
+
+def test_boundary_range_start_inclusive_blocks_write() -> None:
+    """A batch whose ``valid_time_max`` equals a compressed chunk's ``range_start`` blocks.
+
+    Design.md documents chunks as ``[range_start, range_end)`` — ``range_start``
+    is INCLUSIVE. If a batch's max valid_time equals a compressed chunk's
+    ``range_start``, the INSERT would land inside that chunk. Predicate must
+    be ``range_start <= batch_max AND range_end > batch_min``.
+
+    This test uses ``_PredicateAwareFakeCursor`` (not the caller-configured
+    stub) so the predicate is actually exercised: the fake evaluates the
+    boundary comparison against a modeled chunk row rather than blindly
+    returning a preset row. A regression of the predicate back to
+    ``range_start <  batch_max`` will produce no matching chunk here and
+    the test will fail with "no error raised".
+    """
+    # Compressed chunk starts exactly at day 2 00:00, runs to day 3 00:00.
+    compressed_chunk = {
+        "hypertable_schema": "hydro",
+        "hypertable_name": "river_timeseries",
+        "chunk_schema": "_timescaledb_internal",
+        "chunk_name": "_hyper_1_1_chunk",
+        "is_compressed": True,
+        "range_start": _tday(2, 0),
+        "range_end": _tday(3, 0),
+    }
+    cursor = _PredicateAwareFakeCursor(chunks=[compressed_chunk])
+    with pytest.raises(CompressedChunkWriteError) as exc_info:
+        check_batch_targets_uncompressed(
+            cursor,
+            hypertable_schema="hydro",
+            hypertable_name="river_timeseries",
+            valid_time_min=_tday(1, 12),
+            valid_time_max=_tday(2, 0),  # equals range_start
+        )
+    assert exc_info.value.chunk_name == "_hyper_1_1_chunk"
+    assert "_hyper_1_1_chunk" in str(exc_info.value)
+    # Also verify the predicate branch was actually reached (chunks query fired).
+    assert any("timescaledb_information.chunks" in stmt for stmt, _ in cursor.executed)
+
+
+def test_mixed_chunk_batch_uses_first_compressed_chunk() -> None:
+    """When multiple compressed chunks overlap, ORDER BY range_start LIMIT 1 returns the earliest.
+
+    Exercises the ``ORDER BY range_start LIMIT 1`` clause end-to-end via a
+    predicate-aware fake with two compressed chunks in the batch window.
+    """
+    earlier = {
+        "hypertable_schema": "met",
+        "hypertable_name": "forcing_station_timeseries",
+        "chunk_schema": "_timescaledb_internal",
+        "chunk_name": "_hyper_2_earlier",
+        "is_compressed": True,
+        "range_start": _tday(1, 0),
+        "range_end": _tday(2, 0),
+    }
+    later = {
+        "hypertable_schema": "met",
+        "hypertable_name": "forcing_station_timeseries",
+        "chunk_schema": "_timescaledb_internal",
+        "chunk_name": "_hyper_2_later",
+        "is_compressed": True,
+        "range_start": _tday(2, 0),
+        "range_end": _tday(3, 0),
+    }
+    cursor = _PredicateAwareFakeCursor(chunks=[later, earlier])
+    with pytest.raises(CompressedChunkWriteError) as exc_info:
+        check_batch_targets_uncompressed(
+            cursor,
+            hypertable_schema="met",
+            hypertable_name="forcing_station_timeseries",
+            valid_time_min=_tday(1, 12),
+            valid_time_max=_tday(2, 12),
+        )
+    assert exc_info.value.chunk_name == "_hyper_2_earlier"
+
+
+# ---------------------------------------------------------------------------
+# B2 — Unknown hypertable pair refuses at guard entry
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_pair_refuses_at_guard_entry() -> None:
+    """Guard rejects any ``(schema, table)`` outside ``HYPERTABLES_GUARDED``.
+
+    A wire-site typo like ``("hydro", "rivertimeseries")`` MUST NOT silently
+    permit a write. The check fires BEFORE any SQL, so the cursor is never
+    touched.
+    """
+    cursor = _FakeCursor(row=None)
+    with pytest.raises(CompressedChunkGuardError) as exc_info:
+        check_batch_targets_uncompressed(
+            cursor,
+            hypertable_schema="hydro",
+            hypertable_name="not_a_real_table",
+            valid_time_min=_t(0),
+            valid_time_max=_t(1),
+        )
+    assert not isinstance(exc_info.value, CompressedChunkWriteError)
+    assert "not_a_real_table" in str(exc_info.value)
+    assert "unregistered" in str(exc_info.value)
+    # Cursor MUST NOT have been touched — no catalog query, no SET LOCAL.
+    assert cursor.executed == []
+
+
+def test_unknown_pair_refuses_even_for_empty_batch_after_partial_range() -> None:
+    """A partial ``(min, None)`` on an unregistered pair still raises for the partial range.
+
+    Empty-batch short-circuit runs BEFORE the registry check (empty batch is
+    a no-op regardless of table registration), but a partial batch on an
+    unregistered pair MUST still fail. The partial-none check fires next.
+    """
+    cursor = _FakeCursor(row=None)
+    with pytest.raises(CompressedChunkGuardError):
+        check_batch_targets_uncompressed(
+            cursor,
+            hypertable_schema="ops",
+            hypertable_name="scratch",
+            valid_time_min=_t(0),
+            valid_time_max=None,
+        )
+
+
+# ---------------------------------------------------------------------------
+# D3 — SQL predicate assertion (belt-and-suspenders drift guard)
+# ---------------------------------------------------------------------------
+
+
+def test_query_asserts_is_compressed_true_predicate() -> None:
+    """The catalog query MUST filter on ``is_compressed = true``.
+
+    A future refactor that drops the predicate would silently make the guard
+    block on uncompressed chunks too — the whole point of the guard is to
+    let uncompressed writes pass. Substring assertion on the constant is a
+    cheap drift guard.
+    """
+    assert "is_compressed = true" in _COMPRESSED_CHUNK_QUERY
+    # And the boundary-critical predicate for range_start (inclusive):
+    assert "range_start <= %s" in _COMPRESSED_CHUNK_QUERY
+    assert "range_end > %s" in _COMPRESSED_CHUNK_QUERY
+
+
+# ---------------------------------------------------------------------------
+# F1 — SET LOCAL DEFAULT reset fires in ``finally:`` even on SELECT failure
+# ---------------------------------------------------------------------------
+
+
+def test_set_local_default_resets_even_when_select_raises() -> None:
+    """When the catalog SELECT raises, the ``DEFAULT`` reset MUST still fire.
+
+    Verifies F1: the finally block restores the session default so the
+    caller's subsequent DELETE + INSERT are not clipped by the guard's 5s
+    cap. The DEFAULT reset is best-effort (may itself raise if the txn is
+    aborted); we assert it was attempted at all.
+    """
+    cursor = _FakeCursor(raise_on_query=_FakeOperationalError("boom"))
+    with pytest.raises(CompressedChunkGuardError):
+        check_batch_targets_uncompressed(
+            cursor,
+            hypertable_schema="hydro",
+            hypertable_name="river_timeseries",
+            valid_time_min=_t(0),
+            valid_time_max=_t(1),
+        )
+    default_reset = [
+        stmt for stmt, _ in cursor.executed if "DEFAULT" in stmt and stmt.startswith("SET LOCAL")
+    ]
+    assert len(default_reset) == 1, "SET LOCAL statement_timeout = DEFAULT MUST fire in finally"
+
+
+# ---------------------------------------------------------------------------
+# F2 — Empty-batch AND semantics (partial-None refuses)
+# ---------------------------------------------------------------------------
+
+
+def test_partial_none_range_refuses() -> None:
+    """A partial ``(min=None, max=<t>)`` or ``(min=<t>, max=None)`` MUST refuse.
+
+    F2 tightens the empty-batch short-circuit from ``or`` to ``and`` — only
+    fully unset windows (both endpoints ``None``, produced naturally by
+    ``min(...., default=None)`` on an empty batch) short-circuit; a partial
+    ``None`` is a caller bug and fails closed.
+    """
+    for pair in ((None, _t(1)), (_t(0), None)):
+        cursor = _FakeCursor(row=None)
+        with pytest.raises(CompressedChunkGuardError) as exc_info:
+            check_batch_targets_uncompressed(
+                cursor,
+                hypertable_schema="hydro",
+                hypertable_name="river_timeseries",
+                valid_time_min=pair[0],
+                valid_time_max=pair[1],
+            )
+        assert "partial batch range" in str(exc_info.value)
+        # Cursor never touched — partial-none check fires before any SQL.
+        assert cursor.executed == []

@@ -6,6 +6,7 @@ import sys
 from typing import Sequence
 
 from packages.common.manifest_index import ManifestValidationError, load_manifest_entry, resolve_task_id
+from packages.common.timescale_write_guard import CompressedChunkGuardError
 
 from .parser import OutputParser, OutputParsingError
 
@@ -53,6 +54,9 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         except (ManifestValidationError, OutputParsingError) as error:
             click.echo(f"{error.error_code}: {error.message}", err=True)
             raise SystemExit(1) from error
+        except CompressedChunkGuardError as error:
+            click.echo(f"OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED: {error}", err=True)
+            raise SystemExit(1) from error
 
     @cli.command("parse")
     @click.option("--run-id")
@@ -63,6 +67,9 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             click.echo(json.dumps(_parse(_resolve_run_id(run_id, manifest_index, task_id)), sort_keys=True))
         except (ManifestValidationError, OutputParsingError) as error:
             click.echo(f"{error.error_code}: {error.message}", err=True)
+            raise SystemExit(1) from error
+        except CompressedChunkGuardError as error:
+            click.echo(f"OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED: {error}", err=True)
             raise SystemExit(1) from error
 
     cli.main(args=list(argv) if argv is not None else None, standalone_mode=True)
@@ -88,12 +95,18 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
         except (ManifestValidationError, OutputParsingError) as error:
             print(f"{error.error_code}: {error.message}", file=sys.stderr)
             return 1
+        except CompressedChunkGuardError as error:
+            print(f"OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED: {error}", file=sys.stderr)
+            return 1
         return 0
     if args.command == "parse":
         try:
             print(json.dumps(_parse(_resolve_run_id(args.run_id, args.manifest_index, args.task_id)), sort_keys=True))
         except (ManifestValidationError, OutputParsingError) as error:
             print(f"{error.error_code}: {error.message}", file=sys.stderr)
+            return 1
+        except CompressedChunkGuardError as error:
+            print(f"OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED: {error}", file=sys.stderr)
             return 1
         return 0
     parser.error(f"Unsupported command: {args.command}")
