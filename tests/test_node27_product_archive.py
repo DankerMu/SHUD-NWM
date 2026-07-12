@@ -400,6 +400,71 @@ def test_dry_run_is_bounded_and_does_not_mutate_products(tmp_path: Path) -> None
     assert list(config.archive_root.iterdir()) == []
 
 
+def test_validation_bound_limits_full_tree_scans_and_defers_without_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, enforce=False, bound=1)
+    _forcing(config, "2026010100")
+    _forcing(config, "2026010200")
+    original = archive._validate_candidate_locator
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(archive, "_validate_candidate_locator", counted)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 0
+    assert receipt["validation_attempts"] == 1
+    assert calls == 1
+    assert receipt["selected"][0]["validation_state"] == "validated"
+    assert receipt["deferred"][0]["validation_state"] == "pending-validation"
+    assert "source_bytes" not in receipt["deferred"][0]
+
+
+def test_failed_earliest_validation_consumes_bound_and_leaves_next_pending(tmp_path: Path) -> None:
+    config = _config(tmp_path, enforce=False, bound=1)
+    earliest = _forcing(config, "2026010100")
+    _forcing(config, "2026010200")
+    (earliest / "payload.csv").unlink()
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 1
+    assert receipt["validation_attempts"] == 1
+    assert receipt["selected"] == []
+    assert len(receipt["deferred"]) == 1
+    assert receipt["deferred"][0]["identity"]["cycle_identity"] == "2026010200"
+    assert receipt["discovery_failures"][0]["locator"].endswith("2026010100/basin-a/model-a")
+
+
+def test_bounded_validation_receipt_order_is_repeatable(tmp_path: Path) -> None:
+    config = _config(tmp_path, enforce=False, bound=1)
+    _forcing(config, "2026010200")
+    _forcing(config, "2026010100")
+    kwargs = {
+        "now": datetime(2026, 7, 11, tzinfo=UTC),
+        "mount_id_provider": _mount_id,
+        "rename_impl": _rename_noreplace,
+    }
+    first, first_code = archive.run(config, **kwargs)
+    second, second_code = archive.run(config, **kwargs)
+    assert first_code == second_code == 0
+    assert first["candidates"] == second["candidates"]
+    assert first["selected"] == second["selected"]
+    assert first["deferred"] == second["deferred"]
+
+
 def test_cutoff_equality_is_not_eligible(tmp_path: Path) -> None:
     config = _config(tmp_path, enforce=False)
     _forcing(config, "2026052700")
@@ -1271,7 +1336,10 @@ def test_oversized_local_pax_extension_is_rejected_before_body_read() -> None:
     assert stream.bytes_read == 512
 
 
-@pytest.mark.parametrize("extension", [tarfile.XGLTYPE, tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK])
+@pytest.mark.parametrize(
+    "extension",
+    [tarfile.XGLTYPE, tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK, tarfile.GNUTYPE_SPARSE],
+)
 def test_unsupported_tar_extensions_are_rejected_before_body_read(extension: bytes) -> None:
     info = tarfile.TarInfo("extension")
     info.type = extension
@@ -1282,11 +1350,13 @@ def test_unsupported_tar_extensions_are_rejected_before_body_read(extension: byt
         def kill(self) -> None:
             pass
 
+    stream = io.BytesIO(header + b"test")
     guarded = archive._TarHeaderGuardReader(
-        archive._LimitedReader(io.BytesIO(header + b"test"), len(header) + 4, Process())
+        archive._LimitedReader(stream, len(header) + 4, Process())
     )
     with pytest.raises(archive.ArchiveMoverError, match="unsupported extension"):
         guarded.read(10_240)
+    assert stream.tell() == 512
 
 
 def test_many_small_local_pax_headers_fail_typed_without_recursion() -> None:
@@ -1724,6 +1794,111 @@ def test_successful_retirement_leaves_no_durable_guard_leaf(tmp_path: Path) -> N
     assert list(guard_parent.iterdir()) == []
 
 
+def test_durable_guard_mount_evidence_change_blocks_source_deletion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    source = _forcing(config)
+    changed = False
+    original = archive._install_durable_archive_guard
+
+    def provider(fd: int) -> int:
+        return os.fstat(fd).st_dev + int(changed)
+
+    def install_then_change(*args, **kwargs):
+        nonlocal changed
+        guard = original(*args, **kwargs)
+        changed = True
+        return guard
+
+    monkeypatch.setattr(archive, "_install_durable_archive_guard", install_then_change)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=provider,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 1
+    assert receipt["terminals"][0]["status"] == "indeterminate"
+    assert source.exists()
+    assert any(path.startswith(".archive-guards/") for path in receipt["terminals"][0]["residue"])
+
+
+def test_durable_guard_child_mount_evidence_change_blocks_source_deletion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    source = _forcing(config)
+    changed = False
+    original = archive._install_durable_archive_guard
+
+    def provider(fd: int) -> int:
+        info = os.fstat(fd)
+        child_drift = changed and stat.S_ISREG(info.st_mode)
+        return info.st_dev + int(child_drift)
+
+    def install_then_change(*args, **kwargs):
+        nonlocal changed
+        guard = original(*args, **kwargs)
+        changed = True
+        return guard
+
+    monkeypatch.setattr(archive, "_install_durable_archive_guard", install_then_change)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=provider,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 1
+    terminal = receipt["terminals"][0]
+    assert terminal["status"] == "indeterminate"
+    assert source.exists()
+    assert any(path.startswith(".archive-guards/") for path in terminal["residue"])
+
+
+@pytest.mark.parametrize("boundary", ["canonical-pair", "second-allowlist"])
+def test_early_post_tombstone_failures_report_actual_tombstone_and_guard_residue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    source = _forcing(config)
+    if boundary == "canonical-pair":
+        original_match = archive._canonical_pair_matches
+        calls = 0
+
+        def fail_second(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return False if calls == 2 else original_match(*args, **kwargs)
+
+        monkeypatch.setattr(archive, "_canonical_pair_matches", fail_second)
+    else:
+        original_allowlist = archive._validate_tombstone_allowlist
+        calls = 0
+
+        def fail_second(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise archive.ArchiveMoverError("second allowlist injected failure", kind="conflict")
+            return original_allowlist(*args, **kwargs)
+
+        monkeypatch.setattr(archive, "_validate_tombstone_allowlist", fail_second)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 1
+    terminal = receipt["terminals"][0]
+    assert terminal["status"] == "indeterminate"
+    assert not source.exists()
+    assert any(".archive-delete-" in path for path in terminal["residue"])
+    assert any(path.startswith(".archive-guards/") for path in terminal["residue"])
+
+
 @pytest.mark.parametrize(
     "fault", ["root-rename", "parent-fsync", "claim-fsync", "root-rmdir", "claim-cleanup"]
 )
@@ -1888,17 +2063,17 @@ def test_global_discovery_cap_failure_defers_known_candidates_without_mutation(
 ) -> None:
     config = _config(tmp_path, enforce=True)
     source = _forcing(config)
-    candidates, failures = archive.discover_candidates(
+    locators, failures = archive.discover_candidate_locators(
         config,
         now=datetime(2026, 7, 11, tzinfo=UTC),
         mount_id_provider=_mount_id,
     )
-    assert len(candidates) == 1 and failures == []
+    assert len(locators) == 1 and failures == []
     monkeypatch.setattr(
         archive,
-        "discover_candidates",
+        "discover_candidate_locators",
         lambda *_args, **_kwargs: (
-            candidates,
+            locators,
             [archive.DiscoveryFailure("forcing", "forcing", "discovery exceeds 100000 candidates/failures")],
         ),
     )
@@ -2033,6 +2208,7 @@ def test_receipt_schema_positive_and_negative() -> None:
         lambda value: value["candidates"][0]["identity"].update({"cycle_time": "2026-99-99T00:00:00Z"}),
         lambda value: value["terminals"][0].update({"reason": ""}),
         lambda value: value["events"][0].update({"detail": ""}),
+        lambda value: value["deferred"][0].update({"source_bytes": 99}),
     ],
 )
 def test_receipt_schema_rejects_legacy_arrays_negative_bytes_and_unsafe_locator(mutate) -> None:
@@ -2057,6 +2233,8 @@ def test_receipt_semantic_partition_and_terminal_bijection() -> None:
         "source_path": "runs/r",
         "archive_path": "runs/gfs/2026010100/r/archive.tar.zst",
         "source_bytes": 1,
+        "eligibility_end": "2026-01-01T00:00:00Z",
+        "validation_state": "validated",
     }
     example["candidates"] = [candidate]
     with pytest.raises(archive.ArchiveMoverError, match="partition"):
@@ -2258,6 +2436,8 @@ def test_receipt_semantics_bind_exact_source_and_unique_failure_locator() -> Non
         "source_path": "runs/not-r",
         "archive_path": "runs/gfs/2026010100/r/archive.tar.zst",
         "source_bytes": 1,
+        "eligibility_end": "2026-01-01T00:00:00Z",
+        "validation_state": "validated",
     }
     example.update(
         {

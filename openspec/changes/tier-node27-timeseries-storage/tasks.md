@@ -607,6 +607,8 @@ Order is load-bearing:
   A same-mount mover-owned retirement guard durably references the exact
   verified tar+manifest inodes across every destructive source step. Canonical
   pair drift preserves that guard as truthful residue and is indeterminate.
+  Each destructive canonical-pair check re-proves the pinned archive root,
+  leaf and child device + Linux mount ID in addition to inode signatures.
   The same bounded tar pass parses the embedded producer manifest and binds its
   identity/window/model/basin/subject/object URIs/checksums to the outer
   identity and configured object-store prefix.
@@ -665,9 +667,12 @@ Order is load-bearing:
   selected identity, ordered side events, disjoint discovery failures, byte
   totals and stable identities/paths/reasons. Legacy skipped/quarantined
   action arrays are not alternate terminal representations.
-  Runtime set invariants apply only to valid eligible canonical identities:
-  candidates = selected ∪ deferred with no duplicates/omissions. Every
-  selected identity has exactly one terminal outcome (`planned`, `archived`,
+  Runtime set invariants distinguish validated work from the lightweight queue:
+  candidates = selected(validated) ∪ deferred(`pending-validation`) with no
+  duplicates/omissions. Selected entries have exact non-negative source bytes;
+  deferred entries do not claim source bytes or manifest completeness. Full
+  validation attempts (successes plus validation failures) never exceed the
+  tick bound. Every selected identity has exactly one terminal outcome (`planned`, `archived`,
   `retired-from-existing`, `failed`, or `indeterminate`) plus zero or more
   ordered side events such as `quarantined`; discovery failures remain a
   disjoint locator-keyed collection. Bytes are non-negative, ordering is
@@ -700,7 +705,10 @@ Order is load-bearing:
     Expected: first remains hot; only second is eligible. Missing/inverted
     windows fail discovery; state eligibility remains valid-time point.
   - Input: more candidates than the per-tick bound.
-    Expected: bound respected; deferred remainder listed in the receipt.
+    Expected: lightweight eligible order is stable; no more than the bound are
+    fully scanned/hashed. Successful validations are selected, validation
+    failures consume attempts and remain locator failures, and the untouched
+    remainder is `pending-validation` deferred without fabricated source bytes.
   - Input: one forcing source cycle with two basin/model leaves, one valid and
     one malformed/unreadable.
     Expected: only the verified leaf can publish/retire; the shared cycle root
@@ -760,6 +768,10 @@ Order is load-bearing:
     before its removal.
     Expected: atomic child claim observes the replacement inode, preserves it
     as residue and never removes data outside the allowlist.
+  - Input: source has been renamed to a tombstone, then canonical-pair or second
+    allowlist validation fails before the first child claim.
+    Expected: terminal residue contains every actual surviving tombstone,
+    claim and durable-guard path; no obsolete source locator is substituted.
   - Input: verified final pair plus identical source, and verified final pair
     plus drifted source.
     Expected: identical is recorded idempotent without duplicate and may
@@ -798,8 +810,8 @@ Order is load-bearing:
     Expected: operational/indeterminate; canonical final and source remain and
     no quarantine event is emitted.
   - Input: tar begins with an unexpected member, declared-size mismatch or
-    more members than manifest/tree cap; or with oversized/global PAX or GNU
-    longname/longlink metadata.
+    more members than manifest/tree cap; or with oversized/global PAX, GNU
+    longname/longlink, GNU sparse or any non-POSIX-regular representation.
     Expected: reject at the offending header before streaming its body;
     member-count, size, extension metadata, cumulative payload and depth caps
     are fail-fast while bounded writer-generated local PAX still round-trips.

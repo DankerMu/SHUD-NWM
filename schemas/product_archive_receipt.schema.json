@@ -3,7 +3,7 @@
   "title": "NHMS Product Archive Mover Receipt",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "generated_at", "mode", "cutoff", "minimum_age_days", "per_tick_bound", "outcome", "candidates", "selected", "deferred", "terminals", "events", "discovery_failures", "bytes"],
+  "required": ["schema_version", "generated_at", "mode", "cutoff", "minimum_age_days", "per_tick_bound", "validation_attempts", "outcome", "candidates", "selected", "deferred", "terminals", "events", "discovery_failures", "bytes"],
   "properties": {
     "schema_version": {"const": "1.0"},
     "generated_at": {"type": "string", "format": "date-time"},
@@ -11,6 +11,7 @@
     "cutoff": {"type": "string", "format": "date-time"},
     "minimum_age_days": {"type": "integer", "minimum": 30},
     "per_tick_bound": {"type": "integer", "minimum": 1, "maximum": 100000},
+    "validation_attempts": {"type": "integer", "minimum": 0, "maximum": 100000},
     "outcome": {"enum": ["success", "failed", "indeterminate"]},
     "candidates": {"type": "array", "maxItems": 100000, "items": {"$ref": "#/definitions/candidate"}, "uniqueItems": true},
     "selected": {"type": "array", "maxItems": 100000, "items": {"$ref": "#/definitions/candidate"}, "uniqueItems": true},
@@ -36,8 +37,12 @@
     },
     "candidate": {
       "type": "object", "additionalProperties": false,
-      "required": ["identity", "source_path", "archive_path", "source_bytes", "eligibility_end"],
-      "properties": {"identity": {"$ref": "#/definitions/identity"}, "source_path": {"allOf": [{"$ref": "#/definitions/safe_relative_path"}, {"pattern": "^(?:forcing|runs|states)/"}]}, "archive_path": {"allOf": [{"$ref": "#/definitions/safe_relative_path"}, {"pattern": "^(?:forcing|runs|states)/.+/archive\\.tar\\.zst$"}]}, "source_bytes": {"type": "integer", "minimum": 0}, "eligibility_end": {"type": "string", "format": "date-time"}}
+      "required": ["identity", "source_path", "archive_path", "eligibility_end", "validation_state"],
+      "properties": {"identity": {"$ref": "#/definitions/identity"}, "source_path": {"allOf": [{"$ref": "#/definitions/safe_relative_path"}, {"pattern": "^(?:forcing|runs|states)/"}]}, "archive_path": {"allOf": [{"$ref": "#/definitions/safe_relative_path"}, {"pattern": "^(?:forcing|runs|states)/.+/archive\\.tar\\.zst$"}]}, "source_bytes": {"type": "integer", "minimum": 0}, "eligibility_end": {"type": "string", "format": "date-time"}, "validation_state": {"enum": ["validated", "pending-validation"]}},
+      "allOf": [
+        {"if": {"properties": {"validation_state": {"const": "validated"}}}, "then": {"required": ["source_bytes"]}},
+        {"if": {"properties": {"validation_state": {"const": "pending-validation"}}}, "then": {"not": {"required": ["source_bytes"]}}}
+      ]
     },
     "terminal": {
       "type": "object", "additionalProperties": false,

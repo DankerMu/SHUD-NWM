@@ -178,6 +178,32 @@ class Candidate:
             "archive_path": archive_path.relative_to(archive_root).as_posix(),
             "source_bytes": self.source_bytes,
             "eligibility_end": _time(self.eligibility_end),
+            "validation_state": "validated",
+        }
+
+
+@dataclass(frozen=True)
+class CandidateLocator:
+    """Bounded manifest-derived identity awaiting full tree validation."""
+
+    identity: ArchiveIdentity
+    source_path: Path
+    source_relative: str
+    manifest_relative: str | None
+    eligibility_end: datetime
+
+    @property
+    def sort_key(self) -> tuple[str, str, str]:
+        return self.identity.cycle_time, self.identity.lane, _identity_key(self.identity)
+
+    def receipt_value(self, archive_root: Path) -> dict[str, Any]:
+        archive_path = archive_provenance_paths(archive_root, identity=self.identity).archive
+        return {
+            "identity": _identity_dict(self.identity),
+            "source_path": self.source_relative,
+            "archive_path": archive_path.relative_to(archive_root).as_posix(),
+            "eligibility_end": _time(self.eligibility_end),
+            "validation_state": "pending-validation",
         }
 
 
@@ -211,6 +237,11 @@ class DurableArchiveGuard:
     canonical_leaf: Path
     archive_signature: tuple[int, int, int, int, int]
     manifest_signature: tuple[int, int, int, int, int]
+    archive_root_signature: tuple[int, int, int]
+    canonical_leaf_signature: tuple[int, int, int]
+    guard_leaf_signature: tuple[int, int, int]
+    archive_device: int
+    archive_mount_id: int
 
 
 MountIdProvider = Callable[[int], int]
@@ -834,15 +865,15 @@ def _state_identity(parts: Sequence[str]) -> tuple[ArchiveIdentity, datetime]:
     return ArchiveIdentity("states", source, cycle, time.strftime("%Y-%m-%dT%H:00:00Z"), model_id=model), time
 
 
-def discover_candidates(
+def discover_candidate_locators(
     config: MoverConfig, *, now: datetime, mount_id_provider: MountIdProvider = fd_mount_id
-) -> tuple[list[Candidate], list[DiscoveryFailure]]:
-    """Discover lane-specific physical leaves; malformed leaves remain locator failures."""
+) -> tuple[list[CandidateLocator], list[DiscoveryFailure]]:
+    """Discover and order eligible identities without scanning product payload trees."""
     root = verify_directory_no_follow(config.object_store_root)
     root_fd = open_directory_no_follow(root)
     root_stat = os.fstat(root_fd)
     root_mount = mount_id_provider(root_fd)
-    candidates: list[Candidate] = []
+    candidates: list[CandidateLocator] = []
     failures: list[DiscoveryFailure] = []
     observed = 0
     cutoff = now - timedelta(days=config.minimum_age_days)
@@ -871,11 +902,10 @@ def discover_candidates(
                 if opened.st_dev != root_stat.st_dev or mount_id_provider(leaf_fd) != root_mount:
                     raise ArchiveMoverError(f"cross-device/mount candidate rejected: {relative}")
                 manifest: dict[str, Any] | None = None
-                manifest_record: FileRecord | None = None
                 if manifest_rel is None:
                     identity, eligibility_end = _state_identity(relative.split("/"))
                 else:
-                    manifest, manifest_record = _read_json_relative_fd(
+                    manifest, _manifest_record = _read_json_relative_fd(
                         leaf_fd,
                         manifest_rel,
                         label=f"{relative}/{manifest_rel}",
@@ -899,45 +929,13 @@ def discover_candidates(
                     raise ArchiveMoverError(f"candidate archive identity is unsafe: {error}") from error
                 if eligibility_end >= cutoff:
                     return
-                files, directories = scan_tree_snapshot(
-                    leaf_fd, mount_id=root_mount, mount_id_provider=mount_id_provider
-                )
-                if manifest_rel is not None:
-                    assert manifest is not None and manifest_record is not None
-                    scanned_manifest = next((item for item in files if item.path == manifest_rel), None)
-                    if scanned_manifest != manifest_record:
-                        raise ArchiveMoverError(
-                            f"manifest changed between identity read and tree snapshot: {relative}/{manifest_rel}"
-                        )
-                    producer = (
-                        _forcing_provenance(
-                            manifest,
-                            source_relative=relative,
-                            files=files,
-                            manifest_record=manifest_record,
-                            object_store_prefix=config.object_store_prefix,
-                            source_fd=leaf_fd,
-                            source_mount_id=root_mount,
-                            mount_id_provider=mount_id_provider,
-                            source_device=root_stat.st_dev,
-                        )
-                        if lane == "forcing"
-                        else _run_provenance(manifest, files=files, manifest_record=manifest_record)
-                    )
-                else:
-                    producer = None
                 candidates.append(
-                    Candidate(
+                    CandidateLocator(
                         identity,
                         leaf,
                         relative,
-                        sum(item.size_bytes for item in files),
-                        files,
-                        directories,
-                        (opened.st_dev, opened.st_ino, opened.st_mtime_ns),
-                        root_mount,
+                        manifest_rel,
                         eligibility_end,
-                        producer,
                     )
                 )
             finally:
@@ -1010,6 +1008,110 @@ def discover_candidates(
     finally:
         os.close(root_fd)
     candidates.sort(key=lambda value: value.sort_key)
+    failures.sort(key=lambda value: (value.lane_hint, value.locator, value.reason))
+    return candidates, failures
+
+
+def _validate_candidate_locator(
+    locator: CandidateLocator,
+    config: MoverConfig,
+    *,
+    mount_id_provider: MountIdProvider,
+) -> Candidate:
+    """Perform the expensive full-tree snapshot for one already-ordered locator."""
+    root_fd = open_directory_no_follow(config.object_store_root)
+    try:
+        root_stat = os.fstat(root_fd)
+        root_mount = mount_id_provider(root_fd)
+    finally:
+        os.close(root_fd)
+    leaf_fd = open_directory_no_follow(locator.source_path, containment_root=config.object_store_root)
+    try:
+        opened = os.fstat(leaf_fd)
+        if opened.st_dev != root_stat.st_dev or mount_id_provider(leaf_fd) != root_mount:
+            raise ArchiveMoverError(f"cross-device/mount candidate rejected: {locator.source_relative}")
+        manifest: dict[str, Any] | None = None
+        manifest_record: FileRecord | None = None
+        if locator.manifest_relative is not None:
+            manifest, manifest_record = _read_json_relative_fd(
+                leaf_fd,
+                locator.manifest_relative,
+                label=f"{locator.source_relative}/{locator.manifest_relative}",
+                mount_id=root_mount,
+                mount_id_provider=mount_id_provider,
+            )
+            current_identity, current_end = (
+                _forcing_identity(manifest, locator.source_relative.split("/"))
+                if locator.identity.lane == "forcing"
+                else _run_identity(manifest, locator.source_relative.split("/")[-1], config.object_store_prefix)
+            )
+            if locator.identity.lane == "forcing":
+                _validate_forcing_declaration_shape(
+                    manifest,
+                    source_relative=locator.source_relative,
+                    object_store_prefix=config.object_store_prefix,
+                )
+        else:
+            current_identity, current_end = _state_identity(locator.source_relative.split("/"))
+        if current_identity != locator.identity or current_end != locator.eligibility_end:
+            raise ArchiveMoverError("candidate identity/window changed during bounded validation")
+        files, directories = scan_tree_snapshot(
+            leaf_fd, mount_id=root_mount, mount_id_provider=mount_id_provider
+        )
+        if locator.manifest_relative is not None:
+            assert manifest is not None and manifest_record is not None
+            scanned_manifest = next((item for item in files if item.path == locator.manifest_relative), None)
+            if scanned_manifest != manifest_record:
+                raise ArchiveMoverError(
+                    "manifest changed between identity read and tree snapshot: "
+                    f"{locator.source_relative}/{locator.manifest_relative}"
+                )
+            producer = (
+                _forcing_provenance(
+                    manifest,
+                    source_relative=locator.source_relative,
+                    files=files,
+                    manifest_record=manifest_record,
+                    object_store_prefix=config.object_store_prefix,
+                    source_fd=leaf_fd,
+                    source_mount_id=root_mount,
+                    mount_id_provider=mount_id_provider,
+                    source_device=root_stat.st_dev,
+                )
+                if locator.identity.lane == "forcing"
+                else _run_provenance(manifest, files=files, manifest_record=manifest_record)
+            )
+        else:
+            producer = None
+        return Candidate(
+            locator.identity,
+            locator.source_path,
+            locator.source_relative,
+            sum(item.size_bytes for item in files),
+            files,
+            directories,
+            (opened.st_dev, opened.st_ino, opened.st_mtime_ns),
+            root_mount,
+            locator.eligibility_end,
+            producer,
+        )
+    finally:
+        os.close(leaf_fd)
+
+
+def discover_candidates(
+    config: MoverConfig, *, now: datetime, mount_id_provider: MountIdProvider = fd_mount_id
+) -> tuple[list[Candidate], list[DiscoveryFailure]]:
+    """Compatibility helper that fully validates every discovered locator."""
+    locators, failures = discover_candidate_locators(config, now=now, mount_id_provider=mount_id_provider)
+    candidates: list[Candidate] = []
+    for locator in locators:
+        try:
+            candidates.append(
+                _validate_candidate_locator(locator, config, mount_id_provider=mount_id_provider)
+            )
+        except Exception as error:
+            failures.append(DiscoveryFailure(locator.identity.lane, locator.source_relative, str(error)))
     failures.sort(key=lambda value: (value.lane_hint, value.locator, value.reason))
     return candidates, failures
 
@@ -1738,8 +1840,11 @@ class _TarHeaderGuardReader(io.RawIOBase):
             declared_size = int(size_field.rstrip(b"\0 ") or b"0", 8)
         except ValueError as error:
             raise ArchiveMoverError("tar header has invalid size encoding") from error
-        if typeflag in {b"g", b"X", b"L", b"K"}:
-            raise ArchiveMoverError(f"tar uses unsupported extension type: {typeflag.decode('ascii')}")
+        if typeflag not in {b"0", b"\0", b"x"}:
+            rendered = typeflag.hex() if typeflag else "empty"
+            raise ArchiveMoverError(
+                f"tar unsafe/duplicate/non-regular unsupported extension/member typeflag: {rendered}"
+            )
         if typeflag == b"x":
             if self.previous_was_local_pax:
                 raise ArchiveMoverError("tar contains consecutive local PAX headers")
@@ -2312,6 +2417,33 @@ def _pair_signatures(leaf_fd: int) -> tuple[tuple[int, int, int, int, int], tupl
     return values[0], values[1]
 
 
+def _guard_pair_signatures(
+    leaf_fd: int,
+    *,
+    archive_device: int,
+    archive_mount_id: int,
+    provider: MountIdProvider,
+) -> tuple[tuple[int, int, int, int, int], tuple[int, int, int, int, int]]:
+    """Prove both guarded children remain regular files on the pinned mount."""
+    values: list[tuple[int, int, int, int, int]] = []
+    for name in ("archive.tar.zst", "manifest.json"):
+        fd = os.open(name, _READ_FLAGS, dir_fd=leaf_fd)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise ArchiveMoverError(f"archive guard source is not regular: {name}")
+            if info.st_dev != archive_device or provider(fd) != archive_mount_id:
+                raise ArchiveOperationalError(f"archive guard child crossed pinned device/mount: {name}")
+            values.append(_stat_signature(info))
+        finally:
+            os.close(fd)
+    return values[0], values[1]
+
+
+def _directory_identity_signature(value: os.stat_result) -> tuple[int, int, int]:
+    return value.st_dev, value.st_ino, value.st_mode
+
+
 def _install_durable_archive_guard(
     config: MoverConfig,
     archive_guard: tuple[int, Path, Path],
@@ -2319,7 +2451,22 @@ def _install_durable_archive_guard(
 ) -> DurableArchiveGuard:
     leaf_fd, final_leaf, archive_root = archive_guard
     _verify_open_directory_entry(leaf_fd, final_leaf, archive_root)
-    expected_archive, expected_manifest = _pair_signatures(leaf_fd)
+    archive_root_fd = open_directory_no_follow(archive_root)
+    try:
+        archive_root_info = os.fstat(archive_root_fd)
+        archive_device = archive_root_info.st_dev
+        archive_mount_id = provider(archive_root_fd)
+    finally:
+        os.close(archive_root_fd)
+    leaf_info = os.fstat(leaf_fd)
+    if leaf_info.st_dev != archive_device or provider(leaf_fd) != archive_mount_id:
+        raise ArchiveMoverError("canonical archive leaf crossed pinned device/mount")
+    expected_archive, expected_manifest = _guard_pair_signatures(
+        leaf_fd,
+        archive_device=archive_device,
+        archive_mount_id=archive_mount_id,
+        provider=provider,
+    )
     parent = ensure_directory_no_follow(archive_root / ".archive-guards", containment_root=archive_root)
     _fsync_directory_chain(parent, archive_root)
     guard_path = parent / uuid.uuid4().hex
@@ -2332,11 +2479,24 @@ def _install_durable_archive_guard(
         finally:
             os.close(parent_fd)
         guard_fd = open_directory_no_follow(guard_path, containment_root=archive_root)
+        guard_info = os.fstat(guard_fd)
+        if guard_info.st_dev != archive_device or provider(guard_fd) != archive_mount_id:
+            raise ArchiveMoverError("durable archive guard crossed pinned device/mount")
         for name in ("archive.tar.zst", "manifest.json"):
             os.link(name, name, src_dir_fd=leaf_fd, dst_dir_fd=guard_fd, follow_symlinks=False)
         os.fsync(guard_fd)
-        current_archive, current_manifest = _pair_signatures(leaf_fd)
-        guard_archive, guard_manifest = _pair_signatures(guard_fd)
+        current_archive, current_manifest = _guard_pair_signatures(
+            leaf_fd,
+            archive_device=archive_device,
+            archive_mount_id=archive_mount_id,
+            provider=provider,
+        )
+        guard_archive, guard_manifest = _guard_pair_signatures(
+            guard_fd,
+            archive_device=archive_device,
+            archive_mount_id=archive_mount_id,
+            provider=provider,
+        )
         if (
             current_archive != expected_archive
             or current_manifest != expected_manifest
@@ -2352,14 +2512,31 @@ def _install_durable_archive_guard(
             require_canonical_location=False,
             mount_id_provider=provider,
         )
-        if _pair_signatures(leaf_fd) != (expected_archive, expected_manifest):
+        if _guard_pair_signatures(
+            leaf_fd,
+            archive_device=archive_device,
+            archive_mount_id=archive_mount_id,
+            provider=provider,
+        ) != (expected_archive, expected_manifest):
             raise ArchiveMoverError("canonical archive pair drifted while installing durable guard")
+        archive_root_fd = open_directory_no_follow(archive_root)
+        try:
+            installed_root_signature = _directory_identity_signature(os.fstat(archive_root_fd))
+            if provider(archive_root_fd) != archive_mount_id:
+                raise ArchiveMoverError("archive root mount changed while installing durable guard")
+        finally:
+            os.close(archive_root_fd)
         return DurableArchiveGuard(
             guard_path,
             guard_fd,
             final_leaf,
             expected_archive,
             expected_manifest,
+            installed_root_signature,
+            _directory_identity_signature(os.fstat(leaf_fd)),
+            _directory_identity_signature(os.fstat(guard_fd)),
+            archive_device,
+            archive_mount_id,
         )
     except Exception as error:
         if guard_fd is not None:
@@ -2377,20 +2554,65 @@ def _install_durable_archive_guard(
         ) from error
 
 
-def _canonical_pair_matches(guard: DurableArchiveGuard, archive_root: Path) -> bool:
+def _canonical_pair_matches(
+    guard: DurableArchiveGuard,
+    archive_root: Path,
+    provider: MountIdProvider,
+) -> bool:
     try:
-        fd = open_directory_no_follow(guard.canonical_leaf, containment_root=archive_root)
+        root_fd = open_directory_no_follow(archive_root)
         try:
-            return _pair_signatures(fd) == (guard.archive_signature, guard.manifest_signature)
+            root_info = os.fstat(root_fd)
+            if (
+                _directory_identity_signature(root_info) != guard.archive_root_signature
+                or root_info.st_dev != guard.archive_device
+                or provider(root_fd) != guard.archive_mount_id
+            ):
+                return False
         finally:
-            os.close(fd)
+            os.close(root_fd)
+        leaf_fd = open_directory_no_follow(guard.canonical_leaf, containment_root=archive_root)
+        try:
+            leaf_info = os.fstat(leaf_fd)
+            if (
+                _directory_identity_signature(leaf_info) != guard.canonical_leaf_signature
+                or leaf_info.st_dev != guard.archive_device
+                or provider(leaf_fd) != guard.archive_mount_id
+            ):
+                return False
+            if _guard_pair_signatures(
+                leaf_fd,
+                archive_device=guard.archive_device,
+                archive_mount_id=guard.archive_mount_id,
+                provider=provider,
+            ) != (guard.archive_signature, guard.manifest_signature):
+                return False
+        finally:
+            os.close(leaf_fd)
+        guard_info = os.fstat(guard.fd)
+        return (
+            _directory_identity_signature(guard_info) == guard.guard_leaf_signature
+            and guard_info.st_dev == guard.archive_device
+            and provider(guard.fd) == guard.archive_mount_id
+            and _guard_pair_signatures(
+                guard.fd,
+                archive_device=guard.archive_device,
+                archive_mount_id=guard.archive_mount_id,
+                provider=provider,
+            )
+            == (guard.archive_signature, guard.manifest_signature)
+        )
     except (OSError, ArchiveMoverError):
         return False
 
 
-def _cleanup_durable_archive_guard(guard: DurableArchiveGuard, archive_root: Path) -> None:
+def _cleanup_durable_archive_guard(
+    guard: DurableArchiveGuard,
+    archive_root: Path,
+    provider: MountIdProvider,
+) -> None:
     relative = guard.path.relative_to(archive_root).as_posix()
-    if not _canonical_pair_matches(guard, archive_root):
+    if not _canonical_pair_matches(guard, archive_root, provider):
         raise ArchiveMoverError(
             "canonical archive pair drifted after durable guard installation",
             indeterminate=True,
@@ -2443,22 +2665,78 @@ def _retire_source(
             rename_impl,
             durable,
         )
-        _cleanup_durable_archive_guard(durable, config.archive_root)
+        _cleanup_durable_archive_guard(durable, config.archive_root, provider)
     except Exception as error:
+        observed = _discover_retirement_residue(candidate, config, durable)
         if isinstance(error, ArchiveMoverError):
             raise ArchiveMoverError(
                 str(error),
                 indeterminate=error.indeterminate or not candidate.source_path.exists(),
-                residue=tuple(dict.fromkeys((*error.residue, relative))),
+                residue=tuple(dict.fromkeys((*error.residue, *observed))),
                 kind=error.kind,
             ) from error
         raise ArchiveMoverError(
             f"source retirement failed while durable archive guard is held: {error}",
             indeterminate=True,
-            residue=(relative,),
+            residue=observed or (relative,),
         ) from error
     finally:
         os.close(durable.fd)
+
+
+def _discover_retirement_residue(
+    candidate: Candidate,
+    config: MoverConfig,
+    guard: DurableArchiveGuard,
+) -> tuple[str, ...]:
+    """Best-effort no-follow inventory of every mover-owned surviving namespace."""
+    residue: list[str] = []
+    guard_relative = guard.path.relative_to(config.archive_root).as_posix()
+    try:
+        if _lexists_no_follow(guard.path, config.archive_root):
+            residue.append(guard_relative)
+    except ArchiveMoverError:
+        residue.append(guard_relative)
+    parent = candidate.source_path.parent
+    try:
+        parent_fd = open_directory_no_follow(parent, containment_root=config.object_store_root)
+        try:
+            names = _safe_names(
+                parent_fd,
+                parent.relative_to(config.object_store_root).as_posix(),
+                remaining=MAX_TREE_ENTRIES,
+            )
+            for name in names:
+                if not (
+                    name.startswith(f".archive-delete-{candidate.source_path.name}-")
+                    or name.startswith(f".archive-claims-{candidate.source_path.name}-")
+                ):
+                    continue
+                relative = (parent / name).relative_to(config.object_store_root).as_posix()
+                residue.append(relative)
+                if name.startswith(f".archive-claims-{candidate.source_path.name}-"):
+                    try:
+                        claim_fd = _open_child_dir(
+                            parent_fd,
+                            name,
+                            relative,
+                            candidate.source_mount_id,
+                            lambda fd: candidate.source_mount_id,
+                            candidate.source_root_stat[0],
+                        )
+                    except ArchiveMoverError:
+                        continue
+                    try:
+                        for child in _safe_names(claim_fd, relative, remaining=MAX_TREE_ENTRIES):
+                            residue.append(f"{relative}/{child}")
+                    finally:
+                        os.close(claim_fd)
+        finally:
+            os.close(parent_fd)
+    except (OSError, ArchiveMoverError):
+        # The terminal remains indeterminate; retain all already-observed paths.
+        pass
+    return tuple(dict.fromkeys(residue))
 
 
 def _retire_source_destructive(
@@ -2472,7 +2750,7 @@ def _retire_source_destructive(
     durable_guard: DurableArchiveGuard,
 ) -> None:
     guard_relative = durable_guard.path.relative_to(config.archive_root).as_posix()
-    if not _canonical_pair_matches(durable_guard, config.archive_root):
+    if not _canonical_pair_matches(durable_guard, config.archive_root, provider):
         raise ArchiveMoverError(
             "canonical archive pair drifted before source tombstone",
             indeterminate=True,
@@ -2520,7 +2798,7 @@ def _retire_source_destructive(
         _event(len(events), identity, "tombstoned", tombstone_relative, "source leaf renamed to delete tombstone")
     )
     tomb_fd = open_directory_no_follow(tombstone, containment_root=config.object_store_root)
-    claim_root = tombstone.parent / f".archive-claims-{uuid.uuid4().hex}"
+    claim_root = tombstone.parent / f".archive-claims-{candidate.source_path.name}-{uuid.uuid4().hex}"
     claim_parent_fd = open_directory_no_follow(tombstone.parent, containment_root=config.object_store_root)
     try:
         os.mkdir(claim_root.name, 0o700, dir_fd=claim_parent_fd)
@@ -2533,7 +2811,6 @@ def _retire_source_destructive(
         ) from error
     claim_fd = open_directory_no_follow(claim_root, containment_root=config.object_store_root)
     claim_relative = claim_root.relative_to(config.object_store_root).as_posix()
-    removal_started = False
     root_claim_relative: str | None = None
     try:
         renamed = os.fstat(tomb_fd)
@@ -2559,7 +2836,7 @@ def _retire_source_destructive(
                 residue=(tombstone_relative,),
             )
         _validate_tombstone_allowlist(candidate, tomb_fd, provider)
-        if not _canonical_pair_matches(durable_guard, config.archive_root):
+        if not _canonical_pair_matches(durable_guard, config.archive_root, provider):
             raise ArchiveMoverError(
                 "canonical archive pair drifted before destructive child claims",
                 indeterminate=True,
@@ -2568,7 +2845,6 @@ def _retire_source_destructive(
         _validate_tombstone_allowlist(candidate, tomb_fd, provider)
         parent_fd = open_directory_no_follow(tombstone.parent, containment_root=config.object_store_root)
         try:
-            removal_started = True
             _remove_tree_contents_fd(
                 tomb_fd,
                 tombstone_relative,
@@ -2601,8 +2877,6 @@ def _retire_source_destructive(
         finally:
             os.close(parent_fd)
     except Exception as error:
-        if isinstance(error, ArchiveMoverError) and not removal_started:
-            raise
         if isinstance(error, ArchiveMoverError) and error.indeterminate:
             message = str(error)
         else:
@@ -2620,6 +2894,7 @@ def _retire_source_destructive(
             message,
             indeterminate=True,
             residue=tuple(dict.fromkeys(actual_residue)),
+            kind=error.kind if isinstance(error, ArchiveMoverError) else "safety",
         ) from error
     finally:
         os.close(tomb_fd)
@@ -2830,10 +3105,26 @@ def run(
 ) -> tuple[dict[str, Any], int]:
     now = (now or datetime.now(UTC)).astimezone(UTC)
     _validate_config(config)
-    candidates, failures = discover_candidates(config, now=now, mount_id_provider=mount_id_provider)
+    locators, failures = discover_candidate_locators(config, now=now, mount_id_provider=mount_id_provider)
     discovery_incomplete = any(failure.reason.startswith("discovery exceeds") for failure in failures)
-    selected = [] if discovery_incomplete else candidates[: config.per_tick_bound]
-    deferred = candidates if discovery_incomplete else candidates[config.per_tick_bound :]
+    selected: list[Candidate] = []
+    validation_attempts = 0
+    next_locator = 0
+    if not discovery_incomplete:
+        while next_locator < len(locators) and validation_attempts < config.per_tick_bound:
+            locator = locators[next_locator]
+            next_locator += 1
+            validation_attempts += 1
+            try:
+                selected.append(
+                    _validate_candidate_locator(locator, config, mount_id_provider=mount_id_provider)
+                )
+            except Exception as error:
+                failures.append(
+                    DiscoveryFailure(locator.identity.lane, locator.source_relative, str(error))
+                )
+    deferred_locators = locators if discovery_incomplete else locators[next_locator:]
+    failures.sort(key=lambda value: (value.lane_hint, value.locator, value.reason))
     terminals: list[dict[str, Any]] = []
     events: list[dict[str, Any]] = []
     for candidate in selected:
@@ -2854,9 +3145,11 @@ def run(
         "minimum_age_days": config.minimum_age_days,
         "per_tick_bound": config.per_tick_bound,
         "outcome": "indeterminate" if has_indeterminate else "failed" if has_failure else "success",
-        "candidates": [item.receipt_value(config.archive_root) for item in candidates],
+        "validation_attempts": validation_attempts,
+        "candidates": [item.receipt_value(config.archive_root) for item in selected]
+        + [item.receipt_value(config.archive_root) for item in deferred_locators],
         "selected": [item.receipt_value(config.archive_root) for item in selected],
-        "deferred": [item.receipt_value(config.archive_root) for item in deferred],
+        "deferred": [item.receipt_value(config.archive_root) for item in deferred_locators],
         "terminals": terminals,
         "events": events,
         "discovery_failures": [failure.value() for failure in failures],
@@ -2894,6 +3187,14 @@ def validate_receipt_semantics(receipt: Mapping[str, Any]) -> None:
         raise ArchiveMoverError("receipt selection must be the stable candidate prefix")
     if len(selected) > receipt["per_tick_bound"]:
         raise ArchiveMoverError("receipt selected set exceeds per-tick bound")
+    if not isinstance(receipt["validation_attempts"], int) or not (
+        len(selected) <= receipt["validation_attempts"] <= receipt["per_tick_bound"]
+    ):
+        raise ArchiveMoverError("receipt validation attempts disagree with bounded selection")
+    if any(item.get("validation_state") != "validated" for item in selected):
+        raise ArchiveMoverError("receipt selected entries must be fully validated")
+    if any(item.get("validation_state") != "pending-validation" for item in deferred):
+        raise ArchiveMoverError("receipt deferred entries must remain pending validation")
     sortable: list[tuple[str, str, str]] = []
     for item in candidates:
         try:
@@ -2916,6 +3217,11 @@ def validate_receipt_semantics(receipt: Mapping[str, Any]) -> None:
             expected_source = f"states/{identity.source}/{identity.model_id}/{identity.cycle_identity}"
         if item["source_path"] != expected_source:
             raise ArchiveMoverError("receipt candidate source path does not bind its identity")
+        if item["validation_state"] == "validated":
+            if not isinstance(item.get("source_bytes"), int):
+                raise ArchiveMoverError("validated receipt candidate must declare source bytes")
+        elif "source_bytes" in item:
+            raise ArchiveMoverError("pending-validation candidate must not fabricate source bytes")
         eligibility_end = _parse_hour_or_instant(item["eligibility_end"], label="candidate eligibility_end")
         if eligibility_end >= _parse_hour_or_instant(receipt["cutoff"], label="receipt cutoff"):
             raise ArchiveMoverError("receipt candidate is not strictly older than cutoff")

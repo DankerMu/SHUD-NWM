@@ -104,6 +104,9 @@ keys SHALL be rejected before their declared body is streamed.
 Raw header count, local-PAX count, consecutive-PAX structure and cumulative PAX
 bytes SHALL also have explicit bounds derived from the expected member count;
 Python recursion or the global tar-byte timeout is not a protocol boundary.
+Only POSIX regular-file typeflags (`0` or NUL) plus bounded local PAX (`x`)
+SHALL be accepted; GNU sparse and every other tar representation fail before
+body consumption.
 
 The verified tarball and manifest SHALL be published as one dirfd-bound,
 no-replace atomic leaf directory, followed by complete durability fsync and
@@ -140,6 +143,12 @@ The bounded tar stream SHALL capture and parse the unique producer-manifest
 member and bind its lane identity, source/cycle/window/model/basin/subject and
 object URIs/checksums to outer identity/provenance; outer self-consistency alone
 is insufficient.
+Every destructive canonical-pair predicate SHALL re-prove the pinned archive
+root, leaf and child device + Linux mount ID as well as inode signatures;
+unavailable or changed proof is operational/indeterminate. Once a source has
+been renamed to a tombstone, every later failure path SHALL discover and report
+the actual surviving tombstone/claim/guard locations even before the first
+child removal.
 
 Source/archive discovery, tar reads and retirement SHALL remain
 descriptor-bound with no-follow component opens, fixed-root-device checks and
@@ -219,9 +228,17 @@ discovery/mutation. One UTC now SHALL drive strict
 eligibility end is authoritative non-inverted manifest `end_time`, matching
 the inventory/DB/display hot window, while state uses valid-time point.
 Canonical archive identity/order remains cycle-time based and receipts also
-bind eligibility end. Candidate
-selection SHALL be deterministic and record all eligible work beyond the
-positive tick bound as deferred. Discovery and each tree SHALL have explicit
+bind eligibility end. Candidate selection SHALL be deterministic and
+two-phase. Bounded manifest/locator metadata first forms the ordered eligible
+queue; entries beyond the positive tick's full-validation-attempt bound are
+recorded as `pending-validation` deferred entries without claiming manifest
+completeness or source bytes. Each attempt performs full descriptor-bound
+tree/hash/provenance validation; validation failures consume an attempt,
+remain locator-keyed failures and do not enter selected. Only successfully
+validated attempts enter selected and may be processed. Thus candidates =
+validated selected + lightweight pending deferred, while expensive tree scans
+and hashes per tick never exceed the configured bound. Discovery and each tree
+SHALL have explicit
 candidate/entry/depth/manifest-size, per-file/source/tar/uncompressed-byte,
 compressor-timeout and stderr limits; unsafe, unreadable, malformed or
 over-limit evidence is a failure rather than a skip. The compression
@@ -229,8 +246,8 @@ executable SHALL resolve to a configured absolute regular non-symlink path
 (node-27 default `/usr/bin/zstd`) and run with fixed argv and `shell=False`.
 Malformed/unreadable entries that cannot form canonical identity SHALL be
 separate deterministic discovery failures keyed by lane hint + safe
-root-relative locator; they count toward discovery/overall failure but never
-enter the canonical selected/deferred partition or processing bound.
+root-relative locator; they count toward discovery/overall failure and the
+full-validation attempt bound but never enter selected/deferred.
 
 The lock file is absolute mode-0600 safe coordination metadata opened from a
 trusted dirfd with no-follow; existing files are fstat-bound without
