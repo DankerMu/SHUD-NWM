@@ -1,0 +1,10 @@
+[Unit]
+Description=Run NHMS node-27 timeseries compression daily
+
+[Timer]
+OnCalendar=*-*-* 04:25:00 UTC
+Persistent=true
+Unit=nhms-node27-timeseries-compression.service
+
+[Install]
+WantedBy=timers.target

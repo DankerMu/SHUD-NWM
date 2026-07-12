@@ -23,7 +23,7 @@ system-level (root) units for this lane.
 1. Create the runbook receipt directories:
 
    ```
-   mkdir -p ~/node27-product-archive-logs ~/node27-storage-inventory-audit-logs
+   mkdir -p ~/node27-product-archive-logs ~/node27-storage-inventory-audit-logs ~/node27-timeseries-compression-logs
    ```
 
 2. Copy the env examples into place and lock them down:
@@ -76,7 +76,7 @@ system-level (root) units for this lane.
 
 ## Timer cadence order (UTC)
 
-The three related timers are staggered so each receipt is fresh when the
+The four related timers are staggered so each receipt is fresh when the
 next tick runs:
 
 | Order | Timer                                        | OnCalendar         | Rationale |
@@ -84,6 +84,7 @@ next tick runs:
 | 1     | `nhms-node27-product-archive.timer`          | `03:20:00 UTC` daily | Mover finalizes leaves before audit scans them. |
 | 2     | `nhms-node27-storage-inventory-audit.timer`  | `03:40:00 UTC` daily | Audit reads the mover's committed final leaves and emits the completeness receipt. |
 | 3     | `nhms-node27-resource-governance.timer`      | `04:10:00 UTC` daily | Governance audit reports the four new units + archive-root free-space band. |
+| 4     | `nhms-node27-timeseries-compression.timer`   | `04:25:00 UTC` daily | Terminal-chunk compression runs after governance so the previous-day receipt is already captured. Enablement is task §4.5 (requires migration `000047` applied first). |
 
 ### Cadence vs. retention-receipt validity window (design D6)
 
@@ -427,6 +428,7 @@ disabling the timers; the receipts stay on disk as historical evidence.
 ```
 systemctl --user disable --now nhms-node27-product-archive.timer
 systemctl --user disable --now nhms-node27-storage-inventory-audit.timer
+systemctl --user disable --now nhms-node27-timeseries-compression.timer
 ```
 
 Notes:
