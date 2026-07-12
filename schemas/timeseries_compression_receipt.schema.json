@@ -20,7 +20,7 @@
     "schema_version": {"enum": ["1.0"]},
     "generated_at": {"type": "string", "format": "date-time"},
     "now_utc": {"type": "string", "format": "date-time"},
-    "lag_seconds": {"type": "integer", "minimum": 0},
+    "lag_seconds": {"type": "integer", "minimum": 1},
     "per_tick_bound": {"type": "integer", "minimum": 1},
     "mode": {"enum": ["dry-run", "enforce"]},
     "outcome": {"enum": ["clean", "partial", "refused_lock", "refused_config"]},

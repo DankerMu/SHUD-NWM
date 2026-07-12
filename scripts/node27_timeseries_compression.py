@@ -303,10 +303,12 @@ def _default_measure_chunk_bytes(
                 target_name = chunk.chunk_name
                 if after:
                     # Re-query the catalog for the compressed sibling that
-                    # compress_chunk() populated. Fall back to the origin
-                    # chunk when the compressed relation is not yet visible
-                    # (race, or no-op path) — matches pre-fix behavior for
-                    # that edge case without leaking a stale 0-byte number.
+                    # compress_chunk() populated. cand-G: refuse to fall back
+                    # to the origin chunk — post-compress its rows have been
+                    # moved to the sibling and it now measures near-zero,
+                    # which would silently misreport savings. Raise instead so
+                    # the outer per-chunk try/except records ``after_bytes =
+                    # null`` in the descriptor and marks outcome=partial.
                     cursor.execute(
                         """
                         SELECT compressed_chunk_schema, compressed_chunk_name
@@ -316,11 +318,17 @@ def _default_measure_chunk_bytes(
                         (chunk.chunk_schema, chunk.chunk_name),
                     )
                     row = cursor.fetchone()
-                    if row is not None:
-                        compressed_schema, compressed_name = row
-                        if compressed_schema and compressed_name:
-                            target_schema = compressed_schema
-                            target_name = compressed_name
+                    if row is None:
+                        raise RuntimeError(
+                            f"compressed sibling not visible for {chunk.chunk_schema}.{chunk.chunk_name}"
+                        )
+                    compressed_schema, compressed_name = row
+                    if not compressed_schema or not compressed_name:
+                        raise RuntimeError(
+                            f"compressed sibling not visible for {chunk.chunk_schema}.{chunk.chunk_name}"
+                        )
+                    target_schema = compressed_schema
+                    target_name = compressed_name
                 cursor.execute(
                     "SELECT pg_total_relation_size(%s::regclass)",
                     (f"{target_schema}.{target_name}",),
@@ -419,6 +427,12 @@ def build_receipt(
     # ``after_bytes``. If nothing was compressed we keep the dry-run
     # convention of ``after_bytes = null`` (schema allows it).
     saw_after = {key: False for key in totals}
+    # cand-H: sticky poison flag. If ANY chunk in the table hits an
+    # after-side failure, the per-table ``after_bytes`` sum is a partial
+    # aggregate (chunks_compressed still counts the compressed-but-unmeasured
+    # chunk), so we MUST null it. The end-of-loop pass honors this even when
+    # a later chunk in the same table succeeds — poison is one-way.
+    after_poisoned = {key: False for key in totals}
     selected_descriptors: list[dict[str, Any]] = []
     any_errors = False
     for chunk in selected_rows:
@@ -458,6 +472,10 @@ def build_receipt(
                 # of the chunk that got compressed.
                 totals[chunk.hypertable_key]["before_bytes"] += before
                 totals[chunk.hypertable_key]["chunks_compressed"] += 1
+                # cand-H: poison this table's after_bytes — chunks_compressed
+                # just grew but the after side is unknown, so any partial sum
+                # over other chunks would misrepresent compressed footprint.
+                after_poisoned[chunk.hypertable_key] = True
                 selected_descriptors.append(descriptor)
                 continue
             descriptor = _descriptor(chunk, before=before, after=after)
@@ -472,9 +490,12 @@ def build_receipt(
         selected_descriptors.append(descriptor)
 
     # Nullify after_bytes for tables where nothing was compressed (matches
-    # dry-run convention: absence of measurement, not zero-size).
+    # dry-run convention: absence of measurement, not zero-size) OR where any
+    # after-side measurement failed (cand-H sticky poison — preserves the
+    # invariant that per-table after_bytes is either the exact aggregate over
+    # ``chunks_compressed`` or null, never a partial sum).
     for key in totals:
-        if not saw_after[key]:
+        if not saw_after[key] or after_poisoned[key]:
             totals[key]["after_bytes"] = None
 
     if config.enforce:

@@ -296,6 +296,54 @@ def test_measure_after_failure_isolated(tmp_path: Path, monkeypatch: pytest.Monk
     river = receipt["per_table_totals"]["hydro.river_timeseries"]
     assert river["chunks_compressed"] == 2
     assert river["before_bytes"] == 200 + 200
+    # cand-H: mixed success + after-fail in the same table MUST poison
+    # per-table after_bytes to null — a partial sum over successful chunks
+    # would mislead the (before-after)/before savings computation.
+    assert river["after_bytes"] is None
+
+
+def test_after_fail_poisons_per_table_after_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cand-H: mixed success + after-fail in one hypertable nulls after_bytes.
+
+    Constructs two chunks in ``hydro.river_timeseries``: A succeeds with a
+    real after measurement, B fails on after-measure. The per-table roll-up
+    MUST show ``chunks_compressed=2`` and ``before_bytes = A_before + B_before``
+    but ``after_bytes = None`` (poisoned by the invariant), so a downstream
+    consumer cannot compute an inflated savings ratio from the partial sum.
+    """
+    env = _base_env(tmp_path)
+    config = compression.config_from_args(_args(enforce=True), env)
+    chunk_a = _chunk("hydro", "river_timeseries", "mixed-A", delta_days=10)
+    chunk_b = _chunk("hydro", "river_timeseries", "mixed-B", delta_days=11)
+
+    def fake_fetch(dsn: str) -> list[compression.ChunkRow]:
+        return [chunk_a, chunk_b]
+
+    def fake_measure(dsn: str, chunk: compression.ChunkRow, *, after: bool = False) -> int:
+        if after and chunk.chunk_name == "mixed-B":
+            raise RuntimeError("simulated after-measure failure on mixed-B")
+        if not after:
+            return 400 if chunk.chunk_name == "mixed-A" else 800
+        # after=True, success (chunk_a only)
+        return 100
+
+    def fake_compress(dsn: str, chunk: compression.ChunkRow) -> None:
+        return None
+
+    receipt = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=fake_fetch,
+        measure_chunk_bytes=fake_measure,
+        compress_chunk=fake_compress,
+    )
+    river = receipt["per_table_totals"]["hydro.river_timeseries"]
+    assert river["chunks_compressed"] == 2
+    assert river["before_bytes"] == 400 + 800
+    assert river["after_bytes"] is None
+    assert receipt["outcome"] == "partial"
 
 
 def test_measure_before_failure_isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -500,15 +548,18 @@ def test_migration_alter_statements_are_disjoint_and_order_independent() -> None
 def test_migration_has_no_transaction_wrapper() -> None:
     """cand-D: partial-apply idempotency assumes each ALTER runs standalone.
 
-    A ``DO $$``/``BEGIN``/``END $$`` block would collapse both statements
-    into one transaction and break the "re-run the migration after a partial
-    apply completes the second statement" guarantee that the header prose
-    (and design D3) promises.
+    A ``DO $$``/``BEGIN``/``END $$`` block, or the explicit
+    ``START TRANSACTION`` / ``COMMIT`` / ``ROLLBACK`` / ``SAVEPOINT`` verbs,
+    would collapse both statements into one transaction and break the
+    "re-run the migration after a partial apply completes the second
+    statement" guarantee that the header prose (and design D3) promises.
     """
     text = _MIGRATION_PATH.read_text(encoding="utf-8")
     executable = "\n".join(line for line in text.splitlines() if not line.startswith("--"))
     forbidden = re.search(
-        r"\bDO\s*\$\$|\bBEGIN\b|\bEND\s*\$\$", executable, flags=re.IGNORECASE
+        r"\bDO\s*\$\$|\bBEGIN\b|\bEND\s*\$\$|\bSTART\s+TRANSACTION\b|\bCOMMIT\b|\bROLLBACK\b|\bSAVEPOINT\b",
+        executable,
+        flags=re.IGNORECASE,
     )
     assert forbidden is None, (
         f"migration must not wrap ALTERs in a transaction block; matched: {forbidden.group(0)!r}"
