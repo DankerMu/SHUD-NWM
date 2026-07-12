@@ -1288,6 +1288,37 @@ def test_fresh_staging_verification_failure_never_publishes_or_retires_source(
     assert config.receipt_path.stat().st_mode & 0o777 == 0o600
 
 
+def test_fresh_staging_tarball_digest_mismatch_never_publishes_or_retires_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    source = _forcing(config)
+    original_manifest = archive._manifest
+
+    def manifest_with_wrong_archive_digest(*args, **kwargs):
+        manifest = original_manifest(*args, **kwargs)
+        actual_digest = manifest["archive"]["sha256"]
+        manifest["archive"]["sha256"] = "0" * 64 if actual_digest != "0" * 64 else "1" * 64
+        return manifest
+
+    monkeypatch.setattr(archive, "_manifest", manifest_with_wrong_archive_digest)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+
+    assert code == 1
+    assert source.exists()
+    final = config.archive_root / Path(receipt["candidates"][0]["archive_path"]).parent
+    assert not final.exists()
+    terminal = receipt["terminals"][0]
+    assert terminal["status"] == "failed"
+    assert "archive tarball size/sha256 mismatch" in terminal["reason"]
+    assert all(event["kind"] != "published" for event in receipt["events"])
+
+
 def test_corrupt_final_namespace_swap_is_restored_without_quarantine_event(tmp_path: Path) -> None:
     config = _config(tmp_path, enforce=True)
     source = _forcing(config)
@@ -2662,3 +2693,91 @@ def test_receipt_semantics_bind_exact_source_and_unique_failure_locator() -> Non
     example["outcome"] = "failed"
     with pytest.raises(archive.ArchiveMoverError, match="unique by lane/locator"):
         archive.validate_receipt_semantics(example)
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_reason"),
+    [
+        ("relative-wrapper-path", "wrapper paths must be absolute"),
+        ("env-mode", "env file must have mode 0600"),
+        ("env-symlink", "env file must be a regular non-symlink file"),
+        ("missing-object-prefix", "canonical object-store prefix must be configured"),
+        ("relative-zstd", "zstd path must be absolute"),
+        ("missing-zstd", "zstd executable is unavailable or unsafe"),
+        ("symlink-zstd", "zstd executable is unavailable or unsafe"),
+    ],
+)
+def test_product_archive_wrapper_rejects_unsafe_runtime_contract(
+    tmp_path: Path, case: str, expected_reason: str
+) -> None:
+    wrapper = _ROOT / "scripts/node27_product_archive_once.sh"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stat_shim = bin_dir / "stat"
+    stat_shim.write_text(
+        "#!/bin/sh\n"
+        "for last do :; done\n"
+        "case \"$last\" in\n"
+        "  *bad-mode.env) printf '644\\n' ;;\n"
+        "  *) printf '600\\n' ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    stat_shim.chmod(0o700)
+
+    python_bin = tmp_path / "python"
+    python_bin.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    python_bin.chmod(0o700)
+    entrypoint = tmp_path / "archive.py"
+    entrypoint.write_text("raise SystemExit(99)\n", encoding="utf-8")
+    zstd = tmp_path / "zstd"
+    zstd.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    zstd.chmod(0o700)
+
+    env_file = tmp_path / ("bad-mode.env" if case == "env-mode" else "archive.env")
+    configured_zstd = str(zstd)
+    if case == "relative-zstd":
+        configured_zstd = "zstd"
+    elif case == "missing-zstd":
+        configured_zstd = str(tmp_path / "missing-zstd")
+    elif case == "symlink-zstd":
+        zstd_link = tmp_path / "zstd-link"
+        zstd_link.symlink_to(zstd)
+        configured_zstd = str(zstd_link)
+    env_lines = [
+        f"NODE27_PRODUCT_ARCHIVE_OBJECT_STORE_ROOT={tmp_path / 'object-store'}",
+        f"NODE27_PRODUCT_ARCHIVE_ARCHIVE_ROOT={tmp_path / 'archive'}",
+        f"NODE27_PRODUCT_ARCHIVE_RECEIPT={tmp_path / 'receipt.json'}",
+        f"NODE27_PRODUCT_ARCHIVE_LOCK_FILE={tmp_path / 'archive.lock'}",
+        f"NODE27_PRODUCT_ARCHIVE_ZSTD={configured_zstd}",
+    ]
+    if case != "missing-object-prefix":
+        env_lines.append("OBJECT_STORE_PREFIX=s3://nhms")
+    env_file.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
+    env_file.chmod(0o600)
+    if case == "env-symlink":
+        target = tmp_path / "real.env"
+        env_file.rename(target)
+        env_file.symlink_to(target)
+
+    process_env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "NODE27_PRODUCT_ARCHIVE_ENV_FILE": (
+            "relative.env" if case == "relative-wrapper-path" else str(env_file)
+        ),
+        "NODE27_PRODUCT_ARCHIVE_PYTHON": str(python_bin),
+        "NODE27_PRODUCT_ARCHIVE_SCRIPT": str(entrypoint),
+    }
+    result = subprocess.run(
+        ["/bin/sh", str(wrapper)],
+        env=process_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    failure = json.loads(result.stderr.strip())
+    assert failure == {"status": "failed", "reason": expected_reason}
