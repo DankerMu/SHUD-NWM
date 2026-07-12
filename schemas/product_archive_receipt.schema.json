@@ -12,7 +12,7 @@
     "minimum_age_days": {"type": "integer", "minimum": 30},
     "per_tick_bound": {"type": "integer", "minimum": 1, "maximum": 100000},
     "validation_attempts": {"type": "integer", "minimum": 0, "maximum": 100000},
-    "outcome": {"enum": ["success", "failed", "indeterminate"]},
+    "outcome": {"enum": ["success", "failed", "indeterminate", "refused_free_space"]},
     "candidates": {"type": "array", "maxItems": 100000, "items": {"$ref": "#/definitions/candidate"}, "uniqueItems": true},
     "selected": {"type": "array", "maxItems": 100000, "items": {"$ref": "#/definitions/candidate"}, "uniqueItems": true},
     "deferred": {"type": "array", "maxItems": 100000, "items": {"$ref": "#/definitions/candidate"}, "uniqueItems": true},
@@ -23,6 +23,17 @@
       "type": "object", "additionalProperties": false,
       "required": ["source", "archived"],
       "properties": {"source": {"type": "integer", "minimum": 0}, "archived": {"type": "integer", "minimum": 0}}
+    },
+    "free_space": {
+      "type": "object", "additionalProperties": false,
+      "required": ["archive_root", "free_bytes", "warn_bytes", "refuse_bytes", "band"],
+      "properties": {
+        "archive_root": {"type": "string", "minLength": 1},
+        "free_bytes": {"type": "integer", "minimum": 0},
+        "warn_bytes": {"type": "integer", "minimum": 1},
+        "refuse_bytes": {"type": "integer", "minimum": 1},
+        "band": {"enum": ["clean", "warn", "refuse"]}
+      }
     }
   },
   "definitions": {

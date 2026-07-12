@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -228,6 +229,8 @@ class MoverConfig:
     minimum_age_days: int = 45
     per_tick_bound: int = 10
     enforce: bool = False
+    free_space_warn_bytes: int | None = None
+    free_space_refuse_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -3125,6 +3128,73 @@ def _validate_tombstone_allowlist(candidate: Candidate, tomb_fd: int, provider: 
         raise ArchiveMoverError("tombstone differs from exact path/inode/signature allowlist")
 
 
+def _measure_archive_free_space(config: MoverConfig) -> dict[str, Any] | None:
+    """Return archive-root free-space band + measurements, or None if unconfigured.
+
+    Measurement follows `_validate_config` so the archive root is already known
+    to be an absolute, safe, non-symlink directory. Any measurement OSError
+    fails closed as an operational error rather than a silent proceed — the
+    watermarks are a safety gate and cannot be bypassed by disk-usage
+    unavailability.
+    """
+    if config.free_space_refuse_bytes is None or config.free_space_warn_bytes is None:
+        return None
+    try:
+        usage = shutil.disk_usage(config.archive_root)
+    except OSError as error:
+        raise ArchiveOperationalError(
+            f"cannot measure archive-root free space at {config.archive_root}: {error}"
+        ) from error
+    free_bytes = int(usage.free)
+    warn_bytes = int(config.free_space_warn_bytes)
+    refuse_bytes = int(config.free_space_refuse_bytes)
+    if free_bytes < refuse_bytes:
+        band = "refuse"
+    elif free_bytes < warn_bytes:
+        band = "warn"
+    else:
+        band = "clean"
+    return {
+        "archive_root": str(config.archive_root),
+        "free_bytes": free_bytes,
+        "warn_bytes": warn_bytes,
+        "refuse_bytes": refuse_bytes,
+        "band": band,
+    }
+
+
+def _publish_refusal_receipt(
+    config: MoverConfig,
+    *,
+    now: datetime,
+    free_space: dict[str, Any],
+) -> dict[str, Any]:
+    receipt = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": _time(now),
+        "mode": "enforce" if config.enforce else "dry-run",
+        "cutoff": _time(now - timedelta(days=config.minimum_age_days)),
+        "minimum_age_days": config.minimum_age_days,
+        "per_tick_bound": config.per_tick_bound,
+        "outcome": "refused_free_space",
+        "validation_attempts": 0,
+        "candidates": [],
+        "selected": [],
+        "deferred": [],
+        "terminals": [],
+        "events": [],
+        "discovery_failures": [],
+        "bytes": {"source": 0, "archived": 0},
+        "free_space": free_space,
+    }
+    validate_receipt_semantics(receipt)
+    jsonschema.Draft7Validator(_load_schema(RECEIPT_SCHEMA_PATH), format_checker=jsonschema.FormatChecker()).validate(
+        receipt
+    )
+    _publish_receipt(config.receipt_path, receipt)
+    return receipt
+
+
 def run(
     config: MoverConfig,
     *,
@@ -3134,6 +3204,10 @@ def run(
 ) -> tuple[dict[str, Any], int]:
     now = (now or datetime.now(UTC)).astimezone(UTC)
     _validate_config(config)
+    free_space = _measure_archive_free_space(config)
+    if free_space is not None and free_space["band"] == "refuse":
+        receipt = _publish_refusal_receipt(config, now=now, free_space=free_space)
+        return receipt, 1
     locators, failures = discover_candidate_locators(config, now=now, mount_id_provider=mount_id_provider)
     discovery_incomplete = any(failure.reason.startswith("discovery exceeds") for failure in failures)
     selected: list[Candidate] = []
@@ -3187,6 +3261,8 @@ def run(
             "archived": sum(item["archive_bytes"] for item in terminals),
         },
     }
+    if free_space is not None:
+        receipt["free_space"] = free_space
     validate_receipt_semantics(receipt)
     jsonschema.Draft7Validator(_load_schema(RECEIPT_SCHEMA_PATH), format_checker=jsonschema.FormatChecker()).validate(
         receipt
@@ -3195,7 +3271,41 @@ def run(
     return receipt, 1 if has_failure or has_indeterminate else 0
 
 
+def _validate_refusal_receipt_semantics(receipt: Mapping[str, Any]) -> None:
+    """Receipts refusing on free space MUST NOT report any candidate work."""
+    for key in ("candidates", "selected", "deferred", "terminals", "events", "discovery_failures"):
+        if receipt.get(key):
+            raise ArchiveMoverError(
+                f"refused_free_space receipt must not carry {key} entries"
+            )
+    if receipt.get("validation_attempts") != 0:
+        raise ArchiveMoverError("refused_free_space receipt must record zero validation attempts")
+    if receipt.get("bytes") != {"source": 0, "archived": 0}:
+        raise ArchiveMoverError("refused_free_space receipt must record zero source/archived bytes")
+    free_space = receipt.get("free_space")
+    if not isinstance(free_space, Mapping):
+        raise ArchiveMoverError("refused_free_space receipt must carry a free_space block")
+    if free_space.get("band") != "refuse":
+        raise ArchiveMoverError("refused_free_space receipt free_space.band must be 'refuse'")
+    for numeric in ("free_bytes", "warn_bytes", "refuse_bytes"):
+        if not isinstance(free_space.get(numeric), int):
+            raise ArchiveMoverError(f"refused_free_space receipt free_space.{numeric} must be an integer")
+    if free_space["refuse_bytes"] >= free_space["warn_bytes"]:
+        raise ArchiveMoverError("refused_free_space receipt refuse_bytes must be < warn_bytes")
+    if free_space["free_bytes"] >= free_space["refuse_bytes"]:
+        raise ArchiveMoverError(
+            "refused_free_space receipt free_bytes must be < refuse_bytes"
+        )
+    generated = _parse_hour_or_instant(receipt["generated_at"], label="receipt generated_at")
+    cutoff = _parse_hour_or_instant(receipt["cutoff"], label="receipt cutoff")
+    if cutoff != generated - timedelta(days=receipt["minimum_age_days"]):
+        raise ArchiveMoverError("receipt cutoff does not match generated_at/minimum age")
+
+
 def validate_receipt_semantics(receipt: Mapping[str, Any]) -> None:
+    if receipt.get("outcome") == "refused_free_space":
+        _validate_refusal_receipt_semantics(receipt)
+        return
     candidates = receipt["candidates"]
     selected = receipt["selected"]
     deferred = receipt["deferred"]
@@ -3452,6 +3562,7 @@ def _config_from_args(args: argparse.Namespace) -> MoverConfig:
         bound = int(raw_bound)
     except ValueError as error:
         raise ArchiveMoverError("minimum age and per-tick bound must be integers") from error
+    warn_bytes, refuse_bytes = _parse_free_space_watermarks(env)
     return MoverConfig(
         object_store_root=Path(args.object_store_root or env.get("NODE27_PRODUCT_ARCHIVE_OBJECT_STORE_ROOT", "")),
         object_store_prefix=(args.object_store_prefix or env.get("OBJECT_STORE_PREFIX", "")),
@@ -3464,7 +3575,38 @@ def _config_from_args(args: argparse.Namespace) -> MoverConfig:
         minimum_age_days=age,
         per_tick_bound=bound,
         enforce=args.enforce,
+        free_space_warn_bytes=warn_bytes,
+        free_space_refuse_bytes=refuse_bytes,
     )
+
+
+def _parse_free_space_watermarks(env: Mapping[str, str]) -> tuple[int | None, int | None]:
+    """Strict integer parse of archive free-space warn/refuse watermarks.
+
+    Missing (both env vars absent) means the free-space refusal feature is
+    disabled and returns (None, None). Every other invalid shape (partial
+    configuration, empty string, non-integer, non-positive, refuse >= warn)
+    fails closed before any mutation runs.
+    """
+    warn_raw = env.get("NHMS_ARCHIVE_FREE_SPACE_WARN_BYTES")
+    refuse_raw = env.get("NHMS_ARCHIVE_FREE_SPACE_REFUSE_BYTES")
+    if warn_raw is None and refuse_raw is None:
+        return None, None
+    if warn_raw is None or refuse_raw is None:
+        raise ArchiveMoverError(
+            "free-space watermarks NHMS_ARCHIVE_FREE_SPACE_WARN_BYTES and "
+            "NHMS_ARCHIVE_FREE_SPACE_REFUSE_BYTES must be set together"
+        )
+    try:
+        warn_bytes = int(warn_raw)
+        refuse_bytes = int(refuse_raw)
+    except ValueError as error:
+        raise ArchiveMoverError("free-space watermarks must be integer byte counts") from error
+    if warn_bytes <= 0 or refuse_bytes <= 0:
+        raise ArchiveMoverError("free-space watermarks must be positive")
+    if refuse_bytes >= warn_bytes:
+        raise ArchiveMoverError("refuse watermark must be strictly less than warn watermark")
+    return warn_bytes, refuse_bytes
 
 
 def _parser() -> argparse.ArgumentParser:
