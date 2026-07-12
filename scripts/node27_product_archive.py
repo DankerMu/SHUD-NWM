@@ -646,7 +646,7 @@ def _validate_forcing_domain_bundle(
     expected_forcing_uri = f"{object_store_prefix}/{source_relative}"
     if version.get("forcing_version_id") != forcing.get("forcing_version_id"):
         raise ArchiveMoverError("forcing version sidecar identity drift")
-    for field in ("source_id", "cycle_time", "start_time", "end_time", "model_id", "basin_version_id"):
+    for field in ("source_id", "cycle_time", "start_time", "end_time", "model_id"):
         left, right = version.get(field), forcing.get(field)
         if field == "source_id":
             try:
@@ -669,9 +669,17 @@ def _validate_forcing_domain_bundle(
     lineage = version.get("lineage_json")
     if not isinstance(lineage, Mapping):
         raise ArchiveMoverError("forcing version sidecar lineage is missing")
+    forcing_basin_version_id = forcing.get("basin_version_id")
+    if lineage.get("basin_version_id") != forcing_basin_version_id:
+        raise ArchiveMoverError("forcing version sidecar lineage basin identity drift")
+    top_level_basin_version_id = version.get("basin_version_id")
+    if top_level_basin_version_id not in (None, "") and top_level_basin_version_id != forcing_basin_version_id:
+        raise ArchiveMoverError("forcing version sidecar basin identity drift")
     lineage_uri = lineage.get("forcing_package_manifest_uri")
     if _canonical_object_uri(lineage_uri) != required_prefix + "forcing_package.json":
         raise ArchiveMoverError("forcing version sidecar lineage package URI drift")
+    if lineage.get("forcing_package_manifest_checksum") != manifest_record.sha256:
+        raise ArchiveMoverError("forcing version sidecar lineage package checksum drift")
 
 
 def _run_identity(

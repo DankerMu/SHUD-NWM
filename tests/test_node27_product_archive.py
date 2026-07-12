@@ -24,6 +24,8 @@ archive = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = archive
 _SPEC.loader.exec_module(archive)
 
+_MISSING = object()
+
 
 def _mount_id(fd: int) -> int:
     return os.fstat(fd).st_dev
@@ -141,7 +143,7 @@ def _forcing(config: archive.MoverConfig, cycle: str = "2026010100") -> Path:
     return leaf
 
 
-def _forcing_with_domain_bundle(config: archive.MoverConfig) -> Path:
+def _forcing_with_domain_bundle(config: archive.MoverConfig, *, top_level_basin: object = _MISSING) -> Path:
     cycle = "2026010100"
     leaf = config.object_store_root / f"forcing/ifs/{cycle}/basin-a/model-a"
     (leaf / "payloads").mkdir(parents=True)
@@ -205,23 +207,30 @@ def _forcing_with_domain_bundle(config: archive.MoverConfig) -> Path:
     (leaf / "forcing_domain_package.json").write_text(json.dumps(domain), encoding="utf-8")
     version = {
         **{field: forcing[field] for field in (
-            "forcing_version_id", "source_id", "cycle_time", "start_time", "end_time", "model_id", "basin_version_id"
+            "forcing_version_id", "source_id", "cycle_time", "start_time", "end_time", "model_id"
         )},
         "forcing_package_uri": "s3://nhms/forcing/ifs/2026010100/basin-a/model-a",
         "checksum": hashlib.sha256(forcing_raw).hexdigest(),
         "lineage_json": {
+            "basin_version_id": forcing["basin_version_id"],
             "forcing_package_manifest_uri": (
                 "s3://nhms/forcing/ifs/2026010100/basin-a/model-a/forcing_package.json"
-            )
+            ),
+            "forcing_package_manifest_checksum": hashlib.sha256(forcing_raw).hexdigest(),
         },
     }
+    if top_level_basin is not _MISSING:
+        version["basin_version_id"] = top_level_basin
     (leaf / "forcing_version_record.json").write_text(json.dumps(version), encoding="utf-8")
     return leaf
 
 
-def test_complete_forcing_domain_bundle_accepts_uppercase_ifs_and_shorter_domain_window(tmp_path: Path) -> None:
+@pytest.mark.parametrize("top_level_basin", [_MISSING, None], ids=["top-basin-absent", "top-basin-null"])
+def test_complete_forcing_domain_bundle_accepts_uppercase_ifs_and_shorter_domain_window(
+    tmp_path: Path, top_level_basin: object
+) -> None:
     config = _config(tmp_path, enforce=False)
-    _forcing_with_domain_bundle(config)
+    _forcing_with_domain_bundle(config, top_level_basin=top_level_basin)
     candidates, failures = archive.discover_candidates(
         config, now=datetime(2026, 7, 11, tzinfo=UTC), mount_id_provider=_mount_id
     )
@@ -231,7 +240,21 @@ def test_complete_forcing_domain_bundle_accepts_uppercase_ifs_and_shorter_domain
     assert candidates[0].eligibility_end == datetime(2026, 1, 2, tzinfo=UTC)
 
 
-@pytest.mark.parametrize("mutation", ["partial", "extra", "payload-checksum", "version-lineage", "identity"])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "partial",
+        "extra",
+        "payload-checksum",
+        "version-lineage",
+        "version-lineage-checksum",
+        "version-lineage-basin",
+        "version-top-basin",
+        "version-top-package-uri",
+        "version-top-package-checksum",
+        "identity",
+    ],
+)
 def test_forcing_domain_bundle_drift_fails_discovery(tmp_path: Path, mutation: str) -> None:
     config = _config(tmp_path, enforce=False)
     leaf = _forcing_with_domain_bundle(config)
@@ -246,6 +269,26 @@ def test_forcing_domain_bundle_drift_fails_discovery(tmp_path: Path, mutation: s
     elif mutation == "version-lineage":
         version = json.loads((leaf / "forcing_version_record.json").read_text())
         version["lineage_json"]["forcing_package_manifest_uri"] = "s3://nhms/other.json"
+        (leaf / "forcing_version_record.json").write_text(json.dumps(version), encoding="utf-8")
+    elif mutation == "version-lineage-checksum":
+        version = json.loads((leaf / "forcing_version_record.json").read_text())
+        version["lineage_json"]["forcing_package_manifest_checksum"] = "0" * 64
+        (leaf / "forcing_version_record.json").write_text(json.dumps(version), encoding="utf-8")
+    elif mutation == "version-lineage-basin":
+        version = json.loads((leaf / "forcing_version_record.json").read_text())
+        version["lineage_json"]["basin_version_id"] = "other"
+        (leaf / "forcing_version_record.json").write_text(json.dumps(version), encoding="utf-8")
+    elif mutation == "version-top-basin":
+        version = json.loads((leaf / "forcing_version_record.json").read_text())
+        version["basin_version_id"] = "other"
+        (leaf / "forcing_version_record.json").write_text(json.dumps(version), encoding="utf-8")
+    elif mutation == "version-top-package-uri":
+        version = json.loads((leaf / "forcing_version_record.json").read_text())
+        version["forcing_package_uri"] = "s3://nhms/forcing/ifs/other"
+        (leaf / "forcing_version_record.json").write_text(json.dumps(version), encoding="utf-8")
+    elif mutation == "version-top-package-checksum":
+        version = json.loads((leaf / "forcing_version_record.json").read_text())
+        version["checksum"] = "0" * 64
         (leaf / "forcing_version_record.json").write_text(json.dumps(version), encoding="utf-8")
     else:
         package = json.loads((leaf / "forcing_domain_package.json").read_text())
