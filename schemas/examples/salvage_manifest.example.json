@@ -11,7 +11,18 @@
         "window": {"start": "2026-05-28T00:00:00Z", "end": "2026-05-29T00:00:00Z"}
       },
       "exported_row_count": 86400,
-      "columns": ["forcing_version_id", "station_id", "variable", "valid_time", "value"],
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
       "object": {
         "path": "db-export/forcing/forc-gfs-2026052800-yangtze/data.csv.zst",
         "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",

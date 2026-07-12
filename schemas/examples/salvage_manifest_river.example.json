@@ -1,0 +1,34 @@
+{
+  "schema_version": "1.0",
+  "provenance": "db-export",
+  "generated_at": "2026-07-11T12:15:00Z",
+  "source_database": {"database": "nhms", "instance_id": "node27-primary-pg15"},
+  "exports": [
+    {
+      "selector": {
+        "table": "hydro.river_timeseries",
+        "identity": {"run_id": "run-nwm-2026052800-yangtze"},
+        "window": {"start": "2026-05-28T00:00:00Z", "end": "2026-05-29T00:00:00Z"}
+      },
+      "exported_row_count": 172800,
+      "columns": [
+        "run_id",
+        "basin_version_id",
+        "river_network_version_id",
+        "river_segment_id",
+        "valid_time",
+        "lead_time_hours",
+        "variable",
+        "value",
+        "unit",
+        "quality_flag",
+        "created_at"
+      ],
+      "object": {
+        "path": "db-export/runs/run-nwm-2026052800-yangtze/data.csv.zst",
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "size_bytes": 1048576
+      }
+    }
+  ]
+}

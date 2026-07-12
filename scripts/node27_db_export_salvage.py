@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 import jsonschema
 
@@ -112,6 +112,8 @@ class SalvageConfig:
     statement_timeout_ms: int
     source_instance_id: str
     mode: str  # "dry-run" | "enforce"
+    max_selector_bytes: int
+    zstd_path: Path
 
     @property
     def enforce(self) -> bool:
@@ -152,6 +154,27 @@ def _parse_positive_int(raw: str | None, *, name: str, minimum: int, maximum: in
 def _require_absolute(path: Path, *, name: str) -> Path:
     if not path.is_absolute():
         raise SalvageConfigError(f"{name} must be absolute, got {path}")
+    return path
+
+
+def _validate_zstd_path(path: Path) -> Path:
+    """Mirror of the mover's `_validate_zstd` — refuse relative, symlink, or missing."""
+    if not path.is_absolute():
+        raise SalvageConfigError("NODE27_DB_EXPORT_SALVAGE_ZSTD must be absolute")
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise SalvageConfigError(
+            f"NODE27_DB_EXPORT_SALVAGE_ZSTD binary is unavailable: {path}: {error}"
+        ) from error
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or not os.access(path, os.X_OK)
+    ):
+        raise SalvageConfigError(
+            f"NODE27_DB_EXPORT_SALVAGE_ZSTD must be an executable regular non-symlink file: {path}"
+        )
     return path
 
 
@@ -210,6 +233,20 @@ def config_from_args(
         raise SalvageConfigError(
             f"NODE27_DB_EXPORT_SALVAGE_MODE must be one of dry-run|enforce, got {mode_raw!r}"
         )
+    # Byte cap gates the buffered COPY-then-compress flow so a single selector
+    # cannot swamp memory. Default 2 GiB matches "single interactive salvage
+    # tick" scope; operators can shrink it if their host is memory constrained.
+    max_selector_bytes = _parse_positive_int(
+        env.get("NODE27_DB_EXPORT_SALVAGE_MAX_SELECTOR_BYTES", str(2 * 1024 * 1024 * 1024)),
+        name="NODE27_DB_EXPORT_SALVAGE_MAX_SELECTOR_BYTES",
+        minimum=1,
+    )
+    zstd_raw = env.get("NODE27_DB_EXPORT_SALVAGE_ZSTD", "/usr/bin/zstd")
+    if not zstd_raw or not zstd_raw.strip() or zstd_raw.strip() != zstd_raw:
+        raise SalvageConfigError(
+            "NODE27_DB_EXPORT_SALVAGE_ZSTD must not be empty or contain leading/trailing whitespace"
+        )
+    zstd_path = _validate_zstd_path(Path(zstd_raw))
     return SalvageConfig(
         database_url=database_url,
         archive_root=_require_absolute(Path(archive_root_raw), name="NHMS_ARCHIVE_ROOT"),
@@ -225,6 +262,8 @@ def config_from_args(
         statement_timeout_ms=statement_timeout_ms,
         source_instance_id=source_instance_id,
         mode=mode_raw,
+        max_selector_bytes=max_selector_bytes,
+        zstd_path=zstd_path,
     )
 
 
@@ -287,7 +326,35 @@ def acquire_lock(path: Path) -> int | None:
 CheckWritePrivileges = Callable[[str], str | None]
 FetchRowCount = Callable[[str, str, Mapping[str, Any], int], int]
 PerformCopyExport = Callable[[str, str, Sequence[str], Mapping[str, Any], int], bytes]
-CompressBytes = Callable[[bytes, int], bytes]
+# Compresses ``data`` at ``level`` via the given absolute zstd binary path.
+# The path is injected so the runner can refuse relative / symlink / missing
+# binaries at boot rather than at compress-time.
+CompressBytes = Callable[[bytes, int, Path], bytes]
+
+
+class SalvageOversizeError(RuntimeError):
+    """Raised when a selector's exported bytes exceed the configured cap."""
+
+
+def _count_csv_rows(csv_bytes: bytes) -> int:
+    """Row count = newline count minus one for the CSV header row.
+
+    Deriving the exported_row_count from the CSV bytes we actually shipped
+    guarantees the manifest count and the compressed object come from the
+    same MVCC snapshot (a separate SELECT COUNT(*) sits in its own
+    connection under READ COMMITTED and can drift under concurrent writes,
+    which the display_ro role cannot itself prevent).
+    """
+    if not csv_bytes:
+        return 0
+    newlines = csv_bytes.count(b"\n")
+    # COPY ... WITH HEADER always emits a header line, and psycopg2's
+    # copy_expert writes a trailing newline for every row (including the
+    # last). If the header is present but the body is empty, newlines == 1
+    # and row_count == 0. If bytes don't end in newline (never in practice
+    # from COPY, but defensive), we still treat the header as one line.
+    row_count = newlines - 1
+    return max(row_count, 0)
 
 
 def _iso(value: datetime) -> str:
@@ -348,6 +415,14 @@ def _default_check_write_privileges(dsn: str) -> str | None:
 
 
 def _sentinel_insert_check(dsn: str, table: str, identity_col: str) -> str | None:
+    """Sentinel INSERT probe. Returns None ONLY when the role is provably read-only.
+
+    Any other outcome — success, constraint violation, connection error,
+    timeout — returns a non-None refusal reason so the caller fails closed.
+    Connection / timeout / syntax errors are labelled as an unavailable
+    privilege probe rather than as "role can INSERT" so operators do not
+    misdiagnose a transient DB issue as a real write-privilege leak.
+    """
     import psycopg2  # type: ignore[import-untyped]
     from psycopg2 import errors as pg_errors  # type: ignore[import-untyped]
 
@@ -366,7 +441,14 @@ def _sentinel_insert_check(dsn: str, table: str, identity_col: str) -> str | Non
             except pg_errors.InsufficientPrivilege:
                 return None
             except pg_errors.SyntaxError:
-                return f"unexpected SQL syntax error probing {table}"
+                return f"role privilege probe unavailable for {table}: syntax error"
+            except (pg_errors.OperationalError, pg_errors.QueryCanceled) as error:
+                # Connection loss or statement_timeout — we cannot prove the
+                # role is read-only, so fail closed with an accurate label.
+                return (
+                    f"role privilege probe unavailable for {table}: "
+                    f"{type(error).__name__}"
+                )
             except Exception as error:
                 # NotNullViolation, ForeignKeyViolation, CheckViolation, etc.
                 # If the role weren't writable, PG would have raised
@@ -433,10 +515,10 @@ def _default_perform_copy_export(
         connection.close()
 
 
-def _default_compress_bytes(data: bytes, level: int) -> bytes:
-    """Compress via ``zstd -<level> -q -c`` subprocess (existing runtime dep)."""
+def _default_compress_bytes(data: bytes, level: int, zstd_path: Path) -> bytes:
+    """Compress via ``<zstd_path> -<level> -q -c`` subprocess (mover-validated binary)."""
     result = subprocess.run(
-        ["zstd", f"-{int(level)}", "-q", "-c"],
+        [str(zstd_path), f"-{int(level)}", "-q", "-c"],
         input=data,
         capture_output=True,
         check=True,
@@ -788,16 +870,23 @@ def build_receipt(
             continue
 
         # Enforce path: run the COPY, compress, hash, publish.
+        # exported_row_count is derived from csv_bytes (newlines minus header)
+        # so it always agrees with the shipped object; a second connection
+        # SELECT COUNT(*) would sit in its own MVCC snapshot and can disagree
+        # under concurrent writes that the display_ro role cannot itself
+        # prevent (cand-A).
         try:
             csv_bytes = perform_copy_export(
                 config.database_url, table, columns, selector, config.statement_timeout_ms
             )
-            db_row_count = int(
-                fetch_row_count(
-                    config.database_url, table, selector, config.statement_timeout_ms
+            csv_size = len(csv_bytes)
+            if csv_size > config.max_selector_bytes:
+                raise SalvageOversizeError(
+                    f"selector CSV size {csv_size} exceeds cap {config.max_selector_bytes} "
+                    f"(NODE27_DB_EXPORT_SALVAGE_MAX_SELECTOR_BYTES)"
                 )
-            )
-            compressed = compress_bytes(csv_bytes, config.zstd_level)
+            db_row_count = _count_csv_rows(csv_bytes)
+            compressed = compress_bytes(csv_bytes, config.zstd_level, config.zstd_path)
             sha_hex = _sha256_of(compressed)
             manifest = _build_manifest(
                 selector=selector,
@@ -819,6 +908,41 @@ def build_receipt(
                 manifest_schema=manifest_schema,
                 archive_root=config.archive_root,
             )
+        except MemoryError as error:
+            # MemoryError must NOT be swallowed by the broad Exception arm
+            # below — an OOM inside the two-stage buffered COPY / compress
+            # path is a resource-envelope failure, not a per-selector data
+            # problem. Record a distinct label so downstream automation can
+            # escalate (cand-C).
+            descriptors.append(
+                {
+                    "selector": dict(selector),
+                    "state": "error",
+                    "exported_row_count": None,
+                    "object": None,
+                    "error": (
+                        "out-of-memory during buffered COPY/compress; "
+                        "shrink NODE27_DB_EXPORT_SALVAGE_MAX_SELECTOR_BYTES "
+                        f"or scope selector more tightly ({type(error).__name__})"
+                    ),
+                }
+            )
+            totals["error"] += 1
+            any_errors = True
+            continue
+        except SalvageOversizeError as error:
+            descriptors.append(
+                {
+                    "selector": dict(selector),
+                    "state": "error",
+                    "exported_row_count": None,
+                    "object": None,
+                    "error": str(error),
+                }
+            )
+            totals["error"] += 1
+            any_errors = True
+            continue
         except (SafeFilesystemError, jsonschema.ValidationError, subprocess.CalledProcessError, Exception) as error:
             # Per-selector failure isolation. The failing selector records
             # an ``error`` state; the loop continues.
@@ -856,7 +980,10 @@ def build_receipt(
     if any_errors and any_success:
         outcome = "partial"
     elif any_errors and not any_success:
-        outcome = "partial"
+        # All selectors failed — distinct from "some succeeded, some
+        # failed" so operators can see the difference at a glance
+        # (cand-I).
+        outcome = "all_failed"
     else:
         outcome = "clean"
 
@@ -876,15 +1003,49 @@ def build_receipt(
     }
 
 
+_LIBPQ_PASSWORD_KEYWORD_RE = re.compile(
+    r"(?i)(?:(?<=\s)|(?<=^))password\s*=\s*\S+"
+)
+
+
 def _mask_dsn_in_message(message: str, dsn: str) -> str:
+    """Scrub every plausible echo of the DSN's password from ``message``.
+
+    Covers:
+    - Verbatim DSN substring.
+    - URL-encoded password (verbatim, still-quoted).
+    - URL-decoded password (some client libraries echo the decoded form).
+    - libpq keyword-form password (``... password=<literal> ...``) — a
+      distinct DSN shape callers may compose independently. Only scrubs the
+      value token, never the ``password=`` keyword itself.
+
+    Hostname and username are intentionally left alone (they carry
+    diagnostic value and are not secrets).
+    """
     if dsn in message:
-        return message.replace(dsn, _mask_dsn(dsn))
+        message = message.replace(dsn, _mask_dsn(dsn))
     try:
         parts = urlsplit(dsn)
     except Exception:
-        return message
-    if parts.password and parts.password in message:
-        return message.replace(parts.password, "***")
+        parts = None
+    if parts is not None and parts.password:
+        password_raw = parts.password
+        if password_raw in message:
+            message = message.replace(password_raw, "***")
+        try:
+            password_decoded = unquote(password_raw)
+        except Exception:
+            password_decoded = password_raw
+        if (
+            password_decoded
+            and password_decoded != password_raw
+            and password_decoded in message
+        ):
+            message = message.replace(password_decoded, "***")
+    # libpq keyword form: even if the runner never composes such a DSN,
+    # error messages produced by the DB driver may echo a caller-provided
+    # DSN in that shape. Scrub the value defensively.
+    message = _LIBPQ_PASSWORD_KEYWORD_RE.sub("password=***", message)
     return message
 
 

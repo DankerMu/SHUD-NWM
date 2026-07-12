@@ -51,3 +51,14 @@ NODE27_DB_EXPORT_SALVAGE_SOURCE_INSTANCE_ID=node27-primary-pg15
 # Execution mode: dry-run (default; classifies selectors, no objects written)
 # or enforce (publishes objects + manifests).
 NODE27_DB_EXPORT_SALVAGE_MODE=dry-run
+
+# Absolute path to the zstd binary. Refused if relative, symlinked, or
+# non-executable — mirrors the mover's fail-closed boot check. Default
+# matches Debian/Ubuntu system zstd.
+NODE27_DB_EXPORT_SALVAGE_ZSTD=/usr/bin/zstd
+
+# Per-selector byte cap (>=1). The current implementation buffers the full
+# CSV in memory before invoking zstd via a subprocess; the cap gates the
+# buffered path so a single selector cannot swamp memory. Default 2 GiB.
+# Operators may shrink this on memory-constrained hosts.
+NODE27_DB_EXPORT_SALVAGE_MAX_SELECTOR_BYTES=2147483648

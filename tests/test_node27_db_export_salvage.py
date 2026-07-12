@@ -67,9 +67,18 @@ def _write_receipt_input(path: Path, salvage_selectors: list[dict[str, Any]] | N
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _make_fake_zstd_binary(tmp_path: Path) -> Path:
+    """Create an executable regular non-symlink stub that passes `_validate_zstd_path`."""
+    zstd_bin = tmp_path / "fake-zstd"
+    zstd_bin.write_text("#!/bin/sh\ncat\n", encoding="utf-8")
+    zstd_bin.chmod(0o700)
+    return zstd_bin
+
+
 def _base_env(tmp_path: Path, *, override: dict[str, str | None] | None = None) -> dict[str, str]:
     receipt_input = tmp_path / "completeness-receipt.json"
     _write_receipt_input(receipt_input)
+    zstd_bin = _make_fake_zstd_binary(tmp_path)
     env: dict[str, str] = {
         "DATABASE_URL": _DSN,
         "NHMS_ARCHIVE_ROOT": str(tmp_path / "archive"),
@@ -81,6 +90,8 @@ def _base_env(tmp_path: Path, *, override: dict[str, str | None] | None = None) 
         "NODE27_DB_EXPORT_SALVAGE_STATEMENT_TIMEOUT_MS": "300000",
         "NODE27_DB_EXPORT_SALVAGE_SOURCE_INSTANCE_ID": "node27-primary-pg15",
         "NODE27_DB_EXPORT_SALVAGE_MODE": "dry-run",
+        "NODE27_DB_EXPORT_SALVAGE_ZSTD": str(zstd_bin),
+        "NODE27_DB_EXPORT_SALVAGE_MAX_SELECTOR_BYTES": str(2 * 1024 * 1024 * 1024),
     }
     (tmp_path / "archive").mkdir(exist_ok=True)
     if override:
@@ -128,7 +139,7 @@ def _make_stub_copy_and_count(
             raise RuntimeError("simulated statement_timeout on COPY")
         return csv_by_key.get(key, b"forcing_version_id,station_id,variable,valid_time,value\n")
 
-    def fake_compress(data: bytes, level: int) -> bytes:
+    def fake_compress(data: bytes, level: int, zstd_path: Path) -> bytes:
         # Identity "compression" so tests can assert on stable byte content.
         return b"ZSTD:" + data
 
@@ -283,7 +294,7 @@ def test_role_write_privilege_refused_when_has_table_privilege_true(
         check_write_privileges=_stub_check_writable,
         fetch_row_count=lambda *a, **k: 1,
         perform_copy_export=lambda *a, **k: b"",
-        compress_bytes=lambda data, level: data,
+        compress_bytes=lambda data, level, zstd_path: data,
     )
     assert code != 0
     diag = json.loads(capsys.readouterr().err.strip())
@@ -310,7 +321,7 @@ def test_role_write_privilege_refused_when_sentinel_insert_succeeds(
         check_write_privileges=sentinel_leg,
         fetch_row_count=lambda *a, **k: 1,
         perform_copy_export=lambda *a, **k: b"",
-        compress_bytes=lambda data, level: data,
+        compress_bytes=lambda data, level, zstd_path: data,
     )
     assert code != 0
     diag = json.loads(capsys.readouterr().err.strip())
@@ -508,7 +519,7 @@ def test_idempotent_skip_on_verified_existing_object(tmp_path: Path) -> None:
             b"forc-missing,s2,q,2026-05-29T00:00:00Z,2.0\n"
         )
 
-    def fake_compress(data: bytes, level: int) -> bytes:
+    def fake_compress(data: bytes, level: int, zstd_path: Path) -> bytes:
         return b"ZSTD:" + data
 
     receipt = _run_build_receipt(
@@ -554,12 +565,20 @@ def test_per_selector_failure_isolated(tmp_path: Path) -> None:
     def fake_row_count(dsn, table, selector, timeout_ms):
         return 4
 
+    ok_csv = (
+        b"forcing_version_id,station_id,variable,valid_time,value\n"
+        b"forc-ok,s1,q,2026-05-28T00:00:00Z,1.0\n"
+        b"forc-ok,s1,q,2026-05-29T00:00:00Z,2.0\n"
+        b"forc-ok,s1,q,2026-05-30T00:00:00Z,3.0\n"
+        b"forc-ok,s1,q,2026-05-31T00:00:00Z,4.0\n"
+    )
+
     def fake_copy(dsn, table, columns, selector, timeout_ms):
         if str(selector["identity"]["forcing_version_id"]) == "forc-fail":
             raise RuntimeError("simulated statement_timeout on COPY")
-        return b"forcing_version_id,station_id,variable,valid_time,value\n"
+        return ok_csv
 
-    def fake_compress(data, level):
+    def fake_compress(data, level, zstd_path):
         return b"ZSTD:" + data
 
     receipt = _run_build_receipt(
@@ -577,11 +596,13 @@ def test_per_selector_failure_isolated(tmp_path: Path) -> None:
     assert by_identity["forc-ok"]["state"] == "exported"
     assert by_identity["forc-fail"]["state"] == "error"
     assert "simulated statement_timeout" in by_identity["forc-fail"]["error"]
-    # per_selector_totals reflects only the successful set + error count
+    # per_selector_totals reflects only the successful set + error count.
+    # row_count is derived from the CSV bytes (newlines minus header), so
+    # the ok_csv above with four data lines contributes exactly 4.
     totals = receipt["per_selector_totals"]
     assert totals["exported"] == 1
     assert totals["error"] == 1
-    assert totals["row_count"] == 4  # only the successful one contributes
+    assert totals["row_count"] == 4
 
 
 # === Safe relative path enforcement ===
@@ -670,14 +691,16 @@ def test_dsn_never_leaks_via_exception_message(
         perform_copy_export=leaky_copy,
         compress_bytes=default_compress,
     )
-    # Per-selector error masked in the receipt (not stderr — receipt gets published)
+    # Per-selector error masked in the receipt (not stderr — receipt gets published).
+    # With a single selector failing the outcome is now ``all_failed`` (cand-I)
+    # rather than ``partial``; both are non-clean and produce a non-zero exit.
     receipt_out = Path(env["NODE27_DB_EXPORT_SALVAGE_RECEIPT_PATH"])
     assert receipt_out.exists()
     receipt = json.loads(receipt_out.read_text())
-    assert receipt["outcome"] == "partial"
+    assert receipt["outcome"] == "all_failed"
     error_msg = receipt["selected"][0]["error"]
     assert "secretpw" not in error_msg
-    # partial → non-zero exit
+    # non-clean → non-zero exit
     assert code != 0
     err = capsys.readouterr().err
     assert "secretpw" not in err
@@ -715,16 +738,32 @@ def test_lock_contention_refuses(
 
 
 def _extract_ddl_columns(text: str, table_name: str) -> tuple[str, ...]:
-    # Isolate the CREATE TABLE ... table_name ( ... ); block and grab first
-    # token per column-definition line (skip PRIMARY KEY / FOREIGN KEY and
-    # any multi-line constraint continuations such as "REFERENCES ...").
-    match = re.search(
-        rf"CREATE TABLE IF NOT EXISTS {re.escape(table_name)}\s*\(([^;]+)\);",
+    """Balance-parse the CREATE TABLE ... table_name ( ... ) body.
+
+    The old `[^;]+` regex broke on any semicolon-containing comment inside
+    the DDL. We now find the opening ``(`` of the table body and walk the
+    stream with a depth counter until we hit the matching ``)`` — this is
+    exact rather than heuristic (cand-N).
+    """
+    head_match = re.search(
+        rf"CREATE TABLE IF NOT EXISTS {re.escape(table_name)}\s*\(",
         text,
-        flags=re.DOTALL,
     )
-    assert match, f"could not find CREATE TABLE {table_name} in migration"
-    body = match.group(1)
+    assert head_match, f"could not find CREATE TABLE {table_name} in migration"
+    start = head_match.end()  # points immediately AFTER the opening '('
+    depth = 1
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    assert depth == 0, f"unbalanced parentheses in CREATE TABLE {table_name}"
+    body = text[start:i]
     columns: list[str] = []
     skip_continuation = False
     for raw_line in body.splitlines():
@@ -766,23 +805,32 @@ def test_column_constants_match_migration_ddl() -> None:
 
 
 def test_migration_has_no_ddl_in_runner() -> None:
-    """The runner runs zero DDL / transactional statements outside sentinel-INSERT preflight."""
+    """The runner runs zero DDL / transactional statements outside sentinel-INSERT preflight.
+
+    Uses ``ast.parse`` to locate ``_sentinel_insert_check`` by line-span so
+    the sentinel block is excluded exactly (source-slicing on
+    ``line.startswith("def ")`` would break if a nested/decorated def
+    appeared, or if the function was moved). This is more robust than the
+    previous grep (cand-K).
+    """
+    import ast
+
     source = _RUNNER_SOURCE_PATH.read_text(encoding="utf-8")
-    # Filter out sentinel-INSERT preflight block: it legally uses ROLLBACK to
-    # discard a probe INSERT. Strip _sentinel_insert_check function.
-    filtered_lines = []
-    inside_sentinel = False
-    for line in source.splitlines():
-        if line.startswith("def _sentinel_insert_check"):
-            inside_sentinel = True
+    tree = ast.parse(source)
+    exclude_ranges: list[tuple[int, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_sentinel_insert_check":
+            start = node.lineno  # 1-based, inclusive
+            end = node.end_lineno or node.lineno
+            exclude_ranges.append((start, end))
+    assert exclude_ranges, "expected to find _sentinel_insert_check in runner source"
+    lines = source.splitlines()
+    kept: list[str] = []
+    for idx, line in enumerate(lines, start=1):
+        if any(start <= idx <= end for (start, end) in exclude_ranges):
             continue
-        if inside_sentinel:
-            if line.startswith("def ") and not line.startswith("def _sentinel_insert_check"):
-                inside_sentinel = False
-            else:
-                continue
-        filtered_lines.append(line)
-    filtered = "\n".join(filtered_lines)
+        kept.append(line)
+    filtered = "\n".join(kept)
     forbidden = re.search(
         r"\bALTER\s+TABLE\b|\bCREATE\s+TABLE\b|\bDROP\s+TABLE\b|\bTRUNCATE\b|\bBEGIN\b|\bCOMMIT\b|\bROLLBACK\b|\bSAVEPOINT\b",
         filtered,
@@ -861,22 +909,33 @@ def test_receipt_input_schema_rejects_unknown_top_level_key() -> None:
 
 
 def test_display_carve_out() -> None:
-    # Grep confirmation that neither apps/api nor apps/frontend references the
-    # salvage runner or its env vars.
+    """Neither apps/api nor apps/frontend references the salvage runner or its env vars.
+
+    Guards against silent-pass on renamed / missing target dirs: assert they
+    exist first, and constrain grep return code to ``{0, 1}`` (2 = grep
+    itself failed and should be surfaced as a test failure, cand-L).
+    """
+    api_dir = _ROOT / "apps/api"
+    frontend_dir = _ROOT / "apps/frontend"
+    assert api_dir.is_dir(), f"apps/api target missing: {api_dir}"
+    assert frontend_dir.is_dir(), f"apps/frontend target missing: {frontend_dir}"
     result = subprocess.run(
         [
             "grep",
             "-rn",
             "-E",
             r"db_export_salvage|NODE27_DB_EXPORT_SALVAGE|db-export/",
-            str(_ROOT / "apps/api"),
-            str(_ROOT / "apps/frontend"),
+            str(api_dir),
+            str(frontend_dir),
         ],
         capture_output=True,
         text=True,
         check=False,
     )
-    assert result.returncode != 0 or result.stdout == "", (
+    assert result.returncode in {0, 1}, (
+        f"grep failed unexpectedly (rc={result.returncode}): stderr={result.stderr!r}"
+    )
+    assert result.returncode == 1 and result.stdout == "", (
         f"display carve-out violated. grep output:\n{result.stdout}"
     )
 
@@ -981,3 +1040,767 @@ def test_per_tick_bound_slices_selectors(tmp_path: Path) -> None:
     # Only 2 selectors processed
     assert len(receipt["selected"]) == 2
     assert all(d["state"] == "skipped_dry_run" for d in receipt["selected"])
+
+
+# === cand-A: exported_row_count is byte-derived from the CSV, not a
+# separate DB round-trip whose MVCC snapshot can drift under concurrent
+# writes.
+
+
+def test_manifest_exported_row_count_matches_csv_bytes(tmp_path: Path) -> None:
+    """Reg regression: manifest.exports[0].exported_row_count must equal
+    ``csv_bytes.count(b"\\n") - 1``, so a stale ``SELECT COUNT(*)`` on a
+    second connection can never disagree with the shipped object.
+    """
+    csv_body = (
+        b"forcing_version_id,basin_version_id,station_id,valid_time,source_id,"
+        b"variable,value,unit,native_resolution,quality_flag\n"
+        b"forc-a,bv1,s1,2026-05-28T00:00:00Z,src,q,1.0,mm,PT1H,0\n"
+        b"forc-a,bv1,s1,2026-05-29T00:00:00Z,src,q,2.0,mm,PT1H,0\n"
+        b"forc-a,bv1,s1,2026-05-30T00:00:00Z,src,q,3.0,mm,PT1H,0\n"
+    )
+    expected_row_count = csv_body.count(b"\n") - 1
+
+    def stub_copy(dsn, table, columns, selector, timeout_ms):
+        return csv_body
+
+    # Intentionally have fetch_row_count LIE about the DB count — cand-A's
+    # bug shape was "second connection disagrees with the shipped bytes".
+    # The manifest must ignore this drift and report the byte-derived count.
+    lying_row_count_calls = {"n": 0}
+
+    def lying_row_count(dsn, table, selector, timeout_ms):
+        lying_row_count_calls["n"] += 1
+        return 999999
+
+    receipt = _run_build_receipt(
+        tmp_path,
+        env_override={"NODE27_DB_EXPORT_SALVAGE_MODE": "enforce"},
+        fetch_row_count=lying_row_count,
+        perform_copy_export=stub_copy,
+    )
+    (descriptor,) = receipt["selected"]
+    assert descriptor["state"] == "exported"
+    assert descriptor["exported_row_count"] == expected_row_count
+
+    manifest_path = (
+        tmp_path / "archive" / "db-export/forcing/forc-a/manifest.json"
+    )
+    manifest = _load_json(manifest_path)
+    assert manifest["exports"][0]["exported_row_count"] == expected_row_count
+    # And explicitly not the lying DB count.
+    assert manifest["exports"][0]["exported_row_count"] != 999999
+
+
+def test_count_csv_rows_edge_cases() -> None:
+    """Byte-derivation helper handles empty / header-only / no-trailing-newline."""
+    assert salvage._count_csv_rows(b"") == 0
+    # Header only (one newline) -> 0 data rows
+    assert salvage._count_csv_rows(b"a,b,c\n") == 0
+    # Header + 1 data row
+    assert salvage._count_csv_rows(b"a,b,c\n1,2,3\n") == 1
+    # Header + 2 data rows
+    assert salvage._count_csv_rows(b"a,b,c\n1,2,3\n4,5,6\n") == 2
+    # Defensive: no trailing newline on the last row (COPY always emits
+    # one, but the helper must not underflow).
+    assert salvage._count_csv_rows(b"a,b,c") == 0
+
+
+# === cand-B: DSN mask completeness ===
+
+
+@pytest.mark.parametrize(
+    ("dsn", "message_template", "must_not_contain", "sample_hostname"),
+    [
+        # URL-encoded password with %-encoding echoed
+        (
+            "postgresql://user:s%40cret%23pw@127.0.0.1:55432/nhms",
+            "boom: {dsn} (network)",
+            ["s%40cret%23pw"],
+            "127.0.0.1",
+        ),
+        # URL-encoded password with the DECODED form echoed
+        (
+            "postgresql://user:s%40cret%23pw@127.0.0.1:55432/nhms",
+            "psql: FATAL:  password authentication failed for user 'user' pw=s@cret#pw",
+            ["s@cret#pw"],
+            "user",  # username may still appear (design choice; not a secret)
+        ),
+        # libpq keyword form (with password= verbatim)
+        (
+            "postgresql://user:secretpw@127.0.0.1:55432/nhms",
+            "connection refused: host=127.0.0.1 port=55432 user=user password=secretpw dbname=nhms",
+            ["secretpw"],
+            "127.0.0.1",
+        ),
+    ],
+    ids=["url-encoded-echoed", "url-decoded-echoed", "libpq-keyword-form"],
+)
+def test_mask_dsn_in_message_scrubs_all_password_shapes(
+    dsn: str,
+    message_template: str,
+    must_not_contain: list[str],
+    sample_hostname: str,
+) -> None:
+    message = message_template.format(dsn=dsn)
+    masked = salvage._mask_dsn_in_message(message, dsn)
+    for banned in must_not_contain:
+        assert banned not in masked, (
+            f"password shape {banned!r} leaked in {masked!r}"
+        )
+    # Hostname or username is NOT considered secret and stays visible for
+    # diagnostics. The test proves the design intent explicitly.
+    assert sample_hostname in masked or "***" in masked
+
+
+def test_mask_dsn_in_message_leaves_hostname_and_username() -> None:
+    """Design contract: hostname + username are diagnostic, not secret."""
+    dsn = "postgresql://alice:s%40cret@db.example.internal:55432/nhms"
+    message = "psql: could not connect to db.example.internal as alice"
+    masked = salvage._mask_dsn_in_message(message, dsn)
+    assert "db.example.internal" in masked
+    assert "alice" in masked
+
+
+def test_mask_dsn_in_message_scrubs_libpq_password_even_without_matching_dsn() -> None:
+    """If the message carries a keyword-form password= that came from
+    elsewhere (e.g. a driver echoing a caller-provided libpq DSN), scrub
+    it defensively regardless of whether the runner's DSN matches.
+    """
+    dsn = "postgresql://user:secretpw@127.0.0.1:55432/nhms"
+    unrelated_message = "sub-driver reported: password=someOtherThing failed"
+    masked = salvage._mask_dsn_in_message(unrelated_message, dsn)
+    assert "someOtherThing" not in masked
+    assert "password=***" in masked
+
+
+# === cand-C: MemoryError must not be silently classified as per-selector
+# error; the byte cap gate refuses selectors whose CSV exceeds the bound.
+
+
+def test_memory_error_is_not_swallowed_by_broad_except(tmp_path: Path) -> None:
+    """A MemoryError inside the COPY/compress path must produce a
+    distinct diagnostic — never a generic 'partial' with masked message.
+    """
+    def stub_copy(dsn, table, columns, selector, timeout_ms):
+        raise MemoryError("simulated OOM inside copy_expert")
+
+    receipt = _run_build_receipt(
+        tmp_path,
+        env_override={"NODE27_DB_EXPORT_SALVAGE_MODE": "enforce"},
+        perform_copy_export=stub_copy,
+    )
+    (descriptor,) = receipt["selected"]
+    assert descriptor["state"] == "error"
+    # Distinct label — not the generic exception str().
+    assert "out-of-memory" in descriptor["error"]
+    assert "MAX_SELECTOR_BYTES" in descriptor["error"]
+    # Totals bookkeeping must remain locked.
+    assert receipt["per_selector_totals"]["error"] == 1
+    assert receipt["per_selector_totals"]["exported"] == 0
+
+
+def test_per_selector_bytes_cap_refuses(tmp_path: Path) -> None:
+    """When CSV size > cap, refuse the selector (never write the object)."""
+    big_csv = b"a,b,c\n" + b"1,2,3\n" * 100
+
+    def stub_copy(dsn, table, columns, selector, timeout_ms):
+        return big_csv
+
+    receipt = _run_build_receipt(
+        tmp_path,
+        env_override={
+            "NODE27_DB_EXPORT_SALVAGE_MODE": "enforce",
+            "NODE27_DB_EXPORT_SALVAGE_MAX_SELECTOR_BYTES": str(len(big_csv) - 1),
+        },
+        perform_copy_export=stub_copy,
+    )
+    (descriptor,) = receipt["selected"]
+    assert descriptor["state"] == "error"
+    assert "exceeds cap" in descriptor["error"]
+    assert descriptor["object"] is None
+    # No object hit disk.
+    csv_path = tmp_path / "archive" / "db-export/forcing/forc-a/data.csv.zst"
+    assert not csv_path.exists()
+
+
+# === cand-D: full receipt shape pinned by a positive example ===
+
+
+def test_receipt_positive_shape_pins_all_keys(tmp_path: Path) -> None:
+    receipt = _run_build_receipt(tmp_path)
+    expected_keys = {
+        "schema_version",
+        "tool_version",
+        "generated_at",
+        "mode",
+        "outcome",
+        "source_database",
+        "receipt_input_path",
+        "selected",
+        "per_selector_totals",
+    }
+    assert set(receipt.keys()) == expected_keys
+    assert receipt["schema_version"] == salvage.SCHEMA_VERSION == "1.0"
+    assert isinstance(receipt["tool_version"], str) and receipt["tool_version"]
+    assert receipt["tool_version"] == salvage.TOOL_VERSION
+    assert isinstance(receipt["generated_at"], str) and receipt["generated_at"].endswith("Z")
+    assert receipt["mode"] in {"dry-run", "enforce"}
+    assert receipt["outcome"] in {"clean", "partial", "all_failed"}
+    assert set(receipt["source_database"].keys()) == {"database", "instance_id"}
+    assert receipt["source_database"]["database"] == "nhms"
+    assert receipt["source_database"]["instance_id"] == "node27-primary-pg15"
+    # receipt_input_path echoes the configured input path
+    env = _base_env(tmp_path)
+    assert receipt["receipt_input_path"] == env["NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH"]
+
+
+# === cand-E: universal per_selector_totals accounting invariant ===
+
+
+def _reached_exported(descriptor: dict[str, Any]) -> bool:
+    return descriptor.get("state") == "exported"
+
+
+def _expected_totals_from_descriptors(descriptors: list[dict[str, Any]]) -> dict[str, int]:
+    exported = sum(1 for d in descriptors if d["state"] == "exported")
+    skipped_verified = sum(1 for d in descriptors if d["state"] == "skipped_verified")
+    skipped_dry_run = sum(1 for d in descriptors if d["state"] == "skipped_dry_run")
+    error = sum(1 for d in descriptors if d["state"] == "error")
+    row_count = sum(
+        int(d["exported_row_count"]) for d in descriptors if _reached_exported(d)
+    )
+    compressed_bytes = sum(
+        int(d["object"]["size_bytes"]) for d in descriptors if _reached_exported(d)
+    )
+    return {
+        "exported": exported,
+        "skipped_verified": skipped_verified,
+        "skipped_dry_run": skipped_dry_run,
+        "error": error,
+        "row_count": row_count,
+        "compressed_bytes": compressed_bytes,
+    }
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "dry_run_only",
+        "per_selector_copy_fail",
+        "path_derivation_error",
+        "unknown_lane",
+        "idempotency_skip",
+        "valid_enforce",
+        "mixed_all_states",
+        "all_failed",
+    ],
+)
+def test_partial_receipt_totals_stay_locked_across_all_selector_paths(
+    tmp_path: Path, scenario: str
+) -> None:
+    """Universal invariant: ``exported + skipped_verified + skipped_dry_run + error
+    == len(selectors_processed)`` AND per-key totals are the sum of the
+    matching descriptor field, derived from the descriptor stream itself.
+    """
+    body_row = (
+        b"forcing_version_id,basin_version_id,station_id,valid_time,source_id,"
+        b"variable,value,unit,native_resolution,quality_flag\n"
+        b"forc-a,bv,s,2026-05-28T00:00:00Z,src,q,1.0,mm,PT1H,0\n"
+    )
+    ok_selector = {
+        "table": "met.forcing_station_timeseries",
+        "identity": {"forcing_version_id": "forc-a"},
+        "window": {"start": "2026-05-28T00:00:00Z", "end": "2026-06-16T00:00:00Z"},
+    }
+    env_override: dict[str, str | None] = {}
+    selectors: list[dict[str, Any]] = []
+    if scenario == "dry_run_only":
+        selectors = [ok_selector]
+    elif scenario == "per_selector_copy_fail":
+        env_override["NODE27_DB_EXPORT_SALVAGE_MODE"] = "enforce"
+        selectors = [ok_selector]
+    elif scenario == "path_derivation_error":
+        env_override["NODE27_DB_EXPORT_SALVAGE_MODE"] = "enforce"
+        selectors = [
+            {
+                "table": "met.forcing_station_timeseries",
+                "identity": {"forcing_version_id": "../evil"},
+                "window": {"start": "2026-05-28T00:00:00Z", "end": "2026-06-16T00:00:00Z"},
+            }
+        ]
+    elif scenario == "unknown_lane":
+        # The completeness-receipt schema itself rejects unknown tables, so
+        # unknown-lane can only be reached by an in-memory
+        # ``input_receipt_override`` that bypasses schema validation. This
+        # exercises the runner's internal ``table not in _TABLE_TO_LANE``
+        # guard.
+        env_override["NODE27_DB_EXPORT_SALVAGE_MODE"] = "enforce"
+        selectors = []  # unused; override supplies selectors directly
+    elif scenario == "idempotency_skip":
+        env_override["NODE27_DB_EXPORT_SALVAGE_MODE"] = "enforce"
+        selectors = [ok_selector]
+        _prepare_verified_existing_pair(tmp_path, ok_selector, body_row)
+    elif scenario == "valid_enforce":
+        env_override["NODE27_DB_EXPORT_SALVAGE_MODE"] = "enforce"
+        selectors = [ok_selector]
+    elif scenario == "mixed_all_states":
+        env_override["NODE27_DB_EXPORT_SALVAGE_MODE"] = "enforce"
+        existing_selector = {
+            "table": "met.forcing_station_timeseries",
+            "identity": {"forcing_version_id": "forc-existing"},
+            "window": {"start": "2026-05-28T00:00:00Z", "end": "2026-06-16T00:00:00Z"},
+        }
+        fail_selector = {
+            "table": "met.forcing_station_timeseries",
+            "identity": {"forcing_version_id": "forc-fail"},
+            "window": {"start": "2026-05-28T00:00:00Z", "end": "2026-06-16T00:00:00Z"},
+        }
+        selectors = [ok_selector, existing_selector, fail_selector]
+        _prepare_verified_existing_pair(tmp_path, existing_selector, body_row)
+    elif scenario == "all_failed":
+        env_override["NODE27_DB_EXPORT_SALVAGE_MODE"] = "enforce"
+        selectors = [
+            {
+                "table": "met.forcing_station_timeseries",
+                "identity": {"forcing_version_id": "forc-a"},
+                "window": {"start": "2026-05-28T00:00:00Z", "end": "2026-06-16T00:00:00Z"},
+            },
+            {
+                "table": "met.forcing_station_timeseries",
+                "identity": {"forcing_version_id": "forc-b"},
+                "window": {"start": "2026-05-28T00:00:00Z", "end": "2026-06-16T00:00:00Z"},
+            },
+        ]
+
+    def stub_copy(dsn, table, columns, selector, timeout_ms):
+        # In "per_selector_copy_fail" always fail; in "mixed_all_states"
+        # fail only forc-fail; in "all_failed" always fail; else return body.
+        if scenario == "per_selector_copy_fail":
+            raise RuntimeError("simulated fault")
+        if scenario == "all_failed":
+            raise RuntimeError("all failed")
+        if scenario == "mixed_all_states" and selector["identity"].get(
+            "forcing_version_id"
+        ) == "forc-fail":
+            raise RuntimeError("simulated fault")
+        return body_row
+
+    def stub_row_count(dsn, table, selector, timeout_ms):
+        # For idempotency probe: existing manifest has row_count = 1 (one data
+        # row in body_row). Return 1 so verified path is taken.
+        return 1
+
+    input_receipt_override: dict[str, Any] | None = None
+    if scenario == "unknown_lane":
+        input_receipt_override = {
+            "salvage_selectors": [
+                {
+                    "table": "met.unknown_table",
+                    "identity": {"forcing_version_id": "forc-x"},
+                    "window": {
+                        "start": "2026-05-28T00:00:00Z",
+                        "end": "2026-06-16T00:00:00Z",
+                    },
+                }
+            ]
+        }
+
+    receipt = _run_build_receipt(
+        tmp_path,
+        env_override=env_override,
+        selectors=selectors if selectors else None,
+        fetch_row_count=stub_row_count,
+        perform_copy_export=stub_copy,
+        input_receipt_override=input_receipt_override,
+    )
+
+    descriptors = receipt["selected"]
+    totals = receipt["per_selector_totals"]
+    expected = _expected_totals_from_descriptors(descriptors)
+
+    # Universal invariant #1: state counts sum to processed count.
+    assert (
+        totals["exported"]
+        + totals["skipped_verified"]
+        + totals["skipped_dry_run"]
+        + totals["error"]
+        == len(descriptors)
+    ), f"state totals must sum to descriptor count in {scenario}"
+
+    # Universal invariant #2: every totals key matches the descriptor-derived
+    # expected value.
+    for key, want in expected.items():
+        assert totals[key] == want, (
+            f"totals[{key!r}] mismatch in {scenario}: got {totals[key]}, want {want}"
+        )
+
+    # Universal invariant #3: outcome enum matches the failure/success mix.
+    if scenario == "all_failed":
+        assert receipt["outcome"] == "all_failed"
+    elif totals["error"] > 0 and (
+        totals["exported"] + totals["skipped_verified"] + totals["skipped_dry_run"] > 0
+    ):
+        assert receipt["outcome"] == "partial"
+    elif totals["error"] == 0:
+        assert receipt["outcome"] == "clean"
+
+
+def _prepare_verified_existing_pair(
+    tmp_path: Path, selector: dict[str, Any], body_row: bytes
+) -> None:
+    """Create an on-disk manifest + object that idempotency verifies."""
+    identity = str(
+        selector["identity"].get("forcing_version_id")
+        or selector["identity"].get("run_id")
+    )
+    lane = "forcing" if selector["table"].startswith("met.") else "runs"
+    existing_dir = tmp_path / "archive" / f"db-export/{lane}/{identity}"
+    existing_dir.mkdir(parents=True, exist_ok=True)
+    compressed_bytes = b"ZSTD:" + body_row  # matches test _make_stub_copy_and_count
+    existing_object_path = existing_dir / "data.csv.zst"
+    existing_object_path.write_bytes(compressed_bytes)
+    existing_sha = hashlib.sha256(compressed_bytes).hexdigest()
+    row_count = body_row.count(b"\n") - 1
+    manifest = {
+        "schema_version": "1.0",
+        "provenance": "db-export",
+        "generated_at": "2026-07-01T00:00:00Z",
+        "source_database": {"database": "nhms", "instance_id": "node27-primary-pg15"},
+        "exports": [
+            {
+                "selector": selector,
+                "exported_row_count": row_count,
+                "columns": list(
+                    salvage._COLUMNS_FORCING
+                    if selector["table"].startswith("met.")
+                    else salvage._COLUMNS_RIVER
+                ),
+                "object": {
+                    "path": f"db-export/{lane}/{identity}/data.csv.zst",
+                    "sha256": existing_sha,
+                    "size_bytes": len(compressed_bytes),
+                },
+            }
+        ],
+    }
+    (existing_dir / "manifest.json").write_text(json.dumps(manifest))
+
+
+# === cand-F: idempotency multi-gate coverage ===
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "sha256_mismatch",
+        "size_bytes_mismatch",
+        "row_count_mismatch",
+        "schema_invalid_manifest",
+        "exports_length_2",
+        "selector_drift",
+    ],
+)
+def test_idempotency_gate_negative_cases(tmp_path: Path, case: str) -> None:
+    """Any single-property mismatch in the existing pair must cause the
+    idempotency check to reject the verified skip. state must NOT be
+    ``skipped_verified``.
+    """
+    selector = {
+        "table": "met.forcing_station_timeseries",
+        "identity": {"forcing_version_id": "forc-a"},
+        "window": {"start": "2026-05-28T00:00:00Z", "end": "2026-06-16T00:00:00Z"},
+    }
+    body_row = (
+        b"forcing_version_id,basin_version_id,station_id,valid_time,source_id,"
+        b"variable,value,unit,native_resolution,quality_flag\n"
+        b"forc-a,bv,s,2026-05-28T00:00:00Z,src,q,1.0,mm,PT1H,0\n"
+    )
+    identity = "forc-a"
+    existing_dir = tmp_path / "archive" / f"db-export/forcing/{identity}"
+    existing_dir.mkdir(parents=True)
+    truthful_compressed = b"ZSTD:" + body_row
+    existing_object_path = existing_dir / "data.csv.zst"
+    truthful_sha = hashlib.sha256(truthful_compressed).hexdigest()
+    truthful_size = len(truthful_compressed)
+    truthful_row_count = body_row.count(b"\n") - 1
+
+    # Baseline manifest — mutated per case.
+    manifest: dict[str, Any] = {
+        "schema_version": "1.0",
+        "provenance": "db-export",
+        "generated_at": "2026-07-01T00:00:00Z",
+        "source_database": {"database": "nhms", "instance_id": "node27-primary-pg15"},
+        "exports": [
+            {
+                "selector": selector,
+                "exported_row_count": truthful_row_count,
+                "columns": list(salvage._COLUMNS_FORCING),
+                "object": {
+                    "path": f"db-export/forcing/{identity}/data.csv.zst",
+                    "sha256": truthful_sha,
+                    "size_bytes": truthful_size,
+                },
+            }
+        ],
+    }
+    existing_object_path.write_bytes(truthful_compressed)
+    row_count_stub_returns = truthful_row_count
+
+    if case == "sha256_mismatch":
+        manifest["exports"][0]["object"]["sha256"] = "0" * 64
+    elif case == "size_bytes_mismatch":
+        manifest["exports"][0]["object"]["size_bytes"] = truthful_size + 1
+    elif case == "row_count_mismatch":
+        # Manifest claims one row; DB says a different number.
+        row_count_stub_returns = truthful_row_count + 5
+    elif case == "schema_invalid_manifest":
+        # provenance must be "db-export" — replace with something invalid.
+        manifest["provenance"] = "product-archive"
+    elif case == "exports_length_2":
+        # Duplicate the export entry so len != 1.
+        manifest["exports"].append(dict(manifest["exports"][0]))
+    elif case == "selector_drift":
+        drifted = dict(selector)
+        drifted["window"] = {
+            "start": "2000-01-01T00:00:00Z",
+            "end": "2000-01-02T00:00:00Z",
+        }
+        manifest["exports"][0]["selector"] = drifted
+
+    (existing_dir / "manifest.json").write_text(json.dumps(manifest))
+
+    def stub_row_count(dsn, table, selector, timeout_ms):
+        return row_count_stub_returns
+
+    receipt = _run_build_receipt(
+        tmp_path,
+        env_override={"NODE27_DB_EXPORT_SALVAGE_MODE": "enforce"},
+        selectors=[selector],
+        fetch_row_count=stub_row_count,
+        perform_copy_export=lambda *a, **k: body_row,
+    )
+    (descriptor,) = receipt["selected"]
+    assert descriptor["state"] != "skipped_verified", (
+        f"idempotency gate must reject case {case!r} — got skipped_verified"
+    )
+    # And the selector must re-run (either exported or error), never
+    # silently claimed clean.
+    assert descriptor["state"] in {"exported", "error"}
+
+
+# === cand-I: outcome enum extended with all_failed ===
+
+
+def test_outcome_all_failed_when_no_success_and_any_error(tmp_path: Path) -> None:
+    """`any_errors and not any_success` must yield ``outcome="all_failed"``,
+    distinct from the mixed ``partial`` case.
+    """
+    selectors = [
+        {
+            "table": "met.forcing_station_timeseries",
+            "identity": {"forcing_version_id": f"forc-{i}"},
+            "window": {"start": "2026-05-28T00:00:00Z", "end": "2026-06-16T00:00:00Z"},
+        }
+        for i in range(2)
+    ]
+
+    def failing_copy(dsn, table, columns, selector, timeout_ms):
+        raise RuntimeError("simulated fault")
+
+    receipt = _run_build_receipt(
+        tmp_path,
+        env_override={"NODE27_DB_EXPORT_SALVAGE_MODE": "enforce"},
+        selectors=selectors,
+        perform_copy_export=failing_copy,
+    )
+    assert receipt["outcome"] == "all_failed"
+    assert receipt["per_selector_totals"]["error"] == 2
+    assert receipt["per_selector_totals"]["exported"] == 0
+
+
+# === cand-J: default mode is dry-run when env var omitted ===
+
+
+def test_config_defaults_mode_to_dry_run(tmp_path: Path) -> None:
+    env = _base_env(
+        tmp_path, override={"NODE27_DB_EXPORT_SALVAGE_MODE": None}
+    )
+    config = salvage.config_from_args(_args(), env)
+    assert config.mode == "dry-run"
+    assert config.enforce is False
+
+
+# === cand-M: _sentinel_insert_check internals fail-closed classification ===
+
+
+class _FakePsycopgErrors:
+    class InsufficientPrivilege(Exception):
+        pass
+
+    class SyntaxError(Exception):  # noqa: N818 — mirror psycopg2's naming
+        pass
+
+    class NotNullViolation(Exception):
+        pass
+
+    class OperationalError(Exception):
+        pass
+
+    class QueryCanceled(Exception):
+        pass
+
+
+class _FakeCursor:
+    def __init__(self, on_execute):
+        self._on_execute = on_execute
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, *_args, **_kwargs):
+        self._on_execute()
+
+
+class _FakeConnection:
+    def __init__(self, on_execute):
+        self._on_execute = on_execute
+        self.rolled_back = False
+
+    def cursor(self):
+        return _FakeCursor(self._on_execute)
+
+    def rollback(self):
+        self.rolled_back = True
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_prefix"),
+    [
+        ("insufficient_privilege_returns_none", None),
+        ("not_null_violation_refuses", "role can INSERT into"),
+        ("syntax_error_refuses_as_unavailable", "role privilege probe unavailable"),
+        ("operational_error_refuses_as_unavailable", "role privilege probe unavailable"),
+        ("query_canceled_refuses_as_unavailable", "role privilege probe unavailable"),
+        ("success_refuses", "role can INSERT into"),
+    ],
+)
+def test_sentinel_insert_check_classification(
+    monkeypatch: pytest.MonkeyPatch, case: str, expected_prefix: str | None
+) -> None:
+    fake_errors = _FakePsycopgErrors()
+
+    # Patch the psycopg2 modules at import-time inside the runner.
+    import types
+
+    fake_psycopg2 = types.ModuleType("psycopg2")
+    fake_errors_module = types.ModuleType("psycopg2.errors")
+    fake_errors_module.InsufficientPrivilege = fake_errors.InsufficientPrivilege
+    fake_errors_module.SyntaxError = fake_errors.SyntaxError
+    fake_errors_module.NotNullViolation = fake_errors.NotNullViolation
+    fake_errors_module.OperationalError = fake_errors.OperationalError
+    fake_errors_module.QueryCanceled = fake_errors.QueryCanceled
+    fake_psycopg2.errors = fake_errors_module
+
+    def on_execute():
+        if case == "insufficient_privilege_returns_none":
+            raise fake_errors.InsufficientPrivilege("permission denied")
+        if case == "not_null_violation_refuses":
+            raise fake_errors.NotNullViolation("null in column")
+        if case == "syntax_error_refuses_as_unavailable":
+            raise fake_errors.SyntaxError("syntax error at or near")
+        if case == "operational_error_refuses_as_unavailable":
+            raise fake_errors.OperationalError("server closed the connection")
+        if case == "query_canceled_refuses_as_unavailable":
+            raise fake_errors.QueryCanceled("canceling statement due to statement timeout")
+        # "success_refuses" — do not raise; INSERT "succeeded".
+
+    connection = _FakeConnection(on_execute)
+    fake_psycopg2.connect = lambda dsn: connection
+
+    monkeypatch.setitem(__import__("sys").modules, "psycopg2", fake_psycopg2)
+    monkeypatch.setitem(__import__("sys").modules, "psycopg2.errors", fake_errors_module)
+
+    result = salvage._sentinel_insert_check(
+        "postgresql://ignored", "met.forcing_station_timeseries", "forcing_version_id"
+    )
+    if expected_prefix is None:
+        assert result is None
+    else:
+        assert result is not None and result.startswith(expected_prefix), (
+            f"case {case!r} expected prefix {expected_prefix!r}, got {result!r}"
+        )
+    # Sentinel probe MUST rollback regardless of outcome.
+    assert connection.rolled_back
+
+
+# === cand-G / cand-H: river schema example still validates ===
+
+
+def test_salvage_manifest_river_example_validates() -> None:
+    river_example = _ROOT / "schemas/examples/salvage_manifest_river.example.json"
+    assert river_example.exists(), "river example must ship"
+    jsonschema.validate(_load_json(river_example), _load_json(_MANIFEST_SCHEMA_PATH))
+
+
+def test_forcing_example_columns_match_full_ddl() -> None:
+    """The manifest example's columns list must span the full DDL, not a subset."""
+    example = _load_json(_MANIFEST_EXAMPLE_PATH)
+    assert tuple(example["exports"][0]["columns"]) == salvage._COLUMNS_FORCING
+
+
+def test_river_example_columns_match_full_ddl() -> None:
+    river_example = _ROOT / "schemas/examples/salvage_manifest_river.example.json"
+    example = _load_json(river_example)
+    assert tuple(example["exports"][0]["columns"]) == salvage._COLUMNS_RIVER
+
+
+# === Extra: zstd binary validation contract ===
+
+
+def test_zstd_env_var_refused_when_relative(tmp_path: Path) -> None:
+    env = _base_env(tmp_path, override={"NODE27_DB_EXPORT_SALVAGE_ZSTD": "relative-zstd"})
+    with pytest.raises(salvage.SalvageConfigError, match="ZSTD"):
+        salvage.config_from_args(_args(), env)
+
+
+def test_zstd_env_var_refused_when_missing(tmp_path: Path) -> None:
+    env = _base_env(
+        tmp_path,
+        override={"NODE27_DB_EXPORT_SALVAGE_ZSTD": str(tmp_path / "missing-zstd")},
+    )
+    with pytest.raises(salvage.SalvageConfigError, match="ZSTD"):
+        salvage.config_from_args(_args(), env)
+
+
+def test_zstd_env_var_refused_when_symlink(tmp_path: Path) -> None:
+    real = tmp_path / "real-zstd"
+    real.write_text("#!/bin/sh\ncat\n", encoding="utf-8")
+    real.chmod(0o700)
+    link = tmp_path / "zstd-symlink"
+    link.symlink_to(real)
+    env = _base_env(tmp_path, override={"NODE27_DB_EXPORT_SALVAGE_ZSTD": str(link)})
+    with pytest.raises(salvage.SalvageConfigError, match="ZSTD"):
+        salvage.config_from_args(_args(), env)
+
+
+def test_max_selector_bytes_default_is_2gib(tmp_path: Path) -> None:
+    env = _base_env(
+        tmp_path, override={"NODE27_DB_EXPORT_SALVAGE_MAX_SELECTOR_BYTES": None}
+    )
+    config = salvage.config_from_args(_args(), env)
+    assert config.max_selector_bytes == 2 * 1024 * 1024 * 1024
+
+
+def test_max_selector_bytes_refused_when_non_positive(tmp_path: Path) -> None:
+    env = _base_env(
+        tmp_path, override={"NODE27_DB_EXPORT_SALVAGE_MAX_SELECTOR_BYTES": "0"}
+    )
+    with pytest.raises(salvage.SalvageConfigError, match="MAX_SELECTOR_BYTES"):
+        salvage.config_from_args(_args(), env)
