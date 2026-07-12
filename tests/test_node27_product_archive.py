@@ -2781,3 +2781,342 @@ def test_product_archive_wrapper_rejects_unsafe_runtime_contract(
     assert result.stdout == ""
     failure = json.loads(result.stderr.strip())
     assert failure == {"status": "failed", "reason": expected_reason}
+
+
+# ---------------------------------------------------------------------------
+# #849: archive-root free-space refusal gate.
+# The refusal must fire BEFORE candidate discovery/mutation. See the
+# governing invariant + Invariant Matrix in
+# openspec/changes/tier-node27-timeseries-storage/design.md
+# under the "Workflow Fixture: Issue #849" section.
+
+
+def _config_with_watermarks(
+    tmp_path: Path,
+    *,
+    enforce: bool,
+    warn_bytes: int | None,
+    refuse_bytes: int | None,
+) -> archive.MoverConfig:
+    base = _config(tmp_path, enforce=enforce)
+    return archive.MoverConfig(
+        **{
+            **base.__dict__,
+            "free_space_warn_bytes": warn_bytes,
+            "free_space_refuse_bytes": refuse_bytes,
+        }
+    )
+
+
+def _fake_disk_usage(free: int) -> object:
+    return type("U", (), {"total": free * 4, "used": free * 3, "free": free})()
+
+
+def test_enforce_below_refuse_watermark_refuses_before_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config_with_watermarks(
+        tmp_path, enforce=True, warn_bytes=2_000, refuse_bytes=1_000
+    )
+    source_leaf = _forcing(config)
+    # Free space (500) is below refuse (1000).
+    monkeypatch.setattr(archive.shutil, "disk_usage", lambda path: _fake_disk_usage(500))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("discovery must not run after free-space refusal")
+
+    monkeypatch.setattr(archive, "discover_candidate_locators", forbidden)
+
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 1
+    assert receipt["outcome"] == "refused_free_space"
+    assert receipt["candidates"] == []
+    assert receipt["selected"] == []
+    assert receipt["deferred"] == []
+    assert receipt["terminals"] == []
+    assert receipt["events"] == []
+    assert receipt["discovery_failures"] == []
+    assert receipt["free_space"]["band"] == "refuse"
+    assert receipt["free_space"]["free_bytes"] == 500
+    assert receipt["free_space"]["warn_bytes"] == 2_000
+    assert receipt["free_space"]["refuse_bytes"] == 1_000
+    assert receipt["free_space"]["archive_root"] == str(config.archive_root)
+    # Source untouched.
+    assert source_leaf.exists()
+    # No archive tree published.
+    assert list(config.archive_root.iterdir()) == []
+    # Refusal is receipt-schema-valid.
+    jsonschema.Draft7Validator(
+        json.loads((_ROOT / "schemas/product_archive_receipt.schema.json").read_text()),
+        format_checker=jsonschema.FormatChecker(),
+    ).validate(receipt)
+
+
+def test_dry_run_below_refuse_watermark_also_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config_with_watermarks(
+        tmp_path, enforce=False, warn_bytes=2_000, refuse_bytes=1_000
+    )
+    _forcing(config)
+    monkeypatch.setattr(archive.shutil, "disk_usage", lambda path: _fake_disk_usage(500))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("discovery must not run after free-space refusal")
+
+    monkeypatch.setattr(archive, "discover_candidate_locators", forbidden)
+
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 1
+    assert receipt["outcome"] == "refused_free_space"
+    assert receipt["mode"] == "dry-run"
+
+
+def test_enforce_between_refuse_and_warn_proceeds_with_warn_band(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config_with_watermarks(
+        tmp_path, enforce=True, warn_bytes=2_000, refuse_bytes=1_000
+    )
+    _forcing(config)
+    # Free (1500) >= refuse (1000) and < warn (2000).
+    monkeypatch.setattr(archive.shutil, "disk_usage", lambda path: _fake_disk_usage(1_500))
+
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 0
+    assert receipt["outcome"] == "success"
+    assert receipt["free_space"]["band"] == "warn"
+
+
+def test_enforce_at_or_above_warn_watermark_is_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config_with_watermarks(
+        tmp_path, enforce=True, warn_bytes=2_000, refuse_bytes=1_000
+    )
+    _forcing(config)
+    monkeypatch.setattr(archive.shutil, "disk_usage", lambda path: _fake_disk_usage(5_000))
+
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 0
+    assert receipt["outcome"] == "success"
+    assert receipt["free_space"]["band"] == "clean"
+
+
+def test_watermarks_unset_preserves_legacy_run_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    _forcing(config)
+
+    # Even a zero-free-space filesystem MUST NOT refuse when watermarks are
+    # unset — backwards-compatible with pre-#849 deployments.
+    def would_be_refuse(path):
+        return _fake_disk_usage(0)
+
+    monkeypatch.setattr(archive.shutil, "disk_usage", would_be_refuse)
+
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 0
+    assert receipt["outcome"] == "success"
+    assert "free_space" not in receipt
+
+
+@pytest.mark.parametrize(
+    ("warn", "refuse"),
+    [
+        (None, "1000"),
+        ("2000", None),
+    ],
+)
+def test_partial_watermark_env_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, warn: str | None, refuse: str | None
+) -> None:
+    for key in (
+        "NHMS_ARCHIVE_FREE_SPACE_WARN_BYTES",
+        "NHMS_ARCHIVE_FREE_SPACE_REFUSE_BYTES",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    if warn is not None:
+        monkeypatch.setenv("NHMS_ARCHIVE_FREE_SPACE_WARN_BYTES", warn)
+    if refuse is not None:
+        monkeypatch.setenv("NHMS_ARCHIVE_FREE_SPACE_REFUSE_BYTES", refuse)
+    with pytest.raises(archive.ArchiveMoverError, match="watermarks"):
+        archive._parse_free_space_watermarks(os.environ)
+
+
+@pytest.mark.parametrize(
+    ("warn", "refuse"),
+    [
+        ("", "1000"),
+        ("2000", ""),
+        ("not-an-int", "1000"),
+        ("2000", "not-an-int"),
+        ("0", "0"),
+        ("-1", "-2"),
+        ("100", "200"),  # refuse >= warn
+        ("100", "100"),
+    ],
+)
+def test_invalid_watermark_env_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, warn: str, refuse: str
+) -> None:
+    monkeypatch.setenv("NHMS_ARCHIVE_FREE_SPACE_WARN_BYTES", warn)
+    monkeypatch.setenv("NHMS_ARCHIVE_FREE_SPACE_REFUSE_BYTES", refuse)
+    with pytest.raises(archive.ArchiveMoverError):
+        archive._parse_free_space_watermarks(os.environ)
+
+
+def test_valid_watermark_env_parses_to_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NHMS_ARCHIVE_FREE_SPACE_WARN_BYTES", "2000")
+    monkeypatch.setenv("NHMS_ARCHIVE_FREE_SPACE_REFUSE_BYTES", "1000")
+    warn, refuse = archive._parse_free_space_watermarks(os.environ)
+    assert (warn, refuse) == (2000, 1000)
+
+
+def test_missing_watermark_env_is_backwards_compatible(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NHMS_ARCHIVE_FREE_SPACE_WARN_BYTES", raising=False)
+    monkeypatch.delenv("NHMS_ARCHIVE_FREE_SPACE_REFUSE_BYTES", raising=False)
+    assert archive._parse_free_space_watermarks(os.environ) == (None, None)
+
+
+def test_refusal_receipt_semantics_reject_extra_terminals() -> None:
+    receipt = {
+        "schema_version": archive.SCHEMA_VERSION,
+        "generated_at": "2026-07-11T00:00:00Z",
+        "mode": "enforce",
+        "cutoff": "2026-05-27T00:00:00Z",
+        "minimum_age_days": 45,
+        "per_tick_bound": 8,
+        "outcome": "refused_free_space",
+        "validation_attempts": 0,
+        "candidates": [],
+        "selected": [],
+        "deferred": [],
+        "terminals": [
+            {
+                "identity": {
+                    "lane": "runs",
+                    "source": "gfs",
+                    "cycle_identity": "2026010100",
+                    "cycle_time": "2026-01-01T00:00:00Z",
+                    "run_id": "r",
+                },
+                "status": "planned",
+                "reason": "should not be here",
+                "source_bytes": 0,
+                "archive_bytes": 0,
+                "residue": [],
+            }
+        ],
+        "events": [],
+        "discovery_failures": [],
+        "bytes": {"source": 0, "archived": 0},
+        "free_space": {
+            "archive_root": "/tmp/archive",
+            "free_bytes": 100,
+            "warn_bytes": 2_000,
+            "refuse_bytes": 1_000,
+            "band": "refuse",
+        },
+    }
+    with pytest.raises(archive.ArchiveMoverError, match="must not carry terminals"):
+        archive.validate_receipt_semantics(receipt)
+
+
+def test_refusal_receipt_requires_free_below_refuse() -> None:
+    receipt = {
+        "schema_version": archive.SCHEMA_VERSION,
+        "generated_at": "2026-07-11T00:00:00Z",
+        "mode": "enforce",
+        "cutoff": "2026-05-27T00:00:00Z",
+        "minimum_age_days": 45,
+        "per_tick_bound": 8,
+        "outcome": "refused_free_space",
+        "validation_attempts": 0,
+        "candidates": [],
+        "selected": [],
+        "deferred": [],
+        "terminals": [],
+        "events": [],
+        "discovery_failures": [],
+        "bytes": {"source": 0, "archived": 0},
+        "free_space": {
+            "archive_root": "/tmp/archive",
+            "free_bytes": 5_000,  # Above refuse — invalid for refusal receipt.
+            "warn_bytes": 2_000,
+            "refuse_bytes": 1_000,
+            "band": "refuse",
+        },
+    }
+    with pytest.raises(archive.ArchiveMoverError, match="free_bytes must be"):
+        archive.validate_receipt_semantics(receipt)
+
+
+def test_refused_free_space_receipt_schema_positive_example() -> None:
+    schema = json.loads((_ROOT / "schemas/product_archive_receipt.schema.json").read_text())
+    receipt = {
+        "schema_version": archive.SCHEMA_VERSION,
+        "generated_at": "2026-07-11T00:00:00Z",
+        "mode": "enforce",
+        "cutoff": "2026-05-27T00:00:00Z",
+        "minimum_age_days": 45,
+        "per_tick_bound": 8,
+        "outcome": "refused_free_space",
+        "validation_attempts": 0,
+        "candidates": [],
+        "selected": [],
+        "deferred": [],
+        "terminals": [],
+        "events": [],
+        "discovery_failures": [],
+        "bytes": {"source": 0, "archived": 0},
+        "free_space": {
+            "archive_root": "/tmp/archive",
+            "free_bytes": 500,
+            "warn_bytes": 2_000,
+            "refuse_bytes": 1_000,
+            "band": "refuse",
+        },
+    }
+    jsonschema.Draft7Validator(schema, format_checker=jsonschema.FormatChecker()).validate(receipt)
+
+
+def test_disk_usage_error_at_free_space_measurement_is_operational(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config_with_watermarks(
+        tmp_path, enforce=True, warn_bytes=2_000, refuse_bytes=1_000
+    )
+
+    def raiser(path):
+        raise OSError("disk usage unavailable")
+
+    monkeypatch.setattr(archive.shutil, "disk_usage", raiser)
+    with pytest.raises(archive.ArchiveOperationalError):
+        archive._measure_archive_free_space(config)

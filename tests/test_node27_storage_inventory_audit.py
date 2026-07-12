@@ -7,6 +7,7 @@ import io
 import json
 import os
 import stat
+import subprocess
 import tarfile
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -19,6 +20,8 @@ from packages.common import safe_fs
 from packages.common.object_store import LocalObjectStore
 from scripts import node27_product_archive as mover
 from scripts import node27_storage_inventory_audit as audit
+
+_ROOT = Path(__file__).resolve().parents[1]
 
 NOW = datetime(2026, 7, 11, 12, tzinfo=UTC)
 START = datetime(2026, 5, 1, tzinfo=UTC)
@@ -1468,3 +1471,91 @@ def test_descriptor_bound_json_read_detects_leaf_swap(tmp_path: Path, monkeypatc
     monkeypatch.setattr(os, "open", swap_open)
     with pytest.raises(audit.AuditBlocked, match="changed while being opened"):
         audit._read_json(target, root)
+
+
+# ---------------------------------------------------------------------------
+# #849 Invariant Matrix Regression row 1: the audit `_once.sh` wrapper reuses
+# the same mode-0600 env-file check and absolute-path gates inherited from the
+# mover wrapper (see openspec/changes/tier-node27-timeseries-storage/design.md
+# under "Workflow Fixture: Issue #849"). The sibling mover-side coverage lives
+# at tests/test_node27_product_archive.py
+# ::test_product_archive_wrapper_rejects_unsafe_runtime_contract; this test
+# mirrors that structure for the audit-side wrapper's 5 shell-level gates.
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_reason"),
+    [
+        ("relative-wrapper-path", "wrapper paths must be absolute"),
+        ("env-mode", "env file must have mode 0600"),
+        ("env-symlink", "env file must be a regular non-symlink file"),
+        ("missing-python", "python executable is unavailable"),
+        ("missing-script", "audit entrypoint is unavailable or a symlink"),
+        ("symlink-script", "audit entrypoint is unavailable or a symlink"),
+    ],
+)
+def test_storage_inventory_audit_wrapper_rejects_unsafe_runtime_contract(
+    tmp_path: Path, case: str, expected_reason: str
+) -> None:
+    wrapper = _ROOT / "scripts/node27_storage_inventory_audit_once.sh"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stat_shim = bin_dir / "stat"
+    stat_shim.write_text(
+        "#!/bin/sh\n"
+        "for last do :; done\n"
+        "case \"$last\" in\n"
+        "  *bad-mode.env) printf '644\\n' ;;\n"
+        "  *) printf '600\\n' ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    stat_shim.chmod(0o700)
+
+    python_bin = tmp_path / "python"
+    python_bin.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    python_bin.chmod(0o700)
+    entrypoint = tmp_path / "audit.py"
+    entrypoint.write_text("raise SystemExit(99)\n", encoding="utf-8")
+
+    env_file = tmp_path / ("bad-mode.env" if case == "env-mode" else "audit.env")
+    env_file.write_text("", encoding="utf-8")
+    env_file.chmod(0o600)
+    if case == "env-symlink":
+        target = tmp_path / "real.env"
+        env_file.rename(target)
+        env_file.symlink_to(target)
+
+    configured_python = str(python_bin)
+    if case == "missing-python":
+        configured_python = str(tmp_path / "missing-python")
+
+    configured_script = str(entrypoint)
+    if case == "missing-script":
+        configured_script = str(tmp_path / "missing-script.py")
+    elif case == "symlink-script":
+        script_link = tmp_path / "audit-link.py"
+        script_link.symlink_to(entrypoint)
+        configured_script = str(script_link)
+
+    process_env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "NODE27_STORAGE_INVENTORY_AUDIT_ENV_FILE": (
+            "relative.env" if case == "relative-wrapper-path" else str(env_file)
+        ),
+        "NODE27_STORAGE_INVENTORY_AUDIT_PYTHON": configured_python,
+        "NODE27_STORAGE_INVENTORY_AUDIT_SCRIPT": configured_script,
+    }
+    result = subprocess.run(
+        ["/bin/sh", str(wrapper)],
+        env=process_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    failure = json.loads(result.stderr.strip())
+    assert failure == {"status": "failed", "reason": expected_reason}

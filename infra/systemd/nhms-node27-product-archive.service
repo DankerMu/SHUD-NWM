@@ -1,0 +1,10 @@
+[Unit]
+Description=NHMS node-27 product archive mover
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/nwm/NWM
+ExecStart=/home/nwm/NWM/scripts/node27_product_archive_once.sh
+StandardOutput=append:/home/nwm/node27-product-archive-logs/systemd.log
+StandardError=append:/home/nwm/node27-product-archive-logs/systemd.err
+TimeoutStartSec=0

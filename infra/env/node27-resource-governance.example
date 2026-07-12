@@ -13,3 +13,20 @@ NODE27_RESOURCE_GOVERNANCE_LOG_ROOT=/home/nwm/node27-resource-governance-logs
 # Use a node-27-local DB account. Read-only display credentials are enough for
 # the audit path; do not use this env for ingest or cleanup writes.
 DATABASE_URL=postgresql://nhms_display_ro:REPLACE_ME@127.0.0.1:5432/nhms
+
+# --- Archive lane observability -------------------------------------------
+# The governance audit reports archive-root size + shared-volume free space
+# with warn/refuse bands. The mover, audit, and governance each source ONLY
+# their own env file (wrapper `set -a; . "$ENV_FILE"; set +a` pattern), so
+# these three vars MUST match across the three env files:
+#   infra/env/node27-product-archive.env
+#   infra/env/node27-storage-inventory-audit.env
+#   infra/env/node27-resource-governance.env
+# Drifting them is a governance blind-spot bug (governance may report a
+# different band than the mover actually enforces).
+
+NHMS_ARCHIVE_ROOT=/home/ghdc/nwm/archive
+
+# Strict integer bytes; matches mover env verbatim. See #849 for tuning.
+NHMS_ARCHIVE_FREE_SPACE_WARN_BYTES=322122547200      # 300 GiB
+NHMS_ARCHIVE_FREE_SPACE_REFUSE_BYTES=161061273600    # 150 GiB

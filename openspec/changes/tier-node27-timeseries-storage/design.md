@@ -306,3 +306,96 @@ Boundary-surface checklist:
 - Producer/consumer evidence boundary: the audit is the sole archive-completeness receipt producer; #850 salvage consumes its exact selectors and #855 retention consumes its subject coverage. Product archive and `db-export` provenance remain distinguishable.
 - Publish boundary: validated receipts explicitly opt into same-directory mode-0600 temporary files plus atomic replace, mandatory directory fsync, and post-replace parent-FD identity verification. Pre-replace blockers preserve the previous receipt and clean temporary residue; after-replace durability/namespace failures make the producer indeterminate/non-zero and never `published`, but a file-fsynced payload may already be visible. #855 independently validates the currently configured two receipt contents and does not add producer status, a sidecar, or systemd state as a third gate. The configured parent is operator-controlled and non-rotating during publication. The shared atomic helper keeps its legacy default for unmigrated non-receipt callers. Product/archive deletion and other mutations remain out of scope.
 - Mover mutation boundary: dry-run writes only safe lock metadata and its receipt. Enforce publishes a fully re-read staging leaf, may quarantine an invalid final leaf, then retires only a revalidated source preimage through a held-FD tombstone. Failures before tombstone rename preserve the source path; later uncertainty is non-zero and records complete/partial tombstone residue without falsely promising rollback.
+
+## Workflow Fixture: Issue #849 Archive/Audit Systemd + Capacity + First Live Receipts
+
+Fixture level: expanded. Repair intensity: high. Project profile: NHMS.
+
+Change surface:
+
+- `infra/systemd/nhms-node27-product-archive.{service,timer}` (new): oneshot service + daily timer running `scripts/node27_product_archive_once.sh`.
+- `infra/systemd/nhms-node27-storage-inventory-audit.{service,timer}` (new): oneshot service + daily timer running the audit `_once.sh`; cadence must be strictly shorter than the retention gate's receipt validity window (design decision D6).
+- `infra/env/node27-product-archive.example` (new): `NHMS_ARCHIVE_ROOT`, `NHMS_ARCHIVE_MIN_AGE_DAYS`, per-tick bound, free-space warn/refuse watermarks, tool path.
+- `infra/env/node27-storage-inventory-audit.example` (new): DB URL, `NHMS_ARCHIVE_ROOT`, receipt path.
+- `scripts/node27_resource_governance.py` extension: append the four new units to `DEFAULT_SERVICES`; add archive-root size + shared-volume free-space measurements (warn/refuse thresholds, initial values from Open Questions) to the governance receipt; existing receipt fields remain unchanged.
+- `scripts/node27_product_archive.py` extension: enforce refuses (non-zero, receipt WARN, sources untouched) below the free-space refuse threshold; dry-run reports the same evaluation without action.
+- `docs/runbooks/tier-node27-timeseries-storage.md` new section: archive mover + audit operation, rollback, timer cadence rationale.
+- Node-27 live (task 2.5): committed schema-valid completeness receipt (recurring audit) + first enforce archive receipt covering aged `forcing/` + `runs/` + `states/` cycles, both under runbook receipts.
+
+Must preserve:
+
+- Existing `nhms-node27-*` user-unit installation pattern (`nwm` user, `WorkingDirectory=/home/nwm/NWM`, append log path, `OnCalendar` UTC, `Persistent=true`).
+- Existing `scripts/node27_resource_governance.py` schema `nhms.node27_resource_governance.audit.v1` and its unit-status/free-space output shapes for existing consumers (extend, do not renumber or reshape).
+- The mover's ADR 0002 invariant "no deletion without archive receipt": the free-space refusal must gate enforce **before** any source mutation, and must not weaken any existing verify-before-delete guarantee.
+- ADR 0001 display carve-out: no display API/frontend/read code path may import the archive resolver or reference the archive root through env.
+- Existing env aliasing conventions (`NHMS_ARCHIVE_ROOT` + `NODE27_<SCRIPT>_ARCHIVE_ROOT`) already pinned in #846 remain the sole configuration surface.
+
+Must add/change:
+
+- Two new systemd user-unit pairs (mover + inventory audit) and the two env examples above.
+- Governance-receipt-visible archive root size + free-space measurement with warn/refuse thresholds; thresholds must be parseable from the env with strict validation, no truthiness fallback (matches #846/#848 discipline).
+- Mover free-space refusal at enforce start (before candidate selection or source mutation) with structured receipt outcome — refusal is a first-class terminal, not an ad-hoc exit.
+- Runbook section describing operation, rollback, refuse-threshold tuning, and the cadence-vs-retention-gate invariant.
+- Live receipts committed under `docs/runbooks/receipts/<date>/` (or existing convention) capturing both the recurring-audit completeness receipt and the first enforce archive run.
+
+Risk packs considered (core):
+
+- Public API / CLI / script entry: selected — governance and mover scripts gain new env-driven behavior; unit files are a new operator surface.
+- Config / project setup: selected — env examples + watermark parsing + unit installation are the feature.
+- File IO / path safety / overwrite: selected — free-space refusal must fire before mover discovery/mutation; runbook receipts are new write locations under `NODE27_PRODUCT_ARCHIVE_LOG_ROOT`.
+- Schema / columns / units / field names: selected — governance receipt gains archive-root fields; existing consumers must remain compatible.
+- Auth / permissions / secrets: selected — env files are mode-0600 on node-27; DB URL in the audit env is display_ro only.
+- Concurrency / shared state / ordering: selected — timer cadence must guarantee a fresh completeness receipt at every retention gate tick (D6).
+- Resource limits / large input / discovery: selected — per-tick bound + free-space watermark bound production impact of first enforce.
+- Legacy compatibility / examples: selected — existing governance receipt consumers and unit-installation runbooks must remain functional.
+- Error handling / rollback / partial outputs: selected — refusal preserves sources; recurring audit failure preserves the previous receipt (already locked in #847).
+- Release / packaging / dependency compatibility: not selected — no new runtime or Python dependency.
+- Documentation / migration notes: selected — runbook section is part of the deliverable.
+
+Domain packs:
+
+- Geospatial / CRS / basin geometry: not selected — no geometry, CRS, or basin-shape surface touched.
+- Hydro-met time series / forcing windows: selected — first live enforce/audit fold pre-2026-06-16 forcing gap into the salvage selector list.
+- SHUD numerical runtime / conservation / NaN: not selected — no solver, numerical, or SHUD-output surface touched.
+- PostGIS / TimescaleDB domain behavior: not selected — no schema/query change.
+- Slurm production lifecycle / mock-vs-real parity: not selected — node-22 untouched.
+- External hydro-met providers / snapshot reproducibility: not selected — no provider discovery/fetch; archive lane consumes already-produced products.
+- Run manifest / QC provenance: selected — audit and enforce receipts feed the change's evidence chain.
+- Published NHMS artifacts / display identity: not selected — ADR 0001 carve-out preserved; display never reads archive.
+
+Invariant Matrix:
+
+- Governing invariant: enforce archive runs only when node-27 free space is above the configured refuse threshold; a fresh, schema-valid archive-completeness receipt must be present at every retention gate tick.
+- Source-of-truth identity/contract: `NHMS_ARCHIVE_ROOT` + free-space watermarks + governance receipt schema `nhms.node27_resource_governance.audit.v1` (extended) + audit timer cadence < retention receipt validity window.
+- Producers: extended `scripts/node27_product_archive.py` enforce entry (adds free-space refusal); extended `scripts/node27_resource_governance.py` (adds archive-root size + free-space measurements).
+- Validators/preflight: env watermark parser + free-space measurement; existing #846 archive-root/overlap/min-age preflight remains upstream.
+- Storage/cache/query: `scripts/node27_resource_governance.py` `DEFAULT_SERVICES` extended with 4 new units; no DB behavior added.
+- Public routes/entrypoints: 4 new systemd user units + 2 env examples; installation via existing user-timer pattern.
+- Frontend/downstream consumers: display API and frontend unchanged (ADR 0001 carve-out) — regression-check the display code path imports zero archive references.
+- Failure paths/rollback/stale state: enforce below refuse threshold → refusal + WARN + non-zero, sources untouched; audit failure → prior completeness receipt preserved byte-identical (#847).
+- Evidence/audit/readiness: governance receipt lists 4 new units + archive-root free-space; first live receipts (recurring completeness + first enforce archive) committed under runbook receipts.
+
+Regression rows:
+
+- Env-file mode + DB role preflight → mover and audit `_once.sh` wrappers reuse the mode-0600 env-file check inherited from #847/#848 (loosen-mode env is refused before Python entrypoint); the audit env DB URL must resolve to `nhms_display_ro` (or another intentionally read-only role) per the runbook, and a superuser/write-capable DBURL used against the audit env is a documented rollback/lint finding, not a silent success. The audit itself is `REPEATABLE READ READ ONLY` (locked in #847), so no permission gate is added to the audit code path in #849.
+- Governance audit with 4 new units enabled (systemctl mocked) → receipt includes archive + inventory-audit `service` + `timer` states beside existing entries; existing consumer fields unchanged.
+- Governance audit measures archive root size + shared-volume free space → receipt reports both under a stable field name; thresholds evaluated deterministically; existing thresholds remain visible.
+- Free space `<` refuse threshold with enforce requested → mover refuses at entry, no source mutation, receipt records refusal terminal, exit non-zero.
+- Free space `>=` refuse threshold and `<` warn threshold with enforce requested → mover proceeds; receipt WARN.
+- Free space `>=` warn threshold with enforce requested → mover proceeds; receipt clean.
+- Invalid watermark env (empty, negative, non-numeric, truthiness `"0"`) → fail closed before mutation; no receipt lie.
+- Audit timer OnCalendar cadence < retention receipt validity window (documented in runbook + reflected in the timer file) → retention tick always finds a fresh receipt.
+- Display API / frontend import graph → zero references to archive resolver, `NHMS_ARCHIVE_ROOT`, or archive receipt path (ADR 0001 carve-out compatibility).
+- Live: committed schema-valid recurring completeness receipt whose `salvage_selectors` covers the known pre-2026-06-16 forcing gap.
+- Live: committed enforce archive receipt covering ≥1 verified object per source lane (`forcing/`, `runs/`, `states/`) in rotation scope, 0 checksum failures, source removal only for verified objects.
+
+Boundary-surface checklist:
+
+- Shared helper roots: `scripts/node27_product_archive.py` (mover enforce entry gains refusal), `scripts/node27_resource_governance.py` (governance audit gains archive-root capacity fields + registers 4 new units).
+- Public entrypoints: 4 new systemd user units + 2 env examples; installation and rollback documented in runbook.
+- Read surfaces: shared-volume `statvfs`, archive root `du`-equivalent walk (bounded), unit enumeration; no DB writes.
+- Write/delete/overwrite surfaces: unchanged — free-space refusal is a gate on top of existing mover mutation boundary (#848); no new write path added.
+- Staging/publish/rollback surfaces: unchanged — refusal precedes staging; if refusal fires mid-run (rare) it is treated as a failure preserving all source/staging state.
+- Producer/consumer evidence boundaries: audit → completeness receipt is the sole gate for #855 retention; extended governance receipt keeps existing schema+consumers intact.
+- Stale-state/idempotency boundaries: refusal is stateless (evaluated per tick); missing/stale receipt handled by #847 already.
+- Unchanged downstream consumers: display API/frontend/read paths, `nhms_display_ro` DB role, node-22 (all out of scope; regression rows above enforce).

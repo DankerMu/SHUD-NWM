@@ -849,7 +849,7 @@ Order is load-bearing:
     validated attempt. Production `/home/ghdc/nwm` ACL/archive-root provisioning
     and first real-lane enforce remain explicitly owned by tasks 2.3/2.5; no
     live state candidate was claimed because current state inventory is empty.
-- [ ] 2.3 Add systemd units + env + governance registration for the mover
+- [x] 2.3 Add systemd units + env + governance registration for the mover
   and the recurring audit.
   Evidence floor: `infra/systemd/nhms-node27-product-archive.{service,timer}`
   and `nhms-node27-storage-inventory-audit.{service,timer}`;
@@ -864,7 +864,7 @@ Order is load-bearing:
   - Input: resource-governance audit run (systemctl mocked).
     Expected: receipt includes archive and inventory-audit service/timer
     states.
-- [ ] 2.4 Extend `scripts/node27_resource_governance.py` capacity
+- [x] 2.4 Extend `scripts/node27_resource_governance.py` capacity
   visibility and the mover's free-space refusal.
   Evidence floor: governance receipt reports archive root size and
   shared-volume free space; mover refuses enforce below the configured

@@ -1,0 +1,39 @@
+# Node-27 product archive mover.
+#
+# Copy to /home/nwm/NWM/infra/env/node27-product-archive.env on node-27, set
+# mode 0600, and install
+# infra/systemd/nhms-node27-product-archive.{service,timer} as user units for
+# nwm. See docs/runbooks/tier-node27-timeseries-storage.md for the install
+# order and rollback procedure.
+
+NODE27_PRODUCT_ARCHIVE_REPO_ROOT=/home/nwm/NWM
+NODE27_PRODUCT_ARCHIVE_LOG_ROOT=/home/nwm/node27-product-archive-logs
+
+# Archive root shared with the inventory audit (and later the drill/salvage).
+# NODE27_PRODUCT_ARCHIVE_ARCHIVE_ROOT overrides NHMS_ARCHIVE_ROOT per the #846
+# aliasing convention; leave it commented out to reuse the shared root.
+NHMS_ARCHIVE_ROOT=/home/ghdc/nwm/archive
+
+# Object-store source root the mover discovers products from.
+NODE27_PRODUCT_ARCHIVE_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
+OBJECT_STORE_PREFIX=s3://nhms-object-store
+
+# Receipt / lock / staging (all absolute). Under LOG_ROOT for rollup.
+NODE27_PRODUCT_ARCHIVE_RECEIPT=/home/nwm/node27-product-archive-logs/receipt.json
+NODE27_PRODUCT_ARCHIVE_LOCK_FILE=/home/nwm/node27-product-archive-logs/mover.lock
+
+# Archive minimum age (days). >= 30 required (foundation invariant #846).
+NHMS_ARCHIVE_MIN_AGE_DAYS=45
+
+# Per-tick candidate processing bound (bounded work per tick).
+NODE27_PRODUCT_ARCHIVE_PER_TICK_BOUND=8
+
+# Free-space watermarks against the shared 1.7 TB volume. Strict integer
+# bytes; empty/negative/zero/non-integer fails closed at startup with no
+# truthiness fallback. Refuse < warn is enforced by config validation.
+# Initial values from design Open Questions; tune with first receipts.
+NHMS_ARCHIVE_FREE_SPACE_WARN_BYTES=322122547200      # 300 GiB
+NHMS_ARCHIVE_FREE_SPACE_REFUSE_BYTES=161061273600    # 150 GiB
+
+# Zstd absolute path (must be a mode-executable regular non-symlink file).
+NODE27_PRODUCT_ARCHIVE_ZSTD=/usr/bin/zstd
