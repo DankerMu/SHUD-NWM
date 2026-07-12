@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NHMS Product Archive Mover Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "generated_at", "mode", "cutoff", "minimum_age_days", "per_tick_bound", "validation_attempts", "outcome", "candidates", "selected", "deferred", "terminals", "events", "discovery_failures", "bytes"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "mode": {"enum": ["dry-run", "enforce"]},
+    "cutoff": {"type": "string", "format": "date-time"},
+    "minimum_age_days": {"type": "integer", "minimum": 30},
+    "per_tick_bound": {"type": "integer", "minimum": 1, "maximum": 100000},
+    "validation_attempts": {"type": "integer", "minimum": 0, "maximum": 100000},
+    "outcome": {"enum": ["success", "failed", "indeterminate"]},
+    "candidates": {"type": "array", "maxItems": 100000, "items": {"$ref": "#/definitions/candidate"}, "uniqueItems": true},
+    "selected": {"type": "array", "maxItems": 100000, "items": {"$ref": "#/definitions/candidate"}, "uniqueItems": true},
+    "deferred": {"type": "array", "maxItems": 100000, "items": {"$ref": "#/definitions/candidate"}, "uniqueItems": true},
+    "terminals": {"type": "array", "maxItems": 100000, "items": {"$ref": "#/definitions/terminal"}, "uniqueItems": true},
+    "events": {"type": "array", "maxItems": 500000, "items": {"$ref": "#/definitions/event"}, "uniqueItems": true},
+    "discovery_failures": {"type": "array", "maxItems": 100000, "items": {"$ref": "#/definitions/discovery_failure"}, "uniqueItems": true},
+    "bytes": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source", "archived"],
+      "properties": {"source": {"type": "integer", "minimum": 0}, "archived": {"type": "integer", "minimum": 0}}
+    }
+  },
+  "definitions": {
+    "safe_relative_path": {"type": "string", "pattern": "^(?!/)(?![A-Za-z]:/)(?!.*(?:^|/)(?:\\.{1,2})(?:/|$))(?!.*//)(?!.*[\\\\\\u0000-\\u001F\\u007F])[^/]+(?:/[^/]+)*$"},
+    "safe_segment": {"type": "string", "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001F\\u007F]+$"},
+    "identity": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["lane", "source", "cycle_identity", "cycle_time", "basin_version_id", "model_id"], "properties": {"lane": {"const": "forcing"}, "source": {"enum": ["gfs", "ERA5", "IFS"]}, "cycle_identity": {"type": "string", "pattern": "^[0-9]{10}$"}, "cycle_time": {"type": "string", "format": "date-time", "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):00:00Z$"}, "basin_version_id": {"$ref": "#/definitions/safe_segment"}, "model_id": {"$ref": "#/definitions/safe_segment"}}},
+        {"type": "object", "additionalProperties": false, "required": ["lane", "source", "cycle_identity", "cycle_time", "run_id"], "properties": {"lane": {"const": "runs"}, "source": {"enum": ["gfs", "ERA5", "IFS"]}, "cycle_identity": {"type": "string", "pattern": "^[0-9]{10}$"}, "cycle_time": {"type": "string", "format": "date-time", "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):00:00Z$"}, "run_id": {"$ref": "#/definitions/safe_segment"}}},
+        {"type": "object", "additionalProperties": false, "required": ["lane", "source", "cycle_identity", "cycle_time", "model_id"], "properties": {"lane": {"const": "states"}, "source": {"enum": ["gfs", "ERA5", "IFS", "legacy-unqualified"]}, "cycle_identity": {"type": "string", "pattern": "^[0-9]{10}$"}, "cycle_time": {"type": "string", "format": "date-time", "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):00:00Z$"}, "model_id": {"$ref": "#/definitions/safe_segment"}}}
+      ]
+    },
+    "candidate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["identity", "source_path", "archive_path", "eligibility_end", "validation_state"],
+      "properties": {"identity": {"$ref": "#/definitions/identity"}, "source_path": {"allOf": [{"$ref": "#/definitions/safe_relative_path"}, {"pattern": "^(?:forcing|runs|states)/"}]}, "archive_path": {"allOf": [{"$ref": "#/definitions/safe_relative_path"}, {"pattern": "^(?:forcing|runs|states)/.+/archive\\.tar\\.zst$"}]}, "source_bytes": {"type": "integer", "minimum": 0}, "eligibility_end": {"type": "string", "format": "date-time"}, "validation_state": {"enum": ["validated", "pending-validation"]}},
+      "allOf": [
+        {"if": {"properties": {"validation_state": {"const": "validated"}}}, "then": {"required": ["source_bytes"]}},
+        {"if": {"properties": {"validation_state": {"const": "pending-validation"}}}, "then": {"not": {"required": ["source_bytes"]}}}
+      ]
+    },
+    "terminal": {
+      "type": "object", "additionalProperties": false,
+      "required": ["identity", "status", "reason", "source_bytes", "archive_bytes", "residue"],
+      "properties": {"identity": {"$ref": "#/definitions/identity"}, "status": {"enum": ["planned", "archived", "retired-from-existing", "failed", "indeterminate"]}, "reason": {"type": "string", "minLength": 1}, "source_bytes": {"type": "integer", "minimum": 0}, "archive_bytes": {"type": "integer", "minimum": 0}, "residue": {"type": "array", "items": {"$ref": "#/definitions/safe_relative_path"}, "uniqueItems": true}}
+    },
+    "event": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sequence", "identity", "kind", "path", "detail"],
+      "properties": {"sequence": {"type": "integer", "minimum": 0}, "identity": {"$ref": "#/definitions/identity"}, "kind": {"enum": ["would-quarantine", "quarantined", "staged", "published", "tombstoned", "tombstone-preserved", "retired"]}, "path": {"$ref": "#/definitions/safe_relative_path"}, "detail": {"type": "string", "minLength": 1}}
+    },
+    "discovery_failure": {
+      "type": "object", "additionalProperties": false,
+      "required": ["lane_hint", "locator", "reason"],
+      "properties": {"lane_hint": {"enum": ["forcing", "runs", "states"]}, "locator": {"$ref": "#/definitions/safe_relative_path"}, "reason": {"type": "string", "minLength": 1}}
+    }
+  }
+}

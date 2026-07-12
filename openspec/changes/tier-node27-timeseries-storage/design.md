@@ -76,6 +76,25 @@ display disk window — is never shorter than the DB hot window.
 inode-heavy), per-file zstd (object explosion), cross-volume copy (no second
 volume exists).
 
+The producer product remains the source of truth inside that archive object:
+forcing `files` checksums and run output presence are validated from the same
+pinned source snapshot before eligibility. The sidecar also preserves the
+producer-manifest digest and stable subject/window/model/basin provenance so
+the DB-aware inventory audit can bind a filesystem-created archive back to the
+exact DB subject. The mover itself stays filesystem-only; provenance capture is
+not a hidden DB lookup.
+Node-27 forcing finalization has two valid package shapes: older leaves contain
+only the forcing manifest and declared products, while newer leaves add one
+complete domain-handoff/version bundle. That five-file bundle is validated as
+an independent checksum/identity contract rather than inserted into the
+forcing manifest's output list (the version record itself binds the forcing
+manifest digest, so folding it into that manifest would create a hash cycle).
+Source retirement keeps a same-volume durable reference to the exact verified
+tar/manifest inodes until all source deletion steps finish. This closes the
+gap that descriptor rechecks alone cannot close: a canonical-name replacement
+may make the terminal indeterminate, but it cannot erase the only valid archive
+copy after the hot source is retired.
+
 **D3 — Compression settings must cover the existing primary keys.**
 TimescaleDB 2.10 requires unique-constraint columns to appear in
 `compress_segmentby` + `compress_orderby`:
@@ -270,6 +289,10 @@ Invariant Matrix:
 - Regression: missing archive namespaces are ordinary absence; existing unsafe/unreadable/malformed/conflicting evidence blocks publication, while a fully readable size/checksum mismatch is recorded and treated as absent coverage so the safe pending/gap receipt can still publish.
 - Regression: readable hot forcing manifest/member and state checksum mismatches are retained as absent-coverage evidence even when product/salvage wins; unsafe, malformed, permission and I/O failures remain blockers.
 - Regression: final completeness receipts are deterministic, schema-valid, atomically replaced, cover every subject exactly once, and enforce an exact forcing/run gap-selector bijection; pre-replace blockers preserve the previous valid receipt, while directory-fsync or observed post-replace parent-identity failure is reported as indeterminate and never as `published`.
+- Regression: #848 discovers forcing leaf, strict-prefix manifest-bound flat run tree, and provider/legacy physical state valid-time units without DB access or clone-target fabrication; forcing/run eligibility uses authoritative window end (state uses point valid-time), while exact-cutoff, malformed, ambiguous and unreadable candidates fail closed without hiding valid siblings.
+- Regression: archive tar verification proves fail-fast exact safe regular-member path/size/sha bijection in addition to tarball sha; staged tar+manifest publish and only typed deterministic corrupt-final quarantine move whole leaf directories on one device, while operational verification failure preserves canonical evidence.
+- Regression: source retirement fully re-verifies the pinned final pair and complete source/tombstone preimage before same-device rename/unlink, then deletes only exact allowlisted inodes; observed final-pair/path/content drift preserves source/tombstone, while post-final-check open-FD writes remain an explicit immutable-producer contract violation outside the rename protocol.
+- Regression: mover dry-run mutates only safe lock metadata + its mode-0600 receipt, direct Python invocation owns flock, valid selection/deferred ordering is deterministic and bounded, locator-keyed discovery failures remain disjoint, and any failure makes the overall outcome non-zero without stopping independent bounded candidates.
 - Regression: valid examples -> schema PASS; missing completeness verdict or salvage row count -> schema FAIL.
 - Regression: product manifest row count/unsafe paths, invalid table-selector key, incomplete drill verdict details, or incomplete retention outcome details -> schema FAIL.
 - Regression: product-only drill with empty selector list -> schema PASS; clean default test environment executes all schema negatives with zero skip.
@@ -279,6 +302,7 @@ Invariant Matrix:
 Boundary-surface checklist:
 
 - Shared helper root: `packages/common/storage.py`; read-only path derivation and validation only.
-- Public entrypoint: #847 adds `scripts/node27_storage_inventory_audit.py`, a DB/filesystem read-only audit whose only write is its configured gate receipt; display entrypoints remain unchanged.
+- Public entrypoints: #847 adds `scripts/node27_storage_inventory_audit.py`, a DB/filesystem read-only audit whose only write is its configured gate receipt; #848 adds the filesystem-only archive mover + wrapper, with explicit dry-run/enforce and internal flock. Display entrypoints remain unchanged.
 - Producer/consumer evidence boundary: the audit is the sole archive-completeness receipt producer; #850 salvage consumes its exact selectors and #855 retention consumes its subject coverage. Product archive and `db-export` provenance remain distinguishable.
 - Publish boundary: validated receipts explicitly opt into same-directory mode-0600 temporary files plus atomic replace, mandatory directory fsync, and post-replace parent-FD identity verification. Pre-replace blockers preserve the previous receipt and clean temporary residue; after-replace durability/namespace failures make the producer indeterminate/non-zero and never `published`, but a file-fsynced payload may already be visible. #855 independently validates the currently configured two receipt contents and does not add producer status, a sidecar, or systemd state as a third gate. The configured parent is operator-controlled and non-rotating during publication. The shared atomic helper keeps its legacy default for unmigrated non-receipt callers. Product/archive deletion and other mutations remain out of scope.
+- Mover mutation boundary: dry-run writes only safe lock metadata and its receipt. Enforce publishes a fully re-read staging leaf, may quarantine an invalid final leaf, then retires only a revalidated source preimage through a held-FD tombstone. Failures before tombstone rename preserve the source path; later uncertainty is non-zero and records complete/partial tombstone residue without falsely promising rollback.

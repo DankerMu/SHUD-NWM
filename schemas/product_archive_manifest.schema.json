@@ -8,6 +8,7 @@
     "schema_version": {"const": "1.0"},
     "provenance": {"const": "product-archive"},
     "identity": {"$ref": "#/definitions/archive_identity"},
+    "producer": {"$ref": "#/definitions/producer_provenance"},
     "archive": {
       "type": "object",
       "additionalProperties": false,
@@ -36,6 +37,20 @@
     "created_at": {"type": "string", "format": "date-time"},
     "tool_version": {"type": "string", "minLength": 1}
   },
+  "allOf": [
+    {
+      "if": {"properties": {"identity": {"properties": {"lane": {"enum": ["forcing", "runs"]}}}}},
+      "then": {"required": ["producer"]}
+    },
+    {
+      "if": {"properties": {"identity": {"properties": {"lane": {"const": "forcing"}}}}},
+      "then": {"properties": {"producer": {"properties": {"kind": {"const": "forcing-package"}}}}}
+    },
+    {
+      "if": {"properties": {"identity": {"properties": {"lane": {"const": "runs"}}}}},
+      "then": {"properties": {"producer": {"properties": {"kind": {"const": "run-manifest"}}}}}
+    }
+  ],
   "definitions": {
     "safe_segment": {
       "type": "string",
@@ -44,6 +59,24 @@
     "safe_relative_path": {
       "type": "string",
       "pattern": "^(?!/)(?![A-Za-z]:/)(?!.*(?:^|/)(?:\\.{1,2})(?:/|$))(?!.*//)(?!.*[\\\\\\u0000-\\u001F\\u007F])[^/]+(?:/[^/]+)*$"
+    },
+    "producer_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "subject_id", "manifest_path", "manifest_sha256",
+        "start_time", "end_time", "model_id", "basin_version_id"
+      ],
+      "properties": {
+        "kind": {"enum": ["forcing-package", "run-manifest"]},
+        "subject_id": {"$ref": "#/definitions/safe_segment"},
+        "manifest_path": {"$ref": "#/definitions/safe_relative_path"},
+        "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "start_time": {"type": "string", "format": "date-time"},
+        "end_time": {"type": "string", "format": "date-time"},
+        "model_id": {"$ref": "#/definitions/safe_segment"},
+        "basin_version_id": {"$ref": "#/definitions/safe_segment"}
+      }
     },
     "archive_identity": {
       "oneOf": [

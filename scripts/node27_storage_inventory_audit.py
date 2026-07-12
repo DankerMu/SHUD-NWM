@@ -37,6 +37,7 @@ from packages.common.storage import (
     archive_provenance_paths,
     validate_product_archive_manifest_binding,
 )
+from scripts import node27_product_archive as product_archive
 
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_SALVAGE_MANIFESTS = 10_000
@@ -135,6 +136,7 @@ class AuditConfig:
     archive_root: Path
     archive_min_age_days: int
     receipt_path: Path
+    zstd_path: Path = Path("/usr/bin/zstd")
 
 
 @dataclass(frozen=True)
@@ -471,7 +473,10 @@ def _size_sha256_fd(file_fd: int, label: Path) -> tuple[int, str]:
 
 
 def verify_product_archive(
-    subject: InventorySubject, archive_root: Path, object_store_prefix: str = ""
+    subject: InventorySubject,
+    archive_root: Path,
+    object_store_prefix: str = "",
+    zstd_path: Path = Path("/usr/bin/zstd"),
 ) -> Coverage | None:
     paths = archive_provenance_paths(archive_root, identity=subject.archive_identity)
     manifest_result = _read_json_with_digest_optional(paths.manifest, archive_root)
@@ -488,6 +493,8 @@ def verify_product_archive(
         raise AuditBlocked(str(error)) from error
     if expected != paths:
         raise AuditBlocked(f"archive path binding differs for {subject.stable_key}")
+    if subject.lane in {"forcing", "runs"}:
+        _verify_product_producer_provenance(subject, manifest)
     if subject.lane == "states":
         member_path = _state_archive_member_path(subject, object_store_prefix)
         members = [entry for entry in manifest["files"] if entry["path"] == member_path]
@@ -501,7 +508,59 @@ def verify_product_archive(
     declared = manifest["archive"]
     if size != declared["size_bytes"] or digest != declared["sha256"]:
         return Coverage("none", ("product archive size/sha256 mismatch",))
-    return Coverage("product-archive", ("checksum-verified product archive present",))
+    try:
+        validated_zstd = product_archive._validate_zstd(zstd_path)
+        verified_manifest = product_archive.verify_archive_pair(
+            paths.archive.parent,
+            archive_root,
+            zstd_path=validated_zstd,
+            object_store_prefix=object_store_prefix,
+            mount_id_provider=_archive_mount_id,
+        )
+    except product_archive.ArchiveMoverError as error:
+        raise AuditBlocked(f"product archive content verification failed: {error}") from error
+    if verified_manifest != manifest:
+        raise AuditBlocked(f"product archive manifest changed during verification: {subject.subject_id}")
+    return Coverage("product-archive", ("member-verified product archive present",))
+
+
+def _archive_mount_id(fd: int) -> int:
+    """Use Linux mount IDs in production and a device proof for local portable tests."""
+    if Path(f"/proc/self/fdinfo/{fd}").exists():
+        return product_archive.fd_mount_id(fd)
+    return os.fstat(fd).st_dev
+
+
+def _verify_product_producer_provenance(subject: InventorySubject, manifest: Mapping[str, Any]) -> None:
+    producer = manifest.get("producer")
+    if not isinstance(producer, Mapping):
+        raise AuditBlocked(f"product archive lacks producer provenance: {subject.subject_id}")
+    expected_kind = "forcing-package" if subject.lane == "forcing" else "run-manifest"
+    expected_path = "forcing_package.json" if subject.lane == "forcing" else "input/manifest.json"
+    expected = {
+        "kind": expected_kind,
+        "subject_id": subject.subject_id,
+        "manifest_path": expected_path,
+        "start_time": _time(subject.start),
+        "end_time": _time(subject.end),
+        "model_id": subject.model_id,
+        "basin_version_id": subject.basin_version_id,
+    }
+    for field, expected_value in expected.items():
+        if producer.get(field) != expected_value:
+            raise AuditBlocked(
+                f"product archive producer {field} differs from DB inventory for {subject.subject_id}"
+            )
+    digest = producer.get("manifest_sha256")
+    if not isinstance(digest, str):
+        raise AuditBlocked(f"product archive producer manifest digest is missing: {subject.subject_id}")
+    if subject.lane == "forcing" and digest != subject.checksum:
+        raise AuditBlocked(f"forcing producer manifest digest differs from DB provenance: {subject.subject_id}")
+    members = [entry for entry in manifest["files"] if entry["path"] == expected_path]
+    if len(members) != 1 or members[0]["sha256"] != digest:
+        raise AuditBlocked(
+            f"product archive producer manifest member does not bind its declared digest: {subject.subject_id}"
+        )
 
 
 def _state_archive_member_path(subject: InventorySubject, object_store_prefix: str) -> str:
@@ -813,7 +872,9 @@ def run_audit(config: AuditConfig, *, connect: ConnectionFactory | None = None) 
     product: dict[tuple[str, str], Coverage | None] = {}
     hot: dict[tuple[str, str], Coverage | None] = {}
     for subject in subjects:
-        product[subject.stable_key] = verify_product_archive(subject, config.archive_root, config.object_store_prefix)
+        product[subject.stable_key] = verify_product_archive(
+            subject, config.archive_root, config.object_store_prefix, config.zstd_path
+        )
         hot[subject.stable_key] = verify_hot(subject, config)
     receipt = build_receipt(
         subjects,
@@ -858,6 +919,7 @@ def config_from_args(args: argparse.Namespace) -> AuditConfig:
         archive_root,
         age,
         receipt_path,
+        _absolute(getattr(args, "zstd_path", None) or os.getenv("ZSTD_BIN") or "/usr/bin/zstd", "zstd_path"),
     )
 
 
@@ -869,6 +931,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--archive-root")
     parser.add_argument("--archive-min-age-days", type=int)
     parser.add_argument("--receipt-path")
+    parser.add_argument("--zstd-path")
     return parser
 
 

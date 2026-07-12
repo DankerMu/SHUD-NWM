@@ -240,6 +240,27 @@ def test_product_archive_manifest_rejects_row_count(tmp_path: Path) -> None:
     assert result.returncode != 0
 
 
+@pytest.mark.parametrize("lane", ["forcing", "runs"])
+def test_product_archive_manifest_requires_producer_provenance_for_product_lanes(
+    tmp_path: Path, lane: str
+) -> None:
+    document = _document("product_archive_manifest")
+    if lane == "runs":
+        document["identity"] = {
+            "lane": "runs",
+            "source": "gfs",
+            "cycle_identity": "2026053100",
+            "cycle_time": "2026-05-31T00:00:00Z",
+            "run_id": "run-42",
+        }
+        parent = "runs/gfs/2026053100/run-42"
+        document["archive"]["path"] = f"{parent}/archive.tar.zst"
+        document["archive"]["manifest_path"] = f"{parent}/manifest.json"
+    document.pop("producer")
+    result = _validate_document(tmp_path, "product_archive_manifest", document)
+    assert result.returncode != 0
+
+
 @pytest.mark.parametrize(
     ("identity", "parent"),
     [
@@ -285,6 +306,12 @@ def test_product_archive_manifest_accepts_each_lane_identity(
     document["identity"] = identity
     document["archive"]["path"] = f"{parent}/archive.tar.zst"
     document["archive"]["manifest_path"] = f"{parent}/manifest.json"
+    if identity["lane"] == "runs":
+        document["producer"]["kind"] = "run-manifest"
+        document["producer"]["subject_id"] = identity["run_id"]
+        document["producer"]["manifest_path"] = "input/manifest.json"
+    elif identity["lane"] == "states":
+        document.pop("producer")
 
     result = _validate_document(tmp_path, "product_archive_manifest", document)
     assert result.returncode == 0, result.stdout + result.stderr

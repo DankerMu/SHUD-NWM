@@ -1,0 +1,3555 @@
+#!/usr/bin/env python3
+"""Bounded, verify-before-delete product archive mover for node-27."""
+
+from __future__ import annotations
+
+import argparse
+import ctypes
+import errno
+import fcntl
+import hashlib
+import io
+import json
+import os
+import stat
+import subprocess
+import sys
+import tarfile
+import threading
+import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any, Callable, Mapping, Sequence
+from urllib.parse import urlsplit
+
+import jsonschema
+
+from packages.common.forcing_domain_handoff import (
+    PACKAGE_CONTRACT_ID as FORCING_DOMAIN_PACKAGE_CONTRACT_ID,
+)
+from packages.common.forcing_domain_handoff import (
+    PAYLOAD_TABLES as FORCING_DOMAIN_PAYLOAD_TABLES,
+)
+from packages.common.forcing_domain_handoff import (
+    SCHEMA_VERSION as FORCING_DOMAIN_SCHEMA_VERSION,
+)
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    atomic_write_bytes_no_follow,
+    ensure_directory_no_follow,
+    open_directory_no_follow,
+    stat_no_follow,
+    verify_directory_no_follow,
+)
+from packages.common.source_identity import normalize_source_id
+from packages.common.storage import (
+    DEFAULT_DB_RETENTION_DAYS,
+    ArchiveConfigurationError,
+    ArchiveIdentity,
+    archive_provenance_paths,
+    validate_archive_configuration,
+    validate_product_archive_manifest_binding,
+)
+
+SCHEMA_VERSION = "1.0"
+TOOL_VERSION = "node27-product-archive/1"
+MAX_MANIFEST_BYTES = 16 * 1024 * 1024
+MAX_DISCOVERY = 100_000
+MAX_TREE_ENTRIES = 100_000
+MAX_TREE_DEPTH = 16
+MAX_FILE_BYTES = 256 * 1024**3
+MAX_SOURCE_BYTES = 1024**4
+MAX_ARCHIVE_BYTES = 1024**4
+MAX_TAR_BYTES = 2 * 1024**4
+TOOL_TIMEOUT_SECONDS = 3_600
+MAX_STDERR_BYTES = 64 * 1024
+MAX_PAX_EXTENSION_BYTES = 64 * 1024
+_ROOT = Path(__file__).resolve().parents[1]
+MANIFEST_SCHEMA_PATH = _ROOT / "schemas/product_archive_manifest.schema.json"
+RECEIPT_SCHEMA_PATH = _ROOT / "schemas/product_archive_receipt.schema.json"
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+_READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+_CREATE_FLAGS = (
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+)
+_CREATE_RDWR_FLAGS = (
+    os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+)
+_FORCING_DOMAIN_BUNDLE = frozenset(
+    {
+        "forcing_domain_package.json",
+        "forcing_version_record.json",
+        "payloads/interp_weights.json",
+        "payloads/station_inventory.json",
+        "payloads/station_timeseries.json",
+    }
+)
+_FORCING_DOMAIN_PAYLOAD_PATHS = {
+    "station_inventory": "payloads/station_inventory.json",
+    "station_timeseries": "payloads/station_timeseries.json",
+    "interpolation_weights": "payloads/interp_weights.json",
+}
+
+
+class ArchiveMoverError(RuntimeError):
+    """A deterministic safety or contract failure."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        indeterminate: bool = False,
+        residue: Sequence[str] = (),
+        kind: str = "safety",
+    ) -> None:
+        super().__init__(message)
+        self.indeterminate = indeterminate
+        self.residue = tuple(residue)
+        self.kind = kind
+
+
+class ArchiveCorruptError(ArchiveMoverError):
+    """Deterministic invalidity of an existing archive pair."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, kind="corrupt")
+
+
+class ArchiveOperationalError(ArchiveMoverError):
+    """Operational verification failure for which evidence must be preserved."""
+
+    def __init__(self, message: str, *, indeterminate: bool = True) -> None:
+        super().__init__(message, indeterminate=indeterminate, kind="operational")
+
+
+class ArchiveConflictError(ArchiveMoverError):
+    """Valid archive and source describe different immutable preimages."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, kind="conflict")
+
+
+@dataclass(frozen=True)
+class FileRecord:
+    path: str
+    size_bytes: int
+    sha256: str
+    device: int
+    inode: int
+    mode: int
+    mtime_ns: int
+
+    def manifest_entry(self) -> dict[str, Any]:
+        return {"path": self.path, "sha256": self.sha256, "size_bytes": self.size_bytes}
+
+
+@dataclass(frozen=True)
+class DirectoryRecord:
+    path: str
+    device: int
+    inode: int
+    mode: int
+    mtime_ns: int
+
+
+@dataclass(frozen=True)
+class Candidate:
+    identity: ArchiveIdentity
+    source_path: Path
+    source_relative: str
+    source_bytes: int
+    files: tuple[FileRecord, ...]
+    directories: tuple[DirectoryRecord, ...]
+    source_root_stat: tuple[int, int, int]
+    source_mount_id: int
+    eligibility_end: datetime
+    producer: Mapping[str, Any] | None = None
+
+    @property
+    def sort_key(self) -> tuple[str, str, str]:
+        return self.identity.cycle_time, self.identity.lane, _identity_key(self.identity)
+
+    def receipt_value(self, archive_root: Path) -> dict[str, Any]:
+        archive_path = archive_provenance_paths(archive_root, identity=self.identity).archive
+        return {
+            "identity": _identity_dict(self.identity),
+            "source_path": self.source_relative,
+            "archive_path": archive_path.relative_to(archive_root).as_posix(),
+            "source_bytes": self.source_bytes,
+            "eligibility_end": _time(self.eligibility_end),
+            "validation_state": "validated",
+        }
+
+
+@dataclass(frozen=True)
+class CandidateLocator:
+    """Bounded manifest-derived identity awaiting full tree validation."""
+
+    identity: ArchiveIdentity
+    source_path: Path
+    source_relative: str
+    manifest_relative: str | None
+    eligibility_end: datetime
+
+    @property
+    def sort_key(self) -> tuple[str, str, str]:
+        return self.identity.cycle_time, self.identity.lane, _identity_key(self.identity)
+
+    def receipt_value(self, archive_root: Path) -> dict[str, Any]:
+        archive_path = archive_provenance_paths(archive_root, identity=self.identity).archive
+        return {
+            "identity": _identity_dict(self.identity),
+            "source_path": self.source_relative,
+            "archive_path": archive_path.relative_to(archive_root).as_posix(),
+            "eligibility_end": _time(self.eligibility_end),
+            "validation_state": "pending-validation",
+        }
+
+
+@dataclass(frozen=True)
+class DiscoveryFailure:
+    lane_hint: str
+    locator: str
+    reason: str
+
+    def value(self) -> dict[str, str]:
+        return {"lane_hint": self.lane_hint, "locator": self.locator, "reason": self.reason}
+
+
+@dataclass(frozen=True)
+class MoverConfig:
+    object_store_root: Path
+    object_store_prefix: str
+    archive_root: Path
+    receipt_path: Path
+    lock_path: Path
+    zstd_path: Path
+    minimum_age_days: int = 45
+    per_tick_bound: int = 10
+    enforce: bool = False
+
+
+@dataclass(frozen=True)
+class DurableArchiveGuard:
+    path: Path
+    fd: int
+    canonical_leaf: Path
+    archive_signature: tuple[int, int, int, int, int]
+    manifest_signature: tuple[int, int, int, int, int]
+    archive_root_signature: tuple[int, int, int]
+    canonical_leaf_signature: tuple[int, int, int]
+    guard_leaf_signature: tuple[int, int, int]
+    archive_device: int
+    archive_mount_id: int
+
+
+MountIdProvider = Callable[[int], int]
+RenameNoReplace = Callable[[int, str, int, str], None]
+
+
+def fd_mount_id(fd: int) -> int:
+    """Return the Linux mount ID for an opened descriptor, failing closed elsewhere."""
+    path = Path(f"/proc/self/fdinfo/{fd}")
+    try:
+        text = path.read_text(encoding="ascii")
+    except OSError as error:
+        raise ArchiveOperationalError(f"cannot prove mount ID for fd {fd}: {error}") from error
+    for line in text.splitlines():
+        if line.startswith("mnt_id:"):
+            try:
+                return int(line.split(":", 1)[1].strip())
+            except ValueError as error:
+                raise ArchiveOperationalError(f"invalid mount ID evidence for fd {fd}") from error
+    raise ArchiveOperationalError(f"mount ID evidence is unavailable for fd {fd}")
+
+
+def rename_no_replace(src_fd: int, src: str, dst_fd: int, dst: str) -> None:
+    """Linux renameat2(RENAME_NOREPLACE), with no unsafe check-then-rename fallback."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    function = getattr(libc, "renameat2", None)
+    if function is None:
+        raise ArchiveMoverError("native no-replace rename is unavailable")
+    function.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    function.restype = ctypes.c_int
+    if function(src_fd, os.fsencode(src), dst_fd, os.fsencode(dst), 1) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), dst)
+
+
+def _safe_names(fd: int, label: str, *, remaining: int) -> list[str]:
+    names: list[str] = []
+    try:
+        with os.scandir(fd) as entries:
+            for entry in entries:
+                names.append(entry.name)
+                if len(names) > remaining:
+                    raise ArchiveMoverError(f"tree exceeds {MAX_TREE_ENTRIES} entries: {label}")
+    except ArchiveMoverError:
+        raise
+    except OSError as error:
+        raise ArchiveMoverError(f"cannot list {label}: {error}") from error
+    return sorted(names)
+
+
+def _open_child_dir(
+    parent_fd: int,
+    name: str,
+    label: str,
+    mount_id: int,
+    provider: MountIdProvider,
+    device: int | None = None,
+) -> int:
+    fd: int | None = None
+    try:
+        expected = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if stat.S_ISLNK(expected.st_mode) or not stat.S_ISDIR(expected.st_mode):
+            raise ArchiveMoverError(f"non-directory or symlink in product tree: {label}")
+        fd = os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino):
+            raise ArchiveMoverError(f"directory changed while opening: {label}")
+        if device is not None and opened.st_dev != device:
+            raise ArchiveMoverError(f"cross-device directory rejected: {label}")
+        if provider(fd) != mount_id:
+            raise ArchiveMoverError(f"cross-mount directory rejected: {label}", kind="operational")
+        return fd
+    except ArchiveMoverError:
+        if fd is not None:
+            os.close(fd)
+        raise
+    except OSError as error:
+        if fd is not None:
+            os.close(fd)
+        raise ArchiveMoverError(f"cannot open directory {label}: {error}") from error
+
+
+def _open_regular(
+    parent_fd: int,
+    name: str,
+    label: str,
+    mount_id: int,
+    provider: MountIdProvider,
+    device: int | None = None,
+    max_file_bytes: int | None = None,
+    allow_hardlinks: bool = False,
+) -> tuple[int, os.stat_result]:
+    fd: int | None = None
+    try:
+        expected = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if stat.S_ISLNK(expected.st_mode) or not stat.S_ISREG(expected.st_mode):
+            raise ArchiveMoverError(f"unsupported product entry type: {label}")
+        if expected.st_nlink != 1 and not allow_hardlinks:
+            raise ArchiveMoverError(f"hard-linked product file rejected: {label}")
+        file_limit = MAX_FILE_BYTES if max_file_bytes is None else max_file_bytes
+        if expected.st_size > file_limit:
+            raise ArchiveMoverError(f"product file exceeds {file_limit} bytes: {label}")
+        fd = os.open(name, _READ_FLAGS, dir_fd=parent_fd)
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino, opened.st_mode) != (expected.st_dev, expected.st_ino, expected.st_mode):
+            raise ArchiveMoverError(f"file changed while opening: {label}")
+        if device is not None and opened.st_dev != device:
+            raise ArchiveMoverError(f"cross-device file rejected: {label}")
+        if provider(fd) != mount_id:
+            raise ArchiveMoverError(f"cross-mount file rejected: {label}", kind="operational")
+        return fd, opened
+    except ArchiveMoverError:
+        if fd is not None:
+            os.close(fd)
+        raise
+    except OSError as error:
+        if fd is not None:
+            os.close(fd)
+        raise ArchiveMoverError(f"cannot open product file {label}: {error}") from error
+
+
+def scan_tree_snapshot(
+    root_fd: int, *, mount_id: int, mount_id_provider: MountIdProvider = fd_mount_id
+) -> tuple[tuple[FileRecord, ...], tuple[DirectoryRecord, ...]]:
+    """Return a complete deterministic descriptor-bound tree snapshot."""
+    root = os.fstat(root_fd)
+    if not stat.S_ISDIR(root.st_mode) or mount_id_provider(root_fd) != mount_id:
+        raise ArchiveMoverError("source root device/mount identity changed", kind="operational")
+    records: list[FileRecord] = []
+    directories: list[DirectoryRecord] = []
+    count = 0
+    total = 0
+
+    def walk(fd: int, prefix: str, depth: int) -> None:
+        nonlocal count, total
+        if depth > MAX_TREE_DEPTH:
+            raise ArchiveMoverError(f"tree exceeds depth {MAX_TREE_DEPTH}: {prefix}")
+        for name in _safe_names(fd, prefix or ".", remaining=MAX_TREE_ENTRIES - count):
+            count += 1
+            if count > MAX_TREE_ENTRIES:
+                raise ArchiveMoverError(f"tree exceeds {MAX_TREE_ENTRIES} entries")
+            relative = f"{prefix}/{name}" if prefix else name
+            try:
+                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            except OSError as error:
+                raise ArchiveMoverError(f"cannot stat product entry {relative}: {error}") from error
+            if stat.S_ISDIR(info.st_mode):
+                child = _open_child_dir(
+                    fd,
+                    name,
+                    relative,
+                    mount_id,
+                    mount_id_provider,
+                    root.st_dev,
+                )
+                try:
+                    opened_directory = os.fstat(child)
+                    directories.append(
+                        DirectoryRecord(
+                            relative,
+                            opened_directory.st_dev,
+                            opened_directory.st_ino,
+                            opened_directory.st_mode,
+                            opened_directory.st_mtime_ns,
+                        )
+                    )
+                    walk(child, relative, depth + 1)
+                finally:
+                    os.close(child)
+                continue
+            file_fd, opened = _open_regular(
+                fd,
+                name,
+                relative,
+                mount_id,
+                mount_id_provider,
+                root.st_dev,
+            )
+            digest = hashlib.sha256()
+            size = 0
+            try:
+                while chunk := os.read(file_fd, 1024 * 1024):
+                    size += len(chunk)
+                    digest.update(chunk)
+                after = os.fstat(file_fd)
+            except OSError as error:
+                raise ArchiveMoverError(f"cannot read product file {relative}: {error}") from error
+            finally:
+                os.close(file_fd)
+            if _stat_signature(opened) != _stat_signature(after) or size != opened.st_size:
+                raise ArchiveMoverError(f"product file changed while hashing: {relative}")
+            total += size
+            if total > MAX_SOURCE_BYTES:
+                raise ArchiveMoverError(f"tree exceeds {MAX_SOURCE_BYTES} source bytes")
+            records.append(
+                FileRecord(
+                    relative, size, digest.hexdigest(), opened.st_dev, opened.st_ino, opened.st_mode, opened.st_mtime_ns
+                )
+            )
+
+    walk(root_fd, "", 0)
+    if not records:
+        raise ArchiveMoverError("product tree contains no regular files")
+    return tuple(records), tuple(directories)
+
+
+def scan_tree(
+    root_fd: int, *, mount_id: int, mount_id_provider: MountIdProvider = fd_mount_id
+) -> tuple[FileRecord, ...]:
+    """Compatibility helper returning the file portion of a complete snapshot."""
+    return scan_tree_snapshot(root_fd, mount_id=mount_id, mount_id_provider=mount_id_provider)[0]
+
+
+def _parse_hour(value: Any, *, label: str) -> datetime:
+    if not isinstance(value, str):
+        raise ArchiveMoverError(f"{label} must be a timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ArchiveMoverError(f"{label} is invalid: {value!r}") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ArchiveMoverError(f"{label} must be timezone-aware")
+    parsed = parsed.astimezone(UTC)
+    if parsed.minute or parsed.second or parsed.microsecond:
+        raise ArchiveMoverError(f"{label} must be an exact UTC hour")
+    return parsed
+
+
+def _parse_instant(value: Any, *, label: str) -> datetime:
+    if not isinstance(value, str):
+        raise ArchiveMoverError(f"{label} must be a timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ArchiveMoverError(f"{label} is invalid: {value!r}") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ArchiveMoverError(f"{label} must be timezone-aware")
+    return parsed.astimezone(UTC)
+
+
+def _forcing_identity(manifest: Mapping[str, Any], parts: Sequence[str]) -> tuple[ArchiveIdentity, datetime]:
+    if len(parts) != 5 or parts[0] != "forcing":
+        raise ArchiveMoverError("forcing locator shape is invalid")
+    _, source_segment, cycle, basin, model = parts
+    source = normalize_source_id(str(manifest.get("source_id") or ""))
+    time = _parse_hour(manifest.get("cycle_time"), label="forcing cycle_time")
+    start_time = _parse_instant(manifest.get("start_time"), label="forcing start_time")
+    end_time = _parse_instant(manifest.get("end_time"), label="forcing end_time")
+    if start_time > end_time:
+        raise ArchiveMoverError("forcing manifest window is inverted")
+    if (source.lower(), time.strftime("%Y%m%d%H"), manifest.get("basin_version_id"), manifest.get("model_id")) != (
+        source_segment,
+        cycle,
+        basin,
+        model,
+    ):
+        raise ArchiveMoverError("forcing package identity does not bind its leaf path")
+    return (
+        ArchiveIdentity(
+            "forcing", source, cycle, time.strftime("%Y-%m-%dT%H:00:00Z"), basin_version_id=basin, model_id=model
+        ),
+        end_time,
+    )
+
+
+def _forcing_provenance(
+    manifest: Mapping[str, Any],
+    *,
+    source_relative: str,
+    files: Sequence[FileRecord],
+    manifest_record: FileRecord,
+    object_store_prefix: str,
+    source_fd: int,
+    source_mount_id: int,
+    mount_id_provider: MountIdProvider,
+    source_device: int,
+) -> dict[str, Any]:
+    forcing_version_id = manifest.get("forcing_version_id")
+    if not isinstance(forcing_version_id, str) or not _safe_segment(forcing_version_id):
+        raise ArchiveMoverError("forcing manifest has no safe forcing_version_id")
+    declared = manifest.get("files")
+    if not isinstance(declared, list) or not declared:
+        raise ArchiveMoverError("forcing manifest files must be a non-empty array")
+    snapshot = {record.path: record for record in files if record.path != manifest_record.path}
+    bundle_present = set(snapshot) & _FORCING_DOMAIN_BUNDLE
+    if bundle_present and bundle_present != _FORCING_DOMAIN_BUNDLE:
+        raise ArchiveMoverError("forcing domain bundle is partial")
+    product_snapshot = {path: record for path, record in snapshot.items() if path not in _FORCING_DOMAIN_BUNDLE}
+    declared_paths: set[str] = set()
+    for entry in declared:
+        if not isinstance(entry, Mapping):
+            raise ArchiveMoverError("forcing manifest contains a malformed file entry")
+        uri = entry.get("uri")
+        checksum = entry.get("checksum")
+        canonical_uri = _canonical_object_uri(uri)
+        required_prefix = f"{object_store_prefix}/{source_relative}/"
+        if not canonical_uri.startswith(required_prefix):
+            raise ArchiveMoverError("forcing manifest file URI escapes its exact package leaf")
+        relative = canonical_uri[len(required_prefix) :]
+        if not _safe_relative(relative) or relative == "forcing_package.json":
+            raise ArchiveMoverError("forcing manifest file URI has an unsafe package-relative path")
+        if relative in declared_paths:
+            raise ArchiveMoverError(f"forcing manifest has duplicate file declaration: {relative}")
+        declared_paths.add(relative)
+        record = product_snapshot.get(relative)
+        if record is None:
+            raise ArchiveMoverError(f"forcing manifest declares a missing product: {relative}")
+        if not isinstance(checksum, str) or checksum != record.sha256:
+            raise ArchiveMoverError(f"forcing manifest checksum differs from pinned product: {relative}")
+    if declared_paths != set(product_snapshot):
+        missing = sorted(set(product_snapshot) - declared_paths)
+        raise ArchiveMoverError(f"forcing package contains undeclared products: {missing}")
+    if bundle_present:
+        _validate_forcing_domain_bundle(
+            manifest,
+            source_relative=source_relative,
+            snapshot=snapshot,
+            object_store_prefix=object_store_prefix,
+            manifest_record=manifest_record,
+            source_fd=source_fd,
+            source_mount_id=source_mount_id,
+            mount_id_provider=mount_id_provider,
+            source_device=source_device,
+        )
+    return {
+        "kind": "forcing-package",
+        "subject_id": forcing_version_id,
+        "manifest_path": manifest_record.path,
+        "manifest_sha256": manifest_record.sha256,
+        "start_time": _time(_parse_instant(manifest.get("start_time"), label="forcing start_time")),
+        "end_time": _time(_parse_instant(manifest.get("end_time"), label="forcing end_time")),
+        "model_id": str(manifest["model_id"]),
+        "basin_version_id": str(manifest["basin_version_id"]),
+    }
+
+
+def _validate_forcing_declaration_shape(
+    manifest: Mapping[str, Any], *, source_relative: str, object_store_prefix: str
+) -> None:
+    """Validate the cheap immutable declaration without opening product payloads."""
+    forcing_version_id = manifest.get("forcing_version_id")
+    if not isinstance(forcing_version_id, str) or not _safe_segment(forcing_version_id):
+        raise ArchiveMoverError("forcing manifest has no safe forcing_version_id")
+    declared = manifest.get("files")
+    if not isinstance(declared, list) or not declared:
+        raise ArchiveMoverError("forcing manifest files must be a non-empty array")
+    required_prefix = f"{object_store_prefix}/{source_relative}/"
+    paths: set[str] = set()
+    for entry in declared:
+        if not isinstance(entry, Mapping):
+            raise ArchiveMoverError("forcing manifest contains a malformed file entry")
+        canonical_uri = _canonical_object_uri(entry.get("uri"))
+        if not canonical_uri.startswith(required_prefix):
+            raise ArchiveMoverError("forcing manifest file URI escapes its exact package leaf")
+        relative = canonical_uri[len(required_prefix) :]
+        checksum = entry.get("checksum")
+        if not _safe_relative(relative) or relative == "forcing_package.json":
+            raise ArchiveMoverError("forcing manifest file URI has an unsafe package-relative path")
+        if relative in paths:
+            raise ArchiveMoverError(f"forcing manifest has duplicate file declaration: {relative}")
+        if not isinstance(checksum, str) or len(checksum) != 64:
+            raise ArchiveMoverError(f"forcing manifest checksum is not sha256-shaped: {relative}")
+        try:
+            int(checksum, 16)
+        except ValueError as error:
+            raise ArchiveMoverError(f"forcing manifest checksum is not sha256-shaped: {relative}") from error
+        paths.add(relative)
+
+
+def _record_json(
+    record: FileRecord,
+    *,
+    root_fd: int,
+    mount_id: int,
+    mount_id_provider: MountIdProvider,
+    device: int,
+) -> Mapping[str, Any]:
+    file_fd, opened = _open_regular(
+        root_fd, record.path, record.path, mount_id, mount_id_provider, device, MAX_MANIFEST_BYTES
+    )
+    try:
+        raw = bytearray()
+        while len(raw) <= MAX_MANIFEST_BYTES:
+            chunk = os.read(file_fd, MAX_MANIFEST_BYTES + 1 - len(raw))
+            if not chunk:
+                break
+            raw.extend(chunk)
+        after = os.fstat(file_fd)
+        value = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ArchiveMoverError(f"forcing domain sidecar is unreadable: {record.path}: {error}") from error
+    finally:
+        os.close(file_fd)
+    if not isinstance(value, Mapping):
+        raise ArchiveMoverError(f"forcing domain sidecar must be an object: {record.path}")
+    if (
+        len(raw) > MAX_MANIFEST_BYTES
+        or _stat_signature(opened) != _stat_signature(after)
+        or _stat_signature(after) != _file_record_signature(record)
+        or len(raw) != record.size_bytes
+        or hashlib.sha256(raw).hexdigest() != record.sha256
+    ):
+        raise ArchiveMoverError(f"forcing domain sidecar changed after pinned snapshot: {record.path}")
+    return value
+
+
+def _validate_forcing_domain_bundle(
+    forcing: Mapping[str, Any],
+    *,
+    source_relative: str,
+    snapshot: Mapping[str, FileRecord],
+    object_store_prefix: str,
+    manifest_record: FileRecord,
+    source_fd: int,
+    source_mount_id: int,
+    mount_id_provider: MountIdProvider,
+    source_device: int,
+) -> None:
+    """Validate the producer's fixed DB-free forcing-domain bundle in-place."""
+    read_args = {
+        "root_fd": source_fd,
+        "mount_id": source_mount_id,
+        "mount_id_provider": mount_id_provider,
+        "device": source_device,
+    }
+    package = _record_json(snapshot["forcing_domain_package.json"], **read_args)
+    version = _record_json(snapshot["forcing_version_record.json"], **read_args)
+    if package.get("schema_version") != FORCING_DOMAIN_SCHEMA_VERSION:
+        raise ArchiveMoverError("forcing domain package schema_version drift")
+    if package.get("contract_id") != FORCING_DOMAIN_PACKAGE_CONTRACT_ID:
+        raise ArchiveMoverError("forcing domain package contract_id drift")
+    identity_fields = (
+        "source_id",
+        "cycle_time",
+        "model_id",
+        "basin_version_id",
+        "forcing_version_id",
+    )
+    for field in identity_fields:
+        left, right = package.get(field), forcing.get(field)
+        if field == "source_id":
+            try:
+                left, right = normalize_source_id(str(left)), normalize_source_id(str(right))
+            except ValueError as error:
+                raise ArchiveMoverError("forcing domain package source identity is invalid") from error
+        elif field == "cycle_time":
+            left = _time(_parse_hour(left, label="forcing domain cycle_time"))
+            right = _time(_parse_hour(right, label="forcing cycle_time"))
+        if left != right:
+            raise ArchiveMoverError(f"forcing domain package identity drift: {field}")
+    domain_start = _parse_instant(package.get("start_time"), label="forcing domain start_time")
+    domain_end = _parse_instant(package.get("end_time"), label="forcing domain end_time")
+    forcing_start = _parse_instant(forcing.get("start_time"), label="forcing start_time")
+    forcing_end = _parse_instant(forcing.get("end_time"), label="forcing end_time")
+    if domain_start > domain_end or domain_start < forcing_start or domain_end > forcing_end:
+        raise ArchiveMoverError("forcing domain package window is outside forcing package window")
+    payloads = package.get("payloads")
+    if not isinstance(payloads, Mapping) or set(payloads) != set(_FORCING_DOMAIN_PAYLOAD_PATHS):
+        raise ArchiveMoverError("forcing domain package payload roles differ from fixed bundle")
+    required_prefix = f"{object_store_prefix}/{source_relative}/"
+    for role, relative in _FORCING_DOMAIN_PAYLOAD_PATHS.items():
+        ref = payloads.get(role)
+        if not isinstance(ref, Mapping):
+            raise ArchiveMoverError(f"forcing domain payload reference is malformed: {role}")
+        expected_uri = required_prefix + relative
+        expected_table = FORCING_DOMAIN_PAYLOAD_TABLES[role]
+        record = snapshot[relative]
+        if (
+            _canonical_object_uri(ref.get("uri")) != expected_uri
+            or ref.get("table") != expected_table
+            or ref.get("checksum_sha256") != record.sha256
+        ):
+            raise ArchiveMoverError(f"forcing domain payload binding drift: {role}")
+        if not isinstance(ref.get("row_count"), int) or isinstance(ref.get("row_count"), bool) or ref["row_count"] < 1:
+            raise ArchiveMoverError(f"forcing domain payload row_count is invalid: {role}")
+    expected_forcing_uri = f"{object_store_prefix}/{source_relative}"
+    if version.get("forcing_version_id") != forcing.get("forcing_version_id"):
+        raise ArchiveMoverError("forcing version sidecar identity drift")
+    for field in ("source_id", "cycle_time", "start_time", "end_time", "model_id"):
+        left, right = version.get(field), forcing.get(field)
+        if field == "source_id":
+            try:
+                left, right = normalize_source_id(str(left)), normalize_source_id(str(right))
+            except ValueError as error:
+                raise ArchiveMoverError("forcing version sidecar source identity is invalid") from error
+        elif field == "cycle_time":
+            left = _time(_parse_hour(left, label="forcing version cycle_time"))
+            right = _time(_parse_hour(right, label="forcing cycle_time"))
+        elif field in {"start_time", "end_time"}:
+            left = _time(_parse_instant(left, label=f"forcing version {field}"))
+            right = _time(_parse_instant(right, label=f"forcing {field}"))
+        if left != right:
+            raise ArchiveMoverError(f"forcing version sidecar identity drift: {field}")
+    if (
+        _canonical_object_uri(version.get("forcing_package_uri"), directory=True) != expected_forcing_uri
+        or version.get("checksum") != manifest_record.sha256
+    ):
+        raise ArchiveMoverError("forcing version sidecar package binding drift")
+    lineage = version.get("lineage_json")
+    if not isinstance(lineage, Mapping):
+        raise ArchiveMoverError("forcing version sidecar lineage is missing")
+    forcing_basin_version_id = forcing.get("basin_version_id")
+    if lineage.get("basin_version_id") != forcing_basin_version_id:
+        raise ArchiveMoverError("forcing version sidecar lineage basin identity drift")
+    top_level_basin_version_id = version.get("basin_version_id")
+    if top_level_basin_version_id not in (None, "") and top_level_basin_version_id != forcing_basin_version_id:
+        raise ArchiveMoverError("forcing version sidecar basin identity drift")
+    lineage_uri = lineage.get("forcing_package_manifest_uri")
+    if _canonical_object_uri(lineage_uri) != required_prefix + "forcing_package.json":
+        raise ArchiveMoverError("forcing version sidecar lineage package URI drift")
+    if lineage.get("forcing_package_manifest_checksum") != manifest_record.sha256:
+        raise ArchiveMoverError("forcing version sidecar lineage package checksum drift")
+
+
+def _run_identity(
+    manifest: Mapping[str, Any], run_id: str, object_store_prefix: str
+) -> tuple[ArchiveIdentity, datetime]:
+    model = manifest.get("model")
+    outputs = manifest.get("outputs")
+    if not isinstance(model, Mapping) or not isinstance(outputs, Mapping):
+        raise ArchiveMoverError("run manifest lacks model/outputs identity")
+    source = normalize_source_id(str(manifest.get("source_id") or ""))
+    time = _parse_hour(manifest.get("cycle_time"), label="run cycle_time")
+    start_time = _parse_instant(manifest.get("start_time"), label="run start_time")
+    end_time = _parse_instant(manifest.get("end_time"), label="run end_time")
+    if start_time > end_time:
+        raise ArchiveMoverError("run manifest window is inverted")
+    required = {
+        "run_id": run_id,
+        "run_manifest_uri": f"{object_store_prefix}/runs/{run_id}/input/manifest.json",
+        "output_uri": f"{object_store_prefix}/runs/{run_id}/output",
+    }
+    if (
+        manifest.get("run_id") != required["run_id"]
+        or _canonical_object_uri(outputs.get("run_manifest_uri")) != required["run_manifest_uri"]
+        or _canonical_object_uri(outputs.get("output_uri"), directory=True) != required["output_uri"]
+    ):
+        raise ArchiveMoverError("run manifest identity/outputs do not bind run directory")
+    basin = model.get("basin_version_id")
+    model_id = model.get("model_id")
+    if not isinstance(basin, str) or not isinstance(model_id, str):
+        raise ArchiveMoverError("run manifest model identity is incomplete")
+    if not _safe_segment(basin) or not _safe_segment(model_id):
+        raise ArchiveMoverError("run manifest model identity contains an unsafe segment")
+    duplicated = manifest.get("identity")
+    if duplicated is not None:
+        if not isinstance(duplicated, Mapping):
+            raise ArchiveMoverError("run duplicated identity must be an object")
+        expected = {
+            "run_id": run_id,
+            "cycle_time": time.strftime("%Y-%m-%dT%H:00:00Z"),
+            "model_id": model_id,
+            "basin_version_id": basin,
+            "start_time": _time(start_time),
+            "end_time": _time(end_time),
+        }
+        for source_field in ("source", "source_id"):
+            if source_field in duplicated and normalize_source_id(str(duplicated[source_field])) != source:
+                raise ArchiveMoverError(f"run duplicated identity drift: {source_field}")
+        for field, expected_value in expected.items():
+            if field in duplicated:
+                actual = duplicated[field]
+                if field == "cycle_time":
+                    actual = _parse_hour(actual, label="run duplicated cycle_time").strftime("%Y-%m-%dT%H:00:00Z")
+                elif field in {"start_time", "end_time"}:
+                    actual = _time(_parse_instant(actual, label=f"run duplicated {field}"))
+                if actual != expected_value:
+                    raise ArchiveMoverError(f"run duplicated identity drift: {field}")
+    return (
+        ArchiveIdentity(
+            "runs", source, time.strftime("%Y%m%d%H"), time.strftime("%Y-%m-%dT%H:00:00Z"), run_id=run_id
+        ),
+        end_time,
+    )
+
+
+def _run_provenance(
+    manifest: Mapping[str, Any], *, files: Sequence[FileRecord], manifest_record: FileRecord
+) -> dict[str, Any]:
+    output_files = [record for record in files if record.path.startswith("output/")]
+    if not output_files:
+        raise ArchiveMoverError("run output tree contains no regular product")
+    model = manifest["model"]
+    assert isinstance(model, Mapping)
+    return {
+        "kind": "run-manifest",
+        "subject_id": str(manifest["run_id"]),
+        "manifest_path": manifest_record.path,
+        "manifest_sha256": manifest_record.sha256,
+        "start_time": _time(_parse_instant(manifest.get("start_time"), label="run start_time")),
+        "end_time": _time(_parse_instant(manifest.get("end_time"), label="run end_time")),
+        "model_id": str(model["model_id"]),
+        "basin_version_id": str(model["basin_version_id"]),
+    }
+
+
+def _state_identity(parts: Sequence[str]) -> tuple[ArchiveIdentity, datetime]:
+    if len(parts) == 4:
+        _, source_segment, model, cycle = parts
+        try:
+            source = normalize_source_id(source_segment)
+        except ValueError as error:
+            raise ArchiveMoverError(f"unknown provider state layout: {source_segment}") from error
+        if source_segment != source:
+            raise ArchiveMoverError(f"provider state layout must use canonical source ID: {source_segment}")
+    elif len(parts) == 3:
+        _, model, cycle = parts
+        source = "legacy-unqualified"
+        try:
+            normalize_source_id(model)
+        except ValueError:
+            pass
+        else:
+            raise ArchiveMoverError("ambiguous provider/legacy state layout")
+    else:
+        raise ArchiveMoverError("state locator shape is invalid")
+    try:
+        time = datetime.strptime(cycle, "%Y%m%d%H").replace(tzinfo=UTC)
+    except ValueError as error:
+        raise ArchiveMoverError("state valid-time directory is not canonical") from error
+    return ArchiveIdentity("states", source, cycle, time.strftime("%Y-%m-%dT%H:00:00Z"), model_id=model), time
+
+
+def discover_candidate_locators(
+    config: MoverConfig, *, now: datetime, mount_id_provider: MountIdProvider = fd_mount_id
+) -> tuple[list[CandidateLocator], list[DiscoveryFailure]]:
+    """Discover and order eligible identities without scanning product payload trees."""
+    root = verify_directory_no_follow(config.object_store_root)
+    root_fd = open_directory_no_follow(root)
+    root_stat = os.fstat(root_fd)
+    root_mount = mount_id_provider(root_fd)
+    candidates: list[CandidateLocator] = []
+    failures: list[DiscoveryFailure] = []
+    observed = 0
+    cutoff = now - timedelta(days=config.minimum_age_days)
+
+    def lane_exists(lane: str, path: Path) -> bool:
+        nonlocal observed
+        try:
+            return _entry_exists(path, root)
+        except Exception as error:
+            observed += 1
+            if observed > MAX_DISCOVERY:
+                raise ArchiveMoverError(f"discovery exceeds {MAX_DISCOVERY} candidates/failures") from error
+            failures.append(DiscoveryFailure(lane, lane, str(error)))
+            return False
+
+    def add_leaf(lane: str, relative: str, manifest_rel: str | None) -> None:
+        nonlocal observed
+        observed += 1
+        if observed > MAX_DISCOVERY:
+            raise ArchiveMoverError(f"discovery exceeds {MAX_DISCOVERY} candidates/failures")
+        try:
+            leaf = root / relative
+            leaf_fd = open_directory_no_follow(leaf, containment_root=root)
+            try:
+                opened = os.fstat(leaf_fd)
+                if opened.st_dev != root_stat.st_dev or mount_id_provider(leaf_fd) != root_mount:
+                    raise ArchiveMoverError(f"cross-device/mount candidate rejected: {relative}")
+                manifest: dict[str, Any] | None = None
+                if manifest_rel is None:
+                    identity, eligibility_end = _state_identity(relative.split("/"))
+                else:
+                    manifest, _manifest_record = _read_json_relative_fd(
+                        leaf_fd,
+                        manifest_rel,
+                        label=f"{relative}/{manifest_rel}",
+                        mount_id=root_mount,
+                        mount_id_provider=mount_id_provider,
+                    )
+                    identity, eligibility_end = (
+                        _forcing_identity(manifest, relative.split("/"))
+                        if lane == "forcing"
+                        else _run_identity(manifest, relative.split("/")[-1], config.object_store_prefix)
+                    )
+                    if lane == "forcing":
+                        _validate_forcing_declaration_shape(
+                            manifest,
+                            source_relative=relative,
+                            object_store_prefix=config.object_store_prefix,
+                        )
+                try:
+                    archive_provenance_paths(config.archive_root, identity=identity)
+                except ArchiveConfigurationError as error:
+                    raise ArchiveMoverError(f"candidate archive identity is unsafe: {error}") from error
+                if eligibility_end >= cutoff:
+                    return
+                candidates.append(
+                    CandidateLocator(
+                        identity,
+                        leaf,
+                        relative,
+                        manifest_rel,
+                        eligibility_end,
+                    )
+                )
+            finally:
+                os.close(leaf_fd)
+        except Exception as error:
+            failures.append(DiscoveryFailure(lane, relative, str(error)))
+
+    try:
+        # A deliberately shallow locator pass; full leaf safety is proven by scan_tree.
+        def shallow_dirs(lane: str, path: Path, relative: str) -> list[str]:
+            nonlocal observed
+            names = _path_entries(path, root)
+            valid: list[str] = []
+            for name in names:
+                child_relative = f"{relative}/{name}"
+                try:
+                    child_fd = open_directory_no_follow(path / name, containment_root=root)
+                    try:
+                        opened = os.fstat(child_fd)
+                        if opened.st_dev != root_stat.st_dev or mount_id_provider(child_fd) != root_mount:
+                            raise ArchiveMoverError(f"cross-device/mount discovery directory: {child_relative}")
+                    finally:
+                        os.close(child_fd)
+                except Exception as error:
+                    observed += 1
+                    if observed > MAX_DISCOVERY:
+                        raise ArchiveMoverError(f"discovery exceeds {MAX_DISCOVERY} candidates/failures") from error
+                    failures.append(DiscoveryFailure(lane, child_relative, str(error)))
+                    continue
+                valid.append(name)
+            return valid
+
+        forcing = root / "forcing"
+        if lane_exists("forcing", forcing):
+            try:
+                for source in shallow_dirs("forcing", forcing, "forcing"):
+                    for cycle in shallow_dirs("forcing", forcing / source, f"forcing/{source}"):
+                        for basin in shallow_dirs(
+                            "forcing", forcing / source / cycle, f"forcing/{source}/{cycle}"
+                        ):
+                            for model in _path_entries(forcing / source / cycle / basin, root):
+                                add_leaf("forcing", f"forcing/{source}/{cycle}/{basin}/{model}", "forcing_package.json")
+            except Exception as error:
+                failures.append(DiscoveryFailure("forcing", "forcing", str(error)))
+        runs = root / "runs"
+        if lane_exists("runs", runs):
+            try:
+                for run_id in _path_entries(runs, root):
+                    add_leaf("runs", f"runs/{run_id}", "input/manifest.json")
+            except Exception as error:
+                failures.append(DiscoveryFailure("runs", "runs", str(error)))
+        states = root / "states"
+        if lane_exists("states", states):
+            try:
+                for first in shallow_dirs("states", states, "states"):
+                    first_path = states / first
+                    try:
+                        provider = normalize_source_id(first)
+                    except ValueError:
+                        provider = None
+                    if provider is not None:
+                        for model in shallow_dirs("states", first_path, f"states/{first}"):
+                            for cycle in _path_entries(first_path / model, root):
+                                add_leaf("states", f"states/{first}/{model}/{cycle}", None)
+                    else:
+                        for cycle in _path_entries(first_path, root):
+                            add_leaf("states", f"states/{first}/{cycle}", None)
+            except Exception as error:
+                failures.append(DiscoveryFailure("states", "states", str(error)))
+    finally:
+        os.close(root_fd)
+    candidates.sort(key=lambda value: value.sort_key)
+    failures.sort(key=lambda value: (value.lane_hint, value.locator, value.reason))
+    return candidates, failures
+
+
+def _validate_candidate_locator(
+    locator: CandidateLocator,
+    config: MoverConfig,
+    *,
+    mount_id_provider: MountIdProvider,
+) -> Candidate:
+    """Perform the expensive full-tree snapshot for one already-ordered locator."""
+    root_fd = open_directory_no_follow(config.object_store_root)
+    try:
+        root_stat = os.fstat(root_fd)
+        root_mount = mount_id_provider(root_fd)
+    finally:
+        os.close(root_fd)
+    leaf_fd = open_directory_no_follow(locator.source_path, containment_root=config.object_store_root)
+    try:
+        opened = os.fstat(leaf_fd)
+        if opened.st_dev != root_stat.st_dev or mount_id_provider(leaf_fd) != root_mount:
+            raise ArchiveMoverError(f"cross-device/mount candidate rejected: {locator.source_relative}")
+        manifest: dict[str, Any] | None = None
+        manifest_record: FileRecord | None = None
+        if locator.manifest_relative is not None:
+            manifest, manifest_record = _read_json_relative_fd(
+                leaf_fd,
+                locator.manifest_relative,
+                label=f"{locator.source_relative}/{locator.manifest_relative}",
+                mount_id=root_mount,
+                mount_id_provider=mount_id_provider,
+            )
+            current_identity, current_end = (
+                _forcing_identity(manifest, locator.source_relative.split("/"))
+                if locator.identity.lane == "forcing"
+                else _run_identity(manifest, locator.source_relative.split("/")[-1], config.object_store_prefix)
+            )
+            if locator.identity.lane == "forcing":
+                _validate_forcing_declaration_shape(
+                    manifest,
+                    source_relative=locator.source_relative,
+                    object_store_prefix=config.object_store_prefix,
+                )
+        else:
+            current_identity, current_end = _state_identity(locator.source_relative.split("/"))
+        if current_identity != locator.identity or current_end != locator.eligibility_end:
+            raise ArchiveMoverError("candidate identity/window changed during bounded validation")
+        files, directories = scan_tree_snapshot(
+            leaf_fd, mount_id=root_mount, mount_id_provider=mount_id_provider
+        )
+        if locator.manifest_relative is not None:
+            assert manifest is not None and manifest_record is not None
+            scanned_manifest = next((item for item in files if item.path == locator.manifest_relative), None)
+            if scanned_manifest != manifest_record:
+                raise ArchiveMoverError(
+                    "manifest changed between identity read and tree snapshot: "
+                    f"{locator.source_relative}/{locator.manifest_relative}"
+                )
+            producer = (
+                _forcing_provenance(
+                    manifest,
+                    source_relative=locator.source_relative,
+                    files=files,
+                    manifest_record=manifest_record,
+                    object_store_prefix=config.object_store_prefix,
+                    source_fd=leaf_fd,
+                    source_mount_id=root_mount,
+                    mount_id_provider=mount_id_provider,
+                    source_device=root_stat.st_dev,
+                )
+                if locator.identity.lane == "forcing"
+                else _run_provenance(manifest, files=files, manifest_record=manifest_record)
+            )
+        else:
+            producer = None
+        return Candidate(
+            locator.identity,
+            locator.source_path,
+            locator.source_relative,
+            sum(item.size_bytes for item in files),
+            files,
+            directories,
+            (opened.st_dev, opened.st_ino, opened.st_mtime_ns),
+            root_mount,
+            locator.eligibility_end,
+            producer,
+        )
+    finally:
+        os.close(leaf_fd)
+
+
+def discover_candidates(
+    config: MoverConfig, *, now: datetime, mount_id_provider: MountIdProvider = fd_mount_id
+) -> tuple[list[Candidate], list[DiscoveryFailure]]:
+    """Compatibility helper that fully validates every discovered locator."""
+    locators, failures = discover_candidate_locators(config, now=now, mount_id_provider=mount_id_provider)
+    candidates: list[Candidate] = []
+    for locator in locators:
+        try:
+            candidates.append(
+                _validate_candidate_locator(locator, config, mount_id_provider=mount_id_provider)
+            )
+        except Exception as error:
+            failures.append(DiscoveryFailure(locator.identity.lane, locator.source_relative, str(error)))
+    failures.sort(key=lambda value: (value.lane_hint, value.locator, value.reason))
+    return candidates, failures
+
+
+def _path_entries(path: Path, root: Path) -> list[str]:
+    try:
+        fd = open_directory_no_follow(path, containment_root=root)
+        try:
+            return _safe_names(fd, path.relative_to(root).as_posix(), remaining=MAX_DISCOVERY)
+        finally:
+            os.close(fd)
+    except Exception as error:
+        if "tree exceeds" in str(error):
+            raise ArchiveMoverError(f"discovery exceeds {MAX_DISCOVERY} candidates/failures") from error
+        raise ArchiveMoverError(f"cannot enumerate {path}: {error}") from error
+
+
+def _read_json_relative_fd(
+    root_fd: int,
+    relative: str,
+    *,
+    label: str,
+    mount_id: int,
+    mount_id_provider: MountIdProvider,
+    allow_hardlinks: bool = False,
+) -> tuple[dict[str, Any], FileRecord]:
+    if not _safe_relative(relative):
+        raise ArchiveMoverError(f"unsafe relative manifest path: {relative!r}")
+    current_fd = os.dup(root_fd)
+    root_device = os.fstat(root_fd).st_dev
+    try:
+        parts = relative.split("/")
+        for part in parts[:-1]:
+            child = _open_child_dir(
+                current_fd,
+                part,
+                label,
+                mount_id,
+                mount_id_provider,
+                root_device,
+            )
+            os.close(current_fd)
+            current_fd = child
+        file_fd, opened = _open_regular(
+            current_fd,
+            parts[-1],
+            label,
+            mount_id,
+            mount_id_provider,
+            root_device,
+            allow_hardlinks=allow_hardlinks,
+        )
+        try:
+            content = bytearray()
+            while len(content) <= MAX_MANIFEST_BYTES:
+                chunk = os.read(file_fd, MAX_MANIFEST_BYTES + 1 - len(content))
+                if not chunk:
+                    break
+                content.extend(chunk)
+            if len(content) > MAX_MANIFEST_BYTES:
+                raise ArchiveMoverError(f"manifest exceeds {MAX_MANIFEST_BYTES} bytes: {label}")
+            after = os.fstat(file_fd)
+            if _stat_signature(opened) != _stat_signature(after) or len(content) != opened.st_size:
+                raise ArchiveMoverError(f"manifest changed while reading: {label}")
+        finally:
+            os.close(file_fd)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ArchiveMoverError(f"cannot read bounded manifest {label}: {error}") from error
+    finally:
+        os.close(current_fd)
+    try:
+        value = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ArchiveMoverError(f"cannot parse bounded manifest {label}: {error}") from error
+    if not isinstance(value, dict):
+        raise ArchiveMoverError(f"manifest must be a JSON object: {label}")
+    return value, FileRecord(
+        relative,
+        len(content),
+        hashlib.sha256(content).hexdigest(),
+        opened.st_dev,
+        opened.st_ino,
+        opened.st_mode,
+        opened.st_mtime_ns,
+    )
+
+
+def _entry_exists(path: Path, root: Path) -> bool:
+    try:
+        info = stat_no_follow(path, containment_root=root)
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISDIR(info.st_mode):
+        raise ArchiveMoverError(f"namespace entry must be a directory: {path}")
+    return True
+
+
+def _path_dirs(path: Path, root: Path) -> list[str]:
+    return _path_entries(path, root)
+
+
+def _canonical_object_uri(value: Any, *, directory: bool = False) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ArchiveMoverError("object URI must be a non-empty canonical string")
+    if "\\" in value or "%" in value or any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ArchiveMoverError("object URI contains encoded/unsafe path syntax")
+    parsed = urlsplit(value)
+    if parsed.scheme != "s3" or not parsed.netloc or parsed.query or parsed.fragment:
+        raise ArchiveMoverError("object URI must use canonical s3 authority without query/fragment")
+    if parsed.username is not None or parsed.password is not None or parsed.port is not None:
+        raise ArchiveMoverError("object URI authority must be a bare bucket")
+    if parsed.hostname != parsed.netloc or parsed.netloc != parsed.netloc.lower():
+        raise ArchiveMoverError("object URI bucket must be canonical lowercase")
+    path = parsed.path
+    if directory and path.endswith("/"):
+        if path.endswith("//"):
+            raise ArchiveMoverError("object URI directory key must not contain multiple trailing slashes")
+        path = path[:-1]
+        value = value[:-1]
+    if not path.startswith("/") or path.endswith("/") or not _safe_relative(path[1:]):
+        kind = "directory" if directory else "non-directory"
+        raise ArchiveMoverError(f"object URI key must be a canonical safe {kind} path")
+    return value
+
+
+def _canonical_object_store_prefix(value: Any) -> str:
+    if not isinstance(value, str) or not value or value != value.strip() or value.endswith("/"):
+        raise ArchiveMoverError("object-store prefix must be a canonical s3 URI without trailing slash")
+    if "\\" in value or "%" in value:
+        raise ArchiveMoverError("object-store prefix contains encoded/unsafe path syntax")
+    parsed = urlsplit(value)
+    if parsed.scheme != "s3" or not parsed.netloc or parsed.query or parsed.fragment:
+        raise ArchiveMoverError("object-store prefix must use canonical s3 authority")
+    if parsed.username is not None or parsed.password is not None or parsed.port is not None:
+        raise ArchiveMoverError("object-store prefix authority must be a bare bucket")
+    if parsed.hostname != parsed.netloc or parsed.netloc != parsed.netloc.lower():
+        raise ArchiveMoverError("object-store prefix bucket must be canonical lowercase")
+    if parsed.path and (not parsed.path.startswith("/") or not _safe_relative(parsed.path[1:])):
+        raise ArchiveMoverError("object-store prefix key is unsafe")
+    return value
+
+
+def _write_tar_from_tree(
+    candidate: Candidate,
+    root_fd: int,
+    output_fd: int,
+    mount_id_provider: MountIdProvider,
+) -> None:
+    expected = {record.path: record for record in candidate.files}
+    with os.fdopen(os.dup(output_fd), "wb") as output:
+        with tarfile.open(fileobj=output, mode="w", format=tarfile.PAX_FORMAT) as archive:
+            for path in sorted(expected):
+                record = expected[path]
+                current_fd = os.dup(root_fd)
+                file_fd: int | None = None
+                try:
+                    parts = path.split("/")
+                    for part in parts[:-1]:
+                        child = _open_child_dir(
+                            current_fd,
+                            part,
+                            path,
+                            candidate.source_mount_id,
+                            mount_id_provider,
+                            candidate.source_root_stat[0],
+                        )
+                        os.close(current_fd)
+                        current_fd = child
+                    file_fd, opened = _open_regular(
+                        current_fd,
+                        parts[-1],
+                        path,
+                        candidate.source_mount_id,
+                        mount_id_provider,
+                        candidate.source_root_stat[0],
+                    )
+                    digest = hashlib.sha256()
+                    stream = _HashingReader(file_fd, digest)
+                    info = tarfile.TarInfo(path)
+                    info.size = record.size_bytes
+                    info.mode = stat.S_IMODE(record.mode)
+                    info.mtime = 0
+                    info.uid = info.gid = 0
+                    info.uname = info.gname = ""
+                    archive.addfile(info, stream)
+                    after = os.fstat(file_fd)
+                    os.close(file_fd)
+                    file_fd = None
+                    if (
+                        stream.bytes_read != record.size_bytes
+                        or digest.hexdigest() != record.sha256
+                        or _stat_signature(opened) != _stat_signature(after)
+                    ):
+                        raise ArchiveMoverError(f"source changed while feeding tar: {path}")
+                finally:
+                    if file_fd is not None:
+                        os.close(file_fd)
+                    os.close(current_fd)
+        output.flush()
+    os.fsync(output_fd)
+    if os.fstat(output_fd).st_size > MAX_TAR_BYTES:
+        raise ArchiveMoverError(f"uncompressed tar exceeds {MAX_TAR_BYTES} bytes")
+
+
+class _HashingReader(io.RawIOBase):
+    def __init__(self, fd: int, digest: Any) -> None:
+        self.fd = fd
+        self.digest = digest
+        self.bytes_read = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int:
+        chunk = os.read(self.fd, len(buffer))
+        if not chunk:
+            return 0
+        buffer[: len(chunk)] = chunk
+        self.digest.update(chunk)
+        self.bytes_read += len(chunk)
+        return len(chunk)
+
+
+def _run_tool(
+    argv: list[str],
+    *,
+    input_fd: int,
+    stdout_fd: int,
+    max_output_bytes: int,
+) -> str:
+    stderr = bytearray()
+    stderr_overflow = False
+    output_overflow = False
+    output_error: Exception | None = None
+    input_position = os.lseek(input_fd, 0, os.SEEK_CUR)
+    stdin_fd = os.dup(input_fd)
+    try:
+        os.lseek(stdin_fd, 0, os.SEEK_SET)
+        with os.fdopen(os.dup(stdout_fd), "wb") as output:
+            os.fchmod(stdout_fd, 0o600)
+            process = subprocess.Popen(
+                argv,
+                stdin=stdin_fd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                shell=False,
+            )
+
+            def drain_stderr() -> None:
+                nonlocal stderr_overflow
+                assert process.stderr is not None
+                while chunk := process.stderr.read(8192):
+                    room = MAX_STDERR_BYTES - len(stderr)
+                    if room > 0:
+                        stderr.extend(chunk[:room])
+                    if len(chunk) > room:
+                        stderr_overflow = True
+
+            def drain_stdout() -> None:
+                nonlocal output_overflow, output_error
+                assert process.stdout is not None
+                written = 0
+                try:
+                    while chunk := process.stdout.read(1024 * 1024):
+                        written += len(chunk)
+                        if written > max_output_bytes:
+                            output_overflow = True
+                            process.kill()
+                            break
+                        output.write(chunk)
+                    output.flush()
+                    os.fsync(stdout_fd)
+                except Exception as error:  # surfaced deterministically in the caller thread
+                    output_error = error
+                    process.kill()
+
+            stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+            stdout_thread = threading.Thread(target=drain_stdout, daemon=True)
+            stderr_thread.start()
+            stdout_thread.start()
+            try:
+                return_code = process.wait(timeout=TOOL_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired as error:
+                process.kill()
+                process.wait()
+                stderr_thread.join()
+                stdout_thread.join()
+                raise ArchiveMoverError(f"compression tool timed out after {TOOL_TIMEOUT_SECONDS}s") from error
+            stderr_thread.join()
+            stdout_thread.join()
+    finally:
+        os.close(stdin_fd)
+        os.lseek(input_fd, input_position, os.SEEK_SET)
+    if output_error is not None:
+        raise ArchiveMoverError(f"cannot capture compression output safely: {output_error}")
+    if output_overflow:
+        raise ArchiveMoverError(f"compression output exceeds {max_output_bytes} bytes")
+    if stderr_overflow:
+        raise ArchiveMoverError(f"compression stderr exceeds {MAX_STDERR_BYTES} bytes")
+    message = stderr.decode("utf-8", "replace")
+    if return_code:
+        raise ArchiveMoverError(f"compression tool failed ({return_code}): {message}")
+    return message
+
+
+def _validate_zstd(path: Path) -> Path:
+    if not path.is_absolute():
+        raise ArchiveMoverError("zstd path must be absolute")
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise ArchiveMoverError(f"zstd executable is unavailable: {path}: {error}") from error
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or not os.access(path, os.X_OK):
+        raise ArchiveMoverError(f"zstd must be an executable regular non-symlink file: {path}")
+    return path
+
+
+def verify_archive_pair(
+    leaf: Path,
+    archive_root: Path,
+    *,
+    zstd_path: Path,
+    object_store_prefix: str,
+    require_canonical_location: bool = True,
+    mount_id_provider: MountIdProvider = fd_mount_id,
+) -> dict[str, Any]:
+    """Verify a pair and classify deterministic corruption separately from operations."""
+    try:
+        return _verify_archive_pair_impl(
+            leaf,
+            archive_root,
+            zstd_path=zstd_path,
+            object_store_prefix=object_store_prefix,
+            require_canonical_location=require_canonical_location,
+            mount_id_provider=mount_id_provider,
+        )
+    except (ArchiveCorruptError, ArchiveOperationalError, ArchiveConflictError):
+        raise
+    except ArchiveMoverError as error:
+        if error.kind == "operational" or isinstance(error.__cause__, OSError):
+            raise ArchiveOperationalError(str(error)) from error
+        raise ArchiveCorruptError(str(error)) from error
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ArchiveOperationalError(f"archive verification operation failed: {error}") from error
+    except (
+        json.JSONDecodeError,
+        jsonschema.ValidationError,
+        tarfile.TarError,
+        ValueError,
+        KeyError,
+        TypeError,
+    ) as error:
+        raise ArchiveCorruptError(f"archive content verification failed: {error}") from error
+
+
+def _verify_archive_pair_impl(
+    leaf: Path,
+    archive_root: Path,
+    *,
+    zstd_path: Path,
+    object_store_prefix: str,
+    require_canonical_location: bool = True,
+    mount_id_provider: MountIdProvider = fd_mount_id,
+) -> dict[str, Any]:
+    """Verify exact leaf shape, schema/binding, compressed checksum and tar members."""
+    root_fd = open_directory_no_follow(archive_root)
+    root_info = os.fstat(root_fd)
+    root_mount = mount_id_provider(root_fd)
+    leaf_fd = open_directory_no_follow(leaf, containment_root=archive_root)
+    try:
+        leaf_info = os.fstat(leaf_fd)
+        if leaf_info.st_dev != root_info.st_dev or mount_id_provider(leaf_fd) != root_mount:
+            raise ArchiveOperationalError(f"archive leaf is on a different device/mount: {leaf}")
+        names = _safe_names(leaf_fd, str(leaf), remaining=2)
+        if names != ["archive.tar.zst", "manifest.json"]:
+            raise ArchiveMoverError(f"archive leaf does not contain exact expected pair: {leaf}")
+        manifest, manifest_record = _read_json_relative_fd(
+            leaf_fd,
+            "manifest.json",
+            label=f"{leaf}/manifest.json",
+            mount_id=root_mount,
+            mount_id_provider=mount_id_provider,
+            allow_hardlinks=True,
+        )
+        try:
+            jsonschema.Draft7Validator(
+                _load_schema(MANIFEST_SCHEMA_PATH),
+                format_checker=jsonschema.FormatChecker(),
+            ).validate(manifest)
+            paths = validate_product_archive_manifest_binding(archive_root, manifest)
+        except (jsonschema.ValidationError, ArchiveConfigurationError) as error:
+            raise ArchiveMoverError(f"archive manifest contract failed: {error}") from error
+        _validate_manifest_resource_bounds(manifest)
+        if require_canonical_location and paths.manifest != leaf / "manifest.json":
+            raise ArchiveMoverError("archive manifest is installed at the wrong canonical leaf")
+        archive_fd, archive_info = _open_regular(
+            leaf_fd,
+            "archive.tar.zst",
+            f"{leaf}/archive.tar.zst",
+            root_mount,
+            mount_id_provider,
+            root_info.st_dev,
+            MAX_ARCHIVE_BYTES,
+            allow_hardlinks=True,
+        )
+        try:
+            size, digest = _size_digest_fd(archive_fd, max_bytes=MAX_ARCHIVE_BYTES)
+            archive_after = os.fstat(archive_fd)
+            if _stat_signature(archive_info) != _stat_signature(archive_after) or size != archive_info.st_size:
+                raise ArchiveMoverError("archive tarball changed while verifying")
+            if size != manifest["archive"]["size_bytes"] or digest != manifest["archive"]["sha256"]:
+                raise ArchiveMoverError("archive tarball size/sha256 mismatch")
+            os.lseek(archive_fd, 0, os.SEEK_SET)
+            expected = {entry["path"]: entry for entry in manifest["files"]}
+            if len(expected) != len(manifest["files"]):
+                raise ArchiveMoverError("archive manifest has duplicate file paths")
+            actual: dict[str, tuple[int, str]] = {}
+            embedded_manifest_raw: bytes | None = None
+            member_count = 0
+            cumulative_size = 0
+            with _decompressed_tar_stream(
+                archive_fd, zstd_path, expected_member_count=len(expected)
+            ) as archive:
+                for member in archive:
+                    member_count += 1
+                    if member_count > len(expected) or member_count > MAX_TREE_ENTRIES:
+                        raise ArchiveMoverError("tar has more members than its bounded manifest")
+                    unexpected_pax = set(member.pax_headers) - {"path", "size"}
+                    if unexpected_pax:
+                        raise ArchiveMoverError(f"tar member has unsupported PAX keys: {sorted(unexpected_pax)}")
+                    if not member.isfile() or not _safe_relative(member.name) or member.name in actual:
+                        raise ArchiveMoverError(f"unsafe/duplicate/non-regular tar member: {member.name!r}")
+                    expected_member = expected.get(member.name)
+                    if expected_member is None:
+                        raise ArchiveMoverError(f"unexpected tar member: {member.name!r}")
+                    if len(member.name.split("/")) > MAX_TREE_DEPTH + 1:
+                        raise ArchiveMoverError(f"tar member exceeds depth {MAX_TREE_DEPTH}: {member.name}")
+                    if member.size != expected_member["size_bytes"] or member.size > MAX_FILE_BYTES:
+                        raise ArchiveMoverError(f"tar member declared size differs from manifest: {member.name}")
+                    cumulative_size += member.size
+                    if cumulative_size > MAX_SOURCE_BYTES:
+                        raise ArchiveMoverError(f"tar members exceed {MAX_SOURCE_BYTES} source bytes")
+                    source = archive.extractfile(member)
+                    if source is None:
+                        raise ArchiveMoverError(f"cannot read tar member: {member.name}")
+                    digest_obj = hashlib.sha256()
+                    count = 0
+                    captured = bytearray()
+                    while chunk := source.read(1024 * 1024):
+                        count += len(chunk)
+                        digest_obj.update(chunk)
+                        if member.name in {"forcing_package.json", "input/manifest.json"}:
+                            if len(captured) + len(chunk) > MAX_MANIFEST_BYTES:
+                                raise ArchiveMoverError("embedded producer manifest exceeds bounded read")
+                            captured.extend(chunk)
+                    actual[member.name] = (count, digest_obj.hexdigest())
+                    if member.name in {"forcing_package.json", "input/manifest.json"}:
+                        if embedded_manifest_raw is not None:
+                            raise ArchiveMoverError("archive contains multiple producer manifests")
+                        embedded_manifest_raw = bytes(captured)
+            if set(actual) != set(expected):
+                raise ArchiveMoverError("tar member set differs from manifest")
+            for name, (member_size, member_digest) in actual.items():
+                if member_size != expected[name]["size_bytes"] or member_digest != expected[name]["sha256"]:
+                    raise ArchiveMoverError(f"tar member differs from manifest: {name}")
+            archive_final = os.fstat(archive_fd)
+            if _stat_signature(archive_info) != _stat_signature(archive_final):
+                raise ArchiveMoverError("archive tarball changed during internal verification")
+            archive_signature = _stat_signature(archive_final)
+        finally:
+            os.close(archive_fd)
+        manifest_after, manifest_record_after = _read_json_relative_fd(
+            leaf_fd,
+            "manifest.json",
+            label=f"{leaf}/manifest.json",
+            mount_id=root_mount,
+            mount_id_provider=mount_id_provider,
+            allow_hardlinks=True,
+        )
+        if manifest_after != manifest or manifest_record_after != manifest_record:
+            raise ArchiveMoverError("archive manifest changed during verification")
+        _validate_producer_semantics(
+            manifest,
+            embedded_manifest_raw=embedded_manifest_raw,
+            members=actual,
+            object_store_prefix=object_store_prefix,
+        )
+        _rebind_leaf_file(leaf_fd, "archive.tar.zst", archive_signature, root_info.st_dev)
+        _rebind_leaf_file(
+            leaf_fd,
+            "manifest.json",
+            _file_record_signature(manifest_record_after),
+            root_info.st_dev,
+        )
+        _verify_open_directory_entry(leaf_fd, leaf, archive_root)
+    finally:
+        os.close(leaf_fd)
+        os.close(root_fd)
+    return manifest
+
+
+def _rebind_leaf_file(leaf_fd: int, name: str, signature: tuple[int, int, int, int, int], device: int) -> None:
+    """Reopen a final directory entry no-follow and bind it to the descriptor just verified."""
+    rebound = os.open(name, _READ_FLAGS, dir_fd=leaf_fd)
+    try:
+        opened = os.fstat(rebound)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_dev != device or _stat_signature(opened) != signature:
+            raise ArchiveMoverError(f"archive pair namespace entry changed after final read: {name}")
+    finally:
+        os.close(rebound)
+
+
+def _validate_producer_semantics(
+    manifest: Mapping[str, Any],
+    *,
+    embedded_manifest_raw: bytes | None,
+    members: Mapping[str, tuple[int, str]],
+    object_store_prefix: str,
+) -> None:
+    """Make product provenance self-bind to archive identity and its unique member."""
+    identity = manifest.get("identity")
+    producer = manifest.get("producer")
+    if not isinstance(identity, Mapping):
+        raise ArchiveMoverError("archive identity is malformed")
+    lane = identity.get("lane")
+    if lane == "states":
+        if producer is not None:
+            raise ArchiveMoverError("state archive must not carry producer provenance")
+        return
+    if lane not in {"forcing", "runs"} or not isinstance(producer, Mapping):
+        raise ArchiveMoverError("product archive producer provenance is missing")
+    expected_kind = "forcing-package" if lane == "forcing" else "run-manifest"
+    expected_path = "forcing_package.json" if lane == "forcing" else "input/manifest.json"
+    if producer.get("kind") != expected_kind or producer.get("manifest_path") != expected_path:
+        raise ArchiveMoverError("producer kind/path does not bind archive lane")
+    if lane == "runs" and producer.get("subject_id") != identity.get("run_id"):
+        raise ArchiveMoverError("run producer subject does not bind archive run_id")
+    if producer.get("model_id") != identity.get("model_id") and lane == "forcing":
+        raise ArchiveMoverError("forcing producer model does not bind archive identity")
+    if producer.get("basin_version_id") != identity.get("basin_version_id") and lane == "forcing":
+        raise ArchiveMoverError("forcing producer basin does not bind archive identity")
+    cycle = _parse_hour(identity.get("cycle_time"), label="archive cycle_time")
+    start = _parse_instant(producer.get("start_time"), label="producer start_time")
+    end = _parse_instant(producer.get("end_time"), label="producer end_time")
+    if start > end or not start <= cycle <= end:
+        raise ArchiveMoverError("producer window does not bind archive cycle")
+    producer_members = [entry for entry in manifest.get("files", ()) if entry.get("path") == expected_path]
+    if len(producer_members) != 1 or producer_members[0].get("sha256") != producer.get("manifest_sha256"):
+        raise ArchiveMoverError("producer manifest member does not bind its declared digest")
+    if embedded_manifest_raw is None:
+        raise ArchiveMoverError("embedded producer manifest is missing")
+    try:
+        embedded = json.loads(embedded_manifest_raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ArchiveMoverError(f"embedded producer manifest is unreadable: {error}") from error
+    if not isinstance(embedded, Mapping):
+        raise ArchiveMoverError("embedded producer manifest must be an object")
+    if lane == "runs":
+        run_id = str(identity["run_id"])
+        embedded_identity, _ = _run_identity(embedded, run_id, object_store_prefix)
+        if _identity_dict(embedded_identity) != identity:
+            raise ArchiveMoverError("embedded run manifest identity differs from archive identity")
+        embedded_producer = _run_provenance_from_members(embedded, members)
+    else:
+        source_relative = (
+            f"forcing/{str(identity['source']).lower()}/{identity['cycle_identity']}/"
+            f"{identity['basin_version_id']}/{identity['model_id']}"
+        )
+        embedded_identity, _ = _forcing_identity(embedded, source_relative.split("/"))
+        if _identity_dict(embedded_identity) != identity:
+            raise ArchiveMoverError("embedded forcing manifest identity differs from archive identity")
+        _validate_forcing_declaration_shape(
+            embedded,
+            source_relative=source_relative,
+            object_store_prefix=object_store_prefix,
+        )
+        declared: dict[str, str] = {}
+        prefix = f"{object_store_prefix}/{source_relative}/"
+        for entry in embedded["files"]:
+            uri = _canonical_object_uri(entry["uri"])
+            declared[uri[len(prefix) :]] = entry["checksum"]
+        products = {
+            path: digest
+            for path, (_, digest) in members.items()
+            if path != "forcing_package.json" and path not in _FORCING_DOMAIN_BUNDLE
+        }
+        if declared != products:
+            raise ArchiveMoverError("embedded forcing declarations differ from archive product members")
+        embedded_producer = {
+            "kind": "forcing-package",
+            "subject_id": str(embedded["forcing_version_id"]),
+            "manifest_path": "forcing_package.json",
+            "manifest_sha256": hashlib.sha256(embedded_manifest_raw).hexdigest(),
+            "start_time": _time(_parse_instant(embedded.get("start_time"), label="forcing start_time")),
+            "end_time": _time(_parse_instant(embedded.get("end_time"), label="forcing end_time")),
+            "model_id": str(embedded["model_id"]),
+            "basin_version_id": str(embedded["basin_version_id"]),
+        }
+    if embedded_producer != producer:
+        raise ArchiveMoverError("embedded producer manifest differs from outer producer provenance")
+
+
+def _run_provenance_from_members(
+    manifest: Mapping[str, Any], members: Mapping[str, tuple[int, str]]
+) -> dict[str, Any]:
+    if not any(path.startswith("output/") for path in members):
+        raise ArchiveMoverError("embedded run manifest has no archived output product")
+    model = manifest.get("model")
+    if not isinstance(model, Mapping):
+        raise ArchiveMoverError("embedded run model is malformed")
+    raw_digest = members.get("input/manifest.json")
+    if raw_digest is None:
+        raise ArchiveMoverError("embedded run manifest member is absent")
+    return {
+        "kind": "run-manifest",
+        "subject_id": str(manifest["run_id"]),
+        "manifest_path": "input/manifest.json",
+        "manifest_sha256": raw_digest[1],
+        "start_time": _time(_parse_instant(manifest.get("start_time"), label="run start_time")),
+        "end_time": _time(_parse_instant(manifest.get("end_time"), label="run end_time")),
+        "model_id": str(model["model_id"]),
+        "basin_version_id": str(model["basin_version_id"]),
+    }
+
+
+def _validate_manifest_resource_bounds(manifest: Mapping[str, Any]) -> None:
+    files = manifest["files"]
+    if len(files) > MAX_TREE_ENTRIES:
+        raise ArchiveMoverError(f"archive manifest exceeds {MAX_TREE_ENTRIES} file entries")
+    total = 0
+    for entry in files:
+        path = entry["path"]
+        if len(path.split("/")) > MAX_TREE_DEPTH + 1:
+            raise ArchiveMoverError(f"archive manifest member exceeds depth {MAX_TREE_DEPTH}: {path}")
+        size = entry["size_bytes"]
+        if size > MAX_FILE_BYTES:
+            raise ArchiveMoverError(f"archive manifest member exceeds {MAX_FILE_BYTES} bytes: {path}")
+        total += size
+        if total > MAX_SOURCE_BYTES:
+            raise ArchiveMoverError(f"archive manifest exceeds {MAX_SOURCE_BYTES} source bytes")
+
+
+def _size_digest_fd(source_fd: int, *, max_bytes: int) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    size = 0
+    while chunk := os.read(source_fd, 1024 * 1024):
+        size += len(chunk)
+        if size > max_bytes:
+            raise ArchiveMoverError(f"evidence file exceeds {max_bytes} bytes")
+        digest.update(chunk)
+    return size, digest.hexdigest()
+
+
+class _LimitedReader(io.RawIOBase):
+    def __init__(self, stream: Any, limit: int, process: subprocess.Popen[bytes]) -> None:
+        self.stream = stream
+        self.limit = limit
+        self.process = process
+        self.count = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self.stream.read(size)
+        self.count += len(chunk)
+        if self.count > self.limit:
+            self.process.kill()
+            raise ArchiveMoverError(f"decompressed tar exceeds {self.limit} bytes")
+        return chunk
+
+
+class _TarHeaderGuardReader(io.RawIOBase):
+    """Inspect each tar header before exposing any extension body to tarfile."""
+
+    def __init__(self, stream: _LimitedReader, expected_member_count: int | None = None) -> None:
+        self.stream = stream
+        self.body_bytes_remaining = 0
+        self.pending = bytearray()
+        self.expected_member_count = expected_member_count
+        self.raw_header_count = 0
+        self.local_pax_count = 0
+        self.local_pax_bytes = 0
+        self.previous_was_local_pax = False
+
+    def readable(self) -> bool:
+        return True
+
+    def read(self, size: int = -1) -> bytes:
+        request = 512 if size < 0 else size
+        if request == 0:
+            return b""
+        if self.pending:
+            result = bytes(self.pending[:request])
+            del self.pending[:request]
+            return result
+        if self.body_bytes_remaining:
+            chunk = self.stream.read(min(request, self.body_bytes_remaining))
+            self.body_bytes_remaining -= len(chunk)
+            return chunk
+        parts: list[bytes] = []
+        remaining = 512
+        while remaining:
+            chunk = self.stream.read(remaining)
+            if not chunk:
+                break
+            parts.append(chunk)
+            remaining -= len(chunk)
+        block = b"".join(parts)
+        if len(block) != 512:
+            return block
+        if block == b"\0" * 512:
+            self.pending.extend(block)
+            return self.read(request)
+        self.raw_header_count += 1
+        if (
+            self.expected_member_count is not None
+            and self.raw_header_count > self.expected_member_count * 2
+        ):
+            raise ArchiveMoverError("tar raw header count exceeds manifest-derived bound")
+        typeflag = block[156:157]
+        size_field = block[124:136]
+        if size_field[:1] and size_field[0] & 0x80:
+            raise ArchiveMoverError("tar header uses unsupported base-256 size encoding")
+        try:
+            declared_size = int(size_field.rstrip(b"\0 ") or b"0", 8)
+        except ValueError as error:
+            raise ArchiveMoverError("tar header has invalid size encoding") from error
+        if typeflag not in {b"0", b"\0", b"x"}:
+            rendered = typeflag.hex() if typeflag else "empty"
+            raise ArchiveMoverError(
+                f"tar unsafe/duplicate/non-regular unsupported extension/member typeflag: {rendered}"
+            )
+        if typeflag == b"x":
+            if self.previous_was_local_pax:
+                raise ArchiveMoverError("tar contains consecutive local PAX headers")
+            if declared_size > MAX_PAX_EXTENSION_BYTES:
+                raise ArchiveMoverError(
+                    f"local PAX extension exceeds {MAX_PAX_EXTENSION_BYTES} bytes before body consumption"
+                )
+            self.local_pax_count += 1
+            self.local_pax_bytes += declared_size
+            if (
+                self.expected_member_count is not None
+                and self.local_pax_count > self.expected_member_count
+            ):
+                raise ArchiveMoverError("tar local PAX count exceeds manifest-derived bound")
+            if self.local_pax_bytes > MAX_MANIFEST_BYTES:
+                raise ArchiveMoverError("tar cumulative local PAX bytes exceed bounded metadata budget")
+            self.previous_was_local_pax = True
+        else:
+            self.previous_was_local_pax = False
+        self.body_bytes_remaining = ((declared_size + 511) // 512) * 512
+        self.pending.extend(block)
+        return self.read(request)
+
+
+class _TarStreamContext:
+    def __init__(self, archive_fd: int, zstd_path: Path, *, expected_member_count: int | None = None) -> None:
+        self.archive_fd = archive_fd
+        self.archive_position = os.lseek(archive_fd, 0, os.SEEK_CUR)
+        stdin_fd = os.dup(archive_fd)
+        try:
+            os.lseek(stdin_fd, 0, os.SEEK_SET)
+            self.process = subprocess.Popen(
+                [str(zstd_path), "-q", "-d", "-c"],
+                stdin=stdin_fd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                shell=False,
+            )
+        except Exception:
+            os.lseek(archive_fd, self.archive_position, os.SEEK_SET)
+            raise
+        finally:
+            os.close(stdin_fd)
+        self.stderr = bytearray()
+        self.stderr_overflow = False
+        self.timed_out = False
+        self.thread = threading.Thread(target=self._drain_stderr, daemon=True)
+        self.thread.start()
+        self.timer = threading.Timer(TOOL_TIMEOUT_SECONDS, self._kill_on_timeout)
+        self.timer.daemon = True
+        self.timer.start()
+        assert self.process.stdout is not None
+        self.limited_reader = _LimitedReader(self.process.stdout, MAX_TAR_BYTES, self.process)
+        self.reader = _TarHeaderGuardReader(self.limited_reader, expected_member_count)
+        try:
+            self.archive = tarfile.open(fileobj=self.reader, mode="r|")
+        except Exception as error:
+            self.timer.cancel()
+            killed_for_parser = self.process.poll() is None
+            if killed_for_parser:
+                self.process.kill()
+            try:
+                return_code = self.process.wait(timeout=TOOL_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired as timeout_error:
+                self.process.kill()
+                self.process.wait()
+                raise ArchiveOperationalError(
+                    f"decompressor timed out after {TOOL_TIMEOUT_SECONDS}s"
+                ) from timeout_error
+            self.thread.join()
+            self.process.stdout.close()
+            assert self.process.stderr is not None
+            self.process.stderr.close()
+            os.lseek(self.archive_fd, self.archive_position, os.SEEK_SET)
+            if self.timed_out:
+                raise ArchiveOperationalError(
+                    f"decompressor timed out after {TOOL_TIMEOUT_SECONDS}s"
+                ) from error
+            if self.stderr_overflow:
+                raise ArchiveOperationalError(
+                    f"compression stderr exceeds {MAX_STDERR_BYTES} bytes"
+                ) from error
+            if return_code and not killed_for_parser:
+                message = self.stderr.decode("utf-8", "replace")
+                raise ArchiveOperationalError(f"decompressor failed ({return_code}): {message}") from error
+            raise
+
+    def _drain_stderr(self) -> None:
+        assert self.process.stderr is not None
+        while chunk := self.process.stderr.read(8192):
+            room = MAX_STDERR_BYTES - len(self.stderr)
+            if room > 0:
+                self.stderr.extend(chunk[:room])
+            if len(chunk) > room:
+                self.stderr_overflow = True
+
+    def _kill_on_timeout(self) -> None:
+        if self.process.poll() is None:
+            self.timed_out = True
+            self.process.kill()
+
+    def __enter__(self) -> tarfile.TarFile:
+        return self.archive
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        try:
+            self.archive.close()
+            self.timer.cancel()
+            killed_for_parser = False
+            if exc_type is not None and self.process.poll() is None:
+                killed_for_parser = True
+                self.process.kill()
+            try:
+                return_code = self.process.wait(timeout=TOOL_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired as error:
+                self.process.kill()
+                self.process.wait()
+                self.thread.join()
+                raise ArchiveOperationalError(f"decompressor timed out after {TOOL_TIMEOUT_SECONDS}s") from error
+            self.thread.join()
+            if self.timed_out:
+                raise ArchiveOperationalError(f"decompressor timed out after {TOOL_TIMEOUT_SECONDS}s")
+            if self.stderr_overflow:
+                raise ArchiveOperationalError(f"compression stderr exceeds {MAX_STDERR_BYTES} bytes")
+            if return_code and not killed_for_parser:
+                message = self.stderr.decode("utf-8", "replace")
+                raise ArchiveOperationalError(f"decompressor failed ({return_code}): {message}")
+        finally:
+            if self.process.stdout is not None:
+                self.process.stdout.close()
+            if self.process.stderr is not None:
+                self.process.stderr.close()
+            os.lseek(self.archive_fd, self.archive_position, os.SEEK_SET)
+
+
+def _decompressed_tar_stream(
+    archive_fd: int, zstd_path: Path, *, expected_member_count: int | None = None
+) -> _TarStreamContext:
+    return _TarStreamContext(archive_fd, zstd_path, expected_member_count=expected_member_count)
+
+
+def _safe_relative(value: str) -> bool:
+    return (
+        bool(value)
+        and not value.startswith("/")
+        and "\\" not in value
+        and all(part not in {"", ".", ".."} for part in value.split("/"))
+        and not any(ord(c) < 32 or ord(c) == 127 for c in value)
+    )
+
+
+def _safe_segment(value: str) -> bool:
+    return (
+        bool(value)
+        and value == value.strip()
+        and value not in {".", ".."}
+        and "/" not in value
+        and "\\" not in value
+        and not any(ord(character) < 32 or ord(character) == 127 for character in value)
+    )
+
+
+def _manifest(
+    candidate: Candidate, archive_root: Path, *, archive_size: int, archive_digest: str, now: datetime
+) -> dict[str, Any]:
+    paths = archive_provenance_paths(archive_root, identity=candidate.identity)
+    manifest = {
+        "schema_version": SCHEMA_VERSION,
+        "provenance": "product-archive",
+        "identity": _identity_dict(candidate.identity),
+        "archive": {
+            "path": paths.archive.relative_to(archive_root).as_posix(),
+            "manifest_path": paths.manifest.relative_to(archive_root).as_posix(),
+            "sha256": archive_digest,
+            "size_bytes": archive_size,
+        },
+        "files": [record.manifest_entry() for record in candidate.files],
+        "created_at": _time(now),
+        "tool_version": TOOL_VERSION,
+    }
+    if candidate.producer is not None:
+        manifest["producer"] = dict(candidate.producer)
+    return manifest
+
+
+def _same_snapshot(candidate: Candidate, root_fd: int, provider: MountIdProvider) -> bool:
+    current_root = os.fstat(root_fd)
+    if (current_root.st_dev, current_root.st_ino, current_root.st_mtime_ns) != candidate.source_root_stat:
+        return False
+    files, directories = scan_tree_snapshot(
+        root_fd,
+        mount_id=candidate.source_mount_id,
+        mount_id_provider=provider,
+    )
+    return files == candidate.files and directories == candidate.directories
+
+
+def process_candidate(
+    candidate: Candidate,
+    config: MoverConfig,
+    *,
+    now: datetime,
+    mount_id_provider: MountIdProvider = fd_mount_id,
+    rename_impl: RenameNoReplace = rename_no_replace,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Process one independent candidate and return one terminal plus side events."""
+    identity = _identity_dict(candidate.identity)
+    events: list[dict[str, Any]] = []
+    paths = archive_provenance_paths(config.archive_root, identity=candidate.identity)
+    final_leaf = paths.archive.parent
+    source_fd: int | None = None
+    stage_fd: int | None = None
+    final_guard_fd: int | None = None
+    archive_bytes = 0
+    residue: list[str] = []
+    try:
+        source_fd = open_directory_no_follow(candidate.source_path, containment_root=config.object_store_root)
+        if not _same_snapshot(candidate, source_fd, mount_id_provider):
+            raise ArchiveMoverError("source differs from discovered preimage")
+        existing = _lexists_no_follow(final_leaf, config.archive_root)
+        if existing:
+            verification_error: ArchiveCorruptError | None = None
+            try:
+                final_guard_fd = open_directory_no_follow(final_leaf, containment_root=config.archive_root)
+                existing_manifest = verify_archive_pair(
+                    final_leaf,
+                    config.archive_root,
+                    zstd_path=config.zstd_path,
+                    object_store_prefix=config.object_store_prefix,
+                    mount_id_provider=mount_id_provider,
+                )
+                _verify_open_directory_entry(final_guard_fd, final_leaf, config.archive_root)
+                existing_files = {
+                    item["path"]: (item["size_bytes"], item["sha256"])
+                    for item in existing_manifest["files"]
+                }
+                candidate_files = {item.path: (item.size_bytes, item.sha256) for item in candidate.files}
+                if existing_files != candidate_files:
+                    raise ArchiveConflictError("verified existing archive conflicts with present source")
+                if existing_manifest.get("producer") != candidate.producer:
+                    raise ArchiveConflictError("verified existing archive producer differs from present source")
+                archive_bytes = existing_manifest["archive"]["size_bytes"]
+            except ArchiveConflictError:
+                raise
+            except ArchiveCorruptError as error:
+                verification_error = error
+            if verification_error is None:
+                if not config.enforce:
+                    return _terminal(
+                        identity,
+                        "planned",
+                        "verified existing archive; would retire identical source",
+                        candidate.source_bytes,
+                        archive_bytes,
+                        [],
+                    ), events
+                _retire_source(
+                    candidate,
+                    config,
+                    source_fd,
+                    events,
+                    identity,
+                    mount_id_provider,
+                    rename_impl,
+                    archive_guard=(final_guard_fd, final_leaf, config.archive_root),
+                )
+                return _terminal(
+                    identity,
+                    "retired-from-existing",
+                    "verified existing archive and retired identical source",
+                    candidate.source_bytes,
+                    archive_bytes,
+                    [],
+                ), events
+            else:
+                assert final_guard_fd is not None
+                quarantine_relative = f".quarantine/{uuid.uuid4().hex}"
+                if not config.enforce:
+                    events.append(
+                        _event(
+                            len(events),
+                            identity,
+                            "would-quarantine",
+                            final_leaf.relative_to(config.archive_root).as_posix(),
+                            str(verification_error),
+                        )
+                    )
+                else:
+                    quarantine = config.archive_root / quarantine_relative
+                    ensure_directory_no_follow(quarantine.parent, containment_root=config.archive_root)
+                    _fsync_directory_chain(quarantine.parent, config.archive_root)
+                    _verify_open_directory_entry(final_guard_fd, final_leaf, config.archive_root)
+                    guarded = os.fstat(final_guard_fd)
+                    _rename_leaf(
+                        final_leaf,
+                        quarantine,
+                        config.archive_root,
+                        rename_impl,
+                        mount_id_provider,
+                        expected_source=(guarded.st_dev, guarded.st_ino),
+                    )
+                    events.append(
+                        _event(len(events), identity, "quarantined", quarantine_relative, str(verification_error))
+                    )
+        if not config.enforce:
+            return _terminal(
+                identity, "planned", "would create verified archive then retire source", candidate.source_bytes, 0, []
+            ), events
+        staging_parent = ensure_directory_no_follow(
+            config.archive_root / ".staging", containment_root=config.archive_root
+        )
+        _fsync_directory_chain(staging_parent, config.archive_root)
+        staging = staging_parent / uuid.uuid4().hex
+        ensure_directory_no_follow(staging, containment_root=config.archive_root)
+        _fsync_directory_chain(staging, config.archive_root)
+        residue.append(staging.relative_to(config.archive_root).as_posix())
+        stage_fd = open_directory_no_follow(staging, containment_root=config.archive_root)
+        archive_root_fd = open_directory_no_follow(config.archive_root)
+        try:
+            archive_root_info = os.fstat(archive_root_fd)
+            archive_mount_id = mount_id_provider(archive_root_fd)
+            stage_info = os.fstat(stage_fd)
+            if stage_info.st_dev != archive_root_info.st_dev or mount_id_provider(stage_fd) != archive_mount_id:
+                raise ArchiveMoverError("staging directory is on a different device/mount")
+        finally:
+            os.close(archive_root_fd)
+        uncompressed_fd = os.open(".archive.tar", _CREATE_RDWR_FLAGS, 0o600, dir_fd=stage_fd)
+        try:
+            _write_tar_from_tree(candidate, source_fd, uncompressed_fd, mount_id_provider)
+            if not _same_snapshot(candidate, source_fd, mount_id_provider):
+                raise ArchiveMoverError("source changed after tar stream")
+            os.lseek(uncompressed_fd, 0, os.SEEK_SET)
+            archive_output_fd = os.open("archive.tar.zst", _CREATE_FLAGS, 0o600, dir_fd=stage_fd)
+            try:
+                _run_tool(
+                    [str(config.zstd_path), "-q", "-c"],
+                    input_fd=uncompressed_fd,
+                    stdout_fd=archive_output_fd,
+                    max_output_bytes=MAX_ARCHIVE_BYTES,
+                )
+            finally:
+                os.close(archive_output_fd)
+        finally:
+            os.close(uncompressed_fd)
+        os.unlink(".archive.tar", dir_fd=stage_fd)
+        archive_read_fd, archive_opened = _open_regular(
+            stage_fd,
+            "archive.tar.zst",
+            f"{staging}/archive.tar.zst",
+            archive_mount_id,
+            mount_id_provider,
+            archive_root_info.st_dev,
+            MAX_ARCHIVE_BYTES,
+        )
+        try:
+            archive_bytes, digest = _size_digest_fd(archive_read_fd, max_bytes=MAX_ARCHIVE_BYTES)
+            archive_after = os.fstat(archive_read_fd)
+            if _stat_signature(archive_opened) != _stat_signature(archive_after):
+                raise ArchiveMoverError("compressed archive changed while hashing")
+        finally:
+            os.close(archive_read_fd)
+        if archive_bytes > MAX_ARCHIVE_BYTES:
+            raise ArchiveMoverError(f"compressed archive exceeds {MAX_ARCHIVE_BYTES} bytes")
+        manifest = _manifest(candidate, config.archive_root, archive_size=archive_bytes, archive_digest=digest, now=now)
+        manifest_raw = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
+        if len(manifest_raw) > MAX_MANIFEST_BYTES:
+            raise ArchiveMoverError(f"generated manifest exceeds {MAX_MANIFEST_BYTES} bytes")
+        fd = os.open("manifest.json", _CREATE_FLAGS, 0o600, dir_fd=stage_fd)
+        try:
+            view = memoryview(manifest_raw)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise ArchiveMoverError("short write while staging archive manifest")
+                view = view[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        staged_root = os.fstat(stage_fd)
+        os.fsync(stage_fd)
+        _verify_open_directory_entry(stage_fd, staging, config.archive_root)
+        verify_archive_pair(
+            staging,
+            config.archive_root,
+            zstd_path=config.zstd_path,
+            object_store_prefix=config.object_store_prefix,
+            require_canonical_location=False,
+            mount_id_provider=mount_id_provider,
+        )
+        if not _same_snapshot(candidate, source_fd, mount_id_provider):
+            raise ArchiveMoverError("source changed before final publication")
+        ensure_directory_no_follow(final_leaf.parent, containment_root=config.archive_root)
+        _fsync_directory_chain(final_leaf.parent, config.archive_root)
+        _rename_leaf(
+            staging,
+            final_leaf,
+            config.archive_root,
+            rename_impl,
+            mount_id_provider,
+            expected_source=(staged_root.st_dev, staged_root.st_ino),
+        )
+        residue.clear()
+        events.append(
+            _event(
+                len(events),
+                identity,
+                "published",
+                final_leaf.relative_to(config.archive_root).as_posix(),
+                "verified staging leaf published without replacement",
+            )
+        )
+        _verify_open_directory_entry(stage_fd, final_leaf, config.archive_root)
+        verify_archive_pair(
+            final_leaf,
+            config.archive_root,
+            zstd_path=config.zstd_path,
+            object_store_prefix=config.object_store_prefix,
+            mount_id_provider=mount_id_provider,
+        )
+        _verify_open_directory_entry(stage_fd, final_leaf, config.archive_root)
+        if not _same_snapshot(candidate, source_fd, mount_id_provider):
+            raise ArchiveMoverError("source changed after final verification")
+        _retire_source(
+            candidate,
+            config,
+            source_fd,
+            events,
+            identity,
+            mount_id_provider,
+            rename_impl,
+            archive_guard=(stage_fd, final_leaf, config.archive_root),
+        )
+        return _terminal(
+            identity,
+            "archived",
+            "published verified archive and retired source",
+            candidate.source_bytes,
+            archive_bytes,
+            [],
+        ), events
+    except ArchiveMoverError as error:
+        final_relative = final_leaf.relative_to(config.archive_root).as_posix()
+        if final_relative in error.residue:
+            staging_relative = next((item for item in residue if item.startswith(".staging/")), None)
+            if staging_relative is not None:
+                residue.remove(staging_relative)
+        residue.extend(item for item in error.residue if item not in residue)
+        status = "indeterminate" if error.indeterminate else "failed"
+        return _terminal(identity, status, str(error), candidate.source_bytes, archive_bytes, residue), events
+    except Exception as error:
+        return _terminal(identity, "failed", str(error), candidate.source_bytes, archive_bytes, residue), events
+    finally:
+        if final_guard_fd is not None:
+            os.close(final_guard_fd)
+        if stage_fd is not None:
+            os.close(stage_fd)
+        if source_fd is not None:
+            os.close(source_fd)
+
+
+def _rename_leaf(
+    source: Path,
+    destination: Path,
+    containment_root: Path,
+    rename_impl: RenameNoReplace,
+    mount_id_provider: MountIdProvider,
+    *,
+    expected_source: tuple[int, int] | None = None,
+) -> None:
+    src_fd = open_directory_no_follow(source.parent, containment_root=containment_root)
+    dst_fd = open_directory_no_follow(destination.parent, containment_root=containment_root)
+    root_fd = open_directory_no_follow(containment_root)
+    source_entry_fd: int | None = None
+    try:
+        root_info = os.fstat(root_fd)
+        root_mount = mount_id_provider(root_fd)
+        if os.fstat(src_fd).st_dev != os.fstat(dst_fd).st_dev:
+            raise ArchiveMoverError("cross-device rename rejected")
+        if mount_id_provider(src_fd) != mount_id_provider(dst_fd):
+            raise ArchiveMoverError("cross-mount rename rejected")
+        if mount_id_provider(src_fd) != root_mount:
+            raise ArchiveMoverError("rename parent is not on the pinned root mount")
+        source_entry_fd = _open_child_dir(
+            src_fd,
+            source.name,
+            source.relative_to(containment_root).as_posix(),
+            root_mount,
+            mount_id_provider,
+            root_info.st_dev,
+        )
+        current = os.fstat(source_entry_fd)
+        if expected_source is not None and (current.st_dev, current.st_ino) != expected_source:
+            raise ArchiveMoverError("rename source namespace identity changed")
+        expected_source = (current.st_dev, current.st_ino)
+        try:
+            rename_impl(src_fd, source.name, dst_fd, destination.name)
+        except OSError as error:
+            if error.errno == errno.EXDEV:
+                raise ArchiveMoverError("cross-device rename rejected") from error
+            raise ArchiveMoverError(f"no-replace rename failed: {error}") from error
+        if expected_source is not None:
+            installed = os.stat(destination.name, dir_fd=dst_fd, follow_symlinks=False)
+            if (installed.st_dev, installed.st_ino) != expected_source:
+                try:
+                    rename_impl(dst_fd, destination.name, src_fd, source.name)
+                    os.fsync(src_fd)
+                    if dst_fd != src_fd:
+                        os.fsync(dst_fd)
+                except OSError as rollback_error:
+                    raise ArchiveMoverError(
+                        f"renamed destination identity is indeterminate; rollback failed: {rollback_error}",
+                        indeterminate=True,
+                        residue=(destination.relative_to(containment_root).as_posix(),),
+                    ) from rollback_error
+                raise ArchiveMoverError(
+                    "rename source namespace identity changed; replacement restored",
+                )
+        try:
+            os.fsync(src_fd)
+            if dst_fd != src_fd:
+                os.fsync(dst_fd)
+        except OSError as error:
+            raise ArchiveMoverError(
+                f"rename completed but parent fsync failed: {error}",
+                indeterminate=True,
+                residue=(destination.relative_to(containment_root).as_posix(),),
+            ) from error
+    finally:
+        if source_entry_fd is not None:
+            os.close(source_entry_fd)
+        os.close(src_fd)
+        os.close(dst_fd)
+        os.close(root_fd)
+
+
+def _verify_open_directory_entry(fd: int, path: Path, containment_root: Path) -> None:
+    """Prove a held directory still names the configured no-follow leaf."""
+    parent_fd = open_directory_no_follow(path.parent, containment_root=containment_root)
+    try:
+        current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        opened = os.fstat(fd)
+        if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+            raise ArchiveMoverError(f"directory namespace identity changed: {path}")
+    except OSError as error:
+        raise ArchiveMoverError(f"cannot verify directory namespace {path}: {error}") from error
+    finally:
+        os.close(parent_fd)
+
+
+def _lexists_no_follow(path: Path, containment_root: Path) -> bool:
+    try:
+        parent_fd = open_directory_no_follow(path.parent, containment_root=containment_root)
+    except FileNotFoundError:
+        return False
+    try:
+        try:
+            os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            return True
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            raise ArchiveMoverError(f"cannot stat namespace entry {path}: {error}") from error
+    finally:
+        os.close(parent_fd)
+
+
+def _pair_signatures(leaf_fd: int) -> tuple[tuple[int, int, int, int, int], tuple[int, int, int, int, int]]:
+    values: list[tuple[int, int, int, int, int]] = []
+    for name in ("archive.tar.zst", "manifest.json"):
+        fd = os.open(name, _READ_FLAGS, dir_fd=leaf_fd)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise ArchiveMoverError(f"archive guard source is not regular: {name}")
+            values.append(_stat_signature(info))
+        finally:
+            os.close(fd)
+    return values[0], values[1]
+
+
+def _guard_pair_signatures(
+    leaf_fd: int,
+    *,
+    archive_device: int,
+    archive_mount_id: int,
+    provider: MountIdProvider,
+) -> tuple[tuple[int, int, int, int, int], tuple[int, int, int, int, int]]:
+    """Prove both guarded children remain regular files on the pinned mount."""
+    values: list[tuple[int, int, int, int, int]] = []
+    for name in ("archive.tar.zst", "manifest.json"):
+        fd = os.open(name, _READ_FLAGS, dir_fd=leaf_fd)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise ArchiveMoverError(f"archive guard source is not regular: {name}")
+            if info.st_dev != archive_device or provider(fd) != archive_mount_id:
+                raise ArchiveOperationalError(f"archive guard child crossed pinned device/mount: {name}")
+            values.append(_stat_signature(info))
+        finally:
+            os.close(fd)
+    return values[0], values[1]
+
+
+def _directory_identity_signature(value: os.stat_result) -> tuple[int, int, int]:
+    return value.st_dev, value.st_ino, value.st_mode
+
+
+def _install_durable_archive_guard(
+    config: MoverConfig,
+    archive_guard: tuple[int, Path, Path],
+    provider: MountIdProvider,
+) -> DurableArchiveGuard:
+    leaf_fd, final_leaf, archive_root = archive_guard
+    _verify_open_directory_entry(leaf_fd, final_leaf, archive_root)
+    archive_root_fd = open_directory_no_follow(archive_root)
+    try:
+        archive_root_info = os.fstat(archive_root_fd)
+        archive_device = archive_root_info.st_dev
+        archive_mount_id = provider(archive_root_fd)
+    finally:
+        os.close(archive_root_fd)
+    leaf_info = os.fstat(leaf_fd)
+    if leaf_info.st_dev != archive_device or provider(leaf_fd) != archive_mount_id:
+        raise ArchiveMoverError("canonical archive leaf crossed pinned device/mount")
+    expected_archive, expected_manifest = _guard_pair_signatures(
+        leaf_fd,
+        archive_device=archive_device,
+        archive_mount_id=archive_mount_id,
+        provider=provider,
+    )
+    parent = ensure_directory_no_follow(archive_root / ".archive-guards", containment_root=archive_root)
+    _fsync_directory_chain(parent, archive_root)
+    guard_path = parent / uuid.uuid4().hex
+    guard_fd: int | None = None
+    try:
+        parent_fd = open_directory_no_follow(parent, containment_root=archive_root)
+        try:
+            os.mkdir(guard_path.name, 0o700, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+        guard_fd = open_directory_no_follow(guard_path, containment_root=archive_root)
+        guard_info = os.fstat(guard_fd)
+        if guard_info.st_dev != archive_device or provider(guard_fd) != archive_mount_id:
+            raise ArchiveMoverError("durable archive guard crossed pinned device/mount")
+        for name in ("archive.tar.zst", "manifest.json"):
+            os.link(name, name, src_dir_fd=leaf_fd, dst_dir_fd=guard_fd, follow_symlinks=False)
+        os.fsync(guard_fd)
+        current_archive, current_manifest = _guard_pair_signatures(
+            leaf_fd,
+            archive_device=archive_device,
+            archive_mount_id=archive_mount_id,
+            provider=provider,
+        )
+        guard_archive, guard_manifest = _guard_pair_signatures(
+            guard_fd,
+            archive_device=archive_device,
+            archive_mount_id=archive_mount_id,
+            provider=provider,
+        )
+        if (
+            current_archive != expected_archive
+            or current_manifest != expected_manifest
+            or guard_archive != expected_archive
+            or guard_manifest != expected_manifest
+        ):
+            raise ArchiveMoverError("durable archive guard does not bind the verified exact pair")
+        verify_archive_pair(
+            guard_path,
+            archive_root,
+            zstd_path=config.zstd_path,
+            object_store_prefix=config.object_store_prefix,
+            require_canonical_location=False,
+            mount_id_provider=provider,
+        )
+        if _guard_pair_signatures(
+            leaf_fd,
+            archive_device=archive_device,
+            archive_mount_id=archive_mount_id,
+            provider=provider,
+        ) != (expected_archive, expected_manifest):
+            raise ArchiveMoverError("canonical archive pair drifted while installing durable guard")
+        archive_root_fd = open_directory_no_follow(archive_root)
+        try:
+            installed_root_signature = _directory_identity_signature(os.fstat(archive_root_fd))
+            if provider(archive_root_fd) != archive_mount_id:
+                raise ArchiveMoverError("archive root mount changed while installing durable guard")
+        finally:
+            os.close(archive_root_fd)
+        return DurableArchiveGuard(
+            guard_path,
+            guard_fd,
+            final_leaf,
+            expected_archive,
+            expected_manifest,
+            installed_root_signature,
+            _directory_identity_signature(os.fstat(leaf_fd)),
+            _directory_identity_signature(os.fstat(guard_fd)),
+            archive_device,
+            archive_mount_id,
+        )
+    except Exception as error:
+        if guard_fd is not None:
+            os.close(guard_fd)
+        residue = ()
+        try:
+            if _lexists_no_follow(guard_path, archive_root):
+                residue = (guard_path.relative_to(archive_root).as_posix(),)
+        except ArchiveMoverError:
+            residue = (guard_path.relative_to(archive_root).as_posix(),)
+        raise ArchiveMoverError(
+            f"durable archive guard installation is indeterminate: {error}",
+            indeterminate=True,
+            residue=residue,
+        ) from error
+
+
+def _canonical_pair_matches(
+    guard: DurableArchiveGuard,
+    archive_root: Path,
+    provider: MountIdProvider,
+) -> bool:
+    try:
+        root_fd = open_directory_no_follow(archive_root)
+        try:
+            root_info = os.fstat(root_fd)
+            if (
+                _directory_identity_signature(root_info) != guard.archive_root_signature
+                or root_info.st_dev != guard.archive_device
+                or provider(root_fd) != guard.archive_mount_id
+            ):
+                return False
+        finally:
+            os.close(root_fd)
+        leaf_fd = open_directory_no_follow(guard.canonical_leaf, containment_root=archive_root)
+        try:
+            leaf_info = os.fstat(leaf_fd)
+            if (
+                _directory_identity_signature(leaf_info) != guard.canonical_leaf_signature
+                or leaf_info.st_dev != guard.archive_device
+                or provider(leaf_fd) != guard.archive_mount_id
+            ):
+                return False
+            if _guard_pair_signatures(
+                leaf_fd,
+                archive_device=guard.archive_device,
+                archive_mount_id=guard.archive_mount_id,
+                provider=provider,
+            ) != (guard.archive_signature, guard.manifest_signature):
+                return False
+        finally:
+            os.close(leaf_fd)
+        guard_info = os.fstat(guard.fd)
+        return (
+            _directory_identity_signature(guard_info) == guard.guard_leaf_signature
+            and guard_info.st_dev == guard.archive_device
+            and provider(guard.fd) == guard.archive_mount_id
+            and _guard_pair_signatures(
+                guard.fd,
+                archive_device=guard.archive_device,
+                archive_mount_id=guard.archive_mount_id,
+                provider=provider,
+            )
+            == (guard.archive_signature, guard.manifest_signature)
+        )
+    except (OSError, ArchiveMoverError):
+        return False
+
+
+def _cleanup_durable_archive_guard(
+    guard: DurableArchiveGuard,
+    archive_root: Path,
+    provider: MountIdProvider,
+) -> None:
+    relative = guard.path.relative_to(archive_root).as_posix()
+    if not _canonical_pair_matches(guard, archive_root, provider):
+        raise ArchiveMoverError(
+            "canonical archive pair drifted after durable guard installation",
+            indeterminate=True,
+            residue=(relative,),
+        )
+    parent_fd = open_directory_no_follow(guard.path.parent, containment_root=archive_root)
+    try:
+        try:
+            os.unlink("archive.tar.zst", dir_fd=guard.fd)
+            os.unlink("manifest.json", dir_fd=guard.fd)
+            os.fsync(guard.fd)
+            os.rmdir(guard.path.name, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+        except OSError as error:
+            residue = (relative,) if _lexists_no_follow(guard.path, archive_root) else ()
+            raise ArchiveMoverError(
+                f"durable archive guard cleanup is indeterminate: {error}",
+                indeterminate=True,
+                residue=residue,
+            ) from error
+    finally:
+        os.close(parent_fd)
+
+
+def _retire_source(
+    candidate: Candidate,
+    config: MoverConfig,
+    source_fd: int,
+    events: list[dict[str, Any]],
+    identity: dict[str, Any],
+    provider: MountIdProvider,
+    rename_impl: RenameNoReplace,
+    archive_guard: tuple[int, Path, Path],
+) -> None:
+    _verify_guarded_archive_pair(config, archive_guard, provider)
+    _verify_open_directory_entry(*archive_guard)
+    if not _same_snapshot(candidate, source_fd, provider):
+        raise ArchiveMoverError("source preimage changed immediately before retirement")
+    _verify_guarded_archive_pair(config, archive_guard, provider)
+    durable = _install_durable_archive_guard(config, archive_guard, provider)
+    relative = durable.path.relative_to(config.archive_root).as_posix()
+    try:
+        _retire_source_destructive(
+            candidate,
+            config,
+            source_fd,
+            events,
+            identity,
+            provider,
+            rename_impl,
+            durable,
+        )
+        _cleanup_durable_archive_guard(durable, config.archive_root, provider)
+    except Exception as error:
+        observed = _discover_retirement_residue(candidate, config, durable)
+        if isinstance(error, ArchiveMoverError):
+            raise ArchiveMoverError(
+                str(error),
+                indeterminate=error.indeterminate or not candidate.source_path.exists(),
+                residue=tuple(dict.fromkeys((*error.residue, *observed))),
+                kind=error.kind,
+            ) from error
+        raise ArchiveMoverError(
+            f"source retirement failed while durable archive guard is held: {error}",
+            indeterminate=True,
+            residue=observed or (relative,),
+        ) from error
+    finally:
+        os.close(durable.fd)
+
+
+def _discover_retirement_residue(
+    candidate: Candidate,
+    config: MoverConfig,
+    guard: DurableArchiveGuard,
+) -> tuple[str, ...]:
+    """Best-effort no-follow inventory of every mover-owned surviving namespace."""
+    residue: list[str] = []
+    guard_relative = guard.path.relative_to(config.archive_root).as_posix()
+    try:
+        if _lexists_no_follow(guard.path, config.archive_root):
+            residue.append(guard_relative)
+    except ArchiveMoverError:
+        residue.append(guard_relative)
+    parent = candidate.source_path.parent
+    try:
+        parent_fd = open_directory_no_follow(parent, containment_root=config.object_store_root)
+        try:
+            names = _safe_names(
+                parent_fd,
+                parent.relative_to(config.object_store_root).as_posix(),
+                remaining=MAX_TREE_ENTRIES,
+            )
+            for name in names:
+                if not (
+                    name.startswith(f".archive-delete-{candidate.source_path.name}-")
+                    or name.startswith(f".archive-claims-{candidate.source_path.name}-")
+                ):
+                    continue
+                relative = (parent / name).relative_to(config.object_store_root).as_posix()
+                residue.append(relative)
+                if name.startswith(f".archive-claims-{candidate.source_path.name}-"):
+                    try:
+                        claim_fd = _open_child_dir(
+                            parent_fd,
+                            name,
+                            relative,
+                            candidate.source_mount_id,
+                            lambda fd: candidate.source_mount_id,
+                            candidate.source_root_stat[0],
+                        )
+                    except ArchiveMoverError:
+                        continue
+                    try:
+                        for child in _safe_names(claim_fd, relative, remaining=MAX_TREE_ENTRIES):
+                            residue.append(f"{relative}/{child}")
+                    finally:
+                        os.close(claim_fd)
+        finally:
+            os.close(parent_fd)
+    except (OSError, ArchiveMoverError):
+        # The terminal remains indeterminate; retain all already-observed paths.
+        pass
+    return tuple(dict.fromkeys(residue))
+
+
+def _retire_source_destructive(
+    candidate: Candidate,
+    config: MoverConfig,
+    source_fd: int,
+    events: list[dict[str, Any]],
+    identity: dict[str, Any],
+    provider: MountIdProvider,
+    rename_impl: RenameNoReplace,
+    durable_guard: DurableArchiveGuard,
+) -> None:
+    guard_relative = durable_guard.path.relative_to(config.archive_root).as_posix()
+    if not _canonical_pair_matches(durable_guard, config.archive_root, provider):
+        raise ArchiveMoverError(
+            "canonical archive pair drifted before source tombstone",
+            indeterminate=True,
+            residue=(guard_relative,),
+        )
+    tombstone = candidate.source_path.parent / f".archive-delete-{candidate.source_path.name}-{uuid.uuid4().hex}"
+    parent_fd = open_directory_no_follow(
+        candidate.source_path.parent,
+        containment_root=config.object_store_root,
+    )
+    try:
+        expected = os.fstat(source_fd)
+        current = os.stat(
+            candidate.source_path.name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
+            raise ArchiveMoverError("source namespace root changed before tombstone rename")
+        if provider(parent_fd) != candidate.source_mount_id:
+            raise ArchiveMoverError("source parent mount changed before tombstone rename")
+        try:
+            rename_impl(
+                parent_fd,
+                candidate.source_path.name,
+                parent_fd,
+                tombstone.name,
+            )
+        except OSError as error:
+            if error.errno == errno.EXDEV:
+                raise ArchiveMoverError("cross-device source tombstone rename rejected") from error
+            raise ArchiveMoverError(f"source tombstone no-replace rename failed: {error}") from error
+        try:
+            os.fsync(parent_fd)
+        except OSError as error:
+            raise ArchiveMoverError(
+                f"source tombstone rename completed but parent fsync failed: {error}",
+                indeterminate=True,
+                residue=(tombstone.relative_to(config.object_store_root).as_posix(),),
+            ) from error
+    finally:
+        os.close(parent_fd)
+    tombstone_relative = tombstone.relative_to(config.object_store_root).as_posix()
+    events.append(
+        _event(len(events), identity, "tombstoned", tombstone_relative, "source leaf renamed to delete tombstone")
+    )
+    claim_root = tombstone.parent / f".archive-claims-{candidate.source_path.name}-{uuid.uuid4().hex}"
+    claim_relative = claim_root.relative_to(config.object_store_root).as_posix()
+    tomb_fd: int | None = None
+    claim_parent_fd: int | None = None
+    claim_fd: int | None = None
+    root_claim_relative: str | None = None
+    tombstone_live = True
+    claim_root_live = False
+    retirement_failed = False
+    try:
+        tomb_fd = open_directory_no_follow(tombstone, containment_root=config.object_store_root)
+        claim_parent_fd = open_directory_no_follow(
+            tombstone.parent, containment_root=config.object_store_root
+        )
+        os.mkdir(claim_root.name, 0o700, dir_fd=claim_parent_fd)
+        claim_root_live = True
+        os.fsync(claim_parent_fd)
+        claim_fd = open_directory_no_follow(claim_root, containment_root=config.object_store_root)
+        renamed = os.fstat(tomb_fd)
+        original = os.fstat(source_fd)
+        if (renamed.st_dev, renamed.st_ino) != (original.st_dev, original.st_ino):
+            raise ArchiveMoverError(
+                "tombstone namespace does not bind the verified source inode",
+                indeterminate=True,
+                residue=(tombstone_relative,),
+            )
+        if not _same_snapshot(candidate, tomb_fd, provider):
+            events.append(
+                _event(
+                    len(events),
+                    identity,
+                    "tombstone-preserved",
+                    tombstone.relative_to(config.object_store_root).as_posix(),
+                    "producer-contract violation: tombstone drift before unlink",
+                )
+            )
+            raise ArchiveMoverError(
+                "producer-contract violation: tombstone changed before unlink",
+                residue=(tombstone_relative,),
+            )
+        _validate_tombstone_allowlist(candidate, tomb_fd, provider)
+        if not _canonical_pair_matches(durable_guard, config.archive_root, provider):
+            raise ArchiveMoverError(
+                "canonical archive pair drifted before destructive child claims",
+                indeterminate=True,
+                residue=(guard_relative,),
+            )
+        _validate_tombstone_allowlist(candidate, tomb_fd, provider)
+        parent_fd = open_directory_no_follow(tombstone.parent, containment_root=config.object_store_root)
+        try:
+            _remove_tree_contents_fd(
+                tomb_fd,
+                tombstone_relative,
+                device=candidate.source_root_stat[0],
+                mount_id=candidate.source_mount_id,
+                mount_id_provider=provider,
+                expected_files={item.path: item for item in candidate.files},
+                expected_directories={item.path: item for item in candidate.directories},
+                prefix="",
+                claim_fd=claim_fd,
+                claim_label=claim_relative,
+                rename_impl=rename_impl,
+            )
+            root_claim = f"root-{uuid.uuid4().hex}"
+            root_claim_relative = f"{claim_relative}/{root_claim}"
+            try:
+                rename_impl(parent_fd, tombstone.name, claim_fd, root_claim)
+            except Exception:
+                try:
+                    os.stat(tombstone.name, dir_fd=parent_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    tombstone_live = False
+                raise
+            tombstone_live = False
+            os.fsync(parent_fd)
+            os.fsync(claim_fd)
+            claimed_root = os.stat(root_claim, dir_fd=claim_fd, follow_symlinks=False)
+            if (claimed_root.st_dev, claimed_root.st_ino) != (renamed.st_dev, renamed.st_ino):
+                raise ArchiveMoverError(
+                    "tombstone root replacement was atomically claimed and preserved",
+                    indeterminate=True,
+                    residue=(root_claim_relative,),
+                )
+            os.rmdir(root_claim, dir_fd=claim_fd)
+            os.fsync(claim_fd)
+            os.rmdir(claim_root.name, dir_fd=parent_fd)
+            claim_root_live = False
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    except Exception as error:
+        retirement_failed = True
+        if isinstance(error, ArchiveMoverError) and error.indeterminate:
+            message = str(error)
+        else:
+            message = f"tombstone removal incomplete: {tombstone}: {error}"
+        actual_residue = list(error.residue if isinstance(error, ArchiveMoverError) else ())
+        if tombstone_live and tombstone_relative not in actual_residue:
+            actual_residue.append(tombstone_relative)
+        if claim_root_live and claim_relative not in actual_residue:
+            actual_residue.append(claim_relative)
+        for path in (root_claim_relative, tombstone_relative, claim_relative):
+            if path is None or path in actual_residue:
+                continue
+            try:
+                if _lexists_no_follow(config.object_store_root / path, config.object_store_root):
+                    actual_residue.append(path)
+            except (OSError, ArchiveMoverError):
+                pass
+        raise ArchiveMoverError(
+            message,
+            indeterminate=True,
+            residue=tuple(dict.fromkeys(actual_residue)),
+            kind=error.kind if isinstance(error, ArchiveMoverError) else "safety",
+        ) from error
+    finally:
+        if tomb_fd is not None:
+            os.close(tomb_fd)
+        if claim_fd is not None and not retirement_failed:
+            try:
+                if not _safe_names(claim_fd, claim_relative, remaining=1):
+                    try:
+                        assert claim_parent_fd is not None
+                        os.rmdir(claim_root.name, dir_fd=claim_parent_fd)
+                        os.fsync(claim_parent_fd)
+                    except FileNotFoundError:
+                        pass
+                    except OSError:
+                        # Preserve the already-classified retirement failure; the
+                        # live claim namespace was recorded by the exception path.
+                        pass
+            except ArchiveMoverError:
+                pass
+        if claim_fd is not None:
+            os.close(claim_fd)
+        if claim_parent_fd is not None:
+            os.close(claim_parent_fd)
+    events.append(
+        _event(len(events), identity, "retired", candidate.source_relative, "verified tombstone recursively removed")
+    )
+
+
+def _remove_tree_contents_fd(
+    directory_fd: int,
+    label: str,
+    *,
+    device: int,
+    mount_id: int,
+    mount_id_provider: MountIdProvider,
+    expected_files: Mapping[str, FileRecord] | None = None,
+    expected_directories: Mapping[str, DirectoryRecord] | None = None,
+    prefix: str = "",
+    claim_fd: int,
+    claim_label: str,
+    rename_impl: RenameNoReplace,
+) -> None:
+    """Remove only exact allowlisted entries from a verified tombstone tree."""
+    if os.fstat(directory_fd).st_dev != device or mount_id_provider(directory_fd) != mount_id:
+        raise ArchiveMoverError(f"tombstone directory crossed device/mount during removal: {label}")
+    actual_names = _safe_names(directory_fd, label, remaining=MAX_TREE_ENTRIES)
+    exact_allowlist = expected_files is not None and expected_directories is not None
+    expected_names = (
+        _expected_child_names(prefix, expected_files, expected_directories) if exact_allowlist else actual_names
+    )
+    if actual_names != expected_names:
+        raise ArchiveMoverError(f"tombstone entries differ from exact archive preimage: {label}")
+    for name in expected_names:
+        child_label = f"{label}/{name}"
+        relative = f"{prefix}/{name}" if prefix else name
+        preclaim = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISDIR(preclaim.st_mode):
+            preflight_fd = _open_child_dir(
+                directory_fd, name, child_label, mount_id, mount_id_provider, device
+            )
+            os.close(preflight_fd)
+        claim_name = f"entry-{uuid.uuid4().hex}"
+        try:
+            rename_impl(directory_fd, name, claim_fd, claim_name)
+            os.fsync(directory_fd)
+            os.fsync(claim_fd)
+        except OSError as error:
+            raise ArchiveMoverError(f"cannot atomically claim tombstone child {child_label}: {error}") from error
+        claim_residue = f"{claim_label}/{claim_name}"
+        entry = os.stat(claim_name, dir_fd=claim_fd, follow_symlinks=False)
+        if stat.S_ISDIR(entry.st_mode):
+            expected_directory = expected_directories.get(relative) if expected_directories is not None else None
+            if exact_allowlist and (
+                expected_directory is None
+                or _directory_signature(entry) != _directory_record_signature(expected_directory)
+            ):
+                raise ArchiveMoverError(
+                    f"claimed tombstone directory differs from exact preimage: {child_label}",
+                    residue=(claim_residue,),
+                )
+            try:
+                child_fd = _open_child_dir(
+                    claim_fd,
+                    claim_name,
+                    child_label,
+                    mount_id,
+                    mount_id_provider,
+                    device,
+                )
+            except ArchiveMoverError as error:
+                raise ArchiveMoverError(str(error), residue=(claim_residue,)) from error
+            try:
+                _remove_tree_contents_fd(
+                    child_fd,
+                    child_label,
+                    device=device,
+                    mount_id=mount_id,
+                    mount_id_provider=mount_id_provider,
+                    expected_files=expected_files,
+                    expected_directories=expected_directories,
+                    prefix=relative,
+                    claim_fd=claim_fd,
+                    claim_label=claim_label,
+                    rename_impl=rename_impl,
+                )
+                current = os.stat(claim_name, dir_fd=claim_fd, follow_symlinks=False)
+                opened = os.fstat(child_fd)
+                if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+                    raise ArchiveMoverError(
+                        f"claimed tombstone child changed during removal: {child_label}",
+                        residue=(claim_residue,),
+                    )
+                os.rmdir(claim_name, dir_fd=claim_fd)
+                os.fsync(claim_fd)
+            finally:
+                os.close(child_fd)
+            continue
+        expected_file = expected_files.get(relative) if expected_files is not None else None
+        if exact_allowlist and expected_file is None:
+            raise ArchiveMoverError(
+                f"claimed tombstone file is not allowlisted: {child_label}", residue=(claim_residue,)
+            )
+        try:
+            file_fd, opened = _open_regular(
+                claim_fd,
+                claim_name,
+                child_label,
+                mount_id,
+                mount_id_provider,
+                device,
+            )
+        except ArchiveMoverError as error:
+            raise ArchiveMoverError(str(error), residue=(claim_residue,)) from error
+        try:
+            if expected_file is not None and _stat_signature(opened) != _file_record_signature(expected_file):
+                raise ArchiveMoverError(
+                    f"claimed tombstone file differs from exact preimage: {child_label}",
+                    residue=(claim_residue,),
+                )
+            current = os.stat(claim_name, dir_fd=claim_fd, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+                raise ArchiveMoverError(
+                    f"claimed tombstone file changed during removal: {child_label}", residue=(claim_residue,)
+                )
+            os.unlink(claim_name, dir_fd=claim_fd)
+            os.fsync(claim_fd)
+        finally:
+            os.close(file_fd)
+    os.fsync(directory_fd)
+
+
+def _verify_guarded_archive_pair(
+    config: MoverConfig,
+    archive_guard: tuple[int, Path, Path],
+    provider: MountIdProvider,
+) -> None:
+    guard_fd, final_leaf, archive_root = archive_guard
+    _verify_open_directory_entry(guard_fd, final_leaf, archive_root)
+    verify_archive_pair(
+        final_leaf,
+        archive_root,
+        zstd_path=config.zstd_path,
+        object_store_prefix=config.object_store_prefix,
+        mount_id_provider=provider,
+    )
+    _verify_open_directory_entry(guard_fd, final_leaf, archive_root)
+
+
+def _expected_child_names(
+    prefix: str,
+    files: Mapping[str, FileRecord],
+    directories: Mapping[str, DirectoryRecord],
+) -> list[str]:
+    names: set[str] = set()
+    prefix_parts = 0 if not prefix else len(prefix.split("/"))
+    for path in (*files, *directories):
+        parts = path.split("/")
+        if prefix and "/".join(parts[:prefix_parts]) != prefix:
+            continue
+        if len(parts) == prefix_parts + 1:
+            names.add(parts[-1])
+    return sorted(names)
+
+
+def _file_record_signature(record: FileRecord) -> tuple[int, int, int, int, int]:
+    return record.device, record.inode, record.mode, record.size_bytes, record.mtime_ns
+
+
+def _directory_signature(value: os.stat_result) -> tuple[int, int, int, int]:
+    return value.st_dev, value.st_ino, value.st_mode, value.st_mtime_ns
+
+
+def _directory_record_signature(record: DirectoryRecord) -> tuple[int, int, int, int]:
+    return record.device, record.inode, record.mode, record.mtime_ns
+
+
+def _validate_tombstone_allowlist(candidate: Candidate, tomb_fd: int, provider: MountIdProvider) -> None:
+    files, directories = scan_tree_snapshot(
+        tomb_fd,
+        mount_id=candidate.source_mount_id,
+        mount_id_provider=provider,
+    )
+    if files != candidate.files or directories != candidate.directories:
+        raise ArchiveMoverError("tombstone differs from exact path/inode/signature allowlist")
+
+
+def run(
+    config: MoverConfig,
+    *,
+    now: datetime | None = None,
+    mount_id_provider: MountIdProvider = fd_mount_id,
+    rename_impl: RenameNoReplace = rename_no_replace,
+) -> tuple[dict[str, Any], int]:
+    now = (now or datetime.now(UTC)).astimezone(UTC)
+    _validate_config(config)
+    locators, failures = discover_candidate_locators(config, now=now, mount_id_provider=mount_id_provider)
+    discovery_incomplete = any(failure.reason.startswith("discovery exceeds") for failure in failures)
+    selected: list[Candidate] = []
+    validation_attempts = 0
+    next_locator = 0
+    if not discovery_incomplete:
+        while next_locator < len(locators) and validation_attempts < config.per_tick_bound:
+            locator = locators[next_locator]
+            next_locator += 1
+            validation_attempts += 1
+            try:
+                selected.append(
+                    _validate_candidate_locator(locator, config, mount_id_provider=mount_id_provider)
+                )
+            except Exception as error:
+                failures.append(
+                    DiscoveryFailure(locator.identity.lane, locator.source_relative, str(error))
+                )
+    deferred_locators = locators if discovery_incomplete else locators[next_locator:]
+    failures.sort(key=lambda value: (value.lane_hint, value.locator, value.reason))
+    terminals: list[dict[str, Any]] = []
+    events: list[dict[str, Any]] = []
+    for candidate in selected:
+        terminal, side_events = process_candidate(
+            candidate, config, now=now, mount_id_provider=mount_id_provider, rename_impl=rename_impl
+        )
+        for event in side_events:
+            event["sequence"] = len(events)
+            events.append(event)
+        terminals.append(terminal)
+    has_indeterminate = any(item["status"] == "indeterminate" for item in terminals)
+    has_failure = bool(failures) or any(item["status"] == "failed" for item in terminals)
+    receipt = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": _time(now),
+        "mode": "enforce" if config.enforce else "dry-run",
+        "cutoff": _time(now - timedelta(days=config.minimum_age_days)),
+        "minimum_age_days": config.minimum_age_days,
+        "per_tick_bound": config.per_tick_bound,
+        "outcome": "indeterminate" if has_indeterminate else "failed" if has_failure else "success",
+        "validation_attempts": validation_attempts,
+        "candidates": [item.receipt_value(config.archive_root) for item in selected]
+        + [item.receipt_value(config.archive_root) for item in deferred_locators],
+        "selected": [item.receipt_value(config.archive_root) for item in selected],
+        "deferred": [item.receipt_value(config.archive_root) for item in deferred_locators],
+        "terminals": terminals,
+        "events": events,
+        "discovery_failures": [failure.value() for failure in failures],
+        "bytes": {
+            "source": sum(item["source_bytes"] for item in terminals),
+            "archived": sum(item["archive_bytes"] for item in terminals),
+        },
+    }
+    validate_receipt_semantics(receipt)
+    jsonschema.Draft7Validator(_load_schema(RECEIPT_SCHEMA_PATH), format_checker=jsonschema.FormatChecker()).validate(
+        receipt
+    )
+    _publish_receipt(config.receipt_path, receipt)
+    return receipt, 1 if has_failure or has_indeterminate else 0
+
+
+def validate_receipt_semantics(receipt: Mapping[str, Any]) -> None:
+    candidates = receipt["candidates"]
+    selected = receipt["selected"]
+    deferred = receipt["deferred"]
+
+    def key(item: Mapping[str, Any]) -> str:
+        return json.dumps(item["identity"], sort_keys=True)
+
+    candidate_keys = [key(item) for item in candidates]
+    selected_keys = [key(item) for item in selected]
+    deferred_keys = [key(item) for item in deferred]
+    if (
+        len(set(candidate_keys)) != len(candidate_keys)
+        or set(candidate_keys) != set(selected_keys) | set(deferred_keys)
+        or set(selected_keys) & set(deferred_keys)
+    ):
+        raise ArchiveMoverError("receipt candidate/selected/deferred partition is invalid")
+    if candidates != [*selected, *deferred]:
+        raise ArchiveMoverError("receipt selection must be the stable candidate prefix")
+    if len(selected) > receipt["per_tick_bound"]:
+        raise ArchiveMoverError("receipt selected set exceeds per-tick bound")
+    if not isinstance(receipt["validation_attempts"], int) or not (
+        len(selected) <= receipt["validation_attempts"] <= receipt["per_tick_bound"]
+    ):
+        raise ArchiveMoverError("receipt validation attempts disagree with bounded selection")
+    if any(item.get("validation_state") != "validated" for item in selected):
+        raise ArchiveMoverError("receipt selected entries must be fully validated")
+    if any(item.get("validation_state") != "pending-validation" for item in deferred):
+        raise ArchiveMoverError("receipt deferred entries must remain pending validation")
+    sortable: list[tuple[str, str, str]] = []
+    for item in candidates:
+        try:
+            identity = ArchiveIdentity.from_mapping(item["identity"])
+        except ArchiveConfigurationError as error:
+            raise ArchiveMoverError(f"receipt candidate identity is invalid: {error}") from error
+        expected_archive = archive_provenance_paths(Path("/archive"), identity=identity).archive
+        if item["archive_path"] != expected_archive.relative_to("/archive").as_posix():
+            raise ArchiveMoverError("receipt candidate archive path does not bind its identity")
+        if identity.lane == "forcing":
+            expected_source = (
+                f"forcing/{identity.source.lower()}/{identity.cycle_identity}/"
+                f"{identity.basin_version_id}/{identity.model_id}"
+            )
+        elif identity.lane == "runs":
+            expected_source = f"runs/{identity.run_id}"
+        elif identity.source == "legacy-unqualified":
+            expected_source = f"states/{identity.model_id}/{identity.cycle_identity}"
+        else:
+            expected_source = f"states/{identity.source}/{identity.model_id}/{identity.cycle_identity}"
+        if item["source_path"] != expected_source:
+            raise ArchiveMoverError("receipt candidate source path does not bind its identity")
+        if item["validation_state"] == "validated":
+            if not isinstance(item.get("source_bytes"), int):
+                raise ArchiveMoverError("validated receipt candidate must declare source bytes")
+        elif "source_bytes" in item:
+            raise ArchiveMoverError("pending-validation candidate must not fabricate source bytes")
+        eligibility_end = _parse_hour_or_instant(item["eligibility_end"], label="candidate eligibility_end")
+        if eligibility_end >= _parse_hour_or_instant(receipt["cutoff"], label="receipt cutoff"):
+            raise ArchiveMoverError("receipt candidate is not strictly older than cutoff")
+        if identity.lane == "states" and eligibility_end != _parse_hour(
+            identity.cycle_time, label="state candidate valid_time"
+        ):
+            raise ArchiveMoverError("state eligibility end must equal physical valid_time")
+        sortable.append((identity.cycle_time, identity.lane, _identity_key(identity)))
+    if sortable != sorted(sortable):
+        raise ArchiveMoverError("receipt candidates are not in stable order")
+    terminal_keys = [key(item) for item in receipt["terminals"]]
+    if terminal_keys != selected_keys or len(set(terminal_keys)) != len(terminal_keys):
+        raise ArchiveMoverError("receipt must contain exactly one terminal per selected identity")
+    if any(event["sequence"] != index for index, event in enumerate(receipt["events"])):
+        raise ArchiveMoverError("receipt event sequence is not contiguous")
+    if any(key(event) not in set(selected_keys) for event in receipt["events"]):
+        raise ArchiveMoverError("receipt event references an unselected identity")
+    if receipt["mode"] == "dry-run" and any(
+        terminal["status"] not in {"planned", "failed", "indeterminate"} for terminal in receipt["terminals"]
+    ):
+        raise ArchiveMoverError("dry-run receipt claims a mutation terminal")
+    if receipt["mode"] == "enforce" and any(terminal["status"] == "planned" for terminal in receipt["terminals"]):
+        raise ArchiveMoverError("enforce receipt contains a planned terminal")
+    failure_keys = [(item["lane_hint"], item["locator"]) for item in receipt["discovery_failures"]]
+    if len(failure_keys) != len(set(failure_keys)):
+        raise ArchiveMoverError("receipt discovery failures must be unique by lane/locator")
+    expected = (
+        "indeterminate"
+        if any(item["status"] == "indeterminate" for item in receipt["terminals"])
+        else "failed"
+        if receipt["discovery_failures"] or any(item["status"] == "failed" for item in receipt["terminals"])
+        else "success"
+    )
+    if receipt["outcome"] != expected:
+        raise ArchiveMoverError("receipt overall outcome disagrees with terminals/discovery failures")
+    if receipt["bytes"] != {
+        "source": sum(item["source_bytes"] for item in receipt["terminals"]),
+        "archived": sum(item["archive_bytes"] for item in receipt["terminals"]),
+    }:
+        raise ArchiveMoverError("receipt byte totals disagree with terminals")
+    generated = _parse_hour_or_instant(receipt["generated_at"], label="receipt generated_at")
+    cutoff = _parse_hour_or_instant(receipt["cutoff"], label="receipt cutoff")
+    if cutoff != generated - timedelta(days=receipt["minimum_age_days"]):
+        raise ArchiveMoverError("receipt cutoff does not match generated_at/minimum age")
+
+
+def _parse_hour_or_instant(value: Any, *, label: str) -> datetime:
+    if not isinstance(value, str):
+        raise ArchiveMoverError(f"{label} must be a timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ArchiveMoverError(f"{label} is invalid") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ArchiveMoverError(f"{label} must be timezone-aware")
+    return parsed.astimezone(UTC)
+
+
+def _fsync_directory_chain(path: Path, root: Path) -> None:
+    """Durably record every directory component from a trusted root through path."""
+    try:
+        relative = path.relative_to(root)
+    except ValueError as error:
+        raise ArchiveMoverError(f"directory fsync path escapes trusted root: {path}") from error
+    current = root
+    targets = [root]
+    for part in relative.parts:
+        current /= part
+        targets.append(current)
+    for target in targets:
+        fd = open_directory_no_follow(target, containment_root=root if target != root else None)
+        try:
+            os.fsync(fd)
+        except OSError as error:
+            raise ArchiveMoverError(f"directory fsync failed for {target}: {error}") from error
+        finally:
+            os.close(fd)
+
+
+def _publish_receipt(path: Path, receipt: Mapping[str, Any]) -> None:
+    if not path.is_absolute():
+        raise ArchiveMoverError("receipt path must be absolute")
+    raw = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode()
+    try:
+        ensure_directory_no_follow(path.parent)
+        _fsync_directory_chain(path.parent, Path(path.anchor))
+        atomic_write_bytes_no_follow(path, raw, mode=0o600, require_durable_replace=True)
+    except SafeFilesystemError as error:
+        raise ArchiveMoverError(
+            f"receipt publication failed: {error}", indeterminate=error.kind == "indeterminate"
+        ) from error
+
+
+def _validate_config(config: MoverConfig) -> None:
+    if not config.object_store_root.is_absolute() or not config.archive_root.is_absolute():
+        raise ArchiveMoverError("object-store and archive roots must be absolute")
+    if not config.receipt_path.is_absolute() or not config.lock_path.is_absolute():
+        raise ArchiveMoverError("receipt and lock paths must be absolute")
+    if config.receipt_path == config.lock_path:
+        raise ArchiveMoverError("receipt and lock paths must be distinct")
+    _canonical_object_store_prefix(config.object_store_prefix)
+    if config.minimum_age_days < DEFAULT_DB_RETENTION_DAYS:
+        raise ArchiveMoverError(f"minimum age must be at least {DEFAULT_DB_RETENTION_DAYS} days")
+    if config.per_tick_bound <= 0:
+        raise ArchiveMoverError("per-tick bound must be positive")
+    if config.per_tick_bound > MAX_DISCOVERY:
+        raise ArchiveMoverError(f"per-tick bound must not exceed {MAX_DISCOVERY}")
+    validate_archive_configuration(
+        archive_root=config.archive_root,
+        cleanup_roots={"object_store_root": config.object_store_root},
+        archive_min_age_days=config.minimum_age_days,
+    )
+    verify_directory_no_follow(config.object_store_root)
+    verify_directory_no_follow(config.archive_root)
+    _validate_zstd(config.zstd_path)
+    try:
+        ensure_directory_no_follow(config.receipt_path.parent)
+        _fsync_directory_chain(config.receipt_path.parent, Path(config.receipt_path.anchor))
+        try:
+            receipt_info = stat_no_follow(config.receipt_path)
+        except FileNotFoundError:
+            pass
+        else:
+            if not stat.S_ISREG(receipt_info.st_mode):
+                raise ArchiveMoverError("receipt target must be a regular non-symlink file")
+    except SafeFilesystemError as error:
+        raise ArchiveMoverError(f"receipt target preflight failed: {error}") from error
+
+
+def acquire_lock(path: Path) -> int | None:
+    """Open/create safe mode-0600 lock metadata and take a nonblocking flock."""
+    if not path.is_absolute():
+        raise ArchiveMoverError("lock path must be absolute")
+    ensure_directory_no_follow(path.parent)
+    _fsync_directory_chain(path.parent, Path(path.anchor))
+    common_flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    created = False
+    parent_fd = open_directory_no_follow(path.parent)
+    fd: int | None = None
+    try:
+        try:
+            fd = os.open(path.name, common_flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent_fd)
+            created = True
+        except FileExistsError:
+            fd = os.open(path.name, common_flags, dir_fd=parent_fd)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+            raise ArchiveMoverError("lock file must be a mode-0600 regular file")
+        current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+            raise ArchiveMoverError("lock file namespace identity changed while opening")
+        _verify_directory_namespace(parent_fd, path.parent)
+        if created:
+            os.fsync(fd)
+            os.fsync(parent_fd)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            fd = None
+            return None
+        return fd
+    except ArchiveMoverError:
+        if fd is not None:
+            os.close(fd)
+        raise
+    except OSError as error:
+        if fd is not None:
+            os.close(fd)
+        raise ArchiveMoverError(f"cannot safely open lock file: {error}") from error
+    finally:
+        os.close(parent_fd)
+
+
+def _verify_directory_namespace(fd: int, path: Path) -> None:
+    try:
+        current = path.lstat()
+    except OSError as error:
+        raise ArchiveMoverError(f"cannot verify directory namespace {path}: {error}") from error
+    opened = os.fstat(fd)
+    if stat.S_ISLNK(current.st_mode) or not stat.S_ISDIR(current.st_mode):
+        raise ArchiveMoverError(f"directory namespace is unsafe: {path}")
+    if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+        raise ArchiveMoverError(f"directory namespace identity changed: {path}")
+
+
+def _config_from_args(args: argparse.Namespace) -> MoverConfig:
+    env = os.environ
+    raw_age = (
+        str(args.minimum_age_days) if args.minimum_age_days is not None else env.get("NHMS_ARCHIVE_MIN_AGE_DAYS", "45")
+    )
+    raw_bound = (
+        str(args.per_tick_bound)
+        if args.per_tick_bound is not None
+        else env.get("NODE27_PRODUCT_ARCHIVE_PER_TICK_BOUND", "10")
+    )
+    try:
+        age = int(raw_age)
+        bound = int(raw_bound)
+    except ValueError as error:
+        raise ArchiveMoverError("minimum age and per-tick bound must be integers") from error
+    return MoverConfig(
+        object_store_root=Path(args.object_store_root or env.get("NODE27_PRODUCT_ARCHIVE_OBJECT_STORE_ROOT", "")),
+        object_store_prefix=(args.object_store_prefix or env.get("OBJECT_STORE_PREFIX", "")),
+        archive_root=Path(
+            args.archive_root or env.get("NODE27_PRODUCT_ARCHIVE_ARCHIVE_ROOT") or env.get("NHMS_ARCHIVE_ROOT", "")
+        ),
+        receipt_path=Path(args.receipt or env.get("NODE27_PRODUCT_ARCHIVE_RECEIPT", "")),
+        lock_path=Path(args.lock_file or env.get("NODE27_PRODUCT_ARCHIVE_LOCK_FILE", "")),
+        zstd_path=Path(args.zstd or env.get("NODE27_PRODUCT_ARCHIVE_ZSTD", "/usr/bin/zstd")),
+        minimum_age_days=age,
+        per_tick_bound=bound,
+        enforce=args.enforce,
+    )
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--object-store-root")
+    parser.add_argument("--object-store-prefix")
+    parser.add_argument("--archive-root")
+    parser.add_argument("--receipt")
+    parser.add_argument("--lock-file")
+    parser.add_argument("--zstd")
+    parser.add_argument("--minimum-age-days", type=int)
+    parser.add_argument("--per-tick-bound", type=int)
+    parser.add_argument("--enforce", action="store_true", help="perform archive and retirement mutations")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    try:
+        config = _config_from_args(_parser().parse_args(argv))
+        lock_fd = acquire_lock(config.lock_path)
+        if lock_fd is None:
+            print(json.dumps({"status": "skipped", "reason": "lock-contended"}, sort_keys=True), file=sys.stderr)
+            return 0
+        try:
+            _receipt, code = run(config)
+            return code
+        finally:
+            os.close(lock_fd)
+    except Exception as error:
+        status = "indeterminate" if isinstance(error, ArchiveMoverError) and error.indeterminate else "failed"
+        print(json.dumps({"status": status, "reason": str(error)}, sort_keys=True), file=sys.stderr)
+        return 1
+
+
+def _identity_dict(identity: ArchiveIdentity) -> dict[str, Any]:
+    value = {
+        "lane": identity.lane,
+        "source": identity.source,
+        "cycle_identity": identity.cycle_identity,
+        "cycle_time": identity.cycle_time,
+    }
+    if identity.basin_version_id is not None:
+        value["basin_version_id"] = identity.basin_version_id
+    if identity.model_id is not None:
+        value["model_id"] = identity.model_id
+    if identity.run_id is not None:
+        value["run_id"] = identity.run_id
+    return value
+
+
+def _identity_key(identity: ArchiveIdentity) -> str:
+    return json.dumps(_identity_dict(identity), sort_keys=True, separators=(",", ":"))
+
+
+def _terminal(
+    identity: dict[str, Any], status: str, reason: str, source_bytes: int, archive_bytes: int, residue: list[str]
+) -> dict[str, Any]:
+    return {
+        "identity": identity,
+        "status": status,
+        "reason": reason,
+        "source_bytes": source_bytes,
+        "archive_bytes": archive_bytes,
+        "residue": sorted(residue),
+    }
+
+
+def _event(sequence: int, identity: dict[str, Any], kind: str, path: str, detail: str) -> dict[str, Any]:
+    return {"sequence": sequence, "identity": identity, "kind": kind, "path": path, "detail": detail}
+
+
+def _stat_signature(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return value.st_dev, value.st_ino, value.st_mode, value.st_size, value.st_mtime_ns
+
+
+def _time(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _load_schema(path: Path) -> dict[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ArchiveMoverError(f"schema is not an object: {path}")
+    return value
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

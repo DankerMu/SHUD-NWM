@@ -18,6 +18,41 @@ per-file sha256 checksums, file sizes, tarball sha256, and identity fields
 - **THEN** a `tar.zst` object and `manifest.json` MUST exist under
   `NHMS_ARCHIVE_ROOT` with recorded checksums and identity fields
 
+The mover SHALL discover filesystem-only archive units by strict lane shape:
+one forcing basin/model leaf, one whole run-id tree whose bounded input
+manifest is authoritative for source/cycle/model/basin, or one physical state
+valid-time tree. Provider-qualified and `legacy-unqualified` state identities
+SHALL remain collision-disjoint. Historical run-id spelling SHALL NOT replace
+manifest identity validation, and the mover SHALL NOT access the database or
+fabricate clone-target archives for a shared physical state artifact. Run
+top-level identity, nested model identity and output URIs SHALL use the same
+authority as the inventory audit; duplicated `identity.*` values SHALL agree.
+Run output URIs SHALL bind configured S3 scheme/bucket/optional prefix and
+reject wrong authority/prefix, query/fragment, encoded traversal, backslash or
+unsupported schemes.
+
+Only manifest-complete producer trees are archive candidates. A forcing
+package SHALL carry a safe `forcing_version_id`, a non-empty unique `files`
+list whose canonical object URIs remain inside the exact package leaf, and
+valid sha256 checksums that match every declared regular member from the same
+pinned source snapshot. A forcing leaf SHALL have exactly one of two accepted
+shapes: the legacy manifest + declared products, or that shape plus the complete
+finalized domain-handoff bundle (`forcing_domain_package.json`,
+`forcing_version_record.json`, and the three fixed payload JSON files). A
+complete bundle SHALL bind its contract/version, fixed roles/URIs/checksums,
+package digest, lineage and source/cycle/model/basin/version identity; a
+partial bundle or any unknown extra SHALL fail discovery. Its domain time
+window need not equal the authoritative forcing package window. A run SHALL
+contain its bound `output/` directory and at least one regular output product
+under the bounded no-follow snapshot. The outer archive manifest for
+forcing/runs SHALL retain producer provenance (stable subject identifier,
+producer-manifest path and sha256, authoritative window and model/basin
+identity). The inventory audit SHALL bind that provenance and the archived
+producer-manifest member digest to the DB subject and SHALL verify the actual
+decompressed tar member bijection/size/checksum before reporting
+`product-archive` coverage; sidecar claims alone are not coverage. A
+filesystem-only mover never substitutes for that later DB comparison.
+
 #### Scenario: State snapshot products are archived
 
 - **WHEN** the archive mover archives an aged state product from
@@ -55,6 +90,96 @@ checksums have been verified by re-reading the written tarball; it SHALL NOT
 remove source product files until that verification has passed. An object at
 the final path counts as present — for idempotency skips and for the
 archive-completeness receipt — only when it verifies against its manifest.
+Re-reading SHALL decompress the staged/final tar and prove an exact bijection
+with the manifest's deterministic regular-file list, including safe relative
+path, size and sha256. Duplicate, missing, extra, path-traversing, symlink,
+hardlink, device or FIFO members SHALL fail verification even when the
+tarball-level sha256 matches. Actual member count/name/type/declared size and
+depth SHALL be checked at each header before body extraction; unexpected or
+oversize members fail immediately, with cumulative payload limits enforced.
+Tar extension headers are part of that boundary: bounded local PAX metadata
+needed by the deterministic writer MAY be accepted, but oversized PAX bodies,
+global/Solaris PAX headers, GNU longname/longlink headers and unexpected PAX
+keys SHALL be rejected before their declared body is streamed.
+Raw header count, local-PAX count, consecutive-PAX structure and cumulative PAX
+bytes SHALL also have explicit bounds derived from the expected member count;
+Python recursion or the global tar-byte timeout is not a protocol boundary.
+Only POSIX regular-file typeflags (`0` or NUL) plus bounded local PAX (`x`)
+SHALL be accepted; GNU sparse and every other tar representation fail before
+body consumption.
+
+The verified tarball and manifest SHALL be published as one dirfd-bound,
+no-replace atomic leaf directory, followed by complete durability fsync and
+final-path re-verification. Both staged files and their directory SHALL be
+fsynced before rename; created ancestors and every source/destination parent
+affected by publish, quarantine, tombstone or tombstone removal SHALL be
+fsynced. A raced destination SHALL never be overwritten. A corrupt,
+partial or unexpected final leaf SHALL be atomically quarantined whole on the
+same archive device before fresh staging; dry-run only reports that plan. A
+quarantine rename SHALL remain bound to the exact guarded inode that failed
+deterministic verification; a namespace replacement MUST fail closed and MUST
+NOT move or label the replacement as corrupt. A verified existing archive is
+idempotent only when any still-present source
+tree is member-for-member identical; drift preserves both and fails rather
+than overwriting valid historical evidence. Member comparison is a unique
+path -> (size, sha256) map and is independent of manifest array order.
+Only typed deterministic structural/schema/identity/member/checksum invalidity
+permits quarantine. Operational verification failure (timeout, tool, I/O,
+mount proof) preserves canonical final + source and fails; conflict is a
+separate typed outcome.
+Producer provenance SHALL also self-bind semantically to the archive lane,
+identity, authoritative window/model/basin and exactly one producer-manifest
+entry whose digest matches; a shape-valid but semantically drifted sidecar is
+corrupt and cannot authorize source retirement. Verification SHALL rebind both
+the manifest and tar namespace entries to the exact opened descriptors after
+their final reads. The pre-retirement guard SHALL cover that exact child pair,
+not only the containing leaf inode. Retirement SHALL keep a same-mount durable
+reference to the exact verified pair (for example signature-checked hard links
+inside a mover-owned guard directory) across every destructive source step, so
+a concurrent canonical-name replacement cannot leave the retired source with
+no valid archive evidence. A changed canonical pair makes the operation
+indeterminate and preserves that exact guard as reported residue.
+The bounded tar stream SHALL capture and parse the unique producer-manifest
+member and bind its lane identity, source/cycle/window/model/basin/subject and
+object URIs/checksums to outer identity/provenance; outer self-consistency alone
+is insufficient.
+Every destructive canonical-pair predicate SHALL re-prove the pinned archive
+root, leaf and child device + Linux mount ID as well as inode signatures;
+unavailable or changed proof is operational/indeterminate. Once a source has
+been renamed to a tombstone, every later failure path SHALL discover and report
+the actual surviving tombstone/claim/guard locations even before the first
+child removal.
+
+Source/archive discovery, tar reads and retirement SHALL remain
+descriptor-bound with no-follow component opens, fixed-root-device checks and
+bounded traversal. Every opened FD SHALL match the pinned Linux mount ID as
+well as device, so same-filesystem bind mounts and cross-device descendants
+fail closed; production inability to prove FD mount identity is a blocker.
+Traversal SHALL hold only the bounded directory stack plus one regular file
+FD, with before/after fstat around the same tar/hash byte stream and a complete
+second tree comparison. Immediately before
+retirement the pinned source tree SHALL still equal the archived preimage.
+The exact source leaf SHALL then be atomically renamed by held parent FDs into
+a same-device delete tombstone and only that pinned inode tree recursively
+removed after another tombstone comparison. A replacement at the original
+pathname, observed late write/entry change, cross-device rename, fsync or
+namespace-identity failure SHALL block deletion and SHALL NOT report the
+candidate archived. Aged manifest-complete product trees are an immutable
+producer contract; writes through an already-open FD after the final check are
+an explicit producer violation that no rename protocol can prevent. Failures
+before tombstone rename preserve the original source path; failures after
+rename/unlink begins SHALL truthfully report complete/partial tombstone residue
+and SHALL NOT claim the source path was untouched or automatically restored.
+Before any tombstone child unlink the pinned final tar+manifest pair SHALL be
+fully re-verified. Removal SHALL follow the archived preimage's exact
+path/inode/signature allowlist; extra, missing or drifted entries preserve
+residue and fail rather than being enumerated and deleted.
+Each tombstone child SHALL first be atomically claimed by no-replace rename
+into a same-mount mover-exclusive namespace and checked against the expected
+inode/signature before deletion. A same-name replacement at any pre-claim
+boundary is preserved as residue and MUST NOT be unlinked or removed as a
+directory. Recursive directory cleanup applies the same claim rule; inability
+to maintain the exclusive claim namespace or producer quiescence fails closed.
 
 #### Scenario: Checksum verification fails
 
@@ -67,8 +192,11 @@ archive-completeness receipt — only when it verifies against its manifest.
 
 - **WHEN** the mover encounters a cycle whose verified archive object already
   exists
-- **THEN** it MUST skip re-archiving without duplicating objects and record
-  the skip in the receipt
+- **THEN** it MUST avoid duplication; an identical present source is planned
+  for retirement in dry-run and `retired-from-existing` in enforce
+- **AND** a drifted present source is a conflict that preserves both
+- **AND** archive-only identities with no source are not mover candidates and
+  remain the inventory audit's responsibility
 
 #### Scenario: Residual unverified object at the final path
 
@@ -94,17 +222,69 @@ hot object-store window — which is also the ADR 0001 display disk window for
 station forcing CSVs — is never shorter than the DB hot window. Cycles
 rotated after the minimum age are thereafter reachable only via the archive
 tier (display routes return their ADR 0001 not-found for them).
+The Python entrypoint SHALL acquire the non-blocking flock itself before
+discovery/mutation. One UTC now SHALL drive strict
+`eligibility_end < now - minimum_age`; equality remains hot. Forcing/run
+eligibility end is authoritative non-inverted manifest `end_time`, matching
+the inventory/DB/display hot window, while state uses valid-time point.
+Canonical archive identity/order remains cycle-time based and receipts also
+bind eligibility end. Candidate selection SHALL be deterministic and
+two-phase. Bounded manifest/locator metadata first forms the ordered eligible
+queue; entries beyond the positive tick's full-validation-attempt bound are
+recorded as `pending-validation` deferred entries without claiming manifest
+completeness or source bytes. Each attempt performs full descriptor-bound
+tree/hash/provenance validation; validation failures consume an attempt,
+remain locator-keyed failures and do not enter selected. Only successfully
+validated attempts enter selected and may be processed. Thus candidates =
+validated selected + lightweight pending deferred, while expensive tree scans
+and hashes per tick never exceed the configured bound. Discovery and each tree
+SHALL have explicit
+candidate/entry/depth/manifest-size, per-file/source/tar/uncompressed-byte,
+compressor-timeout and stderr limits; unsafe, unreadable, malformed or
+over-limit evidence is a failure rather than a skip. The compression
+executable SHALL resolve to a configured absolute regular non-symlink path
+(node-27 default `/usr/bin/zstd`) and run with fixed argv and `shell=False`.
+Malformed/unreadable entries that cannot form canonical identity SHALL be
+separate deterministic discovery failures keyed by lane hint + safe
+root-relative locator; they count toward discovery/overall failure and the
+full-validation attempt bound but never enter selected/deferred.
+
+The lock file is absolute mode-0600 safe coordination metadata opened from a
+trusted dirfd with no-follow; existing files are fstat-bound without
+truncation and first creation is exclusive plus parent-fsynced. Only the lock holder
+may publish the shared receipt; a contender emits one structured JSON skip to
+stderr and never overwrites the active holder's receipt. The JSON receipt SHALL
+validate against `product_archive_receipt.schema.json`, use an absolute
+configured path and the #847 strict dirfd/no-follow mode-0600 publication
+protocol: exclusive temp, file fsync, atomic replace, directory fsync and
+post-replace parent check; pre-replace failure preserves the old receipt and
+post-replace uncertainty is indeterminate. It SHALL record the captured now/cutoff, mode/bound,
+candidate/selected/deferred identities, one terminal outcome per selected
+identity, ordered side events, disjoint locator-keyed discovery failures,
+bytes and reasons. Legacy skipped/quarantined action arrays SHALL NOT be
+alternate terminal representations. Runtime set invariants require exact valid
+candidate = selected + deferred partitioning. Each selected identity has one
+terminal outcome and zero or more ordered side events (including quarantine);
+locator-keyed discovery failures remain disjoint. Ordering is deterministic,
+bytes are non-negative and overall outcome matches terminal/discovery failures.
+Lock metadata plus the receipt are the only writes allowed during dry-run.
+Enforce requires an explicit flag, may continue
+over bounded independent candidates, and exits non-zero if any candidate
+failed or publication/retirement became indeterminate.
 
 #### Scenario: Previous run still active
 
 - **WHEN** a tick starts while the flock is held
 - **THEN** the new tick MUST exit without mutating and note the skip
+- **AND** it MUST emit a structured JSON diagnostic without touching the
+  lock holder's stable receipt
 
 #### Scenario: Dry-run lists without mutating
 
 - **WHEN** the mover runs without the enforce flag
 - **THEN** it MUST emit the candidate list and planned actions in the receipt
-  and perform no filesystem mutation
+  and perform no source/archive/staging/quarantine mutation; atomic receipt
+  publication and safe lock metadata are the sole permitted writes
 
 #### Scenario: Cycle younger than the minimum age is not archived
 
