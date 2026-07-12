@@ -157,7 +157,8 @@ def check_batch_targets_uncompressed(
     if valid_time_min is None or valid_time_max is None:
         raise CompressedChunkGuardError(
             "guard called with partial batch range (one endpoint None); "
-            "callers MUST pass both endpoints or both None for empty batch"
+            "callers MUST pass both endpoints or both None for empty batch "
+            f"(min={valid_time_min!r}, max={valid_time_max!r})"
         )
 
     # Wire-site typo guard: refuse any unregistered pair BEFORE any SQL runs.

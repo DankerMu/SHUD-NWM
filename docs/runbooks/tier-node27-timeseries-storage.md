@@ -334,6 +334,27 @@ chunk(s) TimescaleDB names.
 
 ### 4.3 Decompress procedure
 
+#### 4.3.1 Operator triage codes
+
+The compressed-chunk write guard surfaces via four caller-observable string
+codes. Every one of them routes to the decompress procedure below. Grep
+the DB / stderr / receipt surface for these literals when triaging a
+reingest failure:
+
+| Code (literal string) | Where produced | How to observe |
+|---|---|---|
+| `HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED` | `packages/common/forcing_domain_handoff_apply.py::apply_forcing_domain_handoff` — attached as `unavailable_report.unavailable_reasons[].code` (from `REASON_APPLY_COMPRESSED_CHUNK_BLOCKED`) when the guard raises inside `_replace_forcing_station_timeseries`. | Persisted on the apply report (DB or API response) that the caller inspects. |
+| `OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED` | `workers/output_parser/parser.py::OutputParser.parse_run` — stamped on `hydro.hydro_run.error_code` via `mark_run_failed`, and emitted as the stderr prefix by `workers/output_parser/cli.py` when the guard escapes. | `hydro.hydro_run.error_code` column; parser CLI stderr line `OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED: ...`. |
+| `FORCING_PRODUCE_COMPRESSED_CHUNK_BLOCKED` | `workers/forcing_producer/cli.py` stderr prefix — emitted when `ForcingProducer.produce()` re-raises a `CompressedChunkGuardError` un-wrapped. | Forcing producer CLI stderr line `FORCING_PRODUCE_COMPRESSED_CHUNK_BLOCKED: ...`. |
+| `FORCING_COMPRESSED_CHUNK_BLOCKED` | `workers/forcing_producer/producer.py::ForcingProducer._mark_failed` — stamped on `met.forecast_cycle.error_code` when the dedicated `except CompressedChunkGuardError` arm fires. | `met.forecast_cycle.error_code` column (with `status = 'failed_forcing'`). |
+
+For every code above, the operator response is the decompress procedure
+in §4.3.2 below (identify chunk from the structured error message → run
+`decompress_chunk(...)` → re-run ingest). Route on the code; do NOT paper
+over with a generic ingest retry.
+
+#### 4.3.2 Manual decompress steps
+
 When a reingest surfaces `CompressedChunkWriteError` or TimescaleDB's raw
 compressed-chunk error, follow this manual procedure. Do NOT introduce an
 automated decompress-on-demand lane (ADR 0002 decision 3 — the manual

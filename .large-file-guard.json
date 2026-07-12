@@ -9,6 +9,8 @@
     "tests/test_node27_db_export_salvage.py",
     "db/seeds/seed_demo.py",
     "packages/common/forcing_domain_handoff_apply.py",
-    "workers/output_parser/parser.py"
+    "workers/output_parser/parser.py",
+    "workers/forcing_producer/producer.py",
+    "tests/test_forcing_producer.py"
   ]
 }

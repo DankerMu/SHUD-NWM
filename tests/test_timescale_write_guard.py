@@ -114,6 +114,20 @@ class _PredicateAwareFakeCursor:
             return
         if "timescaledb_information.chunks" not in statement:
             return
+        # I1: SQL sanity check — assert the guard's catalog query literal is
+        # BYTE-IDENTICAL to :data:`_COMPRESSED_CHUNK_QUERY`. Any drift in the
+        # guard SQL (predicate, ORDER BY, LIMIT, whitespace) makes this fake
+        # fail-fast rather than silently modeling the OLD SQL against the
+        # NEW production behavior. This is the class-pattern fake-oracle
+        # repair: predicate-aware evaluation is only trustworthy if the
+        # SQL under evaluation is the SQL production actually runs.
+        assert statement == _COMPRESSED_CHUNK_QUERY, (
+            "Guard SQL drift: _PredicateAwareFakeCursor evaluates the Python "
+            "predicate against a modeled chunk row, but the guard's SQL "
+            "literal has changed. Update this fake's predicate to match the "
+            "new SQL, then re-run boundary tests. Diff:\n"
+            f"expected={_COMPRESSED_CHUNK_QUERY!r}\nactual={statement!r}"
+        )
         # Guard binds params as (schema, name, batch_max, batch_min).
         hypertable_schema, hypertable_name, batch_max, batch_min = parameters
         matching = [
@@ -243,22 +257,40 @@ def test_query_cancelled_raises_guard_error() -> None:
 
 
 def test_boundary_range_end_exclusive_allows_write() -> None:
-    """A batch whose ``valid_time_max`` equals a compressed chunk's ``range_end`` is allowed.
+    """A batch whose ``valid_time_min`` equals a compressed chunk's ``range_end`` is allowed.
 
-    The query filter ``range_start < %s AND range_end > %s`` binds
-    ``(valid_time_max, valid_time_min)``. If the compressed chunk ends at
-    ``valid_time_max`` (i.e. its ``range_end == valid_time_max``) then
-    ``range_start < valid_time_max`` may hold but ``range_end > valid_time_min``
-    also has to hold; the fake cursor returns ``None`` to model this — the
-    real DB would filter it out via the exclusive semantic.
+    TimescaleDB chunk intervals are ``[range_start, range_end)`` — ``range_end``
+    is EXCLUSIVE. The guard's SQL filter ``range_start <= %s AND range_end > %s``
+    binds ``(valid_time_max, valid_time_min)``. If a compressed chunk ends at
+    exactly ``valid_time_min`` (i.e. ``range_end == valid_time_min``), then
+    ``range_end > valid_time_min`` is FALSE — the chunk is excluded, and the
+    batch is allowed to write.
+
+    I2: migrated to :class:`_PredicateAwareFakeCursor` so this test exercises
+    the exclusive-end predicate against a modeled compressed chunk, not
+    against a caller-configured pre-set row. A regression that flipped
+    ``range_end > %s`` to ``range_end >= %s`` would produce a matching
+    chunk here and the test would fail with ``CompressedChunkWriteError`` —
+    the exclusive-end contract is now driven by the predicate.
     """
-    cursor = _FakeCursor(row=None)
+    # Compressed chunk runs [day 2 00:00, day 3 00:00) — range_end is EXCLUSIVE.
+    compressed_chunk = {
+        "hypertable_schema": "hydro",
+        "hypertable_name": "river_timeseries",
+        "chunk_schema": "_timescaledb_internal",
+        "chunk_name": "_hyper_1_1_chunk",
+        "is_compressed": True,
+        "range_start": _tday(2, 0),
+        "range_end": _tday(3, 0),
+    }
+    cursor = _PredicateAwareFakeCursor(chunks=[compressed_chunk])
+    # Batch min equals chunk range_end (day 3 00:00), so range_end > min is FALSE.
     check_batch_targets_uncompressed(
         cursor,
         hypertable_schema="hydro",
         hypertable_name="river_timeseries",
-        valid_time_min=_t(20),
-        valid_time_max=_t(23),
+        valid_time_min=_tday(3, 0),
+        valid_time_max=_tday(3, 12),
     )
     # verify the query was bound with (max, min) — max first
     query_calls = [
@@ -266,7 +298,7 @@ def test_boundary_range_end_exclusive_allows_write() -> None:
     ]
     assert len(query_calls) == 1
     _, params = query_calls[0]
-    assert params == ("hydro", "river_timeseries", _t(23), _t(20))
+    assert params == ("hydro", "river_timeseries", _tday(3, 12), _tday(3, 0))
 
 
 def test_set_local_not_set_session() -> None:
@@ -397,7 +429,25 @@ def test_mixed_chunk_batch_uses_first_compressed_chunk() -> None:
 
     Exercises the ``ORDER BY range_start LIMIT 1`` clause end-to-end via a
     predicate-aware fake with two compressed chunks in the batch window.
+
+    I3: also seeds an UNCOMPRESSED chunk (``is_compressed = False``) whose
+    time window would otherwise be selected by an earlier ``range_start``.
+    The fake's ``is_compressed is True`` predicate must filter that chunk
+    OUT — mirroring the guard SQL's ``is_compressed = true`` clause. If a
+    future refactor drops that predicate, this test fails because the
+    uncompressed chunk would surface first and the reported chunk_name
+    would drift.
     """
+    uncompressed_early = {
+        # Uncompressed, so filtered out even though its range_start is earliest.
+        "hypertable_schema": "met",
+        "hypertable_name": "forcing_station_timeseries",
+        "chunk_schema": "_timescaledb_internal",
+        "chunk_name": "_hyper_2_uncompressed_early",
+        "is_compressed": False,
+        "range_start": _tday(1, 0),
+        "range_end": _tday(2, 0),
+    }
     earlier = {
         "hypertable_schema": "met",
         "hypertable_name": "forcing_station_timeseries",
@@ -416,7 +466,7 @@ def test_mixed_chunk_batch_uses_first_compressed_chunk() -> None:
         "range_start": _tday(2, 0),
         "range_end": _tday(3, 0),
     }
-    cursor = _PredicateAwareFakeCursor(chunks=[later, earlier])
+    cursor = _PredicateAwareFakeCursor(chunks=[uncompressed_early, later, earlier])
     with pytest.raises(CompressedChunkWriteError) as exc_info:
         check_batch_targets_uncompressed(
             cursor,
@@ -426,6 +476,8 @@ def test_mixed_chunk_batch_uses_first_compressed_chunk() -> None:
             valid_time_max=_tday(2, 12),
         )
     assert exc_info.value.chunk_name == "_hyper_2_earlier"
+    # Uncompressed chunk MUST NOT surface even though it shares range_start.
+    assert exc_info.value.chunk_name != "_hyper_2_uncompressed_early"
 
 
 # ---------------------------------------------------------------------------
@@ -456,15 +508,27 @@ def test_unknown_pair_refuses_at_guard_entry() -> None:
     assert cursor.executed == []
 
 
-def test_unknown_pair_refuses_even_for_empty_batch_after_partial_range() -> None:
-    """A partial ``(min, None)`` on an unregistered pair still raises for the partial range.
+def test_partial_range_refuses_before_registry_check() -> None:
+    """A partial ``(min, None)`` on an unregistered pair fails the partial-range check.
 
-    Empty-batch short-circuit runs BEFORE the registry check (empty batch is
-    a no-op regardless of table registration), but a partial batch on an
-    unregistered pair MUST still fail. The partial-none check fires next.
+    Ordering-lock (K1): the guard checks the invariants in this order:
+    1. Empty-batch (both endpoints ``None``) short-circuits — no SQL, no
+       registry check (empty batch is a no-op regardless of table).
+    2. Partial batch range (one endpoint ``None``) raises
+       ``CompressedChunkGuardError`` with ``"partial batch range"`` in the
+       message — BEFORE the registry check.
+    3. Unregistered ``(schema, table)`` pair — raises with ``"unregistered"``.
+    4. Registered pair with a full batch window — runs the catalog query.
+
+    This test asserts step 2 fires when both an unregistered pair AND a
+    partial range are present — the partial-range error MUST beat the
+    registry error, and the error message MUST name the partial-range
+    branch. Renamed from
+    ``test_unknown_pair_refuses_even_for_empty_batch_after_partial_range``
+    to reflect the ordering claim.
     """
     cursor = _FakeCursor(row=None)
-    with pytest.raises(CompressedChunkGuardError):
+    with pytest.raises(CompressedChunkGuardError) as exc_info:
         check_batch_targets_uncompressed(
             cursor,
             hypertable_schema="ops",
@@ -472,6 +536,13 @@ def test_unknown_pair_refuses_even_for_empty_batch_after_partial_range() -> None
             valid_time_min=_t(0),
             valid_time_max=None,
         )
+    # Partial-range check fires FIRST, so the error names the partial branch,
+    # NOT the registry branch. If a future refactor reorders these two checks,
+    # this assertion fires immediately.
+    assert "partial batch range" in str(exc_info.value)
+    # Cursor MUST NOT have been touched — the partial check fires before
+    # any SQL runs.
+    assert cursor.executed == []
 
 
 # ---------------------------------------------------------------------------

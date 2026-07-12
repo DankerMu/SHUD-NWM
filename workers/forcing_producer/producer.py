@@ -31,6 +31,7 @@ from packages.common.grid_signature import (
 from packages.common.met_store import PsycopgMetStore
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
 from packages.common.source_identity import normalize_source_id
+from packages.common.timescale_write_guard import CompressedChunkGuardError
 from workers.canonical_converter.converter import canonical_product_is_forcing_usable
 from workers.data_adapters.region import GeoBBox
 from workers.forcing_producer.direct_grid_contract import (
@@ -797,6 +798,24 @@ class ForcingProducer:
                 forcing_version_id=result.forcing_version_id,
             )
             return result
+        except CompressedChunkGuardError as error:
+            # Dedicated caller-observable contract for the compressed-chunk write
+            # guard: operators route on this dedicated error_code
+            # (``FORCING_COMPRESSED_CHUNK_BLOCKED``) to the runbook decompress
+            # procedure rather than the generic ``FORCING_FAILED`` bucket. The
+            # exception re-raises un-wrapped so the CLI's dedicated
+            # ``except CompressedChunkGuardError`` arm can emit the
+            # ``FORCING_PRODUCE_COMPRESSED_CHUNK_BLOCKED:`` stderr prefix.
+            # MUST precede the generic ``except Exception`` — otherwise the
+            # guard error would be wrapped as ``ForcingProductionError`` and
+            # the CLI arm becomes dead code.
+            self._mark_failed(
+                resolved_source_id,
+                parsed_cycle_time,
+                error,
+                error_code="FORCING_COMPRESSED_CHUNK_BLOCKED",
+            )
+            raise
         except Exception as error:
             self._mark_failed(resolved_source_id, parsed_cycle_time, error)
             if isinstance(error, ForcingProductionError):
@@ -2391,7 +2410,14 @@ class ForcingProducer:
             object_store=self.object_store,
         )
 
-    def _mark_failed(self, source_id: str, cycle_time: datetime, error: Exception) -> None:
+    def _mark_failed(
+        self,
+        source_id: str,
+        cycle_time: datetime,
+        error: Exception,
+        *,
+        error_code: str = "FORCING_FAILED",
+    ) -> None:
         if self.repository is None:
             return
         try:
@@ -2399,7 +2425,7 @@ class ForcingProducer:
                 source_id=source_id,
                 cycle_time=cycle_time,
                 status="failed_forcing",
-                error_code="FORCING_FAILED",
+                error_code=error_code,
                 error_message=str(error),
             )
         except Exception:

@@ -509,6 +509,18 @@ def test_seed_demo_does_not_import_guard() -> None:
                 f"seed_demo must not import from the guard module (found: "
                 f"from {node.module} import ...)."
             )
+            # L1: also catch ``from packages.common import timescale_write_guard as X``
+            # — the parent-package aliased form. Attribute inspection alone
+            # would miss the alias name binding; walk the ImportFrom aliases.
+            if node.module == "packages.common":
+                for alias in node.names:
+                    assert alias.name != "timescale_write_guard", (
+                        "seed_demo must not import the guard module via the "
+                        "packages.common parent (found: from packages.common "
+                        f"import {alias.name}"
+                        + (f" as {alias.asname}" if alias.asname else "")
+                        + ")."
+                    )
         if isinstance(node, ast.Import):
             for alias in node.names:
                 assert alias.name != "packages.common.timescale_write_guard", (
