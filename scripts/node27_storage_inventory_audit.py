@@ -488,6 +488,8 @@ def verify_product_archive(
         raise AuditBlocked(str(error)) from error
     if expected != paths:
         raise AuditBlocked(f"archive path binding differs for {subject.stable_key}")
+    if subject.lane in {"forcing", "runs"}:
+        _verify_product_producer_provenance(subject, manifest)
     if subject.lane == "states":
         member_path = _state_archive_member_path(subject, object_store_prefix)
         members = [entry for entry in manifest["files"] if entry["path"] == member_path]
@@ -502,6 +504,38 @@ def verify_product_archive(
     if size != declared["size_bytes"] or digest != declared["sha256"]:
         return Coverage("none", ("product archive size/sha256 mismatch",))
     return Coverage("product-archive", ("checksum-verified product archive present",))
+
+
+def _verify_product_producer_provenance(subject: InventorySubject, manifest: Mapping[str, Any]) -> None:
+    producer = manifest.get("producer")
+    if not isinstance(producer, Mapping):
+        raise AuditBlocked(f"product archive lacks producer provenance: {subject.subject_id}")
+    expected_kind = "forcing-package" if subject.lane == "forcing" else "run-manifest"
+    expected_path = "forcing_package.json" if subject.lane == "forcing" else "input/manifest.json"
+    expected = {
+        "kind": expected_kind,
+        "subject_id": subject.subject_id,
+        "manifest_path": expected_path,
+        "start_time": _time(subject.start),
+        "end_time": _time(subject.end),
+        "model_id": subject.model_id,
+        "basin_version_id": subject.basin_version_id,
+    }
+    for field, expected_value in expected.items():
+        if producer.get(field) != expected_value:
+            raise AuditBlocked(
+                f"product archive producer {field} differs from DB inventory for {subject.subject_id}"
+            )
+    digest = producer.get("manifest_sha256")
+    if not isinstance(digest, str):
+        raise AuditBlocked(f"product archive producer manifest digest is missing: {subject.subject_id}")
+    if subject.lane == "forcing" and digest != subject.checksum:
+        raise AuditBlocked(f"forcing producer manifest digest differs from DB provenance: {subject.subject_id}")
+    members = [entry for entry in manifest["files"] if entry["path"] == expected_path]
+    if len(members) != 1 or members[0]["sha256"] != digest:
+        raise AuditBlocked(
+            f"product archive producer manifest member does not bind its declared digest: {subject.subject_id}"
+        )
 
 
 def _state_archive_member_path(subject: InventorySubject, object_store_prefix: str) -> str:

@@ -15,6 +15,7 @@ import pytest
 
 from packages.common import safe_fs
 from packages.common.object_store import LocalObjectStore
+from scripts import node27_product_archive as mover
 from scripts import node27_storage_inventory_audit as audit
 
 NOW = datetime(2026, 7, 11, 12, tzinfo=UTC)
@@ -186,8 +187,21 @@ def test_product_archive_checksum_mismatch_is_absent_and_reported(tmp_path: Path
             "basin_version_id": "basin-a",
             "model_id": "model-a",
         },
+        "producer": {
+            "kind": "forcing-package",
+            "subject_id": subject.subject_id,
+            "manifest_path": "forcing_package.json",
+            "manifest_sha256": subject.checksum,
+            "start_time": audit._time(subject.start),
+            "end_time": audit._time(subject.end),
+            "model_id": subject.model_id,
+            "basin_version_id": subject.basin_version_id,
+        },
         "archive": {"path": relative_archive, "manifest_path": relative_manifest, "sha256": "0" * 64, "size_bytes": 3},
-        "files": [{"path": "forcing.csv", "sha256": "1" * 64, "size_bytes": 1}],
+        "files": [
+            {"path": "forcing.csv", "sha256": "1" * 64, "size_bytes": 1},
+            {"path": "forcing_package.json", "sha256": subject.checksum, "size_bytes": 1},
+        ],
         "created_at": "2026-07-11T00:00:00Z",
         "tool_version": "test/1",
     }
@@ -196,6 +210,105 @@ def test_product_archive_checksum_mismatch_is_absent_and_reported(tmp_path: Path
     assert coverage == audit.Coverage("none", ("product archive size/sha256 mismatch",))
     receipt = _receipt([subject], product={subject.stable_key: coverage})
     assert "mismatch" in receipt["windows"][0]["evidence"][0]
+
+
+def _write_forcing_and_run_product_archives(
+    tmp_path: Path,
+) -> tuple[audit.AuditConfig, audit.InventorySubject, audit.InventorySubject]:
+    config = _config(tmp_path)
+    tool = tmp_path / "fake-zstd"
+    tool.write_text("#!/bin/sh\ncat\n", encoding="utf-8")
+    tool.chmod(0o700)
+    forcing_leaf = config.object_store_root / "forcing/gfs/2026050100/basin-a/model-a"
+    forcing_leaf.mkdir(parents=True)
+    payload = b"forcing-product"
+    (forcing_leaf / "payload.csv").write_bytes(payload)
+    forcing_manifest = {
+        "forcing_version_id": "forcing-a",
+        "source_id": "gfs",
+        "cycle_time": audit._time(START),
+        "start_time": audit._time(START),
+        "end_time": audit._time(END),
+        "basin_version_id": "basin-a",
+        "model_id": "model-a",
+        "files": [
+            {
+                "uri": "s3://nhms/forcing/gfs/2026050100/basin-a/model-a/payload.csv",
+                "checksum": hashlib.sha256(payload).hexdigest(),
+            }
+        ],
+    }
+    forcing_raw = json.dumps(forcing_manifest).encode()
+    (forcing_leaf / "forcing_package.json").write_bytes(forcing_raw)
+    run_leaf = config.object_store_root / "runs/run-a"
+    (run_leaf / "input").mkdir(parents=True)
+    (run_leaf / "output").mkdir()
+    (run_leaf / "output/result.nc").write_bytes(b"run-product")
+    run_manifest = {
+        "run_id": "run-a",
+        "source_id": "gfs",
+        "cycle_time": audit._time(START),
+        "start_time": audit._time(START),
+        "end_time": audit._time(END),
+        "model": {"model_id": "model-a", "basin_version_id": "basin-a"},
+        "outputs": {
+            "run_manifest_uri": "s3://nhms/runs/run-a/input/manifest.json",
+            "output_uri": "s3://nhms/runs/run-a/output/",
+        },
+    }
+    (run_leaf / "input/manifest.json").write_text(json.dumps(run_manifest), encoding="utf-8")
+    mover_config = mover.MoverConfig(
+        object_store_root=config.object_store_root,
+        object_store_prefix=config.object_store_prefix,
+        archive_root=config.archive_root,
+        receipt_path=tmp_path / "mover-receipt.json",
+        lock_path=tmp_path / "mover.lock",
+        zstd_path=tool,
+        enforce=True,
+    )
+    receipt, code = mover.run(
+        mover_config,
+        now=NOW,
+        mount_id_provider=lambda fd: os.fstat(fd).st_dev,
+        rename_impl=lambda src_fd, src, dst_fd, dst: os.rename(
+            src, dst, src_dir_fd=src_fd, dst_dir_fd=dst_fd
+        ),
+    )
+    assert code == 0, json.dumps(receipt, indent=2)
+    forcing_subject = _subject(checksum=hashlib.sha256(forcing_raw).hexdigest())
+    run_subject = _subject("runs", "run-a")
+    return config, forcing_subject, run_subject
+
+
+def test_product_archive_provenance_closes_forcing_and_run_db_inventory_loop(tmp_path: Path) -> None:
+    config, forcing_subject, run_subject = _write_forcing_and_run_product_archives(tmp_path)
+    for subject in (forcing_subject, run_subject):
+        assert audit.verify_product_archive(subject, config.archive_root, config.object_store_prefix) == audit.Coverage(
+            "product-archive", ("checksum-verified product archive present",)
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("subject_id", "other"),
+        ("manifest_path", "other.json"),
+        ("manifest_sha256", "b" * 64),
+        ("start_time", "2026-04-30T00:00:00Z"),
+        ("model_id", "other-model"),
+        ("basin_version_id", "other-basin"),
+    ],
+)
+def test_product_archive_forcing_provenance_drift_blocks_completion(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    config, subject, _run_subject = _write_forcing_and_run_product_archives(tmp_path)
+    paths = audit.archive_provenance_paths(config.archive_root, identity=subject.archive_identity)
+    manifest = json.loads(paths.manifest.read_text())
+    manifest["producer"][field] = value
+    paths.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(audit.AuditBlocked, match="producer|schema"):
+        audit.verify_product_archive(subject, config.archive_root, config.object_store_prefix)
 
 
 def test_product_and_hot_manifests_enforce_actual_cap_plus_one(

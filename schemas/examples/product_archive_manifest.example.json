@@ -9,6 +9,16 @@
     "basin_version_id": "yangtze-v1",
     "model_id": "yangtze-shud-v12"
   },
+  "producer": {
+    "kind": "forcing-package",
+    "subject_id": "forc_gfs_2026053100_yangtze_shud_v12",
+    "manifest_path": "forcing_package.json",
+    "manifest_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "start_time": "2026-05-31T00:00:00Z",
+    "end_time": "2026-06-03T00:00:00Z",
+    "model_id": "yangtze-shud-v12",
+    "basin_version_id": "yangtze-v1"
+  },
   "archive": {
     "path": "forcing/gfs/2026053100/yangtze-v1/yangtze-shud-v12/archive.tar.zst",
     "manifest_path": "forcing/gfs/2026053100/yangtze-v1/yangtze-shud-v12/manifest.json",
@@ -16,6 +26,11 @@
     "size_bytes": 1048576
   },
   "files": [
+    {
+      "path": "forcing_package.json",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "size_bytes": 2048
+    },
     {
       "path": "X110.0Y30.0.csv",
       "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",

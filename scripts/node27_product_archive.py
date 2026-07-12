@@ -55,6 +55,7 @@ MAX_ARCHIVE_BYTES = 1024**4
 MAX_TAR_BYTES = 2 * 1024**4
 TOOL_TIMEOUT_SECONDS = 3_600
 MAX_STDERR_BYTES = 64 * 1024
+MAX_PAX_EXTENSION_BYTES = 64 * 1024
 _ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_SCHEMA_PATH = _ROOT / "schemas/product_archive_manifest.schema.json"
 RECEIPT_SCHEMA_PATH = _ROOT / "schemas/product_archive_receipt.schema.json"
@@ -140,6 +141,7 @@ class Candidate:
     source_root_stat: tuple[int, int, int]
     source_mount_id: int
     eligibility_end: datetime
+    producer: Mapping[str, Any] | None = None
 
     @property
     def sort_key(self) -> tuple[str, str, str]:
@@ -441,6 +443,57 @@ def _forcing_identity(manifest: Mapping[str, Any], parts: Sequence[str]) -> tupl
     )
 
 
+def _forcing_provenance(
+    manifest: Mapping[str, Any],
+    *,
+    source_relative: str,
+    files: Sequence[FileRecord],
+    manifest_record: FileRecord,
+    object_store_prefix: str,
+) -> dict[str, Any]:
+    forcing_version_id = manifest.get("forcing_version_id")
+    if not isinstance(forcing_version_id, str) or not _safe_segment(forcing_version_id):
+        raise ArchiveMoverError("forcing manifest has no safe forcing_version_id")
+    declared = manifest.get("files")
+    if not isinstance(declared, list) or not declared:
+        raise ArchiveMoverError("forcing manifest files must be a non-empty array")
+    snapshot = {record.path: record for record in files if record.path != manifest_record.path}
+    declared_paths: set[str] = set()
+    for entry in declared:
+        if not isinstance(entry, Mapping):
+            raise ArchiveMoverError("forcing manifest contains a malformed file entry")
+        uri = entry.get("uri")
+        checksum = entry.get("checksum")
+        canonical_uri = _canonical_object_uri(uri)
+        required_prefix = f"{object_store_prefix}/{source_relative}/"
+        if not canonical_uri.startswith(required_prefix):
+            raise ArchiveMoverError("forcing manifest file URI escapes its exact package leaf")
+        relative = canonical_uri[len(required_prefix) :]
+        if not _safe_relative(relative) or relative == "forcing_package.json":
+            raise ArchiveMoverError("forcing manifest file URI has an unsafe package-relative path")
+        if relative in declared_paths:
+            raise ArchiveMoverError(f"forcing manifest has duplicate file declaration: {relative}")
+        declared_paths.add(relative)
+        record = snapshot.get(relative)
+        if record is None:
+            raise ArchiveMoverError(f"forcing manifest declares a missing product: {relative}")
+        if not isinstance(checksum, str) or checksum != record.sha256:
+            raise ArchiveMoverError(f"forcing manifest checksum differs from pinned product: {relative}")
+    if declared_paths != set(snapshot):
+        missing = sorted(set(snapshot) - declared_paths)
+        raise ArchiveMoverError(f"forcing package contains undeclared products: {missing}")
+    return {
+        "kind": "forcing-package",
+        "subject_id": forcing_version_id,
+        "manifest_path": manifest_record.path,
+        "manifest_sha256": manifest_record.sha256,
+        "start_time": _time(_parse_instant(manifest.get("start_time"), label="forcing start_time")),
+        "end_time": _time(_parse_instant(manifest.get("end_time"), label="forcing end_time")),
+        "model_id": str(manifest["model_id"]),
+        "basin_version_id": str(manifest["basin_version_id"]),
+    }
+
+
 def _run_identity(
     manifest: Mapping[str, Any], run_id: str, object_store_prefix: str
 ) -> tuple[ArchiveIdentity, datetime]:
@@ -501,6 +554,26 @@ def _run_identity(
         ),
         end_time,
     )
+
+
+def _run_provenance(
+    manifest: Mapping[str, Any], *, files: Sequence[FileRecord], manifest_record: FileRecord
+) -> dict[str, Any]:
+    output_files = [record for record in files if record.path.startswith("output/")]
+    if not output_files:
+        raise ArchiveMoverError("run output tree contains no regular product")
+    model = manifest["model"]
+    assert isinstance(model, Mapping)
+    return {
+        "kind": "run-manifest",
+        "subject_id": str(manifest["run_id"]),
+        "manifest_path": manifest_record.path,
+        "manifest_sha256": manifest_record.sha256,
+        "start_time": _time(_parse_instant(manifest.get("start_time"), label="run start_time")),
+        "end_time": _time(_parse_instant(manifest.get("end_time"), label="run end_time")),
+        "model_id": str(model["model_id"]),
+        "basin_version_id": str(model["basin_version_id"]),
+    }
 
 
 def _state_identity(parts: Sequence[str]) -> tuple[ArchiveIdentity, datetime]:
@@ -566,6 +639,8 @@ def discover_candidates(
                 opened = os.fstat(leaf_fd)
                 if opened.st_dev != root_stat.st_dev or mount_id_provider(leaf_fd) != root_mount:
                     raise ArchiveMoverError(f"cross-device/mount candidate rejected: {relative}")
+                manifest: dict[str, Any] | None = None
+                manifest_record: FileRecord | None = None
                 if manifest_rel is None:
                     identity, eligibility_end = _state_identity(relative.split("/"))
                 else:
@@ -589,11 +664,25 @@ def discover_candidates(
                     leaf_fd, mount_id=root_mount, mount_id_provider=mount_id_provider
                 )
                 if manifest_rel is not None:
+                    assert manifest is not None and manifest_record is not None
                     scanned_manifest = next((item for item in files if item.path == manifest_rel), None)
                     if scanned_manifest != manifest_record:
                         raise ArchiveMoverError(
                             f"manifest changed between identity read and tree snapshot: {relative}/{manifest_rel}"
                         )
+                    producer = (
+                        _forcing_provenance(
+                            manifest,
+                            source_relative=relative,
+                            files=files,
+                            manifest_record=manifest_record,
+                            object_store_prefix=config.object_store_prefix,
+                        )
+                        if lane == "forcing"
+                        else _run_provenance(manifest, files=files, manifest_record=manifest_record)
+                    )
+                else:
+                    producer = None
                 if eligibility_end >= cutoff:
                     return
                 candidates.append(
@@ -607,6 +696,7 @@ def discover_candidates(
                         (opened.st_dev, opened.st_ino, opened.st_mtime_ns),
                         root_mount,
                         eligibility_end,
+                        producer,
                     )
                 )
             finally:
@@ -1096,6 +1186,9 @@ def _verify_archive_pair_impl(
                     member_count += 1
                     if member_count > len(expected) or member_count > MAX_TREE_ENTRIES:
                         raise ArchiveMoverError("tar has more members than its bounded manifest")
+                    unexpected_pax = set(member.pax_headers) - {"path", "size"}
+                    if unexpected_pax:
+                        raise ArchiveMoverError(f"tar member has unsupported PAX keys: {sorted(unexpected_pax)}")
                     if not member.isfile() or not _safe_relative(member.name) or member.name in actual:
                         raise ArchiveMoverError(f"unsafe/duplicate/non-regular tar member: {member.name!r}")
                     expected_member = expected.get(member.name)
@@ -1190,6 +1283,62 @@ class _LimitedReader(io.RawIOBase):
         return chunk
 
 
+class _TarHeaderGuardReader(io.RawIOBase):
+    """Inspect each tar header before exposing any extension body to tarfile."""
+
+    def __init__(self, stream: _LimitedReader) -> None:
+        self.stream = stream
+        self.body_bytes_remaining = 0
+        self.pending = bytearray()
+
+    def readable(self) -> bool:
+        return True
+
+    def read(self, size: int = -1) -> bytes:
+        request = 512 if size < 0 else size
+        if request == 0:
+            return b""
+        if self.pending:
+            result = bytes(self.pending[:request])
+            del self.pending[:request]
+            return result
+        if self.body_bytes_remaining:
+            chunk = self.stream.read(min(request, self.body_bytes_remaining))
+            self.body_bytes_remaining -= len(chunk)
+            return chunk
+        parts: list[bytes] = []
+        remaining = 512
+        while remaining:
+            chunk = self.stream.read(remaining)
+            if not chunk:
+                break
+            parts.append(chunk)
+            remaining -= len(chunk)
+        block = b"".join(parts)
+        if len(block) != 512:
+            return block
+        if block == b"\0" * 512:
+            self.pending.extend(block)
+            return self.read(request)
+        typeflag = block[156:157]
+        size_field = block[124:136]
+        if size_field[:1] and size_field[0] & 0x80:
+            raise ArchiveMoverError("tar header uses unsupported base-256 size encoding")
+        try:
+            declared_size = int(size_field.rstrip(b"\0 ") or b"0", 8)
+        except ValueError as error:
+            raise ArchiveMoverError("tar header has invalid size encoding") from error
+        if typeflag in {b"g", b"X", b"L", b"K"}:
+            raise ArchiveMoverError(f"tar uses unsupported extension type: {typeflag.decode('ascii')}")
+        if typeflag == b"x" and declared_size > MAX_PAX_EXTENSION_BYTES:
+            raise ArchiveMoverError(
+                f"local PAX extension exceeds {MAX_PAX_EXTENSION_BYTES} bytes before body consumption"
+            )
+        self.body_bytes_remaining = ((declared_size + 511) // 512) * 512
+        self.pending.extend(block)
+        return self.read(request)
+
+
 class _TarStreamContext:
     def __init__(self, archive_fd: int, zstd_path: Path) -> None:
         self.archive_fd = archive_fd
@@ -1218,19 +1367,28 @@ class _TarStreamContext:
         self.timer.daemon = True
         self.timer.start()
         assert self.process.stdout is not None
-        self.reader = _LimitedReader(self.process.stdout, MAX_TAR_BYTES, self.process)
+        self.limited_reader = _LimitedReader(self.process.stdout, MAX_TAR_BYTES, self.process)
+        self.reader = _TarHeaderGuardReader(self.limited_reader)
         try:
             self.archive = tarfile.open(fileobj=self.reader, mode="r|")
-        except Exception:
+        except Exception as error:
             self.timer.cancel()
-            if self.process.poll() is None:
+            try:
+                return_code = self.process.wait(timeout=TOOL_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired as timeout_error:
                 self.process.kill()
-            self.process.wait()
+                self.process.wait()
+                raise ArchiveOperationalError(
+                    f"decompressor timed out after {TOOL_TIMEOUT_SECONDS}s"
+                ) from timeout_error
             self.thread.join()
             self.process.stdout.close()
             assert self.process.stderr is not None
             self.process.stderr.close()
             os.lseek(self.archive_fd, self.archive_position, os.SEEK_SET)
+            if return_code:
+                message = self.stderr.decode("utf-8", "replace")
+                raise ArchiveOperationalError(f"decompressor failed ({return_code}): {message}") from error
             raise
 
     def _drain_stderr(self) -> None:
@@ -1254,7 +1412,9 @@ class _TarStreamContext:
         try:
             self.archive.close()
             self.timer.cancel()
+            killed_for_parser = False
             if exc_type is not None and self.process.poll() is None:
+                killed_for_parser = True
                 self.process.kill()
             try:
                 return_code = self.process.wait(timeout=TOOL_TIMEOUT_SECONDS)
@@ -1266,12 +1426,11 @@ class _TarStreamContext:
             self.thread.join()
             if self.timed_out:
                 raise ArchiveOperationalError(f"decompressor timed out after {TOOL_TIMEOUT_SECONDS}s")
-            if exc_type is None:
-                if self.stderr_overflow:
-                    raise ArchiveOperationalError(f"compression stderr exceeds {MAX_STDERR_BYTES} bytes")
-                if return_code:
-                    message = self.stderr.decode("utf-8", "replace")
-                    raise ArchiveMoverError(f"decompressor failed ({return_code}): {message}")
+            if self.stderr_overflow:
+                raise ArchiveOperationalError(f"compression stderr exceeds {MAX_STDERR_BYTES} bytes")
+            if return_code and not killed_for_parser:
+                message = self.stderr.decode("utf-8", "replace")
+                raise ArchiveOperationalError(f"decompressor failed ({return_code}): {message}")
         finally:
             if self.process.stdout is not None:
                 self.process.stdout.close()
@@ -1309,7 +1468,7 @@ def _manifest(
     candidate: Candidate, archive_root: Path, *, archive_size: int, archive_digest: str, now: datetime
 ) -> dict[str, Any]:
     paths = archive_provenance_paths(archive_root, identity=candidate.identity)
-    return {
+    manifest = {
         "schema_version": SCHEMA_VERSION,
         "provenance": "product-archive",
         "identity": _identity_dict(candidate.identity),
@@ -1323,6 +1482,9 @@ def _manifest(
         "created_at": _time(now),
         "tool_version": TOOL_VERSION,
     }
+    if candidate.producer is not None:
+        manifest["producer"] = dict(candidate.producer)
+    return manifest
 
 
 def _same_snapshot(candidate: Candidate, root_fd: int, provider: MountIdProvider) -> bool:
@@ -1412,9 +1574,7 @@ def process_candidate(
                     [],
                 ), events
             else:
-                if final_guard_fd is not None:
-                    os.close(final_guard_fd)
-                    final_guard_fd = None
+                assert final_guard_fd is not None
                 quarantine_relative = f".quarantine/{uuid.uuid4().hex}"
                 if not config.enforce:
                     events.append(
@@ -1430,12 +1590,15 @@ def process_candidate(
                     quarantine = config.archive_root / quarantine_relative
                     ensure_directory_no_follow(quarantine.parent, containment_root=config.archive_root)
                     _fsync_directory_chain(quarantine.parent, config.archive_root)
+                    _verify_open_directory_entry(final_guard_fd, final_leaf, config.archive_root)
+                    guarded = os.fstat(final_guard_fd)
                     _rename_leaf(
                         final_leaf,
                         quarantine,
                         config.archive_root,
                         rename_impl,
                         mount_id_provider,
+                        expected_source=(guarded.st_dev, guarded.st_ino),
                     )
                     events.append(
                         _event(len(events), identity, "quarantined", quarantine_relative, str(verification_error))
@@ -1632,10 +1795,19 @@ def _rename_leaf(
         if expected_source is not None:
             installed = os.stat(destination.name, dir_fd=dst_fd, follow_symlinks=False)
             if (installed.st_dev, installed.st_ino) != expected_source:
+                try:
+                    rename_impl(dst_fd, destination.name, src_fd, source.name)
+                    os.fsync(src_fd)
+                    if dst_fd != src_fd:
+                        os.fsync(dst_fd)
+                except OSError as rollback_error:
+                    raise ArchiveMoverError(
+                        f"renamed destination identity is indeterminate; rollback failed: {rollback_error}",
+                        indeterminate=True,
+                        residue=(destination.relative_to(containment_root).as_posix(),),
+                    ) from rollback_error
                 raise ArchiveMoverError(
-                    "renamed destination identity is indeterminate",
-                    indeterminate=True,
-                    residue=(destination.relative_to(containment_root).as_posix(),),
+                    "rename source namespace identity changed; replacement restored",
                 )
         try:
             os.fsync(src_fd)

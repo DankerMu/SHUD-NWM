@@ -91,16 +91,26 @@ def test_compressor_protocol_uses_stdin_only_and_restores_input_offset(tmp_path:
 def _forcing(config: archive.MoverConfig, cycle: str = "2026010100") -> Path:
     leaf = config.object_store_root / f"forcing/gfs/{cycle}/basin-a/model-a"
     leaf.mkdir(parents=True)
-    (leaf / "payload.csv").write_text("time,value\n1,2\n", encoding="utf-8")
+    payload = b"time,value\n1,2\n"
+    (leaf / "payload.csv").write_bytes(payload)
     (leaf / "forcing_package.json").write_text(
         json.dumps(
             {
+                "forcing_version_id": f"forc_gfs_{cycle}_model-a",
                 "source_id": "gfs",
                 "cycle_time": f"{cycle[:4]}-{cycle[4:6]}-{cycle[6:8]}T{cycle[8:]}:00:00Z",
                 "start_time": f"{cycle[:4]}-{cycle[4:6]}-{cycle[6:8]}T{cycle[8:]}:00:00Z",
                 "end_time": f"{cycle[:4]}-{cycle[4:6]}-{cycle[6:8]}T{cycle[8:]}:00:00Z",
                 "basin_version_id": "basin-a",
                 "model_id": "model-a",
+                "files": [
+                    {
+                        "role": "shud_forcing_csv",
+                        "relative_path": "payload.csv",
+                        "uri": f"s3://nhms/forcing/gfs/{cycle}/basin-a/model-a/payload.csv",
+                        "checksum": hashlib.sha256(payload).hexdigest(),
+                    }
+                ],
             }
         ),
         encoding="utf-8",
@@ -249,6 +259,54 @@ def test_inverted_forcing_window_is_discovery_failure(tmp_path: Path) -> None:
     )
     assert candidates == []
     assert "window is inverted" in failures[0].reason
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["unsafe-version", "empty-files", "duplicate", "escape-uri", "bad-checksum", "missing-product", "extra-product"],
+)
+def test_forcing_manifest_must_completely_bind_pinned_package(tmp_path: Path, mutation: str) -> None:
+    config = _config(tmp_path, enforce=False)
+    leaf = _forcing(config)
+    path = leaf / "forcing_package.json"
+    manifest = json.loads(path.read_text())
+    if mutation == "unsafe-version":
+        manifest["forcing_version_id"] = "../unsafe"
+    elif mutation == "empty-files":
+        manifest["files"] = []
+    elif mutation == "duplicate":
+        manifest["files"].append(dict(manifest["files"][0]))
+    elif mutation == "escape-uri":
+        manifest["files"][0]["uri"] = "s3://nhms/forcing/gfs/2026010100/other/model-a/payload.csv"
+    elif mutation == "bad-checksum":
+        manifest["files"][0]["checksum"] = "0" * 64
+    elif mutation == "missing-product":
+        manifest["files"][0]["uri"] = "s3://nhms/forcing/gfs/2026010100/basin-a/model-a/missing.csv"
+    else:
+        (leaf / "undeclared.bin").write_bytes(b"extra")
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    candidates, failures = archive.discover_candidates(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+    )
+    assert candidates == []
+    assert len(failures) == 1
+
+
+def test_run_without_regular_output_product_is_discovery_failure(tmp_path: Path) -> None:
+    config = _config(tmp_path, enforce=False)
+    leaf = _run(config)
+    (leaf / "output/result.nc").unlink()
+    candidates, failures = archive.discover_candidates(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+    )
+    assert candidates == []
+    assert len(failures) == 1
+    assert "no regular product" in failures[0].reason
 
 
 @pytest.mark.parametrize(
@@ -439,23 +497,9 @@ def test_existing_verified_archive_is_idempotently_retired(tmp_path: Path) -> No
     )
     assert code == 0
     # Restore an exact source copy from fixture content, leaving verified final in place.
-    source.mkdir(parents=True)
-    (source / "payload.csv").write_text("time,value\n1,2\n", encoding="utf-8")
+    _forcing(enforce)
     manifest_member = next(item for item in receipt["candidates"][0:1])
     del manifest_member  # receipt identity is not used to reconstruct content
-    (source / "forcing_package.json").write_text(
-        json.dumps(
-            {
-                "source_id": "gfs",
-                "cycle_time": "2026-01-01T00:00:00Z",
-                "start_time": "2026-01-01T00:00:00Z",
-                "end_time": "2026-01-01T00:00:00Z",
-                "basin_version_id": "basin-a",
-                "model_id": "model-a",
-            }
-        ),
-        encoding="utf-8",
-    )
     second, code = archive.run(
         enforce,
         now=datetime(2026, 7, 11, tzinfo=UTC),
@@ -469,7 +513,7 @@ def test_existing_verified_archive_is_idempotently_retired(tmp_path: Path) -> No
 
 def test_existing_verified_archive_is_not_quarantined_when_source_retirement_fails(tmp_path: Path) -> None:
     config = _config(tmp_path, enforce=True)
-    source = _forcing(config)
+    _forcing(config)
     first, code = archive.run(
         config,
         now=datetime(2026, 7, 11, tzinfo=UTC),
@@ -477,21 +521,7 @@ def test_existing_verified_archive_is_not_quarantined_when_source_retirement_fai
         rename_impl=_rename_noreplace,
     )
     assert code == 0
-    source.mkdir(parents=True)
-    (source / "payload.csv").write_text("time,value\n1,2\n", encoding="utf-8")
-    (source / "forcing_package.json").write_text(
-        json.dumps(
-            {
-                "source_id": "gfs",
-                "cycle_time": "2026-01-01T00:00:00Z",
-                "start_time": "2026-01-01T00:00:00Z",
-                "end_time": "2026-01-01T00:00:00Z",
-                "basin_version_id": "basin-a",
-                "model_id": "model-a",
-            }
-        ),
-        encoding="utf-8",
-    )
+    _forcing(config)
 
     def mutate_at_retirement(src_fd: int, src: str, dst_fd: int, dst: str) -> None:
         if dst.startswith(".archive-delete-"):
@@ -580,6 +610,61 @@ def test_operational_existing_verify_failure_never_quarantines(
     assert second["terminals"][0]["status"] == "indeterminate"
     assert second["events"] == []
     assert final.exists() and source.exists()
+
+
+@pytest.mark.parametrize("body", ["exit 7\n", "cat\nexit 7\n"])
+def test_real_decompressor_nonzero_is_operational_and_preserves_evidence(tmp_path: Path, body: str) -> None:
+    config = _config(tmp_path, enforce=True)
+    _forcing(config)
+    first, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 0
+    final = config.archive_root / Path(first["candidates"][0]["archive_path"]).parent
+    source = _forcing(config)
+    failing = tmp_path / "failing-zstd"
+    failing.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+    failing.chmod(0o700)
+    config = archive.MoverConfig(**{**config.__dict__, "zstd_path": failing})
+
+    second, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 1
+    assert second["terminals"][0]["status"] == "indeterminate"
+    assert second["events"] == []
+    assert final.exists() and source.exists()
+
+
+def test_decompressor_spawn_race_is_operational(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _config(tmp_path, enforce=True)
+    _forcing(config)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 0
+    final = config.archive_root / Path(receipt["candidates"][0]["archive_path"]).parent
+
+    def missing(*_args, **_kwargs):
+        raise FileNotFoundError("executable disappeared")
+
+    monkeypatch.setattr(archive.subprocess, "Popen", missing)
+    with pytest.raises(archive.ArchiveOperationalError, match="operation failed"):
+        archive.verify_archive_pair(
+            final,
+            config.archive_root,
+            zstd_path=config.zstd_path,
+            mount_id_provider=_mount_id,
+        )
 
 
 def test_existing_final_internal_swap_before_retirement_preserves_source(
@@ -695,6 +780,42 @@ def test_corrupt_final_is_quarantined_then_replaced_in_enforce(tmp_path: Path) -
     )
 
 
+def test_corrupt_final_namespace_swap_is_restored_without_quarantine_event(tmp_path: Path) -> None:
+    config = _config(tmp_path, enforce=True)
+    source = _forcing(config)
+    final = config.archive_root / "forcing/gfs/2026010100/basin-a/model-a"
+    final.mkdir(parents=True)
+    (final / "unexpected").write_bytes(b"original-corrupt")
+    swapped = False
+
+    def swap_before_rename(src_fd: int, src: str, dst_fd: int, dst: str) -> None:
+        nonlocal swapped
+        if not swapped and src == "model-a" and dst != "model-a":
+            swapped = True
+            os.rename(src, ".raced-original", src_dir_fd=src_fd, dst_dir_fd=src_fd)
+            os.mkdir(src, dir_fd=src_fd)
+            replacement_fd = os.open(src, os.O_RDONLY | os.O_DIRECTORY, dir_fd=src_fd)
+            try:
+                marker_fd = os.open("replacement", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=replacement_fd)
+                os.close(marker_fd)
+            finally:
+                os.close(replacement_fd)
+        _rename_noreplace(src_fd, src, dst_fd, dst)
+
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=swap_before_rename,
+    )
+    assert code == 1
+    assert receipt["events"] == []
+    assert receipt["terminals"][0]["status"] == "failed"
+    assert source.exists()
+    assert (final / "replacement").exists()
+    assert not list((config.archive_root / ".quarantine").iterdir())
+
+
 def test_symlink_final_is_not_quarantined_or_followed(tmp_path: Path) -> None:
     config = _config(tmp_path, enforce=True)
     source = _forcing(config)
@@ -767,6 +888,74 @@ def test_internal_tar_verification_rejects_invalid_member_even_with_matching_out
             zstd_path=config.zstd_path,
             mount_id_provider=_mount_id,
         )
+
+
+def test_oversized_local_pax_extension_is_rejected_before_body_read() -> None:
+    size = archive.MAX_PAX_EXTENSION_BYTES + 1
+    info = tarfile.TarInfo("pax")
+    info.type = tarfile.XHDTYPE
+    info.size = size
+    header = info.tobuf(format=tarfile.USTAR_FORMAT)
+
+    class CountingStream(io.BytesIO):
+        bytes_read = 0
+
+        def read(self, count: int = -1) -> bytes:
+            value = super().read(count)
+            self.bytes_read += len(value)
+            return value
+
+    class Process:
+        def kill(self) -> None:
+            pass
+
+    stream = CountingStream(header + b"x" * size)
+    guarded = archive._TarHeaderGuardReader(archive._LimitedReader(stream, len(header) + size, Process()))
+    with pytest.raises(archive.ArchiveMoverError, match="before body consumption"):
+        guarded.read(10_240)
+    assert stream.bytes_read == 512
+
+
+@pytest.mark.parametrize("extension", [tarfile.XGLTYPE, tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK])
+def test_unsupported_tar_extensions_are_rejected_before_body_read(extension: bytes) -> None:
+    info = tarfile.TarInfo("extension")
+    info.type = extension
+    info.size = 4
+    header = info.tobuf(format=tarfile.USTAR_FORMAT)
+
+    class Process:
+        def kill(self) -> None:
+            pass
+
+    guarded = archive._TarHeaderGuardReader(
+        archive._LimitedReader(io.BytesIO(header + b"test"), len(header) + 4, Process())
+    )
+    with pytest.raises(archive.ArchiveMoverError, match="unsupported extension"):
+        guarded.read(10_240)
+
+
+def test_deterministic_writer_local_pax_path_round_trips(tmp_path: Path) -> None:
+    config = _config(tmp_path, enforce=True)
+    leaf = _forcing(config)
+    long_name = "product-" + "x" * 110 + ".csv"
+    content = b"long-path-product"
+    (leaf / long_name).write_bytes(content)
+    manifest_path = leaf / "forcing_package.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["files"].append(
+        {
+            "uri": f"s3://nhms/forcing/gfs/2026010100/basin-a/model-a/{long_name}",
+            "checksum": hashlib.sha256(content).hexdigest(),
+        }
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 0, receipt
 
 
 @pytest.mark.parametrize("fault", ["unexpected", "declared-size"])

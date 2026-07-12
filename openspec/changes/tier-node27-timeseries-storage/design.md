@@ -76,6 +76,14 @@ display disk window — is never shorter than the DB hot window.
 inode-heavy), per-file zstd (object explosion), cross-volume copy (no second
 volume exists).
 
+The producer product remains the source of truth inside that archive object:
+forcing `files` checksums and run output presence are validated from the same
+pinned source snapshot before eligibility. The sidecar also preserves the
+producer-manifest digest and stable subject/window/model/basin provenance so
+the DB-aware inventory audit can bind a filesystem-created archive back to the
+exact DB subject. The mover itself stays filesystem-only; provenance capture is
+not a hidden DB lookup.
+
 **D3 — Compression settings must cover the existing primary keys.**
 TimescaleDB 2.10 requires unique-constraint columns to appear in
 `compress_segmentby` + `compress_orderby`:

@@ -499,6 +499,15 @@ Order is load-bearing:
     Output URIs bind the configured canonical `OBJECT_STORE_PREFIX`, including
     scheme, bucket and optional key prefix; wrong authority/prefix,
     query/fragment, encoded traversal, backslash or non-S3 scheme fails closed.
+    The run output directory must exist and the bounded no-follow snapshot must
+    contain at least one regular product.
+  - forcing producer completeness requires safe `forcing_version_id`, a
+    non-empty unique `files` list, canonical member URIs bound inside the exact
+    leaf, valid sha256 values matching the same pinned snapshot, and no
+    undeclared product members. The outer archive manifest retains the stable
+    producer subject, producer-manifest digest/path, authoritative window and
+    model/basin identity; #847 archive coverage binds those values and the
+    archived producer-manifest member digest to its DB subject.
   - state candidates are whole physical valid-time trees. Provider-qualified
     layout is `states/<source>/<physical_model>/<valid_time>/...`; legacy
     layout is `states/<physical_model>/<valid_time>/...` and maps only to
@@ -573,6 +582,14 @@ Order is load-bearing:
   triggers quarantine. Conflict is a separate typed outcome, not string
   matching. A verified manifest compares source members by unique
   path -> (size, sha256), never by array input order.
+  A corrupt final remains pinned through quarantine: the rename must target the
+  exact guarded inode that failed verification, and a path replacement fails
+  closed without moving or labelling the replacement. Decompressor non-zero,
+  timeout, spawn, stream or stderr failure is operational even when tar parsing
+  also fails. Bounded local PAX metadata may support deterministic long paths
+  and large-file size fields, but extension-header size is checked before body
+  streaming; global/Solaris PAX, GNU longname/longlink and unexpected PAX keys
+  are rejected.
 
   Immediately before retirement the still-pinned source root and complete
   tree must equal the archived preimage (inode/type/path/size/mtime and
@@ -671,6 +688,13 @@ Order is load-bearing:
     traversal, backslash or unsupported scheme.
     Expected: strict configured object-store authority binding blocks before
     candidate selection or source mutation.
+  - Input: forcing manifest has missing/empty/duplicate `files`, missing or
+    unsafe stable subject, escaped URI, missing/checksum-different member or an
+    undeclared product; or run output is missing/empty/non-regular-only.
+    Expected: discovery fails before selection in dry-run and enforce; source
+    remains and no canonical archive is created. A valid forcing/run archive
+    carries producer provenance which #847 binds to the exact DB subject before
+    declaring product-archive coverage complete.
   - Input: provider state, source-less legacy state and a clone target model
     that references the provider physical artifact.
     Expected: provider/legacy paths are collision-disjoint; only the physical
@@ -700,6 +724,10 @@ Order is load-bearing:
     non-zero/indeterminate; before tombstone rename source is untouched, while
     later failures truthfully record complete/partial tombstone residue.
     Dry-run only records plans.
+  - Input: a corrupt canonical final is namespace-swapped for a different valid
+    leaf immediately before quarantine.
+    Expected: exact guarded-inode binding detects the swap; the replacement is
+    not moved or called corrupt and the candidate fails non-zero.
   - Input: quarantine succeeds then fresh archive succeeds/fails, and receipt
     temp/replace/fsync/parent-swap faults or unsafe lock/receipt parents.
     Expected: one terminal outcome plus ordered quarantine event(s); strict
@@ -710,10 +738,16 @@ Order is load-bearing:
     its `files` array.
     Expected: only deterministic corruption quarantines; operational failure
     preserves final+source; reversed valid order remains idempotent.
+  - Input: a real decompressor emits no tar or a valid tar and then exits
+    non-zero.
+    Expected: both are operational/indeterminate; canonical final and source
+    remain and no quarantine event is emitted.
   - Input: tar begins with an unexpected member, declared-size mismatch or
-    more members than manifest/tree cap.
+    more members than manifest/tree cap; or with oversized/global PAX or GNU
+    longname/longlink metadata.
     Expected: reject at the offending header before streaming its body;
-    member-count, size, cumulative payload and depth caps are fail-fast.
+    member-count, size, extension metadata, cumulative payload and depth caps
+    are fail-fast while bounded writer-generated local PAX still round-trips.
   - Input: cutoff equality, CLI age zero/20, candidate/tree/depth/manifest/
     file/source/tar/uncompressed/timeout/stderr cap overflow, unreadable state
     directory, relative/bare zstd path, and lock contention.

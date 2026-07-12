@@ -31,6 +31,20 @@ Run output URIs SHALL bind configured S3 scheme/bucket/optional prefix and
 reject wrong authority/prefix, query/fragment, encoded traversal, backslash or
 unsupported schemes.
 
+Only manifest-complete producer trees are archive candidates. A forcing
+package SHALL carry a safe `forcing_version_id`, a non-empty unique `files`
+list whose canonical object URIs remain inside the exact package leaf, and
+valid sha256 checksums that match every declared regular member from the same
+pinned source snapshot; undeclared product members SHALL fail discovery. A run
+SHALL contain its bound `output/` directory and at least one regular output
+product under the bounded no-follow snapshot. The outer archive manifest for
+forcing/runs SHALL retain producer provenance (stable subject identifier,
+producer-manifest path and sha256, authoritative window and model/basin
+identity). The inventory audit SHALL bind that provenance and the archived
+producer-manifest member digest to the DB subject before reporting
+`product-archive` coverage; a filesystem-only mover never substitutes for that
+later DB comparison.
+
 #### Scenario: State snapshot products are archived
 
 - **WHEN** the archive mover archives an aged state product from
@@ -75,6 +89,10 @@ hardlink, device or FIFO members SHALL fail verification even when the
 tarball-level sha256 matches. Actual member count/name/type/declared size and
 depth SHALL be checked at each header before body extraction; unexpected or
 oversize members fail immediately, with cumulative payload limits enforced.
+Tar extension headers are part of that boundary: bounded local PAX metadata
+needed by the deterministic writer MAY be accepted, but oversized PAX bodies,
+global/Solaris PAX headers, GNU longname/longlink headers and unexpected PAX
+keys SHALL be rejected before their declared body is streamed.
 
 The verified tarball and manifest SHALL be published as one dirfd-bound,
 no-replace atomic leaf directory, followed by complete durability fsync and
@@ -84,7 +102,10 @@ affected by publish, quarantine, tombstone or tombstone removal SHALL be
 fsynced. A raced destination SHALL never be overwritten. A corrupt,
 partial or unexpected final leaf SHALL be atomically quarantined whole on the
 same archive device before fresh staging; dry-run only reports that plan. A
-verified existing archive is idempotent only when any still-present source
+quarantine rename SHALL remain bound to the exact guarded inode that failed
+deterministic verification; a namespace replacement MUST fail closed and MUST
+NOT move or label the replacement as corrupt. A verified existing archive is
+idempotent only when any still-present source
 tree is member-for-member identical; drift preserves both and fails rather
 than overwriting valid historical evidence. Member comparison is a unique
 path -> (size, sha256) map and is independent of manifest array order.
