@@ -21,6 +21,8 @@ _SCHEMA_PATH = _ROOT / "schemas/timeseries_compression_receipt.schema.json"
 _MIGRATION_PATH = _ROOT / "db/migrations/000047_hypertable_compression_settings.sql"
 _RUNNER_SOURCE_PATH = _ROOT / "scripts/node27_timeseries_compression.py"
 _WRAPPER_PATH = _ROOT / "scripts/node27_timeseries_compression_once.sh"
+_SYSTEMD_SERVICE_PATH = _ROOT / "infra/systemd/nhms-node27-timeseries-compression.service"
+_SYSTEMD_TIMER_PATH = _ROOT / "infra/systemd/nhms-node27-timeseries-compression.timer"
 
 _NOW = datetime(2026, 7, 11, 12, 0, tzinfo=UTC)
 
@@ -884,3 +886,29 @@ def test_compression_wrapper_rejects_unsafe_runtime_contract(
     assert result.stdout == ""
     failure = json.loads(result.stderr.strip())
     assert failure == {"status": "failed", "reason": expected_reason}
+
+
+def test_timeseries_compression_service_bootstraps_log_dir() -> None:
+    service_text = _SYSTEMD_SERVICE_PATH.read_text(encoding="utf-8")
+    assert (
+        "ExecStartPre=/usr/bin/mkdir -p /home/nwm/node27-timeseries-compression-logs"
+        in service_text
+    )
+    assert (
+        "StandardOutput=append:/home/nwm/node27-timeseries-compression-logs/systemd.log"
+        in service_text
+    )
+    lines = service_text.splitlines()
+    pre_index = next(
+        i for i, line in enumerate(lines) if line.startswith("ExecStartPre=")
+    )
+    start_index = next(
+        i for i, line in enumerate(lines) if line.startswith("ExecStart=")
+    )
+    assert pre_index < start_index
+
+
+def test_timeseries_compression_timer_oncalendar_and_unit_wiring() -> None:
+    timer_text = _SYSTEMD_TIMER_PATH.read_text(encoding="utf-8")
+    assert "OnCalendar=*-*-* 04:25:00 UTC" in timer_text
+    assert "Unit=nhms-node27-timeseries-compression.service" in timer_text

@@ -23,7 +23,7 @@ system-level (root) units for this lane.
 1. Create the runbook receipt directories:
 
    ```
-   mkdir -p ~/node27-product-archive-logs ~/node27-storage-inventory-audit-logs
+   mkdir -p ~/node27-product-archive-logs ~/node27-storage-inventory-audit-logs ~/node27-timeseries-compression-logs
    ```
 
 2. Copy the env examples into place and lock them down:

@@ -4,6 +4,7 @@ Description=NHMS node-27 timeseries compression
 [Service]
 Type=oneshot
 WorkingDirectory=/home/nwm/NWM
+ExecStartPre=/usr/bin/mkdir -p /home/nwm/node27-timeseries-compression-logs
 ExecStart=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh
 StandardOutput=append:/home/nwm/node27-timeseries-compression-logs/systemd.log
 StandardError=append:/home/nwm/node27-timeseries-compression-logs/systemd.err
