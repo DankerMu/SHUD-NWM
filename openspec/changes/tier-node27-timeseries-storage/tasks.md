@@ -917,7 +917,7 @@ Order is load-bearing:
 
 ## 4. Hypertable compression (`hypertable-compression`)
 
-- [ ] 4.1 Migration `000043`: compression settings for both hypertables.
+- [ ] 4.1 Migration `000047`: compression settings for both hypertables. (Issue #851 body still cites `000043` from the earlier planning window; slot 000043–000046 are now occupied, so this task uses the next free slot 000047. #851 fixture in `design.md` records the deviation.)
   Evidence floor: `ALTER TABLE ... SET (timescaledb.compress,
   compress_segmentby, compress_orderby)` per design D3; no policy job.
   Verification on the real-DB oracle:

@@ -1,0 +1,141 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NHMS Node-27 Timeseries Compression Runner Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "generated_at",
+    "now_utc",
+    "lag_seconds",
+    "per_tick_bound",
+    "mode",
+    "outcome",
+    "selected",
+    "deferred",
+    "skipped",
+    "per_table_totals"
+  ],
+  "properties": {
+    "schema_version": {"enum": ["1.0"]},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "now_utc": {"type": "string", "format": "date-time"},
+    "lag_seconds": {"type": "integer", "minimum": 1},
+    "per_tick_bound": {"type": "integer", "minimum": 1},
+    "mode": {"enum": ["dry-run", "enforce"]},
+    "outcome": {"enum": ["clean", "partial", "refused_lock", "refused_config"]},
+    "selected": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": {"$ref": "#/$defs/selected_descriptor"}
+    },
+    "deferred": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": {"$ref": "#/$defs/deferred_descriptor"}
+    },
+    "skipped": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": {"$ref": "#/$defs/skipped_descriptor"}
+    },
+    "per_table_totals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hydro.river_timeseries", "met.forcing_station_timeseries"],
+      "properties": {
+        "hydro.river_timeseries": {"$ref": "#/$defs/table_total"},
+        "met.forcing_station_timeseries": {"$ref": "#/$defs/table_total"}
+      }
+    }
+  },
+  "$defs": {
+    "selected_descriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hypertable_schema",
+        "hypertable_name",
+        "chunk_schema",
+        "chunk_name",
+        "range_start",
+        "range_end",
+        "before_bytes",
+        "after_bytes"
+      ],
+      "properties": {
+        "hypertable_schema": {"type": "string", "minLength": 1},
+        "hypertable_name": {"type": "string", "minLength": 1},
+        "chunk_schema": {"type": "string", "minLength": 1},
+        "chunk_name": {"type": "string", "minLength": 1},
+        "range_start": {"type": "string", "format": "date-time"},
+        "range_end": {"type": "string", "format": "date-time"},
+        "before_bytes": {"type": "integer", "minimum": 0},
+        "after_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "error": {"type": "string", "minLength": 1}
+      }
+    },
+    "deferred_descriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hypertable_schema",
+        "hypertable_name",
+        "chunk_schema",
+        "chunk_name",
+        "range_start",
+        "range_end",
+        "before_bytes",
+        "after_bytes",
+        "defer_reason"
+      ],
+      "properties": {
+        "hypertable_schema": {"type": "string", "minLength": 1},
+        "hypertable_name": {"type": "string", "minLength": 1},
+        "chunk_schema": {"type": "string", "minLength": 1},
+        "chunk_name": {"type": "string", "minLength": 1},
+        "range_start": {"type": "string", "format": "date-time"},
+        "range_end": {"type": "string", "format": "date-time"},
+        "before_bytes": {"type": "integer", "minimum": 0},
+        "after_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "defer_reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "skipped_descriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hypertable_schema",
+        "hypertable_name",
+        "chunk_schema",
+        "chunk_name",
+        "range_start",
+        "range_end",
+        "before_bytes",
+        "after_bytes",
+        "skip_reason"
+      ],
+      "properties": {
+        "hypertable_schema": {"type": "string", "minLength": 1},
+        "hypertable_name": {"type": "string", "minLength": 1},
+        "chunk_schema": {"type": "string", "minLength": 1},
+        "chunk_name": {"type": "string", "minLength": 1},
+        "range_start": {"type": "string", "format": "date-time"},
+        "range_end": {"type": "string", "format": "date-time"},
+        "before_bytes": {"type": "integer", "minimum": 0},
+        "after_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "skip_reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "table_total": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["before_bytes", "after_bytes", "chunks_compressed"],
+      "properties": {
+        "before_bytes": {"type": "integer", "minimum": 0},
+        "after_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "chunks_compressed": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}
