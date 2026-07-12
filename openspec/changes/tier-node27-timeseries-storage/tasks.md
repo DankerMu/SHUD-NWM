@@ -961,7 +961,7 @@ Order is load-bearing:
     runbook procedure.
   - Input: write targeting only uncompressed chunks.
     Expected: behavior unchanged.
-- [ ] 4.4 Add compression systemd units + env + governance registration.
+- [x] 4.4 Add compression systemd units + env + governance registration.
   Evidence floor:
   `infra/systemd/nhms-node27-timeseries-compression.{service,timer}` +
   `infra/env/node27-timeseries-compression.example` (lag, per-tick bound,

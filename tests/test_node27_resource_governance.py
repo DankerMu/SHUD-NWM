@@ -113,6 +113,47 @@ def test_default_services_include_new_archive_and_audit_units() -> None:
     assert expected.issubset(set(governance.DEFAULT_SERVICES))
 
 
+def test_default_services_includes_timeseries_compression_units() -> None:
+    # #853 registers the compression service + timer so the governance
+    # audit receipt reflects their systemd state alongside the other
+    # node-27 storage-tier units.
+    expected = {
+        "nhms-node27-timeseries-compression.service",
+        "nhms-node27-timeseries-compression.timer",
+    }
+    assert expected.issubset(set(governance.DEFAULT_SERVICES))
+
+
+def test_collect_systemd_receipt_includes_compression_units(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When systemctl is mocked, the audit receipt must carry entries for
+    both new compression units so #853 governance registration is proven
+    end-to-end through the collector rather than only via the tuple set."""
+
+    def _fake_run_command(args, *, timeout: int = 20) -> dict:
+        # Simulate a healthy systemctl show/list-timers response.
+        return {
+            "status": "ok",
+            "return_code": 0,
+            "stdout": "Id=stub\nActiveState=active\nSubState=running\nResult=success\n",
+            "stderr": "",
+            "args": list(args),
+        }
+
+    monkeypatch.setattr(governance, "_run_command", _fake_run_command)
+    payload = governance.collect_systemd(governance.DEFAULT_SERVICES)
+    services = payload["services"]
+    assert "nhms-node27-timeseries-compression.service" in services
+    assert "nhms-node27-timeseries-compression.timer" in services
+    for unit in (
+        "nhms-node27-timeseries-compression.service",
+        "nhms-node27-timeseries-compression.timer",
+    ):
+        assert services[unit]["command"]["status"] == "ok"
+        assert services[unit]["properties"].get("Id") == "stub"
+
+
 def test_config_absent_archive_env_yields_none_archive_root(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in (
         "NODE27_GOVERNANCE_ARCHIVE_ROOT",
