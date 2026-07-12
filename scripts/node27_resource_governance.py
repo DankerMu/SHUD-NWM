@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -27,8 +28,12 @@ DEFAULT_SERVICES = (
     "nhms-node27-autopipe.timer",
     "nhms-node27-download.service",
     "nhms-node27-download.timer",
+    "nhms-node27-product-archive.service",
+    "nhms-node27-product-archive.timer",
     "nhms-node27-raw-retention.service",
     "nhms-node27-raw-retention.timer",
+    "nhms-node27-storage-inventory-audit.service",
+    "nhms-node27-storage-inventory-audit.timer",
 )
 DEFAULT_REPO_RELATIVE_SIZE_TARGETS = (
     "data",
@@ -67,6 +72,8 @@ class AuditThresholds:
     temp_bytes_warn: int = 50 * GIB
     wal_warn_bytes: int = 10 * GIB
     dead_tuple_warn_pct: float = 10.0
+    archive_free_warn_bytes: int | None = None
+    archive_free_refuse_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -78,6 +85,7 @@ class AuditConfig:
     summary_path: Path | None
     services: tuple[str, ...]
     thresholds: AuditThresholds
+    archive_root: Path | None = None
 
 
 def _utc_now() -> str:
@@ -196,6 +204,58 @@ def _du_bytes(path: Path) -> dict[str, Any]:
         "status": "unavailable",
         "error": fallback.get("stderr") or first.get("stderr") or "du_failed",
     }
+
+
+def collect_archive_root(config: AuditConfig) -> dict[str, Any]:
+    """Report archive-root shared-volume free space + on-disk footprint.
+
+    Returns a benign "skipped" note when no archive root is configured so
+    hosts without the archive lane still emit a full governance receipt.
+    Free-space watermarks may independently be unset even when archive_root
+    is configured — the receipt keeps the raw measurements and reports
+    band="unconfigured" so future tuning can inspect production numbers
+    before turning refusal on.
+    """
+    if config.archive_root is None:
+        return {"status": "skipped", "reason": "archive_root_unset"}
+    resolved = _safe_resolve(config.archive_root)
+    if resolved is None:
+        return {"path": str(config.archive_root), "status": "unavailable"}
+    payload: dict[str, Any] = {"path": str(resolved), "status": "ok"}
+    try:
+        usage = shutil.disk_usage(resolved)
+        payload["total_bytes"] = usage.total
+        payload["free_bytes"] = usage.free
+        payload["total_pretty"] = _bytes_pretty(usage.total)
+        payload["free_pretty"] = _bytes_pretty(usage.free)
+    except OSError as error:
+        payload["status"] = "unavailable"
+        payload["error"] = str(error)
+        return payload
+    du_result = _du_bytes(resolved)
+    if du_result.get("status") == "ok":
+        payload["used_bytes"] = du_result["bytes"]
+        payload["used_pretty"] = du_result["pretty"]
+    else:
+        payload["used_bytes"] = None
+        payload["used_status"] = du_result.get("status")
+        if "error" in du_result:
+            payload["used_error"] = du_result["error"]
+    warn = config.thresholds.archive_free_warn_bytes
+    refuse = config.thresholds.archive_free_refuse_bytes
+    payload["warn_free_bytes"] = warn
+    payload["refuse_free_bytes"] = refuse
+    free = payload.get("free_bytes")
+    if warn is not None and refuse is not None and isinstance(free, int):
+        if free < refuse:
+            payload["band"] = "refuse"
+        elif free < warn:
+            payload["band"] = "warn"
+        else:
+            payload["band"] = "clean"
+    else:
+        payload["band"] = "unconfigured"
+    return payload
 
 
 def collect_filesystem(config: AuditConfig) -> dict[str, Any]:
@@ -622,6 +682,46 @@ def _recommendations(receipt: Mapping[str, Any], thresholds: AuditThresholds) ->
                         "action": "Let autovacuum finish or schedule manual VACUUM during a quiet window.",
                     }
                 )
+    archive = receipt.get("archive_root")
+    if isinstance(archive, Mapping) and archive.get("status") == "ok":
+        band = archive.get("band")
+        free_bytes = archive.get("free_bytes")
+        if band == "refuse":
+            recommendations.append(
+                {
+                    "severity": "critical",
+                    "area": "archive",
+                    "code": "ARCHIVE_FREE_BELOW_REFUSE",
+                    "evidence": {
+                        "archive_root": archive.get("path"),
+                        "free_bytes": free_bytes,
+                        "free_pretty": archive.get("free_pretty"),
+                        "refuse_free_bytes": archive.get("refuse_free_bytes"),
+                    },
+                    "action": (
+                        "Archive-root shared volume free space is below the refuse "
+                        "watermark; the mover will refuse enforce until space is freed."
+                    ),
+                }
+            )
+        elif band == "warn":
+            recommendations.append(
+                {
+                    "severity": "warning",
+                    "area": "archive",
+                    "code": "ARCHIVE_FREE_BELOW_WARN",
+                    "evidence": {
+                        "archive_root": archive.get("path"),
+                        "free_bytes": free_bytes,
+                        "free_pretty": archive.get("free_pretty"),
+                        "warn_free_bytes": archive.get("warn_free_bytes"),
+                    },
+                    "action": (
+                        "Archive-root shared volume free space is below the warn "
+                        "watermark; review retention/backlog before the refuse gate fires."
+                    ),
+                }
+            )
     return recommendations
 
 
@@ -630,6 +730,7 @@ def build_receipt(config: AuditConfig) -> dict[str, Any]:
     filesystem = collect_filesystem(config)
     postgres = collect_postgres(config.database_url)
     systemd = collect_systemd(config.services)
+    archive_root = collect_archive_root(config)
     receipt: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "status": "completed",
@@ -640,10 +741,12 @@ def build_receipt(config: AuditConfig) -> dict[str, Any]:
             "repo_root": str(config.repo_root),
             "object_store_root": str(config.object_store_root),
             "pgdata_root": str(config.pgdata_root) if config.pgdata_root is not None else None,
+            "archive_root": str(config.archive_root) if config.archive_root is not None else None,
         },
         "filesystem": filesystem,
         "postgres": postgres,
         "systemd": systemd,
+        "archive_root": archive_root,
         "safety": {
             "database_url_redacted": bool(config.database_url),
             "destructive_actions_enabled": False,
@@ -691,6 +794,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--database-url", default=os.getenv("DATABASE_URL"))
     parser.add_argument("--summary-path", default=os.getenv("NODE27_GOVERNANCE_SUMMARY_PATH"))
+    parser.add_argument(
+        "--archive-root",
+        default=None,
+        help=(
+            "Absolute archive root; env fallback NODE27_GOVERNANCE_ARCHIVE_ROOT "
+            "or NHMS_ARCHIVE_ROOT."
+        ),
+    )
     parser.add_argument("--service", dest="services", action="append", default=[])
     parser.add_argument(
         "--root-free-warn-bytes",
@@ -722,16 +833,55 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _parse_archive_free_space_watermarks() -> tuple[int | None, int | None]:
+    """Strict integer parse of archive free-space warn/refuse env watermarks.
+
+    Missing (both env vars absent) means the archive-free-space report skips
+    the band classification and returns (None, None). Every other invalid
+    shape (partial configuration, empty string, non-integer, non-positive,
+    refuse >= warn) is a fail-closed governance error rather than a silent
+    accept — the audit must not fabricate green bands.
+    """
+    warn_raw = os.environ.get("NHMS_ARCHIVE_FREE_SPACE_WARN_BYTES")
+    refuse_raw = os.environ.get("NHMS_ARCHIVE_FREE_SPACE_REFUSE_BYTES")
+    if warn_raw is None and refuse_raw is None:
+        return None, None
+    if warn_raw is None or refuse_raw is None:
+        raise ValueError(
+            "archive free-space watermarks NHMS_ARCHIVE_FREE_SPACE_WARN_BYTES and "
+            "NHMS_ARCHIVE_FREE_SPACE_REFUSE_BYTES must be set together"
+        )
+    try:
+        warn = int(warn_raw)
+        refuse = int(refuse_raw)
+    except ValueError as error:
+        raise ValueError("archive free-space watermarks must be integer byte counts") from error
+    if warn <= 0 or refuse <= 0:
+        raise ValueError("archive free-space watermarks must be positive")
+    if refuse >= warn:
+        raise ValueError("archive refuse watermark must be strictly less than warn watermark")
+    return warn, refuse
+
+
 def config_from_args(args: argparse.Namespace) -> AuditConfig:
+    archive_warn, archive_refuse = _parse_archive_free_space_watermarks()
     thresholds = AuditThresholds(
         root_free_warn_bytes=args.root_free_warn_bytes,
         root_free_critical_bytes=args.root_free_critical_bytes,
         home_free_warn_bytes=args.home_free_warn_bytes,
         database_warn_bytes=args.database_warn_bytes,
         database_critical_bytes=args.database_critical_bytes,
+        archive_free_warn_bytes=archive_warn,
+        archive_free_refuse_bytes=archive_refuse,
     )
     pgdata_root = Path(args.pgdata_root).expanduser() if args.pgdata_root else None
     summary_path = Path(args.summary_path).expanduser() if args.summary_path else None
+    archive_raw = (
+        args.archive_root
+        or os.getenv("NODE27_GOVERNANCE_ARCHIVE_ROOT")
+        or os.getenv("NHMS_ARCHIVE_ROOT")
+    )
+    archive_root = Path(archive_raw).expanduser() if archive_raw else None
     return AuditConfig(
         repo_root=Path(args.repo_root).expanduser(),
         object_store_root=Path(args.object_store_root).expanduser(),
@@ -740,12 +890,20 @@ def config_from_args(args: argparse.Namespace) -> AuditConfig:
         summary_path=summary_path,
         services=tuple(args.services or DEFAULT_SERVICES),
         thresholds=thresholds,
+        archive_root=archive_root,
     )
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    config = config_from_args(args)
+    try:
+        config = config_from_args(args)
+    except ValueError as error:
+        print(
+            json.dumps({"status": "failed", "reason": str(error)}, sort_keys=True),
+            file=sys.stderr,
+        )
+        return 2
     receipt = build_receipt(config)
     if config.summary_path is not None:
         _write_summary(config.summary_path, receipt)
