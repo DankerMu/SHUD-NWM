@@ -23,7 +23,7 @@ system-level (root) units for this lane.
 1. Create the runbook receipt directories:
 
    ```
-   mkdir -p ~/node27-product-archive-logs ~/node27-storage-inventory-audit-logs ~/node27-timeseries-compression-logs
+   mkdir -p ~/node27-product-archive-logs ~/node27-storage-inventory-audit-logs ~/node27-timeseries-compression-logs ~/node27-archive-rebuild-drill-logs
    ```
 
 2. Copy the env examples into place and lock them down:
@@ -418,6 +418,119 @@ undone by the scheduled compression runner. If the reingest itself
 completes but the operator wants to abandon the decompress state, force a
 compression pass with the runner's enforce flag once the chunk falls
 outside the lag window.
+
+## 7. Archive rebuild drill (`archive-rebuild-drill`)
+
+The drill (`scripts/node27_archive_rebuild_drill.py`, issue #854) proves that
+products archived by the mover and salvage objects published by
+`scripts/node27_db_export_salvage.py` are round-trippable back into an
+ingest-shaped Postgres/TimescaleDB — without ever writing the production
+hypertables (design D5, ADR 0002).
+
+### 7.1 Isolation invariants (never bypass)
+
+- **Staging DB is a SEPARATE PHYSICAL DATABASE.** Same-DB same-schema
+  isolation is unachievable because every ingest SQL literal is
+  `core.` / `met.` / `hydro.` / `ops.` qualified (`workers/output_parser/parser.py`,
+  `packages/common/forcing_domain_handoff_apply.py`). The drill refuses at
+  entry if the parsed `STAGING_DATABASE_URL` dbname equals
+  `PROD_DATABASE_URL_RO` dbname.
+- **Prod connection is SELECT-only.** The drill opens the prod DSN with
+  `default_transaction_read_only = on` and asserts the setting via
+  `SHOW default_transaction_read_only`. Even a role that accidentally has
+  INSERT privilege cannot mutate prod inside a read-only transaction.
+- **Staging DB is DROPped + CREATEd + migrated from zero per run.** Uses
+  `POSTGRES_ADMIN_URL` (a superuser DSN whose dbname is `postgres`).
+  Cleanup runs in a `finally:` block on both PASS and FAIL paths.
+- **Archive files are read-only inputs.** The drill never rewrites, moves,
+  or deletes tar.zst / manifest.json / db-export .csv.zst objects.
+
+### 7.2 Wire-format codes
+
+The drill emits structured `differences[]` on FAIL. Codes are
+byte-identical across the code (`scripts/node27_archive_rebuild_drill.py`),
+this runbook, and design.md #854 fixture block:
+
+- `ARCHIVE_MANIFEST_MISMATCH` — manifest sha256/size does not match
+  restored file.
+- `ARCHIVE_TAR_CORRUPTED` — tarball truncated or extract-to-disk fails
+  (includes malicious `../` path escape).
+- `SALVAGE_SHA256_MISMATCH` — db-export object sha256 does not match its
+  salvage manifest.
+- `SALVAGE_ROW_COUNT_MISMATCH` — decompressed row count differs from
+  manifest `exported_row_count`.
+- `REGISTRY_CLOSURE_INCOMPLETE` — the ancestor row(s) needed for
+  ingest FK checks are missing in prod (fail-closed; no vacuous PASS).
+- `STAGING_COUNT_MISMATCH` — staging `COUNT(*)` differs from the
+  file-derived expected count (archive manifests carry no row counts;
+  parity oracle is the restored file itself).
+
+### 7.3 How to run
+
+```
+# 1. Prime env
+cp /home/nwm/NWM/infra/env/node27-archive-rebuild-drill.example \
+   /home/nwm/NWM/infra/env/node27-archive-rebuild-drill.env
+chmod 0600 /home/nwm/NWM/infra/env/node27-archive-rebuild-drill.env
+# fill in real PROD_DATABASE_URL_RO, STAGING_DATABASE_URL,
+# POSTGRES_ADMIN_URL, and NHMS_ARCHIVE_ROOT.
+
+# 2. Source + invoke against real archive + salvage manifests
+set -a; source /home/nwm/NWM/infra/env/node27-archive-rebuild-drill.env; set +a
+uv run python scripts/node27_archive_rebuild_drill.py \
+  --archive-manifest "${NHMS_ARCHIVE_ROOT}/runs/<run_id>/manifest.json" \
+  --archive-manifest "${NHMS_ARCHIVE_ROOT}/forcing/gfs/<cycle>/<basin>/<model>/manifest.json" \
+  --salvage-manifest "${NHMS_ARCHIVE_ROOT}/db-export/forcing/<forcing_version_id>/manifest.json"
+```
+
+Exit code semantics: `0` = PASS, `1` = FAIL (per-item differences), `2` =
+configuration refusal (missing env var, DSN parity, unsafe path). The
+receipt path is announced to stdout on success.
+
+### 7.4 Reading the receipt
+
+Receipts match `schemas/archive_rebuild_drill_receipt.schema.json`.
+Every receipt carries:
+
+- `staging_database.database` — the isolated physical database name that
+  was DROPped after the run. MUST differ from prod dbname.
+- `staging_database.schema` — semantic drill-run label (e.g.
+  `archive_drill_20260711_forcing_gfs`); NOT a Postgres CREATE SCHEMA.
+- `staging_database.instance_id` — cluster/host identifier stamped by
+  `NHMS_ARCHIVE_REBUILD_DRILL_INSTANCE_ID`.
+- `coverage[]` — the validated `(source, window)` tuples the drill
+  actually restored + verified. Coverage tuples are attributed ONLY to
+  successfully verified manifests (per-source: `forcing` / `runs` from
+  product cycles, `db-export` from salvage selectors).
+- On PASS: `comparisons.cycles[]`, `comparisons.selectors[]`,
+  `comparisons.counts[]`.
+- On FAIL: `differences[]` where each entry names the failing item, the
+  wire-format code, and the expected/actual values.
+
+### 7.5 How the coverage rule maps to the retention gate
+
+Per the `archive-rebuild-drill` spec: a drill PASS receipt covers a
+candidate retention drop window only when its declared `coverage[]`
+tuples include, sampled within or older than that window:
+
+- ≥1 product-derived cycle for each timeseries-bearing source lane
+  (`forcing/`, `runs/`) that has DB rows in the drop window; PLUS
+- ≥1 `db-export` selector whenever verified salvage objects cover any
+  part of the drop window.
+
+The drill declares its tuples faithfully; the retention runner (#855)
+evaluates them against its candidate drop window. A FAIL receipt, a
+stale receipt, or a PASS receipt whose coverage is insufficient blocks
+retention enforcement.
+
+### 7.6 Live receipts (§5.2 boundary)
+
+Live PASS receipts on node-27 covering the planned 30-day drop window
+are the domain of task §5.2 (follow-up commit under issue #854, not part
+of the §5.1 PR that introduced this section). Once §5.2 lands, the live
+receipts will be committed under
+`docs/runbooks/receipts/node27_archive_rebuild_drill/` — mirroring the
+mover and audit receipt directories.
 
 ## Rollback (unit-level, not data-level)
 

@@ -980,7 +980,7 @@ Order is load-bearing:
 
 ## 5. Archive rebuild drill (`archive-rebuild-drill`)
 
-- [ ] 5.1 Build the drill script
+- [x] 5.1 Build the drill script
   (`scripts/node27_archive_rebuild_drill.py`).
   Evidence floor: restores sample archived cycles and reingests them via the
   existing ingest code path configured to write an **isolated staging

@@ -1,0 +1,58 @@
+# Node-27 archive rebuild drill (issue #854 §5.1 / OpenSpec:
+# tier-node27-timeseries-storage). The drill proves archived products +
+# db-export salvage objects are round-trippable back into an ingest-shaped
+# staging database WITHOUT ever touching production hypertables.
+#
+# Copy to /home/nwm/NWM/infra/env/node27-archive-rebuild-drill.env on
+# node-27 and `chmod 0600`. Fill in real DSNs + paths.
+#
+# Invariants enforced at boot (design.md #854 fixture block):
+#   - STAGING dbname MUST differ from PROD dbname (H1 isolation).
+#   - PROD DSN opens with `default_transaction_read_only = on` +
+#     assertion; the drill never writes to prod.
+#   - Staging DB is DROPped + CREATEd + migrated from zero per run,
+#     via POSTGRES_ADMIN_URL (superuser DSN whose dbname is `postgres`).
+#   - Archive files are READ ONLY; the drill never rewrites or deletes
+#     them (ADR 0002).
+
+# Production readonly DSN. `nhms_display_ro` is sufficient (SELECT on
+# hydro.hydro_run, core.model_instance, met.forcing_version, and
+# associated ancestors). If the role has INSERT on any hypertable, the
+# drill still refuses to write to it via `default_transaction_read_only`,
+# but you SHOULD scope the credential tightly.
+PROD_DATABASE_URL_RO=postgresql://REPLACE_ME_READONLY:REPLACE_ME_PW@127.0.0.1:55432/nhms
+
+# Isolated staging DSN. `dbname` MUST NOT equal the prod dbname above.
+# The drill DROPs + CREATEs this DB per run, so it MUST be an
+# exclusively-drill-owned database.
+STAGING_DATABASE_URL=postgresql://REPLACE_ME_ADMIN:REPLACE_ME_PW@127.0.0.1:55432/nhms_archive_drill
+
+# Admin DSN with CREATEDB privilege. Its `dbname` is `postgres` (or any
+# non-target database). Used to DROP + CREATE the staging DB before
+# migrations run.
+POSTGRES_ADMIN_URL=postgresql://REPLACE_ME_ADMIN:REPLACE_ME_PW@127.0.0.1:55432/postgres
+
+# Shared archive root — must match node27-product-archive.env and
+# node27-storage-inventory-audit.env. The drill reads product manifests +
+# `.tar.zst` files here plus salvage objects under `db-export/`.
+NHMS_ARCHIVE_ROOT=/home/ghdc/nwm/archive
+
+# Filesystem workspace where per-cycle extract trees land. Bounded by the
+# per-file / per-tree / per-source caps that mirror the mover's guards.
+NHMS_ARCHIVE_REBUILD_DRILL_WORKSPACE=/home/nwm/node27-archive-rebuild-drill-logs/workspace
+
+# Absolute path where the drill receipt is published (mode 0600, atomic).
+NHMS_ARCHIVE_REBUILD_DRILL_RECEIPT_PATH=/home/nwm/NWM/artifacts/receipts/node27_archive_rebuild_drill.json
+
+# Non-empty literal stamped into every receipt's
+# `staging_database.instance_id`. Matches the salvage runner's convention.
+NHMS_ARCHIVE_REBUILD_DRILL_INSTANCE_ID=node27-primary-pg15
+
+# Optional label for `staging_database.schema` (semantic drill-run tag,
+# NOT a Postgres CREATE SCHEMA). Defaults to
+# `archive_drill_<UTC timestamp>` when unset.
+# NHMS_ARCHIVE_REBUILD_DRILL_RUN_LABEL=archive_drill_20260711
+
+# Absolute path to the zstd binary. Refused if relative, symlinked, or
+# non-executable — mirrors the mover's fail-closed boot check.
+NHMS_ZSTD_BIN=/usr/bin/zstd
