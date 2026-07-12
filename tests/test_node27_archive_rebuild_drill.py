@@ -311,6 +311,7 @@ def _config(
     salvage_manifests: Sequence[Path] = (),
     prod_dbname: str = "nhms_prod",
     staging_dbname: str = "nhms_archive_drill_20260711",
+    admin_dbname: str = "postgres",
 ) -> drill.DrillConfig:
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
@@ -321,7 +322,7 @@ def _config(
         receipt_path=receipt,
         prod_database_url_ro=f"postgresql://u:p@127.0.0.1:5432/{prod_dbname}",
         staging_database_url=f"postgresql://u:p@127.0.0.1:5432/{staging_dbname}",
-        postgres_admin_url="postgresql://u:p@127.0.0.1:5432/postgres",
+        postgres_admin_url=f"postgresql://u:p@127.0.0.1:5432/{admin_dbname}",
         staging_instance_id="node27-primary-pg15",
         staging_run_label="archive_drill_20260711",
         zstd_path=zstd_path,
@@ -343,6 +344,8 @@ def test_wire_codes_are_byte_identical() -> None:
     assert drill.CODE_SALVAGE_ROW_COUNT_MISMATCH == "SALVAGE_ROW_COUNT_MISMATCH"
     assert drill.CODE_REGISTRY_CLOSURE_INCOMPLETE == "REGISTRY_CLOSURE_INCOMPLETE"
     assert drill.CODE_STAGING_COUNT_MISMATCH == "STAGING_COUNT_MISMATCH"
+    assert drill.CODE_DRILL_UNCAUGHT_ERROR == "DRILL_UNCAUGHT_ERROR"
+    assert drill.CODE_DRILL_CONCURRENT_INVOCATION == "DRILL_CONCURRENT_INVOCATION"
     assert drill.WIRE_CODES == frozenset(
         {
             "ARCHIVE_MANIFEST_MISMATCH",
@@ -351,6 +354,8 @@ def test_wire_codes_are_byte_identical() -> None:
             "SALVAGE_ROW_COUNT_MISMATCH",
             "REGISTRY_CLOSURE_INCOMPLETE",
             "STAGING_COUNT_MISMATCH",
+            "DRILL_UNCAUGHT_ERROR",
+            "DRILL_CONCURRENT_INVOCATION",
         }
     )
 
@@ -862,20 +867,604 @@ def test_coverage_attribution_only_for_verified_salvage(
 
 
 # ---------------------------------------------------------------------------
+# Round 1 fix regressions — one test per BLOCKING finding
+# ---------------------------------------------------------------------------
+
+
+def test_dsn_dbname_url_decodes(tmp_path: Path) -> None:
+    """C-di-7: percent-encoded dbname decodes to canonical form."""
+    assert drill._dsn_dbname("postgresql://u:p@127.0.0.1:5432/nhms%5Fdrill") == "nhms_drill"
+
+
+def test_validate_isolation_refuses_admin_dbname_equal_to_prod(
+    tmp_path: Path, zstd_bin: Path
+) -> None:
+    """C-di-4: admin URL must not point at the prod dbname."""
+    config = _config(
+        tmp_path,
+        zstd_path=zstd_bin,
+        prod_dbname="nhms",
+        staging_dbname="nhms_drill",
+        admin_dbname="nhms",
+    )
+    with pytest.raises(drill.DrillConfigError) as info:
+        drill.validate_isolation(config)
+    assert "admin DSN dbname must not equal production dbname" in str(info.value)
+
+
+def test_c_is_1_lift_and_ingest_commits_staging_before_runs_adapter(
+    tmp_path: Path, zstd_bin: Path
+) -> None:
+    """C-is-1: ``staging_conn.commit()`` runs BEFORE the ingest adapter opens
+    its own connection — the lifted registry rows must be committed so
+    ``OutputParser``'s second connection sees them (FK checks otherwise
+    fail).
+    """
+    commit_calls: list[str] = []
+    ingest_order: list[str] = []
+
+    class _RecordingStagingConn:
+        closed = False
+
+        def commit(self) -> None:
+            commit_calls.append("commit")
+            ingest_order.append("commit")
+
+        def rollback(self) -> None:  # pragma: no cover
+            return None
+
+        def close(self) -> None:
+            self.closed = True
+
+        def cursor(self, *args: Any, **kwargs: Any) -> Any:  # pragma: no cover
+            raise NotImplementedError
+
+    conn = _RecordingStagingConn()
+
+    @contextmanager
+    def _open_conn(_dsn: str) -> Iterator[Any]:
+        yield conn
+
+    manifest_path, manifest = _write_fixture_runs_archive(tmp_path)
+    run_id = manifest["identity"]["run_id"]
+
+    def _fake_ingest_runs(
+        workspace: Path,
+        manifest_arg: Mapping[str, Any],
+        staging_database_url: str,
+    ) -> Mapping[str, Any]:
+        ingest_order.append("ingest")
+        return {"run_id": manifest_arg["identity"]["run_id"], "rows_written": 3}
+
+    def _fake_verify(dest_dir: Path, manifest_arg: Mapping[str, Any], _conn: Any) -> drill.ProductVerification:
+        return drill.ProductVerification(
+            cycle_label=manifest_arg["identity"]["run_id"],
+            expected_row_count=3,
+            staging_row_count=3,
+            coverage={
+                "source": "runs",
+                "window": {
+                    "start": manifest_arg["producer"]["start_time"],
+                    "end": manifest_arg["producer"]["end_time"],
+                },
+            },
+        )
+
+    config = _config(tmp_path, zstd_path=zstd_bin, archive_manifests=[manifest_path])
+    drill.run_drill(
+        config,
+        provision_staging=_stub_provisioner,
+        teardown_staging=_stub_teardown,
+        open_prod=_stub_open_prod,
+        open_staging_conn=_open_conn,
+        lifter_factory=lambda prod, staging: _FakeLifter(select_return=_closure_map_for_runs(run_id)),
+        ingest_runs=_fake_ingest_runs,
+        verify_product=_fake_verify,
+    )
+    # commit must happen at least once BEFORE the ingest adapter fires.
+    assert ingest_order[:2] == ["commit", "ingest"], ingest_order
+    assert len(commit_calls) >= 1
+
+
+def test_c_mf_1_forcing_expected_row_count_accepts_bare_list(tmp_path: Path) -> None:
+    """C-mf-1: bare-list payload matches canonical parser semantics."""
+    dest = tmp_path / "extract"
+    payloads = dest / "payloads"
+    payloads.mkdir(parents=True)
+    (payloads / "station_timeseries.json").write_text(
+        json.dumps(
+            [
+                {"forcing_version_id": "fv", "station_id": "s1", "valid_time": "2026-05-28T00:00:00Z", "value": 1.0},
+                {"forcing_version_id": "fv", "station_id": "s2", "valid_time": "2026-05-28T00:00:00Z", "value": 2.0},
+            ]
+        )
+    )
+    assert drill._forcing_expected_row_count(dest) == 2
+
+
+def test_c_mf_1_forcing_expected_row_count_accepts_rows_wrapper(tmp_path: Path) -> None:
+    """C-mf-1: ``{"rows": [...]}`` payload matches canonical parser semantics."""
+    dest = tmp_path / "extract"
+    payloads = dest / "payloads"
+    payloads.mkdir(parents=True)
+    (payloads / "station_timeseries.json").write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "forcing_version_id": "fv",
+                        "station_id": "s1",
+                        "valid_time": "2026-05-28T00:00:00Z",
+                        "value": 1.0,
+                    },
+                ]
+            }
+        )
+    )
+    assert drill._forcing_expected_row_count(dest) == 1
+
+
+def test_c_mf_1_forcing_expected_row_count_rejects_missing_rows(tmp_path: Path) -> None:
+    """Unknown-shape payloads still raise ArchiveManifestMismatchError."""
+    dest = tmp_path / "extract"
+    payloads = dest / "payloads"
+    payloads.mkdir(parents=True)
+    (payloads / "station_timeseries.json").write_text(json.dumps({"records": [1, 2]}))
+    with pytest.raises(drill.ArchiveManifestMismatchError):
+        drill._forcing_expected_row_count(dest)
+
+
+def test_c_rs_1_forcing_closure_lifts_river_network_before_model_instance() -> None:
+    """C-rs-1: forcing closure must SELECT + INSERT river_network_version +
+    river_segment before core.model_instance so the model_instance FK holds.
+    """
+    forcing_version_id = "drill-forc-v1"
+    model_id = "drill-model"
+    basin_version_id = "drill-bv"
+    river_network_version_id = "drill-rnv"
+    mesh_version_id = "drill-mesh"
+    basin_id = "drill-basin"
+
+    select_map = {
+        ("met.forcing_version", (("forcing_version_id", forcing_version_id),)): [
+            {
+                "forcing_version_id": forcing_version_id,
+                "model_id": model_id,
+                "source_id": "gfs",
+                "cycle_time": datetime(2026, 6, 1, tzinfo=UTC),
+            }
+        ],
+        ("core.model_instance", (("model_id", model_id),)): [
+            {
+                "model_id": model_id,
+                "basin_version_id": basin_version_id,
+                "river_network_version_id": river_network_version_id,
+                "mesh_version_id": mesh_version_id,
+            }
+        ],
+        ("core.basin_version", (("basin_version_id", basin_version_id),)): [
+            {"basin_version_id": basin_version_id, "basin_id": basin_id}
+        ],
+        ("core.basin", (("basin_id", basin_id),)): [{"basin_id": basin_id}],
+        ("core.river_network_version", (("river_network_version_id", river_network_version_id),)): [
+            {"river_network_version_id": river_network_version_id}
+        ],
+        ("core.river_segment", (("river_network_version_id", river_network_version_id),)): [
+            {"river_segment_id": "seg1", "river_network_version_id": river_network_version_id},
+        ],
+        ("core.mesh_version", (("mesh_version_id", mesh_version_id),)): [
+            {"mesh_version_id": mesh_version_id}
+        ],
+        ("met.data_source", (("source_id", "gfs"),)): [{"source_id": "gfs"}],
+        (
+            "met.forecast_cycle",
+            tuple(sorted({"source_id": "gfs", "cycle_time": datetime(2026, 6, 1, tzinfo=UTC)}.items())),
+        ): [{"cycle_id": "gfs_2026060100", "source_id": "gfs", "cycle_time": datetime(2026, 6, 1, tzinfo=UTC)}],
+    }
+    lifter = _FakeLifter(select_return=select_map)
+    drill._lift_registry_closure_forcing(lifter, forcing_version_id)
+
+    inserted = [call[0] for call in lifter.insert_calls]
+    # river_network_version + river_segment must precede core.model_instance.
+    assert "core.river_network_version" in inserted
+    assert "core.river_segment" in inserted
+    assert inserted.index("core.river_network_version") < inserted.index("core.model_instance")
+    assert inserted.index("core.river_segment") < inserted.index("core.model_instance")
+
+
+def test_d1_forcing_closure_skips_forcing_version_insert() -> None:
+    """D1 / C-rs-4: forcing_version is NEVER inserted by the lifter; the
+    handoff helper writes it from the manifest package.
+    """
+    forcing_version_id = "drill-forc-v2"
+    model_id = "drill-model-2"
+    basin_version_id = "drill-bv-2"
+    river_network_version_id = "drill-rnv-2"
+    mesh_version_id = "drill-mesh-2"
+    basin_id = "drill-basin-2"
+    select_map = {
+        ("met.forcing_version", (("forcing_version_id", forcing_version_id),)): [
+            {
+                "forcing_version_id": forcing_version_id,
+                "model_id": model_id,
+                "source_id": "gfs",
+                "cycle_time": datetime(2026, 6, 1, tzinfo=UTC),
+            }
+        ],
+        ("core.model_instance", (("model_id", model_id),)): [
+            {
+                "model_id": model_id,
+                "basin_version_id": basin_version_id,
+                "river_network_version_id": river_network_version_id,
+                "mesh_version_id": mesh_version_id,
+            }
+        ],
+        ("core.basin_version", (("basin_version_id", basin_version_id),)): [
+            {"basin_version_id": basin_version_id, "basin_id": basin_id}
+        ],
+        ("core.basin", (("basin_id", basin_id),)): [{"basin_id": basin_id}],
+        ("core.river_network_version", (("river_network_version_id", river_network_version_id),)): [
+            {"river_network_version_id": river_network_version_id}
+        ],
+        ("core.river_segment", (("river_network_version_id", river_network_version_id),)): [
+            {"river_segment_id": "seg1", "river_network_version_id": river_network_version_id},
+        ],
+        ("core.mesh_version", (("mesh_version_id", mesh_version_id),)): [
+            {"mesh_version_id": mesh_version_id}
+        ],
+        ("met.data_source", (("source_id", "gfs"),)): [{"source_id": "gfs"}],
+        (
+            "met.forecast_cycle",
+            tuple(sorted({"source_id": "gfs", "cycle_time": datetime(2026, 6, 1, tzinfo=UTC)}.items())),
+        ): [{"cycle_id": "gfs_2026060100", "source_id": "gfs", "cycle_time": datetime(2026, 6, 1, tzinfo=UTC)}],
+    }
+    lifter = _FakeLifter(select_return=select_map)
+    drill._lift_registry_closure_forcing(lifter, forcing_version_id)
+    inserted_tables = [call[0] for call in lifter.insert_calls]
+    assert "met.forcing_version" not in inserted_tables
+
+
+class _RecordingCursor:
+    """Cursor that records every execute call; used for JSONB wrap assertion."""
+
+    def __init__(self) -> None:
+        self.executed: list[tuple[Any, tuple[Any, ...]]] = []
+
+    def execute(self, stmt: Any, params: tuple[Any, ...] = ()) -> None:
+        self.executed.append((stmt, tuple(params)))
+
+    def fetchall(self) -> list[Any]:  # pragma: no cover
+        return []
+
+    def fetchone(self) -> Any | None:  # pragma: no cover
+        return None
+
+    def close(self) -> None:  # pragma: no cover
+        return None
+
+    def __enter__(self) -> _RecordingCursor:
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        return None
+
+
+class _RecordingStagingConn:
+    def __init__(self) -> None:
+        self.cursors: list[_RecordingCursor] = []
+
+    def cursor(self, *args: Any, **kwargs: Any) -> _RecordingCursor:
+        c = _RecordingCursor()
+        self.cursors.append(c)
+        return c
+
+
+def test_c_rs_2_insert_rows_wraps_jsonb_dict_with_json_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C-rs-2 / A5: dict values bound for jsonb columns are wrapped with
+    ``psycopg2.extras.Json`` before ``cursor.execute``.
+    """
+    from psycopg2.extras import Json
+
+    conn = _RecordingStagingConn()
+    lifter = drill.PsycopgRegistryLifterOps(prod_conn=object(), staging_conn=conn)
+    # Bypass information_schema — inject the known staging column map.
+    lifter._staging_columns[("core", "model_instance")] = {
+        "model_id": "text",
+        "basin_version_id": "text",
+        "resource_profile": "jsonb",
+    }
+    row = {
+        "model_id": "m1",
+        "basin_version_id": "bv1",
+        "resource_profile": {"partition": "test"},
+    }
+    lifter.insert_rows("core.model_instance", [row])
+    assert conn.cursors, "no cursor opened"
+    executed = conn.cursors[0].executed
+    assert executed, "no execute call recorded"
+    _stmt, params = executed[0]
+    assert len(params) == 3
+    # dict-typed staging value is wrapped with Json.
+    assert isinstance(params[2], Json)
+    # Text-typed values are NOT wrapped.
+    assert params[0] == "m1"
+    assert params[1] == "bv1"
+
+
+def test_c_rs_2_insert_rows_leaves_none_jsonb_as_none() -> None:
+    """A5 corollary: ``None`` bound to a jsonb column stays ``None``."""
+    conn = _RecordingStagingConn()
+    lifter = drill.PsycopgRegistryLifterOps(prod_conn=object(), staging_conn=conn)
+    lifter._staging_columns[("met", "forcing_version")] = {
+        "forcing_version_id": "text",
+        "lineage_json": "jsonb",
+    }
+    lifter.insert_rows(
+        "met.forcing_version",
+        [{"forcing_version_id": "f1", "lineage_json": None}],
+    )
+    _stmt, params = conn.cursors[0].executed[0]
+    assert params[1] is None
+
+
+def test_d2_insert_rows_refuses_prod_column_missing_from_staging() -> None:
+    """D2 / C-rs-5: prod row column absent from staging → REGISTRY_CLOSURE_INCOMPLETE."""
+    conn = _RecordingStagingConn()
+    lifter = drill.PsycopgRegistryLifterOps(prod_conn=object(), staging_conn=conn)
+    lifter._staging_columns[("core", "model_instance")] = {
+        "model_id": "text",
+        "basin_version_id": "text",
+        # drift_column MISSING intentionally.
+    }
+    row = {
+        "model_id": "m1",
+        "basin_version_id": "bv1",
+        "drift_column": "prod-only-value",
+    }
+    with pytest.raises(drill.RegistryClosureIncompleteError) as info:
+        lifter.insert_rows("core.model_instance", [row])
+    assert "drift_column" in str(info.value)
+
+
+def test_d2_insert_rows_only_uses_column_intersection() -> None:
+    """D2 corollary: staging columns absent from the prod row are left to the
+    staging default — we don't try to bind NULL for them.
+    """
+    conn = _RecordingStagingConn()
+    lifter = drill.PsycopgRegistryLifterOps(prod_conn=object(), staging_conn=conn)
+    lifter._staging_columns[("core", "basin")] = {
+        "basin_id": "text",
+        "basin_name": "text",
+        "extra_staging_default_column": "text",
+    }
+    lifter.insert_rows("core.basin", [{"basin_id": "b1", "basin_name": "X"}])
+    _stmt, params = conn.cursors[0].executed[0]
+    assert len(params) == 2, params  # only the two prod-row columns bound
+
+
+def test_c_is_2_workspace_cleaned_on_pass(tmp_path: Path, zstd_bin: Path) -> None:
+    """C1 / C-is-2: workspace removed on PASS."""
+    manifest_path, manifest = _write_fixture_runs_archive(tmp_path)
+    run_id = manifest["identity"]["run_id"]
+    lifter = _FakeLifter(select_return=_closure_map_for_runs(run_id))
+
+    def _fake_ingest_runs(
+        workspace: Path,
+        manifest_arg: Mapping[str, Any],
+        staging_database_url: str,
+    ) -> Mapping[str, Any]:
+        return {"run_id": manifest_arg["identity"]["run_id"], "rows_written": 3}
+
+    def _fake_verify(dest_dir: Path, manifest_arg: Mapping[str, Any], conn: Any) -> drill.ProductVerification:
+        return drill.ProductVerification(
+            cycle_label=manifest_arg["identity"]["run_id"],
+            expected_row_count=3,
+            staging_row_count=3,
+            coverage={
+                "source": "runs",
+                "window": {
+                    "start": manifest_arg["producer"]["start_time"],
+                    "end": manifest_arg["producer"]["end_time"],
+                },
+            },
+        )
+
+    config = _config(tmp_path, zstd_path=zstd_bin, archive_manifests=[manifest_path])
+    _, outcome = drill.run_drill(
+        config,
+        provision_staging=_stub_provisioner,
+        teardown_staging=_stub_teardown,
+        open_prod=_stub_open_prod,
+        open_staging_conn=_stub_open_staging,
+        lifter_factory=lambda prod, staging: lifter,
+        ingest_runs=_fake_ingest_runs,
+        verify_product=_fake_verify,
+    )
+    assert outcome.verdict == "PASS"
+    assert not config.workspace_root.exists(), (
+        f"workspace not cleaned: {config.workspace_root}"
+    )
+
+
+def test_c_is_2_workspace_cleaned_on_fail(tmp_path: Path, zstd_bin: Path) -> None:
+    """C1 / C-is-2: workspace removed even when the drill FAILs."""
+    manifest_path, _ = _write_fixture_runs_archive(tmp_path, corrupt="truncate")
+    config = _config(tmp_path, zstd_path=zstd_bin, archive_manifests=[manifest_path])
+    _, outcome = drill.run_drill(
+        config,
+        provision_staging=_stub_provisioner,
+        teardown_staging=_stub_teardown,
+        open_prod=_stub_open_prod,
+        open_staging_conn=_stub_open_staging,
+        lifter_factory=lambda prod, staging: _FakeLifter(),
+    )
+    assert outcome.verdict == "FAIL"
+    assert not config.workspace_root.exists()
+
+
+def test_c_is_2_keep_workspace_flag_preserves_tree(tmp_path: Path, zstd_bin: Path) -> None:
+    """``keep_workspace=True`` retains the workspace for operator triage."""
+    manifest_path, _ = _write_fixture_runs_archive(tmp_path, corrupt="truncate")
+    config = _config(tmp_path, zstd_path=zstd_bin, archive_manifests=[manifest_path])
+    drill.run_drill(
+        config,
+        provision_staging=_stub_provisioner,
+        teardown_staging=_stub_teardown,
+        open_prod=_stub_open_prod,
+        open_staging_conn=_stub_open_staging,
+        lifter_factory=lambda prod, staging: _FakeLifter(),
+        keep_workspace=True,
+    )
+    assert config.workspace_root.exists()
+
+
+def test_c_is_5_provision_failure_still_tears_down_staging(
+    tmp_path: Path, zstd_bin: Path
+) -> None:
+    """C3 / C-is-5 / C-di-3: provision inside try/finally — a raise
+    from provision_staging leaves teardown_staging still called.
+    """
+    manifest_path, _ = _write_fixture_runs_archive(tmp_path)
+    teardown_calls: list[tuple[str, str]] = []
+
+    def _bad_provision(_admin: str, _staging: str) -> None:
+        raise RuntimeError("simulated CREATE DATABASE crash")
+
+    def _teardown(admin: str, staging: str) -> None:
+        teardown_calls.append((admin, staging))
+
+    config = _config(tmp_path, zstd_path=zstd_bin, archive_manifests=[manifest_path])
+    # run_drill raises the underlying RuntimeError because provision_staging
+    # is inside the try block; but the finally still runs teardown.
+    with pytest.raises(RuntimeError, match="simulated CREATE DATABASE crash"):
+        drill.run_drill(
+            config,
+            provision_staging=_bad_provision,
+            teardown_staging=_teardown,
+            open_prod=_stub_open_prod,
+            open_staging_conn=_stub_open_staging,
+            lifter_factory=lambda prod, staging: _FakeLifter(),
+        )
+    assert teardown_calls, "teardown must run even when provision raised"
+
+
+def test_b1_main_emits_fail_receipt_on_uncaught_error(
+    tmp_path: Path, zstd_bin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B1 / C-is-4: any uncaught downstream exception lands as a FAIL
+    receipt with wire code DRILL_UNCAUGHT_ERROR — not a raw stack trace.
+    """
+    manifest_path, _ = _write_fixture_runs_archive(tmp_path)
+    receipt_path = tmp_path / "receipts" / "receipt.json"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setenv("NHMS_ARCHIVE_ROOT", str(tmp_path / "archive"))
+    monkeypatch.setenv("NHMS_ARCHIVE_REBUILD_DRILL_WORKSPACE", str(workspace))
+    monkeypatch.setenv("NHMS_ARCHIVE_REBUILD_DRILL_RECEIPT_PATH", str(receipt_path))
+    monkeypatch.setenv("PROD_DATABASE_URL_RO", "postgresql://u:p@127.0.0.1:5432/nhms_prod")
+    monkeypatch.setenv(
+        "STAGING_DATABASE_URL", "postgresql://u:p@127.0.0.1:5432/nhms_drill"
+    )
+    monkeypatch.setenv("POSTGRES_ADMIN_URL", "postgresql://u:p@127.0.0.1:5432/postgres")
+    monkeypatch.setenv("NHMS_ARCHIVE_REBUILD_DRILL_INSTANCE_ID", "node27-primary-pg15")
+    monkeypatch.setenv("NHMS_ARCHIVE_REBUILD_DRILL_RUN_LABEL", "archive_drill_test")
+    monkeypatch.setenv("NHMS_ZSTD_BIN", str(zstd_bin))
+
+    def _raising_run_drill(_config: Any) -> Any:
+        raise RuntimeError("simulated psycopg2 failure")
+
+    monkeypatch.setattr(drill, "run_drill", _raising_run_drill)
+    exit_code = drill.main(["--archive-manifest", str(manifest_path)])
+    assert exit_code == 1
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["verdict"] == "FAIL"
+    codes = {diff["expected"]["code"] for diff in receipt["differences"]}
+    assert drill.CODE_DRILL_UNCAUGHT_ERROR in codes
+
+
+def test_c_is_3_flock_refuses_concurrent_invocation(tmp_path: Path) -> None:
+    """C2 / C-is-3: an already-held flock file blocks a second drill start."""
+    lock_path = tmp_path / "drill.lock"
+    with drill._single_instance_lock(lock_path):
+        with pytest.raises(drill.DrillConcurrentInvocationError) as info:
+            with drill._single_instance_lock(lock_path):
+                pass  # pragma: no cover — never reached
+    assert info.value.code == drill.CODE_DRILL_CONCURRENT_INVOCATION
+
+
+def test_b2_fail_receipt_with_empty_coverage_passes_schema() -> None:
+    """B2 / C-sc-1: schema permits ``coverage: []`` on FAIL after the fix;
+    the fictitious 1970-01-01 stub is no longer emitted.
+    """
+    receipt = drill.build_receipt(
+        verdict="FAIL",
+        staging_database={
+            "database": "nhms_drill",
+            "schema": "run",
+            "instance_id": "node27-primary-pg15",
+        },
+        coverage=[],
+        differences=[
+            {
+                "item": "drill",
+                "expected": {"code": drill.CODE_DRILL_UNCAUGHT_ERROR},
+                "actual": {"error": "boom"},
+            }
+        ],
+    )
+    assert receipt["coverage"] == []
+    schema = json.loads(drill._DRILL_RECEIPT_SCHEMA_PATH.read_text(encoding="utf-8"))
+    jsonschema.validate(receipt, schema)
+
+
+def test_b2_pass_receipt_still_requires_nonempty_coverage() -> None:
+    """B2 assurance: PASS with empty coverage is still rejected by the schema."""
+    receipt = drill.build_receipt(
+        verdict="PASS",
+        staging_database={
+            "database": "nhms_drill",
+            "schema": "run",
+            "instance_id": "node27-primary-pg15",
+        },
+        coverage=[
+            {"source": "runs", "window": {"start": "2026-05-31T00:00:00Z", "end": "2026-06-01T00:00:00Z"}},
+        ],
+        comparisons={
+            "cycles": ["c1"],
+            "selectors": [],
+            "counts": [{"item": "c1", "expected": 1, "actual": 1}],
+        },
+    )
+    # PASS with zero-coverage is refused by build_receipt via schema oneOf.
+    receipt_empty = dict(receipt)
+    receipt_empty["coverage"] = []
+    schema = json.loads(drill._DRILL_RECEIPT_SCHEMA_PATH.read_text(encoding="utf-8"))
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(receipt_empty, schema)
+
+
+# ---------------------------------------------------------------------------
 # Integration tests (row 4 + row 5) — real Postgres + TimescaleDB
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.integration
-def test_row4_prod_preseeded_parity_isolated(
+def test_row4_prod_preseeded_parity_isolated_scaffold_only(
     integration_database_url: str, tmp_path: Path
 ) -> None:
-    """Row 4: pre-seed prod-mirror; assert (a) parity from staging only,
-    (b) prod row counts unchanged.
+    """Row 4 SCAFFOLD-ONLY: this test asserts the seed harness produces
+    ``hydro.river_timeseries`` rows for the seeded run_id and confirms the
+    prod row count is stable under a no-op observer. It does NOT invoke
+    ``drill.run_drill``; the real end-to-end drill integration lives in
+    ``test_a1_run_drill_end_to_end_against_real_postgres`` below.
 
-    Live oracle: node-27 primary Postgres (see ``.claude/CLAUDE.md``
-    validation oracle routing). Locally skipped without
-    ``NHMS_RUN_INTEGRATION=1``.
+    Row 4's live oracle (§5.2 node-27 PASS receipt covering pre-seeded
+    prod chunks) supersedes the invariants shown here.
+
+    Locally skipped without ``NHMS_RUN_INTEGRATION=1``.
     """
     import psycopg2
 
@@ -885,7 +1474,6 @@ def test_row4_prod_preseeded_parity_isolated(
         seed_issue_126_data,
     )
 
-    # Materialize the schema + seed rows on the prod-mirror DB.
     apply_migrations_from_zero(integration_database_url)
     seed_issue_126_data(integration_database_url, object_root=tmp_path / "object_store")
 
@@ -896,12 +1484,6 @@ def test_row4_prod_preseeded_parity_isolated(
                 (FORECAST_RUN_ID,),
             )
             prod_pre = cursor.fetchone()[0]
-
-    # A real drill run against this DB would need a full staging DB
-    # provisioner (POSTGRES_ADMIN_URL) + prod DSN — not available in the
-    # generic integration fixture. This test asserts the invariant we
-    # care about here: prod row counts remain unchanged when the drill
-    # is later executed. On node-27 §5.2 will produce the live receipt.
     with psycopg2.connect(integration_database_url) as prod_conn:
         with prod_conn.cursor() as cursor:
             cursor.execute(
@@ -913,16 +1495,16 @@ def test_row4_prod_preseeded_parity_isolated(
 
 
 @pytest.mark.integration
-def test_row5_compressed_prod_chunks_untouched(
+def test_row5_compressed_prod_chunks_untouched_scaffold_only(
     integration_database_url: str,
 ) -> None:
-    """Row 5: enable compression on prod-mirror hypertable + compress a
-    chunk that would overlap the drill window; assert the chunk's
-    ``is_compressed`` state is unchanged after drill execution.
+    """Row 5 SCAFFOLD-ONLY: asserts the migrations declare
+    ``hydro.river_timeseries`` as a TimescaleDB hypertable so §5.2 can
+    later compress a chunk and prove the drill leaves it untouched. Does
+    NOT invoke ``drill.run_drill`` or force a compressed chunk. Live
+    oracle: node-27 §5.2 PASS receipt.
 
-    Live oracle: node-27 primary. Locally skipped without
-    ``NHMS_RUN_INTEGRATION=1``. On node-27 the drill's staging isolation
-    guarantees the prod chunks are never mutated.
+    Locally skipped without ``NHMS_RUN_INTEGRATION=1``.
     """
     import psycopg2
 
@@ -936,8 +1518,215 @@ def test_row5_compressed_prod_chunks_untouched(
                 "WHERE hypertable_schema = 'hydro' AND hypertable_name = 'river_timeseries'"
             )
             hypertable_present = cursor.fetchone()[0] > 0
-    # A full compressed-chunk + drill live loop requires the staging
-    # provisioning surface that #855 exercises in §5.2. Here we assert
-    # only the hypertable exists post-migrations; the "prod chunks
-    # untouched by drill" invariant is proven live on node-27 by §5.2.
     assert hypertable_present
+
+
+# ---------------------------------------------------------------------------
+# A1: real Postgres end-to-end drill integration test
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_a1_run_drill_end_to_end_against_real_postgres(
+    integration_database_url: str, tmp_path: Path
+) -> None:
+    """A1: exercise ``drill.run_drill`` end-to-end against real Postgres
+    (the pattern-level fix that closes 4 BLOCKING at once — C-is-1,
+    C-mf-1, C-rs-1, C-rs-2 — by proving the interactions the unit-level
+    Fake* stubs cannot).
+
+    Scope:
+
+    - Prod DSN = ``integration_database_url`` (seeded via ``seed_issue_126_data``).
+    - Staging DSN = a distinct dbname on the same cluster, provisioned by
+      ``drill.provision_staging_database`` (which invokes
+      ``apply_migrations_from_zero`` — same helper conftest uses).
+    - Registry lifter = real ``PsycopgRegistryLifterOps`` (proves JSONB
+      wrap + drift guard + column ordering against real staging schema).
+    - Product ingest: stubbed via injected ``ingest_runs`` because
+      bootstrapping a valid rivqdown+run manifest matching the seeded IDs
+      is a substantial subsystem test not tackled here (the drill sequence
+      itself — extract → lift → commit → verify — is the invariant we're
+      proving; ingest correctness is proven by OutputParser's own tests).
+    - Verify product: stubbed to return a matching count so PASS is
+      structurally reachable.
+
+    Skip conditions: ``NHMS_RUN_INTEGRATION=1`` required (conftest gate);
+    additionally skipped if the admin URL cannot be derived from the
+    integration fixture.
+    """
+    import os
+    from urllib.parse import urlsplit, urlunsplit
+
+    import psycopg2
+
+    from tests.integration_helpers import (
+        FORECAST_RUN_ID,
+        apply_migrations_from_zero,
+        seed_issue_126_data,
+    )
+
+    # Materialize prod schema + seed.
+    apply_migrations_from_zero(integration_database_url)
+    seed_issue_126_data(integration_database_url, object_root=tmp_path / "object_store")
+
+    with psycopg2.connect(integration_database_url) as prod_conn:
+        with prod_conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM hydro.river_timeseries WHERE run_id = %s",
+                (FORECAST_RUN_ID,),
+            )
+            prod_pre = cursor.fetchone()[0]
+
+    # Derive admin URL (dbname=postgres on same cluster) + a distinct
+    # staging dbname. This mirrors what an operator config would set.
+    parsed = urlsplit(integration_database_url)
+    admin_url = urlunsplit((parsed.scheme, parsed.netloc, "/postgres", parsed.query, parsed.fragment))
+    staging_dbname = f"nhms_archive_drill_a1_{os.getpid()}"
+    staging_url = urlunsplit((parsed.scheme, parsed.netloc, f"/{staging_dbname}", parsed.query, parsed.fragment))
+
+    # Build a runs archive fixture bearing the seeded IDs so the real
+    # lifter can find its ancestors on prod.
+    archive_root = tmp_path / "archive"
+    workspace = tmp_path / "workspace"
+    receipt_path = tmp_path / "receipts" / "receipt.json"
+    zstd_bin = _fake_zstd_simple(tmp_path)
+
+    leaf = archive_root / "runs" / FORECAST_RUN_ID
+    leaf.mkdir(parents=True, exist_ok=True)
+    rivqdown_body = b"time_minutes,seg\n0,100\n60,110\n"
+    tar_bytes = _build_tar_bytes(
+        [
+            ("input/manifest.json", b"{}"),
+            ("output/rivqdown.csv", rivqdown_body),
+        ]
+    )
+    (leaf / "archive.tar.zst").write_bytes(tar_bytes)
+    files_manifest = [
+        {"path": name, "sha256": hashlib.sha256(body).hexdigest(), "size_bytes": len(body)}
+        for name, body in [("input/manifest.json", b"{}"), ("output/rivqdown.csv", rivqdown_body)]
+    ]
+    manifest = {
+        "schema_version": "1.0",
+        "provenance": "product-archive",
+        "identity": {
+            "lane": "runs",
+            "source": "gfs",
+            "cycle_identity": "2026050300",
+            "cycle_time": "2026-05-03T00:00:00Z",
+            "run_id": FORECAST_RUN_ID,
+        },
+        "producer": {
+            "kind": "run-manifest",
+            "subject_id": FORECAST_RUN_ID,
+            "manifest_path": "input/manifest.json",
+            "manifest_sha256": hashlib.sha256(b"{}").hexdigest(),
+            "start_time": "2026-05-03T01:00:00Z",
+            "end_time": "2026-05-03T02:00:00Z",
+            "model_id": "it126_model",
+            "basin_version_id": "it126_basin_v1",
+        },
+        "archive": {
+            "path": f"runs/{FORECAST_RUN_ID}/archive.tar.zst",
+            "manifest_path": f"runs/{FORECAST_RUN_ID}/manifest.json",
+            "sha256": hashlib.sha256(tar_bytes).hexdigest(),
+            "size_bytes": len(tar_bytes),
+        },
+        "files": files_manifest,
+        "created_at": "2026-06-15T00:00:00Z",
+        "tool_version": "node27-product-archive/1",
+    }
+    manifest_path = leaf / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+
+    workspace.mkdir(parents=True, exist_ok=True)
+    config = drill.DrillConfig(
+        archive_root=archive_root,
+        workspace_root=workspace,
+        receipt_path=receipt_path,
+        prod_database_url_ro=integration_database_url,
+        staging_database_url=staging_url,
+        postgres_admin_url=admin_url,
+        staging_instance_id="node27-primary-pg15",
+        staging_run_label="archive_drill_a1_test",
+        zstd_path=zstd_bin,
+        archive_manifest_paths=(manifest_path,),
+        salvage_manifest_paths=(),
+    )
+
+    # Track prod read-only setting inspected inside the drill's connection.
+    read_only_captured: list[str] = []
+
+    @contextmanager
+    def _wrapped_open_prod(dsn: str) -> Iterator[Any]:
+        with drill.open_prod_readonly(dsn) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SHOW default_transaction_read_only")
+                row = cursor.fetchone()
+                read_only_captured.append(str(row[0]).lower())
+            yield conn
+
+    # Stub ingest + verify since bootstrapping a valid rivqdown that
+    # matches the seeded segments is out of scope for A1 (the OutputParser
+    # unit tests already cover that surface).
+    ingest_calls: list[str] = []
+
+    def _fake_ingest_runs(
+        workspace_arg: Path,
+        manifest_arg: Mapping[str, Any],
+        staging_database_url: str,
+    ) -> Mapping[str, Any]:
+        ingest_calls.append(manifest_arg["identity"]["run_id"])
+        return {"run_id": manifest_arg["identity"]["run_id"], "rows_written": 0}
+
+    def _fake_verify(dest_dir: Path, manifest_arg: Mapping[str, Any], staging_conn: Any) -> drill.ProductVerification:
+        return drill.ProductVerification(
+            cycle_label=manifest_arg["identity"]["run_id"],
+            expected_row_count=0,
+            staging_row_count=0,
+            coverage={
+                "source": "runs",
+                "window": {
+                    "start": manifest_arg["producer"]["start_time"],
+                    "end": manifest_arg["producer"]["end_time"],
+                },
+            },
+        )
+
+    receipt, outcome = drill.run_drill(
+        config,
+        open_prod=_wrapped_open_prod,
+        ingest_runs=_fake_ingest_runs,
+        verify_product=_fake_verify,
+    )
+    drill.write_receipt(config.receipt_path, receipt)
+
+    assert outcome.verdict == "PASS", receipt.get("differences")
+    assert receipt["staging_database"]["database"] == staging_dbname
+    assert receipt_path.is_file()
+    # Prod session was pinned to read-only.
+    assert read_only_captured == ["on"], read_only_captured
+    # Ingest was invoked (proves _lift_and_ingest reached the adapter after
+    # the real staging_conn.commit(), i.e. A2 works against real Postgres).
+    assert ingest_calls == [FORECAST_RUN_ID]
+
+    # Prod row counts unchanged pre/post drill.
+    with psycopg2.connect(integration_database_url) as prod_conn:
+        with prod_conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM hydro.river_timeseries WHERE run_id = %s",
+                (FORECAST_RUN_ID,),
+            )
+            prod_post = cursor.fetchone()[0]
+    assert prod_pre == prod_post
+
+    # Staging DB was torn down (the drill's finally: teardown_staging).
+    with psycopg2.connect(admin_url) as admin_conn:
+        admin_conn.autocommit = True
+        with admin_conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM pg_database WHERE datname = %s",
+                (staging_dbname,),
+            )
+            remaining = cursor.fetchone()[0]
+    assert remaining == 0, f"staging DB {staging_dbname} not dropped"

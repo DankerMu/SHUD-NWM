@@ -461,9 +461,22 @@ this runbook, and design.md #854 fixture block:
   manifest `exported_row_count`.
 - `REGISTRY_CLOSURE_INCOMPLETE` — the ancestor row(s) needed for
   ingest FK checks are missing in prod (fail-closed; no vacuous PASS).
+  Also fires on staging schema-drift: if any prod row carries a column
+  the staging table lacks (e.g. a not-yet-migrated staging DB).
 - `STAGING_COUNT_MISMATCH` — staging `COUNT(*)` differs from the
   file-derived expected count (archive manifests carry no row counts;
   parity oracle is the restored file itself).
+- `DRILL_UNCAUGHT_ERROR` — any downstream fault outside the enumerated
+  codes (psycopg2 disconnect, filesystem I/O error, unexpected
+  AttributeError, ...) is packaged as a schema-valid FAIL receipt with
+  `differences[].expected.code = DRILL_UNCAUGHT_ERROR` +
+  `differences[].actual.cause_type = <ExceptionClassName>`. Never emit
+  a raw stack trace to the receipt lane; operators consume the receipt
+  file as the sole oracle.
+- `DRILL_CONCURRENT_INVOCATION` — an existing drill holds
+  `~/node27-archive-rebuild-drill-logs/drill.lock` (single-instance
+  guard via `fcntl.flock`, non-blocking). Wait for the first drill to
+  finish or investigate the stuck process.
 
 ### 7.3 How to run
 
@@ -523,7 +536,32 @@ evaluates them against its candidate drop window. A FAIL receipt, a
 stale receipt, or a PASS receipt whose coverage is insufficient blocks
 retention enforcement.
 
-### 7.6 Live receipts (§5.2 boundary)
+### 7.6 Recovery (post-fault operator playbook)
+
+When a drill run leaves side effects (stale staging DB, stale workspace,
+held lock), recover in this order — every step is safe to run against
+a clean environment (no-op if already recovered):
+
+1. **Stuck lock (`DRILL_CONCURRENT_INVOCATION`).** Confirm no live
+   drill is running (`ps -ef | grep node27_archive_rebuild_drill`);
+   if none, remove the lock file:
+   `rm -f ~/node27-archive-rebuild-drill-logs/drill.lock`.
+2. **Staging DB left over.** The drill's `finally:` teardown drops
+   the staging DB even on FAIL. If a hard kill (SIGKILL, OOM) skipped
+   the finally, drop by hand: connect via `POSTGRES_ADMIN_URL` and run
+   `DROP DATABASE IF EXISTS "<staging_dbname>"`. Staging dbname is in
+   the last receipt at `staging_database.database`.
+3. **Workspace tree left over.** The drill removes
+   `NHMS_ARCHIVE_REBUILD_DRILL_WORKSPACE` on both PASS and FAIL. If a
+   hard kill skipped cleanup, remove the tree manually:
+   `rm -rf "$NHMS_ARCHIVE_REBUILD_DRILL_WORKSPACE"`. Do NOT touch
+   `NHMS_ARCHIVE_ROOT` (the archive source is read-only per ADR 0002).
+4. **Prod DB never needs recovery.** The drill only ever holds the prod
+   connection in `default_transaction_read_only = on`; there is no
+   prod-side state to unwind. If a receipt disagrees, that is a bug —
+   file it against #854.
+
+### 7.7 Live receipts (§5.2 boundary)
 
 Live PASS receipts on node-27 covering the planned 30-day drop window
 are the domain of task §5.2 (follow-up commit under issue #854, not part

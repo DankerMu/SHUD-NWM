@@ -64,10 +64,13 @@ ADR 0001 display carve-out: no imports touching ``apps/api`` or
 from __future__ import annotations
 
 import argparse
+import errno
+import fcntl
 import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -77,7 +80,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 import jsonschema
 
@@ -91,6 +94,9 @@ CODE_SALVAGE_SHA256_MISMATCH = "SALVAGE_SHA256_MISMATCH"
 CODE_SALVAGE_ROW_COUNT_MISMATCH = "SALVAGE_ROW_COUNT_MISMATCH"
 CODE_REGISTRY_CLOSURE_INCOMPLETE = "REGISTRY_CLOSURE_INCOMPLETE"
 CODE_STAGING_COUNT_MISMATCH = "STAGING_COUNT_MISMATCH"
+# Wire codes added post-review (Round 1 fix pass — B1/C2):
+CODE_DRILL_UNCAUGHT_ERROR = "DRILL_UNCAUGHT_ERROR"
+CODE_DRILL_CONCURRENT_INVOCATION = "DRILL_CONCURRENT_INVOCATION"
 
 WIRE_CODES: frozenset[str] = frozenset(
     {
@@ -100,6 +106,8 @@ WIRE_CODES: frozenset[str] = frozenset(
         CODE_SALVAGE_ROW_COUNT_MISMATCH,
         CODE_REGISTRY_CLOSURE_INCOMPLETE,
         CODE_STAGING_COUNT_MISMATCH,
+        CODE_DRILL_UNCAUGHT_ERROR,
+        CODE_DRILL_CONCURRENT_INVOCATION,
     }
 )
 
@@ -178,6 +186,12 @@ class TarBoundExceededError(ArchiveTarCorruptedError):
     """Bounded per-file / per-tree / per-source cap tripped mid-extract."""
 
 
+class DrillConcurrentInvocationError(DrillError):
+    """Another drill is currently holding the single-instance lock."""
+
+    code = CODE_DRILL_CONCURRENT_INVOCATION
+
+
 class DrillConfigError(RuntimeError):
     """Fail-closed configuration error surfaced before any DB call."""
 
@@ -211,12 +225,17 @@ class DrillConfig:
 
 
 def _dsn_dbname(dsn: str) -> str:
-    """Return the target database name from a psycopg2-shaped URL."""
+    """Return the target database name from a psycopg2-shaped URL.
+
+    URL-decodes the path (e.g. ``nhms%5Fdrill`` -> ``nhms_drill``) so a
+    percent-encoded DSN does not slip past the equality check in
+    ``validate_isolation`` (C-di-7).
+    """
     if not dsn:
         raise DrillConfigError("DSN is empty")
     parsed = urlsplit(dsn)
     path = parsed.path or ""
-    return path.lstrip("/") or ""
+    return unquote(path.lstrip("/")) or ""
 
 
 def _dsn_with_dbname(dsn: str, dbname: str) -> str:
@@ -240,6 +259,15 @@ def validate_isolation(config: DrillConfig) -> None:
     if prod == staging:
         raise DrillConfigError(
             f"staging database name must differ from production (both are {prod!r})"
+        )
+    # C-di-4: admin DSN's dbname must not equal prod dbname. The admin URL is
+    # used for DROP DATABASE / CREATE DATABASE; connecting via the prod dbname
+    # would risk any typo hitting production. Standard shape is
+    # ``postgresql://.../postgres``.
+    admin_dbname = _dsn_dbname(config.postgres_admin_url)
+    if admin_dbname == prod:
+        raise DrillConfigError(
+            f"admin DSN dbname must not equal production dbname (both are {prod!r})"
         )
 
 
@@ -733,7 +761,17 @@ def _lift_registry_closure_runs(
 def _lift_registry_closure_forcing(
     ops: RegistryLifterOps, forcing_version_id: str
 ) -> dict[str, Any]:
-    """Lift the ancestor closure needed by ``apply_forcing_domain_handoff_path``."""
+    """Lift the ancestor closure needed by ``apply_forcing_domain_handoff_path``.
+
+    The forcing_version row itself is NOT lifted into staging (D1 / C-rs-4).
+    Handoff's ``_upsert_forcing_version`` writes it from the manifest —
+    lifting it would (a) duplicate work, (b) risk row-shape drift (prod
+    row could have columns handoff does not).
+
+    river_network_version + river_segment are lifted BEFORE core.model_instance
+    (C-rs-1). The staging ``core.model_instance.river_network_version_id`` FK
+    would trip otherwise; runs-lane closure already mirrors this order.
+    """
     forcing_rows = ops.select_where(
         "met.forcing_version", {"forcing_version_id": forcing_version_id}
     )
@@ -756,10 +794,15 @@ def _lift_registry_closure_forcing(
         )
     model = model_rows[0]
     basin_version_id = model.get("basin_version_id")
+    river_network_version_id = model.get("river_network_version_id")
     mesh_version_id = model.get("mesh_version_id")
     if not isinstance(basin_version_id, str) or not basin_version_id:
         raise RegistryClosureIncompleteError(
             f"core.model_instance.basin_version_id missing for model_id={model_id!r}"
+        )
+    if not isinstance(river_network_version_id, str) or not river_network_version_id:
+        raise RegistryClosureIncompleteError(
+            f"core.model_instance.river_network_version_id missing for model_id={model_id!r}"
         )
     basin_version_rows = ops.select_where(
         "core.basin_version", {"basin_version_id": basin_version_id}
@@ -776,6 +819,22 @@ def _lift_registry_closure_forcing(
     basin_rows = ops.select_where("core.basin", {"basin_id": basin_id})
     if not basin_rows:
         raise RegistryClosureIncompleteError(f"core.basin row missing for {basin_id!r}")
+    river_network_rows = ops.select_where(
+        "core.river_network_version",
+        {"river_network_version_id": river_network_version_id},
+    )
+    if not river_network_rows:
+        raise RegistryClosureIncompleteError(
+            f"core.river_network_version row missing for {river_network_version_id!r}"
+        )
+    river_segment_rows = ops.select_where(
+        "core.river_segment",
+        {"river_network_version_id": river_network_version_id},
+    )
+    if not river_segment_rows:
+        raise RegistryClosureIncompleteError(
+            f"core.river_segment rows missing for {river_network_version_id!r}"
+        )
     mesh_rows = ops.select_where("core.mesh_version", {"mesh_version_id": mesh_version_id})
     if not mesh_rows:
         raise RegistryClosureIncompleteError(
@@ -797,19 +856,26 @@ def _lift_registry_closure_forcing(
     else:
         cycle_rows = []
 
+    # Parent-first insert order — river_network_version + river_segment before
+    # core.model_instance so the model_instance FK to river_network_version
+    # holds (C-rs-1 fix). met.forcing_version intentionally NOT lifted (D1);
+    # handoff will upsert it from the manifest package.
     ops.insert_rows("core.basin", basin_rows)
     ops.insert_rows("core.basin_version", basin_version_rows)
+    ops.insert_rows("core.river_network_version", river_network_rows)
+    ops.insert_rows("core.river_segment", river_segment_rows)
     ops.insert_rows("core.mesh_version", mesh_rows)
     ops.insert_rows("core.model_instance", [model])
     if source_rows:
         ops.insert_rows("met.data_source", source_rows)
     if cycle_rows:
         ops.insert_rows("met.forecast_cycle", cycle_rows)
-    ops.insert_rows("met.forcing_version", [forcing])
     return {
         "forcing_version_id": forcing_version_id,
         "model_id": model_id,
         "basin_version_id": basin_version_id,
+        "river_network_version_id": river_network_version_id,
+        "river_segment_count": len(river_segment_rows),
         "source_id": source_id,
     }
 
@@ -832,11 +898,25 @@ class RegistryLifterOps:
 
 
 class PsycopgRegistryLifterOps(RegistryLifterOps):
-    """psycopg2-backed lifter. Idempotent (``ON CONFLICT DO NOTHING``)."""
+    """psycopg2-backed lifter. Idempotent (``ON CONFLICT DO NOTHING``).
+
+    Column-drift guard (C-rs-5 / D2): before INSERTing the first row for a
+    table, queries staging's ``information_schema.columns`` for the target
+    table and refuses fail-closed if any prod row column is absent from
+    staging — a silent DROP could otherwise ship a receipt whose staging
+    row was missing a NOT NULL column.
+
+    JSONB wrapping (C-rs-2 / A5): staging column type ``jsonb`` triggers
+    ``psycopg2.extras.Json(value)`` wrapping on dict values so the INSERT
+    does not fail with "column is of type jsonb but expression is of type
+    record".
+    """
 
     def __init__(self, prod_conn: Any, staging_conn: Any) -> None:
         self._prod = prod_conn
         self._staging = staging_conn
+        # Cache: (schema, table) -> {column_name: udt_name} on staging.
+        self._staging_columns: dict[tuple[str, str], dict[str, str]] = {}
 
     def select_where(
         self, table: str, predicates: Mapping[str, Any]
@@ -855,13 +935,66 @@ class PsycopgRegistryLifterOps(RegistryLifterOps):
             cursor.execute(stmt, tuple(predicates.values()))
             return [dict(row) for row in cursor.fetchall()]
 
+    def _staging_column_types(self, schema: str, name: str) -> dict[str, str]:
+        """Return ``{column_name: udt_name}`` for staging table, cached."""
+        key = (schema, name)
+        cached = self._staging_columns.get(key)
+        if cached is not None:
+            return cached
+        with self._staging.cursor() as cursor:
+            cursor.execute(
+                "SELECT column_name, udt_name FROM information_schema.columns "
+                "WHERE table_schema = %s AND table_name = %s",
+                (schema, name),
+            )
+            columns = {str(row[0]): str(row[1]) for row in cursor.fetchall()}
+        if not columns:
+            raise RegistryClosureIncompleteError(
+                f"staging table {schema}.{name} not found in information_schema.columns "
+                "— migration drift?"
+            )
+        self._staging_columns[key] = columns
+        return columns
+
+    @staticmethod
+    def _wrap_jsonb(value: Any) -> Any:
+        """Wrap dict/list values bound for jsonb columns via ``Json``.
+
+        psycopg2 does not adapt a Python ``dict`` to jsonb by default; the
+        server sees ``ROW(...)`` and rejects it. ``Json(value)`` renders as
+        ``jsonb`` literal. ``None`` is passed through so nullable columns
+        stay NULL. Already-``Json``-wrapped values also pass through.
+        """
+        from psycopg2.extras import Json
+
+        if value is None or isinstance(value, Json):
+            return value
+        if isinstance(value, (dict, list)):
+            return Json(value)
+        return value
+
     def insert_rows(self, table: str, rows: Sequence[Mapping[str, Any]]) -> None:
         if not rows:
             return
         from psycopg2 import sql
 
         schema, name = table.split(".", 1)
-        columns = list(rows[0].keys())
+        staging_columns = self._staging_column_types(schema, name)
+        # Column-drift guard: any prod row column that staging lacks is a
+        # fail-closed condition — we cannot safely INSERT a subset when the
+        # missing column may be a NOT NULL prod-only lineage field, nor can
+        # we invent a value. Emit REGISTRY_CLOSURE_INCOMPLETE naming the
+        # drift columns.
+        prod_columns = list(rows[0].keys())
+        drift = sorted(column for column in prod_columns if column not in staging_columns)
+        if drift:
+            raise RegistryClosureIncompleteError(
+                f"staging schema drift for {schema}.{name}: prod row has columns "
+                f"missing from staging: {drift}"
+            )
+        # Insert only the intersection so a staging-only column with a
+        # default is left to Postgres.
+        columns = [column for column in prod_columns if column in staging_columns]
         placeholders = sql.SQL(", ").join(sql.Placeholder() * len(columns))
         stmt = sql.SQL(
             "INSERT INTO {}.{} ({}) VALUES ({}) ON CONFLICT DO NOTHING"
@@ -873,7 +1006,14 @@ class PsycopgRegistryLifterOps(RegistryLifterOps):
         )
         with self._staging.cursor() as cursor:
             for row in rows:
-                cursor.execute(stmt, tuple(row.get(column) for column in columns))
+                values: list[Any] = []
+                for column in columns:
+                    raw = row.get(column)
+                    if staging_columns.get(column) == "jsonb":
+                        values.append(self._wrap_jsonb(raw))
+                    else:
+                        values.append(raw)
+                cursor.execute(stmt, tuple(values))
 
 
 # ---------------------------------------------------------------------------
@@ -1046,6 +1186,11 @@ def build_receipt(
     """
     if verdict not in {"PASS", "FAIL"}:
         raise DrillConfigError(f"verdict must be PASS or FAIL: {verdict!r}")
+    # B2 / C-sc-1: coverage is NEVER stub-filled. The schema was amended to
+    # allow ``coverage: []`` on FAIL (see
+    # ``schemas/archive_rebuild_drill_receipt.schema.json``); PASS still
+    # requires ``minItems: 1`` because a PASS with zero restored windows is
+    # meaningless.
     receipt: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": _now_iso(now or datetime.now(UTC)),
@@ -1055,18 +1200,7 @@ def build_receipt(
             "schema": staging_database["schema"],
             "instance_id": staging_database["instance_id"],
         },
-        "coverage": [dict(entry) for entry in coverage] or [
-            # Schema requires ``minItems: 1``. If a drill produced no
-            # verified restore, emit a coverage stub for the staging label
-            # so the receipt is still schema-valid on FAIL.
-            {
-                "source": "runs",
-                "window": {
-                    "start": "1970-01-01T00:00:00Z",
-                    "end": "1970-01-01T00:00:00Z",
-                },
-            }
-        ],
+        "coverage": [dict(entry) for entry in coverage],
     }
     if verdict == "PASS":
         if not comparisons:
@@ -1216,16 +1350,52 @@ def run_drill(
     ingest_runs: Callable[[Path, Mapping[str, Any], str], Mapping[str, Any]] | None = None,
     ingest_forcing: Callable[[Path, Mapping[str, Any], Any], Mapping[str, Any]] | None = None,
     verify_product: Callable[[Path, Mapping[str, Any], Any], ProductVerification] | None = None,
+    keep_workspace: bool = False,
     now: datetime | None = None,
 ) -> tuple[dict[str, Any], DrillOutcome]:
     """End-to-end drill: extract → lift → ingest → verify → receipt.
 
     Returns ``(receipt_dict, outcome)`` — caller writes the receipt to
     disk after receiving it (see ``write_receipt``).
+
+    Workspace cleanup (C1 / C-is-2): the extract tree under
+    ``config.workspace_root`` is removed on both PASS and FAIL exit unless
+    ``keep_workspace=True`` (operator triage aid — not surfaced by the CLI
+    yet; kept as a keyword arg for tests + future flag).
     """
     validate_isolation(config)
     now = now or datetime.now(UTC)
+    try:
+        return _run_drill_body(
+            config,
+            provision_staging=provision_staging,
+            teardown_staging=teardown_staging,
+            open_prod=open_prod,
+            open_staging_conn=open_staging_conn,
+            lifter_factory=lifter_factory,
+            ingest_runs=ingest_runs,
+            ingest_forcing=ingest_forcing,
+            verify_product=verify_product,
+            now=now,
+        )
+    finally:
+        if not keep_workspace:
+            shutil.rmtree(config.workspace_root, ignore_errors=True)
 
+
+def _run_drill_body(
+    config: DrillConfig,
+    *,
+    provision_staging: Callable[[str, str], None],
+    teardown_staging: Callable[[str, str], None],
+    open_prod: Callable[[str], Any],
+    open_staging_conn: Callable[[str], Any] | None,
+    lifter_factory: Callable[[Any, Any], RegistryLifterOps] | None,
+    ingest_runs: Callable[[Path, Mapping[str, Any], str], Mapping[str, Any]] | None,
+    ingest_forcing: Callable[[Path, Mapping[str, Any], Any], Mapping[str, Any]] | None,
+    verify_product: Callable[[Path, Mapping[str, Any], Any], ProductVerification] | None,
+    now: datetime,
+) -> tuple[dict[str, Any], DrillOutcome]:
     cycles: list[str] = []
     selectors: list[str] = []
     counts: list[dict[str, Any]] = []
@@ -1305,9 +1475,13 @@ def run_drill(
     # Phase 3: provision staging DB, lift closure, ingest, verify.
     # If archive_extracts is empty but salvage_selectors is non-empty we
     # still skip staging (salvage does not require DB).
+    #
+    # C3 / C-is-5 / C-di-3: provision_staging INSIDE the try block whose
+    # finally runs teardown_staging. If CREATE succeeded but migration
+    # then failed, the finally still runs DROP DATABASE — no leaked DB.
     if archive_extracts:
-        provision_staging(config.postgres_admin_url, config.staging_dbname())
         try:
+            provision_staging(config.postgres_admin_url, config.staging_dbname())
             with open_prod(config.prod_database_url_ro) as prod_conn:
                 open_staging = open_staging_conn or _default_open_staging
                 with open_staging(config.staging_database_url) as staging_conn:
@@ -1454,6 +1628,13 @@ def _lift_and_ingest(
     if lane == "runs":
         run_id = identity["run_id"]
         _lift_registry_closure_runs(lifter, run_id)
+        # A2 / C-is-1: commit the lifted registry rows on the staging
+        # connection BEFORE we hand off to OutputParser. OutputParser
+        # opens its own psycopg2 connection via
+        # ``PsycopgOutputParserRepository(database_url=STAGING_DATABASE_URL)``
+        # — an uncommitted lift is invisible to that second connection and
+        # every ingest INSERT fails an FK check against the parent tables.
+        _staging_commit_if_possible(staging_conn)
         # Copy the restored ``input/manifest.json`` + ``output/`` tree into
         # workspace layout ``runs/<run_id>/input/`` +
         # ``runs/<run_id>/output/`` so ``OutputParser`` finds the rivqdown
@@ -1468,12 +1649,24 @@ def _lift_and_ingest(
                 "forcing manifest producer.subject_id (forcing_version_id) is missing"
             )
         _lift_registry_closure_forcing(lifter, forcing_version_id)
+        # A2 / C-is-1: even though the forcing adapter uses the same
+        # ``staging_conn`` (so an uncommitted lift is visible), the handoff
+        # helper begins its own transaction; commit here for symmetry with
+        # the runs lane and to keep transaction scope narrow.
+        _staging_commit_if_possible(staging_conn)
         adapter = ingest_forcing or _ingest_forcing_cycle
         adapter(dest_dir, manifest, staging_conn)  # type: ignore[misc]
     else:
         raise ArchiveManifestMismatchError(
             f"unsupported lane for ingest: {lane!r} (states lane not reingested)"
         )
+
+
+def _staging_commit_if_possible(staging_conn: Any) -> None:
+    """Commit the staging connection, no-op if the stub does not support it."""
+    commit = getattr(staging_conn, "commit", None)
+    if callable(commit):
+        commit()
 
 
 def _prepare_run_workspace(dest_dir: Path, workspace_root: Path, run_id: str) -> None:
@@ -1596,15 +1789,24 @@ def _staging_segment_count(conn: Any, identity: Mapping[str, Any]) -> int:
 
 
 def _forcing_expected_row_count(dest_dir: Path) -> int:
-    """Count timeseries rows in the extracted forcing bundle."""
+    """Count timeseries rows in the extracted forcing bundle.
+
+    Matches ``packages/common/forcing_domain_handoff._json_rows`` semantics
+    (A3 / C-mf-1): payload is either a bare row list OR an object with
+    ``rows: [...]``. The prior ``records`` fallback was dead code and is
+    dropped (C-mf-3 — subsumed).
+    """
     payload = dest_dir / "payloads" / "station_timeseries.json"
     data = json.loads(payload.read_text(encoding="utf-8"))
-    rows = data.get("rows") or data.get("records") or []
-    if not isinstance(rows, list):
-        raise ArchiveManifestMismatchError(
-            "forcing station_timeseries.json rows array is missing"
-        )
-    return len(rows)
+    if isinstance(data, list):
+        return len(data)
+    if isinstance(data, Mapping):
+        rows = data.get("rows")
+        if isinstance(rows, list):
+            return len(rows)
+    raise ArchiveManifestMismatchError(
+        "forcing station_timeseries.json must be a row array or object with 'rows'"
+    )
 
 
 def _identity_window(manifest: Mapping[str, Any]) -> dict[str, str]:
@@ -1688,6 +1890,70 @@ def _validate_zstd(path: Path) -> Path:
     return _MOVER._validate_zstd(path)
 
 
+@contextmanager
+def _single_instance_lock(lock_path: Path) -> Iterator[Any]:
+    """Acquire an exclusive fcntl.flock on ``lock_path``; refuse if held.
+
+    C2 / C-is-3: without a single-instance guard, two overlapping runs
+    would race on DROP/CREATE DATABASE + tar extract into the same
+    workspace. Non-blocking LOCK_EX | LOCK_NB — held → raise
+    ``DrillConcurrentInvocationError``.
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = lock_path.open("a+")
+    acquired = False
+    try:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+        except OSError as error:
+            if error.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
+                raise DrillConcurrentInvocationError(
+                    f"another drill holds {lock_path}"
+                ) from error
+            raise
+        yield fh
+    finally:
+        if acquired:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+        try:
+            fh.close()
+        except OSError:
+            pass
+
+
+def _default_lock_path(receipt_path: Path) -> Path:
+    """Lock path co-located with the receipt directory."""
+    return receipt_path.parent / "drill.lock"
+
+
+def _fail_receipt_for_uncaught(
+    config: DrillConfig, error: Exception, now: datetime
+) -> dict[str, Any]:
+    """Build a FAIL receipt for an otherwise-unhandled exception (B1)."""
+    outcome = DrillOutcome(
+        verdict="FAIL",
+        cycles=[],
+        selectors=[],
+        counts=[],
+        coverage=[],
+        differences=[
+            {
+                "item": "drill",
+                "expected": {"code": CODE_DRILL_UNCAUGHT_ERROR},
+                "actual": {
+                    "error": str(error),
+                    "cause_type": type(error).__name__,
+                },
+            }
+        ],
+    )
+    return _build_receipt_from_outcome(outcome, config, now)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     argv = list(argv if argv is not None else sys.argv[1:])
     try:
@@ -1695,11 +1961,82 @@ def main(argv: Sequence[str] | None = None) -> int:
     except DrillConfigError as error:
         print(json.dumps({"status": "failed", "reason": str(error)}), file=sys.stderr)
         return 2
+
+    lock_path = _default_lock_path(config.receipt_path)
+    try:
+        with _single_instance_lock(lock_path):
+            return _main_locked(config)
+    except DrillConcurrentInvocationError as error:
+        # C2: emit a FAIL receipt so operators see the collision in the
+        # normal receipt stream — a silent exit 2 is easy to miss.
+        try:
+            receipt = _fail_receipt_for_concurrent(config, error, datetime.now(UTC))
+            write_receipt(config.receipt_path, receipt)
+        except Exception:  # pragma: no cover — receipt best-effort
+            pass
+        print(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "reason": str(error),
+                    "code": CODE_DRILL_CONCURRENT_INVOCATION,
+                }
+            ),
+            file=sys.stderr,
+        )
+        return 2
+
+
+def _fail_receipt_for_concurrent(
+    config: DrillConfig, error: DrillConcurrentInvocationError, now: datetime
+) -> dict[str, Any]:
+    outcome = DrillOutcome(
+        verdict="FAIL",
+        cycles=[],
+        selectors=[],
+        counts=[],
+        coverage=[],
+        differences=[
+            {
+                "item": "drill",
+                "expected": {"code": CODE_DRILL_CONCURRENT_INVOCATION},
+                "actual": {"error": str(error)},
+            }
+        ],
+    )
+    return _build_receipt_from_outcome(outcome, config, now)
+
+
+def _main_locked(config: DrillConfig) -> int:
     try:
         receipt, outcome = run_drill(config)
     except DrillConfigError as error:
         print(json.dumps({"status": "failed", "reason": str(error)}), file=sys.stderr)
         return 2
+    except Exception as error:
+        # B1 / C-is-4: any uncaught downstream fault (psycopg2 / OSError /
+        # OutputParsingError / AttributeError / ...) must land as a
+        # schema-valid FAIL receipt with wire code DRILL_UNCAUGHT_ERROR,
+        # not a raw stack trace. Operators consume receipts as the sole
+        # oracle.
+        now = datetime.now(UTC)
+        try:
+            receipt = _fail_receipt_for_uncaught(config, error, now)
+            write_receipt(config.receipt_path, receipt)
+        except Exception:  # pragma: no cover — receipt-emit best-effort
+            pass
+        print(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "reason": str(error),
+                    "code": CODE_DRILL_UNCAUGHT_ERROR,
+                    "cause_type": type(error).__name__,
+                }
+            ),
+            file=sys.stderr,
+        )
+        return 1
     write_receipt(config.receipt_path, receipt)
     print(json.dumps({"verdict": outcome.verdict, "receipt_path": str(config.receipt_path)}))
     return 0 if outcome.verdict == "PASS" else 1

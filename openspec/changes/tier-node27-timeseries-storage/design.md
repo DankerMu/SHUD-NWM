@@ -812,8 +812,10 @@ Drill emits structured `differences[]` on FAIL. Code strings (byte-identical acr
 - `ARCHIVE_TAR_CORRUPTED` — tarball truncated or extract-to-disk fails.
 - `SALVAGE_SHA256_MISMATCH` — `db-export` object sha256 does not match manifest.
 - `SALVAGE_ROW_COUNT_MISMATCH` — decompressed row count ≠ manifest `exported_row_count`.
-- `REGISTRY_CLOSURE_INCOMPLETE` — missing ancestor row in prod DB.
+- `REGISTRY_CLOSURE_INCOMPLETE` — missing ancestor row in prod DB, or a prod row column absent from the staging table (schema-drift guard, D2).
 - `STAGING_COUNT_MISMATCH` — staging `COUNT(*)` ≠ file-derived expected count.
+- `DRILL_UNCAUGHT_ERROR` — any downstream fault outside the enumerated codes lands here (psycopg2 / OSError / OutputParsingError / ...); receipt carries `differences[].actual.cause_type` = exception class name. Added by Round 1 fix pass (B1 / C-is-4).
+- `DRILL_CONCURRENT_INVOCATION` — non-blocking `fcntl.flock` on the drill lock file is already held. Added by Round 1 fix pass (C2 / C-is-3).
 
 ### Explicit deviations from prior sub-issue patterns
 

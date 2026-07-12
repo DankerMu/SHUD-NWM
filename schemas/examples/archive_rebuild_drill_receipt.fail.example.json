@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-07-11T12:20:00Z",
+  "verdict": "FAIL",
+  "staging_database": {"database": "nhms_archive_drill_20260711", "schema": "archive_drill_20260711", "instance_id": "node27-primary-pg15"},
+  "coverage": [],
+  "differences": [
+    {
+      "item": "drill",
+      "expected": {"code": "DRILL_UNCAUGHT_ERROR"},
+      "actual": {"error": "connection to server at \"127.0.0.1\" (127.0.0.1), port 5432 failed: Connection refused", "cause_type": "OperationalError"}
+    }
+  ]
+}
