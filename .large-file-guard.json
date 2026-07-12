@@ -1,0 +1,9 @@
+{
+  "enabled": true,
+  "maxLines": 1000,
+  "exclude": [
+    "openspec/changes/*/tasks.md",
+    "openspec/changes/*/design.md",
+    "openspec/changes/*/specs/**"
+  ]
+}

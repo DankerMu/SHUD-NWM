@@ -1,0 +1,53 @@
+# This runner has NO automated restore lane; salvage restore is the manual `COPY FROM` procedure documented in the archive runbook section 3.2. Retention (#855) drops salvage-covered windows only with the manual runbook in place.
+#
+# Node-27 one-time DB-export salvage runner (issue #850 / OpenSpec: tier-node27-timeseries-storage).
+# Consumes the archive-completeness receipt's `salvage_selectors` list verbatim
+# (hardcoded date lists refused) and publishes CSV.zst objects + manifest.json
+# siblings under NHMS_ARCHIVE_ROOT/db-export/<lane>/<identity>/.
+#
+# Copy to /home/nwm/NWM/infra/env/node27-db-export-salvage.env on node-27 and chmod 0600.
+
+# Node-27 primary Postgres — MUST be a strictly read-only role
+# (nhms_display_ro or an equivalent explicitly-scoped read role). The runner
+# fails closed on `refused_role` if the role can INSERT into
+# met.forcing_station_timeseries or hydro.river_timeseries.
+DATABASE_URL=postgresql://REPLACE_ME_READONLY:REPLACE_ME_PW@127.0.0.1:55432/nhms
+
+# Shared archive root (must match node27-product-archive.env and
+# node27-storage-inventory-audit.env). The exporter writes only under
+# ${NHMS_ARCHIVE_ROOT}/db-export/.
+NHMS_ARCHIVE_ROOT=/home/ghdc/nwm/archive
+
+# Absolute path to the archive-completeness receipt emitted by the storage
+# inventory audit (#849). The runner refuses to boot if this file is missing
+# or fails schema validation against
+# schemas/archive_completeness_receipt.schema.json.
+NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH=/home/nwm/node27-storage-inventory-audit-logs/completeness-receipt.json
+
+# Absolute path where the salvage receipt is published (mode 0600, atomic).
+NODE27_DB_EXPORT_SALVAGE_RECEIPT_PATH=/home/nwm/NWM/artifacts/receipts/node27_db_export_salvage.json
+
+# Absolute path to the mode-0600 flock file (single-writer discipline).
+NODE27_DB_EXPORT_SALVAGE_LOCK_PATH=/tmp/nhms-node27-db-export-salvage.lock
+
+# Maximum number of selectors processed per invocation (>=1). The salvage
+# operation is one-time, but the per-tick bound keeps a single interactive
+# run bounded and predictable.
+NODE27_DB_EXPORT_SALVAGE_PER_TICK_BOUND=32
+
+# Zstd compression level (1-22; default 3 — matches sibling raw retention
+# and archive discipline). Higher = slower + smaller.
+NODE27_DB_EXPORT_SALVAGE_ZSTD_LEVEL=3
+
+# Per-COPY statement timeout in milliseconds (>=1000; default 300000 = 5 min).
+# Matches the sibling compression runner's convention (#851).
+NODE27_DB_EXPORT_SALVAGE_STATEMENT_TIMEOUT_MS=300000
+
+# Non-empty literal stamped into every manifest's source_database.instance_id.
+# The schema example uses "node27-primary-pg15"; use whatever binds the
+# published objects unambiguously to the source primary.
+NODE27_DB_EXPORT_SALVAGE_SOURCE_INSTANCE_ID=node27-primary-pg15
+
+# Execution mode: dry-run (default; classifies selectors, no objects written)
+# or enforce (publishes objects + manifests).
+NODE27_DB_EXPORT_SALVAGE_MODE=dry-run
