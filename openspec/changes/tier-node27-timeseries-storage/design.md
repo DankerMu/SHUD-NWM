@@ -399,3 +399,99 @@ Boundary-surface checklist:
 - Producer/consumer evidence boundaries: audit → completeness receipt is the sole gate for #855 retention; extended governance receipt keeps existing schema+consumers intact.
 - Stale-state/idempotency boundaries: refusal is stateless (evaluated per tick); missing/stale receipt handled by #847 already.
 - Unchanged downstream consumers: display API/frontend/read paths, `nhms_display_ro` DB role, node-22 (all out of scope; regression rows above enforce).
+
+## Workflow Fixture: Issue #851 Hypertable Compression Migration + Receipted Runner
+
+Fixture level: expanded. Repair intensity: high. Project profile: NHMS.
+
+Migration slot deviation from issue body: issue #851 and `tasks.md` line 920 pin task 4.1 to migration `000043`; that slot is already occupied (`000043_canonical_grid_snapshot.sql`, and `000044`–`000046` are also occupied by later work). This issue lands at the next free slot `000047`. `tasks.md` line 920 is corrected in the same PR to cite `000047` so future readers do not chase a stale slot.
+
+Change surface:
+
+- `db/migrations/000047_hypertable_compression_settings.sql` (new): `ALTER TABLE ... SET (timescaledb.compress = true, timescaledb.compress_segmentby = ..., timescaledb.compress_orderby = ...)` for `hydro.river_timeseries` and `met.forcing_station_timeseries`. No `add_compression_policy` — script-driven only (D3 rejects background policy jobs: no receipts, no bounds, invisible to governance audit).
+- `scripts/node27_timeseries_compression.py` (new): compression runner selecting terminal chunks whose `range_end < (now_utc - lag)`, default lag 7 d = one chunk width; per-chunk `compress_chunk`; per-tick chunk bound (deferred remainder listed); dry-run default + `--enforce` flag; in-process `fcntl.flock` LOCK_EX|LOCK_NB on mode-0600 O_CREAT|O_EXCL|O_NOFOLLOW lock file; receipt via `atomic_write_bytes_no_follow(require_durable_replace=True)` with per-chunk + per-table before/after bytes.
+- `scripts/node27_timeseries_compression_once.sh` (new, 0755): mode-0600 env-file preflight + absolute-path guards + tool availability check, mirroring mover/audit wrappers (#848 / #849 shape).
+- `schemas/timeseries_compression_receipt.schema.json` (new): pinned receipt JSON contract (top-level shape below under "Must add/change") — CI json-schema-validate loop consumes it via basename pairing with the sibling positive example.
+- `schemas/examples/timeseries_compression_receipt.example.json` (new): schema-valid positive example. Filename is exactly `timeseries_compression_receipt.example.json` so `.github/workflows/ci.yml` `check-jsonschema` loop (lines 115-136) auto-pairs it via `basename(example, .example.json) → schemas/<base>.schema.json`; any other filename would silently `WARNING: No schema found` and skip.
+- `infra/env/node27-timeseries-compression.example` (new): documents runner env vars; header comment states verbatim `NHMS_ARCHIVE_ROOT` is NOT read by this runner (compression is DB-side only) so operators do not attempt to sync it against the mover/audit/governance archive-root trio.
+- `tests/test_node27_timeseries_compression.py` (new): chunk-selection classification (recent skipped, terminal eligible, active never), per-tick bound + deferred remainder, dry-run vs enforce semantics, flock contention, config parse fail-closed (invalid lag / bound / DB URL), wrapper shell-contract parametrized cases, receipt schema/semantic contract.
+- `openspec/changes/tier-node27-timeseries-storage/tasks.md` line 920 edit: `000043` → `000047`.
+
+Not touched (out of scope):
+
+- `scripts/node27_timeseries_compression_once.sh` **is** touched (wrapper is the runner's operator surface). Systemd units + governance registration (task 4.4) belong to #853, NOT #851.
+- Fail-closed compressed-chunk write guard belongs to #852 (task 4.3). Compression itself is safe without the write guard as long as no ingest hits a compressed chunk during the tests; production compression on node-27 is task 4.5 (#853).
+- Initial live compression + representative-query timing receipts are task 4.5 (#853).
+- No touching of `scripts/node27_product_archive.py`, `scripts/node27_storage_inventory_audit.py`, `scripts/node27_resource_governance.py` — this issue is chunk-writer only.
+- No touching of `apps/api/**`, `apps/frontend/**`, `workers/output_parser/**`, `workers/forcing_producer/**` — ADR 0001 display carve-out; ingest write paths owned by #852.
+
+Must preserve:
+
+- The chunk-select query must not full-scan detail hypertables. Reuse the existing `timescaledb_information.chunks` lookup pattern from `scripts/node27_resource_governance.py:454-513` (identity-leading index-only style); the compression runner MUST NOT hit `hydro.river_timeseries` / `met.forcing_station_timeseries` rows directly.
+- ADR 0002 hot/cold tiering invariant: compression is a "cold" operation on terminal chunks; the active chunk is never compressed (chunk selection filter must exclude it).
+- Existing `node27_product_archive.py` runner patterns for lock / atomic receipt publication / dry-run default / per-tick bound / env aliasing (`NODE27_<SCRIPT>_<KEY>` overriding `NHMS_<KEY>` when applicable) — do not fork a new discipline.
+- TimescaleDB 2.10 catalog surface: on 2.10 the `timescaledb_information.hypertables` view does not expose segmentby/orderby; verification MUST use `timescaledb_information.compression_settings` (rows with `segmentby_column_index` set for segmentby columns; rows with `orderby_column_index` set for orderby columns).
+- Compression segmentby columns MUST cover the primary-key columns of each hypertable (TimescaleDB 2.10 unique-constraint requirement); D3 already enumerates the mapping.
+- The runner MUST NOT decompress anything. `decompress_chunk` is operator-only (documented in the compression runbook section, but #851 does not author that runbook — task 7.1 owns it).
+
+Must add/change:
+
+- Migration `000047` adding compression settings, matching the house style (no BEGIN/COMMIT wrap; `--` prose header citing #845 / #851 / OpenSpec change; idempotent enough that a re-apply on already-compressed table does not error — TimescaleDB `SET (...)` is idempotent, but the migration must handle the case where a previous partial apply left settings on one table but not the other).
+- Compression runner emitting receipt with:
+  - `schema_version: "1.0"` (matches #848 mover schema-version discipline).
+  - Top-level: `now_utc`, `lag_seconds`, `per_tick_bound`, `mode` (`dry-run` | `enforce`), `outcome` (`clean` | `partial` | `refused_lock` | `refused_config`), `selected` (list of chunk descriptors with before/after bytes), `deferred` (list of chunk descriptors beyond bound), `skipped` (list of chunk descriptors inside lag window), `per_table_totals` (`{table_name → {before_bytes, after_bytes, chunks_compressed}}`).
+  - Per-chunk descriptor: `hypertable_schema`, `hypertable_name`, `chunk_schema`, `chunk_name`, `range_start`, `range_end`, `before_bytes`, `after_bytes` (null on dry-run or failure).
+  - Receipt validates against a new `schemas/timeseries_compression_receipt.schema.json` (this schema pins JSON contract; example + negative test rows land in the same PR).
+- Env example `infra/env/node27-timeseries-compression.example` documenting `DATABASE_URL`, `NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` (default 604800 = 7 d), `NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND` (default 5), `NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH`. Header comment (pinned wording): `# This runner does NOT read NHMS_ARCHIVE_ROOT / archive watermarks — compression is DB-side only. Do not sync this env against node27-product-archive.env / node27-storage-inventory-audit.env / node27-resource-governance.env.`
+
+Risk packs considered (core):
+
+- Public API / CLI / script entry: **selected** — new mutation script; `--enforce` flag; new env vars.
+- Config / project setup: **selected** — new env example + strict lag/bound parsing (no truthiness fallback, matches #846/#848 discipline).
+- File IO / path safety / overwrite: **selected** — receipt publication (atomic write, dirfd, no-follow); lock file mode/permissions.
+- Schema / columns / units / field names: **selected** — new receipt schema + example + negative tests.
+- Auth / permissions / secrets: **selected** — env file mode 0600; DB URL is a write-capable superuser role (compression is DDL/DML, not read-only).
+- Concurrency / shared state / ordering: **selected** — in-process flock; active chunk never compressed; deferred remainder ordering.
+- Resource limits / large input / discovery: **selected** — per-tick chunk bound; compression is CPU-and-IO intensive.
+- DB migration / DDL: **selected** — migration `000047` is production DDL.
+- Error handling / retries / backoff: **selected** — `compress_chunk` failure per candidate must not corrupt the receipt (per-candidate outcome, not aborting the run).
+- Auth / secrets in logs: **selected** — DSN must never appear in receipt or stderr.
+- Testing / evidence rigor: **selected** — chunk-selection classification must be unit-testable without a real DB (monkeypatch DB query function, consistent with `test_node27_resource_governance.py`).
+- Publish/delete/deletion safety: not selected as its own category — compression is not deletion; write-guard is #852.
+
+Risk packs considered (domain):
+
+- Geospatial / grid CRS: not selected — compression is opaque to grid semantics.
+- SHUD / hydrology model: not selected — compression preserves row values; SHUD reads are downstream of hot data anyway.
+- External providers / GRIB / weather feeds: not selected — compression is DB-side only.
+- Auth regression: not selected explicitly (inherits mode-0600 env-file discipline from #847/#848 — reused by wrapper preflight test, but no new auth surface).
+
+Six-reviewer high-risk escalation triggered by: production DDL migration + `compress_chunk` mutation + new receipt schema + shared retention gate consumer (task 6.3 will consume this via governance registration in #853; #851 must leave contracts clean).
+
+Invariant Matrix:
+
+- Terminal-chunk-only: chunk-select query filter `range_end < now - lag` yields only chunks strictly older than the lag window; active chunk (whose `range_end` >= now) never selected. Test: two chunks — one `range_end = now - 3d` (skipped), one `range_end = now - 10d` (eligible).
+- Per-tick bound respected: `SELECT ... LIMIT bound` (or explicit slice after ordering) — no more than `bound` chunks fully compressed; deferred remainder listed in receipt with reason "beyond per-tick bound".
+- Dry-run isolation: `mode=dry-run` writes only the receipt; no `compress_chunk` call; per-chunk `after_bytes` = null.
+- Flock lock-holder-only publish: contender receives structured JSON skip on stderr; **does not** touch the shared receipt path.
+- Strict config parse: invalid lag (empty, negative, non-numeric, `"0"`) → exit non-zero before any DB call; no stale receipt overwrite.
+- Migration idempotent on partial state: re-applying after only one table's ALTER succeeded must fix the second table without erroring on the first.
+- Compression `segmentby` covers PK columns (TimescaleDB 2.10 unique-constraint requirement) — asserted via test that reads the migration text and cross-references the expected PK column list per table.
+- Compressed-chunk catalog verifiable: after migration, `timescaledb_information.compression_settings` rows for both hypertables list exactly the D3-specified columns (segmentby + orderby); this is task 4.1 acceptance and is unit-testable by parsing the migration file plus a real-DB smoke marker (deferred to #853 for the live oracle).
+- Ingest write-guard NOT weakened: this issue delivers zero coupling to `workers/output_parser/parser.py`, `workers/forcing_producer/store.py`, `packages/common/forcing_domain_handoff_apply.py` — #852 owns that. Runner has no import graph reaching those modules.
+- Display carve-out: `grep` of `apps/api`, `apps/frontend` for `timeseries_compression`, `compress_chunk`, `NODE27_TIMESERIES_COMPRESSION` → zero hits (ADR 0001).
+- Env-file mode + DSN privilege preflight → compression `_once.sh` wrapper reuses the mode-0600 env-file check inherited from #847/#848 and refuses a loosened env. DB URL is superuser (compression is DDL/DML) and must remain out of the audit env; audit still uses `nhms_display_ro`.
+- Receipt schema fresh contract: new `schemas/timeseries_compression_receipt.schema.json` includes positive example (validates via `check-jsonschema` CI loop) + Python-side negative tests for missing per-chunk fields, missing per-table totals, wrong mode enum, etc. No stale `warn_bytes`/`refuse_bytes` fields leak from mover schema (independent contract).
+- No accidental compression policy: migration MUST NOT call `add_compression_policy`; explicit test grepping the migration file for `add_compression_policy` finds zero matches.
+
+Boundary-surface checklist:
+
+- Shared helper roots: none forked (new `scripts/node27_timeseries_compression.py` is a fresh script, reuses `packages/common/safe_fs.py:atomic_write_bytes_no_follow` and the flock pattern from `node27_product_archive.py` inline without extracting).
+- Public entrypoints: 1 new user-facing runner (`node27_timeseries_compression.py`) + 1 wrapper + 1 env example + 1 migration + 1 schema.
+- Read surfaces: `timescaledb_information.chunks`, `timescaledb_information.hypertables`, `timescaledb_information.compression_settings` — all catalog-only, no detail-hypertable row reads.
+- Write/delete/overwrite surfaces: `compress_chunk` calls (DDL/DML); receipt publication (atomic, dirfd, no-follow); lock file creation.
+- Staging/publish/rollback surfaces: no staging (compression is direct on chunk); rollback = operator-only `decompress_chunk` (documented in task 7.1 runbook, not authored here).
+- Producer/consumer evidence boundaries: receipt → task 4.5 live receipt (#853 consumes); `timescaledb_information.compression_settings` → task 4.1 verification (real-DB oracle in #853).
+- Stale-state/idempotency boundaries: re-running the runner over already-compressed chunks must skip them (chunk-select query filters on `is_compressed = false` from `timescaledb_information.chunks`, which on TimescaleDB 2.10 exposes an `is_compressed` boolean column on this view — do NOT reach into `_timescaledb_catalog.chunk.compressed_chunk_id` for the same signal).
+- Unchanged downstream consumers: display API/frontend/read paths (ADR 0001), ingest write paths (#852 owns write-guard coupling), retention gate (#855 owns receipt consumption).
+
