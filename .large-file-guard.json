@@ -1,0 +1,11 @@
+{
+  "enabled": true,
+  "maxLines": 1000,
+  "exclude": [
+    "openspec/changes/*/tasks.md",
+    "openspec/changes/*/design.md",
+    "openspec/changes/*/specs/**",
+    "scripts/node27_db_export_salvage.py",
+    "tests/test_node27_db_export_salvage.py"
+  ]
+}

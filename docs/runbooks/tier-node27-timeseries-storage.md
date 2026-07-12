@@ -158,6 +158,138 @@ When `free_bytes < refuse_bytes` at mover start:
 Dry-run mode still evaluates and reports the refusal terminal — the refuse
 band is a governance signal, not a mutation-only gate.
 
+## 3. DB-export salvage
+
+The salvage lane covers a one-time historical operation: forcing / river
+timeseries windows whose upstream product cycles never made it into either
+the hot object-store or the archive (typical case: `forcing/` before
+2026-06-16, where the object-store was reset before an archive lane
+existed). The salvage exporter reads those rows straight out of the two
+detail hypertables via `COPY (SELECT ... WHERE ...) TO STDOUT WITH
+(FORMAT CSV, HEADER)`, compresses the CSV with zstd, and publishes the
+object plus a `manifest.json` sidecar under
+`NHMS_ARCHIVE_ROOT/db-export/<lane>/<identity>/`.
+
+Runner: `scripts/node27_db_export_salvage.py` (wrapper
+`scripts/node27_db_export_salvage_once.sh`, env example
+`infra/env/node27-db-export-salvage.example`).
+
+### 3.1 Scope + provenance invariants
+
+- Selector scope is the archive-completeness receipt's `salvage_selectors`
+  array (design D6). Hardcoded selector lists are refused — the exporter
+  is a downstream consumer of the audit contract, not a scope authority.
+- Manifests carry `provenance: "db-export"` so downstream consumers
+  (drill #854, retention gate #855) can permanently distinguish salvage
+  objects from product-derived archive objects.
+- The runner refuses at boot if its DSN maps to a role that can INSERT
+  into either `met.forcing_station_timeseries` or `hydro.river_timeseries`
+  (both `has_table_privilege` AND a rolled-back sentinel INSERT are
+  checked). Wire the runner with `nhms_display_ro` or an equivalent
+  explicit read-only role.
+
+### 3.2 Salvage restore is manual — no automated restore lane
+
+**Per ADR 0002 decision 3, `db-export` salvage objects have no automated
+or steady-state restore lane.** The only restore path is the manual
+`COPY FROM` procedure below. Retention (#855, forward cross-link to
+section 6.2 of the retention runbook when authored) MAY drop
+salvage-covered windows only with this documented manual recovery path
+in place.
+
+The archive rebuild drill (#854) verifies salvage objects by checksum
+and manifest row-count parity — it does NOT reingest them.
+
+#### 3.2.1 Checksum pre-check
+
+Before any restore attempt, confirm the on-disk object matches the
+manifest's recorded sha256:
+
+```
+cd ${NHMS_ARCHIVE_ROOT}/db-export/<lane>/<identity>/
+manifest_sha=$(jq -r '.exports[0].object.sha256' manifest.json)
+disk_sha=$(sha256sum data.csv.zst | awk '{print $1}')
+[ "$manifest_sha" = "$disk_sha" ] || { echo "ABORT: checksum mismatch"; exit 1; }
+```
+
+If the pre-check fails, **do not restore** — treat the object as
+corrupted evidence and escalate; the archive rebuild drill (#854)
+verifies the same digest and will surface the corruption.
+
+Also confirm the manifest matches the schema:
+
+```
+uv run python -c "
+import json, jsonschema
+schema = json.load(open('schemas/salvage_manifest.schema.json'))
+manifest = json.load(open('manifest.json'))
+jsonschema.validate(manifest, schema)
+print('OK')
+"
+```
+
+#### 3.2.2 Manual `COPY FROM` procedure
+
+Salvage manifests record the exact column list used at export time (the
+full DDL column set for the hypertable). The restore MUST reuse that same
+list — do not paste a hand-typed column list.
+
+For a forcing salvage object
+(`db-export/forcing/<forcing_version_id>/data.csv.zst`):
+
+```
+zstd -q -d -c data.csv.zst | psql \
+  -h 127.0.0.1 -p 55432 -U <writer_role> -d nhms \
+  -c "\copy met.forcing_station_timeseries (
+        forcing_version_id, basin_version_id, station_id, valid_time,
+        source_id, variable, value, unit, native_resolution, quality_flag
+      ) FROM STDIN WITH (FORMAT CSV, HEADER)"
+```
+
+For a river salvage object
+(`db-export/runs/<run_id>/data.csv.zst`):
+
+```
+zstd -q -d -c data.csv.zst | psql \
+  -h 127.0.0.1 -p 55432 -U <writer_role> -d nhms \
+  -c "\copy hydro.river_timeseries (
+        run_id, basin_version_id, river_network_version_id,
+        river_segment_id, valid_time, lead_time_hours, variable, value,
+        unit, quality_flag, created_at
+      ) FROM STDIN WITH (FORMAT CSV, HEADER)"
+```
+
+The writer role MUST have INSERT on the target hypertable — the salvage
+exporter's read-only role will not be able to restore. Verify the
+restored row count against `manifest.exports[0].exported_row_count`
+after the load:
+
+```
+psql -h 127.0.0.1 -p 55432 -U <writer_role> -d nhms -c "
+  SELECT COUNT(*) FROM met.forcing_station_timeseries
+   WHERE forcing_version_id = '<forcing_version_id>'
+     AND valid_time >= '<manifest.exports[0].selector.window.start>'
+     AND valid_time <  '<manifest.exports[0].selector.window.end>';"
+```
+
+#### 3.2.3 No pipeline code path performs automated CSV import
+
+`apps/api/**` and `apps/frontend/**` MUST NOT reference the salvage
+runner or the `db-export/` prefix (ADR 0001 display carve-out; enforced
+by `tests/test_node27_db_export_salvage.py::test_display_carve_out`).
+The reingest pipeline covers only product-provenance archive rebuilds
+(design D1). Salvage restore requires a human operator, deliberately.
+
+Related documents:
+
+- ADR 0002 decision 3 (salvage restore is manual): see
+  [`docs/adr/0002-node27-timeseries-hot-cold-tiering.md`](../adr/0002-node27-timeseries-hot-cold-tiering.md#decisions).
+- Retention runbook section 6.2 (forward reference; to be authored by
+  #855): retention MAY drop a salvage-covered window only if the
+  manifest here validates and the checksum pre-check above succeeds.
+  When #855 lands section 6.2, it MUST cross-link back to this section
+  3.2.
+
 ## Rollback (unit-level, not data-level)
 
 Both units are read-mostly (audit is read-only; mover's writes are already

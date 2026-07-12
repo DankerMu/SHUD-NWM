@@ -882,7 +882,7 @@ Order is load-bearing:
 
 ## 3. One-time DB-export salvage (`db-export-salvage`)
 
-- [ ] 3.1 Build the salvage exporter
+- [x] 3.1 Build the salvage exporter
   (`scripts/node27_db_export_salvage.py`).
   Evidence floor: consumes the archive-completeness receipt's salvage
   selector list verbatim (hardcoded date lists refused); `COPY` per selector
@@ -898,7 +898,7 @@ Order is load-bearing:
     at export time.
   - Input: invocation with a hardcoded selector list and no receipt.
     Expected: refused; the receipt is the only scope source.
-- [ ] 3.2 Document the manual `COPY FROM` restore procedure for `db-export`
+- [x] 3.2 Document the manual `COPY FROM` restore procedure for `db-export`
   objects.
   Evidence floor: archive runbook section documents the checksum pre-check +
   manual `COPY FROM` sequence as the **only** restore path for salvage
