@@ -326,6 +326,29 @@ def test_recommendations_skip_archive_when_status_not_ok() -> None:
     assert not any(code.startswith("ARCHIVE_") for code in codes)
 
 
+def _parse_env_value(text: str, key: str) -> str:
+    """Extract the value declared for ``key`` in a bash-style env file.
+
+    Approximates ``bash source`` for simple ``KEY=VALUE`` lines: strips the
+    inline ``# comment`` suffix (bash treats ``#`` preceded by whitespace as
+    a comment separator) and trailing whitespace. Returns ``""`` if the key
+    is not declared, which lets callers distinguish "missing" from "empty
+    value" via the presence assertion above.
+    """
+    prefix = f"\n{key}="
+    marker = "\n" + text
+    idx = marker.find(prefix)
+    if idx < 0:
+        return ""
+    line_end = marker.find("\n", idx + 1)
+    raw = marker[idx + len(prefix) : (line_end if line_end != -1 else None)]
+    for sep in (" #", "\t#"):
+        pos = raw.find(sep)
+        if pos != -1:
+            raw = raw[:pos]
+    return raw.strip()
+
+
 def test_env_examples_declare_shared_archive_watermarks() -> None:
     """All three env examples must declare NHMS_ARCHIVE_ROOT and the
     free-space watermark pair so governance/mover/audit observe the same
@@ -343,11 +366,25 @@ def test_env_examples_declare_shared_archive_watermarks() -> None:
         "infra/env/node27-resource-governance.example",
     )
     root = Path(__file__).resolve().parents[1]
-    for env_path in envs:
-        text = (root / env_path).read_text(encoding="utf-8")
+    env_texts = {env_path: (root / env_path).read_text(encoding="utf-8") for env_path in envs}
+    for env_path, text in env_texts.items():
         for key in required_keys:
             assert f"\n{key}=" in "\n" + text, (
                 f"{env_path} is missing shared archive env {key}; "
                 "the three env files must stay synchronized so "
                 "governance/mover/audit observe the same watermarks."
             )
+    # Beyond mere presence, the three files must agree on the VALUES for
+    # every shared key. Each wrapper sources only its own env file; a value
+    # mismatch here means governance may report a different band than the
+    # mover actually enforces (the exact drift #849 closes).
+    for key in required_keys:
+        values = {env_path: _parse_env_value(text, key) for env_path, text in env_texts.items()}
+        unique = set(values.values())
+        assert len(unique) == 1, (
+            f"Shared archive env {key} drifted across env files: {values}. "
+            "The mover, audit, and governance wrappers each source only their "
+            "own env file, so a value mismatch here means governance may "
+            "report a different band than the mover actually enforces. Keep "
+            "the three files byte-identical for these shared keys."
+        )
