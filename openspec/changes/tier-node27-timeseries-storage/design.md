@@ -495,3 +495,103 @@ Boundary-surface checklist:
 - Stale-state/idempotency boundaries: re-running the runner over already-compressed chunks must skip them (chunk-select query filters on `is_compressed = false` from `timescaledb_information.chunks`, which on TimescaleDB 2.10 exposes an `is_compressed` boolean column on this view — do NOT reach into `_timescaledb_catalog.chunk.compressed_chunk_id` for the same signal).
 - Unchanged downstream consumers: display API/frontend/read paths (ADR 0001), ingest write paths (#852 owns write-guard coupling), retention gate (#855 owns receipt consumption).
 
+## Workflow Fixture: Issue #850 DB-Export Salvage Exporter + Manual Restore Runbook + Live Salvage Run
+
+Fixture level: expanded. Repair intensity: high. Project profile: NHMS.
+
+Change surface:
+
+- `scripts/node27_db_export_salvage.py` (new): reads the archive-completeness receipt (schema `schemas/archive_completeness_receipt.schema.json`), consumes the `salvage_selectors` array verbatim, runs `COPY (SELECT <fixed column list> FROM met.forcing_station_timeseries | hydro.river_timeseries WHERE <PK-scoped selector predicate>) TO STDOUT WITH (FORMAT CSV, HEADER)` per selector, zstd-compresses the CSV, publishes the object plus a per-object `manifest.json` sibling under `NHMS_ARCHIVE_ROOT/db-export/<lane>/<identity>/{data.csv.zst,manifest.json}` (`exports` array length 1 per manifest) via `atomic_write_bytes_no_follow(mode=0o600, require_durable_replace=True)`, and emits a receipt outside the archive root. Reads: `met.forcing_station_timeseries`, `hydro.river_timeseries` via display_ro or explicitly-scoped read role. Writes: filesystem only under `NHMS_ARCHIVE_ROOT/db-export/`. Never runs DDL, never deletes DB rows, never deletes archive objects. `tasks.md §3.1` and §3.2 checkboxes flipped in this PR; §3.3 flipped in the follow-up live-receipt commit.
+- `scripts/node27_db_export_salvage_once.sh` (new, 0755): systemd oneshot wrapper — preflight absolute paths + non-symlink + env-file mode 0600, `set -a; . "$ENV_FILE"; set +a; exec uv run python …` per `#849` and `#851` convention.
+- `infra/env/node27-db-export-salvage.example` (new): DB URL (display_ro or read-scoped role), `NHMS_ARCHIVE_ROOT`, `NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH` (input scope source), receipt output path, lock path, `NODE27_DB_EXPORT_SALVAGE_PER_TICK_BOUND` (per-tick selector bound), `NODE27_DB_EXPORT_SALVAGE_ZSTD_LEVEL` (default `3`, matches sibling raw retention + archive discipline), `NODE27_DB_EXPORT_SALVAGE_STATEMENT_TIMEOUT_MS` (default `300000`, mirrors #851's compress-timeout convention), `NODE27_DB_EXPORT_SALVAGE_SOURCE_INSTANCE_ID` (env-configured literal that stamps `source_database.instance_id` in the manifest, matches the schema example's `"node27-primary-pg15"`). Header explicitly states "no automated restore lane exists — restore is the manual `COPY FROM` procedure documented in the archive runbook".
+- `tests/test_node27_db_export_salvage.py` (new): unit tests covering selector-consumption invariants (receipt schema-validated on load, refuse hardcoded selector lists, refuse malformed selectors, idempotency skip on verified existing objects, dry-run isolation, per-selector failure isolation, manifest row-count parity, safe-relative-path enforcement, DSN masking, wrapper 6-case parametrized shell contract, receipt `outcome` enum coverage — `clean` / `partial` / `refused_lock` / `refused_config` / `refused_role` — and per-table column-list constants pinned by test asserting the SELECT column list matches the migration DDL columns for both hypertables).
+- `docs/runbooks/tier-node27-timeseries-storage.md` (edit): new section 3.2 — checksum pre-check + manual `COPY FROM` sequence as the ONLY restore path for salvage objects, explicitly states no automated restore lane exists (ADR 0002 decision 3). Cross-link direction: this PR authors section 3.2 with a forward reference to the retention runbook section 6.2 anchor (owned by #855); this PR does not create section 6.2. When #855 lands section 6.2 it MUST include the reverse link back to 3.2.
+- Node-27 live (task 3.3, deferred to a follow-up commit under this same issue per PR body): committed salvage receipt covering every `gap`/salvage selector in the live completeness receipt (expected: forcing before 2026-06-16); per-selector manifest row count equals DB row count at export time; follow-up audit run marks those subjects `complete` and emits an empty salvage list.
+
+Must preserve:
+
+- ADR 0002 decision 3: `db-export` provenance is the sole exception to product-provenance and gets NO automated restore lane. Manual `COPY FROM` runbook is the only restore path.
+- Design D6: salvage selectors are audit-derived (from the archive-completeness receipt); hardcoded date lists MUST be refused. The exporter is a downstream consumer of the audit contract, not a scope authority.
+- Design D1: the archive is derived from products, not from DB export; salvage is one-time, not steady-state.
+- ADR 0001 display carve-out: no display API/frontend/read code path may import the salvage script or reference `NHMS_ARCHIVE_ROOT/db-export/`.
+- Salvage manifest schema (`schemas/salvage_manifest.schema.json`) contract from #846 foundation — provenance MUST be the const `"db-export"`, path pattern MUST match `^db-export/(?:[^/]+/)*[^/]+\.csv\.zst$`, sha256 hex-64.
+- Existing `nhms_display_ro` role write-refusal semantics — the exporter MUST fail closed if the role can write.
+- Existing #846/#849 env-file mode-0600 discipline and `_once.sh` preflight pattern.
+- Existing `packages/common/safe_fs.py::atomic_write_bytes_no_follow(require_durable_replace=True)` publication surface — reuse verbatim, do not fork.
+- fcntl.flock LOCK_EX|LOCK_NB pattern from `scripts/node27_product_archive.py::acquire_lock` — reuse inline (sibling script convention, matches #851).
+
+Must add/change:
+
+- One receipted, mutation-free, dry-run-default exporter with strict receipt-scoped selector input, mode-0600 atomic receipt publication, per-tick selector bound, safe-relative-path enforcement on all filesystem writes, and structured refusal outcomes.
+- One systemd oneshot wrapper and env example matching the #849/#851 shape.
+- One runbook section pinning the manual `COPY FROM` restore procedure and stating no automated lane exists, cross-linked from the retention runbook.
+- A unit-test suite covering every requirement scenario in `openspec/changes/tier-node27-timeseries-storage/specs/db-export-salvage/spec.md` plus the fixture-mandated regression rows.
+
+Risk packs considered (core):
+
+- Public API / CLI / script entry: selected — new operator script + wrapper + env-file surface + runbook section.
+- Config / project setup: selected — env example, receipt scope source, DB role scoping are the configuration surface.
+- File IO / path safety / overwrite: selected — new writes under `NHMS_ARCHIVE_ROOT/db-export/…`; safe-relative-path pattern MUST be enforced on every write; receipt publication uses `atomic_write_bytes_no_follow`.
+- Schema / columns / units / field names: selected — manifest schema (foundation) MUST NOT be silently reshaped; upstream archive-completeness receipt MUST be schema-validated on load.
+- Auth / permissions / secrets: selected — DB role scoping (display_ro or explicit read-only role), DSN masking on all diagnostic surfaces, env-file mode-0600 preflight.
+- Concurrency / shared state / ordering: selected — flock LOCK_EX|LOCK_NB; second-invocation contender emits stderr JSON refusal without touching the receipt.
+- Resource limits / large input / discovery: selected — per-tick selector bound + statement timeout + zstd level bound production impact of first run.
+- Legacy compatibility / examples: selected — no change to mover/audit/compression scripts; sibling regression must show 321+ unchanged.
+- Error handling / rollback / partial outputs: selected — per-selector failure MUST NOT corrupt the receipt; verified partially-completed objects MUST be skipped on re-run (idempotency); refusal preserves all state.
+- Release / packaging / dependency compatibility: not selected — zstd is already a runtime dependency (via product archive + raw retention); no new Python dependency.
+- Documentation / migration notes: selected — runbook section is part of the deliverable.
+
+Domain packs:
+
+- Geospatial / CRS / basin geometry: not selected — no geometry surface.
+- Hydro-met time series / forcing windows: selected — salvage covers pre-2026-06-16 forcing gap; forcing_version_id + window selector identity is domain-critical.
+- SHUD numerical runtime / conservation / NaN: not selected — no solver or numerical surface.
+- PostGIS / TimescaleDB domain behavior: selected — CHUNK-boundary reads MUST NOT bypass the RLS/view boundary or accidentally hit compressed-chunk internals; `SELECT` from the hypertable view + PK-scoped WHERE.
+- Slurm production lifecycle / mock-vs-real parity: not selected — node-22 untouched.
+- External hydro-met providers / snapshot reproducibility: not selected — salvage is a one-time historical operation, not a provider fetch.
+- Run manifest / QC provenance: selected — manifest `provenance: "db-export"` is the permanent producer distinguisher; downstream drill (#854) MUST see this const to route verification correctly.
+- Published NHMS artifacts / display identity: not selected — ADR 0001 carve-out preserved.
+
+Invariant Matrix:
+
+- Governing invariant: exporter scope = archive-completeness receipt `salvage_selectors` list verbatim; no other scope source may be invoked; the receipt schema is validated on load and its selector shape is passed through unchanged into the manifest.
+- Source-of-truth identity/contract: `archive_completeness_receipt.schema.json` on input side + `salvage_manifest.schema.json` on output side. Provenance const `"db-export"`. Manifest path pattern `^db-export/(?:[^/]+/)*[^/]+\.csv\.zst$`.
+- Producers: new `scripts/node27_db_export_salvage.py`. Downstream consumers: archive rebuild drill (#854) verifies salvage objects by sha256 + manifest row-count parity; retention (#855) reads audit-derived `complete` verdicts (not the manifest directly).
+- Validators/preflight: receipt schema validation; hardcoded selector-list refusal; env-file mode-0600 preflight; DSN-writable role refusal via `SELECT has_table_privilege(current_user, 'met.forcing_station_timeseries', 'INSERT') OR has_table_privilege(current_user, 'hydro.river_timeseries', 'INSERT')` returning `true` **or** a rolled-back sentinel `INSERT` against either target hypertable succeeding (both must fail closed — the belt-and-braces mirrors that `has_table_privilege` alone can miss column-level GRANTs); safe-relative-path enforcement per manifest write.
+- Storage/cache/query: filesystem-only writes under `NHMS_ARCHIVE_ROOT/db-export/`; no DB writes; SELECT reads via `COPY (SELECT …) TO STDOUT` with PK-scoped WHERE per selector.
+- Public routes/entrypoints: 1 script + 1 wrapper + 1 env example + 1 runbook section; installation is one-time (not a systemd timer — salvage is a one-time historical operation triggered manually via the wrapper).
+- Frontend/downstream consumers: display API/frontend unchanged (ADR 0001 grep must be zero hits); retention gate consumes audit-derived `complete` verdicts, not the manifest.
+- Failure paths/rollback/stale state: per-selector failure → skipped in receipt with descriptor `error`, other selectors continue; refusal → stderr JSON refusal + non-zero exit + no receipt touch. Receipt `outcome` enum is one of `clean` (all selectors exported or all verified-skipped), `partial` (at least one per-selector failure but at least one success), `refused_lock` (LOCK_EX contention at boot), `refused_config` (env / receipt-file / receipt-schema / hardcoded-list refusal), or `refused_role` (write-privilege preflight tripped by `has_table_privilege` OR rolled-back sentinel INSERT). Idempotent re-run skips selectors whose object exists with matching sha256 + manifest row count.
+- Evidence/audit/readiness: dry-run default; enforce writes objects + manifest + receipt atomically; live task 3.3 receipt covers every audit-emitted salvage selector; follow-up audit shows those subjects `complete` and empty salvage list.
+
+Regression rows:
+
+- Input: receipt with two selectors, one already exported (object + manifest present + sha256 verifies + manifest row count matches DB). Expected: only the missing selector is exported; existing object untouched; receipt records both descriptors (one `skipped_verified`, one exported).
+- Input: completed enforce export for a selector. Expected: manifest `exported_row_count` equals the DB row count for that selector at export time; per-object sha256 recorded; column list recorded verbatim.
+- Input: invocation with a hardcoded selector list flag and no receipt. Expected: refused with structured stderr JSON diagnostic; exit non-zero; no receipt written.
+- Input: receipt file missing OR schema-invalid OR `salvage_selectors` array missing/malformed. Expected: fail-closed refusal; no partial export; no receipt touch.
+- Input: enforce request with the exporter DSN resolving to a role that can WRITE (`has_table_privilege(current_user, 'met.forcing_station_timeseries' | 'hydro.river_timeseries', 'INSERT')` returns `true` for at least one target, or the rolled-back sentinel `INSERT` succeeds against either target). Expected: refusal (`outcome=refused_role`); no export; no receipt written; stderr JSON refusal captured; test parametrizes both preflight legs so either alone fires the refusal.
+- Input: dry-run mode. Expected: no filesystem writes to `NHMS_ARCHIVE_ROOT/db-export/`; receipt is written to receipt path with `mode: "dry-run"`; no `COPY` executed for enforce-only side effects.
+- Input: per-selector `COPY` failure mid-run (e.g., statement timeout). Expected: the failing selector's descriptor records `error`; other selectors continue; per_selector_totals arithmetic reflects only the successfully-exported set (evidence-fidelity: no misleading aggregated totals); outcome=partial; exit non-zero.
+- Input: manifest.json write path leaves the archive root via a symlink or `..` traversal (test injects a malicious selector). Expected: `safe_relative_path` refusal via manifest schema validation and independently via runtime path-safety check; no write; refusal descriptor.
+- Input: env-file mode is 0644 instead of 0600. Expected: `_once.sh` refuses at preflight; Python entrypoint never starts.
+- Input: LOCK_EX|LOCK_NB contention — a second invocation runs while the first holds the lock. Expected: contender emits stderr JSON refusal ("lock held", `outcome=refused_lock`), exits non-zero, does NOT touch the receipt.
+- Input: DSN in an exception message routed through the outer diagnostic. Expected: `_mask_dsn` applied before stderr emit; no cleartext password.
+- Input: negative jsonschema tests on manifest — drop `provenance`, set `provenance: "product-archive"`, drop `exports[0].object.sha256`, inject unknown top-level key. Expected: `jsonschema.ValidationError` per case.
+- Input: negative jsonschema tests on receipt — drop `salvage_selectors`, inject unknown top-level key. Expected: refusal on load.
+- Migration idempotency (no DDL): the exporter runs no DDL — assert via test that the runner has zero `ALTER TABLE|CREATE TABLE|DROP TABLE|TRUNCATE|BEGIN|COMMIT|SAVEPOINT` textual occurrences (mirrors #851 migration guard shape).
+- ADR 0001 display carve-out: `grep -rn "db_export_salvage\|NODE27_DB_EXPORT_SALVAGE\|db-export/" apps/api apps/frontend` → zero hits.
+- Sibling regression: existing archive mover / storage inventory audit / resource governance / raw retention / compression pytest suites remain green with no line changes to their code.
+
+Boundary-surface checklist:
+
+- Shared helper roots reused (not forked): `packages/common/safe_fs.py::atomic_write_bytes_no_follow` (receipt + manifest publication), `fcntl.flock` pattern inline from `scripts/node27_product_archive.py::acquire_lock`, `_parse_positive_int` / `_mask_dsn` convention inline from `scripts/node27_timeseries_compression.py`.
+- Public entrypoints added: 1 exporter + 1 wrapper + 1 env example + 1 runbook section.
+- Read surfaces: archive-completeness receipt file (schema-validated); `met.forcing_station_timeseries`, `hydro.river_timeseries` via `COPY (SELECT … WHERE PK-scoped) TO STDOUT WITH (FORMAT CSV, HEADER)`; sentinel write preflight against a scratch table (or `SELECT has_table_privilege`).
+- Write/delete/overwrite surfaces: per exported selector, one `data.csv.zst` object + one `manifest.json` sibling published under `NHMS_ARCHIVE_ROOT/db-export/<lane>/<identity>/` (one directory per selector, `manifest.exports` length 1); receipt publication outside the archive root. All via `atomic_write_bytes_no_follow` at mode 0600. Zero DB writes. Zero deletes anywhere.
+- Staging/publish/rollback surfaces: same-directory temp + atomic rename via `require_durable_replace=True`; partial-write is impossible; rollback = re-run (idempotent skip).
+- Producer/consumer evidence boundaries: input = audit's `salvage_selectors`; output = manifest with `provenance: "db-export"`; downstream drill (#854) verifies salvage objects by sha256 + manifest row-count parity, not by reingest.
+- Stale-state/idempotency boundaries: re-run over verified existing objects skips them; a stale receipt (older than audit's next scheduled tick) is not a runtime hazard because the operation is one-time and the audit refresh cadence is already gated in #849.
+- Unchanged downstream consumers: display API/frontend/read paths (ADR 0001), archive mover (#848), storage inventory audit (#847), resource governance (#849 extension), raw retention (pre-existing), hypertable compression (#851), write-guard (#852 owns), retention gate (#855 owns). None touched.
+
+
