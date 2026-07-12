@@ -1,0 +1,10 @@
+[Unit]
+Description=Run NHMS node-27 product archive mover daily
+
+[Timer]
+OnCalendar=*-*-* 03:20:00 UTC
+Persistent=true
+Unit=nhms-node27-product-archive.service
+
+[Install]
+WantedBy=timers.target

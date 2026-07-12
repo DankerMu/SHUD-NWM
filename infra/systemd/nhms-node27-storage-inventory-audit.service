@@ -1,0 +1,10 @@
+[Unit]
+Description=NHMS node-27 storage inventory audit
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/nwm/NWM
+ExecStart=/home/nwm/NWM/scripts/node27_storage_inventory_audit_once.sh
+StandardOutput=append:/home/nwm/node27-storage-inventory-audit-logs/systemd.log
+StandardError=append:/home/nwm/node27-storage-inventory-audit-logs/systemd.err
+TimeoutStartSec=0

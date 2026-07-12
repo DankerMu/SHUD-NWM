@@ -1,0 +1,10 @@
+[Unit]
+Description=Run NHMS node-27 storage inventory audit daily
+
+[Timer]
+OnCalendar=*-*-* 03:40:00 UTC
+Persistent=true
+Unit=nhms-node27-storage-inventory-audit.service
+
+[Install]
+WantedBy=timers.target

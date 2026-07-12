@@ -1,0 +1,31 @@
+# Node-27 storage inventory audit (emits archive-completeness receipt).
+#
+# Copy to /home/nwm/NWM/infra/env/node27-storage-inventory-audit.env on
+# node-27, set mode 0600, and install
+# infra/systemd/nhms-node27-storage-inventory-audit.{service,timer} as user
+# units for nwm. See docs/runbooks/tier-node27-timeseries-storage.md for the
+# install order and rollback procedure.
+
+NODE27_STORAGE_INVENTORY_AUDIT_REPO_ROOT=/home/nwm/NWM
+NODE27_STORAGE_INVENTORY_AUDIT_LOG_ROOT=/home/nwm/node27-storage-inventory-audit-logs
+
+# Archive root (shared with the mover and later drill/salvage).
+NHMS_ARCHIVE_ROOT=/home/ghdc/nwm/archive
+
+# Object-store hot root for coverage lookups.
+OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
+OBJECT_STORE_PREFIX=s3://nhms-object-store
+
+# Receipt path (absolute; parent must be a non-symlink directory). The
+# retention gate (#855) will consume this receipt path directly, so keep it
+# stable across restarts.
+NODE27_STORAGE_INVENTORY_RECEIPT_PATH=/home/nwm/node27-storage-inventory-audit-logs/completeness-receipt.json
+
+# Archive minimum age must match the shared retention invariant (>= 30 d).
+NHMS_ARCHIVE_MIN_AGE_DAYS=45
+
+# DB URL for the audit. MUST be a read-only role (nhms_display_ro or the
+# equivalent read-only account); the audit itself is REPEATABLE READ READ
+# ONLY. A superuser/write-capable DBURL here is a documented rollback /
+# lint finding, not a silent success.
+DATABASE_URL=postgresql://nhms_display_ro:REPLACE_ME@127.0.0.1:5432/nhms
