@@ -800,67 +800,73 @@ class _HashingReader(io.RawIOBase):
 def _run_tool(
     argv: list[str],
     *,
+    input_fd: int,
     stdout_fd: int,
     max_output_bytes: int,
-    pass_fds: tuple[int, ...] = (),
 ) -> str:
     stderr = bytearray()
     stderr_overflow = False
     output_overflow = False
     output_error: Exception | None = None
-    with os.fdopen(os.dup(stdout_fd), "wb") as output:
-        os.fchmod(stdout_fd, 0o600)
-        process = subprocess.Popen(
-            argv,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            pass_fds=pass_fds,
-            shell=False,
-        )
+    input_position = os.lseek(input_fd, 0, os.SEEK_CUR)
+    stdin_fd = os.dup(input_fd)
+    try:
+        os.lseek(stdin_fd, 0, os.SEEK_SET)
+        with os.fdopen(os.dup(stdout_fd), "wb") as output:
+            os.fchmod(stdout_fd, 0o600)
+            process = subprocess.Popen(
+                argv,
+                stdin=stdin_fd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                shell=False,
+            )
 
-        def drain_stderr() -> None:
-            nonlocal stderr_overflow
-            assert process.stderr is not None
-            while chunk := process.stderr.read(8192):
-                room = MAX_STDERR_BYTES - len(stderr)
-                if room > 0:
-                    stderr.extend(chunk[:room])
-                if len(chunk) > room:
-                    stderr_overflow = True
+            def drain_stderr() -> None:
+                nonlocal stderr_overflow
+                assert process.stderr is not None
+                while chunk := process.stderr.read(8192):
+                    room = MAX_STDERR_BYTES - len(stderr)
+                    if room > 0:
+                        stderr.extend(chunk[:room])
+                    if len(chunk) > room:
+                        stderr_overflow = True
 
-        def drain_stdout() -> None:
-            nonlocal output_overflow, output_error
-            assert process.stdout is not None
-            written = 0
+            def drain_stdout() -> None:
+                nonlocal output_overflow, output_error
+                assert process.stdout is not None
+                written = 0
+                try:
+                    while chunk := process.stdout.read(1024 * 1024):
+                        written += len(chunk)
+                        if written > max_output_bytes:
+                            output_overflow = True
+                            process.kill()
+                            break
+                        output.write(chunk)
+                    output.flush()
+                    os.fsync(stdout_fd)
+                except Exception as error:  # surfaced deterministically in the caller thread
+                    output_error = error
+                    process.kill()
+
+            stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+            stdout_thread = threading.Thread(target=drain_stdout, daemon=True)
+            stderr_thread.start()
+            stdout_thread.start()
             try:
-                while chunk := process.stdout.read(1024 * 1024):
-                    written += len(chunk)
-                    if written > max_output_bytes:
-                        output_overflow = True
-                        process.kill()
-                        break
-                    output.write(chunk)
-                output.flush()
-                os.fsync(stdout_fd)
-            except Exception as error:  # surfaced deterministically in the caller thread
-                output_error = error
+                return_code = process.wait(timeout=TOOL_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired as error:
                 process.kill()
-
-        stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
-        stdout_thread = threading.Thread(target=drain_stdout, daemon=True)
-        stderr_thread.start()
-        stdout_thread.start()
-        try:
-            return_code = process.wait(timeout=TOOL_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired as error:
-            process.kill()
-            process.wait()
+                process.wait()
+                stderr_thread.join()
+                stdout_thread.join()
+                raise ArchiveMoverError(f"compression tool timed out after {TOOL_TIMEOUT_SECONDS}s") from error
             stderr_thread.join()
             stdout_thread.join()
-            raise ArchiveMoverError(f"compression tool timed out after {TOOL_TIMEOUT_SECONDS}s") from error
-        stderr_thread.join()
-        stdout_thread.join()
+    finally:
+        os.close(stdin_fd)
+        os.lseek(input_fd, input_position, os.SEEK_SET)
     if output_error is not None:
         raise ArchiveMoverError(f"cannot capture compression output safely: {output_error}")
     if output_overflow:
@@ -883,10 +889,6 @@ def _validate_zstd(path: Path) -> Path:
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or not os.access(path, os.X_OK):
         raise ArchiveMoverError(f"zstd must be an executable regular non-symlink file: {path}")
     return path
-
-
-def _fd_path(fd: int) -> str:
-    return f"/proc/self/fd/{fd}" if Path("/proc/self/fd").exists() else f"/dev/fd/{fd}"
 
 
 def verify_archive_pair(
@@ -1036,15 +1038,23 @@ class _LimitedReader(io.RawIOBase):
 
 class _TarStreamContext:
     def __init__(self, archive_fd: int, zstd_path: Path) -> None:
-        fd_path = f"/proc/self/fd/{archive_fd}" if Path("/proc/self/fd").exists() else f"/dev/fd/{archive_fd}"
-        self.process = subprocess.Popen(
-            [str(zstd_path), "-q", "-d", "-c", "--", fd_path],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            pass_fds=(archive_fd,),
-            shell=False,
-        )
+        self.archive_fd = archive_fd
+        self.archive_position = os.lseek(archive_fd, 0, os.SEEK_CUR)
+        stdin_fd = os.dup(archive_fd)
+        try:
+            os.lseek(stdin_fd, 0, os.SEEK_SET)
+            self.process = subprocess.Popen(
+                [str(zstd_path), "-q", "-d", "-c"],
+                stdin=stdin_fd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                shell=False,
+            )
+        except Exception:
+            os.lseek(archive_fd, self.archive_position, os.SEEK_SET)
+            raise
+        finally:
+            os.close(stdin_fd)
         self.stderr = bytearray()
         self.stderr_overflow = False
         self.timed_out = False
@@ -1055,7 +1065,19 @@ class _TarStreamContext:
         self.timer.start()
         assert self.process.stdout is not None
         self.reader = _LimitedReader(self.process.stdout, MAX_TAR_BYTES, self.process)
-        self.archive = tarfile.open(fileobj=self.reader, mode="r|")
+        try:
+            self.archive = tarfile.open(fileobj=self.reader, mode="r|")
+        except Exception:
+            self.timer.cancel()
+            if self.process.poll() is None:
+                self.process.kill()
+            self.process.wait()
+            self.thread.join()
+            self.process.stdout.close()
+            assert self.process.stderr is not None
+            self.process.stderr.close()
+            os.lseek(self.archive_fd, self.archive_position, os.SEEK_SET)
+            raise
 
     def _drain_stderr(self) -> None:
         assert self.process.stderr is not None
@@ -1075,26 +1097,33 @@ class _TarStreamContext:
         return self.archive
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
-        self.archive.close()
-        self.timer.cancel()
-        if exc_type is not None and self.process.poll() is None:
-            self.process.kill()
         try:
-            return_code = self.process.wait(timeout=TOOL_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired as error:
-            self.process.kill()
-            self.process.wait()
+            self.archive.close()
+            self.timer.cancel()
+            if exc_type is not None and self.process.poll() is None:
+                self.process.kill()
+            try:
+                return_code = self.process.wait(timeout=TOOL_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired as error:
+                self.process.kill()
+                self.process.wait()
+                self.thread.join()
+                raise ArchiveMoverError(f"decompressor timed out after {TOOL_TIMEOUT_SECONDS}s") from error
             self.thread.join()
-            raise ArchiveMoverError(f"decompressor timed out after {TOOL_TIMEOUT_SECONDS}s") from error
-        self.thread.join()
-        if self.timed_out:
-            raise ArchiveMoverError(f"decompressor timed out after {TOOL_TIMEOUT_SECONDS}s")
-        if exc_type is None:
-            if self.stderr_overflow:
-                raise ArchiveMoverError(f"compression stderr exceeds {MAX_STDERR_BYTES} bytes")
-            if return_code:
-                message = self.stderr.decode("utf-8", "replace")
-                raise ArchiveMoverError(f"decompressor failed ({return_code}): {message}")
+            if self.timed_out:
+                raise ArchiveMoverError(f"decompressor timed out after {TOOL_TIMEOUT_SECONDS}s")
+            if exc_type is None:
+                if self.stderr_overflow:
+                    raise ArchiveMoverError(f"compression stderr exceeds {MAX_STDERR_BYTES} bytes")
+                if return_code:
+                    message = self.stderr.decode("utf-8", "replace")
+                    raise ArchiveMoverError(f"decompressor failed ({return_code}): {message}")
+        finally:
+            if self.process.stdout is not None:
+                self.process.stdout.close()
+            if self.process.stderr is not None:
+                self.process.stderr.close()
+            os.lseek(self.archive_fd, self.archive_position, os.SEEK_SET)
 
 
 def _decompressed_tar_stream(archive_fd: int, zstd_path: Path) -> _TarStreamContext:
@@ -1289,10 +1318,10 @@ def process_candidate(
             archive_output_fd = os.open("archive.tar.zst", _CREATE_FLAGS, 0o600, dir_fd=stage_fd)
             try:
                 _run_tool(
-                    [str(config.zstd_path), "-q", "-c", "--", _fd_path(uncompressed_fd)],
+                    [str(config.zstd_path), "-q", "-c"],
+                    input_fd=uncompressed_fd,
                     stdout_fd=archive_output_fd,
                     max_output_bytes=MAX_ARCHIVE_BYTES,
-                    pass_fds=(uncompressed_fd,),
                 )
             finally:
                 os.close(archive_output_fd)

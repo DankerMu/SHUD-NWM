@@ -36,7 +36,13 @@ def _rename_noreplace(src_fd: int, src: str, dst_fd: int, dst: str) -> None:
 def _tool(tmp_path: Path) -> Path:
     path = tmp_path / "fake-zstd"
     path.write_text(
-        '#!/bin/sh\nlast=\nfor item do last=$item; done\ncat "$last"\n',
+        "#!/bin/sh\n"
+        "case \"$*\" in\n"
+        "  '-q -c'|'-q -d -c') cat\n"
+        "  ;;\n"
+        "  *) echo 'unexpected arguments' >&2; exit 64\n"
+        "  ;;\n"
+        "esac\n",
         encoding="utf-8",
     )
     path.chmod(0o700)
@@ -57,6 +63,28 @@ def _config(tmp_path: Path, *, enforce: bool, bound: int = 10) -> archive.MoverC
         per_tick_bound=bound,
         enforce=enforce,
     )
+
+
+def test_compressor_protocol_uses_stdin_only_and_restores_input_offset(tmp_path: Path) -> None:
+    payload = b"same-opened-inode\x00payload"
+    source = tmp_path / "source.tar"
+    output = tmp_path / "archive.tar.zst"
+    source.write_bytes(payload)
+    source_fd = os.open(source, os.O_RDONLY)
+    output_fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.lseek(source_fd, 7, os.SEEK_SET)
+        archive._run_tool(
+            [str(_tool(tmp_path)), "-q", "-c"],
+            input_fd=source_fd,
+            stdout_fd=output_fd,
+            max_output_bytes=len(payload),
+        )
+        assert os.lseek(source_fd, 0, os.SEEK_CUR) == 7
+    finally:
+        os.close(output_fd)
+        os.close(source_fd)
+    assert output.read_bytes() == payload
 
 
 def _forcing(config: archive.MoverConfig, cycle: str = "2026010100") -> Path:
