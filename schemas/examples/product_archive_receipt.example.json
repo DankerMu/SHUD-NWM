@@ -1,0 +1,82 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-07-11T00:00:00Z",
+  "mode": "dry-run",
+  "cutoff": "2026-05-27T00:00:00Z",
+  "minimum_age_days": 45,
+  "per_tick_bound": 2,
+  "outcome": "failed",
+  "candidates": [
+    {
+      "identity": {"lane": "forcing", "source": "gfs", "cycle_identity": "2026010100", "cycle_time": "2026-01-01T00:00:00Z", "basin_version_id": "basin-a", "model_id": "model-a"},
+      "source_path": "forcing/gfs/2026010100/basin-a/model-a",
+      "archive_path": "forcing/gfs/2026010100/basin-a/model-a/archive.tar.zst",
+      "source_bytes": 10
+    },
+    {
+      "identity": {"lane": "runs", "source": "ERA5", "cycle_identity": "2026010100", "cycle_time": "2026-01-01T00:00:00Z", "run_id": "run-a"},
+      "source_path": "runs/run-a",
+      "archive_path": "runs/era5/2026010100/run-a/archive.tar.zst",
+      "source_bytes": 20
+    },
+    {
+      "identity": {"lane": "states", "source": "IFS", "cycle_identity": "2026010100", "cycle_time": "2026-01-01T00:00:00Z", "model_id": "model-c"},
+      "source_path": "states/IFS/model-c/2026010100",
+      "archive_path": "states/ifs/2026010100/model-c/archive.tar.zst",
+      "source_bytes": 30
+    }
+  ],
+  "selected": [
+    {
+      "identity": {"lane": "forcing", "source": "gfs", "cycle_identity": "2026010100", "cycle_time": "2026-01-01T00:00:00Z", "basin_version_id": "basin-a", "model_id": "model-a"},
+      "source_path": "forcing/gfs/2026010100/basin-a/model-a",
+      "archive_path": "forcing/gfs/2026010100/basin-a/model-a/archive.tar.zst",
+      "source_bytes": 10
+    },
+    {
+      "identity": {"lane": "runs", "source": "ERA5", "cycle_identity": "2026010100", "cycle_time": "2026-01-01T00:00:00Z", "run_id": "run-a"},
+      "source_path": "runs/run-a",
+      "archive_path": "runs/era5/2026010100/run-a/archive.tar.zst",
+      "source_bytes": 20
+    }
+  ],
+  "deferred": [
+    {
+      "identity": {"lane": "states", "source": "IFS", "cycle_identity": "2026010100", "cycle_time": "2026-01-01T00:00:00Z", "model_id": "model-c"},
+      "source_path": "states/IFS/model-c/2026010100",
+      "archive_path": "states/ifs/2026010100/model-c/archive.tar.zst",
+      "source_bytes": 30
+    }
+  ],
+  "terminals": [
+    {
+      "identity": {"lane": "forcing", "source": "gfs", "cycle_identity": "2026010100", "cycle_time": "2026-01-01T00:00:00Z", "basin_version_id": "basin-a", "model_id": "model-a"},
+      "status": "planned",
+      "reason": "verified corrupt final would be quarantined before fresh archive publication",
+      "source_bytes": 10,
+      "archive_bytes": 0,
+      "residue": []
+    },
+    {
+      "identity": {"lane": "runs", "source": "ERA5", "cycle_identity": "2026010100", "cycle_time": "2026-01-01T00:00:00Z", "run_id": "run-a"},
+      "status": "planned",
+      "reason": "would create verified archive then retire source",
+      "source_bytes": 20,
+      "archive_bytes": 0,
+      "residue": []
+    }
+  ],
+  "events": [
+    {
+      "sequence": 0,
+      "identity": {"lane": "forcing", "source": "gfs", "cycle_identity": "2026010100", "cycle_time": "2026-01-01T00:00:00Z", "basin_version_id": "basin-a", "model_id": "model-a"},
+      "kind": "would-quarantine",
+      "path": "forcing/gfs/2026010100/basin-a/model-a",
+      "detail": "existing final leaf failed exact-pair verification"
+    }
+  ],
+  "discovery_failures": [
+    {"lane_hint": "states", "locator": "states/unknown-layout", "reason": "unknown provider state layout"}
+  ],
+  "bytes": {"source": 30, "archived": 0}
+}
