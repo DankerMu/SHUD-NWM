@@ -1,0 +1,18 @@
+# Node-27 timeseries compression runner (issue #851 / OpenSpec: tier-node27-timeseries-storage).
+# This runner does NOT read NHMS_ARCHIVE_ROOT / archive watermarks — compression is DB-side only. Do not sync this env against node27-product-archive.env / node27-storage-inventory-audit.env / node27-resource-governance.env.
+#
+# Copy to node27-timeseries-compression.env and chmod 0600.
+
+# Node-27 primary Postgres (writer role — compression is DDL/DML)
+DATABASE_URL=postgresql://REPLACE_ME_WRITER:REPLACE_ME_PW@127.0.0.1:55432/nhms
+
+# Chunk-selection lag in seconds. Default 604800 = 7 days (one chunk width).
+# Chunks whose range_end is younger than this are skipped.
+NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=604800
+
+# Maximum number of chunks compressed per timer tick.
+NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=5
+
+# Absolute paths (must be owned by the nwm user, mode 0600 on the receipt).
+NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH=/home/nwm/NWM/artifacts/receipts/node27_timeseries_compression.json
+NODE27_TIMESERIES_COMPRESSION_LOCK_PATH=/tmp/nhms-node27-timeseries-compression.lock

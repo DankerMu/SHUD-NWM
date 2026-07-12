@@ -1,0 +1,59 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-07-11T12:00:00Z",
+  "now_utc": "2026-07-11T12:00:00Z",
+  "lag_seconds": 604800,
+  "per_tick_bound": 5,
+  "mode": "dry-run",
+  "outcome": "clean",
+  "selected": [
+    {
+      "hypertable_schema": "hydro",
+      "hypertable_name": "river_timeseries",
+      "chunk_schema": "_timescaledb_internal",
+      "chunk_name": "_hyper_1_42_chunk",
+      "range_start": "2026-05-01T00:00:00Z",
+      "range_end": "2026-05-08T00:00:00Z",
+      "before_bytes": 2147483648,
+      "after_bytes": null
+    }
+  ],
+  "deferred": [
+    {
+      "hypertable_schema": "met",
+      "hypertable_name": "forcing_station_timeseries",
+      "chunk_schema": "_timescaledb_internal",
+      "chunk_name": "_hyper_2_57_chunk",
+      "range_start": "2026-05-08T00:00:00Z",
+      "range_end": "2026-05-15T00:00:00Z",
+      "before_bytes": 1073741824,
+      "after_bytes": null,
+      "defer_reason": "per-tick bound reached"
+    }
+  ],
+  "skipped": [
+    {
+      "hypertable_schema": "hydro",
+      "hypertable_name": "river_timeseries",
+      "chunk_schema": "_timescaledb_internal",
+      "chunk_name": "_hyper_1_60_chunk",
+      "range_start": "2026-07-05T00:00:00Z",
+      "range_end": "2026-07-12T00:00:00Z",
+      "before_bytes": 536870912,
+      "after_bytes": null,
+      "skip_reason": "range_end inside lag window"
+    }
+  ],
+  "per_table_totals": {
+    "hydro.river_timeseries": {
+      "before_bytes": 2147483648,
+      "after_bytes": null,
+      "chunks_compressed": 0
+    },
+    "met.forcing_station_timeseries": {
+      "before_bytes": 0,
+      "after_bytes": null,
+      "chunks_compressed": 0
+    }
+  }
+}
