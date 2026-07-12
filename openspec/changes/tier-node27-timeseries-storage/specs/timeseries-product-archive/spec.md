@@ -35,15 +35,23 @@ Only manifest-complete producer trees are archive candidates. A forcing
 package SHALL carry a safe `forcing_version_id`, a non-empty unique `files`
 list whose canonical object URIs remain inside the exact package leaf, and
 valid sha256 checksums that match every declared regular member from the same
-pinned source snapshot; undeclared product members SHALL fail discovery. A run
-SHALL contain its bound `output/` directory and at least one regular output
-product under the bounded no-follow snapshot. The outer archive manifest for
+pinned source snapshot. A forcing leaf SHALL have exactly one of two accepted
+shapes: the legacy manifest + declared products, or that shape plus the complete
+finalized domain-handoff bundle (`forcing_domain_package.json`,
+`forcing_version_record.json`, and the three fixed payload JSON files). A
+complete bundle SHALL bind its contract/version, fixed roles/URIs/checksums,
+package digest, lineage and source/cycle/model/basin/version identity; a
+partial bundle or any unknown extra SHALL fail discovery. Its domain time
+window need not equal the authoritative forcing package window. A run SHALL
+contain its bound `output/` directory and at least one regular output product
+under the bounded no-follow snapshot. The outer archive manifest for
 forcing/runs SHALL retain producer provenance (stable subject identifier,
 producer-manifest path and sha256, authoritative window and model/basin
 identity). The inventory audit SHALL bind that provenance and the archived
-producer-manifest member digest to the DB subject before reporting
-`product-archive` coverage; a filesystem-only mover never substitutes for that
-later DB comparison.
+producer-manifest member digest to the DB subject and SHALL verify the actual
+decompressed tar member bijection/size/checksum before reporting
+`product-archive` coverage; sidecar claims alone are not coverage. A
+filesystem-only mover never substitutes for that later DB comparison.
 
 #### Scenario: State snapshot products are archived
 
@@ -113,6 +121,13 @@ Only typed deterministic structural/schema/identity/member/checksum invalidity
 permits quarantine. Operational verification failure (timeout, tool, I/O,
 mount proof) preserves canonical final + source and fails; conflict is a
 separate typed outcome.
+Producer provenance SHALL also self-bind semantically to the archive lane,
+identity, authoritative window/model/basin and exactly one producer-manifest
+entry whose digest matches; a shape-valid but semantically drifted sidecar is
+corrupt and cannot authorize source retirement. Verification SHALL rebind both
+the manifest and tar namespace entries to the exact opened descriptors after
+their final reads. The pre-retirement guard SHALL cover that exact child pair,
+not only the containing leaf inode.
 
 Source/archive discovery, tar reads and retirement SHALL remain
 descriptor-bound with no-follow component opens, fixed-root-device checks and
@@ -138,6 +153,12 @@ Before any tombstone child unlink the pinned final tar+manifest pair SHALL be
 fully re-verified. Removal SHALL follow the archived preimage's exact
 path/inode/signature allowlist; extra, missing or drifted entries preserve
 residue and fail rather than being enumerated and deleted.
+Each tombstone child SHALL first be atomically claimed by no-replace rename
+into a same-mount mover-exclusive namespace and checked against the expected
+inode/signature before deletion. A same-name replacement at any pre-claim
+boundary is preserved as residue and MUST NOT be unlinked or removed as a
+directory. Recursive directory cleanup applies the same claim rule; inability
+to maintain the exclusive claim namespace or producer quiescence fails closed.
 
 #### Scenario: Checksum verification fails
 

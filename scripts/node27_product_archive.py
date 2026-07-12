@@ -25,6 +25,15 @@ from urllib.parse import urlsplit
 
 import jsonschema
 
+from packages.common.forcing_domain_handoff import (
+    PACKAGE_CONTRACT_ID as FORCING_DOMAIN_PACKAGE_CONTRACT_ID,
+)
+from packages.common.forcing_domain_handoff import (
+    PAYLOAD_TABLES as FORCING_DOMAIN_PAYLOAD_TABLES,
+)
+from packages.common.forcing_domain_handoff import (
+    SCHEMA_VERSION as FORCING_DOMAIN_SCHEMA_VERSION,
+)
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
@@ -67,6 +76,20 @@ _CREATE_FLAGS = (
 _CREATE_RDWR_FLAGS = (
     os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 )
+_FORCING_DOMAIN_BUNDLE = frozenset(
+    {
+        "forcing_domain_package.json",
+        "forcing_version_record.json",
+        "payloads/interp_weights.json",
+        "payloads/station_inventory.json",
+        "payloads/station_timeseries.json",
+    }
+)
+_FORCING_DOMAIN_PAYLOAD_PATHS = {
+    "station_inventory": "payloads/station_inventory.json",
+    "station_timeseries": "payloads/station_timeseries.json",
+    "interpolation_weights": "payloads/interp_weights.json",
+}
 
 
 class ArchiveMoverError(RuntimeError):
@@ -450,6 +473,10 @@ def _forcing_provenance(
     files: Sequence[FileRecord],
     manifest_record: FileRecord,
     object_store_prefix: str,
+    source_fd: int,
+    source_mount_id: int,
+    mount_id_provider: MountIdProvider,
+    source_device: int,
 ) -> dict[str, Any]:
     forcing_version_id = manifest.get("forcing_version_id")
     if not isinstance(forcing_version_id, str) or not _safe_segment(forcing_version_id):
@@ -458,6 +485,10 @@ def _forcing_provenance(
     if not isinstance(declared, list) or not declared:
         raise ArchiveMoverError("forcing manifest files must be a non-empty array")
     snapshot = {record.path: record for record in files if record.path != manifest_record.path}
+    bundle_present = set(snapshot) & _FORCING_DOMAIN_BUNDLE
+    if bundle_present and bundle_present != _FORCING_DOMAIN_BUNDLE:
+        raise ArchiveMoverError("forcing domain bundle is partial")
+    product_snapshot = {path: record for path, record in snapshot.items() if path not in _FORCING_DOMAIN_BUNDLE}
     declared_paths: set[str] = set()
     for entry in declared:
         if not isinstance(entry, Mapping):
@@ -474,14 +505,26 @@ def _forcing_provenance(
         if relative in declared_paths:
             raise ArchiveMoverError(f"forcing manifest has duplicate file declaration: {relative}")
         declared_paths.add(relative)
-        record = snapshot.get(relative)
+        record = product_snapshot.get(relative)
         if record is None:
             raise ArchiveMoverError(f"forcing manifest declares a missing product: {relative}")
         if not isinstance(checksum, str) or checksum != record.sha256:
             raise ArchiveMoverError(f"forcing manifest checksum differs from pinned product: {relative}")
-    if declared_paths != set(snapshot):
-        missing = sorted(set(snapshot) - declared_paths)
+    if declared_paths != set(product_snapshot):
+        missing = sorted(set(product_snapshot) - declared_paths)
         raise ArchiveMoverError(f"forcing package contains undeclared products: {missing}")
+    if bundle_present:
+        _validate_forcing_domain_bundle(
+            manifest,
+            source_relative=source_relative,
+            snapshot=snapshot,
+            object_store_prefix=object_store_prefix,
+            manifest_record=manifest_record,
+            source_fd=source_fd,
+            source_mount_id=source_mount_id,
+            mount_id_provider=mount_id_provider,
+            source_device=source_device,
+        )
     return {
         "kind": "forcing-package",
         "subject_id": forcing_version_id,
@@ -492,6 +535,143 @@ def _forcing_provenance(
         "model_id": str(manifest["model_id"]),
         "basin_version_id": str(manifest["basin_version_id"]),
     }
+
+
+def _record_json(
+    record: FileRecord,
+    *,
+    root_fd: int,
+    mount_id: int,
+    mount_id_provider: MountIdProvider,
+    device: int,
+) -> Mapping[str, Any]:
+    file_fd, opened = _open_regular(
+        root_fd, record.path, record.path, mount_id, mount_id_provider, device, MAX_MANIFEST_BYTES
+    )
+    try:
+        raw = bytearray()
+        while len(raw) <= MAX_MANIFEST_BYTES:
+            chunk = os.read(file_fd, MAX_MANIFEST_BYTES + 1 - len(raw))
+            if not chunk:
+                break
+            raw.extend(chunk)
+        after = os.fstat(file_fd)
+        value = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ArchiveMoverError(f"forcing domain sidecar is unreadable: {record.path}: {error}") from error
+    finally:
+        os.close(file_fd)
+    if not isinstance(value, Mapping):
+        raise ArchiveMoverError(f"forcing domain sidecar must be an object: {record.path}")
+    if (
+        len(raw) > MAX_MANIFEST_BYTES
+        or _stat_signature(opened) != _stat_signature(after)
+        or _stat_signature(after) != _file_record_signature(record)
+        or len(raw) != record.size_bytes
+        or hashlib.sha256(raw).hexdigest() != record.sha256
+    ):
+        raise ArchiveMoverError(f"forcing domain sidecar changed after pinned snapshot: {record.path}")
+    return value
+
+
+def _validate_forcing_domain_bundle(
+    forcing: Mapping[str, Any],
+    *,
+    source_relative: str,
+    snapshot: Mapping[str, FileRecord],
+    object_store_prefix: str,
+    manifest_record: FileRecord,
+    source_fd: int,
+    source_mount_id: int,
+    mount_id_provider: MountIdProvider,
+    source_device: int,
+) -> None:
+    """Validate the producer's fixed DB-free forcing-domain bundle in-place."""
+    read_args = {
+        "root_fd": source_fd,
+        "mount_id": source_mount_id,
+        "mount_id_provider": mount_id_provider,
+        "device": source_device,
+    }
+    package = _record_json(snapshot["forcing_domain_package.json"], **read_args)
+    version = _record_json(snapshot["forcing_version_record.json"], **read_args)
+    if package.get("schema_version") != FORCING_DOMAIN_SCHEMA_VERSION:
+        raise ArchiveMoverError("forcing domain package schema_version drift")
+    if package.get("contract_id") != FORCING_DOMAIN_PACKAGE_CONTRACT_ID:
+        raise ArchiveMoverError("forcing domain package contract_id drift")
+    identity_fields = (
+        "source_id",
+        "cycle_time",
+        "model_id",
+        "basin_version_id",
+        "forcing_version_id",
+    )
+    for field in identity_fields:
+        left, right = package.get(field), forcing.get(field)
+        if field == "source_id":
+            try:
+                left, right = normalize_source_id(str(left)), normalize_source_id(str(right))
+            except ValueError as error:
+                raise ArchiveMoverError("forcing domain package source identity is invalid") from error
+        elif field == "cycle_time":
+            left = _time(_parse_hour(left, label="forcing domain cycle_time"))
+            right = _time(_parse_hour(right, label="forcing cycle_time"))
+        if left != right:
+            raise ArchiveMoverError(f"forcing domain package identity drift: {field}")
+    domain_start = _parse_instant(package.get("start_time"), label="forcing domain start_time")
+    domain_end = _parse_instant(package.get("end_time"), label="forcing domain end_time")
+    forcing_start = _parse_instant(forcing.get("start_time"), label="forcing start_time")
+    forcing_end = _parse_instant(forcing.get("end_time"), label="forcing end_time")
+    if domain_start > domain_end or domain_start < forcing_start or domain_end > forcing_end:
+        raise ArchiveMoverError("forcing domain package window is outside forcing package window")
+    payloads = package.get("payloads")
+    if not isinstance(payloads, Mapping) or set(payloads) != set(_FORCING_DOMAIN_PAYLOAD_PATHS):
+        raise ArchiveMoverError("forcing domain package payload roles differ from fixed bundle")
+    required_prefix = f"{object_store_prefix}/{source_relative}/"
+    for role, relative in _FORCING_DOMAIN_PAYLOAD_PATHS.items():
+        ref = payloads.get(role)
+        if not isinstance(ref, Mapping):
+            raise ArchiveMoverError(f"forcing domain payload reference is malformed: {role}")
+        expected_uri = required_prefix + relative
+        expected_table = FORCING_DOMAIN_PAYLOAD_TABLES[role]
+        record = snapshot[relative]
+        if (
+            _canonical_object_uri(ref.get("uri")) != expected_uri
+            or ref.get("table") != expected_table
+            or ref.get("checksum_sha256") != record.sha256
+        ):
+            raise ArchiveMoverError(f"forcing domain payload binding drift: {role}")
+        if not isinstance(ref.get("row_count"), int) or isinstance(ref.get("row_count"), bool) or ref["row_count"] < 1:
+            raise ArchiveMoverError(f"forcing domain payload row_count is invalid: {role}")
+    expected_forcing_uri = f"{object_store_prefix}/{source_relative}"
+    if version.get("forcing_version_id") != forcing.get("forcing_version_id"):
+        raise ArchiveMoverError("forcing version sidecar identity drift")
+    for field in ("source_id", "cycle_time", "start_time", "end_time", "model_id", "basin_version_id"):
+        left, right = version.get(field), forcing.get(field)
+        if field == "source_id":
+            try:
+                left, right = normalize_source_id(str(left)), normalize_source_id(str(right))
+            except ValueError as error:
+                raise ArchiveMoverError("forcing version sidecar source identity is invalid") from error
+        elif field == "cycle_time":
+            left = _time(_parse_hour(left, label="forcing version cycle_time"))
+            right = _time(_parse_hour(right, label="forcing cycle_time"))
+        elif field in {"start_time", "end_time"}:
+            left = _time(_parse_instant(left, label=f"forcing version {field}"))
+            right = _time(_parse_instant(right, label=f"forcing {field}"))
+        if left != right:
+            raise ArchiveMoverError(f"forcing version sidecar identity drift: {field}")
+    if (
+        _canonical_object_uri(version.get("forcing_package_uri"), directory=True) != expected_forcing_uri
+        or version.get("checksum") != manifest_record.sha256
+    ):
+        raise ArchiveMoverError("forcing version sidecar package binding drift")
+    lineage = version.get("lineage_json")
+    if not isinstance(lineage, Mapping):
+        raise ArchiveMoverError("forcing version sidecar lineage is missing")
+    lineage_uri = lineage.get("forcing_package_manifest_uri")
+    if _canonical_object_uri(lineage_uri) != required_prefix + "forcing_package.json":
+        raise ArchiveMoverError("forcing version sidecar lineage package URI drift")
 
 
 def _run_identity(
@@ -677,6 +857,10 @@ def discover_candidates(
                             files=files,
                             manifest_record=manifest_record,
                             object_store_prefix=config.object_store_prefix,
+                            source_fd=leaf_fd,
+                            source_mount_id=root_mount,
+                            mount_id_provider=mount_id_provider,
+                            source_device=root_stat.st_dev,
                         )
                         if lane == "forcing"
                         else _run_provenance(manifest, files=files, manifest_record=manifest_record)
@@ -1218,6 +1402,7 @@ def _verify_archive_pair_impl(
             archive_final = os.fstat(archive_fd)
             if _stat_signature(archive_info) != _stat_signature(archive_final):
                 raise ArchiveMoverError("archive tarball changed during internal verification")
+            archive_signature = _stat_signature(archive_final)
         finally:
             os.close(archive_fd)
         manifest_after, manifest_record_after = _read_json_relative_fd(
@@ -1229,11 +1414,63 @@ def _verify_archive_pair_impl(
         )
         if manifest_after != manifest or manifest_record_after != manifest_record:
             raise ArchiveMoverError("archive manifest changed during verification")
+        _validate_producer_semantics(manifest)
+        _rebind_leaf_file(leaf_fd, "archive.tar.zst", archive_signature, root_info.st_dev)
+        _rebind_leaf_file(
+            leaf_fd,
+            "manifest.json",
+            _file_record_signature(manifest_record_after),
+            root_info.st_dev,
+        )
         _verify_open_directory_entry(leaf_fd, leaf, archive_root)
     finally:
         os.close(leaf_fd)
         os.close(root_fd)
     return manifest
+
+
+def _rebind_leaf_file(leaf_fd: int, name: str, signature: tuple[int, int, int, int, int], device: int) -> None:
+    """Reopen a final directory entry no-follow and bind it to the descriptor just verified."""
+    rebound = os.open(name, _READ_FLAGS, dir_fd=leaf_fd)
+    try:
+        opened = os.fstat(rebound)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_dev != device or _stat_signature(opened) != signature:
+            raise ArchiveMoverError(f"archive pair namespace entry changed after final read: {name}")
+    finally:
+        os.close(rebound)
+
+
+def _validate_producer_semantics(manifest: Mapping[str, Any]) -> None:
+    """Make product provenance self-bind to archive identity and its unique member."""
+    identity = manifest.get("identity")
+    producer = manifest.get("producer")
+    if not isinstance(identity, Mapping):
+        raise ArchiveMoverError("archive identity is malformed")
+    lane = identity.get("lane")
+    if lane == "states":
+        if producer is not None:
+            raise ArchiveMoverError("state archive must not carry producer provenance")
+        return
+    if lane not in {"forcing", "runs"} or not isinstance(producer, Mapping):
+        raise ArchiveMoverError("product archive producer provenance is missing")
+    expected_kind = "forcing-package" if lane == "forcing" else "run-manifest"
+    expected_path = "forcing_package.json" if lane == "forcing" else "input/manifest.json"
+    if producer.get("kind") != expected_kind or producer.get("manifest_path") != expected_path:
+        raise ArchiveMoverError("producer kind/path does not bind archive lane")
+    if lane == "runs" and producer.get("subject_id") != identity.get("run_id"):
+        raise ArchiveMoverError("run producer subject does not bind archive run_id")
+    if producer.get("model_id") != identity.get("model_id") and lane == "forcing":
+        raise ArchiveMoverError("forcing producer model does not bind archive identity")
+    if producer.get("basin_version_id") != identity.get("basin_version_id") and lane == "forcing":
+        raise ArchiveMoverError("forcing producer basin does not bind archive identity")
+    cycle = _parse_hour(identity.get("cycle_time"), label="archive cycle_time")
+    start = _parse_instant(producer.get("start_time"), label="producer start_time")
+    end = _parse_instant(producer.get("end_time"), label="producer end_time")
+    if start > end or not start <= cycle <= end:
+        raise ArchiveMoverError("producer window does not bind archive cycle")
+    members = [entry for entry in manifest.get("files", ()) if entry.get("path") == expected_path]
+    if len(members) != 1 or members[0].get("sha256") != producer.get("manifest_sha256"):
+        raise ArchiveMoverError("producer manifest member does not bind its declared digest")
 
 
 def _validate_manifest_resource_bounds(manifest: Mapping[str, Any]) -> None:
@@ -1373,6 +1610,9 @@ class _TarStreamContext:
             self.archive = tarfile.open(fileobj=self.reader, mode="r|")
         except Exception as error:
             self.timer.cancel()
+            killed_for_parser = self.process.poll() is None
+            if killed_for_parser:
+                self.process.kill()
             try:
                 return_code = self.process.wait(timeout=TOOL_TIMEOUT_SECONDS)
             except subprocess.TimeoutExpired as timeout_error:
@@ -1386,7 +1626,7 @@ class _TarStreamContext:
             assert self.process.stderr is not None
             self.process.stderr.close()
             os.lseek(self.archive_fd, self.archive_position, os.SEEK_SET)
-            if return_code:
+            if return_code and not killed_for_parser:
                 message = self.stderr.decode("utf-8", "replace")
                 raise ArchiveOperationalError(f"decompressor failed ({return_code}): {message}") from error
             raise
@@ -1540,6 +1780,8 @@ def process_candidate(
                 candidate_files = {item.path: (item.size_bytes, item.sha256) for item in candidate.files}
                 if existing_files != candidate_files:
                     raise ArchiveConflictError("verified existing archive conflicts with present source")
+                if existing_manifest.get("producer") != candidate.producer:
+                    raise ArchiveConflictError("verified existing archive producer differs from present source")
                 archive_bytes = existing_manifest["archive"]["size_bytes"]
             except ArchiveConflictError:
                 raise
@@ -1738,6 +1980,11 @@ def process_candidate(
             [],
         ), events
     except ArchiveMoverError as error:
+        final_relative = final_leaf.relative_to(config.archive_root).as_posix()
+        if final_relative in error.residue:
+            staging_relative = next((item for item in residue if item.startswith(".staging/")), None)
+            if staging_relative is not None:
+                residue.remove(staging_relative)
         residue.extend(item for item in error.residue if item not in residue)
         status = "indeterminate" if error.indeterminate else "failed"
         return _terminal(identity, status, str(error), candidate.source_bytes, archive_bytes, residue), events
@@ -1814,7 +2061,11 @@ def _rename_leaf(
             if dst_fd != src_fd:
                 os.fsync(dst_fd)
         except OSError as error:
-            raise ArchiveMoverError(f"rename completed but parent fsync failed: {error}", indeterminate=True) from error
+            raise ArchiveMoverError(
+                f"rename completed but parent fsync failed: {error}",
+                indeterminate=True,
+                residue=(destination.relative_to(containment_root).as_posix(),),
+            ) from error
     finally:
         if source_entry_fd is not None:
             os.close(source_entry_fd)
@@ -1911,6 +2162,19 @@ def _retire_source(
         _event(len(events), identity, "tombstoned", tombstone_relative, "source leaf renamed to delete tombstone")
     )
     tomb_fd = open_directory_no_follow(tombstone, containment_root=config.object_store_root)
+    claim_root = tombstone.parent / f".archive-claims-{uuid.uuid4().hex}"
+    claim_parent_fd = open_directory_no_follow(tombstone.parent, containment_root=config.object_store_root)
+    try:
+        os.mkdir(claim_root.name, 0o700, dir_fd=claim_parent_fd)
+        os.fsync(claim_parent_fd)
+    except OSError as error:
+        os.close(claim_parent_fd)
+        os.close(tomb_fd)
+        raise ArchiveMoverError(
+            f"cannot create mover-exclusive claim namespace: {error}", residue=(tombstone_relative,)
+        ) from error
+    claim_fd = open_directory_no_follow(claim_root, containment_root=config.object_store_root)
+    claim_relative = claim_root.relative_to(config.object_store_root).as_posix()
     removal_started = False
     try:
         renamed = os.fstat(tomb_fd)
@@ -1950,11 +2214,24 @@ def _retire_source(
                 expected_files={item.path: item for item in candidate.files},
                 expected_directories={item.path: item for item in candidate.directories},
                 prefix="",
+                claim_fd=claim_fd,
+                claim_label=claim_relative,
+                rename_impl=rename_impl,
             )
-            current = os.stat(tombstone.name, dir_fd=parent_fd, follow_symlinks=False)
-            if (current.st_dev, current.st_ino) != (renamed.st_dev, renamed.st_ino):
-                raise ArchiveMoverError("tombstone root changed during removal", indeterminate=True)
-            os.rmdir(tombstone.name, dir_fd=parent_fd)
+            root_claim = f"root-{uuid.uuid4().hex}"
+            rename_impl(parent_fd, tombstone.name, claim_fd, root_claim)
+            os.fsync(parent_fd)
+            os.fsync(claim_fd)
+            claimed_root = os.stat(root_claim, dir_fd=claim_fd, follow_symlinks=False)
+            if (claimed_root.st_dev, claimed_root.st_ino) != (renamed.st_dev, renamed.st_ino):
+                raise ArchiveMoverError(
+                    "tombstone root replacement was atomically claimed and preserved",
+                    indeterminate=True,
+                    residue=(f"{claim_relative}/{root_claim}",),
+                )
+            os.rmdir(root_claim, dir_fd=claim_fd)
+            os.fsync(claim_fd)
+            os.rmdir(claim_root.name, dir_fd=parent_fd)
             os.fsync(parent_fd)
         finally:
             os.close(parent_fd)
@@ -1968,10 +2245,26 @@ def _retire_source(
         raise ArchiveMoverError(
             message,
             indeterminate=True,
-            residue=(tombstone_relative,),
+            residue=tuple(
+                dict.fromkeys(
+                    (tombstone_relative,)
+                    + (error.residue if isinstance(error, ArchiveMoverError) else ())
+                )
+            ),
         ) from error
     finally:
         os.close(tomb_fd)
+        try:
+            if not _safe_names(claim_fd, claim_relative, remaining=1):
+                try:
+                    os.rmdir(claim_root.name, dir_fd=claim_parent_fd)
+                    os.fsync(claim_parent_fd)
+                except FileNotFoundError:
+                    pass
+        except ArchiveMoverError:
+            pass
+        os.close(claim_fd)
+        os.close(claim_parent_fd)
     events.append(
         _event(len(events), identity, "retired", candidate.source_relative, "verified tombstone recursively removed")
     )
@@ -1987,6 +2280,9 @@ def _remove_tree_contents_fd(
     expected_files: Mapping[str, FileRecord] | None = None,
     expected_directories: Mapping[str, DirectoryRecord] | None = None,
     prefix: str = "",
+    claim_fd: int,
+    claim_label: str,
+    rename_impl: RenameNoReplace,
 ) -> None:
     """Remove only exact allowlisted entries from a verified tombstone tree."""
     if os.fstat(directory_fd).st_dev != device or mount_id_provider(directory_fd) != mount_id:
@@ -2001,22 +2297,42 @@ def _remove_tree_contents_fd(
     for name in expected_names:
         child_label = f"{label}/{name}"
         relative = f"{prefix}/{name}" if prefix else name
-        entry = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        preclaim = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISDIR(preclaim.st_mode):
+            preflight_fd = _open_child_dir(
+                directory_fd, name, child_label, mount_id, mount_id_provider, device
+            )
+            os.close(preflight_fd)
+        claim_name = f"entry-{uuid.uuid4().hex}"
+        try:
+            rename_impl(directory_fd, name, claim_fd, claim_name)
+            os.fsync(directory_fd)
+            os.fsync(claim_fd)
+        except OSError as error:
+            raise ArchiveMoverError(f"cannot atomically claim tombstone child {child_label}: {error}") from error
+        claim_residue = f"{claim_label}/{claim_name}"
+        entry = os.stat(claim_name, dir_fd=claim_fd, follow_symlinks=False)
         if stat.S_ISDIR(entry.st_mode):
             expected_directory = expected_directories.get(relative) if expected_directories is not None else None
             if exact_allowlist and (
                 expected_directory is None
                 or _directory_signature(entry) != _directory_record_signature(expected_directory)
             ):
-                raise ArchiveMoverError(f"tombstone directory differs from exact preimage: {child_label}")
-            child_fd = _open_child_dir(
-                directory_fd,
-                name,
-                child_label,
-                mount_id,
-                mount_id_provider,
-                device,
-            )
+                raise ArchiveMoverError(
+                    f"claimed tombstone directory differs from exact preimage: {child_label}",
+                    residue=(claim_residue,),
+                )
+            try:
+                child_fd = _open_child_dir(
+                    claim_fd,
+                    claim_name,
+                    child_label,
+                    mount_id,
+                    mount_id_provider,
+                    device,
+                )
+            except ArchiveMoverError as error:
+                raise ArchiveMoverError(str(error), residue=(claim_residue,)) from error
             try:
                 _remove_tree_contents_fd(
                     child_fd,
@@ -2027,33 +2343,51 @@ def _remove_tree_contents_fd(
                     expected_files=expected_files,
                     expected_directories=expected_directories,
                     prefix=relative,
+                    claim_fd=claim_fd,
+                    claim_label=claim_label,
+                    rename_impl=rename_impl,
                 )
-                current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                current = os.stat(claim_name, dir_fd=claim_fd, follow_symlinks=False)
                 opened = os.fstat(child_fd)
                 if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
-                    raise ArchiveMoverError(f"tombstone child changed during removal: {child_label}")
-                os.rmdir(name, dir_fd=directory_fd)
+                    raise ArchiveMoverError(
+                        f"claimed tombstone child changed during removal: {child_label}",
+                        residue=(claim_residue,),
+                    )
+                os.rmdir(claim_name, dir_fd=claim_fd)
+                os.fsync(claim_fd)
             finally:
                 os.close(child_fd)
             continue
         expected_file = expected_files.get(relative) if expected_files is not None else None
         if exact_allowlist and expected_file is None:
-            raise ArchiveMoverError(f"tombstone file is not allowlisted: {child_label}")
-        file_fd, opened = _open_regular(
-            directory_fd,
-            name,
-            child_label,
-            mount_id,
-            mount_id_provider,
-            device,
-        )
+            raise ArchiveMoverError(
+                f"claimed tombstone file is not allowlisted: {child_label}", residue=(claim_residue,)
+            )
+        try:
+            file_fd, opened = _open_regular(
+                claim_fd,
+                claim_name,
+                child_label,
+                mount_id,
+                mount_id_provider,
+                device,
+            )
+        except ArchiveMoverError as error:
+            raise ArchiveMoverError(str(error), residue=(claim_residue,)) from error
         try:
             if expected_file is not None and _stat_signature(opened) != _file_record_signature(expected_file):
-                raise ArchiveMoverError(f"tombstone file differs from exact preimage: {child_label}")
-            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                raise ArchiveMoverError(
+                    f"claimed tombstone file differs from exact preimage: {child_label}",
+                    residue=(claim_residue,),
+                )
+            current = os.stat(claim_name, dir_fd=claim_fd, follow_symlinks=False)
             if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
-                raise ArchiveMoverError(f"tombstone file changed during removal: {child_label}")
-            os.unlink(name, dir_fd=directory_fd)
+                raise ArchiveMoverError(
+                    f"claimed tombstone file changed during removal: {child_label}", residue=(claim_residue,)
+                )
+            os.unlink(claim_name, dir_fd=claim_fd)
+            os.fsync(claim_fd)
         finally:
             os.close(file_fd)
     os.fsync(directory_fd)

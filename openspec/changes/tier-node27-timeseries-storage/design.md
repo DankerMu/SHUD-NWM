@@ -83,6 +83,12 @@ producer-manifest digest and stable subject/window/model/basin provenance so
 the DB-aware inventory audit can bind a filesystem-created archive back to the
 exact DB subject. The mover itself stays filesystem-only; provenance capture is
 not a hidden DB lookup.
+Node-27 forcing finalization has two valid package shapes: older leaves contain
+only the forcing manifest and declared products, while newer leaves add one
+complete domain-handoff/version bundle. That five-file bundle is validated as
+an independent checksum/identity contract rather than inserted into the
+forcing manifest's output list (the version record itself binds the forcing
+manifest digest, so folding it into that manifest would create a hash cycle).
 
 **D3 — Compression settings must cover the existing primary keys.**
 TimescaleDB 2.10 requires unique-constraint columns to appear in

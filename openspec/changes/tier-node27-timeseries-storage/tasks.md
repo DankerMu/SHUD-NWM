@@ -503,11 +503,15 @@ Order is load-bearing:
     contain at least one regular product.
   - forcing producer completeness requires safe `forcing_version_id`, a
     non-empty unique `files` list, canonical member URIs bound inside the exact
-    leaf, valid sha256 values matching the same pinned snapshot, and no
-    undeclared product members. The outer archive manifest retains the stable
+    leaf, and valid sha256 values matching the same pinned snapshot. The leaf
+    is either legacy (manifest + declared products) or additionally contains
+    the complete fixed five-file domain-handoff/version bundle; partial bundle,
+    unknown extra, identity/contract/version/URI/checksum/package-digest or
+    lineage drift fails closed. The outer archive manifest retains the stable
     producer subject, producer-manifest digest/path, authoritative window and
     model/basin identity; #847 archive coverage binds those values and the
-    archived producer-manifest member digest to its DB subject.
+    archived producer-manifest member digest to its DB subject and verifies the
+    actual decompressed member bijection before declaring coverage.
   - state candidates are whole physical valid-time trees. Provider-qualified
     layout is `states/<source>/<physical_model>/<valid_time>/...`; legacy
     layout is `states/<physical_model>/<valid_time>/...` and maps only to
@@ -590,6 +594,10 @@ Order is load-bearing:
   and large-file size fields, but extension-header size is checked before body
   streaming; global/Solaris PAX, GNU longname/longlink and unexpected PAX keys
   are rejected.
+  Both sidecar files remain namespace-bound to the exact descriptors used for
+  final reads; pre-retirement guards recheck the exact tar+manifest pair. The
+  producer block is semantically self-bound to lane/identity/window/model/
+  basin and its unique producer-manifest member digest, not merely schema-valid.
 
   Immediately before retirement the still-pinned source root and complete
   tree must equal the archived preimage (inode/type/path/size/mtime and
@@ -616,6 +624,12 @@ Order is load-bearing:
   by the exact expected path/inode/signature allowlist, not by deleting every
   newly enumerated name; an extra/missing/drifted file or directory preserves
   residue and fails non-zero.
+  Before unlink or directory removal, every child is no-replace renamed into a
+  same-mount mover-exclusive claim namespace and its claimed inode/signature is
+  compared to the allowlist. A same-name replacement before claim is preserved
+  as residue; directories recursively apply the same rule. Post-rename fsync
+  uncertainty reports the real destination residue and removes stale staging
+  locators from the receipt.
 
   The Python entrypoint itself owns a non-blocking flock before discovery or
   mutation, so direct invocation cannot bypass single-instance behavior; the
@@ -690,11 +704,16 @@ Order is load-bearing:
     candidate selection or source mutation.
   - Input: forcing manifest has missing/empty/duplicate `files`, missing or
     unsafe stable subject, escaped URI, missing/checksum-different member or an
-    undeclared product; or run output is missing/empty/non-regular-only.
+    unknown extra product; forcing finalized sidecars are legacy-absent,
+    complete-valid, partial, or binding/checksum-drifted; or run output is
+    missing/empty/non-regular-only.
     Expected: discovery fails before selection in dry-run and enforce; source
-    remains and no canonical archive is created. A valid forcing/run archive
+    remains and no canonical archive is created for invalid shapes; legacy and
+    complete-valid forcing shapes archive, including canonical uppercase IFS
+    and a domain end earlier than the forcing eligibility end. A valid archive
     carries producer provenance which #847 binds to the exact DB subject before
-    declaring product-archive coverage complete.
+    declaring product-archive coverage complete, after decompressing and
+    verifying its actual exact members rather than trusting the sidecar alone.
   - Input: provider state, source-less legacy state and a clone target model
     that references the provider physical artifact.
     Expected: provider/legacy paths are collision-disjoint; only the physical
@@ -707,11 +726,20 @@ Order is load-bearing:
     boundaries.
     Expected: observed drift preserves the changed/replacement source or
     tombstone; the aged producer-immutability precondition is explicit.
+  - Input: opened archive tar or manifest directory entry is replaced after its
+    final byte read; or a shape-valid producer block drifts from identity,
+    window/model/basin or producer-manifest member digest.
+    Expected: exact child-pair/producer semantic binding fails before source
+    retirement; source and current archive evidence are preserved.
   - Input: final tar/manifest is replaced after final verify but before
     tombstone rename, or an extra child appears after tombstone recheck but
     before recursive removal.
     Expected: full final-pair and expected-allowlist validation blocks child
     unlink, preserves source/tombstone residue and returns non-zero.
+  - Input: a tombstone file or directory is replaced after allowlist stat but
+    before its removal.
+    Expected: atomic child claim observes the replacement inode, preserves it
+    as residue and never removes data outside the allowlist.
   - Input: verified final pair plus identical source, and verified final pair
     plus drifted source.
     Expected: identical is recorded idempotent without duplicate and may
@@ -733,6 +761,10 @@ Order is load-bearing:
     Expected: one terminal outcome plus ordered quarantine event(s); strict
     receipt publication preserves old content pre-replace and reports
     indeterminate post-replace; unsafe coordination paths block.
+  - Input: publish or quarantine rename succeeds but its following parent fsync
+    fails.
+    Expected: terminal is indeterminate and residue names the real destination
+    only; no stale staging locator or falsely durable quarantine event.
   - Input: existing-final verify reports deterministic corruption versus
     timeout/tool/read/mount operational error; and a valid manifest reverses
     its `files` array.
@@ -748,6 +780,10 @@ Order is load-bearing:
     Expected: reject at the offending header before streaming its body;
     member-count, size, extension metadata, cumulative payload and depth caps
     are fail-fast while bounded writer-generated local PAX still round-trips.
+  - Input: the decompressor keeps writing after the first header/PAX rejection.
+    Expected: parser failure immediately terminates and reaps the tool, restores
+    the archive FD offset and preserves deterministic failure classification
+    rather than holding the global lock until the full tool timeout.
   - Input: cutoff equality, CLI age zero/20, candidate/tree/depth/manifest/
     file/source/tar/uncompressed/timeout/stderr cap overflow, unreadable state
     directory, relative/bare zstd path, and lock contention.

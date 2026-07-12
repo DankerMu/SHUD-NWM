@@ -5,8 +5,10 @@ import importlib.util
 import io
 import json
 import os
+import stat
 import sys
 import tarfile
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -88,6 +90,27 @@ def test_compressor_protocol_uses_stdin_only_and_restores_input_offset(tmp_path:
     assert output.read_bytes() == payload
 
 
+def test_tar_constructor_parser_failure_kills_live_decompressor_and_restores_offset(tmp_path: Path) -> None:
+    tool = tmp_path / "bad-zstd"
+    tool.write_text(
+        "#!/bin/sh\nwhile :; do printf 'not-a-valid-tar-block-not-a-valid-tar-block'; done\n",
+        encoding="utf-8",
+    )
+    tool.chmod(0o700)
+    source = tmp_path / "archive.zst"
+    source.write_bytes(b"input")
+    fd = os.open(source, os.O_RDONLY)
+    try:
+        os.lseek(fd, 2, os.SEEK_SET)
+        started = time.monotonic()
+        with pytest.raises(archive.ArchiveMoverError, match="invalid size encoding"):
+            archive._TarStreamContext(fd, tool)
+        assert time.monotonic() - started < 2
+        assert os.lseek(fd, 0, os.SEEK_CUR) == 2
+    finally:
+        os.close(fd)
+
+
 def _forcing(config: archive.MoverConfig, cycle: str = "2026010100") -> Path:
     leaf = config.object_store_root / f"forcing/gfs/{cycle}/basin-a/model-a"
     leaf.mkdir(parents=True)
@@ -116,6 +139,123 @@ def _forcing(config: archive.MoverConfig, cycle: str = "2026010100") -> Path:
         encoding="utf-8",
     )
     return leaf
+
+
+def _forcing_with_domain_bundle(config: archive.MoverConfig) -> Path:
+    cycle = "2026010100"
+    leaf = config.object_store_root / f"forcing/ifs/{cycle}/basin-a/model-a"
+    (leaf / "payloads").mkdir(parents=True)
+    product = b"time,value\n1,2\n"
+    (leaf / "payload.csv").write_bytes(product)
+    forcing = {
+        "forcing_version_id": "forc_ifs_2026010100_model-a",
+        "source_id": "IFS",
+        "cycle_time": "2026-01-01T00:00:00Z",
+        "start_time": "2026-01-01T00:00:00Z",
+        "end_time": "2026-01-02T00:00:00Z",
+        "basin_version_id": "basin-a",
+        "model_id": "model-a",
+        "files": [
+            {
+                "uri": "s3://nhms/forcing/ifs/2026010100/basin-a/model-a/payload.csv",
+                "checksum": hashlib.sha256(product).hexdigest(),
+            }
+        ],
+    }
+    forcing_raw = json.dumps(forcing).encode()
+    (leaf / "forcing_package.json").write_bytes(forcing_raw)
+    payload_specs = {
+        "station_inventory": ("station_inventory.json", "met.met_station"),
+        "station_timeseries": ("station_timeseries.json", "met.forcing_station_timeseries"),
+        "interpolation_weights": ("interp_weights.json", "met.interp_weight"),
+    }
+    payloads = {}
+    for role, (name, table) in payload_specs.items():
+        raw = json.dumps([{"id": role}]).encode()
+        (leaf / "payloads" / name).write_bytes(raw)
+        payloads[role] = {
+            "uri": f"s3://nhms/forcing/ifs/{cycle}/basin-a/model-a/payloads/{name}",
+            "checksum_sha256": hashlib.sha256(raw).hexdigest(),
+            "table": table,
+            "row_count": 1,
+            "content_type": "application/json",
+        }
+    domain = {
+        "schema_version": "1.0",
+        "contract_id": "nhms.forcing_domain_handoff.package.v1",
+        "run_id": "fcst_ifs_2026010100_model-a",
+        "source_id": "IFS",
+        "source": "ifs",
+        "cycle_time": "2026-01-01T00:00:00Z",
+        "start_time": "2026-01-01T00:00:00Z",
+        "end_time": "2026-01-01T21:00:00Z",
+        "model_id": "model-a",
+        "basin_id": "basin-a",
+        "basin_version_id": "basin-a",
+        "forcing_version_id": forcing["forcing_version_id"],
+        "station_count": 1,
+        "payloads": payloads,
+        "table_row_counts": {
+            "met.forcing_version": 1,
+            "met.met_station": 1,
+            "met.forcing_station_timeseries": 1,
+            "met.interp_weight": 1,
+        },
+    }
+    (leaf / "forcing_domain_package.json").write_text(json.dumps(domain), encoding="utf-8")
+    version = {
+        **{field: forcing[field] for field in (
+            "forcing_version_id", "source_id", "cycle_time", "start_time", "end_time", "model_id", "basin_version_id"
+        )},
+        "forcing_package_uri": "s3://nhms/forcing/ifs/2026010100/basin-a/model-a",
+        "checksum": hashlib.sha256(forcing_raw).hexdigest(),
+        "lineage_json": {
+            "forcing_package_manifest_uri": (
+                "s3://nhms/forcing/ifs/2026010100/basin-a/model-a/forcing_package.json"
+            )
+        },
+    }
+    (leaf / "forcing_version_record.json").write_text(json.dumps(version), encoding="utf-8")
+    return leaf
+
+
+def test_complete_forcing_domain_bundle_accepts_uppercase_ifs_and_shorter_domain_window(tmp_path: Path) -> None:
+    config = _config(tmp_path, enforce=False)
+    _forcing_with_domain_bundle(config)
+    candidates, failures = archive.discover_candidates(
+        config, now=datetime(2026, 7, 11, tzinfo=UTC), mount_id_provider=_mount_id
+    )
+    assert failures == []
+    assert len(candidates) == 1
+    assert candidates[0].identity.source == "IFS"
+    assert candidates[0].eligibility_end == datetime(2026, 1, 2, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("mutation", ["partial", "extra", "payload-checksum", "version-lineage", "identity"])
+def test_forcing_domain_bundle_drift_fails_discovery(tmp_path: Path, mutation: str) -> None:
+    config = _config(tmp_path, enforce=False)
+    leaf = _forcing_with_domain_bundle(config)
+    if mutation == "partial":
+        (leaf / "forcing_version_record.json").unlink()
+    elif mutation == "extra":
+        (leaf / "unexpected.json").write_text("{}", encoding="utf-8")
+    elif mutation == "payload-checksum":
+        package = json.loads((leaf / "forcing_domain_package.json").read_text())
+        package["payloads"]["station_inventory"]["checksum_sha256"] = "0" * 64
+        (leaf / "forcing_domain_package.json").write_text(json.dumps(package), encoding="utf-8")
+    elif mutation == "version-lineage":
+        version = json.loads((leaf / "forcing_version_record.json").read_text())
+        version["lineage_json"]["forcing_package_manifest_uri"] = "s3://nhms/other.json"
+        (leaf / "forcing_version_record.json").write_text(json.dumps(version), encoding="utf-8")
+    else:
+        package = json.loads((leaf / "forcing_domain_package.json").read_text())
+        package["model_id"] = "other"
+        (leaf / "forcing_domain_package.json").write_text(json.dumps(package), encoding="utf-8")
+    candidates, failures = archive.discover_candidates(
+        config, now=datetime(2026, 7, 11, tzinfo=UTC), mount_id_provider=_mount_id
+    )
+    assert candidates == []
+    assert len(failures) == 1
 
 
 def _run(config: archive.MoverConfig, run_id: str = "opaque-run") -> Path:
@@ -1015,6 +1155,79 @@ def test_archive_leaf_mount_id_mismatch_fails_verification(tmp_path: Path) -> No
         )
 
 
+@pytest.mark.parametrize("boundary", ["after-hash", "after-tar", "manifest"])
+def test_archive_pair_namespace_rebinding_rejects_same_bytes_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    _forcing(config)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 0
+    final = config.archive_root / Path(receipt["candidates"][0]["archive_path"]).parent
+
+    def replace_same_bytes(path: Path) -> None:
+        raw = path.read_bytes()
+        displaced = path.with_name(path.name + ".displaced")
+        path.rename(displaced)
+        path.write_bytes(raw)
+
+    if boundary == "after-hash":
+        original = archive._size_digest_fd
+
+        def swap_after_hash(fd: int, *, max_bytes: int):
+            result = original(fd, max_bytes=max_bytes)
+            replace_same_bytes(final / "archive.tar.zst")
+            return result
+
+        monkeypatch.setattr(archive, "_size_digest_fd", swap_after_hash)
+    elif boundary == "manifest":
+        original = archive._read_json_relative_fd
+        count = 0
+
+        def swap_after_manifest(*args, **kwargs):
+            nonlocal count
+            result = original(*args, **kwargs)
+            if args[1] == "manifest.json":
+                count += 1
+                if count == 2:
+                    replace_same_bytes(final / "manifest.json")
+            return result
+
+        monkeypatch.setattr(archive, "_read_json_relative_fd", swap_after_manifest)
+    else:
+        original = archive._decompressed_tar_stream
+
+        class SwapAfterTar:
+            def __init__(self, inner):
+                self.inner = inner
+
+            def __enter__(self):
+                return self.inner.__enter__()
+
+            def __exit__(self, exc_type, exc, traceback):
+                result = self.inner.__exit__(exc_type, exc, traceback)
+                replace_same_bytes(final / "archive.tar.zst")
+                return result
+
+        monkeypatch.setattr(
+            archive,
+            "_decompressed_tar_stream",
+            lambda fd, zstd: SwapAfterTar(original(fd, zstd)),
+        )
+    with pytest.raises(archive.ArchiveCorruptError, match="namespace entry changed"):
+        archive.verify_archive_pair(
+            final,
+            config.archive_root,
+            zstd_path=config.zstd_path,
+            mount_id_provider=_mount_id,
+        )
+
+
 def test_existing_archive_manifest_resource_bounds_are_revalidated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1073,6 +1286,52 @@ def test_tombstone_recheck_preserves_late_write_and_reports_residue(tmp_path: Pa
     assert (config.object_store_root / terminal["residue"][0]).exists()
 
 
+@pytest.mark.parametrize("entry_kind", ["file", "directory"])
+def test_atomic_tombstone_claim_preserves_preclaim_replacement(
+    tmp_path: Path, entry_kind: str
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    source = _forcing(config) if entry_kind == "file" else _run(config)
+    target = "payload.csv" if entry_kind == "file" else "output"
+    replaced = False
+
+    def replace_before_claim(src_fd: int, src: str, dst_fd: int, dst: str) -> None:
+        nonlocal replaced
+        if not replaced and src == target and dst.startswith("entry-"):
+            replaced = True
+            os.rename(src, f"{src}.original", src_dir_fd=src_fd, dst_dir_fd=src_fd)
+            if entry_kind == "file":
+                replacement_fd = os.open(src, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=src_fd)
+                os.write(replacement_fd, b"replacement")
+                os.close(replacement_fd)
+            else:
+                os.mkdir(src, dir_fd=src_fd)
+                replacement_fd = os.open(src, os.O_RDONLY | os.O_DIRECTORY, dir_fd=src_fd)
+                marker_fd = os.open("replacement", os.O_WRONLY | os.O_CREAT, 0o600, dir_fd=replacement_fd)
+                os.close(marker_fd)
+                os.close(replacement_fd)
+        _rename_noreplace(src_fd, src, dst_fd, dst)
+
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=replace_before_claim,
+    )
+    assert code == 1
+    assert replaced
+    terminal = receipt["terminals"][0]
+    assert terminal["status"] == "indeterminate"
+    assert any(".archive-claims-" in path for path in terminal["residue"])
+    claims = list(source.parent.glob(".archive-claims-*"))
+    assert claims
+    claimed = next(path for path in claims[0].iterdir() if path.name.startswith("entry-"))
+    if entry_kind == "file":
+        assert claimed.read_bytes() == b"replacement"
+    else:
+        assert (claimed / "replacement").exists()
+
+
 def test_late_extra_tombstone_entry_blocks_every_unlink(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1107,6 +1366,9 @@ def test_tombstone_removal_refuses_cross_mount_descendant(tmp_path: Path) -> Non
     child.mkdir(parents=True)
     (child / "payload").write_bytes(b"keep")
     root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    claim = tmp_path / "claims"
+    claim.mkdir()
+    claim_fd = os.open(claim, os.O_RDONLY | os.O_DIRECTORY)
     try:
         root_info = os.fstat(root_fd)
 
@@ -1121,8 +1383,14 @@ def test_tombstone_removal_refuses_cross_mount_descendant(tmp_path: Path) -> Non
                 device=root_info.st_dev,
                 mount_id=root_info.st_dev,
                 mount_id_provider=mismatch,
+                claim_fd=claim_fd,
+                claim_label="claims",
+                rename_impl=lambda src_fd, src, dst_fd, dst: os.rename(
+                    src, dst, src_dir_fd=src_fd, dst_dir_fd=dst_fd
+                ),
             )
     finally:
+        os.close(claim_fd)
         os.close(root_fd)
     assert (child / "payload").read_bytes() == b"keep"
 
@@ -1480,6 +1748,78 @@ def test_leaf_rename_detects_source_replacement_race(tmp_path: Path) -> None:
         archive._rename_leaf(source, destination, root, swap_then_rename, _mount_id)
     assert caught.value.indeterminate
     assert (root / "displaced/original").read_text() == "original"
+
+
+def test_leaf_rename_parent_fsync_failure_reports_real_destination_residue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "root"
+    source = root / "source"
+    destination = root / "destination"
+    source.mkdir(parents=True)
+    real_fsync = os.fsync
+    failed = False
+
+    def fail_first_parent_fsync(fd: int) -> None:
+        nonlocal failed
+        if not failed and stat.S_ISDIR(os.fstat(fd).st_mode):
+            failed = True
+            raise OSError("durability unknown")
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fail_first_parent_fsync)
+    with pytest.raises(archive.ArchiveMoverError, match="parent fsync failed") as caught:
+        archive._rename_leaf(source, destination, root, _rename_noreplace, _mount_id)
+    assert caught.value.indeterminate
+    assert caught.value.residue == ("destination",)
+    assert destination.is_dir()
+    assert not source.exists()
+
+
+@pytest.mark.parametrize("path_kind", ["publish", "quarantine"])
+def test_indeterminate_leaf_rename_receipt_uses_destination_without_false_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path_kind: str
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    _forcing(config)
+    if path_kind == "quarantine":
+        first, code = archive.run(
+            config,
+            now=datetime(2026, 7, 11, tzinfo=UTC),
+            mount_id_provider=_mount_id,
+            rename_impl=_rename_noreplace,
+        )
+        assert code == 0
+        _forcing(config)
+        final = config.archive_root / Path(first["candidates"][0]["archive_path"]).parent
+        (final / "archive.tar.zst").write_bytes(b"corrupt")
+    original = archive._rename_leaf
+
+    def rename_then_indeterminate(source, destination, containment_root, rename_impl, provider, **kwargs):
+        original(source, destination, containment_root, rename_impl, provider, **kwargs)
+        if (path_kind == "publish" and ".staging" in source.parts) or (
+            path_kind == "quarantine" and ".quarantine" in destination.parts
+        ):
+            raise archive.ArchiveMoverError(
+                "rename completed but parent fsync failed",
+                indeterminate=True,
+                residue=(destination.relative_to(containment_root).as_posix(),),
+            )
+
+    monkeypatch.setattr(archive, "_rename_leaf", rename_then_indeterminate)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 1
+    terminal = receipt["terminals"][0]
+    assert terminal["status"] == "indeterminate"
+    assert all(not path.startswith(".staging/") for path in terminal["residue"])
+    if path_kind == "quarantine":
+        assert any(path.startswith(".quarantine/") for path in terminal["residue"])
+        assert all(event["kind"] != "quarantined" for event in receipt["events"])
 
 
 def test_receipt_semantics_bind_exact_source_and_unique_failure_locator() -> None:

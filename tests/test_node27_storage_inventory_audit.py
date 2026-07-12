@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import errno
 import hashlib
+import io
 import json
 import os
 import stat
+import tarfile
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -59,7 +61,12 @@ def _config(tmp_path: Path) -> audit.AuditConfig:
     receipt = tmp_path / "receipt.json"
     object_root.mkdir()
     archive_root.mkdir()
-    return audit.AuditConfig("postgresql://redacted", object_root, "s3://nhms", archive_root, 45, receipt)
+    zstd = tmp_path / "fake-zstd"
+    zstd.write_text("#!/bin/sh\ncat\n", encoding="utf-8")
+    zstd.chmod(0o700)
+    return audit.AuditConfig(
+        "postgresql://redacted", object_root, "s3://nhms", archive_root, 45, receipt, zstd
+    )
 
 
 def _receipt(subjects: list[audit.InventorySubject], *, product=None, salvage=(), hot=None):
@@ -219,6 +226,7 @@ def _write_forcing_and_run_product_archives(
     tool = tmp_path / "fake-zstd"
     tool.write_text("#!/bin/sh\ncat\n", encoding="utf-8")
     tool.chmod(0o700)
+    config = replace(config, zstd_path=tool)
     forcing_leaf = config.object_store_root / "forcing/gfs/2026050100/basin-a/model-a"
     forcing_leaf.mkdir(parents=True)
     payload = b"forcing-product"
@@ -283,8 +291,32 @@ def _write_forcing_and_run_product_archives(
 def test_product_archive_provenance_closes_forcing_and_run_db_inventory_loop(tmp_path: Path) -> None:
     config, forcing_subject, run_subject = _write_forcing_and_run_product_archives(tmp_path)
     for subject in (forcing_subject, run_subject):
-        assert audit.verify_product_archive(subject, config.archive_root, config.object_store_prefix) == audit.Coverage(
-            "product-archive", ("checksum-verified product archive present",)
+        assert audit.verify_product_archive(
+            subject, config.archive_root, config.object_store_prefix, config.zstd_path
+        ) == audit.Coverage(
+            "product-archive", ("member-verified product archive present",)
+        )
+
+
+def test_product_archive_coverage_reads_and_rejects_tampered_tar_members(tmp_path: Path) -> None:
+    config, subject, _run_subject = _write_forcing_and_run_product_archives(tmp_path)
+    paths = audit.archive_provenance_paths(config.archive_root, identity=subject.archive_identity)
+    manifest = json.loads(paths.manifest.read_text())
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w") as tar:
+        for entry in manifest["files"]:
+            content = b"tampered"
+            info = tarfile.TarInfo(entry["path"])
+            info.size = len(content)
+            tar.addfile(info, io.BytesIO(content))
+    tampered = stream.getvalue()
+    paths.archive.write_bytes(tampered)
+    manifest["archive"]["size_bytes"] = len(tampered)
+    manifest["archive"]["sha256"] = hashlib.sha256(tampered).hexdigest()
+    paths.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(audit.AuditBlocked, match="tar member"):
+        audit.verify_product_archive(
+            subject, config.archive_root, config.object_store_prefix, config.zstd_path
         )
 
 
@@ -308,7 +340,7 @@ def test_product_archive_forcing_provenance_drift_blocks_completion(
     manifest["producer"][field] = value
     paths.manifest.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(audit.AuditBlocked, match="producer|schema"):
-        audit.verify_product_archive(subject, config.archive_root, config.object_store_prefix)
+        audit.verify_product_archive(subject, config.archive_root, config.object_store_prefix, config.zstd_path)
 
 
 def test_product_and_hot_manifests_enforce_actual_cap_plus_one(
@@ -340,7 +372,7 @@ def test_missing_archive_root_is_ordinary_absence(tmp_path: Path) -> None:
 
 
 def _state_archive_subject(kind: str) -> audit.InventorySubject:
-    checksum = "c" * 64
+    checksum = hashlib.sha256(b"state").hexdigest()
     if kind == "provider":
         return _subject(
             "states",
@@ -371,8 +403,7 @@ def _state_archive_subject(kind: str) -> audit.InventorySubject:
 def _write_state_product_archive(config: audit.AuditConfig, subject: audit.InventorySubject, *, mutation: str) -> None:
     paths = audit.archive_provenance_paths(config.archive_root, identity=subject.archive_identity)
     paths.archive.parent.mkdir(parents=True)
-    archive_content = b"state archive"
-    paths.archive.write_bytes(archive_content)
+    member_content = b"state"
     identity = subject.archive_identity
     identity_payload = {
         "lane": "states",
@@ -395,6 +426,13 @@ def _write_state_product_archive(config: audit.AuditConfig, subject: audit.Inven
         files = [{**entry, "sha256": "d" * 64}]
     else:
         files = [entry]
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w") as tar:
+        info = tarfile.TarInfo(entry["path"])
+        info.size = len(member_content)
+        tar.addfile(info, io.BytesIO(member_content))
+    archive_content = stream.getvalue()
+    paths.archive.write_bytes(archive_content)
     manifest = {
         "schema_version": "1.0",
         "provenance": "product-archive",
@@ -417,8 +455,10 @@ def test_state_product_archive_binds_exact_physical_member(kind: str, tmp_path: 
     config = _config(tmp_path)
     subject = _state_archive_subject(kind)
     _write_state_product_archive(config, subject, mutation="valid")
-    coverage = audit.verify_product_archive(subject, config.archive_root, config.object_store_prefix)
-    assert coverage == audit.Coverage("product-archive", ("checksum-verified product archive present",))
+    coverage = audit.verify_product_archive(
+        subject, config.archive_root, config.object_store_prefix, config.zstd_path
+    )
+    assert coverage == audit.Coverage("product-archive", ("member-verified product archive present",))
     assert subject.stable_key == ("states", f"{kind}-state")
 
 

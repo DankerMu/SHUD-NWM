@@ -37,6 +37,7 @@ from packages.common.storage import (
     archive_provenance_paths,
     validate_product_archive_manifest_binding,
 )
+from scripts import node27_product_archive as product_archive
 
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_SALVAGE_MANIFESTS = 10_000
@@ -135,6 +136,7 @@ class AuditConfig:
     archive_root: Path
     archive_min_age_days: int
     receipt_path: Path
+    zstd_path: Path = Path("/usr/bin/zstd")
 
 
 @dataclass(frozen=True)
@@ -471,7 +473,10 @@ def _size_sha256_fd(file_fd: int, label: Path) -> tuple[int, str]:
 
 
 def verify_product_archive(
-    subject: InventorySubject, archive_root: Path, object_store_prefix: str = ""
+    subject: InventorySubject,
+    archive_root: Path,
+    object_store_prefix: str = "",
+    zstd_path: Path = Path("/usr/bin/zstd"),
 ) -> Coverage | None:
     paths = archive_provenance_paths(archive_root, identity=subject.archive_identity)
     manifest_result = _read_json_with_digest_optional(paths.manifest, archive_root)
@@ -503,7 +508,26 @@ def verify_product_archive(
     declared = manifest["archive"]
     if size != declared["size_bytes"] or digest != declared["sha256"]:
         return Coverage("none", ("product archive size/sha256 mismatch",))
-    return Coverage("product-archive", ("checksum-verified product archive present",))
+    try:
+        validated_zstd = product_archive._validate_zstd(zstd_path)
+        verified_manifest = product_archive.verify_archive_pair(
+            paths.archive.parent,
+            archive_root,
+            zstd_path=validated_zstd,
+            mount_id_provider=_archive_mount_id,
+        )
+    except product_archive.ArchiveMoverError as error:
+        raise AuditBlocked(f"product archive content verification failed: {error}") from error
+    if verified_manifest != manifest:
+        raise AuditBlocked(f"product archive manifest changed during verification: {subject.subject_id}")
+    return Coverage("product-archive", ("member-verified product archive present",))
+
+
+def _archive_mount_id(fd: int) -> int:
+    """Use Linux mount IDs in production and a device proof for local portable tests."""
+    if Path(f"/proc/self/fdinfo/{fd}").exists():
+        return product_archive.fd_mount_id(fd)
+    return os.fstat(fd).st_dev
 
 
 def _verify_product_producer_provenance(subject: InventorySubject, manifest: Mapping[str, Any]) -> None:
@@ -847,7 +871,9 @@ def run_audit(config: AuditConfig, *, connect: ConnectionFactory | None = None) 
     product: dict[tuple[str, str], Coverage | None] = {}
     hot: dict[tuple[str, str], Coverage | None] = {}
     for subject in subjects:
-        product[subject.stable_key] = verify_product_archive(subject, config.archive_root, config.object_store_prefix)
+        product[subject.stable_key] = verify_product_archive(
+            subject, config.archive_root, config.object_store_prefix, config.zstd_path
+        )
         hot[subject.stable_key] = verify_hot(subject, config)
     receipt = build_receipt(
         subjects,
@@ -892,6 +918,7 @@ def config_from_args(args: argparse.Namespace) -> AuditConfig:
         archive_root,
         age,
         receipt_path,
+        _absolute(getattr(args, "zstd_path", None) or os.getenv("ZSTD_BIN") or "/usr/bin/zstd", "zstd_path"),
     )
 
 
@@ -903,6 +930,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--archive-root")
     parser.add_argument("--archive-min-age-days", type=int)
     parser.add_argument("--receipt-path")
+    parser.add_argument("--zstd-path")
     return parser
 
 
