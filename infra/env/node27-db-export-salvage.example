@@ -60,5 +60,8 @@ NODE27_DB_EXPORT_SALVAGE_ZSTD=/usr/bin/zstd
 # Per-selector byte cap (>=1). The current implementation buffers the full
 # CSV in memory before invoking zstd via a subprocess; the cap gates the
 # buffered path so a single selector cannot swamp memory. Default 2 GiB.
-# Operators may shrink this on memory-constrained hosts.
+# Operators may shrink this on memory-constrained hosts. Upper ceiling:
+# 16 GiB (17179869184 bytes) — inclusive; values above are refused so an
+# operator typo (e.g. an extra trailing zero) cannot effectively disable
+# the cap.
 NODE27_DB_EXPORT_SALVAGE_MAX_SELECTOR_BYTES=2147483648

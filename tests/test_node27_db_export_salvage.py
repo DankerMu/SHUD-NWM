@@ -178,6 +178,13 @@ def _make_stub_copy_and_count(
             {"NODE27_DB_EXPORT_SALVAGE_MAX_SELECTOR_BYTES": "999999999999999"},
             "MAX_SELECTOR_BYTES",
         ),
+        # Off-by-one at the 16 GiB ceiling: exactly one byte over must be
+        # refused. Pairs with test_max_selector_bytes_boundary_accepts_ceiling
+        # below, which proves the inclusive-ceiling value is accepted.
+        (
+            {"NODE27_DB_EXPORT_SALVAGE_MAX_SELECTOR_BYTES": "17179869185"},
+            "MAX_SELECTOR_BYTES",
+        ),
         ({"NODE27_DB_EXPORT_SALVAGE_SOURCE_INSTANCE_ID": None}, "SOURCE_INSTANCE_ID"),
         ({"NODE27_DB_EXPORT_SALVAGE_SOURCE_INSTANCE_ID": ""}, "SOURCE_INSTANCE_ID"),
         ({"NODE27_DB_EXPORT_SALVAGE_SOURCE_INSTANCE_ID": "  padded"}, "SOURCE_INSTANCE_ID"),
@@ -1142,11 +1149,20 @@ def test_count_csv_rows_edge_cases() -> None:
         ),
         # libpq quoted-value form: password embedded in single quotes,
         # value contains an embedded space (a valid libpq DSN shape a
-        # driver may echo).
+        # driver may echo). The banned substrings are chosen to
+        # DISCRIMINATE between the old ``\S+``-only regex (which stops at
+        # whitespace, producing tail-leak ``... password=*** space pw'
+        # dbname=nhms``) and the new ``('[^']*'|\S+)`` alternation (which
+        # consumes the full quoted value, producing ``... password=***
+        # dbname=nhms``). Asserting ``"has space pw" not in masked`` was a
+        # fake oracle because the substring ``has space pw`` never appears
+        # verbatim in either branch's output; the fragments ``space pw``
+        # and ``pw'`` DO appear in the old-regex output and are proof of a
+        # tail leak.
         (
             "postgresql://user:secretpw@127.0.0.1:55432/nhms",
             "connection refused: host=127.0.0.1 port=55432 user=user password='has space pw' dbname=nhms",
-            ["has space pw"],
+            ["space pw", "pw'"],
             "127.0.0.1",
         ),
     ],
@@ -1841,3 +1857,18 @@ def test_max_selector_bytes_refused_when_non_positive(tmp_path: Path) -> None:
     )
     with pytest.raises(salvage.SalvageConfigError, match="MAX_SELECTOR_BYTES"):
         salvage.config_from_args(_args(), env)
+
+
+def test_max_selector_bytes_boundary_accepts_ceiling(tmp_path: Path) -> None:
+    """Inclusive 16 GiB ceiling: exact-ceiling value parses successfully.
+
+    Pairs with the ``"17179869185"`` (ceiling+1) parametrize entry in
+    ``test_config_parse_fails_closed``, which proves off-by-one refusal.
+    """
+    ceiling = 16 * 1024 * 1024 * 1024  # 17_179_869_184
+    env = _base_env(
+        tmp_path,
+        override={"NODE27_DB_EXPORT_SALVAGE_MAX_SELECTOR_BYTES": str(ceiling)},
+    )
+    config = salvage.config_from_args(_args(), env)
+    assert config.max_selector_bytes == ceiling
