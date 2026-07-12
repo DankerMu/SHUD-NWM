@@ -92,6 +92,23 @@ def test_compressor_protocol_uses_stdin_only_and_restores_input_offset(tmp_path:
     assert output.read_bytes() == payload
 
 
+@pytest.mark.parametrize("evidence", ["missing", "invalid", "unavailable"])
+def test_fd_mount_id_failures_are_operational(
+    monkeypatch: pytest.MonkeyPatch, evidence: str
+) -> None:
+    if evidence == "missing":
+        def fail_read(self, **kwargs):
+            raise OSError("fdinfo unavailable")
+
+        monkeypatch.setattr(Path, "read_text", fail_read)
+    elif evidence == "invalid":
+        monkeypatch.setattr(Path, "read_text", lambda self, **kwargs: "mnt_id:not-a-number\n")
+    else:
+        monkeypatch.setattr(Path, "read_text", lambda self, **kwargs: "pos: 0\n")
+    with pytest.raises(archive.ArchiveOperationalError):
+        archive.fd_mount_id(123)
+
+
 def test_tar_constructor_parser_failure_kills_live_decompressor_and_restores_offset(tmp_path: Path) -> None:
     tool = tmp_path / "bad-zstd"
     tool.write_text(
@@ -359,6 +376,7 @@ def test_enforce_archives_three_physical_lanes_and_retires_sources(tmp_path: Pat
             leaf,
             config.archive_root,
             zstd_path=config.zstd_path,
+            object_store_prefix=config.object_store_prefix,
             mount_id_provider=_mount_id,
         )
     assert config.receipt_path.stat().st_mode & 0o777 == 0o600
@@ -426,6 +444,64 @@ def test_forcing_and_run_eligibility_uses_authoritative_end_time(tmp_path: Path)
     )
     assert candidates == []
     assert failures == []
+
+
+@pytest.mark.parametrize("lane", ["forcing", "runs"])
+def test_hot_product_gate_skips_payload_scan_and_cold_completeness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lane: str
+) -> None:
+    config = _config(tmp_path, enforce=False)
+    leaf = _forcing(config) if lane == "forcing" else _run(config)
+    if lane == "runs":
+        (leaf / "output/result.nc").unlink()
+
+    def forbidden_scan(*args, **kwargs):
+        raise AssertionError("hot product must not scan/hash its payload tree")
+
+    monkeypatch.setattr(archive, "scan_tree_snapshot", forbidden_scan)
+    candidates, failures = archive.discover_candidates(
+        config,
+        now=datetime(2026, 1, 10, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+    )
+    assert candidates == []
+    assert failures == []
+
+
+@pytest.mark.parametrize("mutation", ["identity", "window", "prefix"])
+def test_hot_forcing_still_rejects_lightweight_contract_drift(tmp_path: Path, mutation: str) -> None:
+    config = _config(tmp_path, enforce=False)
+    leaf = _forcing(config)
+    path = leaf / "forcing_package.json"
+    manifest = json.loads(path.read_text())
+    if mutation == "identity":
+        manifest["model_id"] = "other"
+    elif mutation == "window":
+        manifest["start_time"], manifest["end_time"] = manifest["end_time"], "2025-12-31T00:00:00Z"
+    else:
+        manifest["files"][0]["uri"] = "s3://other/forcing/gfs/2026010100/basin-a/model-a/payload.csv"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    candidates, failures = archive.discover_candidates(
+        config,
+        now=datetime(2026, 1, 10, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+    )
+    assert candidates == []
+    assert len(failures) == 1
+
+
+def test_cold_run_still_requires_complete_output(tmp_path: Path) -> None:
+    config = _config(tmp_path, enforce=False)
+    leaf = _run(config)
+    (leaf / "output/result.nc").unlink()
+    candidates, failures = archive.discover_candidates(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+    )
+    assert candidates == []
+    assert len(failures) == 1
+    assert "no regular product" in failures[0].reason
 
 
 def test_inverted_forcing_window_is_discovery_failure(tmp_path: Path) -> None:
@@ -726,13 +802,14 @@ def test_existing_verified_archive_is_not_quarantined_when_source_retirement_fai
         rename_impl=mutate_at_retirement,
     )
     assert code == 1
-    assert second["terminals"][0]["status"] == "failed"
+    assert second["terminals"][0]["status"] == "indeterminate"
     assert all(event["kind"] != "quarantined" for event in second["events"])
     final = config.archive_root / Path(first["candidates"][0]["archive_path"]).parent
     archive.verify_archive_pair(
         final,
         config.archive_root,
         zstd_path=config.zstd_path,
+        object_store_prefix=config.object_store_prefix,
         mount_id_provider=_mount_id,
     )
 
@@ -783,6 +860,42 @@ def test_operational_existing_verify_failure_never_quarantines(
         raise archive.ArchiveOperationalError("decompressor timed out")
 
     monkeypatch.setattr(archive, "verify_archive_pair", timeout)
+    second, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 1
+    assert second["terminals"][0]["status"] == "indeterminate"
+    assert second["events"] == []
+    assert final.exists() and source.exists()
+
+
+def test_existing_final_mount_evidence_failure_keeps_archive_and_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    _forcing(config)
+    first, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 0
+    final = config.archive_root / Path(first["candidates"][0]["archive_path"]).parent
+    source = _forcing(config)
+    original_verify = archive.verify_archive_pair
+
+    def verify_with_missing_mount(*args, **kwargs):
+        def unavailable(fd: int) -> int:
+            raise archive.ArchiveOperationalError("mount evidence unavailable")
+
+        kwargs["mount_id_provider"] = unavailable
+        return original_verify(*args, **kwargs)
+
+    monkeypatch.setattr(archive, "verify_archive_pair", verify_with_missing_mount)
     second, code = archive.run(
         config,
         now=datetime(2026, 7, 11, tzinfo=UTC),
@@ -846,6 +959,7 @@ def test_decompressor_spawn_race_is_operational(tmp_path: Path, monkeypatch: pyt
             final,
             config.archive_root,
             zstd_path=config.zstd_path,
+            object_store_prefix=config.object_store_prefix,
             mount_id_provider=_mount_id,
         )
 
@@ -959,6 +1073,7 @@ def test_corrupt_final_is_quarantined_then_replaced_in_enforce(tmp_path: Path) -
         final,
         config.archive_root,
         zstd_path=config.zstd_path,
+        object_store_prefix=config.object_store_prefix,
         mount_id_provider=_mount_id,
     )
 
@@ -1069,6 +1184,63 @@ def test_internal_tar_verification_rejects_invalid_member_even_with_matching_out
             final,
             config.archive_root,
             zstd_path=config.zstd_path,
+            object_store_prefix=config.object_store_prefix,
+            mount_id_provider=_mount_id,
+        )
+
+
+@pytest.mark.parametrize("lane", ["forcing", "runs"])
+def test_embedded_producer_rejects_self_consistent_sidecar_rewrite(
+    tmp_path: Path, lane: str
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    (_forcing(config) if lane == "forcing" else _run(config))
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 0
+    final = config.archive_root / Path(receipt["candidates"][0]["archive_path"]).parent
+    manifest_path = final / "manifest.json"
+    outer = json.loads(manifest_path.read_text())
+    payloads: dict[str, bytes] = {}
+    with tarfile.open(final / "archive.tar.zst", mode="r:") as source:
+        for member in source:
+            extracted = source.extractfile(member)
+            assert extracted is not None
+            payloads[member.name] = extracted.read()
+    embedded_path = "forcing_package.json" if lane == "forcing" else "input/manifest.json"
+    embedded = json.loads(payloads[embedded_path])
+    if lane == "forcing":
+        embedded["files"][0]["uri"] = "s3://other/forcing/gfs/2026010100/basin-a/model-a/payload.csv"
+    else:
+        embedded["outputs"]["output_uri"] = "s3://other/runs/opaque-run/output/"
+    payloads[embedded_path] = json.dumps(embedded, sort_keys=True).encode()
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as target:
+        for name, raw in payloads.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(raw)
+            target.addfile(info, io.BytesIO(raw))
+    archive_raw = buffer.getvalue()
+    (final / "archive.tar.zst").write_bytes(archive_raw)
+    digest = hashlib.sha256(payloads[embedded_path]).hexdigest()
+    for entry in outer["files"]:
+        if entry["path"] == embedded_path:
+            entry["size_bytes"] = len(payloads[embedded_path])
+            entry["sha256"] = digest
+    outer["producer"]["manifest_sha256"] = digest
+    outer["archive"]["size_bytes"] = len(archive_raw)
+    outer["archive"]["sha256"] = hashlib.sha256(archive_raw).hexdigest()
+    manifest_path.write_text(json.dumps(outer), encoding="utf-8")
+    with pytest.raises(archive.ArchiveCorruptError, match="URI escapes|identity/outputs"):
+        archive.verify_archive_pair(
+            final,
+            config.archive_root,
+            zstd_path=config.zstd_path,
+            object_store_prefix=config.object_store_prefix,
             mount_id_provider=_mount_id,
         )
 
@@ -1115,6 +1287,51 @@ def test_unsupported_tar_extensions_are_rejected_before_body_read(extension: byt
     )
     with pytest.raises(archive.ArchiveMoverError, match="unsupported extension"):
         guarded.read(10_240)
+
+
+def test_many_small_local_pax_headers_fail_typed_without_recursion() -> None:
+    info = tarfile.TarInfo("pax")
+    info.type = tarfile.XHDTYPE
+    body = b"6 x=y\n"
+    info.size = len(body)
+    header = info.tobuf(format=tarfile.USTAR_FORMAT)
+    record = header + body + b"\0" * (512 - len(body))
+
+    class Process:
+        def kill(self) -> None:
+            pass
+
+    stream = io.BytesIO(record * 330)
+    guarded = archive._TarHeaderGuardReader(
+        archive._LimitedReader(stream, len(record) * 330, Process()),
+        expected_member_count=330,
+    )
+    with pytest.raises(archive.ArchiveMoverError, match="consecutive local PAX"):
+        while guarded.read(512):
+            pass
+
+
+def test_local_pax_count_is_bounded_by_expected_members() -> None:
+    info = tarfile.TarInfo("pax")
+    info.type = tarfile.XHDTYPE
+    body = b"6 x=y\n"
+    info.size = len(body)
+    pax = info.tobuf(format=tarfile.USTAR_FORMAT) + body + b"\0" * (512 - len(body))
+    regular = tarfile.TarInfo("member")
+    regular.size = 0
+    raw = pax + regular.tobuf(format=tarfile.USTAR_FORMAT) + pax
+
+    class Process:
+        def kill(self) -> None:
+            pass
+
+    guarded = archive._TarHeaderGuardReader(
+        archive._LimitedReader(io.BytesIO(raw), len(raw), Process()),
+        expected_member_count=1,
+    )
+    with pytest.raises(archive.ArchiveMoverError, match="raw header count|local PAX count"):
+        while guarded.read(512):
+            pass
 
 
 def test_deterministic_writer_local_pax_path_round_trips(tmp_path: Path) -> None:
@@ -1168,6 +1385,7 @@ def test_tar_header_limits_fail_before_member_body(tmp_path: Path, fault: str) -
             final,
             config.archive_root,
             zstd_path=config.zstd_path,
+            object_store_prefix=config.object_store_prefix,
             mount_id_provider=_mount_id,
         )
 
@@ -1194,6 +1412,7 @@ def test_archive_leaf_mount_id_mismatch_fails_verification(tmp_path: Path) -> No
             final,
             config.archive_root,
             zstd_path=config.zstd_path,
+            object_store_prefix=config.object_store_prefix,
             mount_id_provider=mismatch,
         )
 
@@ -1260,13 +1479,14 @@ def test_archive_pair_namespace_rebinding_rejects_same_bytes_replacement(
         monkeypatch.setattr(
             archive,
             "_decompressed_tar_stream",
-            lambda fd, zstd: SwapAfterTar(original(fd, zstd)),
+            lambda fd, zstd, **kwargs: SwapAfterTar(original(fd, zstd, **kwargs)),
         )
     with pytest.raises(archive.ArchiveCorruptError, match="namespace entry changed"):
         archive.verify_archive_pair(
             final,
             config.archive_root,
             zstd_path=config.zstd_path,
+            object_store_prefix=config.object_store_prefix,
             mount_id_provider=_mount_id,
         )
 
@@ -1290,6 +1510,7 @@ def test_existing_archive_manifest_resource_bounds_are_revalidated(
             final,
             config.archive_root,
             zstd_path=config.zstd_path,
+            object_store_prefix=config.object_store_prefix,
             mount_id_provider=_mount_id,
         )
 
@@ -1323,10 +1544,11 @@ def test_tombstone_recheck_preserves_late_write_and_reports_residue(tmp_path: Pa
     )
     assert code == 1
     terminal = receipt["terminals"][0]
-    assert terminal["status"] == "failed"
-    assert terminal["residue"] and ".archive-delete-" in terminal["residue"][0]
+    assert terminal["status"] == "indeterminate"
+    assert any(".archive-delete-" in item for item in terminal["residue"])
     assert not source.exists()
-    assert (config.object_store_root / terminal["residue"][0]).exists()
+    tombstone_residue = next(item for item in terminal["residue"] if ".archive-delete-" in item)
+    assert (config.object_store_root / tombstone_residue).exists()
 
 
 @pytest.mark.parametrize("entry_kind", ["file", "directory"])
@@ -1397,10 +1619,168 @@ def test_late_extra_tombstone_entry_blocks_every_unlink(
     assert code == 1
     terminal = receipt["terminals"][0]
     assert terminal["status"] == "indeterminate"
-    tombstone = config.object_store_root / terminal["residue"][0]
+    tombstone = next(config.object_store_root.glob("forcing/gfs/2026010100/basin-a/.archive-delete-*"))
     assert (tombstone / "late-extra").exists()
     assert (tombstone / "payload.csv").exists()
     assert (tombstone / "forcing_package.json").exists()
+
+
+@pytest.mark.parametrize("member", ["archive.tar.zst", "manifest.json"])
+def test_durable_guard_preserves_exact_pair_when_canonical_swaps_before_retirement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, member: str
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    source = _forcing(config)
+    original = archive._install_durable_archive_guard
+    captured: list[Path] = []
+
+    def install_then_swap(*args, **kwargs):
+        guard = original(*args, **kwargs)
+        captured.append(guard.path)
+        target = guard.canonical_leaf / member
+        raw = target.read_bytes()
+        target.rename(target.with_name(member + ".displaced"))
+        target.write_bytes(raw)
+        return guard
+
+    monkeypatch.setattr(archive, "_install_durable_archive_guard", install_then_swap)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 1
+    terminal = receipt["terminals"][0]
+    assert terminal["status"] == "indeterminate"
+    assert source.exists()
+    assert captured and captured[0].is_dir()
+    assert captured[0].relative_to(config.archive_root).as_posix() in terminal["residue"]
+    archive.verify_archive_pair(
+        captured[0],
+        config.archive_root,
+        zstd_path=config.zstd_path,
+        object_store_prefix=config.object_store_prefix,
+        require_canonical_location=False,
+        mount_id_provider=_mount_id,
+    )
+
+
+@pytest.mark.parametrize("member", ["archive.tar.zst", "manifest.json"])
+def test_durable_guard_survives_swap_at_first_destructive_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, member: str
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    source = _forcing(config)
+    original = archive._validate_tombstone_allowlist
+    calls = 0
+
+    def validate_then_swap(candidate, tomb_fd, provider):
+        nonlocal calls
+        original(candidate, tomb_fd, provider)
+        calls += 1
+        if calls == 2:
+            final = config.archive_root / "forcing/gfs/2026010100/basin-a/model-a"
+            target = final / member
+            raw = target.read_bytes()
+            target.rename(target.with_name(member + ".displaced"))
+            target.write_bytes(raw)
+
+    monkeypatch.setattr(archive, "_validate_tombstone_allowlist", validate_then_swap)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 1
+    terminal = receipt["terminals"][0]
+    assert terminal["status"] == "indeterminate"
+    assert not source.exists()
+    guard_relative = next(item for item in terminal["residue"] if item.startswith(".archive-guards/"))
+    guard = config.archive_root / guard_relative
+    archive.verify_archive_pair(
+        guard,
+        config.archive_root,
+        zstd_path=config.zstd_path,
+        object_store_prefix=config.object_store_prefix,
+        require_canonical_location=False,
+        mount_id_provider=_mount_id,
+    )
+
+
+def test_successful_retirement_leaves_no_durable_guard_leaf(tmp_path: Path) -> None:
+    config = _config(tmp_path, enforce=True)
+    _forcing(config)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 0, receipt
+    guard_parent = config.archive_root / ".archive-guards"
+    assert guard_parent.is_dir()
+    assert list(guard_parent.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "fault", ["root-rename", "parent-fsync", "claim-fsync", "root-rmdir", "claim-cleanup"]
+)
+def test_root_claim_failure_receipt_tracks_only_live_namespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    _forcing(config)
+    real_rmdir = os.rmdir
+    real_fsync = os.fsync
+    root_claimed = False
+    post_claim_fsync = 0
+
+    def rename_with_fault(src_fd: int, src: str, dst_fd: int, dst: str) -> None:
+        nonlocal root_claimed
+        _rename_noreplace(src_fd, src, dst_fd, dst)
+        if dst.startswith("root-"):
+            root_claimed = True
+            if fault == "root-rename":
+                raise OSError("root rename durability fault")
+
+    if fault in {"parent-fsync", "claim-fsync"}:
+        def fsync_with_fault(fd: int) -> None:
+            nonlocal post_claim_fsync
+            if root_claimed:
+                post_claim_fsync += 1
+                if (fault == "parent-fsync" and post_claim_fsync == 1) or (
+                    fault == "claim-fsync" and post_claim_fsync == 2
+                ):
+                    raise OSError(f"{fault} fault")
+            real_fsync(fd)
+
+        monkeypatch.setattr(os, "fsync", fsync_with_fault)
+
+    if fault in {"root-rmdir", "claim-cleanup"}:
+        def rmdir_with_fault(path, *args, **kwargs):
+            name = os.fspath(path)
+            if fault == "root-rmdir" and name.startswith("root-"):
+                raise OSError("root rmdir fault")
+            if fault == "claim-cleanup" and name.startswith(".archive-claims-"):
+                raise OSError("claim cleanup fault")
+            return real_rmdir(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "rmdir", rmdir_with_fault)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=rename_with_fault,
+    )
+    assert code == 1
+    terminal = receipt["terminals"][0]
+    assert terminal["status"] == "indeterminate"
+    source_residue = [item for item in terminal["residue"] if ".archive-claims-" in item]
+    assert source_residue, terminal
+    assert all((config.object_store_root / item).exists() for item in source_residue)
+    assert not any(".archive-delete-" in item for item in terminal["residue"])
 
 
 def test_tombstone_removal_refuses_cross_mount_descendant(tmp_path: Path) -> None:

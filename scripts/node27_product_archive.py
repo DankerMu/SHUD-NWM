@@ -204,6 +204,15 @@ class MoverConfig:
     enforce: bool = False
 
 
+@dataclass(frozen=True)
+class DurableArchiveGuard:
+    path: Path
+    fd: int
+    canonical_leaf: Path
+    archive_signature: tuple[int, int, int, int, int]
+    manifest_signature: tuple[int, int, int, int, int]
+
+
 MountIdProvider = Callable[[int], int]
 RenameNoReplace = Callable[[int, str, int, str], None]
 
@@ -214,14 +223,14 @@ def fd_mount_id(fd: int) -> int:
     try:
         text = path.read_text(encoding="ascii")
     except OSError as error:
-        raise ArchiveMoverError(f"cannot prove mount ID for fd {fd}: {error}") from error
+        raise ArchiveOperationalError(f"cannot prove mount ID for fd {fd}: {error}") from error
     for line in text.splitlines():
         if line.startswith("mnt_id:"):
             try:
                 return int(line.split(":", 1)[1].strip())
             except ValueError as error:
-                raise ArchiveMoverError(f"invalid mount ID evidence for fd {fd}") from error
-    raise ArchiveMoverError(f"mount ID evidence is unavailable for fd {fd}")
+                raise ArchiveOperationalError(f"invalid mount ID evidence for fd {fd}") from error
+    raise ArchiveOperationalError(f"mount ID evidence is unavailable for fd {fd}")
 
 
 def rename_no_replace(src_fd: int, src: str, dst_fd: int, dst: str) -> None:
@@ -292,13 +301,14 @@ def _open_regular(
     provider: MountIdProvider,
     device: int | None = None,
     max_file_bytes: int | None = None,
+    allow_hardlinks: bool = False,
 ) -> tuple[int, os.stat_result]:
     fd: int | None = None
     try:
         expected = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         if stat.S_ISLNK(expected.st_mode) or not stat.S_ISREG(expected.st_mode):
             raise ArchiveMoverError(f"unsupported product entry type: {label}")
-        if expected.st_nlink != 1:
+        if expected.st_nlink != 1 and not allow_hardlinks:
             raise ArchiveMoverError(f"hard-linked product file rejected: {label}")
         file_limit = MAX_FILE_BYTES if max_file_bytes is None else max_file_bytes
         if expected.st_size > file_limit:
@@ -535,6 +545,39 @@ def _forcing_provenance(
         "model_id": str(manifest["model_id"]),
         "basin_version_id": str(manifest["basin_version_id"]),
     }
+
+
+def _validate_forcing_declaration_shape(
+    manifest: Mapping[str, Any], *, source_relative: str, object_store_prefix: str
+) -> None:
+    """Validate the cheap immutable declaration without opening product payloads."""
+    forcing_version_id = manifest.get("forcing_version_id")
+    if not isinstance(forcing_version_id, str) or not _safe_segment(forcing_version_id):
+        raise ArchiveMoverError("forcing manifest has no safe forcing_version_id")
+    declared = manifest.get("files")
+    if not isinstance(declared, list) or not declared:
+        raise ArchiveMoverError("forcing manifest files must be a non-empty array")
+    required_prefix = f"{object_store_prefix}/{source_relative}/"
+    paths: set[str] = set()
+    for entry in declared:
+        if not isinstance(entry, Mapping):
+            raise ArchiveMoverError("forcing manifest contains a malformed file entry")
+        canonical_uri = _canonical_object_uri(entry.get("uri"))
+        if not canonical_uri.startswith(required_prefix):
+            raise ArchiveMoverError("forcing manifest file URI escapes its exact package leaf")
+        relative = canonical_uri[len(required_prefix) :]
+        checksum = entry.get("checksum")
+        if not _safe_relative(relative) or relative == "forcing_package.json":
+            raise ArchiveMoverError("forcing manifest file URI has an unsafe package-relative path")
+        if relative in paths:
+            raise ArchiveMoverError(f"forcing manifest has duplicate file declaration: {relative}")
+        if not isinstance(checksum, str) or len(checksum) != 64:
+            raise ArchiveMoverError(f"forcing manifest checksum is not sha256-shaped: {relative}")
+        try:
+            int(checksum, 16)
+        except ValueError as error:
+            raise ArchiveMoverError(f"forcing manifest checksum is not sha256-shaped: {relative}") from error
+        paths.add(relative)
 
 
 def _record_json(
@@ -844,10 +887,18 @@ def discover_candidates(
                         if lane == "forcing"
                         else _run_identity(manifest, relative.split("/")[-1], config.object_store_prefix)
                     )
+                    if lane == "forcing":
+                        _validate_forcing_declaration_shape(
+                            manifest,
+                            source_relative=relative,
+                            object_store_prefix=config.object_store_prefix,
+                        )
                 try:
                     archive_provenance_paths(config.archive_root, identity=identity)
                 except ArchiveConfigurationError as error:
                     raise ArchiveMoverError(f"candidate archive identity is unsafe: {error}") from error
+                if eligibility_end >= cutoff:
+                    return
                 files, directories = scan_tree_snapshot(
                     leaf_fd, mount_id=root_mount, mount_id_provider=mount_id_provider
                 )
@@ -875,8 +926,6 @@ def discover_candidates(
                     )
                 else:
                     producer = None
-                if eligibility_end >= cutoff:
-                    return
                 candidates.append(
                     Candidate(
                         identity,
@@ -985,6 +1034,7 @@ def _read_json_relative_fd(
     label: str,
     mount_id: int,
     mount_id_provider: MountIdProvider,
+    allow_hardlinks: bool = False,
 ) -> tuple[dict[str, Any], FileRecord]:
     if not _safe_relative(relative):
         raise ArchiveMoverError(f"unsafe relative manifest path: {relative!r}")
@@ -1010,6 +1060,7 @@ def _read_json_relative_fd(
             mount_id,
             mount_id_provider,
             root_device,
+            allow_hardlinks=allow_hardlinks,
         )
         try:
             content = bytearray()
@@ -1281,6 +1332,7 @@ def verify_archive_pair(
     archive_root: Path,
     *,
     zstd_path: Path,
+    object_store_prefix: str,
     require_canonical_location: bool = True,
     mount_id_provider: MountIdProvider = fd_mount_id,
 ) -> dict[str, Any]:
@@ -1290,6 +1342,7 @@ def verify_archive_pair(
             leaf,
             archive_root,
             zstd_path=zstd_path,
+            object_store_prefix=object_store_prefix,
             require_canonical_location=require_canonical_location,
             mount_id_provider=mount_id_provider,
         )
@@ -1317,6 +1370,7 @@ def _verify_archive_pair_impl(
     archive_root: Path,
     *,
     zstd_path: Path,
+    object_store_prefix: str,
     require_canonical_location: bool = True,
     mount_id_provider: MountIdProvider = fd_mount_id,
 ) -> dict[str, Any]:
@@ -1338,6 +1392,7 @@ def _verify_archive_pair_impl(
             label=f"{leaf}/manifest.json",
             mount_id=root_mount,
             mount_id_provider=mount_id_provider,
+            allow_hardlinks=True,
         )
         try:
             jsonschema.Draft7Validator(
@@ -1358,6 +1413,7 @@ def _verify_archive_pair_impl(
             mount_id_provider,
             root_info.st_dev,
             MAX_ARCHIVE_BYTES,
+            allow_hardlinks=True,
         )
         try:
             size, digest = _size_digest_fd(archive_fd, max_bytes=MAX_ARCHIVE_BYTES)
@@ -1371,9 +1427,12 @@ def _verify_archive_pair_impl(
             if len(expected) != len(manifest["files"]):
                 raise ArchiveMoverError("archive manifest has duplicate file paths")
             actual: dict[str, tuple[int, str]] = {}
+            embedded_manifest_raw: bytes | None = None
             member_count = 0
             cumulative_size = 0
-            with _decompressed_tar_stream(archive_fd, zstd_path) as archive:
+            with _decompressed_tar_stream(
+                archive_fd, zstd_path, expected_member_count=len(expected)
+            ) as archive:
                 for member in archive:
                     member_count += 1
                     if member_count > len(expected) or member_count > MAX_TREE_ENTRIES:
@@ -1398,10 +1457,19 @@ def _verify_archive_pair_impl(
                         raise ArchiveMoverError(f"cannot read tar member: {member.name}")
                     digest_obj = hashlib.sha256()
                     count = 0
+                    captured = bytearray()
                     while chunk := source.read(1024 * 1024):
                         count += len(chunk)
                         digest_obj.update(chunk)
+                        if member.name in {"forcing_package.json", "input/manifest.json"}:
+                            if len(captured) + len(chunk) > MAX_MANIFEST_BYTES:
+                                raise ArchiveMoverError("embedded producer manifest exceeds bounded read")
+                            captured.extend(chunk)
                     actual[member.name] = (count, digest_obj.hexdigest())
+                    if member.name in {"forcing_package.json", "input/manifest.json"}:
+                        if embedded_manifest_raw is not None:
+                            raise ArchiveMoverError("archive contains multiple producer manifests")
+                        embedded_manifest_raw = bytes(captured)
             if set(actual) != set(expected):
                 raise ArchiveMoverError("tar member set differs from manifest")
             for name, (member_size, member_digest) in actual.items():
@@ -1419,10 +1487,16 @@ def _verify_archive_pair_impl(
             label=f"{leaf}/manifest.json",
             mount_id=root_mount,
             mount_id_provider=mount_id_provider,
+            allow_hardlinks=True,
         )
         if manifest_after != manifest or manifest_record_after != manifest_record:
             raise ArchiveMoverError("archive manifest changed during verification")
-        _validate_producer_semantics(manifest)
+        _validate_producer_semantics(
+            manifest,
+            embedded_manifest_raw=embedded_manifest_raw,
+            members=actual,
+            object_store_prefix=object_store_prefix,
+        )
         _rebind_leaf_file(leaf_fd, "archive.tar.zst", archive_signature, root_info.st_dev)
         _rebind_leaf_file(
             leaf_fd,
@@ -1448,7 +1522,13 @@ def _rebind_leaf_file(leaf_fd: int, name: str, signature: tuple[int, int, int, i
         os.close(rebound)
 
 
-def _validate_producer_semantics(manifest: Mapping[str, Any]) -> None:
+def _validate_producer_semantics(
+    manifest: Mapping[str, Any],
+    *,
+    embedded_manifest_raw: bytes | None,
+    members: Mapping[str, tuple[int, str]],
+    object_store_prefix: str,
+) -> None:
     """Make product provenance self-bind to archive identity and its unique member."""
     identity = manifest.get("identity")
     producer = manifest.get("producer")
@@ -1476,9 +1556,83 @@ def _validate_producer_semantics(manifest: Mapping[str, Any]) -> None:
     end = _parse_instant(producer.get("end_time"), label="producer end_time")
     if start > end or not start <= cycle <= end:
         raise ArchiveMoverError("producer window does not bind archive cycle")
-    members = [entry for entry in manifest.get("files", ()) if entry.get("path") == expected_path]
-    if len(members) != 1 or members[0].get("sha256") != producer.get("manifest_sha256"):
+    producer_members = [entry for entry in manifest.get("files", ()) if entry.get("path") == expected_path]
+    if len(producer_members) != 1 or producer_members[0].get("sha256") != producer.get("manifest_sha256"):
         raise ArchiveMoverError("producer manifest member does not bind its declared digest")
+    if embedded_manifest_raw is None:
+        raise ArchiveMoverError("embedded producer manifest is missing")
+    try:
+        embedded = json.loads(embedded_manifest_raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ArchiveMoverError(f"embedded producer manifest is unreadable: {error}") from error
+    if not isinstance(embedded, Mapping):
+        raise ArchiveMoverError("embedded producer manifest must be an object")
+    if lane == "runs":
+        run_id = str(identity["run_id"])
+        embedded_identity, _ = _run_identity(embedded, run_id, object_store_prefix)
+        if _identity_dict(embedded_identity) != identity:
+            raise ArchiveMoverError("embedded run manifest identity differs from archive identity")
+        embedded_producer = _run_provenance_from_members(embedded, members)
+    else:
+        source_relative = (
+            f"forcing/{str(identity['source']).lower()}/{identity['cycle_identity']}/"
+            f"{identity['basin_version_id']}/{identity['model_id']}"
+        )
+        embedded_identity, _ = _forcing_identity(embedded, source_relative.split("/"))
+        if _identity_dict(embedded_identity) != identity:
+            raise ArchiveMoverError("embedded forcing manifest identity differs from archive identity")
+        _validate_forcing_declaration_shape(
+            embedded,
+            source_relative=source_relative,
+            object_store_prefix=object_store_prefix,
+        )
+        declared: dict[str, str] = {}
+        prefix = f"{object_store_prefix}/{source_relative}/"
+        for entry in embedded["files"]:
+            uri = _canonical_object_uri(entry["uri"])
+            declared[uri[len(prefix) :]] = entry["checksum"]
+        products = {
+            path: digest
+            for path, (_, digest) in members.items()
+            if path != "forcing_package.json" and path not in _FORCING_DOMAIN_BUNDLE
+        }
+        if declared != products:
+            raise ArchiveMoverError("embedded forcing declarations differ from archive product members")
+        embedded_producer = {
+            "kind": "forcing-package",
+            "subject_id": str(embedded["forcing_version_id"]),
+            "manifest_path": "forcing_package.json",
+            "manifest_sha256": hashlib.sha256(embedded_manifest_raw).hexdigest(),
+            "start_time": _time(_parse_instant(embedded.get("start_time"), label="forcing start_time")),
+            "end_time": _time(_parse_instant(embedded.get("end_time"), label="forcing end_time")),
+            "model_id": str(embedded["model_id"]),
+            "basin_version_id": str(embedded["basin_version_id"]),
+        }
+    if embedded_producer != producer:
+        raise ArchiveMoverError("embedded producer manifest differs from outer producer provenance")
+
+
+def _run_provenance_from_members(
+    manifest: Mapping[str, Any], members: Mapping[str, tuple[int, str]]
+) -> dict[str, Any]:
+    if not any(path.startswith("output/") for path in members):
+        raise ArchiveMoverError("embedded run manifest has no archived output product")
+    model = manifest.get("model")
+    if not isinstance(model, Mapping):
+        raise ArchiveMoverError("embedded run model is malformed")
+    raw_digest = members.get("input/manifest.json")
+    if raw_digest is None:
+        raise ArchiveMoverError("embedded run manifest member is absent")
+    return {
+        "kind": "run-manifest",
+        "subject_id": str(manifest["run_id"]),
+        "manifest_path": "input/manifest.json",
+        "manifest_sha256": raw_digest[1],
+        "start_time": _time(_parse_instant(manifest.get("start_time"), label="run start_time")),
+        "end_time": _time(_parse_instant(manifest.get("end_time"), label="run end_time")),
+        "model_id": str(model["model_id"]),
+        "basin_version_id": str(model["basin_version_id"]),
+    }
 
 
 def _validate_manifest_resource_bounds(manifest: Mapping[str, Any]) -> None:
@@ -1531,10 +1685,15 @@ class _LimitedReader(io.RawIOBase):
 class _TarHeaderGuardReader(io.RawIOBase):
     """Inspect each tar header before exposing any extension body to tarfile."""
 
-    def __init__(self, stream: _LimitedReader) -> None:
+    def __init__(self, stream: _LimitedReader, expected_member_count: int | None = None) -> None:
         self.stream = stream
         self.body_bytes_remaining = 0
         self.pending = bytearray()
+        self.expected_member_count = expected_member_count
+        self.raw_header_count = 0
+        self.local_pax_count = 0
+        self.local_pax_bytes = 0
+        self.previous_was_local_pax = False
 
     def readable(self) -> bool:
         return True
@@ -1565,6 +1724,12 @@ class _TarHeaderGuardReader(io.RawIOBase):
         if block == b"\0" * 512:
             self.pending.extend(block)
             return self.read(request)
+        self.raw_header_count += 1
+        if (
+            self.expected_member_count is not None
+            and self.raw_header_count > self.expected_member_count * 2
+        ):
+            raise ArchiveMoverError("tar raw header count exceeds manifest-derived bound")
         typeflag = block[156:157]
         size_field = block[124:136]
         if size_field[:1] and size_field[0] & 0x80:
@@ -1575,17 +1740,32 @@ class _TarHeaderGuardReader(io.RawIOBase):
             raise ArchiveMoverError("tar header has invalid size encoding") from error
         if typeflag in {b"g", b"X", b"L", b"K"}:
             raise ArchiveMoverError(f"tar uses unsupported extension type: {typeflag.decode('ascii')}")
-        if typeflag == b"x" and declared_size > MAX_PAX_EXTENSION_BYTES:
-            raise ArchiveMoverError(
-                f"local PAX extension exceeds {MAX_PAX_EXTENSION_BYTES} bytes before body consumption"
-            )
+        if typeflag == b"x":
+            if self.previous_was_local_pax:
+                raise ArchiveMoverError("tar contains consecutive local PAX headers")
+            if declared_size > MAX_PAX_EXTENSION_BYTES:
+                raise ArchiveMoverError(
+                    f"local PAX extension exceeds {MAX_PAX_EXTENSION_BYTES} bytes before body consumption"
+                )
+            self.local_pax_count += 1
+            self.local_pax_bytes += declared_size
+            if (
+                self.expected_member_count is not None
+                and self.local_pax_count > self.expected_member_count
+            ):
+                raise ArchiveMoverError("tar local PAX count exceeds manifest-derived bound")
+            if self.local_pax_bytes > MAX_MANIFEST_BYTES:
+                raise ArchiveMoverError("tar cumulative local PAX bytes exceed bounded metadata budget")
+            self.previous_was_local_pax = True
+        else:
+            self.previous_was_local_pax = False
         self.body_bytes_remaining = ((declared_size + 511) // 512) * 512
         self.pending.extend(block)
         return self.read(request)
 
 
 class _TarStreamContext:
-    def __init__(self, archive_fd: int, zstd_path: Path) -> None:
+    def __init__(self, archive_fd: int, zstd_path: Path, *, expected_member_count: int | None = None) -> None:
         self.archive_fd = archive_fd
         self.archive_position = os.lseek(archive_fd, 0, os.SEEK_CUR)
         stdin_fd = os.dup(archive_fd)
@@ -1613,7 +1793,7 @@ class _TarStreamContext:
         self.timer.start()
         assert self.process.stdout is not None
         self.limited_reader = _LimitedReader(self.process.stdout, MAX_TAR_BYTES, self.process)
-        self.reader = _TarHeaderGuardReader(self.limited_reader)
+        self.reader = _TarHeaderGuardReader(self.limited_reader, expected_member_count)
         try:
             self.archive = tarfile.open(fileobj=self.reader, mode="r|")
         except Exception as error:
@@ -1687,8 +1867,10 @@ class _TarStreamContext:
             os.lseek(self.archive_fd, self.archive_position, os.SEEK_SET)
 
 
-def _decompressed_tar_stream(archive_fd: int, zstd_path: Path) -> _TarStreamContext:
-    return _TarStreamContext(archive_fd, zstd_path)
+def _decompressed_tar_stream(
+    archive_fd: int, zstd_path: Path, *, expected_member_count: int | None = None
+) -> _TarStreamContext:
+    return _TarStreamContext(archive_fd, zstd_path, expected_member_count=expected_member_count)
 
 
 def _safe_relative(value: str) -> bool:
@@ -1778,6 +1960,7 @@ def process_candidate(
                     final_leaf,
                     config.archive_root,
                     zstd_path=config.zstd_path,
+                    object_store_prefix=config.object_store_prefix,
                     mount_id_provider=mount_id_provider,
                 )
                 _verify_open_directory_entry(final_guard_fd, final_leaf, config.archive_root)
@@ -1934,6 +2117,7 @@ def process_candidate(
             staging,
             config.archive_root,
             zstd_path=config.zstd_path,
+            object_store_prefix=config.object_store_prefix,
             require_canonical_location=False,
             mount_id_provider=mount_id_provider,
         )
@@ -1964,6 +2148,7 @@ def process_candidate(
             final_leaf,
             config.archive_root,
             zstd_path=config.zstd_path,
+            object_store_prefix=config.object_store_prefix,
             mount_id_provider=mount_id_provider,
         )
         _verify_open_directory_entry(stage_fd, final_leaf, config.archive_root)
@@ -2113,6 +2298,123 @@ def _lexists_no_follow(path: Path, containment_root: Path) -> bool:
         os.close(parent_fd)
 
 
+def _pair_signatures(leaf_fd: int) -> tuple[tuple[int, int, int, int, int], tuple[int, int, int, int, int]]:
+    values: list[tuple[int, int, int, int, int]] = []
+    for name in ("archive.tar.zst", "manifest.json"):
+        fd = os.open(name, _READ_FLAGS, dir_fd=leaf_fd)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise ArchiveMoverError(f"archive guard source is not regular: {name}")
+            values.append(_stat_signature(info))
+        finally:
+            os.close(fd)
+    return values[0], values[1]
+
+
+def _install_durable_archive_guard(
+    config: MoverConfig,
+    archive_guard: tuple[int, Path, Path],
+    provider: MountIdProvider,
+) -> DurableArchiveGuard:
+    leaf_fd, final_leaf, archive_root = archive_guard
+    _verify_open_directory_entry(leaf_fd, final_leaf, archive_root)
+    expected_archive, expected_manifest = _pair_signatures(leaf_fd)
+    parent = ensure_directory_no_follow(archive_root / ".archive-guards", containment_root=archive_root)
+    _fsync_directory_chain(parent, archive_root)
+    guard_path = parent / uuid.uuid4().hex
+    guard_fd: int | None = None
+    try:
+        parent_fd = open_directory_no_follow(parent, containment_root=archive_root)
+        try:
+            os.mkdir(guard_path.name, 0o700, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+        guard_fd = open_directory_no_follow(guard_path, containment_root=archive_root)
+        for name in ("archive.tar.zst", "manifest.json"):
+            os.link(name, name, src_dir_fd=leaf_fd, dst_dir_fd=guard_fd, follow_symlinks=False)
+        os.fsync(guard_fd)
+        current_archive, current_manifest = _pair_signatures(leaf_fd)
+        guard_archive, guard_manifest = _pair_signatures(guard_fd)
+        if (
+            current_archive != expected_archive
+            or current_manifest != expected_manifest
+            or guard_archive != expected_archive
+            or guard_manifest != expected_manifest
+        ):
+            raise ArchiveMoverError("durable archive guard does not bind the verified exact pair")
+        verify_archive_pair(
+            guard_path,
+            archive_root,
+            zstd_path=config.zstd_path,
+            object_store_prefix=config.object_store_prefix,
+            require_canonical_location=False,
+            mount_id_provider=provider,
+        )
+        if _pair_signatures(leaf_fd) != (expected_archive, expected_manifest):
+            raise ArchiveMoverError("canonical archive pair drifted while installing durable guard")
+        return DurableArchiveGuard(
+            guard_path,
+            guard_fd,
+            final_leaf,
+            expected_archive,
+            expected_manifest,
+        )
+    except Exception as error:
+        if guard_fd is not None:
+            os.close(guard_fd)
+        residue = ()
+        try:
+            if _lexists_no_follow(guard_path, archive_root):
+                residue = (guard_path.relative_to(archive_root).as_posix(),)
+        except ArchiveMoverError:
+            residue = (guard_path.relative_to(archive_root).as_posix(),)
+        raise ArchiveMoverError(
+            f"durable archive guard installation is indeterminate: {error}",
+            indeterminate=True,
+            residue=residue,
+        ) from error
+
+
+def _canonical_pair_matches(guard: DurableArchiveGuard, archive_root: Path) -> bool:
+    try:
+        fd = open_directory_no_follow(guard.canonical_leaf, containment_root=archive_root)
+        try:
+            return _pair_signatures(fd) == (guard.archive_signature, guard.manifest_signature)
+        finally:
+            os.close(fd)
+    except (OSError, ArchiveMoverError):
+        return False
+
+
+def _cleanup_durable_archive_guard(guard: DurableArchiveGuard, archive_root: Path) -> None:
+    relative = guard.path.relative_to(archive_root).as_posix()
+    if not _canonical_pair_matches(guard, archive_root):
+        raise ArchiveMoverError(
+            "canonical archive pair drifted after durable guard installation",
+            indeterminate=True,
+            residue=(relative,),
+        )
+    parent_fd = open_directory_no_follow(guard.path.parent, containment_root=archive_root)
+    try:
+        try:
+            os.unlink("archive.tar.zst", dir_fd=guard.fd)
+            os.unlink("manifest.json", dir_fd=guard.fd)
+            os.fsync(guard.fd)
+            os.rmdir(guard.path.name, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+        except OSError as error:
+            residue = (relative,) if _lexists_no_follow(guard.path, archive_root) else ()
+            raise ArchiveMoverError(
+                f"durable archive guard cleanup is indeterminate: {error}",
+                indeterminate=True,
+                residue=residue,
+            ) from error
+    finally:
+        os.close(parent_fd)
+
+
 def _retire_source(
     candidate: Candidate,
     config: MoverConfig,
@@ -2128,6 +2430,54 @@ def _retire_source(
     if not _same_snapshot(candidate, source_fd, provider):
         raise ArchiveMoverError("source preimage changed immediately before retirement")
     _verify_guarded_archive_pair(config, archive_guard, provider)
+    durable = _install_durable_archive_guard(config, archive_guard, provider)
+    relative = durable.path.relative_to(config.archive_root).as_posix()
+    try:
+        _retire_source_destructive(
+            candidate,
+            config,
+            source_fd,
+            events,
+            identity,
+            provider,
+            rename_impl,
+            durable,
+        )
+        _cleanup_durable_archive_guard(durable, config.archive_root)
+    except Exception as error:
+        if isinstance(error, ArchiveMoverError):
+            raise ArchiveMoverError(
+                str(error),
+                indeterminate=error.indeterminate or not candidate.source_path.exists(),
+                residue=tuple(dict.fromkeys((*error.residue, relative))),
+                kind=error.kind,
+            ) from error
+        raise ArchiveMoverError(
+            f"source retirement failed while durable archive guard is held: {error}",
+            indeterminate=True,
+            residue=(relative,),
+        ) from error
+    finally:
+        os.close(durable.fd)
+
+
+def _retire_source_destructive(
+    candidate: Candidate,
+    config: MoverConfig,
+    source_fd: int,
+    events: list[dict[str, Any]],
+    identity: dict[str, Any],
+    provider: MountIdProvider,
+    rename_impl: RenameNoReplace,
+    durable_guard: DurableArchiveGuard,
+) -> None:
+    guard_relative = durable_guard.path.relative_to(config.archive_root).as_posix()
+    if not _canonical_pair_matches(durable_guard, config.archive_root):
+        raise ArchiveMoverError(
+            "canonical archive pair drifted before source tombstone",
+            indeterminate=True,
+            residue=(guard_relative,),
+        )
     tombstone = candidate.source_path.parent / f".archive-delete-{candidate.source_path.name}-{uuid.uuid4().hex}"
     parent_fd = open_directory_no_follow(
         candidate.source_path.parent,
@@ -2184,6 +2534,7 @@ def _retire_source(
     claim_fd = open_directory_no_follow(claim_root, containment_root=config.object_store_root)
     claim_relative = claim_root.relative_to(config.object_store_root).as_posix()
     removal_started = False
+    root_claim_relative: str | None = None
     try:
         renamed = os.fstat(tomb_fd)
         original = os.fstat(source_fd)
@@ -2208,7 +2559,12 @@ def _retire_source(
                 residue=(tombstone_relative,),
             )
         _validate_tombstone_allowlist(candidate, tomb_fd, provider)
-        _verify_guarded_archive_pair(config, archive_guard, provider)
+        if not _canonical_pair_matches(durable_guard, config.archive_root):
+            raise ArchiveMoverError(
+                "canonical archive pair drifted before destructive child claims",
+                indeterminate=True,
+                residue=(guard_relative,),
+            )
         _validate_tombstone_allowlist(candidate, tomb_fd, provider)
         parent_fd = open_directory_no_follow(tombstone.parent, containment_root=config.object_store_root)
         try:
@@ -2227,6 +2583,7 @@ def _retire_source(
                 rename_impl=rename_impl,
             )
             root_claim = f"root-{uuid.uuid4().hex}"
+            root_claim_relative = f"{claim_relative}/{root_claim}"
             rename_impl(parent_fd, tombstone.name, claim_fd, root_claim)
             os.fsync(parent_fd)
             os.fsync(claim_fd)
@@ -2235,7 +2592,7 @@ def _retire_source(
                 raise ArchiveMoverError(
                     "tombstone root replacement was atomically claimed and preserved",
                     indeterminate=True,
-                    residue=(f"{claim_relative}/{root_claim}",),
+                    residue=(root_claim_relative,),
                 )
             os.rmdir(root_claim, dir_fd=claim_fd)
             os.fsync(claim_fd)
@@ -2250,15 +2607,19 @@ def _retire_source(
             message = str(error)
         else:
             message = f"tombstone removal incomplete: {tombstone}: {error}"
+        actual_residue = list(error.residue if isinstance(error, ArchiveMoverError) else ())
+        for path in (root_claim_relative, tombstone_relative, claim_relative):
+            if path is None or path in actual_residue:
+                continue
+            try:
+                if _lexists_no_follow(config.object_store_root / path, config.object_store_root):
+                    actual_residue.append(path)
+            except ArchiveMoverError:
+                actual_residue.append(path)
         raise ArchiveMoverError(
             message,
             indeterminate=True,
-            residue=tuple(
-                dict.fromkeys(
-                    (tombstone_relative,)
-                    + (error.residue if isinstance(error, ArchiveMoverError) else ())
-                )
-            ),
+            residue=tuple(dict.fromkeys(actual_residue)),
         ) from error
     finally:
         os.close(tomb_fd)
@@ -2268,6 +2629,10 @@ def _retire_source(
                     os.rmdir(claim_root.name, dir_fd=claim_parent_fd)
                     os.fsync(claim_parent_fd)
                 except FileNotFoundError:
+                    pass
+                except OSError:
+                    # Preserve the already-classified retirement failure; the
+                    # live claim namespace was recorded by the exception path.
                     pass
         except ArchiveMoverError:
             pass
@@ -2412,6 +2777,7 @@ def _verify_guarded_archive_pair(
         final_leaf,
         archive_root,
         zstd_path=config.zstd_path,
+        object_store_prefix=config.object_store_prefix,
         mount_id_provider=provider,
     )
     _verify_open_directory_entry(guard_fd, final_leaf, archive_root)

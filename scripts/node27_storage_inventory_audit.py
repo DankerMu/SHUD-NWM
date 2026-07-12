@@ -514,6 +514,7 @@ def verify_product_archive(
             paths.archive.parent,
             archive_root,
             zstd_path=validated_zstd,
+            object_store_prefix=object_store_prefix,
             mount_id_provider=_archive_mount_id,
         )
     except product_archive.ArchiveMoverError as error:

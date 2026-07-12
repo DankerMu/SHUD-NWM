@@ -101,6 +101,9 @@ Tar extension headers are part of that boundary: bounded local PAX metadata
 needed by the deterministic writer MAY be accepted, but oversized PAX bodies,
 global/Solaris PAX headers, GNU longname/longlink headers and unexpected PAX
 keys SHALL be rejected before their declared body is streamed.
+Raw header count, local-PAX count, consecutive-PAX structure and cumulative PAX
+bytes SHALL also have explicit bounds derived from the expected member count;
+Python recursion or the global tar-byte timeout is not a protocol boundary.
 
 The verified tarball and manifest SHALL be published as one dirfd-bound,
 no-replace atomic leaf directory, followed by complete durability fsync and
@@ -127,7 +130,16 @@ entry whose digest matches; a shape-valid but semantically drifted sidecar is
 corrupt and cannot authorize source retirement. Verification SHALL rebind both
 the manifest and tar namespace entries to the exact opened descriptors after
 their final reads. The pre-retirement guard SHALL cover that exact child pair,
-not only the containing leaf inode.
+not only the containing leaf inode. Retirement SHALL keep a same-mount durable
+reference to the exact verified pair (for example signature-checked hard links
+inside a mover-owned guard directory) across every destructive source step, so
+a concurrent canonical-name replacement cannot leave the retired source with
+no valid archive evidence. A changed canonical pair makes the operation
+indeterminate and preserves that exact guard as reported residue.
+The bounded tar stream SHALL capture and parse the unique producer-manifest
+member and bind its lane identity, source/cycle/window/model/basin/subject and
+object URIs/checksums to outer identity/provenance; outer self-consistency alone
+is insufficient.
 
 Source/archive discovery, tar reads and retirement SHALL remain
 descriptor-bound with no-follow component opens, fixed-root-device checks and

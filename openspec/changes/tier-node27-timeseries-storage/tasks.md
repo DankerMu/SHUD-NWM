@@ -541,6 +541,10 @@ Order is load-bearing:
   fabricated canonical identity. Discovery failures count toward the global
   discovery cap and overall non-zero outcome but not the valid eligible
   selected/deferred partition or per-tick processing bound.
+  Hot forcing/run leaves perform only bounded manifest identity/window and
+  declaration/URI-shape validation, then skip before any full tree hash,
+  bundle completeness or run-output scan. Identity, inverted-window and wrong
+  configured-prefix evidence still fail even while hot.
 
   Source traversal is descriptor-bound and no-follow. Every opened descendant
   must remain on the pinned source-root device **and Linux mount ID**, rejecting
@@ -594,10 +598,18 @@ Order is load-bearing:
   and large-file size fields, but extension-header size is checked before body
   streaming; global/Solaris PAX, GNU longname/longlink and unexpected PAX keys
   are rejected.
+  Raw headers, local-PAX count, consecutive local-PAX structure and cumulative
+  PAX bytes have explicit expected-member-derived limits.
   Both sidecar files remain namespace-bound to the exact descriptors used for
   final reads; pre-retirement guards recheck the exact tar+manifest pair. The
   producer block is semantically self-bound to lane/identity/window/model/
   basin and its unique producer-manifest member digest, not merely schema-valid.
+  A same-mount mover-owned retirement guard durably references the exact
+  verified tar+manifest inodes across every destructive source step. Canonical
+  pair drift preserves that guard as truthful residue and is indeterminate.
+  The same bounded tar pass parses the embedded producer manifest and binds its
+  identity/window/model/basin/subject/object URIs/checksums to the outer
+  identity and configured object-store prefix.
 
   Immediately before retirement the still-pinned source root and complete
   tree must equal the archived preimage (inode/type/path/size/mtime and
@@ -730,7 +742,15 @@ Order is load-bearing:
     final byte read; or a shape-valid producer block drifts from identity,
     window/model/basin or producer-manifest member digest.
     Expected: exact child-pair/producer semantic binding fails before source
-    retirement; source and current archive evidence are preserved.
+    retirement; source and current archive evidence are preserved. If a
+    replacement occurs after the durable retirement guard is installed, the
+    exact valid guarded pair remains as reported residue and the terminal is
+    indeterminate rather than falsely archived.
+  - Input: the tar and sidecar are internally checksum-consistent but the
+    embedded forcing/run producer manifest drifts in subject/source/cycle/
+    window/model/basin or configured-prefix URI identity.
+    Expected: mover and inventory member verification reject the archive;
+    outer producer claims cannot manufacture completeness.
   - Input: final tar/manifest is replaced after final verify but before
     tombstone rename, or an extra child appears after tombstone recheck but
     before recursive removal.
@@ -774,6 +794,9 @@ Order is load-bearing:
     non-zero.
     Expected: both are operational/indeterminate; canonical final and source
     remain and no quarantine event is emitted.
+  - Input: Linux mount-ID evidence is missing or malformed.
+    Expected: operational/indeterminate; canonical final and source remain and
+    no quarantine event is emitted.
   - Input: tar begins with an unexpected member, declared-size mismatch or
     more members than manifest/tree cap; or with oversized/global PAX or GNU
     longname/longlink metadata.
@@ -784,6 +807,14 @@ Order is load-bearing:
     Expected: parser failure immediately terminates and reaps the tool, restores
     the archive FD offset and preserves deterministic failure classification
     rather than holding the global lock until the full tool timeout.
+  - Input: many small or consecutive local-PAX headers precede one member.
+    Expected: raw/PAX count, structure or cumulative-byte limit rejects before
+    recursion/global tar limits; failure remains typed deterministic corruption.
+  - Input: hot forcing payload changes/checksum is incomplete, or hot run output
+    is not yet present, while manifest identity/window/URI shape remains valid.
+    Expected: leaf is skipped without full scan or discovery failure; the same
+    invalidity on a cold leaf fails, and hot identity/window/prefix drift still
+    fails during the lightweight manifest gate.
   - Input: cutoff equality, CLI age zero/20, candidate/tree/depth/manifest/
     file/source/tar/uncompressed/timeout/stderr cap overflow, unreadable state
     directory, relative/bare zstd path, and lock contention.

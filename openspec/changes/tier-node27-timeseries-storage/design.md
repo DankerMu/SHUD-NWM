@@ -89,6 +89,11 @@ complete domain-handoff/version bundle. That five-file bundle is validated as
 an independent checksum/identity contract rather than inserted into the
 forcing manifest's output list (the version record itself binds the forcing
 manifest digest, so folding it into that manifest would create a hash cycle).
+Source retirement keeps a same-volume durable reference to the exact verified
+tar/manifest inodes until all source deletion steps finish. This closes the
+gap that descriptor rechecks alone cannot close: a canonical-name replacement
+may make the terminal indeterminate, but it cannot erase the only valid archive
+copy after the hot source is retired.
 
 **D3 — Compression settings must cover the existing primary keys.**
 TimescaleDB 2.10 requires unique-constraint columns to appear in
