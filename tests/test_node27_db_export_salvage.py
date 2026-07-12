@@ -171,6 +171,13 @@ def _make_stub_copy_and_count(
         ({"NODE27_DB_EXPORT_SALVAGE_STATEMENT_TIMEOUT_MS": "0"}, "STATEMENT_TIMEOUT_MS"),
         ({"NODE27_DB_EXPORT_SALVAGE_STATEMENT_TIMEOUT_MS": "999"}, "STATEMENT_TIMEOUT_MS"),
         ({"NODE27_DB_EXPORT_SALVAGE_STATEMENT_TIMEOUT_MS": "abc"}, "STATEMENT_TIMEOUT_MS"),
+        # Upper ceiling on MAX_SELECTOR_BYTES: an operator typo (extra trailing
+        # zero) must not effectively disable the cap. 999999999999999 bytes
+        # (~909 TiB) is well above the 16 GiB ceiling.
+        (
+            {"NODE27_DB_EXPORT_SALVAGE_MAX_SELECTOR_BYTES": "999999999999999"},
+            "MAX_SELECTOR_BYTES",
+        ),
         ({"NODE27_DB_EXPORT_SALVAGE_SOURCE_INSTANCE_ID": None}, "SOURCE_INSTANCE_ID"),
         ({"NODE27_DB_EXPORT_SALVAGE_SOURCE_INSTANCE_ID": ""}, "SOURCE_INSTANCE_ID"),
         ({"NODE27_DB_EXPORT_SALVAGE_SOURCE_INSTANCE_ID": "  padded"}, "SOURCE_INSTANCE_ID"),
@@ -1133,8 +1140,22 @@ def test_count_csv_rows_edge_cases() -> None:
             ["secretpw"],
             "127.0.0.1",
         ),
+        # libpq quoted-value form: password embedded in single quotes,
+        # value contains an embedded space (a valid libpq DSN shape a
+        # driver may echo).
+        (
+            "postgresql://user:secretpw@127.0.0.1:55432/nhms",
+            "connection refused: host=127.0.0.1 port=55432 user=user password='has space pw' dbname=nhms",
+            ["has space pw"],
+            "127.0.0.1",
+        ),
     ],
-    ids=["url-encoded-echoed", "url-decoded-echoed", "libpq-keyword-form"],
+    ids=[
+        "url-encoded-echoed",
+        "url-decoded-echoed",
+        "libpq-keyword-form",
+        "libpq-quoted-value-form",
+    ],
 )
 def test_mask_dsn_in_message_scrubs_all_password_shapes(
     dsn: str,
@@ -1435,14 +1456,30 @@ def test_partial_receipt_totals_stay_locked_across_all_selector_paths(
             f"totals[{key!r}] mismatch in {scenario}: got {totals[key]}, want {want}"
         )
 
-    # Universal invariant #3: outcome enum matches the failure/success mix.
-    if scenario == "all_failed":
+    # Universal invariant #3: outcome enum is derived from the totals
+    # themselves (not the scenario name), so any future selector arm that
+    # produces the same failure/success mix will pin the same outcome.
+    #
+    # NOTE: the ``MemoryError`` and ``SalvageOversizeError`` arms are
+    # intentionally NOT in this parametrize list because they exercise the
+    # ``perform_copy_export`` path and land inside a per-selector descriptor
+    # (state="error") — same shape as ``per_selector_copy_fail`` and
+    # ``all_failed`` here. Dedicated tests
+    # ``test_memory_error_is_not_swallowed_by_broad_except`` and
+    # ``test_per_selector_bytes_cap_refuses`` cover their distinct error
+    # messages; the totals invariant they'd add here is already exercised
+    # by the failure arms above.
+    any_success = (
+        totals["exported"] > 0
+        or totals["skipped_verified"] > 0
+        or totals["skipped_dry_run"] > 0
+    )
+    any_error = totals["error"] > 0
+    if any_error and not any_success:
         assert receipt["outcome"] == "all_failed"
-    elif totals["error"] > 0 and (
-        totals["exported"] + totals["skipped_verified"] + totals["skipped_dry_run"] > 0
-    ):
+    elif any_error and any_success:
         assert receipt["outcome"] == "partial"
-    elif totals["error"] == 0:
+    else:
         assert receipt["outcome"] == "clean"
 
 

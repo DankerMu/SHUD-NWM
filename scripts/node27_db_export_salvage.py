@@ -236,10 +236,13 @@ def config_from_args(
     # Byte cap gates the buffered COPY-then-compress flow so a single selector
     # cannot swamp memory. Default 2 GiB matches "single interactive salvage
     # tick" scope; operators can shrink it if their host is memory constrained.
+    # Upper ceiling of 16 GiB prevents an operator typo (e.g. a value with an
+    # extra trailing zero) from effectively disabling the cap.
     max_selector_bytes = _parse_positive_int(
         env.get("NODE27_DB_EXPORT_SALVAGE_MAX_SELECTOR_BYTES", str(2 * 1024 * 1024 * 1024)),
         name="NODE27_DB_EXPORT_SALVAGE_MAX_SELECTOR_BYTES",
         minimum=1,
+        maximum=16 * 1024 * 1024 * 1024,
     )
     zstd_raw = env.get("NODE27_DB_EXPORT_SALVAGE_ZSTD", "/usr/bin/zstd")
     if not zstd_raw or not zstd_raw.strip() or zstd_raw.strip() != zstd_raw:
@@ -1004,7 +1007,7 @@ def build_receipt(
 
 
 _LIBPQ_PASSWORD_KEYWORD_RE = re.compile(
-    r"(?i)(?:(?<=\s)|(?<=^))password\s*=\s*\S+"
+    r"(?i)(?:(?<=\s)|(?<=^))password\s*=\s*(?:'[^']*'|\S+)"
 )
 
 
