@@ -14,6 +14,7 @@ from typing import Any, Protocol
 
 from packages.common.object_store import LocalObjectStore
 from packages.common.storage import validate_object_path
+from packages.common.timescale_write_guard import check_batch_targets_uncompressed
 
 LOGGER = logging.getLogger(__name__)
 
@@ -652,6 +653,16 @@ class PsycopgOutputParserRepository:
             with self.transaction() as repository:
                 repository.upsert_river_timeseries(rows, batch_size=batch_size)
             return
+        valid_time_min = min(row.valid_time for row in rows)
+        valid_time_max = max(row.valid_time for row in rows)
+        with self._connection.cursor() as guard_cursor:
+            check_batch_targets_uncompressed(
+                guard_cursor,
+                hypertable_schema="hydro",
+                hypertable_name="river_timeseries",
+                valid_time_min=valid_time_min,
+                valid_time_max=valid_time_max,
+            )
         for run_id, river_network_version_id, variable in replacement_keys:
             self._fetch_all(
                 """

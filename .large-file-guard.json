@@ -6,6 +6,9 @@
     "openspec/changes/*/design.md",
     "openspec/changes/*/specs/**",
     "scripts/node27_db_export_salvage.py",
-    "tests/test_node27_db_export_salvage.py"
+    "tests/test_node27_db_export_salvage.py",
+    "db/seeds/seed_demo.py",
+    "packages/common/forcing_domain_handoff_apply.py",
+    "workers/output_parser/parser.py"
   ]
 }

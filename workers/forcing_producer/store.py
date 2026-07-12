@@ -3,13 +3,14 @@ from __future__ import annotations
 import math
 import uuid
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from packages.common.met_store import MetStoreError, default_database_url
 from packages.common.source_identity import normalize_source_id
+from packages.common.timescale_write_guard import check_batch_targets_uncompressed
 
 from .direct_grid_contract import (
     DirectGridContractError,
@@ -746,6 +747,18 @@ class PsycopgForcingRepository:
             )
             for row in rows
         ]
+        valid_time_min = min((row.valid_time for row in rows), default=None)
+        valid_time_max = max((row.valid_time for row in rows), default=None)
+
+        def _guard(cursor: Any) -> None:
+            check_batch_targets_uncompressed(
+                cursor,
+                hypertable_schema="met",
+                hypertable_name="forcing_station_timeseries",
+                valid_time_min=valid_time_min,
+                valid_time_max=valid_time_max,
+            )
+
         self._replace_values(
             None,
             (),
@@ -767,6 +780,7 @@ class PsycopgForcingRepository:
             VALUES %s
             """,
             value_rows,
+            pre_write_cursor_hook=_guard,
         )
 
     def find_registered_snapshot_bbox_by_identity(
@@ -897,6 +911,7 @@ class PsycopgForcingRepository:
         template: str | None = None,
         expected_insert_count: int | None = None,
         conflict_error: str | None = None,
+        pre_write_cursor_hook: Callable[[Any], None] | None = None,
     ) -> None:
         try:
             import psycopg2
@@ -909,6 +924,12 @@ class PsycopgForcingRepository:
             connection = psycopg2.connect(self.database_url)
             connection.autocommit = False
             with connection.cursor() as cursor:
+                # The compressed-chunk write guard MUST run BEFORE any DELETE:
+                # TimescaleDB rejects DELETE on compressed chunks with its
+                # own raw error, and placing the guard after the DELETE
+                # forfeits the structured runbook-referencing error path.
+                if pre_write_cursor_hook is not None:
+                    pre_write_cursor_hook(cursor)
                 if pre_delete_statement is not None:
                     cursor.execute(pre_delete_statement, pre_delete_parameters)
                 if delete_statement is not None:

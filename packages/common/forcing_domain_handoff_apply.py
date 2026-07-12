@@ -14,6 +14,7 @@ from packages.common.forcing_domain_handoff import (
 )
 from packages.common.redaction import redact_payload, redact_text
 from packages.common.source_identity import normalize_source_id
+from packages.common.timescale_write_guard import check_batch_targets_uncompressed
 
 APPLY_MODE = "object_store_forcing_domain_handoff"
 APPLY_SAVEPOINT_NAME = "nhms_forcing_domain_handoff_apply"
@@ -690,6 +691,15 @@ def _replace_forcing_station_timeseries(
     forcing_version_id: str,
     rows: Sequence[Mapping[str, Any]],
 ) -> None:
+    valid_time_min = min((row["valid_time"] for row in rows), default=None)
+    valid_time_max = max((row["valid_time"] for row in rows), default=None)
+    check_batch_targets_uncompressed(
+        cursor,
+        hypertable_schema="met",
+        hypertable_name="forcing_station_timeseries",
+        valid_time_min=valid_time_min,
+        valid_time_max=valid_time_max,
+    )
     cursor.execute(
         "DELETE FROM met.forcing_station_timeseries WHERE forcing_version_id = %s",
         (forcing_version_id,),

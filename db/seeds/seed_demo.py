@@ -4,6 +4,20 @@ Database records, composite IDs, and object-storage key paths use canonical
 source_id='gfs' for GFS.
 
 Timeseries records use hourly half-open interval semantics: [START_TIME, END_TIME).
+
+Compressed-chunk write guard: intentionally NOT wired.
+
+The seed populates a fresh, empty demo database from a known-good demo
+snapshot; it never targets compressed chunks in production. Adding the
+``packages.common.timescale_write_guard`` guard here would drag a
+TimescaleDB-catalog dependency into a fixture builder whose contract is
+"empty demo DB, no compression state", and any accidental hit would mean
+the seed was pointed at a real hypertable — the wrong problem to catch
+here. Production write paths import the guard (see
+``workers/output_parser/parser.py``,
+``workers/forcing_producer/store.py``,
+``packages/common/forcing_domain_handoff_apply.py``); this module does
+not.
 """
 
 from __future__ import annotations

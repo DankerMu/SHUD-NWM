@@ -617,6 +617,18 @@ class _FakeCursor:
     def execute(self, statement: str, parameters: tuple[Any, ...] = ()) -> None:
         self.connection.executions.append(("execute", statement, tuple(parameters)))
         normalized = " ".join(statement.lower().split())
+        if normalized.startswith("set local statement_timeout"):
+            # Compressed-chunk write guard bounds its own catalog lookup with a
+            # transaction-scoped SET LOCAL. The fake connection has no such
+            # concept; accept it as a no-op so the guard runs to its SELECT.
+            return
+        if normalized.startswith("select chunk_schema, chunk_name from timescaledb_information.chunks"):
+            # Guard's catalog lookup. Fixture has no compressed chunks — return
+            # no row so the guard passes and the wrapped DELETE + INSERT run
+            # byte-identical to the pre-guard path.
+            self._fetchone = None
+            self._fetchall = []
+            return
         if normalized.startswith("savepoint "):
             name = normalized.split()[1]
             self.connection._savepoints[name] = copy.deepcopy(self.connection.state)
