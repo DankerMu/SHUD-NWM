@@ -16,7 +16,7 @@ from pathlib import Path
 import jsonschema
 import pytest
 
-from packages.common import safe_fs
+from packages.common import redaction, safe_fs
 from packages.common.object_store import LocalObjectStore
 from scripts import node27_product_archive as mover
 from scripts import node27_storage_inventory_audit as audit
@@ -70,6 +70,23 @@ def _config(tmp_path: Path) -> audit.AuditConfig:
     return audit.AuditConfig(
         "postgresql://redacted", object_root, "s3://nhms", archive_root, 45, receipt, zstd
     )
+
+
+def _main_argv(config: audit.AuditConfig) -> list[str]:
+    return [
+        "--receipt-path",
+        str(config.receipt_path),
+        "--database-url",
+        config.database_url,
+        "--object-store-root",
+        str(config.object_store_root),
+        "--object-store-prefix",
+        config.object_store_prefix,
+        "--archive-root",
+        str(config.archive_root),
+        "--zstd-path",
+        str(config.zstd_path),
+    ]
 
 
 def _receipt(subjects: list[audit.InventorySubject], *, product=None, salvage=(), hot=None):
@@ -475,6 +492,18 @@ def test_state_product_archive_rejects_unbound_member(kind: str, mutation: str, 
         audit.verify_product_archive(subject, config.archive_root, config.object_store_prefix)
 
 
+def test_state_archive_member_binding_rejects_file_uri_trailing_slash(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    subject = _state_archive_subject("provider")
+    _write_state_product_archive(config, subject, mutation="valid")
+    subject = replace(subject, hot_uri=subject.hot_uri + "/")
+    with pytest.raises(audit.AuditBlocked, match="file.*trailing slash") as captured:
+        audit.verify_product_archive(
+            subject, config.archive_root, config.object_store_prefix, config.zstd_path
+        )
+    assert audit._blocked_reason(captured.value) == "EVIDENCE_BLOCKED"
+
+
 def test_run_audit_wires_object_store_prefix_into_state_archive_binding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -735,7 +764,8 @@ def test_limited_no_follow_read_loops_across_short_reads_and_returns_sentinel(
     assert len(content) == 11
 
 
-def test_forcing_hot_binds_manifest_and_files(tmp_path: Path) -> None:
+@pytest.mark.parametrize("package_suffix", ["", "/"])
+def test_forcing_hot_binds_manifest_and_files(tmp_path: Path, package_suffix: str) -> None:
     config = _config(tmp_path)
     key = "forcing/gfs/2026050100/basin-a/model-a"
     package = config.object_store_root / key
@@ -756,7 +786,10 @@ def test_forcing_hot_binds_manifest_and_files(tmp_path: Path) -> None:
     manifest_path = package / "forcing_package.json"
     raw = json.dumps(manifest).encode()
     manifest_path.write_bytes(raw)
-    subject = _subject(hot_uri=f"s3://nhms/{key}", checksum=hashlib.sha256(raw).hexdigest())
+    subject = _subject(
+        hot_uri=f"s3://nhms/{key}{package_suffix}",
+        checksum=hashlib.sha256(raw).hexdigest(),
+    )
     assert audit.verify_hot(subject, config).mechanism == "hot-object-store"
     bad = replace(subject, basin_version_id="other")
     with pytest.raises(audit.AuditBlocked, match="URI identity"):
@@ -824,9 +857,22 @@ def test_hot_forcing_manifest_checksum_mismatch_is_absent_evidence(tmp_path: Pat
     )
 
 
-def test_run_hot_requires_row_bound_manifest_and_output(tmp_path: Path) -> None:
+@pytest.mark.parametrize("db_output_suffix", ["", "/"])
+@pytest.mark.parametrize("embedded_output_suffix", ["", "/"])
+def test_run_hot_requires_row_bound_manifest_and_output(
+    tmp_path: Path, db_output_suffix: str, embedded_output_suffix: str
+) -> None:
     config = _config(tmp_path)
-    subject = _subject("runs", "run-a")
+    subject = _subject(
+        "runs",
+        "run-a",
+        hot_uri=json.dumps(
+            {
+                "manifest": "runs/run-a/input/manifest.json",
+                "output": f"runs/run-a/output{db_output_suffix}",
+            }
+        ),
+    )
     manifest_path = config.object_store_root / "runs/run-a/input/manifest.json"
     manifest_path.parent.mkdir(parents=True)
     manifest_path.write_text(
@@ -840,7 +886,7 @@ def test_run_hot_requires_row_bound_manifest_and_output(tmp_path: Path) -> None:
                 "model": {"model_id": "model-a", "basin_version_id": "basin-a"},
                 "outputs": {
                     "run_manifest_uri": "s3://nhms/runs/run-a/input/manifest.json",
-                    "output_uri": "s3://nhms/runs/run-a/output/",
+                    "output_uri": f"s3://nhms/runs/run-a/output{embedded_output_suffix}",
                 },
             }
         ),
@@ -1153,27 +1199,1822 @@ def test_main_redacts_dsn_from_runtime_error(
     dsn = "postgresql://user:secret@db/nhms"
     config = _config(tmp_path)
     config = replace(config, database_url=dsn)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
     monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
-    monkeypatch.setattr(audit, "run_audit", lambda _config: (_ for _ in ()).throw(RuntimeError(f"failed {dsn}")))
+    monkeypatch.setattr(
+        audit,
+        "run_audit",
+        lambda _config, *, publish: (_ for _ in ()).throw(RuntimeError(f"failed {dsn}")),
+    )
     assert audit.main([]) == 1
     captured = capsys.readouterr()
-    assert dsn not in captured.err and "[DATABASE_URL]" in captured.err
+    receipt = json.loads(config.receipt_path.read_text())
+    assert receipt["outcome"] == "indeterminate"
+    assert dsn not in captured.out and dsn not in json.dumps(receipt)
+    assert "[DATABASE_URL]" in receipt["detail"]
 
 
 def test_main_reports_post_replace_failure_as_indeterminate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     config = _config(tmp_path)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(
+        audit,
+        "publish_receipt",
+        lambda *_args: (_ for _ in ()).throw(audit.PublicationIndeterminate("directory fsync failed")),
+    )
+    assert audit.main([]) == 1
+    diagnostic = json.loads(capsys.readouterr().err)
+    assert diagnostic["status"] == "blocked"
+    assert diagnostic["reason"] == audit.PUBLICATION_INDETERMINATE_CODE
+
+
+@pytest.mark.parametrize(
+    "argv_tail",
+    [
+        ["--unknown-option"],
+        ["--archive-min-age-days", "not-an-integer"],
+        [],
+    ],
+)
+def test_main_parser_or_config_failure_publishes_blocked_receipt(
+    tmp_path: Path,
+    argv_tail: list[str],
+) -> None:
+    receipt_path = tmp_path / "terminal.json"
+    assert audit.main(["--receipt-path", str(receipt_path), *argv_tail]) == 1
+    receipt = json.loads(receipt_path.read_text())
+    assert receipt["schema_version"] == "1.1"
+    assert receipt["outcome"] == "blocked"
+    assert receipt["refusal_reason"] == "CONFIG_INVALID"
+
+
+@pytest.mark.parametrize(
+    ("flag", "path_position", "path_source", "seed_outcome"),
+    [
+        ("-h", "after", "cli", "complete"),
+        ("--help", "before", "cli", "incomplete"),
+        ("-h", "none", "env", "complete"),
+        ("--help", "none", "env", "incomplete"),
+        ("--help", "none", "absent", "incomplete"),
+    ],
+)
+def test_help_is_early_side_effect_free_and_preserves_receipt_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    flag: str,
+    path_position: str,
+    path_source: str,
+    seed_outcome: str,
+) -> None:
+    config = _config(tmp_path)
+    seed_subject = (
+        _subject(start=NOW - timedelta(days=1), end=NOW)
+        if seed_outcome == "complete"
+        else _subject()
+    )
+    old_receipt = _receipt(
+        [seed_subject],
+        hot={seed_subject.stable_key: audit.Coverage("hot-object-store")}
+        if seed_outcome == "complete"
+        else {},
+    )
+    assert old_receipt["outcome"] == seed_outcome
+    if path_source != "absent":
+        audit.publish_receipt(config.receipt_path, old_receipt)
+        before = config.receipt_path.read_bytes()
+    else:
+        before = None
+        monkeypatch.delenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", raising=False)
+    if path_source == "env":
+        monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+        argv = [flag]
+    elif path_position == "after":
+        argv = [flag, "--receipt-path", str(config.receipt_path)]
+    else:
+        argv = [flag] if path_source == "absent" else ["--receipt-path", str(config.receipt_path), flag]
+    attempts = 0
+
+    def reject_publish(*_args: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise AssertionError("help must not publish")
+
+    monkeypatch.setattr(audit, "publish_receipt", reject_publish)
+    monkeypatch.setattr(
+        audit,
+        "bootstrap_receipt_path",
+        lambda _argv: (_ for _ in ()).throw(AssertionError("help must precede bootstrap")),
+    )
+    assert audit.main(argv) == 0
+    captured = capsys.readouterr()
+    assert "usage:" in captured.out and "--receipt-path" in captured.out
+    assert captured.err == ""
+    assert attempts == 0
+    if before is None:
+        assert not config.receipt_path.exists()
+    else:
+        assert config.receipt_path.read_bytes() == before
+
+
+def test_help_ignores_unsafe_destination_without_touching_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    old_path = real / "receipt.json"
+    old_path.write_text(json.dumps(_receipt([_subject()])), encoding="utf-8")
+    before = old_path.read_bytes()
+    linked = tmp_path / "linked"
+    linked.symlink_to(real, target_is_directory=True)
+    assert audit.main(["-h", "--receipt-path", str(linked / "receipt.json")]) == 0
+    captured = capsys.readouterr()
+    assert "usage:" in captured.out and captured.err == ""
+    assert old_path.read_bytes() == before
+
+
+def test_help_never_enters_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    audit.publish_receipt(config.receipt_path, _receipt([_subject()]))
+    attempts = 0
+
+    def fail_if_called(*_args: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise AssertionError("publication must be unreachable for help")
+
+    before = config.receipt_path.read_bytes()
+    monkeypatch.setattr(audit, "publish_receipt", fail_if_called)
+    assert audit.main(["--receipt-path", str(config.receipt_path), "--help"]) == 0
+    assert attempts == 0
+    captured = capsys.readouterr()
+    assert "usage:" in captured.out and captured.err == ""
+    assert config.receipt_path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        "--database-url",
+        "--object-store-root",
+        "--object-store-prefix",
+        "--archive-root",
+        "--archive-min-age-days",
+        "--receipt-path",
+        "--zstd-path",
+    ],
+)
+@pytest.mark.parametrize("help_flag", ["-h", "--help"])
+def test_help_token_used_where_option_requires_value_is_not_help(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    option: str,
+    help_flag: str,
+) -> None:
+    receipt_path = tmp_path / "terminal.json"
+    argv = [option, help_flag]
+    if option != "--receipt-path":
+        argv.extend(["--receipt-path", str(receipt_path)])
+    assert audit.main(argv) == 1
+    captured = capsys.readouterr()
+    assert "usage:" not in captured.out
+    if option == "--receipt-path":
+        assert json.loads(captured.err)["reason"] == "CONFIG_INVALID"
+        assert not receipt_path.exists()
+    else:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        assert receipt["outcome"] == "blocked"
+        assert receipt["refusal_reason"] == "CONFIG_INVALID"
+
+
+def test_type_error_order_uses_real_parser_help_semantics(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    receipt_path = tmp_path / "terminal.json"
+    assert (
+        audit.main(
+            [
+                "--archive-min-age-days",
+                "not-an-integer",
+                "--help",
+                "--receipt-path",
+                str(receipt_path),
+            ]
+        )
+        == 1
+    )
+    first = capsys.readouterr()
+    assert "usage:" not in first.out
+    assert json.loads(receipt_path.read_text(encoding="utf-8"))["refusal_reason"] == "CONFIG_INVALID"
+    before = receipt_path.read_bytes()
+
+    assert (
+        audit.main(
+            [
+                "--help",
+                "--archive-min-age-days",
+                "not-an-integer",
+                "--receipt-path",
+                str(receipt_path),
+            ]
+        )
+        == 0
+    )
+    second = capsys.readouterr()
+    assert second.out.count("usage:") == 1 and second.err == ""
+    assert receipt_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("argv", [["--unknown", "--help"], ["--help", "--unknown"]])
+def test_unknown_option_around_help_follows_argparse_help_action(
+    argv: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert audit.main(argv) == 0
+    captured = capsys.readouterr()
+    assert captured.out.count("usage:") == 1 and captured.err == ""
+
+
+def test_help_after_double_dash_is_not_help_and_replaces_stale_success(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    receipt_path = tmp_path / "terminal.json"
+    audit.publish_receipt(receipt_path, _receipt([_subject()]))
+    before = receipt_path.read_bytes()
+    assert audit.main(["--receipt-path", str(receipt_path), "--", "--help"]) == 1
+    captured = capsys.readouterr()
+    assert "usage:" not in captured.out
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "blocked" and receipt["refusal_reason"] == "CONFIG_INVALID"
+    assert receipt_path.read_bytes() != before
+
+
+@pytest.mark.parametrize("outcome", ["complete", "incomplete"])
+def test_main_publishes_each_success_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    config = _config(tmp_path)
+    subject = _subject(start=NOW - timedelta(days=1), end=NOW) if outcome == "complete" else _subject()
+    hot = (
+        {subject.stable_key: audit.Coverage("hot-object-store")}
+        if outcome == "complete"
+        else {}
+    )
+    success = _receipt([subject], hot=hot)
+    assert success["outcome"] == outcome
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(audit, "run_audit", lambda _config, *, publish: success)
+    assert audit.main([]) == 0
+    assert json.loads(config.receipt_path.read_text()) == success
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--receipt-path"],
+        ["--receipt-path="],
+        ["--receipt-path", "/tmp/a", "--receipt-path=/tmp/b"],
+        ["--receipt-path", "relative.json"],
+        [],
+    ],
+)
+def test_unwriteable_receipt_bootstrap_is_stderr_only(
+    argv: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", raising=False)
+    assert audit.main(argv) == 1
+    diagnostic = json.loads(capsys.readouterr().err)
+    assert diagnostic["reason"] == "CONFIG_INVALID"
+    assert diagnostic["status"] == "blocked"
+
+
+def test_cli_receipt_path_overrides_environment_independently_of_argument_order(
+    tmp_path: Path,
+) -> None:
+    env_path = tmp_path / "from-env.json"
+    cli_path = tmp_path / "from-cli.json"
+    os.environ["NODE27_STORAGE_INVENTORY_RECEIPT_PATH"] = str(env_path)
+    try:
+        assert audit.main(["--unknown", "--receipt-path=" + str(cli_path)]) == 1
+    finally:
+        os.environ.pop("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", None)
+    assert cli_path.is_file()
+    assert not env_path.exists()
+
+
+def test_real_db_shaped_prefix_mismatch_reaches_main_and_publishes_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    key = "forcing/gfs/2026050100/basin-a/model-a"
+    package = config.object_store_root / key
+    package.mkdir(parents=True)
+    data = b"forcing-evidence"
+    (package / "data.csv").write_bytes(data)
+    manifest = {
+        "forcing_version_id": "forcing-a",
+        "source_id": "gfs",
+        "cycle_time": audit._time(START),
+        "start_time": audit._time(START),
+        "end_time": audit._time(END),
+        "model_id": "model-a",
+        "basin_version_id": "basin-a",
+        "files": [
+            {
+                "uri": f"s3://nhms/{key}/data.csv",
+                "checksum": hashlib.sha256(data).hexdigest(),
+            }
+        ],
+    }
+    raw_manifest = json.dumps(manifest).encode()
+    (package / "forcing_package.json").write_bytes(raw_manifest)
+    forcing_row = {
+        "forcing_version_id": "forcing-a",
+        "model_id": "model-a",
+        "source_id": "gfs",
+        "cycle_time": START,
+        "start_time": START,
+        "end_time": END,
+        "forcing_package_uri": f"s3://nhms/{key}",
+        "checksum": hashlib.sha256(raw_manifest).hexdigest(),
+        "basin_version_id": "basin-a",
+    }
+
+    class Connection(_Connection):
+        def __init__(self) -> None:
+            super().__init__([[{"audit_time": NOW}], [forcing_row], [], []])
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    connection = Connection()
+    monkeypatch.setattr("psycopg2.connect", lambda _dsn: connection)
+    argv = [
+        "--receipt-path",
+        str(config.receipt_path),
+        "--database-url",
+        config.database_url,
+        "--object-store-root",
+        str(config.object_store_root),
+        "--object-store-prefix",
+        "s3://wrong-bucket",
+        "--archive-root",
+        str(config.archive_root),
+        "--zstd-path",
+        str(config.zstd_path),
+    ]
+    assert audit.main(argv) == 1
+    receipt = json.loads(config.receipt_path.read_text())
+    assert receipt["outcome"] == "blocked"
+    assert receipt["refusal_reason"] == "OBJECT_URI_PREFIX_MISMATCH"
+    assert "s3://nhms/forcing/" in receipt["detail"]
+    assert connection.rolled_back and connection.closed
+    sql = "\n".join(connection.cursor_value.executed)
+    assert "REPEATABLE READ READ ONLY" in sql
+    assert audit.FORCING_INVENTORY_SQL in connection.cursor_value.executed
+    assert audit.RUN_INVENTORY_SQL in connection.cursor_value.executed
+    assert audit.STATE_INVENTORY_SQL in connection.cursor_value.executed
+
+
+def test_unexpected_prepublication_error_publishes_sanitized_indeterminate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    dsn = "postgresql://reader:top-secret@db/nhms"
+    config = replace(config, database_url=dsn)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
     monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
     monkeypatch.setattr(
         audit,
         "run_audit",
-        lambda _config: (_ for _ in ()).throw(audit.PublicationIndeterminate("directory fsync failed")),
+        lambda _config, *, publish: (_ for _ in ()).throw(RuntimeError(f"driver echoed {dsn}")),
+    )
+    assert audit.main([]) == 1
+    receipt = json.loads(config.receipt_path.read_text())
+    assert receipt["outcome"] == "indeterminate"
+    assert receipt["error_reason"] == audit.UNEXPECTED_ERROR_REASON
+    assert "top-secret" not in json.dumps(receipt)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        audit.AuditBlocked(
+            "AWS_SECRET_ACCESS_KEY=aws-secret Authorization: Bearer bearer-secret "
+            "token=opaque-token https://user:pass@example.test/path?X-Amz-Signature=signed#api_key=tail "
+            'payload={"p\\u0061ssword": "quoted-blocked-secret", "safe": "visible"} '
+            'fragment="password=inner-blocked-secret" '
+            '{"auth_\\u0068eader": "Bearer escaped-blocked-auth-secret"} '
+            "password\u00a0=\u00a0unicode-blocked-secret "
+            'payload="prefix {"password":"unescaped-blocked-secret"} suffix" '
+            r'payload="prefix {\\\"password\\\":\\\"layered-blocked-secret\\\"} suffix" '
+            'Authorization=Bearer "quoted-blocked-auth-secret" '
+            r'{\"password\":\"standalone-blocked-secret\"} '
+            'token=Bearer assigned-blocked-secret '
+            '\"token=quoted-outer-blocked-secret\": "outer-blocked-secret"'
+        ),
+        RuntimeError(
+            "AWS_ACCESS_KEY_ID=aws-key Authorization: Basic basic-secret "
+            "api_key=opaque-key https://user:pass@example.test/path?token=query#secret=tail "
+            "payload={'\\u0061pi_key': 'quoted-indeterminate-secret', 'safe': 'visible'} "
+            "source='token=inner-indeterminate-secret' "
+            "{'\\u0061uth': 'Basic escaped-indeterminate-auth-secret'} "
+            "password\u0085=\u0085unicode-indeterminate-secret "
+            'payload="prefix {"password":"unescaped-indeterminate-secret"} suffix" '
+            r'payload="prefix {\\\"password\\\":\\\"layered-indeterminate-secret\\\"} suffix" '
+            "Proxy-Authorization=Basic 'quoted-indeterminate-auth-secret' "
+            r'{\"api_key\":\"standalone-indeterminate-secret\"} '
+            'password=Basic assigned-indeterminate-secret '
+            "'api_key=quoted-outer-indeterminate-secret' = 'outer-indeterminate-secret'"
+        ),
+    ],
+)
+def test_terminal_receipt_redacts_generic_credentials_for_controlled_and_unexpected_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(
+        audit,
+        "run_audit",
+        lambda _config, *, publish: (_ for _ in ()).throw(error),
+    )
+    assert audit.main([]) == 1
+    body = config.receipt_path.read_text(encoding="utf-8")
+    for secret in (
+        "aws-secret",
+        "aws-key",
+        "bearer-secret",
+        "basic-secret",
+        "opaque-token",
+        "opaque-key",
+        "user:pass",
+        "X-Amz-Signature",
+        "signed",
+        "api_key=tail",
+        "token=query",
+        "secret=tail",
+        "quoted-blocked-secret",
+        "quoted-indeterminate-secret",
+        "inner-blocked-secret",
+        "inner-indeterminate-secret",
+        "escaped-blocked-auth-secret",
+        "escaped-indeterminate-auth-secret",
+        "unicode-blocked-secret",
+        "unicode-indeterminate-secret",
+        "unescaped-blocked-secret",
+        "unescaped-indeterminate-secret",
+        "layered-blocked-secret",
+        "layered-indeterminate-secret",
+        "quoted-blocked-auth-secret",
+        "quoted-indeterminate-auth-secret",
+        "standalone-blocked-secret",
+        "standalone-indeterminate-secret",
+        "assigned-blocked-secret",
+        "assigned-indeterminate-secret",
+        "quoted-outer-blocked-secret",
+        "quoted-outer-indeterminate-secret",
+        "outer-blocked-secret",
+        "outer-indeterminate-secret",
+    ):
+        assert secret not in body
+
+
+def test_audit_detail_sanitizer_inherits_fail_closed_nested_and_bracket_redaction() -> None:
+    deep = json.dumps({r"p\u0061ssword": "audit-deep-secret"})
+    for _layer in range(4):
+        deep = json.dumps(deep)
+    raw = (
+        'payload="password="audit-early-secret"" '
+        "Authorization: Bearer [audit-bracket-secret] "
+        f"deep={deep}"
+    )
+
+    sanitized = audit._sanitize_detail(audit.AuditBlocked(raw))
+
+    for secret in ("audit-early-secret", "audit-bracket-secret", "audit-deep-secret"):
+        assert secret not in sanitized
+    assert "[redacted]" in sanitized
+
+
+def test_audit_detail_sanitizer_redacts_bare_unicode_escaped_sensitive_keys() -> None:
+    raw = (
+        r"p\u0061ssword=audit-password-secret "
+        r"api\u005fkey=audit-api-secret "
+        r"authoriz\u0061tion=Bearer audit-auth-secret "
+        r"ordinary\u006bey=visible"
+    )
+
+    sanitized = audit._sanitize_detail(audit.AuditBlocked(raw))
+
+    for secret in ("audit-password-secret", "audit-api-secret", "audit-auth-secret"):
+        assert secret not in sanitized
+    assert "visible" in sanitized
+    assert audit._sanitize_detail(audit.AuditBlocked(sanitized)) == sanitized
+
+
+def test_quoted_credential_key_is_redacted_from_bootstrap_stderr(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(
+        audit,
+        "bootstrap_receipt_path",
+        lambda _argv: (_ for _ in ()).throw(
+            audit.AuditConfigError(
+                'bootstrap {"ordinary\\uD800": "boot\\\"secret", "safe": "visible"} '
+                'payload="password=bootstrap-fragment-secret" '
+                'payload="prefix {"password":"bootstrap-unescaped-secret"} suffix" '
+                r'payload="prefix {\\\"password\\\":\\\"bootstrap-layered-secret\\\"} suffix" '
+                'auth_header=Bearer\u2003"bootstrap quoted auth secret" '
+                r'{\"token\":\"bootstrap-standalone-secret\"} '
+                'api_key=Bearer bootstrap-assigned-secret '
+                '{"前缀authorization": "Bearer bootstrap-auth-secret"}'
+            )
+        ),
     )
     assert audit.main([]) == 1
     diagnostic = json.loads(capsys.readouterr().err)
-    assert diagnostic["status"] == "indeterminate"
-    assert diagnostic["error_type"] == "PublicationIndeterminate"
+    assert diagnostic["reason"] == "CONFIG_INVALID"
+    assert 'boot\\"secret' not in diagnostic["message"]
+    assert "bootstrap-fragment-secret" not in diagnostic["message"]
+    assert "bootstrap-auth-secret" not in diagnostic["message"]
+    assert "bootstrap-unescaped-secret" not in diagnostic["message"]
+    assert "bootstrap-layered-secret" not in diagnostic["message"]
+    assert "bootstrap quoted auth secret" not in diagnostic["message"]
+    assert "bootstrap-standalone-secret" not in diagnostic["message"]
+    assert "bootstrap-assigned-secret" not in diagnostic["message"]
+    assert "visible" in diagnostic["message"]
+
+
+@pytest.mark.parametrize(
+    ("error_type", "reason"),
+    [
+        (audit.AuditBlocked, audit.PUBLICATION_FAILED_CODE),
+        (audit.PublicationIndeterminate, audit.PUBLICATION_INDETERMINATE_CODE),
+    ],
+)
+def test_quoted_credential_key_is_redacted_from_publication_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    error_type: type[Exception],
+    reason: str,
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(audit, "run_audit", lambda _config, *, publish: _receipt([_subject()]))
+    monkeypatch.setattr(
+        audit,
+        "publish_receipt",
+        lambda *_args: (_ for _ in ()).throw(
+            error_type(
+                "publisher {'\\u0061pi_key' = 'publication-secret', 'safe': 'visible'} "
+                'payload="token=publication-fragment-secret" '
+                '{"proxy_\\u0061uthorization": "Bearer publication-auth-secret"} '
+                "password\u2003=\u2003publication-unicode-secret "
+                'payload="prefix {\\"password\\":\\"publication-inner-secret\\"}" '
+                'payload="prefix {"password":"publication-unescaped-secret"} suffix" '
+                r'payload="prefix {\\\"password\\\":\\\"publication-layered-secret\\\"} suffix" '
+                r'Proxy-Authorization=Basic \"publication escaped auth secret\" '
+                r'{\"Authorization\":\"publication-standalone-auth-secret\"} '
+                'credential=Basic publication-assigned-secret '
+                '\"token=publication-quoted-outer-secret\": "publication-outer-secret"'
+            )
+        ),
+    )
+    assert audit.main([]) == 1
+    diagnostic = json.loads(capsys.readouterr().err)
+    assert diagnostic["reason"] == reason
+    assert "publication-secret" not in diagnostic["message"]
+    assert "publication-fragment-secret" not in diagnostic["message"]
+    assert "publication-auth-secret" not in diagnostic["message"]
+    assert "publication-unicode-secret" not in diagnostic["message"]
+    assert "publication-inner-secret" not in diagnostic["message"]
+    assert "publication-unescaped-secret" not in diagnostic["message"]
+    assert "publication-layered-secret" not in diagnostic["message"]
+    assert "publication escaped auth secret" not in diagnostic["message"]
+    assert "publication-standalone-auth-secret" not in diagnostic["message"]
+    assert "publication-assigned-secret" not in diagnostic["message"]
+    assert "publication-quoted-outer-secret" not in diagnostic["message"]
+    assert "publication-outer-secret" not in diagnostic["message"]
+    assert "visible" in diagnostic["message"]
+
+
+def test_terminal_receipt_redacts_driver_decoded_and_libpq_passwords(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dsn = "postgresql://reader:p%40ss%20word@db/nhms"
+    config = replace(_config(tmp_path), database_url=dsn)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(
+        audit,
+        "run_audit",
+        lambda _config, *, publish: (_ for _ in ()).throw(
+            RuntimeError(
+                f"dsn={dsn}; decoded=p@ss word; password='quoted with spaces'; "
+                "password=escaped\\ value host=db"
+            )
+        ),
+    )
+    assert audit.main([]) == 1
+    body = config.receipt_path.read_text(encoding="utf-8")
+    for secret in (dsn, "p%40ss%20word", "p@ss word", "quoted with spaces", "escaped\\ value"):
+        assert secret not in body
+
+
+@pytest.mark.parametrize("error_type", [audit.AuditBlocked, RuntimeError])
+@pytest.mark.parametrize(
+    ("dsn", "echoed"),
+    [
+        (
+            "postgresql://reader:userinfo@db/nhms?password=query%20audit%2Bsecret",
+            "query audit+secret",
+        ),
+        (
+            "host=db user=reader sslpassword='ssl audit secret' dbname=nhms",
+            "ssl audit secret",
+        ),
+    ],
+)
+def test_terminal_receipt_redacts_libpq_query_and_ssl_passwords(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
+    dsn: str,
+    echoed: str,
+) -> None:
+    config = replace(_config(tmp_path), database_url=dsn)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(
+        audit,
+        "run_audit",
+        lambda _config, *, publish: (_ for _ in ()).throw(error_type(f"driver echoed {echoed}")),
+    )
+    assert audit.main([]) == 1
+    assert echoed not in config.receipt_path.read_text(encoding="utf-8")
+
+
+def test_bootstrap_stderr_redacts_libpq_query_password(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dsn = "postgresql://reader:userinfo@db/nhms?password=bootstrap%20query%2Bsecret"
+    monkeypatch.setenv("DATABASE_URL", dsn)
+    monkeypatch.setattr(
+        audit,
+        "bootstrap_receipt_path",
+        lambda _argv: (_ for _ in ()).throw(
+            audit.AuditConfigError("driver echoed bootstrap query+secret")
+        ),
+    )
+    assert audit.main([]) == 1
+    assert "bootstrap query+secret" not in capsys.readouterr().err
+
+
+def test_publication_stderr_redacts_libpq_sslpassword(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    dsn = "host=db user=reader sslpassword='publication ssl secret' dbname=nhms"
+    config = replace(_config(tmp_path), database_url=dsn)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(audit, "run_audit", lambda _config, *, publish: _receipt([_subject()]))
+    monkeypatch.setattr(
+        audit,
+        "publish_receipt",
+        lambda *_args: (_ for _ in ()).throw(
+            audit.AuditBlocked("publisher echoed publication ssl secret")
+        ),
+    )
+    assert audit.main([]) == 1
+    assert "publication ssl secret" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("encoded", "decoded"),
+    [
+        ("left-a%0Aright-a", "left-a\nright-a"),
+        ("left-b%0Dright-b", "left-b\rright-b"),
+        ("left-c%0D%0Aright-c", "left-c\r\nright-c"),
+    ],
+)
+@pytest.mark.parametrize("error_type", [audit.AuditBlocked, RuntimeError])
+def test_newline_url_dsn_password_is_redacted_before_single_line_terminal_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    encoded: str,
+    decoded: str,
+    error_type: type[Exception],
+) -> None:
+    dsn = f"postgresql://reader:{encoded}@db/nhms"
+    config = replace(_config(tmp_path), database_url=dsn)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(
+        audit,
+        "run_audit",
+        lambda _config, *, publish: (_ for _ in ()).throw(
+            error_type(f"driver raw={encoded}; decoded={decoded}; dsn={dsn}")
+        ),
+    )
+    assert audit.main([]) == 1
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    detail = receipt["detail"]
+    assert "left-" not in detail and "right-" not in detail
+    assert "\r" not in detail and "\n" not in detail
+
+
+def test_newline_url_dsn_password_is_redacted_from_bootstrap_stderr_before_line_collapse(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    encoded = "bootstrap-left%0Dbootstrap-right"
+    decoded = "bootstrap-left\rbootstrap-right"
+    dsn = f"postgresql://reader:{encoded}@db/nhms"
+    monkeypatch.setenv("DATABASE_URL", dsn)
+    monkeypatch.setattr(
+        audit,
+        "bootstrap_receipt_path",
+        lambda _argv: (_ for _ in ()).throw(
+            audit.AuditConfigError(f"bootstrap raw={encoded}; decoded={decoded}; dsn={dsn}")
+        ),
+    )
+    assert audit.main([]) == 1
+    diagnostic = json.loads(capsys.readouterr().err)
+    assert "bootstrap-left" not in diagnostic["message"]
+    assert "bootstrap-right" not in diagnostic["message"]
+    assert "\r" not in diagnostic["message"] and "\n" not in diagnostic["message"]
+
+
+@pytest.mark.parametrize(
+    ("error_type", "reason"),
+    [
+        (audit.AuditBlocked, audit.PUBLICATION_FAILED_CODE),
+        (audit.PublicationIndeterminate, audit.PUBLICATION_INDETERMINATE_CODE),
+    ],
+)
+def test_newline_url_dsn_password_is_redacted_from_publication_stderr_before_line_collapse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    error_type: type[Exception],
+    reason: str,
+) -> None:
+    encoded = "publication-left%0D%0Apublication-right"
+    decoded = "publication-left\r\npublication-right"
+    dsn = f"postgresql://reader:{encoded}@db/nhms"
+    config = replace(_config(tmp_path), database_url=dsn)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(audit, "run_audit", lambda _config, *, publish: _receipt([_subject()]))
+    monkeypatch.setattr(
+        audit,
+        "publish_receipt",
+        lambda *_args: (_ for _ in ()).throw(
+            error_type(f"publisher raw={encoded}; decoded={decoded}; dsn={dsn}")
+        ),
+    )
+    assert audit.main([]) == 1
+    diagnostic = json.loads(capsys.readouterr().err)
+    assert diagnostic["reason"] == reason
+    assert "publication-left" not in diagnostic["message"]
+    assert "publication-right" not in diagnostic["message"]
+    assert "\r" not in diagnostic["message"] and "\n" not in diagnostic["message"]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        audit.AuditBlocked(
+            "driver echoed dbname=nhms host=db password='keyword secret' user=reader; "
+            "bare=keyword secret"
+        ),
+        RuntimeError(
+            "driver echoed user=reader password='keyword secret' dbname=nhms host=db; "
+            "bare=keyword secret"
+        ),
+    ],
+)
+def test_keyword_dsn_is_redacted_from_blocked_and_indeterminate_receipts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    dsn = "host=db user=reader password='keyword secret' dbname=nhms"
+    config = replace(_config(tmp_path), database_url=dsn)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(
+        audit,
+        "run_audit",
+        lambda _config, *, publish: (_ for _ in ()).throw(error),
+    )
+    assert audit.main([]) == 1
+    body = config.receipt_path.read_text(encoding="utf-8")
+    assert dsn not in body and "keyword secret" not in body
+
+
+def test_keyword_dsn_is_redacted_from_publication_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dsn = "host=db user=reader password='keyword secret' dbname=nhms"
+    config = replace(_config(tmp_path), database_url=dsn)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(audit, "run_audit", lambda _config, *, publish: _receipt([_subject()]))
+    monkeypatch.setattr(
+        audit,
+        "publish_receipt",
+        lambda *_args: (_ for _ in ()).throw(
+            audit.AuditBlocked(f"publication failed {dsn}; bare=keyword secret")
+        ),
+    )
+    assert audit.main([]) == 1
+    stderr = capsys.readouterr().err
+    assert json.loads(stderr)["reason"] == audit.PUBLICATION_FAILED_CODE
+    assert dsn not in stderr and "keyword secret" not in stderr
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [audit.AuditBlocked, RuntimeError],
+)
+def test_raw_escaped_keyword_password_is_redacted_from_terminal_receipts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
+) -> None:
+    raw_password = "raw-secret" + "\\" * 3 + "tail"
+    dsn = f"host=db user=reader password='{raw_password}' dbname=nhms"
+    config = replace(_config(tmp_path), database_url=dsn)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(
+        audit,
+        "run_audit",
+        lambda _config, *, publish: (_ for _ in ()).throw(
+            error_type(f"driver raw password was {raw_password}")
+        ),
+    )
+    assert audit.main([]) == 1
+    body = config.receipt_path.read_text(encoding="utf-8")
+    assert dsn not in body and raw_password not in body
+
+
+@pytest.mark.parametrize(
+    ("error_type", "reason"),
+    [
+        (audit.AuditBlocked, audit.PUBLICATION_FAILED_CODE),
+        (audit.PublicationIndeterminate, audit.PUBLICATION_INDETERMINATE_CODE),
+    ],
+)
+def test_raw_escaped_keyword_password_is_redacted_from_publication_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    error_type: type[Exception],
+    reason: str,
+) -> None:
+    raw_password = "raw-secret" + "\\" * 3 + "tail"
+    dsn = f"host=db user=reader password='{raw_password}' dbname=nhms"
+    config = replace(_config(tmp_path), database_url=dsn)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(audit, "run_audit", lambda _config, *, publish: _receipt([_subject()]))
+    monkeypatch.setattr(
+        audit,
+        "publish_receipt",
+        lambda *_args: (_ for _ in ()).throw(
+            error_type(f"publisher raw password was {raw_password}")
+        ),
+    )
+    assert audit.main([]) == 1
+    stderr = capsys.readouterr().err
+    assert json.loads(stderr)["reason"] == reason
+    assert dsn not in stderr and raw_password not in stderr
+
+
+@pytest.mark.parametrize("error_type", [audit.AuditBlocked, RuntimeError])
+def test_overlapping_dsn_password_candidates_are_redacted_from_terminal_receipts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
+) -> None:
+    dsn = "host=db password=s3c password=s3cLONG dbname=nhms"
+    config = replace(_config(tmp_path), database_url=dsn)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(
+        audit,
+        "run_audit",
+        lambda _config, *, publish: (_ for _ in ()).throw(error_type("driver raw=s3cLONG")),
+    )
+    assert audit.main([]) == 1
+    body = config.receipt_path.read_text(encoding="utf-8")
+    assert "s3c" not in body and "LONG" not in body
+
+
+def test_overlapping_dsn_password_candidates_are_redacted_from_bootstrap_stderr(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dsn = "host=db password=s3c password=s3cLONG dbname=nhms"
+    monkeypatch.setenv("DATABASE_URL", dsn)
+    monkeypatch.setattr(
+        audit,
+        "bootstrap_receipt_path",
+        lambda _argv: (_ for _ in ()).throw(audit.AuditConfigError("bootstrap raw=s3cLONG")),
+    )
+    assert audit.main([]) == 1
+    stderr = capsys.readouterr().err
+    assert json.loads(stderr)["reason"] == "CONFIG_INVALID"
+    assert "s3c" not in stderr and "LONG" not in stderr
+
+
+@pytest.mark.parametrize(
+    ("error_type", "reason"),
+    [
+        (audit.AuditBlocked, audit.PUBLICATION_FAILED_CODE),
+        (audit.PublicationIndeterminate, audit.PUBLICATION_INDETERMINATE_CODE),
+    ],
+)
+def test_overlapping_dsn_password_candidates_are_redacted_from_publication_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    error_type: type[Exception],
+    reason: str,
+) -> None:
+    dsn = "host=db password=s3c password=s3cLONG dbname=nhms"
+    config = replace(_config(tmp_path), database_url=dsn)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(audit, "run_audit", lambda _config, *, publish: _receipt([_subject()]))
+    monkeypatch.setattr(
+        audit,
+        "publish_receipt",
+        lambda *_args: (_ for _ in ()).throw(error_type("publisher raw=s3cLONG")),
+    )
+    assert audit.main([]) == 1
+    stderr = capsys.readouterr().err
+    assert json.loads(stderr)["reason"] == reason
+    assert "s3c" not in stderr and "LONG" not in stderr
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_outcome"),
+    [
+        (audit.AuditBlocked("blocked path-\udcff token=secret"), "blocked"),
+        (RuntimeError("unexpected path-\udcff token=secret"), "indeterminate"),
+    ],
+)
+def test_lone_surrogate_terminal_error_replaces_stale_success_exactly_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    expected_outcome: str,
+) -> None:
+    config = _config(tmp_path)
+    old_receipt = _receipt([_subject(identifier="stale-success")])
+    audit.publish_receipt(config.receipt_path, old_receipt)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(
+        audit,
+        "run_audit",
+        lambda _config, *, publish: (_ for _ in ()).throw(error),
+    )
+    original_publish = audit.publish_receipt
+    attempts = 0
+
+    def count_publish(path: Path, receipt: dict[str, object]) -> None:
+        nonlocal attempts
+        attempts += 1
+        original_publish(path, receipt)
+
+    monkeypatch.setattr(audit, "publish_receipt", count_publish)
+    assert audit.main([]) == 1
+    assert attempts == 1
+    raw = config.receipt_path.read_bytes()
+    published = json.loads(raw)
+    assert published["outcome"] == expected_outcome
+    assert published != old_receipt
+    assert "\udcff" not in raw.decode("utf-8")
+    assert "secret" not in raw.decode("utf-8")
+    schema = json.loads(audit.COMPLETENESS_SCHEMA_PATH.read_text())
+    jsonschema.Draft7Validator(schema, format_checker=jsonschema.FormatChecker()).validate(published)
+    audit.validate_receipt_semantics(published)
+
+
+@pytest.mark.parametrize("surrogate", ["\udcff", "\ud800"])
+@pytest.mark.parametrize("source", ["db-identity", "salvage-evidence"])
+def test_success_payload_surrogate_is_mapped_to_blocked_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    surrogate: str,
+    source: str,
+) -> None:
+    config = _config(tmp_path)
+    stale = _receipt([_subject(identifier="stale-success")])
+    audit.publish_receipt(config.receipt_path, stale)
+    if source == "db-identity":
+        unsafe = _receipt([_subject()])
+        unsafe["windows"][0]["subject"]["forcing_version_id"] = f"forcing-{surrogate}"
+    else:
+        unsafe = _receipt([_subject()])
+        unsafe["windows"][0]["evidence"].append(f"salvage-{surrogate}")
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(audit, "run_audit", lambda _config, *, publish: unsafe)
+    original_publish = audit.publish_receipt
+    original_atomic = audit.atomic_write_bytes_no_follow
+    publish_attempts = 0
+    atomic_attempts = 0
+
+    def count_publish(path: Path, receipt: dict[str, object]) -> None:
+        nonlocal publish_attempts
+        publish_attempts += 1
+        original_publish(path, receipt)
+
+    def count_atomic(*args: object, **kwargs: object) -> None:
+        nonlocal atomic_attempts
+        atomic_attempts += 1
+        original_atomic(*args, **kwargs)
+
+    monkeypatch.setattr(audit, "publish_receipt", count_publish)
+    monkeypatch.setattr(audit, "atomic_write_bytes_no_follow", count_atomic)
+    assert audit.main([]) == 1
+    captured = capsys.readouterr()
+    assert audit.PUBLICATION_FAILED_CODE not in captured.err
+    assert publish_attempts == 1 and atomic_attempts == 1
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "blocked"
+    assert receipt["refusal_reason"] == "RECEIPT_INVALID"
+    assert receipt != stale
+    schema = json.loads(audit.COMPLETENESS_SCHEMA_PATH.read_text())
+    jsonschema.Draft7Validator(schema, format_checker=jsonschema.FormatChecker()).validate(receipt)
+
+
+@pytest.mark.parametrize("surrogate", ["\udcff", "\ud800"])
+def test_real_manifest_member_surrogate_blocks_without_publication_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    surrogate: str,
+) -> None:
+    config = _config(tmp_path)
+    stale = _receipt([_subject(identifier="stale-success")])
+    audit.publish_receipt(config.receipt_path, stale)
+    key = "forcing/gfs/2026050100/basin-a/model-a"
+    package = config.object_store_root / key
+    package.mkdir(parents=True)
+    manifest = {
+        "forcing_version_id": "forcing-a",
+        "source_id": "gfs",
+        "cycle_time": audit._time(START),
+        "start_time": audit._time(START),
+        "end_time": audit._time(END),
+        "model_id": "model-a",
+        "basin_version_id": "basin-a",
+        "files": [
+            {
+                "uri": f"s3://nhms/{key}/member-{surrogate}.csv",
+                "checksum": "a" * 64,
+            }
+        ],
+    }
+    raw_manifest = json.dumps(manifest).encode("utf-8")
+    (package / "forcing_package.json").write_bytes(raw_manifest)
+    forcing_row = {
+        "forcing_version_id": "forcing-a",
+        "model_id": "model-a",
+        "source_id": "gfs",
+        "cycle_time": START,
+        "start_time": START,
+        "end_time": END,
+        "forcing_package_uri": f"s3://nhms/{key}",
+        "checksum": hashlib.sha256(raw_manifest).hexdigest(),
+        "basin_version_id": "basin-a",
+    }
+
+    class Connection(_Connection):
+        def __init__(self) -> None:
+            super().__init__([[{"audit_time": NOW}], [forcing_row], [], []])
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("psycopg2.connect", lambda _dsn: Connection())
+    original_publish = audit.publish_receipt
+    original_atomic = audit.atomic_write_bytes_no_follow
+    publish_attempts = 0
+    atomic_attempts = 0
+
+    def count_publish(path: Path, receipt: dict[str, object]) -> None:
+        nonlocal publish_attempts
+        publish_attempts += 1
+        original_publish(path, receipt)
+
+    def count_atomic(*args: object, **kwargs: object) -> None:
+        nonlocal atomic_attempts
+        atomic_attempts += 1
+        original_atomic(*args, **kwargs)
+
+    monkeypatch.setattr(audit, "publish_receipt", count_publish)
+    monkeypatch.setattr(audit, "atomic_write_bytes_no_follow", count_atomic)
+    argv = [
+        "--receipt-path",
+        str(config.receipt_path),
+        "--database-url",
+        config.database_url,
+        "--object-store-root",
+        str(config.object_store_root),
+        "--object-store-prefix",
+        config.object_store_prefix,
+        "--archive-root",
+        str(config.archive_root),
+        "--zstd-path",
+        str(config.zstd_path),
+    ]
+    assert audit.main(argv) == 1
+    captured = capsys.readouterr()
+    assert audit.PUBLICATION_FAILED_CODE not in captured.err
+    assert publish_attempts == 1 and atomic_attempts == 1
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "blocked"
+    assert receipt["refusal_reason"] == "EVIDENCE_BLOCKED"
+    assert receipt != stale
+
+
+def test_success_payload_accepts_supplementary_unicode_scalar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    receipt = _receipt([_subject()])
+    receipt["windows"][0]["evidence"].append("supplementary-\U0001F4A7")
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(audit, "run_audit", lambda _config, *, publish: receipt)
+    assert audit.main([]) == 0
+    published = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert "supplementary-\U0001F4A7" in published["windows"][0]["evidence"]
+
+
+def test_lone_surrogate_and_credentials_are_sanitized_on_bootstrap_and_publication_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", raising=False)
+    assert audit.main(["--receipt-path", "relative-\udcff-token=bootstrap-secret"]) == 1
+    bootstrap = capsys.readouterr().err
+    assert json.loads(bootstrap)["reason"] == "CONFIG_INVALID"
+    assert "\udcff" not in bootstrap and "bootstrap-secret" not in bootstrap
+    assert bootstrap.encode("utf-8")
+
+    config = _config(tmp_path)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(audit, "run_audit", lambda _config, *, publish: _receipt([_subject()]))
+    monkeypatch.setattr(
+        audit,
+        "publish_receipt",
+        lambda *_args: (_ for _ in ()).throw(
+            audit.AuditBlocked("write path-\udcff AWS_SECRET_ACCESS_KEY=publication-secret")
+        ),
+    )
+    assert audit.main([]) == 1
+    publication = capsys.readouterr().err
+    assert json.loads(publication)["reason"] == audit.PUBLICATION_FAILED_CODE
+    assert "\udcff" not in publication and "publication-secret" not in publication
+    assert publication.encode("utf-8")
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_outcome"),
+    [
+        (
+            audit.AuditBlocked('password="' + "\\" * 200_000),
+            "blocked",
+        ),
+        (
+            RuntimeError(
+                "remote https://user:url-secret@example.test:not-a-port/path?token=query"
+            ),
+            "indeterminate",
+        ),
+    ],
+)
+def test_hostile_assignment_and_malformed_url_replace_stale_success_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    expected_outcome: str,
+) -> None:
+    config = _config(tmp_path)
+    stale = _receipt([_subject(identifier="stale-before-redaction-error")])
+    audit.publish_receipt(config.receipt_path, stale)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(
+        audit,
+        "run_audit",
+        lambda _config, *, publish: (_ for _ in ()).throw(error),
+    )
+    original_publish = audit.publish_receipt
+    attempts = 0
+
+    def count_publish(path: Path, receipt: dict[str, object]) -> None:
+        nonlocal attempts
+        attempts += 1
+        original_publish(path, receipt)
+
+    monkeypatch.setattr(audit, "publish_receipt", count_publish)
+    assert audit.main([]) == 1
+    assert attempts == 1
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == expected_outcome
+    assert receipt != stale
+    body = json.dumps(receipt)
+    assert "url-secret" not in body and "token=query" not in body
+    schema = json.loads(audit.COMPLETENESS_SCHEMA_PATH.read_text())
+    jsonschema.Draft7Validator(schema, format_checker=jsonschema.FormatChecker()).validate(receipt)
+    audit.validate_receipt_semantics(receipt)
+
+
+def test_large_schema_error_detail_is_bounded_before_redaction_and_replaces_stale_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    audit.publish_receipt(config.receipt_path, _receipt([_subject(identifier="stale-success")]))
+    invalid = _receipt([_subject()])
+    invalid["schema_version"] = "x" * (16 * 1024 * 1024)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(audit, "run_audit", lambda _config, *, publish: invalid)
+    original_publish = audit.publish_receipt
+    original_atomic = audit.atomic_write_bytes_no_follow
+    publish_attempts = 0
+    atomic_attempts = 0
+
+    def reject_redactor(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("oversized diagnostics must bypass all redactors")
+
+    text_inputs: list[str] = []
+
+    def allow_only_receipt_path(value: str) -> str:
+        text_inputs.append(value)
+        if value != str(config.receipt_path):
+            raise AssertionError("oversized diagnostics must bypass text redaction")
+        return value
+
+    def count_publish(path: Path, receipt: dict[str, object]) -> None:
+        nonlocal publish_attempts
+        publish_attempts += 1
+        original_publish(path, receipt)
+
+    def count_atomic(*args: object, **kwargs: object) -> None:
+        nonlocal atomic_attempts
+        atomic_attempts += 1
+        original_atomic(*args, **kwargs)
+
+    monkeypatch.setattr(audit, "redact_database_dsn", reject_redactor)
+    monkeypatch.setattr(audit, "redact_text", allow_only_receipt_path)
+    monkeypatch.setattr(audit, "publish_receipt", count_publish)
+    monkeypatch.setattr(audit, "atomic_write_bytes_no_follow", count_atomic)
+    assert audit.main([]) == 1
+    assert text_inputs == [str(config.receipt_path)]
+    assert publish_attempts == 1 and atomic_attempts == 1
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "blocked"
+    assert receipt["refusal_reason"] == "RECEIPT_INVALID"
+    assert receipt["detail"] == (
+        f"AuditBlocked{audit.DETAIL_TRUNCATION_MARKER}{audit.DIAGNOSTIC_REDACTED_MARKER}"
+    )
+    assert len(receipt["detail"]) <= audit.DETAIL_OUTPUT_LIMIT
+
+
+@pytest.mark.parametrize("size_delta", [-1, 0, 1, 16 * 1024 * 1024])
+def test_sanitize_detail_raw_input_limit_is_inclusive_and_oversize_bypasses_redactors(
+    monkeypatch: pytest.MonkeyPatch, size_delta: int
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    size = audit.DETAIL_INPUT_LIMIT + size_delta
+    calls: list[str] = []
+
+    def record_dsn(value: str, _dsn: str | None) -> str:
+        calls.append("dsn")
+        return value
+
+    def record_text(value: str) -> str:
+        calls.append("text")
+        return value
+
+    if size_delta > 0:
+        def reject_redactor(*_args: object, **_kwargs: object) -> str:
+            raise AssertionError("oversized raw diagnostics must not enter a redactor")
+
+        monkeypatch.setattr(audit, "redact_database_dsn", reject_redactor)
+        monkeypatch.setattr(audit, "redact_text", reject_redactor)
+    else:
+        monkeypatch.setattr(audit, "redact_database_dsn", record_dsn)
+        monkeypatch.setattr(audit, "redact_text", record_text)
+
+    detail = audit._sanitize_detail(RuntimeError("x" * size))
+    if size_delta > 0:
+        assert detail == (
+            f"RuntimeError{audit.DETAIL_TRUNCATION_MARKER}"
+            f"{audit.DIAGNOSTIC_REDACTED_MARKER}"
+        )
+        assert calls == []
+    else:
+        assert calls == ["dsn", "dsn", "text", "text"]
+        assert len(detail) <= audit.DETAIL_OUTPUT_LIMIT
+
+
+@pytest.mark.parametrize("size_delta", [-1, 0, 1, 16 * 1024 * 1024])
+def test_sanitize_detail_dsn_limit_is_inclusive_and_oversize_bypasses_redactors(
+    monkeypatch: pytest.MonkeyPatch, size_delta: int
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    dsn = "x" * (audit.DSN_REDACTION_INPUT_LIMIT + size_delta)
+    calls: list[str] = []
+
+    def record_dsn(value: str, _dsn: str | None) -> str:
+        calls.append("dsn")
+        return value
+
+    def record_text(value: str) -> str:
+        calls.append("text")
+        return value
+
+    if size_delta > 0:
+        def reject_redactor(*_args: object, **_kwargs: object) -> str:
+            raise AssertionError("oversized DSNs must not enter a redactor")
+
+        monkeypatch.setattr(audit, "redact_database_dsn", reject_redactor)
+        monkeypatch.setattr(audit, "redact_text", reject_redactor)
+    else:
+        monkeypatch.setattr(audit, "redact_database_dsn", record_dsn)
+        monkeypatch.setattr(audit, "redact_text", record_text)
+
+    detail = audit._sanitize_detail(RuntimeError("bounded failure"), database_url=dsn)
+    if size_delta > 0:
+        assert detail == f"RuntimeError{audit.DIAGNOSTIC_REDACTED_MARKER}"
+        assert calls == []
+    else:
+        assert calls == ["dsn", "dsn", "text", "text"]
+        assert detail == "bounded failure"
+
+
+@pytest.mark.parametrize(
+    "secret_shape",
+    [
+        "postgresql://reader:raw-secret@db/nhms",
+        "postgresql://reader:p%40ss%20decoded@db/nhms",
+        "host=db password='quoted secret' dbname=nhms",
+        r"host=db password=escaped\ secret dbname=nhms",
+    ],
+)
+def test_secret_crossing_detail_limit_returns_only_fixed_diagnostic(
+    monkeypatch: pytest.MonkeyPatch, secret_shape: str
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    prefix = "x" * (audit.DETAIL_INPUT_LIMIT - len(secret_shape) // 2)
+
+    def reject_redactor(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("cross-boundary secrets must bypass diagnostic redactors")
+
+    monkeypatch.setattr(audit, "redact_database_dsn", reject_redactor)
+    monkeypatch.setattr(audit, "redact_text", reject_redactor)
+    detail = audit._sanitize_detail(RuntimeError(prefix + secret_shape))
+    assert detail == (
+        f"RuntimeError{audit.DETAIL_TRUNCATION_MARKER}{audit.DIAGNOSTIC_REDACTED_MARKER}"
+    )
+    assert "x" not in detail and "secret" not in detail and "reader" not in detail
+
+
+@pytest.mark.parametrize("error_type", [audit.AuditBlocked, RuntimeError])
+def test_oversized_terminal_detail_replaces_stale_success_once_with_fixed_diagnostic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
+) -> None:
+    config = _config(tmp_path)
+    stale = _receipt([_subject(identifier="stale-long-detail")])
+    audit.publish_receipt(config.receipt_path, stale)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    long_error = error_type("x" * audit.DETAIL_INPUT_LIMIT + '"password":"cross-secret"')
+    monkeypatch.setattr(
+        audit,
+        "run_audit",
+        lambda _config, *, publish: (_ for _ in ()).throw(long_error),
+    )
+    original_publish = audit.publish_receipt
+    original_atomic = audit.atomic_write_bytes_no_follow
+    publish_attempts = 0
+    atomic_attempts = 0
+
+    def count_publish(path: Path, receipt: dict[str, object]) -> None:
+        nonlocal publish_attempts
+        publish_attempts += 1
+        original_publish(path, receipt)
+
+    def count_atomic(*args: object, **kwargs: object) -> None:
+        nonlocal atomic_attempts
+        atomic_attempts += 1
+        original_atomic(*args, **kwargs)
+
+    monkeypatch.setattr(audit, "publish_receipt", count_publish)
+    monkeypatch.setattr(audit, "atomic_write_bytes_no_follow", count_atomic)
+    assert audit.main([]) == 1
+    assert publish_attempts == 1 and atomic_attempts == 1
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == ("blocked" if error_type is audit.AuditBlocked else "indeterminate")
+    assert receipt["detail"] == (
+        f"{error_type.__name__}{audit.DETAIL_TRUNCATION_MARKER}"
+        f"{audit.DIAGNOSTIC_REDACTED_MARKER}"
+    )
+    assert receipt != stale and "cross-secret" not in json.dumps(receipt)
+    schema = json.loads(audit.COMPLETENESS_SCHEMA_PATH.read_text())
+    jsonschema.Draft7Validator(schema, format_checker=jsonschema.FormatChecker()).validate(receipt)
+    audit.validate_receipt_semantics(receipt)
+
+
+def test_oversized_bootstrap_diagnostic_bypasses_redactors(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(
+        audit,
+        "bootstrap_receipt_path",
+        lambda _argv: (_ for _ in ()).throw(
+            audit.AuditConfigError(
+                "x" * audit.DETAIL_INPUT_LIMIT + '"password":"bootstrap-secret"'
+            )
+        ),
+    )
+
+    def reject_redactor(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("oversized bootstrap diagnostics must bypass redactors")
+
+    monkeypatch.setattr(audit, "redact_database_dsn", reject_redactor)
+    monkeypatch.setattr(audit, "redact_text", reject_redactor)
+    assert audit.main([]) == 1
+    diagnostic = json.loads(capsys.readouterr().err)
+    assert diagnostic["message"] == (
+        f"AuditConfigError{audit.DETAIL_TRUNCATION_MARKER}"
+        f"{audit.DIAGNOSTIC_REDACTED_MARKER}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("error_type", "reason"),
+    [
+        (audit.AuditBlocked, audit.PUBLICATION_FAILED_CODE),
+        (audit.PublicationIndeterminate, audit.PUBLICATION_INDETERMINATE_CODE),
+    ],
+)
+def test_oversized_publication_diagnostic_bypasses_redactors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    error_type: type[Exception],
+    reason: str,
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(audit, "run_audit", lambda _config, *, publish: _receipt([_subject()]))
+    monkeypatch.setattr(
+        audit,
+        "publish_receipt",
+        lambda *_args: (_ for _ in ()).throw(
+            error_type("x" * audit.DETAIL_INPUT_LIMIT + '"api_key":"publication-secret"')
+        ),
+    )
+
+    def reject_redactor(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("oversized publication diagnostics must bypass redactors")
+
+    monkeypatch.setattr(audit, "redact_database_dsn", reject_redactor)
+    monkeypatch.setattr(audit, "redact_text", reject_redactor)
+    assert audit.main([]) == 1
+    diagnostic = json.loads(capsys.readouterr().err)
+    assert diagnostic["reason"] == reason
+    assert diagnostic["message"] == (
+        f"{error_type.__name__}{audit.DETAIL_TRUNCATION_MARKER}"
+        f"{audit.DIAGNOSTIC_REDACTED_MARKER}"
+    )
+
+
+def test_audit_8k_detail_slash_run_uses_linear_shared_redaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    original = redaction._slash_run_end
+    slash_visits = 0
+
+    def count_slash_run(value: str, start: int) -> int:
+        nonlocal slash_visits
+        end = original(value, start)
+        slash_visits += end - start
+        return end
+
+    monkeypatch.setattr(redaction, "_slash_run_end", count_slash_run)
+    suffix = "u0061pi_key=audit-linear-secret"
+    raw = "\\" * (audit.DETAIL_INPUT_LIMIT - len(suffix)) + suffix
+
+    assert len(raw) == audit.DETAIL_INPUT_LIMIT
+    assert "audit-linear-secret" not in audit._sanitize_detail(audit.AuditBlocked(raw))
+    assert slash_visits <= 12 * len(raw)
+
+
+def test_malformed_url_is_fail_closed_on_bootstrap_and_publication_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    malformed = "https://user:url-secret@example.test:not-a-port/path?token=query"
+    original_bootstrap = audit.bootstrap_receipt_path
+    monkeypatch.setattr(
+        audit,
+        "bootstrap_receipt_path",
+        lambda _argv: (_ for _ in ()).throw(audit.AuditConfigError(f"bad path {malformed}")),
+    )
+    assert audit.main([]) == 1
+    bootstrap = capsys.readouterr().err
+    assert json.loads(bootstrap)["reason"] == "CONFIG_INVALID"
+    assert "url-secret" not in bootstrap and "token=query" not in bootstrap
+
+    monkeypatch.setattr(audit, "bootstrap_receipt_path", original_bootstrap)
+    config = _config(tmp_path)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(audit, "run_audit", lambda _config, *, publish: _receipt([_subject()]))
+    attempts = 0
+
+    def fail_publish(*_args: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise audit.AuditBlocked(f"publication path {malformed}")
+
+    monkeypatch.setattr(audit, "publish_receipt", fail_publish)
+    assert audit.main([]) == 1
+    assert attempts == 1
+    publication = capsys.readouterr().err
+    assert json.loads(publication)["reason"] == audit.PUBLICATION_FAILED_CODE
+    assert "url-secret" not in publication and "token=query" not in publication
+
+
+def test_empty_inventory_publishes_blocked_instead_of_empty_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(
+        audit,
+        "run_audit",
+        lambda _config, *, publish: (_ for _ in ()).throw(
+            audit.AuditBlocked("inventory is empty", reason="EMPTY_INVENTORY")
+        ),
+    )
+    assert audit.main([]) == 1
+    receipt = json.loads(config.receipt_path.read_text())
+    assert receipt["outcome"] == "blocked"
+    assert receipt["refusal_reason"] == "EMPTY_INVENTORY"
+    assert "windows" not in receipt
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_code"),
+    [
+        (audit.AuditBlocked("write failed"), audit.PUBLICATION_FAILED_CODE),
+        (audit.PublicationIndeterminate("directory fsync failed"), audit.PUBLICATION_INDETERMINATE_CODE),
+    ],
+)
+def test_main_publication_failure_attempts_exactly_once_and_never_recurses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    error: Exception,
+    expected_code: str,
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(audit, "run_audit", lambda _config, *, publish: _receipt([_subject()]))
+    attempts = 0
+
+    def fail_once(*_args: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise error
+
+    monkeypatch.setattr(audit, "publish_receipt", fail_once)
+    assert audit.main([]) == 1
+    assert attempts == 1
+    assert json.loads(capsys.readouterr().err)["reason"] == expected_code
+
+
+def test_terminal_schema_has_four_exact_mutually_exclusive_branches() -> None:
+    schema = json.loads(audit.COMPLETENESS_SCHEMA_PATH.read_text())
+    success = _receipt([_subject()])
+    receipts = [
+        {**success, "outcome": "incomplete"},
+        audit.build_terminal_receipt("blocked", NOW, reason="EVIDENCE_BLOCKED", detail="safe"),
+        audit.build_terminal_receipt(
+            "indeterminate", NOW, reason=audit.UNEXPECTED_ERROR_REASON, detail="safe"
+        ),
+    ]
+    complete_subject = _subject(start=NOW - timedelta(days=1), end=NOW)
+    receipts.insert(
+        0,
+        _receipt(
+            [complete_subject],
+            hot={complete_subject.stable_key: audit.Coverage("hot-object-store")},
+        ),
+    )
+    for receipt in receipts:
+        matches = 0
+        for branch in schema["oneOf"]:
+            branch_schema = {"definitions": schema["definitions"], **branch}
+            if not list(
+                jsonschema.Draft7Validator(
+                    branch_schema, format_checker=jsonschema.FormatChecker()
+                ).iter_errors(receipt)
+            ):
+                matches += 1
+        assert matches == 1, receipt
+        jsonschema.Draft7Validator(
+            schema, format_checker=jsonschema.FormatChecker()
+        ).validate(receipt)
+
+
+def test_success_receipt_validator_uses_one_surrogate_schema_semantics_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = _receipt([_subject()])
+    calls: list[str] = []
+    monkeypatch.setattr(
+        audit,
+        "_reject_success_payload_surrogates",
+        lambda _receipt: calls.append("surrogate"),
+    )
+    monkeypatch.setattr(
+        audit,
+        "_validate_schema",
+        lambda _receipt, _schema, _label, **_kwargs: calls.append("schema"),
+    )
+    monkeypatch.setattr(
+        audit,
+        "_validate_receipt_runtime_semantics",
+        lambda _receipt, _subjects: calls.append("semantics"),
+    )
+
+    audit.validate_success_receipt_for_publication(receipt)
+    assert calls == ["surrogate", "schema", "semantics"]
+
+
+def test_success_receipt_validator_stops_before_semantics_when_schema_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(audit, "_reject_success_payload_surrogates", lambda _receipt: None)
+    monkeypatch.setattr(
+        audit,
+        "_validate_schema",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(audit.AuditBlocked("schema-first")),
+    )
+    monkeypatch.setattr(
+        audit,
+        "_validate_receipt_runtime_semantics",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("semantics must not run")),
+    )
+
+    with pytest.raises(audit.AuditBlocked, match="schema-first"):
+        audit.validate_success_receipt_for_publication({"windows": [{}]})
+
+
+@pytest.mark.parametrize("reason", sorted(audit.BLOCKED_REASONS))
+def test_all_stable_blocked_reason_codes_are_schema_valid(reason: str) -> None:
+    receipt = audit.build_terminal_receipt("blocked", NOW, reason=reason, detail="sanitized")
+    schema = json.loads(audit.COMPLETENESS_SCHEMA_PATH.read_text())
+    jsonschema.Draft7Validator(
+        schema, format_checker=jsonschema.FormatChecker()
+    ).validate(receipt)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    sorted(audit.BLOCKED_REASONS - {"CONFIG_INVALID"}),
+)
+def test_main_preserves_typed_blocked_reason_without_message_inference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: audit.BlockedReason,
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(
+        audit,
+        "run_audit",
+        lambda _config, *, publish: (_ for _ in ()).throw(
+            audit.AuditBlocked(
+                "/path/exceeds/receipt-schema/inventory is empty",
+                reason=reason,
+            )
+        ),
+    )
+
+    assert audit.main([]) == 1
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["refusal_reason"] == reason
+
+
+def test_success_semantics_rejects_contradictory_aggregate() -> None:
+    subject = _subject()
+    incomplete = _receipt([subject])
+    incomplete["outcome"] = "complete"
+    with pytest.raises(audit.AuditBlocked, match="schema validation"):
+        audit.validate_receipt_semantics(incomplete, [subject])
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "empty-window",
+        "string-window",
+        "unknown-lane",
+        "missing-identity",
+        "bad-timestamp",
+        "semantic-aggregate",
+    ],
+)
+def test_main_invalid_success_payload_publishes_receipt_invalid_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mutation: str,
+) -> None:
+    config = _config(tmp_path)
+    stale = _receipt([_subject(identifier="stale-schema-order")])
+    audit.publish_receipt(config.receipt_path, stale)
+    malformed = _receipt([_subject()])
+    if mutation == "empty-window":
+        malformed["windows"] = [{}]
+    elif mutation == "string-window":
+        malformed["windows"] = ["bad"]
+    elif mutation == "unknown-lane":
+        malformed["windows"][0]["lane"] = "unknown"
+    elif mutation == "missing-identity":
+        malformed["windows"][0]["subject"] = {}
+    elif mutation == "bad-timestamp":
+        malformed["windows"][0]["window"]["start"] = "not-a-timestamp"
+    else:
+        malformed["outcome"] = "complete"
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(audit, "run_audit", lambda _config, *, publish: malformed)
+    original_publish = audit.publish_receipt
+    original_atomic = audit.atomic_write_bytes_no_follow
+    publish_attempts = 0
+    atomic_attempts = 0
+
+    def count_publish(path: Path, receipt: dict[str, object]) -> None:
+        nonlocal publish_attempts
+        publish_attempts += 1
+        original_publish(path, receipt)
+
+    def count_atomic(*args: object, **kwargs: object) -> None:
+        nonlocal atomic_attempts
+        atomic_attempts += 1
+        original_atomic(*args, **kwargs)
+
+    monkeypatch.setattr(audit, "publish_receipt", count_publish)
+    monkeypatch.setattr(audit, "atomic_write_bytes_no_follow", count_atomic)
+    assert audit.main([]) == 1
+    assert audit.PUBLICATION_FAILED_CODE not in capsys.readouterr().err
+    assert publish_attempts == 1 and atomic_attempts == 1
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "blocked"
+    assert receipt["refusal_reason"] == "RECEIPT_INVALID"
+    assert receipt != stale
+    schema = json.loads(audit.COMPLETENESS_SCHEMA_PATH.read_text())
+    jsonschema.Draft7Validator(
+        schema, format_checker=jsonschema.FormatChecker()
+    ).validate(receipt)
 
 
 def test_symlinked_object_root_blocks_without_path_walk_loop(tmp_path: Path) -> None:
@@ -1274,6 +3115,783 @@ def test_archive_age_cli_overrides_env_and_env_below_retention_blocks(
     assert audit.config_from_args(_args(tmp_path, age=30)).archive_min_age_days == 30
     with pytest.raises(audit.AuditBlocked, match="at least DB retention"):
         audit.config_from_args(_args(tmp_path, age=None))
+
+
+def test_archive_age_invalid_env_uses_typed_config_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NHMS_ARCHIVE_MIN_AGE_DAYS", "not-an-int")
+
+    with pytest.raises(audit.AuditConfigError, match="must be an integer") as captured:
+        audit.config_from_args(_args(tmp_path, age=None))
+
+    assert audit._blocked_reason(captured.value) == "CONFIG_INVALID"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--receipt-path"],
+        ["--receipt-path="],
+        ["--receipt-path", "/tmp/one.json", "--receipt-path", "/tmp/two.json"],
+        ["--receipt-path", "relative.json"],
+    ],
+)
+def test_bootstrap_configuration_failures_are_typed(argv: list[str]) -> None:
+    with pytest.raises(audit.AuditConfigError) as captured:
+        audit.bootstrap_receipt_path(argv)
+
+    assert audit._blocked_reason(captured.value) == "CONFIG_INVALID"
+
+
+def test_blocked_reason_never_infers_from_path_or_diagnostic_words() -> None:
+    error = audit.AuditBlocked(
+        "/archive/exceeds/resource-bound/receipt-schema-selector-outcome/inventory is empty"
+    )
+    assert audit._blocked_reason(error) == "EVIDENCE_BLOCKED"
+
+
+def test_io_error_path_named_exceeds_and_receipt_remains_evidence_blocked(
+    tmp_path: Path,
+) -> None:
+    misleading_path = tmp_path / "archive-exceeds-resource-bound-receipt-schema"
+    misleading_path.mkdir()
+
+    with pytest.raises(audit.AuditBlocked, match="cannot read JSON evidence") as captured:
+        audit._read_json(misleading_path, tmp_path)
+
+    assert audit._blocked_reason(captured.value) == "EVIDENCE_BLOCKED"
+
+
+def test_blocked_reason_property_is_read_only() -> None:
+    error = audit.AuditBlocked("bounded", reason="RESOURCE_BOUND_EXCEEDED")
+
+    with pytest.raises(AttributeError):
+        error.reason = "EVIDENCE_BLOCKED"  # type: ignore[misc]
+
+
+def test_actual_empty_inventory_and_resource_limit_raises_are_typed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(audit.AuditBlocked, match="inventory is empty") as empty:
+        audit.build_receipt(
+            [],
+            audit_time=NOW,
+            archive_min_age_days=45,
+            product_coverage={},
+            salvage_selectors=[],
+            hot_coverage={},
+        )
+    assert audit._blocked_reason(empty.value) == "EMPTY_INVENTORY"
+
+    output = tmp_path / "run-output"
+    output.mkdir()
+    (output / "product.txt").write_text("evidence", encoding="utf-8")
+    monkeypatch.setattr(audit, "MAX_RUN_OUTPUT_ENTRIES", 0)
+    with pytest.raises(audit.AuditBlocked, match="run output exceeds") as bounded:
+        audit._directory_has_regular_file(output, tmp_path)
+    assert audit._blocked_reason(bounded.value) == "RESOURCE_BOUND_EXCEEDED"
+
+
+def test_main_does_not_label_untyped_bootstrap_failure_as_config_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        audit,
+        "bootstrap_receipt_path",
+        lambda _argv: (_ for _ in ()).throw(audit.AuditBlocked("evidence is required")),
+    )
+
+    assert audit.main([]) == 1
+    diagnostic = json.loads(capsys.readouterr().err)
+    assert diagnostic["reason"] == audit.UNEXPECTED_ERROR_REASON
+
+
+@pytest.mark.parametrize(
+    ("label", "expected_reason"),
+    [
+        ("product archive manifest", "EVIDENCE_BLOCKED"),
+        ("salvage manifest", "EVIDENCE_BLOCKED"),
+        ("archive completeness receipt", "RECEIPT_INVALID"),
+    ],
+)
+def test_main_classifies_required_property_schema_failure_by_typed_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    label: str,
+    expected_reason: str,
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+
+    def fail_schema(_config: audit.AuditConfig, *, publish: bool) -> dict[str, object]:
+        assert publish is False
+        audit._validate_schema(
+            {},
+            {"type": "object", "required": ["required_evidence"]},
+            label,
+            reason="RECEIPT_INVALID" if label == "archive completeness receipt" else "EVIDENCE_BLOCKED",
+        )
+        raise AssertionError("schema validation must raise")
+
+    monkeypatch.setattr(audit, "run_audit", fail_schema)
+
+    assert audit.main([]) == 1
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "blocked"
+    assert receipt["refusal_reason"] == expected_reason
+
+
+def test_main_publishes_config_invalid_for_non_integer_archive_age_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setenv("NHMS_ARCHIVE_MIN_AGE_DAYS", "not-an-int")
+    argv = [
+        "--database-url",
+        config.database_url,
+        "--object-store-root",
+        str(config.object_store_root),
+        "--object-store-prefix",
+        config.object_store_prefix,
+        "--archive-root",
+        str(config.archive_root),
+        "--receipt-path",
+        str(config.receipt_path),
+    ]
+
+    assert audit.main(argv) == 1
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "blocked"
+    assert receipt["refusal_reason"] == "CONFIG_INVALID"
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "s3://user:password@nhms",
+        "s3://nhms:443",
+        "s3://nhms/path?token=query-secret",
+        "s3://nhms/path#fragment",
+        "s3://nhms/encoded%2fpath",
+        "s3://nhms/option%61l-path",
+        "s3://nhms/path\\escape",
+        "s3://nhms/control\x00path",
+        "s3://nhms/../unsafe",
+        "s3://nhms/double//segment",
+        "s3://UPPERCASE/path",
+    ],
+)
+def test_object_store_prefix_config_rejects_noncanonical_authority_and_path(
+    tmp_path: Path, prefix: str
+) -> None:
+    args = _args(tmp_path, age=45)
+    args.object_store_prefix = prefix
+    with pytest.raises(audit.AuditBlocked, match="OBJECT_STORE_PREFIX") as captured:
+        audit.config_from_args(args)
+    assert "query-secret" not in str(captured.value)
+
+
+@pytest.mark.parametrize("prefix", ["s3://nhms", "s3://lowercase-bucket/safe/prefix"])
+def test_object_store_prefix_config_accepts_canonical_root_or_safe_path(
+    tmp_path: Path, prefix: str
+) -> None:
+    args = _args(tmp_path, age=45)
+    args.object_store_prefix = prefix
+    assert audit.config_from_args(args).object_store_prefix == prefix
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "forcing/gfs/raw\\backslash",
+        "forcing/gfs/encoded%5cbackslash",
+        "forcing/gfs/encoded%2fseparator",
+        "forcing/gfs/%2e%2e/traversal",
+        "forcing/gfs/%252e%252e/double-traversal",
+        "forcing/gfs/control%00byte",
+        "forcing/gfs/unreserved%61lias",
+        "s3://user:password@nhms/forcing/gfs/file",
+        "s3://nhms:443/forcing/gfs/file",
+        "s3://nhms/%66orcing/gfs/file",
+        "s3://nhms/forcing/gfs/file?token=query-secret",
+    ],
+)
+def test_object_key_rejects_noncanonical_or_encoded_evidence_as_evidence_blocked(uri: str) -> None:
+    with pytest.raises(audit.AuditBlocked) as captured:
+        audit._object_key(uri, "s3://nhms", kind="file")
+    assert audit._blocked_reason(captured.value) == "EVIDENCE_BLOCKED"
+    assert "query-secret" not in str(captured.value)
+
+
+@pytest.mark.parametrize("kind", ["file", "directory"])
+@pytest.mark.parametrize(
+    ("uri", "prefix"),
+    [
+        ("runs/run-%61/output", "s3://nhms"),
+        ("s3://nhms/runs/run-%61/output", "s3://nhms"),
+        ("s3://nhms/optional/runs/run-%61/output", "s3://nhms/optional"),
+    ],
+)
+def test_object_key_rejects_percent_alias_before_decode_at_root_or_optional_prefix(
+    uri: str, prefix: str, kind: str
+) -> None:
+    with pytest.raises(audit.AuditBlocked, match="invalid object-store evidence URI") as captured:
+        audit._object_key(uri, prefix, kind=kind)  # type: ignore[arg-type]
+    assert audit._blocked_reason(captured.value) == "EVIDENCE_BLOCKED"
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "s3://other/forcing/gfs/file",
+        "s3://nhms/other-prefix/forcing/gfs/file",
+    ],
+)
+def test_object_key_bucket_and_optional_prefix_mismatch_keep_stable_reason(uri: str) -> None:
+    prefix = "s3://nhms/expected-prefix" if "other-prefix" in uri else "s3://nhms"
+    with pytest.raises(audit.AuditBlocked) as captured:
+        audit._object_key(uri, prefix, kind="file")
+    assert audit._blocked_reason(captured.value) == "OBJECT_URI_PREFIX_MISMATCH"
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "s3://nhms//forcing/gfs/file",
+        "s3://nhms///forcing/gfs/file",
+        "s3://nhms/forcing//gfs/file",
+        "s3://nhms/forcing/gfs/file//",
+        "runs//run-a/output",
+        "states//gfs/model-a/state.cfg.ic",
+    ],
+)
+def test_object_key_rejects_double_slash_identity_forms(uri: str) -> None:
+    with pytest.raises(audit.AuditBlocked) as captured:
+        audit._object_key(uri, "s3://nhms", kind="file")
+    assert audit._blocked_reason(captured.value) == "EVIDENCE_BLOCKED"
+
+
+def test_object_key_rejects_double_slash_below_optional_configured_prefix() -> None:
+    with pytest.raises(audit.AuditBlocked) as captured:
+        audit._object_key(
+            "s3://nhms/expected-prefix//runs/run-a/output",
+            "s3://nhms/expected-prefix",
+            kind="directory",
+        )
+    assert audit._blocked_reason(captured.value) == "EVIDENCE_BLOCKED"
+
+
+@pytest.mark.parametrize(
+    ("uri", "kind", "expected"),
+    [
+        ("s3://nhms/runs/run-a/output/", "directory", "runs/run-a/output"),
+        ("runs/run-a/output/", "directory", "runs/run-a/output"),
+        (
+            "s3://nhms/states/gfs/model-a/state.cfg.ic",
+            "file",
+            "states/gfs/model-a/state.cfg.ic",
+        ),
+    ],
+)
+def test_object_key_allows_single_directory_trailing_slash_and_state_file(
+    uri: str, kind: str, expected: str
+) -> None:
+    assert audit._object_key(uri, "s3://nhms", kind=kind) == expected  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "s3://nhms/runs/run-a/input/manifest.json/",
+        "runs/run-a/input/manifest.json/",
+    ],
+)
+def test_object_key_file_kind_rejects_single_trailing_slash(uri: str) -> None:
+    with pytest.raises(audit.AuditBlocked, match="file.*trailing slash") as captured:
+        audit._object_key(uri, "s3://nhms", kind="file")
+    assert audit._blocked_reason(captured.value) == "EVIDENCE_BLOCKED"
+
+
+def test_invalid_prefix_blocks_before_audit_and_replaces_stale_success_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    audit.publish_receipt(config.receipt_path, _receipt([_subject()]))
+    stale = config.receipt_path.read_bytes()
+    audit_calls = 0
+    publish_attempts = 0
+    atomic_attempts = 0
+    original_publish = audit.publish_receipt
+    original_atomic = audit.atomic_write_bytes_no_follow
+
+    def reject_audit(*_args: object, **_kwargs: object) -> dict[str, object]:
+        nonlocal audit_calls
+        audit_calls += 1
+        raise AssertionError("invalid prefix must fail before audit/DB/FS preflight")
+
+    def count_publish(path: Path, receipt: dict[str, object]) -> None:
+        nonlocal publish_attempts
+        publish_attempts += 1
+        original_publish(path, receipt)
+
+    def count_atomic(*args: object, **kwargs: object) -> None:
+        nonlocal atomic_attempts
+        atomic_attempts += 1
+        original_atomic(*args, **kwargs)
+
+    monkeypatch.setattr(audit, "run_audit", reject_audit)
+    monkeypatch.setattr(audit, "publish_receipt", count_publish)
+    monkeypatch.setattr(audit, "atomic_write_bytes_no_follow", count_atomic)
+    argv = [
+        "--receipt-path",
+        str(config.receipt_path),
+        "--database-url",
+        config.database_url,
+        "--object-store-root",
+        str(config.object_store_root),
+        "--object-store-prefix",
+        "s3://nhms/prefix?token=query-secret",
+        "--archive-root",
+        str(config.archive_root),
+        "--zstd-path",
+        str(config.zstd_path),
+    ]
+    assert audit.main(argv) == 1
+    assert audit_calls == 0 and publish_attempts == 1 and atomic_attempts == 1
+    body = config.receipt_path.read_text(encoding="utf-8")
+    receipt = json.loads(body)
+    assert receipt["outcome"] == "blocked"
+    assert receipt["refusal_reason"] == "CONFIG_INVALID"
+    assert "query-secret" not in body
+    assert config.receipt_path.read_bytes() != stale
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "query",
+        "encoded-separator",
+        "db-package-double-slash",
+        "member-double-slash",
+        "member-trailing-slash",
+        "db-package-percent-alias",
+        "member-percent-alias",
+    ],
+)
+def test_real_complete_forcing_evidence_with_unsafe_member_uri_blocks_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mutation: str,
+) -> None:
+    config = _config(tmp_path)
+    stale_subject = _subject(start=NOW - timedelta(days=1), end=NOW)
+    audit.publish_receipt(
+        config.receipt_path,
+        _receipt(
+            [stale_subject],
+            hot={stale_subject.stable_key: audit.Coverage("hot-object-store")},
+        ),
+    )
+    stale = config.receipt_path.read_bytes()
+    key = "forcing/gfs/2026050100/basin-a/model-a"
+    package = config.object_store_root / key
+    package.mkdir(parents=True)
+    data = b"complete-forcing-evidence"
+    (package / "data.csv").write_bytes(data)
+    if mutation == "query":
+        member_uri = f"s3://nhms/{key}/data.csv?token=query-secret"
+    elif mutation == "encoded-separator":
+        member_uri = f"s3://nhms/{key}/nested%2fdata.csv"
+    elif mutation == "member-double-slash":
+        member_uri = f"s3://nhms//{key}/data.csv"
+    elif mutation == "member-trailing-slash":
+        member_uri = f"s3://nhms/{key}/data.csv/"
+    elif mutation == "member-percent-alias":
+        member_uri = f"s3://nhms/{key}/d%61ta.csv"
+    else:
+        member_uri = f"s3://nhms/{key}/data.csv"
+    manifest = {
+        "forcing_version_id": "forcing-a",
+        "source_id": "gfs",
+        "cycle_time": audit._time(START),
+        "start_time": audit._time(START),
+        "end_time": audit._time(END),
+        "model_id": "model-a",
+        "basin_version_id": "basin-a",
+        "files": [{"uri": member_uri, "checksum": hashlib.sha256(data).hexdigest()}],
+    }
+    raw_manifest = json.dumps(manifest).encode("utf-8")
+    (package / "forcing_package.json").write_bytes(raw_manifest)
+    forcing_row = {
+        "forcing_version_id": "forcing-a",
+        "model_id": "model-a",
+        "source_id": "gfs",
+        "cycle_time": START,
+        "start_time": START,
+        "end_time": END,
+        "forcing_package_uri": (
+            f"s3://nhms//{key}"
+            if mutation == "db-package-double-slash"
+            else f"s3://nhms/%66orcing/{key.removeprefix('forcing/')}"
+            if mutation == "db-package-percent-alias"
+            else f"s3://nhms/{key}"
+        ),
+        "checksum": hashlib.sha256(raw_manifest).hexdigest(),
+        "basin_version_id": "basin-a",
+    }
+
+    class Connection(_Connection):
+        def __init__(self) -> None:
+            super().__init__([[{"audit_time": NOW}], [forcing_row], [], []])
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("psycopg2.connect", lambda _dsn: Connection())
+    original_publish = audit.publish_receipt
+    original_atomic = audit.atomic_write_bytes_no_follow
+    publish_attempts = 0
+    atomic_attempts = 0
+
+    def count_publish(path: Path, receipt: dict[str, object]) -> None:
+        nonlocal publish_attempts
+        publish_attempts += 1
+        original_publish(path, receipt)
+
+    def count_atomic(*args: object, **kwargs: object) -> None:
+        nonlocal atomic_attempts
+        atomic_attempts += 1
+        original_atomic(*args, **kwargs)
+
+    monkeypatch.setattr(audit, "publish_receipt", count_publish)
+    monkeypatch.setattr(audit, "atomic_write_bytes_no_follow", count_atomic)
+    argv = [
+        "--receipt-path",
+        str(config.receipt_path),
+        "--database-url",
+        config.database_url,
+        "--object-store-root",
+        str(config.object_store_root),
+        "--object-store-prefix",
+        config.object_store_prefix,
+        "--archive-root",
+        str(config.archive_root),
+        "--zstd-path",
+        str(config.zstd_path),
+    ]
+    assert audit.main(argv) == 1
+    captured = capsys.readouterr()
+    assert audit.PUBLICATION_FAILED_CODE not in captured.err
+    assert publish_attempts == 1 and atomic_attempts == 1
+    body = config.receipt_path.read_text(encoding="utf-8")
+    receipt = json.loads(body)
+    assert receipt["outcome"] == "blocked"
+    assert receipt["refusal_reason"] == "EVIDENCE_BLOCKED"
+    assert "coverage_bounds" not in receipt and "windows" not in receipt
+    assert "query-secret" not in body
+    assert config.receipt_path.read_bytes() != stale
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "state-file-trailing-slash",
+        "run-db-manifest-trailing-slash",
+        "run-embedded-manifest-trailing-slash",
+        "state-file-percent-alias",
+        "run-db-manifest-percent-alias",
+        "run-db-output-percent-alias",
+        "run-embedded-manifest-percent-alias",
+        "run-embedded-output-percent-alias",
+    ],
+)
+def test_real_main_rejects_noncanonical_inventory_evidence_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    scenario: str,
+) -> None:
+    config = _config(tmp_path)
+    stale = _receipt([_subject(identifier="stale-file-kind")])
+    audit.publish_receipt(config.receipt_path, stale)
+    forcing_rows: list[dict[str, object]] = []
+    run_rows: list[dict[str, object]] = []
+    state_rows: list[dict[str, object]] = []
+
+    if scenario.startswith("state-file"):
+        state_uri = "states/gfs/model-a/2026050100/state.cfg.ic"
+        if scenario.endswith("trailing-slash"):
+            state_uri += "/"
+        else:
+            state_uri = "%73tates/gfs/model-a/2026050100/state.cfg.ic"
+        state_rows.append(
+            {
+                "state_id": "state-a",
+                "model_id": "model-a",
+                "run_id": "run-a",
+                "source_id": "gfs",
+                "valid_time": START,
+                "state_uri": state_uri,
+                "checksum": "a" * 64,
+                "cloned_from_state_id": None,
+                "cloned_from_model_id": None,
+                "clone_gate_fingerprint": None,
+            }
+        )
+    else:
+        manifest_path = config.object_store_root / "runs/run-a/input/manifest.json"
+        manifest_path.parent.mkdir(parents=True)
+        output = config.object_store_root / "runs/run-a/output/result.csv"
+        output.parent.mkdir(parents=True)
+        output.write_text("run-output", encoding="utf-8")
+        embedded_manifest_uri = "s3://nhms/runs/run-a/input/manifest.json"
+        if scenario == "run-embedded-manifest-trailing-slash":
+            embedded_manifest_uri += "/"
+        elif scenario == "run-embedded-manifest-percent-alias":
+            embedded_manifest_uri = "s3://nhms/runs/run-a/input/manifest%2Ejson"
+        embedded_output_uri = "s3://nhms/runs/run-a/output/"
+        if scenario == "run-embedded-output-percent-alias":
+            embedded_output_uri = "s3://nhms/runs/run-a/outp%75t/"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "run_id": "run-a",
+                    "source_id": "gfs",
+                    "cycle_time": audit._time(START),
+                    "start_time": audit._time(START),
+                    "end_time": audit._time(END),
+                    "model": {"model_id": "model-a", "basin_version_id": "basin-a"},
+                    "outputs": {
+                        "run_manifest_uri": embedded_manifest_uri,
+                        "output_uri": embedded_output_uri,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        db_manifest_uri = "s3://nhms/runs/run-a/input/manifest.json"
+        if scenario == "run-db-manifest-trailing-slash":
+            db_manifest_uri += "/"
+        elif scenario == "run-db-manifest-percent-alias":
+            db_manifest_uri = "s3://nhms/runs/run-a/input/manifest%2Ejson"
+        db_output_uri = "s3://nhms/runs/run-a/output/"
+        if scenario == "run-db-output-percent-alias":
+            db_output_uri = "s3://nhms/runs/run-a/outp%75t/"
+        run_rows.append(
+            {
+                "run_id": "run-a",
+                "model_id": "model-a",
+                "basin_version_id": "basin-a",
+                "source_id": "gfs",
+                "cycle_time": START,
+                "start_time": START,
+                "end_time": END,
+                "run_manifest_uri": db_manifest_uri,
+                "output_uri": db_output_uri,
+                "detail_present": 1,
+            }
+        )
+
+    class Connection(_Connection):
+        def __init__(self) -> None:
+            super().__init__([[{"audit_time": NOW}], forcing_rows, run_rows, state_rows])
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("psycopg2.connect", lambda _dsn: Connection())
+    original_publish = audit.publish_receipt
+    original_atomic = audit.atomic_write_bytes_no_follow
+    publish_attempts = 0
+    atomic_attempts = 0
+
+    def count_publish(path: Path, receipt: dict[str, object]) -> None:
+        nonlocal publish_attempts
+        publish_attempts += 1
+        original_publish(path, receipt)
+
+    def count_atomic(*args: object, **kwargs: object) -> None:
+        nonlocal atomic_attempts
+        atomic_attempts += 1
+        original_atomic(*args, **kwargs)
+
+    monkeypatch.setattr(audit, "publish_receipt", count_publish)
+    monkeypatch.setattr(audit, "atomic_write_bytes_no_follow", count_atomic)
+    assert audit.main(_main_argv(config)) == 1
+    assert audit.PUBLICATION_FAILED_CODE not in capsys.readouterr().err
+    assert publish_attempts == 1 and atomic_attempts == 1
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "blocked"
+    assert receipt["refusal_reason"] == "EVIDENCE_BLOCKED"
+    assert receipt != stale
+
+
+@pytest.mark.parametrize(
+    ("scenario", "lane", "subject_id"),
+    [
+        ("forcing-unknown-source", "forcing", "forcing-a"),
+        ("forcing-unsafe-model", "forcing", "forcing-a"),
+        ("forcing-unsafe-basin", "forcing", "forcing-a"),
+        ("run-unknown-source", "runs", "run-a"),
+        ("run-unsafe-id", "runs", "../run-a"),
+        ("state-unknown-source", "states", "state-a"),
+        ("state-unsafe-model", "states", "state-a"),
+        ("state-non-hour", "states", "state-a"),
+    ],
+)
+def test_real_main_classifies_db_shaped_archive_identity_failures_as_evidence_blocked_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    scenario: str,
+    lane: str,
+    subject_id: str,
+) -> None:
+    config = _config(tmp_path)
+    stale = _receipt([_subject(identifier="stale-identity")])
+    audit.publish_receipt(config.receipt_path, stale)
+    forcing_rows: list[dict[str, object]] = []
+    run_rows: list[dict[str, object]] = []
+    state_rows: list[dict[str, object]] = []
+    if lane == "forcing":
+        forcing_rows.append(
+            {
+                "forcing_version_id": subject_id,
+                "model_id": "../model-a" if scenario == "forcing-unsafe-model" else "model-a",
+                "source_id": "unknown-provider" if scenario.endswith("unknown-source") else "gfs",
+                "cycle_time": START,
+                "start_time": START,
+                "end_time": END,
+                "forcing_package_uri": "missing",
+                "checksum": "a" * 64,
+                "basin_version_id": (
+                    "../basin-a" if scenario == "forcing-unsafe-basin" else "basin-a"
+                ),
+            }
+        )
+    elif lane == "runs":
+        run_rows.append(
+            {
+                "run_id": subject_id,
+                "model_id": "model-a",
+                "basin_version_id": "basin-a",
+                "source_id": "unknown-provider" if scenario.endswith("unknown-source") else "gfs",
+                "cycle_time": START,
+                "start_time": START,
+                "end_time": END,
+                "run_manifest_uri": "s3://nhms/runs/run-a/input/manifest.json",
+                "output_uri": "s3://nhms/runs/run-a/output/",
+                "detail_present": 1,
+            }
+        )
+    else:
+        state_rows.append(
+            {
+                "state_id": subject_id,
+                "model_id": "../model-a" if scenario == "state-unsafe-model" else "model-a",
+                "run_id": "run-a",
+                "source_id": "unknown-provider" if scenario.endswith("unknown-source") else "gfs",
+                "valid_time": START + timedelta(minutes=1) if scenario == "state-non-hour" else START,
+                "state_uri": "states/gfs/model-a/2026050100/state.cfg.ic",
+                "checksum": "a" * 64,
+                "cloned_from_state_id": None,
+                "cloned_from_model_id": None,
+                "clone_gate_fingerprint": None,
+            }
+        )
+
+    class Connection(_Connection):
+        def __init__(self) -> None:
+            super().__init__([[{"audit_time": NOW}], forcing_rows, run_rows, state_rows])
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("psycopg2.connect", lambda _dsn: Connection())
+    original_publish = audit.publish_receipt
+    original_atomic = audit.atomic_write_bytes_no_follow
+    publish_attempts = 0
+    atomic_attempts = 0
+
+    def count_publish(path: Path, receipt: dict[str, object]) -> None:
+        nonlocal publish_attempts
+        publish_attempts += 1
+        original_publish(path, receipt)
+
+    def count_atomic(*args: object, **kwargs: object) -> None:
+        nonlocal atomic_attempts
+        atomic_attempts += 1
+        original_atomic(*args, **kwargs)
+
+    monkeypatch.setattr(audit, "publish_receipt", count_publish)
+    monkeypatch.setattr(audit, "atomic_write_bytes_no_follow", count_atomic)
+    assert audit.main(_main_argv(config)) == 1
+    assert audit.PUBLICATION_FAILED_CODE not in capsys.readouterr().err
+    assert publish_attempts == 1 and atomic_attempts == 1
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "blocked"
+    assert receipt["refusal_reason"] == "EVIDENCE_BLOCKED"
+    assert "coverage_bounds" not in receipt and "windows" not in receipt
+    assert lane in receipt["detail"] and subject_id in receipt["detail"]
+    assert receipt != stale
+    schema = json.loads(audit.COMPLETENESS_SCHEMA_PATH.read_text())
+    jsonschema.Draft7Validator(
+        schema, format_checker=jsonschema.FormatChecker()
+    ).validate(receipt)
+
+
+@pytest.mark.parametrize(
+    ("subject", "expected_source"),
+    [
+        (_subject(source_id="GFS"), "gfs"),
+        (_subject("states", "provider-alias", source_id="era5"), "ERA5"),
+        (_subject("states", "legacy", source_id=None), "legacy-unqualified"),
+    ],
+)
+def test_archive_identity_keeps_valid_source_aliases_and_source_less_legacy(
+    subject: audit.InventorySubject, expected_source: str
+) -> None:
+    assert subject.archive_identity.source == expected_source
+
+
+def test_non_identity_runtime_error_during_archive_derivation_remains_indeterminate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    forcing_row = {
+        "forcing_version_id": "forcing-a",
+        "model_id": "model-a",
+        "source_id": "gfs",
+        "cycle_time": START,
+        "start_time": START,
+        "end_time": END,
+        "forcing_package_uri": "missing",
+        "checksum": "a" * 64,
+        "basin_version_id": "basin-a",
+    }
+
+    class Connection(_Connection):
+        def __init__(self) -> None:
+            super().__init__([[{"audit_time": NOW}], [forcing_row], [], []])
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("psycopg2.connect", lambda _dsn: Connection())
+    monkeypatch.setattr(
+        audit,
+        "normalize_source_id",
+        lambda _value: (_ for _ in ()).throw(RuntimeError("non-identity runtime failure")),
+    )
+    assert audit.main(_main_argv(config)) == 1
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "indeterminate"
+    assert receipt["error_reason"] == audit.UNEXPECTED_ERROR_REASON
 
 
 def _clone_row(**overrides: object) -> dict[str, object]:
@@ -1381,6 +3999,51 @@ def test_run_output_entry_and_depth_caps_fail_closed(tmp_path: Path, monkeypatch
     )
     with pytest.raises(audit.AuditBlocked, match="entries"):
         audit._directory_has_regular_file(output, config.object_store_root)
+
+
+def test_run_output_wide_tree_holds_only_one_sibling_fd_at_a_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    output = config.object_store_root / "runs/run-a/output"
+    output.mkdir(parents=True)
+    for index in range(64):
+        child = output / f"child-{index:03d}"
+        child.mkdir()
+        (child / "result.csv").write_text("valid", encoding="utf-8")
+
+    original_open_child = audit._open_run_output_child
+    original_close = audit.os.close
+    child_fds: set[int] = set()
+    peak_child_fds = 0
+
+    def track_open_child(
+        directory_fd: int, name: str, path_label: Path, expected: os.stat_result
+    ) -> int:
+        nonlocal peak_child_fds
+        child_fd = original_open_child(directory_fd, name, path_label, expected)
+        child_fds.add(child_fd)
+        peak_child_fds = max(peak_child_fds, len(child_fds))
+        return child_fd
+
+    def track_close(fd: int) -> None:
+        child_fds.discard(fd)
+        original_close(fd)
+
+    monkeypatch.setattr(audit, "_open_run_output_child", track_open_child)
+    monkeypatch.setattr(audit.os, "close", track_close)
+
+    assert audit._directory_has_regular_file(output, config.object_store_root) is True
+    assert peak_child_fds == 1
+    assert child_fds == set()
+
+    outside = tmp_path / "outside-output"
+    outside.mkdir()
+    (output / "child-063/zz-unsafe").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(audit.AuditBlocked, match="unsafe non-regular"):
+        audit._directory_has_regular_file(output, config.object_store_root)
+    assert peak_child_fds == 1
+    assert child_fds == set()
 
 
 def test_run_output_depth_cap_fails_closed_after_inspecting_bounded_tree(tmp_path: Path) -> None:

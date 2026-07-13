@@ -106,12 +106,33 @@ def _completeness_receipt(
             }
         ]
     return {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "generated_at": _iso(generated_at),
+        "outcome": (
+            "complete" if all(subject.get("verdict") == "complete" for subject in subjects) else "incomplete"
+        ),
         "coverage_bounds": {"start": _iso(bounds_start), "end": _iso(bounds_end)},
         "windows": list(subjects),
         "salvage_selectors": [],
     }
+
+
+def test_blocked_upstream_receipt_is_distinguishable_from_missing_path(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "archive-completeness.json"
+    blocked = {
+        "schema_version": "1.1",
+        "generated_at": _iso(_NOW),
+        "outcome": "blocked",
+        "refusal_reason": "EVIDENCE_BLOCKED",
+    }
+    path.write_text(json.dumps(blocked), encoding="utf-8")
+    assert retention.load_completeness_receipt(path) == blocked
+    path.unlink()
+    with pytest.raises(retention.ReceiptGateError) as missing:
+        retention.load_completeness_receipt(path)
+    assert missing.value.code == retention.CODE_COMPLETENESS_RECEIPT_MISSING
 
 
 def _daily_coverage_tuples(

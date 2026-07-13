@@ -1,24 +1,97 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "NHMS Archive Completeness Receipt",
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["schema_version", "generated_at", "coverage_bounds", "windows", "salvage_selectors"],
-  "properties": {
-    "schema_version": {"const": "1.0"},
-    "generated_at": {"type": "string", "format": "date-time"},
-    "coverage_bounds": {"$ref": "#/definitions/window"},
-    "windows": {
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "generated_at", "outcome", "coverage_bounds", "windows", "salvage_selectors"],
+      "properties": {
+        "schema_version": {"const": "1.1"},
+        "generated_at": {"type": "string", "format": "date-time"},
+        "outcome": {"const": "complete"},
+        "coverage_bounds": {"$ref": "#/definitions/window"},
+        "windows": {"$ref": "#/definitions/complete_subject_verdicts"},
+        "salvage_selectors": {"type": "array", "maxItems": 0, "items": {"$ref": "#/definitions/selector"}}
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "generated_at", "outcome", "coverage_bounds", "windows", "salvage_selectors"],
+      "properties": {
+        "schema_version": {"const": "1.1"},
+        "generated_at": {"type": "string", "format": "date-time"},
+        "outcome": {"const": "incomplete"},
+        "coverage_bounds": {"$ref": "#/definitions/window"},
+        "windows": {"$ref": "#/definitions/incomplete_subject_verdicts"},
+        "salvage_selectors": {"type": "array", "items": {"$ref": "#/definitions/selector"}}
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "generated_at", "outcome", "refusal_reason"],
+      "properties": {
+        "schema_version": {"const": "1.1"},
+        "generated_at": {"type": "string", "format": "date-time"},
+        "outcome": {"const": "blocked"},
+        "refusal_reason": {"$ref": "#/definitions/blocked_reason"},
+        "detail": {"$ref": "#/definitions/detail"}
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "generated_at", "outcome", "error_reason"],
+      "properties": {
+        "schema_version": {"const": "1.1"},
+        "generated_at": {"type": "string", "format": "date-time"},
+        "outcome": {"const": "indeterminate"},
+        "error_reason": {"const": "UNEXPECTED_AUDIT_ERROR"},
+        "detail": {"$ref": "#/definitions/detail"}
+      }
+    }
+  ],
+  "definitions": {
+    "subject_verdicts": {
       "type": "array",
       "minItems": 1,
       "items": {"$ref": "#/definitions/subject_verdict"}
     },
-    "salvage_selectors": {
+    "complete_subject_verdicts": {
       "type": "array",
-      "items": {"$ref": "#/definitions/selector"}
-    }
-  },
-  "definitions": {
+      "minItems": 1,
+      "items": {
+        "allOf": [
+          {"$ref": "#/definitions/subject_verdict"},
+          {"type": "object", "required": ["verdict"], "properties": {"verdict": {"const": "complete"}}}
+        ]
+      }
+    },
+    "incomplete_subject_verdicts": {
+      "allOf": [
+        {"$ref": "#/definitions/subject_verdicts"},
+        {
+          "contains": {
+            "type": "object",
+            "required": ["verdict"],
+            "properties": {"verdict": {"enum": ["pending-archive", "gap"]}}
+          }
+        }
+      ]
+    },
+    "blocked_reason": {
+      "enum": [
+        "CONFIG_INVALID",
+        "EMPTY_INVENTORY",
+        "OBJECT_URI_PREFIX_MISMATCH",
+        "EVIDENCE_BLOCKED",
+        "RESOURCE_BOUND_EXCEEDED",
+        "RECEIPT_INVALID"
+      ]
+    },
+    "detail": {"type": "string", "minLength": 1, "maxLength": 512},
     "subject_verdict": {
       "oneOf": [
         {

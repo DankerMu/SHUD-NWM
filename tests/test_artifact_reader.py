@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from packages.common import redaction
 from services.artifacts import ArtifactLogError, ArtifactReader, ArtifactReaderConfig, safe_public_log_uri
+from services.artifacts import reader as artifact_reader
 from services.artifacts.reader import Boto3ObjectReader
 
 
@@ -71,6 +73,28 @@ def test_env_tail_max_bytes_is_clamped_for_direct_reader(
     assert observed_max_bytes == [1024 * 1024]
     assert result.content == "tail"
     assert result.truncated is False
+
+
+def test_artifact_1mib_tail_slash_run_uses_linear_shared_redaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = redaction._slash_run_end
+    slash_visits = 0
+
+    def count_slash_run(value: str, start: int) -> int:
+        nonlocal slash_visits
+        end = original(value, start)
+        slash_visits += end - start
+        return end
+
+    monkeypatch.setattr(redaction, "_slash_run_end", count_slash_run)
+    suffix = "u0061pi_key=artifact-linear-secret"
+    raw = "\\" * (1024 * 1024 - len(suffix)) + suffix
+    content = artifact_reader._redacted_text_from_bytes(raw.encode())
+
+    assert len(raw) == 1024 * 1024
+    assert "artifact-linear-secret" not in content
+    assert slash_visits <= 6 * len(raw)
 
 
 def test_published_uri_reads_bounded_tail(tmp_path: Path) -> None:

@@ -1,0 +1,52 @@
+{
+  "evidence_type": "node27-systemd-terminal-receipt",
+  "generated_at": "2026-07-13T09:32:37Z",
+  "issue": 1066,
+  "node": "node-27",
+  "user": "nwm",
+  "repository": "/home/nwm/NWM",
+  "head_sha": "1f7bba9d89a80b563fc51ff6ef407189ca5ee58b",
+  "service": "nhms-node27-storage-inventory-audit.service",
+  "focused_test_result": "476 passed, 1 skipped",
+  "live_config": {
+    "audit_object_store_prefix": "s3://nhms",
+    "product_archive_object_store_prefix": "s3://nhms"
+  },
+  "systemctl_returncode": 0,
+  "service_state": {
+    "active_state": "inactive",
+    "sub_state": "dead",
+    "result": "success",
+    "exec_main_status": 0
+  },
+  "stderr_byte_range": {
+    "start_offset": 923,
+    "end_offset": 923
+  },
+  "receipt": {
+    "path": "/home/nwm/node27-storage-inventory-audit-logs/completeness-receipt.json",
+    "committed_copy": "completeness-incomplete-live-20260713T093237Z.json",
+    "sha256": "3b91c0821e1f0c8e3d9ffae7bbef07ab2e7c3a22d8a2910b7f5044a7438a236d",
+    "size_bytes": 472062,
+    "mode": "0600",
+    "schema_version": "1.1",
+    "outcome": "incomplete",
+    "windows": 1585,
+    "salvage_selectors": 228,
+    "verdict_counts": {
+      "complete": 1357,
+      "gap": 228
+    },
+    "lane_counts": {
+      "forcing": 733,
+      "runs": 852
+    }
+  },
+  "validation": {
+    "draft7_with_format_checker": "PASS",
+    "runtime_semantics": "PASS",
+    "remote_and_committed_sha256_match": true
+  },
+  "verdict": "PASS_TERMINAL_RECEIPT",
+  "downstream_boundary": "The incomplete receipt proves issue #1066. The 228 gap selectors remain evidence for issue #1065; no #856 retention dry-run or enforce action was executed."
+}

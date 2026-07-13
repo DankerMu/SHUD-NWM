@@ -30,6 +30,24 @@ def _clear_libpq_ambient_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(key, raising=False)
 
 
+def test_emitted_pipeline_summary_masks_unicode_escaped_sensitive_mapping_keys(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    autopipe._emit_json_summary(
+        {
+            "status": "blocked",
+            r"p\u0061ssword": "pipeline-password-secret",
+            r"api\u005fkey": "pipeline-api-secret",
+            r"ordinary\u006bey": "visible",
+        }
+    )
+
+    summary = json.loads(capsys.readouterr().out)
+    assert summary[r"p\u0061ssword"] == "[redacted]"
+    assert summary[r"api\u005fkey"] == "[redacted]"
+    assert summary[r"ordinary\u006bey"] == "visible"
+
+
 def _prepare_roots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     object_store_root = tmp_path / "object-store"
     basins_root = tmp_path / "Basins"
@@ -911,7 +929,12 @@ def test_basin_seed_failure_isolated_after_valid_preflight(
     monkeypatch.setattr(autopipe, "_ensure_seeded_basin_display_ready", _display_ready_stub)
 
     def fake_seed(**kwargs: object) -> dict[str, Any]:
-        return {"basin": kwargs["basin"], "outcome": "seed_failed", "stage": "import", "error": "secret=seed-token"}
+        return {
+            "basin": kwargs["basin"],
+            "outcome": "seed_failed",
+            "stage": "import",
+            "error": '{"\\u0073ecret": "seed-token"}',
+        }
 
     processed: list[str] = []
     monkeypatch.setattr(autopipe, "_seed_basin", fake_seed)
@@ -932,7 +955,9 @@ def test_basin_seed_failure_isolated_after_valid_preflight(
     assert rc == 1
     assert summary["status"] == "completed_with_failures"
     assert summary["return_code"] == 1
-    assert summary["seed"]["failed"] == [{"basin": "qhh", "error": "secret=[redacted]", "stage": "import"}]
+    assert summary["seed"]["failed"] == [
+        {"basin": "qhh", "error": '{"\\u0073ecret": [redacted]}', "stage": "import"}
+    ]
     assert processed == [RUN_HEIHE]
     assert summary["runs"]["processed"] == 1
     assert "seed-token" not in rendered

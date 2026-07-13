@@ -16,6 +16,7 @@ from typing import Any
 import jsonschema
 import pytest
 
+from packages.common import redaction
 from scripts import node27_db_export_salvage as salvage
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -41,8 +42,9 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 def _write_receipt_input(path: Path, salvage_selectors: list[dict[str, Any]] | None = None) -> None:
     payload: dict[str, Any] = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "generated_at": "2026-07-11T12:05:00Z",
+        "outcome": "incomplete",
         "coverage_bounds": {"start": "2026-05-28T00:00:00Z", "end": "2026-06-16T00:00:00Z"},
         "windows": [
             {
@@ -684,6 +686,480 @@ def test_mask_dsn_strips_credentials() -> None:
     assert "127.0.0.1" in masked
 
 
+def test_keyword_dsn_mask_and_source_database_are_allowlist_rebuilt() -> None:
+    dsn = "host=db.example.test port=55432 user=reader password='keyword secret' dbname=nhms"
+    masked = salvage._mask_dsn(dsn)
+    assert masked == "postgresql://***@db.example.test:55432/nhms"
+    assert salvage._source_database_from_dsn(dsn) == "nhms"
+    assert dsn not in masked and "keyword secret" not in masked
+
+
+@pytest.mark.parametrize(
+    "dsn",
+    [
+        "host=db user=reader password=secret dbname='unsafe/path'",
+        "host='/tmp/postgres socket' user=reader password=secret dbname=nhms",
+        "opaque-dsn-secret",
+    ],
+)
+def test_dsn_mask_never_reemits_unvalidated_database_or_host(dsn: str) -> None:
+    assert salvage._mask_dsn(dsn) == "postgresql://***@***/***"
+    assert salvage._source_database_from_dsn(dsn) == "unknown"
+
+
+def test_keyword_dsn_success_receipt_contains_only_safe_database_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dsn = "password='keyword secret' dbname=nhms host=db.example.test user=reader port=55432"
+    env = _base_env(tmp_path, override={"DATABASE_URL": dsn})
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    row_count, copy_export, compress = _make_stub_copy_and_count()
+    assert (
+        salvage.main(
+            argv=[],
+            now_utc=_NOW,
+            check_write_privileges=_stub_check_read_only,
+            fetch_row_count=row_count,
+            perform_copy_export=copy_export,
+            compress_bytes=compress,
+        )
+        == 0
+    )
+    receipt = Path(env["NODE27_DB_EXPORT_SALVAGE_RECEIPT_PATH"]).read_text(encoding="utf-8")
+    payload = json.loads(receipt)
+    assert payload["source_database"]["database"] == "nhms"
+    assert dsn not in receipt and "keyword secret" not in receipt
+
+
+def test_opaque_dsn_success_receipt_uses_safe_database_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dsn = "opaque-dsn-secret"
+    env = _base_env(tmp_path, override={"DATABASE_URL": dsn})
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    row_count, copy_export, compress = _make_stub_copy_and_count()
+    assert (
+        salvage.main(
+            argv=[],
+            now_utc=_NOW,
+            check_write_privileges=_stub_check_read_only,
+            fetch_row_count=row_count,
+            perform_copy_export=copy_export,
+            compress_bytes=compress,
+        )
+        == 0
+    )
+    receipt = Path(env["NODE27_DB_EXPORT_SALVAGE_RECEIPT_PATH"]).read_text(encoding="utf-8")
+    assert json.loads(receipt)["source_database"]["database"] == "unknown"
+    assert dsn not in receipt
+
+
+def test_keyword_dsn_refused_stderr_masks_reordered_echo_and_bare_password(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    dsn = "host=db user=reader password='keyword secret' dbname=nhms"
+    reordered = "dbname=nhms password='keyword secret' host=db user=reader"
+    env = _base_env(tmp_path, override={"DATABASE_URL": dsn})
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert (
+        salvage.main(
+            argv=[],
+            now_utc=_NOW,
+            check_write_privileges=lambda _dsn: (
+                f"role probe echoed {reordered}; bare=keyword secret"
+            ),
+            fetch_row_count=lambda *_args, **_kwargs: 0,
+            perform_copy_export=lambda *_args, **_kwargs: b"",
+            compress_bytes=lambda data, _level, _zstd_path: data,
+        )
+        == 1
+    )
+    stderr = capsys.readouterr().err
+    assert json.loads(stderr)["outcome"] == "refused_role"
+    assert dsn not in stderr and reordered not in stderr and "keyword secret" not in stderr
+
+
+def test_quoted_credential_keys_are_masked_in_helper_and_refused_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    diagnostic = (
+        '{"auth_\\u0068eader": "Bearer helper-secret", "safe": "visible"} '
+        'payload="password=helper-fragment-secret" '
+        'payload="prefix {"password":"helper-unescaped-secret"} suffix" '
+        r'payload="prefix {\\\"password\\\":\\\"helper-layered-secret\\\"} suffix" '
+        'Authorization=Bearer "helper quoted auth secret" '
+        r'{\"password\":\"helper-standalone-secret\"} '
+        'token=Bearer helper-assigned-secret'
+    )
+    masked = salvage._mask_dsn_in_message(diagnostic, _DSN)
+    assert "helper-secret" not in masked and "helper-fragment-secret" not in masked
+    assert "helper-unescaped-secret" not in masked and "helper-layered-secret" not in masked
+    assert "helper quoted auth secret" not in masked
+    assert "helper-standalone-secret" not in masked
+    assert "helper-assigned-secret" not in masked
+    assert "visible" in masked
+
+    env = _base_env(tmp_path)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert (
+        salvage.main(
+            argv=[],
+            now_utc=_NOW,
+            check_write_privileges=lambda _dsn: (
+                "role {'\\u0061uth': 'Basic refused-secret', 'safe': 'visible'} "
+                "source='token=refused-fragment-secret' "
+                r'Proxy-Authorization=Basic \"refused quoted auth secret\" '
+                r'{\"api_key\":\"refused-standalone-secret\"} '
+                'password=Basic refused-assigned-secret'
+            ),
+            fetch_row_count=lambda *_args, **_kwargs: 0,
+            perform_copy_export=lambda *_args, **_kwargs: b"",
+            compress_bytes=lambda data, _level, _zstd_path: data,
+        )
+        == 1
+    )
+    stderr = capsys.readouterr().err
+    assert json.loads(stderr)["outcome"] == "refused_role"
+    assert "refused-secret" not in stderr and "refused-fragment-secret" not in stderr
+    assert "refused quoted auth secret" not in stderr
+    assert "refused-standalone-secret" not in stderr
+    assert "refused-assigned-secret" not in stderr
+    assert "visible" in stderr
+
+
+def test_quoted_credential_keys_are_masked_in_selector_receipt_and_runner_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    env = _base_env(
+        tmp_path,
+        override={"NODE27_DB_EXPORT_SALVAGE_MODE": "enforce"},
+    )
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    def fail_copy(*_args: object, **_kwargs: object) -> bytes:
+        raise RuntimeError(
+            'selector {"前缀authorization": "Bearer selector-secret", "safe": "visible"} '
+            'payload="api_key=selector-fragment-secret" '
+            'payload="prefix {"password":"selector-unescaped-secret"} suffix" '
+            r'payload="prefix {\\\"password\\\":\\\"selector-layered-secret\\\"} suffix" '
+            'auth_header=Bearer\u2003"selector quoted auth secret" '
+            r'{\"token\":\"selector-standalone-secret\"} '
+            'api_key=Bearer selector-assigned-secret '
+            "password\u00a0=\u00a0selector-unicode-secret "
+            '\"token=selector-quoted-outer-secret\": "selector-outer-secret"'
+        )
+
+    assert (
+        salvage.main(
+            argv=[],
+            now_utc=_NOW,
+            check_write_privileges=_stub_check_read_only,
+            fetch_row_count=lambda *_args, **_kwargs: 0,
+            perform_copy_export=fail_copy,
+            compress_bytes=lambda data, _level, _zstd_path: data,
+        )
+        == 1
+    )
+    receipt = Path(env["NODE27_DB_EXPORT_SALVAGE_RECEIPT_PATH"]).read_text(encoding="utf-8")
+    assert json.loads(receipt)["selected"][0]["state"] == "error"
+    for secret in (
+        "selector-secret",
+        "selector-fragment-secret",
+        "selector-unescaped-secret",
+        "selector-layered-secret",
+        "selector quoted auth secret",
+        "selector-standalone-secret",
+        "selector-assigned-secret",
+        "selector-unicode-secret",
+        "selector-quoted-outer-secret",
+        "selector-outer-secret",
+    ):
+        assert secret not in receipt
+    assert "visible" in receipt
+
+    monkeypatch.setattr(
+        salvage,
+        "build_receipt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError(
+                "runner {'proxy_\\u0061uthorization': 'Bearer runner-secret', 'safe': 'visible'} "
+                'source="password=runner-fragment-secret" '
+                'payload="prefix {"password":"runner-unescaped-secret"} suffix" '
+                r'payload="prefix {\\\"password\\\":\\\"runner-layered-secret\\\"} suffix" '
+                "Proxy-Authorization=Basic 'runner quoted auth secret' "
+                r'{\"Authorization\":\"runner-standalone-auth-secret\"} '
+                'credential=Basic runner-assigned-secret '
+                "token\u0085=\u0085runner-unicode-secret "
+                "'api_key=runner-quoted-outer-secret' = 'runner-outer-secret'"
+            )
+        ),
+    )
+    assert salvage.main(argv=[], now_utc=_NOW) == 1
+    stderr = capsys.readouterr().err
+    assert json.loads(stderr)["outcome"] == "partial"
+    for secret in (
+        "runner-secret",
+        "runner-fragment-secret",
+        "runner-unescaped-secret",
+        "runner-layered-secret",
+        "runner quoted auth secret",
+        "runner-standalone-auth-secret",
+        "runner-assigned-secret",
+        "runner-unicode-secret",
+        "runner-quoted-outer-secret",
+        "runner-outer-secret",
+    ):
+        assert secret not in stderr
+    assert "visible" in stderr
+
+
+def test_unicode_escaped_credential_key_is_masked_from_salvage_publication_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    env = _base_env(tmp_path)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    row_count, copy_export, compress = _make_stub_copy_and_count()
+    monkeypatch.setattr(
+        salvage,
+        "publish_receipt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            salvage.SafeFilesystemError(
+                'publisher {"auth_\\u0068eader": "Basic publication-secret", '
+                '"safe": "visible"} payload="token=publication-fragment-secret" '
+                'detail="prefix {\\"api.key\\":\\"publication-inner-secret\\"}" '
+                'detail="prefix {"password":"publication-unescaped-secret"} suffix" '
+                r'detail="prefix {\\\"password\\\":\\\"publication-layered-secret\\\"} suffix" '
+                r'auth_header=Basic \"publication quoted auth secret\" '
+                r'{\"password\":\"publication-standalone-secret\"} '
+                'session-key=Bearer publication-assigned-secret '
+                r'p\u0061ssword=publication-bare-unicode-secret'
+            )
+        ),
+    )
+    assert (
+        salvage.main(
+            argv=[],
+            now_utc=_NOW,
+            check_write_privileges=_stub_check_read_only,
+            fetch_row_count=row_count,
+            perform_copy_export=copy_export,
+            compress_bytes=compress,
+        )
+        == 1
+    )
+    stderr = capsys.readouterr().err
+    assert json.loads(stderr)["outcome"] == "partial"
+    assert "publication-secret" not in stderr and "publication-fragment-secret" not in stderr
+    assert "publication-inner-secret" not in stderr
+    assert "publication-unescaped-secret" not in stderr
+    assert "publication-layered-secret" not in stderr
+    assert "publication quoted auth secret" not in stderr
+    assert "publication-standalone-secret" not in stderr
+    assert "publication-assigned-secret" not in stderr
+    assert "publication-bare-unicode-secret" not in stderr
+    assert "visible" in stderr
+
+
+def test_salvage_1mib_diagnostic_slash_run_uses_linear_shared_redaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = redaction._slash_run_end
+    slash_visits = 0
+
+    def count_slash_run(value: str, start: int) -> int:
+        nonlocal slash_visits
+        end = original(value, start)
+        slash_visits += end - start
+        return end
+
+    monkeypatch.setattr(redaction, "_slash_run_end", count_slash_run)
+    suffix = "u0061pi_key=salvage-linear-secret"
+    raw = "\\" * (1024 * 1024 - len(suffix)) + suffix
+    masked = salvage._mask_dsn_in_message(raw, _DSN)
+
+    assert len(raw) == 1024 * 1024
+    assert "salvage-linear-secret" not in masked
+    assert slash_visits <= 6 * len(raw)
+
+
+@pytest.mark.parametrize("quoted", [False, True])
+@pytest.mark.parametrize("backslash_count", [1, 2, 3])
+def test_mask_dsn_message_redacts_raw_escaped_password_body(
+    quoted: bool, backslash_count: int
+) -> None:
+    raw_password = "raw-secret" + "\\" * backslash_count + "tail"
+    lexical = f"'{raw_password}'" if quoted else raw_password
+    dsn = f"host=db user=reader password={lexical} dbname=nhms"
+    masked = salvage._mask_dsn_in_message(f"driver raw={raw_password}", dsn)
+    assert raw_password not in masked
+
+
+def test_raw_escaped_password_is_masked_in_refused_stderr_and_selector_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    raw_password = "raw-secret" + "\\" * 3 + "tail"
+    dsn = f"host=db user=reader password='{raw_password}' dbname=nhms"
+    env = _base_env(tmp_path, override={"DATABASE_URL": dsn})
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert (
+        salvage.main(
+            argv=[],
+            now_utc=_NOW,
+            check_write_privileges=lambda _dsn: f"role probe raw={raw_password}",
+            fetch_row_count=lambda *_args, **_kwargs: 0,
+            perform_copy_export=lambda *_args, **_kwargs: b"",
+            compress_bytes=lambda data, _level, _zstd_path: data,
+        )
+        == 1
+    )
+    stderr = capsys.readouterr().err
+    assert raw_password not in stderr and dsn not in stderr
+
+    for key, value in _base_env(
+        tmp_path,
+        override={"DATABASE_URL": dsn, "NODE27_DB_EXPORT_SALVAGE_MODE": "enforce"},
+    ).items():
+        monkeypatch.setenv(key, value)
+
+    def fail_copy(*_args: object, **_kwargs: object) -> bytes:
+        raise RuntimeError(f"selector runner raw={raw_password}")
+
+    assert (
+        salvage.main(
+            argv=[],
+            now_utc=_NOW,
+            check_write_privileges=_stub_check_read_only,
+            fetch_row_count=lambda *_args, **_kwargs: 0,
+            perform_copy_export=fail_copy,
+            compress_bytes=lambda data, _level, _zstd_path: data,
+        )
+        == 1
+    )
+    receipt_path = Path(os.environ["NODE27_DB_EXPORT_SALVAGE_RECEIPT_PATH"])
+    receipt = receipt_path.read_text(encoding="utf-8")
+    assert raw_password not in receipt and dsn not in receipt
+    assert json.loads(receipt)["selected"][0]["state"] == "error"
+
+
+def test_overlapping_password_candidates_are_masked_in_helper_stderr_and_selector_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    dsn = "host=db password=s3c password=s3cLONG dbname=nhms"
+    assert "LONG" not in salvage._mask_dsn_in_message("driver raw=s3cLONG", dsn)
+    env = _base_env(tmp_path, override={"DATABASE_URL": dsn})
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert (
+        salvage.main(
+            argv=[],
+            now_utc=_NOW,
+            check_write_privileges=lambda _dsn: "role raw=s3cLONG",
+            fetch_row_count=lambda *_args, **_kwargs: 0,
+            perform_copy_export=lambda *_args, **_kwargs: b"",
+            compress_bytes=lambda data, _level, _zstd_path: data,
+        )
+        == 1
+    )
+    stderr = capsys.readouterr().err
+    assert "s3c" not in stderr and "LONG" not in stderr
+
+    enforce_env = _base_env(
+        tmp_path,
+        override={"DATABASE_URL": dsn, "NODE27_DB_EXPORT_SALVAGE_MODE": "enforce"},
+    )
+    for key, value in enforce_env.items():
+        monkeypatch.setenv(key, value)
+
+    def fail_copy(*_args: object, **_kwargs: object) -> bytes:
+        raise RuntimeError("selector raw=s3cLONG")
+
+    assert (
+        salvage.main(
+            argv=[],
+            now_utc=_NOW,
+            check_write_privileges=_stub_check_read_only,
+            fetch_row_count=lambda *_args, **_kwargs: 0,
+            perform_copy_export=fail_copy,
+            compress_bytes=lambda data, _level, _zstd_path: data,
+        )
+        == 1
+    )
+    receipt = Path(enforce_env["NODE27_DB_EXPORT_SALVAGE_RECEIPT_PATH"]).read_text(
+        encoding="utf-8"
+    )
+    assert "s3c" not in receipt and "LONG" not in receipt
+
+
+@pytest.mark.parametrize(
+    "malformed_dsn",
+    [
+        "postgresql://user:secret@db.example.test:not-a-port/nhms",
+        "postgresql://user:secret@db.example.test:99999/nhms",
+        "postgresql://user:secret@[::1/nhms",
+        "postgresql://user:secret@[not-ipv6]/nhms",
+    ],
+)
+def test_mask_dsn_is_total_and_fail_closed_for_malformed_urls(malformed_dsn: str) -> None:
+    masked = salvage._mask_dsn(malformed_dsn)
+    assert masked == "postgresql://***@***/***"
+    assert "secret" not in masked
+
+
+def test_mask_dsn_in_message_is_total_for_malformed_remote_url() -> None:
+    malformed = "https://user:url-secret@example.test:not-a-port/path?token=query"
+    masked = salvage._mask_dsn_in_message(f"remote failed: {malformed}", _DSN)
+    assert "url-secret" not in masked
+    assert "token=query" not in masked
+
+
+def test_main_diagnostic_masks_malformed_config_dsn_and_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    malformed_dsn = "postgresql://user:dsn-secret@db.example.test:not-a-port/nhms"
+    malformed_remote = "https://user:url-secret@example.test:99999/path?token=query"
+    env = _base_env(tmp_path, override={"DATABASE_URL": malformed_dsn})
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    code = salvage.main(
+        argv=[],
+        now_utc=_NOW,
+        check_write_privileges=lambda _dsn: (
+            f"role probe failed at {malformed_remote}; password=probe-secret"
+        ),
+        fetch_row_count=lambda *_args, **_kwargs: 0,
+        perform_copy_export=lambda *_args, **_kwargs: b"",
+        compress_bytes=lambda data, _level, _zstd_path: data,
+    )
+    assert code == 1
+    diagnostic = capsys.readouterr().err
+    payload = json.loads(diagnostic)
+    assert payload["outcome"] == "refused_role"
+    assert payload["dsn"] == "postgresql://***@***/***"
+    for secret in ("dsn-secret", "url-secret", "token=query", "probe-secret"):
+        assert secret not in diagnostic
+
+
 def test_dsn_never_leaks_via_exception_message(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -919,6 +1395,52 @@ def test_receipt_input_schema_rejects_unknown_top_level_key() -> None:
         jsonschema.validate(receipt, _load_json(_RECEIPT_INPUT_SCHEMA_PATH))
 
 
+@pytest.mark.parametrize(
+    "terminal",
+    [
+        {
+            "schema_version": "1.1",
+            "generated_at": "2026-07-11T12:05:00Z",
+            "outcome": "blocked",
+            "refusal_reason": "EVIDENCE_BLOCKED",
+        },
+        {
+            "schema_version": "1.1",
+            "generated_at": "2026-07-11T12:05:00Z",
+            "outcome": "indeterminate",
+            "error_reason": "UNEXPECTED_AUDIT_ERROR",
+        },
+    ],
+)
+def test_terminal_receipt_refuses_before_any_db_read_or_archive_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal: dict[str, Any],
+) -> None:
+    env = _base_env(tmp_path)
+    input_path = Path(env["NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH"])
+    input_path.write_text(json.dumps(terminal), encoding="utf-8")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    calls: list[str] = []
+
+    def called(*_args: object, **_kwargs: object) -> int:
+        calls.append("db-or-write")
+        return 0
+
+    code = salvage.main(
+        argv=[],
+        now_utc=_NOW,
+        check_write_privileges=called,
+        fetch_row_count=called,
+        perform_copy_export=called,
+        compress_bytes=called,
+    )
+    assert code == 1
+    assert calls == []
+    assert not Path(env["NODE27_DB_EXPORT_SALVAGE_RECEIPT_PATH"]).exists()
+
+
 # === ADR 0001 display carve-out ===
 
 
@@ -1147,6 +1669,24 @@ def test_count_csv_rows_edge_cases() -> None:
             ["secretpw"],
             "127.0.0.1",
         ),
+        (
+            "postgresql://user:userinfo@127.0.0.1:55432/nhms?password=query%20secret%2Bvalue",
+            "driver decoded query secret+value",
+            ["query secret+value"],
+            "***",
+        ),
+        (
+            "postgresql://user:userinfo@127.0.0.1:55432/nhms?sslpassword=ssl%20query%2Bvalue",
+            "driver decoded ssl query+value",
+            ["ssl query+value"],
+            "***",
+        ),
+        (
+            "host=db.example.test user=reader sslpassword='ssl keyword secret' dbname=nhms",
+            "driver decoded ssl keyword secret",
+            ["ssl keyword secret"],
+            "***",
+        ),
         # libpq quoted-value form: password embedded in single quotes,
         # value contains an embedded space (a valid libpq DSN shape a
         # driver may echo). The banned substrings are chosen to
@@ -1170,6 +1710,9 @@ def test_count_csv_rows_edge_cases() -> None:
         "url-encoded-echoed",
         "url-decoded-echoed",
         "libpq-keyword-form",
+        "uri-query-password",
+        "uri-query-sslpassword",
+        "keyword-sslpassword",
         "libpq-quoted-value-form",
     ],
 )
@@ -1209,6 +1752,23 @@ def test_mask_dsn_in_message_scrubs_libpq_password_even_without_matching_dsn() -
     masked = salvage._mask_dsn_in_message(unrelated_message, dsn)
     assert "someOtherThing" not in masked
     assert "password=***" in masked
+
+
+def test_salvage_diagnostic_inherits_fail_closed_nested_and_bracket_redaction() -> None:
+    deep = json.dumps({r"p\u0061ssword": "salvage-deep-secret"})
+    for _layer in range(4):
+        deep = json.dumps(deep)
+    message = (
+        'payload="password="salvage-early-secret"" '
+        "Proxy-Authorization: Basic {salvage-bracket-secret} "
+        f"deep={deep}"
+    )
+
+    masked = salvage._mask_dsn_in_message(message, _DSN)
+
+    for secret in ("salvage-early-secret", "salvage-bracket-secret", "salvage-deep-secret"):
+        assert secret not in masked
+    assert "***" in masked
 
 
 # === cand-C: MemoryError must not be silently classified as per-selector

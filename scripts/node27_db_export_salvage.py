@@ -29,10 +29,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
-from urllib.parse import unquote, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import jsonschema
 
+from packages.common.redaction import REDACTION_MARKER, redact_database_dsn
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
@@ -122,16 +123,40 @@ class SalvageConfig:
 
 def _mask_dsn(dsn: str) -> str:
     """Return a DSN safe for stderr diagnostics — credentials stripped."""
-    try:
-        parts = urlsplit(dsn)
-    except Exception:
+    fields = _safe_dsn_fields(dsn)
+    if fields is None:
         return "postgresql://***@***/***"
-    netloc = parts.hostname or "***"
-    if parts.port is not None:
-        netloc = f"{netloc}:{parts.port}"
-    if parts.username is not None or parts.password is not None:
-        netloc = f"***@{netloc}"
-    return urlunsplit((parts.scheme or "postgresql", netloc, parts.path or "", "", ""))
+    database, host, port = fields
+    display_host = f"[{host}]" if ":" in host else host
+    netloc = f"***@{display_host}"
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    return urlunsplit(("postgresql", netloc, f"/{database}", "", ""))
+
+
+_SAFE_DSN_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_SAFE_DSN_HOST_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
+
+
+def _safe_dsn_fields(dsn: str) -> tuple[str, str, int | None] | None:
+    try:
+        if "://" in dsn:
+            url_parts = urlsplit(dsn)
+            _ = (url_parts.hostname, url_parts.port)
+        from psycopg2.extensions import parse_dsn
+
+        parsed = parse_dsn(dsn)
+        database = str(parsed.get("dbname") or "")
+        host = str(parsed.get("host") or "***")
+        raw_port = parsed.get("port")
+        port = int(raw_port) if raw_port not in (None, "") else None
+    except Exception:
+        return None
+    if not _SAFE_DSN_NAME_RE.fullmatch(database) or not _SAFE_DSN_HOST_RE.fullmatch(host):
+        return None
+    if port is not None and not 1 <= port <= 65535:
+        return None
+    return database, host, port
 
 
 def _parse_positive_int(raw: str | None, *, name: str, minimum: int, maximum: int | None = None) -> int:
@@ -548,11 +573,18 @@ def _load_input_receipt(path: Path) -> dict[str, Any]:
     except OSError as error:  # pragma: no cover — packaged with repo
         raise SalvageConfigError(f"cannot read receipt input schema: {error}") from error
     try:
-        jsonschema.validate(data, schema)
+        jsonschema.Draft7Validator(
+            schema, format_checker=jsonschema.FormatChecker()
+        ).validate(data)
     except jsonschema.ValidationError as error:
         raise SalvageConfigError(
             f"archive-completeness receipt failed schema validation: {error.message}"
         ) from error
+    outcome = data.get("outcome")
+    if outcome not in {"complete", "incomplete"}:
+        raise SalvageConfigError(
+            f"archive-completeness receipt outcome {outcome!r} cannot supply salvage selectors"
+        )
     if not isinstance(data.get("salvage_selectors"), list):
         raise SalvageConfigError("salvage_selectors must be an array")
     return data
@@ -709,14 +741,8 @@ def _build_manifest(
 
 
 def _source_database_from_dsn(dsn: str) -> str:
-    try:
-        parts = urlsplit(dsn)
-    except Exception:
-        return ""
-    path = parts.path or ""
-    if path.startswith("/"):
-        path = path[1:]
-    return path or ""
+    fields = _safe_dsn_fields(dsn)
+    return fields[0] if fields is not None else "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -725,7 +751,11 @@ def _source_database_from_dsn(dsn: str) -> str:
 
 
 def _emit_stderr_diagnostic(outcome: str, reason: str, dsn: str | None = None) -> None:
-    payload: dict[str, Any] = {"status": "failed", "outcome": outcome, "reason": reason}
+    payload: dict[str, Any] = {
+        "status": "failed",
+        "outcome": outcome,
+        "reason": redact_database_dsn(reason, dsn),
+    }
     if dsn is not None:
         payload["dsn"] = _mask_dsn(dsn)
     print(json.dumps(payload, sort_keys=True), file=sys.stderr)
@@ -1006,50 +1036,9 @@ def build_receipt(
     }
 
 
-_LIBPQ_PASSWORD_KEYWORD_RE = re.compile(
-    r"(?i)(?:(?<=\s)|(?<=^))password\s*=\s*(?:'[^']*'|\S+)"
-)
-
-
 def _mask_dsn_in_message(message: str, dsn: str) -> str:
-    """Scrub every plausible echo of the DSN's password from ``message``.
-
-    Covers:
-    - Verbatim DSN substring.
-    - URL-encoded password (verbatim, still-quoted).
-    - URL-decoded password (some client libraries echo the decoded form).
-    - libpq keyword-form password (``... password=<literal> ...``) — a
-      distinct DSN shape callers may compose independently. Only scrubs the
-      value token, never the ``password=`` keyword itself.
-
-    Hostname and username are intentionally left alone (they carry
-    diagnostic value and are not secrets).
-    """
-    if dsn in message:
-        message = message.replace(dsn, _mask_dsn(dsn))
-    try:
-        parts = urlsplit(dsn)
-    except Exception:
-        parts = None
-    if parts is not None and parts.password:
-        password_raw = parts.password
-        if password_raw in message:
-            message = message.replace(password_raw, "***")
-        try:
-            password_decoded = unquote(password_raw)
-        except Exception:
-            password_decoded = password_raw
-        if (
-            password_decoded
-            and password_decoded != password_raw
-            and password_decoded in message
-        ):
-            message = message.replace(password_decoded, "***")
-    # libpq keyword form: even if the runner never composes such a DSN,
-    # error messages produced by the DB driver may echo a caller-provided
-    # DSN in that shape. Scrub the value defensively.
-    message = _LIBPQ_PASSWORD_KEYWORD_RE.sub("password=***", message)
-    return message
+    """Scrub credential-bearing error text through the shared policy."""
+    return redact_database_dsn(message, dsn).replace(REDACTION_MARKER, "***")
 
 
 def publish_receipt(config: SalvageConfig, receipt: Mapping[str, Any]) -> None:

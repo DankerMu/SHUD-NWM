@@ -335,9 +335,12 @@ def test_one_source_failure_isolated_while_other_source_completes(
                 status="failed",
                 return_code=1,
                 command=["nhms-gfs", "download"],
-                result={"error_code": "HTTP_403"},
+                result={
+                    "error_code": "HTTP_403",
+                    r"api\u005fkey": "download-result-secret",
+                },
                 stdout_tail="",
-                stderr_tail="password=download-secret",
+                stderr_tail='{"p\\u0061ssword": "download-secret"}',
             )
         return downloader.SourceDownloadResult(
             source=source,
@@ -377,6 +380,7 @@ def test_one_source_failure_isolated_while_other_source_completes(
     assert summary["downloads"]["failed"] == 1
     assert [detail["source"] for detail in summary["downloads"]["details"]] == ["GFS", "IFS"]
     assert "download-secret" not in rendered
+    assert "download-result-secret" not in rendered
     assert "writer-secret" not in rendered
 
 

@@ -3,14 +3,21 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, unquote_plus, urlsplit, urlunsplit
+
+from psycopg2.extensions import parse_dsn
 
 REDACTION_MARKER = "[redacted]"
 BOOLEAN_CONFIGURED_FIELD_ALLOWLIST = frozenset({"database_url_configured"})
 
+_AUTHORIZATION_KEY_PATTERN = (
+    r"(?:(?:proxy[-_.]?)?authorization|"
+    r"(?<![A-Za-z0-9])(?:proxy[-_.]?)?auth[-_.]?header)"
+)
+
 SENSITIVE_KEY_RE = re.compile(
-    r"(token|password|passwd|pwd|secret|credential|api[_-]?key|access[_-]?key|session[_-]?key|signature|"
-    r"accountingstoragepass|storagepass|authorization|proxy[_-]?authorization|auth[_-]?header|^auth$)",
+    r"(token|password|passwd|pwd|secret|credential|api[-_.]?key|access[-_.]?key|session[-_.]?key|signature|"
+    rf"accountingstoragepass|storagepass|{_AUTHORIZATION_KEY_PATTERN}|^auth$)",
     re.IGNORECASE,
 )
 AUTH_NAMESPACE_KEY_RE = re.compile(r"^auth$", re.IGNORECASE)
@@ -74,27 +81,18 @@ AUTH_NAMESPACE_OPAQUE_SCALAR_KEYS = frozenset(
 AUTH_NAMESPACE_CONTEXT_ROOT = "root"
 AUTH_NAMESPACE_CONTEXT_METADATA = "metadata"
 AUTH_NAMESPACE_CONTEXT_OPAQUE = "opaque"
-AUTHORIZATION_ASSIGNMENT_RE = re.compile(
-    r"(?P<prefix>(?P<key_quote>[\"']?)\b"
-    r"(?P<key>(?:proxy[-_.]?)?authorization|auth[-_.]?header|auth)\b"
-    r"(?P=key_quote)(?P<separator>\s*[:=]\s*)(?P<value_quote>[\"']?))"
-    r"(?:(?P<scheme>Bearer|Basic)\s+)?"
-    r"(?P<secret>[^\"'\s,;&}]+)"
-    r"(?P=value_quote)",
+AUTHORIZATION_KEY_RE = re.compile(
+    rf"(?:{_AUTHORIZATION_KEY_PATTERN}|auth)",
     re.IGNORECASE,
 )
-AUTHORIZATION_SCHEME_RE = re.compile(
-    r"(?<![A-Za-z0-9_.-])(?P<scheme>Bearer|Basic)\b(?P<separator>\s+)"
-    r"(?P<secret>[^\"'\s,;&<>{}\[\]()]+)",
-    re.IGNORECASE,
-)
-SENSITIVE_ASSIGNMENT_RE = re.compile(
-    r"\b([A-Za-z0-9_.-]*(?:token|password|passwd|pwd|secret|credential|api[_-]?key|"
-    r"access[_-]?key|session[_-]?key|signature|accountingstoragepass|storagepass)"
-    r"[A-Za-z0-9_.-]*)(\s*[:=]\s*)([^\s,;&]+)",
-    re.IGNORECASE,
+LIBPQ_PASSWORD_PREFIX_RE = re.compile(
+    r"(?<!\S)(?:password|sslpassword)\s*=\s*", re.IGNORECASE
 )
 URL_RE = re.compile(r"(?:(?:[A-Za-z][A-Za-z0-9+.-]*)://|//)[^\s\"'<>]+", re.IGNORECASE)
+SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
+OPAQUE_UNICODE_ESCAPE_RE = re.compile(r"\\+u([0-9a-fA-F]{4})")
+MALFORMED_UNICODE_KEY_ESCAPE_RE = re.compile(r"\\+u[0-9A-Za-z]{0,4}")
+MAX_FRAGMENT_DECODE_LAYERS = 3
 
 
 def redact_payload(value: Any) -> Any:
@@ -159,14 +157,62 @@ def _redact_payload(value: Any, *, auth_context: str | None, auth_scalar_allowed
 
 
 def redact_text(value: str) -> str:
-    redacted = URL_RE.sub(lambda match: _redact_url(match.group(0)), value)
-    redacted = AUTHORIZATION_ASSIGNMENT_RE.sub(_redact_authorization_assignment, redacted)
-    redacted = AUTHORIZATION_SCHEME_RE.sub(_redact_authorization_scheme, redacted)
-    return SENSITIVE_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}{REDACTION_MARKER}", redacted)
+    redacted = SURROGATE_RE.sub("\ufffd", value)
+    redacted = URL_RE.sub(lambda match: _redact_url(match.group(0)), redacted)
+    redacted = _redact_authorization_schemes(redacted)
+    return _redact_sensitive_assignments(redacted)
+
+
+def redact_database_dsn(value: str, dsn: str | None) -> str:
+    """Redact free-form text plus verbatim and driver-decoded DSN passwords."""
+    redacted = SURROGATE_RE.sub("\ufffd", value)
+    normalized_dsn = SURROGATE_RE.sub("\ufffd", dsn or "")
+    if normalized_dsn:
+        secrets = {normalized_dsn}
+        for password_raw in _dsn_password_candidates(normalized_dsn):
+            try:
+                password_decoded = unquote(password_raw)
+            except Exception:
+                password_decoded = password_raw
+            secrets.update(secret for secret in (password_raw, password_decoded) if secret)
+        redacted = _replace_literals_once(redacted, secrets)
+    return redact_text(redacted)
 
 
 def is_sensitive_key(key: str) -> bool:
-    return bool(SENSITIVE_KEY_RE.search(key))
+    """Match sensitive keys through a fixed number of JSON-like escape layers."""
+    original = key
+    candidate = key
+    for _layer in range(MAX_FRAGMENT_DECODE_LAYERS):
+        if SENSITIVE_KEY_RE.search(candidate):
+            return True
+        if "\\" not in candidate:
+            return False
+        decoded = _decode_escape_layer_once(candidate)
+        if decoded == candidate:
+            break
+        candidate = decoded
+    if SENSITIVE_KEY_RE.search(candidate):
+        return True
+
+    # Fail closed for credential-shaped keys whose valid Unicode escape remains
+    # opaque beyond the fixed decode budget, without treating an ordinary
+    # escaped key as sensitive merely because it contains a backslash.
+    for opaque_candidate in (candidate, original):
+        normalized = OPAQUE_UNICODE_ESCAPE_RE.sub(
+            lambda match: _safe_opaque_codepoint(match.group(1)), opaque_candidate
+        )
+        if normalized != opaque_candidate and SENSITIVE_KEY_RE.search(normalized):
+            return True
+
+    # A malformed Unicode escape can stand in for one credential-key character.
+    # Removing the bounded escape token catches shapes such as
+    # ``passw\uZZZZord`` while leaving ``ordinary\u12key`` alone.
+    for opaque_candidate in (candidate, original):
+        collapsed = MALFORMED_UNICODE_KEY_ESCAPE_RE.sub("", opaque_candidate)
+        if collapsed != opaque_candidate and SENSITIVE_KEY_RE.search(collapsed):
+            return True
+    return False
 
 
 def _should_redact_mapping_value(key: str, value: Any) -> bool:
@@ -332,30 +378,659 @@ def _is_scalar_value(value: Any) -> bool:
 def _redact_url(value: str) -> str:
     try:
         parsed = urlsplit(value)
-    except ValueError:
+        if not parsed.netloc:
+            return _redact_sensitive_assignments(
+                value.split("?", maxsplit=1)[0].split("#", maxsplit=1)[0]
+            )
+        hostname = parsed.hostname or ""
+        netloc = hostname
+        if parsed.port is not None:
+            netloc = f"{netloc}:{parsed.port}"
+        return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+    except Exception:
         return REDACTION_MARKER
-    if not parsed.netloc:
-        return SENSITIVE_ASSIGNMENT_RE.sub(
-            lambda match: f"{match.group(1)}{match.group(2)}{REDACTION_MARKER}",
-            value.split("?", maxsplit=1)[0].split("#", maxsplit=1)[0],
-        )
-    hostname = parsed.hostname or ""
-    netloc = hostname
-    if parsed.port is not None:
-        netloc = f"{netloc}:{parsed.port}"
-    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
 
 
-def _redact_authorization_assignment(match: re.Match[str]) -> str:
-    scheme = match.group("scheme")
-    value = f"{scheme} {REDACTION_MARKER}" if scheme else REDACTION_MARKER
-    return f"{match.group('prefix')}{value}{match.group('value_quote')}"
+def _redact_sensitive_assignments(value: str) -> str:
+    """Redact assignment values with one linear, mutually exclusive scan."""
+    pieces: list[str] = []
+    cursor = 0
+    emitted = 0
+    length = len(value)
+    while cursor < length:
+        quote = value[cursor] if value[cursor] in {'"', "'"} else None
+        fragment_sensitive = False
+        if quote is not None:
+            key_start = cursor
+            cursor, token, malformed, closed = _scan_quoted_assignment_key(value, cursor)
+            fragment_sensitive = _fragment_contains_sensitive_assignment(token)
+            if fragment_sensitive:
+                if closed and _fragment_ends_with_sensitive_value_opener(token):
+                    cursor = _consume_early_closed_fragment_credential(value, cursor, quote)
+                pieces.append(value[emitted:key_start])
+                pieces.append(REDACTION_MARKER)
+                emitted = cursor
+            if not closed:
+                continue
+        elif _is_bare_assignment_key_start(value, cursor):
+            key_start = cursor
+            cursor = _scan_bare_assignment_key(value, cursor)
+            token = value[key_start:cursor]
+            malformed = False
+        else:
+            cursor = _skip_non_key_slash_run(value, cursor)
+            continue
+        separator_end = cursor
+        if quote is None:
+            separator_end = _skip_assignment_key_closer(value, separator_end)
+        while separator_end < length and _is_assignment_whitespace(value[separator_end]):
+            separator_end += 1
+        if quote is not None and (
+            separator_end >= length or value[separator_end] not in ":="
+        ):
+            continue
+        key_is_sensitive = malformed or fragment_sensitive or _decoded_key_is_sensitive(token)
+        if (
+            not key_is_sensitive
+            or separator_end >= length
+            or value[separator_end] not in ":="
+        ):
+            continue
+        value_start = separator_end + 1
+        while value_start < length and _is_assignment_whitespace(value[value_start]):
+            value_start += 1
+        if _is_authorization_assignment_key(token):
+            value_end, replacement = _scan_authorization_assignment_value(value, value_start)
+        elif _authorization_scheme_at(value, value_start) is not None:
+            value_end, _scheme_replacement = _scan_authorization_assignment_value(
+                value, value_start
+            )
+            replacement = REDACTION_MARKER
+        else:
+            value_end, _raw, _decoded = _scan_assignment_value(value, value_start)
+            replacement = REDACTION_MARKER
+        pieces.append(value[emitted:value_start])
+        pieces.append(replacement)
+        emitted = value_end
+        cursor = value_end
+    pieces.append(value[emitted:])
+    return "".join(pieces)
 
 
-def _redact_authorization_scheme(match: re.Match[str]) -> str:
-    secret = match.group("secret")
+def _fragment_contains_sensitive_assignment(value: str) -> bool:
+    """Inspect at most three escape layers with a fixed linear work bound."""
+    candidate = value
+    if _fragment_contains_sensitive_assignment_once(
+        candidate
+    ) or _fragment_contains_sensitive_assignment_decoded(candidate):
+        return True
+    for _layer in range(MAX_FRAGMENT_DECODE_LAYERS - 1):
+        decoded = _decode_escaped_fragment_once(candidate)
+        if decoded == candidate:
+            return False
+        if _fragment_contains_sensitive_assignment_decoded(decoded):
+            return True
+        candidate = decoded
+    return _fragment_has_opaque_structured_risk(candidate)
+
+
+def _fragment_has_opaque_structured_risk(value: str) -> bool:
+    """Fail closed after the fixed decode budget on serialized assignment shapes."""
+    normalized = OPAQUE_UNICODE_ESCAPE_RE.sub(
+        lambda match: _safe_opaque_codepoint(match.group(1)), value
+    )
+    return (
+        "\\" in value
+        and any(separator in value for separator in (":", "="))
+        and any(delimiter in value for delimiter in ('"', "'", "{", "}"))
+        and is_sensitive_key(normalized)
+    )
+
+
+def _safe_opaque_codepoint(raw: str) -> str:
+    codepoint = int(raw, 16)
+    return "\ufffd" if 0xD800 <= codepoint <= 0xDFFF else chr(codepoint)
+
+
+def _fragment_ends_with_sensitive_value_opener(value: str) -> bool:
+    """Identify a quote that closed immediately after a sensitive key separator."""
+    if not value.rstrip().endswith((":", "=")):
+        return False
+    candidate = value
+    for _layer in range(MAX_FRAGMENT_DECODE_LAYERS):
+        stripped = candidate.rstrip()
+        if stripped.endswith((":", "=")) and _fragment_contains_sensitive_assignment_decoded(
+            stripped
+        ):
+            return True
+        decoded = _decode_escaped_fragment_once(candidate)
+        if decoded == candidate:
+            return False
+        candidate = decoded
+    return False
+
+
+def _consume_early_closed_fragment_credential(value: str, start: int, quote: str) -> int:
+    """Consume the credential opened by a quote mistaken for a fragment closer."""
+    cursor = start
+    length = len(value)
+    while cursor < length:
+        current = value[cursor]
+        if current == quote:
+            cursor += 1
+            if cursor < length and value[cursor] == quote:
+                cursor += 1
+            return cursor
+        if current == "\\" and cursor + 1 < length:
+            cursor += 2
+        else:
+            cursor += 1
+    return cursor
+
+
+def _decoded_key_is_sensitive(value: str) -> bool:
+    """Match sensitive quoted keys through the same fixed escape budget."""
+    if is_sensitive_key(value):
+        return True
+    normalized = OPAQUE_UNICODE_ESCAPE_RE.sub(
+        lambda match: _safe_opaque_codepoint(match.group(1)), value
+    )
+    return normalized != value and is_sensitive_key(normalized)
+
+
+def _fragment_contains_sensitive_assignment_once(value: str) -> bool:
+    """Inspect one decoded quoted fragment with a bounded monotonic key scan."""
+    cursor = 0
+    length = len(value)
+    while cursor < length:
+        quote = value[cursor] if value[cursor] in {'"', "'"} else None
+        malformed = False
+        if quote is not None:
+            cursor, token, malformed, closed = _scan_quoted_assignment_key(value, cursor)
+            if _fragment_contains_bare_sensitive_assignment(token):
+                return True
+            if not closed:
+                continue
+        elif _is_bare_assignment_key_start(value, cursor):
+            key_start = cursor
+            cursor = _scan_bare_assignment_key(value, cursor)
+            token = value[key_start:cursor]
+        else:
+            cursor = _skip_non_key_slash_run(value, cursor)
+            continue
+        separator = cursor
+        while separator < length and _is_assignment_whitespace(value[separator]):
+            separator += 1
+        if (
+            separator < length
+            and value[separator] in ":="
+            and (malformed or _decoded_key_is_sensitive(token))
+        ):
+            return True
+    return False
+
+
+def _fragment_contains_sensitive_assignment_decoded(value: str) -> bool:
+    cursor = 0
+    length = len(value)
+    while cursor < length:
+        if not _is_bare_assignment_key_start(value, cursor):
+            cursor = _skip_non_key_slash_run(value, cursor)
+            continue
+        key_start = cursor
+        cursor = _scan_bare_assignment_key(value, cursor)
+        separator = cursor
+        separator = _skip_assignment_key_closer(value, separator)
+        while separator < length and _is_assignment_whitespace(value[separator]):
+            separator += 1
+        if (
+            separator < length
+            and value[separator] in ":="
+            and _decoded_key_is_sensitive(value[key_start:cursor])
+        ):
+            return True
+    return False
+
+
+def _skip_assignment_key_closer(value: str, start: int) -> int:
+    """Skip one bounded slash-run and its optional quoted-key closer."""
+    cursor = start
+    length = len(value)
+    while cursor < length and value[cursor] == "\\":
+        cursor += 1
+    if cursor < length and value[cursor] in {'"', "'"}:
+        cursor += 1
+    return cursor
+
+
+def _decode_escaped_fragment_once(value: str) -> str:
+    """Decode one JSON-like escape layer without recursion or input revisits."""
+    return _decode_escape_layer_once(value)
+
+
+def _decode_escape_layer_once(value: str) -> str:
+    """Decode one bounded escape layer for fragments and sensitive keys."""
+    decoded: list[str] = []
+    cursor = 0
+    length = len(value)
+    while cursor < length:
+        current = value[cursor]
+        if current != "\\" or cursor + 1 >= length:
+            decoded.append(current)
+            cursor += 1
+            continue
+        escape = value[cursor + 1]
+        if escape == "u" and cursor + 6 <= length and all(
+            _is_hex_digit(character) for character in value[cursor + 2 : cursor + 6]
+        ):
+            codepoint = int(value[cursor + 2 : cursor + 6], 16)
+            decoded.append("\ufffd" if 0xD800 <= codepoint <= 0xDFFF else chr(codepoint))
+            cursor += 6
+            continue
+        decoded_escape = _QUOTED_KEY_ESCAPES.get(escape)
+        if decoded_escape is None:
+            decoded.extend((current, escape))
+        else:
+            decoded.append(decoded_escape)
+        cursor += 2
+    return "".join(decoded)
+
+
+def _fragment_contains_bare_sensitive_assignment(value: str) -> bool:
+    """Inspect decoded quote contents without recursively parsing nested quotes."""
+    cursor = 0
+    length = len(value)
+    while cursor < length:
+        if not _is_bare_assignment_key_start(value, cursor):
+            cursor = _skip_non_key_slash_run(value, cursor)
+            continue
+        key_start = cursor
+        cursor = _scan_bare_assignment_key(value, cursor)
+        separator = cursor
+        while separator < length and _is_assignment_whitespace(value[separator]):
+            separator += 1
+        if (
+            separator < length
+            and value[separator] in ":="
+            and _decoded_key_is_sensitive(value[key_start:cursor])
+        ):
+            return True
+    return False
+
+
+def _is_authorization_assignment_key(key: str) -> bool:
+    return AUTHORIZATION_KEY_RE.fullmatch(key) is not None
+
+
+def _scan_authorization_assignment_value(value: str, start: int) -> tuple[int, str]:
+    quote = value[start] if start < len(value) and value[start] in {'"', "'"} else None
+    if quote is not None:
+        end, _raw, decoded = _scan_assignment_value(value, start)
+        closed = end <= len(value) and end > start and value[end - 1] == quote
+        replacement = _redact_authorization_schemes(decoded)
+        if replacement == decoded and _authorization_scheme_at(decoded, 0) is None:
+            replacement = REDACTION_MARKER
+        return end, f"{quote}{replacement}{quote if closed else ''}"
+
+    scheme = _authorization_scheme_at(value, start)
+    if scheme is None:
+        end, _raw, _decoded = _scan_assignment_value(value, start)
+        return end, REDACTION_MARKER
+    scheme_end = start + len(scheme)
+    separator_end = scheme_end
+    while separator_end < len(value) and _is_assignment_whitespace(value[separator_end]):
+        separator_end += 1
+    if separator_end == scheme_end:
+        end, _raw, _decoded = _scan_assignment_value(value, start)
+        return end, REDACTION_MARKER
+    credential_end, marker = _scan_authorization_credential(value, separator_end)
+    return credential_end, f"{value[start:separator_end]}{marker}"
+
+
+_QUOTED_KEY_ESCAPES = {
+    '"': '"',
+    "'": "'",
+    "\\": "\\",
+    "/": "/",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+}
+
+
+def _scan_quoted_assignment_key(value: str, start: int) -> tuple[int, str, bool, bool]:
+    """Scan and decode one quoted key without revisiting input characters."""
+    quote = value[start]
+    decoded: list[str] = []
+    malformed = False
+    cursor = start + 1
+    length = len(value)
+    while cursor < length:
+        current = value[cursor]
+        if current == quote:
+            return cursor + 1, "".join(decoded), malformed, True
+        if current != "\\":
+            if 0xD800 <= ord(current) <= 0xDFFF:
+                malformed = True
+            else:
+                decoded.append(current)
+            cursor += 1
+            continue
+        escaped_quote_end = cursor + 2
+        if cursor + 1 < length and value[cursor + 1] == quote:
+            boundary = escaped_quote_end
+            while boundary < length and _is_assignment_whitespace(value[boundary]):
+                boundary += 1
+            if boundary == length or value[boundary] in "}]":
+                return escaped_quote_end, "".join(decoded), malformed, True
+        cursor += 1
+        if cursor >= length:
+            return cursor, "".join(decoded), True, False
+        escape = value[cursor]
+        if escape != "u":
+            decoded_escape = _QUOTED_KEY_ESCAPES.get(escape)
+            if decoded_escape is None:
+                malformed = True
+            else:
+                decoded.append(decoded_escape)
+            cursor += 1
+            continue
+        cursor += 1
+        code_start = cursor
+        while cursor < length and cursor - code_start < 4 and _is_hex_digit(value[cursor]):
+            cursor += 1
+        if cursor - code_start != 4:
+            malformed = True
+            continue
+        codepoint = int(value[code_start:cursor], 16)
+        if 0xD800 <= codepoint <= 0xDBFF:
+            low_escape_end = cursor + 6
+            if (
+                low_escape_end <= length
+                and value[cursor : cursor + 2] == "\\u"
+                and all(_is_hex_digit(character) for character in value[cursor + 2 : low_escape_end])
+            ):
+                low = int(value[cursor + 2 : low_escape_end], 16)
+                cursor = low_escape_end
+                if 0xDC00 <= low <= 0xDFFF:
+                    decoded.append(chr(0x10000 + ((codepoint - 0xD800) << 10) + low - 0xDC00))
+                else:
+                    malformed = True
+            else:
+                malformed = True
+        elif 0xDC00 <= codepoint <= 0xDFFF:
+            malformed = True
+        else:
+            decoded.append(chr(codepoint))
+    return cursor, "".join(decoded), True, False
+
+
+def _is_hex_digit(character: str) -> bool:
+    return character.isascii() and (character.isdigit() or character.lower() in "abcdef")
+
+
+def _is_assignment_key_char(character: str) -> bool:
+    return character.isascii() and (character.isalnum() or character in "_.-")
+
+
+def _is_bare_assignment_key_start(value: str, start: int) -> bool:
+    return _is_assignment_key_char(value[start]) or _unicode_key_escape_end(value, start) is not None
+
+
+def _scan_bare_assignment_key(value: str, start: int) -> int:
+    """Consume one bare key, treating each Unicode escape as one atomic token."""
+    cursor = start
+    length = len(value)
+    while cursor < length:
+        if _is_assignment_key_char(value[cursor]):
+            cursor += 1
+            continue
+        escape_end = _unicode_key_escape_end(value, cursor)
+        if escape_end is None:
+            break
+        cursor = escape_end
+    return cursor
+
+
+def _unicode_key_escape_end(value: str, start: int) -> int | None:
+    """Return the end of one bounded slash-run plus Unicode key escape."""
+    length = len(value)
+    if start >= length or value[start] != "\\":
+        return None
+    cursor = _slash_run_end(value, start)
+    if cursor >= length or value[cursor] != "u":
+        return None
+    cursor += 1
+    digits_start = cursor
+    while cursor < length and cursor - digits_start < 4 and value[cursor].isascii() and value[cursor].isalnum():
+        cursor += 1
+    return cursor
+
+
+def _slash_run_end(value: str, start: int) -> int:
+    """Return the end of one backslash run with a single forward scan."""
+    cursor = start
+    while cursor < len(value) and value[cursor] == "\\":
+        cursor += 1
+    return cursor
+
+
+def _skip_non_key_slash_run(value: str, start: int) -> int:
+    """Skip a rejected slash-run atomically so outer scans never retry suffixes."""
+    if value[start] != "\\":
+        return start + 1
+    return _slash_run_end(value, start)
+
+
+def _is_assignment_whitespace(character: str) -> bool:
+    """Own the Unicode whitespace semantics shared by assignment scans."""
+    return character.isspace()
+
+
+def _replace_literals_once(value: str, literals: set[str]) -> str:
+    ordered = sorted((literal for literal in literals if literal), key=lambda item: (-len(item), item))
+    if not ordered:
+        return value
+    matcher = re.compile("|".join(re.escape(literal) for literal in ordered))
+    return matcher.sub(REDACTION_MARKER, value)
+
+
+def _scan_assignment_value(value: str, start: int) -> tuple[int, str, str]:
+    decoded: list[str] = []
+    cursor = start
+    length = len(value)
+    quote = value[cursor] if cursor < length and value[cursor] in {'"', "'"} else None
+    escaped_quote: str | None = None
+    if quote is None:
+        slash_end = cursor
+        while slash_end < length and value[slash_end] == "\\":
+            slash_end += 1
+        if slash_end > cursor and slash_end < length and value[slash_end] in {'"', "'"}:
+            escaped_quote = value[cursor : slash_end + 1]
+            quote = value[slash_end]
+            cursor = slash_end + 1
+    else:
+        cursor += 1
+    body_start = cursor
+    body_end = cursor
+    while cursor < length:
+        current = value[cursor]
+        if escaped_quote is not None and current == "\\":
+            slash_end = cursor
+            while slash_end < length and value[slash_end] == "\\":
+                slash_end += 1
+            if slash_end < length and value[slash_end] == quote and (
+                slash_end + 1 == length
+                or _is_assignment_whitespace(value[slash_end + 1])
+                or value[slash_end + 1] in ",;&}]"
+            ):
+                body_end = cursor
+                cursor = slash_end + 1
+                break
+            while cursor < slash_end:
+                if cursor + 1 < slash_end:
+                    decoded.append("\\")
+                    cursor += 2
+                else:
+                    decoded.append("\\")
+                    cursor += 1
+            body_end = cursor
+            continue
+        if current == "\\" and cursor + 1 < length:
+            decoded.append(value[cursor + 1])
+            cursor += 2
+            body_end = cursor
+        elif escaped_quote is not None and current == quote:
+            decoded.append(current)
+            cursor += 1
+            body_end = cursor
+        elif quote is not None and current == quote:
+            body_end = cursor
+            cursor += 1
+            break
+        elif quote is None and (_is_assignment_whitespace(current) or current in ",;&"):
+            body_end = cursor
+            break
+        else:
+            decoded.append(current)
+            cursor += 1
+            body_end = cursor
+    return cursor, value[body_start:body_end], "".join(decoded)
+
+
+def _dsn_password_candidates(dsn: str) -> set[str]:
+    candidates: set[str] = set()
+    cursor = 0
+    while match := LIBPQ_PASSWORD_PREFIX_RE.search(dsn, cursor):
+        cursor, raw, decoded = _scan_assignment_value(dsn, match.end())
+        candidates.update(candidate for candidate in (raw, decoded) if candidate)
+        if cursor == match.end():
+            cursor += 1
+    try:
+        parsed_password = urlsplit(dsn).password
+    except Exception:
+        parsed_password = None
+    if parsed_password:
+        candidates.add(parsed_password)
+    try:
+        parsed_dsn = parse_dsn(dsn)
+    except Exception:
+        parsed_dsn = {}
+    candidates.update(
+        parsed_dsn[key]
+        for key in ("password", "sslpassword")
+        if isinstance(parsed_dsn.get(key), str) and parsed_dsn[key]
+    )
+    try:
+        query = urlsplit(dsn).query
+    except Exception:
+        query = ""
+    for field in query.split("&"):
+        raw_key, separator, raw_value = field.partition("=")
+        if separator and unquote_plus(raw_key).lower() in {"password", "sslpassword"}:
+            candidates.add(raw_value)
+            candidates.add(unquote_plus(raw_value))
+    scheme, separator, remainder = dsn.partition(":")
+    if separator and scheme.lower() in {"postgres", "postgresql"} and not remainder.startswith("//"):
+        userinfo, at, _target = remainder.rpartition("@")
+        if at and ":" in userinfo:
+            _username, _colon, password = userinfo.partition(":")
+            if password:
+                candidates.add(password)
+    return candidates
+
+
+def _authorization_scheme_at(value: str, start: int) -> str | None:
+    if start > 0 and (value[start - 1].isalnum() or value[start - 1] in "_.-"):
+        return None
+    for scheme in ("Bearer", "Basic"):
+        end = start + len(scheme)
+        if value[start:end].lower() != scheme.lower():
+            continue
+        if end < len(value) and (value[end].isalnum() or value[end] in "_.-"):
+            continue
+        return value[start:end]
+    return None
+
+
+def _scan_authorization_credential(value: str, start: int) -> tuple[int, str]:
+    length = len(value)
+    if start >= length:
+        return start, REDACTION_MARKER
+    if value.startswith(REDACTION_MARKER, start):
+        return start + len(REDACTION_MARKER), REDACTION_MARKER
+    slash_end = start
+    while slash_end < length and value[slash_end] == "\\":
+        slash_end += 1
+    opener_index = slash_end if slash_end < length else start
+    opener = value[opener_index] if opener_index < length else ""
+    encoded_opener = opener_index > start
+    delimiter_pairs = {'"': '"', "'": "'", "[": "]", "{": "}", "(": ")", "<": ">"}
+    closer = delimiter_pairs.get(opener)
+    if closer is not None:
+        cursor = opener_index + 1
+        depth = 1
+        while cursor < length:
+            if value[cursor] == "\\":
+                slash_cursor = cursor
+                while slash_cursor < length and value[slash_cursor] == "\\":
+                    slash_cursor += 1
+                if (
+                    encoded_opener
+                    and slash_cursor < length
+                    and value[slash_cursor] == closer
+                ):
+                    return slash_cursor + 1, REDACTION_MARKER
+                cursor = min(slash_cursor + 1, length)
+                continue
+            if opener not in {'"', "'"} and value[cursor] == opener:
+                depth += 1
+            elif value[cursor] == closer:
+                depth -= 1
+                if depth == 0:
+                    return cursor + 1, REDACTION_MARKER
+            cursor += 1
+        return cursor, REDACTION_MARKER
+
+    cursor = start
+    while cursor < length and not (
+        _is_assignment_whitespace(value[cursor])
+        or value[cursor] in "\"',;&<>{}[]()"
+    ):
+        cursor += 1
+    secret = value[start:cursor]
     trimmed = secret.rstrip(".,:!?")
     suffix = secret[len(trimmed) :]
-    if not trimmed:
-        return match.group(0)
-    return f"{match.group('scheme')}{match.group('separator')}{REDACTION_MARKER}{suffix}"
+    return cursor, f"{REDACTION_MARKER}{suffix}"
+
+
+def _redact_authorization_schemes(value: str) -> str:
+    """Redact free-form Bearer/Basic credentials with one monotonic scan."""
+    pieces: list[str] = []
+    emitted = 0
+    cursor = 0
+    length = len(value)
+    while cursor < length:
+        scheme = _authorization_scheme_at(value, cursor)
+        if scheme is None:
+            cursor += 1
+            continue
+        scheme_end = cursor + len(scheme)
+        separator_end = scheme_end
+        while separator_end < length and _is_assignment_whitespace(value[separator_end]):
+            separator_end += 1
+        if separator_end == scheme_end or separator_end >= length:
+            cursor = scheme_end
+            continue
+        credential_end, marker = _scan_authorization_credential(value, separator_end)
+        if credential_end == separator_end:
+            cursor = scheme_end
+            continue
+        pieces.append(value[emitted:separator_end])
+        pieces.append(marker)
+        emitted = credential_end
+        cursor = credential_end
+    pieces.append(value[emitted:])
+    return "".join(pieces)

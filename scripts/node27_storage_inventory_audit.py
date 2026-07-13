@@ -13,11 +13,12 @@ import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Literal, Mapping, Protocol, Sequence
 from urllib.parse import unquote, urlparse
 
 import jsonschema
 
+from packages.common.redaction import redact_database_dsn, redact_text
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
@@ -47,19 +48,70 @@ MAX_SUBJECTS = 100_000
 MAX_RUN_OUTPUT_ENTRIES = 10_000
 MAX_RUN_OUTPUT_DEPTH = 8
 STATEMENT_TIMEOUT_MS = 20_000
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 _ROOT = Path(__file__).resolve().parents[1]
 COMPLETENESS_SCHEMA_PATH = _ROOT / "schemas/archive_completeness_receipt.schema.json"
 PRODUCT_SCHEMA_PATH = _ROOT / "schemas/product_archive_manifest.schema.json"
 SALVAGE_SCHEMA_PATH = _ROOT / "schemas/salvage_manifest.schema.json"
 
 
+BlockedReason = Literal[
+    "CONFIG_INVALID",
+    "EMPTY_INVENTORY",
+    "OBJECT_URI_PREFIX_MISMATCH",
+    "EVIDENCE_BLOCKED",
+    "RESOURCE_BOUND_EXCEEDED",
+    "RECEIPT_INVALID",
+]
+BLOCKED_REASONS: frozenset[BlockedReason] = frozenset(
+    {
+        "CONFIG_INVALID",
+        "EMPTY_INVENTORY",
+        "OBJECT_URI_PREFIX_MISMATCH",
+        "EVIDENCE_BLOCKED",
+        "RESOURCE_BOUND_EXCEEDED",
+        "RECEIPT_INVALID",
+    }
+)
+
+
 class AuditBlocked(RuntimeError):
     """Raised when evidence is unsafe or the gate receipt cannot be proved."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: BlockedReason = "EVIDENCE_BLOCKED",
+    ) -> None:
+        if reason not in BLOCKED_REASONS:
+            raise ValueError(f"unknown blocked reason: {reason}")
+        super().__init__(message)
+        self._reason = reason
+
+    @property
+    def reason(self) -> BlockedReason:
+        """Return the stable terminal reason without inferring from message text."""
+        return self._reason
+
+
+class AuditConfigError(AuditBlocked):
+    """Raised when operator-supplied audit configuration is invalid."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, reason="CONFIG_INVALID")
 
 
 class PublicationIndeterminate(AuditBlocked):
     """Raised after replacement when receipt durability or namespace identity is unknown."""
+UNEXPECTED_ERROR_REASON = "UNEXPECTED_AUDIT_ERROR"
+PUBLICATION_FAILED_CODE = "RECEIPT_PUBLICATION_FAILED"
+PUBLICATION_INDETERMINATE_CODE = "RECEIPT_PUBLICATION_INDETERMINATE"
+DETAIL_INPUT_LIMIT = 8 * 1024
+DSN_REDACTION_INPUT_LIMIT = 8 * 1024
+DETAIL_OUTPUT_LIMIT = 512
+DETAIL_TRUNCATION_MARKER = " [detail-truncated]"
+DIAGNOSTIC_REDACTED_MARKER = " [diagnostic-redacted]"
 
 
 @dataclass(frozen=True)
@@ -110,22 +162,27 @@ class InventorySubject:
 
     @property
     def archive_identity(self) -> ArchiveIdentity:
-        if self.lane == "states":
-            physical_model = self.cloned_from_model_id or self.model_id
-            return archive_identity_for_state_reference(
-                source_id=self.source_id, model_id=physical_model, valid_time=self.cycle_time
+        try:
+            if self.lane == "states":
+                physical_model = self.cloned_from_model_id or self.model_id
+                return archive_identity_for_state_reference(
+                    source_id=self.source_id, model_id=physical_model, valid_time=self.cycle_time
+                )
+            source = normalize_source_id(self.source_id or "")
+            cycle = self.cycle_time.astimezone(UTC)
+            return ArchiveIdentity(
+                lane=self.lane,
+                source=source,
+                cycle_identity=cycle.strftime("%Y%m%d%H"),
+                cycle_time=cycle.strftime("%Y-%m-%dT%H:00:00Z"),
+                basin_version_id=self.basin_version_id if self.lane == "forcing" else None,
+                model_id=self.model_id if self.lane == "forcing" else None,
+                run_id=self.subject_id if self.lane == "runs" else None,
             )
-        source = normalize_source_id(self.source_id or "")
-        cycle = self.cycle_time.astimezone(UTC)
-        return ArchiveIdentity(
-            lane=self.lane,
-            source=source,
-            cycle_identity=cycle.strftime("%Y%m%d%H"),
-            cycle_time=cycle.strftime("%Y-%m-%dT%H:00:00Z"),
-            basin_version_id=self.basin_version_id if self.lane == "forcing" else None,
-            model_id=self.model_id if self.lane == "forcing" else None,
-            run_id=self.subject_id if self.lane == "runs" else None,
-        )
+        except (ValueError, ArchiveConfigurationError) as error:
+            raise AuditBlocked(
+                f"invalid {self.lane} archive identity for {self.stable_key}: {error}"
+            ) from error
 
 
 @dataclass(frozen=True)
@@ -208,7 +265,10 @@ def load_inventory(connection: Any) -> tuple[datetime, list[InventorySubject]]:
         state_rows = [_row_mapping(cursor, row) for row in cursor.fetchall()]
     connection.rollback()
     if len(forcing_rows) + len(run_rows) + len(state_rows) > MAX_SUBJECTS:
-        raise AuditBlocked(f"inventory exceeds {MAX_SUBJECTS} subjects")
+        raise AuditBlocked(
+            f"inventory exceeds {MAX_SUBJECTS} subjects",
+            reason="RESOURCE_BOUND_EXCEEDED",
+        )
     subjects: list[InventorySubject] = []
     for row in forcing_rows:
         if not row["cycle_time"]:
@@ -270,9 +330,12 @@ def load_inventory(connection: Any) -> tuple[datetime, list[InventorySubject]]:
             )
         )
     if not subjects:
-        raise AuditBlocked("inventory is empty")
+        raise AuditBlocked("inventory is empty", reason="EMPTY_INVENTORY")
     if len(subjects) > MAX_SUBJECTS:
-        raise AuditBlocked(f"inventory exceeds {MAX_SUBJECTS} subjects")
+        raise AuditBlocked(
+            f"inventory exceeds {MAX_SUBJECTS} subjects",
+            reason="RESOURCE_BOUND_EXCEEDED",
+        )
     if len({subject.stable_key for subject in subjects}) != len(subjects):
         raise AuditBlocked("inventory contains duplicate stable subjects")
     return _require_aware(audit_time), sorted(subjects, key=lambda value: value.stable_key)
@@ -301,7 +364,10 @@ def discover_salvage(
             directory_fd, directory, MAX_SALVAGE_ENTRIES - scanned_entries
         )
         if scanned_entries + len(names) > MAX_SALVAGE_ENTRIES:
-            raise AuditBlocked(f"salvage scan exceeds {MAX_SALVAGE_ENTRIES} total entries")
+            raise AuditBlocked(
+                f"salvage scan exceeds {MAX_SALVAGE_ENTRIES} total entries",
+                reason="RESOURCE_BOUND_EXCEEDED",
+            )
         scanned_entries += len(names)
         for name in names:
             entry = directory / name
@@ -310,7 +376,10 @@ def discover_salvage(
                 raise AuditBlocked(f"unsafe salvage symlink: {entry}")
             if stat.S_ISDIR(info.st_mode):
                 if depth >= MAX_SALVAGE_DEPTH:
-                    raise AuditBlocked(f"salvage scan exceeds depth {MAX_SALVAGE_DEPTH}: {entry}")
+                    raise AuditBlocked(
+                        f"salvage scan exceeds depth {MAX_SALVAGE_DEPTH}: {entry}",
+                        reason="RESOURCE_BOUND_EXCEEDED",
+                    )
                 child_fd = _open_salvage_child_dir(directory_fd, name, entry, info)
                 try:
                     walk(child_fd, entry, depth + 1)
@@ -319,7 +388,10 @@ def discover_salvage(
             elif name == "manifest.json" and stat.S_ISREG(info.st_mode):
                 manifest_count += 1
                 if manifest_count > MAX_SALVAGE_MANIFESTS:
-                    raise AuditBlocked(f"salvage scan exceeds {MAX_SALVAGE_MANIFESTS} manifests")
+                    raise AuditBlocked(
+                        f"salvage scan exceeds {MAX_SALVAGE_MANIFESTS} manifests",
+                        reason="RESOURCE_BOUND_EXCEEDED",
+                    )
                 manifest_fd = _open_salvage_regular_file(directory_fd, name, entry, info)
                 try:
                     manifest = _read_json_fd(manifest_fd, entry)
@@ -449,7 +521,10 @@ def _read_json_fd(file_fd: int, label: Path) -> dict[str, Any]:
                 break
             content.extend(chunk)
         if len(content) > MAX_MANIFEST_BYTES:
-            raise AuditBlocked(f"manifest exceeds {MAX_MANIFEST_BYTES} bytes: {label}")
+            raise AuditBlocked(
+                f"manifest exceeds {MAX_MANIFEST_BYTES} bytes: {label}",
+                reason="RESOURCE_BOUND_EXCEEDED",
+            )
         value = json.loads(content)
     except AuditBlocked:
         raise
@@ -564,7 +639,7 @@ def _verify_product_producer_provenance(subject: InventorySubject, manifest: Map
 
 
 def _state_archive_member_path(subject: InventorySubject, object_store_prefix: str) -> str:
-    key = _object_key(subject.hot_uri, object_store_prefix)
+    key = _object_key(subject.hot_uri, object_store_prefix, kind="file")
     physical_model = subject.cloned_from_model_id or subject.model_id
     cycle = subject.cycle_time.astimezone(UTC).strftime("%Y%m%d%H")
     if subject.source_id:
@@ -591,7 +666,7 @@ def _verify_forcing_hot(subject: InventorySubject, config: AuditConfig) -> Cover
     cycle = subject.cycle_time.astimezone(UTC).strftime("%Y%m%d%H")
     source = normalize_source_id(subject.source_id or "").lower()
     expected = f"forcing/{source}/{cycle}/{subject.basin_version_id}/{subject.model_id}"
-    key = _object_key(subject.hot_uri, config.object_store_prefix)
+    key = _object_key(subject.hot_uri, config.object_store_prefix, kind="directory")
     if key != expected:
         raise AuditBlocked(f"forcing URI identity mismatch for {subject.subject_id}: {key}")
     manifest_path = config.object_store_root / key / "forcing_package.json"
@@ -634,7 +709,7 @@ def _verify_forcing_hot(subject: InventorySubject, config: AuditConfig) -> Cover
             or not isinstance(entry.get("checksum"), str)
         ):
             raise AuditBlocked(f"malformed forcing file entry: {subject.subject_id}")
-        file_key = _object_key(entry["uri"], config.object_store_prefix)
+        file_key = _object_key(entry["uri"], config.object_store_prefix, kind="file")
         if not file_key.startswith(expected + "/"):
             raise AuditBlocked(f"forcing file escapes package: {file_key}")
         path = config.object_store_root / file_key
@@ -655,8 +730,12 @@ def _verify_run_hot(subject: InventorySubject, config: AuditConfig) -> Coverage 
         refs = json.loads(subject.hot_uri)
     except json.JSONDecodeError as error:
         raise AuditBlocked(f"malformed internal run refs: {subject.subject_id}") from error
-    manifest_key = _object_key(str(refs.get("manifest") or ""), config.object_store_prefix)
-    output_key = _object_key(str(refs.get("output") or ""), config.object_store_prefix).rstrip("/")
+    manifest_key = _object_key(
+        str(refs.get("manifest") or ""), config.object_store_prefix, kind="file"
+    )
+    output_key = _object_key(
+        str(refs.get("output") or ""), config.object_store_prefix, kind="directory"
+    )
     expected_manifest = f"runs/{subject.subject_id}/input/manifest.json"
     expected_output = f"runs/{subject.subject_id}/output"
     if manifest_key != expected_manifest or output_key != expected_output:
@@ -694,8 +773,18 @@ def _verify_run_hot(subject: InventorySubject, config: AuditConfig) -> Coverage 
         actual != expected
         or actual_model.get("model_id") != subject.model_id
         or actual_model.get("basin_version_id") != subject.basin_version_id
-        or _object_key(str(outputs.get("run_manifest_uri") or ""), config.object_store_prefix) != expected_manifest
-        or _object_key(str(outputs.get("output_uri") or ""), config.object_store_prefix).rstrip("/") != expected_output
+        or _object_key(
+            str(outputs.get("run_manifest_uri") or ""),
+            config.object_store_prefix,
+            kind="file",
+        )
+        != expected_manifest
+        or _object_key(
+            str(outputs.get("output_uri") or ""),
+            config.object_store_prefix,
+            kind="directory",
+        )
+        != expected_output
     ):
         raise AuditBlocked(f"run manifest row identity mismatch: {subject.subject_id}")
     if output_has_regular is None:
@@ -706,7 +795,7 @@ def _verify_run_hot(subject: InventorySubject, config: AuditConfig) -> Coverage 
 
 
 def _verify_state_hot(subject: InventorySubject, config: AuditConfig) -> Coverage | None:
-    key = _object_key(subject.hot_uri, config.object_store_prefix)
+    key = _object_key(subject.hot_uri, config.object_store_prefix, kind="file")
     physical_model = subject.cloned_from_model_id or subject.model_id
     cycle = subject.cycle_time.astimezone(UTC).strftime("%Y%m%d%H")
     if subject.source_id:
@@ -735,7 +824,7 @@ def build_receipt(
     salvage_mismatches: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     if not subjects:
-        raise AuditBlocked("inventory is empty")
+        raise AuditBlocked("inventory is empty", reason="EMPTY_INVENTORY")
     audit_time = _require_aware(audit_time)
     keys = [subject.stable_key for subject in subjects]
     if len(set(keys)) != len(keys):
@@ -787,6 +876,7 @@ def build_receipt(
     receipt = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": _time(audit_time),
+        "outcome": "complete" if all(item["verdict"] == "complete" for item in windows) else "incomplete",
         "coverage_bounds": {
             "start": min(item["window"]["start"] for item in windows),
             "end": max(item["window"]["end"] for item in windows),
@@ -794,12 +884,33 @@ def build_receipt(
         "windows": windows,
         "salvage_selectors": [required_selectors[key] for key in sorted(required_selectors)],
     }
-    validate_receipt_semantics(receipt, subjects)
-    _validate_schema(receipt, _load_schema(COMPLETENESS_SCHEMA_PATH), "archive completeness receipt")
+    validate_success_receipt_for_publication(receipt, subjects)
     return receipt
 
 
 def validate_receipt_semantics(receipt: Mapping[str, Any], subjects: Sequence[InventorySubject] | None = None) -> None:
+    _reject_success_payload_surrogates(receipt)
+    _validate_schema(
+        receipt,
+        _load_schema(COMPLETENESS_SCHEMA_PATH),
+        "archive completeness receipt",
+        reason="RECEIPT_INVALID",
+    )
+    try:
+        _validate_receipt_runtime_semantics(receipt, subjects)
+    except AuditBlocked as error:
+        raise AuditBlocked(
+            f"archive completeness receipt semantic validation failed: {error}",
+            reason="RECEIPT_INVALID",
+        ) from error
+
+
+def _validate_receipt_runtime_semantics(
+    receipt: Mapping[str, Any], subjects: Sequence[InventorySubject] | None = None
+) -> None:
+    outcome = receipt.get("outcome")
+    if outcome in {"blocked", "indeterminate"}:
+        return
     windows = receipt.get("windows")
     selectors = receipt.get("salvage_selectors")
     if not isinstance(windows, list) or not windows or not isinstance(selectors, list):
@@ -837,9 +948,16 @@ def validate_receipt_semantics(receipt: Mapping[str, Any], subjects: Sequence[In
         raise AuditBlocked("forcing/run gap-selector bijection failed")
     if receipt.get("coverage_bounds") != {"start": min(starts), "end": max(ends)}:
         raise AuditBlocked("receipt coverage_bounds do not match subject set")
+    all_complete = all(item.get("verdict") == "complete" for item in windows)
+    if (outcome == "complete") != all_complete:
+        raise AuditBlocked("receipt outcome contradicts subject verdict aggregate")
+    if outcome == "complete" and selectors:
+        raise AuditBlocked("complete receipt must not contain salvage selectors")
 
 
 def publish_receipt(path: Path, receipt: Mapping[str, Any]) -> None:
+    if receipt.get("outcome") in {"complete", "incomplete"}:
+        _reject_success_payload_surrogates(receipt)
     path = _validate_output_path(path)
     payload = (_canonical(receipt) + "\n").encode()
     try:
@@ -856,7 +974,12 @@ def publish_receipt(path: Path, receipt: Mapping[str, Any]) -> None:
         raise AuditBlocked(f"failed to publish receipt safely: {error}") from error
 
 
-def run_audit(config: AuditConfig, *, connect: ConnectionFactory | None = None) -> dict[str, Any]:
+def run_audit(
+    config: AuditConfig,
+    *,
+    connect: ConnectionFactory | None = None,
+    publish: bool = True,
+) -> dict[str, Any]:
     _validate_audit_roots(config)
     if connect is None:
         import psycopg2
@@ -885,46 +1008,67 @@ def run_audit(config: AuditConfig, *, connect: ConnectionFactory | None = None) 
         hot_coverage=hot,
         salvage_mismatches=salvage_mismatches,
     )
-    publish_receipt(config.receipt_path, receipt)
+    if publish:
+        validate_success_receipt_for_publication(receipt, subjects)
+        publish_receipt(config.receipt_path, receipt)
     return receipt
 
 
 def config_from_args(args: argparse.Namespace) -> AuditConfig:
-    database_url = (args.database_url or os.getenv("DATABASE_URL") or "").strip()
-    object_root = _absolute(args.object_store_root or os.getenv("OBJECT_STORE_ROOT"), "object_store_root")
-    archive_root = _absolute(
-        args.archive_root or os.getenv("NODE27_STORAGE_INVENTORY_ARCHIVE_ROOT") or os.getenv("NHMS_ARCHIVE_ROOT"),
-        "archive_root",
-    )
-    receipt_path = _absolute(args.receipt_path or os.getenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH"), "receipt_path")
-    if not database_url:
-        raise AuditBlocked("DATABASE_URL is required")
-    raw_age: int | str = (
-        args.archive_min_age_days
-        if args.archive_min_age_days is not None
-        else os.getenv("NHMS_ARCHIVE_MIN_AGE_DAYS", "45")
-    )
     try:
-        age = int(raw_age)
-    except ValueError as error:
-        raise AuditBlocked("NHMS_ARCHIVE_MIN_AGE_DAYS must be an integer") from error
-    if age < DEFAULT_DB_RETENTION_DAYS:
-        raise AuditBlocked(
-            f"NHMS_ARCHIVE_MIN_AGE_DAYS must be at least DB retention ({DEFAULT_DB_RETENTION_DAYS} days)"
+        database_url = (args.database_url or os.getenv("DATABASE_URL") or "").strip()
+        object_store_prefix = _canonical_object_store_prefix(
+            args.object_store_prefix or os.getenv("OBJECT_STORE_PREFIX") or ""
         )
-    return AuditConfig(
-        database_url,
-        object_root,
-        (args.object_store_prefix or os.getenv("OBJECT_STORE_PREFIX") or "").strip(),
-        archive_root,
-        age,
-        receipt_path,
-        _absolute(getattr(args, "zstd_path", None) or os.getenv("ZSTD_BIN") or "/usr/bin/zstd", "zstd_path"),
-    )
+        object_root = _absolute(
+            args.object_store_root or os.getenv("OBJECT_STORE_ROOT"), "object_store_root"
+        )
+        archive_root = _absolute(
+            args.archive_root
+            or os.getenv("NODE27_STORAGE_INVENTORY_ARCHIVE_ROOT")
+            or os.getenv("NHMS_ARCHIVE_ROOT"),
+            "archive_root",
+        )
+        receipt_path = _absolute(
+            args.receipt_path or os.getenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH"),
+            "receipt_path",
+        )
+        if not database_url:
+            raise AuditConfigError("DATABASE_URL is required")
+        raw_age: int | str = (
+            args.archive_min_age_days
+            if args.archive_min_age_days is not None
+            else os.getenv("NHMS_ARCHIVE_MIN_AGE_DAYS", "45")
+        )
+        try:
+            age = int(raw_age)
+        except ValueError as error:
+            raise AuditConfigError("NHMS_ARCHIVE_MIN_AGE_DAYS must be an integer") from error
+        if age < DEFAULT_DB_RETENTION_DAYS:
+            raise AuditConfigError(
+                "NHMS_ARCHIVE_MIN_AGE_DAYS must be at least DB retention "
+                f"({DEFAULT_DB_RETENTION_DAYS} days)"
+            )
+        return AuditConfig(
+            database_url,
+            object_root,
+            object_store_prefix,
+            archive_root,
+            age,
+            receipt_path,
+            _absolute(
+                getattr(args, "zstd_path", None) or os.getenv("ZSTD_BIN") or "/usr/bin/zstd",
+                "zstd_path",
+            ),
+        )
+    except AuditConfigError:
+        raise
+    except AuditBlocked as error:
+        raise AuditConfigError(str(error)) from error
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = _AuditArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--database-url")
     parser.add_argument("--object-store-root")
     parser.add_argument("--object-store-prefix")
@@ -935,27 +1079,206 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+class _AuditArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise AuditConfigError(f"invalid arguments: {message}")
+
+
+def bootstrap_receipt_path(argv: Sequence[str]) -> Path:
+    """Resolve one exact receipt option before full CLI/config validation."""
+    try:
+        values: list[str] = []
+        index = 0
+        while index < len(argv):
+            token = argv[index]
+            if token == "--":
+                break
+            if token == "--receipt-path":
+                if index + 1 >= len(argv) or argv[index + 1].startswith("-"):
+                    raise AuditConfigError("--receipt-path requires one absolute value")
+                values.append(argv[index + 1])
+                index += 2
+                continue
+            if token.startswith("--receipt-path="):
+                value = token.partition("=")[2]
+                if not value:
+                    raise AuditConfigError("--receipt-path requires one absolute value")
+                values.append(value)
+            index += 1
+        if len(values) > 1:
+            raise AuditConfigError("--receipt-path must be supplied at most once")
+        raw = values[0] if values else (os.getenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH") or "")
+        return _validate_output_path(_absolute(raw, "receipt_path"))
+    except AuditConfigError:
+        raise
+    except AuditBlocked as error:
+        raise AuditConfigError(str(error)) from error
+
+
+def build_terminal_receipt(
+    outcome: str,
+    generated_at: datetime,
+    *,
+    reason: str,
+    detail: str | None = None,
+) -> dict[str, Any]:
+    if outcome == "blocked":
+        if reason not in BLOCKED_REASONS:
+            raise AuditBlocked(f"unknown blocked reason: {reason}")
+        receipt: dict[str, Any] = {
+            "schema_version": SCHEMA_VERSION,
+            "generated_at": _time(generated_at),
+            "outcome": "blocked",
+            "refusal_reason": reason,
+        }
+    elif outcome == "indeterminate":
+        if reason != UNEXPECTED_ERROR_REASON:
+            raise AuditBlocked(f"unknown indeterminate reason: {reason}")
+        receipt = {
+            "schema_version": SCHEMA_VERSION,
+            "generated_at": _time(generated_at),
+            "outcome": "indeterminate",
+            "error_reason": reason,
+        }
+    else:
+        raise AuditBlocked(f"invalid terminal outcome: {outcome}")
+    if detail:
+        receipt["detail"] = detail[:512]
+    _validate_schema(
+        receipt,
+        _load_schema(COMPLETENESS_SCHEMA_PATH),
+        "archive completeness receipt",
+        reason="RECEIPT_INVALID",
+    )
+    return receipt
+
+
+def _blocked_reason(error: AuditBlocked) -> BlockedReason:
+    return error.reason
+
+
+def _sanitize_detail(error: BaseException, *, database_url: str | None = None) -> str:
+    raw_detail = str(error)
+    configured_dsns = (database_url, os.getenv("DATABASE_URL"))
+    if len(raw_detail) > DETAIL_INPUT_LIMIT:
+        return f"{type(error).__name__}{DETAIL_TRUNCATION_MARKER}{DIAGNOSTIC_REDACTED_MARKER}"
+    if any(dsn and len(dsn) > DSN_REDACTION_INPUT_LIMIT for dsn in configured_dsns):
+        return f"{type(error).__name__}{DIAGNOSTIC_REDACTED_MARKER}"
+    detail = raw_detail
+    for dsn in configured_dsns:
+        if dsn:
+            detail = detail.replace(dsn, "[DATABASE_URL]")
+        detail = redact_database_dsn(detail, dsn)
+    detail = redact_text(detail)
+    detail = detail.replace("\r", " ").replace("\n", " ")
+    detail = redact_text(detail)
+    if len(detail) > DETAIL_OUTPUT_LIMIT:
+        detail = detail[: DETAIL_OUTPUT_LIMIT - len(DETAIL_TRUNCATION_MARKER)] + DETAIL_TRUNCATION_MARKER
+    return detail or type(error).__name__
+
+
+def _emit_stderr(code: str, message: str) -> None:
+    safe_message = message[:512]
+    safe_code = code[:128]
+    print(_canonical({"status": "blocked", "reason": safe_code, "message": safe_message}), file=sys.stderr)
+
+
+def _parser_requested_help(argv: Sequence[str]) -> bool:
+    try:
+        build_parser().parse_args(argv)
+    except AuditBlocked:
+        return False
+    except SystemExit as error:
+        return error.code == 0
+    return False
+
+
+def _reject_success_payload_surrogates(value: Any, *, location: str = "$") -> None:
+    if isinstance(value, str):
+        if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+            raise AuditBlocked(
+                f"success receipt contains Unicode surrogate at {location}",
+                reason="RECEIPT_INVALID",
+            )
+        return
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            _reject_success_payload_surrogates(key, location=f"{location}.<key>")
+            _reject_success_payload_surrogates(nested, location=f"{location}.{key}")
+        return
+    if isinstance(value, Sequence) and not isinstance(value, bytes | bytearray):
+        for index, nested in enumerate(value):
+            _reject_success_payload_surrogates(nested, location=f"{location}[{index}]")
+
+
+def validate_success_receipt_for_publication(
+    receipt: Mapping[str, Any], subjects: Sequence[InventorySubject] | None = None
+) -> None:
+    validate_receipt_semantics(receipt, subjects)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if _parser_requested_help(raw_argv):
+        return 0
+    generated_at = datetime.now(UTC)
+    try:
+        receipt_path = bootstrap_receipt_path(raw_argv)
+    except AuditConfigError as error:
+        _emit_stderr("CONFIG_INVALID", _sanitize_detail(error))
+        return 1
+    except Exception as error:
+        _emit_stderr(UNEXPECTED_ERROR_REASON, _sanitize_detail(error))
+        return 1
     config: AuditConfig | None = None
     try:
-        config = config_from_args(build_parser().parse_args(argv))
-        receipt = run_audit(config)
+        args = build_parser().parse_args(raw_argv)
+        args.receipt_path = str(receipt_path)
+        config = config_from_args(args)
+        receipt = run_audit(config, publish=False)
+        validate_success_receipt_for_publication(receipt)
+        exit_code = 0
+    except AuditBlocked as error:
+        receipt = build_terminal_receipt(
+            "blocked",
+            generated_at,
+            reason=_blocked_reason(error),
+            detail=_sanitize_detail(error, database_url=config.database_url if config else None),
+        )
+        exit_code = 1
     except Exception as error:
-        message = str(error)
-        if config is not None and config.database_url:
-            message = message.replace(config.database_url, "[DATABASE_URL]")
-        status = "indeterminate" if isinstance(error, PublicationIndeterminate) else "blocked"
-        print(
-            _canonical({"status": status, "error_type": type(error).__name__, "message": message}),
-            file=sys.stderr,
+        receipt = build_terminal_receipt(
+            "indeterminate",
+            generated_at,
+            reason=UNEXPECTED_ERROR_REASON,
+            detail=_sanitize_detail(error, database_url=config.database_url if config else None),
+        )
+        exit_code = 1
+    try:
+        publish_receipt(receipt_path, receipt)
+    except PublicationIndeterminate as error:
+        _emit_stderr(
+            PUBLICATION_INDETERMINATE_CODE,
+            _sanitize_detail(error, database_url=config.database_url if config else None),
+        )
+        return 1
+    except Exception as error:
+        _emit_stderr(
+            PUBLICATION_FAILED_CODE,
+            _sanitize_detail(error, database_url=config.database_url if config else None),
         )
         return 1
     print(
         _canonical(
-            {"status": "published", "receipt_path": str(config.receipt_path), "subjects": len(receipt["windows"])}
+            {
+                "status": "published",
+                "receipt_path": redact_text(str(receipt_path)),
+                "outcome": receipt["outcome"],
+                "subjects": len(receipt.get("windows", [])),
+            }
         )
     )
-    return 0
+    return exit_code
 
 
 def _row_mapping(cursor: Any, row: Any) -> dict[str, Any]:
@@ -998,12 +1321,19 @@ def _load_schema(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _validate_schema(instance: Any, schema: Mapping[str, Any], label: str) -> None:
+def _validate_schema(
+    instance: Any,
+    schema: Mapping[str, Any],
+    label: str,
+    *,
+    reason: BlockedReason = "EVIDENCE_BLOCKED",
+) -> None:
     try:
         jsonschema.Draft7Validator(schema, format_checker=jsonschema.FormatChecker()).validate(instance)
     except jsonschema.ValidationError as error:
         raise AuditBlocked(
-            f"{label} schema validation failed at {list(error.absolute_path)}: {error.message}"
+            f"{label} schema validation failed at {list(error.absolute_path)}: {error.message}",
+            reason=reason,
         ) from error
 
 
@@ -1016,7 +1346,10 @@ def _read_json_with_digest(path: Path, root: Path) -> tuple[dict[str, Any], int,
     try:
         content = read_bytes_limited_no_follow(path, max_bytes=MAX_MANIFEST_BYTES, containment_root=root)
         if len(content) > MAX_MANIFEST_BYTES:
-            raise AuditBlocked(f"manifest exceeds {MAX_MANIFEST_BYTES} bytes: {path}")
+            raise AuditBlocked(
+                f"manifest exceeds {MAX_MANIFEST_BYTES} bytes: {path}",
+                reason="RESOURCE_BOUND_EXCEEDED",
+            )
         value = json.loads(content)
     except FileNotFoundError:
         raise
@@ -1072,33 +1405,40 @@ def _directory_has_regular_file(directory: Path, root: Path) -> bool:
         raise
     except (OSError, SafeFilesystemError) as error:
         raise AuditBlocked(f"cannot open run output safely {directory}: {error}") from error
-    stack: list[tuple[int, Path, int]] = [(root_fd, directory, 0)]
+
+    def visit(current_fd: int, current: Path, depth: int) -> None:
+        nonlocal found, seen
+        names = _list_run_output_fd(current_fd, current, MAX_RUN_OUTPUT_ENTRIES - seen)
+        if seen + len(names) > MAX_RUN_OUTPUT_ENTRIES:
+            raise AuditBlocked(
+                f"run output exceeds {MAX_RUN_OUTPUT_ENTRIES} entries",
+                reason="RESOURCE_BOUND_EXCEEDED",
+            )
+        seen += len(names)
+        for name in names:
+            entry = current / name
+            info = _stat_run_output_entry(current_fd, name, entry)
+            if stat.S_ISDIR(info.st_mode):
+                if depth >= MAX_RUN_OUTPUT_DEPTH:
+                    raise AuditBlocked(
+                        f"run output exceeds depth {MAX_RUN_OUTPUT_DEPTH}: {entry}",
+                        reason="RESOURCE_BOUND_EXCEEDED",
+                    )
+                child_fd = _open_run_output_child(current_fd, name, entry, info)
+                try:
+                    visit(child_fd, entry, depth + 1)
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(info.st_mode):
+                found = True
+            else:
+                raise AuditBlocked(f"unsafe non-regular run output: {entry}")
+
     try:
-        while stack:
-            current_fd, current, depth = stack.pop()
-            try:
-                names = _list_run_output_fd(current_fd, current, MAX_RUN_OUTPUT_ENTRIES - seen)
-                if seen + len(names) > MAX_RUN_OUTPUT_ENTRIES:
-                    raise AuditBlocked(f"run output exceeds {MAX_RUN_OUTPUT_ENTRIES} entries")
-                seen += len(names)
-                for name in names:
-                    entry = current / name
-                    info = _stat_run_output_entry(current_fd, name, entry)
-                    if stat.S_ISDIR(info.st_mode):
-                        if depth >= MAX_RUN_OUTPUT_DEPTH:
-                            raise AuditBlocked(f"run output exceeds depth {MAX_RUN_OUTPUT_DEPTH}: {entry}")
-                        child_fd = _open_run_output_child(current_fd, name, entry, info)
-                        stack.append((child_fd, entry, depth + 1))
-                    elif stat.S_ISREG(info.st_mode):
-                        found = True
-                    else:
-                        raise AuditBlocked(f"unsafe non-regular run output: {entry}")
-            finally:
-                os.close(current_fd)
+        visit(root_fd, directory, 0)
         return found
     finally:
-        for pending_fd, _path, _depth in stack:
-            os.close(pending_fd)
+        os.close(root_fd)
 
 
 def _list_run_output_fd(directory_fd: int, path_label: Path, max_entries: int) -> list[str]:
@@ -1149,36 +1489,152 @@ def _directory_has_regular_file_optional(directory: Path, root: Path) -> bool | 
         return None
 
 
-def _object_key(uri: str, prefix: str) -> str:
+def _object_key(uri: str, prefix: str, *, kind: Literal["file", "directory"]) -> str:
     raw = uri.strip()
-    if not raw or "?" in raw or "#" in raw or "\\" in raw:
-        raise AuditBlocked(f"invalid object-store URI: {raw!r}")
+    if (
+        not raw
+        or raw != uri
+        or "?" in raw
+        or "#" in raw
+        or "\\" in raw
+        or "%" in raw
+        or any(ord(character) < 32 or ord(character) == 127 for character in raw)
+    ):
+        raise AuditBlocked("invalid object-store evidence URI")
     if raw.startswith("s3://"):
-        parsed = urlparse(raw)
-        if parsed.scheme != "s3" or not parsed.netloc:
-            raise AuditBlocked(f"invalid object-store URI: {raw!r}")
+        try:
+            parsed = urlparse(raw)
+            bare_authority = (
+                parsed.username is None
+                and parsed.password is None
+                and parsed.port is None
+                and parsed.hostname == parsed.netloc
+                and parsed.netloc == parsed.netloc.lower()
+            )
+        except Exception as error:
+            raise AuditBlocked("invalid object-store evidence URI") from error
+        if parsed.scheme != "s3" or not parsed.netloc or parsed.query or parsed.fragment or not bare_authority:
+            raise AuditBlocked("invalid object-store evidence URI")
         if not prefix:
             raise AuditBlocked("OBJECT_STORE_PREFIX is required for s3 URI binding")
         expected = urlparse(prefix.rstrip("/"))
         if expected.scheme != "s3" or expected.netloc != parsed.netloc:
-            raise AuditBlocked(f"object URI outside configured prefix: {raw}")
-        object_path, prefix_path = unquote(parsed.path).strip("/"), unquote(expected.path).strip("/")
+            raise AuditBlocked(
+                f"object URI outside configured prefix: {raw}",
+                reason="OBJECT_URI_PREFIX_MISMATCH",
+            )
+        if not parsed.path.startswith("/") or parsed.path.startswith("//"):
+            raise AuditBlocked("object-store evidence URI path is noncanonical")
+        object_path = _decode_object_key_path(
+            _normalize_object_key_trailing_slash(parsed.path[1:], kind=kind)
+        )
+        prefix_path = expected.path[1:] if expected.path.startswith("/") else ""
         if prefix_path:
             if not object_path.startswith(prefix_path + "/"):
-                raise AuditBlocked(f"object URI outside configured prefix: {raw}")
+                raise AuditBlocked(
+                    f"object URI outside configured prefix: {raw}",
+                    reason="OBJECT_URI_PREFIX_MISMATCH",
+                )
             object_path = object_path[len(prefix_path) + 1 :]
         raw = object_path
     elif "://" in raw or raw.startswith("/"):
-        raise AuditBlocked(f"unsupported object-store URI: {raw}")
-    key = raw.strip("/")
+        raise AuditBlocked("unsupported object-store evidence URI")
+    else:
+        raw = _decode_object_key_path(_normalize_object_key_trailing_slash(raw, kind=kind))
+    key = raw
     parts = key.split("/")
     if (
         not key
         or any(part in {"", ".", ".."} for part in parts)
-        or any(ord(char) < 32 or ord(char) == 127 for char in key)
+        or any(
+            ord(char) < 32 or ord(char) == 127 or 0xD800 <= ord(char) <= 0xDFFF
+            for char in key
+        )
     ):
         raise AuditBlocked(f"unsafe object key: {key!r}")
     return key
+
+
+_S3_BUCKET_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
+_ENCODED_SEPARATOR_RE = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
+
+
+def _canonical_object_store_prefix(value: Any) -> str:
+    if not isinstance(value, str) or not value or value != value.strip() or value.endswith("/"):
+        raise AuditBlocked("OBJECT_STORE_PREFIX must be a canonical s3 URI without trailing slash")
+    if (
+        "\\" in value
+        or "%" in value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise AuditBlocked("OBJECT_STORE_PREFIX contains unsafe path syntax")
+    try:
+        parsed = urlparse(value)
+        bare_authority = (
+            parsed.username is None
+            and parsed.password is None
+            and parsed.port is None
+            and parsed.hostname == parsed.netloc
+        )
+    except Exception as error:
+        raise AuditBlocked("OBJECT_STORE_PREFIX must use a canonical s3 authority") from error
+    if (
+        parsed.scheme != "s3"
+        or not parsed.netloc
+        or parsed.query
+        or parsed.fragment
+        or not bare_authority
+        or parsed.netloc != parsed.netloc.lower()
+        or not _S3_BUCKET_RE.fullmatch(parsed.netloc)
+    ):
+        raise AuditBlocked("OBJECT_STORE_PREFIX must use a canonical lowercase bare bucket")
+    if parsed.path:
+        path = parsed.path[1:] if parsed.path.startswith("/") else ""
+        if not _safe_object_key(path):
+            raise AuditBlocked("OBJECT_STORE_PREFIX optional path is unsafe")
+    return value
+
+
+def _decode_object_key_path(value: str) -> str:
+    if _ENCODED_SEPARATOR_RE.search(value):
+        raise AuditBlocked("object-store evidence URI contains encoded separator")
+    try:
+        decoded = unquote(value, errors="strict")
+    except (UnicodeDecodeError, UnicodeEncodeError) as error:
+        raise AuditBlocked("object-store evidence URI contains invalid encoding") from error
+    if "%" in decoded:
+        raise AuditBlocked("object-store evidence URI contains nested or invalid encoding")
+    if not _safe_object_key(decoded):
+        raise AuditBlocked("object-store evidence URI key is unsafe")
+    return decoded
+
+
+def _normalize_object_key_trailing_slash(
+    value: str, *, kind: Literal["file", "directory"]
+) -> str:
+    if value.endswith("//"):
+        raise AuditBlocked("object-store evidence URI has multiple trailing slashes")
+    if kind == "file" and value.endswith("/"):
+        raise AuditBlocked("object-store file evidence URI has a trailing slash")
+    if kind == "directory":
+        return value[:-1] if value.endswith("/") else value
+    if kind != "file":
+        raise AuditBlocked("object-store evidence URI has an unknown object kind")
+    return value
+
+
+def _safe_object_key(value: str) -> bool:
+    return (
+        bool(value)
+        and "\\" not in value
+        and all(part not in {"", ".", ".."} for part in value.split("/"))
+        and not any(
+            ord(character) < 32
+            or ord(character) == 127
+            or 0xD800 <= ord(character) <= 0xDFFF
+            for character in value
+        )
+    )
 
 
 def _validate_output_path(path: Path) -> Path:
@@ -1196,6 +1652,7 @@ def _validate_output_path(path: Path) -> Path:
 
 
 def _validate_audit_roots(config: AuditConfig) -> None:
+    _canonical_object_store_prefix(config.object_store_prefix)
     try:
         verify_directory_no_follow(config.object_store_root)
     except (OSError, SafeFilesystemError) as error:

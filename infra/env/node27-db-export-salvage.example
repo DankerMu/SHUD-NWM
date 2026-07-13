@@ -23,7 +23,9 @@ NHMS_ARCHIVE_ROOT=/home/ghdc/nwm/archive
 # Absolute path to the archive-completeness receipt emitted by the storage
 # inventory audit (#849). The runner refuses to boot if this file is missing
 # or fails schema validation against
-# schemas/archive_completeness_receipt.schema.json.
+# schemas/archive_completeness_receipt.schema.json. Schema-valid `blocked` and
+# `indeterminate` terminals are also refused before any DB read/archive write;
+# only `complete`/`incomplete` receipts can supply selectors.
 NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH=/home/nwm/node27-storage-inventory-audit-logs/completeness-receipt.json
 
 # Absolute path where the salvage receipt is published (mode 0600, atomic).

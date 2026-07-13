@@ -28,6 +28,8 @@ DATABASE_URL=postgresql://nhms_control_rw:change-me@db.internal.example:5432/nhm
 
 WORKSPACE_ROOT=/scratch/frd_muziyao/nhms-production/workspace
 OBJECT_STORE_ROOT=/scratch/frd_muziyao/nhms-production/object-store
+# Compute consumer/config identity. Node-27 ingest is the producer of the DB
+# rows audited by storage_inventory_audit and uses its own s3://nhms identity.
 OBJECT_STORE_PREFIX=s3://nhms-prod
 NHMS_OBJECT_STORE_COPYBACK_ROOT=/ghdc/data/nwm/object-store
 

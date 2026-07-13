@@ -276,7 +276,9 @@ def test_declared_handoff_apply_exception_isolated_without_node22_db_fallback(
         tmp_path,
         runs={RUN_A: True, RUN_B: True},
         apply_reports={
-            RUN_A: RuntimeError("apply exploded with password=n22-secret"),
+            RUN_A: RuntimeError(
+                'apply exploded with {"p\\u0061ssword": "n22-secret"}'
+            ),
             RUN_B: _handoff_success(RUN_B),
         },
     )

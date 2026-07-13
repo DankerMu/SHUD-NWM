@@ -88,16 +88,15 @@ next tick runs:
 
 ### Cadence vs. retention-receipt validity window (design D6)
 
-`#855` will pin the retention runner's completeness-receipt validity
+`#855` pins the retention runner's completeness-receipt validity
 window at 24 h. The storage inventory audit fires every 24 h with the audit
 tick preceding every planned retention tick (audit at 03:40 UTC, retention
 by construction after the audit), so a fresh, schema-valid
-archive-completeness receipt is always present when the retention gate
-consults it. **Do not lengthen the audit cadence beyond 24 h without
+archive-completeness terminal receipt is present when the retention gate
+consults it whenever the configured destination remains writable. Publication
+failures are instead explicit journal diagnostics and never recurse into a
+second write. **Do not lengthen the audit cadence beyond 24 h without
 extending the retention receipt validity window first.**
-
-TODO(#855): cross-link the retention runbook and the retention receipt
-validity constant once the retention runner lands.
 
 ## Operation
 
@@ -117,7 +116,12 @@ validity constant once the retention runner lands.
     `free_space.free_bytes < free_space.refuse_bytes`. Non-zero exit.
 - Storage inventory audit receipt (archive completeness):
   `/home/nwm/node27-storage-inventory-audit-logs/completeness-receipt.json`.
-  Consumed byte-for-byte by the future retention gate (#855).
+  Schema version `1.1` has four exact outcomes: `complete` and `incomplete`
+  carry coverage windows/selectors; `blocked` carries a stable
+  `refusal_reason`; `indeterminate` carries `UNEXPECTED_AUDIT_ERROR`.
+  DB-export salvage accepts only the two coverage outcomes. Retention can
+  distinguish an on-disk blocked terminal from a missing audit receipt; live
+  downstream refusal behavior remains part of #856.
 
 ### Free-space watermark tuning
 
