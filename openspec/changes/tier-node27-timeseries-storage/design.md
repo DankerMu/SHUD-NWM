@@ -740,3 +740,99 @@ Additional post-review corrections applied on top of head `830218fb` (R1 fix pas
 - **Constant rename** — `_STATEMENT_TIMEOUT_MS` renamed to `_STATEMENT_TIMEOUT_LITERAL` (the value is a Postgres duration literal `'5s'`, not a millisecond integer). Closes MINOR C-cor-2.
 
 
+
+## Workflow Fixture: Issue #854 Archive Rebuild Drill
+
+Fixture level `expanded` · Repair intensity `high` · NHMS project profile · Reuses the shared change (`tier-node27-timeseries-storage`); no new capability required. Task scope: §5.1 (drill script + fixture unit tests). §5.2 (live PASS receipt on node-27) is a follow-up commit under the same issue.
+
+### Pre-implementation hazards resolved (Phase 0.5)
+
+The Phase 0.5 fixture review surfaced four hazards. Resolutions pinned here so Phase 1 implementation does not drift.
+
+**H1 — Ingest schema is hardcoded (CONFIRMED).**
+`workers/output_parser/parser.py::PsycopgOutputParserRepository` accepts only `database_url`; every SQL literal is `hydro.`/`met.`/`core.`/`ops.`-qualified. Same for `packages/common/forcing_domain_handoff_apply.py` (all `met.`-qualified) and `HYPERTABLES_GUARDED = frozenset({("hydro","river_timeseries"), ("met","forcing_station_timeseries")})` (name-matched, not DB-matched).
+
+Consequence: same-DB-different-Postgres-schema isolation is NOT achievable without forking every ingest SQL literal. The only viable isolation is a **separate physical Postgres database** with the standard `core`/`met`/`hydro`/`ops`/`map` schemas provisioned via `apply_migrations_from_zero`. The compressed-chunk write guard stays silent in staging because staging has no compression enabled (guard fires on `is_compressed = true`, never matches in a fresh-migrated DB) — isolation is by-DB and by-data-state, not by-schema-namespace.
+
+**H2 — Receipt `staging_database` field semantics (CONFIRMED, example fixed).**
+`schemas/archive_rebuild_drill_receipt.schema.json` requires `staging_database{database, schema, instance_id}` (three free strings, no coupling). The prior example JSON set `"database": "nhms"` which literally implies same-DB-different-schema — unrealizable per H1. Fixed by updating `schemas/examples/archive_rebuild_drill_receipt.example.json` to `"database": "nhms_archive_drill_20260711"`.
+
+Canonical field semantics (pinned for implementer):
+
+- `staging_database.database` = isolated physical Postgres database name; MUST NOT equal the production database name. Drill refuses to run if identical.
+- `staging_database.schema` = semantic drill-run label (NOT a Postgres CREATE SCHEMA). The isolated DB actually contains all five canonical schemas `core/met/hydro/ops/map`; this field is a run-tag for the receipt (e.g., `archive_drill_20260711_forcing_gfs`).
+- `staging_database.instance_id` = cluster/host identifier (e.g., `node27-primary-pg15`).
+
+**H3 — Missing extract-to-disk helper (PARTIAL).**
+`scripts/node27_product_archive.py::_decompressed_tar_stream` + `verify_archive_pair` decompress + iterate for checksum only; no extract-to-disk symbol. The drill implements a `_extract_archive_to_disk(manifest, tar_zst_path, dest_dir)` helper (~50-100 LOC) that reuses `_decompressed_tar_stream` as the read primitive, applies bounded per-file (`MAX_FILE_BYTES`) + per-tree (`MAX_TREE_ENTRIES`) + per-source (`MAX_SOURCE_BYTES`) limits symmetric with the mover's guards, verifies each file's sha256 against the manifest as it writes, and refuses any path escape (`..`, absolute paths, symlink targets).
+
+**H4 — Registry closure NOT synthesizable from manifest alone (CONFIRMED).**
+`OutputParser.parse_run` requires: `hydro.hydro_run` → `core.model_instance` → (`core.mesh_version`, `core.river_network_version` → `core.river_segment` × N) + `met.data_source` → `met.forecast_cycle` + `met.forcing_version` + `met.met_station` × M. Archive manifest identity carries the SELECT-key set (`basin_version_id`, `model_id`, `run_id`, `cycle_time`, `source`) but not the full row shapes for these 11 tables.
+
+Pinned strategy: **hybrid — drill lifts registry closure from prod readonly DB using manifest identity as SELECT keys, into staging DB before parse_run/apply_forcing_domain_handoff**. Pure "operator pre-seeds" is fragile; pure "manifest synthesis" is impossible.
+
+The drill uses two connections:
+
+- `prod_ro_conn` — read-only SELECT-only against production (`nhms_display_ro` role or the same); NEVER writes.
+- `staging_conn` — full CRUD against the isolated staging DB (`staging_database.database`); writes registry closure + receives ingest output.
+
+Registry lifter walks: `manifest.identity` → forcing lane closure (`met.data_source`, `met.forecast_cycle`, `met.forcing_version`, `met.met_station × M`, `core.basin`, `core.basin_version`, `core.mesh_version`, `core.model_instance`) or runs lane closure (`hydro.hydro_run` → same via `model_id`, plus `core.river_network_version` → `core.river_segment × N`). Lifter is idempotent (checks existence before INSERT); staging DB is dropped + recreated per run so idempotency is defense-in-depth.
+
+Fail-closed on incomplete closure: if any required ancestor row cannot be lifted (missing in prod), drill emits FAIL receipt with `differences[]` naming the missing ancestor and exits non-zero — no vacuous PASS.
+
+### Deliverables
+
+- `scripts/node27_archive_rebuild_drill.py` — drill orchestrator with the four sub-components above (extract, lift, ingest, verify) + receipt emitter matching `schemas/archive_rebuild_drill_receipt.schema.json`.
+- `scripts/node27_archive_rebuild_drill_once.sh` (optional per §4.5 pattern; defer to §5.2 or bundle here — implementer choice with recorded deviation).
+- `infra/env/node27-archive-rebuild-drill.example` — `PROD_DATABASE_URL_RO`, `STAGING_DATABASE_URL` (must be distinct from prod URL's dbname), `ARCHIVE_ROOT`, `SALVAGE_MANIFEST_PATH`, `RECEIPT_PATH`, drill window bounds.
+- `tests/test_node27_archive_rebuild_drill.py` — unit tests covering the 5 test rows in tasks.md §5.1.
+- `tests/fixtures/archive-rebuild-drill/` — `.tar.zst` sample archives + salvage `.csv.zst` samples + manifest JSONs (crafted per manifest schema).
+
+### Invariant matrix
+
+| Invariant | Enforcement |
+|---|---|
+| Staging DB name ≠ prod DB name | Drill entry: parses both DSNs, refuses if `dbname` equal; unit test asserts refusal. |
+| No writes to prod DB | prod_ro_conn opened with role scope; unit test uses `SELECT current_user, session_user` assertions + rejects any INSERT/UPDATE/DELETE on the mocked prod cursor. |
+| Staging DB dropped + recreated per run | Drill entry: `DROP DATABASE IF EXISTS <staging>` + `CREATE DATABASE <staging>` + `apply_migrations_from_zero`; unit test asserts sequence. |
+| Registry closure lifted before ingest | Drill orchestrator sequence: lift → ingest; unit test asserts lift runs before OutputParser call. |
+| Fail-closed on incomplete closure | Lifter raises `RegistryClosureIncompleteError`; drill catches → FAIL receipt with `differences[]`; unit test covers. |
+| Extract-to-disk bounded | Extract helper caps enforced with `TarPathEscapeError` / `TarBoundExceededError`; unit test uses malicious tarball fixture. |
+| Product parity via file-parsed expected counts | Verifier parses restored files via same `parse_rivqdown_file` logic + compares to staging `COUNT(*)`; unit test asserts count derivation from file, not manifest. |
+| Salvage verified sha256 + decompressed row count = manifest | No reingest; unit test covers sha256 mismatch → FAIL and row-count mismatch → FAIL. |
+| Receipt coverage tuples attributed only to actually-restored manifests | Verifier accumulates coverage tuples as each restore succeeds; unit test asserts an unrestored manifest does NOT appear in coverage. |
+| Coverage rule per spec (§5.1 test row 4 + spec.md coverage requirement) | Coverage evaluator function referenced by receipt emitter; unit test with pre-seeded prod + various coverage tuple combinations. |
+| Compressed prod chunks unaffected | staging_conn writes staging DB only; unit test uses TimescaleDB integration marker + real prod-mirror with force-compressed chunk covering drill window + asserts prod chunk `is_compressed` unchanged post-drill. |
+
+### Wire-format codes
+
+Drill emits structured `differences[]` on FAIL. Code strings (byte-identical across code / runbook / this fixture):
+
+- `ARCHIVE_MANIFEST_MISMATCH` — manifest sha256/size does not match restored file.
+- `ARCHIVE_TAR_CORRUPTED` — tarball truncated or extract-to-disk fails.
+- `SALVAGE_SHA256_MISMATCH` — `db-export` object sha256 does not match manifest.
+- `SALVAGE_ROW_COUNT_MISMATCH` — decompressed row count ≠ manifest `exported_row_count`.
+- `REGISTRY_CLOSURE_INCOMPLETE` — missing ancestor row in prod DB, or a prod row column absent from the staging table (schema-drift guard, D2).
+- `STAGING_COUNT_MISMATCH` — staging `COUNT(*)` ≠ file-derived expected count.
+- `DRILL_UNCAUGHT_ERROR` — any downstream fault outside the enumerated codes lands here (psycopg2 / OSError / OutputParsingError / ...); receipt carries `differences[].actual.cause_type` = exception class name. Added by Round 1 fix pass (B1 / C-is-4).
+- `DRILL_CONCURRENT_INVOCATION` — non-blocking `fcntl.flock` on the drill lock file is already held. Added by Round 1 fix pass (C2 / C-is-3). Round 2 NEW-3: FAIL receipt actual carries `cause_type = "DrillConcurrentInvocationError"` (symmetric with `DRILL_UNCAUGHT_ERROR`) so operators reading the receipt file — the sole oracle — can distinguish this race from a generic uncaught error without stderr.
+
+### Single-instance lock path (Round 2)
+
+The lock file backing `DRILL_CONCURRENT_INVOCATION` MUST be byte-identical across code, `.example`, and runbook so operators reading either surface find the same absolute path:
+
+- Env override: `NHMS_ARCHIVE_REBUILD_DRILL_LOCK_PATH` (absolute path required at boot; parity with `NHMS_ARCHIVE_REBUILD_DRILL_RECEIPT_PATH`).
+- Default (env unset): `~/node27-archive-rebuild-drill-logs/drill.lock`.
+- Runbook cross-references: `docs/runbooks/tier-node27-timeseries-storage.md` §7.2 (wire-code entry) + §7.6 step 1 (stuck-lock `rm -f` recovery). Both cite the default path verbatim; the drill code returns the same string.
+
+Round 2 NEW-1: prior to this pin, `_default_lock_path(receipt_path)` co-located the lock next to the receipt file, so the shipped example put the lock at `/home/nwm/NWM/artifacts/receipts/drill.lock` while the runbook said `~/node27-archive-rebuild-drill-logs/drill.lock` — the documented recovery `rm` was a no-op. Fixed by making the default a fixed absolute path and adding the env override.
+
+### Explicit deviations from prior sub-issue patterns
+
+- **Two DB connections** — no prior sub-issue opens two Postgres connections. Documented here as inherent to H4 hybrid lifter; drill orchestrator must own connection lifecycle for both.
+- **DROP + CREATE DATABASE per run** — `apply_migrations_from_zero` is the same helper `tests/conftest.py::integration_database_url` uses; running against a real Postgres cluster in a scripted (not pytest) context is new. Drill must accept `--dry-run` that skips CREATE DATABASE + logs planned actions; enforce path (default OFF, matching §5.1 unit-test-only surface) actually creates + drops.
+- **prod readonly credential** — the `nhms_display_ro` role suffices for SELECT lift closure. Drill entry validates the prod DSN's user has SELECT on the target tables and FAILs closed otherwise.
+
+### Task §5.2 boundary
+
+Live PASS receipt on node-27 covering ≥1 forcing cycle + ≥1 runs cycle + ≥1 db-export selector for the planned 30-day drop window; committed as a follow-up commit under this same issue, not part of the §5.1 PR. §5.2 unlocks retention enforce in §6.3.

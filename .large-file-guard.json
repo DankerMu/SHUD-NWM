@@ -11,6 +11,8 @@
     "packages/common/forcing_domain_handoff_apply.py",
     "workers/output_parser/parser.py",
     "workers/forcing_producer/producer.py",
-    "tests/test_forcing_producer.py"
+    "tests/test_forcing_producer.py",
+    "scripts/node27_archive_rebuild_drill.py",
+    "tests/test_node27_archive_rebuild_drill.py"
   ]
 }
