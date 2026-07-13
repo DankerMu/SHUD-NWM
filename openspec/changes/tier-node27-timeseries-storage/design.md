@@ -815,7 +815,17 @@ Drill emits structured `differences[]` on FAIL. Code strings (byte-identical acr
 - `REGISTRY_CLOSURE_INCOMPLETE` — missing ancestor row in prod DB, or a prod row column absent from the staging table (schema-drift guard, D2).
 - `STAGING_COUNT_MISMATCH` — staging `COUNT(*)` ≠ file-derived expected count.
 - `DRILL_UNCAUGHT_ERROR` — any downstream fault outside the enumerated codes lands here (psycopg2 / OSError / OutputParsingError / ...); receipt carries `differences[].actual.cause_type` = exception class name. Added by Round 1 fix pass (B1 / C-is-4).
-- `DRILL_CONCURRENT_INVOCATION` — non-blocking `fcntl.flock` on the drill lock file is already held. Added by Round 1 fix pass (C2 / C-is-3).
+- `DRILL_CONCURRENT_INVOCATION` — non-blocking `fcntl.flock` on the drill lock file is already held. Added by Round 1 fix pass (C2 / C-is-3). Round 2 NEW-3: FAIL receipt actual carries `cause_type = "DrillConcurrentInvocationError"` (symmetric with `DRILL_UNCAUGHT_ERROR`) so operators reading the receipt file — the sole oracle — can distinguish this race from a generic uncaught error without stderr.
+
+### Single-instance lock path (Round 2)
+
+The lock file backing `DRILL_CONCURRENT_INVOCATION` MUST be byte-identical across code, `.example`, and runbook so operators reading either surface find the same absolute path:
+
+- Env override: `NHMS_ARCHIVE_REBUILD_DRILL_LOCK_PATH` (absolute path required at boot; parity with `NHMS_ARCHIVE_REBUILD_DRILL_RECEIPT_PATH`).
+- Default (env unset): `~/node27-archive-rebuild-drill-logs/drill.lock`.
+- Runbook cross-references: `docs/runbooks/tier-node27-timeseries-storage.md` §7.2 (wire-code entry) + §7.6 step 1 (stuck-lock `rm -f` recovery). Both cite the default path verbatim; the drill code returns the same string.
+
+Round 2 NEW-1: prior to this pin, `_default_lock_path(receipt_path)` co-located the lock next to the receipt file, so the shipped example put the lock at `/home/nwm/NWM/artifacts/receipts/drill.lock` while the runbook said `~/node27-archive-rebuild-drill-logs/drill.lock` — the documented recovery `rm` was a no-op. Fixed by making the default a fixed absolute path and adding the env override.
 
 ### Explicit deviations from prior sub-issue patterns
 

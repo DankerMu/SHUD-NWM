@@ -8,9 +8,13 @@ Test rows map 1:1 with ``openspec/changes/tier-node27-timeseries-storage/tasks.m
 - Row 3 (salvage row count mismatch → FAIL) —
   ``test_row3_salvage_row_count_mismatch``.
 - Row 4 (prod pre-seeded, parity judged only on staging + prod unchanged)
-  — ``test_row4_prod_preseeded_parity_isolated`` (``@pytest.mark.integration``).
+  — ``test_row4_prod_preseeded_parity_isolated_scaffold_only``
+  (``@pytest.mark.integration``, scaffold; real end-to-end drill oracle is
+  ``test_a1_run_drill_end_to_end_against_real_postgres``).
 - Row 5 (prod chunks compressed → drill completes without touching prod)
-  — ``test_row5_compressed_prod_chunks_untouched`` (``@pytest.mark.integration``).
+  — ``test_row5_compressed_prod_chunks_untouched_scaffold_only``
+  (``@pytest.mark.integration``, scaffold; real end-to-end drill oracle is
+  ``test_a1_run_drill_end_to_end_against_real_postgres``).
 
 Invariant tests (from #854 fixture invariant matrix):
 - Staging DSN ≠ prod DSN refusal — ``test_invariant_staging_dbname_must_differ``.
@@ -312,10 +316,14 @@ def _config(
     prod_dbname: str = "nhms_prod",
     staging_dbname: str = "nhms_archive_drill_20260711",
     admin_dbname: str = "postgres",
+    lock_path: Path | None = None,
 ) -> drill.DrillConfig:
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
     receipt = tmp_path / "receipts" / "receipt.json"
+    # Tests use a tmp-fenced lock path to avoid writing to `~/` during
+    # unit-test runs; production default is `~/node27-archive-rebuild-drill-logs/drill.lock`.
+    lock = lock_path if lock_path is not None else tmp_path / "drill.lock"
     return drill.DrillConfig(
         archive_root=tmp_path / "archive",
         workspace_root=workspace,
@@ -328,6 +336,7 @@ def _config(
         zstd_path=zstd_path,
         archive_manifest_paths=tuple(archive_manifests),
         salvage_manifest_paths=tuple(salvage_manifests),
+        lock_path=lock,
     )
 
 
@@ -1372,6 +1381,11 @@ def test_b1_main_emits_fail_receipt_on_uncaught_error(
     monkeypatch.setenv("NHMS_ARCHIVE_REBUILD_DRILL_INSTANCE_ID", "node27-primary-pg15")
     monkeypatch.setenv("NHMS_ARCHIVE_REBUILD_DRILL_RUN_LABEL", "archive_drill_test")
     monkeypatch.setenv("NHMS_ZSTD_BIN", str(zstd_bin))
+    # Fence the single-instance lock inside tmp_path so the test does not
+    # create files under `~/` (the runbook default).
+    monkeypatch.setenv(
+        "NHMS_ARCHIVE_REBUILD_DRILL_LOCK_PATH", str(tmp_path / "drill.lock")
+    )
 
     def _raising_run_drill(_config: Any) -> Any:
         raise RuntimeError("simulated psycopg2 failure")
@@ -1383,6 +1397,15 @@ def test_b1_main_emits_fail_receipt_on_uncaught_error(
     assert receipt["verdict"] == "FAIL"
     codes = {diff["expected"]["code"] for diff in receipt["differences"]}
     assert drill.CODE_DRILL_UNCAUGHT_ERROR in codes
+    # NEW-3 (R2): FAIL receipts must carry the concrete exception class name
+    # and message so operators can distinguish infra faults (OSError,
+    # psycopg2.*) from logic faults (KeyError, ...) without a stack trace.
+    diff = next(
+        d for d in receipt["differences"]
+        if d["expected"]["code"] == drill.CODE_DRILL_UNCAUGHT_ERROR
+    )
+    assert diff["actual"]["cause_type"] == "RuntimeError"
+    assert diff["actual"]["error"] == "simulated psycopg2 failure"
 
 
 def test_c_is_3_flock_refuses_concurrent_invocation(tmp_path: Path) -> None:
@@ -1393,6 +1416,49 @@ def test_c_is_3_flock_refuses_concurrent_invocation(tmp_path: Path) -> None:
             with drill._single_instance_lock(lock_path):
                 pass  # pragma: no cover — never reached
     assert info.value.code == drill.CODE_DRILL_CONCURRENT_INVOCATION
+
+
+def test_c_is_3_main_emits_fail_receipt_on_concurrent_invocation(
+    tmp_path: Path, zstd_bin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NEW-3 (R2): the ``main()``-level ``DRILL_CONCURRENT_INVOCATION``
+    branch must publish a schema-valid FAIL receipt carrying
+    ``cause_type == "DrillConcurrentInvocationError"``, symmetric with the
+    uncaught-error path (B1 / C-is-4). Operators consume the receipt
+    file, not stderr, so cause_type is the wire signal.
+    """
+    manifest_path, _ = _write_fixture_runs_archive(tmp_path)
+    receipt_path = tmp_path / "receipts" / "receipt.json"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    lock_path = tmp_path / "drill.lock"
+
+    monkeypatch.setenv("NHMS_ARCHIVE_ROOT", str(tmp_path / "archive"))
+    monkeypatch.setenv("NHMS_ARCHIVE_REBUILD_DRILL_WORKSPACE", str(workspace))
+    monkeypatch.setenv("NHMS_ARCHIVE_REBUILD_DRILL_RECEIPT_PATH", str(receipt_path))
+    monkeypatch.setenv("PROD_DATABASE_URL_RO", "postgresql://u:p@127.0.0.1:5432/nhms_prod")
+    monkeypatch.setenv(
+        "STAGING_DATABASE_URL", "postgresql://u:p@127.0.0.1:5432/nhms_drill"
+    )
+    monkeypatch.setenv("POSTGRES_ADMIN_URL", "postgresql://u:p@127.0.0.1:5432/postgres")
+    monkeypatch.setenv("NHMS_ARCHIVE_REBUILD_DRILL_INSTANCE_ID", "node27-primary-pg15")
+    monkeypatch.setenv("NHMS_ARCHIVE_REBUILD_DRILL_RUN_LABEL", "archive_drill_test")
+    monkeypatch.setenv("NHMS_ZSTD_BIN", str(zstd_bin))
+    monkeypatch.setenv("NHMS_ARCHIVE_REBUILD_DRILL_LOCK_PATH", str(lock_path))
+
+    # Hold the flock in the outer context so main() (same process, new fd)
+    # is refused non-blockingly — the exact race the wire code exists to name.
+    with drill._single_instance_lock(lock_path):
+        exit_code = drill.main(["--archive-manifest", str(manifest_path)])
+    assert exit_code == 2
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["verdict"] == "FAIL"
+    diff = next(
+        d for d in receipt["differences"]
+        if d["expected"]["code"] == drill.CODE_DRILL_CONCURRENT_INVOCATION
+    )
+    assert diff["actual"]["cause_type"] == "DrillConcurrentInvocationError"
+    assert str(lock_path) in diff["actual"]["error"]
 
 
 def test_b2_fail_receipt_with_empty_coverage_passes_schema() -> None:
@@ -1652,6 +1718,7 @@ def test_a1_run_drill_end_to_end_against_real_postgres(
         zstd_path=zstd_bin,
         archive_manifest_paths=(manifest_path,),
         salvage_manifest_paths=(),
+        lock_path=tmp_path / "drill.lock",
     )
 
     # Track prod read-only setting inspected inside the drill's connection.
@@ -1730,3 +1797,188 @@ def test_a1_run_drill_end_to_end_against_real_postgres(
             )
             remaining = cursor.fetchone()[0]
     assert remaining == 0, f"staging DB {staging_dbname} not dropped"
+
+
+# ---------------------------------------------------------------------------
+# Round 2 fix regressions — one test per finding
+# ---------------------------------------------------------------------------
+
+
+def test_default_lock_path_matches_runbook_string() -> None:
+    """NEW-1 (R2): ``_default_lock_path()`` must be byte-identical with
+    ``docs/runbooks/tier-node27-timeseries-storage.md`` §7.2 + §7.6 so the
+    documented ``rm -f`` recovery is not a no-op.
+
+    Both the runbook and the drill code MUST cite exactly
+    ``~/node27-archive-rebuild-drill-logs/drill.lock``.
+    """
+    expected = Path("~/node27-archive-rebuild-drill-logs/drill.lock").expanduser()
+    assert drill._default_lock_path() == expected
+    # Signature parity: takes no argument (was `_default_lock_path(receipt_path)`
+    # in R1; now a constant so the receipt directory cannot silently drift the
+    # lock file location).
+    import inspect
+
+    sig = inspect.signature(drill._default_lock_path)
+    assert list(sig.parameters) == []
+
+
+def test_config_from_env_lock_path_defaults_to_runbook_path(
+    tmp_path: Path, zstd_bin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NEW-1 (R2): with ``NHMS_ARCHIVE_REBUILD_DRILL_LOCK_PATH`` unset,
+    ``_config_from_env`` MUST yield ``config.lock_path`` byte-identical
+    with the runbook default.
+    """
+    manifest_path, _ = _write_fixture_runs_archive(tmp_path)
+    receipt_path = tmp_path / "receipts" / "receipt.json"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    env = {
+        "NHMS_ARCHIVE_ROOT": str(tmp_path / "archive"),
+        "NHMS_ARCHIVE_REBUILD_DRILL_WORKSPACE": str(workspace),
+        "NHMS_ARCHIVE_REBUILD_DRILL_RECEIPT_PATH": str(receipt_path),
+        "PROD_DATABASE_URL_RO": "postgresql://u:p@127.0.0.1:5432/nhms_prod",
+        "STAGING_DATABASE_URL": "postgresql://u:p@127.0.0.1:5432/nhms_drill",
+        "POSTGRES_ADMIN_URL": "postgresql://u:p@127.0.0.1:5432/postgres",
+        "NHMS_ARCHIVE_REBUILD_DRILL_INSTANCE_ID": "node27-primary-pg15",
+        "NHMS_ZSTD_BIN": str(zstd_bin),
+    }
+    config = drill._config_from_env(
+        env, ["--archive-manifest", str(manifest_path)]
+    )
+    assert config.lock_path == Path(
+        "~/node27-archive-rebuild-drill-logs/drill.lock"
+    ).expanduser()
+
+
+def test_config_from_env_lock_path_env_override(
+    tmp_path: Path, zstd_bin: Path
+) -> None:
+    """NEW-1 (R2): ``NHMS_ARCHIVE_REBUILD_DRILL_LOCK_PATH`` MUST override
+    the default. Non-absolute values MUST be refused fail-closed so the
+    boot-time surface catches operator typos, not a mid-run flock failure.
+    """
+    manifest_path, _ = _write_fixture_runs_archive(tmp_path)
+    receipt_path = tmp_path / "receipts" / "receipt.json"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    override = tmp_path / "custom" / "drill.lock"
+    base_env = {
+        "NHMS_ARCHIVE_ROOT": str(tmp_path / "archive"),
+        "NHMS_ARCHIVE_REBUILD_DRILL_WORKSPACE": str(workspace),
+        "NHMS_ARCHIVE_REBUILD_DRILL_RECEIPT_PATH": str(receipt_path),
+        "PROD_DATABASE_URL_RO": "postgresql://u:p@127.0.0.1:5432/nhms_prod",
+        "STAGING_DATABASE_URL": "postgresql://u:p@127.0.0.1:5432/nhms_drill",
+        "POSTGRES_ADMIN_URL": "postgresql://u:p@127.0.0.1:5432/postgres",
+        "NHMS_ARCHIVE_REBUILD_DRILL_INSTANCE_ID": "node27-primary-pg15",
+        "NHMS_ZSTD_BIN": str(zstd_bin),
+    }
+    env_ok = {**base_env, "NHMS_ARCHIVE_REBUILD_DRILL_LOCK_PATH": str(override)}
+    config = drill._config_from_env(
+        env_ok, ["--archive-manifest", str(manifest_path)]
+    )
+    assert config.lock_path == override
+
+    env_bad = {**base_env, "NHMS_ARCHIVE_REBUILD_DRILL_LOCK_PATH": "relative/drill.lock"}
+    with pytest.raises(drill.DrillConfigError) as info:
+        drill._config_from_env(env_bad, ["--archive-manifest", str(manifest_path)])
+    assert "NHMS_ARCHIVE_REBUILD_DRILL_LOCK_PATH" in str(info.value)
+
+
+def test_n_mf_1_coverage_attribution_only_for_matched_product_cycles(
+    tmp_path: Path, zstd_bin: Path
+) -> None:
+    """N-mf-1 (R2): when a product cycle's staging count mismatches, its
+    coverage window MUST be excluded from ``receipt.coverage[]`` —
+    symmetric with the salvage path (``:494-579``) which ``continue``s
+    before ``coverage.append`` on any mismatch. Emitting coverage for a
+    FAIL cycle would falsely claim the drill covered that window.
+    """
+    manifest_path_ok, manifest_ok = _write_fixture_runs_archive(
+        tmp_path,
+        run_id="cycle_match",
+        cycle_time_iso="2026-06-01T00:00:00Z",
+        cycle_identity="2026060100",
+    )
+    manifest_path_bad, manifest_bad = _write_fixture_runs_archive(
+        tmp_path,
+        # Distinct cycle_time_iso so the coverage window (which sources
+        # `producer.start_time` = ``cycle_time_iso``) differs from the
+        # match cycle — required to prove the FAIL window is dropped, not
+        # merely deduped.
+        run_id="cycle_mismatch",
+        cycle_time_iso="2026-06-02T00:00:00Z",
+        cycle_identity="2026060200",
+    )
+    lifter = _FakeLifter(
+        select_return={
+            **_closure_map_for_runs(manifest_ok["identity"]["run_id"]),
+            **_closure_map_for_runs(manifest_bad["identity"]["run_id"]),
+        }
+    )
+
+    def _fake_ingest_runs(
+        workspace: Path,
+        manifest_arg: Mapping[str, Any],
+        staging_database_url: str,
+    ) -> Mapping[str, Any]:
+        return {"run_id": manifest_arg["identity"]["run_id"], "rows_written": 6}
+
+    def _fake_verify(
+        dest_dir: Path, manifest_arg: Mapping[str, Any], conn: Any
+    ) -> drill.ProductVerification:
+        run_id = manifest_arg["identity"]["run_id"]
+        expected = 3
+        actual = 3 if run_id == "cycle_match" else 2  # mismatch on the second cycle
+        return drill.ProductVerification(
+            cycle_label=run_id,
+            expected_row_count=expected,
+            staging_row_count=actual,
+            coverage={
+                "source": "runs",
+                "window": {
+                    "start": manifest_arg["producer"]["start_time"],
+                    "end": manifest_arg["producer"]["end_time"],
+                },
+            },
+        )
+
+    config = _config(
+        tmp_path,
+        zstd_path=zstd_bin,
+        archive_manifests=[manifest_path_ok, manifest_path_bad],
+    )
+    receipt, outcome = drill.run_drill(
+        config,
+        provision_staging=_stub_provisioner,
+        teardown_staging=_stub_teardown,
+        open_prod=_stub_open_prod,
+        open_staging_conn=_stub_open_staging,
+        lifter_factory=lambda prod, staging: lifter,
+        ingest_runs=_fake_ingest_runs,
+        verify_product=_fake_verify,
+    )
+    assert outcome.verdict == "FAIL"
+    # Both cycles ran through lift+ingest so both appear in cycles + counts;
+    # only the matching cycle's window is attributable to coverage.
+    assert "cycle_match" in outcome.cycles
+    assert "cycle_mismatch" in outcome.cycles
+    coverage_windows = [entry["window"] for entry in receipt["coverage"]]
+    match_window = {
+        "start": manifest_ok["producer"]["start_time"],
+        "end": manifest_ok["producer"]["end_time"],
+    }
+    mismatch_window = {
+        "start": manifest_bad["producer"]["start_time"],
+        "end": manifest_bad["producer"]["end_time"],
+    }
+    assert match_window in coverage_windows
+    assert mismatch_window not in coverage_windows
+    # STAGING_COUNT_MISMATCH difference is emitted for the mismatched cycle.
+    mismatch_codes = {
+        d["expected"]["code"]
+        for d in receipt["differences"]
+        if d.get("item") == "cycle_mismatch"
+    }
+    assert drill.CODE_STAGING_COUNT_MISMATCH in mismatch_codes

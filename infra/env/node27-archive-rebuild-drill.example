@@ -56,3 +56,10 @@ NHMS_ARCHIVE_REBUILD_DRILL_INSTANCE_ID=node27-primary-pg15
 # Absolute path to the zstd binary. Refused if relative, symlinked, or
 # non-executable — mirrors the mover's fail-closed boot check.
 NHMS_ZSTD_BIN=/usr/bin/zstd
+
+# Single-instance guard lock file (fcntl.flock). Defaults to
+# ``~/node27-archive-rebuild-drill-logs/drill.lock`` — byte-identical
+# with the runbook's §7.2 wire-code entry and §7.6 stuck-lock recovery
+# step so operators can `rm -f` the exact path documented there. Override
+# only if the deployment stamps the logs directory somewhere non-default.
+# NHMS_ARCHIVE_REBUILD_DRILL_LOCK_PATH=/home/nwm/node27-archive-rebuild-drill-logs/drill.lock

@@ -216,6 +216,7 @@ class DrillConfig:
     zstd_path: Path
     archive_manifest_paths: tuple[Path, ...]
     salvage_manifest_paths: tuple[Path, ...]
+    lock_path: Path
 
     def prod_dbname(self) -> str:
         return _dsn_dbname(self.prod_database_url_ro)
@@ -1519,7 +1520,12 @@ def _run_drill_body(
                                 "actual": verification.staging_row_count,
                             }
                         )
-                        coverage.append(verification.coverage)
+                        # N-mf-1: coverage[] must be attributed only to
+                        # cycles whose staging count actually matched — mirrors
+                        # the salvage verifier (:494-579) which `continue`s
+                        # before `coverage.append` on any mismatch. Emitting
+                        # coverage for a FAIL cycle would falsely claim the
+                        # drill covered its window.
                         if not verification.matches:
                             differences.append(
                                 {
@@ -1531,6 +1537,8 @@ def _run_drill_body(
                                     "actual": {"row_count": verification.staging_row_count},
                                 }
                             )
+                            continue
+                        coverage.append(verification.coverage)
         finally:
             teardown_staging(config.postgres_admin_url, config.staging_dbname())
 
@@ -1855,6 +1863,15 @@ def _config_from_env(env: Mapping[str, str], argv: Sequence[str]) -> DrillConfig
         raise DrillConfigError(
             "no --archive-manifest / --salvage-manifest args passed; nothing to drill"
         )
+    lock_path_env = env.get("NHMS_ARCHIVE_REBUILD_DRILL_LOCK_PATH")
+    if lock_path_env and lock_path_env.strip():
+        lock_path = Path(lock_path_env).expanduser()
+        if not lock_path.is_absolute():
+            raise DrillConfigError(
+                "NHMS_ARCHIVE_REBUILD_DRILL_LOCK_PATH must be an absolute path"
+            )
+    else:
+        lock_path = _default_lock_path()
     return DrillConfig(
         archive_root=archive_root,
         workspace_root=workspace_root,
@@ -1867,6 +1884,7 @@ def _config_from_env(env: Mapping[str, str], argv: Sequence[str]) -> DrillConfig
         zstd_path=zstd_path,
         archive_manifest_paths=archive_manifests,
         salvage_manifest_paths=salvage_manifests,
+        lock_path=lock_path,
     )
 
 
@@ -1925,9 +1943,16 @@ def _single_instance_lock(lock_path: Path) -> Iterator[Any]:
             pass
 
 
-def _default_lock_path(receipt_path: Path) -> Path:
-    """Lock path co-located with the receipt directory."""
-    return receipt_path.parent / "drill.lock"
+def _default_lock_path() -> Path:
+    """Canonical single-instance lock path.
+
+    Byte-identical with the runbook (`docs/runbooks/tier-node27-timeseries-storage.md`
+    §7.2 wire-code entry + §7.6 step 1 recovery) so operators reading either
+    surface can rely on the same absolute path. Override via
+    ``NHMS_ARCHIVE_REBUILD_DRILL_LOCK_PATH`` when the deployment stamps the
+    logs directory somewhere non-default.
+    """
+    return Path("~/node27-archive-rebuild-drill-logs/drill.lock").expanduser()
 
 
 def _fail_receipt_for_uncaught(
@@ -1962,7 +1987,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps({"status": "failed", "reason": str(error)}), file=sys.stderr)
         return 2
 
-    lock_path = _default_lock_path(config.receipt_path)
+    lock_path = config.lock_path
     try:
         with _single_instance_lock(lock_path):
             return _main_locked(config)
@@ -2000,7 +2025,10 @@ def _fail_receipt_for_concurrent(
             {
                 "item": "drill",
                 "expected": {"code": CODE_DRILL_CONCURRENT_INVOCATION},
-                "actual": {"error": str(error)},
+                "actual": {
+                    "error": str(error),
+                    "cause_type": type(error).__name__,
+                },
             }
         ],
     )
