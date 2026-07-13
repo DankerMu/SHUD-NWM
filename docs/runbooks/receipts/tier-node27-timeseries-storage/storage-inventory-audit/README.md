@@ -31,3 +31,18 @@ Final issue #1067 path-model proof from PR #1073 head `699d2921616cddf411cdc2d18
 - The installed audit systemd lane passed the matching file-launch preflight and again reached the independent #1066 `AuditBlocked` path.
 - The isolated stderr delta is bytes 751-923, with zero import errors and zero import-origin refusals.
 - The service remains non-zero solely because #1066 is still open; this bounded stderr proof is not an archive-completeness receipt.
+
+## `completeness-incomplete-live-20260713T093237Z.json`
+
+Issue #1066 first schema 1.1 terminal receipt from node-27 at implementation head `1f7bba9d89a80b563fc51ff6ef407189ca5ee58b`:
+
+- Both installed audit and product-archive env files use the node-27 producer/DB URI identity `s3://nhms`.
+- The installed audit systemd unit completed successfully with no new stderr bytes and published a mode-0600 `incomplete` receipt.
+- The receipt contains 1,585 real DB subjects: 1,357 `complete` and 228 `gap`; the 228 exact selectors are retained for the independently tracked #1065 archive-layout/mover closure.
+- Draft 7 validation with date-time format checking and the audit runtime semantic validator both passed.
+- The committed copy SHA-256 is `3b91c0821e1f0c8e3d9ffae7bbef07ab2e7c3a22d8a2910b7f5044a7438a236d`, byte-identical to the live stable receipt.
+- This is an actual archive-completeness receipt, unlike the three earlier bounded stderr proofs. No #856 retention action was run.
+
+## `terminal-receipt-live-20260713T093237Z.json`
+
+Machine-readable execution envelope for the same #1066 run: code/config identity, systemd result, stderr byte boundary, receipt counts/hash/mode, and validator results.

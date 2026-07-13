@@ -1144,7 +1144,7 @@ Order is load-bearing:
   archive-completeness receipt is explicitly deferred until #1066/#1065
   merge and does not block this issue's PR.
 
-- [ ] 8.2 Fix issue #1066's audit prefix and terminal receipt contract.
+- [x] 8.2 Fix issue #1066's audit prefix and terminal receipt contract.
   Evidence floor: align the audit and product-archive node-27 examples to the
   producer/DB canonical `s3://nhms` prefix while documenting why the separate
   compute/display consumer/config identities retain `s3://nhms-prod` without
