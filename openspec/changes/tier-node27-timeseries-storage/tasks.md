@@ -1059,10 +1059,25 @@ Order is load-bearing:
 
 ## 7. Docs and verification floor
 
-- [ ] 7.1 Cross-link ADR 0002, the new runbook sections (archive operation
+- [x] 7.1 Cross-link ADR 0002, the new runbook sections (archive operation
   and rollback, decompress procedure, manual salvage restore), and
   `docs/governance/DOC_STATUS.md`.
   Evidence floor: `openspec validate tier-node27-timeseries-storage --strict
   --no-interactive`, `uv run ruff check .`, and targeted pytest for the new
   scripts pass as the change-level verification floor; runbook cross-links
   resolve.
+  Delivery: ADR 0002 gained an "Implementation" section that cross-links
+  the tier-node27-timeseries-storage runbook (§2 archive operation and
+  rollback, §3.2 manual salvage restore, §4.3 decompress procedure, §7
+  archive rebuild drill, §8 gated retention) plus the 7 sub-issue scripts
+  and 4 committed receipt schemas.
+  `docs/governance/DOC_STATUS.md` `Current Notes` records the runbook
+  as the current-authority operator entrypoint.
+  §6.3 note: first live retention receipt on node-27 is committed at
+  `docs/runbooks/receipts/tier-node27-timeseries-storage/timeseries-retention/refusal-completeness-missing-20260713T030936Z.json`
+  (mode=enforce, outcome=refused,
+  refusal_reason=COMPLETENESS_RECEIPT_MISSING, schema-valid, exit 1),
+  satisfying §6.3 test row 1 (missing/stale completeness receipt);
+  test rows 2-4 (dry-run + enforce + metadata invariant) remain
+  pending upstream #849/#851/#853/#854 §5.2 live receipts and
+  systemd unit installation on node-27, tracked separately by #856.

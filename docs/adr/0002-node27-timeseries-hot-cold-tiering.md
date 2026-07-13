@@ -103,3 +103,35 @@ it omits TimescaleDB native compression entirely.
 - Node-22 keeps writing products exactly as today; all new machinery runs on
   node-27 (mover, salvage, compression, retention, drill), matching the
   current "node-27 owns data plane" topology.
+
+## Implementation
+
+Delivered under OpenSpec change
+[`tier-node27-timeseries-storage`](../../openspec/changes/tier-node27-timeseries-storage/proposal.md)
+across a family of node-27 user-level systemd oneshot + timer scripts,
+plus receipt schemas and a single operator runbook. Every write path is
+gated on a signed receipt so the "no deletion without archive receipt"
+invariant is enforceable from operator tooling, not honor-based.
+
+Runbook — the single operator entrypoint for all sections below:
+[`docs/runbooks/tier-node27-timeseries-storage.md`](../runbooks/tier-node27-timeseries-storage.md).
+
+| Sub-issue | Scope | Code | Receipt schema | Runbook |
+|---|---|---|---|---|
+| #846 | Storage-source foundation | `packages/common/runtime_storage_source.py` | — | §1 |
+| #849 | Product archive mover + inventory audit systemd + capacity guards | `scripts/node27_product_archive.py`, `scripts/node27_storage_inventory_audit.py` | [`schemas/archive_completeness_receipt.schema.json`](../../schemas/archive_completeness_receipt.schema.json) | Install / Operation / Rollback (top of runbook) |
+| #850 | DB-export salvage exporter + manual restore | `scripts/node27_db_export_salvage.py` | [`schemas/db_export_salvage_receipt.schema.json`](../../schemas/db_export_salvage_receipt.schema.json) | §3 (including §3.2 manual restore) |
+| #851 | Hypertable compression migration + runner | `db/migrations/000047_hypertable_compression.sql`, `scripts/node27_timeseries_compression.py` | [`schemas/timeseries_compression_receipt.schema.json`](../../schemas/timeseries_compression_receipt.schema.json) | §4 (including §4.3 decompress procedure) |
+| #852 | Fail-closed compressed-chunk write guard | `packages/common/timescale_write_guard.py` + wired at 3 write paths | — (in-process exception) | §4.3 |
+| #853 | Compression systemd + governance registration | `infra/systemd/nhms-node27-timeseries-compression.{service,timer}` | — | §4 install / cadence / rollback |
+| #854 | Archive rebuild drill (isolated staging) | `scripts/node27_archive_rebuild_drill.py` | [`schemas/archive_rebuild_drill_receipt.schema.json`](../../schemas/archive_rebuild_drill_receipt.schema.json) | §7 (including §7.5 coverage rule + §7.6 recovery) |
+| #855 | Gated retention runner (`drop_chunks`) + systemd | `scripts/node27_timeseries_retention.py`, `infra/systemd/nhms-node27-timeseries-retention.{service,timer}` | [`schemas/timeseries_retention_receipt.schema.json`](../../schemas/timeseries_retention_receipt.schema.json) | §8 (including §8.5 dry-run semantics + §8.6 recovery + §8.7 salvage cross-link) |
+| #856 | Node-27 live dry-run + first enforce | committed receipts under [`docs/runbooks/receipts/tier-node27-timeseries-storage/`](../runbooks/receipts/tier-node27-timeseries-storage/) | consumes retention schema | §8.4 how to run |
+
+The two gate receipts consumed by retention enforce are the audit's
+archive-completeness receipt (from the archive/audit section at the top
+of the runbook) and the drill PASS receipt (§7);
+compression state is never a retention gate. All new node-27 systemd
+units are registered in the resource-governance audit unit list
+([`scripts/node27_resource_governance.py`](../../scripts/node27_resource_governance.py)
+`DEFAULT_SERVICES`).
