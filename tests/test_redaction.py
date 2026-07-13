@@ -770,6 +770,98 @@ def test_authoritative_catalog_covers_bare_quoted_escaped_and_unicode_auth_keys(
 
 
 @pytest.mark.parametrize(
+    "key",
+    [
+        r"p\u0061ssword",
+        r"api\u005fkey",
+        r"authoriz\u0061tion",
+        r"p\\u0061ssword",
+        r"p\\\\\\u0061ssword",
+        r"passw\uZZZZord",
+    ],
+)
+def test_unicode_escaped_sensitive_keys_share_one_mapping_bare_and_quoted_catalog(
+    key: str,
+) -> None:
+    assert redaction.is_sensitive_key(key)
+    assert redact_payload({key: "catalog-secret"}) == {key: REDACTION_MARKER}
+
+    bare = redact_text(f"{key}=catalog-secret")
+    quoted = redact_text(f'"{key}": "catalog-secret"')
+    assert "catalog-secret" not in bare
+    assert "catalog-secret" not in quoted
+    assert redact_text(bare) == bare
+    assert redact_text(quoted) == quoted
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        r"ordinary\u006bey",
+        r"ordinary\u12key",
+        r"release\\u006eame",
+    ],
+)
+def test_unicode_escaped_non_sensitive_keys_are_not_overmatched(key: str) -> None:
+    assert not redaction.is_sensitive_key(key)
+    assert redact_payload({key: "visible"}) == {key: "visible"}
+    assert redact_text(f"{key}=visible") == f"{key}=visible"
+
+
+def test_mapping_and_auth_role_paths_consult_the_shared_sensitive_key_entrypoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[str] = []
+    original = redaction.is_sensitive_key
+
+    def observe(key: str) -> bool:
+        observed.append(key)
+        return original(key)
+
+    monkeypatch.setattr(redaction, "is_sensitive_key", observe)
+    redact_payload(
+        {
+            r"p\u0061ssword": "mapping-secret",
+            "proof_type": "auth",
+            "surface": "live_backend_auth",
+            "role_mapping": {
+                "operator": {
+                    r"api\u005fkey": "role-secret",
+                    "roles": ["operator"],
+                }
+            },
+            "provider": {r"authoriz\u0061tion": "opaque-secret"},
+        }
+    )
+
+    assert r"p\u0061ssword" in observed
+    assert r"api\u005fkey" in observed
+    assert r"authoriz\u0061tion" in observed
+
+
+def test_unicode_escaped_sensitive_key_decode_work_is_fixed_for_200k_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = redaction._decode_escape_layer_once
+    calls = 0
+    scanned = 0
+
+    def count_decode(value: str) -> str:
+        nonlocal calls, scanned
+        calls += 1
+        scanned += len(value)
+        return original(value)
+
+    monkeypatch.setattr(redaction, "_decode_escape_layer_once", count_decode)
+    key = "ordinary." * 22_223 + r"p\\\\\\u0061ssword"
+
+    assert len(key) > 200_000
+    assert redaction.is_sensitive_key(key)
+    assert calls <= redaction.MAX_FRAGMENT_DECODE_LAYERS
+    assert scanned <= redaction.MAX_FRAGMENT_DECODE_LAYERS * len(key)
+
+
+@pytest.mark.parametrize(
     "raw",
     [
         '"password=double-secret"',

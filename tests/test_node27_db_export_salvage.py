@@ -944,7 +944,8 @@ def test_unicode_escaped_credential_key_is_masked_from_salvage_publication_stder
                 r'detail="prefix {\\\"password\\\":\\\"publication-layered-secret\\\"} suffix" '
                 r'auth_header=Basic \"publication quoted auth secret\" '
                 r'{\"password\":\"publication-standalone-secret\"} '
-                'session-key=Bearer publication-assigned-secret'
+                'session-key=Bearer publication-assigned-secret '
+                r'p\u0061ssword=publication-bare-unicode-secret'
             )
         ),
     )
@@ -968,6 +969,7 @@ def test_unicode_escaped_credential_key_is_masked_from_salvage_publication_stder
     assert "publication quoted auth secret" not in stderr
     assert "publication-standalone-secret" not in stderr
     assert "publication-assigned-secret" not in stderr
+    assert "publication-bare-unicode-secret" not in stderr
     assert "visible" in stderr
 
 

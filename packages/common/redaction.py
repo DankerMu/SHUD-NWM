@@ -91,6 +91,7 @@ LIBPQ_PASSWORD_PREFIX_RE = re.compile(
 URL_RE = re.compile(r"(?:(?:[A-Za-z][A-Za-z0-9+.-]*)://|//)[^\s\"'<>]+", re.IGNORECASE)
 SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 OPAQUE_UNICODE_ESCAPE_RE = re.compile(r"\\+u([0-9a-fA-F]{4})")
+MALFORMED_UNICODE_KEY_ESCAPE_RE = re.compile(r"\\+u[0-9A-Za-z]{0,4}")
 MAX_FRAGMENT_DECODE_LAYERS = 3
 
 
@@ -179,7 +180,39 @@ def redact_database_dsn(value: str, dsn: str | None) -> str:
 
 
 def is_sensitive_key(key: str) -> bool:
-    return bool(SENSITIVE_KEY_RE.search(key))
+    """Match sensitive keys through a fixed number of JSON-like escape layers."""
+    original = key
+    candidate = key
+    for _layer in range(MAX_FRAGMENT_DECODE_LAYERS):
+        if SENSITIVE_KEY_RE.search(candidate):
+            return True
+        if "\\" not in candidate:
+            return False
+        decoded = _decode_escape_layer_once(candidate)
+        if decoded == candidate:
+            break
+        candidate = decoded
+    if SENSITIVE_KEY_RE.search(candidate):
+        return True
+
+    # Fail closed for credential-shaped keys whose valid Unicode escape remains
+    # opaque beyond the fixed decode budget, without treating an ordinary
+    # escaped key as sensitive merely because it contains a backslash.
+    for opaque_candidate in (candidate, original):
+        normalized = OPAQUE_UNICODE_ESCAPE_RE.sub(
+            lambda match: _safe_opaque_codepoint(match.group(1)), opaque_candidate
+        )
+        if normalized != opaque_candidate and SENSITIVE_KEY_RE.search(normalized):
+            return True
+
+    # A malformed Unicode escape can stand in for one credential-key character.
+    # Removing the bounded escape token catches shapes such as
+    # ``passw\uZZZZord`` while leaving ``ordinary\u12key`` alone.
+    for opaque_candidate in (candidate, original):
+        collapsed = MALFORMED_UNICODE_KEY_ESCAPE_RE.sub("", opaque_candidate)
+        if collapsed != opaque_candidate and SENSITIVE_KEY_RE.search(collapsed):
+            return True
+    return False
 
 
 def _should_redact_mapping_value(key: str, value: Any) -> bool:
@@ -379,10 +412,9 @@ def _redact_sensitive_assignments(value: str) -> str:
                 emitted = cursor
             if not closed:
                 continue
-        elif _is_assignment_key_char(value[cursor]):
+        elif _is_bare_assignment_key_start(value, cursor):
             key_start = cursor
-            while cursor < length and _is_assignment_key_char(value[cursor]):
-                cursor += 1
+            cursor = _scan_bare_assignment_key(value, cursor)
             token = value[key_start:cursor]
             malformed = False
         else:
@@ -519,10 +551,9 @@ def _fragment_contains_sensitive_assignment_once(value: str) -> bool:
                 return True
             if not closed:
                 continue
-        elif _is_assignment_key_char(value[cursor]):
+        elif _is_bare_assignment_key_start(value, cursor):
             key_start = cursor
-            while cursor < length and _is_assignment_key_char(value[cursor]):
-                cursor += 1
+            cursor = _scan_bare_assignment_key(value, cursor)
             token = value[key_start:cursor]
         else:
             cursor += 1
@@ -543,16 +574,11 @@ def _fragment_contains_sensitive_assignment_decoded(value: str) -> bool:
     cursor = 0
     length = len(value)
     while cursor < length:
-        character = value[cursor]
-        if not (character.isascii() and (character.isalnum() or character in "_.-")):
+        if not _is_bare_assignment_key_start(value, cursor):
             cursor += 1
             continue
         key_start = cursor
-        while cursor < length:
-            character = value[cursor]
-            if not (character.isascii() and (character.isalnum() or character in "_.-")):
-                break
-            cursor += 1
+        cursor = _scan_bare_assignment_key(value, cursor)
         separator = cursor
         separator = _skip_assignment_key_closer(value, separator)
         while separator < length and _is_assignment_whitespace(value[separator]):
@@ -579,6 +605,11 @@ def _skip_assignment_key_closer(value: str, start: int) -> int:
 
 def _decode_escaped_fragment_once(value: str) -> str:
     """Decode one JSON-like escape layer without recursion or input revisits."""
+    return _decode_escape_layer_once(value)
+
+
+def _decode_escape_layer_once(value: str) -> str:
+    """Decode one bounded escape layer for fragments and sensitive keys."""
     decoded: list[str] = []
     cursor = 0
     length = len(value)
@@ -610,12 +641,11 @@ def _fragment_contains_bare_sensitive_assignment(value: str) -> bool:
     cursor = 0
     length = len(value)
     while cursor < length:
-        if not _is_assignment_key_char(value[cursor]):
+        if not _is_bare_assignment_key_start(value, cursor):
             cursor += 1
             continue
         key_start = cursor
-        while cursor < length and _is_assignment_key_char(value[cursor]):
-            cursor += 1
+        cursor = _scan_bare_assignment_key(value, cursor)
         separator = cursor
         while separator < length and _is_assignment_whitespace(value[separator]):
             separator += 1
@@ -743,6 +773,42 @@ def _is_hex_digit(character: str) -> bool:
 
 def _is_assignment_key_char(character: str) -> bool:
     return character.isascii() and (character.isalnum() or character in "_.-")
+
+
+def _is_bare_assignment_key_start(value: str, start: int) -> bool:
+    return _is_assignment_key_char(value[start]) or _unicode_key_escape_end(value, start) is not None
+
+
+def _scan_bare_assignment_key(value: str, start: int) -> int:
+    """Consume one bare key, treating each Unicode escape as one atomic token."""
+    cursor = start
+    length = len(value)
+    while cursor < length:
+        if _is_assignment_key_char(value[cursor]):
+            cursor += 1
+            continue
+        escape_end = _unicode_key_escape_end(value, cursor)
+        if escape_end is None:
+            break
+        cursor = escape_end
+    return cursor
+
+
+def _unicode_key_escape_end(value: str, start: int) -> int | None:
+    """Return the end of one bounded slash-run plus Unicode key escape."""
+    length = len(value)
+    if start >= length or value[start] != "\\":
+        return None
+    cursor = start
+    while cursor < length and value[cursor] == "\\":
+        cursor += 1
+    if cursor >= length or value[cursor] != "u":
+        return None
+    cursor += 1
+    digits_start = cursor
+    while cursor < length and cursor - digits_start < 4 and value[cursor].isascii() and value[cursor].isalnum():
+        cursor += 1
+    return cursor if cursor > digits_start else None
 
 
 def _is_assignment_whitespace(character: str) -> bool:

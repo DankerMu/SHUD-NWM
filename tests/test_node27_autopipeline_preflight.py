@@ -30,6 +30,24 @@ def _clear_libpq_ambient_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(key, raising=False)
 
 
+def test_emitted_pipeline_summary_masks_unicode_escaped_sensitive_mapping_keys(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    autopipe._emit_json_summary(
+        {
+            "status": "blocked",
+            r"p\u0061ssword": "pipeline-password-secret",
+            r"api\u005fkey": "pipeline-api-secret",
+            r"ordinary\u006bey": "visible",
+        }
+    )
+
+    summary = json.loads(capsys.readouterr().out)
+    assert summary[r"p\u0061ssword"] == "[redacted]"
+    assert summary[r"api\u005fkey"] == "[redacted]"
+    assert summary[r"ordinary\u006bey"] == "visible"
+
+
 def _prepare_roots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     object_store_root = tmp_path / "object-store"
     basins_root = tmp_path / "Basins"

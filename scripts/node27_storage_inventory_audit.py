@@ -1033,28 +1033,33 @@ class _AuditArgumentParser(argparse.ArgumentParser):
 
 def bootstrap_receipt_path(argv: Sequence[str]) -> Path:
     """Resolve one exact receipt option before full CLI/config validation."""
-    values: list[str] = []
-    index = 0
-    while index < len(argv):
-        token = argv[index]
-        if token == "--":
-            break
-        if token == "--receipt-path":
-            if index + 1 >= len(argv) or argv[index + 1].startswith("-"):
-                raise AuditBlocked("--receipt-path requires one absolute value")
-            values.append(argv[index + 1])
-            index += 2
-            continue
-        if token.startswith("--receipt-path="):
-            value = token.partition("=")[2]
-            if not value:
-                raise AuditBlocked("--receipt-path requires one absolute value")
-            values.append(value)
-        index += 1
-    if len(values) > 1:
-        raise AuditBlocked("--receipt-path must be supplied at most once")
-    raw = values[0] if values else (os.getenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH") or "")
-    return _validate_output_path(_absolute(raw, "receipt_path"))
+    try:
+        values: list[str] = []
+        index = 0
+        while index < len(argv):
+            token = argv[index]
+            if token == "--":
+                break
+            if token == "--receipt-path":
+                if index + 1 >= len(argv) or argv[index + 1].startswith("-"):
+                    raise AuditConfigError("--receipt-path requires one absolute value")
+                values.append(argv[index + 1])
+                index += 2
+                continue
+            if token.startswith("--receipt-path="):
+                value = token.partition("=")[2]
+                if not value:
+                    raise AuditConfigError("--receipt-path requires one absolute value")
+                values.append(value)
+            index += 1
+        if len(values) > 1:
+            raise AuditConfigError("--receipt-path must be supplied at most once")
+        raw = values[0] if values else (os.getenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH") or "")
+        return _validate_output_path(_absolute(raw, "receipt_path"))
+    except AuditConfigError:
+        raise
+    except AuditBlocked as error:
+        raise AuditConfigError(str(error)) from error
 
 
 def build_terminal_receipt(
@@ -1102,19 +1107,6 @@ def _blocked_reason(error: AuditBlocked) -> str:
         return "RESOURCE_BOUND_EXCEEDED"
     if "receipt" in message and any(word in message for word in ("schema", "semantic", "selector", "outcome")):
         return "RECEIPT_INVALID"
-    if any(
-        word in message
-        for word in (
-            "required",
-            "must be absolute",
-            "invalid arguments",
-            "minimum age",
-            "at least db retention",
-            "unsafe object-store root",
-            "object_store_prefix",
-        )
-    ):
-        return "CONFIG_INVALID"
     return "EVIDENCE_BLOCKED"
 
 
@@ -1182,8 +1174,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     generated_at = datetime.now(UTC)
     try:
         receipt_path = bootstrap_receipt_path(raw_argv)
-    except Exception as error:
+    except AuditConfigError as error:
         _emit_stderr("CONFIG_INVALID", _sanitize_detail(error))
+        return 1
+    except Exception as error:
+        _emit_stderr(UNEXPECTED_ERROR_REASON, _sanitize_detail(error))
         return 1
     config: AuditConfig | None = None
     try:

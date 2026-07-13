@@ -1707,6 +1707,22 @@ def test_audit_detail_sanitizer_inherits_fail_closed_nested_and_bracket_redactio
     assert "[redacted]" in sanitized
 
 
+def test_audit_detail_sanitizer_redacts_bare_unicode_escaped_sensitive_keys() -> None:
+    raw = (
+        r"p\u0061ssword=audit-password-secret "
+        r"api\u005fkey=audit-api-secret "
+        r"authoriz\u0061tion=Bearer audit-auth-secret "
+        r"ordinary\u006bey=visible"
+    )
+
+    sanitized = audit._sanitize_detail(audit.AuditBlocked(raw))
+
+    for secret in ("audit-password-secret", "audit-api-secret", "audit-auth-secret"):
+        assert secret not in sanitized
+    assert "visible" in sanitized
+    assert audit._sanitize_detail(audit.AuditBlocked(sanitized)) == sanitized
+
+
 def test_quoted_credential_key_is_redacted_from_bootstrap_stderr(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1715,7 +1731,7 @@ def test_quoted_credential_key_is_redacted_from_bootstrap_stderr(
         audit,
         "bootstrap_receipt_path",
         lambda _argv: (_ for _ in ()).throw(
-            audit.AuditBlocked(
+            audit.AuditConfigError(
                 'bootstrap {"ordinary\\uD800": "boot\\\"secret", "safe": "visible"} '
                 'payload="password=bootstrap-fragment-secret" '
                 'payload="prefix {"password":"bootstrap-unescaped-secret"} suffix" '
@@ -1861,7 +1877,7 @@ def test_bootstrap_stderr_redacts_libpq_query_password(
         audit,
         "bootstrap_receipt_path",
         lambda _argv: (_ for _ in ()).throw(
-            audit.AuditBlocked("driver echoed bootstrap query+secret")
+            audit.AuditConfigError("driver echoed bootstrap query+secret")
         ),
     )
     assert audit.main([]) == 1
@@ -1934,7 +1950,7 @@ def test_newline_url_dsn_password_is_redacted_from_bootstrap_stderr_before_line_
         audit,
         "bootstrap_receipt_path",
         lambda _argv: (_ for _ in ()).throw(
-            audit.AuditBlocked(f"bootstrap raw={encoded}; decoded={decoded}; dsn={dsn}")
+            audit.AuditConfigError(f"bootstrap raw={encoded}; decoded={decoded}; dsn={dsn}")
         ),
     )
     assert audit.main([]) == 1
@@ -2118,7 +2134,7 @@ def test_overlapping_dsn_password_candidates_are_redacted_from_bootstrap_stderr(
     monkeypatch.setattr(
         audit,
         "bootstrap_receipt_path",
-        lambda _argv: (_ for _ in ()).throw(audit.AuditBlocked("bootstrap raw=s3cLONG")),
+        lambda _argv: (_ for _ in ()).throw(audit.AuditConfigError("bootstrap raw=s3cLONG")),
     )
     assert audit.main([]) == 1
     stderr = capsys.readouterr().err
@@ -2644,7 +2660,9 @@ def test_oversized_bootstrap_diagnostic_bypasses_redactors(
         audit,
         "bootstrap_receipt_path",
         lambda _argv: (_ for _ in ()).throw(
-            audit.AuditBlocked("x" * audit.DETAIL_INPUT_LIMIT + '"password":"bootstrap-secret"')
+            audit.AuditConfigError(
+                "x" * audit.DETAIL_INPUT_LIMIT + '"password":"bootstrap-secret"'
+            )
         ),
     )
 
@@ -2656,7 +2674,8 @@ def test_oversized_bootstrap_diagnostic_bypasses_redactors(
     assert audit.main([]) == 1
     diagnostic = json.loads(capsys.readouterr().err)
     assert diagnostic["message"] == (
-        f"AuditBlocked{audit.DETAIL_TRUNCATION_MARKER}{audit.DIAGNOSTIC_REDACTED_MARKER}"
+        f"AuditConfigError{audit.DETAIL_TRUNCATION_MARKER}"
+        f"{audit.DIAGNOSTIC_REDACTED_MARKER}"
     )
 
 
@@ -2709,7 +2728,7 @@ def test_malformed_url_is_fail_closed_on_bootstrap_and_publication_stderr(
     monkeypatch.setattr(
         audit,
         "bootstrap_receipt_path",
-        lambda _argv: (_ for _ in ()).throw(audit.AuditBlocked(f"bad path {malformed}")),
+        lambda _argv: (_ for _ in ()).throw(audit.AuditConfigError(f"bad path {malformed}")),
     )
     assert audit.main([]) == 1
     bootstrap = capsys.readouterr().err
@@ -3055,6 +3074,77 @@ def test_archive_age_invalid_env_uses_typed_config_reason(
         audit.config_from_args(_args(tmp_path, age=None))
 
     assert audit._blocked_reason(captured.value) == "CONFIG_INVALID"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--receipt-path"],
+        ["--receipt-path="],
+        ["--receipt-path", "/tmp/one.json", "--receipt-path", "/tmp/two.json"],
+        ["--receipt-path", "relative.json"],
+    ],
+)
+def test_bootstrap_configuration_failures_are_typed(argv: list[str]) -> None:
+    with pytest.raises(audit.AuditConfigError) as captured:
+        audit.bootstrap_receipt_path(argv)
+
+    assert audit._blocked_reason(captured.value) == "CONFIG_INVALID"
+
+
+def test_required_keyword_without_typed_config_boundary_is_evidence_blocked() -> None:
+    error = audit.AuditBlocked("product archive manifest 'files' is a required property")
+    assert audit._blocked_reason(error) == "EVIDENCE_BLOCKED"
+
+
+def test_main_does_not_label_untyped_bootstrap_failure_as_config_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        audit,
+        "bootstrap_receipt_path",
+        lambda _argv: (_ for _ in ()).throw(audit.AuditBlocked("evidence is required")),
+    )
+
+    assert audit.main([]) == 1
+    diagnostic = json.loads(capsys.readouterr().err)
+    assert diagnostic["reason"] == audit.UNEXPECTED_ERROR_REASON
+
+
+@pytest.mark.parametrize(
+    ("label", "expected_reason"),
+    [
+        ("product archive manifest", "EVIDENCE_BLOCKED"),
+        ("salvage manifest", "EVIDENCE_BLOCKED"),
+        ("archive completeness receipt", "RECEIPT_INVALID"),
+    ],
+)
+def test_main_classifies_required_property_schema_failure_by_typed_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    label: str,
+    expected_reason: str,
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+
+    def fail_schema(_config: audit.AuditConfig, *, publish: bool) -> dict[str, object]:
+        assert publish is False
+        audit._validate_schema(
+            {},
+            {"type": "object", "required": ["required_evidence"]},
+            label,
+        )
+        raise AssertionError("schema validation must raise")
+
+    monkeypatch.setattr(audit, "run_audit", fail_schema)
+
+    assert audit.main([]) == 1
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "blocked"
+    assert receipt["refusal_reason"] == expected_reason
 
 
 def test_main_publishes_config_invalid_for_non_integer_archive_age_env(
