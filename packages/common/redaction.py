@@ -88,10 +88,10 @@ AUTHORIZATION_SCHEME_RE = re.compile(
     r"(?P<secret>[^\"'\s,;&<>{}\[\]()]+)",
     re.IGNORECASE,
 )
-SENSITIVE_ASSIGNMENT_RE = re.compile(
+SENSITIVE_ASSIGNMENT_PREFIX_RE = re.compile(
     r"\b([A-Za-z0-9_.-]*(?:token|password|passwd|pwd|secret|credential|api[_-]?key|"
     r"access[_-]?key|session[_-]?key|signature|accountingstoragepass|storagepass)"
-    r"[A-Za-z0-9_.-]*)(\s*[:=]\s*)(?:\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|(?:\\.|[^\s,;&])+)",
+    r"[A-Za-z0-9_.-]*)(\s*[:=]\s*)",
     re.IGNORECASE,
 )
 URL_RE = re.compile(r"(?:(?:[A-Za-z][A-Za-z0-9+.-]*)://|//)[^\s\"'<>]+", re.IGNORECASE)
@@ -164,7 +164,7 @@ def redact_text(value: str) -> str:
     redacted = URL_RE.sub(lambda match: _redact_url(match.group(0)), redacted)
     redacted = AUTHORIZATION_ASSIGNMENT_RE.sub(_redact_authorization_assignment, redacted)
     redacted = AUTHORIZATION_SCHEME_RE.sub(_redact_authorization_scheme, redacted)
-    return SENSITIVE_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}{REDACTION_MARKER}", redacted)
+    return _redact_sensitive_assignments(redacted)
 
 
 def redact_database_dsn(value: str, dsn: str | None) -> str:
@@ -178,7 +178,10 @@ def redact_database_dsn(value: str, dsn: str | None) -> str:
         except ValueError:
             password_raw = None
         if password_raw:
-            password_decoded = unquote(password_raw)
+            try:
+                password_decoded = unquote(password_raw)
+            except Exception:
+                password_decoded = password_raw
             for secret in (password_raw, password_decoded):
                 if secret:
                     redacted = redacted.replace(secret, REDACTION_MARKER)
@@ -352,18 +355,50 @@ def _is_scalar_value(value: Any) -> bool:
 def _redact_url(value: str) -> str:
     try:
         parsed = urlsplit(value)
-    except ValueError:
+        if not parsed.netloc:
+            return _redact_sensitive_assignments(
+                value.split("?", maxsplit=1)[0].split("#", maxsplit=1)[0]
+            )
+        hostname = parsed.hostname or ""
+        netloc = hostname
+        if parsed.port is not None:
+            netloc = f"{netloc}:{parsed.port}"
+        return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+    except Exception:
         return REDACTION_MARKER
-    if not parsed.netloc:
-        return SENSITIVE_ASSIGNMENT_RE.sub(
-            lambda match: f"{match.group(1)}{match.group(2)}{REDACTION_MARKER}",
-            value.split("?", maxsplit=1)[0].split("#", maxsplit=1)[0],
-        )
-    hostname = parsed.hostname or ""
-    netloc = hostname
-    if parsed.port is not None:
-        netloc = f"{netloc}:{parsed.port}"
-    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+
+
+def _redact_sensitive_assignments(value: str) -> str:
+    """Redact assignment values with one linear, mutually exclusive scan."""
+    pieces: list[str] = []
+    cursor = 0
+    length = len(value)
+    while match := SENSITIVE_ASSIGNMENT_PREFIX_RE.search(value, cursor):
+        pieces.append(value[cursor : match.start()])
+        pieces.append(f"{match.group(1)}{match.group(2)}{REDACTION_MARKER}")
+        value_start = match.end()
+        value_end = value_start
+        if value_start < length and value[value_start] in {'"', "'"}:
+            quote = value[value_start]
+            value_end += 1
+            while value_end < length:
+                current = value[value_end]
+                if current == "\\" and value_end + 1 < length:
+                    value_end += 2
+                elif current == quote:
+                    value_end += 1
+                    break
+                else:
+                    value_end += 1
+        else:
+            while value_end < length and value[value_end] not in " \t\r\n,;&":
+                if value[value_end] == "\\" and value_end + 1 < length:
+                    value_end += 2
+                else:
+                    value_end += 1
+        cursor = value_end
+    pieces.append(value[cursor:])
+    return "".join(pieces)
 
 
 def _redact_authorization_assignment(match: re.Match[str]) -> str:

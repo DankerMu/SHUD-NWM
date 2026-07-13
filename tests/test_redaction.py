@@ -393,3 +393,51 @@ def test_redact_text_replaces_lone_surrogates_before_utf8_output() -> None:
     assert redacted.encode("utf-8")
     assert "\udcff" not in redacted
     assert "secret" not in redacted
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ('password="closed value" tail', "password=[redacted] tail"),
+        ("password='closed value' tail", "password=[redacted] tail"),
+        ('password="unterminated value', "password=[redacted]"),
+        ("password='unterminated value", "password=[redacted]"),
+        (r'password="escaped\"quote" tail', "password=[redacted] tail"),
+        (r'password="even\\" tail', "password=[redacted] tail"),
+        (r"password=escaped\ value host=db", "password=[redacted] host=db"),
+        ("password=", "password=[redacted]"),
+    ],
+)
+def test_sensitive_assignment_scanner_handles_quoted_and_escaped_boundaries(
+    raw: str, expected: str
+) -> None:
+    assert redact_text(raw) == expected
+
+
+def test_sensitive_assignment_scanner_handles_long_unterminated_hostile_input() -> None:
+    hostile = 'password="' + "\\" * 200_000
+    assert redact_text(hostile) == "password=[redacted]"
+
+
+@pytest.mark.parametrize(
+    "malformed_url",
+    [
+        "https://user:secret@example.test:not-a-port/path?token=query",
+        "https://user:secret@example.test:99999/path?token=query",
+        "https://user:secret@[::1/path?token=query",
+        "https://user:secret@[not-ipv6]/path?token=query",
+    ],
+)
+def test_redact_text_is_total_and_fail_closed_for_malformed_urls(malformed_url: str) -> None:
+    redacted = redact_text(f"request failed: {malformed_url}")
+    assert "secret" not in redacted
+    assert "token=query" not in redacted
+    assert REDACTION_MARKER in redacted
+
+
+def test_redact_database_dsn_is_total_when_error_contains_malformed_url() -> None:
+    dsn = "postgresql://reader:db-secret@db.example.test:55432/nhms"
+    malformed = "https://user:url-secret@example.test:not-a-port/path?token=query"
+    redacted = redact_database_dsn(f"dsn={dsn}; remote={malformed}", dsn)
+    for secret in ("db-secret", "url-secret", "token=query"):
+        assert secret not in redacted

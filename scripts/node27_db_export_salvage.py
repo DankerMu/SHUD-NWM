@@ -125,14 +125,14 @@ def _mask_dsn(dsn: str) -> str:
     """Return a DSN safe for stderr diagnostics — credentials stripped."""
     try:
         parts = urlsplit(dsn)
+        netloc = parts.hostname or "***"
+        if parts.port is not None:
+            netloc = f"{netloc}:{parts.port}"
+        if parts.username is not None or parts.password is not None:
+            netloc = f"***@{netloc}"
+        return urlunsplit((parts.scheme or "postgresql", netloc, parts.path or "", "", ""))
     except Exception:
         return "postgresql://***@***/***"
-    netloc = parts.hostname or "***"
-    if parts.port is not None:
-        netloc = f"{netloc}:{parts.port}"
-    if parts.username is not None or parts.password is not None:
-        netloc = f"***@{netloc}"
-    return urlunsplit((parts.scheme or "postgresql", netloc, parts.path or "", "", ""))
 
 
 def _parse_positive_int(raw: str | None, *, name: str, minimum: int, maximum: int | None = None) -> int:
@@ -733,7 +733,11 @@ def _source_database_from_dsn(dsn: str) -> str:
 
 
 def _emit_stderr_diagnostic(outcome: str, reason: str, dsn: str | None = None) -> None:
-    payload: dict[str, Any] = {"status": "failed", "outcome": outcome, "reason": reason}
+    payload: dict[str, Any] = {
+        "status": "failed",
+        "outcome": outcome,
+        "reason": redact_database_dsn(reason, dsn),
+    }
     if dsn is not None:
         payload["dsn"] = _mask_dsn(dsn)
     print(json.dumps(payload, sort_keys=True), file=sys.stderr)

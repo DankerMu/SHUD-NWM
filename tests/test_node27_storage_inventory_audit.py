@@ -1596,6 +1596,93 @@ def test_lone_surrogate_and_credentials_are_sanitized_on_bootstrap_and_publicati
     assert publication.encode("utf-8")
 
 
+@pytest.mark.parametrize(
+    ("error", "expected_outcome"),
+    [
+        (
+            audit.AuditBlocked('password="' + "\\" * 200_000),
+            "blocked",
+        ),
+        (
+            RuntimeError(
+                "remote https://user:url-secret@example.test:not-a-port/path?token=query"
+            ),
+            "indeterminate",
+        ),
+    ],
+)
+def test_hostile_assignment_and_malformed_url_replace_stale_success_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    expected_outcome: str,
+) -> None:
+    config = _config(tmp_path)
+    stale = _receipt([_subject(identifier="stale-before-redaction-error")])
+    audit.publish_receipt(config.receipt_path, stale)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(
+        audit,
+        "run_audit",
+        lambda _config, *, publish: (_ for _ in ()).throw(error),
+    )
+    original_publish = audit.publish_receipt
+    attempts = 0
+
+    def count_publish(path: Path, receipt: dict[str, object]) -> None:
+        nonlocal attempts
+        attempts += 1
+        original_publish(path, receipt)
+
+    monkeypatch.setattr(audit, "publish_receipt", count_publish)
+    assert audit.main([]) == 1
+    assert attempts == 1
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == expected_outcome
+    assert receipt != stale
+    body = json.dumps(receipt)
+    assert "url-secret" not in body and "token=query" not in body
+    schema = json.loads(audit.COMPLETENESS_SCHEMA_PATH.read_text())
+    jsonschema.Draft7Validator(schema, format_checker=jsonschema.FormatChecker()).validate(receipt)
+    audit.validate_receipt_semantics(receipt)
+
+
+def test_malformed_url_is_fail_closed_on_bootstrap_and_publication_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    malformed = "https://user:url-secret@example.test:not-a-port/path?token=query"
+    original_bootstrap = audit.bootstrap_receipt_path
+    monkeypatch.setattr(
+        audit,
+        "bootstrap_receipt_path",
+        lambda _argv: (_ for _ in ()).throw(audit.AuditBlocked(f"bad path {malformed}")),
+    )
+    assert audit.main([]) == 1
+    bootstrap = capsys.readouterr().err
+    assert json.loads(bootstrap)["reason"] == "CONFIG_INVALID"
+    assert "url-secret" not in bootstrap and "token=query" not in bootstrap
+
+    monkeypatch.setattr(audit, "bootstrap_receipt_path", original_bootstrap)
+    config = _config(tmp_path)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(audit, "run_audit", lambda _config, *, publish: _receipt([_subject()]))
+    attempts = 0
+
+    def fail_publish(*_args: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise audit.AuditBlocked(f"publication path {malformed}")
+
+    monkeypatch.setattr(audit, "publish_receipt", fail_publish)
+    assert audit.main([]) == 1
+    assert attempts == 1
+    publication = capsys.readouterr().err
+    assert json.loads(publication)["reason"] == audit.PUBLICATION_FAILED_CODE
+    assert "url-secret" not in publication and "token=query" not in publication
+
+
 def test_empty_inventory_publishes_blocked_instead_of_empty_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -685,6 +685,57 @@ def test_mask_dsn_strips_credentials() -> None:
     assert "127.0.0.1" in masked
 
 
+@pytest.mark.parametrize(
+    "malformed_dsn",
+    [
+        "postgresql://user:secret@db.example.test:not-a-port/nhms",
+        "postgresql://user:secret@db.example.test:99999/nhms",
+        "postgresql://user:secret@[::1/nhms",
+        "postgresql://user:secret@[not-ipv6]/nhms",
+    ],
+)
+def test_mask_dsn_is_total_and_fail_closed_for_malformed_urls(malformed_dsn: str) -> None:
+    masked = salvage._mask_dsn(malformed_dsn)
+    assert masked == "postgresql://***@***/***"
+    assert "secret" not in masked
+
+
+def test_mask_dsn_in_message_is_total_for_malformed_remote_url() -> None:
+    malformed = "https://user:url-secret@example.test:not-a-port/path?token=query"
+    masked = salvage._mask_dsn_in_message(f"remote failed: {malformed}", _DSN)
+    assert "url-secret" not in masked
+    assert "token=query" not in masked
+
+
+def test_main_diagnostic_masks_malformed_config_dsn_and_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    malformed_dsn = "postgresql://user:dsn-secret@db.example.test:not-a-port/nhms"
+    malformed_remote = "https://user:url-secret@example.test:99999/path?token=query"
+    env = _base_env(tmp_path, override={"DATABASE_URL": malformed_dsn})
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    code = salvage.main(
+        argv=[],
+        now_utc=_NOW,
+        check_write_privileges=lambda _dsn: (
+            f"role probe failed at {malformed_remote}; password=probe-secret"
+        ),
+        fetch_row_count=lambda *_args, **_kwargs: 0,
+        perform_copy_export=lambda *_args, **_kwargs: b"",
+        compress_bytes=lambda data, _level, _zstd_path: data,
+    )
+    assert code == 1
+    diagnostic = capsys.readouterr().err
+    payload = json.loads(diagnostic)
+    assert payload["outcome"] == "refused_role"
+    assert payload["dsn"] == "postgresql://***@***/***"
+    for secret in ("dsn-secret", "url-secret", "token=query", "probe-secret"):
+        assert secret not in diagnostic
+
+
 def test_dsn_never_leaks_via_exception_message(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
