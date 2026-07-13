@@ -1,0 +1,11 @@
+[Unit]
+Description=NHMS node-27 timeseries retention (gated drop_chunks)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/nwm/NWM
+ExecStartPre=/usr/bin/mkdir -p /home/nwm/node27-timeseries-retention-logs
+ExecStart=/home/nwm/NWM/scripts/node27_timeseries_retention_once.sh
+StandardOutput=append:/home/nwm/node27-timeseries-retention-logs/systemd.log
+StandardError=append:/home/nwm/node27-timeseries-retention-logs/systemd.err
+TimeoutStartSec=0

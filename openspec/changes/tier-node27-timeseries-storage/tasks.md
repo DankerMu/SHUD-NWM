@@ -1016,7 +1016,7 @@ Order is load-bearing:
 
 ## 6. Gated DB retention (`timeseries-db-retention`)
 
-- [ ] 6.1 Build the retention runner
+- [x] 6.1 Build the retention runner
   (`scripts/node27_timeseries_retention.py` + `_once.sh`).
   Evidence floor: `drop_chunks` older than 30d targeting exactly the two
   detail hypertables; hard gate consumes exactly two receipts — a fresh
@@ -1037,7 +1037,7 @@ Order is load-bearing:
     remainder and salvage-backed windows recorded in the receipt.
   - Input: metadata/coverage table row counts before vs after enforce.
     Expected: unchanged.
-- [ ] 6.2 Add retention systemd units + env + governance registration.
+- [x] 6.2 Add retention systemd units + env + governance registration.
   Evidence floor:
   `infra/systemd/nhms-node27-timeseries-retention.{service,timer}` +
   `infra/env/node27-timeseries-retention.example` (window, bounds, gate

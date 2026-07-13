@@ -836,3 +836,139 @@ Round 2 NEW-1: prior to this pin, `_default_lock_path(receipt_path)` co-located 
 ### Task §5.2 boundary
 
 Live PASS receipt on node-27 covering ≥1 forcing cycle + ≥1 runs cycle + ≥1 db-export selector for the planned 30-day drop window; committed as a follow-up commit under this same issue, not part of the §5.1 PR. §5.2 unlocks retention enforce in §6.3.
+
+## Workflow Fixture: Issue #855 Gated Retention Runner + Systemd Wiring
+
+Fixture level `expanded` · Repair intensity `high` · NHMS project profile · Reuses the shared change (`tier-node27-timeseries-storage`); capability `timeseries-db-retention`. Task scope: §6.1 (runner + wrapper + unit tests) + §6.2 (systemd + env + governance registration + runbook §8). §6.3 (live dry-run receipt review + first enforce) is a follow-up commit under the same issue, wired to #856.
+
+### Pre-implementation hazards resolved (Phase 0.5)
+
+Phase 0.5 fixture review surfaced **4 BLOCKING + 6 MODERATE + 3 MINOR CONFIRMED**. Resolutions pinned so Phase 1 does not drift; wire-format codes and env-name catalogue are canonical here.
+
+**H1 — Completeness-receipt gate scope (BLOCKING).**
+Spec `timeseries-db-retention/spec.md:13-19` says every subject "with rows or products in the drop window" must carry `verdict = complete`, but `schemas/archive_completeness_receipt.schema.json` is subject-list keyed; the runner MUST NOT re-query the DB to enumerate in-window subjects (would introduce a shadow oracle bypassing D6). Pinned rule: the receipt is the sole authority. Runner refuses if (a) `coverage_bounds` does not fully contain the drop window (`bounds.start <= drop.start ∧ bounds.end >= drop.end`), or (b) any subject whose `window` overlaps the drop window has `verdict != complete`. Distinct wire codes per case (see §Wire-format codes).
+
+**H2 — Drill per-source coverage rule (BLOCKING).**
+Retention drops chunks from `hydro.river_timeseries` (source=`runs`) and `met.forcing_station_timeseries` (source=`forcing`); the drill receipt PASS branch declares `coverage[]` tuples `(source ∈ {forcing, runs, db-export}, window)`. Runbook §7.5 already declares the rule the runner MUST byte-for-byte enforce: for BOTH `source=forcing` AND `source=runs` the UNION of coverage tuples must span the drop window (the drill emits per-cycle 24 h tuples, so a 30 d drop window is normally covered by ~30 daily tuples whose union spans it — no single tuple is expected to individually contain the drop window); `db-export` coverage is required iff the completeness receipt reports any `coverage=db-export` verdict overlapping the drop window, and the same union rule applies. Refusal is per-shortfall — distinct wire codes so operators see which source blocked. §7.5 uses UNION wording aligned with §8.2 wire codes (`DRILL_COVERAGE_FORCING_MISSING`, `DRILL_COVERAGE_RUNS_MISSING`, `DRILL_COVERAGE_DB_EXPORT_MISSING`) so all three surfaces — H2 here, runbook §7.5, and runbook §8.2 — share the same byte-identical semantic.
+
+**H3 — Chunk enumeration to honour per-tick bound (BLOCKING).**
+`SELECT drop_chunks(older_than := X, hypertable := 'schema.table'::regclass)` cannot bound cardinality (server picks all matching chunks). Runner MUST reuse the #851 pattern: catalog-enumerate via `timescaledb_information.chunks` for the two D3 hypertables, `ORDER BY hypertable_schema, hypertable_name, range_end ASC`, take `per_tick_bound`, then invoke `drop_chunks` per selected chunk (`older_than := chunk.range_end + INTERVAL '1 microsecond'` — the smallest strict-greater step). Remaining eligible chunks are recorded in `deferred_remainder[]`.
+
+Divergence from #851 sibling: retention MUST NOT filter `is_compressed = false`. Compressed chunks older than 30 d are exactly the retention target; the enumeration includes both `is_compressed IN (true, false)`. Code comment MUST cite this divergence.
+
+**H4 — `freed_bytes` measured BEFORE drop (BLOCKING).**
+Receipt schema requires `dropped_chunks[]{name, freed_bytes: integer, minimum: 0}`. Measurement path: `pg_total_relation_size(<schema>.<chunk_name>::regclass)` per selected chunk BEFORE the corresponding `drop_chunks` call; recorded in a local dict keyed by fully-qualified chunk name; attached to `dropped_chunks[]` on success. Post-drop measurement is impossible (relation gone). Reuse compression `_default_measure_chunk_bytes` pattern minus the `after=True` branch.
+
+**H5 — No partial-outcome shape in the schema (MODERATE).**
+`schemas/timeseries_retention_receipt.schema.json:40-68` `oneOf` is exactly `{dry-run | refused | enforced}`; no `partial` outcome. Pinned policy: fail-closed. If any per-chunk `drop_chunks` raises, the whole tick refuses — subsequent chunks are NOT attempted; the receipt outcome is `refused` with `refusal_reason = RETENTION_DROP_FAILED:<schema>.<chunk>` and the runner exits non-zero. Alternative (extend schema for `partial`) rejected: retention drops on healthy chunks should not happen mid-failure without operator inspection.
+
+**H6 — Wire-format refusal codes (MODERATE).**
+Established byte-identity discipline from #854 (wire codes byte-identical across code / runbook / design / tests). Retention codes pinned here (see §Wire-format codes below).
+
+**H7 — Chunk-boundary predicate (MODERATE, #852-class).**
+Spec: "chunks are dropped only when their entire range is older than the window". TimescaleDB catalog `range_end` is exclusive (half-open `[range_start, range_end)`; max row time is `range_end - ε`). Correct predicate is `chunk.range_end <= cutoff` (non-strict); a chunk with `range_end == cutoff` has all row times strictly less than `cutoff` and therefore satisfies "entire range older than window". #851 compression uses strict `<` (which is safer for compression but wrong for retention). Divergence MUST be cited in a code comment.
+
+**H8 — Per-gate freshness defaults (MODERATE).**
+Spec: "configurable validity window". Pinned defaults:
+- `NODE27_TIMESERIES_RETENTION_COMPLETENESS_MAX_AGE_HOURS` default `26` (audit runs daily; 26h absorbs one late run).
+- `NODE27_TIMESERIES_RETENTION_DRILL_MAX_AGE_DAYS` default `30` (matches drill cadence; an expiring receipt forces a re-run per tasks §6.3 steady state).
+Both compared against `generated_at` in each receipt; distinct refusal codes for missing vs stale.
+
+**H9 — `salvage_backed_windows[]` provenance (MODERATE).**
+Populated from the completeness receipt's subject windows where `coverage == "db-export"` AND `verdict == "complete"` AND the subject `window` overlaps the drop window. NOT synthesized from chunk ranges — chunk boundaries do not carry lane/subject identity; the recovery path (§3.2 manual `COPY FROM`) is completeness-selector scoped. Deduplicate identical `{start,end}` pairs and sort ascending.
+
+**H10 — Lock-path byte-identity (MODERATE, #854-R2 same-class).**
+Default absolute path: `/tmp/nhms-node27-timeseries-retention.lock` (`nhms-` prefix parity with `/tmp/nhms-node27-timeseries-compression.lock`). Env override: `NODE27_TIMESERIES_RETENTION_LOCK_PATH` (must be absolute). Runbook §8, `.example`, and code default MUST be byte-identical.
+
+**H11 — Governance DEFAULT_SERVICES (MODERATE).**
+`scripts/node27_resource_governance.py` DEFAULT_SERVICES tuple gains BOTH `nhms-node27-timeseries-retention.service` and `nhms-node27-timeseries-retention.timer`, alphabetically after the compression pair. Unit test asserts membership + presence in the governance receipt when systemctl is mocked.
+
+**H12 — `statement_timeout` reuse (MINOR).**
+Reuse the compression per-connection `SET statement_timeout` pattern (each catalog/DDL op opens its own connection). Catalog enumeration: 60 000 ms. `drop_chunks` per chunk: 300 000 ms.
+
+**H13 — Env prefix (MINOR).**
+`NODE27_TIMESERIES_RETENTION_*` (parity with `NODE27_TIMESERIES_COMPRESSION_*`).
+
+**H14 — Runbook §8 placement (MINOR).**
+New §8 immediately after §7.7. Sub-sections: install, wire-format codes, metadata-table exemption + row-count invariant, run recipe (dry-run first), reading the receipt, recovery from stuck lock / partial drop, salvage-backed windows → cross-link §3.2 manual restore + §7.5 drill coverage rule. Retention units added to §Rollback list.
+
+**H15, H16 — REFUTED.** Metadata tables are regular (`drop_chunks` accepts only hypertables); chunk-interval divergence is per-chunk-agnostic.
+
+**H17 — Zero-eligible enforce (MINOR, PLAUSIBLE).**
+Add explicit test row: enforce mode when the catalog enumeration returns 0 eligible chunks yields `outcome=enforced`, `dropped_chunks=[]`, `deferred_remainder=[]`, `salvage_backed_windows=[]`, exit 0. Prevents miscoding as `refused`.
+
+### Deliverables
+
+- `scripts/node27_timeseries_retention.py` — 4-phase runner (config → gate → enumerate/measure → drop) + receipt emitter matching `schemas/timeseries_retention_receipt.schema.json` + wire-code frozenset + jsonschema self-validation.
+- `scripts/node27_timeseries_retention_once.sh` — env-file `_once.sh` mirror of `node27_timeseries_compression_once.sh` (mode/no-symlink checks; python bin resolve).
+- `infra/systemd/nhms-node27-timeseries-retention.{service,timer}` — cloned from compression siblings, `OnCalendar` slot `05:15:00 UTC` (after audit ~03:xx + compression 04:25).
+- `infra/env/node27-timeseries-retention.example` — envs enumerated in H13 + H8 + H10.
+- `scripts/node27_resource_governance.py` — DEFAULT_SERVICES gains 2 entries (H11).
+- `tests/test_node27_timeseries_retention.py` — unit tests covering §6.1 test rows + H1-H17 pins + 2 governance test rows.
+- `tests/test_node27_resource_governance.py` — assertion that new units are included (H11 test row).
+- `docs/runbooks/tier-node27-timeseries-storage.md` §8 (H14).
+
+### Invariant matrix
+
+| Invariant | Enforcement |
+|---|---|
+| Completeness receipt authority (H1) | Runner reads only from the receipt; no DB probe for in-window subjects; unit test asserts refusal on subject `verdict != complete` in drop window and on `coverage_bounds` shortfall. |
+| Drill per-source coverage (H2) | Runner requires that for BOTH `source=forcing` AND `source=runs` the UNION of coverage tuples spans the drop window (per-cycle 24 h tuples merge into a single covering interval); `db-export` required iff completeness reports `coverage=db-export` overlap; unit test per shortfall and per union-gap. |
+| Chunk enumeration honours per-tick bound (H3) | Catalog query + ORDER BY range_end ASC + `[:per_tick_bound]`; unit test asserts (a) selected count == bound when eligible > bound, (b) `deferred_remainder[]` = remaining eligible chunks. |
+| Compressed chunks are retention-eligible | Catalog filter includes `is_compressed IN (true, false)`; unit test with mixed compressed/uncompressed eligible chunks. |
+| Boundary predicate `range_end <= cutoff` (H7) | Predicate in enumeration query + code comment citing spec; unit test with chunk at boundary + chunk straddling boundary. |
+| `freed_bytes` measured BEFORE drop (H4) | Per-chunk measurement precedes `drop_chunks` call; unit test asserts measurement call happens before drop call via mock ordering assertion. |
+| Fail-closed on per-chunk drop failure (H5) | Try/except around each `drop_chunks`; on failure → `outcome=refused`, `refusal_reason=RETENTION_DROP_FAILED:<schema>.<chunk>`, non-zero exit; subsequent chunks NOT attempted; unit test asserts abort ordering. |
+| Freshness gates (H8) | `generated_at` compared to `now`; unit test per gate at boundary + past. |
+| `salvage_backed_windows[]` from completeness (H9) | Derived only from completeness receipt subjects; unit test asserts absence when no `db-export` subject overlaps. |
+| Lock path byte-identity (H10) | `_default_lock_path()` returns the literal string; test asserts against runbook §8 + `.example`. |
+| Metadata tables untouched (spec test row 4) | Structural (drop_chunks only accepts hypertables) + belt-and-braces unit test row asserting `hydro_run`/`run_display_coverage`/`forcing_version`/`state_snapshot` row counts unchanged pre/post enforce (fixture-level assertion in integration marker; §6.3 covers live proof). |
+| Governance registration (H11) | `DEFAULT_SERVICES` membership test + governance receipt inclusion test with `systemctl` mocked. |
+| Zero-eligible enforce (H17) | Unit test row per §6.1 with catalog empty → `outcome=enforced`, exit 0. |
+
+### Wire-format codes
+
+Retention emits structured refusal codes; byte-identical across code (`scripts/node27_timeseries_retention.py` WIRE_CODES frozenset) / runbook §8.2 / this fixture / unit tests.
+
+- `COMPLETENESS_RECEIPT_MISSING` — env-declared path missing / not a regular file.
+- `COMPLETENESS_RECEIPT_STALE` — `generated_at` older than `NODE27_TIMESERIES_RETENTION_COMPLETENESS_MAX_AGE_HOURS`.
+- `COMPLETENESS_RECEIPT_BOUNDS_INSUFFICIENT` — `coverage_bounds` does not contain the drop window.
+- `COMPLETENESS_RECEIPT_GAP_IN_DROP_WINDOW` — any in-window subject has `verdict = gap`.
+- `COMPLETENESS_RECEIPT_PENDING_IN_DROP_WINDOW` — any in-window subject has `verdict = pending-archive`.
+- `DRILL_RECEIPT_MISSING` — env-declared path missing / not a regular file.
+- `DRILL_RECEIPT_STALE` — `generated_at` older than `NODE27_TIMESERIES_RETENTION_DRILL_MAX_AGE_DAYS`.
+- `DRILL_RECEIPT_FAIL` — drill receipt `verdict = FAIL`.
+- `DRILL_COVERAGE_FORCING_MISSING` — no set of `source=forcing` tuples whose UNION covers the drop window.
+- `DRILL_COVERAGE_RUNS_MISSING` — no set of `source=runs` tuples whose UNION covers the drop window.
+- `DRILL_COVERAGE_DB_EXPORT_MISSING` — completeness shows `db-export` overlap but no set of drill `source=db-export` tuples whose UNION covers the drop window.
+- `RETENTION_CONFIG_INVALID` — absolute-path / positive-int / env-parse failure before any DB call. Emitted to stderr as a single JSON line `{status: "failed", code: "RETENTION_CONFIG_INVALID", reason: <detail>}`; the runner exits with code 2 and NEVER publishes a file receipt (the receipt path itself may be part of what failed to parse).
+- `RETENTION_CONCURRENT_INVOCATION` — non-blocking `fcntl.flock` on the lock path is already held.
+- `RETENTION_DROP_FAILED` — per-chunk `drop_chunks` raised; suffix `:<schema>.<chunk_name>`. Whole tick refuses (H5).
+- `RETENTION_UNCAUGHT_ERROR` — catch-all top-level exception; receipt carries `refusal_reason = "RETENTION_UNCAUGHT_ERROR:<ClassName>: <str(exc)>"`; runner exits non-zero. Symmetric with #854 `DRILL_UNCAUGHT_ERROR`.
+
+### Environment variables
+
+Byte-identical across code default lookup, `infra/env/node27-timeseries-retention.example`, runbook §8.1, this fixture.
+
+- `DATABASE_URL` — Postgres writer role DSN for the retention runner.
+- `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` — default `30`.
+- `NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND` — default `5` (matches compression sibling).
+- `NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH` — absolute.
+- `NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH` — absolute.
+- `NODE27_TIMESERIES_RETENTION_COMPLETENESS_MAX_AGE_HOURS` — default `26`.
+- `NODE27_TIMESERIES_RETENTION_DRILL_MAX_AGE_DAYS` — default `30`.
+- `NODE27_TIMESERIES_RETENTION_RECEIPT_PATH` — absolute.
+- `NODE27_TIMESERIES_RETENTION_LOCK_PATH` — default `/tmp/nhms-node27-timeseries-retention.lock`.
+- `NODE27_TIMESERIES_RETENTION_ENFORCE` — presence toggles enforce mode; absent → dry-run.
+
+### Explicit deviations from prior sub-issue patterns
+
+- **Retention includes compressed chunks** — divergence from #851 compression `_CHUNK_QUERY` which filters `is_compressed = false`. Runner filter is `is_compressed IN (true, false)`; code comment cites this pin. Compressed chunks older than 30 d are exactly the retention target.
+- **Predicate `range_end <= cutoff` (non-strict)** — divergence from #851 compression's strict `<`. Retention semantics: chunk with `range_end == cutoff` has all row times strictly < cutoff → satisfies "entire range older than window". Code comment cites spec sentence.
+- **Fail-closed whole-tick refusal on per-chunk drop failure** — no `partial` outcome. Alternative rejected due to schema `oneOf` strictness + operator-inspection principle (drops on healthy chunks should not proceed mid-failure).
+- **`drop_chunks` per selected chunk (not per hypertable bulk)** — required by per-tick bound (H3). Two per-chunk calls with `older_than := chunk.range_end + INTERVAL '1 microsecond'` per selected chunk.
+- **Byte-identity discipline scope extension** — when correcting a runbook section for a gate-mechanism semantic (§8.5 dry-run behavior in R1; §7.5 union coverage in R2), the fix MUST (a) sweep every runbook section referencing the same mechanism (§7.5 mirrors §8.2 wire-code definitions; §8.5 mirrors the dry-run gate-eval semantics), (b) add a behavior-lock test for the corrected claim. R2 fix pass adds §7.5 union alignment + `test_dry_run_evaluates_gates_before_dryrun_branch` to close the pattern. This extends the discipline established for wire codes in #854 R2 to prose corrections of gate mechanisms, so a section-level rewrite cannot silently leave a sibling section out of sync.
+
+### Task §6.3 boundary
+
+Live dry-run receipt review + first enforce receipt on node-27 (row-count of metadata/coverage tables unchanged pre/post; DB size delta reported) is a follow-up commit under a distinct issue (#856), not part of the §6.1 + §6.2 PR. Steady state: timer-driven enforce keeps passing gates via recurring audit receipts; drill re-run required when the drill receipt exceeds its validity window or archive tooling/format changes.

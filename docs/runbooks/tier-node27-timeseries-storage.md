@@ -527,14 +527,30 @@ candidate retention drop window only when its declared `coverage[]`
 tuples include, sampled within or older than that window:
 
 - ≥1 product-derived cycle for each timeseries-bearing source lane
-  (`forcing/`, `runs/`) that has DB rows in the drop window; PLUS
+  (`forcing/`, `runs/`) that has DB rows in the drop window, AND the
+  UNION of these cycles' coverage tuples must cover the entire drop
+  window; PLUS
 - ≥1 `db-export` selector whenever verified salvage objects cover any
-  part of the drop window.
+  part of the drop window, AND the UNION of the drill's
+  `source=db-export` tuples must likewise cover the drop window.
+
+The drill EMIT contract is per-cycle: each verified product manifest
+contributes one 24 h coverage tuple sampled within or older than the
+drop window (see §7.4). The retention gate check is UNION-based: a 30 d
+drop window is normally covered by ~30 daily tuples whose union spans
+it — no single tuple is expected to individually contain the drop
+window. These two shapes coexist deliberately (drill emits per-cycle
+tuples; retention union-checks them against the candidate drop window).
 
 The drill declares its tuples faithfully; the retention runner (#855)
-evaluates them against its candidate drop window. A FAIL receipt, a
-stale receipt, or a PASS receipt whose coverage is insufficient blocks
-retention enforcement.
+evaluates their UNION against its candidate drop window. A FAIL receipt,
+a stale receipt, or a PASS receipt whose per-source UNION does not
+cover the drop window blocks retention enforcement. See §8.2 wire-code
+`DRILL_COVERAGE_FORCING_MISSING` / `DRILL_COVERAGE_RUNS_MISSING` /
+`DRILL_COVERAGE_DB_EXPORT_MISSING` for the code emitted when the union
+does not cover; see
+`openspec/changes/tier-node27-timeseries-storage/design.md` #855
+fixture block H2 pin for the canonical statement.
 
 ### 7.6 Recovery (post-fault operator playbook)
 
@@ -570,16 +586,270 @@ receipts will be committed under
 `docs/runbooks/receipts/node27_archive_rebuild_drill/` — mirroring the
 mover and audit receipt directories.
 
+## 8. Gated DB retention (`timeseries-db-retention`)
+
+The retention runner
+(`scripts/node27_timeseries_retention.py`, issue #855) drops chunks
+strictly older than the drop window (default 30 days) from the two D3
+detail hypertables `hydro.river_timeseries` and
+`met.forcing_station_timeseries` via TimescaleDB `drop_chunks`. Enforce
+mode is hard-gated on TWO archive receipts and refuses fail-closed if
+either is missing, stale, or fails to cover the drop window (spec
+`timeseries-db-retention` and design D6 / D7). Compression state is
+never a gate — compressed chunks older than 30 days are exactly the
+retention target (H3 divergence from #851).
+
+Related documents:
+
+- Design record: `openspec/changes/tier-node27-timeseries-storage/design.md`
+  fixture block "Workflow Fixture: Issue #855" (H1–H17 pins).
+- Architecture record:
+  [`docs/adr/0002-node27-timeseries-hot-cold-tiering.md`](../adr/0002-node27-timeseries-hot-cold-tiering.md).
+- Display carve-out: `docs/adr/0001-display-timeseries-carveout.md`. The
+  runner is never imported by `apps/api/**` or `apps/frontend/**`.
+
+### 8.1 Install (node-27, `nwm` user)
+
+Live enablement of the retention unit is a §6.3 follow-up (issue #856);
+this PR delivers the units + wrapper + tests, and the install steps below
+are prepared for the follow-up commit.
+
+1. Create the retention log directory (same shape as the compression
+   sibling):
+
+   ```
+   mkdir -p ~/node27-timeseries-retention-logs
+   ```
+
+2. Copy the env example into place and lock it down. The env file MUST be
+   mode `0600` — the wrapper refuses otherwise
+   (`ENV_FILE_MODE_UNSAFE`).
+
+   ```
+   cp /home/nwm/NWM/infra/env/node27-timeseries-retention.example \
+      /home/nwm/NWM/infra/env/node27-timeseries-retention.env
+   chmod 0600 /home/nwm/NWM/infra/env/node27-timeseries-retention.env
+   ```
+
+   Fill in `DATABASE_URL` with a writer role (retention runs `drop_chunks`
+   DDL). Do NOT share the audit env's `nhms_display_ro` role — retention
+   requires DML privileges.
+
+3. Register the two new units (§6.3 will `enable --now`; kept commented
+   here because §6.3 owns the first live enforce):
+
+   ```
+   systemctl --user daemon-reload
+   # systemctl --user enable --now nhms-node27-timeseries-retention.timer
+   ```
+
+   The service and timer files are installed under
+   `~/.config/systemd/user/` from the checked-in
+   `infra/systemd/nhms-node27-timeseries-retention.{service,timer}`.
+
+### 8.2 Wire-format codes
+
+The runner emits structured refusal reasons on `outcome=refused`. Codes
+are byte-identical across code (`scripts/node27_timeseries_retention.py`
+`WIRE_CODES` frozenset), this runbook, the design fixture
+(`openspec/changes/tier-node27-timeseries-storage/design.md` #855 block),
+and the unit tests. Any addition / rename / removal MUST land in all four
+surfaces in the same commit.
+
+- `COMPLETENESS_RECEIPT_MISSING` — env-declared completeness receipt path
+  missing, unreadable, or schema-invalid.
+- `COMPLETENESS_RECEIPT_STALE` — completeness `generated_at` older than
+  `NODE27_TIMESERIES_RETENTION_COMPLETENESS_MAX_AGE_HOURS`.
+- `COMPLETENESS_RECEIPT_BOUNDS_INSUFFICIENT` — `coverage_bounds` does not
+  fully contain the drop window.
+- `COMPLETENESS_RECEIPT_GAP_IN_DROP_WINDOW` — any in-window subject has
+  `verdict = gap`.
+- `COMPLETENESS_RECEIPT_PENDING_IN_DROP_WINDOW` — any in-window subject
+  has `verdict = pending-archive`.
+- `DRILL_RECEIPT_MISSING` — env-declared drill receipt path missing,
+  unreadable, or schema-invalid.
+- `DRILL_RECEIPT_STALE` — drill `generated_at` older than
+  `NODE27_TIMESERIES_RETENTION_DRILL_MAX_AGE_DAYS`.
+- `DRILL_RECEIPT_FAIL` — drill receipt `verdict = FAIL`.
+- `DRILL_COVERAGE_FORCING_MISSING` — no set of `source=forcing` coverage
+  tuples whose UNION covers the drop window (per-cycle 24 h tuples merge
+  into a single covering interval; a 30 d drop window is normally covered
+  by ~30 daily tuples).
+- `DRILL_COVERAGE_RUNS_MISSING` — no set of `source=runs` coverage tuples
+  whose UNION covers the drop window.
+- `DRILL_COVERAGE_DB_EXPORT_MISSING` — completeness has `coverage=db-export`
+  subject overlap but no set of drill `source=db-export` tuples whose
+  UNION covers the drop window.
+- `RETENTION_CONFIG_INVALID` — absolute-path / positive-int / env-parse
+  failure before any DB call. Emitted to stderr as a single JSON line
+  `{status: "failed", code: "RETENTION_CONFIG_INVALID", reason: <detail>}`;
+  the runner exits with code 2 and NEVER publishes a file receipt (the
+  receipt path itself may be part of what failed to parse).
+- `RETENTION_CONCURRENT_INVOCATION` — non-blocking `fcntl.flock` on
+  `/tmp/nhms-node27-timeseries-retention.lock` is already held. Receipt
+  published, exit code 1.
+- `RETENTION_DROP_FAILED` — per-chunk `drop_chunks` raised. Suffix
+  `:<hypertable_schema>.<chunk_name>: <error>`. Whole tick refuses (H5
+  fail-closed); subsequent chunks NOT attempted.
+- `RETENTION_UNCAUGHT_ERROR` — catch-all top-level exception. Receipt
+  carries `refusal_reason = "RETENTION_UNCAUGHT_ERROR:<ClassName>: <str(exc)>"`.
+  Symmetric with #854 `DRILL_UNCAUGHT_ERROR`.
+
+Refusal-code priority (highest first — the first hit wins):
+
+```
+COMPLETENESS_RECEIPT_MISSING
+  -> COMPLETENESS_RECEIPT_STALE
+    -> COMPLETENESS_RECEIPT_BOUNDS_INSUFFICIENT
+      -> COMPLETENESS_RECEIPT_GAP_IN_DROP_WINDOW
+        -> COMPLETENESS_RECEIPT_PENDING_IN_DROP_WINDOW
+          -> DRILL_RECEIPT_MISSING
+            -> DRILL_RECEIPT_STALE
+              -> DRILL_RECEIPT_FAIL
+                -> DRILL_COVERAGE_FORCING_MISSING
+                  -> DRILL_COVERAGE_RUNS_MISSING
+                    -> DRILL_COVERAGE_DB_EXPORT_MISSING
+```
+
+### 8.3 Metadata-table exemption + row-count invariant
+
+The runner targets EXACTLY two hypertables (spec §Window and mechanism):
+
+- `hydro.river_timeseries`
+- `met.forcing_station_timeseries`
+
+Metadata / coverage tables are NEVER retention targets:
+
+- `hydro.hydro_run`
+- `hydro.run_display_coverage`
+- `met.forcing_version`
+- `hydro.state_snapshot` (or wherever the state snapshot table currently
+  lives)
+- QC / lineage tables
+
+Two guardrails enforce this:
+
+1. **Structural**: `drop_chunks` only accepts hypertables; metadata
+   tables are regular Postgres tables and cannot be dropped by
+   `drop_chunks`. The runner's SQL literal restricts the tuple filter to
+   the two D3 hypertables.
+2. **Row-count invariant** (§6.1 test row 4): after every enforce tick,
+   the row counts of the metadata / coverage tables MUST be unchanged.
+   §6.3 embeds a pre/post row-count check in the live receipt review.
+
+### 8.4 How to run
+
+```
+# 1. Prime env (once per node-27, then owned by operators)
+cp /home/nwm/NWM/infra/env/node27-timeseries-retention.example \
+   /home/nwm/NWM/infra/env/node27-timeseries-retention.env
+chmod 0600 /home/nwm/NWM/infra/env/node27-timeseries-retention.env
+# Fill DATABASE_URL (writer role), completeness/drill receipt paths,
+# receipt path, and (optionally) lock path override.
+
+# 2. First run MUST be dry-run — inspect candidate_chunks + deferred_remainder
+set -a; source /home/nwm/NWM/infra/env/node27-timeseries-retention.env; set +a
+uv run python scripts/node27_timeseries_retention.py --dry-run
+cat "$NODE27_TIMESERIES_RETENTION_RECEIPT_PATH" | jq .
+
+# 3. When ready to enforce, flip the env flag (or pass --enforce).
+# Enforce PRECONDITIONS:
+#  - Completeness receipt fresh AND covers the drop window with verdict=complete
+#    for every subject overlapping the drop window.
+#  - Drill receipt fresh AND verdict=PASS AND forcing+runs coverage tuples
+#    span the drop window (+ db-export tuple if completeness reports a
+#    db-export overlap).
+# Either export NODE27_TIMESERIES_RETENTION_ENFORCE=1 in the env file or
+# pass --enforce on the CLI.
+uv run python scripts/node27_timeseries_retention.py --enforce
+```
+
+Exit codes: `0` = dry-run / enforced (both are "success" outcomes; the
+receipt carries the outcome). `1` = refused (gate failure, per-chunk drop
+failure, concurrent invocation, uncaught error — see §8.6). `2` = config
+refusal (missing / non-absolute / non-positive env; no receipt written).
+
+### 8.5 Reading the receipt
+
+Receipts match `schemas/timeseries_retention_receipt.schema.json`
+(schema `oneOf` — exactly one of `dry-run` / `refused` / `enforced`).
+
+- `outcome=dry-run`: `mode=dry-run`; `candidate_chunks[]` lists chunks
+  that WOULD be dropped up to the per-tick bound; `deferred_remainder[]`
+  lists chunks beyond the bound. Gates ARE evaluated in dry-run mode —
+  a dry-run invocation that would refuse still emits a `refused` receipt
+  (`mode=enforce` per the schema `oneOf`) so operators see the exact
+  refusal reason before ever running enforce. If gates pass, dry-run
+  enumerates candidate chunks + deferred remainder without invoking
+  `drop_chunks`. The `--dry-run` CLI flag controls the DROP phase only;
+  gate evaluation is always run because it is the operator's oracle for
+  whether enforce is safe.
+- `outcome=refused`: `mode=enforce`; `refusal_reason` is one of the codes
+  in §8.2. Nothing was dropped this tick. A `refused` receipt can be
+  emitted by a `--dry-run` invocation too — the mode field always reads
+  `enforce` because the schema pins that pairing.
+- `outcome=enforced`: `mode=enforce`; `dropped_chunks[]` records each
+  dropped chunk with its pre-drop `freed_bytes` (H4 — measured BEFORE
+  `drop_chunks`); `deferred_remainder[]` records the beyond-bound
+  chunks; `salvage_backed_windows[]` records the completeness-derived
+  db-export windows that fell inside the drop window (H9).
+
+### 8.6 Recovery (post-fault operator playbook)
+
+1. **Stuck lock (`RETENTION_CONCURRENT_INVOCATION`).** Confirm no live
+   retention run is active (`ps -ef | grep node27_timeseries_retention`),
+   then remove the lock file:
+
+   ```
+   rm -f /tmp/nhms-node27-timeseries-retention.lock
+   ```
+
+   The lock path is byte-identical with the runner's
+   `_default_lock_path()` and `infra/env/node27-timeseries-retention.example`.
+2. **Per-chunk drop failure (`RETENTION_DROP_FAILED`).** The whole tick
+   refuses fail-closed (H5) — no schema `partial` outcome exists.
+   **Chunks that dropped successfully before the failure are NOT
+   enumerated in the receipt** (schema `oneOf` forbids `dropped_chunks`
+   on refused); those chunks are already gone. To reconstruct what
+   actually happened, cross-reference the wrapper's `retention.log`
+   (per-chunk drop timings printed to stderr) with the current
+   `timescaledb_information.chunks` state before re-running enforce.
+   Inspect the offending chunk (the refusal_reason suffix names it
+   `<hypertable_schema>.<chunk_name>`). Common causes: statement timeout
+   (5 min per chunk), active writer holding an incompatible lock, or a
+   TimescaleDB catalog inconsistency. Re-run enforce after the operator
+   has confirmed the DB is healthy. There is no automated retry loop —
+   drops on healthy chunks should NOT proceed mid-failure without
+   operator inspection.
+3. **Config refusal (`RETENTION_CONFIG_INVALID`).** No receipt was
+   written. Fix the env file per §8.4 and retry.
+4. **Uncaught error (`RETENTION_UNCAUGHT_ERROR`).** The receipt carries
+   the exception class + message. File a bug against #855 (or the
+   downstream owner if the class is from a shared helper).
+
+### 8.7 Salvage-backed windows
+
+`salvage_backed_windows[]` in an `enforced` receipt is derived only from
+the completeness receipt's subjects where `coverage=db-export` AND
+`verdict=complete` AND the subject window overlaps the drop window (H9
+provenance rule — chunk boundaries do NOT carry lane/subject identity).
+Each entry names a `{start, end}` interval whose post-drop recovery
+lane is the manual `COPY FROM` procedure documented in [§3.2](#32-salvage-restore-is-manual--no-automated-restore-lane);
+the drill's coverage rule that permits dropping such windows is
+[§7.5](#75-how-the-coverage-rule-maps-to-the-retention-gate).
+
 ## Rollback (unit-level, not data-level)
 
-Both units are read-mostly (audit is read-only; mover's writes are already
-gated by ADR 0002 "no deletion without archive receipt"). Rollback is
-disabling the timers; the receipts stay on disk as historical evidence.
+All units are read-mostly (audit is read-only; mover's writes are already
+gated by ADR 0002 "no deletion without archive receipt"; retention only
+drops chunks after both gate receipts pass). Rollback is disabling the
+timers; the receipts stay on disk as historical evidence.
 
 ```
 systemctl --user disable --now nhms-node27-product-archive.timer
 systemctl --user disable --now nhms-node27-storage-inventory-audit.timer
 systemctl --user disable --now nhms-node27-timeseries-compression.timer
+systemctl --user disable --now nhms-node27-timeseries-retention.timer
 ```
 
 Notes:

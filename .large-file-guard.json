@@ -13,6 +13,8 @@
     "workers/forcing_producer/producer.py",
     "tests/test_forcing_producer.py",
     "scripts/node27_archive_rebuild_drill.py",
-    "tests/test_node27_archive_rebuild_drill.py"
+    "scripts/node27_timeseries_retention.py",
+    "tests/test_node27_archive_rebuild_drill.py",
+    "tests/test_node27_timeseries_retention.py"
   ]
 }
