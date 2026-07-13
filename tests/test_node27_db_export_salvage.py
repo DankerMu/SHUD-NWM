@@ -1729,6 +1729,23 @@ def test_mask_dsn_in_message_scrubs_libpq_password_even_without_matching_dsn() -
     assert "password=***" in masked
 
 
+def test_salvage_diagnostic_inherits_fail_closed_nested_and_bracket_redaction() -> None:
+    deep = json.dumps({r"p\u0061ssword": "salvage-deep-secret"})
+    for _layer in range(4):
+        deep = json.dumps(deep)
+    message = (
+        'payload="password="salvage-early-secret"" '
+        "Proxy-Authorization: Basic {salvage-bracket-secret} "
+        f"deep={deep}"
+    )
+
+    masked = salvage._mask_dsn_in_message(message, _DSN)
+
+    for secret in ("salvage-early-secret", "salvage-bracket-secret", "salvage-deep-secret"):
+        assert secret not in masked
+    assert "***" in masked
+
+
 # === cand-C: MemoryError must not be silently classified as per-selector
 # error; the byte cap gate refuses selectors whose CSV exceeds the bound.
 

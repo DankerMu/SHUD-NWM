@@ -1690,6 +1690,23 @@ def test_terminal_receipt_redacts_generic_credentials_for_controlled_and_unexpec
         assert secret not in body
 
 
+def test_audit_detail_sanitizer_inherits_fail_closed_nested_and_bracket_redaction() -> None:
+    deep = json.dumps({r"p\u0061ssword": "audit-deep-secret"})
+    for _layer in range(4):
+        deep = json.dumps(deep)
+    raw = (
+        'payload="password="audit-early-secret"" '
+        "Authorization: Bearer [audit-bracket-secret] "
+        f"deep={deep}"
+    )
+
+    sanitized = audit._sanitize_detail(audit.AuditBlocked(raw))
+
+    for secret in ("audit-early-secret", "audit-bracket-secret", "audit-deep-secret"):
+        assert secret not in sanitized
+    assert "[redacted]" in sanitized
+
+
 def test_quoted_credential_key_is_redacted_from_bootstrap_stderr(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -3027,6 +3044,41 @@ def test_archive_age_cli_overrides_env_and_env_below_retention_blocks(
     assert audit.config_from_args(_args(tmp_path, age=30)).archive_min_age_days == 30
     with pytest.raises(audit.AuditBlocked, match="at least DB retention"):
         audit.config_from_args(_args(tmp_path, age=None))
+
+
+def test_archive_age_invalid_env_uses_typed_config_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NHMS_ARCHIVE_MIN_AGE_DAYS", "not-an-int")
+
+    with pytest.raises(audit.AuditConfigError, match="must be an integer") as captured:
+        audit.config_from_args(_args(tmp_path, age=None))
+
+    assert audit._blocked_reason(captured.value) == "CONFIG_INVALID"
+
+
+def test_main_publishes_config_invalid_for_non_integer_archive_age_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setenv("NHMS_ARCHIVE_MIN_AGE_DAYS", "not-an-int")
+    argv = [
+        "--database-url",
+        config.database_url,
+        "--object-store-root",
+        str(config.object_store_root),
+        "--object-store-prefix",
+        config.object_store_prefix,
+        "--archive-root",
+        str(config.archive_root),
+        "--receipt-path",
+        str(config.receipt_path),
+    ]
+
+    assert audit.main(argv) == 1
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "blocked"
+    assert receipt["refusal_reason"] == "CONFIG_INVALID"
 
 
 @pytest.mark.parametrize(

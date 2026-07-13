@@ -59,6 +59,10 @@ class AuditBlocked(RuntimeError):
     """Raised when evidence is unsafe or the gate receipt cannot be proved."""
 
 
+class AuditConfigError(AuditBlocked):
+    """Raised when operator-supplied audit configuration is invalid."""
+
+
 class PublicationIndeterminate(AuditBlocked):
     """Raised after replacement when receipt durability or namespace identity is unknown."""
 
@@ -958,40 +962,56 @@ def run_audit(
 
 
 def config_from_args(args: argparse.Namespace) -> AuditConfig:
-    database_url = (args.database_url or os.getenv("DATABASE_URL") or "").strip()
-    object_store_prefix = _canonical_object_store_prefix(
-        args.object_store_prefix or os.getenv("OBJECT_STORE_PREFIX") or ""
-    )
-    object_root = _absolute(args.object_store_root or os.getenv("OBJECT_STORE_ROOT"), "object_store_root")
-    archive_root = _absolute(
-        args.archive_root or os.getenv("NODE27_STORAGE_INVENTORY_ARCHIVE_ROOT") or os.getenv("NHMS_ARCHIVE_ROOT"),
-        "archive_root",
-    )
-    receipt_path = _absolute(args.receipt_path or os.getenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH"), "receipt_path")
-    if not database_url:
-        raise AuditBlocked("DATABASE_URL is required")
-    raw_age: int | str = (
-        args.archive_min_age_days
-        if args.archive_min_age_days is not None
-        else os.getenv("NHMS_ARCHIVE_MIN_AGE_DAYS", "45")
-    )
     try:
-        age = int(raw_age)
-    except ValueError as error:
-        raise AuditBlocked("NHMS_ARCHIVE_MIN_AGE_DAYS must be an integer") from error
-    if age < DEFAULT_DB_RETENTION_DAYS:
-        raise AuditBlocked(
-            f"NHMS_ARCHIVE_MIN_AGE_DAYS must be at least DB retention ({DEFAULT_DB_RETENTION_DAYS} days)"
+        database_url = (args.database_url or os.getenv("DATABASE_URL") or "").strip()
+        object_store_prefix = _canonical_object_store_prefix(
+            args.object_store_prefix or os.getenv("OBJECT_STORE_PREFIX") or ""
         )
-    return AuditConfig(
-        database_url,
-        object_root,
-        object_store_prefix,
-        archive_root,
-        age,
-        receipt_path,
-        _absolute(getattr(args, "zstd_path", None) or os.getenv("ZSTD_BIN") or "/usr/bin/zstd", "zstd_path"),
-    )
+        object_root = _absolute(
+            args.object_store_root or os.getenv("OBJECT_STORE_ROOT"), "object_store_root"
+        )
+        archive_root = _absolute(
+            args.archive_root
+            or os.getenv("NODE27_STORAGE_INVENTORY_ARCHIVE_ROOT")
+            or os.getenv("NHMS_ARCHIVE_ROOT"),
+            "archive_root",
+        )
+        receipt_path = _absolute(
+            args.receipt_path or os.getenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH"),
+            "receipt_path",
+        )
+        if not database_url:
+            raise AuditConfigError("DATABASE_URL is required")
+        raw_age: int | str = (
+            args.archive_min_age_days
+            if args.archive_min_age_days is not None
+            else os.getenv("NHMS_ARCHIVE_MIN_AGE_DAYS", "45")
+        )
+        try:
+            age = int(raw_age)
+        except ValueError as error:
+            raise AuditConfigError("NHMS_ARCHIVE_MIN_AGE_DAYS must be an integer") from error
+        if age < DEFAULT_DB_RETENTION_DAYS:
+            raise AuditConfigError(
+                "NHMS_ARCHIVE_MIN_AGE_DAYS must be at least DB retention "
+                f"({DEFAULT_DB_RETENTION_DAYS} days)"
+            )
+        return AuditConfig(
+            database_url,
+            object_root,
+            object_store_prefix,
+            archive_root,
+            age,
+            receipt_path,
+            _absolute(
+                getattr(args, "zstd_path", None) or os.getenv("ZSTD_BIN") or "/usr/bin/zstd",
+                "zstd_path",
+            ),
+        )
+    except AuditConfigError:
+        raise
+    except AuditBlocked as error:
+        raise AuditConfigError(str(error)) from error
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1008,7 +1028,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 class _AuditArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
-        raise AuditBlocked(f"invalid arguments: {message}")
+        raise AuditConfigError(f"invalid arguments: {message}")
 
 
 def bootstrap_receipt_path(argv: Sequence[str]) -> Path:
@@ -1071,6 +1091,8 @@ def build_terminal_receipt(
 
 
 def _blocked_reason(error: AuditBlocked) -> str:
+    if isinstance(error, AuditConfigError):
+        return "CONFIG_INVALID"
     message = str(error).lower()
     if "inventory is empty" in message:
         return "EMPTY_INVENTORY"

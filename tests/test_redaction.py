@@ -501,6 +501,88 @@ def test_authorization_redaction_is_idempotent(raw: str) -> None:
     assert redact_text(redact_text(raw)) == redact_text(raw)
 
 
+@pytest.mark.parametrize(
+    ("prefix", "scheme"),
+    [
+        ("Authorization: ", "Bearer"),
+        ("Proxy-Authorization=", "Basic"),
+        ("auth_header: ", "Bearer"),
+        ("", "Basic"),
+    ],
+)
+@pytest.mark.parametrize(("opener", "closer"), [("[", "]"), ("{", "}"), ("(", ")"), ("<", ">")])
+@pytest.mark.parametrize("slash_count", range(4))
+@pytest.mark.parametrize("closed", [True, False])
+def test_authorization_bracket_credentials_collapse_to_one_idempotent_marker(
+    prefix: str,
+    scheme: str,
+    opener: str,
+    closer: str,
+    slash_count: int,
+    closed: bool,
+) -> None:
+    slashes = "\\" * slash_count
+    credential = f"{slashes}{opener}bracket-credential-secret"
+    if closed:
+        credential += f"{slashes}{closer}"
+    raw = f"{prefix}{scheme} {credential}"
+    expected = f"{prefix}{scheme} {REDACTION_MARKER}"
+
+    assert redact_text(raw) == expected
+    assert redact_text(expected) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        'payload="password="early-close-secret""',
+        r'{\"password\":\"mixed-escaped-secret\"}',
+    ],
+)
+def test_sensitive_fragment_early_close_never_emits_marker_plus_original_value(raw: str) -> None:
+    redacted = redact_text(raw)
+    assert "secret" not in redacted
+    assert REDACTION_MARKER in redacted
+    assert redact_text(redacted) == redacted
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        r'Bearer "quoted-inner-\"authorization-secret"',
+        r"Basic [bracket-inner-\]authorization-secret]",
+    ],
+)
+def test_unescaped_authorization_delimiters_do_not_close_on_escaped_inner_delimiter(
+    raw: str,
+) -> None:
+    redacted = redact_text(raw)
+    assert "authorization-secret" not in redacted
+    assert redacted in {f"Bearer {REDACTION_MARKER}", f"Basic {REDACTION_MARKER}"}
+
+
+@pytest.mark.parametrize("wrapper_layers", [3, 4, 5])
+def test_deep_json_serialization_fails_closed_after_fixed_decode_budget(
+    wrapper_layers: int,
+) -> None:
+    raw = json.dumps({r"p\u0061ssword": "deep-serialization-secret"})
+    for _layer in range(wrapper_layers):
+        raw = json.dumps(raw)
+
+    redacted = redact_text(raw)
+    assert "deep-serialization-secret" not in redacted
+    assert REDACTION_MARKER in redacted
+    assert redact_text(redacted) == redacted
+
+
+def test_deep_json_serialization_preserves_non_sensitive_text_contract() -> None:
+    raw = json.dumps({"ordinary.key": "deep-visible-value"})
+    for _layer in range(redaction.MAX_FRAGMENT_DECODE_LAYERS + 1):
+        raw = json.dumps(raw)
+
+    assert redact_text(raw) == raw
+
+
 def test_authorization_escaped_quote_staircase_has_bounded_monotonic_scan() -> None:
     staircase = "\\" * 200_000 + '"'
     raw = f"Authorization=Bearer {staircase}staircase-auth-secret{staircase} tail"

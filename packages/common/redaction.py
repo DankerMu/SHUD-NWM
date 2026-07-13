@@ -90,6 +90,7 @@ LIBPQ_PASSWORD_PREFIX_RE = re.compile(
 )
 URL_RE = re.compile(r"(?:(?:[A-Za-z][A-Za-z0-9+.-]*)://|//)[^\s\"'<>]+", re.IGNORECASE)
 SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
+OPAQUE_UNICODE_ESCAPE_RE = re.compile(r"\\+u([0-9a-fA-F]{4})")
 MAX_FRAGMENT_DECODE_LAYERS = 3
 
 
@@ -371,6 +372,8 @@ def _redact_sensitive_assignments(value: str) -> str:
             cursor, token, malformed, closed = _scan_quoted_assignment_key(value, cursor)
             fragment_sensitive = _fragment_contains_sensitive_assignment(token)
             if fragment_sensitive:
+                if closed and _fragment_ends_with_sensitive_value_opener(token):
+                    cursor = _consume_early_closed_fragment_credential(value, cursor, quote)
                 pieces.append(value[emitted:key_start])
                 pieces.append(REDACTION_MARKER)
                 emitted = cursor
@@ -394,7 +397,7 @@ def _redact_sensitive_assignments(value: str) -> str:
             separator_end >= length or value[separator_end] not in ":="
         ):
             continue
-        key_is_sensitive = malformed or fragment_sensitive or is_sensitive_key(token)
+        key_is_sensitive = malformed or fragment_sensitive or _decoded_key_is_sensitive(token)
         if (
             not key_is_sensitive
             or separator_end >= length
@@ -436,7 +439,71 @@ def _fragment_contains_sensitive_assignment(value: str) -> bool:
         if _fragment_contains_sensitive_assignment_decoded(decoded):
             return True
         candidate = decoded
+    return _fragment_has_opaque_structured_risk(candidate)
+
+
+def _fragment_has_opaque_structured_risk(value: str) -> bool:
+    """Fail closed after the fixed decode budget on serialized assignment shapes."""
+    normalized = OPAQUE_UNICODE_ESCAPE_RE.sub(
+        lambda match: _safe_opaque_codepoint(match.group(1)), value
+    )
+    return (
+        "\\" in value
+        and any(separator in value for separator in (":", "="))
+        and any(delimiter in value for delimiter in ('"', "'", "{", "}"))
+        and is_sensitive_key(normalized)
+    )
+
+
+def _safe_opaque_codepoint(raw: str) -> str:
+    codepoint = int(raw, 16)
+    return "\ufffd" if 0xD800 <= codepoint <= 0xDFFF else chr(codepoint)
+
+
+def _fragment_ends_with_sensitive_value_opener(value: str) -> bool:
+    """Identify a quote that closed immediately after a sensitive key separator."""
+    if not value.rstrip().endswith((":", "=")):
+        return False
+    candidate = value
+    for _layer in range(MAX_FRAGMENT_DECODE_LAYERS):
+        stripped = candidate.rstrip()
+        if stripped.endswith((":", "=")) and _fragment_contains_sensitive_assignment_decoded(
+            stripped
+        ):
+            return True
+        decoded = _decode_escaped_fragment_once(candidate)
+        if decoded == candidate:
+            return False
+        candidate = decoded
     return False
+
+
+def _consume_early_closed_fragment_credential(value: str, start: int, quote: str) -> int:
+    """Consume the credential opened by a quote mistaken for a fragment closer."""
+    cursor = start
+    length = len(value)
+    while cursor < length:
+        current = value[cursor]
+        if current == quote:
+            cursor += 1
+            if cursor < length and value[cursor] == quote:
+                cursor += 1
+            return cursor
+        if current == "\\" and cursor + 1 < length:
+            cursor += 2
+        else:
+            cursor += 1
+    return cursor
+
+
+def _decoded_key_is_sensitive(value: str) -> bool:
+    """Match sensitive quoted keys through the same fixed escape budget."""
+    if is_sensitive_key(value):
+        return True
+    normalized = OPAQUE_UNICODE_ESCAPE_RE.sub(
+        lambda match: _safe_opaque_codepoint(match.group(1)), value
+    )
+    return normalized != value and is_sensitive_key(normalized)
 
 
 def _fragment_contains_sensitive_assignment_once(value: str) -> bool:
@@ -466,7 +533,7 @@ def _fragment_contains_sensitive_assignment_once(value: str) -> bool:
         if (
             separator < length
             and value[separator] in ":="
-            and (malformed or is_sensitive_key(token))
+            and (malformed or _decoded_key_is_sensitive(token))
         ):
             return True
     return False
@@ -493,7 +560,7 @@ def _fragment_contains_sensitive_assignment_decoded(value: str) -> bool:
         if (
             separator < length
             and value[separator] in ":="
-            and is_sensitive_key(value[key_start:cursor])
+            and _decoded_key_is_sensitive(value[key_start:cursor])
         ):
             return True
     return False
@@ -555,7 +622,7 @@ def _fragment_contains_bare_sensitive_assignment(value: str) -> bool:
         if (
             separator < length
             and value[separator] in ":="
-            and is_sensitive_key(value[key_start:cursor])
+            and _decoded_key_is_sensitive(value[key_start:cursor])
         ):
             return True
     return False
@@ -818,32 +885,35 @@ def _scan_authorization_credential(value: str, start: int) -> tuple[int, str]:
     slash_end = start
     while slash_end < length and value[slash_end] == "\\":
         slash_end += 1
-    escaped_quote = (
-        value[start : slash_end + 1]
-        if slash_end > start and slash_end < length and value[slash_end] in {'"', "'"}
-        else None
-    )
-    quote = value[start] if value[start] in {'"', "'"} else None
-    if quote is not None or escaped_quote is not None:
-        delimiter = escaped_quote or quote or ""
-        cursor = start + len(delimiter)
+    opener_index = slash_end if slash_end < length else start
+    opener = value[opener_index] if opener_index < length else ""
+    encoded_opener = opener_index > start
+    delimiter_pairs = {'"': '"', "'": "'", "[": "]", "{": "}", "(": ")", "<": ">"}
+    closer = delimiter_pairs.get(opener)
+    if closer is not None:
+        cursor = opener_index + 1
+        depth = 1
         while cursor < length:
-            if escaped_quote is not None and value[cursor] == "\\":
-                closing_end = cursor
-                while closing_end < length and value[closing_end] == "\\":
-                    closing_end += 1
-                if closing_end < length and value[closing_end] == escaped_quote[-1]:
-                    closing = value[cursor : closing_end + 1]
-                    return closing_end + 1, f"{delimiter}{REDACTION_MARKER}{closing}"
-                cursor = closing_end
+            if value[cursor] == "\\":
+                slash_cursor = cursor
+                while slash_cursor < length and value[slash_cursor] == "\\":
+                    slash_cursor += 1
+                if (
+                    encoded_opener
+                    and slash_cursor < length
+                    and value[slash_cursor] == closer
+                ):
+                    return slash_cursor + 1, REDACTION_MARKER
+                cursor = min(slash_cursor + 1, length)
                 continue
-            if quote is not None and value[cursor] == quote:
-                return cursor + 1, f"{quote}{REDACTION_MARKER}{quote}"
-            if value[cursor] == "\\" and cursor + 1 < length:
-                cursor += 2
-            else:
-                cursor += 1
-        return cursor, f"{delimiter}{REDACTION_MARKER}"
+            if opener not in {'"', "'"} and value[cursor] == opener:
+                depth += 1
+            elif value[cursor] == closer:
+                depth -= 1
+                if depth == 0:
+                    return cursor + 1, REDACTION_MARKER
+            cursor += 1
+        return cursor, REDACTION_MARKER
 
     cursor = start
     while cursor < length and not (
