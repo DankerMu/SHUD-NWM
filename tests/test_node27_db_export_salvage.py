@@ -41,8 +41,9 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 def _write_receipt_input(path: Path, salvage_selectors: list[dict[str, Any]] | None = None) -> None:
     payload: dict[str, Any] = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "generated_at": "2026-07-11T12:05:00Z",
+        "outcome": "incomplete",
         "coverage_bounds": {"start": "2026-05-28T00:00:00Z", "end": "2026-06-16T00:00:00Z"},
         "windows": [
             {
@@ -917,6 +918,52 @@ def test_receipt_input_schema_rejects_unknown_top_level_key() -> None:
     receipt["surprise"] = "x"
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(receipt, _load_json(_RECEIPT_INPUT_SCHEMA_PATH))
+
+
+@pytest.mark.parametrize(
+    "terminal",
+    [
+        {
+            "schema_version": "1.1",
+            "generated_at": "2026-07-11T12:05:00Z",
+            "outcome": "blocked",
+            "refusal_reason": "EVIDENCE_BLOCKED",
+        },
+        {
+            "schema_version": "1.1",
+            "generated_at": "2026-07-11T12:05:00Z",
+            "outcome": "indeterminate",
+            "error_reason": "UNEXPECTED_AUDIT_ERROR",
+        },
+    ],
+)
+def test_terminal_receipt_refuses_before_any_db_read_or_archive_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal: dict[str, Any],
+) -> None:
+    env = _base_env(tmp_path)
+    input_path = Path(env["NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH"])
+    input_path.write_text(json.dumps(terminal), encoding="utf-8")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    calls: list[str] = []
+
+    def called(*_args: object, **_kwargs: object) -> int:
+        calls.append("db-or-write")
+        return 0
+
+    code = salvage.main(
+        argv=[],
+        now_utc=_NOW,
+        check_write_privileges=called,
+        fetch_row_count=called,
+        perform_copy_export=called,
+        compress_bytes=called,
+    )
+    assert code == 1
+    assert calls == []
+    assert not Path(env["NODE27_DB_EXPORT_SALVAGE_RECEIPT_PATH"]).exists()
 
 
 # === ADR 0001 display carve-out ===

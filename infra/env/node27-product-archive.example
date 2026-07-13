@@ -16,7 +16,8 @@ NHMS_ARCHIVE_ROOT=/home/ghdc/nwm/archive
 
 # Object-store source root the mover discovers products from.
 NODE27_PRODUCT_ARCHIVE_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
-OBJECT_STORE_PREFIX=s3://nhms-object-store
+# Producer/DB URI identity shared with node27 ingest and the inventory audit.
+OBJECT_STORE_PREFIX=s3://nhms
 
 # Receipt / lock / staging (all absolute). Under LOG_ROOT for rollup.
 NODE27_PRODUCT_ARCHIVE_RECEIPT=/home/nwm/node27-product-archive-logs/receipt.json

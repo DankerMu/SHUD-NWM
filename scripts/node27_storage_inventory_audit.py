@@ -47,7 +47,7 @@ MAX_SUBJECTS = 100_000
 MAX_RUN_OUTPUT_ENTRIES = 10_000
 MAX_RUN_OUTPUT_DEPTH = 8
 STATEMENT_TIMEOUT_MS = 20_000
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 _ROOT = Path(__file__).resolve().parents[1]
 COMPLETENESS_SCHEMA_PATH = _ROOT / "schemas/archive_completeness_receipt.schema.json"
 PRODUCT_SCHEMA_PATH = _ROOT / "schemas/product_archive_manifest.schema.json"
@@ -60,6 +60,21 @@ class AuditBlocked(RuntimeError):
 
 class PublicationIndeterminate(AuditBlocked):
     """Raised after replacement when receipt durability or namespace identity is unknown."""
+
+
+BLOCKED_REASONS = frozenset(
+    {
+        "CONFIG_INVALID",
+        "EMPTY_INVENTORY",
+        "OBJECT_URI_PREFIX_MISMATCH",
+        "EVIDENCE_BLOCKED",
+        "RESOURCE_BOUND_EXCEEDED",
+        "RECEIPT_INVALID",
+    }
+)
+UNEXPECTED_ERROR_REASON = "UNEXPECTED_AUDIT_ERROR"
+PUBLICATION_FAILED_CODE = "RECEIPT_PUBLICATION_FAILED"
+PUBLICATION_INDETERMINATE_CODE = "RECEIPT_PUBLICATION_INDETERMINATE"
 
 
 @dataclass(frozen=True)
@@ -787,6 +802,7 @@ def build_receipt(
     receipt = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": _time(audit_time),
+        "outcome": "complete" if all(item["verdict"] == "complete" for item in windows) else "incomplete",
         "coverage_bounds": {
             "start": min(item["window"]["start"] for item in windows),
             "end": max(item["window"]["end"] for item in windows),
@@ -800,6 +816,12 @@ def build_receipt(
 
 
 def validate_receipt_semantics(receipt: Mapping[str, Any], subjects: Sequence[InventorySubject] | None = None) -> None:
+    outcome = receipt.get("outcome")
+    if outcome in {"blocked", "indeterminate"}:
+        _validate_schema(receipt, _load_schema(COMPLETENESS_SCHEMA_PATH), "archive completeness receipt")
+        return
+    if outcome not in {"complete", "incomplete"}:
+        raise AuditBlocked("receipt outcome is invalid")
     windows = receipt.get("windows")
     selectors = receipt.get("salvage_selectors")
     if not isinstance(windows, list) or not windows or not isinstance(selectors, list):
@@ -837,6 +859,11 @@ def validate_receipt_semantics(receipt: Mapping[str, Any], subjects: Sequence[In
         raise AuditBlocked("forcing/run gap-selector bijection failed")
     if receipt.get("coverage_bounds") != {"start": min(starts), "end": max(ends)}:
         raise AuditBlocked("receipt coverage_bounds do not match subject set")
+    all_complete = all(item.get("verdict") == "complete" for item in windows)
+    if (outcome == "complete") != all_complete:
+        raise AuditBlocked("receipt outcome contradicts subject verdict aggregate")
+    if outcome == "complete" and selectors:
+        raise AuditBlocked("complete receipt must not contain salvage selectors")
 
 
 def publish_receipt(path: Path, receipt: Mapping[str, Any]) -> None:
@@ -856,7 +883,12 @@ def publish_receipt(path: Path, receipt: Mapping[str, Any]) -> None:
         raise AuditBlocked(f"failed to publish receipt safely: {error}") from error
 
 
-def run_audit(config: AuditConfig, *, connect: ConnectionFactory | None = None) -> dict[str, Any]:
+def run_audit(
+    config: AuditConfig,
+    *,
+    connect: ConnectionFactory | None = None,
+    publish: bool = True,
+) -> dict[str, Any]:
     _validate_audit_roots(config)
     if connect is None:
         import psycopg2
@@ -885,7 +917,8 @@ def run_audit(config: AuditConfig, *, connect: ConnectionFactory | None = None) 
         hot_coverage=hot,
         salvage_mismatches=salvage_mismatches,
     )
-    publish_receipt(config.receipt_path, receipt)
+    if publish:
+        publish_receipt(config.receipt_path, receipt)
     return receipt
 
 
@@ -924,7 +957,7 @@ def config_from_args(args: argparse.Namespace) -> AuditConfig:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = _AuditArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--database-url")
     parser.add_argument("--object-store-root")
     parser.add_argument("--object-store-prefix")
@@ -935,27 +968,161 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+class _AuditArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise AuditBlocked(f"invalid arguments: {message}")
+
+
+def bootstrap_receipt_path(argv: Sequence[str]) -> Path:
+    """Resolve one exact receipt option before full CLI/config validation."""
+    values: list[str] = []
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token == "--":
+            break
+        if token == "--receipt-path":
+            if index + 1 >= len(argv) or argv[index + 1].startswith("-"):
+                raise AuditBlocked("--receipt-path requires one absolute value")
+            values.append(argv[index + 1])
+            index += 2
+            continue
+        if token.startswith("--receipt-path="):
+            value = token.partition("=")[2]
+            if not value:
+                raise AuditBlocked("--receipt-path requires one absolute value")
+            values.append(value)
+        index += 1
+    if len(values) > 1:
+        raise AuditBlocked("--receipt-path must be supplied at most once")
+    raw = values[0] if values else (os.getenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH") or "")
+    return _validate_output_path(_absolute(raw, "receipt_path"))
+
+
+def build_terminal_receipt(
+    outcome: str,
+    generated_at: datetime,
+    *,
+    reason: str,
+    detail: str | None = None,
+) -> dict[str, Any]:
+    if outcome == "blocked":
+        if reason not in BLOCKED_REASONS:
+            raise AuditBlocked(f"unknown blocked reason: {reason}")
+        receipt: dict[str, Any] = {
+            "schema_version": SCHEMA_VERSION,
+            "generated_at": _time(generated_at),
+            "outcome": "blocked",
+            "refusal_reason": reason,
+        }
+    elif outcome == "indeterminate":
+        if reason != UNEXPECTED_ERROR_REASON:
+            raise AuditBlocked(f"unknown indeterminate reason: {reason}")
+        receipt = {
+            "schema_version": SCHEMA_VERSION,
+            "generated_at": _time(generated_at),
+            "outcome": "indeterminate",
+            "error_reason": reason,
+        }
+    else:
+        raise AuditBlocked(f"invalid terminal outcome: {outcome}")
+    if detail:
+        receipt["detail"] = detail[:512]
+    _validate_schema(receipt, _load_schema(COMPLETENESS_SCHEMA_PATH), "archive completeness receipt")
+    return receipt
+
+
+def _blocked_reason(error: AuditBlocked) -> str:
+    message = str(error).lower()
+    if "inventory is empty" in message:
+        return "EMPTY_INVENTORY"
+    if "outside configured prefix" in message:
+        return "OBJECT_URI_PREFIX_MISMATCH"
+    if "exceeds" in message or "resource bound" in message:
+        return "RESOURCE_BOUND_EXCEEDED"
+    if "receipt" in message and any(word in message for word in ("schema", "semantic", "selector", "outcome")):
+        return "RECEIPT_INVALID"
+    if any(
+        word in message
+        for word in (
+            "required",
+            "must be absolute",
+            "invalid arguments",
+            "minimum age",
+            "at least db retention",
+            "unsafe object-store root",
+        )
+    ):
+        return "CONFIG_INVALID"
+    return "EVIDENCE_BLOCKED"
+
+
+def _sanitize_detail(error: BaseException, *, database_url: str | None = None) -> str:
+    detail = str(error).replace("\n", " ").replace("\r", " ")
+    secrets = {value for value in (database_url, os.getenv("DATABASE_URL")) if value}
+    for secret in secrets:
+        detail = detail.replace(secret, "[DATABASE_URL]")
+    detail = re.sub(r"(?i)postgres(?:ql)?://[^\s]+", "[DATABASE_URL]", detail)
+    detail = re.sub(r"(?i)(password\s*=\s*)[^\s]+", r"\1***", detail)
+    return detail[:512] or type(error).__name__
+
+
+def _emit_stderr(code: str, message: str) -> None:
+    print(_canonical({"status": "blocked", "reason": code, "message": message[:512]}), file=sys.stderr)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    generated_at = datetime.now(UTC)
+    try:
+        receipt_path = bootstrap_receipt_path(raw_argv)
+    except Exception as error:
+        _emit_stderr("CONFIG_INVALID", _sanitize_detail(error))
+        return 1
     config: AuditConfig | None = None
     try:
-        config = config_from_args(build_parser().parse_args(argv))
-        receipt = run_audit(config)
-    except Exception as error:
-        message = str(error)
-        if config is not None and config.database_url:
-            message = message.replace(config.database_url, "[DATABASE_URL]")
-        status = "indeterminate" if isinstance(error, PublicationIndeterminate) else "blocked"
-        print(
-            _canonical({"status": status, "error_type": type(error).__name__, "message": message}),
-            file=sys.stderr,
+        args = build_parser().parse_args(raw_argv)
+        args.receipt_path = str(receipt_path)
+        config = config_from_args(args)
+        receipt = run_audit(config, publish=False)
+        validate_receipt_semantics(receipt)
+        _validate_schema(receipt, _load_schema(COMPLETENESS_SCHEMA_PATH), "archive completeness receipt")
+        exit_code = 0
+    except AuditBlocked as error:
+        receipt = build_terminal_receipt(
+            "blocked",
+            generated_at,
+            reason=_blocked_reason(error),
+            detail=_sanitize_detail(error, database_url=config.database_url if config else None),
         )
+        exit_code = 1
+    except Exception as error:
+        receipt = build_terminal_receipt(
+            "indeterminate",
+            generated_at,
+            reason=UNEXPECTED_ERROR_REASON,
+            detail=_sanitize_detail(error, database_url=config.database_url if config else None),
+        )
+        exit_code = 1
+    try:
+        publish_receipt(receipt_path, receipt)
+    except PublicationIndeterminate as error:
+        _emit_stderr(PUBLICATION_INDETERMINATE_CODE, _sanitize_detail(error))
+        return 1
+    except Exception as error:
+        _emit_stderr(PUBLICATION_FAILED_CODE, _sanitize_detail(error))
         return 1
     print(
         _canonical(
-            {"status": "published", "receipt_path": str(config.receipt_path), "subjects": len(receipt["windows"])}
+            {
+                "status": "published",
+                "receipt_path": str(receipt_path),
+                "outcome": receipt["outcome"],
+                "subjects": len(receipt.get("windows", [])),
+            }
         )
     )
-    return 0
+    return exit_code
 
 
 def _row_mapping(cursor: Any, row: Any) -> dict[str, Any]:

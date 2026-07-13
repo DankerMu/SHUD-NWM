@@ -548,11 +548,18 @@ def _load_input_receipt(path: Path) -> dict[str, Any]:
     except OSError as error:  # pragma: no cover — packaged with repo
         raise SalvageConfigError(f"cannot read receipt input schema: {error}") from error
     try:
-        jsonschema.validate(data, schema)
+        jsonschema.Draft7Validator(
+            schema, format_checker=jsonschema.FormatChecker()
+        ).validate(data)
     except jsonschema.ValidationError as error:
         raise SalvageConfigError(
             f"archive-completeness receipt failed schema validation: {error.message}"
         ) from error
+    outcome = data.get("outcome")
+    if outcome not in {"complete", "incomplete"}:
+        raise SalvageConfigError(
+            f"archive-completeness receipt outcome {outcome!r} cannot supply salvage selectors"
+        )
     if not isinstance(data.get("salvage_selectors"), list):
         raise SalvageConfigError("salvage_selectors must be an array")
     return data

@@ -60,6 +60,76 @@ def test_timeseries_storage_schema_and_example_are_valid(tmp_path: Path, base: s
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.mark.parametrize(
+    "document",
+    [
+        {
+            "schema_version": "1.1",
+            "generated_at": "2026-07-11T12:05:00Z",
+            "outcome": "blocked",
+            "refusal_reason": "EMPTY_INVENTORY",
+        },
+        {
+            "schema_version": "1.1",
+            "generated_at": "2026-07-11T12:05:00Z",
+            "outcome": "indeterminate",
+            "error_reason": "UNEXPECTED_AUDIT_ERROR",
+            "detail": "sanitized diagnostic",
+        },
+    ],
+)
+def test_completeness_terminal_failure_branches_are_valid(
+    tmp_path: Path, document: dict[str, Any]
+) -> None:
+    result = _validate_document(tmp_path, "archive_completeness_receipt", document)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("outcome", "forbidden_field"),
+    [
+        ("blocked", "coverage_bounds"),
+        ("blocked", "error_reason"),
+        ("indeterminate", "windows"),
+        ("indeterminate", "refusal_reason"),
+    ],
+)
+def test_completeness_failure_branches_forbid_cross_branch_fields(
+    tmp_path: Path, outcome: str, forbidden_field: str
+) -> None:
+    document: dict[str, Any] = {
+        "schema_version": "1.1",
+        "generated_at": "2026-07-11T12:05:00Z",
+        "outcome": outcome,
+        "refusal_reason" if outcome == "blocked" else "error_reason": (
+            "EVIDENCE_BLOCKED" if outcome == "blocked" else "UNEXPECTED_AUDIT_ERROR"
+        ),
+    }
+    values: dict[str, Any] = {
+        "coverage_bounds": {
+            "start": "2026-05-28T00:00:00Z",
+            "end": "2026-05-29T00:00:00Z",
+        },
+        "windows": [],
+        "refusal_reason": "EVIDENCE_BLOCKED",
+        "error_reason": "UNEXPECTED_AUDIT_ERROR",
+    }
+    document[forbidden_field] = values[forbidden_field]
+    result = _validate_document(tmp_path, "archive_completeness_receipt", document)
+    assert result.returncode != 0
+
+
+def test_completeness_terminal_generated_at_enforces_datetime_format(tmp_path: Path) -> None:
+    document = {
+        "schema_version": "1.1",
+        "generated_at": "not-a-date",
+        "outcome": "blocked",
+        "refusal_reason": "CONFIG_INVALID",
+    }
+    result = _validate_document(tmp_path, "archive_completeness_receipt", document)
+    assert result.returncode != 0
+
+
 def test_completeness_receipt_requires_each_window_verdict(tmp_path: Path) -> None:
     document = _document("archive_completeness_receipt")
     del document["windows"][0]["verdict"]
@@ -156,6 +226,9 @@ def test_completeness_receipt_accepts_valid_coverage_verdict_pairs(
     document["windows"] = [document["windows"][0]]
     document["windows"][0]["coverage"] = coverage
     document["windows"][0]["verdict"] = verdict
+    document["outcome"] = "complete" if verdict == "complete" else "incomplete"
+    if verdict == "complete":
+        document["salvage_selectors"] = []
 
     result = _validate_document(tmp_path, "archive_completeness_receipt", document)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -211,6 +284,9 @@ def test_state_completeness_receipt_accepts_non_salvage_coverage_pairs(
             "verdict": verdict,
         }
     )
+    document["outcome"] = "complete" if verdict == "complete" else "incomplete"
+    if verdict == "complete":
+        document["salvage_selectors"] = []
 
     result = _validate_document(tmp_path, "archive_completeness_receipt", document)
     assert result.returncode == 0, result.stdout + result.stderr

@@ -24,7 +24,9 @@ NHMS_ARCHIVE_FREE_SPACE_REFUSE_BYTES=161061273600    # 150 GiB
 
 # Object-store hot root for coverage lookups.
 OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
-OBJECT_STORE_PREFIX=s3://nhms-object-store
+# Producer/DB URI identity emitted by node27 ingest; this is a URI contract,
+# not a claim that compute/display use a separate physical store.
+OBJECT_STORE_PREFIX=s3://nhms
 
 # Receipt path (absolute; parent must be a non-symlink directory). The
 # retention gate (#855) will consume this receipt path directly, so keep it

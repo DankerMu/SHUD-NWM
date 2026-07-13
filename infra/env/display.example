@@ -36,6 +36,8 @@ NHMS_PUBLISHED_ARTIFACT_S3_PREFIX=published
 NHMS_LOG_TAIL_MAX_BYTES=1048576
 
 NHMS_ARTIFACT_BACKEND=local
+# Read-only display consumer/config identity. Node-27 ingest is the producer of
+# audited DB URIs; this value does not assert a separate physical store.
 OBJECT_STORE_PREFIX=s3://nhms-prod
 S3_ENDPOINT_URL=https://object-store.internal.example
 S3_BUCKET_NAME=nhms-prod
