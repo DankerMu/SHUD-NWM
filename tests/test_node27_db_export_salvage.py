@@ -903,7 +903,8 @@ def test_unicode_escaped_credential_key_is_masked_from_salvage_publication_stder
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             salvage.SafeFilesystemError(
                 'publisher {"auth_\\u0068eader": "Basic publication-secret", '
-                '"safe": "visible"} payload="token=publication-fragment-secret"'
+                '"safe": "visible"} payload="token=publication-fragment-secret" '
+                'detail="prefix {\\"api.key\\":\\"publication-inner-secret\\"}"'
             )
         ),
     )
@@ -921,6 +922,7 @@ def test_unicode_escaped_credential_key_is_masked_from_salvage_publication_stder
     stderr = capsys.readouterr().err
     assert json.loads(stderr)["outcome"] == "partial"
     assert "publication-secret" not in stderr and "publication-fragment-secret" not in stderr
+    assert "publication-inner-secret" not in stderr
     assert "visible" in stderr
 
 

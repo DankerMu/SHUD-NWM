@@ -1721,6 +1721,7 @@ def test_quoted_credential_key_is_redacted_from_publication_stderr(
                 'payload="token=publication-fragment-secret" '
                 '{"proxy_\\u0061uthorization": "Bearer publication-auth-secret"} '
                 "password\u2003=\u2003publication-unicode-secret "
+                'payload="prefix {\\"password\\":\\"publication-inner-secret\\"}" '
                 '\"token=publication-quoted-outer-secret\": "publication-outer-secret"'
             )
         ),
@@ -1732,6 +1733,7 @@ def test_quoted_credential_key_is_redacted_from_publication_stderr(
     assert "publication-fragment-secret" not in diagnostic["message"]
     assert "publication-auth-secret" not in diagnostic["message"]
     assert "publication-unicode-secret" not in diagnostic["message"]
+    assert "publication-inner-secret" not in diagnostic["message"]
     assert "publication-quoted-outer-secret" not in diagnostic["message"]
     assert "publication-outer-secret" not in diagnostic["message"]
     assert "visible" in diagnostic["message"]
@@ -3648,6 +3650,51 @@ def test_run_output_entry_and_depth_caps_fail_closed(tmp_path: Path, monkeypatch
     )
     with pytest.raises(audit.AuditBlocked, match="entries"):
         audit._directory_has_regular_file(output, config.object_store_root)
+
+
+def test_run_output_wide_tree_holds_only_one_sibling_fd_at_a_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    output = config.object_store_root / "runs/run-a/output"
+    output.mkdir(parents=True)
+    for index in range(64):
+        child = output / f"child-{index:03d}"
+        child.mkdir()
+        (child / "result.csv").write_text("valid", encoding="utf-8")
+
+    original_open_child = audit._open_run_output_child
+    original_close = audit.os.close
+    child_fds: set[int] = set()
+    peak_child_fds = 0
+
+    def track_open_child(
+        directory_fd: int, name: str, path_label: Path, expected: os.stat_result
+    ) -> int:
+        nonlocal peak_child_fds
+        child_fd = original_open_child(directory_fd, name, path_label, expected)
+        child_fds.add(child_fd)
+        peak_child_fds = max(peak_child_fds, len(child_fds))
+        return child_fd
+
+    def track_close(fd: int) -> None:
+        child_fds.discard(fd)
+        original_close(fd)
+
+    monkeypatch.setattr(audit, "_open_run_output_child", track_open_child)
+    monkeypatch.setattr(audit.os, "close", track_close)
+
+    assert audit._directory_has_regular_file(output, config.object_store_root) is True
+    assert peak_child_fds == 1
+    assert child_fds == set()
+
+    outside = tmp_path / "outside-output"
+    outside.mkdir()
+    (output / "child-063/zz-unsafe").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(audit.AuditBlocked, match="unsafe non-regular"):
+        audit._directory_has_regular_file(output, config.object_store_root)
+    assert peak_child_fds == 1
+    assert child_fds == set()
 
 
 def test_run_output_depth_cap_fails_closed_after_inspecting_bounded_tree(tmp_path: Path) -> None:

@@ -468,6 +468,9 @@ def test_assignment_scanner_uses_authoritative_sensitive_key_catalog_only() -> N
 @pytest.mark.parametrize(
     "key",
     [
+        "api.key",
+        "access.key",
+        "session.key",
         "auth.header",
         "auth-header",
         "auth_header",
@@ -489,12 +492,29 @@ def test_authoritative_catalog_covers_auth_header_and_proxy_spellings(key: str) 
 
 @pytest.mark.parametrize(
     "key",
-    ["author.profile", "oauth.header", "authentication.header", "proxy.status"],
+    [
+        "api.status",
+        "access.mode",
+        "session.state",
+        "author.profile",
+        "oauth.header",
+        "authentication.header",
+        "proxy.status",
+    ],
 )
 def test_authoritative_catalog_does_not_overmatch_ordinary_dotted_keys(key: str) -> None:
     payload = {key: "visible"}
     assert redact_payload(payload) == payload
     assert redact_text(f"{key}=visible") == f"{key}=visible"
+
+
+def test_authoritative_catalog_is_shared_by_database_dsn_redaction() -> None:
+    raw = "driver api.key=api-secret access.key=access-secret session.key=session-secret"
+    redacted = redact_database_dsn(raw, None)
+
+    for secret in ("api-secret", "access-secret", "session-secret"):
+        assert secret not in redacted
+    assert redacted.count(REDACTION_MARKER) == 3
 
 
 @pytest.mark.parametrize(
@@ -523,6 +543,8 @@ def test_authoritative_catalog_covers_bare_quoted_escaped_and_unicode_auth_keys(
         'payload="api_key=payload-secret"',
         'source_error="driver password=source-secret failed"',
         r'payload="prefix \" token=escaped-secret \" suffix"',
+        r'payload="prefix {\"password\":\"escaped-json-secret\"} suffix"',
+        r'payload="prefix \'api_key\'=\'inner-single-secret\' suffix"',
         'payload="unterminated password=unterminated-secret',
     ],
 )
@@ -710,6 +732,26 @@ def test_escaped_quote_staircase_with_outer_value_has_bounded_character_visits(
     assert redaction._redact_sensitive_assignments(hostile) == (
         f"{REDACTION_MARKER}: {REDACTION_MARKER}"
     )
+    assert visits <= 2 * len(hostile)
+
+
+def test_quoted_inner_key_fragment_has_bounded_character_visits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = redaction._is_assignment_key_char
+    visits = 0
+
+    def count_visit(character: str) -> bool:
+        nonlocal visits
+        visits += 1
+        return original(character)
+
+    monkeypatch.setattr(redaction, "_is_assignment_key_char", count_visit)
+    hostile = 'payload="' + r'\"ordinary.key\":\"visible\",' * 20_000
+    hostile += r'\"password\":\"hostile-secret\""'
+    redacted = redaction._redact_sensitive_assignments(hostile)
+
+    assert "hostile-secret" not in redacted
     assert visits <= 2 * len(hostile)
 
 

@@ -14,7 +14,7 @@ _AUTHORIZATION_KEY_PATTERN = (
 )
 
 SENSITIVE_KEY_RE = re.compile(
-    r"(token|password|passwd|pwd|secret|credential|api[_-]?key|access[_-]?key|session[_-]?key|signature|"
+    r"(token|password|passwd|pwd|secret|credential|api[-_.]?key|access[-_.]?key|session[-_.]?key|signature|"
     rf"accountingstoragepass|storagepass|{_AUTHORIZATION_KEY_PATTERN}|^auth$)",
     re.IGNORECASE,
 )
@@ -423,7 +423,40 @@ def _redact_sensitive_assignments(value: str) -> str:
 
 
 def _fragment_contains_sensitive_assignment(value: str) -> bool:
-    """Inspect one decoded quoted fragment with a bounded bare-key scan."""
+    """Inspect one decoded quoted fragment with a bounded monotonic key scan."""
+    cursor = 0
+    length = len(value)
+    while cursor < length:
+        quote = value[cursor] if value[cursor] in {'"', "'"} else None
+        malformed = False
+        if quote is not None:
+            cursor, token, malformed, closed = _scan_quoted_assignment_key(value, cursor)
+            if _fragment_contains_bare_sensitive_assignment(token):
+                return True
+            if not closed:
+                continue
+        elif _is_assignment_key_char(value[cursor]):
+            key_start = cursor
+            while cursor < length and _is_assignment_key_char(value[cursor]):
+                cursor += 1
+            token = value[key_start:cursor]
+        else:
+            cursor += 1
+            continue
+        separator = cursor
+        while separator < length and _is_assignment_whitespace(value[separator]):
+            separator += 1
+        if (
+            separator < length
+            and value[separator] in ":="
+            and (malformed or is_sensitive_key(token))
+        ):
+            return True
+    return False
+
+
+def _fragment_contains_bare_sensitive_assignment(value: str) -> bool:
+    """Inspect decoded quote contents without recursively parsing nested quotes."""
     cursor = 0
     length = len(value)
     while cursor < length:

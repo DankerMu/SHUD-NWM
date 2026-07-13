@@ -1328,33 +1328,34 @@ def _directory_has_regular_file(directory: Path, root: Path) -> bool:
         raise
     except (OSError, SafeFilesystemError) as error:
         raise AuditBlocked(f"cannot open run output safely {directory}: {error}") from error
-    stack: list[tuple[int, Path, int]] = [(root_fd, directory, 0)]
+
+    def visit(current_fd: int, current: Path, depth: int) -> None:
+        nonlocal found, seen
+        names = _list_run_output_fd(current_fd, current, MAX_RUN_OUTPUT_ENTRIES - seen)
+        if seen + len(names) > MAX_RUN_OUTPUT_ENTRIES:
+            raise AuditBlocked(f"run output exceeds {MAX_RUN_OUTPUT_ENTRIES} entries")
+        seen += len(names)
+        for name in names:
+            entry = current / name
+            info = _stat_run_output_entry(current_fd, name, entry)
+            if stat.S_ISDIR(info.st_mode):
+                if depth >= MAX_RUN_OUTPUT_DEPTH:
+                    raise AuditBlocked(f"run output exceeds depth {MAX_RUN_OUTPUT_DEPTH}: {entry}")
+                child_fd = _open_run_output_child(current_fd, name, entry, info)
+                try:
+                    visit(child_fd, entry, depth + 1)
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(info.st_mode):
+                found = True
+            else:
+                raise AuditBlocked(f"unsafe non-regular run output: {entry}")
+
     try:
-        while stack:
-            current_fd, current, depth = stack.pop()
-            try:
-                names = _list_run_output_fd(current_fd, current, MAX_RUN_OUTPUT_ENTRIES - seen)
-                if seen + len(names) > MAX_RUN_OUTPUT_ENTRIES:
-                    raise AuditBlocked(f"run output exceeds {MAX_RUN_OUTPUT_ENTRIES} entries")
-                seen += len(names)
-                for name in names:
-                    entry = current / name
-                    info = _stat_run_output_entry(current_fd, name, entry)
-                    if stat.S_ISDIR(info.st_mode):
-                        if depth >= MAX_RUN_OUTPUT_DEPTH:
-                            raise AuditBlocked(f"run output exceeds depth {MAX_RUN_OUTPUT_DEPTH}: {entry}")
-                        child_fd = _open_run_output_child(current_fd, name, entry, info)
-                        stack.append((child_fd, entry, depth + 1))
-                    elif stat.S_ISREG(info.st_mode):
-                        found = True
-                    else:
-                        raise AuditBlocked(f"unsafe non-regular run output: {entry}")
-            finally:
-                os.close(current_fd)
+        visit(root_fd, directory, 0)
         return found
     finally:
-        for pending_fd, _path, _depth in stack:
-            os.close(pending_fd)
+        os.close(root_fd)
 
 
 def _list_run_output_fd(directory_fd: int, path_label: Path, max_entries: int) -> list[str]:
