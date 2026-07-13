@@ -92,3 +92,31 @@ def test_node27_raw_retention_preflight_rejects_unsafe_root(monkeypatch: pytest.
 def test_node27_raw_retention_dry_run_cli_is_removed() -> None:
     with pytest.raises(SystemExit):
         node27_raw_retention.build_parser().parse_args(["--dry-run"])
+
+
+_SYSTEMD_SERVICE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "infra"
+    / "systemd"
+    / "nhms-node27-raw-retention.service"
+)
+
+
+def test_raw_retention_service_bootstraps_log_dir() -> None:
+    service_text = _SYSTEMD_SERVICE_PATH.read_text(encoding="utf-8")
+    assert (
+        "ExecStartPre=/usr/bin/mkdir -p /home/nwm/node27-raw-retention-logs"
+        in service_text
+    )
+    assert (
+        "StandardOutput=append:/home/nwm/node27-raw-retention-logs/systemd.log"
+        in service_text
+    )
+    lines = service_text.splitlines()
+    pre_index = next(
+        i for i, line in enumerate(lines) if line.startswith("ExecStartPre=")
+    )
+    start_index = next(
+        i for i, line in enumerate(lines) if line.startswith("ExecStart=")
+    )
+    assert pre_index < start_index
