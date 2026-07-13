@@ -317,10 +317,11 @@ when free space is below a configurable threshold.
 
 The inventory audit SHALL compare DB coverage — `hydro_run` cycles,
 `forcing_version` windows, and `state_snapshot.state_uri` references —
-against checksum-verified archive objects and hot object-store presence, and
-emit a JSON **archive-completeness receipt** recording: `generated_at`, the
-inventoried coverage bounds, a verdict for every inventoried subject, and the
-salvage selector list. Each verdict SHALL bind exactly one lane-discriminated
+against checksum-verified archive objects and hot object-store presence. When
+classification completes, its JSON **archive-completeness receipt** success
+branch records `generated_at`, the inventoried coverage bounds, a verdict for
+every inventoried subject, and the salvage selector list. Each verdict SHALL
+bind exactly one lane-discriminated
 stable subject (`forcing_version_id`, `run_id`, or `state_id`) so subjects
 sharing a time window remain distinguishable; the coverage mechanism SHALL
 be recorded separately from the subject lane. The verdict per subject SHALL
@@ -334,10 +335,35 @@ salvage selector list. A state subject MUST NOT claim `db-export` coverage:
 its missing product remains a non-salvageable `gap` that blocks retention
 until product coverage is restored. This
 receipt is the single artifact named "archive completeness receipt" consumed
-by the `timeseries-db-retention` enforce gate and the scope source consumed
-by `db-export-salvage`. The audit SHALL run recurringly from a node-27
+by the `timeseries-db-retention` enforce gate; only its success branches may be
+the selector scope source consumed by `db-export-salvage`. The audit SHALL run recurringly from a node-27
 user-level systemd timer registered in the resource-governance audit unit
 list, so a fresh receipt is available to each retention tick.
+
+The receipt contract SHALL use `schema_version=1.1` and an exact top-level
+`oneOf` with `additionalProperties=false` in every branch. All branches require
+`schema_version`, `generated_at`, and `outcome`. `outcome=complete` and
+`outcome=incomplete` are coverage-only branches requiring `coverage_bounds`,
+`windows`, and `salvage_selectors` and forbidding `refusal_reason`,
+`error_reason`, and `detail`. `complete` requires every subject verdict to be
+`complete` and an empty selector array. `incomplete` requires at least one
+`pending-archive` or `gap`; every forcing/run gap and selector SHALL retain the
+exact bijection above. `outcome=blocked` requires a stable non-secret
+`refusal_reason`, permits optional sanitized `detail`, and forbids all coverage
+fields plus `error_reason`. `outcome=indeterminate` requires a stable non-secret
+`error_reason`, permits optional sanitized `detail`, and forbids all coverage
+fields plus `refusal_reason`. Runtime validation SHALL enforce the aggregate
+success-branch rules that JSON Schema cannot express. Empty inventory SHALL be
+`blocked` with `refusal_reason=EMPTY_INVENTORY`, never a success receipt.
+Stable blocked reason codes SHALL be `CONFIG_INVALID`, `EMPTY_INVENTORY`,
+`OBJECT_URI_PREFIX_MISMATCH`, `EVIDENCE_BLOCKED`, `RESOURCE_BOUND_EXCEEDED`,
+and `RECEIPT_INVALID`; unexpected failures reached before publication use
+`error_reason=UNEXPECTED_AUDIT_ERROR`. Raw exception text is allowed only as
+optional sanitized `detail`. Publication failures use stderr code
+`RECEIPT_PUBLICATION_FAILED` before replace and
+`RECEIPT_PUBLICATION_INDETERMINATE` after replace; neither is a receipt
+outcome. Published success exits zero; published `blocked`/`indeterminate` and
+all publication/unwriteable exceptions exit non-zero.
 
 The inventory transaction SHALL be `REPEATABLE READ READ ONLY`, use one
 captured audit time, and apply a 20-second statement timeout. A forcing
@@ -363,7 +389,7 @@ input manifest identity plus at least one contained regular output file.
 State hot coverage requires the referenced regular file to match the DB
 checksum. Existing permission/I/O failures, malformed
 URIs/manifests, containment escapes, or conflicting selector evidence SHALL
-block publication rather than be treated as absence. A missing archive root
+produce a `blocked` terminal receipt rather than be treated as absence. A missing archive root
 or absent canonical archive siblings is ordinary absence. Product archive
 coverage requires a schema-valid, semantic-binding-valid manifest whose
 declared tarball size and sha256 match the regular tarball. A fully readable
@@ -377,7 +403,7 @@ levels and 100,000 total entries beneath `db-export/`, and at most 16 MiB per
 manifest. Directory enumeration, entry stat, child open, manifest read and
 referenced-object hash SHALL use one held descriptor-bound `db-export` tree;
 the audit SHALL NOT reopen stored manifest paths after traversal. Inventory SHALL be capped at 100,000 subjects; exceeding any bound
-blocks publication.
+produces a `blocked` terminal receipt.
 Run output traversal SHALL inspect at most 10,000 entries and eight levels per
 run, failing closed on overflow while still checking all bounded siblings.
 Enumeration, entry stat and child-directory opens SHALL remain bound to the
@@ -397,34 +423,44 @@ anchored to trusted directory file descriptors with no-follow component
 opens. `ENOENT` is ordinary absence only after every existing parent has been
 verified as a real directory. JSON bytes, size and sha256 SHALL come from the
 same opened inode; a pre-existing or raced symlink/non-directory/permission
-error is a blocker.
+error produces a `blocked` terminal receipt.
 For a state subject, including a clone, archive coverage SHALL additionally
 require exactly one manifest file entry whose path is the strict physical
 state URI relative to its provider/legacy state root and whose sha256 equals
 the origin-bound DB checksum. A tarball with only lane/model/time identity is
 not proof that the referenced state artifact is preserved.
 
-The emitted receipt SHALL contain every inventoried stable subject exactly
+Every success receipt SHALL contain every inventoried stable subject exactly
 once, deterministically ordered. Its forcing/run gaps and salvage selectors
-SHALL form an exact bijection; state gaps SHALL have no selector. The complete
-receipt SHALL pass the pinned schema before atomic replacement. Empty
-inventory or any blocker SHALL exit non-zero without overwriting a previous
-valid retention-gating receipt. The output path is an absolute CLI/env
-contract, all parent components are non-symlink directories, and publication
-uses a mode-0600 same-directory temporary file with flush/fsync, atomic
-replace, mandatory directory fsync, post-replace verification that the pinned
-parent FD still names the configured parent, and pre-replace failure cleanup.
-Directory-fsync failure or an observed parent namespace replacement SHALL be
-reported as indeterminate publication and SHALL NOT report `published`.
-Failures before replace preserve the old receipt byte-for-byte; after-replace
-failures must fail closed rather than falsely claim either successful
-publication or preservation. The configured parent is therefore an
+SHALL form an exact bijection; state gaps SHALL have no selector. Every terminal
+receipt SHALL pass the pinned schema and runtime semantic validation before
+atomic replacement. A bootstrap parser SHALL resolve a single raw
+`--receipt-path VALUE` or `--receipt-path=VALUE` independently of argument
+order, unknown options, and later argparse type validation, with one CLI value
+taking precedence over `NODE27_STORAGE_INVENTORY_RECEIPT_PATH`. Once it has a
+safe destination, full-parser/config/evidence `AuditBlocked` failures SHALL
+publish `blocked`, and unexpected failures reached before publication starts
+SHALL publish `indeterminate`. A missing receipt option value, multiple or
+ambiguous receipt-path occurrences, no CLI/env value, or an unsafe destination
+itself is an unwriteable exception: emit sanitized JSON stderr and make no
+publication claim.
+
+Publication uses one mode-0600 same-directory temporary file with flush/fsync,
+atomic replace, mandatory directory fsync, post-replace verification that the
+pinned parent FD still names the configured parent, and pre-replace failure
+cleanup. Once this single publication attempt starts, its own failures SHALL be
+reported only through sanitized JSON stderr and SHALL NOT trigger a second
+publication attempt. A pre-replace publication error preserves the old receipt
+byte-for-byte; a post-replace directory-fsync or parent-identity error leaves
+target content unknown and reports indeterminate publication. Neither reports
+`published`, and the latter is not an on-disk `outcome=indeterminate` claim.
+The configured parent is therefore an
 operator-controlled, non-rotating namespace during publication. A fully
 validated, file-fsynced receipt may already be visible after an indeterminate
 post-replace failure; the later retention consumer SHALL independently apply
 the exactly-two-receipt content gates and SHALL NOT add producer exit status,
-a sidecar marker or systemd state as a third gate. Failure
-diagnostics go to stderr and never replace the gate receipt. Strict
+a sidecar marker or systemd state as a third gate. Publication-failure
+diagnostics go to stderr and never cause a second receipt write. Strict
 post-replace durability/identity checks SHALL be explicitly enabled for this
 receipt and SHALL NOT silently change the shared helper's default contract for
 unmigrated non-receipt callers. Runtime schema validation SHALL
@@ -435,7 +471,7 @@ Evidence for every readable corrupt sibling SHALL be retained regardless of
 which valid coverage mechanism wins precedence. Readable hot forcing
 manifest/member and state-file checksum mismatches are absent coverage with
 retained evidence; malformed identity, unsafe type, permission and I/O
-failures remain publication blockers.
+failures terminate in `blocked` before the publication attempt.
 
 #### Scenario: Verified archive coverage yields a complete verdict
 
@@ -443,6 +479,8 @@ failures remain publication blockers.
   checksum-verified archive objects (or verified `db-export` salvage objects)
 - **THEN** the receipt MUST mark that window `complete` and exclude it from
   the salvage selector list
+- **AND** the top-level outcome is `complete` only when every other subject is
+  also complete; otherwise the success branch is `incomplete`
 
 #### Scenario: Past-eligibility window without a verified archive object
 
@@ -451,6 +489,7 @@ failures remain publication blockers.
 - **THEN** the receipt MUST mark it `pending-archive`, and that verdict MUST
   NOT satisfy the retention gate's completeness check for any drop window
   containing it
+- **AND** the top-level receipt outcome MUST be `incomplete`
 
 #### Scenario: Salvageable DB-only timeseries window is a gap with selectors
 
@@ -458,6 +497,7 @@ failures remain publication blockers.
   products exist in neither the hot object-store nor the archive
 - **THEN** the receipt MUST mark that window `gap` and include its exact
   selectors in the salvage selector list
+- **AND** the top-level receipt outcome MUST be `incomplete`
 
 #### Scenario: Missing state artifacts cannot use DB-export salvage
 
@@ -481,12 +521,12 @@ failures remain publication blockers.
 - **WHEN** a forcing version or hydro run has no row in its detail hypertable
 - **THEN** it MUST NOT become an inventory subject or salvage selector
 
-#### Scenario: Unknown or unsafe evidence state blocks publication
+#### Scenario: Unknown or unsafe evidence state yields blocked receipt
 
 - **WHEN** a referenced hot object or existing archive/salvage artifact is
   unreadable, unsafe, malformed, or conflicting
-- **THEN** the audit MUST fail non-zero and preserve the previous valid
-  receipt
+- **THEN** the audit MUST publish a current schema-valid `blocked` receipt and
+  fail non-zero when the destination is safe
 
 #### Scenario: Readable checksum mismatch is absent coverage
 
@@ -509,21 +549,27 @@ failures remain publication blockers.
   names the provenance-declared physical source model
 - **THEN** the receipt MUST retain the clone `state_id` as its stable subject
 - **AND** hot/archive coverage MUST follow the shared physical artifact
-- **AND** an undeclared model alias or source/time drift MUST block
-  publication
+- **AND** an undeclared model alias or source/time drift MUST terminate the
+  coverage audit in a schema-valid `blocked` receipt rather than publish a
+  success branch
 
-#### Scenario: Receipt publish is all-or-nothing
+#### Scenario: Terminal receipt branches are exact
 
-- **WHEN** the subject set is empty, duplicated, incomplete, has a
+- **WHEN** the subject set is empty, duplicated, omits an inventoried subject, has a
   gap-selector mismatch, fails schema validation, or encounters any audit
   blocker
-- **THEN** no new gate receipt may replace the previous valid receipt
+- **THEN** empty inventory MUST publish `blocked/EMPTY_INVENTORY`
+- **AND** every other pre-publication audit blocker MUST publish a schema-valid
+  `blocked` receipt rather than leave a prior success current
+- **AND** a contradictory success aggregate or invalid set shape MUST NOT be
+  published as `complete` or `incomplete`
 
 #### Scenario: Audit resource bounds are enforced
 
 - **WHEN** the inventory, manifest size, salvage manifest count, or discovery
   depth exceeds its fixed safety bound
-- **THEN** the audit MUST fail non-zero without replacing the prior receipt
+- **THEN** the audit MUST publish a `blocked` receipt and fail non-zero when the
+  destination is safe
 
 #### Scenario: Receipt uses one consistent database snapshot
 
@@ -535,7 +581,7 @@ failures remain publication blockers.
 
 - **WHEN** a clone references no origin or its origin model/source/time/URI/
   checksum or fingerprint disagrees with the clone provenance
-- **THEN** the audit MUST block publication
+- **THEN** the audit MUST publish a `blocked` terminal receipt
 - **AND** a valid clone MUST retain its own subject ID while sharing only the
   exact origin artifact coverage
 
@@ -543,7 +589,7 @@ failures remain publication blockers.
 
 - **WHEN** an evidence component is a symlink, becomes a symlink/inode after
   discovery, or a missing leaf is reached through an unsafe parent
-- **THEN** descriptor-bound no-follow access MUST block publication
+- **THEN** descriptor-bound no-follow access MUST terminate in `blocked`
 - **AND** manifest parsing and checksum verification MUST refer to the same
   opened inode
 
@@ -552,8 +598,8 @@ failures remain publication blockers.
 - **WHEN** a provider, legacy, or clone state archive tarball verifies but its
   manifest lacks a unique member matching the physical state URI and DB
   checksum
-- **THEN** the audit MUST block publication rather than mark the state
-  subject complete
+- **THEN** the audit MUST publish `blocked` rather than mark the state subject
+  complete
 
 #### Scenario: Receipt publication loses its parent or durability proof
 
@@ -561,3 +607,21 @@ failures remain publication blockers.
   directory fsync fails after replacement
 - **THEN** the audit MUST fail closed with an indeterminate-publication
   diagnostic and MUST NOT report a fresh published receipt
+- **AND** target content MUST be treated as unknown and no second publication
+  attempt may write an `indeterminate` receipt
+
+#### Scenario: Publication fails before replace
+
+- **WHEN** the one terminal-receipt publication attempt fails before atomic
+  replace
+- **THEN** the previous target bytes MUST remain unchanged
+- **AND** the audit MUST emit sanitized JSON stderr, exit non-zero, and MUST NOT
+  attempt a second receipt publication
+
+#### Scenario: Config parser fails after receipt-path bootstrap
+
+- **WHEN** the full CLI parser rejects an unknown option or typed value after a
+  single safe receipt path was bootstrapped
+- **THEN** the audit MUST publish `blocked` and exit non-zero
+- **AND** a missing-value, duplicate/ambiguous, absent, or unsafe receipt-path
+  bootstrap MUST remain the explicit stderr-only unwriteable exception

@@ -283,12 +283,12 @@ Invariant Matrix:
 - Regression: provider/legacy/clone state product archives prove the exact physical state member path and origin-bound checksum; lane/model/time tarball identity alone cannot satisfy state coverage.
 - Regression: legacy clone provenance canonicalizes source `NULL` and empty string to the same `legacy-unqualified` identity in both directions while provider/legacy drift still blocks.
 - Regression: every evidence read and receipt replace is root-dirfd anchored with no-follow component opens; missing leaves behind symlinks, inode swaps, unsafe siblings and parse/hash cross-inode races fail closed.
-- Regression: salvage traversal is bounded to 10,000 manifests/100,000 total entries/eight levels, and per-run output traversal is bounded to 10,000 entries/eight levels; both inspect every bounded sibling and preserve the prior receipt on overflow, while run-output list/stat/child-open stays on one held directory-FD tree across pathname swaps.
+- Regression: salvage traversal is bounded to 10,000 manifests/100,000 total entries/eight levels, and per-run output traversal is bounded to 10,000 entries/eight levels; both inspect every bounded sibling and publish a schema-valid `blocked` terminal receipt on overflow when the bootstrapped destination is safe, while run-output list/stat/child-open stays on one held directory-FD tree across pathname swaps.
 - Regression: salvage enumeration/stat/child-open/manifest-read/object-hash stays on one held `db-export` FD tree; real-directory swaps cannot mix evidence namespaces or bypass the global entry cap.
 - Regression: archive age shares the >=30-day foundation invariant without truthiness fallback, and all readable mismatch evidence survives coverage fallback precedence.
-- Regression: missing archive namespaces are ordinary absence; existing unsafe/unreadable/malformed/conflicting evidence blocks publication, while a fully readable size/checksum mismatch is recorded and treated as absent coverage so the safe pending/gap receipt can still publish.
+- Regression: missing archive namespaces are ordinary absence; existing unsafe/unreadable/malformed/conflicting evidence terminates with a schema-valid `blocked` receipt, while a fully readable size/checksum mismatch is recorded and treated as absent coverage so the safe `incomplete` coverage receipt can still publish.
 - Regression: readable hot forcing manifest/member and state checksum mismatches are retained as absent-coverage evidence even when product/salvage wins; unsafe, malformed, permission and I/O failures remain blockers.
-- Regression: final completeness receipts are deterministic, schema-valid, atomically replaced, cover every subject exactly once, and enforce an exact forcing/run gap-selector bijection; pre-replace blockers preserve the previous valid receipt, while directory-fsync or observed post-replace parent-identity failure is reported as indeterminate and never as `published`.
+- Regression: `schema_version=1.1` terminal receipts are deterministic, exact-`oneOf`, and atomically replaced; success branches cover every subject exactly once and enforce the complete/incomplete aggregate plus forcing/run gap-selector bijection, while pre-publication audit blockers publish `blocked`. Once the single publication attempt starts, pre-replace failure preserves prior bytes and post-replace failure leaves content unknown; both are stderr-only, never retried, and never reported as `published`.
 - Regression: #848 discovers forcing leaf, strict-prefix manifest-bound flat run tree, and provider/legacy physical state valid-time units without DB access or clone-target fabrication; forcing/run eligibility uses authoritative window end (state uses point valid-time), while exact-cutoff, malformed, ambiguous and unreadable candidates fail closed without hiding valid siblings.
 - Regression: archive tar verification proves fail-fast exact safe regular-member path/size/sha bijection in addition to tarball sha; staged tar+manifest publish and only typed deterministic corrupt-final quarantine move whole leaf directories on one device, while operational verification failure preserves canonical evidence.
 - Regression: source retirement fully re-verifies the pinned final pair and complete source/tombstone preimage before same-device rename/unlink, then deletes only exact allowlisted inodes; observed final-pair/path/content drift preserves source/tombstone, while post-final-check open-FD writes remain an explicit immutable-producer contract violation outside the rename protocol.
@@ -304,7 +304,7 @@ Boundary-surface checklist:
 - Shared helper root: `packages/common/storage.py`; read-only path derivation and validation only.
 - Public entrypoints: #847 adds `scripts/node27_storage_inventory_audit.py`, a DB/filesystem read-only audit whose only write is its configured gate receipt; #848 adds the filesystem-only archive mover + wrapper, with explicit dry-run/enforce and internal flock. Display entrypoints remain unchanged.
 - Producer/consumer evidence boundary: the audit is the sole archive-completeness receipt producer; #850 salvage consumes its exact selectors and #855 retention consumes its subject coverage. Product archive and `db-export` provenance remain distinguishable.
-- Publish boundary: validated receipts explicitly opt into same-directory mode-0600 temporary files plus atomic replace, mandatory directory fsync, and post-replace parent-FD identity verification. Pre-replace blockers preserve the previous receipt and clean temporary residue; after-replace durability/namespace failures make the producer indeterminate/non-zero and never `published`, but a file-fsynced payload may already be visible. #855 independently validates the currently configured two receipt contents and does not add producer status, a sidecar, or systemd state as a third gate. The configured parent is operator-controlled and non-rotating during publication. The shared atomic helper keeps its legacy default for unmigrated non-receipt callers. Product/archive deletion and other mutations remain out of scope.
+- Publish boundary: validated receipts explicitly opt into same-directory mode-0600 temporary files plus atomic replace, mandatory directory fsync, and post-replace parent-FD identity verification. Audit/config/evidence failures reached before publication starts publish `blocked`/`indeterminate`. Once the one publication attempt starts, a pre-replace write failure preserves the previous receipt and cleans temporary residue; an after-replace durability/namespace failure leaves target content unknown. Both are stderr-only, non-zero, never retried, and never `published`; a file-fsynced payload may already be visible after replace. #855 independently validates the currently configured two receipt contents and does not add producer status, a sidecar, or systemd state as a third gate. The configured parent is operator-controlled and non-rotating during publication. The shared atomic helper keeps its legacy default for unmigrated non-receipt callers. Product/archive deletion and other mutations remain out of scope.
 - Mover mutation boundary: dry-run writes only safe lock metadata and its receipt. Enforce publishes a fully re-read staging leaf, may quarantine an invalid final leaf, then retires only a revalidated source preimage through a held-FD tombstone. Failures before tombstone rename preserve the source path; later uncertainty is non-zero and records complete/partial tombstone residue without falsely promising rollback.
 
 ## Workflow Fixture: Issue #849 Archive/Audit Systemd + Capacity + First Live Receipts
@@ -348,7 +348,7 @@ Risk packs considered (core):
 - Concurrency / shared state / ordering: selected — timer cadence must guarantee a fresh completeness receipt at every retention gate tick (D6).
 - Resource limits / large input / discovery: selected — per-tick bound + free-space watermark bound production impact of first enforce.
 - Legacy compatibility / examples: selected — existing governance receipt consumers and unit-installation runbooks must remain functional.
-- Error handling / rollback / partial outputs: selected — refusal preserves sources; recurring audit failure preserves the previous receipt (already locked in #847).
+- Error handling / rollback / partial outputs: selected — mover refusal preserves sources; recurring audit failures reached before publication starts replace stale success with a `blocked`/`indeterminate` receipt, while publication-attempt failure follows the stderr-only pre/post-replace contract.
 - Release / packaging / dependency compatibility: not selected — no new runtime or Python dependency.
 - Documentation / migration notes: selected — runbook section is part of the deliverable.
 
@@ -372,7 +372,7 @@ Invariant Matrix:
 - Storage/cache/query: `scripts/node27_resource_governance.py` `DEFAULT_SERVICES` extended with 4 new units; no DB behavior added.
 - Public routes/entrypoints: 4 new systemd user units + 2 env examples; installation via existing user-timer pattern.
 - Frontend/downstream consumers: display API and frontend unchanged (ADR 0001 carve-out) — regression-check the display code path imports zero archive references.
-- Failure paths/rollback/stale state: enforce below refuse threshold → refusal + WARN + non-zero, sources untouched; audit failure → prior completeness receipt preserved byte-identical (#847).
+- Failure paths/rollback/stale state: enforce below refuse threshold → refusal + WARN + non-zero, sources untouched; pre-publication audit failure → current `blocked`/`indeterminate` completeness receipt; publication-attempt failure → stderr-only with old bytes preserved before replace and target content unknown after replace.
 - Evidence/audit/readiness: governance receipt lists 4 new units + archive-root free-space; first live receipts (recurring completeness + first enforce archive) committed under runbook receipts.
 
 Regression rows:
@@ -1038,3 +1038,210 @@ Fixture level `expanded` · Repair intensity `high` · NHMS project profile · R
 - Public entrypoints: the exact seven issue-named wrappers above are in scope; `node27_download_once.sh` and `node27_resource_governance_once.sh` are explicit non-goals because #1067 does not name those independent service lanes and they do not launch the affected archive/audit module family.
 - Producer/consumer evidence boundary: systemd environment -> pre-source caller-path snapshot -> env file -> resolved root/interpreter/entrypoint -> import-origin preflight -> audit journal/receipt.
 - Unchanged downstream consumers: Python script arguments, entrypoints, downstream exit codes, and receipt semantics are unchanged.
+
+## Workflow Fixture: Issue #1066 Audit Prefix and Terminal Receipts
+
+Fixture level `expanded` · Repair intensity `high` · NHMS project profile ·
+Reuses the shared change (`tier-node27-timeseries-storage`). Scope is the
+node-27 inventory audit's object-URI identity, terminal receipt state machine,
+schema, two drifting archive-lane examples, and focused regression/live
+evidence. Retention remains an unchanged downstream consumer.
+
+### Source of truth / must preserve / must change
+
+- The canonical prefix for URIs persisted by the node-27 producer/ingest lane
+  is `s3://nhms`: `infra/env/node27-download.example` writes the shared NFS
+  object-store with it; `infra/env/node27-ingest.example` supplies it to the
+  ingest process; `scripts/node27_ingest_run.py` uses the same prefix for its
+  default run manifest/output URIs; and node-27 live DB rows are observed as
+  `s3://nhms/...`. The audit and product-archive examples MUST therefore use
+  `s3://nhms`, not the unproduced `s3://nhms-object-store` bucket identity.
+- `infra/env/compute.example` and `infra/env/display.example` retain
+  `s3://nhms-prod`: those values are consumer/config identities and are not
+  producers of the node-27 DB URI rows audited here. This fixture does not
+  assert a separate physical store or mount. Clarifying comments MUST state
+  producer-vs-consumer identity without inventing topology; this issue MUST
+  NOT globally rewrite every `OBJECT_STORE_PREFIX` to one value.
+- Preserve the audit's repeatable-read/read-only DB snapshot, subject/verdict/
+  selector semantics, URI containment checks, secret redaction, resource
+  bounds, and the existing mode-0600 durable atomic publication protocol.
+- Migrate `archive_completeness_receipt.schema.json` from `schema_version=1.0`
+  to `schema_version=1.1`. The top-level exact `oneOf` has four mutually
+  exclusive branches, all with `additionalProperties=false` and common required
+  fields `schema_version`, `generated_at`, and `outcome`:
+  - `complete`: requires coverage-only fields `coverage_bounds`, `windows`, and
+    `salvage_selectors`; forbids `refusal_reason`, `error_reason`, and `detail`;
+    every subject verdict is `complete` and `salvage_selectors` is empty;
+  - `incomplete`: requires the same coverage-only fields and forbids all reason/
+    detail fields; at least one subject is `pending-archive` or `gap`, and the
+    existing forcing/run gap-selector bijection remains exact;
+  - `blocked`: requires a stable non-secret `refusal_reason`, permits optional
+    sanitized `detail`, and forbids `coverage_bounds`, `windows`,
+    `salvage_selectors`, and `error_reason`;
+  - `indeterminate`: requires a stable non-secret `error_reason`, permits
+    optional sanitized `detail`, and forbids every coverage field plus
+    `refusal_reason`.
+  Runtime semantic validation MUST enforce success aggregate semantics that
+  JSON Schema alone cannot express. Empty inventory is `blocked` with stable
+  `refusal_reason=EMPTY_INVENTORY`, never an empty success receipt.
+- Stable blocked reason codes are
+  `CONFIG_INVALID`, `EMPTY_INVENTORY`, `OBJECT_URI_PREFIX_MISMATCH`,
+  `EVIDENCE_BLOCKED`, `RESOURCE_BOUND_EXCEEDED`, and `RECEIPT_INVALID`;
+  unexpected pre-publication exceptions use
+  `error_reason=UNEXPECTED_AUDIT_ERROR`. Raw exception text belongs only in
+  optional sanitized `detail`. Publication failures use stderr codes
+  `RECEIPT_PUBLICATION_FAILED` (pre-replace) or
+  `RECEIPT_PUBLICATION_INDETERMINATE` (post-replace), never receipt outcomes.
+- Once a safe receipt destination is available, any audit/config/evidence
+  terminal reached before publication starts MUST replace the previous success
+  with a schema-valid `blocked` or `indeterminate` receipt. This prevents a
+  consumer from mistaking an old success for the current invocation. The
+  capability requirement/scenarios and historical fixture/task language in
+  this change are updated now, not deferred to implementation.
+
+### Early config and atomic-publication contract
+
+- Receipt destination discovery is a two-phase config boundary. A bootstrap
+  parser recognizes `--receipt-path VALUE` and `--receipt-path=VALUE`
+  independently of argument order, unknown options, or later argparse type
+  errors, then applies one-CLI-value-over-env precedence and captures one UTC
+  terminal timestamp. Full-parser unknown-option/type failures reached after a
+  safe destination was bootstrapped map to an on-disk `blocked` receipt.
+  Missing option value, multiple/ambiguous receipt-path occurrences, missing
+  CLI+env value, or an unsafe destination itself is an unwriteable exception.
+- Before the first atomic publication call begins, expected `AuditBlocked`
+  failures map to on-disk `blocked`, unexpected exceptions map to on-disk
+  `indeterminate`, and a coverage run maps to `complete`/`incomplete`. Each
+  branch is schema + runtime validated, then gets exactly one publication
+  attempt. The process exits zero only for published success branches.
+- Once that first publication attempt begins, its own failures are NOT receipt
+  outcomes: they emit sanitized structured stderr and MUST NOT trigger a second
+  publish. A pre-replace publication error preserves the old bytes; a
+  post-replace durability/namespace error leaves target content unknown. Both
+  exit non-zero and neither may claim `published`; post-replace stderr uses an
+  indeterminate-publication diagnostic, not an on-disk `outcome=indeterminate`
+  claim.
+- The destination/unwriteable exceptions above cannot truthfully yield an
+  on-disk receipt. They emit one sanitized structured stderr diagnostic and
+  exit non-zero without exposing DB URL/credentials or fabricating a terminal
+  receipt.
+
+### Risk packs considered
+
+- Public API / CLI / script entry: selected — `main()` and the systemd wrapper
+  define exit status, stderr, and the terminal receipt contract.
+- Config / project setup: selected — prefix reconciliation and receipt-path-
+  first config parsing change production examples and startup behavior.
+- File IO / path safety / overwrite: selected — failure receipts deliberately
+  replace a previous gate receipt through the existing no-follow atomic lane.
+- Schema / columns / units / field names: selected — the completeness receipt
+  gains a top-level four-branch terminal `oneOf` contract.
+- Auth / permissions / secrets: selected — DB URLs remain redacted and the
+  audit remains read-only; terminal messages cannot leak credentials.
+- Concurrency / shared state / ordering: selected — config discovery, audit,
+  semantic validation, and one final publication attempt have a fixed order;
+  the stable receipt is shared state consumed by retention/salvage.
+- Resource limits / large input / discovery: selected — existing inventory,
+  traversal, manifest, and timeout bounds must hold on every new branch.
+- Legacy compatibility / examples: selected — successful coverage payload
+  meaning and pinned examples remain compatible while env drift is corrected.
+- Error handling / rollback / partial outputs: selected — pre-publication
+  failures map to one terminal outcome; publication-attempt failures remain
+  stderr-only and preserve/mark uncertainty without a partial-success claim.
+- Release / packaging / dependency compatibility: not selected — no new
+  dependency, packaging surface, or runtime version requirement.
+- Documentation / migration notes: selected — env-plane comments and committed
+  node-27 live receipt document the operational contract.
+- Geospatial / CRS / basin geometry: not selected — geometry is untouched.
+- Hydro-met time series / forcing windows: selected — real DB-shaped forcing/
+  run/state URIs and their coverage windows drive the receipt regression.
+- SHUD numerical runtime / conservation / NaN: not selected — no model run.
+- PostGIS / TimescaleDB domain behavior: selected — the node-27 oracle uses the
+  real read-only DB shape; no schema or mutation is introduced.
+- Slurm production lifecycle / mock-vs-real parity: not selected — node-22 and
+  scheduling are untouched.
+- External hydro-met providers / snapshot reproducibility: not selected —
+  provider retrieval is untouched.
+- Run manifest / QC provenance: selected — real DB URI/manifest identity must
+  pass the audit rather than a prefix-normalized fake oracle.
+- Published NHMS artifacts / display identity: selected — DB URI, hot-object
+  path, terminal receipt bytes, and receipt consumer must remain attributable.
+
+### Invariant Matrix
+
+- Governing invariant: one audit invocation binds node-27 DB URI identity to
+  the actual producer prefix and ends in exactly one of three states: (1) a
+  safe destination contains the invocation's schema-valid terminal receipt;
+  (2) destination bootstrap itself is impossible/unsafe and stderr states
+  receipt unavailability; or (3) the one publication attempt fails, stderr
+  reports the publish phase, old bytes are preserved pre-replace, and target
+  content is unknown post-replace. States (2)/(3) never claim publication.
+- Source-of-truth contract: producer prefix `s3://nhms`; terminal receipt
+  `schema_version=1.1`; exact `outcome`; stable `refusal_reason`/
+  `error_reason`; pinned
+  `archive_completeness_receipt.schema.json`; configured absolute receipt path.
+- Producers: node-27 download/ingest + `LocalObjectStore.uri_for_key` and
+  `scripts/node27_ingest_run.py`; audit `build_receipt()`/terminal builder.
+- Validators/preflight: two-phase config loader, `_object_key`, receipt runtime
+  semantic validation, Draft 7 + format checking, safe output-path validation.
+- Storage/cache/query: node-27 read-only repeatable-read DB snapshot, shared NFS
+  object-store, and the single stable receipt file.
+- Public routes/entrypoints: `node27_storage_inventory_audit.py main()` and
+  `nhms-node27-storage-inventory-audit.service`.
+- Frontend/downstream consumers: DB-export salvage and timeseries retention;
+  salvage may consume selectors only from a `complete`/`incomplete` coverage
+  branch and MUST fail closed before DB/export work on `blocked`/
+  `indeterminate`; retention is inspected only for static
+  outcome-vs-missing distinguishability and receives no behavior change in
+  this issue.
+- Failure paths/rollback/stale state: early config failure, expected evidence
+  blocker, unexpected exception, schema/semantic rejection, pre-replace
+  failure, and post-replace uncertainty.
+- Evidence/audit/readiness: focused local pytest/schema/ruff/OpenSpec checks,
+  real DB-shaped disk-receipt regression, and node-27 live schema-valid receipt.
+- Regression rows:
+  - producer-shaped `s3://nhms/forcing/...` URI + canonical config -> URI binds
+    to the expected hot key and audit reaches coverage classification;
+  - mismatched configured bucket + real DB-shaped URI -> non-zero exit and a
+    schema-valid on-disk `blocked` receipt with stable refusal reason;
+  - all subjects complete -> `complete`; any pending/gap -> `incomplete`, with
+    unchanged subject windows/selectors and aggregate semantic validation;
+  - invalid later config/unknown option/type error + bootstrapped safe receipt
+    path -> on-disk `blocked`; missing-value/duplicate/ambiguous/unsafe receipt
+    path itself -> sanitized stderr only and no fabricated publish;
+  - unexpected audit error before publication -> on-disk `indeterminate`;
+  - injected first-publish pre-replace failure -> prior bytes unchanged,
+    stderr-only, no second publish; injected post-replace failure -> target
+    content unknown, stderr indeterminate-publication, no second publish;
+  - existing successful receipt example -> validates under exactly one branch
+    after the recorded contract migration;
+  - blocked/indeterminate receipt presented to DB-export salvage -> stable
+    pre-export refusal with no DB read or archive write;
+  - blocked receipt file vs absent receipt path -> statically distinguishable
+    to the unchanged retention consumer; runtime refusal mapping remains #856.
+  - node-27 before #1065 closure -> success receipt has at least one `windows`
+    subject, or `blocked/EVIDENCE_BLOCKED` with sanitized #1065-attributable
+    detail; `indeterminate` is not accepted as live readiness evidence.
+
+### Boundary-surface checklist and non-goals
+
+- Public entry/read surface: audit CLI/env parsing and read-only DB/object-store
+  inventory only; no write-capable DB role or query change.
+- Write/overwrite/publish surface: exactly one stable receipt path and one
+  publish attempt, existing safe atomic helper, explicit prior-byte and
+  post-replace unknown-content rules.
+- Producer/consumer evidence boundary: producer prefix -> persisted DB URI ->
+  `_object_key` -> coverage payload -> schema branch -> retention/salvage read.
+- Stale-state/idempotency boundary: each new controlled invocation replaces a
+  prior terminal receipt with its own timestamp/outcome; repeating the same
+  input yields semantically identical terminal classification.
+- Unchanged downstream consumer: no edits to
+  `scripts/node27_timeseries_retention.py`; static inspection only proves a
+  blocked receipt is distinguishable from no file. #856 owns live cascade and
+  any downstream outcome-specific refusal behavior.
+- Adjacent salvage consumer: its selector loader remains fail-closed; focused
+  compatibility evidence proves only coverage branches can supply salvage
+  scope and terminal failure branches cannot trigger export work.
+- Non-goals: #1065 mover discovery/manifest/EACCES repair; #1067 wrapper import
+  repair; DB URI migration or producer rewrite; node-22 compute prefix rewrite;
+  retention enforce/dry-run or any #856 live cascade action.
