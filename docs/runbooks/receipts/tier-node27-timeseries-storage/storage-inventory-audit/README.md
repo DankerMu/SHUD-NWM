@@ -46,3 +46,18 @@ Issue #1066 first schema 1.1 terminal receipt from node-27 at implementation hea
 ## `terminal-receipt-live-20260713T093237Z.json`
 
 Machine-readable execution envelope for the same #1066 run: code/config identity, systemd result, stderr byte boundary, receipt counts/hash/mode, and validator results.
+
+## `completeness-incomplete-live-20260713T155314Z.json`
+
+Final reviewed #1066 schema 1.1 terminal receipt from node-27 at frozen implementation head `bf9124aea6667fc116c872614d92de0e74a6cab1`:
+
+- Node-27 passed the expanded affected-surface regression on the same checkout (`2123 passed, 1 skipped`).
+- The installed user-systemd audit unit completed successfully with no new stderr bytes and published a mode-0600 `incomplete` receipt.
+- The receipt contains 1,585 real DB subjects: 1,357 `complete` and 228 `gap`; the exact 228 selectors remain the input evidence for independently tracked issue #1065.
+- Draft 7 validation with date-time format checking and the runtime semantic validator both passed.
+- The live stable receipt and committed copy are byte-identical: 472,062 bytes with SHA-256 `e2d4f08150943f09af87d3e53e79cff26728fb438aabb545dabff07842497d04`.
+- No #856 retention dry-run or enforce action was executed.
+
+## `terminal-receipt-live-20260713T155314Z.json`
+
+Machine-readable final execution envelope for the same frozen-SHA run: code/config identity, systemd result, zero-byte stderr delta, receipt counts/hash/mode, and validator results. This supersedes the earlier implementation-head envelope as the #1066 merge evidence.
