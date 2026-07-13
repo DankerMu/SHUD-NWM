@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import importlib.util
 import io
 import json
 import os
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -20,6 +22,8 @@ import pytest
 from packages.common.safe_fs import SafeFilesystemError
 
 _ROOT = Path(__file__).resolve().parents[1]
+_LIVE_SHAPE = _ROOT / "tests/fixtures/node27_product_archive/live-shape/object-store"
+_LIVE_SHAPE_NOW = datetime(2026, 9, 1, tzinfo=UTC)
 _SPEC = importlib.util.spec_from_file_location("node27_product_archive", _ROOT / "scripts/node27_product_archive.py")
 assert _SPEC and _SPEC.loader
 archive = importlib.util.module_from_spec(_SPEC)
@@ -70,6 +74,43 @@ def _config(tmp_path: Path, *, enforce: bool, bound: int = 10) -> archive.MoverC
         per_tick_bound=bound,
         enforce=enforce,
     )
+
+
+def _live_shape_config(
+    tmp_path: Path,
+    *,
+    enforce: bool = False,
+    object_store_prefix: str = "s3://nhms",
+) -> archive.MoverConfig:
+    store = tmp_path / "object-store"
+    shutil.copytree(_LIVE_SHAPE, store)
+    archive_root = tmp_path / "archive"
+    archive_root.mkdir()
+    return archive.MoverConfig(
+        object_store_root=store,
+        object_store_prefix=object_store_prefix,
+        archive_root=archive_root,
+        receipt_path=tmp_path / "logs" / "receipt.json",
+        lock_path=tmp_path / "locks" / "archive.lock",
+        zstd_path=_tool(tmp_path),
+        minimum_age_days=45,
+        per_tick_bound=10,
+        enforce=enforce,
+    )
+
+
+def _tree_snapshot(root: Path) -> list[tuple[str, str, bytes | None]]:
+    snapshot: list[tuple[str, str, bytes | None]] = []
+    for path in sorted(root.rglob("*")):
+        kind = "directory" if path.is_dir() else "file"
+        snapshot.append(
+            (
+                path.relative_to(root).as_posix(),
+                kind,
+                path.read_bytes() if kind == "file" else None,
+            )
+        )
+    return snapshot
 
 
 def test_compressor_protocol_uses_stdin_only_and_restores_input_offset(tmp_path: Path) -> None:
@@ -465,6 +506,459 @@ def _state(config: archive.MoverConfig, *, provider: bool) -> Path:
     leaf.mkdir(parents=True)
     (leaf / "state.cfg.ic").write_bytes(b"state")
     return leaf
+
+
+def _inject_state_open_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    config: archive.MoverConfig,
+    failures: dict[str, int],
+) -> None:
+    real_open = archive.open_directory_no_follow
+
+    def injected(path: Path, *, containment_root: Path | None = None) -> int:
+        try:
+            relative = Path(path).relative_to(config.object_store_root).as_posix()
+        except ValueError:
+            relative = ""
+        if relative in failures:
+            code = failures[relative]
+            raise PermissionError(code, "private-state-token", str(path))
+        return real_open(path, containment_root=containment_root)
+
+    monkeypatch.setattr(archive, "open_directory_no_follow", injected)
+
+
+def test_live_shape_fixture_accepts_canonical_gfs_ifs_qhh_heihe_and_reproduces_historical_prefix(
+    tmp_path: Path,
+) -> None:
+    config = _live_shape_config(tmp_path)
+    candidates, failures = archive.discover_candidates(
+        config,
+        now=_LIVE_SHAPE_NOW,
+        mount_id_provider=_mount_id,
+    )
+    assert failures == []
+    assert len(candidates) == 6
+    assert {
+        (
+            candidate.identity.lane,
+            candidate.identity.source,
+            candidate.identity.basin_version_id,
+            candidate.identity.model_id,
+            candidate.identity.run_id,
+        )
+        for candidate in candidates
+    } == {
+        ("forcing", "gfs", "basins_heihe_vbasins", "basins_heihe_shud", None),
+        ("forcing", "IFS", "basins_qhh_vbasins", "basins_qhh_shud", None),
+        ("runs", "gfs", None, None, "fcst_gfs_2026053106_basins_heihe_shud"),
+        ("runs", "IFS", None, None, "fcst_ifs_2026053106_basins_qhh_shud"),
+        ("states", "gfs", None, "basins_heihe_shud", None),
+        ("states", "IFS", None, "basins_qhh_shud", None),
+    }
+    assert {candidate.source_relative for candidate in candidates} == {
+        "forcing/gfs/2026061600/basins_heihe_vbasins/basins_heihe_shud",
+        "forcing/ifs/2026070500/basins_qhh_vbasins/basins_qhh_shud",
+        "runs/fcst_gfs_2026053106_basins_heihe_shud",
+        "runs/fcst_ifs_2026053106_basins_qhh_shud",
+        "states/gfs/basins_heihe_shud/2026050100",
+        "states/IFS/basins_qhh_shud/2026050100",
+    }
+    assert {
+        candidate.producer["subject_id"]
+        for candidate in candidates
+        if candidate.identity.lane == "forcing" and candidate.producer is not None
+    } == {
+        "forc_gfs_2026061600_basins_heihe_shud",
+        "forc_ifs_2026070500_basins_qhh_shud",
+    }
+    assert {
+        (candidate.identity.run_id, candidate.producer["basin_version_id"], candidate.producer["model_id"])
+        for candidate in candidates
+        if candidate.identity.lane == "runs" and candidate.producer is not None
+    } == {
+        (
+            "fcst_gfs_2026053106_basins_heihe_shud",
+            "basins_heihe_vbasins",
+            "basins_heihe_shud",
+        ),
+        (
+            "fcst_ifs_2026053106_basins_qhh_shud",
+            "basins_qhh_vbasins",
+            "basins_qhh_shud",
+        ),
+    }
+
+    historical = archive.MoverConfig(
+        **{**config.__dict__, "object_store_prefix": "s3://nhms-object-store"}
+    )
+    historical_candidates, historical_failures = archive.discover_candidates(
+        historical,
+        now=_LIVE_SHAPE_NOW,
+        mount_id_provider=_mount_id,
+    )
+    assert {candidate.identity.lane for candidate in historical_candidates} == {"states"}
+    assert [failure.reason for failure in historical_failures].count(
+        "forcing manifest file URI escapes its exact package leaf"
+    ) == 2
+    assert [failure.reason for failure in historical_failures].count(
+        "run manifest identity/outputs do not bind run directory"
+    ) == 2
+    assert {failure.locator for failure in historical_failures} == {
+        "forcing/gfs/2026061600/basins_heihe_vbasins/basins_heihe_shud",
+        "forcing/ifs/2026070500/basins_qhh_vbasins/basins_qhh_shud",
+        "runs/fcst_gfs_2026053106_basins_heihe_shud",
+        "runs/fcst_ifs_2026053106_basins_qhh_shud",
+    }
+
+
+@pytest.mark.parametrize(
+    ("case", "reason"),
+    [
+        ("forcing-cross-leaf", "forcing manifest file URI escapes its exact package leaf"),
+        ("run-drift", "run manifest identity/outputs do not bind run directory"),
+        ("run-double-trailing-slash", "multiple trailing slashes"),
+    ],
+)
+def test_live_shape_fixture_retains_cross_leaf_and_uri_safety_boundaries(
+    tmp_path: Path,
+    case: str,
+    reason: str,
+) -> None:
+    config = _live_shape_config(tmp_path)
+    if case == "forcing-cross-leaf":
+        path = (
+            config.object_store_root
+            / "forcing/gfs/2026061600/basins_heihe_vbasins/basins_heihe_shud/forcing_package.json"
+        )
+        manifest = json.loads(path.read_text())
+        manifest["files"][0]["uri"] = (
+            "s3://nhms/forcing/gfs/2026061600/basins_qhh_vbasins/"
+            "basins_heihe_shud/forcing.tsd.forc"
+        )
+    else:
+        path = (
+            config.object_store_root
+            / "runs/fcst_ifs_2026053106_basins_qhh_shud/input/manifest.json"
+        )
+        manifest = json.loads(path.read_text())
+        manifest["outputs"]["output_uri"] = (
+            "s3://nhms/runs/other/output"
+            if case == "run-drift"
+            else "s3://nhms/runs/fcst_ifs_2026053106_basins_qhh_shud/output//"
+        )
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    candidates, failures = archive.discover_candidates(
+        config,
+        now=_LIVE_SHAPE_NOW,
+        mount_id_provider=_mount_id,
+    )
+    assert len(candidates) == 5
+    assert len(failures) == 1
+    assert reason in failures[0].reason
+
+
+def test_live_shape_run_output_without_real_trailing_slash_remains_accepted(
+    tmp_path: Path,
+) -> None:
+    config = _live_shape_config(tmp_path)
+    path = (
+        config.object_store_root
+        / "runs/fcst_ifs_2026053106_basins_qhh_shud/input/manifest.json"
+    )
+    manifest = json.loads(path.read_text())
+    manifest["outputs"]["output_uri"] = manifest["outputs"]["output_uri"].removesuffix("/")
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    candidates, failures = archive.discover_candidates(
+        config,
+        now=_LIVE_SHAPE_NOW,
+        mount_id_provider=_mount_id,
+    )
+    assert len(candidates) == 6
+    assert failures == []
+
+
+@pytest.mark.parametrize(
+    "denied",
+    [
+        {"states/gfs/basins_heihe_shud": errno.EACCES},
+        {
+            "states/gfs/basins_heihe_shud": errno.EACCES,
+            "states/IFS/basins_qhh_shud": errno.EACCES,
+        },
+    ],
+    ids=["one-eacces", "multiple-eacces"],
+)
+def test_state_eacces_is_aggregated_once_before_any_enforce_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    denied: dict[str, int],
+) -> None:
+    config = _live_shape_config(tmp_path, enforce=True)
+    before = _tree_snapshot(config.object_store_root)
+    _inject_state_open_failures(monkeypatch, config, denied)
+
+    receipt, code = archive.run(
+        config,
+        now=_LIVE_SHAPE_NOW,
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+
+    assert code == 1
+    assert receipt["outcome"] == "failed"
+    assert receipt["selected"] == []
+    assert receipt["candidates"] == receipt["deferred"]
+    assert receipt["terminals"] == []
+    assert receipt["events"] == []
+    assert receipt["validation_attempts"] == 0
+    assert receipt["bytes"] == {"source": 0, "archived": 0}
+    assert receipt["discovery_failures"] == [
+        {
+            "lane_hint": "states",
+            "locator": "states",
+            "reason": (
+                f"STATES_ACCESS_DENIED count={len(denied)} "
+                f"euid={os.geteuid()} egid={os.getegid()}"
+            ),
+        }
+    ]
+    assert "private-state-token" not in json.dumps(receipt)
+    assert str(config.object_store_root) not in json.dumps(receipt)
+    assert _tree_snapshot(config.object_store_root) == before
+    assert list(config.archive_root.iterdir()) == []
+    archive.validate_receipt_semantics(receipt)
+
+
+def test_state_eacces_aggregate_does_not_swallow_non_eacces_locator_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _live_shape_config(tmp_path, enforce=True)
+    _inject_state_open_failures(
+        monkeypatch,
+        config,
+        {
+            "states/gfs/basins_heihe_shud": errno.EIO,
+            "states/IFS/basins_qhh_shud": errno.EACCES,
+        },
+    )
+
+    receipt, code = archive.run(
+        config,
+        now=_LIVE_SHAPE_NOW,
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+
+    assert code == 1
+    assert [(item["lane_hint"], item["locator"]) for item in receipt["discovery_failures"]] == [
+        ("states", "states"),
+        ("states", "states/gfs/basins_heihe_shud"),
+    ]
+    assert receipt["discovery_failures"][0]["reason"].startswith(
+        "STATES_ACCESS_DENIED count=1"
+    )
+    assert "private-state-token" in receipt["discovery_failures"][1]["reason"]
+    assert receipt["selected"] == []
+    assert list(config.archive_root.iterdir()) == []
+
+
+def test_state_eacces_during_bounded_leaf_validation_freezes_all_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _live_shape_config(tmp_path, enforce=True)
+    before = _tree_snapshot(config.object_store_root)
+    real_validate = archive._validate_candidate_locator
+
+    def injected(locator, runtime_config, *, mount_id_provider):
+        if locator.identity.lane == "states":
+            raise PermissionError(
+                errno.EACCES,
+                "private-validation-token",
+                str(locator.source_path),
+            )
+        return real_validate(
+            locator,
+            runtime_config,
+            mount_id_provider=mount_id_provider,
+        )
+
+    monkeypatch.setattr(archive, "_validate_candidate_locator", injected)
+    receipt, code = archive.run(
+        config,
+        now=_LIVE_SHAPE_NOW,
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+
+    assert code == 1
+    assert receipt["validation_attempts"] == 6
+    assert receipt["selected"] == []
+    assert receipt["candidates"] == receipt["deferred"]
+    assert receipt["terminals"] == []
+    assert receipt["events"] == []
+    assert receipt["discovery_failures"] == [
+        {
+            "lane_hint": "states",
+            "locator": "states",
+            "reason": (
+                f"STATES_ACCESS_DENIED count=2 euid={os.geteuid()} egid={os.getegid()}"
+            ),
+        }
+    ]
+    assert "private-validation-token" not in json.dumps(receipt)
+    assert _tree_snapshot(config.object_store_root) == before
+    assert list(config.archive_root.iterdir()) == []
+
+
+def test_main_publishes_exact_state_access_receipt_then_emits_one_compact_diagnostic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _live_shape_config(tmp_path, enforce=True)
+    before = _tree_snapshot(config.object_store_root)
+    _inject_state_open_failures(
+        monkeypatch,
+        config,
+        {
+            "states/gfs/basins_heihe_shud": errno.EACCES,
+            "states/IFS/basins_qhh_shud": errno.EACCES,
+        },
+    )
+    real_run = archive.run
+
+    def local_run(runtime_config: archive.MoverConfig):
+        return real_run(
+            runtime_config,
+            now=_LIVE_SHAPE_NOW,
+            mount_id_provider=_mount_id,
+            rename_impl=_rename_noreplace,
+        )
+
+    monkeypatch.setattr(archive, "run", local_run)
+    code = archive.main(
+        [
+            "--object-store-root",
+            str(config.object_store_root),
+            "--object-store-prefix",
+            config.object_store_prefix,
+            "--archive-root",
+            str(config.archive_root),
+            "--receipt",
+            str(config.receipt_path),
+            "--lock-file",
+            str(config.lock_path),
+            "--zstd",
+            str(config.zstd_path),
+            "--enforce",
+        ]
+    )
+
+    assert code == 2
+    expected = {
+        "count": 2,
+        "egid": os.getegid(),
+        "euid": os.geteuid(),
+        "exit_reason": "STATES_ACCESS_DENIED",
+        "status": "failed",
+    }
+    assert capsys.readouterr().err == json.dumps(
+        expected, sort_keys=True, separators=(",", ":")
+    ) + "\n"
+    receipt = json.loads(config.receipt_path.read_text())
+    assert receipt["discovery_failures"] == [
+        {
+            "lane_hint": "states",
+            "locator": "states",
+            "reason": (
+                f"STATES_ACCESS_DENIED count=2 euid={os.geteuid()} egid={os.getegid()}"
+            ),
+        }
+    ]
+    assert stat.S_IMODE(config.receipt_path.stat().st_mode) == 0o600
+    assert _tree_snapshot(config.object_store_root) == before
+    assert list(config.archive_root.iterdir()) == []
+
+
+def test_main_keeps_exit_one_for_other_receipt_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path, enforce=False)
+    monkeypatch.setattr(
+        archive,
+        "run",
+        lambda _config: (
+            {
+                "discovery_failures": [
+                    {
+                        "lane_hint": "runs",
+                        "locator": "runs/bad",
+                        "reason": "run manifest identity/outputs do not bind run directory",
+                    }
+                ]
+            },
+            1,
+        ),
+    )
+    code = archive.main(
+        [
+            "--object-store-root",
+            str(config.object_store_root),
+            "--object-store-prefix",
+            config.object_store_prefix,
+            "--archive-root",
+            str(config.archive_root),
+            "--receipt",
+            str(config.receipt_path),
+            "--lock-file",
+            str(config.lock_path),
+            "--zstd",
+            str(config.zstd_path),
+        ]
+    )
+    assert code == 1
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        ("zero-count", "diagnostic shape"),
+        ("wrong-locator", "diagnostic shape"),
+    ],
+)
+def test_receipt_semantics_rejects_malformed_state_access_aggregate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    reason: str,
+) -> None:
+    config = _live_shape_config(tmp_path)
+    _inject_state_open_failures(
+        monkeypatch,
+        config,
+        {"states/gfs/basins_heihe_shud": errno.EACCES},
+    )
+    receipt, _code = archive.run(
+        config,
+        now=_LIVE_SHAPE_NOW,
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    if mutation == "zero-count":
+        receipt["discovery_failures"][0]["reason"] = (
+            f"STATES_ACCESS_DENIED count=0 euid={os.geteuid()} egid={os.getegid()}"
+        )
+    elif mutation == "wrong-locator":
+        receipt["discovery_failures"][0]["locator"] = "states/gfs/basins_heihe_shud"
+    with pytest.raises(archive.ArchiveMoverError, match=reason):
+        archive.validate_receipt_semantics(receipt)
 
 
 def test_enforce_archives_three_physical_lanes_and_retires_sources(tmp_path: Path) -> None:

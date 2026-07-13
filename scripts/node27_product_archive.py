@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -91,6 +92,9 @@ _FORCING_DOMAIN_PAYLOAD_PATHS = {
     "station_timeseries": "payloads/station_timeseries.json",
     "interpolation_weights": "payloads/interp_weights.json",
 }
+_STATES_ACCESS_DENIED_PATTERN = re.compile(
+    r"\ASTATES_ACCESS_DENIED count=([1-9][0-9]*) euid=(0|[1-9][0-9]*) egid=(0|[1-9][0-9]*)\Z"
+)
 
 
 class ArchiveMoverError(RuntimeError):
@@ -231,6 +235,45 @@ class MoverConfig:
     enforce: bool = False
     free_space_warn_bytes: int | None = None
     free_space_refuse_bytes: int | None = None
+
+
+def _is_eacces(error: BaseException) -> bool:
+    """Recognize EACCES through safety-wrapper exception chains."""
+    pending: list[BaseException] = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, OSError) and current.errno == errno.EACCES:
+            return True
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+    return False
+
+
+def _states_access_denied_context(reason: Any) -> dict[str, int] | None:
+    if not isinstance(reason, str):
+        return None
+    matched = _STATES_ACCESS_DENIED_PATTERN.fullmatch(reason)
+    if matched is None:
+        return None
+    count, euid, egid = (int(value) for value in matched.groups())
+    return {"count": count, "euid": euid, "egid": egid}
+
+
+def _receipt_states_access_denied(receipt: Mapping[str, Any]) -> dict[str, int] | None:
+    for failure in receipt.get("discovery_failures", ()):
+        if not isinstance(failure, Mapping):
+            continue
+        if failure.get("lane_hint") == "states" and failure.get("locator") == "states":
+            context = _states_access_denied_context(failure.get("reason"))
+            if context is not None:
+                return context
+    return None
 
 
 @dataclass(frozen=True)
@@ -879,7 +922,21 @@ def discover_candidate_locators(
     candidates: list[CandidateLocator] = []
     failures: list[DiscoveryFailure] = []
     observed = 0
+    states_access_denied_count = 0
     cutoff = now - timedelta(days=config.minimum_age_days)
+
+    def record_failure(
+        lane: str,
+        locator: str,
+        error: BaseException,
+        *,
+        aggregate_states_access: bool = False,
+    ) -> None:
+        nonlocal states_access_denied_count
+        if aggregate_states_access and _is_eacces(error):
+            states_access_denied_count += 1
+            return
+        failures.append(DiscoveryFailure(lane, locator, str(error)))
 
     def lane_exists(lane: str, path: Path) -> bool:
         nonlocal observed
@@ -889,10 +946,16 @@ def discover_candidate_locators(
             observed += 1
             if observed > MAX_DISCOVERY:
                 raise ArchiveMoverError(f"discovery exceeds {MAX_DISCOVERY} candidates/failures") from error
-            failures.append(DiscoveryFailure(lane, lane, str(error)))
+            record_failure(lane, lane, error)
             return False
 
-    def add_leaf(lane: str, relative: str, manifest_rel: str | None) -> None:
+    def add_leaf(
+        lane: str,
+        relative: str,
+        manifest_rel: str | None,
+        *,
+        aggregate_states_access: bool = False,
+    ) -> None:
         nonlocal observed
         observed += 1
         if observed > MAX_DISCOVERY:
@@ -944,13 +1007,36 @@ def discover_candidate_locators(
             finally:
                 os.close(leaf_fd)
         except Exception as error:
-            failures.append(DiscoveryFailure(lane, relative, str(error)))
+            record_failure(
+                lane,
+                relative,
+                error,
+                aggregate_states_access=aggregate_states_access,
+            )
 
     try:
         # A deliberately shallow locator pass; full leaf safety is proven by scan_tree.
-        def shallow_dirs(lane: str, path: Path, relative: str) -> list[str]:
+        def shallow_dirs(
+            lane: str,
+            path: Path,
+            relative: str,
+            *,
+            aggregate_states_access: bool = False,
+        ) -> list[str]:
             nonlocal observed
-            names = _path_entries(path, root)
+            try:
+                names = _path_entries(path, root)
+            except Exception as error:
+                observed += 1
+                if observed > MAX_DISCOVERY:
+                    raise ArchiveMoverError(f"discovery exceeds {MAX_DISCOVERY} candidates/failures") from error
+                record_failure(
+                    lane,
+                    relative,
+                    error,
+                    aggregate_states_access=aggregate_states_access,
+                )
+                return []
             valid: list[str] = []
             for name in names:
                 child_relative = f"{relative}/{name}"
@@ -966,7 +1052,12 @@ def discover_candidate_locators(
                     observed += 1
                     if observed > MAX_DISCOVERY:
                         raise ArchiveMoverError(f"discovery exceeds {MAX_DISCOVERY} candidates/failures") from error
-                    failures.append(DiscoveryFailure(lane, child_relative, str(error)))
+                    record_failure(
+                        lane,
+                        child_relative,
+                        error,
+                        aggregate_states_access=aggregate_states_access,
+                    )
                     continue
                 valid.append(name)
             return valid
@@ -982,14 +1073,14 @@ def discover_candidate_locators(
                             for model in _path_entries(forcing / source / cycle / basin, root):
                                 add_leaf("forcing", f"forcing/{source}/{cycle}/{basin}/{model}", "forcing_package.json")
             except Exception as error:
-                failures.append(DiscoveryFailure("forcing", "forcing", str(error)))
+                record_failure("forcing", "forcing", error)
         runs = root / "runs"
         if lane_exists("runs", runs):
             try:
                 for run_id in _path_entries(runs, root):
                     add_leaf("runs", f"runs/{run_id}", "input/manifest.json")
             except Exception as error:
-                failures.append(DiscoveryFailure("runs", "runs", str(error)))
+                record_failure("runs", "runs", error)
         states = root / "states"
         if lane_exists("states", states):
             try:
@@ -1000,16 +1091,55 @@ def discover_candidate_locators(
                     except ValueError:
                         provider = None
                     if provider is not None:
-                        for model in shallow_dirs("states", first_path, f"states/{first}"):
-                            for cycle in _path_entries(first_path / model, root):
-                                add_leaf("states", f"states/{first}/{model}/{cycle}", None)
+                        for model in shallow_dirs(
+                            "states",
+                            first_path,
+                            f"states/{first}",
+                            aggregate_states_access=True,
+                        ):
+                            model_relative = f"states/{first}/{model}"
+                            for cycle in shallow_dirs(
+                                "states",
+                                first_path / model,
+                                model_relative,
+                                aggregate_states_access=True,
+                            ):
+                                add_leaf(
+                                    "states",
+                                    f"{model_relative}/{cycle}",
+                                    None,
+                                    aggregate_states_access=True,
+                                )
                     else:
-                        for cycle in _path_entries(first_path, root):
-                            add_leaf("states", f"states/{first}/{cycle}", None)
+                        for cycle in shallow_dirs(
+                            "states",
+                            first_path,
+                            f"states/{first}",
+                            aggregate_states_access=True,
+                        ):
+                            add_leaf(
+                                "states",
+                                f"states/{first}/{cycle}",
+                                None,
+                                aggregate_states_access=True,
+                            )
             except Exception as error:
-                failures.append(DiscoveryFailure("states", "states", str(error)))
+                record_failure(
+                    "states",
+                    "states/discovery" if states_access_denied_count else "states",
+                    error,
+                )
     finally:
         os.close(root_fd)
+    if states_access_denied_count:
+        failures.append(
+            DiscoveryFailure(
+                "states",
+                "states",
+                "STATES_ACCESS_DENIED "
+                f"count={states_access_denied_count} euid={os.geteuid()} egid={os.getegid()}",
+            )
+        )
     candidates.sort(key=lambda value: value.sort_key)
     failures.sort(key=lambda value: (value.lane_hint, value.locator, value.reason))
     return candidates, failures
@@ -3209,7 +3339,15 @@ def run(
         receipt = _publish_refusal_receipt(config, now=now, free_space=free_space)
         return receipt, 1
     locators, failures = discover_candidate_locators(config, now=now, mount_id_provider=mount_id_provider)
-    discovery_incomplete = any(failure.reason.startswith("discovery exceeds") for failure in failures)
+    states_access_denied = any(
+        failure.lane_hint == "states"
+        and failure.locator == "states"
+        and _states_access_denied_context(failure.reason) is not None
+        for failure in failures
+    )
+    discovery_incomplete = states_access_denied or any(
+        failure.reason.startswith("discovery exceeds") for failure in failures
+    )
     selected: list[Candidate] = []
     validation_attempts = 0
     next_locator = 0
@@ -3223,10 +3361,45 @@ def run(
                     _validate_candidate_locator(locator, config, mount_id_provider=mount_id_provider)
                 )
             except Exception as error:
-                failures.append(
-                    DiscoveryFailure(locator.identity.lane, locator.source_relative, str(error))
-                )
-    deferred_locators = locators if discovery_incomplete else locators[next_locator:]
+                if locator.identity.lane == "states" and _is_eacces(error):
+                    failures.append(
+                        DiscoveryFailure(
+                            "states",
+                            "states",
+                            f"STATES_ACCESS_DENIED count=1 euid={os.geteuid()} egid={os.getegid()}",
+                        )
+                    )
+                    states_access_denied = True
+                else:
+                    failures.append(
+                        DiscoveryFailure(locator.identity.lane, locator.source_relative, str(error))
+                    )
+    if states_access_denied:
+        access_count = sum(
+            context["count"]
+            for failure in failures
+            if failure.lane_hint == "states"
+            and failure.locator == "states"
+            and (context := _states_access_denied_context(failure.reason)) is not None
+        )
+        failures = [
+            failure
+            for failure in failures
+            if not (
+                failure.lane_hint == "states"
+                and failure.locator == "states"
+                and _states_access_denied_context(failure.reason) is not None
+            )
+        ]
+        failures.append(
+            DiscoveryFailure(
+                "states",
+                "states",
+                f"STATES_ACCESS_DENIED count={access_count} euid={os.geteuid()} egid={os.getegid()}",
+            )
+        )
+        selected = []
+    deferred_locators = locators if discovery_incomplete or states_access_denied else locators[next_locator:]
     failures.sort(key=lambda value: (value.lane_hint, value.locator, value.reason))
     terminals: list[dict[str, Any]] = []
     events: list[dict[str, Any]] = []
@@ -3387,6 +3560,24 @@ def validate_receipt_semantics(receipt: Mapping[str, Any]) -> None:
     failure_keys = [(item["lane_hint"], item["locator"]) for item in receipt["discovery_failures"]]
     if len(failure_keys) != len(set(failure_keys)):
         raise ArchiveMoverError("receipt discovery failures must be unique by lane/locator")
+    states_access_failures: list[dict[str, int]] = []
+    for item in receipt["discovery_failures"]:
+        reason = item.get("reason")
+        context = _states_access_denied_context(reason)
+        if isinstance(reason, str) and reason.startswith("STATES_ACCESS_DENIED"):
+            if item.get("lane_hint") != "states" or item.get("locator") != "states" or context is None:
+                raise ArchiveMoverError("receipt states access diagnostic shape is invalid")
+            states_access_failures.append(context)
+    if len(states_access_failures) > 1:
+        raise ArchiveMoverError("receipt must aggregate states access denial exactly once")
+    if states_access_failures and (
+        receipt["selected"]
+        or receipt["terminals"]
+        or receipt["events"]
+        or receipt["bytes"] != {"source": 0, "archived": 0}
+        or receipt["candidates"] != receipt["deferred"]
+    ):
+        raise ArchiveMoverError("receipt states access denial must precede candidate mutation")
     expected = (
         "indeterminate"
         if any(item["status"] == "indeterminate" for item in receipt["terminals"])
@@ -3631,7 +3822,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps({"status": "skipped", "reason": "lock-contended"}, sort_keys=True), file=sys.stderr)
             return 0
         try:
-            _receipt, code = run(config)
+            receipt, code = run(config)
+            states_access = _receipt_states_access_denied(receipt)
+            if states_access is not None:
+                print(
+                    json.dumps(
+                        {
+                            **states_access,
+                            "exit_reason": "STATES_ACCESS_DENIED",
+                            "status": "failed",
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    file=sys.stderr,
+                )
+                return 2
             return code
         finally:
             os.close(lock_fd)

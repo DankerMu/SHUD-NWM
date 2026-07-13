@@ -123,6 +123,57 @@ extending the retention receipt validity window first.**
   distinguish an on-disk blocked terminal from a missing audit receipt; live
   downstream refusal behavior remains part of #856.
 
+### States access precondition (`STATES_ACCESS_DENIED`)
+
+The product-archive mover treats an `EACCES` while traversing one or more
+`states` leaves as one lane-level operational precondition failure. It first
+publishes a mode-0600 receipt whose only access entry has
+`lane_hint=states`, `locator=states`, and
+`STATES_ACCESS_DENIED count=N euid=UID egid=GID`; the CLI then writes one
+compact JSON diagnostic with `exit_reason=STATES_ACCESS_DENIED` and exits `2`.
+No candidate is selected and no archive or source mutation is attempted.
+Other discovery failures remain per-locator failures and retain exit `1`.
+
+Adding `nwm` to the `nfsdata` supplementary group is necessary only when that
+group is the chosen access owner; it is not sufficient for a leaf that remains
+mode `0700`. An authorized storage operator must establish one complete access
+model across both existing and future `states` content:
+
+- With group access, every directory from the NFS root through each state leaf
+  grants the chosen group search (`x`) and directory read (`r`) access, state
+  files grant group read access, and newly written directories/files inherit
+  the intended group and compatible modes (for example, setgid parent
+  directories plus a writer umask that preserves group read/search).
+- With ACL access, every existing path grants the named `nwm` user, or the
+  intended group, equivalent directory read/search and file read access. The
+  writer parents also carry a default ACL so future state leaves inherit the
+  same access. The effective ACL mask must not remove those permissions.
+
+The storage administrator owns any group, ownership, mode, or ACL mutation.
+This PR does not run or prescribe `usermod`, `chgrp`, `chmod`, or `setfacl`
+commands. After a supplementary-group change, end the old login and start a
+new login; also refresh the `nwm` user-manager session before restarting the
+user service, because a long-lived user manager retains the old group set.
+
+From that fresh `nwm` login, verify the effective access without changing it:
+
+```
+id
+namei -l /home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/2026050100
+getfacl -p /home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/2026050100
+test -x /home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/2026050100
+test -r /home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/2026050100/state.cfg.ic
+find /home/ghdc/nwm/object-store/states -maxdepth 4 -type d -print | head -n 200
+```
+
+Repeat `namei`, `getfacl`, `test -x`, and `test -r` for
+`states/gfs/basins_heihe_shud/<cycle>` and
+`states/IFS/basins_qhh_shud/<cycle>`. Any permission diagnostic from the bounded `find`,
+a failed `test`, a missing `nfsdata` entry in `id`, or a `---` component in
+`namei` means the precondition is still unresolved. Only after these checks
+pass should the operator rerun the mover dry-run and confirm the new receipt
+has no `STATES_ACCESS_DENIED` entry.
+
 ### Free-space watermark tuning
 
 Initial values (in `infra/env/node27-product-archive.example`):

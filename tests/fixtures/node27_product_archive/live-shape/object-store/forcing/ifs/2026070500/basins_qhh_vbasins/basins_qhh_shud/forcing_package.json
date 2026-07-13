@@ -1,0 +1,17 @@
+{
+  "forcing_version_id": "forc_ifs_2026070500_basins_qhh_shud",
+  "source_id": "IFS",
+  "cycle_time": "2026-07-05T00:00:00Z",
+  "start_time": "2026-07-05T00:00:00Z",
+  "end_time": "2026-07-12T00:00:00Z",
+  "basin_version_id": "basins_qhh_vbasins",
+  "model_id": "basins_qhh_shud",
+  "files": [
+    {
+      "role": "tsd_forc",
+      "relative_path": "forcing.tsd.forc",
+      "uri": "s3://nhms/forcing/ifs/2026070500/basins_qhh_vbasins/basins_qhh_shud/forcing.tsd.forc",
+      "checksum": "9916ad00b468062293a33810a9681914aa40e4826cea13db1de3faf14b0d918f"
+    }
+  ]
+}
