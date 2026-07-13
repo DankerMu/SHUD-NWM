@@ -368,28 +368,24 @@ def _redact_sensitive_assignments(value: str) -> str:
         quote = value[cursor] if value[cursor] in {'"', "'"} else None
         if quote is not None:
             key_start = cursor
-            cursor += 1
-            token_start = cursor
-            while cursor < length and _is_assignment_key_char(value[cursor]):
-                cursor += 1
-            token_end = cursor
-            if cursor >= length or value[cursor] != quote:
+            cursor, token, malformed, closed = _scan_quoted_assignment_key(value, cursor)
+            if not closed:
                 continue
-            cursor += 1
-            token = value[token_start:token_end]
         elif _is_assignment_key_char(value[cursor]):
             key_start = cursor
             while cursor < length and _is_assignment_key_char(value[cursor]):
                 cursor += 1
             token = value[key_start:cursor]
+            malformed = False
         else:
             cursor += 1
             continue
         separator_end = cursor
         while separator_end < length and value[separator_end] in " \t\r\n":
             separator_end += 1
+        key_is_sensitive = malformed or _contains_sensitive_key_fragment(token)
         if (
-            not _contains_sensitive_key_fragment(token)
+            not key_is_sensitive
             or separator_end >= length
             or value[separator_end] not in ":="
         ):
@@ -405,6 +401,83 @@ def _redact_sensitive_assignments(value: str) -> str:
         cursor = value_end
     pieces.append(value[emitted:])
     return "".join(pieces)
+
+
+_QUOTED_KEY_ESCAPES = {
+    '"': '"',
+    "'": "'",
+    "\\": "\\",
+    "/": "/",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+}
+
+
+def _scan_quoted_assignment_key(value: str, start: int) -> tuple[int, str, bool, bool]:
+    """Scan and decode one quoted key without revisiting input characters."""
+    quote = value[start]
+    decoded: list[str] = []
+    malformed = False
+    cursor = start + 1
+    length = len(value)
+    while cursor < length:
+        current = value[cursor]
+        if current == quote:
+            return cursor + 1, "".join(decoded), malformed, True
+        if current != "\\":
+            if 0xD800 <= ord(current) <= 0xDFFF:
+                malformed = True
+            else:
+                decoded.append(current)
+            cursor += 1
+            continue
+        cursor += 1
+        if cursor >= length:
+            return cursor, "".join(decoded), True, False
+        escape = value[cursor]
+        if escape != "u":
+            decoded_escape = _QUOTED_KEY_ESCAPES.get(escape)
+            if decoded_escape is None:
+                malformed = True
+            else:
+                decoded.append(decoded_escape)
+            cursor += 1
+            continue
+        cursor += 1
+        code_start = cursor
+        while cursor < length and cursor - code_start < 4 and _is_hex_digit(value[cursor]):
+            cursor += 1
+        if cursor - code_start != 4:
+            malformed = True
+            continue
+        codepoint = int(value[code_start:cursor], 16)
+        if 0xD800 <= codepoint <= 0xDBFF:
+            low_escape_end = cursor + 6
+            if (
+                low_escape_end <= length
+                and value[cursor : cursor + 2] == "\\u"
+                and all(_is_hex_digit(character) for character in value[cursor + 2 : low_escape_end])
+            ):
+                low = int(value[cursor + 2 : low_escape_end], 16)
+                cursor = low_escape_end
+                if 0xDC00 <= low <= 0xDFFF:
+                    decoded.append(chr(0x10000 + ((codepoint - 0xD800) << 10) + low - 0xDC00))
+                else:
+                    malformed = True
+            else:
+                malformed = True
+        elif 0xDC00 <= codepoint <= 0xDFFF:
+            malformed = True
+        else:
+            decoded.append(chr(codepoint))
+    return cursor, "".join(decoded), True, False
+
+
+def _is_hex_digit(character: str) -> bool:
+    return character.isascii() and (character.isdigit() or character.lower() in "abcdef")
 
 
 def _is_assignment_key_char(character: str) -> bool:

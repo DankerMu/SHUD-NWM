@@ -337,7 +337,7 @@ def test_one_source_failure_isolated_while_other_source_completes(
                 command=["nhms-gfs", "download"],
                 result={"error_code": "HTTP_403"},
                 stdout_tail="",
-                stderr_tail="password=download-secret",
+                stderr_tail='{"p\\u0061ssword": "download-secret"}',
             )
         return downloader.SourceDownloadResult(
             source=source,

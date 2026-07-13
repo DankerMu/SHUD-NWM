@@ -442,6 +442,56 @@ def test_sensitive_assignment_scanner_accepts_paired_single_or_double_quoted_key
     assert redacted.count(REDACTION_MARKER) == 2
 
 
+@pytest.mark.parametrize(
+    ("raw", "secret"),
+    [
+        (r'{"p\u0061ssword": "unicode-secret"}', "unicode-secret"),
+        (r"{'\u0061pi_key': 'single-secret'}", "single-secret"),
+        (r'{"passw\u006frd": "mixed-secret"}', "mixed-secret"),
+        (r'{"\uD83D\uDE00password": "surrogate-pair-secret"}', "surrogate-pair-secret"),
+        ('{"密password": "literal-unicode-secret"}', "literal-unicode-secret"),
+    ],
+)
+def test_quoted_assignment_key_scanner_decodes_unicode_before_sensitive_matching(
+    raw: str, secret: str
+) -> None:
+    redacted = redact_text(raw)
+    assert secret not in redacted
+    assert REDACTION_MARKER in redacted
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        r'{"ordinary\q": "illegal-escape-secret"}',
+        r'{"ordinary\u12": "truncated-unicode-secret"}',
+        r'{"ordinary\uD800": "lone-high-secret"}',
+        r'{"ordinary\uDC00": "lone-low-secret"}',
+        r'{"ordinary\uD800\u0041": "non-low-pair-secret"}',
+    ],
+)
+def test_malformed_quoted_assignment_keys_fail_closed_when_followed_by_assignment(
+    raw: str,
+) -> None:
+    redacted = redact_text(raw)
+    assert "secret" not in redacted
+    assert REDACTION_MARKER in redacted
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        r'{"\u006frdinary": "visible"}',
+        '{"普通键": "visible"}',
+        r'{"emoji\uD83D\uDE00": "visible"}',
+        r'{"quote\"key": "visible"}',
+        r"{'single\'quote': 'visible'}",
+    ],
+)
+def test_valid_escaped_or_unicode_non_sensitive_quoted_keys_remain_unchanged(raw: str) -> None:
+    assert redaction._redact_sensitive_assignments(raw) == raw
+
+
 def test_sensitive_assignment_scanner_handles_long_unterminated_hostile_input() -> None:
     hostile = 'password="' + "\\" * 200_000
     assert redact_text(hostile) == "password=[redacted]"
@@ -480,6 +530,31 @@ def test_quoted_assignment_key_scanner_has_bounded_character_visits(
     assert redaction._redact_sensitive_assignments(hostile).endswith(
         '"password":[redacted]'
     )
+    assert visits <= 2 * len(hostile)
+
+
+def test_unicode_quoted_assignment_key_scanner_has_bounded_character_visits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_hex = redaction._is_hex_digit
+    original_key = redaction._is_assignment_key_char
+    visits = 0
+
+    def count_hex(character: str) -> bool:
+        nonlocal visits
+        visits += 1
+        return original_hex(character)
+
+    def count_key(character: str) -> bool:
+        nonlocal visits
+        visits += 1
+        return original_key(character)
+
+    monkeypatch.setattr(redaction, "_is_hex_digit", count_hex)
+    monkeypatch.setattr(redaction, "_is_assignment_key_char", count_key)
+    hostile = '"' + r"\u0061" * 33_333 + r'\u12": "hostile-secret"'
+    redacted = redaction._redact_sensitive_assignments(hostile)
+    assert "hostile-secret" not in redacted
     assert visits <= 2 * len(hostile)
 
 

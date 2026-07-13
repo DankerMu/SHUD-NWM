@@ -830,18 +830,25 @@ def build_receipt(
         "windows": windows,
         "salvage_selectors": [required_selectors[key] for key in sorted(required_selectors)],
     }
-    validate_receipt_semantics(receipt, subjects)
-    _validate_schema(receipt, _load_schema(COMPLETENESS_SCHEMA_PATH), "archive completeness receipt")
+    validate_success_receipt_for_publication(receipt, subjects)
     return receipt
 
 
 def validate_receipt_semantics(receipt: Mapping[str, Any], subjects: Sequence[InventorySubject] | None = None) -> None:
+    _reject_success_payload_surrogates(receipt)
+    _validate_schema(receipt, _load_schema(COMPLETENESS_SCHEMA_PATH), "archive completeness receipt")
+    try:
+        _validate_receipt_runtime_semantics(receipt, subjects)
+    except AuditBlocked as error:
+        raise AuditBlocked(f"archive completeness receipt semantic validation failed: {error}") from error
+
+
+def _validate_receipt_runtime_semantics(
+    receipt: Mapping[str, Any], subjects: Sequence[InventorySubject] | None = None
+) -> None:
     outcome = receipt.get("outcome")
     if outcome in {"blocked", "indeterminate"}:
-        _validate_schema(receipt, _load_schema(COMPLETENESS_SCHEMA_PATH), "archive completeness receipt")
         return
-    if outcome not in {"complete", "incomplete"}:
-        raise AuditBlocked("receipt outcome is invalid")
     windows = receipt.get("windows")
     selectors = receipt.get("salvage_selectors")
     if not isinstance(windows, list) or not windows or not isinstance(selectors, list):
@@ -1136,9 +1143,7 @@ def _reject_success_payload_surrogates(value: Any, *, location: str = "$") -> No
 def validate_success_receipt_for_publication(
     receipt: Mapping[str, Any], subjects: Sequence[InventorySubject] | None = None
 ) -> None:
-    _reject_success_payload_surrogates(receipt)
     validate_receipt_semantics(receipt, subjects)
-    _validate_schema(receipt, _load_schema(COMPLETENESS_SCHEMA_PATH), "archive completeness receipt")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1401,6 +1406,7 @@ def _object_key(uri: str, prefix: str, *, kind: Literal["file", "directory"]) ->
         or "?" in raw
         or "#" in raw
         or "\\" in raw
+        or "%" in raw
         or any(ord(character) < 32 or ord(character) == 127 for character in raw)
     ):
         raise AuditBlocked("invalid object-store evidence URI")

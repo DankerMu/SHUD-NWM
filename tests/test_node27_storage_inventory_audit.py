@@ -1609,12 +1609,12 @@ def test_unexpected_prepublication_error_publishes_sanitized_indeterminate(
         audit.AuditBlocked(
             "AWS_SECRET_ACCESS_KEY=aws-secret Authorization: Bearer bearer-secret "
             "token=opaque-token https://user:pass@example.test/path?X-Amz-Signature=signed#api_key=tail "
-            'payload={"password": "quoted-blocked-secret", "safe": "visible"}'
+            'payload={"p\\u0061ssword": "quoted-blocked-secret", "safe": "visible"}'
         ),
         RuntimeError(
             "AWS_ACCESS_KEY_ID=aws-key Authorization: Basic basic-secret "
             "api_key=opaque-key https://user:pass@example.test/path?token=query#secret=tail "
-            "payload={'api_key': 'quoted-indeterminate-secret', 'safe': 'visible'}"
+            "payload={'\\u0061pi_key': 'quoted-indeterminate-secret', 'safe': 'visible'}"
         ),
     ],
 )
@@ -1661,7 +1661,7 @@ def test_quoted_credential_key_is_redacted_from_bootstrap_stderr(
         "bootstrap_receipt_path",
         lambda _argv: (_ for _ in ()).throw(
             audit.AuditBlocked(
-                'bootstrap {"password": "boot\\\"secret", "safe": "visible"}'
+                'bootstrap {"ordinary\\uD800": "boot\\\"secret", "safe": "visible"}'
             )
         ),
     )
@@ -1694,7 +1694,9 @@ def test_quoted_credential_key_is_redacted_from_publication_stderr(
         audit,
         "publish_receipt",
         lambda *_args: (_ for _ in ()).throw(
-            error_type("publisher {'api_key' = 'publication-secret', 'safe': 'visible'}")
+            error_type(
+                "publisher {'\\u0061pi_key' = 'publication-secret', 'safe': 'visible'}"
+            )
         ),
     )
     assert audit.main([]) == 1
@@ -1961,7 +1963,8 @@ def test_success_payload_surrogate_is_mapped_to_blocked_before_publication(
     stale = _receipt([_subject(identifier="stale-success")])
     audit.publish_receipt(config.receipt_path, stale)
     if source == "db-identity":
-        unsafe = _receipt([_subject(identifier=f"forcing-{surrogate}")])
+        unsafe = _receipt([_subject()])
+        unsafe["windows"][0]["subject"]["forcing_version_id"] = f"forcing-{surrogate}"
     else:
         unsafe = _receipt([_subject()])
         unsafe["windows"][0]["evidence"].append(f"salvage-{surrogate}")
@@ -2565,6 +2568,50 @@ def test_terminal_schema_has_four_exact_mutually_exclusive_branches() -> None:
         ).validate(receipt)
 
 
+def test_success_receipt_validator_uses_one_surrogate_schema_semantics_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = _receipt([_subject()])
+    calls: list[str] = []
+    monkeypatch.setattr(
+        audit,
+        "_reject_success_payload_surrogates",
+        lambda _receipt: calls.append("surrogate"),
+    )
+    monkeypatch.setattr(
+        audit,
+        "_validate_schema",
+        lambda _receipt, _schema, _label: calls.append("schema"),
+    )
+    monkeypatch.setattr(
+        audit,
+        "_validate_receipt_runtime_semantics",
+        lambda _receipt, _subjects: calls.append("semantics"),
+    )
+
+    audit.validate_success_receipt_for_publication(receipt)
+    assert calls == ["surrogate", "schema", "semantics"]
+
+
+def test_success_receipt_validator_stops_before_semantics_when_schema_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(audit, "_reject_success_payload_surrogates", lambda _receipt: None)
+    monkeypatch.setattr(
+        audit,
+        "_validate_schema",
+        lambda *_args: (_ for _ in ()).throw(audit.AuditBlocked("schema-first")),
+    )
+    monkeypatch.setattr(
+        audit,
+        "_validate_receipt_runtime_semantics",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("semantics must not run")),
+    )
+
+    with pytest.raises(audit.AuditBlocked, match="schema-first"):
+        audit.validate_success_receipt_for_publication({"windows": [{}]})
+
+
 @pytest.mark.parametrize("reason", sorted(audit.BLOCKED_REASONS))
 def test_all_stable_blocked_reason_codes_are_schema_valid(reason: str) -> None:
     receipt = audit.build_terminal_receipt("blocked", NOW, reason=reason, detail="sanitized")
@@ -2578,8 +2625,74 @@ def test_success_semantics_rejects_contradictory_aggregate() -> None:
     subject = _subject()
     incomplete = _receipt([subject])
     incomplete["outcome"] = "complete"
-    with pytest.raises(audit.AuditBlocked, match="aggregate"):
+    with pytest.raises(audit.AuditBlocked, match="schema validation"):
         audit.validate_receipt_semantics(incomplete, [subject])
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "empty-window",
+        "string-window",
+        "unknown-lane",
+        "missing-identity",
+        "bad-timestamp",
+        "semantic-aggregate",
+    ],
+)
+def test_main_invalid_success_payload_publishes_receipt_invalid_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mutation: str,
+) -> None:
+    config = _config(tmp_path)
+    stale = _receipt([_subject(identifier="stale-schema-order")])
+    audit.publish_receipt(config.receipt_path, stale)
+    malformed = _receipt([_subject()])
+    if mutation == "empty-window":
+        malformed["windows"] = [{}]
+    elif mutation == "string-window":
+        malformed["windows"] = ["bad"]
+    elif mutation == "unknown-lane":
+        malformed["windows"][0]["lane"] = "unknown"
+    elif mutation == "missing-identity":
+        malformed["windows"][0]["subject"] = {}
+    elif mutation == "bad-timestamp":
+        malformed["windows"][0]["window"]["start"] = "not-a-timestamp"
+    else:
+        malformed["outcome"] = "complete"
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(audit, "run_audit", lambda _config, *, publish: malformed)
+    original_publish = audit.publish_receipt
+    original_atomic = audit.atomic_write_bytes_no_follow
+    publish_attempts = 0
+    atomic_attempts = 0
+
+    def count_publish(path: Path, receipt: dict[str, object]) -> None:
+        nonlocal publish_attempts
+        publish_attempts += 1
+        original_publish(path, receipt)
+
+    def count_atomic(*args: object, **kwargs: object) -> None:
+        nonlocal atomic_attempts
+        atomic_attempts += 1
+        original_atomic(*args, **kwargs)
+
+    monkeypatch.setattr(audit, "publish_receipt", count_publish)
+    monkeypatch.setattr(audit, "atomic_write_bytes_no_follow", count_atomic)
+    assert audit.main([]) == 1
+    assert audit.PUBLICATION_FAILED_CODE not in capsys.readouterr().err
+    assert publish_attempts == 1 and atomic_attempts == 1
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "blocked"
+    assert receipt["refusal_reason"] == "RECEIPT_INVALID"
+    assert receipt != stale
+    schema = json.loads(audit.COMPLETENESS_SCHEMA_PATH.read_text())
+    jsonschema.Draft7Validator(
+        schema, format_checker=jsonschema.FormatChecker()
+    ).validate(receipt)
 
 
 def test_symlinked_object_root_blocks_without_path_walk_loop(tmp_path: Path) -> None:
@@ -2690,6 +2803,7 @@ def test_archive_age_cli_overrides_env_and_env_below_retention_blocks(
         "s3://nhms/path?token=query-secret",
         "s3://nhms/path#fragment",
         "s3://nhms/encoded%2fpath",
+        "s3://nhms/option%61l-path",
         "s3://nhms/path\\escape",
         "s3://nhms/control\x00path",
         "s3://nhms/../unsafe",
@@ -2725,8 +2839,10 @@ def test_object_store_prefix_config_accepts_canonical_root_or_safe_path(
         "forcing/gfs/%2e%2e/traversal",
         "forcing/gfs/%252e%252e/double-traversal",
         "forcing/gfs/control%00byte",
+        "forcing/gfs/unreserved%61lias",
         "s3://user:password@nhms/forcing/gfs/file",
         "s3://nhms:443/forcing/gfs/file",
+        "s3://nhms/%66orcing/gfs/file",
         "s3://nhms/forcing/gfs/file?token=query-secret",
     ],
 )
@@ -2735,6 +2851,23 @@ def test_object_key_rejects_noncanonical_or_encoded_evidence_as_evidence_blocked
         audit._object_key(uri, "s3://nhms", kind="file")
     assert audit._blocked_reason(captured.value) == "EVIDENCE_BLOCKED"
     assert "query-secret" not in str(captured.value)
+
+
+@pytest.mark.parametrize("kind", ["file", "directory"])
+@pytest.mark.parametrize(
+    ("uri", "prefix"),
+    [
+        ("runs/run-%61/output", "s3://nhms"),
+        ("s3://nhms/runs/run-%61/output", "s3://nhms"),
+        ("s3://nhms/optional/runs/run-%61/output", "s3://nhms/optional"),
+    ],
+)
+def test_object_key_rejects_percent_alias_before_decode_at_root_or_optional_prefix(
+    uri: str, prefix: str, kind: str
+) -> None:
+    with pytest.raises(audit.AuditBlocked, match="invalid object-store evidence URI") as captured:
+        audit._object_key(uri, prefix, kind=kind)  # type: ignore[arg-type]
+    assert audit._blocked_reason(captured.value) == "EVIDENCE_BLOCKED"
 
 
 @pytest.mark.parametrize(
@@ -2871,6 +3004,8 @@ def test_invalid_prefix_blocks_before_audit_and_replaces_stale_success_once(
         "db-package-double-slash",
         "member-double-slash",
         "member-trailing-slash",
+        "db-package-percent-alias",
+        "member-percent-alias",
     ],
 )
 def test_real_complete_forcing_evidence_with_unsafe_member_uri_blocks_once(
@@ -2902,6 +3037,8 @@ def test_real_complete_forcing_evidence_with_unsafe_member_uri_blocks_once(
         member_uri = f"s3://nhms//{key}/data.csv"
     elif mutation == "member-trailing-slash":
         member_uri = f"s3://nhms/{key}/data.csv/"
+    elif mutation == "member-percent-alias":
+        member_uri = f"s3://nhms/{key}/d%61ta.csv"
     else:
         member_uri = f"s3://nhms/{key}/data.csv"
     manifest = {
@@ -2924,7 +3061,11 @@ def test_real_complete_forcing_evidence_with_unsafe_member_uri_blocks_once(
         "start_time": START,
         "end_time": END,
         "forcing_package_uri": (
-            f"s3://nhms//{key}" if mutation == "db-package-double-slash" else f"s3://nhms/{key}"
+            f"s3://nhms//{key}"
+            if mutation == "db-package-double-slash"
+            else f"s3://nhms/%66orcing/{key.removeprefix('forcing/')}"
+            if mutation == "db-package-percent-alias"
+            else f"s3://nhms/{key}"
         ),
         "checksum": hashlib.sha256(raw_manifest).hexdigest(),
         "basin_version_id": "basin-a",
@@ -2984,9 +3125,18 @@ def test_real_complete_forcing_evidence_with_unsafe_member_uri_blocks_once(
 
 @pytest.mark.parametrize(
     "scenario",
-    ["state-file", "run-db-manifest", "run-embedded-manifest"],
+    [
+        "state-file-trailing-slash",
+        "run-db-manifest-trailing-slash",
+        "run-embedded-manifest-trailing-slash",
+        "state-file-percent-alias",
+        "run-db-manifest-percent-alias",
+        "run-db-output-percent-alias",
+        "run-embedded-manifest-percent-alias",
+        "run-embedded-output-percent-alias",
+    ],
 )
-def test_real_main_rejects_trailing_slash_on_file_typed_inventory_evidence_once(
+def test_real_main_rejects_noncanonical_inventory_evidence_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -2999,7 +3149,12 @@ def test_real_main_rejects_trailing_slash_on_file_typed_inventory_evidence_once(
     run_rows: list[dict[str, object]] = []
     state_rows: list[dict[str, object]] = []
 
-    if scenario == "state-file":
+    if scenario.startswith("state-file"):
+        state_uri = "states/gfs/model-a/2026050100/state.cfg.ic"
+        if scenario.endswith("trailing-slash"):
+            state_uri += "/"
+        else:
+            state_uri = "%73tates/gfs/model-a/2026050100/state.cfg.ic"
         state_rows.append(
             {
                 "state_id": "state-a",
@@ -3007,7 +3162,7 @@ def test_real_main_rejects_trailing_slash_on_file_typed_inventory_evidence_once(
                 "run_id": "run-a",
                 "source_id": "gfs",
                 "valid_time": START,
-                "state_uri": "states/gfs/model-a/2026050100/state.cfg.ic/",
+                "state_uri": state_uri,
                 "checksum": "a" * 64,
                 "cloned_from_state_id": None,
                 "cloned_from_model_id": None,
@@ -3021,8 +3176,13 @@ def test_real_main_rejects_trailing_slash_on_file_typed_inventory_evidence_once(
         output.parent.mkdir(parents=True)
         output.write_text("run-output", encoding="utf-8")
         embedded_manifest_uri = "s3://nhms/runs/run-a/input/manifest.json"
-        if scenario == "run-embedded-manifest":
+        if scenario == "run-embedded-manifest-trailing-slash":
             embedded_manifest_uri += "/"
+        elif scenario == "run-embedded-manifest-percent-alias":
+            embedded_manifest_uri = "s3://nhms/runs/run-a/input/manifest%2Ejson"
+        embedded_output_uri = "s3://nhms/runs/run-a/output/"
+        if scenario == "run-embedded-output-percent-alias":
+            embedded_output_uri = "s3://nhms/runs/run-a/outp%75t/"
         manifest_path.write_text(
             json.dumps(
                 {
@@ -3034,15 +3194,20 @@ def test_real_main_rejects_trailing_slash_on_file_typed_inventory_evidence_once(
                     "model": {"model_id": "model-a", "basin_version_id": "basin-a"},
                     "outputs": {
                         "run_manifest_uri": embedded_manifest_uri,
-                        "output_uri": "s3://nhms/runs/run-a/output/",
+                        "output_uri": embedded_output_uri,
                     },
                 }
             ),
             encoding="utf-8",
         )
         db_manifest_uri = "s3://nhms/runs/run-a/input/manifest.json"
-        if scenario == "run-db-manifest":
+        if scenario == "run-db-manifest-trailing-slash":
             db_manifest_uri += "/"
+        elif scenario == "run-db-manifest-percent-alias":
+            db_manifest_uri = "s3://nhms/runs/run-a/input/manifest%2Ejson"
+        db_output_uri = "s3://nhms/runs/run-a/output/"
+        if scenario == "run-db-output-percent-alias":
+            db_output_uri = "s3://nhms/runs/run-a/outp%75t/"
         run_rows.append(
             {
                 "run_id": "run-a",
@@ -3053,7 +3218,7 @@ def test_real_main_rejects_trailing_slash_on_file_typed_inventory_evidence_once(
                 "start_time": START,
                 "end_time": END,
                 "run_manifest_uri": db_manifest_uri,
-                "output_uri": "s3://nhms/runs/run-a/output/",
+                "output_uri": db_output_uri,
                 "detail_present": 1,
             }
         )

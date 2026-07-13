@@ -788,7 +788,7 @@ def test_quoted_credential_keys_are_masked_in_helper_and_refused_stderr(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    diagnostic = '{"password": "helper-secret", "safe": "visible"}'
+    diagnostic = '{"p\\u0061ssword": "helper-secret", "safe": "visible"}'
     masked = salvage._mask_dsn_in_message(diagnostic, _DSN)
     assert "helper-secret" not in masked and "visible" in masked
 
@@ -800,7 +800,7 @@ def test_quoted_credential_keys_are_masked_in_helper_and_refused_stderr(
             argv=[],
             now_utc=_NOW,
             check_write_privileges=lambda _dsn: (
-                "role {'api_key': 'refused-secret', 'safe': 'visible'}"
+                "role {'\\u0061pi_key': 'refused-secret', 'safe': 'visible'}"
             ),
             fetch_row_count=lambda *_args, **_kwargs: 0,
             perform_copy_export=lambda *_args, **_kwargs: b"",
@@ -827,7 +827,7 @@ def test_quoted_credential_keys_are_masked_in_selector_receipt_and_runner_stderr
 
     def fail_copy(*_args: object, **_kwargs: object) -> bytes:
         raise RuntimeError(
-            'selector {"password": "selector-secret", "safe": "visible"}'
+            'selector {"p\\u0061ssword": "selector-secret", "safe": "visible"}'
         )
 
     assert (
@@ -849,13 +849,47 @@ def test_quoted_credential_keys_are_masked_in_selector_receipt_and_runner_stderr
         salvage,
         "build_receipt",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RuntimeError("runner {'api_key': 'runner-secret', 'safe': 'visible'}")
+            RuntimeError("runner {'\\u0061pi_key': 'runner-secret', 'safe': 'visible'}")
         ),
     )
     assert salvage.main(argv=[], now_utc=_NOW) == 1
     stderr = capsys.readouterr().err
     assert json.loads(stderr)["outcome"] == "partial"
     assert "runner-secret" not in stderr and "visible" in stderr
+
+
+def test_unicode_escaped_credential_key_is_masked_from_salvage_publication_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    env = _base_env(tmp_path)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    row_count, copy_export, compress = _make_stub_copy_and_count()
+    monkeypatch.setattr(
+        salvage,
+        "publish_receipt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            salvage.SafeFilesystemError(
+                'publisher {"p\\u0061ssword": "publication-secret", "safe": "visible"}'
+            )
+        ),
+    )
+    assert (
+        salvage.main(
+            argv=[],
+            now_utc=_NOW,
+            check_write_privileges=_stub_check_read_only,
+            fetch_row_count=row_count,
+            perform_copy_export=copy_export,
+            compress_bytes=compress,
+        )
+        == 1
+    )
+    stderr = capsys.readouterr().err
+    assert json.loads(stderr)["outcome"] == "partial"
+    assert "publication-secret" not in stderr and "visible" in stderr
 
 
 @pytest.mark.parametrize("quoted", [False, True])
