@@ -29,10 +29,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
-from urllib.parse import unquote, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import jsonschema
 
+from packages.common.redaction import REDACTION_MARKER, redact_database_dsn
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
@@ -1013,50 +1014,9 @@ def build_receipt(
     }
 
 
-_LIBPQ_PASSWORD_KEYWORD_RE = re.compile(
-    r"(?i)(?:(?<=\s)|(?<=^))password\s*=\s*(?:'[^']*'|\S+)"
-)
-
-
 def _mask_dsn_in_message(message: str, dsn: str) -> str:
-    """Scrub every plausible echo of the DSN's password from ``message``.
-
-    Covers:
-    - Verbatim DSN substring.
-    - URL-encoded password (verbatim, still-quoted).
-    - URL-decoded password (some client libraries echo the decoded form).
-    - libpq keyword-form password (``... password=<literal> ...``) — a
-      distinct DSN shape callers may compose independently. Only scrubs the
-      value token, never the ``password=`` keyword itself.
-
-    Hostname and username are intentionally left alone (they carry
-    diagnostic value and are not secrets).
-    """
-    if dsn in message:
-        message = message.replace(dsn, _mask_dsn(dsn))
-    try:
-        parts = urlsplit(dsn)
-    except Exception:
-        parts = None
-    if parts is not None and parts.password:
-        password_raw = parts.password
-        if password_raw in message:
-            message = message.replace(password_raw, "***")
-        try:
-            password_decoded = unquote(password_raw)
-        except Exception:
-            password_decoded = password_raw
-        if (
-            password_decoded
-            and password_decoded != password_raw
-            and password_decoded in message
-        ):
-            message = message.replace(password_decoded, "***")
-    # libpq keyword form: even if the runner never composes such a DSN,
-    # error messages produced by the DB driver may echo a caller-provided
-    # DSN in that shape. Scrub the value defensively.
-    message = _LIBPQ_PASSWORD_KEYWORD_RE.sub("password=***", message)
-    return message
+    """Scrub credential-bearing error text through the shared policy."""
+    return redact_database_dsn(message, dsn).replace(REDACTION_MARKER, "***")
 
 
 def publish_receipt(config: SalvageConfig, receipt: Mapping[str, Any]) -> None:

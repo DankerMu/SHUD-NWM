@@ -18,6 +18,7 @@ from urllib.parse import unquote, urlparse
 
 import jsonschema
 
+from packages.common.redaction import redact_database_dsn, redact_text
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
@@ -972,6 +973,10 @@ class _AuditArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         raise AuditBlocked(f"invalid arguments: {message}")
 
+    def exit(self, status: int = 0, message: str | None = None) -> None:
+        detail = message.strip() if message else "help requested" if status == 0 else "parser exited"
+        raise AuditBlocked(f"invalid arguments: {detail}")
+
 
 def bootstrap_receipt_path(argv: Sequence[str]) -> Path:
     """Resolve one exact receipt option before full CLI/config validation."""
@@ -1059,16 +1064,18 @@ def _blocked_reason(error: AuditBlocked) -> str:
 
 def _sanitize_detail(error: BaseException, *, database_url: str | None = None) -> str:
     detail = str(error).replace("\n", " ").replace("\r", " ")
-    secrets = {value for value in (database_url, os.getenv("DATABASE_URL")) if value}
-    for secret in secrets:
-        detail = detail.replace(secret, "[DATABASE_URL]")
-    detail = re.sub(r"(?i)postgres(?:ql)?://[^\s]+", "[DATABASE_URL]", detail)
-    detail = re.sub(r"(?i)(password\s*=\s*)[^\s]+", r"\1***", detail)
+    for dsn in (database_url, os.getenv("DATABASE_URL")):
+        if dsn:
+            detail = detail.replace(dsn, "[DATABASE_URL]")
+        detail = redact_database_dsn(detail, dsn)
+    detail = redact_text(detail)
     return detail[:512] or type(error).__name__
 
 
 def _emit_stderr(code: str, message: str) -> None:
-    print(_canonical({"status": "blocked", "reason": code, "message": message[:512]}), file=sys.stderr)
+    safe_message = redact_text(message)[:512]
+    safe_code = redact_text(code)[:128]
+    print(_canonical({"status": "blocked", "reason": safe_code, "message": safe_message}), file=sys.stderr)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1107,16 +1114,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         publish_receipt(receipt_path, receipt)
     except PublicationIndeterminate as error:
-        _emit_stderr(PUBLICATION_INDETERMINATE_CODE, _sanitize_detail(error))
+        _emit_stderr(
+            PUBLICATION_INDETERMINATE_CODE,
+            _sanitize_detail(error, database_url=config.database_url if config else None),
+        )
         return 1
     except Exception as error:
-        _emit_stderr(PUBLICATION_FAILED_CODE, _sanitize_detail(error))
+        _emit_stderr(
+            PUBLICATION_FAILED_CODE,
+            _sanitize_detail(error, database_url=config.database_url if config else None),
+        )
         return 1
     print(
         _canonical(
             {
                 "status": "published",
-                "receipt_path": str(receipt_path),
+                "receipt_path": redact_text(str(receipt_path)),
                 "outcome": receipt["outcome"],
                 "subjects": len(receipt.get("windows", [])),
             }

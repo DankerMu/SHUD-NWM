@@ -4,7 +4,12 @@ import json
 
 import pytest
 
-from packages.common.redaction import REDACTION_MARKER, redact_payload, redact_text
+from packages.common.redaction import (
+    REDACTION_MARKER,
+    redact_database_dsn,
+    redact_payload,
+    redact_text,
+)
 
 
 @pytest.mark.parametrize(
@@ -349,3 +354,42 @@ def test_redact_text_redacts_free_form_authorization_scheme_credentials(
     assert redacted == expected
     for raw_secret in raw_secrets:
         assert raw_secret not in redacted
+
+
+@pytest.mark.parametrize(
+    ("raw", "secrets"),
+    [
+        ("AWS_SECRET_ACCESS_KEY=aws-secret", ("aws-secret",)),
+        ("AWS_ACCESS_KEY_ID='key with spaces'", ("key with spaces",)),
+        ("token=opaque-token api_key=opaque-key", ("opaque-token", "opaque-key")),
+        (
+            "request https://user:pass@example.test/path?X-Amz-Signature=signed#token=tail",
+            ("user", "pass", "X-Amz-Signature", "signed", "token=tail"),
+        ),
+        (r"password=escaped\ value host=db", (r"escaped\ value",)),
+    ],
+)
+def test_redact_text_covers_terminal_diagnostic_credential_shapes(
+    raw: str, secrets: tuple[str, ...]
+) -> None:
+    redacted = redact_text(raw)
+    for secret in secrets:
+        assert secret not in redacted
+
+
+def test_redact_database_dsn_covers_verbatim_decoded_and_libpq_passwords() -> None:
+    dsn = "postgresql://reader:p%40ss%20word@db/nhms"
+    raw = (
+        f"verbatim={dsn}; decoded=p@ss word; "
+        "password='quoted with spaces'; password=escaped\\ value host=db"
+    )
+    redacted = redact_database_dsn(raw, dsn)
+    for secret in (dsn, "p%40ss%20word", "p@ss word", "quoted with spaces", "escaped\\ value"):
+        assert secret not in redacted
+
+
+def test_redact_text_replaces_lone_surrogates_before_utf8_output() -> None:
+    redacted = redact_text("bad-\udcff-token=secret")
+    assert redacted.encode("utf-8")
+    assert "\udcff" not in redacted
+    assert "secret" not in redacted

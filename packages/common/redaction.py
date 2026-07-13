@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 REDACTION_MARKER = "[redacted]"
 BOOLEAN_CONFIGURED_FIELD_ALLOWLIST = frozenset({"database_url_configured"})
@@ -91,10 +91,11 @@ AUTHORIZATION_SCHEME_RE = re.compile(
 SENSITIVE_ASSIGNMENT_RE = re.compile(
     r"\b([A-Za-z0-9_.-]*(?:token|password|passwd|pwd|secret|credential|api[_-]?key|"
     r"access[_-]?key|session[_-]?key|signature|accountingstoragepass|storagepass)"
-    r"[A-Za-z0-9_.-]*)(\s*[:=]\s*)([^\s,;&]+)",
+    r"[A-Za-z0-9_.-]*)(\s*[:=]\s*)(?:\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|(?:\\.|[^\s,;&])+)",
     re.IGNORECASE,
 )
 URL_RE = re.compile(r"(?:(?:[A-Za-z][A-Za-z0-9+.-]*)://|//)[^\s\"'<>]+", re.IGNORECASE)
+SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 
 
 def redact_payload(value: Any) -> Any:
@@ -159,10 +160,29 @@ def _redact_payload(value: Any, *, auth_context: str | None, auth_scalar_allowed
 
 
 def redact_text(value: str) -> str:
-    redacted = URL_RE.sub(lambda match: _redact_url(match.group(0)), value)
+    redacted = SURROGATE_RE.sub("\ufffd", value)
+    redacted = URL_RE.sub(lambda match: _redact_url(match.group(0)), redacted)
     redacted = AUTHORIZATION_ASSIGNMENT_RE.sub(_redact_authorization_assignment, redacted)
     redacted = AUTHORIZATION_SCHEME_RE.sub(_redact_authorization_scheme, redacted)
     return SENSITIVE_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}{REDACTION_MARKER}", redacted)
+
+
+def redact_database_dsn(value: str, dsn: str | None) -> str:
+    """Redact free-form text plus verbatim and driver-decoded DSN passwords."""
+    redacted = SURROGATE_RE.sub("\ufffd", value)
+    normalized_dsn = SURROGATE_RE.sub("\ufffd", dsn or "")
+    if normalized_dsn:
+        redacted = redacted.replace(normalized_dsn, redact_text(normalized_dsn))
+        try:
+            password_raw = urlsplit(normalized_dsn).password
+        except ValueError:
+            password_raw = None
+        if password_raw:
+            password_decoded = unquote(password_raw)
+            for secret in (password_raw, password_decoded):
+                if secret:
+                    redacted = redacted.replace(secret, REDACTION_MARKER)
+    return redact_text(redacted)
 
 
 def is_sensitive_key(key: str) -> bool:
