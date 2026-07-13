@@ -466,6 +466,38 @@ def test_assignment_scanner_uses_authoritative_sensitive_key_catalog_only() -> N
 
 
 @pytest.mark.parametrize(
+    "key",
+    [
+        "auth.header",
+        "auth-header",
+        "auth_header",
+        "proxy.auth.header",
+        "proxy.auth-header",
+        "proxy_auth.header",
+        "proxy-auth_header",
+        "proxy-authorization",
+        "proxy.authorization",
+        "proxy_authorization",
+        "ProxyAuthorization",
+        "requestAuthorization",
+    ],
+)
+def test_authoritative_catalog_covers_auth_header_and_proxy_spellings(key: str) -> None:
+    assert redact_payload({key: "catalog-secret"}) == {key: REDACTION_MARKER}
+    assert redact_text(f"{key}=catalog-secret") == f"{key}={REDACTION_MARKER}"
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["author.profile", "oauth.header", "authentication.header", "proxy.status"],
+)
+def test_authoritative_catalog_does_not_overmatch_ordinary_dotted_keys(key: str) -> None:
+    payload = {key: "visible"}
+    assert redact_payload(payload) == payload
+    assert redact_text(f"{key}=visible") == f"{key}=visible"
+
+
+@pytest.mark.parametrize(
     "raw",
     [
         "authorization=Bearer plain-auth-secret",
@@ -497,6 +529,41 @@ def test_authoritative_catalog_covers_bare_quoted_escaped_and_unicode_auth_keys(
 def test_sensitive_inner_assignments_are_redacted_without_quote_backtracking(raw: str) -> None:
     redacted = redact_text(raw)
     assert "secret" not in redacted
+    assert REDACTION_MARKER in redacted
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ('"password=inner-secret": "outer-visible"', "[redacted]: [redacted]"),
+        (
+            'payload="token=inner-secret" = "outer-visible"',
+            "payload=[redacted] = [redacted]",
+        ),
+    ],
+)
+def test_sensitive_inner_assignment_and_following_outer_value_are_both_redacted(
+    raw: str, expected: str
+) -> None:
+    assert redact_text(raw) == expected
+
+
+@pytest.mark.parametrize("whitespace", ["\v", "\f", "\u0085", "\u00a0", "\u2003"])
+def test_assignment_scanner_uses_unicode_whitespace_for_separators_and_values(
+    whitespace: str,
+) -> None:
+    raw = f"password{whitespace}={whitespace}unicode-secret{whitespace}safe=visible"
+    redacted = redact_text(raw)
+
+    assert "unicode-secret" not in redacted
+    assert redacted.endswith(f"{whitespace}safe=visible")
+
+
+def test_database_dsn_scanner_uses_shared_unicode_whitespace_semantics() -> None:
+    dsn = "host=db password\u00a0=\u00a0dsn-secret dbname=nhms"
+    redacted = redact_database_dsn("driver echoed password\u0085=\u0085dsn-secret", dsn)
+
+    assert "dsn-secret" not in redacted
     assert REDACTION_MARKER in redacted
 
 
@@ -624,6 +691,25 @@ def test_escaped_quote_staircase_fragment_has_deterministic_character_visit_boun
     monkeypatch.setattr(redaction, "_is_assignment_key_char", count_visit)
     hostile = '"' + r'\"' * 100_000 + ' password=staircase-secret"'
     assert redaction._redact_sensitive_assignments(hostile) == REDACTION_MARKER
+    assert visits <= 2 * len(hostile)
+
+
+def test_escaped_quote_staircase_with_outer_value_has_bounded_character_visits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = redaction._is_assignment_key_char
+    visits = 0
+
+    def count_visit(character: str) -> bool:
+        nonlocal visits
+        visits += 1
+        return original(character)
+
+    monkeypatch.setattr(redaction, "_is_assignment_key_char", count_visit)
+    hostile = '"' + r'\"' * 100_000 + ' password=staircase-secret": "outer-secret"'
+    assert redaction._redact_sensitive_assignments(hostile) == (
+        f"{REDACTION_MARKER}: {REDACTION_MARKER}"
+    )
     assert visits <= 2 * len(hostile)
 
 

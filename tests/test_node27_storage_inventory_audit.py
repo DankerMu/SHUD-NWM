@@ -1611,14 +1611,18 @@ def test_unexpected_prepublication_error_publishes_sanitized_indeterminate(
             "token=opaque-token https://user:pass@example.test/path?X-Amz-Signature=signed#api_key=tail "
             'payload={"p\\u0061ssword": "quoted-blocked-secret", "safe": "visible"} '
             'fragment="password=inner-blocked-secret" '
-            '{"auth_\\u0068eader": "Bearer escaped-blocked-auth-secret"}'
+            '{"auth_\\u0068eader": "Bearer escaped-blocked-auth-secret"} '
+            "password\u00a0=\u00a0unicode-blocked-secret "
+            '\"token=quoted-outer-blocked-secret\": "outer-blocked-secret"'
         ),
         RuntimeError(
             "AWS_ACCESS_KEY_ID=aws-key Authorization: Basic basic-secret "
             "api_key=opaque-key https://user:pass@example.test/path?token=query#secret=tail "
             "payload={'\\u0061pi_key': 'quoted-indeterminate-secret', 'safe': 'visible'} "
             "source='token=inner-indeterminate-secret' "
-            "{'\\u0061uth': 'Basic escaped-indeterminate-auth-secret'}"
+            "{'\\u0061uth': 'Basic escaped-indeterminate-auth-secret'} "
+            "password\u0085=\u0085unicode-indeterminate-secret "
+            "'api_key=quoted-outer-indeterminate-secret' = 'outer-indeterminate-secret'"
         ),
     ],
 )
@@ -1656,6 +1660,12 @@ def test_terminal_receipt_redacts_generic_credentials_for_controlled_and_unexpec
         "inner-indeterminate-secret",
         "escaped-blocked-auth-secret",
         "escaped-indeterminate-auth-secret",
+        "unicode-blocked-secret",
+        "unicode-indeterminate-secret",
+        "quoted-outer-blocked-secret",
+        "quoted-outer-indeterminate-secret",
+        "outer-blocked-secret",
+        "outer-indeterminate-secret",
     ):
         assert secret not in body
 
@@ -1709,7 +1719,9 @@ def test_quoted_credential_key_is_redacted_from_publication_stderr(
             error_type(
                 "publisher {'\\u0061pi_key' = 'publication-secret', 'safe': 'visible'} "
                 'payload="token=publication-fragment-secret" '
-                '{"proxy_\\u0061uthorization": "Bearer publication-auth-secret"}'
+                '{"proxy_\\u0061uthorization": "Bearer publication-auth-secret"} '
+                "password\u2003=\u2003publication-unicode-secret "
+                '\"token=publication-quoted-outer-secret\": "publication-outer-secret"'
             )
         ),
     )
@@ -1719,6 +1731,9 @@ def test_quoted_credential_key_is_redacted_from_publication_stderr(
     assert "publication-secret" not in diagnostic["message"]
     assert "publication-fragment-secret" not in diagnostic["message"]
     assert "publication-auth-secret" not in diagnostic["message"]
+    assert "publication-unicode-secret" not in diagnostic["message"]
+    assert "publication-quoted-outer-secret" not in diagnostic["message"]
+    assert "publication-outer-secret" not in diagnostic["message"]
     assert "visible" in diagnostic["message"]
 
 

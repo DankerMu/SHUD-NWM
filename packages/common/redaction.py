@@ -8,9 +8,14 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 REDACTION_MARKER = "[redacted]"
 BOOLEAN_CONFIGURED_FIELD_ALLOWLIST = frozenset({"database_url_configured"})
 
+_AUTHORIZATION_KEY_PATTERN = (
+    r"(?:(?:proxy[-_.]?)?authorization|"
+    r"(?<![A-Za-z0-9])(?:proxy[-_.]?)?auth[-_.]?header)"
+)
+
 SENSITIVE_KEY_RE = re.compile(
     r"(token|password|passwd|pwd|secret|credential|api[_-]?key|access[_-]?key|session[_-]?key|signature|"
-    r"accountingstoragepass|storagepass|authorization|proxy[_-]?authorization|auth[_-]?header|^auth$)",
+    rf"accountingstoragepass|storagepass|{_AUTHORIZATION_KEY_PATTERN}|^auth$)",
     re.IGNORECASE,
 )
 AUTH_NAMESPACE_KEY_RE = re.compile(r"^auth$", re.IGNORECASE)
@@ -76,7 +81,7 @@ AUTH_NAMESPACE_CONTEXT_METADATA = "metadata"
 AUTH_NAMESPACE_CONTEXT_OPAQUE = "opaque"
 AUTHORIZATION_ASSIGNMENT_RE = re.compile(
     r"(?P<prefix>(?P<key_quote>[\"']?)\b"
-    r"(?P<key>(?:proxy[-_.]?)?authorization|auth[-_.]?header|auth)\b"
+    rf"(?P<key>{_AUTHORIZATION_KEY_PATTERN}|auth)\b"
     r"(?P=key_quote)(?P<separator>\s*[:=]\s*)(?P<value_quote>[\"']?))"
     r"(?:(?P<scheme>Bearer|Basic)\s+)?"
     r"(?P<secret>[^\"'\s,;&}]+)"
@@ -366,14 +371,16 @@ def _redact_sensitive_assignments(value: str) -> str:
     length = len(value)
     while cursor < length:
         quote = value[cursor] if value[cursor] in {'"', "'"} else None
+        fragment_sensitive = False
         if quote is not None:
             key_start = cursor
             cursor, token, malformed, closed = _scan_quoted_assignment_key(value, cursor)
+            fragment_sensitive = _fragment_contains_sensitive_assignment(token)
+            if fragment_sensitive:
+                pieces.append(value[emitted:key_start])
+                pieces.append(REDACTION_MARKER)
+                emitted = cursor
             if not closed:
-                if _fragment_contains_sensitive_assignment(token):
-                    pieces.append(value[emitted:key_start])
-                    pieces.append(REDACTION_MARKER)
-                    emitted = cursor
                 continue
         elif _is_assignment_key_char(value[cursor]):
             key_start = cursor
@@ -385,17 +392,13 @@ def _redact_sensitive_assignments(value: str) -> str:
             cursor += 1
             continue
         separator_end = cursor
-        while separator_end < length and value[separator_end] in " \t\r\n":
+        while separator_end < length and _is_assignment_whitespace(value[separator_end]):
             separator_end += 1
         if quote is not None and (
             separator_end >= length or value[separator_end] not in ":="
         ):
-            if _fragment_contains_sensitive_assignment(token):
-                pieces.append(value[emitted:key_start])
-                pieces.append(REDACTION_MARKER)
-                emitted = cursor
             continue
-        key_is_sensitive = malformed or is_sensitive_key(token)
+        key_is_sensitive = malformed or fragment_sensitive or is_sensitive_key(token)
         if (
             not key_is_sensitive
             or separator_end >= length
@@ -403,7 +406,7 @@ def _redact_sensitive_assignments(value: str) -> str:
         ):
             continue
         value_start = separator_end + 1
-        while value_start < length and value[value_start] in " \t\r\n":
+        while value_start < length and _is_assignment_whitespace(value[value_start]):
             value_start += 1
         value_end, _raw, _decoded = _scan_assignment_value(value, value_start)
         if _is_authorization_assignment_key(token) and _authorization_value_is_already_redacted(
@@ -411,8 +414,7 @@ def _redact_sensitive_assignments(value: str) -> str:
         ):
             cursor = value_end
             continue
-        pieces.append(value[emitted:key_start])
-        pieces.append(value[key_start:value_start])
+        pieces.append(value[emitted:value_start])
         pieces.append(REDACTION_MARKER)
         emitted = value_end
         cursor = value_end
@@ -432,7 +434,7 @@ def _fragment_contains_sensitive_assignment(value: str) -> bool:
         while cursor < length and _is_assignment_key_char(value[cursor]):
             cursor += 1
         separator = cursor
-        while separator < length and value[separator] in " \t\r\n":
+        while separator < length and _is_assignment_whitespace(value[separator]):
             separator += 1
         if (
             separator < length
@@ -455,7 +457,9 @@ def _authorization_value_is_already_redacted(value: str, start: int) -> bool:
         if value.startswith(f"{scheme} {REDACTION_MARKER}", body_start):
             if quote is not None:
                 return marker_end < len(value) and value[marker_end] == quote
-            return marker_end == len(value) or value[marker_end] in " \t\r\n,;&}"
+            return marker_end == len(value) or (
+                _is_assignment_whitespace(value[marker_end]) or value[marker_end] in ",;&}"
+            )
     return False
 
 
@@ -540,6 +544,11 @@ def _is_assignment_key_char(character: str) -> bool:
     return character.isascii() and (character.isalnum() or character in "_.-")
 
 
+def _is_assignment_whitespace(character: str) -> bool:
+    """Own the Unicode whitespace semantics shared by assignment scans."""
+    return character.isspace()
+
+
 def _replace_literals_once(value: str, literals: set[str]) -> str:
     ordered = sorted((literal for literal in literals if literal), key=lambda item: (-len(item), item))
     if not ordered:
@@ -567,7 +576,7 @@ def _scan_assignment_value(value: str, start: int) -> tuple[int, str, str]:
             body_end = cursor
             cursor += 1
             break
-        elif quote is None and current in " \t\r\n,;&":
+        elif quote is None and (_is_assignment_whitespace(current) or current in ",;&"):
             body_end = cursor
             break
         else:

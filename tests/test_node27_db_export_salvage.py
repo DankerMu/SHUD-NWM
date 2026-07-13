@@ -834,7 +834,9 @@ def test_quoted_credential_keys_are_masked_in_selector_receipt_and_runner_stderr
     def fail_copy(*_args: object, **_kwargs: object) -> bytes:
         raise RuntimeError(
             'selector {"前缀authorization": "Bearer selector-secret", "safe": "visible"} '
-            'payload="api_key=selector-fragment-secret"'
+            'payload="api_key=selector-fragment-secret" '
+            "password\u00a0=\u00a0selector-unicode-secret "
+            '\"token=selector-quoted-outer-secret\": "selector-outer-secret"'
         )
 
     assert (
@@ -850,7 +852,14 @@ def test_quoted_credential_keys_are_masked_in_selector_receipt_and_runner_stderr
     )
     receipt = Path(env["NODE27_DB_EXPORT_SALVAGE_RECEIPT_PATH"]).read_text(encoding="utf-8")
     assert json.loads(receipt)["selected"][0]["state"] == "error"
-    assert "selector-secret" not in receipt and "selector-fragment-secret" not in receipt
+    for secret in (
+        "selector-secret",
+        "selector-fragment-secret",
+        "selector-unicode-secret",
+        "selector-quoted-outer-secret",
+        "selector-outer-secret",
+    ):
+        assert secret not in receipt
     assert "visible" in receipt
 
     monkeypatch.setattr(
@@ -859,14 +868,23 @@ def test_quoted_credential_keys_are_masked_in_selector_receipt_and_runner_stderr
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             RuntimeError(
                 "runner {'proxy_\\u0061uthorization': 'Bearer runner-secret', 'safe': 'visible'} "
-                'source="password=runner-fragment-secret"'
+                'source="password=runner-fragment-secret" '
+                "token\u0085=\u0085runner-unicode-secret "
+                "'api_key=runner-quoted-outer-secret' = 'runner-outer-secret'"
             )
         ),
     )
     assert salvage.main(argv=[], now_utc=_NOW) == 1
     stderr = capsys.readouterr().err
     assert json.loads(stderr)["outcome"] == "partial"
-    assert "runner-secret" not in stderr and "runner-fragment-secret" not in stderr
+    for secret in (
+        "runner-secret",
+        "runner-fragment-secret",
+        "runner-unicode-secret",
+        "runner-quoted-outer-secret",
+        "runner-outer-secret",
+    ):
+        assert secret not in stderr
     assert "visible" in stderr
 
 
