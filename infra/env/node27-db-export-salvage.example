@@ -7,6 +7,8 @@
 #
 # Copy to /home/nwm/NWM/infra/env/node27-db-export-salvage.env on node-27 and chmod 0600.
 
+NODE27_DB_EXPORT_SALVAGE_REPO_ROOT=/home/nwm/NWM
+
 # Node-27 primary Postgres — MUST be a strictly read-only role
 # (nhms_display_ro or an equivalent explicitly-scoped read role). The runner
 # fails closed on `refused_role` if the role can INSERT into

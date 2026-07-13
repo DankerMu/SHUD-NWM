@@ -17,6 +17,11 @@ blocked() {
   exit 2
 }
 
+case "$REPO" in
+  /*) ;;
+  *) blocked "REPOSITORY_ROOT_NOT_ABSOLUTE" ;;
+esac
+
 if [ -f "$ENV_FILE" ]; then
   if [ -L "$ENV_FILE" ]; then
     blocked "ENV_FILE_SYMLINK_FORBIDDEN"
@@ -35,6 +40,18 @@ if [ -f "$ENV_FILE" ]; then
 else
   blocked "ENV_FILE_MISSING"
 fi
+
+REPO="${NODE27_RAW_RETENTION_REPO:-/home/nwm/NWM}"
+case "$REPO" in
+  /*) ;;
+  *) blocked "REPOSITORY_ROOT_NOT_ABSOLUTE" ;;
+esac
+if [ -n "${PYTHONPATH:-}" ]; then
+  PYTHONPATH="$REPO:$PYTHONPATH"
+else
+  PYTHONPATH="$REPO"
+fi
+export PYTHONPATH
 
 if [ -z "${NODE27_RAW_RETENTION_OBJECT_STORE_ROOT:-}" ]; then
   blocked "OBJECT_STORE_ROOT_MISSING"

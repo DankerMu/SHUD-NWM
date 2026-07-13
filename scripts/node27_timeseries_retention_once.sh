@@ -28,6 +28,11 @@ blocked() {
   exit 2
 }
 
+case "$REPO" in
+  /*) ;;
+  *) blocked "REPOSITORY_ROOT_NOT_ABSOLUTE" ;;
+esac
+
 case "$ENV_FILE" in
   /*) ;;
   *) blocked "ENV_FILE_NOT_ABSOLUTE" ;;
@@ -51,6 +56,18 @@ if [ -f "$ENV_FILE" ]; then
 else
   blocked "ENV_FILE_MISSING"
 fi
+
+REPO="${NODE27_TIMESERIES_RETENTION_REPO:-/home/nwm/NWM}"
+case "$REPO" in
+  /*) ;;
+  *) blocked "REPOSITORY_ROOT_NOT_ABSOLUTE" ;;
+esac
+if [ -n "${PYTHONPATH:-}" ]; then
+  PYTHONPATH="$REPO:$PYTHONPATH"
+else
+  PYTHONPATH="$REPO"
+fi
+export PYTHONPATH
 
 LOG_ROOT="${NODE27_TIMESERIES_RETENTION_LOG_ROOT:-/home/nwm/node27-timeseries-retention-logs}"
 case "$LOG_ROOT" in

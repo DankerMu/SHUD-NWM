@@ -972,3 +972,62 @@ Byte-identical across code default lookup, `infra/env/node27-timeseries-retentio
 ### Task §6.3 boundary
 
 Live dry-run receipt review + first enforce receipt on node-27 (row-count of metadata/coverage tables unchanged pre/post; DB size delta reported) is a follow-up commit under a distinct issue (#856), not part of the §6.1 + §6.2 PR. Steady state: timer-driven enforce keeps passing gates via recurring audit receipts; drill re-run required when the drill receipt exceeds its validity window or archive tooling/format changes.
+
+## Workflow Fixture: Issue #1067 Node-27 Wrapper Import Contract
+
+Fixture level `expanded` · Repair intensity `high` · NHMS project profile · Reuses the shared change (`tier-node27-timeseries-storage`). Scope is the seven issue-named node-27 `*_once.sh` wrappers and their systemd execution contract; Python archive/audit/retention semantics remain unchanged.
+
+### Must preserve / must change
+
+- Preserve each wrapper's existing env loading, argument forwarding, validation, and final Python entrypoint.
+- Every governed wrapper MUST prepend its parameterized repository root to `PYTHONPATH` before launching Python, while preserving any existing non-empty `PYTHONPATH` after the root.
+- Exact governed set and root source: `node27_storage_inventory_audit_once.sh` / `NODE27_STORAGE_INVENTORY_AUDIT_REPO_ROOT`; `node27_product_archive_once.sh` / `NODE27_PRODUCT_ARCHIVE_REPO_ROOT`; `node27_timeseries_compression_once.sh` / `NODE27_TIMESERIES_COMPRESSION_REPO_ROOT`; `node27_timeseries_retention_once.sh` / existing `NODE27_TIMESERIES_RETENTION_REPO`; `node27_db_export_salvage_once.sh` / `NODE27_DB_EXPORT_SALVAGE_REPO_ROOT`; `node27_archive_rebuild_drill_once.sh` / `NODE27_ARCHIVE_REBUILD_DRILL_REPO_ROOT`; `node27_raw_retention_once.sh` / existing `NODE27_RAW_RETENTION_REPO`. Every variable defaults to `/home/nwm/NWM` when unset or empty.
+- `node27_archive_rebuild_drill_once.sh` does not exist on the baseline branch; issue #1067 explicitly names it in the required sibling set, so this PR adds a complete wrapper using the drill's existing env/CLI contract rather than silently reducing coverage.
+- Do not add `scripts/__init__.py` or rewrite Python imports; do not address URI-prefix or mover-discovery defects tracked by #1066/#1065.
+
+### Risk packs considered
+
+- Public API / CLI / script entry: selected — systemd invokes the wrappers as production entrypoints.
+- Config / project setup: selected — repository-root overrides and inherited `PYTHONPATH` are environment contracts.
+- File IO / path safety / overwrite: selected — the configurable repository root becomes a module-search path; empty values fall back to the default and relative roots must be refused before Python launch.
+- Schema / columns / units / field names: not selected — no payload or receipt schema changes.
+- Auth / permissions / secrets: not selected — no credential or privilege behavior changes.
+- Concurrency / shared state / ordering: not selected — wrappers remain single-process `exec` launchers.
+- Resource limits / large input / discovery: not selected — no discovery or data processing behavior changes.
+- Legacy compatibility / examples: selected — all seven wrappers must preserve existing launch behavior and inherited `PYTHONPATH` entries.
+- Error handling / rollback / partial outputs: selected — import startup must succeed; downstream failures and receipts remain owned by existing Python code.
+- Release / packaging / dependency compatibility: selected — the fix defines import resolution for the non-package `scripts/` source tree without adding `__init__.py`.
+- Documentation / migration notes: selected — commit node-27 journal evidence proving the systemd path crossed the former import failure; the completeness receipt is deferred until #1066/#1065 remove the independent downstream blockers.
+- Geospatial / CRS / basin geometry: not selected — untouched.
+- Hydro-met time series / forcing windows: not selected — untouched.
+- SHUD numerical runtime / conservation / NaN: not selected — untouched.
+- PostGIS / TimescaleDB domain behavior: not selected — this issue must not alter or require DB behavior.
+- Slurm production lifecycle / mock-vs-real parity: not selected — node-22 scheduling is untouched.
+- External hydro-met providers / snapshot reproducibility: not selected — untouched.
+- Run manifest / QC provenance: not selected — untouched.
+- Published NHMS artifacts / display identity: not selected — no artifact identity change; only live wrapper evidence is published.
+
+### Invariant Matrix
+
+- Governing invariant: every governed systemd wrapper launches with its own resolved repository root as the first `PYTHONPATH` entry without discarding the caller's existing entries.
+- Source-of-truth contract: wrapper-specific `NODE27_*_REPO_ROOT` value, otherwise `/home/nwm/NWM`.
+- Producers: seven `scripts/node27_*_once.sh` wrappers.
+- Validators/preflight: shell parameter expansion plus wrapper contract tests.
+- Storage/cache/query: none — no persistent state or DB access is added.
+- Public routes/entrypoints: seven wrapper Python-launch boundaries and `nhms-node27-storage-inventory-audit.service`.
+- Frontend/downstream consumers: audit/archive/compression/retention/salvage/drill/raw-retention Python scripts, unchanged.
+- Failure paths/rollback/stale state: missing `scripts` import must disappear; downstream #1066/#1065 failures remain distinct and observable.
+- Evidence/audit/readiness: focused pytest, ruff, strict OpenSpec validation, and node-27 systemd journal evidence; archive-completeness receipt follow-up after #1066/#1065.
+- Regression rows:
+  - unset or empty root override -> governed wrapper uses `/home/nwm/NWM` as the first `PYTHONPATH` entry;
+  - absolute custom root -> custom root becomes the first entry; relative custom root -> stable pre-launch refusal;
+  - empty inherited `PYTHONPATH` + test repo root -> `from scripts import node27_product_archive` succeeds through the wrapper launch contract;
+  - existing two-entry `PYTHONPATH` -> both entries remain byte-for-byte and in order after the resolved root;
+  - all six sibling wrappers -> same root-prepend contract while retaining original arguments, Python entrypoint, and downstream exit code.
+
+### Boundary-surface checklist
+
+- Shared helper roots: no helper exists; keep the prelude text mechanically consistent across all seven wrappers.
+- Public entrypoints: the exact seven issue-named wrappers above are in scope; `node27_download_once.sh` and `node27_resource_governance_once.sh` are explicit non-goals because #1067 does not name those independent service lanes and they do not launch the affected archive/audit module family.
+- Producer/consumer evidence boundary: systemd environment -> wrapper -> Python import path -> audit journal/receipt.
+- Unchanged downstream consumers: Python script arguments, entrypoints, downstream exit codes, and receipt semantics are unchanged.

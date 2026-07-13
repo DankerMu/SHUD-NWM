@@ -7,6 +7,8 @@
 #
 # Copy to node27-timeseries-retention.env and chmod 0600.
 
+NODE27_TIMESERIES_RETENTION_REPO=/home/nwm/NWM
+
 # Node-27 primary Postgres (writer role — retention performs drop_chunks DDL).
 DATABASE_URL=postgresql://REPLACE_ME_WRITER:REPLACE_ME_PW@127.0.0.1:55432/nhms
 

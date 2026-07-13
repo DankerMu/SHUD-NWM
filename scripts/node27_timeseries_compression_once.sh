@@ -32,4 +32,16 @@ set -a
 . "$ENV_FILE"
 set +a
 
+REPO_ROOT=${NODE27_TIMESERIES_COMPRESSION_REPO_ROOT:-/home/nwm/NWM}
+case "$REPO_ROOT" in
+  /*) ;;
+  *) echo '{"status":"failed","reason":"repository root must be absolute"}' >&2; exit 1 ;;
+esac
+if [ -n "${PYTHONPATH:-}" ]; then
+  PYTHONPATH="$REPO_ROOT:$PYTHONPATH"
+else
+  PYTHONPATH="$REPO_ROOT"
+fi
+export PYTHONPATH
+
 exec "$PYTHON_BIN" "$SCRIPT" "$@"
