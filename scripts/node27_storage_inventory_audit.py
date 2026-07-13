@@ -131,22 +131,27 @@ class InventorySubject:
 
     @property
     def archive_identity(self) -> ArchiveIdentity:
-        if self.lane == "states":
-            physical_model = self.cloned_from_model_id or self.model_id
-            return archive_identity_for_state_reference(
-                source_id=self.source_id, model_id=physical_model, valid_time=self.cycle_time
+        try:
+            if self.lane == "states":
+                physical_model = self.cloned_from_model_id or self.model_id
+                return archive_identity_for_state_reference(
+                    source_id=self.source_id, model_id=physical_model, valid_time=self.cycle_time
+                )
+            source = normalize_source_id(self.source_id or "")
+            cycle = self.cycle_time.astimezone(UTC)
+            return ArchiveIdentity(
+                lane=self.lane,
+                source=source,
+                cycle_identity=cycle.strftime("%Y%m%d%H"),
+                cycle_time=cycle.strftime("%Y-%m-%dT%H:00:00Z"),
+                basin_version_id=self.basin_version_id if self.lane == "forcing" else None,
+                model_id=self.model_id if self.lane == "forcing" else None,
+                run_id=self.subject_id if self.lane == "runs" else None,
             )
-        source = normalize_source_id(self.source_id or "")
-        cycle = self.cycle_time.astimezone(UTC)
-        return ArchiveIdentity(
-            lane=self.lane,
-            source=source,
-            cycle_identity=cycle.strftime("%Y%m%d%H"),
-            cycle_time=cycle.strftime("%Y-%m-%dT%H:00:00Z"),
-            basin_version_id=self.basin_version_id if self.lane == "forcing" else None,
-            model_id=self.model_id if self.lane == "forcing" else None,
-            run_id=self.subject_id if self.lane == "runs" else None,
-        )
+        except (ValueError, ArchiveConfigurationError) as error:
+            raise AuditBlocked(
+                f"invalid {self.lane} archive identity for {self.stable_key}: {error}"
+            ) from error
 
 
 @dataclass(frozen=True)
@@ -1098,11 +1103,13 @@ def _sanitize_detail(error: BaseException, *, database_url: str | None = None) -
         return f"{type(error).__name__}{DETAIL_TRUNCATION_MARKER}{DIAGNOSTIC_REDACTED_MARKER}"
     if any(dsn and len(dsn) > DSN_REDACTION_INPUT_LIMIT for dsn in configured_dsns):
         return f"{type(error).__name__}{DIAGNOSTIC_REDACTED_MARKER}"
-    detail = raw_detail.replace("\n", " ").replace("\r", " ")
+    detail = raw_detail
     for dsn in configured_dsns:
         if dsn:
             detail = detail.replace(dsn, "[DATABASE_URL]")
         detail = redact_database_dsn(detail, dsn)
+    detail = redact_text(detail)
+    detail = detail.replace("\r", " ").replace("\n", " ")
     detail = redact_text(detail)
     if len(detail) > DETAIL_OUTPUT_LIMIT:
         detail = detail[: DETAIL_OUTPUT_LIMIT - len(DETAIL_TRUNCATION_MARKER)] + DETAIL_TRUNCATION_MARKER

@@ -1609,12 +1609,16 @@ def test_unexpected_prepublication_error_publishes_sanitized_indeterminate(
         audit.AuditBlocked(
             "AWS_SECRET_ACCESS_KEY=aws-secret Authorization: Bearer bearer-secret "
             "token=opaque-token https://user:pass@example.test/path?X-Amz-Signature=signed#api_key=tail "
-            'payload={"p\\u0061ssword": "quoted-blocked-secret", "safe": "visible"}'
+            'payload={"p\\u0061ssword": "quoted-blocked-secret", "safe": "visible"} '
+            'fragment="password=inner-blocked-secret" '
+            '{"auth_\\u0068eader": "Bearer escaped-blocked-auth-secret"}'
         ),
         RuntimeError(
             "AWS_ACCESS_KEY_ID=aws-key Authorization: Basic basic-secret "
             "api_key=opaque-key https://user:pass@example.test/path?token=query#secret=tail "
-            "payload={'\\u0061pi_key': 'quoted-indeterminate-secret', 'safe': 'visible'}"
+            "payload={'\\u0061pi_key': 'quoted-indeterminate-secret', 'safe': 'visible'} "
+            "source='token=inner-indeterminate-secret' "
+            "{'\\u0061uth': 'Basic escaped-indeterminate-auth-secret'}"
         ),
     ],
 )
@@ -1648,6 +1652,10 @@ def test_terminal_receipt_redacts_generic_credentials_for_controlled_and_unexpec
         "secret=tail",
         "quoted-blocked-secret",
         "quoted-indeterminate-secret",
+        "inner-blocked-secret",
+        "inner-indeterminate-secret",
+        "escaped-blocked-auth-secret",
+        "escaped-indeterminate-auth-secret",
     ):
         assert secret not in body
 
@@ -1661,7 +1669,9 @@ def test_quoted_credential_key_is_redacted_from_bootstrap_stderr(
         "bootstrap_receipt_path",
         lambda _argv: (_ for _ in ()).throw(
             audit.AuditBlocked(
-                'bootstrap {"ordinary\\uD800": "boot\\\"secret", "safe": "visible"}'
+                'bootstrap {"ordinary\\uD800": "boot\\\"secret", "safe": "visible"} '
+                'payload="password=bootstrap-fragment-secret" '
+                '{"前缀authorization": "Bearer bootstrap-auth-secret"}'
             )
         ),
     )
@@ -1669,6 +1679,8 @@ def test_quoted_credential_key_is_redacted_from_bootstrap_stderr(
     diagnostic = json.loads(capsys.readouterr().err)
     assert diagnostic["reason"] == "CONFIG_INVALID"
     assert 'boot\\"secret' not in diagnostic["message"]
+    assert "bootstrap-fragment-secret" not in diagnostic["message"]
+    assert "bootstrap-auth-secret" not in diagnostic["message"]
     assert "visible" in diagnostic["message"]
 
 
@@ -1695,7 +1707,9 @@ def test_quoted_credential_key_is_redacted_from_publication_stderr(
         "publish_receipt",
         lambda *_args: (_ for _ in ()).throw(
             error_type(
-                "publisher {'\\u0061pi_key' = 'publication-secret', 'safe': 'visible'}"
+                "publisher {'\\u0061pi_key' = 'publication-secret', 'safe': 'visible'} "
+                'payload="token=publication-fragment-secret" '
+                '{"proxy_\\u0061uthorization": "Bearer publication-auth-secret"}'
             )
         ),
     )
@@ -1703,6 +1717,8 @@ def test_quoted_credential_key_is_redacted_from_publication_stderr(
     diagnostic = json.loads(capsys.readouterr().err)
     assert diagnostic["reason"] == reason
     assert "publication-secret" not in diagnostic["message"]
+    assert "publication-fragment-secret" not in diagnostic["message"]
+    assert "publication-auth-secret" not in diagnostic["message"]
     assert "visible" in diagnostic["message"]
 
 
@@ -1727,6 +1743,97 @@ def test_terminal_receipt_redacts_driver_decoded_and_libpq_passwords(
     body = config.receipt_path.read_text(encoding="utf-8")
     for secret in (dsn, "p%40ss%20word", "p@ss word", "quoted with spaces", "escaped\\ value"):
         assert secret not in body
+
+
+@pytest.mark.parametrize(
+    ("encoded", "decoded"),
+    [
+        ("left-a%0Aright-a", "left-a\nright-a"),
+        ("left-b%0Dright-b", "left-b\rright-b"),
+        ("left-c%0D%0Aright-c", "left-c\r\nright-c"),
+    ],
+)
+@pytest.mark.parametrize("error_type", [audit.AuditBlocked, RuntimeError])
+def test_newline_url_dsn_password_is_redacted_before_single_line_terminal_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    encoded: str,
+    decoded: str,
+    error_type: type[Exception],
+) -> None:
+    dsn = f"postgresql://reader:{encoded}@db/nhms"
+    config = replace(_config(tmp_path), database_url=dsn)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(
+        audit,
+        "run_audit",
+        lambda _config, *, publish: (_ for _ in ()).throw(
+            error_type(f"driver raw={encoded}; decoded={decoded}; dsn={dsn}")
+        ),
+    )
+    assert audit.main([]) == 1
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    detail = receipt["detail"]
+    assert "left-" not in detail and "right-" not in detail
+    assert "\r" not in detail and "\n" not in detail
+
+
+def test_newline_url_dsn_password_is_redacted_from_bootstrap_stderr_before_line_collapse(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    encoded = "bootstrap-left%0Dbootstrap-right"
+    decoded = "bootstrap-left\rbootstrap-right"
+    dsn = f"postgresql://reader:{encoded}@db/nhms"
+    monkeypatch.setenv("DATABASE_URL", dsn)
+    monkeypatch.setattr(
+        audit,
+        "bootstrap_receipt_path",
+        lambda _argv: (_ for _ in ()).throw(
+            audit.AuditBlocked(f"bootstrap raw={encoded}; decoded={decoded}; dsn={dsn}")
+        ),
+    )
+    assert audit.main([]) == 1
+    diagnostic = json.loads(capsys.readouterr().err)
+    assert "bootstrap-left" not in diagnostic["message"]
+    assert "bootstrap-right" not in diagnostic["message"]
+    assert "\r" not in diagnostic["message"] and "\n" not in diagnostic["message"]
+
+
+@pytest.mark.parametrize(
+    ("error_type", "reason"),
+    [
+        (audit.AuditBlocked, audit.PUBLICATION_FAILED_CODE),
+        (audit.PublicationIndeterminate, audit.PUBLICATION_INDETERMINATE_CODE),
+    ],
+)
+def test_newline_url_dsn_password_is_redacted_from_publication_stderr_before_line_collapse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    error_type: type[Exception],
+    reason: str,
+) -> None:
+    encoded = "publication-left%0D%0Apublication-right"
+    decoded = "publication-left\r\npublication-right"
+    dsn = f"postgresql://reader:{encoded}@db/nhms"
+    config = replace(_config(tmp_path), database_url=dsn)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(audit, "run_audit", lambda _config, *, publish: _receipt([_subject()]))
+    monkeypatch.setattr(
+        audit,
+        "publish_receipt",
+        lambda *_args: (_ for _ in ()).throw(
+            error_type(f"publisher raw={encoded}; decoded={decoded}; dsn={dsn}")
+        ),
+    )
+    assert audit.main([]) == 1
+    diagnostic = json.loads(capsys.readouterr().err)
+    assert diagnostic["reason"] == reason
+    assert "publication-left" not in diagnostic["message"]
+    assert "publication-right" not in diagnostic["message"]
+    assert "\r" not in diagnostic["message"] and "\n" not in diagnostic["message"]
 
 
 @pytest.mark.parametrize(
@@ -2271,7 +2378,7 @@ def test_sanitize_detail_raw_input_limit_is_inclusive_and_oversize_bypasses_reda
         )
         assert calls == []
     else:
-        assert calls == ["dsn", "dsn", "text"]
+        assert calls == ["dsn", "dsn", "text", "text"]
         assert len(detail) <= audit.DETAIL_OUTPUT_LIMIT
 
 
@@ -2306,7 +2413,7 @@ def test_sanitize_detail_dsn_limit_is_inclusive_and_oversize_bypasses_redactors(
         assert detail == f"RuntimeError{audit.DIAGNOSTIC_REDACTED_MARKER}"
         assert calls == []
     else:
-        assert calls == ["dsn", "dsn", "text"]
+        assert calls == ["dsn", "dsn", "text", "text"]
         assert detail == "bounded failure"
 
 
@@ -3255,6 +3362,170 @@ def test_real_main_rejects_noncanonical_inventory_evidence_once(
     assert receipt["outcome"] == "blocked"
     assert receipt["refusal_reason"] == "EVIDENCE_BLOCKED"
     assert receipt != stale
+
+
+@pytest.mark.parametrize(
+    ("scenario", "lane", "subject_id"),
+    [
+        ("forcing-unknown-source", "forcing", "forcing-a"),
+        ("forcing-unsafe-model", "forcing", "forcing-a"),
+        ("forcing-unsafe-basin", "forcing", "forcing-a"),
+        ("run-unknown-source", "runs", "run-a"),
+        ("run-unsafe-id", "runs", "../run-a"),
+        ("state-unknown-source", "states", "state-a"),
+        ("state-unsafe-model", "states", "state-a"),
+        ("state-non-hour", "states", "state-a"),
+    ],
+)
+def test_real_main_classifies_db_shaped_archive_identity_failures_as_evidence_blocked_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    scenario: str,
+    lane: str,
+    subject_id: str,
+) -> None:
+    config = _config(tmp_path)
+    stale = _receipt([_subject(identifier="stale-identity")])
+    audit.publish_receipt(config.receipt_path, stale)
+    forcing_rows: list[dict[str, object]] = []
+    run_rows: list[dict[str, object]] = []
+    state_rows: list[dict[str, object]] = []
+    if lane == "forcing":
+        forcing_rows.append(
+            {
+                "forcing_version_id": subject_id,
+                "model_id": "../model-a" if scenario == "forcing-unsafe-model" else "model-a",
+                "source_id": "unknown-provider" if scenario.endswith("unknown-source") else "gfs",
+                "cycle_time": START,
+                "start_time": START,
+                "end_time": END,
+                "forcing_package_uri": "missing",
+                "checksum": "a" * 64,
+                "basin_version_id": (
+                    "../basin-a" if scenario == "forcing-unsafe-basin" else "basin-a"
+                ),
+            }
+        )
+    elif lane == "runs":
+        run_rows.append(
+            {
+                "run_id": subject_id,
+                "model_id": "model-a",
+                "basin_version_id": "basin-a",
+                "source_id": "unknown-provider" if scenario.endswith("unknown-source") else "gfs",
+                "cycle_time": START,
+                "start_time": START,
+                "end_time": END,
+                "run_manifest_uri": "s3://nhms/runs/run-a/input/manifest.json",
+                "output_uri": "s3://nhms/runs/run-a/output/",
+                "detail_present": 1,
+            }
+        )
+    else:
+        state_rows.append(
+            {
+                "state_id": subject_id,
+                "model_id": "../model-a" if scenario == "state-unsafe-model" else "model-a",
+                "run_id": "run-a",
+                "source_id": "unknown-provider" if scenario.endswith("unknown-source") else "gfs",
+                "valid_time": START + timedelta(minutes=1) if scenario == "state-non-hour" else START,
+                "state_uri": "states/gfs/model-a/2026050100/state.cfg.ic",
+                "checksum": "a" * 64,
+                "cloned_from_state_id": None,
+                "cloned_from_model_id": None,
+                "clone_gate_fingerprint": None,
+            }
+        )
+
+    class Connection(_Connection):
+        def __init__(self) -> None:
+            super().__init__([[{"audit_time": NOW}], forcing_rows, run_rows, state_rows])
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("psycopg2.connect", lambda _dsn: Connection())
+    original_publish = audit.publish_receipt
+    original_atomic = audit.atomic_write_bytes_no_follow
+    publish_attempts = 0
+    atomic_attempts = 0
+
+    def count_publish(path: Path, receipt: dict[str, object]) -> None:
+        nonlocal publish_attempts
+        publish_attempts += 1
+        original_publish(path, receipt)
+
+    def count_atomic(*args: object, **kwargs: object) -> None:
+        nonlocal atomic_attempts
+        atomic_attempts += 1
+        original_atomic(*args, **kwargs)
+
+    monkeypatch.setattr(audit, "publish_receipt", count_publish)
+    monkeypatch.setattr(audit, "atomic_write_bytes_no_follow", count_atomic)
+    assert audit.main(_main_argv(config)) == 1
+    assert audit.PUBLICATION_FAILED_CODE not in capsys.readouterr().err
+    assert publish_attempts == 1 and atomic_attempts == 1
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "blocked"
+    assert receipt["refusal_reason"] == "EVIDENCE_BLOCKED"
+    assert "coverage_bounds" not in receipt and "windows" not in receipt
+    assert lane in receipt["detail"] and subject_id in receipt["detail"]
+    assert receipt != stale
+    schema = json.loads(audit.COMPLETENESS_SCHEMA_PATH.read_text())
+    jsonschema.Draft7Validator(
+        schema, format_checker=jsonschema.FormatChecker()
+    ).validate(receipt)
+
+
+@pytest.mark.parametrize(
+    ("subject", "expected_source"),
+    [
+        (_subject(source_id="GFS"), "gfs"),
+        (_subject("states", "provider-alias", source_id="era5"), "ERA5"),
+        (_subject("states", "legacy", source_id=None), "legacy-unqualified"),
+    ],
+)
+def test_archive_identity_keeps_valid_source_aliases_and_source_less_legacy(
+    subject: audit.InventorySubject, expected_source: str
+) -> None:
+    assert subject.archive_identity.source == expected_source
+
+
+def test_non_identity_runtime_error_during_archive_derivation_remains_indeterminate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    forcing_row = {
+        "forcing_version_id": "forcing-a",
+        "model_id": "model-a",
+        "source_id": "gfs",
+        "cycle_time": START,
+        "start_time": START,
+        "end_time": END,
+        "forcing_package_uri": "missing",
+        "checksum": "a" * 64,
+        "basin_version_id": "basin-a",
+    }
+
+    class Connection(_Connection):
+        def __init__(self) -> None:
+            super().__init__([[{"audit_time": NOW}], [forcing_row], [], []])
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("psycopg2.connect", lambda _dsn: Connection())
+    monkeypatch.setattr(
+        audit,
+        "normalize_source_id",
+        lambda _value: (_ for _ in ()).throw(RuntimeError("non-identity runtime failure")),
+    )
+    assert audit.main(_main_argv(config)) == 1
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "indeterminate"
+    assert receipt["error_reason"] == audit.UNEXPECTED_ERROR_REASON
 
 
 def _clone_row(**overrides: object) -> dict[str, object]:

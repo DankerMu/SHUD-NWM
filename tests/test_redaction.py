@@ -460,6 +460,58 @@ def test_quoted_assignment_key_scanner_decodes_unicode_before_sensitive_matching
     assert REDACTION_MARKER in redacted
 
 
+def test_assignment_scanner_uses_authoritative_sensitive_key_catalog_only() -> None:
+    assert not hasattr(redaction, "_SENSITIVE_KEY_FRAGMENTS")
+    assert not hasattr(redaction, "_contains_sensitive_key_fragment")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "authorization=Bearer plain-auth-secret",
+        '"proxy_authorization": "Bearer quoted-auth-secret"',
+        r'{"auth_\u0068eader": "Basic escaped-auth-secret"}',
+        r'{"\u0061uth": "Bearer exact-auth-secret"}',
+        '{"前缀authorization": "Bearer unicode-auth-secret"}',
+    ],
+)
+def test_authoritative_catalog_covers_bare_quoted_escaped_and_unicode_auth_keys(
+    raw: str,
+) -> None:
+    redacted = redact_text(raw)
+    assert "auth-secret" not in redacted
+    assert REDACTION_MARKER in redacted
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '"password=double-secret"',
+        "'token=single-secret'",
+        'payload="api_key=payload-secret"',
+        'source_error="driver password=source-secret failed"',
+        r'payload="prefix \" token=escaped-secret \" suffix"',
+        'payload="unterminated password=unterminated-secret',
+    ],
+)
+def test_sensitive_inner_assignments_are_redacted_without_quote_backtracking(raw: str) -> None:
+    redacted = redact_text(raw)
+    assert "secret" not in redacted
+    assert REDACTION_MARKER in redacted
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '"ordinary quoted fragment"',
+        "payload='ordinary value'",
+        'source_error="status=failed"',
+    ],
+)
+def test_non_sensitive_quoted_fragments_remain_unchanged(raw: str) -> None:
+    assert redact_text(raw) == raw
+
+
 @pytest.mark.parametrize(
     "raw",
     [
@@ -555,6 +607,23 @@ def test_unicode_quoted_assignment_key_scanner_has_bounded_character_visits(
     hostile = '"' + r"\u0061" * 33_333 + r'\u12": "hostile-secret"'
     redacted = redaction._redact_sensitive_assignments(hostile)
     assert "hostile-secret" not in redacted
+    assert visits <= 2 * len(hostile)
+
+
+def test_escaped_quote_staircase_fragment_has_deterministic_character_visit_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = redaction._is_assignment_key_char
+    visits = 0
+
+    def count_visit(character: str) -> bool:
+        nonlocal visits
+        visits += 1
+        return original(character)
+
+    monkeypatch.setattr(redaction, "_is_assignment_key_char", count_visit)
+    hostile = '"' + r'\"' * 100_000 + ' password=staircase-secret"'
+    assert redaction._redact_sensitive_assignments(hostile) == REDACTION_MARKER
     assert visits <= 2 * len(hostile)
 
 

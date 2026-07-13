@@ -788,9 +788,13 @@ def test_quoted_credential_keys_are_masked_in_helper_and_refused_stderr(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    diagnostic = '{"p\\u0061ssword": "helper-secret", "safe": "visible"}'
+    diagnostic = (
+        '{"auth_\\u0068eader": "Bearer helper-secret", "safe": "visible"} '
+        'payload="password=helper-fragment-secret"'
+    )
     masked = salvage._mask_dsn_in_message(diagnostic, _DSN)
-    assert "helper-secret" not in masked and "visible" in masked
+    assert "helper-secret" not in masked and "helper-fragment-secret" not in masked
+    assert "visible" in masked
 
     env = _base_env(tmp_path)
     for key, value in env.items():
@@ -800,7 +804,8 @@ def test_quoted_credential_keys_are_masked_in_helper_and_refused_stderr(
             argv=[],
             now_utc=_NOW,
             check_write_privileges=lambda _dsn: (
-                "role {'\\u0061pi_key': 'refused-secret', 'safe': 'visible'}"
+                "role {'\\u0061uth': 'Basic refused-secret', 'safe': 'visible'} "
+                "source='token=refused-fragment-secret'"
             ),
             fetch_row_count=lambda *_args, **_kwargs: 0,
             perform_copy_export=lambda *_args, **_kwargs: b"",
@@ -810,7 +815,8 @@ def test_quoted_credential_keys_are_masked_in_helper_and_refused_stderr(
     )
     stderr = capsys.readouterr().err
     assert json.loads(stderr)["outcome"] == "refused_role"
-    assert "refused-secret" not in stderr and "visible" in stderr
+    assert "refused-secret" not in stderr and "refused-fragment-secret" not in stderr
+    assert "visible" in stderr
 
 
 def test_quoted_credential_keys_are_masked_in_selector_receipt_and_runner_stderr(
@@ -827,7 +833,8 @@ def test_quoted_credential_keys_are_masked_in_selector_receipt_and_runner_stderr
 
     def fail_copy(*_args: object, **_kwargs: object) -> bytes:
         raise RuntimeError(
-            'selector {"p\\u0061ssword": "selector-secret", "safe": "visible"}'
+            'selector {"前缀authorization": "Bearer selector-secret", "safe": "visible"} '
+            'payload="api_key=selector-fragment-secret"'
         )
 
     assert (
@@ -843,19 +850,24 @@ def test_quoted_credential_keys_are_masked_in_selector_receipt_and_runner_stderr
     )
     receipt = Path(env["NODE27_DB_EXPORT_SALVAGE_RECEIPT_PATH"]).read_text(encoding="utf-8")
     assert json.loads(receipt)["selected"][0]["state"] == "error"
-    assert "selector-secret" not in receipt and "visible" in receipt
+    assert "selector-secret" not in receipt and "selector-fragment-secret" not in receipt
+    assert "visible" in receipt
 
     monkeypatch.setattr(
         salvage,
         "build_receipt",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RuntimeError("runner {'\\u0061pi_key': 'runner-secret', 'safe': 'visible'}")
+            RuntimeError(
+                "runner {'proxy_\\u0061uthorization': 'Bearer runner-secret', 'safe': 'visible'} "
+                'source="password=runner-fragment-secret"'
+            )
         ),
     )
     assert salvage.main(argv=[], now_utc=_NOW) == 1
     stderr = capsys.readouterr().err
     assert json.loads(stderr)["outcome"] == "partial"
-    assert "runner-secret" not in stderr and "visible" in stderr
+    assert "runner-secret" not in stderr and "runner-fragment-secret" not in stderr
+    assert "visible" in stderr
 
 
 def test_unicode_escaped_credential_key_is_masked_from_salvage_publication_stderr(
@@ -872,7 +884,8 @@ def test_unicode_escaped_credential_key_is_masked_from_salvage_publication_stder
         "publish_receipt",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             salvage.SafeFilesystemError(
-                'publisher {"p\\u0061ssword": "publication-secret", "safe": "visible"}'
+                'publisher {"auth_\\u0068eader": "Basic publication-secret", '
+                '"safe": "visible"} payload="token=publication-fragment-secret"'
             )
         ),
     )
@@ -889,7 +902,8 @@ def test_unicode_escaped_credential_key_is_masked_from_salvage_publication_stder
     )
     stderr = capsys.readouterr().err
     assert json.loads(stderr)["outcome"] == "partial"
-    assert "publication-secret" not in stderr and "visible" in stderr
+    assert "publication-secret" not in stderr and "publication-fragment-secret" not in stderr
+    assert "visible" in stderr
 
 
 @pytest.mark.parametrize("quoted", [False, True])

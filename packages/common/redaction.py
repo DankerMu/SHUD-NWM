@@ -370,6 +370,10 @@ def _redact_sensitive_assignments(value: str) -> str:
             key_start = cursor
             cursor, token, malformed, closed = _scan_quoted_assignment_key(value, cursor)
             if not closed:
+                if _fragment_contains_sensitive_assignment(token):
+                    pieces.append(value[emitted:key_start])
+                    pieces.append(REDACTION_MARKER)
+                    emitted = cursor
                 continue
         elif _is_assignment_key_char(value[cursor]):
             key_start = cursor
@@ -383,7 +387,15 @@ def _redact_sensitive_assignments(value: str) -> str:
         separator_end = cursor
         while separator_end < length and value[separator_end] in " \t\r\n":
             separator_end += 1
-        key_is_sensitive = malformed or _contains_sensitive_key_fragment(token)
+        if quote is not None and (
+            separator_end >= length or value[separator_end] not in ":="
+        ):
+            if _fragment_contains_sensitive_assignment(token):
+                pieces.append(value[emitted:key_start])
+                pieces.append(REDACTION_MARKER)
+                emitted = cursor
+            continue
+        key_is_sensitive = malformed or is_sensitive_key(token)
         if (
             not key_is_sensitive
             or separator_end >= length
@@ -394,6 +406,11 @@ def _redact_sensitive_assignments(value: str) -> str:
         while value_start < length and value[value_start] in " \t\r\n":
             value_start += 1
         value_end, _raw, _decoded = _scan_assignment_value(value, value_start)
+        if _is_authorization_assignment_key(token) and _authorization_value_is_already_redacted(
+            value, value_start
+        ):
+            cursor = value_end
+            continue
         pieces.append(value[emitted:key_start])
         pieces.append(value[key_start:value_start])
         pieces.append(REDACTION_MARKER)
@@ -401,6 +418,45 @@ def _redact_sensitive_assignments(value: str) -> str:
         cursor = value_end
     pieces.append(value[emitted:])
     return "".join(pieces)
+
+
+def _fragment_contains_sensitive_assignment(value: str) -> bool:
+    """Inspect one decoded quoted fragment with a bounded bare-key scan."""
+    cursor = 0
+    length = len(value)
+    while cursor < length:
+        if not _is_assignment_key_char(value[cursor]):
+            cursor += 1
+            continue
+        key_start = cursor
+        while cursor < length and _is_assignment_key_char(value[cursor]):
+            cursor += 1
+        separator = cursor
+        while separator < length and value[separator] in " \t\r\n":
+            separator += 1
+        if (
+            separator < length
+            and value[separator] in ":="
+            and is_sensitive_key(value[key_start:cursor])
+        ):
+            return True
+    return False
+
+
+def _is_authorization_assignment_key(key: str) -> bool:
+    return AUTHORIZATION_ASSIGNMENT_RE.fullmatch(f"{key}=x") is not None
+
+
+def _authorization_value_is_already_redacted(value: str, start: int) -> bool:
+    quote = value[start] if start < len(value) and value[start] in {'"', "'"} else None
+    body_start = start + 1 if quote is not None else start
+    for scheme in ("Bearer", "Basic"):
+        marker_end = body_start + len(scheme) + 1 + len(REDACTION_MARKER)
+        if value.startswith(f"{scheme} {REDACTION_MARKER}", body_start):
+            if quote is not None:
+                return marker_end < len(value) and value[marker_end] == quote
+            return marker_end == len(value) or value[marker_end] in " \t\r\n,;&}"
+    return False
 
 
 _QUOTED_KEY_ESCAPES = {
@@ -482,33 +538,6 @@ def _is_hex_digit(character: str) -> bool:
 
 def _is_assignment_key_char(character: str) -> bool:
     return character.isascii() and (character.isalnum() or character in "_.-")
-
-
-_SENSITIVE_KEY_FRAGMENTS = (
-    "token",
-    "password",
-    "passwd",
-    "pwd",
-    "secret",
-    "credential",
-    "apikey",
-    "api_key",
-    "api-key",
-    "accesskey",
-    "access_key",
-    "access-key",
-    "sessionkey",
-    "session_key",
-    "session-key",
-    "signature",
-    "accountingstoragepass",
-    "storagepass",
-)
-
-
-def _contains_sensitive_key_fragment(key: str) -> bool:
-    lowered = key.lower()
-    return any(fragment in lowered for fragment in _SENSITIVE_KEY_FRAGMENTS)
 
 
 def _replace_literals_once(value: str, literals: set[str]) -> str:
