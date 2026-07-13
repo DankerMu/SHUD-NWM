@@ -418,7 +418,7 @@ def _redact_sensitive_assignments(value: str) -> str:
             token = value[key_start:cursor]
             malformed = False
         else:
-            cursor += 1
+            cursor = _skip_non_key_slash_run(value, cursor)
             continue
         separator_end = cursor
         if quote is None:
@@ -556,7 +556,7 @@ def _fragment_contains_sensitive_assignment_once(value: str) -> bool:
             cursor = _scan_bare_assignment_key(value, cursor)
             token = value[key_start:cursor]
         else:
-            cursor += 1
+            cursor = _skip_non_key_slash_run(value, cursor)
             continue
         separator = cursor
         while separator < length and _is_assignment_whitespace(value[separator]):
@@ -575,7 +575,7 @@ def _fragment_contains_sensitive_assignment_decoded(value: str) -> bool:
     length = len(value)
     while cursor < length:
         if not _is_bare_assignment_key_start(value, cursor):
-            cursor += 1
+            cursor = _skip_non_key_slash_run(value, cursor)
             continue
         key_start = cursor
         cursor = _scan_bare_assignment_key(value, cursor)
@@ -642,7 +642,7 @@ def _fragment_contains_bare_sensitive_assignment(value: str) -> bool:
     length = len(value)
     while cursor < length:
         if not _is_bare_assignment_key_start(value, cursor):
-            cursor += 1
+            cursor = _skip_non_key_slash_run(value, cursor)
             continue
         key_start = cursor
         cursor = _scan_bare_assignment_key(value, cursor)
@@ -799,16 +799,29 @@ def _unicode_key_escape_end(value: str, start: int) -> int | None:
     length = len(value)
     if start >= length or value[start] != "\\":
         return None
-    cursor = start
-    while cursor < length and value[cursor] == "\\":
-        cursor += 1
+    cursor = _slash_run_end(value, start)
     if cursor >= length or value[cursor] != "u":
         return None
     cursor += 1
     digits_start = cursor
     while cursor < length and cursor - digits_start < 4 and value[cursor].isascii() and value[cursor].isalnum():
         cursor += 1
-    return cursor if cursor > digits_start else None
+    return cursor
+
+
+def _slash_run_end(value: str, start: int) -> int:
+    """Return the end of one backslash run with a single forward scan."""
+    cursor = start
+    while cursor < len(value) and value[cursor] == "\\":
+        cursor += 1
+    return cursor
+
+
+def _skip_non_key_slash_run(value: str, start: int) -> int:
+    """Skip a rejected slash-run atomically so outer scans never retry suffixes."""
+    if value[start] != "\\":
+        return start + 1
+    return _slash_run_end(value, start)
 
 
 def _is_assignment_whitespace(character: str) -> bool:

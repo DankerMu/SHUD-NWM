@@ -16,7 +16,7 @@ from pathlib import Path
 import jsonschema
 import pytest
 
-from packages.common import safe_fs
+from packages.common import redaction, safe_fs
 from packages.common.object_store import LocalObjectStore
 from scripts import node27_product_archive as mover
 from scripts import node27_storage_inventory_audit as audit
@@ -2261,7 +2261,7 @@ def test_success_payload_surrogate_is_mapped_to_blocked_before_publication(
     assert publish_attempts == 1 and atomic_attempts == 1
     receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
     assert receipt["outcome"] == "blocked"
-    assert receipt["refusal_reason"] == "EVIDENCE_BLOCKED"
+    assert receipt["refusal_reason"] == "RECEIPT_INVALID"
     assert receipt != stale
     schema = json.loads(audit.COMPLETENESS_SCHEMA_PATH.read_text())
     jsonschema.Draft7Validator(schema, format_checker=jsonschema.FormatChecker()).validate(receipt)
@@ -2720,6 +2720,28 @@ def test_oversized_publication_diagnostic_bypasses_redactors(
     )
 
 
+def test_audit_8k_detail_slash_run_uses_linear_shared_redaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    original = redaction._slash_run_end
+    slash_visits = 0
+
+    def count_slash_run(value: str, start: int) -> int:
+        nonlocal slash_visits
+        end = original(value, start)
+        slash_visits += end - start
+        return end
+
+    monkeypatch.setattr(redaction, "_slash_run_end", count_slash_run)
+    suffix = "u0061pi_key=audit-linear-secret"
+    raw = "\\" * (audit.DETAIL_INPUT_LIMIT - len(suffix)) + suffix
+
+    assert len(raw) == audit.DETAIL_INPUT_LIMIT
+    assert "audit-linear-secret" not in audit._sanitize_detail(audit.AuditBlocked(raw))
+    assert slash_visits <= 12 * len(raw)
+
+
 def test_malformed_url_is_fail_closed_on_bootstrap_and_publication_stderr(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2764,7 +2786,9 @@ def test_empty_inventory_publishes_blocked_instead_of_empty_success(
     monkeypatch.setattr(
         audit,
         "run_audit",
-        lambda _config, *, publish: (_ for _ in ()).throw(audit.AuditBlocked("inventory is empty")),
+        lambda _config, *, publish: (_ for _ in ()).throw(
+            audit.AuditBlocked("inventory is empty", reason="EMPTY_INVENTORY")
+        ),
     )
     assert audit.main([]) == 1
     receipt = json.loads(config.receipt_path.read_text())
@@ -2851,7 +2875,7 @@ def test_success_receipt_validator_uses_one_surrogate_schema_semantics_order(
     monkeypatch.setattr(
         audit,
         "_validate_schema",
-        lambda _receipt, _schema, _label: calls.append("schema"),
+        lambda _receipt, _schema, _label, **_kwargs: calls.append("schema"),
     )
     monkeypatch.setattr(
         audit,
@@ -2870,7 +2894,7 @@ def test_success_receipt_validator_stops_before_semantics_when_schema_fails(
     monkeypatch.setattr(
         audit,
         "_validate_schema",
-        lambda *_args: (_ for _ in ()).throw(audit.AuditBlocked("schema-first")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(audit.AuditBlocked("schema-first")),
     )
     monkeypatch.setattr(
         audit,
@@ -2889,6 +2913,34 @@ def test_all_stable_blocked_reason_codes_are_schema_valid(reason: str) -> None:
     jsonschema.Draft7Validator(
         schema, format_checker=jsonschema.FormatChecker()
     ).validate(receipt)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    sorted(audit.BLOCKED_REASONS - {"CONFIG_INVALID"}),
+)
+def test_main_preserves_typed_blocked_reason_without_message_inference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: audit.BlockedReason,
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(
+        audit,
+        "run_audit",
+        lambda _config, *, publish: (_ for _ in ()).throw(
+            audit.AuditBlocked(
+                "/path/exceeds/receipt-schema/inventory is empty",
+                reason=reason,
+            )
+        ),
+    )
+
+    assert audit.main([]) == 1
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["refusal_reason"] == reason
 
 
 def test_success_semantics_rejects_contradictory_aggregate() -> None:
@@ -3092,9 +3144,53 @@ def test_bootstrap_configuration_failures_are_typed(argv: list[str]) -> None:
     assert audit._blocked_reason(captured.value) == "CONFIG_INVALID"
 
 
-def test_required_keyword_without_typed_config_boundary_is_evidence_blocked() -> None:
-    error = audit.AuditBlocked("product archive manifest 'files' is a required property")
+def test_blocked_reason_never_infers_from_path_or_diagnostic_words() -> None:
+    error = audit.AuditBlocked(
+        "/archive/exceeds/resource-bound/receipt-schema-selector-outcome/inventory is empty"
+    )
     assert audit._blocked_reason(error) == "EVIDENCE_BLOCKED"
+
+
+def test_io_error_path_named_exceeds_and_receipt_remains_evidence_blocked(
+    tmp_path: Path,
+) -> None:
+    misleading_path = tmp_path / "archive-exceeds-resource-bound-receipt-schema"
+    misleading_path.mkdir()
+
+    with pytest.raises(audit.AuditBlocked, match="cannot read JSON evidence") as captured:
+        audit._read_json(misleading_path, tmp_path)
+
+    assert audit._blocked_reason(captured.value) == "EVIDENCE_BLOCKED"
+
+
+def test_blocked_reason_property_is_read_only() -> None:
+    error = audit.AuditBlocked("bounded", reason="RESOURCE_BOUND_EXCEEDED")
+
+    with pytest.raises(AttributeError):
+        error.reason = "EVIDENCE_BLOCKED"  # type: ignore[misc]
+
+
+def test_actual_empty_inventory_and_resource_limit_raises_are_typed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(audit.AuditBlocked, match="inventory is empty") as empty:
+        audit.build_receipt(
+            [],
+            audit_time=NOW,
+            archive_min_age_days=45,
+            product_coverage={},
+            salvage_selectors=[],
+            hot_coverage={},
+        )
+    assert audit._blocked_reason(empty.value) == "EMPTY_INVENTORY"
+
+    output = tmp_path / "run-output"
+    output.mkdir()
+    (output / "product.txt").write_text("evidence", encoding="utf-8")
+    monkeypatch.setattr(audit, "MAX_RUN_OUTPUT_ENTRIES", 0)
+    with pytest.raises(audit.AuditBlocked, match="run output exceeds") as bounded:
+        audit._directory_has_regular_file(output, tmp_path)
+    assert audit._blocked_reason(bounded.value) == "RESOURCE_BOUND_EXCEEDED"
 
 
 def test_main_does_not_label_untyped_bootstrap_failure_as_config_invalid(
@@ -3136,6 +3232,7 @@ def test_main_classifies_required_property_schema_failure_by_typed_boundary(
             {},
             {"type": "object", "required": ["required_evidence"]},
             label,
+            reason="RECEIPT_INVALID" if label == "archive completeness receipt" else "EVIDENCE_BLOCKED",
         )
         raise AssertionError("schema validation must raise")
 

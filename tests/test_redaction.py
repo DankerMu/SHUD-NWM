@@ -808,6 +808,22 @@ def test_unicode_escaped_non_sensitive_keys_are_not_overmatched(key: str) -> Non
     assert redact_text(f"{key}=visible") == f"{key}=visible"
 
 
+@pytest.mark.parametrize("key", [r"password\u", r"api_key\u"])
+def test_zero_length_malformed_unicode_suffix_is_an_atomic_sensitive_key_token(
+    key: str,
+) -> None:
+    assert redaction.is_sensitive_key(key)
+    assert redact_payload({key: "zero-length-secret"}) == {key: REDACTION_MARKER}
+    assert redact_text(f"{key}=zero-length-secret") == f"{key}={REDACTION_MARKER}"
+
+
+def test_zero_length_malformed_unicode_suffix_does_not_overmatch_ordinary_key() -> None:
+    key = r"ordinary\u"
+    assert not redaction.is_sensitive_key(key)
+    assert redact_payload({key: "visible"}) == {key: "visible"}
+    assert redact_text(f"{key}=visible") == f"{key}=visible"
+
+
 def test_mapping_and_auth_role_paths_consult_the_shared_sensitive_key_entrypoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1079,6 +1095,39 @@ def test_quoted_inner_key_fragment_has_bounded_character_visits(
 
     assert "hostile-secret" not in redacted
     assert visits <= 2 * len(hostile)
+
+
+@pytest.mark.parametrize(
+    ("suffix", "secret_must_be_redacted"),
+    [
+        ('"ordinary":"visible"', False),
+        ("ordinary=visible", False),
+        ("u0061pi_key=slash-run-secret", True),
+    ],
+)
+def test_200k_non_key_slash_run_is_skipped_with_linear_visit_bound(
+    monkeypatch: pytest.MonkeyPatch,
+    suffix: str,
+    secret_must_be_redacted: bool,
+) -> None:
+    original = redaction._slash_run_end
+    slash_visits = 0
+
+    def count_slash_run(value: str, start: int) -> int:
+        nonlocal slash_visits
+        end = original(value, start)
+        slash_visits += end - start
+        return end
+
+    monkeypatch.setattr(redaction, "_slash_run_end", count_slash_run)
+    raw = "\\" * 200_000 + suffix
+    result = redaction._redact_sensitive_assignments(raw)
+
+    if secret_must_be_redacted:
+        assert "slash-run-secret" not in result
+    else:
+        assert result == raw
+    assert slash_visits <= 4 * len(raw)
 
 
 @pytest.mark.parametrize(

@@ -16,6 +16,7 @@ from typing import Any
 import jsonschema
 import pytest
 
+from packages.common import redaction
 from scripts import node27_db_export_salvage as salvage
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -971,6 +972,28 @@ def test_unicode_escaped_credential_key_is_masked_from_salvage_publication_stder
     assert "publication-assigned-secret" not in stderr
     assert "publication-bare-unicode-secret" not in stderr
     assert "visible" in stderr
+
+
+def test_salvage_1mib_diagnostic_slash_run_uses_linear_shared_redaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = redaction._slash_run_end
+    slash_visits = 0
+
+    def count_slash_run(value: str, start: int) -> int:
+        nonlocal slash_visits
+        end = original(value, start)
+        slash_visits += end - start
+        return end
+
+    monkeypatch.setattr(redaction, "_slash_run_end", count_slash_run)
+    suffix = "u0061pi_key=salvage-linear-secret"
+    raw = "\\" * (1024 * 1024 - len(suffix)) + suffix
+    masked = salvage._mask_dsn_in_message(raw, _DSN)
+
+    assert len(raw) == 1024 * 1024
+    assert "salvage-linear-secret" not in masked
+    assert slash_visits <= 6 * len(raw)
 
 
 @pytest.mark.parametrize("quoted", [False, True])
