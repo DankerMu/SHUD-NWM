@@ -22,3 +22,12 @@ Post-review invariant-closure proof from PR #1073 head `aa880b8d4378e68e3327a290
 - The installed audit systemd lane passed the new root/checkout/namespace-origin preflight and reached the same independent #1066 `AuditBlocked` path.
 - The isolated stderr delta is bytes 579-751 from that invocation, with zero historical import errors and zero import-origin refusals.
 - The service remains non-zero solely because #1066 is still open; this file is not a completeness receipt.
+
+## `wrapper-pathmodel-live-20260713T075745Z.json`
+
+Final issue #1067 path-model proof from PR #1073 head `699d2921616cddf411cdc2d18d865ce392a7223e`:
+
+- Node-27 passed the expanded real-interpreter wrapper matrix (`140 passed`), including `PYTHONSAFEPATH=1`, script-directory shadow packages, explicit entrypoints outside the governed checkout, and empty inherited path segments.
+- The installed audit systemd lane passed the matching file-launch preflight and again reached the independent #1066 `AuditBlocked` path.
+- The isolated stderr delta is bytes 751-923, with zero import errors and zero import-origin refusals.
+- The service remains non-zero solely because #1066 is still open; this bounded stderr proof is not an archive-completeness receipt.
