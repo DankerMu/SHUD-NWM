@@ -247,7 +247,10 @@ executable SHALL resolve to a configured absolute regular non-symlink path
 Malformed/unreadable entries that cannot form canonical identity SHALL be
 separate deterministic discovery failures keyed by lane hint + safe
 root-relative locator; they count toward discovery/overall failure and the
-full-validation attempt bound but never enter selected/deferred.
+full-validation attempt bound but never enter selected/deferred. The sole
+aggregation exception is one invocation's state-leaf filesystem permission
+denials, which SHALL collapse to the lane-level `STATES_ACCESS_DENIED` contract
+below; non-permission state failures remain separate and locator-keyed.
 
 The lock file is absolute mode-0600 safe coordination metadata opened from a
 trusted dirfd with no-follow; existing files are fstat-bound without
@@ -625,3 +628,54 @@ failures terminate in `blocked` before the publication attempt.
 - **THEN** the audit MUST publish `blocked` and exit non-zero
 - **AND** a missing-value, duplicate/ambiguous, absent, or unsafe receipt-path
   bootstrap MUST remain the explicit stderr-only unwriteable exception
+
+### Requirement: Product discovery binds the canonical producer shape and fails access once
+
+The product-archive mover SHALL treat the configured object-store prefix as an
+exact producer identity, not an alias or bucket-normalization hint. A forcing
+manifest file URI SHALL remain below its exact package leaf. A run manifest
+SHALL bind its `run_id`, input manifest URI, and output directory URI to the
+discovered run directory; one canonical directory trailing slash MAY be
+normalized without changing identity. A configured prefix that differs from
+the manifest producer prefix SHALL fail these bindings rather than broaden URI
+containment. When one invocation cannot traverse one or more state leaves due
+to filesystem permission denial, it SHALL emit exactly one deterministic,
+sanitized `STATES_ACCESS_DENIED` diagnostic with the affected count and
+effective uid/gid context, terminate with the exact stderr/exit contract below,
+and perform no archive/source mutation. The receipt uses exactly one
+existing-schema discovery-failure item: `lane_hint=states`, `locator=states`,
+and reason
+`STATES_ACCESS_DENIED count=<decimal> euid=<decimal> egid=<decimal>`. After
+durable receipt publication the CLI emits exactly one compact stderr JSON line
+with `status=failed`, `exit_reason=STATES_ACCESS_DENIED`, and the same numeric
+`count`, `euid`, and `egid`, then exits `2`. Other receipt-declared failures
+retain exit `1`; this requirement does not add receipt-schema fields.
+
+#### Scenario: Canonical forcing and run products bind their live leaf
+
+- **WHEN** GFS or IFS forcing/run manifests use producer prefix `s3://nhms` and
+  bind the exact discovered package or run directory
+- **THEN** product discovery MUST accept the manifest, including a run output
+  directory URI that differs only by one canonical trailing slash
+- **AND** qhh/heihe basin naming layers MUST NOT be collapsed or inferred away
+
+#### Scenario: Historical configured bucket mismatch remains fail-closed
+
+- **WHEN** a real producer-shaped `s3://nhms/...` forcing or run manifest is
+  validated with configured prefix `s3://nhms-object-store`
+- **THEN** forcing MUST fail its exact-package binding and runs MUST fail their
+  run-directory identity/output binding
+- **AND** the mover MUST NOT accept cross-bucket or cross-leaf aliases as a
+  compatibility fallback
+
+#### Scenario: Multiple inaccessible state leaves produce one terminal access diagnostic
+
+- **WHEN** state discovery encounters filesystem permission denial across one
+  or more GFS/IFS basin leaves
+- **THEN** the receipt and structured stderr MUST expose one safe
+  `STATES_ACCESS_DENIED` diagnostic with the affected count and effective
+  uid/gid context, not one failure per leaf, using the exact receipt and stderr
+  shapes above
+- **AND** raw absolute paths, credentials, and raw exception text MUST be absent
+- **AND** the invocation MUST exit `2` before source/archive mutation and
+  MUST NOT claim a passing receipt

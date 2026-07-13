@@ -1245,3 +1245,184 @@ evidence. Retention remains an unchanged downstream consumer.
 - Non-goals: #1065 mover discovery/manifest/EACCES repair; #1067 wrapper import
   repair; DB URI migration or producer rewrite; node-22 compute prefix rewrite;
   retention enforce/dry-run or any #856 live cascade action.
+
+## Workflow Fixture: Issue #1065 Product-Archive Live Shape and Access Failure
+
+Fixture level `expanded` · Repair intensity `high` · NHMS project profile ·
+Reuses the shared change (`tier-node27-timeseries-storage`). Scope is the
+node-27 product-archive mover's real forcing/run manifest shape, historical
+prefix-mismatch regression, states discovery permission diagnostics, focused
+tests, runbook operations, and the live receipts that unblock the upstream
+archive-completeness audit. Retention, compression, rebuild-drill execution,
+and every #856 cascade action remain unchanged downstream consumers.
+
+### Source of truth / must preserve / must change
+
+- The first live receipt's 592 forcing and 852 run failures were produced with
+  `OBJECT_STORE_PREFIX=s3://nhms-object-store`, while the real manifests use
+  `s3://nhms/...`. Current node-27 env and the producer examples use
+  `s3://nhms`. Real forcing manifests bind every declared file below the exact
+  package leaf. Real GFS/IFS run manifests bind `run_id` to the run directory,
+  `outputs.run_manifest_uri` to `runs/<run_id>/input/manifest.json`, and
+  `outputs.output_uri` to `runs/<run_id>/output` modulo the already-canonical
+  directory trailing slash. Therefore the existing exact-leaf and run-output
+  validators are security boundaries and MUST NOT be loosened to accept the
+  historical mismatched bucket or cross-leaf URIs.
+- The live-shape fixture MUST exercise the production discovery and validation
+  path without replacing the validator under test. It covers forcing and runs
+  for both GFS and IFS, includes qhh and heihe identities, proves canonical
+  `s3://nhms` shapes pass, and proves the historical
+  `s3://nhms-object-store` configuration reproduces the two pinned failure
+  reasons. It also covers inaccessible GFS and IFS qhh/heihe state leaves.
+- Preserve safe relative-path enforcement, exact package containment, manifest
+  identity, checksum/tree/provenance validation, discovery/tree/resource
+  bounds, deterministic ordering, dry-run write limits, enforce
+  verify-before-delete semantics, flocking, and mode-0600 atomic receipt
+  publication.
+- A states subtree access denial is an operational precondition failure, not a
+  malformed independent state identity. All inaccessible state leaves from one
+  discovery invocation MUST collapse into exactly one existing-schema
+  `discovery_failures` item:
+  `{"lane_hint":"states","locator":"states","reason":
+  "STATES_ACCESS_DENIED count=<decimal> euid=<decimal> egid=<decimal>"}`.
+  `count` is positive and counts denied state leaves only. No receipt-schema
+  version or field is added. After the receipt is durably published, `main()`
+  emits exactly one compact structured stderr line
+  `{"count":<decimal>,"egid":<decimal>,"euid":<decimal>,
+  "exit_reason":"STATES_ACCESS_DENIED","status":"failed"}` and exits `2`;
+  other receipt failures keep exit `1`. Raw absolute paths and exception text
+  MUST NOT be copied into the receipt or stderr. Runtime semantic validation
+  recognizes this exact lane-level shape. The invocation does not continue
+  toward source deletion or claim a passing receipt.
+- The runbook MUST state the complete operator repair. Adding `nwm` to
+  `nfsdata` alone is insufficient when leaves are mode `0700`: existing and
+  future directories need group traversal/read bits and files need group read,
+  or an equivalent named-user plus default ACL. A new login/user-manager
+  restart is required after supplementary-group changes. Verification covers
+  `id`, `namei`, `getfacl`, `test -x`, and a bounded `find` as `nwm`. The PR does
+  not execute `usermod`, `chmod`, `chgrp`, or ACL mutation.
+- Live proof is two-stage: before operator permission repair, a direct mover run
+  produces the single `STATES_ACCESS_DENIED` terminal diagnostic; after the
+  operator repair, a direct dry-run produces a schema-valid non-failed receipt
+  with non-empty candidates, `bytes.source > 0`, planned terminals,
+  `bytes.archived == 0`, and zero pinned forcing/run discovery reasons. Dry-run
+  MUST NOT fabricate a compressed archive size. Because the production 45-day
+  cutoff is currently earlier than the oldest live run eligibility end, the
+  non-empty-candidate proof uses the existing allowed minimum of 30 days by an
+  explicit CLI override and leaves the production env at 45 days. A separate
+  default-env direct run proves current production configuration succeeds even
+  when its eligible queue is empty. The recurring inventory audit can become
+  non-empty `complete` only after the 228 DB-only forcing gaps are covered by
+  the already-specified task 3.3 salvage live operation; mover changes cannot
+  synthesize missing products. That additive, non-deleting salvage prerequisite
+  may be executed and evidenced before #1065 closes, but no retention command
+  from #856 is run. Both the immutable first failure receipt and the new
+  mover/salvage/audit receipts remain committed.
+
+### Risk packs considered
+
+- Public API / CLI / script entry: selected — direct and systemd execution must
+  expose a stable non-zero states-access reason.
+- Config / project setup: selected — canonical producer prefix versus the
+  historical mismatched prefix is the primary live-shape regression.
+- File IO / path safety / overwrite: selected — discovery walks untrusted NFS
+  paths and the mover may later delete verified source trees in enforce mode.
+- Schema / columns / units / field names: selected — receipt diagnostics and
+  planned byte accounting must remain schema-valid and semantically exact.
+- Auth / permissions / secrets: selected — effective uid/gid and NFS mode/ACL
+  determine reachability; diagnostics must not leak credentials or unsafe
+  absolute paths.
+- Concurrency / shared state / ordering: selected — one invocation aggregates
+  access failures deterministically while preserving flock and bounded queue
+  ordering.
+- Resource limits / large input / discovery: selected — the real object-store
+  has over a thousand leaves; fixtures and production traversal retain all
+  existing caps.
+- Legacy compatibility / examples: selected — the first-live receipt remains a
+  red baseline and current producer-shaped manifests remain accepted.
+- Error handling / rollback / partial outputs: selected — access denial fails
+  before mutation, is aggregated once, and cannot be confused with a malformed
+  manifest or a successful partial archive.
+- Release / packaging / dependency compatibility: not selected — no dependency
+  or runtime-version change is required.
+- Documentation / migration notes: selected — the operator permission repair
+  and verification procedure are an explicit acceptance condition.
+- Geospatial / CRS / basin geometry: not selected — basin geometry is not read
+  or transformed.
+- Hydro-met time series / forcing windows: selected — GFS/IFS forcing package
+  identities and their authoritative windows are discovered from live-shaped
+  manifests.
+- SHUD numerical runtime / conservation / NaN: not selected — no model runtime
+  or numerical output changes.
+- PostGIS / TimescaleDB domain behavior: selected only for the final read-only
+  inventory-audit completeness oracle; no DB mutation or schema change.
+- Slurm production lifecycle / mock-vs-real parity: not selected — node-22 and
+  scheduling are untouched.
+- External hydro-met providers / snapshot reproducibility: selected — GFS/IFS
+  provider source segments must remain distinct and canonical.
+- Run manifest / QC provenance: selected — run directory, run ID, manifest URI,
+  output URI, and producer prefix stay exactly bound.
+- Published NHMS artifacts / display identity: selected — hot-object identity,
+  archive receipt, and completeness receipt must all refer to the same source
+  bytes; display behavior remains untouched.
+
+### Invariant Matrix
+
+- Governing invariant: every discovered forcing/run leaf is accepted only when
+  its canonical producer URI and manifest identity bind the exact hot-store
+  leaf; a state namespace that cannot be traversed terminates once with a
+  stable access diagnostic before any archive mutation.
+- Source-of-truth contract: producer prefix `s3://nhms`; forcing exact package
+  leaf; run `run_id` plus exact manifest/output locations; states filesystem
+  mode/ACL as the access oracle; product-archive receipt schema as the output
+  contract.
+- Producers: node-27 download/ingest and SHUD run/state writers.
+- Validators/preflight: mover locator discovery, forcing/run manifest loaders,
+  canonical URI/relative-path validators, state dirfd walk, receipt runtime and
+  JSON-Schema validation.
+- Storage/cache/query: `/home/ghdc/nwm/object-store`, archive root, stable mover
+  receipt, and read-only inventory-audit snapshot/receipt.
+- Public routes/entrypoints: `scripts/node27_product_archive.py` and
+  `nhms-node27-product-archive.service`; no HTTP route changes.
+- Frontend/downstream consumers: inventory audit consumes hot/archive evidence;
+  retention consumes only a later complete audit receipt and is not run here.
+- Failure paths/rollback/stale state: mismatched bucket, cross-leaf forcing URI,
+  run identity/output drift, one or many inaccessible state leaves, partial
+  traversal, and receipt publication failure.
+- Evidence/audit/readiness: focused live-shape pytest, full existing mover
+  suite, ruff, strict OpenSpec validation, pre-repair access receipt, post-repair
+  passing mover receipt, and non-empty complete audit receipt tied to the
+  deployed commit.
+- Regression rows:
+  - canonical `s3://nhms` GFS/IFS forcing packages for qhh/heihe -> accepted;
+    historical mismatched configured bucket or a cross-leaf file URI -> the
+    pinned exact-package failure;
+  - canonical GFS/IFS runs for qhh/heihe, including output URI with a trailing
+    slash -> accepted; mismatched configured bucket or drifted run/output
+    identity -> the pinned run-binding failure;
+  - inaccessible GFS and IFS state leaves -> exactly one safe lane-level
+    receipt diagnostic, one exact structured stderr line, and exit code `2`,
+    regardless of leaf count; non-access discovery failures retain exit `1`;
+  - accessible state leaves plus canonical forcing/runs -> non-failed dry-run,
+    non-empty candidates under explicit 30-day evidence override,
+    `bytes.source > 0`, planned terminals, `bytes.archived == 0`, and no pinned
+    discovery reasons; default 45-day env may validly produce an empty queue;
+  - prior first-live failure receipt remains byte-identical and the new mover
+    plus complete audit receipts validate and identify the deployed commit.
+
+### Boundary-surface checklist and non-goals
+
+- Shared helper boundary: no producer URI or manifest contract is rewritten;
+  validators remain mover-owned and strict.
+- Public/operational boundary: code reports the access precondition; the
+  operator alone changes NFS group/mode/ACL state.
+- Producer/consumer evidence boundary: producer manifest -> mover discovery ->
+  archive receipt -> inventory audit -> complete receipt.
+- Stale-state/idempotency boundary: failed access cannot leave a prior passing
+  receipt looking current; repeated dry-runs over unchanged input produce the
+  same identities and diagnostic classification.
+- Non-goals: no retention dry-run/enforce, compression, rebuild drill, source
+  deletion, node-22 change, DB mutation, display change, or #856 live cascade.
+  Task 3.3's additive DB-export salvage is not retention and is required only
+  because #1065 acceptance asks for a `complete` audit receipt; it remains
+  receipt-scoped and never deletes DB rows or hot products.

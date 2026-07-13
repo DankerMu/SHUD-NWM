@@ -1226,3 +1226,63 @@ Order is load-bearing:
   receipt produced through the installed systemd unit. #1065 mover discovery
   repair and every #856 dry-run/enforce live-cascade action remain explicit
   non-goals.
+
+- [ ] 8.3 Fix issue #1065's product-archive live-shape and states-access
+  diagnostics.
+  Evidence floor: retain strict forcing exact-leaf and run identity/output URI
+  validators; add a disk-backed live-shape fixture covering canonical and
+  historical-prefix GFS/IFS forcing/runs for qhh/heihe plus inaccessible state
+  leaves; aggregate every states traversal EACCES from one invocation into one
+  sanitized `STATES_ACCESS_DENIED` diagnostic with a distinct non-zero exit
+  reason; document the complete NFS group/mode-or-ACL operator repair without
+  executing it in this PR; commit a post-repair non-failed mover receipt and a
+  non-empty complete inventory-audit receipt while preserving the first-live
+  failure receipt.
+  Test/evidence rows:
+  - Input: disk-backed GFS and IFS forcing packages for qhh and heihe whose
+    manifests use canonical `s3://nhms/<exact-package-leaf>/...`. Expected:
+    discovery accepts them. Input: the identical packages with configured
+    prefix `s3://nhms-object-store`, or a file URI moved outside its exact leaf.
+    Expected: deterministic `forcing manifest file URI escapes its exact
+    package leaf` failures; no validator weakening.
+  - Input: disk-backed GFS and IFS qhh/heihe runs with directory-bound `run_id`,
+    exact run-manifest URI, and output URI with or without one directory trailing
+    slash. Expected: discovery accepts them. Input: the historical mismatched
+    configured prefix or drifted run/output identity. Expected: deterministic
+    `run manifest identity/outputs do not bind run directory` failure.
+  - Input: one, then two or more inaccessible state leaves spanning GFS and
+    IFS. Expected: the receipt has exactly one item with `lane_hint=states`,
+    `locator=states`, and reason
+    `STATES_ACCESS_DENIED count=<N> euid=<uid> egid=<gid>`; after durable receipt
+    publication stderr has exactly one compact JSON line with
+    `status=failed`, `exit_reason=STATES_ACCESS_DENIED`, the same count/euid/
+    egid, and process exit code `2`. Raw absolute paths/exception text are
+    absent and no source/archive mutation occurs. A non-access discovery
+    failure retains ordinary per-locator diagnostics and exit code `1`.
+  - Input: runbook permission repair. Expected: it states that supplementary
+    group membership alone does not fix mode-0700 leaves; documents group
+    traversal/read plus future-writer inheritance or named-user/default ACL;
+    requires a new login/user-manager restart; and verifies with `id`, `namei`,
+    `getfacl`, `test -x`, and bounded `find` as `nwm`.
+  - Input: node-27 direct mover before permission repair. Expected: committed
+    schema-valid access-failure evidence with the exact receipt/stderr/exit-2
+    contract. Input: default-env direct dry-run after operator repair at the
+    frozen implementation SHA. Expected: `outcome != failed` and neither pinned
+    forcing/run reason appears; an empty queue is valid at the current 45-day
+    cutoff. Input: a second dry-run with explicit `--minimum-age-days 30`.
+    Expected: candidates non-empty, every selected terminal is `planned`,
+    `bytes.source > 0`, and `bytes.archived == 0`; production env remains 45.
+  - Input: the 228 exact selectors from the current incomplete audit receipt,
+    executed through task 3.3's additive non-deleting salvage lane, then the
+    installed recurring inventory audit. Expected: committed schema-valid
+    `complete` receipt with a non-empty `windows` inventory and empty
+    `salvage_selectors`, tied by SHA/provenance to the deployed commit. No #856
+    retention command runs. The original
+    `first-live-run-20260713T043808Z.json` remains unchanged.
+  Verification: `uv run pytest -q tests/test_node27_product_archive.py
+  tests/test_node27_storage_inventory_audit.py`; product/archive receipt schema
+  example validation; `uv run ruff check .`; `openspec validate
+  tier-node27-timeseries-storage --strict --no-interactive`; node-27 direct
+  mover, receipt-scoped task 3.3 salvage, and systemd audit receipts. Retention,
+  drill, compression, source deletion, permission mutation, and every #856
+  live-cascade command are explicit non-goals.
