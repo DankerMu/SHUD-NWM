@@ -655,13 +655,15 @@ surfaces in the same commit.
 - `DRILL_RECEIPT_STALE` — drill `generated_at` older than
   `NODE27_TIMESERIES_RETENTION_DRILL_MAX_AGE_DAYS`.
 - `DRILL_RECEIPT_FAIL` — drill receipt `verdict = FAIL`.
-- `DRILL_COVERAGE_FORCING_MISSING` — no `source=forcing` coverage tuple
-  whose window covers the drop window.
-- `DRILL_COVERAGE_RUNS_MISSING` — no `source=runs` coverage tuple whose
-  window covers the drop window.
+- `DRILL_COVERAGE_FORCING_MISSING` — no set of `source=forcing` coverage
+  tuples whose UNION covers the drop window (per-cycle 24 h tuples merge
+  into a single covering interval; a 30 d drop window is normally covered
+  by ~30 daily tuples).
+- `DRILL_COVERAGE_RUNS_MISSING` — no set of `source=runs` coverage tuples
+  whose UNION covers the drop window.
 - `DRILL_COVERAGE_DB_EXPORT_MISSING` — completeness has `coverage=db-export`
-  subject overlap but no drill `source=db-export` tuple covers the drop
-  window.
+  subject overlap but no set of drill `source=db-export` tuples whose
+  UNION covers the drop window.
 - `RETENTION_CONFIG_INVALID` — absolute-path / positive-int / env-parse
   failure before any DB call. Emitted with `outcome=refused` when a
   receipt path is parseable; otherwise the runner exits with code 2
@@ -757,10 +759,18 @@ Receipts match `schemas/timeseries_retention_receipt.schema.json`
 
 - `outcome=dry-run`: `mode=dry-run`; `candidate_chunks[]` lists chunks
   that WOULD be dropped up to the per-tick bound; `deferred_remainder[]`
-  lists chunks beyond the bound. Gates are NOT evaluated in dry-run mode
-  — the candidate list reflects only enumeration + bound.
+  lists chunks beyond the bound. Gates ARE evaluated in dry-run mode —
+  a dry-run invocation that would refuse still emits a `refused` receipt
+  (`mode=enforce` per the schema `oneOf`) so operators see the exact
+  refusal reason before ever running enforce. If gates pass, dry-run
+  enumerates candidate chunks + deferred remainder without invoking
+  `drop_chunks`. The `--dry-run` CLI flag controls the DROP phase only;
+  gate evaluation is always run because it is the operator's oracle for
+  whether enforce is safe.
 - `outcome=refused`: `mode=enforce`; `refusal_reason` is one of the codes
-  in §8.2. Nothing was dropped this tick.
+  in §8.2. Nothing was dropped this tick. A `refused` receipt can be
+  emitted by a `--dry-run` invocation too — the mode field always reads
+  `enforce` because the schema pins that pairing.
 - `outcome=enforced`: `mode=enforce`; `dropped_chunks[]` records each
   dropped chunk with its pre-drop `freed_bytes` (H4 — measured BEFORE
   `drop_chunks`); `deferred_remainder[]` records the beyond-bound

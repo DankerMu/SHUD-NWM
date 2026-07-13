@@ -16,8 +16,10 @@ BOTH gate receipts are fresh AND cover the drop window:
    ``schemas/archive_rebuild_drill_receipt.schema.json``). Refuses if the
    drill is FAIL, stale, or its declared ``coverage[]`` tuples fail the per-
    source rule in ``docs/runbooks/tier-node27-timeseries-storage.md §7.5``:
-   BOTH ``source=forcing`` AND ``source=runs`` tuples MUST span the drop
-   window; ``source=db-export`` is required iff the completeness receipt
+   for BOTH ``source=forcing`` AND ``source=runs`` the UNION of tuple
+   windows MUST span the drop window (the drill emits per-cycle 24 h
+   tuples — no single tuple is expected to cover a 30 d drop window on
+   its own); ``source=db-export`` is required iff the completeness receipt
    reports any ``coverage=db-export`` subject overlapping the drop window.
 
 Design references (design.md #855 fixture pins H1-H17):
@@ -555,7 +557,11 @@ def check_completeness_gate(
     except ValueError:
         reasons.append(CODE_COMPLETENESS_RECEIPT_STALE)
         return reasons
-    if now - generated_at > timedelta(hours=max_age_hours):
+    age = now - generated_at
+    # Future-dated receipts (negative age) are not fresh — the receipt was
+    # emitted with a clock ahead of the runner's; reuse STALE rather than
+    # introducing a new wire code (byte-identity discipline from #854 R2).
+    if age < timedelta(0) or age > timedelta(hours=max_age_hours):
         reasons.append(CODE_COMPLETENESS_RECEIPT_STALE)
         return reasons
     if drop_window is None:
@@ -634,7 +640,9 @@ def check_drill_gate(
     except ValueError:
         reasons.append(CODE_DRILL_RECEIPT_STALE)
         return reasons
-    if now - generated_at > timedelta(days=max_age_days):
+    age = now - generated_at
+    # Future-dated receipts (negative age) reuse STALE per H8 discipline.
+    if age < timedelta(0) or age > timedelta(days=max_age_days):
         reasons.append(CODE_DRILL_RECEIPT_STALE)
         return reasons
     if receipt.get("verdict") != "PASS":
@@ -656,11 +664,23 @@ def check_drill_gate(
     return reasons
 
 
-def _drill_covers(coverage: Sequence[Mapping[str, Any]], source: str, drop: DropWindow) -> bool:
-    for entry in coverage:
+def _tuples_cover_window(
+    tuples: Sequence[Mapping[str, Any]], drop_window: DropWindow
+) -> bool:
+    """Return True iff the UNION of tuple windows covers ``drop_window``.
+
+    H2 semantics per runbook §7.5: the drill emits per-cycle 24 h coverage
+    tuples (one per verified product manifest); a 30 d drop window is
+    covered by ~30 daily tuples whose union spans it — no single tuple
+    needs to individually contain the drop window.
+
+    Standard interval-merge: sort by start, coalesce overlapping/adjacent
+    intervals, then check whether any merged interval fully contains the
+    drop window.
+    """
+    parsed: list[tuple[datetime, datetime]] = []
+    for entry in tuples:
         if not isinstance(entry, Mapping):
-            continue
-        if entry.get("source") != source:
             continue
         window = entry.get("window") or {}
         try:
@@ -668,9 +688,30 @@ def _drill_covers(coverage: Sequence[Mapping[str, Any]], source: str, drop: Drop
             end = _parse_iso(window["end"])
         except (KeyError, TypeError, ValueError):
             continue
-        if _covers(start, end, drop):
+        if end < start:
+            continue
+        parsed.append((start, end))
+    if not parsed:
+        return False
+    parsed.sort(key=lambda w: w[0])
+    merged: list[tuple[datetime, datetime]] = []
+    for start, end in parsed:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    for start, end in merged:
+        if start <= drop_window.start and end >= drop_window.end:
             return True
     return False
+
+
+def _drill_covers(
+    coverage: Sequence[Mapping[str, Any]], source: str, drop: DropWindow
+) -> bool:
+    """H2 per-source coverage: UNION of ``source=X`` tuples spans drop window."""
+    filtered = [entry for entry in coverage if isinstance(entry, Mapping) and entry.get("source") == source]
+    return _tuples_cover_window(filtered, drop)
 
 
 def derive_salvage_backed_windows(
@@ -786,35 +827,42 @@ def _default_measure_chunk_bytes(
 ) -> dict[str, int]:
     """H4: measure ``pg_total_relation_size(...)`` BEFORE drop.
 
-    Per-chunk try/except: a measure failure records ``0`` for that chunk so
-    the drop phase can still proceed and report best-effort ``freed_bytes``.
-    Measurement uses a fresh connection per invocation with a 60 s timeout;
-    the DROP phase then opens its own connection (300 s) per chunk.
+    Per-chunk connection (mirrors compression sibling ``:292-338`` exactly):
+    a shared transaction would enter ``InFailedSqlTransaction`` state on the
+    first per-chunk failure, silently zeroing every subsequent chunk's
+    ``freed_bytes``. Isolating each measurement in its own connection keeps
+    the receipt faithful when a single chunk fails to size.
+
+    Per-chunk try/except records ``0`` on failure so the drop phase can
+    still proceed and report best-effort ``freed_bytes``. Each connection
+    has a 60 s ``statement_timeout``; the DROP phase opens its own
+    connection (300 s) per chunk.
     """
     import psycopg2  # type: ignore[import-untyped]
 
     if not chunks:
         return {}
     result: dict[str, int] = {}
-    connection = psycopg2.connect(config.database_url)
-    try:
-        with connection:
-            with connection.cursor() as cursor:
-                cursor.execute(f"SET statement_timeout = {_QUERY_TIMEOUT_MS}")
-                for chunk in chunks:
-                    try:
+    for chunk in chunks:
+        try:
+            connection = psycopg2.connect(config.database_url)
+            try:
+                with connection:
+                    with connection.cursor() as cursor:
+                        cursor.execute(f"SET statement_timeout = {_QUERY_TIMEOUT_MS}")
                         cursor.execute(
                             "SELECT pg_total_relation_size(%s::regclass)",
                             (chunk.qualified_name,),
                         )
                         row = cursor.fetchone()
                         result[chunk.qualified_name] = int((row[0] if row else 0) or 0)
-                    except Exception:
-                        # A per-chunk measure failure is not a whole-tick
-                        # fault. Record 0 so the receipt is faithful.
-                        result[chunk.qualified_name] = 0
-    finally:
-        connection.close()
+            finally:
+                connection.close()
+        except Exception:
+            # A per-chunk measure failure is not a whole-tick fault. Record
+            # 0 so the receipt is faithful; a fresh connection for the next
+            # chunk guarantees this chunk's abort does not poison the rest.
+            result[chunk.qualified_name] = 0
     return result
 
 
@@ -856,9 +904,31 @@ def _default_drop_chunk(config: RetentionConfig, chunk: ChunkRow) -> None:
 # ---------------------------------------------------------------------------
 
 
+# Custom ``date-time`` format checker — jsonschema treats ``format`` as
+# informational unless a checker registers it, and the built-in FormatChecker
+# only registers ``date-time`` when an optional ``rfc3339-validator``-style
+# dep is installed (not a project dep here). Register a local checker that
+# reuses ``_parse_iso`` so the receipt emitter's OWN output is the acceptance
+# oracle — no drift between what we emit and what we accept.
+_RECEIPT_FORMAT_CHECKER = jsonschema.FormatChecker()
+
+
+@_RECEIPT_FORMAT_CHECKER.checks("date-time", raises=(ValueError, TypeError))
+def _validate_date_time_format(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    _parse_iso(value)
+    return True
+
+
 def _validate_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+    """Validate the receipt with a FormatChecker so ``format: date-time`` on
+    ``generated_at`` and ``salvage_backed_windows[].{start,end}`` is
+    enforced (schema pins the format; without a checker, jsonschema treats
+    format as informational and silently accepts any string).
+    """
     schema = _load_schema(_RECEIPT_SCHEMA_PATH)
-    jsonschema.validate(receipt, schema)
+    jsonschema.validate(receipt, schema, format_checker=_RECEIPT_FORMAT_CHECKER)
     return receipt
 
 

@@ -849,7 +849,7 @@ Phase 0.5 fixture review surfaced **4 BLOCKING + 6 MODERATE + 3 MINOR CONFIRMED*
 Spec `timeseries-db-retention/spec.md:13-19` says every subject "with rows or products in the drop window" must carry `verdict = complete`, but `schemas/archive_completeness_receipt.schema.json` is subject-list keyed; the runner MUST NOT re-query the DB to enumerate in-window subjects (would introduce a shadow oracle bypassing D6). Pinned rule: the receipt is the sole authority. Runner refuses if (a) `coverage_bounds` does not fully contain the drop window (`bounds.start <= drop.start ∧ bounds.end >= drop.end`), or (b) any subject whose `window` overlaps the drop window has `verdict != complete`. Distinct wire codes per case (see §Wire-format codes).
 
 **H2 — Drill per-source coverage rule (BLOCKING).**
-Retention drops chunks from `hydro.river_timeseries` (source=`runs`) and `met.forcing_station_timeseries` (source=`forcing`); the drill receipt PASS branch declares `coverage[]` tuples `(source ∈ {forcing, runs, db-export}, window)`. Runbook §7.5 already declares the rule the runner MUST byte-for-byte enforce: BOTH `forcing` AND `runs` coverage tuples must span the drop window; `db-export` coverage is required iff the completeness receipt reports any `coverage=db-export` verdict overlapping the drop window. Refusal is per-shortfall — distinct wire codes so operators see which source blocked.
+Retention drops chunks from `hydro.river_timeseries` (source=`runs`) and `met.forcing_station_timeseries` (source=`forcing`); the drill receipt PASS branch declares `coverage[]` tuples `(source ∈ {forcing, runs, db-export}, window)`. Runbook §7.5 already declares the rule the runner MUST byte-for-byte enforce: for BOTH `source=forcing` AND `source=runs` the UNION of coverage tuples must span the drop window (the drill emits per-cycle 24 h tuples, so a 30 d drop window is normally covered by ~30 daily tuples whose union spans it — no single tuple is expected to individually contain the drop window); `db-export` coverage is required iff the completeness receipt reports any `coverage=db-export` verdict overlapping the drop window, and the same union rule applies. Refusal is per-shortfall — distinct wire codes so operators see which source blocked.
 
 **H3 — Chunk enumeration to honour per-tick bound (BLOCKING).**
 `SELECT drop_chunks(older_than := X, hypertable := 'schema.table'::regclass)` cannot bound cardinality (server picks all matching chunks). Runner MUST reuse the #851 pattern: catalog-enumerate via `timescaledb_information.chunks` for the two D3 hypertables, `ORDER BY hypertable_schema, hypertable_name, range_end ASC`, take `per_tick_bound`, then invoke `drop_chunks` per selected chunk (`older_than := chunk.range_end + INTERVAL '1 microsecond'` — the smallest strict-greater step). Remaining eligible chunks are recorded in `deferred_remainder[]`.
@@ -913,7 +913,7 @@ Add explicit test row: enforce mode when the catalog enumeration returns 0 eligi
 | Invariant | Enforcement |
 |---|---|
 | Completeness receipt authority (H1) | Runner reads only from the receipt; no DB probe for in-window subjects; unit test asserts refusal on subject `verdict != complete` in drop window and on `coverage_bounds` shortfall. |
-| Drill per-source coverage (H2) | Runner requires BOTH `forcing` AND `runs` coverage tuples spanning drop window; `db-export` iff completeness reports `coverage=db-export` overlap; unit test per shortfall. |
+| Drill per-source coverage (H2) | Runner requires that for BOTH `source=forcing` AND `source=runs` the UNION of coverage tuples spans the drop window (per-cycle 24 h tuples merge into a single covering interval); `db-export` required iff completeness reports `coverage=db-export` overlap; unit test per shortfall and per union-gap. |
 | Chunk enumeration honours per-tick bound (H3) | Catalog query + ORDER BY range_end ASC + `[:per_tick_bound]`; unit test asserts (a) selected count == bound when eligible > bound, (b) `deferred_remainder[]` = remaining eligible chunks. |
 | Compressed chunks are retention-eligible | Catalog filter includes `is_compressed IN (true, false)`; unit test with mixed compressed/uncompressed eligible chunks. |
 | Boundary predicate `range_end <= cutoff` (H7) | Predicate in enumeration query + code comment citing spec; unit test with chunk at boundary + chunk straddling boundary. |
@@ -938,9 +938,9 @@ Retention emits structured refusal codes; byte-identical across code (`scripts/n
 - `DRILL_RECEIPT_MISSING` — env-declared path missing / not a regular file.
 - `DRILL_RECEIPT_STALE` — `generated_at` older than `NODE27_TIMESERIES_RETENTION_DRILL_MAX_AGE_DAYS`.
 - `DRILL_RECEIPT_FAIL` — drill receipt `verdict = FAIL`.
-- `DRILL_COVERAGE_FORCING_MISSING` — no `source=forcing` tuple whose window covers the drop window.
-- `DRILL_COVERAGE_RUNS_MISSING` — no `source=runs` tuple whose window covers the drop window.
-- `DRILL_COVERAGE_DB_EXPORT_MISSING` — completeness shows `db-export` overlap but no drill `source=db-export` tuple covers the drop window.
+- `DRILL_COVERAGE_FORCING_MISSING` — no set of `source=forcing` tuples whose UNION covers the drop window.
+- `DRILL_COVERAGE_RUNS_MISSING` — no set of `source=runs` tuples whose UNION covers the drop window.
+- `DRILL_COVERAGE_DB_EXPORT_MISSING` — completeness shows `db-export` overlap but no set of drill `source=db-export` tuples whose UNION covers the drop window.
 - `RETENTION_CONFIG_INVALID` — absolute-path / positive-int / env-parse failure before any DB call. Emitted with `outcome=refused` when parseable; otherwise runner exits before receipt.
 - `RETENTION_CONCURRENT_INVOCATION` — non-blocking `fcntl.flock` on the lock path is already held.
 - `RETENTION_DROP_FAILED` — per-chunk `drop_chunks` raised; suffix `:<schema>.<chunk_name>`. Whole tick refuses (H5).
