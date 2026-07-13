@@ -13,7 +13,7 @@ import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Literal, Mapping, Protocol, Sequence
 from urllib.parse import unquote, urlparse
 
 import jsonschema
@@ -77,8 +77,10 @@ UNEXPECTED_ERROR_REASON = "UNEXPECTED_AUDIT_ERROR"
 PUBLICATION_FAILED_CODE = "RECEIPT_PUBLICATION_FAILED"
 PUBLICATION_INDETERMINATE_CODE = "RECEIPT_PUBLICATION_INDETERMINATE"
 DETAIL_INPUT_LIMIT = 8 * 1024
+DSN_REDACTION_INPUT_LIMIT = 8 * 1024
 DETAIL_OUTPUT_LIMIT = 512
 DETAIL_TRUNCATION_MARKER = " [detail-truncated]"
+DIAGNOSTIC_REDACTED_MARKER = " [diagnostic-redacted]"
 
 
 @dataclass(frozen=True)
@@ -583,7 +585,7 @@ def _verify_product_producer_provenance(subject: InventorySubject, manifest: Map
 
 
 def _state_archive_member_path(subject: InventorySubject, object_store_prefix: str) -> str:
-    key = _object_key(subject.hot_uri, object_store_prefix)
+    key = _object_key(subject.hot_uri, object_store_prefix, kind="file")
     physical_model = subject.cloned_from_model_id or subject.model_id
     cycle = subject.cycle_time.astimezone(UTC).strftime("%Y%m%d%H")
     if subject.source_id:
@@ -610,7 +612,7 @@ def _verify_forcing_hot(subject: InventorySubject, config: AuditConfig) -> Cover
     cycle = subject.cycle_time.astimezone(UTC).strftime("%Y%m%d%H")
     source = normalize_source_id(subject.source_id or "").lower()
     expected = f"forcing/{source}/{cycle}/{subject.basin_version_id}/{subject.model_id}"
-    key = _object_key(subject.hot_uri, config.object_store_prefix)
+    key = _object_key(subject.hot_uri, config.object_store_prefix, kind="directory")
     if key != expected:
         raise AuditBlocked(f"forcing URI identity mismatch for {subject.subject_id}: {key}")
     manifest_path = config.object_store_root / key / "forcing_package.json"
@@ -653,7 +655,7 @@ def _verify_forcing_hot(subject: InventorySubject, config: AuditConfig) -> Cover
             or not isinstance(entry.get("checksum"), str)
         ):
             raise AuditBlocked(f"malformed forcing file entry: {subject.subject_id}")
-        file_key = _object_key(entry["uri"], config.object_store_prefix)
+        file_key = _object_key(entry["uri"], config.object_store_prefix, kind="file")
         if not file_key.startswith(expected + "/"):
             raise AuditBlocked(f"forcing file escapes package: {file_key}")
         path = config.object_store_root / file_key
@@ -674,8 +676,12 @@ def _verify_run_hot(subject: InventorySubject, config: AuditConfig) -> Coverage 
         refs = json.loads(subject.hot_uri)
     except json.JSONDecodeError as error:
         raise AuditBlocked(f"malformed internal run refs: {subject.subject_id}") from error
-    manifest_key = _object_key(str(refs.get("manifest") or ""), config.object_store_prefix)
-    output_key = _object_key(str(refs.get("output") or ""), config.object_store_prefix).rstrip("/")
+    manifest_key = _object_key(
+        str(refs.get("manifest") or ""), config.object_store_prefix, kind="file"
+    )
+    output_key = _object_key(
+        str(refs.get("output") or ""), config.object_store_prefix, kind="directory"
+    )
     expected_manifest = f"runs/{subject.subject_id}/input/manifest.json"
     expected_output = f"runs/{subject.subject_id}/output"
     if manifest_key != expected_manifest or output_key != expected_output:
@@ -713,8 +719,18 @@ def _verify_run_hot(subject: InventorySubject, config: AuditConfig) -> Coverage 
         actual != expected
         or actual_model.get("model_id") != subject.model_id
         or actual_model.get("basin_version_id") != subject.basin_version_id
-        or _object_key(str(outputs.get("run_manifest_uri") or ""), config.object_store_prefix) != expected_manifest
-        or _object_key(str(outputs.get("output_uri") or ""), config.object_store_prefix).rstrip("/") != expected_output
+        or _object_key(
+            str(outputs.get("run_manifest_uri") or ""),
+            config.object_store_prefix,
+            kind="file",
+        )
+        != expected_manifest
+        or _object_key(
+            str(outputs.get("output_uri") or ""),
+            config.object_store_prefix,
+            kind="directory",
+        )
+        != expected_output
     ):
         raise AuditBlocked(f"run manifest row identity mismatch: {subject.subject_id}")
     if output_has_regular is None:
@@ -725,7 +741,7 @@ def _verify_run_hot(subject: InventorySubject, config: AuditConfig) -> Coverage 
 
 
 def _verify_state_hot(subject: InventorySubject, config: AuditConfig) -> Coverage | None:
-    key = _object_key(subject.hot_uri, config.object_store_prefix)
+    key = _object_key(subject.hot_uri, config.object_store_prefix, kind="file")
     physical_model = subject.cloned_from_model_id or subject.model_id
     cycle = subject.cycle_time.astimezone(UTC).strftime("%Y%m%d%H")
     if subject.source_id:
@@ -1070,21 +1086,25 @@ def _blocked_reason(error: AuditBlocked) -> str:
 
 def _sanitize_detail(error: BaseException, *, database_url: str | None = None) -> str:
     raw_detail = str(error)
-    input_truncated = len(raw_detail) > DETAIL_INPUT_LIMIT
-    detail = raw_detail[:DETAIL_INPUT_LIMIT].replace("\n", " ").replace("\r", " ")
-    for dsn in (database_url, os.getenv("DATABASE_URL")):
+    configured_dsns = (database_url, os.getenv("DATABASE_URL"))
+    if len(raw_detail) > DETAIL_INPUT_LIMIT:
+        return f"{type(error).__name__}{DETAIL_TRUNCATION_MARKER}{DIAGNOSTIC_REDACTED_MARKER}"
+    if any(dsn and len(dsn) > DSN_REDACTION_INPUT_LIMIT for dsn in configured_dsns):
+        return f"{type(error).__name__}{DIAGNOSTIC_REDACTED_MARKER}"
+    detail = raw_detail.replace("\n", " ").replace("\r", " ")
+    for dsn in configured_dsns:
         if dsn:
             detail = detail.replace(dsn, "[DATABASE_URL]")
         detail = redact_database_dsn(detail, dsn)
     detail = redact_text(detail)
-    if input_truncated or len(detail) > DETAIL_OUTPUT_LIMIT:
+    if len(detail) > DETAIL_OUTPUT_LIMIT:
         detail = detail[: DETAIL_OUTPUT_LIMIT - len(DETAIL_TRUNCATION_MARKER)] + DETAIL_TRUNCATION_MARKER
     return detail or type(error).__name__
 
 
 def _emit_stderr(code: str, message: str) -> None:
-    safe_message = redact_text(message)[:512]
-    safe_code = redact_text(code)[:128]
+    safe_message = message[:512]
+    safe_code = code[:128]
     print(_canonical({"status": "blocked", "reason": safe_code, "message": safe_message}), file=sys.stderr)
 
 
@@ -1373,7 +1393,7 @@ def _directory_has_regular_file_optional(directory: Path, root: Path) -> bool | 
         return None
 
 
-def _object_key(uri: str, prefix: str) -> str:
+def _object_key(uri: str, prefix: str, *, kind: Literal["file", "directory"]) -> str:
     raw = uri.strip()
     if (
         not raw
@@ -1405,7 +1425,9 @@ def _object_key(uri: str, prefix: str) -> str:
             raise AuditBlocked(f"object URI outside configured prefix: {raw}")
         if not parsed.path.startswith("/") or parsed.path.startswith("//"):
             raise AuditBlocked("object-store evidence URI path is noncanonical")
-        object_path = _decode_object_key_path(_without_single_directory_trailing_slash(parsed.path[1:]))
+        object_path = _decode_object_key_path(
+            _normalize_object_key_trailing_slash(parsed.path[1:], kind=kind)
+        )
         prefix_path = expected.path[1:] if expected.path.startswith("/") else ""
         if prefix_path:
             if not object_path.startswith(prefix_path + "/"):
@@ -1415,7 +1437,7 @@ def _object_key(uri: str, prefix: str) -> str:
     elif "://" in raw or raw.startswith("/"):
         raise AuditBlocked("unsupported object-store evidence URI")
     else:
-        raw = _decode_object_key_path(_without_single_directory_trailing_slash(raw))
+        raw = _decode_object_key_path(_normalize_object_key_trailing_slash(raw, kind=kind))
     key = raw
     parts = key.split("/")
     if (
@@ -1484,10 +1506,18 @@ def _decode_object_key_path(value: str) -> str:
     return decoded
 
 
-def _without_single_directory_trailing_slash(value: str) -> str:
+def _normalize_object_key_trailing_slash(
+    value: str, *, kind: Literal["file", "directory"]
+) -> str:
     if value.endswith("//"):
         raise AuditBlocked("object-store evidence URI has multiple trailing slashes")
-    return value[:-1] if value.endswith("/") else value
+    if kind == "file" and value.endswith("/"):
+        raise AuditBlocked("object-store file evidence URI has a trailing slash")
+    if kind == "directory":
+        return value[:-1] if value.endswith("/") else value
+    if kind != "file":
+        raise AuditBlocked("object-store evidence URI has an unknown object kind")
+    return value
 
 
 def _safe_object_key(value: str) -> bool:

@@ -415,6 +415,33 @@ def test_sensitive_assignment_scanner_handles_quoted_and_escaped_boundaries(
     assert redact_text(raw) == expected
 
 
+def test_sensitive_assignment_scanner_handles_quoted_keys_and_consecutive_fields() -> None:
+    raw = (
+        '{"password" : "sec\\\"ret", \'api_key\'=\'key\\\'tail\','
+        '"token":"", "safe": "visible", "ordinary": "password"}'
+    )
+
+    assert redact_text(raw) == (
+        '{"password" : [redacted], \'api_key\'=[redacted],'
+        '"token":[redacted], "safe": "visible", "ordinary": "password"}'
+    )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        'prefix "password"="one"\'api_key\':\'two\' suffix',
+        "prefix 'password' = \"one\" \"api_key\" : 'two' suffix",
+    ],
+)
+def test_sensitive_assignment_scanner_accepts_paired_single_or_double_quoted_keys(
+    raw: str,
+) -> None:
+    redacted = redact_text(raw)
+    assert "one" not in redacted and "two" not in redacted
+    assert redacted.count(REDACTION_MARKER) == 2
+
+
 def test_sensitive_assignment_scanner_handles_long_unterminated_hostile_input() -> None:
     hostile = 'password="' + "\\" * 200_000
     assert redact_text(hostile) == "password=[redacted]"
@@ -435,6 +462,25 @@ def test_sensitive_assignment_key_scanner_has_bounded_character_visits(
     hostile = "ordinary-token." * 50_000 + " password=secret"
     assert redaction._redact_sensitive_assignments(hostile).endswith(" password=[redacted]")
     assert visits <= 3 * len(hostile)
+
+
+def test_quoted_assignment_key_scanner_has_bounded_character_visits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = redaction._is_assignment_key_char
+    visits = 0
+
+    def count_visit(character: str) -> bool:
+        nonlocal visits
+        visits += 1
+        return original(character)
+
+    monkeypatch.setattr(redaction, "_is_assignment_key_char", count_visit)
+    hostile = ('"ordinary_key":"value",' * 50_000) + '"password":"secret"'
+    assert redaction._redact_sensitive_assignments(hostile).endswith(
+        '"password":[redacted]'
+    )
+    assert visits <= 2 * len(hostile)
 
 
 @pytest.mark.parametrize(

@@ -365,18 +365,31 @@ def _redact_sensitive_assignments(value: str) -> str:
     emitted = 0
     length = len(value)
     while cursor < length:
-        if not _is_assignment_key_char(value[cursor]):
+        quote = value[cursor] if value[cursor] in {'"', "'"} else None
+        if quote is not None:
+            key_start = cursor
+            cursor += 1
+            token_start = cursor
+            while cursor < length and _is_assignment_key_char(value[cursor]):
+                cursor += 1
+            token_end = cursor
+            if cursor >= length or value[cursor] != quote:
+                continue
+            cursor += 1
+            token = value[token_start:token_end]
+        elif _is_assignment_key_char(value[cursor]):
+            key_start = cursor
+            while cursor < length and _is_assignment_key_char(value[cursor]):
+                cursor += 1
+            token = value[key_start:cursor]
+        else:
             cursor += 1
             continue
-        key_start = cursor
-        while cursor < length and _is_assignment_key_char(value[cursor]):
-            cursor += 1
-        key_end = cursor
         separator_end = cursor
         while separator_end < length and value[separator_end] in " \t\r\n":
             separator_end += 1
         if (
-            not _contains_sensitive_key_fragment(value[key_start:key_end])
+            not _contains_sensitive_key_fragment(token)
             or separator_end >= length
             or value[separator_end] not in ":="
         ):

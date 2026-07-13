@@ -783,6 +783,81 @@ def test_keyword_dsn_refused_stderr_masks_reordered_echo_and_bare_password(
     assert dsn not in stderr and reordered not in stderr and "keyword secret" not in stderr
 
 
+def test_quoted_credential_keys_are_masked_in_helper_and_refused_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    diagnostic = '{"password": "helper-secret", "safe": "visible"}'
+    masked = salvage._mask_dsn_in_message(diagnostic, _DSN)
+    assert "helper-secret" not in masked and "visible" in masked
+
+    env = _base_env(tmp_path)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert (
+        salvage.main(
+            argv=[],
+            now_utc=_NOW,
+            check_write_privileges=lambda _dsn: (
+                "role {'api_key': 'refused-secret', 'safe': 'visible'}"
+            ),
+            fetch_row_count=lambda *_args, **_kwargs: 0,
+            perform_copy_export=lambda *_args, **_kwargs: b"",
+            compress_bytes=lambda data, _level, _zstd_path: data,
+        )
+        == 1
+    )
+    stderr = capsys.readouterr().err
+    assert json.loads(stderr)["outcome"] == "refused_role"
+    assert "refused-secret" not in stderr and "visible" in stderr
+
+
+def test_quoted_credential_keys_are_masked_in_selector_receipt_and_runner_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    env = _base_env(
+        tmp_path,
+        override={"NODE27_DB_EXPORT_SALVAGE_MODE": "enforce"},
+    )
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    def fail_copy(*_args: object, **_kwargs: object) -> bytes:
+        raise RuntimeError(
+            'selector {"password": "selector-secret", "safe": "visible"}'
+        )
+
+    assert (
+        salvage.main(
+            argv=[],
+            now_utc=_NOW,
+            check_write_privileges=_stub_check_read_only,
+            fetch_row_count=lambda *_args, **_kwargs: 0,
+            perform_copy_export=fail_copy,
+            compress_bytes=lambda data, _level, _zstd_path: data,
+        )
+        == 1
+    )
+    receipt = Path(env["NODE27_DB_EXPORT_SALVAGE_RECEIPT_PATH"]).read_text(encoding="utf-8")
+    assert json.loads(receipt)["selected"][0]["state"] == "error"
+    assert "selector-secret" not in receipt and "visible" in receipt
+
+    monkeypatch.setattr(
+        salvage,
+        "build_receipt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("runner {'api_key': 'runner-secret', 'safe': 'visible'}")
+        ),
+    )
+    assert salvage.main(argv=[], now_utc=_NOW) == 1
+    stderr = capsys.readouterr().err
+    assert json.loads(stderr)["outcome"] == "partial"
+    assert "runner-secret" not in stderr and "visible" in stderr
+
+
 @pytest.mark.parametrize("quoted", [False, True])
 @pytest.mark.parametrize("backslash_count", [1, 2, 3])
 def test_mask_dsn_message_redacts_raw_escaped_password_body(
