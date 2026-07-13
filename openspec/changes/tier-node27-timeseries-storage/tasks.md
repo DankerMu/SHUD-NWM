@@ -1084,7 +1084,7 @@ Order is load-bearing:
 
 ## 8. Live-cascade defect closure
 
-- [ ] 8.1 Fix issue #1067's node-27 wrapper import contract.
+- [x] 8.1 Fix issue #1067's node-27 wrapper import contract.
   Evidence floor: the exact seven issue-named `scripts/node27_*_once.sh`
   wrappers (including the newly required archive-rebuild-drill wrapper)
   prepend their parameterized repository root to `PYTHONPATH` before

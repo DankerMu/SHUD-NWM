@@ -13,3 +13,12 @@ Issue #1067 proof captured on node-27 from PR #1073 head `586558c055b46bee98db4b
 - The non-zero service result is expected until #1066 is fixed. A schema-valid archive-completeness receipt is intentionally not claimed here and will be captured after #1066/#1065 unblock the live lane.
 
 The same PR head passed `tests/test_node27_wrapper_pythonpath.py` on node-27 (`11 passed`).
+
+## `wrapper-invariant-live-20260713T065048Z.json`
+
+Post-review invariant-closure proof from PR #1073 head `aa880b8d4378e68e3327a290f8fd0baae1a2a9ca`:
+
+- Node-27 focused wrapper matrix passed (`89 passed`).
+- The installed audit systemd lane passed the new root/checkout/namespace-origin preflight and reached the same independent #1066 `AuditBlocked` path.
+- The isolated stderr delta is bytes 579-751 from that invocation, with zero historical import errors and zero import-origin refusals.
+- The service remains non-zero solely because #1066 is still open; this file is not a completeness receipt.
