@@ -76,6 +76,9 @@ BLOCKED_REASONS = frozenset(
 UNEXPECTED_ERROR_REASON = "UNEXPECTED_AUDIT_ERROR"
 PUBLICATION_FAILED_CODE = "RECEIPT_PUBLICATION_FAILED"
 PUBLICATION_INDETERMINATE_CODE = "RECEIPT_PUBLICATION_INDETERMINATE"
+DETAIL_INPUT_LIMIT = 8 * 1024
+DETAIL_OUTPUT_LIMIT = 512
+DETAIL_TRUNCATION_MARKER = " [detail-truncated]"
 
 
 @dataclass(frozen=True)
@@ -1066,13 +1069,17 @@ def _blocked_reason(error: AuditBlocked) -> str:
 
 
 def _sanitize_detail(error: BaseException, *, database_url: str | None = None) -> str:
-    detail = str(error).replace("\n", " ").replace("\r", " ")
+    raw_detail = str(error)
+    input_truncated = len(raw_detail) > DETAIL_INPUT_LIMIT
+    detail = raw_detail[:DETAIL_INPUT_LIMIT].replace("\n", " ").replace("\r", " ")
     for dsn in (database_url, os.getenv("DATABASE_URL")):
         if dsn:
             detail = detail.replace(dsn, "[DATABASE_URL]")
         detail = redact_database_dsn(detail, dsn)
     detail = redact_text(detail)
-    return detail[:512] or type(error).__name__
+    if input_truncated or len(detail) > DETAIL_OUTPUT_LIMIT:
+        detail = detail[: DETAIL_OUTPUT_LIMIT - len(DETAIL_TRUNCATION_MARKER)] + DETAIL_TRUNCATION_MARKER
+    return detail or type(error).__name__
 
 
 def _emit_stderr(code: str, message: str) -> None:
@@ -1396,8 +1403,10 @@ def _object_key(uri: str, prefix: str) -> str:
         expected = urlparse(prefix.rstrip("/"))
         if expected.scheme != "s3" or expected.netloc != parsed.netloc:
             raise AuditBlocked(f"object URI outside configured prefix: {raw}")
-        object_path = _decode_object_key_path(parsed.path).strip("/")
-        prefix_path = expected.path.strip("/")
+        if not parsed.path.startswith("/") or parsed.path.startswith("//"):
+            raise AuditBlocked("object-store evidence URI path is noncanonical")
+        object_path = _decode_object_key_path(_without_single_directory_trailing_slash(parsed.path[1:]))
+        prefix_path = expected.path[1:] if expected.path.startswith("/") else ""
         if prefix_path:
             if not object_path.startswith(prefix_path + "/"):
                 raise AuditBlocked(f"object URI outside configured prefix: {raw}")
@@ -1406,8 +1415,8 @@ def _object_key(uri: str, prefix: str) -> str:
     elif "://" in raw or raw.startswith("/"):
         raise AuditBlocked("unsupported object-store evidence URI")
     else:
-        raw = _decode_object_key_path(raw)
-    key = raw.strip("/")
+        raw = _decode_object_key_path(_without_single_directory_trailing_slash(raw))
+    key = raw
     parts = key.split("/")
     if (
         not key
@@ -1470,9 +1479,15 @@ def _decode_object_key_path(value: str) -> str:
         raise AuditBlocked("object-store evidence URI contains invalid encoding") from error
     if "%" in decoded:
         raise AuditBlocked("object-store evidence URI contains nested or invalid encoding")
-    if not _safe_object_key(decoded.strip("/")):
+    if not _safe_object_key(decoded):
         raise AuditBlocked("object-store evidence URI key is unsafe")
     return decoded
+
+
+def _without_single_directory_trailing_slash(value: str) -> str:
+    if value.endswith("//"):
+        raise AuditBlocked("object-store evidence URI has multiple trailing slashes")
+    return value[:-1] if value.endswith("/") else value
 
 
 def _safe_object_key(value: str) -> bool:

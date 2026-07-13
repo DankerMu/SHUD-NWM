@@ -88,12 +88,6 @@ AUTHORIZATION_SCHEME_RE = re.compile(
     r"(?P<secret>[^\"'\s,;&<>{}\[\]()]+)",
     re.IGNORECASE,
 )
-SENSITIVE_ASSIGNMENT_PREFIX_RE = re.compile(
-    r"\b([A-Za-z0-9_.-]*(?:token|password|passwd|pwd|secret|credential|api[_-]?key|"
-    r"access[_-]?key|session[_-]?key|signature|accountingstoragepass|storagepass)"
-    r"[A-Za-z0-9_.-]*)(\s*[:=]\s*)",
-    re.IGNORECASE,
-)
 LIBPQ_PASSWORD_PREFIX_RE = re.compile(r"(?<!\S)password\s*=\s*", re.IGNORECASE)
 URL_RE = re.compile(r"(?:(?:[A-Za-z][A-Za-z0-9+.-]*)://|//)[^\s\"'<>]+", re.IGNORECASE)
 SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
@@ -173,15 +167,14 @@ def redact_database_dsn(value: str, dsn: str | None) -> str:
     redacted = SURROGATE_RE.sub("\ufffd", value)
     normalized_dsn = SURROGATE_RE.sub("\ufffd", dsn or "")
     if normalized_dsn:
-        redacted = redacted.replace(normalized_dsn, REDACTION_MARKER)
+        secrets = {normalized_dsn}
         for password_raw in _dsn_password_candidates(normalized_dsn):
             try:
                 password_decoded = unquote(password_raw)
             except Exception:
                 password_decoded = password_raw
-            for secret in (password_raw, password_decoded):
-                if secret:
-                    redacted = redacted.replace(secret, REDACTION_MARKER)
+            secrets.update(secret for secret in (password_raw, password_decoded) if secret)
+        redacted = _replace_literals_once(redacted, secrets)
     return redact_text(redacted)
 
 
@@ -369,13 +362,75 @@ def _redact_sensitive_assignments(value: str) -> str:
     """Redact assignment values with one linear, mutually exclusive scan."""
     pieces: list[str] = []
     cursor = 0
-    while match := SENSITIVE_ASSIGNMENT_PREFIX_RE.search(value, cursor):
-        pieces.append(value[cursor : match.start()])
-        pieces.append(f"{match.group(1)}{match.group(2)}{REDACTION_MARKER}")
-        value_end, _raw, _decoded = _scan_assignment_value(value, match.end())
+    emitted = 0
+    length = len(value)
+    while cursor < length:
+        if not _is_assignment_key_char(value[cursor]):
+            cursor += 1
+            continue
+        key_start = cursor
+        while cursor < length and _is_assignment_key_char(value[cursor]):
+            cursor += 1
+        key_end = cursor
+        separator_end = cursor
+        while separator_end < length and value[separator_end] in " \t\r\n":
+            separator_end += 1
+        if (
+            not _contains_sensitive_key_fragment(value[key_start:key_end])
+            or separator_end >= length
+            or value[separator_end] not in ":="
+        ):
+            continue
+        value_start = separator_end + 1
+        while value_start < length and value[value_start] in " \t\r\n":
+            value_start += 1
+        value_end, _raw, _decoded = _scan_assignment_value(value, value_start)
+        pieces.append(value[emitted:key_start])
+        pieces.append(value[key_start:value_start])
+        pieces.append(REDACTION_MARKER)
+        emitted = value_end
         cursor = value_end
-    pieces.append(value[cursor:])
+    pieces.append(value[emitted:])
     return "".join(pieces)
+
+
+def _is_assignment_key_char(character: str) -> bool:
+    return character.isascii() and (character.isalnum() or character in "_.-")
+
+
+_SENSITIVE_KEY_FRAGMENTS = (
+    "token",
+    "password",
+    "passwd",
+    "pwd",
+    "secret",
+    "credential",
+    "apikey",
+    "api_key",
+    "api-key",
+    "accesskey",
+    "access_key",
+    "access-key",
+    "sessionkey",
+    "session_key",
+    "session-key",
+    "signature",
+    "accountingstoragepass",
+    "storagepass",
+)
+
+
+def _contains_sensitive_key_fragment(key: str) -> bool:
+    lowered = key.lower()
+    return any(fragment in lowered for fragment in _SENSITIVE_KEY_FRAGMENTS)
+
+
+def _replace_literals_once(value: str, literals: set[str]) -> str:
+    ordered = sorted((literal for literal in literals if literal), key=lambda item: (-len(item), item))
+    if not ordered:
+        return value
+    matcher = re.compile("|".join(re.escape(literal) for literal in ordered))
+    return matcher.sub(REDACTION_MARKER, value)
 
 
 def _scan_assignment_value(value: str, start: int) -> tuple[int, str, str]:

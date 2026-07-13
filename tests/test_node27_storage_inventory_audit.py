@@ -1735,6 +1735,72 @@ def test_raw_escaped_keyword_password_is_redacted_from_publication_stderr(
     assert dsn not in stderr and raw_password not in stderr
 
 
+@pytest.mark.parametrize("error_type", [audit.AuditBlocked, RuntimeError])
+def test_overlapping_dsn_password_candidates_are_redacted_from_terminal_receipts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
+) -> None:
+    dsn = "host=db password=s3c password=s3cLONG dbname=nhms"
+    config = replace(_config(tmp_path), database_url=dsn)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(
+        audit,
+        "run_audit",
+        lambda _config, *, publish: (_ for _ in ()).throw(error_type("driver raw=s3cLONG")),
+    )
+    assert audit.main([]) == 1
+    body = config.receipt_path.read_text(encoding="utf-8")
+    assert "s3c" not in body and "LONG" not in body
+
+
+def test_overlapping_dsn_password_candidates_are_redacted_from_bootstrap_stderr(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dsn = "host=db password=s3c password=s3cLONG dbname=nhms"
+    monkeypatch.setenv("DATABASE_URL", dsn)
+    monkeypatch.setattr(
+        audit,
+        "bootstrap_receipt_path",
+        lambda _argv: (_ for _ in ()).throw(audit.AuditBlocked("bootstrap raw=s3cLONG")),
+    )
+    assert audit.main([]) == 1
+    stderr = capsys.readouterr().err
+    assert json.loads(stderr)["reason"] == "CONFIG_INVALID"
+    assert "s3c" not in stderr and "LONG" not in stderr
+
+
+@pytest.mark.parametrize(
+    ("error_type", "reason"),
+    [
+        (audit.AuditBlocked, audit.PUBLICATION_FAILED_CODE),
+        (audit.PublicationIndeterminate, audit.PUBLICATION_INDETERMINATE_CODE),
+    ],
+)
+def test_overlapping_dsn_password_candidates_are_redacted_from_publication_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    error_type: type[Exception],
+    reason: str,
+) -> None:
+    dsn = "host=db password=s3c password=s3cLONG dbname=nhms"
+    config = replace(_config(tmp_path), database_url=dsn)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(audit, "run_audit", lambda _config, *, publish: _receipt([_subject()]))
+    monkeypatch.setattr(
+        audit,
+        "publish_receipt",
+        lambda *_args: (_ for _ in ()).throw(error_type("publisher raw=s3cLONG")),
+    )
+    assert audit.main([]) == 1
+    stderr = capsys.readouterr().err
+    assert json.loads(stderr)["reason"] == reason
+    assert "s3c" not in stderr and "LONG" not in stderr
+
+
 @pytest.mark.parametrize(
     ("error", "expected_outcome"),
     [
@@ -2012,6 +2078,50 @@ def test_hostile_assignment_and_malformed_url_replace_stale_success_once(
     schema = json.loads(audit.COMPLETENESS_SCHEMA_PATH.read_text())
     jsonschema.Draft7Validator(schema, format_checker=jsonschema.FormatChecker()).validate(receipt)
     audit.validate_receipt_semantics(receipt)
+
+
+def test_large_schema_error_detail_is_bounded_before_redaction_and_replaces_stale_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    audit.publish_receipt(config.receipt_path, _receipt([_subject(identifier="stale-success")]))
+    invalid = _receipt([_subject()])
+    invalid["schema_version"] = "x" * (16 * 1024 * 1024)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(audit, "run_audit", lambda _config, *, publish: invalid)
+    original_redactor = audit.redact_database_dsn
+    original_publish = audit.publish_receipt
+    original_atomic = audit.atomic_write_bytes_no_follow
+    redactor_input_lengths: list[int] = []
+    publish_attempts = 0
+    atomic_attempts = 0
+
+    def record_redactor(value: str, dsn: str | None) -> str:
+        redactor_input_lengths.append(len(value))
+        return original_redactor(value, dsn)
+
+    def count_publish(path: Path, receipt: dict[str, object]) -> None:
+        nonlocal publish_attempts
+        publish_attempts += 1
+        original_publish(path, receipt)
+
+    def count_atomic(*args: object, **kwargs: object) -> None:
+        nonlocal atomic_attempts
+        atomic_attempts += 1
+        original_atomic(*args, **kwargs)
+
+    monkeypatch.setattr(audit, "redact_database_dsn", record_redactor)
+    monkeypatch.setattr(audit, "publish_receipt", count_publish)
+    monkeypatch.setattr(audit, "atomic_write_bytes_no_follow", count_atomic)
+    assert audit.main([]) == 1
+    assert redactor_input_lengths and max(redactor_input_lengths) <= audit.DETAIL_INPUT_LIMIT
+    assert publish_attempts == 1 and atomic_attempts == 1
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "blocked"
+    assert receipt["refusal_reason"] == "RECEIPT_INVALID"
+    assert receipt["detail"].endswith(audit.DETAIL_TRUNCATION_MARKER)
+    assert len(receipt["detail"]) <= audit.DETAIL_OUTPUT_LIMIT
 
 
 def test_malformed_url_is_fail_closed_on_bootstrap_and_publication_stderr(
@@ -2318,6 +2428,46 @@ def test_object_key_bucket_and_optional_prefix_mismatch_keep_stable_reason(uri: 
     assert audit._blocked_reason(captured.value) == "OBJECT_URI_PREFIX_MISMATCH"
 
 
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "s3://nhms//forcing/gfs/file",
+        "s3://nhms///forcing/gfs/file",
+        "s3://nhms/forcing//gfs/file",
+        "s3://nhms/forcing/gfs/file//",
+        "runs//run-a/output",
+        "states//gfs/model-a/state.cfg.ic",
+    ],
+)
+def test_object_key_rejects_double_slash_identity_forms(uri: str) -> None:
+    with pytest.raises(audit.AuditBlocked) as captured:
+        audit._object_key(uri, "s3://nhms")
+    assert audit._blocked_reason(captured.value) == "EVIDENCE_BLOCKED"
+
+
+def test_object_key_rejects_double_slash_below_optional_configured_prefix() -> None:
+    with pytest.raises(audit.AuditBlocked) as captured:
+        audit._object_key(
+            "s3://nhms/expected-prefix//runs/run-a/output",
+            "s3://nhms/expected-prefix",
+        )
+    assert audit._blocked_reason(captured.value) == "EVIDENCE_BLOCKED"
+
+
+@pytest.mark.parametrize(
+    ("uri", "expected"),
+    [
+        ("s3://nhms/runs/run-a/output/", "runs/run-a/output"),
+        ("runs/run-a/output/", "runs/run-a/output"),
+        ("s3://nhms/states/gfs/model-a/state.cfg.ic", "states/gfs/model-a/state.cfg.ic"),
+    ],
+)
+def test_object_key_allows_single_directory_trailing_slash_and_state_file(
+    uri: str, expected: str
+) -> None:
+    assert audit._object_key(uri, "s3://nhms") == expected
+
+
 def test_invalid_prefix_blocks_before_audit_and_replaces_stale_success_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2372,7 +2522,10 @@ def test_invalid_prefix_blocks_before_audit_and_replaces_stale_success_once(
     assert config.receipt_path.read_bytes() != stale
 
 
-@pytest.mark.parametrize("mutation", ["query", "encoded-separator"])
+@pytest.mark.parametrize(
+    "mutation",
+    ["query", "encoded-separator", "db-package-double-slash", "member-double-slash"],
+)
 def test_real_complete_forcing_evidence_with_unsafe_member_uri_blocks_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2394,11 +2547,14 @@ def test_real_complete_forcing_evidence_with_unsafe_member_uri_blocks_once(
     package.mkdir(parents=True)
     data = b"complete-forcing-evidence"
     (package / "data.csv").write_bytes(data)
-    member_uri = (
-        f"s3://nhms/{key}/data.csv?token=query-secret"
-        if mutation == "query"
-        else f"s3://nhms/{key}/nested%2fdata.csv"
-    )
+    if mutation == "query":
+        member_uri = f"s3://nhms/{key}/data.csv?token=query-secret"
+    elif mutation == "encoded-separator":
+        member_uri = f"s3://nhms/{key}/nested%2fdata.csv"
+    elif mutation == "member-double-slash":
+        member_uri = f"s3://nhms//{key}/data.csv"
+    else:
+        member_uri = f"s3://nhms/{key}/data.csv"
     manifest = {
         "forcing_version_id": "forcing-a",
         "source_id": "gfs",
@@ -2418,7 +2574,9 @@ def test_real_complete_forcing_evidence_with_unsafe_member_uri_blocks_once(
         "cycle_time": START,
         "start_time": START,
         "end_time": END,
-        "forcing_package_uri": f"s3://nhms/{key}",
+        "forcing_package_uri": (
+            f"s3://nhms//{key}" if mutation == "db-package-double-slash" else f"s3://nhms/{key}"
+        ),
         "checksum": hashlib.sha256(raw_manifest).hexdigest(),
         "basin_version_id": "basin-a",
     }
@@ -2470,6 +2628,7 @@ def test_real_complete_forcing_evidence_with_unsafe_member_uri_blocks_once(
     receipt = json.loads(body)
     assert receipt["outcome"] == "blocked"
     assert receipt["refusal_reason"] == "EVIDENCE_BLOCKED"
+    assert "coverage_bounds" not in receipt and "windows" not in receipt
     assert "query-secret" not in body
     assert config.receipt_path.read_bytes() != stale
 

@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from packages.common import redaction
 from packages.common.redaction import (
     REDACTION_MARKER,
     redact_database_dsn,
@@ -419,6 +420,23 @@ def test_sensitive_assignment_scanner_handles_long_unterminated_hostile_input() 
     assert redact_text(hostile) == "password=[redacted]"
 
 
+def test_sensitive_assignment_key_scanner_has_bounded_character_visits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = redaction._is_assignment_key_char
+    visits = 0
+
+    def count_visit(character: str) -> bool:
+        nonlocal visits
+        visits += 1
+        return original(character)
+
+    monkeypatch.setattr(redaction, "_is_assignment_key_char", count_visit)
+    hostile = "ordinary-token." * 50_000 + " password=secret"
+    assert redaction._redact_sensitive_assignments(hostile).endswith(" password=[redacted]")
+    assert visits <= 3 * len(hostile)
+
+
 @pytest.mark.parametrize(
     "malformed_url",
     [
@@ -496,3 +514,21 @@ def test_redact_database_dsn_masks_plain_quoted_password_body() -> None:
     dsn = "host=db user=reader password='plain quoted secret' dbname=nhms"
     redacted = redact_database_dsn("driver raw=plain quoted secret", dsn)
     assert "plain quoted secret" not in redacted
+
+
+def test_overlapping_dsn_candidates_are_replaced_longest_first_in_one_pass() -> None:
+    dsn = r"host=db password=abc password=abc\def password=abcdef dbname=nhms"
+    redacted = redact_database_dsn(
+        "short=abc raw=abc\\def decoded=abcdef longest=abcdef configured=" + dsn,
+        dsn,
+    )
+    assert "abc" not in redacted
+    assert "\\def" not in redacted
+    assert redacted.count(REDACTION_MARKER) == 5
+
+
+def test_dsn_candidate_matching_does_not_rewrite_inserted_marker() -> None:
+    dsn = "host=db password=redacted password=redacted-long dbname=nhms"
+    assert redact_database_dsn("a=redacted-long b=redacted", dsn) == (
+        "a=[redacted] b=[redacted]"
+    )

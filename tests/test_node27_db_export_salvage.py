@@ -845,6 +845,57 @@ def test_raw_escaped_password_is_masked_in_refused_stderr_and_selector_receipt(
     assert json.loads(receipt)["selected"][0]["state"] == "error"
 
 
+def test_overlapping_password_candidates_are_masked_in_helper_stderr_and_selector_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    dsn = "host=db password=s3c password=s3cLONG dbname=nhms"
+    assert "LONG" not in salvage._mask_dsn_in_message("driver raw=s3cLONG", dsn)
+    env = _base_env(tmp_path, override={"DATABASE_URL": dsn})
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert (
+        salvage.main(
+            argv=[],
+            now_utc=_NOW,
+            check_write_privileges=lambda _dsn: "role raw=s3cLONG",
+            fetch_row_count=lambda *_args, **_kwargs: 0,
+            perform_copy_export=lambda *_args, **_kwargs: b"",
+            compress_bytes=lambda data, _level, _zstd_path: data,
+        )
+        == 1
+    )
+    stderr = capsys.readouterr().err
+    assert "s3c" not in stderr and "LONG" not in stderr
+
+    enforce_env = _base_env(
+        tmp_path,
+        override={"DATABASE_URL": dsn, "NODE27_DB_EXPORT_SALVAGE_MODE": "enforce"},
+    )
+    for key, value in enforce_env.items():
+        monkeypatch.setenv(key, value)
+
+    def fail_copy(*_args: object, **_kwargs: object) -> bytes:
+        raise RuntimeError("selector raw=s3cLONG")
+
+    assert (
+        salvage.main(
+            argv=[],
+            now_utc=_NOW,
+            check_write_privileges=_stub_check_read_only,
+            fetch_row_count=lambda *_args, **_kwargs: 0,
+            perform_copy_export=fail_copy,
+            compress_bytes=lambda data, _level, _zstd_path: data,
+        )
+        == 1
+    )
+    receipt = Path(enforce_env["NODE27_DB_EXPORT_SALVAGE_RECEIPT_PATH"]).read_text(
+        encoding="utf-8"
+    )
+    assert "s3c" not in receipt and "LONG" not in receipt
+
+
 @pytest.mark.parametrize(
     "malformed_dsn",
     [
