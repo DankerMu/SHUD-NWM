@@ -928,6 +928,9 @@ def run_audit(
 
 def config_from_args(args: argparse.Namespace) -> AuditConfig:
     database_url = (args.database_url or os.getenv("DATABASE_URL") or "").strip()
+    object_store_prefix = _canonical_object_store_prefix(
+        args.object_store_prefix or os.getenv("OBJECT_STORE_PREFIX") or ""
+    )
     object_root = _absolute(args.object_store_root or os.getenv("OBJECT_STORE_ROOT"), "object_store_root")
     archive_root = _absolute(
         args.archive_root or os.getenv("NODE27_STORAGE_INVENTORY_ARCHIVE_ROOT") or os.getenv("NHMS_ARCHIVE_ROOT"),
@@ -952,7 +955,7 @@ def config_from_args(args: argparse.Namespace) -> AuditConfig:
     return AuditConfig(
         database_url,
         object_root,
-        (args.object_store_prefix or os.getenv("OBJECT_STORE_PREFIX") or "").strip(),
+        object_store_prefix,
         archive_root,
         age,
         receipt_path,
@@ -1055,6 +1058,7 @@ def _blocked_reason(error: AuditBlocked) -> str:
             "minimum age",
             "at least db retention",
             "unsafe object-store root",
+            "object_store_prefix",
         )
     ):
         return "CONFIG_INVALID"
@@ -1077,12 +1081,13 @@ def _emit_stderr(code: str, message: str) -> None:
     print(_canonical({"status": "blocked", "reason": safe_code, "message": safe_message}), file=sys.stderr)
 
 
-def _help_requested(argv: Sequence[str]) -> bool:
-    for token in argv:
-        if token == "--":
-            return False
-        if token in {"-h", "--help"}:
-            return True
+def _parser_requested_help(argv: Sequence[str]) -> bool:
+    try:
+        build_parser().parse_args(argv)
+    except AuditBlocked:
+        return False
+    except SystemExit as error:
+        return error.code == 0
     return False
 
 
@@ -1111,8 +1116,7 @@ def validate_success_receipt_for_publication(
 
 def main(argv: Sequence[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
-    if _help_requested(raw_argv):
-        build_parser().print_help()
+    if _parser_requested_help(raw_argv):
         return 0
     generated_at = datetime.now(UTC)
     try:
@@ -1364,25 +1368,45 @@ def _directory_has_regular_file_optional(directory: Path, root: Path) -> bool | 
 
 def _object_key(uri: str, prefix: str) -> str:
     raw = uri.strip()
-    if not raw or "?" in raw or "#" in raw or "\\" in raw:
-        raise AuditBlocked(f"invalid object-store URI: {raw!r}")
+    if (
+        not raw
+        or raw != uri
+        or "?" in raw
+        or "#" in raw
+        or "\\" in raw
+        or any(ord(character) < 32 or ord(character) == 127 for character in raw)
+    ):
+        raise AuditBlocked("invalid object-store evidence URI")
     if raw.startswith("s3://"):
-        parsed = urlparse(raw)
-        if parsed.scheme != "s3" or not parsed.netloc:
-            raise AuditBlocked(f"invalid object-store URI: {raw!r}")
+        try:
+            parsed = urlparse(raw)
+            bare_authority = (
+                parsed.username is None
+                and parsed.password is None
+                and parsed.port is None
+                and parsed.hostname == parsed.netloc
+                and parsed.netloc == parsed.netloc.lower()
+            )
+        except Exception as error:
+            raise AuditBlocked("invalid object-store evidence URI") from error
+        if parsed.scheme != "s3" or not parsed.netloc or parsed.query or parsed.fragment or not bare_authority:
+            raise AuditBlocked("invalid object-store evidence URI")
         if not prefix:
             raise AuditBlocked("OBJECT_STORE_PREFIX is required for s3 URI binding")
         expected = urlparse(prefix.rstrip("/"))
         if expected.scheme != "s3" or expected.netloc != parsed.netloc:
             raise AuditBlocked(f"object URI outside configured prefix: {raw}")
-        object_path, prefix_path = unquote(parsed.path).strip("/"), unquote(expected.path).strip("/")
+        object_path = _decode_object_key_path(parsed.path).strip("/")
+        prefix_path = expected.path.strip("/")
         if prefix_path:
             if not object_path.startswith(prefix_path + "/"):
                 raise AuditBlocked(f"object URI outside configured prefix: {raw}")
             object_path = object_path[len(prefix_path) + 1 :]
         raw = object_path
     elif "://" in raw or raw.startswith("/"):
-        raise AuditBlocked(f"unsupported object-store URI: {raw}")
+        raise AuditBlocked("unsupported object-store evidence URI")
+    else:
+        raw = _decode_object_key_path(raw)
     key = raw.strip("/")
     parts = key.split("/")
     if (
@@ -1395,6 +1419,74 @@ def _object_key(uri: str, prefix: str) -> str:
     ):
         raise AuditBlocked(f"unsafe object key: {key!r}")
     return key
+
+
+_S3_BUCKET_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
+_ENCODED_SEPARATOR_RE = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
+
+
+def _canonical_object_store_prefix(value: Any) -> str:
+    if not isinstance(value, str) or not value or value != value.strip() or value.endswith("/"):
+        raise AuditBlocked("OBJECT_STORE_PREFIX must be a canonical s3 URI without trailing slash")
+    if (
+        "\\" in value
+        or "%" in value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise AuditBlocked("OBJECT_STORE_PREFIX contains unsafe path syntax")
+    try:
+        parsed = urlparse(value)
+        bare_authority = (
+            parsed.username is None
+            and parsed.password is None
+            and parsed.port is None
+            and parsed.hostname == parsed.netloc
+        )
+    except Exception as error:
+        raise AuditBlocked("OBJECT_STORE_PREFIX must use a canonical s3 authority") from error
+    if (
+        parsed.scheme != "s3"
+        or not parsed.netloc
+        or parsed.query
+        or parsed.fragment
+        or not bare_authority
+        or parsed.netloc != parsed.netloc.lower()
+        or not _S3_BUCKET_RE.fullmatch(parsed.netloc)
+    ):
+        raise AuditBlocked("OBJECT_STORE_PREFIX must use a canonical lowercase bare bucket")
+    if parsed.path:
+        path = parsed.path[1:] if parsed.path.startswith("/") else ""
+        if not _safe_object_key(path):
+            raise AuditBlocked("OBJECT_STORE_PREFIX optional path is unsafe")
+    return value
+
+
+def _decode_object_key_path(value: str) -> str:
+    if _ENCODED_SEPARATOR_RE.search(value):
+        raise AuditBlocked("object-store evidence URI contains encoded separator")
+    try:
+        decoded = unquote(value, errors="strict")
+    except (UnicodeDecodeError, UnicodeEncodeError) as error:
+        raise AuditBlocked("object-store evidence URI contains invalid encoding") from error
+    if "%" in decoded:
+        raise AuditBlocked("object-store evidence URI contains nested or invalid encoding")
+    if not _safe_object_key(decoded.strip("/")):
+        raise AuditBlocked("object-store evidence URI key is unsafe")
+    return decoded
+
+
+def _safe_object_key(value: str) -> bool:
+    return (
+        bool(value)
+        and "\\" not in value
+        and all(part not in {"", ".", ".."} for part in value.split("/"))
+        and not any(
+            ord(character) < 32
+            or ord(character) == 127
+            or 0xD800 <= ord(character) <= 0xDFFF
+            for character in value
+        )
+    )
 
 
 def _validate_output_path(path: Path) -> Path:
@@ -1412,6 +1504,7 @@ def _validate_output_path(path: Path) -> Path:
 
 
 def _validate_audit_roots(config: AuditConfig) -> None:
+    _canonical_object_store_prefix(config.object_store_prefix)
     try:
         verify_directory_no_follow(config.object_store_root)
     except (OSError, SafeFilesystemError) as error:

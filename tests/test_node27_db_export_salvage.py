@@ -783,6 +783,68 @@ def test_keyword_dsn_refused_stderr_masks_reordered_echo_and_bare_password(
     assert dsn not in stderr and reordered not in stderr and "keyword secret" not in stderr
 
 
+@pytest.mark.parametrize("quoted", [False, True])
+@pytest.mark.parametrize("backslash_count", [1, 2, 3])
+def test_mask_dsn_message_redacts_raw_escaped_password_body(
+    quoted: bool, backslash_count: int
+) -> None:
+    raw_password = "raw-secret" + "\\" * backslash_count + "tail"
+    lexical = f"'{raw_password}'" if quoted else raw_password
+    dsn = f"host=db user=reader password={lexical} dbname=nhms"
+    masked = salvage._mask_dsn_in_message(f"driver raw={raw_password}", dsn)
+    assert raw_password not in masked
+
+
+def test_raw_escaped_password_is_masked_in_refused_stderr_and_selector_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    raw_password = "raw-secret" + "\\" * 3 + "tail"
+    dsn = f"host=db user=reader password='{raw_password}' dbname=nhms"
+    env = _base_env(tmp_path, override={"DATABASE_URL": dsn})
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert (
+        salvage.main(
+            argv=[],
+            now_utc=_NOW,
+            check_write_privileges=lambda _dsn: f"role probe raw={raw_password}",
+            fetch_row_count=lambda *_args, **_kwargs: 0,
+            perform_copy_export=lambda *_args, **_kwargs: b"",
+            compress_bytes=lambda data, _level, _zstd_path: data,
+        )
+        == 1
+    )
+    stderr = capsys.readouterr().err
+    assert raw_password not in stderr and dsn not in stderr
+
+    for key, value in _base_env(
+        tmp_path,
+        override={"DATABASE_URL": dsn, "NODE27_DB_EXPORT_SALVAGE_MODE": "enforce"},
+    ).items():
+        monkeypatch.setenv(key, value)
+
+    def fail_copy(*_args: object, **_kwargs: object) -> bytes:
+        raise RuntimeError(f"selector runner raw={raw_password}")
+
+    assert (
+        salvage.main(
+            argv=[],
+            now_utc=_NOW,
+            check_write_privileges=_stub_check_read_only,
+            fetch_row_count=lambda *_args, **_kwargs: 0,
+            perform_copy_export=fail_copy,
+            compress_bytes=lambda data, _level, _zstd_path: data,
+        )
+        == 1
+    )
+    receipt_path = Path(os.environ["NODE27_DB_EXPORT_SALVAGE_RECEIPT_PATH"])
+    receipt = receipt_path.read_text(encoding="utf-8")
+    assert raw_password not in receipt and dsn not in receipt
+    assert json.loads(receipt)["selected"][0]["state"] == "error"
+
+
 @pytest.mark.parametrize(
     "malformed_dsn",
     [

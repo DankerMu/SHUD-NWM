@@ -472,3 +472,27 @@ def test_redact_database_dsn_masks_reordered_keyword_echo() -> None:
     redacted = redact_database_dsn(f"driver echoed {reordered}", configured)
     assert reordered not in redacted
     assert "keyword secret" not in redacted
+
+
+@pytest.mark.parametrize("quoted", [False, True])
+@pytest.mark.parametrize("backslash_count", [1, 2, 3])
+def test_redact_database_dsn_masks_raw_and_decoded_libpq_password_bodies(
+    quoted: bool, backslash_count: int
+) -> None:
+    raw_body = "raw-secret" + "\\" * backslash_count + "tail"
+    lexical = f"'{raw_body}'" if quoted else raw_body
+    dsn = f"host=db user=reader password={lexical} dbname=nhms"
+    decoded_body = "raw-secret" + "\\" * (backslash_count // 2) + "tail"
+    redacted = redact_database_dsn(
+        f"configured={dsn}; raw={raw_body}; decoded={decoded_body}",
+        dsn,
+    )
+    assert dsn not in redacted
+    assert raw_body not in redacted
+    assert decoded_body not in redacted
+
+
+def test_redact_database_dsn_masks_plain_quoted_password_body() -> None:
+    dsn = "host=db user=reader password='plain quoted secret' dbname=nhms"
+    redacted = redact_database_dsn("driver raw=plain quoted secret", dsn)
+    assert "plain quoted secret" not in redacted

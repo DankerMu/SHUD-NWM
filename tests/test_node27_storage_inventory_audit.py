@@ -1310,6 +1310,102 @@ def test_help_never_enters_publication(
     assert config.receipt_path.read_bytes() == before
 
 
+@pytest.mark.parametrize(
+    "option",
+    [
+        "--database-url",
+        "--object-store-root",
+        "--object-store-prefix",
+        "--archive-root",
+        "--archive-min-age-days",
+        "--receipt-path",
+        "--zstd-path",
+    ],
+)
+@pytest.mark.parametrize("help_flag", ["-h", "--help"])
+def test_help_token_used_where_option_requires_value_is_not_help(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    option: str,
+    help_flag: str,
+) -> None:
+    receipt_path = tmp_path / "terminal.json"
+    argv = [option, help_flag]
+    if option != "--receipt-path":
+        argv.extend(["--receipt-path", str(receipt_path)])
+    assert audit.main(argv) == 1
+    captured = capsys.readouterr()
+    assert "usage:" not in captured.out
+    if option == "--receipt-path":
+        assert json.loads(captured.err)["reason"] == "CONFIG_INVALID"
+        assert not receipt_path.exists()
+    else:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        assert receipt["outcome"] == "blocked"
+        assert receipt["refusal_reason"] == "CONFIG_INVALID"
+
+
+def test_type_error_order_uses_real_parser_help_semantics(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    receipt_path = tmp_path / "terminal.json"
+    assert (
+        audit.main(
+            [
+                "--archive-min-age-days",
+                "not-an-integer",
+                "--help",
+                "--receipt-path",
+                str(receipt_path),
+            ]
+        )
+        == 1
+    )
+    first = capsys.readouterr()
+    assert "usage:" not in first.out
+    assert json.loads(receipt_path.read_text(encoding="utf-8"))["refusal_reason"] == "CONFIG_INVALID"
+    before = receipt_path.read_bytes()
+
+    assert (
+        audit.main(
+            [
+                "--help",
+                "--archive-min-age-days",
+                "not-an-integer",
+                "--receipt-path",
+                str(receipt_path),
+            ]
+        )
+        == 0
+    )
+    second = capsys.readouterr()
+    assert second.out.count("usage:") == 1 and second.err == ""
+    assert receipt_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("argv", [["--unknown", "--help"], ["--help", "--unknown"]])
+def test_unknown_option_around_help_follows_argparse_help_action(
+    argv: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert audit.main(argv) == 0
+    captured = capsys.readouterr()
+    assert captured.out.count("usage:") == 1 and captured.err == ""
+
+
+def test_help_after_double_dash_is_not_help_and_replaces_stale_success(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    receipt_path = tmp_path / "terminal.json"
+    audit.publish_receipt(receipt_path, _receipt([_subject()]))
+    before = receipt_path.read_bytes()
+    assert audit.main(["--receipt-path", str(receipt_path), "--", "--help"]) == 1
+    captured = capsys.readouterr()
+    assert "usage:" not in captured.out
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "blocked" and receipt["refusal_reason"] == "CONFIG_INVALID"
+    assert receipt_path.read_bytes() != before
+
+
 @pytest.mark.parametrize("outcome", ["complete", "incomplete"])
 def test_main_publishes_each_success_outcome(
     tmp_path: Path,
@@ -1578,6 +1674,65 @@ def test_keyword_dsn_is_redacted_from_publication_stderr(
     stderr = capsys.readouterr().err
     assert json.loads(stderr)["reason"] == audit.PUBLICATION_FAILED_CODE
     assert dsn not in stderr and "keyword secret" not in stderr
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [audit.AuditBlocked, RuntimeError],
+)
+def test_raw_escaped_keyword_password_is_redacted_from_terminal_receipts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
+) -> None:
+    raw_password = "raw-secret" + "\\" * 3 + "tail"
+    dsn = f"host=db user=reader password='{raw_password}' dbname=nhms"
+    config = replace(_config(tmp_path), database_url=dsn)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(
+        audit,
+        "run_audit",
+        lambda _config, *, publish: (_ for _ in ()).throw(
+            error_type(f"driver raw password was {raw_password}")
+        ),
+    )
+    assert audit.main([]) == 1
+    body = config.receipt_path.read_text(encoding="utf-8")
+    assert dsn not in body and raw_password not in body
+
+
+@pytest.mark.parametrize(
+    ("error_type", "reason"),
+    [
+        (audit.AuditBlocked, audit.PUBLICATION_FAILED_CODE),
+        (audit.PublicationIndeterminate, audit.PUBLICATION_INDETERMINATE_CODE),
+    ],
+)
+def test_raw_escaped_keyword_password_is_redacted_from_publication_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    error_type: type[Exception],
+    reason: str,
+) -> None:
+    raw_password = "raw-secret" + "\\" * 3 + "tail"
+    dsn = f"host=db user=reader password='{raw_password}' dbname=nhms"
+    config = replace(_config(tmp_path), database_url=dsn)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(audit, "run_audit", lambda _config, *, publish: _receipt([_subject()]))
+    monkeypatch.setattr(
+        audit,
+        "publish_receipt",
+        lambda *_args: (_ for _ in ()).throw(
+            error_type(f"publisher raw password was {raw_password}")
+        ),
+    )
+    assert audit.main([]) == 1
+    stderr = capsys.readouterr().err
+    assert json.loads(stderr)["reason"] == reason
+    assert dsn not in stderr and raw_password not in stderr
 
 
 @pytest.mark.parametrize(
@@ -2092,6 +2247,231 @@ def test_archive_age_cli_overrides_env_and_env_below_retention_blocks(
     assert audit.config_from_args(_args(tmp_path, age=30)).archive_min_age_days == 30
     with pytest.raises(audit.AuditBlocked, match="at least DB retention"):
         audit.config_from_args(_args(tmp_path, age=None))
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "s3://user:password@nhms",
+        "s3://nhms:443",
+        "s3://nhms/path?token=query-secret",
+        "s3://nhms/path#fragment",
+        "s3://nhms/encoded%2fpath",
+        "s3://nhms/path\\escape",
+        "s3://nhms/control\x00path",
+        "s3://nhms/../unsafe",
+        "s3://nhms/double//segment",
+        "s3://UPPERCASE/path",
+    ],
+)
+def test_object_store_prefix_config_rejects_noncanonical_authority_and_path(
+    tmp_path: Path, prefix: str
+) -> None:
+    args = _args(tmp_path, age=45)
+    args.object_store_prefix = prefix
+    with pytest.raises(audit.AuditBlocked, match="OBJECT_STORE_PREFIX") as captured:
+        audit.config_from_args(args)
+    assert "query-secret" not in str(captured.value)
+
+
+@pytest.mark.parametrize("prefix", ["s3://nhms", "s3://lowercase-bucket/safe/prefix"])
+def test_object_store_prefix_config_accepts_canonical_root_or_safe_path(
+    tmp_path: Path, prefix: str
+) -> None:
+    args = _args(tmp_path, age=45)
+    args.object_store_prefix = prefix
+    assert audit.config_from_args(args).object_store_prefix == prefix
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "forcing/gfs/raw\\backslash",
+        "forcing/gfs/encoded%5cbackslash",
+        "forcing/gfs/encoded%2fseparator",
+        "forcing/gfs/%2e%2e/traversal",
+        "forcing/gfs/%252e%252e/double-traversal",
+        "forcing/gfs/control%00byte",
+        "s3://user:password@nhms/forcing/gfs/file",
+        "s3://nhms:443/forcing/gfs/file",
+        "s3://nhms/forcing/gfs/file?token=query-secret",
+    ],
+)
+def test_object_key_rejects_noncanonical_or_encoded_evidence_as_evidence_blocked(uri: str) -> None:
+    with pytest.raises(audit.AuditBlocked) as captured:
+        audit._object_key(uri, "s3://nhms")
+    assert audit._blocked_reason(captured.value) == "EVIDENCE_BLOCKED"
+    assert "query-secret" not in str(captured.value)
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "s3://other/forcing/gfs/file",
+        "s3://nhms/other-prefix/forcing/gfs/file",
+    ],
+)
+def test_object_key_bucket_and_optional_prefix_mismatch_keep_stable_reason(uri: str) -> None:
+    prefix = "s3://nhms/expected-prefix" if "other-prefix" in uri else "s3://nhms"
+    with pytest.raises(audit.AuditBlocked) as captured:
+        audit._object_key(uri, prefix)
+    assert audit._blocked_reason(captured.value) == "OBJECT_URI_PREFIX_MISMATCH"
+
+
+def test_invalid_prefix_blocks_before_audit_and_replaces_stale_success_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    audit.publish_receipt(config.receipt_path, _receipt([_subject()]))
+    stale = config.receipt_path.read_bytes()
+    audit_calls = 0
+    publish_attempts = 0
+    atomic_attempts = 0
+    original_publish = audit.publish_receipt
+    original_atomic = audit.atomic_write_bytes_no_follow
+
+    def reject_audit(*_args: object, **_kwargs: object) -> dict[str, object]:
+        nonlocal audit_calls
+        audit_calls += 1
+        raise AssertionError("invalid prefix must fail before audit/DB/FS preflight")
+
+    def count_publish(path: Path, receipt: dict[str, object]) -> None:
+        nonlocal publish_attempts
+        publish_attempts += 1
+        original_publish(path, receipt)
+
+    def count_atomic(*args: object, **kwargs: object) -> None:
+        nonlocal atomic_attempts
+        atomic_attempts += 1
+        original_atomic(*args, **kwargs)
+
+    monkeypatch.setattr(audit, "run_audit", reject_audit)
+    monkeypatch.setattr(audit, "publish_receipt", count_publish)
+    monkeypatch.setattr(audit, "atomic_write_bytes_no_follow", count_atomic)
+    argv = [
+        "--receipt-path",
+        str(config.receipt_path),
+        "--database-url",
+        config.database_url,
+        "--object-store-root",
+        str(config.object_store_root),
+        "--object-store-prefix",
+        "s3://nhms/prefix?token=query-secret",
+        "--archive-root",
+        str(config.archive_root),
+        "--zstd-path",
+        str(config.zstd_path),
+    ]
+    assert audit.main(argv) == 1
+    assert audit_calls == 0 and publish_attempts == 1 and atomic_attempts == 1
+    body = config.receipt_path.read_text(encoding="utf-8")
+    receipt = json.loads(body)
+    assert receipt["outcome"] == "blocked"
+    assert receipt["refusal_reason"] == "CONFIG_INVALID"
+    assert "query-secret" not in body
+    assert config.receipt_path.read_bytes() != stale
+
+
+@pytest.mark.parametrize("mutation", ["query", "encoded-separator"])
+def test_real_complete_forcing_evidence_with_unsafe_member_uri_blocks_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mutation: str,
+) -> None:
+    config = _config(tmp_path)
+    stale_subject = _subject(start=NOW - timedelta(days=1), end=NOW)
+    audit.publish_receipt(
+        config.receipt_path,
+        _receipt(
+            [stale_subject],
+            hot={stale_subject.stable_key: audit.Coverage("hot-object-store")},
+        ),
+    )
+    stale = config.receipt_path.read_bytes()
+    key = "forcing/gfs/2026050100/basin-a/model-a"
+    package = config.object_store_root / key
+    package.mkdir(parents=True)
+    data = b"complete-forcing-evidence"
+    (package / "data.csv").write_bytes(data)
+    member_uri = (
+        f"s3://nhms/{key}/data.csv?token=query-secret"
+        if mutation == "query"
+        else f"s3://nhms/{key}/nested%2fdata.csv"
+    )
+    manifest = {
+        "forcing_version_id": "forcing-a",
+        "source_id": "gfs",
+        "cycle_time": audit._time(START),
+        "start_time": audit._time(START),
+        "end_time": audit._time(END),
+        "model_id": "model-a",
+        "basin_version_id": "basin-a",
+        "files": [{"uri": member_uri, "checksum": hashlib.sha256(data).hexdigest()}],
+    }
+    raw_manifest = json.dumps(manifest).encode("utf-8")
+    (package / "forcing_package.json").write_bytes(raw_manifest)
+    forcing_row = {
+        "forcing_version_id": "forcing-a",
+        "model_id": "model-a",
+        "source_id": "gfs",
+        "cycle_time": START,
+        "start_time": START,
+        "end_time": END,
+        "forcing_package_uri": f"s3://nhms/{key}",
+        "checksum": hashlib.sha256(raw_manifest).hexdigest(),
+        "basin_version_id": "basin-a",
+    }
+
+    class Connection(_Connection):
+        def __init__(self) -> None:
+            super().__init__([[{"audit_time": NOW}], [forcing_row], [], []])
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("psycopg2.connect", lambda _dsn: Connection())
+    original_publish = audit.publish_receipt
+    original_atomic = audit.atomic_write_bytes_no_follow
+    publish_attempts = 0
+    atomic_attempts = 0
+
+    def count_publish(path: Path, receipt: dict[str, object]) -> None:
+        nonlocal publish_attempts
+        publish_attempts += 1
+        original_publish(path, receipt)
+
+    def count_atomic(*args: object, **kwargs: object) -> None:
+        nonlocal atomic_attempts
+        atomic_attempts += 1
+        original_atomic(*args, **kwargs)
+
+    monkeypatch.setattr(audit, "publish_receipt", count_publish)
+    monkeypatch.setattr(audit, "atomic_write_bytes_no_follow", count_atomic)
+    argv = [
+        "--receipt-path",
+        str(config.receipt_path),
+        "--database-url",
+        config.database_url,
+        "--object-store-root",
+        str(config.object_store_root),
+        "--object-store-prefix",
+        config.object_store_prefix,
+        "--archive-root",
+        str(config.archive_root),
+        "--zstd-path",
+        str(config.zstd_path),
+    ]
+    assert audit.main(argv) == 1
+    captured = capsys.readouterr()
+    assert audit.PUBLICATION_FAILED_CODE not in captured.err
+    assert publish_attempts == 1 and atomic_attempts == 1
+    body = config.receipt_path.read_text(encoding="utf-8")
+    receipt = json.loads(body)
+    assert receipt["outcome"] == "blocked"
+    assert receipt["refusal_reason"] == "EVIDENCE_BLOCKED"
+    assert "query-secret" not in body
+    assert config.receipt_path.read_bytes() != stale
 
 
 def _clone_row(**overrides: object) -> dict[str, object]:

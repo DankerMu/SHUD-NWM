@@ -372,42 +372,47 @@ def _redact_sensitive_assignments(value: str) -> str:
     while match := SENSITIVE_ASSIGNMENT_PREFIX_RE.search(value, cursor):
         pieces.append(value[cursor : match.start()])
         pieces.append(f"{match.group(1)}{match.group(2)}{REDACTION_MARKER}")
-        value_end, _decoded = _scan_assignment_value(value, match.end())
+        value_end, _raw, _decoded = _scan_assignment_value(value, match.end())
         cursor = value_end
     pieces.append(value[cursor:])
     return "".join(pieces)
 
 
-def _scan_assignment_value(value: str, start: int) -> tuple[int, str]:
+def _scan_assignment_value(value: str, start: int) -> tuple[int, str, str]:
     decoded: list[str] = []
     cursor = start
     length = len(value)
     quote = value[cursor] if cursor < length and value[cursor] in {'"', "'"} else None
     if quote is not None:
         cursor += 1
+    body_start = cursor
+    body_end = cursor
     while cursor < length:
         current = value[cursor]
         if current == "\\" and cursor + 1 < length:
             decoded.append(value[cursor + 1])
             cursor += 2
+            body_end = cursor
         elif quote is not None and current == quote:
+            body_end = cursor
             cursor += 1
             break
         elif quote is None and current in " \t\r\n,;&":
+            body_end = cursor
             break
         else:
             decoded.append(current)
             cursor += 1
-    return cursor, "".join(decoded)
+            body_end = cursor
+    return cursor, value[body_start:body_end], "".join(decoded)
 
 
 def _dsn_password_candidates(dsn: str) -> set[str]:
     candidates: set[str] = set()
     cursor = 0
     while match := LIBPQ_PASSWORD_PREFIX_RE.search(dsn, cursor):
-        cursor, decoded = _scan_assignment_value(dsn, match.end())
-        if decoded:
-            candidates.add(decoded)
+        cursor, raw, decoded = _scan_assignment_value(dsn, match.end())
+        candidates.update(candidate for candidate in (raw, decoded) if candidate)
         if cursor == match.end():
             cursor += 1
     try:
