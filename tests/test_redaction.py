@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from psycopg2.extensions import parse_dsn
 
 from packages.common import redaction
 from packages.common.redaction import (
@@ -355,6 +356,117 @@ def test_redact_text_redacts_free_form_authorization_scheme_credentials(
     assert redacted == expected
     for raw_secret in raw_secrets:
         assert raw_secret not in redacted
+
+
+@pytest.mark.parametrize(
+    ("raw", "secret"),
+    [
+        ('payload="prefix {"password":"inner-json-secret"} suffix"', "inner-json-secret"),
+        (
+            r'payload="prefix {\\\"p\\u0061ssword\\\":\\\"layer-two-secret\\\"} suffix"',
+            "layer-two-secret",
+        ),
+        (
+            r'payload="prefix {\\\\\\\"password\\\\\\\":\\\\\\\"layer-three-secret\\\\\\\"} suffix"',
+            "layer-three-secret",
+        ),
+    ],
+)
+def test_redact_text_fails_closed_for_nested_json_assignment_layers(
+    raw: str, secret: str
+) -> None:
+    redacted = redact_text(raw)
+    assert secret not in redacted
+    assert REDACTION_MARKER in redacted
+
+
+@pytest.mark.parametrize("quote", ['"', "'"])
+@pytest.mark.parametrize("key", ["password", "api.key", "auth.header"])
+@pytest.mark.parametrize("slash_count", range(8))
+def test_nested_assignment_slash_run_matrix_fails_closed(
+    quote: str, key: str, slash_count: int
+) -> None:
+    quoted = "\\" * slash_count + quote
+    secret = f"matrix {key} {slash_count} secret tail"
+    raw = f"payload={quote}prefix {{{quoted}{key}{quoted}:{quoted}{secret}{quoted}}} suffix{quote}"
+    redacted = redact_text(raw)
+    assert secret not in redacted
+    assert REDACTION_MARKER in redacted
+
+
+@pytest.mark.parametrize("quote", ['"', "'"])
+@pytest.mark.parametrize("slash_count", range(8))
+def test_nested_assignment_slash_run_matrix_preserves_ordinary_dotted_keys(
+    quote: str, slash_count: int
+) -> None:
+    quoted = "\\" * slash_count + quote
+    raw = (
+        f"payload={quote}prefix "
+        f"{{{quoted}ordinary.key{quoted}:{quoted}visible-{slash_count}{quoted}}} "
+        f"suffix{quote}"
+    )
+    assert redact_text(raw) == raw
+
+
+def test_even_slash_run_assignment_scan_is_monotonic_and_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = redaction._skip_assignment_key_closer
+    calls = 0
+
+    def count_closer(value: str, start: int) -> int:
+        nonlocal calls
+        calls += 1
+        return original(value, start)
+
+    monkeypatch.setattr(redaction, "_skip_assignment_key_closer", count_closer)
+    slash_run = "\\" * 200_000
+    raw = f'payload="prefix {{{slash_run}"password{slash_run}":"bounded-secret"}} suffix"'
+    redacted = redaction._redact_sensitive_assignments(raw)
+    assert "bounded-secret" not in redacted
+    assert calls <= 6
+
+
+@pytest.mark.parametrize(
+    ("raw", "secret"),
+    [
+        ('Authorization=Bearer "quoted bearer secret" tail', "quoted bearer secret"),
+        ("Proxy-Authorization=Basic 'quoted basic secret' tail", "quoted basic secret"),
+        ('auth_header=Bearer\u2003"unicode bearer secret" tail', "unicode bearer secret"),
+        (r'auth_header=Basic \"escaped basic secret\" tail', "escaped basic secret"),
+        (r'Authorization=Bearer \\\"layered escaped bearer secret\\\" tail', "layered escaped bearer secret"),
+        (
+            r'{\"Authorization\":\"Bearer escaped-json-authorization-secret\"}',
+            "escaped-json-authorization-secret",
+        ),
+    ],
+)
+def test_redact_text_consumes_quoted_authorization_credentials(
+    raw: str, secret: str
+) -> None:
+    redacted = redact_text(raw)
+    assert secret not in redacted
+    assert REDACTION_MARKER in redacted
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Authorization=Bearer [redacted]",
+        "Proxy-Authorization: Basic [redacted]",
+        "Bearer [redacted]",
+    ],
+)
+def test_authorization_redaction_is_idempotent(raw: str) -> None:
+    assert redact_text(redact_text(raw)) == redact_text(raw)
+
+
+def test_authorization_escaped_quote_staircase_has_bounded_monotonic_scan() -> None:
+    staircase = "\\" * 200_000 + '"'
+    raw = f"Authorization=Bearer {staircase}staircase-auth-secret{staircase} tail"
+    redacted = redact_text(raw)
+    assert "staircase-auth-secret" not in redacted
+    assert REDACTION_MARKER in redacted
 
 
 @pytest.mark.parametrize(
@@ -850,3 +962,61 @@ def test_dsn_candidate_matching_does_not_rewrite_inserted_marker() -> None:
     assert redact_database_dsn("a=redacted-long b=redacted", dsn) == (
         "a=[redacted] b=[redacted]"
     )
+
+
+@pytest.mark.parametrize(
+    ("dsn", "echoed_secrets"),
+    [
+        (
+            "postgresql://reader:userinfo@db/nhms?password=query%20secret",
+            ("query%20secret", "query secret"),
+        ),
+        (
+            "postgresql://reader:userinfo@db/nhms?password=first&password=effective%2Bsecond",
+            ("first", "effective%2Bsecond", "effective+second"),
+        ),
+        (
+            "postgresql://reader:userinfo@db/nhms?sslpassword=ssl%20key%2Bsecret",
+            ("ssl%20key%2Bsecret", "ssl key+secret"),
+        ),
+        (
+            r"host=db user=reader sslpassword='ssl\ key secret' dbname=nhms",
+            (r"ssl\ key secret", "ssl key secret"),
+        ),
+    ],
+)
+def test_redact_database_dsn_uses_libpq_password_and_sslpassword_contract(
+    dsn: str, echoed_secrets: tuple[str, ...]
+) -> None:
+    parsed = parse_dsn(dsn)
+    assert "password" in parsed or "sslpassword" in parsed
+    redacted = redact_database_dsn(" | ".join(echoed_secrets), dsn)
+    for secret in echoed_secrets:
+        assert secret not in redacted
+
+
+def test_libpq_repeated_uri_password_uses_last_value_and_redacts_all_echoes() -> None:
+    dsn = "postgresql://reader:userinfo@db/nhms?password=first&password=effective%2Bsecond"
+    assert parse_dsn(dsn)["password"] == "effective+second"
+    redacted = redact_database_dsn("first | effective%2Bsecond | effective+second", dsn)
+    for secret in ("first", "effective%2Bsecond", "effective+second"):
+        assert secret not in redacted
+
+
+def test_nested_fragment_decode_work_is_fixed_and_does_not_recurse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = redaction._decode_escaped_fragment_once
+    calls = 0
+
+    def count_decode(value: str) -> str:
+        nonlocal calls
+        calls += 1
+        return original(value)
+
+    monkeypatch.setattr(redaction, "_decode_escaped_fragment_once", count_decode)
+    hostile = 'payload="' + r"\\\\\"ordinary.key\\\\\":\\\\\"visible\\\\\"," * 20_000
+    hostile += r'\\\\\"password\\\\\":\\\\\"bounded-secret\\\\\""'
+    redacted = redaction._redact_sensitive_assignments(hostile)
+    assert "bounded-secret" not in redacted
+    assert calls <= redaction.MAX_FRAGMENT_DECODE_LAYERS - 1

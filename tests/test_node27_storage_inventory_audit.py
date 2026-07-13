@@ -1613,6 +1613,9 @@ def test_unexpected_prepublication_error_publishes_sanitized_indeterminate(
             'fragment="password=inner-blocked-secret" '
             '{"auth_\\u0068eader": "Bearer escaped-blocked-auth-secret"} '
             "password\u00a0=\u00a0unicode-blocked-secret "
+            'payload="prefix {"password":"unescaped-blocked-secret"} suffix" '
+            r'payload="prefix {\\\"password\\\":\\\"layered-blocked-secret\\\"} suffix" '
+            'Authorization=Bearer "quoted-blocked-auth-secret" '
             '\"token=quoted-outer-blocked-secret\": "outer-blocked-secret"'
         ),
         RuntimeError(
@@ -1622,6 +1625,9 @@ def test_unexpected_prepublication_error_publishes_sanitized_indeterminate(
             "source='token=inner-indeterminate-secret' "
             "{'\\u0061uth': 'Basic escaped-indeterminate-auth-secret'} "
             "password\u0085=\u0085unicode-indeterminate-secret "
+            'payload="prefix {"password":"unescaped-indeterminate-secret"} suffix" '
+            r'payload="prefix {\\\"password\\\":\\\"layered-indeterminate-secret\\\"} suffix" '
+            "Proxy-Authorization=Basic 'quoted-indeterminate-auth-secret' "
             "'api_key=quoted-outer-indeterminate-secret' = 'outer-indeterminate-secret'"
         ),
     ],
@@ -1662,6 +1668,12 @@ def test_terminal_receipt_redacts_generic_credentials_for_controlled_and_unexpec
         "escaped-indeterminate-auth-secret",
         "unicode-blocked-secret",
         "unicode-indeterminate-secret",
+        "unescaped-blocked-secret",
+        "unescaped-indeterminate-secret",
+        "layered-blocked-secret",
+        "layered-indeterminate-secret",
+        "quoted-blocked-auth-secret",
+        "quoted-indeterminate-auth-secret",
         "quoted-outer-blocked-secret",
         "quoted-outer-indeterminate-secret",
         "outer-blocked-secret",
@@ -1681,6 +1693,9 @@ def test_quoted_credential_key_is_redacted_from_bootstrap_stderr(
             audit.AuditBlocked(
                 'bootstrap {"ordinary\\uD800": "boot\\\"secret", "safe": "visible"} '
                 'payload="password=bootstrap-fragment-secret" '
+                'payload="prefix {"password":"bootstrap-unescaped-secret"} suffix" '
+                r'payload="prefix {\\\"password\\\":\\\"bootstrap-layered-secret\\\"} suffix" '
+                'auth_header=Bearer\u2003"bootstrap quoted auth secret" '
                 '{"前缀authorization": "Bearer bootstrap-auth-secret"}'
             )
         ),
@@ -1691,6 +1706,9 @@ def test_quoted_credential_key_is_redacted_from_bootstrap_stderr(
     assert 'boot\\"secret' not in diagnostic["message"]
     assert "bootstrap-fragment-secret" not in diagnostic["message"]
     assert "bootstrap-auth-secret" not in diagnostic["message"]
+    assert "bootstrap-unescaped-secret" not in diagnostic["message"]
+    assert "bootstrap-layered-secret" not in diagnostic["message"]
+    assert "bootstrap quoted auth secret" not in diagnostic["message"]
     assert "visible" in diagnostic["message"]
 
 
@@ -1722,6 +1740,9 @@ def test_quoted_credential_key_is_redacted_from_publication_stderr(
                 '{"proxy_\\u0061uthorization": "Bearer publication-auth-secret"} '
                 "password\u2003=\u2003publication-unicode-secret "
                 'payload="prefix {\\"password\\":\\"publication-inner-secret\\"}" '
+                'payload="prefix {"password":"publication-unescaped-secret"} suffix" '
+                r'payload="prefix {\\\"password\\\":\\\"publication-layered-secret\\\"} suffix" '
+                r'Proxy-Authorization=Basic \"publication escaped auth secret\" '
                 '\"token=publication-quoted-outer-secret\": "publication-outer-secret"'
             )
         ),
@@ -1734,6 +1755,9 @@ def test_quoted_credential_key_is_redacted_from_publication_stderr(
     assert "publication-auth-secret" not in diagnostic["message"]
     assert "publication-unicode-secret" not in diagnostic["message"]
     assert "publication-inner-secret" not in diagnostic["message"]
+    assert "publication-unescaped-secret" not in diagnostic["message"]
+    assert "publication-layered-secret" not in diagnostic["message"]
+    assert "publication escaped auth secret" not in diagnostic["message"]
     assert "publication-quoted-outer-secret" not in diagnostic["message"]
     assert "publication-outer-secret" not in diagnostic["message"]
     assert "visible" in diagnostic["message"]
@@ -1760,6 +1784,76 @@ def test_terminal_receipt_redacts_driver_decoded_and_libpq_passwords(
     body = config.receipt_path.read_text(encoding="utf-8")
     for secret in (dsn, "p%40ss%20word", "p@ss word", "quoted with spaces", "escaped\\ value"):
         assert secret not in body
+
+
+@pytest.mark.parametrize("error_type", [audit.AuditBlocked, RuntimeError])
+@pytest.mark.parametrize(
+    ("dsn", "echoed"),
+    [
+        (
+            "postgresql://reader:userinfo@db/nhms?password=query%20audit%2Bsecret",
+            "query audit+secret",
+        ),
+        (
+            "host=db user=reader sslpassword='ssl audit secret' dbname=nhms",
+            "ssl audit secret",
+        ),
+    ],
+)
+def test_terminal_receipt_redacts_libpq_query_and_ssl_passwords(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
+    dsn: str,
+    echoed: str,
+) -> None:
+    config = replace(_config(tmp_path), database_url=dsn)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(
+        audit,
+        "run_audit",
+        lambda _config, *, publish: (_ for _ in ()).throw(error_type(f"driver echoed {echoed}")),
+    )
+    assert audit.main([]) == 1
+    assert echoed not in config.receipt_path.read_text(encoding="utf-8")
+
+
+def test_bootstrap_stderr_redacts_libpq_query_password(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dsn = "postgresql://reader:userinfo@db/nhms?password=bootstrap%20query%2Bsecret"
+    monkeypatch.setenv("DATABASE_URL", dsn)
+    monkeypatch.setattr(
+        audit,
+        "bootstrap_receipt_path",
+        lambda _argv: (_ for _ in ()).throw(
+            audit.AuditBlocked("driver echoed bootstrap query+secret")
+        ),
+    )
+    assert audit.main([]) == 1
+    assert "bootstrap query+secret" not in capsys.readouterr().err
+
+
+def test_publication_stderr_redacts_libpq_sslpassword(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    dsn = "host=db user=reader sslpassword='publication ssl secret' dbname=nhms"
+    config = replace(_config(tmp_path), database_url=dsn)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(audit, "run_audit", lambda _config, *, publish: _receipt([_subject()]))
+    monkeypatch.setattr(
+        audit,
+        "publish_receipt",
+        lambda *_args: (_ for _ in ()).throw(
+            audit.AuditBlocked("publisher echoed publication ssl secret")
+        ),
+    )
+    assert audit.main([]) == 1
+    assert "publication ssl secret" not in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(

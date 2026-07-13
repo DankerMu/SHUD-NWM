@@ -790,10 +790,15 @@ def test_quoted_credential_keys_are_masked_in_helper_and_refused_stderr(
 ) -> None:
     diagnostic = (
         '{"auth_\\u0068eader": "Bearer helper-secret", "safe": "visible"} '
-        'payload="password=helper-fragment-secret"'
+        'payload="password=helper-fragment-secret" '
+        'payload="prefix {"password":"helper-unescaped-secret"} suffix" '
+        r'payload="prefix {\\\"password\\\":\\\"helper-layered-secret\\\"} suffix" '
+        'Authorization=Bearer "helper quoted auth secret"'
     )
     masked = salvage._mask_dsn_in_message(diagnostic, _DSN)
     assert "helper-secret" not in masked and "helper-fragment-secret" not in masked
+    assert "helper-unescaped-secret" not in masked and "helper-layered-secret" not in masked
+    assert "helper quoted auth secret" not in masked
     assert "visible" in masked
 
     env = _base_env(tmp_path)
@@ -805,7 +810,8 @@ def test_quoted_credential_keys_are_masked_in_helper_and_refused_stderr(
             now_utc=_NOW,
             check_write_privileges=lambda _dsn: (
                 "role {'\\u0061uth': 'Basic refused-secret', 'safe': 'visible'} "
-                "source='token=refused-fragment-secret'"
+                "source='token=refused-fragment-secret' "
+                r'Proxy-Authorization=Basic \"refused quoted auth secret\"'
             ),
             fetch_row_count=lambda *_args, **_kwargs: 0,
             perform_copy_export=lambda *_args, **_kwargs: b"",
@@ -816,6 +822,7 @@ def test_quoted_credential_keys_are_masked_in_helper_and_refused_stderr(
     stderr = capsys.readouterr().err
     assert json.loads(stderr)["outcome"] == "refused_role"
     assert "refused-secret" not in stderr and "refused-fragment-secret" not in stderr
+    assert "refused quoted auth secret" not in stderr
     assert "visible" in stderr
 
 
@@ -835,6 +842,9 @@ def test_quoted_credential_keys_are_masked_in_selector_receipt_and_runner_stderr
         raise RuntimeError(
             'selector {"前缀authorization": "Bearer selector-secret", "safe": "visible"} '
             'payload="api_key=selector-fragment-secret" '
+            'payload="prefix {"password":"selector-unescaped-secret"} suffix" '
+            r'payload="prefix {\\\"password\\\":\\\"selector-layered-secret\\\"} suffix" '
+            'auth_header=Bearer\u2003"selector quoted auth secret" '
             "password\u00a0=\u00a0selector-unicode-secret "
             '\"token=selector-quoted-outer-secret\": "selector-outer-secret"'
         )
@@ -855,6 +865,9 @@ def test_quoted_credential_keys_are_masked_in_selector_receipt_and_runner_stderr
     for secret in (
         "selector-secret",
         "selector-fragment-secret",
+        "selector-unescaped-secret",
+        "selector-layered-secret",
+        "selector quoted auth secret",
         "selector-unicode-secret",
         "selector-quoted-outer-secret",
         "selector-outer-secret",
@@ -869,6 +882,9 @@ def test_quoted_credential_keys_are_masked_in_selector_receipt_and_runner_stderr
             RuntimeError(
                 "runner {'proxy_\\u0061uthorization': 'Bearer runner-secret', 'safe': 'visible'} "
                 'source="password=runner-fragment-secret" '
+                'payload="prefix {"password":"runner-unescaped-secret"} suffix" '
+                r'payload="prefix {\\\"password\\\":\\\"runner-layered-secret\\\"} suffix" '
+                "Proxy-Authorization=Basic 'runner quoted auth secret' "
                 "token\u0085=\u0085runner-unicode-secret "
                 "'api_key=runner-quoted-outer-secret' = 'runner-outer-secret'"
             )
@@ -880,6 +896,9 @@ def test_quoted_credential_keys_are_masked_in_selector_receipt_and_runner_stderr
     for secret in (
         "runner-secret",
         "runner-fragment-secret",
+        "runner-unescaped-secret",
+        "runner-layered-secret",
+        "runner quoted auth secret",
         "runner-unicode-secret",
         "runner-quoted-outer-secret",
         "runner-outer-secret",
@@ -904,7 +923,10 @@ def test_unicode_escaped_credential_key_is_masked_from_salvage_publication_stder
             salvage.SafeFilesystemError(
                 'publisher {"auth_\\u0068eader": "Basic publication-secret", '
                 '"safe": "visible"} payload="token=publication-fragment-secret" '
-                'detail="prefix {\\"api.key\\":\\"publication-inner-secret\\"}"'
+                'detail="prefix {\\"api.key\\":\\"publication-inner-secret\\"}" '
+                'detail="prefix {"password":"publication-unescaped-secret"} suffix" '
+                r'detail="prefix {\\\"password\\\":\\\"publication-layered-secret\\\"} suffix" '
+                r'auth_header=Basic \"publication quoted auth secret\"'
             )
         ),
     )
@@ -923,6 +945,9 @@ def test_unicode_escaped_credential_key_is_masked_from_salvage_publication_stder
     assert json.loads(stderr)["outcome"] == "partial"
     assert "publication-secret" not in stderr and "publication-fragment-secret" not in stderr
     assert "publication-inner-secret" not in stderr
+    assert "publication-unescaped-secret" not in stderr
+    assert "publication-layered-secret" not in stderr
+    assert "publication quoted auth secret" not in stderr
     assert "visible" in stderr
 
 
@@ -1599,6 +1624,24 @@ def test_count_csv_rows_edge_cases() -> None:
             ["secretpw"],
             "127.0.0.1",
         ),
+        (
+            "postgresql://user:userinfo@127.0.0.1:55432/nhms?password=query%20secret%2Bvalue",
+            "driver decoded query secret+value",
+            ["query secret+value"],
+            "***",
+        ),
+        (
+            "postgresql://user:userinfo@127.0.0.1:55432/nhms?sslpassword=ssl%20query%2Bvalue",
+            "driver decoded ssl query+value",
+            ["ssl query+value"],
+            "***",
+        ),
+        (
+            "host=db.example.test user=reader sslpassword='ssl keyword secret' dbname=nhms",
+            "driver decoded ssl keyword secret",
+            ["ssl keyword secret"],
+            "***",
+        ),
         # libpq quoted-value form: password embedded in single quotes,
         # value contains an embedded space (a valid libpq DSN shape a
         # driver may echo). The banned substrings are chosen to
@@ -1622,6 +1665,9 @@ def test_count_csv_rows_edge_cases() -> None:
         "url-encoded-echoed",
         "url-decoded-echoed",
         "libpq-keyword-form",
+        "uri-query-password",
+        "uri-query-sslpassword",
+        "keyword-sslpassword",
         "libpq-quoted-value-form",
     ],
 )
