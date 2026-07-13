@@ -123,16 +123,40 @@ class SalvageConfig:
 
 def _mask_dsn(dsn: str) -> str:
     """Return a DSN safe for stderr diagnostics — credentials stripped."""
-    try:
-        parts = urlsplit(dsn)
-        netloc = parts.hostname or "***"
-        if parts.port is not None:
-            netloc = f"{netloc}:{parts.port}"
-        if parts.username is not None or parts.password is not None:
-            netloc = f"***@{netloc}"
-        return urlunsplit((parts.scheme or "postgresql", netloc, parts.path or "", "", ""))
-    except Exception:
+    fields = _safe_dsn_fields(dsn)
+    if fields is None:
         return "postgresql://***@***/***"
+    database, host, port = fields
+    display_host = f"[{host}]" if ":" in host else host
+    netloc = f"***@{display_host}"
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    return urlunsplit(("postgresql", netloc, f"/{database}", "", ""))
+
+
+_SAFE_DSN_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_SAFE_DSN_HOST_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
+
+
+def _safe_dsn_fields(dsn: str) -> tuple[str, str, int | None] | None:
+    try:
+        if "://" in dsn:
+            url_parts = urlsplit(dsn)
+            _ = (url_parts.hostname, url_parts.port)
+        from psycopg2.extensions import parse_dsn
+
+        parsed = parse_dsn(dsn)
+        database = str(parsed.get("dbname") or "")
+        host = str(parsed.get("host") or "***")
+        raw_port = parsed.get("port")
+        port = int(raw_port) if raw_port not in (None, "") else None
+    except Exception:
+        return None
+    if not _SAFE_DSN_NAME_RE.fullmatch(database) or not _SAFE_DSN_HOST_RE.fullmatch(host):
+        return None
+    if port is not None and not 1 <= port <= 65535:
+        return None
+    return database, host, port
 
 
 def _parse_positive_int(raw: str | None, *, name: str, minimum: int, maximum: int | None = None) -> int:
@@ -717,14 +741,8 @@ def _build_manifest(
 
 
 def _source_database_from_dsn(dsn: str) -> str:
-    try:
-        parts = urlsplit(dsn)
-    except Exception:
-        return ""
-    path = parts.path or ""
-    if path.startswith("/"):
-        path = path[1:]
-    return path or ""
+    fields = _safe_dsn_fields(dsn)
+    return fields[0] if fields is not None else "unknown"
 
 
 # ---------------------------------------------------------------------------

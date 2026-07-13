@@ -94,6 +94,7 @@ SENSITIVE_ASSIGNMENT_PREFIX_RE = re.compile(
     r"[A-Za-z0-9_.-]*)(\s*[:=]\s*)",
     re.IGNORECASE,
 )
+LIBPQ_PASSWORD_PREFIX_RE = re.compile(r"(?<!\S)password\s*=\s*", re.IGNORECASE)
 URL_RE = re.compile(r"(?:(?:[A-Za-z][A-Za-z0-9+.-]*)://|//)[^\s\"'<>]+", re.IGNORECASE)
 SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 
@@ -172,12 +173,8 @@ def redact_database_dsn(value: str, dsn: str | None) -> str:
     redacted = SURROGATE_RE.sub("\ufffd", value)
     normalized_dsn = SURROGATE_RE.sub("\ufffd", dsn or "")
     if normalized_dsn:
-        redacted = redacted.replace(normalized_dsn, redact_text(normalized_dsn))
-        try:
-            password_raw = urlsplit(normalized_dsn).password
-        except ValueError:
-            password_raw = None
-        if password_raw:
+        redacted = redacted.replace(normalized_dsn, REDACTION_MARKER)
+        for password_raw in _dsn_password_candidates(normalized_dsn):
             try:
                 password_decoded = unquote(password_raw)
             except Exception:
@@ -372,33 +369,61 @@ def _redact_sensitive_assignments(value: str) -> str:
     """Redact assignment values with one linear, mutually exclusive scan."""
     pieces: list[str] = []
     cursor = 0
-    length = len(value)
     while match := SENSITIVE_ASSIGNMENT_PREFIX_RE.search(value, cursor):
         pieces.append(value[cursor : match.start()])
         pieces.append(f"{match.group(1)}{match.group(2)}{REDACTION_MARKER}")
-        value_start = match.end()
-        value_end = value_start
-        if value_start < length and value[value_start] in {'"', "'"}:
-            quote = value[value_start]
-            value_end += 1
-            while value_end < length:
-                current = value[value_end]
-                if current == "\\" and value_end + 1 < length:
-                    value_end += 2
-                elif current == quote:
-                    value_end += 1
-                    break
-                else:
-                    value_end += 1
-        else:
-            while value_end < length and value[value_end] not in " \t\r\n,;&":
-                if value[value_end] == "\\" and value_end + 1 < length:
-                    value_end += 2
-                else:
-                    value_end += 1
+        value_end, _decoded = _scan_assignment_value(value, match.end())
         cursor = value_end
     pieces.append(value[cursor:])
     return "".join(pieces)
+
+
+def _scan_assignment_value(value: str, start: int) -> tuple[int, str]:
+    decoded: list[str] = []
+    cursor = start
+    length = len(value)
+    quote = value[cursor] if cursor < length and value[cursor] in {'"', "'"} else None
+    if quote is not None:
+        cursor += 1
+    while cursor < length:
+        current = value[cursor]
+        if current == "\\" and cursor + 1 < length:
+            decoded.append(value[cursor + 1])
+            cursor += 2
+        elif quote is not None and current == quote:
+            cursor += 1
+            break
+        elif quote is None and current in " \t\r\n,;&":
+            break
+        else:
+            decoded.append(current)
+            cursor += 1
+    return cursor, "".join(decoded)
+
+
+def _dsn_password_candidates(dsn: str) -> set[str]:
+    candidates: set[str] = set()
+    cursor = 0
+    while match := LIBPQ_PASSWORD_PREFIX_RE.search(dsn, cursor):
+        cursor, decoded = _scan_assignment_value(dsn, match.end())
+        if decoded:
+            candidates.add(decoded)
+        if cursor == match.end():
+            cursor += 1
+    try:
+        parsed_password = urlsplit(dsn).password
+    except Exception:
+        parsed_password = None
+    if parsed_password:
+        candidates.add(parsed_password)
+    scheme, separator, remainder = dsn.partition(":")
+    if separator and scheme.lower() in {"postgres", "postgresql"} and not remainder.startswith("//"):
+        userinfo, at, _target = remainder.rpartition("@")
+        if at and ":" in userinfo:
+            _username, _colon, password = userinfo.partition(":")
+            if password:
+                candidates.add(password)
+    return candidates
 
 
 def _redact_authorization_assignment(match: re.Match[str]) -> str:

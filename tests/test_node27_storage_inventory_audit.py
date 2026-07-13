@@ -1211,11 +1211,13 @@ def test_main_parser_or_config_failure_publishes_blocked_receipt(
         ("--help", "before", "cli", "incomplete"),
         ("-h", "none", "env", "complete"),
         ("--help", "none", "env", "incomplete"),
+        ("--help", "none", "absent", "incomplete"),
     ],
 )
-def test_help_replaces_stale_success_with_config_blocked_receipt_exactly_once(
+def test_help_is_early_side_effect_free_and_preserves_receipt_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
     flag: str,
     path_position: str,
     path_source: str,
@@ -1234,74 +1236,78 @@ def test_help_replaces_stale_success_with_config_blocked_receipt_exactly_once(
         else {},
     )
     assert old_receipt["outcome"] == seed_outcome
-    audit.publish_receipt(config.receipt_path, old_receipt)
+    if path_source != "absent":
+        audit.publish_receipt(config.receipt_path, old_receipt)
+        before = config.receipt_path.read_bytes()
+    else:
+        before = None
+        monkeypatch.delenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", raising=False)
     if path_source == "env":
         monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
         argv = [flag]
     elif path_position == "after":
         argv = [flag, "--receipt-path", str(config.receipt_path)]
     else:
-        argv = ["--receipt-path", str(config.receipt_path), flag]
-    original_publish = audit.publish_receipt
+        argv = [flag] if path_source == "absent" else ["--receipt-path", str(config.receipt_path), flag]
     attempts = 0
 
-    def count_publish(path: Path, receipt: dict[str, object]) -> None:
+    def reject_publish(*_args: object) -> None:
         nonlocal attempts
         attempts += 1
-        original_publish(path, receipt)
+        raise AssertionError("help must not publish")
 
-    monkeypatch.setattr(audit, "publish_receipt", count_publish)
-    assert audit.main(argv) == 1
-    assert attempts == 1
-    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
-    assert receipt["outcome"] == "blocked"
-    assert receipt["refusal_reason"] == "CONFIG_INVALID"
-    assert receipt != old_receipt
-    schema = json.loads(audit.COMPLETENESS_SCHEMA_PATH.read_text())
-    jsonschema.Draft7Validator(schema, format_checker=jsonschema.FormatChecker()).validate(receipt)
-    audit.validate_receipt_semantics(receipt)
+    monkeypatch.setattr(audit, "publish_receipt", reject_publish)
+    monkeypatch.setattr(
+        audit,
+        "bootstrap_receipt_path",
+        lambda _argv: (_ for _ in ()).throw(AssertionError("help must precede bootstrap")),
+    )
+    assert audit.main(argv) == 0
+    captured = capsys.readouterr()
+    assert "usage:" in captured.out and "--receipt-path" in captured.out
+    assert captured.err == ""
+    assert attempts == 0
+    if before is None:
+        assert not config.receipt_path.exists()
+    else:
+        assert config.receipt_path.read_bytes() == before
 
 
-def test_help_without_safe_destination_is_stderr_only_and_preserves_unsafe_target(
+def test_help_ignores_unsafe_destination_without_touching_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.delenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", raising=False)
-    assert audit.main(["--help"]) == 1
-    missing = capsys.readouterr()
-    assert not missing.out
-    assert json.loads(missing.err)["reason"] == "CONFIG_INVALID"
-
     real = tmp_path / "real"
     real.mkdir()
     old_path = real / "receipt.json"
     old_path.write_text(json.dumps(_receipt([_subject()])), encoding="utf-8")
+    before = old_path.read_bytes()
     linked = tmp_path / "linked"
     linked.symlink_to(real, target_is_directory=True)
-    assert audit.main(["-h", "--receipt-path", str(linked / "receipt.json")]) == 1
-    unsafe = capsys.readouterr()
-    assert not unsafe.out
-    assert json.loads(unsafe.err)["reason"] == "CONFIG_INVALID"
-    assert json.loads(old_path.read_text(encoding="utf-8"))["outcome"] == "incomplete"
+    assert audit.main(["-h", "--receipt-path", str(linked / "receipt.json")]) == 0
+    captured = capsys.readouterr()
+    assert "usage:" in captured.out and captured.err == ""
+    assert old_path.read_bytes() == before
 
 
-def test_help_publication_fault_is_not_retried(
+def test_help_never_enters_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     config = _config(tmp_path)
     audit.publish_receipt(config.receipt_path, _receipt([_subject()]))
     attempts = 0
 
-    def fail_once(*_args: object) -> None:
+    def fail_if_called(*_args: object) -> None:
         nonlocal attempts
         attempts += 1
-        raise audit.AuditBlocked("publication failed token=help-secret")
+        raise AssertionError("publication must be unreachable for help")
 
-    monkeypatch.setattr(audit, "publish_receipt", fail_once)
-    assert audit.main(["--receipt-path", str(config.receipt_path), "--help"]) == 1
-    assert attempts == 1
+    before = config.receipt_path.read_bytes()
+    monkeypatch.setattr(audit, "publish_receipt", fail_if_called)
+    assert audit.main(["--receipt-path", str(config.receipt_path), "--help"]) == 0
+    assert attempts == 0
     captured = capsys.readouterr()
-    assert json.loads(captured.err)["reason"] == audit.PUBLICATION_FAILED_CODE
-    assert "help-secret" not in captured.err
+    assert "usage:" in captured.out and captured.err == ""
+    assert config.receipt_path.read_bytes() == before
 
 
 @pytest.mark.parametrize("outcome", ["complete", "incomplete"])
@@ -1524,6 +1530,57 @@ def test_terminal_receipt_redacts_driver_decoded_and_libpq_passwords(
 
 
 @pytest.mark.parametrize(
+    "error",
+    [
+        audit.AuditBlocked(
+            "driver echoed dbname=nhms host=db password='keyword secret' user=reader; "
+            "bare=keyword secret"
+        ),
+        RuntimeError(
+            "driver echoed user=reader password='keyword secret' dbname=nhms host=db; "
+            "bare=keyword secret"
+        ),
+    ],
+)
+def test_keyword_dsn_is_redacted_from_blocked_and_indeterminate_receipts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    dsn = "host=db user=reader password='keyword secret' dbname=nhms"
+    config = replace(_config(tmp_path), database_url=dsn)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(
+        audit,
+        "run_audit",
+        lambda _config, *, publish: (_ for _ in ()).throw(error),
+    )
+    assert audit.main([]) == 1
+    body = config.receipt_path.read_text(encoding="utf-8")
+    assert dsn not in body and "keyword secret" not in body
+
+
+def test_keyword_dsn_is_redacted_from_publication_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dsn = "host=db user=reader password='keyword secret' dbname=nhms"
+    config = replace(_config(tmp_path), database_url=dsn)
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(audit, "run_audit", lambda _config, *, publish: _receipt([_subject()]))
+    monkeypatch.setattr(
+        audit,
+        "publish_receipt",
+        lambda *_args: (_ for _ in ()).throw(
+            audit.AuditBlocked(f"publication failed {dsn}; bare=keyword secret")
+        ),
+    )
+    assert audit.main([]) == 1
+    stderr = capsys.readouterr().err
+    assert json.loads(stderr)["reason"] == audit.PUBLICATION_FAILED_CODE
+    assert dsn not in stderr and "keyword secret" not in stderr
+
+
+@pytest.mark.parametrize(
     ("error", "expected_outcome"),
     [
         (audit.AuditBlocked("blocked path-\udcff token=secret"), "blocked"),
@@ -1566,6 +1623,160 @@ def test_lone_surrogate_terminal_error_replaces_stale_success_exactly_once(
     schema = json.loads(audit.COMPLETENESS_SCHEMA_PATH.read_text())
     jsonschema.Draft7Validator(schema, format_checker=jsonschema.FormatChecker()).validate(published)
     audit.validate_receipt_semantics(published)
+
+
+@pytest.mark.parametrize("surrogate", ["\udcff", "\ud800"])
+@pytest.mark.parametrize("source", ["db-identity", "salvage-evidence"])
+def test_success_payload_surrogate_is_mapped_to_blocked_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    surrogate: str,
+    source: str,
+) -> None:
+    config = _config(tmp_path)
+    stale = _receipt([_subject(identifier="stale-success")])
+    audit.publish_receipt(config.receipt_path, stale)
+    if source == "db-identity":
+        unsafe = _receipt([_subject(identifier=f"forcing-{surrogate}")])
+    else:
+        unsafe = _receipt([_subject()])
+        unsafe["windows"][0]["evidence"].append(f"salvage-{surrogate}")
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(audit, "run_audit", lambda _config, *, publish: unsafe)
+    original_publish = audit.publish_receipt
+    original_atomic = audit.atomic_write_bytes_no_follow
+    publish_attempts = 0
+    atomic_attempts = 0
+
+    def count_publish(path: Path, receipt: dict[str, object]) -> None:
+        nonlocal publish_attempts
+        publish_attempts += 1
+        original_publish(path, receipt)
+
+    def count_atomic(*args: object, **kwargs: object) -> None:
+        nonlocal atomic_attempts
+        atomic_attempts += 1
+        original_atomic(*args, **kwargs)
+
+    monkeypatch.setattr(audit, "publish_receipt", count_publish)
+    monkeypatch.setattr(audit, "atomic_write_bytes_no_follow", count_atomic)
+    assert audit.main([]) == 1
+    captured = capsys.readouterr()
+    assert audit.PUBLICATION_FAILED_CODE not in captured.err
+    assert publish_attempts == 1 and atomic_attempts == 1
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "blocked"
+    assert receipt["refusal_reason"] == "EVIDENCE_BLOCKED"
+    assert receipt != stale
+    schema = json.loads(audit.COMPLETENESS_SCHEMA_PATH.read_text())
+    jsonschema.Draft7Validator(schema, format_checker=jsonschema.FormatChecker()).validate(receipt)
+
+
+@pytest.mark.parametrize("surrogate", ["\udcff", "\ud800"])
+def test_real_manifest_member_surrogate_blocks_without_publication_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    surrogate: str,
+) -> None:
+    config = _config(tmp_path)
+    stale = _receipt([_subject(identifier="stale-success")])
+    audit.publish_receipt(config.receipt_path, stale)
+    key = "forcing/gfs/2026050100/basin-a/model-a"
+    package = config.object_store_root / key
+    package.mkdir(parents=True)
+    manifest = {
+        "forcing_version_id": "forcing-a",
+        "source_id": "gfs",
+        "cycle_time": audit._time(START),
+        "start_time": audit._time(START),
+        "end_time": audit._time(END),
+        "model_id": "model-a",
+        "basin_version_id": "basin-a",
+        "files": [
+            {
+                "uri": f"s3://nhms/{key}/member-{surrogate}.csv",
+                "checksum": "a" * 64,
+            }
+        ],
+    }
+    raw_manifest = json.dumps(manifest).encode("utf-8")
+    (package / "forcing_package.json").write_bytes(raw_manifest)
+    forcing_row = {
+        "forcing_version_id": "forcing-a",
+        "model_id": "model-a",
+        "source_id": "gfs",
+        "cycle_time": START,
+        "start_time": START,
+        "end_time": END,
+        "forcing_package_uri": f"s3://nhms/{key}",
+        "checksum": hashlib.sha256(raw_manifest).hexdigest(),
+        "basin_version_id": "basin-a",
+    }
+
+    class Connection(_Connection):
+        def __init__(self) -> None:
+            super().__init__([[{"audit_time": NOW}], [forcing_row], [], []])
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("psycopg2.connect", lambda _dsn: Connection())
+    original_publish = audit.publish_receipt
+    original_atomic = audit.atomic_write_bytes_no_follow
+    publish_attempts = 0
+    atomic_attempts = 0
+
+    def count_publish(path: Path, receipt: dict[str, object]) -> None:
+        nonlocal publish_attempts
+        publish_attempts += 1
+        original_publish(path, receipt)
+
+    def count_atomic(*args: object, **kwargs: object) -> None:
+        nonlocal atomic_attempts
+        atomic_attempts += 1
+        original_atomic(*args, **kwargs)
+
+    monkeypatch.setattr(audit, "publish_receipt", count_publish)
+    monkeypatch.setattr(audit, "atomic_write_bytes_no_follow", count_atomic)
+    argv = [
+        "--receipt-path",
+        str(config.receipt_path),
+        "--database-url",
+        config.database_url,
+        "--object-store-root",
+        str(config.object_store_root),
+        "--object-store-prefix",
+        config.object_store_prefix,
+        "--archive-root",
+        str(config.archive_root),
+        "--zstd-path",
+        str(config.zstd_path),
+    ]
+    assert audit.main(argv) == 1
+    captured = capsys.readouterr()
+    assert audit.PUBLICATION_FAILED_CODE not in captured.err
+    assert publish_attempts == 1 and atomic_attempts == 1
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "blocked"
+    assert receipt["refusal_reason"] == "EVIDENCE_BLOCKED"
+    assert receipt != stale
+
+
+def test_success_payload_accepts_supplementary_unicode_scalar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    receipt = _receipt([_subject()])
+    receipt["windows"][0]["evidence"].append("supplementary-\U0001F4A7")
+    monkeypatch.setenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH", str(config.receipt_path))
+    monkeypatch.setattr(audit, "config_from_args", lambda _args: config)
+    monkeypatch.setattr(audit, "run_audit", lambda _config, *, publish: receipt)
+    assert audit.main([]) == 0
+    published = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert "supplementary-\U0001F4A7" in published["windows"][0]["evidence"]
 
 
 def test_lone_surrogate_and_credentials_are_sanitized_on_bootstrap_and_publication_stderr(

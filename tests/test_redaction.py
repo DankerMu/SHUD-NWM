@@ -441,3 +441,34 @@ def test_redact_database_dsn_is_total_when_error_contains_malformed_url() -> Non
     redacted = redact_database_dsn(f"dsn={dsn}; remote={malformed}", dsn)
     for secret in ("db-secret", "url-secret", "token=query"):
         assert secret not in redacted
+
+
+@pytest.mark.parametrize(
+    ("dsn", "bare_password"),
+    [
+        ("host=db user=reader password=plain-secret dbname=nhms", "plain-secret"),
+        ("dbname=nhms password='quoted secret' user=reader host=db", "quoted secret"),
+        (r"user=reader password=escaped\ secret host=db dbname=nhms", "escaped secret"),
+        ("opaque-dsn-secret", None),
+        ("postgresql:reader:missing-slashes-secret@db/nhms", "missing-slashes-secret"),
+    ],
+)
+def test_redact_database_dsn_replaces_exact_dsn_with_fixed_marker_and_bare_password(
+    dsn: str, bare_password: str | None
+) -> None:
+    raw = f"configured={dsn}"
+    if bare_password is not None:
+        raw += f"; driver password echo={bare_password}"
+    redacted = redact_database_dsn(raw, dsn)
+    assert dsn not in redacted
+    assert REDACTION_MARKER in redacted
+    if bare_password is not None:
+        assert bare_password not in redacted
+
+
+def test_redact_database_dsn_masks_reordered_keyword_echo() -> None:
+    configured = "host=db user=reader password='keyword secret' dbname=nhms"
+    reordered = "dbname=nhms host=db password='keyword secret' user=reader"
+    redacted = redact_database_dsn(f"driver echoed {reordered}", configured)
+    assert reordered not in redacted
+    assert "keyword secret" not in redacted

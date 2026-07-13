@@ -868,6 +868,8 @@ def validate_receipt_semantics(receipt: Mapping[str, Any], subjects: Sequence[In
 
 
 def publish_receipt(path: Path, receipt: Mapping[str, Any]) -> None:
+    if receipt.get("outcome") in {"complete", "incomplete"}:
+        _reject_success_payload_surrogates(receipt)
     path = _validate_output_path(path)
     payload = (_canonical(receipt) + "\n").encode()
     try:
@@ -919,6 +921,7 @@ def run_audit(
         salvage_mismatches=salvage_mismatches,
     )
     if publish:
+        validate_success_receipt_for_publication(receipt, subjects)
         publish_receipt(config.receipt_path, receipt)
     return receipt
 
@@ -972,10 +975,6 @@ def build_parser() -> argparse.ArgumentParser:
 class _AuditArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         raise AuditBlocked(f"invalid arguments: {message}")
-
-    def exit(self, status: int = 0, message: str | None = None) -> None:
-        detail = message.strip() if message else "help requested" if status == 0 else "parser exited"
-        raise AuditBlocked(f"invalid arguments: {detail}")
 
 
 def bootstrap_receipt_path(argv: Sequence[str]) -> Path:
@@ -1078,8 +1077,43 @@ def _emit_stderr(code: str, message: str) -> None:
     print(_canonical({"status": "blocked", "reason": safe_code, "message": safe_message}), file=sys.stderr)
 
 
+def _help_requested(argv: Sequence[str]) -> bool:
+    for token in argv:
+        if token == "--":
+            return False
+        if token in {"-h", "--help"}:
+            return True
+    return False
+
+
+def _reject_success_payload_surrogates(value: Any, *, location: str = "$") -> None:
+    if isinstance(value, str):
+        if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+            raise AuditBlocked(f"success receipt contains Unicode surrogate at {location}")
+        return
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            _reject_success_payload_surrogates(key, location=f"{location}.<key>")
+            _reject_success_payload_surrogates(nested, location=f"{location}.{key}")
+        return
+    if isinstance(value, Sequence) and not isinstance(value, bytes | bytearray):
+        for index, nested in enumerate(value):
+            _reject_success_payload_surrogates(nested, location=f"{location}[{index}]")
+
+
+def validate_success_receipt_for_publication(
+    receipt: Mapping[str, Any], subjects: Sequence[InventorySubject] | None = None
+) -> None:
+    _reject_success_payload_surrogates(receipt)
+    validate_receipt_semantics(receipt, subjects)
+    _validate_schema(receipt, _load_schema(COMPLETENESS_SCHEMA_PATH), "archive completeness receipt")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if _help_requested(raw_argv):
+        build_parser().print_help()
+        return 0
     generated_at = datetime.now(UTC)
     try:
         receipt_path = bootstrap_receipt_path(raw_argv)
@@ -1092,8 +1126,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.receipt_path = str(receipt_path)
         config = config_from_args(args)
         receipt = run_audit(config, publish=False)
-        validate_receipt_semantics(receipt)
-        _validate_schema(receipt, _load_schema(COMPLETENESS_SCHEMA_PATH), "archive completeness receipt")
+        validate_success_receipt_for_publication(receipt)
         exit_code = 0
     except AuditBlocked as error:
         receipt = build_terminal_receipt(
@@ -1355,7 +1388,10 @@ def _object_key(uri: str, prefix: str) -> str:
     if (
         not key
         or any(part in {"", ".", ".."} for part in parts)
-        or any(ord(char) < 32 or ord(char) == 127 for char in key)
+        or any(
+            ord(char) < 32 or ord(char) == 127 or 0xD800 <= ord(char) <= 0xDFFF
+            for char in key
+        )
     ):
         raise AuditBlocked(f"unsafe object key: {key!r}")
     return key

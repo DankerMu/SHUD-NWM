@@ -685,6 +685,104 @@ def test_mask_dsn_strips_credentials() -> None:
     assert "127.0.0.1" in masked
 
 
+def test_keyword_dsn_mask_and_source_database_are_allowlist_rebuilt() -> None:
+    dsn = "host=db.example.test port=55432 user=reader password='keyword secret' dbname=nhms"
+    masked = salvage._mask_dsn(dsn)
+    assert masked == "postgresql://***@db.example.test:55432/nhms"
+    assert salvage._source_database_from_dsn(dsn) == "nhms"
+    assert dsn not in masked and "keyword secret" not in masked
+
+
+@pytest.mark.parametrize(
+    "dsn",
+    [
+        "host=db user=reader password=secret dbname='unsafe/path'",
+        "host='/tmp/postgres socket' user=reader password=secret dbname=nhms",
+        "opaque-dsn-secret",
+    ],
+)
+def test_dsn_mask_never_reemits_unvalidated_database_or_host(dsn: str) -> None:
+    assert salvage._mask_dsn(dsn) == "postgresql://***@***/***"
+    assert salvage._source_database_from_dsn(dsn) == "unknown"
+
+
+def test_keyword_dsn_success_receipt_contains_only_safe_database_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dsn = "password='keyword secret' dbname=nhms host=db.example.test user=reader port=55432"
+    env = _base_env(tmp_path, override={"DATABASE_URL": dsn})
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    row_count, copy_export, compress = _make_stub_copy_and_count()
+    assert (
+        salvage.main(
+            argv=[],
+            now_utc=_NOW,
+            check_write_privileges=_stub_check_read_only,
+            fetch_row_count=row_count,
+            perform_copy_export=copy_export,
+            compress_bytes=compress,
+        )
+        == 0
+    )
+    receipt = Path(env["NODE27_DB_EXPORT_SALVAGE_RECEIPT_PATH"]).read_text(encoding="utf-8")
+    payload = json.loads(receipt)
+    assert payload["source_database"]["database"] == "nhms"
+    assert dsn not in receipt and "keyword secret" not in receipt
+
+
+def test_opaque_dsn_success_receipt_uses_safe_database_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dsn = "opaque-dsn-secret"
+    env = _base_env(tmp_path, override={"DATABASE_URL": dsn})
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    row_count, copy_export, compress = _make_stub_copy_and_count()
+    assert (
+        salvage.main(
+            argv=[],
+            now_utc=_NOW,
+            check_write_privileges=_stub_check_read_only,
+            fetch_row_count=row_count,
+            perform_copy_export=copy_export,
+            compress_bytes=compress,
+        )
+        == 0
+    )
+    receipt = Path(env["NODE27_DB_EXPORT_SALVAGE_RECEIPT_PATH"]).read_text(encoding="utf-8")
+    assert json.loads(receipt)["source_database"]["database"] == "unknown"
+    assert dsn not in receipt
+
+
+def test_keyword_dsn_refused_stderr_masks_reordered_echo_and_bare_password(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    dsn = "host=db user=reader password='keyword secret' dbname=nhms"
+    reordered = "dbname=nhms password='keyword secret' host=db user=reader"
+    env = _base_env(tmp_path, override={"DATABASE_URL": dsn})
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert (
+        salvage.main(
+            argv=[],
+            now_utc=_NOW,
+            check_write_privileges=lambda _dsn: (
+                f"role probe echoed {reordered}; bare=keyword secret"
+            ),
+            fetch_row_count=lambda *_args, **_kwargs: 0,
+            perform_copy_export=lambda *_args, **_kwargs: b"",
+            compress_bytes=lambda data, _level, _zstd_path: data,
+        )
+        == 1
+    )
+    stderr = capsys.readouterr().err
+    assert json.loads(stderr)["outcome"] == "refused_role"
+    assert dsn not in stderr and reordered not in stderr and "keyword secret" not in stderr
+
+
 @pytest.mark.parametrize(
     "malformed_dsn",
     [
