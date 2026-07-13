@@ -982,7 +982,7 @@ Fixture level `expanded` · Repair intensity `high` · NHMS project profile · R
 - Preserve each wrapper's existing env loading, argument forwarding, validation, and final Python entrypoint semantics.
 - Every governed wrapper MUST snapshot the caller-inherited `PYTHONPATH` before sourcing its env file, then prepend its parameterized repository root to that snapshot before launching Python; an env-file `PYTHONPATH` assignment cannot discard the caller entries.
 - The resolved root MUST be absolute, contain no `:` path-list delimiter, and identify the same checkout as the default interpreter and Python entrypoint. Explicit interpreter/script overrides remain supported.
-- Because `scripts/` is intentionally a namespace directory without `__init__.py`, wrapper preflight MUST fail closed if the inherited path would make a regular `scripts` package outside the resolved root win module resolution.
+- Because `scripts/` is intentionally a namespace directory without `__init__.py`, wrapper preflight MUST fail closed if the effective file-launch search path would make a regular `scripts` package outside the resolved root win module resolution. The preflight MUST model the actual `python "$SCRIPT"` directory and launch cwd, and MUST remain correct when `PYTHONSAFEPATH=1` / `-P` removes the unsafe command-directory entry.
 - Exact governed set and root source: `node27_storage_inventory_audit_once.sh` / `NODE27_STORAGE_INVENTORY_AUDIT_REPO_ROOT`; `node27_product_archive_once.sh` / `NODE27_PRODUCT_ARCHIVE_REPO_ROOT`; `node27_timeseries_compression_once.sh` / `NODE27_TIMESERIES_COMPRESSION_REPO_ROOT`; `node27_timeseries_retention_once.sh` / existing `NODE27_TIMESERIES_RETENTION_REPO`; `node27_db_export_salvage_once.sh` / `NODE27_DB_EXPORT_SALVAGE_REPO_ROOT`; `node27_archive_rebuild_drill_once.sh` / `NODE27_ARCHIVE_REBUILD_DRILL_REPO_ROOT`; `node27_raw_retention_once.sh` / existing `NODE27_RAW_RETENTION_REPO`. Every variable defaults to `/home/nwm/NWM` when unset or empty.
 - `node27_archive_rebuild_drill_once.sh` does not exist on the baseline branch; issue #1067 explicitly names it in the required sibling set, so this PR adds a complete wrapper using the drill's existing env/CLI contract rather than silently reducing coverage.
 - Do not add `scripts/__init__.py` or rewrite Python imports; do not address URI-prefix or mover-discovery defects tracked by #1066/#1065.
@@ -1026,6 +1026,9 @@ Fixture level `expanded` · Repair intensity `high` · NHMS project profile · R
   - empty inherited `PYTHONPATH` + test repo root -> `from scripts import node27_product_archive` succeeds through the wrapper launch contract;
   - existing two-entry caller `PYTHONPATH` + env-file empty/non-empty assignment -> caller entries remain byte-for-byte and in order after the resolved root;
   - later inherited regular `scripts` package -> governed module origin or stable refusal before the audit entrypoint;
+  - `PYTHONSAFEPATH=1` with a safe governed checkout -> all seven wrappers reach their entrypoints without false refusal;
+  - regular `scripts` package in the actual entrypoint directory, including explicit script override outside the root -> stable refusal before entrypoint side effects;
+  - retention/raw caller path with an empty segment -> preflight and post-`cd` file launch resolve the same effective path;
   - custom root without interpreter/script overrides -> defaults derive from the same custom checkout;
   - all six sibling wrappers across unset/empty/absolute/relative/delimiter roots -> same root-prepend contract while retaining original arguments, Python entrypoint, and downstream exit code.
 

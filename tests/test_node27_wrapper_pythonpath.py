@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import subprocess
@@ -287,6 +288,13 @@ def _default_root_wrapper_harness(
 
     if case not in {"timeseries_retention", "raw_retention"}:
         return wrapper
+
+    probe_prefix = 'if ! (cd "$REPO" && "$PYTHON_BIN" -c \'\n'
+    assert source.count(probe_prefix) == 1
+    source = source.replace(
+        probe_prefix,
+        f"if ! (cd {shlex.quote(str(tmp_path))} && \"$PYTHON_BIN\" -c '\n",
+    )
 
     cd_command = 'cd "$REPO" || blocked "REPO_UNAVAILABLE"'
     assert source.count(cd_command) == 1
@@ -718,3 +726,236 @@ def test_all_wrappers_refuse_conflicting_regular_scripts_package_before_entrypoi
     assert result.returncode in {1, 2}
     assert "IMPORT_ORIGIN" in result.stderr.upper() or "import origin" in result.stderr
     assert not marker.exists()
+
+
+def _real_python_wrapper_harness(
+    tmp_path: Path,
+    case: str,
+    root_env: str,
+    env_file_env: str,
+) -> tuple[dict[str, str], Path, Path, Path]:
+    bin_dir = _shell_tools(tmp_path)
+    zstd = tmp_path / "zstd"
+    _write_executable(zstd, "#!/bin/sh\nexit 0\n")
+    repo_root = tmp_path / "governed checkout"
+    python_bin = repo_root / ".venv/bin/python"
+    python_bin.parent.mkdir(parents=True)
+    python_bin.symlink_to(sys.executable)
+    entrypoint = repo_root / "scripts" / f"node27_{case}.py"
+    entrypoint.parent.mkdir(parents=True)
+    marker = tmp_path / "entrypoint-ran.json"
+    entrypoint.write_text(
+        "import json\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text(json.dumps(sys.argv[1:]), encoding='utf-8')\n"
+        "raise SystemExit(37)\n",
+        encoding="utf-8",
+    )
+    if case == "storage_inventory_audit":
+        (repo_root / "scripts/node27_product_archive.py").write_text(
+            "# governed archive module\n", encoding="utf-8"
+        )
+    log_root = tmp_path / "logs"
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        root_env: str(repo_root),
+        env_file_env: str(
+            _env_file(tmp_path, _runtime_env(case, tmp_path, zstd) + "\n")
+        ),
+        "NODE27_TIMESERIES_RETENTION_BOOTSTRAP_LOG": str(
+            tmp_path / "retention-bootstrap.log"
+        ),
+        "NODE27_TIMESERIES_RETENTION_LOG_ROOT": str(log_root),
+        "NODE27_TIMESERIES_RETENTION_BOOTSTRAP_LOCK": str(
+            tmp_path / "retention.lock"
+        ),
+        "NODE27_RAW_RETENTION_BOOTSTRAP_LOG": str(tmp_path / "raw-bootstrap.log"),
+        "NODE27_RAW_RETENTION_LOG_ROOT": str(log_root),
+        "NODE27_RAW_RETENTION_LOCK_PATH": str(tmp_path / "raw.lock"),
+    }
+    return env, repo_root, entrypoint, marker
+
+
+@pytest.mark.parametrize(
+    ("case", "wrapper_name", "root_env", "env_file_env", "python_env", "script_env"),
+    _WRAPPER_CASES,
+)
+def test_all_wrappers_safe_path_uses_interpreter_search_path_and_runs_entrypoint(
+    tmp_path: Path,
+    case: str,
+    wrapper_name: str,
+    root_env: str,
+    env_file_env: str,
+    python_env: str | None,
+    script_env: str | None,
+) -> None:
+    env, _, _, marker = _real_python_wrapper_harness(
+        tmp_path, case, root_env, env_file_env
+    )
+    env.update({"PYTHONPATH": "", "PYTHONSAFEPATH": "1"})
+
+    result = subprocess.run(
+        [str(_ROOT / "scripts" / wrapper_name), "--probe", "value with spaces"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 37, result.stderr
+    captured_args = json.loads(marker.read_text(encoding="utf-8"))
+    if case == "raw_retention":
+        assert captured_args[0] == "--summary-path"
+        assert Path(captured_args[1]).parent == tmp_path / "logs"
+        assert len(captured_args) == 2
+    else:
+        assert captured_args == ["--probe", "value with spaces"]
+
+
+@pytest.mark.parametrize(
+    ("case", "wrapper_name", "root_env", "env_file_env", "python_env", "script_env"),
+    _WRAPPER_CASES,
+)
+def test_all_wrappers_refuse_regular_scripts_package_in_entrypoint_directory(
+    tmp_path: Path,
+    case: str,
+    wrapper_name: str,
+    root_env: str,
+    env_file_env: str,
+    python_env: str | None,
+    script_env: str | None,
+) -> None:
+    env, _, entrypoint, marker = _real_python_wrapper_harness(
+        tmp_path, case, root_env, env_file_env
+    )
+    shadow = entrypoint.parent / "scripts/__init__.py"
+    shadow.parent.mkdir()
+    shadow.write_text("# script-directory shadow\n", encoding="utf-8")
+    env["PYTHONPATH"] = ""
+    env.pop("PYTHONSAFEPATH", None)
+
+    result = subprocess.run(
+        [str(_ROOT / "scripts" / wrapper_name)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode in {1, 2}
+    assert "IMPORT_ORIGIN" in result.stderr.upper() or "import origin" in result.stderr
+    assert not marker.exists()
+
+
+def test_audit_refuses_script_directory_shadow_even_with_governed_archive_module(
+    tmp_path: Path,
+) -> None:
+    case = _WRAPPER_CASES[0]
+    env, repo_root, entrypoint, marker = _real_python_wrapper_harness(
+        tmp_path, case[0], case[2], case[3]
+    )
+    assert (repo_root / "scripts/node27_product_archive.py").is_file()
+    shadow = entrypoint.parent / "scripts/__init__.py"
+    shadow.parent.mkdir()
+    shadow.write_text("# shadow wins before governed module lookup\n", encoding="utf-8")
+    env["PYTHONPATH"] = ""
+    env.pop("PYTHONSAFEPATH", None)
+
+    result = subprocess.run(
+        [str(_AUDIT_WRAPPER)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "import origin" in result.stderr
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    ("case", "wrapper_name", "root_env", "env_file_env", "python_env", "script_env"),
+    [wrapper_case for wrapper_case in _WRAPPER_CASES if wrapper_case[5] is not None],
+)
+def test_explicit_entrypoint_outside_root_refuses_its_scripts_shadow(
+    tmp_path: Path,
+    case: str,
+    wrapper_name: str,
+    root_env: str,
+    env_file_env: str,
+    python_env: str,
+    script_env: str,
+) -> None:
+    env, _, _, governed_marker = _real_python_wrapper_harness(
+        tmp_path, case, root_env, env_file_env
+    )
+    outside_dir = tmp_path / "supported explicit entrypoint"
+    outside_script = outside_dir / "entrypoint.py"
+    outside_marker = tmp_path / "outside-entrypoint-ran"
+    outside_script.parent.mkdir()
+    outside_script.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(outside_marker)!r}).write_text('ran', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    shadow = outside_dir / "scripts/__init__.py"
+    shadow.parent.mkdir()
+    shadow.write_text("# outside shadow\n", encoding="utf-8")
+    env.update({script_env: str(outside_script), "PYTHONPATH": ""})
+    env.pop("PYTHONSAFEPATH", None)
+
+    result = subprocess.run(
+        [str(_ROOT / "scripts" / wrapper_name)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode in {1, 2}
+    assert "IMPORT_ORIGIN" in result.stderr.upper() or "import origin" in result.stderr
+    assert not governed_marker.exists()
+    assert not outside_marker.exists()
+
+
+@pytest.mark.parametrize(
+    ("case", "wrapper_name", "root_env", "env_file_env", "python_env", "script_env"),
+    [
+        wrapper_case
+        for wrapper_case in _WRAPPER_CASES
+        if wrapper_case[0] in {"timeseries_retention", "raw_retention"}
+    ],
+)
+def test_retention_wrappers_probe_empty_pythonpath_segment_from_final_cwd(
+    tmp_path: Path,
+    case: str,
+    wrapper_name: str,
+    root_env: str,
+    env_file_env: str,
+    python_env: str | None,
+    script_env: str | None,
+) -> None:
+    env, _, _, marker = _real_python_wrapper_harness(
+        tmp_path, case, root_env, env_file_env
+    )
+    caller_cwd = tmp_path / "caller cwd"
+    caller_shadow = caller_cwd / "scripts/__init__.py"
+    caller_shadow.parent.mkdir(parents=True)
+    caller_shadow.write_text("# must not affect post-cd launch\n", encoding="utf-8")
+    env["PYTHONPATH"] = ":"
+    env.pop("PYTHONSAFEPATH", None)
+
+    result = subprocess.run(
+        [str(_ROOT / "scripts" / wrapper_name), "--ignored-for-raw"],
+        cwd=caller_cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 37, result.stderr
+    assert marker.exists()

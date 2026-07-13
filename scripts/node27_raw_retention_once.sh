@@ -82,14 +82,18 @@ if [ ! -f "$SCRIPT" ] || [ -L "$SCRIPT" ]; then
   blocked "raw retention entrypoint is unavailable or a symlink"
 fi
 
-if ! "$PYTHON_BIN" -c '
+if ! (cd "$REPO" && "$PYTHON_BIN" -c '
 import importlib.machinery
 import os
 import sys
 
 root = os.path.realpath(sys.argv[1])
+script = os.path.realpath(sys.argv[2])
 expected_namespace = os.path.join(root, "scripts")
-spec = importlib.machinery.PathFinder.find_spec("scripts", sys.path[1:])
+search_path = list(sys.path)
+if not sys.flags.safe_path:
+    search_path[0] = os.path.dirname(script)
+spec = importlib.machinery.PathFinder.find_spec("scripts", search_path)
 locations = (
     []
     if spec is None or spec.submodule_search_locations is None
@@ -102,7 +106,7 @@ valid = (
     and all(path == expected_namespace for path in locations)
 )
 raise SystemExit(0 if valid else 1)
-' "$REPO"; then
+' "$REPO" "$SCRIPT"); then
   blocked "SCRIPTS_IMPORT_ORIGIN_OUTSIDE_REPOSITORY_ROOT"
 fi
 

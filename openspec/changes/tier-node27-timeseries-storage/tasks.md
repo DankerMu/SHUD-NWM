@@ -1108,6 +1108,16 @@ Order is load-bearing:
   - Input: inherited path containing a later regular `scripts` package.
     Expected: governed module origin wins or wrapper refuses before the
     audit entrypoint.
+  - Input: `PYTHONSAFEPATH=1` and an otherwise safe governed checkout.
+    Expected: all seven wrappers reach the intended entrypoint; preflight
+    does not discard the root entry.
+  - Input: a regular `scripts` package in the actual entrypoint directory,
+    including an explicit script override outside the root. Expected:
+    wrapper refuses before entrypoint side effects; audit never loads a
+    shadow `node27_product_archive.py`.
+  - Input: retention/raw caller `PYTHONPATH` with an empty segment.
+    Expected: preflight and the post-`cd` file launch resolve the same
+    effective search path.
   - Input: custom root with no interpreter/script overrides. Expected:
     default interpreter and entrypoint derive from that same checkout.
   - Input: the exact seven wrappers across unset/empty/absolute/relative/
