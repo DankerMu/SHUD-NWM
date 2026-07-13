@@ -1084,28 +1084,37 @@ Order is load-bearing:
 
 ## 8. Live-cascade defect closure
 
-- [x] 8.1 Fix issue #1067's node-27 wrapper import contract.
+- [ ] 8.1 Fix issue #1067's node-27 wrapper import contract.
   Evidence floor: the exact seven issue-named `scripts/node27_*_once.sh`
   wrappers (including the newly required archive-rebuild-drill wrapper)
   prepend their parameterized repository root to `PYTHONPATH` before
   `exec`, preserve an existing non-empty `PYTHONPATH`, and retain their
   existing Python entrypoint behavior; focused regression tests cover the
-  audit wrapper default/empty root, absolute root override, relative-root
-  refusal, inherited-path preservation, import success, and
-  sibling-wrapper hygiene.
+  all seven wrappers' default/empty root, absolute root override,
+  relative/delimiter-root refusal, pre-source inherited-path preservation,
+  import-origin binding, checkout identity, and sibling hygiene.
   Test rows:
   - Input: unset or empty audit repository-root override. Expected:
     `/home/nwm/NWM` is the first `PYTHONPATH` entry.
   - Input: absolute custom audit repository root. Expected: it becomes the
-    first entry; a relative override is refused before Python launch.
+    first entry; a relative or colon-bearing override is refused before
+    Python launch.
   - Input: empty inherited `PYTHONPATH` and a test repository root.
     Expected: `from scripts import node27_product_archive` succeeds through
     the wrapper launch contract.
-  - Input: existing two-entry `PYTHONPATH`. Expected: both existing entries
-    are preserved byte-for-byte and in order after the resolved root.
-  - Input: the six sibling wrappers. Expected: every wrapper exports the
-    same root-prepend contract before Python launch; original arguments,
-    Python entrypoint, and downstream exit code remain unchanged.
+  - Input: existing two-entry caller `PYTHONPATH` plus env-file empty or
+    non-empty `PYTHONPATH`. Expected: both caller entries are preserved
+    byte-for-byte and in order after the resolved root.
+  - Input: inherited path containing a later regular `scripts` package.
+    Expected: governed module origin wins or wrapper refuses before the
+    audit entrypoint.
+  - Input: custom root with no interpreter/script overrides. Expected:
+    default interpreter and entrypoint derive from that same checkout.
+  - Input: the exact seven wrappers across unset/empty/absolute/relative/
+    delimiter roots and empty/non-empty inherited paths. Expected: every
+    wrapper enforces the same root contract before Python launch; original
+    arguments, entrypoint semantics, and downstream exit code remain
+    unchanged.
   - Input: node-27 `nhms-node27-storage-inventory-audit.service` after
     deployment. Expected: journal contains no `No module named 'scripts'`;
     any later #1066/#1065 blocker remains separately attributable.

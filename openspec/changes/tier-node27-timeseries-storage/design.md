@@ -979,8 +979,10 @@ Fixture level `expanded` · Repair intensity `high` · NHMS project profile · R
 
 ### Must preserve / must change
 
-- Preserve each wrapper's existing env loading, argument forwarding, validation, and final Python entrypoint.
-- Every governed wrapper MUST prepend its parameterized repository root to `PYTHONPATH` before launching Python, while preserving any existing non-empty `PYTHONPATH` after the root.
+- Preserve each wrapper's existing env loading, argument forwarding, validation, and final Python entrypoint semantics.
+- Every governed wrapper MUST snapshot the caller-inherited `PYTHONPATH` before sourcing its env file, then prepend its parameterized repository root to that snapshot before launching Python; an env-file `PYTHONPATH` assignment cannot discard the caller entries.
+- The resolved root MUST be absolute, contain no `:` path-list delimiter, and identify the same checkout as the default interpreter and Python entrypoint. Explicit interpreter/script overrides remain supported.
+- Because `scripts/` is intentionally a namespace directory without `__init__.py`, wrapper preflight MUST fail closed if the inherited path would make a regular `scripts` package outside the resolved root win module resolution.
 - Exact governed set and root source: `node27_storage_inventory_audit_once.sh` / `NODE27_STORAGE_INVENTORY_AUDIT_REPO_ROOT`; `node27_product_archive_once.sh` / `NODE27_PRODUCT_ARCHIVE_REPO_ROOT`; `node27_timeseries_compression_once.sh` / `NODE27_TIMESERIES_COMPRESSION_REPO_ROOT`; `node27_timeseries_retention_once.sh` / existing `NODE27_TIMESERIES_RETENTION_REPO`; `node27_db_export_salvage_once.sh` / `NODE27_DB_EXPORT_SALVAGE_REPO_ROOT`; `node27_archive_rebuild_drill_once.sh` / `NODE27_ARCHIVE_REBUILD_DRILL_REPO_ROOT`; `node27_raw_retention_once.sh` / existing `NODE27_RAW_RETENTION_REPO`. Every variable defaults to `/home/nwm/NWM` when unset or empty.
 - `node27_archive_rebuild_drill_once.sh` does not exist on the baseline branch; issue #1067 explicitly names it in the required sibling set, so this PR adds a complete wrapper using the drill's existing env/CLI contract rather than silently reducing coverage.
 - Do not add `scripts/__init__.py` or rewrite Python imports; do not address URI-prefix or mover-discovery defects tracked by #1066/#1065.
@@ -1009,10 +1011,10 @@ Fixture level `expanded` · Repair intensity `high` · NHMS project profile · R
 
 ### Invariant Matrix
 
-- Governing invariant: every governed systemd wrapper launches with its own resolved repository root as the first `PYTHONPATH` entry without discarding the caller's existing entries.
-- Source-of-truth contract: wrapper-specific `NODE27_*_REPO_ROOT` value, otherwise `/home/nwm/NWM`.
+- Governing invariant: every governed systemd wrapper binds root, default interpreter, entrypoint, and `scripts` import origin to one checkout; encodes that root as exactly one first `PYTHONPATH` entry; and preserves the caller's safe inherited entries byte-for-byte and in order.
+- Source-of-truth contract: wrapper-specific `NODE27_*_REPO_ROOT` value, otherwise `/home/nwm/NWM`; default interpreter/entrypoint derive from the final post-env root.
 - Producers: seven `scripts/node27_*_once.sh` wrappers.
-- Validators/preflight: shell parameter expansion plus wrapper contract tests.
+- Validators/preflight: shell root/delimiter checks, import-origin preflight, and wrapper contract tests.
 - Storage/cache/query: none — no persistent state or DB access is added.
 - Public routes/entrypoints: seven wrapper Python-launch boundaries and `nhms-node27-storage-inventory-audit.service`.
 - Frontend/downstream consumers: audit/archive/compression/retention/salvage/drill/raw-retention Python scripts, unchanged.
@@ -1020,14 +1022,16 @@ Fixture level `expanded` · Repair intensity `high` · NHMS project profile · R
 - Evidence/audit/readiness: focused pytest, ruff, strict OpenSpec validation, and node-27 systemd journal evidence; archive-completeness receipt follow-up after #1066/#1065.
 - Regression rows:
   - unset or empty root override -> governed wrapper uses `/home/nwm/NWM` as the first `PYTHONPATH` entry;
-  - absolute custom root -> custom root becomes the first entry; relative custom root -> stable pre-launch refusal;
+  - absolute custom root -> custom root becomes the first entry; relative or colon-bearing root -> stable pre-launch refusal;
   - empty inherited `PYTHONPATH` + test repo root -> `from scripts import node27_product_archive` succeeds through the wrapper launch contract;
-  - existing two-entry `PYTHONPATH` -> both entries remain byte-for-byte and in order after the resolved root;
-  - all six sibling wrappers -> same root-prepend contract while retaining original arguments, Python entrypoint, and downstream exit code.
+  - existing two-entry caller `PYTHONPATH` + env-file empty/non-empty assignment -> caller entries remain byte-for-byte and in order after the resolved root;
+  - later inherited regular `scripts` package -> governed module origin or stable refusal before the audit entrypoint;
+  - custom root without interpreter/script overrides -> defaults derive from the same custom checkout;
+  - all six sibling wrappers across unset/empty/absolute/relative/delimiter roots -> same root-prepend contract while retaining original arguments, Python entrypoint, and downstream exit code.
 
 ### Boundary-surface checklist
 
 - Shared helper roots: no helper exists; keep the prelude text mechanically consistent across all seven wrappers.
 - Public entrypoints: the exact seven issue-named wrappers above are in scope; `node27_download_once.sh` and `node27_resource_governance_once.sh` are explicit non-goals because #1067 does not name those independent service lanes and they do not launch the affected archive/audit module family.
-- Producer/consumer evidence boundary: systemd environment -> wrapper -> Python import path -> audit journal/receipt.
+- Producer/consumer evidence boundary: systemd environment -> pre-source caller-path snapshot -> env file -> resolved root/interpreter/entrypoint -> import-origin preflight -> audit journal/receipt.
 - Unchanged downstream consumers: Python script arguments, entrypoints, downstream exit codes, and receipt semantics are unchanged.

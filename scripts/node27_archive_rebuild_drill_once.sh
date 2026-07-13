@@ -1,8 +1,11 @@
 #!/bin/sh
 set -eu
 
+CALLER_PYTHONPATH=${PYTHONPATH-}
+readonly CALLER_PYTHONPATH
 INITIAL_REPO_ROOT=${NODE27_ARCHIVE_REBUILD_DRILL_REPO_ROOT:-/home/nwm/NWM}
 case "$INITIAL_REPO_ROOT" in
+  *:*) echo '{"status":"failed","reason":"repository root must not contain a path-list delimiter"}' >&2; exit 1 ;;
   /*) ;;
   *) echo '{"status":"failed","reason":"repository root must be absolute"}' >&2; exit 1 ;;
 esac
@@ -29,6 +32,7 @@ set +a
 
 REPO_ROOT=${NODE27_ARCHIVE_REBUILD_DRILL_REPO_ROOT:-/home/nwm/NWM}
 case "$REPO_ROOT" in
+  *:*) echo '{"status":"failed","reason":"repository root must not contain a path-list delimiter"}' >&2; exit 1 ;;
   /*) ;;
   *) echo '{"status":"failed","reason":"repository root must be absolute"}' >&2; exit 1 ;;
 esac
@@ -80,11 +84,36 @@ if [ ! -x "$ZSTD" ] || [ ! -f "$ZSTD" ] || [ -L "$ZSTD" ]; then
   exit 1
 fi
 
-if [ -n "${PYTHONPATH:-}" ]; then
-  PYTHONPATH="$REPO_ROOT:$PYTHONPATH"
+if [ -n "$CALLER_PYTHONPATH" ]; then
+  PYTHONPATH="$REPO_ROOT:$CALLER_PYTHONPATH"
 else
   PYTHONPATH="$REPO_ROOT"
 fi
 export PYTHONPATH
+
+if ! "$PYTHON_BIN" -c '
+import importlib.machinery
+import os
+import sys
+
+root = os.path.realpath(sys.argv[1])
+expected_namespace = os.path.join(root, "scripts")
+spec = importlib.machinery.PathFinder.find_spec("scripts", sys.path[1:])
+locations = (
+    []
+    if spec is None or spec.submodule_search_locations is None
+    else [os.path.realpath(path) for path in spec.submodule_search_locations]
+)
+valid = (
+    spec is not None
+    and spec.origin is None
+    and locations
+    and all(path == expected_namespace for path in locations)
+)
+raise SystemExit(0 if valid else 1)
+' "$REPO_ROOT"; then
+  echo '{"status":"failed","reason":"scripts import origin is outside repository root"}' >&2
+  exit 1
+fi
 
 exec "$PYTHON_BIN" "$SCRIPT" "$@"

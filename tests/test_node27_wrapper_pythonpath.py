@@ -13,6 +13,9 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[1]
 _AUDIT_WRAPPER = _ROOT / "scripts/node27_storage_inventory_audit_once.sh"
 _CAPTURE_SCRIPT = """#!/bin/sh
+if [ "${1:-}" = "-c" ]; then
+  exit 0
+fi
 {
   printf '%s\\n' "$PYTHONPATH"
   printf '%s\\n' "$1"
@@ -85,15 +88,19 @@ def test_audit_wrapper_defaults_unset_or_empty_repo_root(
     assert capture.read_text(encoding="utf-8").splitlines()[0] == "/home/nwm/NWM"
 
 
+@pytest.mark.parametrize("env_pythonpath", ["", "/env-only/one:/env path/two"])
 def test_audit_wrapper_prepends_custom_root_preserves_path_args_and_exit(
-    tmp_path: Path,
+    tmp_path: Path, env_pythonpath: str
 ) -> None:
     env, capture, entrypoint = _audit_harness(tmp_path)
     custom_root = tmp_path / "custom repo"
     inherited = "/legacy path/one:/legacy/path/two"
     env_file = Path(env["NODE27_STORAGE_INVENTORY_AUDIT_ENV_FILE"])
     env_file.write_text(
-        f"NODE27_STORAGE_INVENTORY_AUDIT_REPO_ROOT={shlex.quote(str(custom_root))}\n",
+        (
+            f"NODE27_STORAGE_INVENTORY_AUDIT_REPO_ROOT={shlex.quote(str(custom_root))}\n"
+            f"PYTHONPATH={shlex.quote(env_pythonpath)}\n"
+        ),
         encoding="utf-8",
     )
     env.update(
@@ -203,59 +210,73 @@ def _runtime_env(case: str, tmp_path: Path, zstd: Path) -> str:
     return ""
 
 
+_WRAPPER_CASES = [
+    (
+        "storage_inventory_audit",
+        "node27_storage_inventory_audit_once.sh",
+        "NODE27_STORAGE_INVENTORY_AUDIT_REPO_ROOT",
+        "NODE27_STORAGE_INVENTORY_AUDIT_ENV_FILE",
+        "NODE27_STORAGE_INVENTORY_AUDIT_PYTHON",
+        "NODE27_STORAGE_INVENTORY_AUDIT_SCRIPT",
+    ),
+    (
+        "product_archive",
+        "node27_product_archive_once.sh",
+        "NODE27_PRODUCT_ARCHIVE_REPO_ROOT",
+        "NODE27_PRODUCT_ARCHIVE_ENV_FILE",
+        "NODE27_PRODUCT_ARCHIVE_PYTHON",
+        "NODE27_PRODUCT_ARCHIVE_SCRIPT",
+    ),
+    (
+        "timeseries_compression",
+        "node27_timeseries_compression_once.sh",
+        "NODE27_TIMESERIES_COMPRESSION_REPO_ROOT",
+        "NODE27_TIMESERIES_COMPRESSION_ENV_FILE",
+        "NODE27_TIMESERIES_COMPRESSION_PYTHON",
+        "NODE27_TIMESERIES_COMPRESSION_SCRIPT",
+    ),
+    (
+        "timeseries_retention",
+        "node27_timeseries_retention_once.sh",
+        "NODE27_TIMESERIES_RETENTION_REPO",
+        "NODE27_TIMESERIES_RETENTION_ENV_FILE",
+        "NODE27_TIMESERIES_RETENTION_PYTHON",
+        "NODE27_TIMESERIES_RETENTION_SCRIPT",
+    ),
+    (
+        "db_export_salvage",
+        "node27_db_export_salvage_once.sh",
+        "NODE27_DB_EXPORT_SALVAGE_REPO_ROOT",
+        "NODE27_DB_EXPORT_SALVAGE_ENV_FILE",
+        "NODE27_DB_EXPORT_SALVAGE_PYTHON",
+        "NODE27_DB_EXPORT_SALVAGE_SCRIPT",
+    ),
+    (
+        "archive_rebuild_drill",
+        "node27_archive_rebuild_drill_once.sh",
+        "NODE27_ARCHIVE_REBUILD_DRILL_REPO_ROOT",
+        "NODE27_ARCHIVE_REBUILD_DRILL_ENV_FILE",
+        "NODE27_ARCHIVE_REBUILD_DRILL_PYTHON",
+        "NODE27_ARCHIVE_REBUILD_DRILL_SCRIPT",
+    ),
+    (
+        "raw_retention",
+        "node27_raw_retention_once.sh",
+        "NODE27_RAW_RETENTION_REPO",
+        "NODE27_RAW_RETENTION_ENV_FILE",
+        None,
+        None,
+    ),
+]
+
+
 @pytest.mark.parametrize(
     ("case", "wrapper_name", "root_env", "env_file_env", "python_env", "script_env"),
-    [
-        (
-            "product_archive",
-            "node27_product_archive_once.sh",
-            "NODE27_PRODUCT_ARCHIVE_REPO_ROOT",
-            "NODE27_PRODUCT_ARCHIVE_ENV_FILE",
-            "NODE27_PRODUCT_ARCHIVE_PYTHON",
-            "NODE27_PRODUCT_ARCHIVE_SCRIPT",
-        ),
-        (
-            "timeseries_compression",
-            "node27_timeseries_compression_once.sh",
-            "NODE27_TIMESERIES_COMPRESSION_REPO_ROOT",
-            "NODE27_TIMESERIES_COMPRESSION_ENV_FILE",
-            "NODE27_TIMESERIES_COMPRESSION_PYTHON",
-            "NODE27_TIMESERIES_COMPRESSION_SCRIPT",
-        ),
-        (
-            "timeseries_retention",
-            "node27_timeseries_retention_once.sh",
-            "NODE27_TIMESERIES_RETENTION_REPO",
-            "NODE27_TIMESERIES_RETENTION_ENV_FILE",
-            "NODE27_TIMESERIES_RETENTION_PYTHON",
-            "NODE27_TIMESERIES_RETENTION_SCRIPT",
-        ),
-        (
-            "db_export_salvage",
-            "node27_db_export_salvage_once.sh",
-            "NODE27_DB_EXPORT_SALVAGE_REPO_ROOT",
-            "NODE27_DB_EXPORT_SALVAGE_ENV_FILE",
-            "NODE27_DB_EXPORT_SALVAGE_PYTHON",
-            "NODE27_DB_EXPORT_SALVAGE_SCRIPT",
-        ),
-        (
-            "archive_rebuild_drill",
-            "node27_archive_rebuild_drill_once.sh",
-            "NODE27_ARCHIVE_REBUILD_DRILL_REPO_ROOT",
-            "NODE27_ARCHIVE_REBUILD_DRILL_ENV_FILE",
-            "NODE27_ARCHIVE_REBUILD_DRILL_PYTHON",
-            "NODE27_ARCHIVE_REBUILD_DRILL_SCRIPT",
-        ),
-        (
-            "raw_retention",
-            "node27_raw_retention_once.sh",
-            "NODE27_RAW_RETENTION_REPO",
-            "NODE27_RAW_RETENTION_ENV_FILE",
-            None,
-            None,
-        ),
-    ],
+    _WRAPPER_CASES,
 )
+@pytest.mark.parametrize("caller_pythonpath", ["", "/first inherited:/second inherited"])
+@pytest.mark.parametrize("env_pythonpath", ["", "/env-only/one:/env path/two"])
+@pytest.mark.parametrize("root_source", ["process", "env-file"])
 def test_sibling_wrappers_share_pythonpath_and_preserve_launch_contract(
     tmp_path: Path,
     case: str,
@@ -264,25 +285,33 @@ def test_sibling_wrappers_share_pythonpath_and_preserve_launch_contract(
     env_file_env: str,
     python_env: str | None,
     script_env: str | None,
+    caller_pythonpath: str,
+    env_pythonpath: str,
+    root_source: str,
 ) -> None:
     bin_dir = _shell_tools(tmp_path)
     zstd = tmp_path / "zstd"
     _write_executable(zstd, "#!/bin/sh\nexit 0\n")
-    repo_root = tmp_path / "repo root"
+    repo_root = tmp_path / "repo root $safe;literal"
     python_bin = repo_root / ".venv/bin/python"
     _write_executable(python_bin, _CAPTURE_SCRIPT)
     entrypoint = repo_root / "scripts" / f"node27_{case}.py"
     entrypoint.parent.mkdir(parents=True, exist_ok=True)
     entrypoint.write_text("raise SystemExit(99)\n", encoding="utf-8")
-    env_file = _env_file(tmp_path, _runtime_env(case, tmp_path, zstd) + "\n")
+    env_lines = [_runtime_env(case, tmp_path, zstd)]
+    if root_source == "env-file":
+        env_lines.append(f"{root_env}={shlex.quote(str(repo_root))}")
+    env_lines.append(f"PYTHONPATH={shlex.quote(env_pythonpath)}")
+    env_file = _env_file(
+        tmp_path,
+        "\n".join(env_lines) + "\n",
+    )
     capture = tmp_path / "capture.txt"
-    inherited = "/first inherited:/second-inherited"
     log_root = tmp_path / "logs"
     env = {
         **os.environ,
         "PATH": f"{bin_dir}:/usr/bin:/bin",
-        "PYTHONPATH": inherited,
-        root_env: str(repo_root),
+        "PYTHONPATH": caller_pythonpath,
         env_file_env: str(env_file),
         "WRAPPER_CAPTURE": str(capture),
         "WRAPPER_EXIT_CODE": "37",
@@ -293,10 +322,8 @@ def test_sibling_wrappers_share_pythonpath_and_preserve_launch_contract(
         "NODE27_RAW_RETENTION_LOG_ROOT": str(log_root),
         "NODE27_RAW_RETENTION_LOCK_PATH": str(tmp_path / "raw.lock"),
     }
-    if python_env is not None and script_env is not None:
-        env[python_env] = str(python_bin)
-        env[script_env] = str(entrypoint)
-
+    if root_source == "process":
+        env[root_env] = str(repo_root)
     wrapper = _ROOT / "scripts" / wrapper_name
     result = subprocess.run(
         [str(wrapper), "--probe", "value with spaces"],
@@ -308,10 +335,200 @@ def test_sibling_wrappers_share_pythonpath_and_preserve_launch_contract(
 
     assert result.returncode == 37, result.stderr
     captured = capture.read_text(encoding="utf-8").splitlines()
-    assert captured[:2] == [f"{repo_root}:{inherited}", str(entrypoint)]
+    expected_pythonpath = (
+        f"{repo_root}:{caller_pythonpath}" if caller_pythonpath else str(repo_root)
+    )
+    assert captured[:2] == [expected_pythonpath, str(entrypoint)]
     if case == "raw_retention":
         assert captured[2] == "--summary-path"
         assert Path(captured[3]).parent == log_root
         assert len(captured) == 4
     else:
         assert captured[2:] == ["--probe", "value with spaces"]
+
+
+@pytest.mark.parametrize(
+    ("case", "wrapper_name", "root_env", "env_file_env", "python_env", "script_env"),
+    [wrapper_case for wrapper_case in _WRAPPER_CASES if wrapper_case[4] is not None],
+)
+def test_wrapper_explicit_interpreter_and_entrypoint_overrides_remain_supported(
+    tmp_path: Path,
+    case: str,
+    wrapper_name: str,
+    root_env: str,
+    env_file_env: str,
+    python_env: str,
+    script_env: str,
+) -> None:
+    bin_dir = _shell_tools(tmp_path)
+    zstd = tmp_path / "zstd"
+    _write_executable(zstd, "#!/bin/sh\nexit 0\n")
+    repo_root = tmp_path / "governed checkout"
+    (repo_root / "scripts").mkdir(parents=True)
+    python_bin = tmp_path / "explicit python"
+    _write_executable(python_bin, _CAPTURE_SCRIPT)
+    entrypoint = tmp_path / "explicit entrypoint.py"
+    entrypoint.write_text("raise SystemExit(99)\n", encoding="utf-8")
+    capture = tmp_path / "capture.txt"
+    env_text = _runtime_env(case, tmp_path, zstd)
+    if case in {
+        "storage_inventory_audit",
+        "product_archive",
+        "timeseries_compression",
+        "db_export_salvage",
+    }:
+        env_text += (
+            f"\n{python_env}={tmp_path / 'env-file-python-must-not-win'}"
+            f"\n{script_env}={tmp_path / 'env-file-script-must-not-win'}"
+        )
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "PYTHONPATH": "/caller/one:/caller/two",
+        root_env: str(repo_root),
+        env_file_env: str(_env_file(tmp_path, env_text + "\n")),
+        python_env: str(python_bin),
+        script_env: str(entrypoint),
+        "WRAPPER_CAPTURE": str(capture),
+        "WRAPPER_EXIT_CODE": "23",
+        "NODE27_TIMESERIES_RETENTION_BOOTSTRAP_LOG": str(tmp_path / "retention.log"),
+        "NODE27_TIMESERIES_RETENTION_LOG_ROOT": str(tmp_path / "retention-logs"),
+        "NODE27_TIMESERIES_RETENTION_BOOTSTRAP_LOCK": str(tmp_path / "retention.lock"),
+    }
+
+    result = subprocess.run(
+        [str(_ROOT / "scripts" / wrapper_name), "--explicit-probe"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 23, result.stderr
+    assert capture.read_text(encoding="utf-8").splitlines() == [
+        f"{repo_root}:/caller/one:/caller/two",
+        str(entrypoint),
+        "--explicit-probe",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("case", "wrapper_name", "root_env", "env_file_env", "python_env", "script_env"),
+    _WRAPPER_CASES,
+)
+@pytest.mark.parametrize(
+    ("bad_root", "expected_reason"),
+    [
+        ("relative/repo", "absolute"),
+        ("/absolute/repo:foreign", "delimiter"),
+    ],
+)
+def test_all_wrappers_refuse_unsafe_root_before_python_launch(
+    tmp_path: Path,
+    case: str,
+    wrapper_name: str,
+    root_env: str,
+    env_file_env: str,
+    python_env: str | None,
+    script_env: str | None,
+    bad_root: str,
+    expected_reason: str,
+) -> None:
+    bin_dir = _shell_tools(tmp_path)
+    zstd = tmp_path / "zstd"
+    _write_executable(zstd, "#!/bin/sh\nexit 0\n")
+    python_bin = tmp_path / "python"
+    _write_executable(python_bin, _CAPTURE_SCRIPT)
+    entrypoint = tmp_path / "entrypoint.py"
+    entrypoint.write_text("raise SystemExit(99)\n", encoding="utf-8")
+    capture = tmp_path / "capture.txt"
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "PYTHONPATH": "/caller/one:/caller/two",
+        root_env: bad_root,
+        env_file_env: str(
+            _env_file(tmp_path, _runtime_env(case, tmp_path, zstd) + "\n")
+        ),
+        "WRAPPER_CAPTURE": str(capture),
+        "NODE27_TIMESERIES_RETENTION_BOOTSTRAP_LOG": str(tmp_path / "retention.log"),
+        "NODE27_RAW_RETENTION_BOOTSTRAP_LOG": str(tmp_path / "raw.log"),
+    }
+    if python_env is not None and script_env is not None:
+        env[python_env] = str(python_bin)
+        env[script_env] = str(entrypoint)
+
+    result = subprocess.run(
+        [str(_ROOT / "scripts" / wrapper_name)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode in {1, 2}
+    assert expected_reason.lower() in result.stderr.lower()
+    assert not capture.exists()
+
+
+@pytest.mark.parametrize(
+    ("case", "wrapper_name", "root_env", "env_file_env", "python_env", "script_env"),
+    _WRAPPER_CASES,
+)
+def test_all_wrappers_refuse_conflicting_regular_scripts_package_before_entrypoint(
+    tmp_path: Path,
+    case: str,
+    wrapper_name: str,
+    root_env: str,
+    env_file_env: str,
+    python_env: str | None,
+    script_env: str | None,
+) -> None:
+    bin_dir = _shell_tools(tmp_path)
+    zstd = tmp_path / "zstd"
+    _write_executable(zstd, "#!/bin/sh\nexit 0\n")
+    repo_root = tmp_path / "governed checkout"
+    python_bin = repo_root / ".venv/bin/python"
+    python_bin.parent.mkdir(parents=True)
+    python_bin.symlink_to(sys.executable)
+    entrypoint = repo_root / "scripts" / f"node27_{case}.py"
+    marker = tmp_path / "entrypoint-ran"
+    entrypoint.parent.mkdir(parents=True)
+    entrypoint.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('ran', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    if case == "storage_inventory_audit":
+        (repo_root / "scripts/node27_product_archive.py").write_text(
+            "# governed module\n", encoding="utf-8"
+        )
+    conflict_root = tmp_path / "foreign checkout"
+    conflict_init = conflict_root / "scripts/__init__.py"
+    conflict_init.parent.mkdir(parents=True)
+    conflict_init.write_text("raise RuntimeError('must not execute')\n", encoding="utf-8")
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "PYTHONPATH": str(conflict_root),
+        root_env: str(repo_root),
+        env_file_env: str(
+            _env_file(tmp_path, _runtime_env(case, tmp_path, zstd) + "\n")
+        ),
+        "NODE27_TIMESERIES_RETENTION_BOOTSTRAP_LOG": str(tmp_path / "retention.log"),
+        "NODE27_TIMESERIES_RETENTION_LOG_ROOT": str(tmp_path / "retention-logs"),
+        "NODE27_RAW_RETENTION_BOOTSTRAP_LOG": str(tmp_path / "raw.log"),
+        "NODE27_RAW_RETENTION_LOG_ROOT": str(tmp_path / "raw-logs"),
+    }
+
+    result = subprocess.run(
+        [str(_ROOT / "scripts" / wrapper_name)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode in {1, 2}
+    assert "IMPORT_ORIGIN" in result.stderr.upper() or "import origin" in result.stderr
+    assert not marker.exists()
