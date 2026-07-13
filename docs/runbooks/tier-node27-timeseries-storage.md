@@ -527,14 +527,30 @@ candidate retention drop window only when its declared `coverage[]`
 tuples include, sampled within or older than that window:
 
 - ≥1 product-derived cycle for each timeseries-bearing source lane
-  (`forcing/`, `runs/`) that has DB rows in the drop window; PLUS
+  (`forcing/`, `runs/`) that has DB rows in the drop window, AND the
+  UNION of these cycles' coverage tuples must cover the entire drop
+  window; PLUS
 - ≥1 `db-export` selector whenever verified salvage objects cover any
-  part of the drop window.
+  part of the drop window, AND the UNION of the drill's
+  `source=db-export` tuples must likewise cover the drop window.
+
+The drill EMIT contract is per-cycle: each verified product manifest
+contributes one 24 h coverage tuple sampled within or older than the
+drop window (see §7.4). The retention gate check is UNION-based: a 30 d
+drop window is normally covered by ~30 daily tuples whose union spans
+it — no single tuple is expected to individually contain the drop
+window. These two shapes coexist deliberately (drill emits per-cycle
+tuples; retention union-checks them against the candidate drop window).
 
 The drill declares its tuples faithfully; the retention runner (#855)
-evaluates them against its candidate drop window. A FAIL receipt, a
-stale receipt, or a PASS receipt whose coverage is insufficient blocks
-retention enforcement.
+evaluates their UNION against its candidate drop window. A FAIL receipt,
+a stale receipt, or a PASS receipt whose per-source UNION does not
+cover the drop window blocks retention enforcement. See §8.2 wire-code
+`DRILL_COVERAGE_FORCING_MISSING` / `DRILL_COVERAGE_RUNS_MISSING` /
+`DRILL_COVERAGE_DB_EXPORT_MISSING` for the code emitted when the union
+does not cover; see
+`openspec/changes/tier-node27-timeseries-storage/design.md` #855
+fixture block H2 pin for the canonical statement.
 
 ### 7.6 Recovery (post-fault operator playbook)
 
@@ -665,9 +681,10 @@ surfaces in the same commit.
   subject overlap but no set of drill `source=db-export` tuples whose
   UNION covers the drop window.
 - `RETENTION_CONFIG_INVALID` — absolute-path / positive-int / env-parse
-  failure before any DB call. Emitted with `outcome=refused` when a
-  receipt path is parseable; otherwise the runner exits with code 2
-  before publishing a receipt.
+  failure before any DB call. Emitted to stderr as a single JSON line
+  `{status: "failed", code: "RETENTION_CONFIG_INVALID", reason: <detail>}`;
+  the runner exits with code 2 and NEVER publishes a file receipt (the
+  receipt path itself may be part of what failed to parse).
 - `RETENTION_CONCURRENT_INVOCATION` — non-blocking `fcntl.flock` on
   `/tmp/nhms-node27-timeseries-retention.lock` is already held. Receipt
   published, exit code 1.

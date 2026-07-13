@@ -419,6 +419,22 @@ def test_default_lock_path_is_zero_arg() -> None:
 
 
 # ---------------------------------------------------------------------------
+# H12 statement_timeout constants pin (CC-F4 opportunistic)
+# ---------------------------------------------------------------------------
+
+
+def test_statement_timeout_constants_match_h12_pin() -> None:
+    """H12 pin: catalog enumeration 60 000 ms, drop_chunks 300 000 ms.
+
+    A silent constant change would drift from the design.md fixture pin
+    and the runbook §8 wording without any surface test noticing. Lock
+    the two integers here.
+    """
+    assert retention._QUERY_TIMEOUT_MS == 60_000
+    assert retention._DROP_TIMEOUT_MS == 300_000
+
+
+# ---------------------------------------------------------------------------
 # TARGET_HYPERTABLES contains only D3 hypertables (spec §6.1 test row 4)
 # ---------------------------------------------------------------------------
 
@@ -1291,6 +1307,48 @@ def test_dry_run_receipt_lists_candidates_and_defers(tmp_path: Path) -> None:
     jsonschema.validate(receipt, _load_schema())
 
 
+def test_dry_run_evaluates_gates_before_dryrun_branch(tmp_path: Path) -> None:
+    """Behavior lock for runbook §8.5 claim: gates ARE evaluated in dry-run.
+
+    Same-class:byte-identity-drift closure (R2 fix, mirrors #854 R2 discipline
+    extension). Runbook §8.5 states: "Gates ARE evaluated in dry-run mode —
+    a dry-run invocation that would refuse still emits a `refused` receipt
+    (`mode=enforce` per the schema `oneOf`) so operators see the exact
+    refusal reason before ever running enforce."
+
+    A refactor moving gate checks after the dry-run branch would produce a
+    dry-run receipt for a stale completeness input, silently invalidating
+    the §8.5 claim. This test locks the order: with a stale completeness
+    receipt (age > default 26 h) AND ``enforce=False``, the runner MUST
+    surface the completeness-stale refusal (mode=enforce per schema oneOf),
+    NOT emit a dry-run receipt.
+    """
+    stale_completeness = _completeness_receipt(generated_at=_NOW - timedelta(hours=27))
+    _write_json(tmp_path / "completeness.json", stale_completeness)
+    _write_json(tmp_path / "drill.json", _drill_receipt())
+    # enforce=False → dry-run branch would fire if gates were skipped.
+    config = _build_config(tmp_path, enforce=False)
+    chunks = [_chunk("hydro", "river_timeseries", "chk-old", delta_days=60)]
+    stub = _StubRunner(chunks)
+
+    receipt = retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+    )
+
+    # Gate refusal fires BEFORE the dry-run branch — no candidate_chunks
+    # emitted; refused receipt carries mode=enforce per schema oneOf pin.
+    assert receipt["outcome"] == "refused"
+    assert receipt["mode"] == "enforce"
+    assert receipt["refusal_reason"] == retention.CODE_COMPLETENESS_RECEIPT_STALE
+    # Dry-run never calls drop (baseline invariant preserved).
+    assert not any(c[0] == "drop" for c in stub.calls)
+    jsonschema.validate(receipt, _load_schema())
+
+
 # ---------------------------------------------------------------------------
 # Concurrent invocation
 # ---------------------------------------------------------------------------
@@ -1514,6 +1572,78 @@ def test_default_measure_chunk_bytes_isolates_per_chunk_failure(
     assert measured[chunks[2].qualified_name] == 0  # failed chunk
     assert measured[chunks[3].qualified_name] == 4_444  # NOT zeroed
     assert measured[chunks[4].qualified_name] == 5_555  # NOT zeroed
+
+
+# ---------------------------------------------------------------------------
+# RF-F1 R2 — loader-side FormatChecker symmetry with emit side
+# ---------------------------------------------------------------------------
+
+
+def test_load_completeness_receipt_rejects_malformed_subject_window(tmp_path: Path) -> None:
+    """RF-F1 R2 fix: loader ENFORCES format:date-time via _RECEIPT_FORMAT_CHECKER.
+
+    Silent-False fallback in _subject_overlaps_drop would skip a gap subject
+    with malformed window; loader-side FormatChecker refuses the receipt
+    entirely so a bad-shape completeness receipt cannot masquerade as
+    "no in-window subjects" and quietly reach the drop phase.
+
+    Deviation record: schema violation is surfaced via existing
+    CODE_COMPLETENESS_RECEIPT_MISSING code (no new SCHEMA_INVALID wire
+    code) — matches the pre-existing loader contract that groups
+    "receipt is not usable" causes under the missing code.
+    """
+    receipt = _completeness_receipt()
+    receipt["windows"][0]["window"]["start"] = "not-a-datetime"
+    completeness_path = tmp_path / "completeness.json"
+    _write_json(completeness_path, receipt)
+    with pytest.raises(retention.ReceiptGateError) as excinfo:
+        retention.load_completeness_receipt(completeness_path)
+    assert excinfo.value.code == retention.CODE_COMPLETENESS_RECEIPT_MISSING
+
+
+def test_load_completeness_receipt_rejects_malformed_generated_at(tmp_path: Path) -> None:
+    """RF-F1 R2 fix (symmetric): malformed top-level generated_at is refused
+    at load. Without FormatChecker, jsonschema would treat ``format`` as
+    informational and let the loader return a receipt with an unparseable
+    timestamp, which would then be caught as STALE downstream — the wrong
+    wire code for a shape defect.
+    """
+    receipt = _completeness_receipt()
+    receipt["generated_at"] = "not-a-datetime"
+    completeness_path = tmp_path / "completeness.json"
+    _write_json(completeness_path, receipt)
+    with pytest.raises(retention.ReceiptGateError) as excinfo:
+        retention.load_completeness_receipt(completeness_path)
+    assert excinfo.value.code == retention.CODE_COMPLETENESS_RECEIPT_MISSING
+
+
+def test_load_drill_receipt_rejects_malformed_coverage_window(tmp_path: Path) -> None:
+    """RF-F1 R2 fix (drill mirror): loader ENFORCES format:date-time on
+    drill coverage tuples via _RECEIPT_FORMAT_CHECKER. Silent-False
+    fallback in _tuples_cover_window would drop the malformed tuple and
+    could silently emit a spurious DRILL_COVERAGE_<source>_MISSING (or
+    worse, pass a UNION check that no longer reflects the receipt shape).
+    """
+    drill = _drill_receipt()
+    # First coverage tuple → malformed start.
+    assert drill["coverage"], "drill fixture must ship coverage tuples"
+    drill["coverage"][0]["window"]["start"] = "not-a-datetime"
+    drill_path = tmp_path / "drill.json"
+    _write_json(drill_path, drill)
+    with pytest.raises(retention.ReceiptGateError) as excinfo:
+        retention.load_drill_receipt(drill_path)
+    assert excinfo.value.code == retention.CODE_DRILL_RECEIPT_MISSING
+
+
+def test_load_drill_receipt_rejects_malformed_generated_at(tmp_path: Path) -> None:
+    """RF-F1 R2 fix (drill mirror, symmetric to completeness generated_at)."""
+    drill = _drill_receipt()
+    drill["generated_at"] = "not-a-datetime"
+    drill_path = tmp_path / "drill.json"
+    _write_json(drill_path, drill)
+    with pytest.raises(retention.ReceiptGateError) as excinfo:
+        retention.load_drill_receipt(drill_path)
+    assert excinfo.value.code == retention.CODE_DRILL_RECEIPT_MISSING
 
 
 # ---------------------------------------------------------------------------

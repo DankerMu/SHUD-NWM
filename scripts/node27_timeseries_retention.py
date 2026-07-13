@@ -465,6 +465,14 @@ def load_completeness_receipt(path: Path) -> dict[str, Any]:
     invalid file; the missing wire code covers all "receipt is not usable"
     conditions since the schema does not carve out a separate invalid-shape
     code.
+
+    Uses ``_RECEIPT_FORMAT_CHECKER`` so ``format: date-time`` on
+    ``generated_at`` / ``coverage_bounds`` / ``windows[].window.*`` is
+    ENFORCED at load — symmetric with the emitter side. Without a format
+    checker jsonschema treats ``format`` as informational and any
+    malformed subject window ``start`` / ``end`` would fall through to the
+    per-subject silent-False fallback in ``_subject_overlaps_drop`` (RF-F1
+    R2 fix — loader-side symmetry with emit side).
     """
     if not path.is_file() or path.is_symlink():
         raise ReceiptGateError(CODE_COMPLETENESS_RECEIPT_MISSING, str(path))
@@ -474,7 +482,11 @@ def load_completeness_receipt(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError) as error:
         raise ReceiptGateError(CODE_COMPLETENESS_RECEIPT_MISSING, str(error)) from error
     try:
-        jsonschema.validate(data, _load_schema(_COMPLETENESS_SCHEMA_PATH))
+        jsonschema.validate(
+            data,
+            _load_schema(_COMPLETENESS_SCHEMA_PATH),
+            format_checker=_RECEIPT_FORMAT_CHECKER,
+        )
     except jsonschema.ValidationError as error:
         raise ReceiptGateError(
             CODE_COMPLETENESS_RECEIPT_MISSING,
@@ -488,7 +500,14 @@ def load_completeness_receipt(path: Path) -> dict[str, Any]:
 
 
 def load_drill_receipt(path: Path) -> dict[str, Any]:
-    """Load + schema-validate the archive-rebuild-drill receipt."""
+    """Load + schema-validate the archive-rebuild-drill receipt.
+
+    Uses ``_RECEIPT_FORMAT_CHECKER`` so ``format: date-time`` on the
+    receipt's timestamped fields is ENFORCED at load — symmetric with the
+    emitter side (RF-F1 R2 fix). A malformed ``coverage[].window.start``
+    would otherwise fall through to the silent-False fallback in
+    ``_tuples_cover_window``.
+    """
     if not path.is_file() or path.is_symlink():
         raise ReceiptGateError(CODE_DRILL_RECEIPT_MISSING, str(path))
     try:
@@ -497,7 +516,11 @@ def load_drill_receipt(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError) as error:
         raise ReceiptGateError(CODE_DRILL_RECEIPT_MISSING, str(error)) from error
     try:
-        jsonschema.validate(data, _load_schema(_DRILL_SCHEMA_PATH))
+        jsonschema.validate(
+            data,
+            _load_schema(_DRILL_SCHEMA_PATH),
+            format_checker=_RECEIPT_FORMAT_CHECKER,
+        )
     except jsonschema.ValidationError as error:
         raise ReceiptGateError(
             CODE_DRILL_RECEIPT_MISSING,
@@ -516,11 +539,6 @@ def load_drill_receipt(path: Path) -> dict[str, Any]:
 def _overlaps(a_start: datetime, a_end: datetime, b_start: datetime, b_end: datetime) -> bool:
     """Two closed intervals overlap iff neither ends before the other begins."""
     return a_start <= b_end and b_start <= a_end
-
-
-def _covers(candidate_start: datetime, candidate_end: datetime, drop: DropWindow) -> bool:
-    """Return True iff [candidate_start, candidate_end] contains the drop window."""
-    return candidate_start <= drop.start and candidate_end >= drop.end
 
 
 def _subject_overlaps_drop(subject: Mapping[str, Any], drop: DropWindow) -> bool:
