@@ -1081,3 +1081,56 @@ Order is load-bearing:
   test rows 2-4 (dry-run + enforce + metadata invariant) remain
   pending upstream #849/#851/#853/#854 §5.2 live receipts and
   systemd unit installation on node-27, tracked separately by #856.
+
+## 8. Live-cascade defect closure
+
+- [x] 8.1 Fix issue #1067's node-27 wrapper import contract.
+  Evidence floor: the exact seven issue-named `scripts/node27_*_once.sh`
+  wrappers (including the newly required archive-rebuild-drill wrapper)
+  prepend their parameterized repository root to `PYTHONPATH` before
+  `exec`, preserve an existing non-empty `PYTHONPATH`, and retain their
+  existing Python entrypoint behavior; focused regression tests cover the
+  all seven wrappers' default/empty root, absolute root override,
+  relative/delimiter-root refusal, pre-source inherited-path preservation,
+  import-origin binding, checkout identity, and sibling hygiene.
+  Test rows:
+  - Input: unset or empty audit repository-root override. Expected:
+    `/home/nwm/NWM` is the first `PYTHONPATH` entry.
+  - Input: absolute custom audit repository root. Expected: it becomes the
+    first entry; a relative or colon-bearing override is refused before
+    Python launch.
+  - Input: empty inherited `PYTHONPATH` and a test repository root.
+    Expected: `from scripts import node27_product_archive` succeeds through
+    the wrapper launch contract.
+  - Input: existing two-entry caller `PYTHONPATH` plus env-file empty or
+    non-empty `PYTHONPATH`. Expected: both caller entries are preserved
+    byte-for-byte and in order after the resolved root.
+  - Input: inherited path containing a later regular `scripts` package.
+    Expected: governed module origin wins or wrapper refuses before the
+    audit entrypoint.
+  - Input: `PYTHONSAFEPATH=1` and an otherwise safe governed checkout.
+    Expected: all seven wrappers reach the intended entrypoint; preflight
+    does not discard the root entry.
+  - Input: a regular `scripts` package in the actual entrypoint directory,
+    including an explicit script override outside the root. Expected:
+    wrapper refuses before entrypoint side effects; audit never loads a
+    shadow `node27_product_archive.py`.
+  - Input: retention/raw caller `PYTHONPATH` with an empty segment.
+    Expected: preflight and the post-`cd` file launch resolve the same
+    effective search path.
+  - Input: custom root with no interpreter/script overrides. Expected:
+    default interpreter and entrypoint derive from that same checkout.
+  - Input: the exact seven wrappers across unset/empty/absolute/relative/
+    delimiter roots and empty/non-empty inherited paths. Expected: every
+    wrapper enforces the same root contract before Python launch; original
+    arguments, entrypoint semantics, and downstream exit code remain
+    unchanged.
+  - Input: node-27 `nhms-node27-storage-inventory-audit.service` after
+    deployment. Expected: journal contains no `No module named 'scripts'`;
+    any later #1066/#1065 blocker remains separately attributable.
+  Verification: `uv run pytest -q tests/<wrapper-contract-test>.py`;
+  `uv run ruff check .`; `openspec validate
+  tier-node27-timeseries-storage --strict --no-interactive`; committed
+  node-27 journal evidence under the tier runbook receipts tree. A complete
+  archive-completeness receipt is explicitly deferred until #1066/#1065
+  merge and does not block this issue's PR.

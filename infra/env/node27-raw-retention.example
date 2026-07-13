@@ -4,6 +4,7 @@
 # 0600, and install infra/systemd/nhms-node27-raw-retention.{service,timer} as
 # user units for nwm.
 
+NODE27_RAW_RETENTION_REPO=/home/nwm/NWM
 NODE27_RAW_RETENTION_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
 NODE27_RAW_RETENTION_LOG_ROOT=/home/nwm/node27-raw-retention-logs
 NODE27_RAW_RETENTION_LOCK_PATH=/tmp/node27-raw-retention.lock

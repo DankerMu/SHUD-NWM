@@ -2,14 +2,18 @@
 set -eu
 
 CALLER_PYTHONPATH=${PYTHONPATH-}
-CALLER_PYTHON_OVERRIDE=${NODE27_TIMESERIES_COMPRESSION_PYTHON-}
-CALLER_SCRIPT_OVERRIDE=${NODE27_TIMESERIES_COMPRESSION_SCRIPT-}
-readonly CALLER_PYTHONPATH CALLER_PYTHON_OVERRIDE CALLER_SCRIPT_OVERRIDE
-ENV_FILE=${NODE27_TIMESERIES_COMPRESSION_ENV_FILE:-/home/nwm/NWM/infra/env/node27-timeseries-compression.env}
+readonly CALLER_PYTHONPATH
+INITIAL_REPO_ROOT=${NODE27_ARCHIVE_REBUILD_DRILL_REPO_ROOT:-/home/nwm/NWM}
+case "$INITIAL_REPO_ROOT" in
+  *:*) echo '{"status":"failed","reason":"repository root must not contain a path-list delimiter"}' >&2; exit 1 ;;
+  /*) ;;
+  *) echo '{"status":"failed","reason":"repository root must be absolute"}' >&2; exit 1 ;;
+esac
 
+ENV_FILE=${NODE27_ARCHIVE_REBUILD_DRILL_ENV_FILE:-$INITIAL_REPO_ROOT/infra/env/node27-archive-rebuild-drill.env}
 case "$ENV_FILE" in
   /*) ;;
-  *) echo '{"status":"failed","reason":"wrapper paths must be absolute"}' >&2; exit 1 ;;
+  *) echo '{"status":"failed","reason":"env file path must be absolute"}' >&2; exit 1 ;;
 esac
 
 if [ ! -f "$ENV_FILE" ] || [ -L "$ENV_FILE" ]; then
@@ -20,19 +24,21 @@ fi
   echo '{"status":"failed","reason":"env file must have mode 0600"}' >&2
   exit 1
 }
+
 set -a
 # shellcheck disable=SC1090
 . "$ENV_FILE"
 set +a
 
-REPO_ROOT=${NODE27_TIMESERIES_COMPRESSION_REPO_ROOT:-/home/nwm/NWM}
+REPO_ROOT=${NODE27_ARCHIVE_REBUILD_DRILL_REPO_ROOT:-/home/nwm/NWM}
 case "$REPO_ROOT" in
   *:*) echo '{"status":"failed","reason":"repository root must not contain a path-list delimiter"}' >&2; exit 1 ;;
   /*) ;;
   *) echo '{"status":"failed","reason":"repository root must be absolute"}' >&2; exit 1 ;;
 esac
-PYTHON_BIN=${CALLER_PYTHON_OVERRIDE:-$REPO_ROOT/.venv/bin/python}
-SCRIPT=${CALLER_SCRIPT_OVERRIDE:-$REPO_ROOT/scripts/node27_timeseries_compression.py}
+
+PYTHON_BIN=${NODE27_ARCHIVE_REBUILD_DRILL_PYTHON:-$REPO_ROOT/.venv/bin/python}
+SCRIPT=${NODE27_ARCHIVE_REBUILD_DRILL_SCRIPT:-$REPO_ROOT/scripts/node27_archive_rebuild_drill.py}
 case "$PYTHON_BIN:$SCRIPT" in
   /*:/*) ;;
   *) echo '{"status":"failed","reason":"wrapper paths must be absolute"}' >&2; exit 1 ;;
@@ -42,7 +48,39 @@ esac
   exit 1
 }
 if [ ! -f "$SCRIPT" ] || [ -L "$SCRIPT" ]; then
-  echo '{"status":"failed","reason":"compression entrypoint is unavailable or a symlink"}' >&2
+  echo '{"status":"failed","reason":"drill entrypoint is unavailable or a symlink"}' >&2
+  exit 1
+fi
+
+for required_value in \
+  "${PROD_DATABASE_URL_RO:-}" \
+  "${STAGING_DATABASE_URL:-}" \
+  "${POSTGRES_ADMIN_URL:-}" \
+  "${NHMS_ARCHIVE_REBUILD_DRILL_INSTANCE_ID:-}"
+do
+  [ -n "$required_value" ] || {
+    echo '{"status":"failed","reason":"required runtime variables must be configured"}' >&2
+    exit 1
+  }
+done
+for configured_path in \
+  "${NHMS_ARCHIVE_ROOT:-}" \
+  "${NHMS_ARCHIVE_REBUILD_DRILL_WORKSPACE:-}" \
+  "${NHMS_ARCHIVE_REBUILD_DRILL_RECEIPT_PATH:-}"
+do
+  case "$configured_path" in
+    /*) ;;
+    *) echo '{"status":"failed","reason":"required runtime paths must be configured and absolute"}' >&2; exit 1 ;;
+  esac
+done
+
+ZSTD=${NHMS_ZSTD_BIN:-/usr/bin/zstd}
+case "$ZSTD" in
+  /*) ;;
+  *) echo '{"status":"failed","reason":"zstd path must be absolute"}' >&2; exit 1 ;;
+esac
+if [ ! -x "$ZSTD" ] || [ ! -f "$ZSTD" ] || [ -L "$ZSTD" ]; then
+  echo '{"status":"failed","reason":"zstd executable is unavailable or unsafe"}' >&2
   exit 1
 fi
 

@@ -3,6 +3,8 @@
 
 set -u
 
+CALLER_PYTHONPATH=${PYTHONPATH-}
+readonly CALLER_PYTHONPATH
 REPO="${NODE27_RAW_RETENTION_REPO:-/home/nwm/NWM}"
 ENV_FILE="${NODE27_RAW_RETENTION_ENV_FILE:-$REPO/infra/env/node27-raw-retention.env}"
 BOOTSTRAP_LOG="${NODE27_RAW_RETENTION_BOOTSTRAP_LOG:-/home/nwm/node27-raw-retention.log}"
@@ -16,6 +18,12 @@ blocked() {
   echo "[$(ts)] node27-raw-retention: BLOCKED rc=2 reason=$reason" >&2
   exit 2
 }
+
+case "$REPO" in
+  *:*) blocked "REPOSITORY_ROOT_PATH_LIST_DELIMITER" ;;
+  /*) ;;
+  *) blocked "REPOSITORY_ROOT_NOT_ABSOLUTE" ;;
+esac
 
 if [ -f "$ENV_FILE" ]; then
   if [ -L "$ENV_FILE" ]; then
@@ -36,6 +44,19 @@ else
   blocked "ENV_FILE_MISSING"
 fi
 
+REPO="${NODE27_RAW_RETENTION_REPO:-/home/nwm/NWM}"
+case "$REPO" in
+  *:*) blocked "REPOSITORY_ROOT_PATH_LIST_DELIMITER" ;;
+  /*) ;;
+  *) blocked "REPOSITORY_ROOT_NOT_ABSOLUTE" ;;
+esac
+if [ -n "$CALLER_PYTHONPATH" ]; then
+  PYTHONPATH="$REPO:$CALLER_PYTHONPATH"
+else
+  PYTHONPATH="$REPO"
+fi
+export PYTHONPATH
+
 if [ -z "${NODE27_RAW_RETENTION_OBJECT_STORE_ROOT:-}" ]; then
   blocked "OBJECT_STORE_ROOT_MISSING"
 fi
@@ -54,6 +75,41 @@ if [ "$LOG_ROOT" = "/" ]; then
 fi
 mkdir -p "$LOG_ROOT" 2>/dev/null || blocked "LOG_ROOT_UNWRITABLE"
 
+PYTHON_BIN="$REPO/.venv/bin/python"
+SCRIPT="$REPO/scripts/node27_raw_retention.py"
+[ -x "$PYTHON_BIN" ] || blocked "python executable is unavailable"
+if [ ! -f "$SCRIPT" ] || [ -L "$SCRIPT" ]; then
+  blocked "raw retention entrypoint is unavailable or a symlink"
+fi
+
+if ! (cd "$REPO" && "$PYTHON_BIN" -c '
+import importlib.machinery
+import os
+import sys
+
+root = os.path.realpath(sys.argv[1])
+script = os.path.realpath(sys.argv[2])
+expected_namespace = os.path.join(root, "scripts")
+search_path = list(sys.path)
+if not sys.flags.safe_path:
+    search_path[0] = os.path.dirname(script)
+spec = importlib.machinery.PathFinder.find_spec("scripts", search_path)
+locations = (
+    []
+    if spec is None or spec.submodule_search_locations is None
+    else [os.path.realpath(path) for path in spec.submodule_search_locations]
+)
+valid = (
+    spec is not None
+    and spec.origin is None
+    and locations
+    and all(path == expected_namespace for path in locations)
+)
+raise SystemExit(0 if valid else 1)
+' "$REPO" "$SCRIPT"); then
+  blocked "SCRIPTS_IMPORT_ORIGIN_OUTSIDE_REPOSITORY_ROOT"
+fi
+
 LOCK_PATH="${NODE27_RAW_RETENTION_LOCK_PATH:-/tmp/node27-raw-retention.lock}"
 SUMMARY_PATH="${NODE27_RAW_RETENTION_SUMMARY_PATH:-$LOG_ROOT/raw-retention-$(date -u +%Y%m%dT%H%M%SZ).json}"
 LOG_FILE="${NODE27_RAW_RETENTION_LOG_FILE:-$LOG_ROOT/raw-retention.log}"
@@ -68,7 +124,7 @@ echo "[$(ts)] node27-raw-retention: start summary=$SUMMARY_PATH" >> "$LOG_FILE"
 START=$(date +%s)
 cd "$REPO" || blocked "REPO_UNAVAILABLE"
 
-"$REPO/.venv/bin/python" "$REPO/scripts/node27_raw_retention.py" \
+"$PYTHON_BIN" "$SCRIPT" \
   --summary-path "$SUMMARY_PATH" >> "$LOG_FILE" 2>&1
 RC=$?
 

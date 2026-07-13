@@ -3,6 +3,8 @@
 #
 # Copy to node27-timeseries-compression.env and chmod 0600.
 
+NODE27_TIMESERIES_COMPRESSION_REPO_ROOT=/home/nwm/NWM
+
 # Node-27 primary Postgres (writer role — compression is DDL/DML)
 DATABASE_URL=postgresql://REPLACE_ME_WRITER:REPLACE_ME_PW@127.0.0.1:55432/nhms
 

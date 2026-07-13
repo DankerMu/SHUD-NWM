@@ -14,6 +14,8 @@
 
 set -u
 
+CALLER_PYTHONPATH=${PYTHONPATH-}
+readonly CALLER_PYTHONPATH
 REPO="${NODE27_TIMESERIES_RETENTION_REPO:-/home/nwm/NWM}"
 ENV_FILE="${NODE27_TIMESERIES_RETENTION_ENV_FILE:-$REPO/infra/env/node27-timeseries-retention.env}"
 BOOTSTRAP_LOG="${NODE27_TIMESERIES_RETENTION_BOOTSTRAP_LOG:-/home/nwm/node27-timeseries-retention.log}"
@@ -27,6 +29,12 @@ blocked() {
   echo '{"status":"failed","reason":"'"$reason"'"}' >&2
   exit 2
 }
+
+case "$REPO" in
+  *:*) blocked "REPOSITORY_ROOT_PATH_LIST_DELIMITER" ;;
+  /*) ;;
+  *) blocked "REPOSITORY_ROOT_NOT_ABSOLUTE" ;;
+esac
 
 case "$ENV_FILE" in
   /*) ;;
@@ -52,6 +60,19 @@ else
   blocked "ENV_FILE_MISSING"
 fi
 
+REPO="${NODE27_TIMESERIES_RETENTION_REPO:-/home/nwm/NWM}"
+case "$REPO" in
+  *:*) blocked "REPOSITORY_ROOT_PATH_LIST_DELIMITER" ;;
+  /*) ;;
+  *) blocked "REPOSITORY_ROOT_NOT_ABSOLUTE" ;;
+esac
+if [ -n "$CALLER_PYTHONPATH" ]; then
+  PYTHONPATH="$REPO:$CALLER_PYTHONPATH"
+else
+  PYTHONPATH="$REPO"
+fi
+export PYTHONPATH
+
 LOG_ROOT="${NODE27_TIMESERIES_RETENTION_LOG_ROOT:-/home/nwm/node27-timeseries-retention-logs}"
 case "$LOG_ROOT" in
   /*) ;;
@@ -73,7 +94,37 @@ case "$PYTHON_BIN:$SCRIPT" in
 esac
 
 [ -x "$PYTHON_BIN" ] || blocked "python executable is unavailable"
-[ -f "$SCRIPT" ] && [ ! -L "$SCRIPT" ] || blocked "retention entrypoint is unavailable or a symlink"
+if [ ! -f "$SCRIPT" ] || [ -L "$SCRIPT" ]; then
+  blocked "retention entrypoint is unavailable or a symlink"
+fi
+
+if ! (cd "$REPO" && "$PYTHON_BIN" -c '
+import importlib.machinery
+import os
+import sys
+
+root = os.path.realpath(sys.argv[1])
+script = os.path.realpath(sys.argv[2])
+expected_namespace = os.path.join(root, "scripts")
+search_path = list(sys.path)
+if not sys.flags.safe_path:
+    search_path[0] = os.path.dirname(script)
+spec = importlib.machinery.PathFinder.find_spec("scripts", search_path)
+locations = (
+    []
+    if spec is None or spec.submodule_search_locations is None
+    else [os.path.realpath(path) for path in spec.submodule_search_locations]
+)
+valid = (
+    spec is not None
+    and spec.origin is None
+    and locations
+    and all(path == expected_namespace for path in locations)
+)
+raise SystemExit(0 if valid else 1)
+' "$REPO" "$SCRIPT"); then
+  blocked "SCRIPTS_IMPORT_ORIGIN_OUTSIDE_REPOSITORY_ROOT"
+fi
 
 # Bootstrap lock — protects wrapper reentry. The python runner also holds a
 # separate DB-scoped flock at NODE27_TIMESERIES_RETENTION_LOCK_PATH.

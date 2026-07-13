@@ -92,6 +92,10 @@ issues were filed via issue-scribe:
   Bug #3). systemd-wrapper-invariant drift; fix at the wrapper contract
   so this class cannot recur across sibling wrappers. Tracked as
   [#1067](https://github.com/DankerMu/SHUD-NWM/issues/1067).
+  Fixed by PR #1073: node-27 systemd proof at
+  `../storage-inventory-audit/wrapper-import-live-20260713T060353Z.json`
+  shows the isolated run delta reached the separately tracked #1066
+  `AuditBlocked` path with zero `No module named 'scripts'` occurrences.
 
 - **Bug #3 — audit URI prefix mismatch + missing receipt emission on
   `blocked`**: with Bug #2 worked around, audit exits with stdout JSON
@@ -149,7 +153,8 @@ systemctl --user start nhms-node27-product-archive.service
 
 Step A0 has landed as much as it can under the current code state.
 Continuing to Step A1 (compression migration + timer) is not
-recommended until Bug #1/#2/#3 are all fixed — the archive-completeness
+recommended until Bug #1/#3 are fixed — Bug #2's import contract is
+resolved by PR #1073, while the archive-completeness
 gate is a prerequisite for every downstream retention step. Coordinated
 with the operator: the raw-retention pattern (14-day `raw/` prune)
 already runs correctly on node-27 and does not depend on this cascade.
