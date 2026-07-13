@@ -1232,12 +1232,14 @@ Order is load-bearing:
   Evidence floor: retain strict forcing exact-leaf and run identity/output URI
   validators; add a disk-backed live-shape fixture covering canonical and
   historical-prefix GFS/IFS forcing/runs for qhh/heihe plus inaccessible state
-  leaves; aggregate every states traversal EACCES from one invocation into one
-  sanitized `STATES_ACCESS_DENIED` diagnostic with a distinct non-zero exit
-  reason; document the complete NFS group/mode-or-ACL operator repair without
-  executing it in this PR; commit a post-repair non-failed mover receipt and a
-  non-empty complete inventory-audit receipt while preserving the first-live
-  failure receipt.
+  leaves; aggregate every states discovery/full-validation EACCES reached before
+  candidate processing into one sanitized `STATES_ACCESS_DENIED` diagnostic
+  with a distinct non-zero exit reason; document the complete NFS
+  group/mode-or-ACL operator repair without executing it in this PR; commit a
+  post-repair non-failed mover receipt and a non-empty complete inventory-audit
+  receipt while preserving the first-live failure receipt. Process-stage
+  permission changes retain the existing independent-candidate terminal model
+  and are not converted into a transactional batch rollback by this issue.
   Test/evidence rows:
   - Input: disk-backed GFS and IFS forcing packages for qhh and heihe whose
     manifests use canonical `s3://nhms/<exact-package-leaf>/...`. Expected:

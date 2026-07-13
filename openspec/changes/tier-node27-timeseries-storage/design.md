@@ -1279,9 +1279,10 @@ and every #856 cascade action remain unchanged downstream consumers.
   bounds, deterministic ordering, dry-run write limits, enforce
   verify-before-delete semantics, flocking, and mode-0600 atomic receipt
   publication.
-- A states subtree access denial is an operational precondition failure, not a
-  malformed independent state identity. All inaccessible state leaves from one
-  discovery invocation MUST collapse into exactly one existing-schema
+- A states subtree access denial reached during locator discovery or bounded
+  full validation is an operational precondition failure, not a malformed
+  independent state identity. All such inaccessible state leaves from one
+  pre-selection invocation MUST collapse into exactly one existing-schema
   `discovery_failures` item:
   `{"lane_hint":"states","locator":"states","reason":
   "STATES_ACCESS_DENIED count=<decimal> euid=<decimal> egid=<decimal>"}`.
@@ -1292,8 +1293,11 @@ and every #856 cascade action remain unchanged downstream consumers.
   "exit_reason":"STATES_ACCESS_DENIED","status":"failed"}` and exits `2`;
   other receipt failures keep exit `1`. Raw absolute paths and exception text
   MUST NOT be copied into the receipt or stderr. Runtime semantic validation
-  recognizes this exact lane-level shape. The invocation does not continue
-  toward source deletion or claim a passing receipt.
+  recognizes this exact lane-level shape. The invocation does not enter
+  candidate processing, source deletion, or archive mutation and does not claim
+  a passing receipt. Permission changes after candidate processing begins retain
+  the existing independent-candidate failed/indeterminate terminal semantics;
+  #1065 does not introduce an all-candidate transactional archive protocol.
 - The runbook MUST state the complete operator repair. Adding `nwm` to
   `nfsdata` alone is insufficient when leaves are mode `0700`: existing and
   future directories need group traversal/read bits and files need group read,
@@ -1400,7 +1404,8 @@ and every #856 cascade action remain unchanged downstream consumers.
   - canonical GFS/IFS runs for qhh/heihe, including output URI with a trailing
     slash -> accepted; mismatched configured bucket or drifted run/output
     identity -> the pinned run-binding failure;
-  - inaccessible GFS and IFS state leaves -> exactly one safe lane-level
+  - inaccessible GFS and IFS state leaves during discovery/full validation ->
+    exactly one safe lane-level
     receipt diagnostic, one exact structured stderr line, and exit code `2`,
     regardless of leaf count; non-access discovery failures retain exit `1`;
   - accessible state leaves plus canonical forcing/runs -> non-failed dry-run,

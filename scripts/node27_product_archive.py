@@ -938,7 +938,12 @@ def discover_candidate_locators(
             return
         failures.append(DiscoveryFailure(lane, locator, str(error)))
 
-    def lane_exists(lane: str, path: Path) -> bool:
+    def lane_exists(
+        lane: str,
+        path: Path,
+        *,
+        aggregate_states_access: bool = False,
+    ) -> bool:
         nonlocal observed
         try:
             return _entry_exists(path, root)
@@ -946,7 +951,12 @@ def discover_candidate_locators(
             observed += 1
             if observed > MAX_DISCOVERY:
                 raise ArchiveMoverError(f"discovery exceeds {MAX_DISCOVERY} candidates/failures") from error
-            record_failure(lane, lane, error)
+            record_failure(
+                lane,
+                lane,
+                error,
+                aggregate_states_access=aggregate_states_access,
+            )
             return False
 
     def add_leaf(
@@ -1082,9 +1092,14 @@ def discover_candidate_locators(
             except Exception as error:
                 record_failure("runs", "runs", error)
         states = root / "states"
-        if lane_exists("states", states):
+        if lane_exists("states", states, aggregate_states_access=True):
             try:
-                for first in shallow_dirs("states", states, "states"):
+                for first in shallow_dirs(
+                    "states",
+                    states,
+                    "states",
+                    aggregate_states_access=True,
+                ):
                     first_path = states / first
                     try:
                         provider = normalize_source_id(first)
@@ -1128,6 +1143,7 @@ def discover_candidate_locators(
                     "states",
                     "states/discovery" if states_access_denied_count else "states",
                     error,
+                    aggregate_states_access=True,
                 )
     finally:
         os.close(root_fd)
@@ -1238,13 +1254,40 @@ def discover_candidates(
     """Compatibility helper that fully validates every discovered locator."""
     locators, failures = discover_candidate_locators(config, now=now, mount_id_provider=mount_id_provider)
     candidates: list[Candidate] = []
+    states_access_denied_count = 0
+    retained_failures: list[DiscoveryFailure] = []
+    for failure in failures:
+        context = (
+            _states_access_denied_context(failure.reason)
+            if failure.lane_hint == "states" and failure.locator == "states"
+            else None
+        )
+        if context is not None:
+            states_access_denied_count += context["count"]
+        else:
+            retained_failures.append(failure)
+    failures = retained_failures
     for locator in locators:
         try:
             candidates.append(
                 _validate_candidate_locator(locator, config, mount_id_provider=mount_id_provider)
             )
         except Exception as error:
-            failures.append(DiscoveryFailure(locator.identity.lane, locator.source_relative, str(error)))
+            if locator.identity.lane == "states" and _is_eacces(error):
+                states_access_denied_count += 1
+            else:
+                failures.append(
+                    DiscoveryFailure(locator.identity.lane, locator.source_relative, str(error))
+                )
+    if states_access_denied_count:
+        failures.append(
+            DiscoveryFailure(
+                "states",
+                "states",
+                "STATES_ACCESS_DENIED "
+                f"count={states_access_denied_count} euid={os.geteuid()} egid={os.getegid()}",
+            )
+        )
     failures.sort(key=lambda value: (value.lane_hint, value.locator, value.reason))
     return candidates, failures
 
@@ -3349,6 +3392,7 @@ def run(
         failure.reason.startswith("discovery exceeds") for failure in failures
     )
     selected: list[Candidate] = []
+    validation_failed_locators: set[str] = set()
     validation_attempts = 0
     next_locator = 0
     if not discovery_incomplete:
@@ -3374,6 +3418,7 @@ def run(
                     failures.append(
                         DiscoveryFailure(locator.identity.lane, locator.source_relative, str(error))
                     )
+                    validation_failed_locators.add(locator.source_relative)
     if states_access_denied:
         access_count = sum(
             context["count"]
@@ -3399,7 +3444,15 @@ def run(
             )
         )
         selected = []
-    deferred_locators = locators if discovery_incomplete or states_access_denied else locators[next_locator:]
+    deferred_locators = (
+        [
+            locator
+            for locator in locators
+            if locator.source_relative not in validation_failed_locators
+        ]
+        if discovery_incomplete or states_access_denied
+        else locators[next_locator:]
+    )
     failures.sort(key=lambda value: (value.lane_hint, value.locator, value.reason))
     terminals: list[dict[str, Any]] = []
     events: list[dict[str, Any]] = []
@@ -3560,6 +3613,17 @@ def validate_receipt_semantics(receipt: Mapping[str, Any]) -> None:
     failure_keys = [(item["lane_hint"], item["locator"]) for item in receipt["discovery_failures"]]
     if len(failure_keys) != len(set(failure_keys)):
         raise ArchiveMoverError("receipt discovery failures must be unique by lane/locator")
+    candidate_sources = {item["source_path"] for item in receipt["candidates"]}
+    for item in receipt["discovery_failures"]:
+        is_states_access_aggregate = (
+            item.get("lane_hint") == "states"
+            and item.get("locator") == "states"
+            and _states_access_denied_context(item.get("reason")) is not None
+        )
+        if not is_states_access_aggregate and item.get("locator") in candidate_sources:
+            raise ArchiveMoverError(
+                "receipt failed locator must not also appear as a candidate/deferred source"
+            )
     states_access_failures: list[dict[str, int]] = []
     for item in receipt["discovery_failures"]:
         reason = item.get("reason")

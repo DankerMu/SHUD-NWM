@@ -23,6 +23,7 @@ from packages.common.safe_fs import SafeFilesystemError
 
 _ROOT = Path(__file__).resolve().parents[1]
 _LIVE_SHAPE = _ROOT / "tests/fixtures/node27_product_archive/live-shape/object-store"
+_LIVE_SHAPE_PROVENANCE = _LIVE_SHAPE.parent / "provenance.json"
 _LIVE_SHAPE_NOW = datetime(2026, 9, 1, tzinfo=UTC)
 _SPEC = importlib.util.spec_from_file_location("node27_product_archive", _ROOT / "scripts/node27_product_archive.py")
 assert _SPEC and _SPEC.loader
@@ -528,6 +529,210 @@ def _inject_state_open_failures(
     monkeypatch.setattr(archive, "open_directory_no_follow", injected)
 
 
+def _assert_states_access_failure(
+    failures: list[archive.DiscoveryFailure], *, count: int
+) -> None:
+    assert failures == [
+        archive.DiscoveryFailure(
+            "states",
+            "states",
+            f"STATES_ACCESS_DENIED count={count} euid={os.geteuid()} egid={os.getegid()}",
+        )
+    ]
+
+
+def test_live_shape_provenance_binds_projected_fixture_bytes_and_authoritative_fields() -> None:
+    provenance = json.loads(_LIVE_SHAPE_PROVENANCE.read_text(encoding="utf-8"))
+    assert provenance["schema_version"] == "1.0"
+    assert len(provenance["samples"]) == 6
+    assert all(Path(sample["source_path"]).is_absolute() for sample in provenance["samples"])
+    for sample in provenance["samples"]:
+        fixture = _LIVE_SHAPE.parent / sample["fixture_path"]
+        assert fixture.is_file()
+        assert hashlib.sha256(fixture.read_bytes()).hexdigest() == sample["fixture_sha256"]
+        original = sample["original_manifest_sha256"]
+        assert original is None or original != sample["fixture_sha256"]
+        assert sample["authoritative_fields"]
+        for relative, expected_sha in sample.get("fixture_bundle_sha256", {}).items():
+            bundled = fixture.parent / relative
+            assert hashlib.sha256(bundled.read_bytes()).hexdigest() == expected_sha
+
+    ifs_run = next(
+        sample
+        for sample in provenance["samples"]
+        if sample["lane"] == "runs"
+        and sample["authoritative_fields"]["source_id"] == "IFS"
+    )
+    assert ifs_run["authoritative_fields"]["end_time"] == "2026-06-06T06:00:00Z"
+
+
+def test_live_shape_complete_forcing_bundles_execute_real_domain_validator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _live_shape_config(tmp_path)
+    calls: list[str] = []
+    real_validate = archive._validate_forcing_domain_bundle
+
+    def observed_validate(forcing, *, source_relative, **kwargs):
+        calls.append(source_relative)
+        return real_validate(
+            forcing,
+            source_relative=source_relative,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(archive, "_validate_forcing_domain_bundle", observed_validate)
+    candidates, failures = archive.discover_candidates(
+        config,
+        now=_LIVE_SHAPE_NOW,
+        mount_id_provider=_mount_id,
+    )
+
+    assert failures == []
+    assert {candidate.identity.lane for candidate in candidates} == {
+        "forcing",
+        "runs",
+        "states",
+    }
+    assert calls == [
+        "forcing/gfs/2026061600/basins_heihe_vbasins/basins_heihe_shud",
+        "forcing/ifs/2026070500/basins_qhh_vbasins/basins_qhh_shud",
+    ]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["payload-checksum", "lineage-checksum", "domain-identity"],
+)
+def test_live_shape_forcing_bundle_checksum_and_provenance_drift_fail_validation(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    config = _live_shape_config(tmp_path)
+    leaf = (
+        config.object_store_root
+        / "forcing/gfs/2026061600/basins_heihe_vbasins/basins_heihe_shud"
+    )
+    if mutation == "payload-checksum":
+        (leaf / "payloads/station_inventory.json").write_bytes(b"[]\n")
+    elif mutation == "lineage-checksum":
+        path = leaf / "forcing_version_record.json"
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["lineage_json"]["forcing_package_manifest_checksum"] = "0" * 64
+        path.write_text(json.dumps(value), encoding="utf-8")
+    else:
+        path = leaf / "forcing_domain_package.json"
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["model_id"] = "basins_qhh_shud"
+        path.write_text(json.dumps(value), encoding="utf-8")
+
+    candidates, failures = archive.discover_candidates(
+        config,
+        now=_LIVE_SHAPE_NOW,
+        mount_id_provider=_mount_id,
+    )
+
+    assert len(candidates) == 5
+    assert len(failures) == 1
+    assert failures[0].locator == (
+        "forcing/gfs/2026061600/basins_heihe_vbasins/basins_heihe_shud"
+    )
+
+
+def test_states_root_eacces_is_one_lane_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path, enforce=False)
+    _state(config, provider=True)
+    real_exists = archive._entry_exists
+
+    def denied_root(path: Path, root: Path) -> bool:
+        if path == config.object_store_root / "states":
+            raise PermissionError(errno.EACCES, "private-root-token", str(path))
+        return real_exists(path, root)
+
+    monkeypatch.setattr(archive, "_entry_exists", denied_root)
+    locators, failures = archive.discover_candidate_locators(
+        config,
+        now=_LIVE_SHAPE_NOW,
+        mount_id_provider=_mount_id,
+    )
+
+    assert locators == []
+    _assert_states_access_failure(failures, count=1)
+    assert "private-root-token" not in failures[0].reason
+
+
+@pytest.mark.parametrize(
+    ("provider", "denied"),
+    [
+        (True, "states/IFS"),
+        (False, "states/model-c"),
+    ],
+    ids=["provider-root", "legacy-model-root"],
+)
+def test_states_provider_and_legacy_root_eacces_are_aggregated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider: bool,
+    denied: str,
+) -> None:
+    config = _config(tmp_path, enforce=False)
+    _state(config, provider=provider)
+    _inject_state_open_failures(monkeypatch, config, {denied: errno.EACCES})
+
+    locators, failures = archive.discover_candidate_locators(
+        config,
+        now=_LIVE_SHAPE_NOW,
+        mount_id_provider=_mount_id,
+    )
+
+    assert locators == []
+    _assert_states_access_failure(failures, count=1)
+
+
+@pytest.mark.parametrize("denied_count", [1, 2], ids=["one-leaf", "multiple-leaves"])
+def test_discover_candidates_compatibility_helper_aggregates_full_validation_eacces(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    denied_count: int,
+) -> None:
+    config = _live_shape_config(tmp_path)
+    real_validate = archive._validate_candidate_locator
+    denied = {
+        "states/IFS/basins_qhh_shud/2026050100",
+        "states/gfs/basins_heihe_shud/2026050100",
+    }
+    if denied_count == 1:
+        denied = {"states/IFS/basins_qhh_shud/2026050100"}
+
+    def injected(locator, runtime_config, *, mount_id_provider):
+        if locator.source_relative in denied:
+            raise PermissionError(
+                errno.EACCES,
+                "private-full-validation-token",
+                str(locator.source_path),
+            )
+        return real_validate(
+            locator,
+            runtime_config,
+            mount_id_provider=mount_id_provider,
+        )
+
+    monkeypatch.setattr(archive, "_validate_candidate_locator", injected)
+    candidates, failures = archive.discover_candidates(
+        config,
+        now=_LIVE_SHAPE_NOW,
+        mount_id_provider=_mount_id,
+    )
+
+    assert len(candidates) == 6 - denied_count
+    _assert_states_access_failure(failures, count=denied_count)
+    assert "private-full-validation-token" not in failures[0].reason
+
+
 def test_live_shape_fixture_accepts_canonical_gfs_ifs_qhh_heihe_and_reproduces_historical_prefix(
     tmp_path: Path,
 ) -> None:
@@ -812,6 +1017,99 @@ def test_state_eacces_during_bounded_leaf_validation_freezes_all_mutation(
     assert "private-validation-token" not in json.dumps(receipt)
     assert _tree_snapshot(config.object_store_root) == before
     assert list(config.archive_root.iterdir()) == []
+
+
+def test_mixed_full_validation_failures_exclude_failed_locator_before_later_state_eacces(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _live_shape_config(tmp_path, enforce=True)
+    before = _tree_snapshot(config.object_store_root)
+    locators, discovery_failures = archive.discover_candidate_locators(
+        config,
+        now=_LIVE_SHAPE_NOW,
+        mount_id_provider=_mount_id,
+    )
+    state_locators = [locator for locator in locators if locator.identity.lane == "states"]
+    assert discovery_failures == []
+    assert len(state_locators) == 2
+    first_failed = state_locators[0].source_relative
+    later_denied = state_locators[1].source_relative
+    real_validate = archive._validate_candidate_locator
+
+    def injected(locator, runtime_config, *, mount_id_provider):
+        if locator.source_relative == first_failed:
+            raise OSError(errno.EIO, "private-io-token", str(locator.source_path))
+        if locator.source_relative == later_denied:
+            raise PermissionError(
+                errno.EACCES,
+                "private-access-token",
+                str(locator.source_path),
+            )
+        return real_validate(
+            locator,
+            runtime_config,
+            mount_id_provider=mount_id_provider,
+        )
+
+    monkeypatch.setattr(archive, "_validate_candidate_locator", injected)
+    receipt, code = archive.run(
+        config,
+        now=_LIVE_SHAPE_NOW,
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+
+    assert code == 1
+    assert receipt["outcome"] == "failed"
+    assert receipt["validation_attempts"] == 6
+    assert receipt["selected"] == []
+    assert receipt["candidates"] == receipt["deferred"]
+    assert first_failed not in {item["source_path"] for item in receipt["candidates"]}
+    assert later_denied in {item["source_path"] for item in receipt["deferred"]}
+    assert receipt["terminals"] == []
+    assert receipt["events"] == []
+    assert receipt["bytes"] == {"source": 0, "archived": 0}
+    assert [(item["lane_hint"], item["locator"]) for item in receipt["discovery_failures"]] == [
+        ("states", "states"),
+        ("states", first_failed),
+    ]
+    assert receipt["discovery_failures"][0]["reason"].startswith(
+        "STATES_ACCESS_DENIED count=1"
+    )
+    assert "private-access-token" not in json.dumps(receipt)
+    assert "private-io-token" in receipt["discovery_failures"][1]["reason"]
+    assert _tree_snapshot(config.object_store_root) == before
+    assert list(config.archive_root.iterdir()) == []
+    archive.validate_receipt_semantics(receipt)
+
+
+def test_receipt_semantics_rejects_failed_locator_reintroduced_as_candidate(
+    tmp_path: Path,
+) -> None:
+    config = _live_shape_config(tmp_path)
+    receipt, code = archive.run(
+        config,
+        now=_LIVE_SHAPE_NOW,
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 0
+    failed_source = receipt["candidates"][0]["source_path"]
+    receipt["discovery_failures"] = [
+        {
+            "lane_hint": receipt["candidates"][0]["identity"]["lane"],
+            "locator": failed_source,
+            "reason": "injected validation failure",
+        }
+    ]
+    receipt["outcome"] = "failed"
+
+    with pytest.raises(
+        archive.ArchiveMoverError,
+        match="failed locator must not also appear",
+    ):
+        archive.validate_receipt_semantics(receipt)
 
 
 def test_main_publishes_exact_state_access_receipt_then_emits_one_compact_diagnostic(

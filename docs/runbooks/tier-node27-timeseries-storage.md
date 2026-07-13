@@ -134,10 +134,12 @@ compact JSON diagnostic with `exit_reason=STATES_ACCESS_DENIED` and exits `2`.
 No candidate is selected and no archive or source mutation is attempted.
 Other discovery failures remain per-locator failures and retain exit `1`.
 
-Adding `nwm` to the `nfsdata` supplementary group is necessary only when that
-group is the chosen access owner; it is not sufficient for a leaf that remains
-mode `0700`. An authorized storage operator must establish one complete access
-model across both existing and future `states` content:
+Choose exactly one access model before changing anything. Adding `nwm` to the
+`nfsdata` supplementary group is required only for the group model; the ACL
+model does not require `id` to contain `nfsdata`. Group membership alone is not
+sufficient for a leaf that remains mode `0700`. An authorized storage operator
+must establish one complete access model across both existing and future
+`states` content:
 
 - With group access, every directory from the NFS root through each state leaf
   grants the chosen group search (`x`) and directory read (`r`) access, state
@@ -149,13 +151,92 @@ model across both existing and future `states` content:
   writer parents also carry a default ACL so future state leaves inherit the
   same access. The effective ACL mask must not remove those permissions.
 
-The storage administrator owns any group, ownership, mode, or ACL mutation.
-This PR does not run or prescribe `usermod`, `chgrp`, `chmod`, or `setfacl`
-commands. After a supplementary-group change, end the old login and start a
-new login; also refresh the `nwm` user-manager session before restarting the
-user service, because a long-lived user manager retains the old group set.
+The storage and identity administrators own any group, ownership, mode, or ACL
+mutation. This PR does not run or prescribe site-specific `usermod`, `chgrp`,
+`chmod`, or `setfacl` commands. Before they choose a repair, capture the current
+tree and both future-inheritance surfaces. Do not truncate `find` with a pipe:
+that would replace its permission-error exit status with `head`'s success.
 
-From that fresh `nwm` login, verify the effective access without changing it:
+```bash
+states_root=/home/ghdc/nwm/object-store/states
+inspection_log=$(mktemp /tmp/node27-states-tree.XXXXXX.log)
+set +e
+find "$states_root" -xdev -maxdepth 4 \
+  -printf '%M %u %g %p\n' >"$inspection_log" 2>&1
+find_rc=$?
+set -e
+sed -n '1,200p' "$inspection_log"
+printf 'complete find exit=%s log=%s\n' "$find_rc" "$inspection_log"
+test "$find_rc" -eq 0
+
+for path in \
+  /home/ghdc/nwm/object-store \
+  "$states_root" \
+  "$states_root/gfs" \
+  "$states_root/IFS" \
+  "$states_root/gfs/basins_heihe_shud" \
+  "$states_root/IFS/basins_qhh_shud"
+do
+  stat -c '%A %a %U %G %n' "$path"
+  getfacl -cp "$path"
+done
+```
+
+The complete `find` must exit zero. For the group model, the selected writer
+parents must have the `nfsdata` (or explicitly selected equivalent) group,
+setgid set, and group read/search after the ACL effective mask is applied.
+Their default ACL/mode and the actual writer's umask must preserve group
+read/search on new directories and group read on new files. For the ACL model,
+the writer parents must have a default named-user `nwm` or selected-group entry
+and a default/effective mask that does not reduce it below directory
+read/search and file read. A plain access ACL on today's leaves is insufficient
+because tomorrow's leaves would regress.
+
+Identify the process that actually creates a recent state leaf on the node
+where that process runs (normally the node-22 compute plane; do not infer its
+umask from node-27's mover). During an authorized observation window, use the
+real writer PID or service/job evidence and record its live supplementary
+groups and umask:
+
+```bash
+# Obtain the cycle/PID from the active service/job and confirm it against the
+# recent state leaf. fuser may report no PID when no writer is active.
+cycle=2026050100
+fuser -v "/home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/$cycle"
+writer_pid=12345
+grep -E '^(Name|Pid|Uid|Gid|Groups|Umask):' "/proc/$writer_pid/status"
+sed -n '1,120p' "/proc/$writer_pid/cgroup"
+ps -o pid,ppid,user,group,lstart,args -p "$writer_pid"
+```
+
+If `/proc/<writer-pid>/cgroup` binds the process to a systemd unit, also record
+the configured value rather than assuming the process default:
+
+```bash
+writer_unit=replace-with-observed-unit.service
+systemctl show "$writer_unit" \
+  -p User -p Group -p SupplementaryGroups -p UMask -p MainPID
+```
+
+For a Slurm writer, bind the PID to its job and record `scontrol show job
+<job-id>`/`sacct -j <job-id>` plus `/proc/<writer-pid>/status`; a login-shell
+`umask` is not evidence for a running batch step. The repair is incomplete
+until a newly created probe leaf from that real writer inherits the chosen
+group/default ACL and effective mask.
+
+After a group-membership change, every old login and the long-lived `nwm`
+systemd user manager still has the old supplementary groups. Coordinate a
+maintenance window with the ingest/display operators first: record enabled and
+active `nwm` user units, wait for archive/audit work to finish, and announce
+that refreshing the user manager terminates **all** `nwm` login sessions and
+stops its user services/timers. An authorized login administrator then
+terminates the old `nwm` session/user manager with the site's login-manager
+procedure (for systemd-logind, `loginctl terminate-user nwm`). Reconnect as
+`nwm`, restore only the previously enabled units, and verify service health.
+Do not merely restart the archive service inside the stale user manager.
+
+From that fresh `nwm` login, verify the effective identity and access without
+changing the object-store:
 
 ```
 id
@@ -163,16 +244,33 @@ namei -l /home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/2026050100
 getfacl -p /home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/2026050100
 test -x /home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/2026050100
 test -r /home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/2026050100/state.cfg.ic
-find /home/ghdc/nwm/object-store/states -maxdepth 4 -type d -print | head -n 200
+
+mapfile -t manager_pids < <(pgrep -u "$(id -u)" -x systemd)
+test "${#manager_pids[@]}" -eq 1
+grep -E '^(Name|Pid|Uid|Gid|Groups|Umask):' \
+  "/proc/${manager_pids[0]}/status"
+
+# systemd-run uses the same user manager and supplementary groups as timer
+# services. Both commands must succeed; the first output is retained as proof.
+systemd-run --user --wait --pipe --collect /usr/bin/id
+systemd-run --user --wait --pipe --collect \
+  /usr/bin/test -r \
+  /home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/2026050100/state.cfg.ic
 ```
 
 Repeat `namei`, `getfacl`, `test -x`, and `test -r` for
 `states/gfs/basins_heihe_shud/<cycle>` and
-`states/IFS/basins_qhh_shud/<cycle>`. Any permission diagnostic from the bounded `find`,
-a failed `test`, a missing `nfsdata` entry in `id`, or a `---` component in
-`namei` means the precondition is still unresolved. Only after these checks
-pass should the operator rerun the mover dry-run and confirm the new receipt
-has no `STATES_ACCESS_DENIED` entry.
+`states/IFS/basins_qhh_shud/<cycle>`, and run the complete logged `find` again.
+Any permission diagnostic or non-zero `find` exit, failed `test`, or `---`
+component in `namei` means the precondition is unresolved. Under the group
+model, a missing selected group (for example `nfsdata`) in the fresh login,
+`/proc/<user-manager-pid>/status`, or `systemd-run --user ... id` is also a
+failure. Under the named-user ACL model, missing `nfsdata` is not a failure;
+the effective/default ACL plus the successful timer-context tests are the
+oracle. Only after the chosen model, current full tree, new writer-created
+leaf, fresh user manager, and timer context all pass should the operator rerun
+the mover dry-run and confirm the new receipt has no
+`STATES_ACCESS_DENIED` entry.
 
 ### Free-space watermark tuning
 

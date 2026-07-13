@@ -638,11 +638,15 @@ SHALL bind its `run_id`, input manifest URI, and output directory URI to the
 discovered run directory; one canonical directory trailing slash MAY be
 normalized without changing identity. A configured prefix that differs from
 the manifest producer prefix SHALL fail these bindings rather than broaden URI
-containment. When one invocation cannot traverse one or more state leaves due
-to filesystem permission denial, it SHALL emit exactly one deterministic,
-sanitized `STATES_ACCESS_DENIED` diagnostic with the affected count and
-effective uid/gid context, terminate with the exact stderr/exit contract below,
-and perform no archive/source mutation. The receipt uses exactly one
+containment. When locator discovery or bounded full validation cannot traverse
+one or more state leaves due to filesystem permission denial before candidate
+processing begins, it SHALL emit exactly one deterministic, sanitized
+`STATES_ACCESS_DENIED` diagnostic with the affected count and effective uid/gid
+context, terminate with the exact stderr/exit contract below, and perform no
+archive/source mutation. Permission changes after candidate processing begins
+retain the existing independent-candidate failed/indeterminate terminal
+semantics; this requirement does not add transactional rollback across the
+batch. The receipt uses exactly one
 existing-schema discovery-failure item: `lane_hint=states`, `locator=states`,
 and reason
 `STATES_ACCESS_DENIED count=<decimal> euid=<decimal> egid=<decimal>`. After
@@ -670,8 +674,9 @@ retain exit `1`; this requirement does not add receipt-schema fields.
 
 #### Scenario: Multiple inaccessible state leaves produce one terminal access diagnostic
 
-- **WHEN** state discovery encounters filesystem permission denial across one
-  or more GFS/IFS basin leaves
+- **WHEN** state discovery or bounded full validation encounters filesystem
+  permission denial across one or more GFS/IFS basin leaves before candidate
+  processing
 - **THEN** the receipt and structured stderr MUST expose one safe
   `STATES_ACCESS_DENIED` diagnostic with the affected count and effective
   uid/gid context, not one failure per leaf, using the exact receipt and stderr
