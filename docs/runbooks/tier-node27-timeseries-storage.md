@@ -808,6 +808,12 @@ Receipts match `schemas/timeseries_retention_receipt.schema.json`
    `_default_lock_path()` and `infra/env/node27-timeseries-retention.example`.
 2. **Per-chunk drop failure (`RETENTION_DROP_FAILED`).** The whole tick
    refuses fail-closed (H5) — no schema `partial` outcome exists.
+   **Chunks that dropped successfully before the failure are NOT
+   enumerated in the receipt** (schema `oneOf` forbids `dropped_chunks`
+   on refused); those chunks are already gone. To reconstruct what
+   actually happened, cross-reference the wrapper's `retention.log`
+   (per-chunk drop timings printed to stderr) with the current
+   `timescaledb_information.chunks` state before re-running enforce.
    Inspect the offending chunk (the refusal_reason suffix names it
    `<hypertable_schema>.<chunk_name>`). Common causes: statement timeout
    (5 min per chunk), active writer holding an incompatible lock, or a
