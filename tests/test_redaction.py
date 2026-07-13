@@ -380,6 +380,46 @@ def test_redact_text_fails_closed_for_nested_json_assignment_layers(
     assert REDACTION_MARKER in redacted
 
 
+@pytest.mark.parametrize("key", ["password", "token", "api_key", "Authorization"])
+def test_standalone_escaped_json_sensitive_assignment_is_redacted(key: str) -> None:
+    raw = rf'{{\"{key}\":\"standalone-escaped-leak-value\"}}'
+    redacted = redact_text(raw)
+    assert "standalone-escaped-leak-value" not in redacted
+    assert REDACTION_MARKER in redacted
+
+
+def test_standalone_escaped_json_ordinary_assignment_remains_visible() -> None:
+    raw = r'{\"ordinary.key\":\"visible\"}'
+    assert redact_text(raw) == raw
+
+
+@pytest.mark.parametrize(
+    "key", ["token", "password", "api_key", "access.key", "session-key", "secret", "credential"]
+)
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Bearer bare-leak-value",
+        "'Basic single quoted leak value'",
+        '"Bearer double quoted leak value"',
+        r'Bearer \"escaped quoted leak value\"',
+        'Basic\u2003"unicode whitespace leak value"',
+        "Bearer punctuation-leak-value, safe=visible",
+    ],
+)
+def test_sensitive_assignment_redacts_complete_authorization_scheme_value(
+    key: str, value: str
+) -> None:
+    raw = f"{key}={value}"
+    redacted = redact_text(raw)
+    assert "leak value" not in redacted
+    assert "leak-value" not in redacted
+    assert redacted.startswith(f"{key}={REDACTION_MARKER}")
+    assert redact_text(redacted) == redacted
+    if "safe=visible" in raw:
+        assert redacted.endswith(" safe=visible")
+
+
 @pytest.mark.parametrize("quote", ['"', "'"])
 @pytest.mark.parametrize("key", ["password", "api.key", "auth.header"])
 @pytest.mark.parametrize("slash_count", range(8))

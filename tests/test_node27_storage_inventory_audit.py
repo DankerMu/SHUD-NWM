@@ -1616,6 +1616,8 @@ def test_unexpected_prepublication_error_publishes_sanitized_indeterminate(
             'payload="prefix {"password":"unescaped-blocked-secret"} suffix" '
             r'payload="prefix {\\\"password\\\":\\\"layered-blocked-secret\\\"} suffix" '
             'Authorization=Bearer "quoted-blocked-auth-secret" '
+            r'{\"password\":\"standalone-blocked-secret\"} '
+            'token=Bearer assigned-blocked-secret '
             '\"token=quoted-outer-blocked-secret\": "outer-blocked-secret"'
         ),
         RuntimeError(
@@ -1628,6 +1630,8 @@ def test_unexpected_prepublication_error_publishes_sanitized_indeterminate(
             'payload="prefix {"password":"unescaped-indeterminate-secret"} suffix" '
             r'payload="prefix {\\\"password\\\":\\\"layered-indeterminate-secret\\\"} suffix" '
             "Proxy-Authorization=Basic 'quoted-indeterminate-auth-secret' "
+            r'{\"api_key\":\"standalone-indeterminate-secret\"} '
+            'password=Basic assigned-indeterminate-secret '
             "'api_key=quoted-outer-indeterminate-secret' = 'outer-indeterminate-secret'"
         ),
     ],
@@ -1674,6 +1678,10 @@ def test_terminal_receipt_redacts_generic_credentials_for_controlled_and_unexpec
         "layered-indeterminate-secret",
         "quoted-blocked-auth-secret",
         "quoted-indeterminate-auth-secret",
+        "standalone-blocked-secret",
+        "standalone-indeterminate-secret",
+        "assigned-blocked-secret",
+        "assigned-indeterminate-secret",
         "quoted-outer-blocked-secret",
         "quoted-outer-indeterminate-secret",
         "outer-blocked-secret",
@@ -1696,6 +1704,8 @@ def test_quoted_credential_key_is_redacted_from_bootstrap_stderr(
                 'payload="prefix {"password":"bootstrap-unescaped-secret"} suffix" '
                 r'payload="prefix {\\\"password\\\":\\\"bootstrap-layered-secret\\\"} suffix" '
                 'auth_header=Bearer\u2003"bootstrap quoted auth secret" '
+                r'{\"token\":\"bootstrap-standalone-secret\"} '
+                'api_key=Bearer bootstrap-assigned-secret '
                 '{"前缀authorization": "Bearer bootstrap-auth-secret"}'
             )
         ),
@@ -1709,6 +1719,8 @@ def test_quoted_credential_key_is_redacted_from_bootstrap_stderr(
     assert "bootstrap-unescaped-secret" not in diagnostic["message"]
     assert "bootstrap-layered-secret" not in diagnostic["message"]
     assert "bootstrap quoted auth secret" not in diagnostic["message"]
+    assert "bootstrap-standalone-secret" not in diagnostic["message"]
+    assert "bootstrap-assigned-secret" not in diagnostic["message"]
     assert "visible" in diagnostic["message"]
 
 
@@ -1743,6 +1755,8 @@ def test_quoted_credential_key_is_redacted_from_publication_stderr(
                 'payload="prefix {"password":"publication-unescaped-secret"} suffix" '
                 r'payload="prefix {\\\"password\\\":\\\"publication-layered-secret\\\"} suffix" '
                 r'Proxy-Authorization=Basic \"publication escaped auth secret\" '
+                r'{\"Authorization\":\"publication-standalone-auth-secret\"} '
+                'credential=Basic publication-assigned-secret '
                 '\"token=publication-quoted-outer-secret\": "publication-outer-secret"'
             )
         ),
@@ -1758,6 +1772,8 @@ def test_quoted_credential_key_is_redacted_from_publication_stderr(
     assert "publication-unescaped-secret" not in diagnostic["message"]
     assert "publication-layered-secret" not in diagnostic["message"]
     assert "publication escaped auth secret" not in diagnostic["message"]
+    assert "publication-standalone-auth-secret" not in diagnostic["message"]
+    assert "publication-assigned-secret" not in diagnostic["message"]
     assert "publication-quoted-outer-secret" not in diagnostic["message"]
     assert "publication-outer-secret" not in diagnostic["message"]
     assert "visible" in diagnostic["message"]

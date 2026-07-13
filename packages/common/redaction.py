@@ -157,8 +157,8 @@ def _redact_payload(value: Any, *, auth_context: str | None, auth_scalar_allowed
 def redact_text(value: str) -> str:
     redacted = SURROGATE_RE.sub("\ufffd", value)
     redacted = URL_RE.sub(lambda match: _redact_url(match.group(0)), redacted)
-    redacted = _redact_sensitive_assignments(redacted)
-    return _redact_authorization_schemes(redacted)
+    redacted = _redact_authorization_schemes(redacted)
+    return _redact_sensitive_assignments(redacted)
 
 
 def redact_database_dsn(value: str, dsn: str | None) -> str:
@@ -406,6 +406,11 @@ def _redact_sensitive_assignments(value: str) -> str:
             value_start += 1
         if _is_authorization_assignment_key(token):
             value_end, replacement = _scan_authorization_assignment_value(value, value_start)
+        elif _authorization_scheme_at(value, value_start) is not None:
+            value_end, _scheme_replacement = _scan_authorization_assignment_value(
+                value, value_start
+            )
+            replacement = REDACTION_MARKER
         else:
             value_end, _raw, _decoded = _scan_assignment_value(value, value_start)
             replacement = REDACTION_MARKER
@@ -420,7 +425,9 @@ def _redact_sensitive_assignments(value: str) -> str:
 def _fragment_contains_sensitive_assignment(value: str) -> bool:
     """Inspect at most three escape layers with a fixed linear work bound."""
     candidate = value
-    if _fragment_contains_sensitive_assignment_once(candidate):
+    if _fragment_contains_sensitive_assignment_once(
+        candidate
+    ) or _fragment_contains_sensitive_assignment_decoded(candidate):
         return True
     for _layer in range(MAX_FRAGMENT_DECODE_LAYERS - 1):
         decoded = _decode_escaped_fragment_once(candidate)
@@ -564,7 +571,7 @@ def _scan_authorization_assignment_value(value: str, start: int) -> tuple[int, s
         end, _raw, decoded = _scan_assignment_value(value, start)
         closed = end <= len(value) and end > start and value[end - 1] == quote
         replacement = _redact_authorization_schemes(decoded)
-        if replacement == decoded:
+        if replacement == decoded and _authorization_scheme_at(decoded, 0) is None:
             replacement = REDACTION_MARKER
         return end, f"{quote}{replacement}{quote if closed else ''}"
 
@@ -614,6 +621,13 @@ def _scan_quoted_assignment_key(value: str, start: int) -> tuple[int, str, bool,
                 decoded.append(current)
             cursor += 1
             continue
+        escaped_quote_end = cursor + 2
+        if cursor + 1 < length and value[cursor + 1] == quote:
+            boundary = escaped_quote_end
+            while boundary < length and _is_assignment_whitespace(value[boundary]):
+                boundary += 1
+            if boundary == length or value[boundary] in "}]":
+                return escaped_quote_end, "".join(decoded), malformed, True
         cursor += 1
         if cursor >= length:
             return cursor, "".join(decoded), True, False

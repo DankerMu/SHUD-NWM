@@ -793,12 +793,16 @@ def test_quoted_credential_keys_are_masked_in_helper_and_refused_stderr(
         'payload="password=helper-fragment-secret" '
         'payload="prefix {"password":"helper-unescaped-secret"} suffix" '
         r'payload="prefix {\\\"password\\\":\\\"helper-layered-secret\\\"} suffix" '
-        'Authorization=Bearer "helper quoted auth secret"'
+        'Authorization=Bearer "helper quoted auth secret" '
+        r'{\"password\":\"helper-standalone-secret\"} '
+        'token=Bearer helper-assigned-secret'
     )
     masked = salvage._mask_dsn_in_message(diagnostic, _DSN)
     assert "helper-secret" not in masked and "helper-fragment-secret" not in masked
     assert "helper-unescaped-secret" not in masked and "helper-layered-secret" not in masked
     assert "helper quoted auth secret" not in masked
+    assert "helper-standalone-secret" not in masked
+    assert "helper-assigned-secret" not in masked
     assert "visible" in masked
 
     env = _base_env(tmp_path)
@@ -811,7 +815,9 @@ def test_quoted_credential_keys_are_masked_in_helper_and_refused_stderr(
             check_write_privileges=lambda _dsn: (
                 "role {'\\u0061uth': 'Basic refused-secret', 'safe': 'visible'} "
                 "source='token=refused-fragment-secret' "
-                r'Proxy-Authorization=Basic \"refused quoted auth secret\"'
+                r'Proxy-Authorization=Basic \"refused quoted auth secret\" '
+                r'{\"api_key\":\"refused-standalone-secret\"} '
+                'password=Basic refused-assigned-secret'
             ),
             fetch_row_count=lambda *_args, **_kwargs: 0,
             perform_copy_export=lambda *_args, **_kwargs: b"",
@@ -823,6 +829,8 @@ def test_quoted_credential_keys_are_masked_in_helper_and_refused_stderr(
     assert json.loads(stderr)["outcome"] == "refused_role"
     assert "refused-secret" not in stderr and "refused-fragment-secret" not in stderr
     assert "refused quoted auth secret" not in stderr
+    assert "refused-standalone-secret" not in stderr
+    assert "refused-assigned-secret" not in stderr
     assert "visible" in stderr
 
 
@@ -845,6 +853,8 @@ def test_quoted_credential_keys_are_masked_in_selector_receipt_and_runner_stderr
             'payload="prefix {"password":"selector-unescaped-secret"} suffix" '
             r'payload="prefix {\\\"password\\\":\\\"selector-layered-secret\\\"} suffix" '
             'auth_header=Bearer\u2003"selector quoted auth secret" '
+            r'{\"token\":\"selector-standalone-secret\"} '
+            'api_key=Bearer selector-assigned-secret '
             "password\u00a0=\u00a0selector-unicode-secret "
             '\"token=selector-quoted-outer-secret\": "selector-outer-secret"'
         )
@@ -868,6 +878,8 @@ def test_quoted_credential_keys_are_masked_in_selector_receipt_and_runner_stderr
         "selector-unescaped-secret",
         "selector-layered-secret",
         "selector quoted auth secret",
+        "selector-standalone-secret",
+        "selector-assigned-secret",
         "selector-unicode-secret",
         "selector-quoted-outer-secret",
         "selector-outer-secret",
@@ -885,6 +897,8 @@ def test_quoted_credential_keys_are_masked_in_selector_receipt_and_runner_stderr
                 'payload="prefix {"password":"runner-unescaped-secret"} suffix" '
                 r'payload="prefix {\\\"password\\\":\\\"runner-layered-secret\\\"} suffix" '
                 "Proxy-Authorization=Basic 'runner quoted auth secret' "
+                r'{\"Authorization\":\"runner-standalone-auth-secret\"} '
+                'credential=Basic runner-assigned-secret '
                 "token\u0085=\u0085runner-unicode-secret "
                 "'api_key=runner-quoted-outer-secret' = 'runner-outer-secret'"
             )
@@ -899,6 +913,8 @@ def test_quoted_credential_keys_are_masked_in_selector_receipt_and_runner_stderr
         "runner-unescaped-secret",
         "runner-layered-secret",
         "runner quoted auth secret",
+        "runner-standalone-auth-secret",
+        "runner-assigned-secret",
         "runner-unicode-secret",
         "runner-quoted-outer-secret",
         "runner-outer-secret",
@@ -926,7 +942,9 @@ def test_unicode_escaped_credential_key_is_masked_from_salvage_publication_stder
                 'detail="prefix {\\"api.key\\":\\"publication-inner-secret\\"}" '
                 'detail="prefix {"password":"publication-unescaped-secret"} suffix" '
                 r'detail="prefix {\\\"password\\\":\\\"publication-layered-secret\\\"} suffix" '
-                r'auth_header=Basic \"publication quoted auth secret\"'
+                r'auth_header=Basic \"publication quoted auth secret\" '
+                r'{\"password\":\"publication-standalone-secret\"} '
+                'session-key=Bearer publication-assigned-secret'
             )
         ),
     )
@@ -948,6 +966,8 @@ def test_unicode_escaped_credential_key_is_masked_from_salvage_publication_stder
     assert "publication-unescaped-secret" not in stderr
     assert "publication-layered-secret" not in stderr
     assert "publication quoted auth secret" not in stderr
+    assert "publication-standalone-secret" not in stderr
+    assert "publication-assigned-secret" not in stderr
     assert "visible" in stderr
 
 
