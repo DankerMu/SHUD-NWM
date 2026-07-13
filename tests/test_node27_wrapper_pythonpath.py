@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 _ROOT = Path(__file__).resolve().parents[1]
+_DEFAULT_REPO_ROOT = "/home/nwm/NWM"
 _AUDIT_WRAPPER = _ROOT / "scripts/node27_storage_inventory_audit_once.sh"
 _CAPTURE_SCRIPT = """#!/bin/sh
 if [ "${1:-}" = "-c" ]; then
@@ -268,6 +269,191 @@ _WRAPPER_CASES = [
         None,
     ),
 ]
+
+
+def _default_root_wrapper_harness(
+    tmp_path: Path,
+    case: str,
+    wrapper_name: str,
+    python_bin: Path,
+    entrypoint: Path,
+) -> Path:
+    """Keep the production root resolution while redirecting unavailable launch I/O."""
+    wrapper = _ROOT / "scripts" / wrapper_name
+    source = wrapper.read_text(encoding="utf-8")
+    shell_root = "REPO" if case in {"timeseries_retention", "raw_retention"} else "REPO_ROOT"
+    assert f"${shell_root}/.venv/bin/python" in source
+    assert f"${shell_root}/scripts/node27_{case}.py" in source
+
+    if case not in {"timeseries_retention", "raw_retention"}:
+        return wrapper
+
+    cd_command = 'cd "$REPO" || blocked "REPO_UNAVAILABLE"'
+    assert source.count(cd_command) == 1
+    source = source.replace(
+        cd_command,
+        f"cd {shlex.quote(str(tmp_path))} || blocked \"REPO_UNAVAILABLE\"",
+    )
+
+    if case == "raw_retention":
+        python_assignment = 'PYTHON_BIN="$REPO/.venv/bin/python"'
+        script_assignment = 'SCRIPT="$REPO/scripts/node27_raw_retention.py"'
+        assert source.count(python_assignment) == 1
+        assert source.count(script_assignment) == 1
+        source = source.replace(
+            python_assignment, f"PYTHON_BIN={shlex.quote(str(python_bin))}"
+        ).replace(script_assignment, f"SCRIPT={shlex.quote(str(entrypoint))}")
+
+    harness = tmp_path / wrapper_name
+    _write_executable(harness, source)
+    return harness
+
+
+@pytest.mark.parametrize(
+    ("case", "wrapper_name", "root_env", "env_file_env", "python_env", "script_env"),
+    _WRAPPER_CASES,
+)
+@pytest.mark.parametrize("root_state", ["unset", "empty"])
+def test_all_wrappers_default_unset_or_empty_root_to_governed_checkout(
+    tmp_path: Path,
+    case: str,
+    wrapper_name: str,
+    root_env: str,
+    env_file_env: str,
+    python_env: str | None,
+    script_env: str | None,
+    root_state: str,
+) -> None:
+    bin_dir = _shell_tools(tmp_path)
+    zstd = tmp_path / "zstd"
+    _write_executable(zstd, "#!/bin/sh\nexit 0\n")
+    python_bin = tmp_path / "python"
+    _write_executable(python_bin, _CAPTURE_SCRIPT)
+    entrypoint = tmp_path / "entrypoint.py"
+    entrypoint.write_text("raise SystemExit(99)\n", encoding="utf-8")
+    capture = tmp_path / "capture.txt"
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "PYTHONPATH": "",
+        env_file_env: str(
+            _env_file(tmp_path, _runtime_env(case, tmp_path, zstd) + "\n")
+        ),
+        "WRAPPER_CAPTURE": str(capture),
+        "NODE27_TIMESERIES_RETENTION_BOOTSTRAP_LOG": str(tmp_path / "retention.log"),
+        "NODE27_TIMESERIES_RETENTION_LOG_ROOT": str(tmp_path / "retention-logs"),
+        "NODE27_TIMESERIES_RETENTION_BOOTSTRAP_LOCK": str(tmp_path / "retention.lock"),
+        "NODE27_RAW_RETENTION_BOOTSTRAP_LOG": str(tmp_path / "raw.log"),
+        "NODE27_RAW_RETENTION_LOG_ROOT": str(tmp_path / "raw-logs"),
+        "NODE27_RAW_RETENTION_LOCK_PATH": str(tmp_path / "raw.lock"),
+    }
+    if root_state == "empty":
+        env[root_env] = ""
+    else:
+        env.pop(root_env, None)
+    if python_env is not None and script_env is not None:
+        env[python_env] = str(python_bin)
+        env[script_env] = str(entrypoint)
+
+    production_wrapper = _ROOT / "scripts" / wrapper_name
+    production_source = production_wrapper.read_text(encoding="utf-8")
+    assert f"${{{root_env}:-{_DEFAULT_REPO_ROOT}}}" in production_source
+    wrapper = _default_root_wrapper_harness(
+        tmp_path, case, wrapper_name, python_bin, entrypoint
+    )
+    result = subprocess.run(
+        [str(wrapper)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    captured = capture.read_text(encoding="utf-8").splitlines()
+    assert captured[:2] == [_DEFAULT_REPO_ROOT, str(entrypoint)]
+
+
+@pytest.mark.parametrize(
+    ("case", "wrapper_name", "root_env", "env_file_env", "python_env", "script_env"),
+    _WRAPPER_CASES,
+)
+@pytest.mark.parametrize(
+    ("bad_root", "expected_reason"),
+    [
+        ("relative/repo", "REPOSITORY_ROOT_NOT_ABSOLUTE"),
+        ("/absolute/repo:foreign", "REPOSITORY_ROOT_PATH_LIST_DELIMITER"),
+    ],
+)
+def test_all_wrappers_refuse_unsafe_root_loaded_from_env_file_before_python_launch(
+    tmp_path: Path,
+    case: str,
+    wrapper_name: str,
+    root_env: str,
+    env_file_env: str,
+    python_env: str | None,
+    script_env: str | None,
+    bad_root: str,
+    expected_reason: str,
+) -> None:
+    bin_dir = _shell_tools(tmp_path)
+    zstd = tmp_path / "zstd"
+    _write_executable(zstd, "#!/bin/sh\nexit 0\n")
+    python_bin = tmp_path / "python"
+    _write_executable(python_bin, _CAPTURE_SCRIPT)
+    entrypoint = tmp_path / "entrypoint.py"
+    entrypoint.write_text("raise SystemExit(99)\n", encoding="utf-8")
+    capture = tmp_path / "capture.txt"
+    env_text = "\n".join(
+        [
+            _runtime_env(case, tmp_path, zstd),
+            f"{root_env}={shlex.quote(bad_root)}",
+        ]
+    )
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "PYTHONPATH": "/caller/one:/caller/two",
+        env_file_env: str(_env_file(tmp_path, env_text + "\n")),
+        "WRAPPER_CAPTURE": str(capture),
+        "NODE27_TIMESERIES_RETENTION_BOOTSTRAP_LOG": str(tmp_path / "retention.log"),
+        "NODE27_RAW_RETENTION_BOOTSTRAP_LOG": str(tmp_path / "raw.log"),
+    }
+    env.pop(root_env, None)
+    if python_env is not None and script_env is not None:
+        env[python_env] = str(python_bin)
+        env[script_env] = str(entrypoint)
+
+    result = subprocess.run(
+        [str(_ROOT / "scripts" / wrapper_name)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.stdout == ""
+    assert not capture.exists()
+    if case == "timeseries_retention":
+        assert result.returncode == 2
+        assert result.stderr == (
+            f'{{"status":"failed","reason":"{expected_reason}"}}\n'
+        )
+    elif case == "raw_retention":
+        assert result.returncode == 2
+        assert result.stderr.endswith(f"reason={expected_reason}\n")
+        assert len(result.stderr.splitlines()) == 1
+    else:
+        expected_json_reason = {
+            "REPOSITORY_ROOT_NOT_ABSOLUTE": "repository root must be absolute",
+            "REPOSITORY_ROOT_PATH_LIST_DELIMITER": (
+                "repository root must not contain a path-list delimiter"
+            ),
+        }[expected_reason]
+        assert result.returncode == 1
+        assert result.stderr == (
+            f'{{"status":"failed","reason":"{expected_json_reason}"}}\n'
+        )
 
 
 @pytest.mark.parametrize(
