@@ -1,0 +1,29 @@
+{
+  "evidence_type": "node27-systemd-stderr-delta",
+  "generated_at": "2026-07-13T06:03:53Z",
+  "issue": 1067,
+  "node": "node-27",
+  "user": "nwm",
+  "repository": "/home/nwm/NWM",
+  "head_sha": "586558c055b46bee98db4b4667d772cd4f0e133c",
+  "service": "nhms-node27-storage-inventory-audit.service",
+  "systemctl_returncode": 1,
+  "service_state": {
+    "active_state": "failed",
+    "sub_state": "failed",
+    "result": "exit-code",
+    "exec_main_status": 1
+  },
+  "stderr_byte_range": {
+    "start_offset": 407,
+    "end_offset": 579
+  },
+  "stderr_delta": {
+    "error_type": "AuditBlocked",
+    "message": "object URI outside configured prefix: s3://nhms/forcing/gfs/2026053106/basins_heihe_vbasins/basins_heihe_shud/",
+    "status": "blocked"
+  },
+  "module_not_found_scripts_count": 0,
+  "verdict": "PASS_IMPORT_CONTRACT",
+  "downstream_blocker": "Issue #1066: live DB object URI prefix differs from the configured audit prefix; the blocked path does not yet publish a completeness receipt."
+}
