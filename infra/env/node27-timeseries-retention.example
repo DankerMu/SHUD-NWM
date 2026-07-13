@@ -1,0 +1,55 @@
+# Node-27 timeseries retention runner (issue #855 / OpenSpec: tier-node27-timeseries-storage).
+#
+# This runner does NOT read NHMS_ARCHIVE_ROOT / archive watermarks — retention is DB-side
+# only and consumes its gate receipts by absolute path (audit-emitted archive-completeness
+# receipt + drill PASS receipt). Do not sync this env against
+# node27-product-archive.env / node27-storage-inventory-audit.env / node27-resource-governance.env.
+#
+# Copy to node27-timeseries-retention.env and chmod 0600.
+
+# Node-27 primary Postgres (writer role — retention performs drop_chunks DDL).
+DATABASE_URL=postgresql://REPLACE_ME_WRITER:REPLACE_ME_PW@127.0.0.1:55432/nhms
+
+# Drop-window size in days. Default 30 = spec §Window and mechanism.
+# Chunks whose entire range is older than this window are eligible.
+NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=30
+
+# Maximum number of chunks dropped per timer tick. Default 5 (matches
+# compression sibling per-tick bound).
+NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND=5
+
+# H8 freshness defaults. Completeness audit fires every 24 h; 26 h absorbs
+# one late run. Drill cadence is roughly quarterly; 30 d forces a re-run
+# once the receipt expires.
+NODE27_TIMESERIES_RETENTION_COMPLETENESS_MAX_AGE_HOURS=26
+NODE27_TIMESERIES_RETENTION_DRILL_MAX_AGE_DAYS=30
+
+# Absolute path — archive-completeness receipt emitted by
+# scripts/node27_storage_inventory_audit.py. The retention gate consumes
+# this byte-for-byte (spec §Retention enforcement is hard-gated on archive
+# receipts).
+NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH=/home/nwm/node27-storage-inventory-audit-logs/completeness-receipt.json
+
+# Absolute path — archive-rebuild-drill PASS receipt emitted by
+# scripts/node27_archive_rebuild_drill.py (issue #854 §5.2). Steady-state
+# retention requires this receipt to be fresh and to cover the drop window
+# per source (forcing / runs / db-export).
+NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH=/home/nwm/node27-archive-rebuild-drill-logs/latest-pass-receipt.json
+
+# Absolute path — retention runner's own receipt (mode 0600, atomic).
+# The wrapper substitutes a per-tick timestamped filename by default; this
+# env override is honoured when set.
+NODE27_TIMESERIES_RETENTION_RECEIPT_PATH=/home/nwm/NWM/artifacts/receipts/node27_timeseries_retention.json
+
+# H10 lock path — MUST match docs/runbooks/tier-node27-timeseries-storage.md
+# §8.1 install steps + §8.6 recovery step and scripts/node27_timeseries_retention.py
+# _default_lock_path() (byte-identical). Override only if the deployment
+# needs a non-default absolute path.
+NODE27_TIMESERIES_RETENTION_LOCK_PATH=/tmp/nhms-node27-timeseries-retention.lock
+
+# Enforce mode toggle. Absent / empty / "0" / "false" / "no" → dry-run
+# (default, safe). Any other non-empty value → enforce (WILL drop chunks
+# older than the drop window). FIRST RUN MUST BE DRY-RUN — inspect the
+# receipt's candidate_chunks + deferred_remainder before flipping to
+# enforce. See runbook §8.4.
+#NODE27_TIMESERIES_RETENTION_ENFORCE=1

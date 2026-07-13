@@ -124,6 +124,18 @@ def test_default_services_includes_timeseries_compression_units() -> None:
     assert expected.issubset(set(governance.DEFAULT_SERVICES))
 
 
+def test_default_services_includes_timeseries_retention_units() -> None:
+    # #855 registers the retention service + timer so the governance
+    # audit receipt reflects their systemd state alongside the compression
+    # sibling. Position is alphabetic — retention follows compression in
+    # DEFAULT_SERVICES (see H11 fixture pin).
+    expected = {
+        "nhms-node27-timeseries-retention.service",
+        "nhms-node27-timeseries-retention.timer",
+    }
+    assert expected.issubset(set(governance.DEFAULT_SERVICES))
+
+
 def test_collect_systemd_receipt_includes_compression_units(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -149,6 +161,35 @@ def test_collect_systemd_receipt_includes_compression_units(
     for unit in (
         "nhms-node27-timeseries-compression.service",
         "nhms-node27-timeseries-compression.timer",
+    ):
+        assert services[unit]["command"]["status"] == "ok"
+        assert services[unit]["properties"].get("Id") == "stub"
+
+
+def test_collect_systemd_receipt_includes_retention_units(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """H11 test row: mocked systemctl → governance receipt must carry entries
+    for BOTH new retention units so #855 registration is proven end-to-end
+    through the collector rather than only via the tuple set."""
+
+    def _fake_run_command(args, *, timeout: int = 20) -> dict:
+        return {
+            "status": "ok",
+            "return_code": 0,
+            "stdout": "Id=stub\nActiveState=active\nSubState=running\nResult=success\n",
+            "stderr": "",
+            "args": list(args),
+        }
+
+    monkeypatch.setattr(governance, "_run_command", _fake_run_command)
+    payload = governance.collect_systemd(governance.DEFAULT_SERVICES)
+    services = payload["services"]
+    assert "nhms-node27-timeseries-retention.service" in services
+    assert "nhms-node27-timeseries-retention.timer" in services
+    for unit in (
+        "nhms-node27-timeseries-retention.service",
+        "nhms-node27-timeseries-retention.timer",
     ):
         assert services[unit]["command"]["status"] == "ok"
         assert services[unit]["properties"].get("Id") == "stub"

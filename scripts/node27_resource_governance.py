@@ -36,6 +36,8 @@ DEFAULT_SERVICES = (
     "nhms-node27-storage-inventory-audit.timer",
     "nhms-node27-timeseries-compression.service",
     "nhms-node27-timeseries-compression.timer",
+    "nhms-node27-timeseries-retention.service",
+    "nhms-node27-timeseries-retention.timer",
 )
 DEFAULT_REPO_RELATIVE_SIZE_TARGETS = (
     "data",
