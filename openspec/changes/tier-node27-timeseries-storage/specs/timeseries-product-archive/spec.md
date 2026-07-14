@@ -150,6 +150,47 @@ been renamed to a tombstone, every later failure path SHALL discover and report
 the actual surviving tombstone/claim/guard locations even before the first
 child removal.
 
+Before any selected candidate creates staging, publishes/quarantines an
+archive leaf, creates a durable guard, or mutates a source, the mover SHALL
+preflight source-retirement capability for the entire selected batch. The
+read-only phase SHALL use descriptor-bound, no-follow traversal and the
+effective mover identity rather than mode-bit inference: every source parent
+requires write/search, every source root and internal directory requires
+read/write/search, and files retain the existing read plus exact preimage
+identity verification. It SHALL retain the existing tree entry/depth/device/
+mount/symlink bounds. Dry-run SHALL execute this read-only phase and fail
+non-zero with a sanitized selected-batch receipt instead of reporting
+`planned` when retirement is unavailable. Sticky-bit source parents, roots and
+internal directories SHALL require a conservative ownership proof for each
+governed rename; effective-access success alone SHALL NOT authorize deletion.
+The selected terminal identity SHALL bind the blocker. Its reason SHALL carry
+one closed check token without interpolating the source locator; other selected
+terminals SHALL carry one constant batch-aborted reason. Unknown tokens and
+probe-only tokens in dry-run receipts SHALL fail semantic validation, while
+legal space-bearing forcing/run/state locators remain unambiguous. Enforce
+SHALL complete the read-only phase for every selected candidate and then
+perform one randomized hidden mkdir/fsync/rmdir/fsync capability probe per
+unique opened source parent. The unique-parent key and probe SHALL derive from
+the same held parent fd and a post-probe namespace rebound SHALL fail closed. Any
+failure SHALL abort the entire selected batch with zero archive publication
+and zero source mutation. Probe cleanup SHALL be attempted before reporting;
+cleanup uncertainty SHALL be indeterminate and record only safe root-relative
+probe residue. After this prepublish gate succeeds, later candidate-specific
+permission/race failures retain the independent terminal model and do not
+imply rollback of already published candidates.
+
+Before a new source-retirement mutation against an existing verified archive,
+the mover SHALL boundedly reconcile prior `.archive-guards` residue. It SHALL
+remove only an exact two-member guard whose opened tar/manifest children have
+the same inode/signature pair as the current verified canonical pair, with
+descriptor, namespace, device and mount identity rechecks before unlink.
+Foreign, extra-entry, copied-but-not-hard-linked, malformed or ambiguous guards
+SHALL remain untouched. Matching-guard cleanup uncertainty SHALL occur before
+source mutation, preserve the source, exit non-zero/indeterminate and report
+safe guard-relative residue. A successful retry SHALL NOT report empty
+terminal residue while leaving a matching stale hard-link guard. Operators
+SHALL NOT manually delete an unclassified durable guard.
+
 Source/archive discovery, tar reads and retirement SHALL remain
 descriptor-bound with no-follow component opens, fixed-root-device checks and
 bounded traversal. Every opened FD SHALL match the pinned Linux mount ID as
@@ -271,9 +312,15 @@ terminal outcome and zero or more ordered side events (including quarantine);
 locator-keyed discovery failures remain disjoint. Ordering is deterministic,
 bytes are non-negative and overall outcome matches terminal/discovery failures.
 Lock metadata plus the receipt are the only writes allowed during dry-run.
-Enforce requires an explicit flag, may continue
-over bounded independent candidates, and exits non-zero if any candidate
-failed or publication/retirement became indeterminate.
+Enforce requires an explicit flag. The selected batch retirement-capability
+gate above is fail-closed before candidate one; after it passes, enforce may
+continue over bounded independent candidates and exits non-zero if any
+candidate failed or publication/retirement became indeterminate. Preflight
+terminal reasons SHALL use only deterministic safe check tokens, with source
+binding supplied by the selected terminal identity rather than interpolated
+locator text; they SHALL NOT contain absolute paths or raw exception text.
+Candidate/selected/deferred partitions and locator-keyed discovery-failure
+disjointness remain unchanged.
 
 #### Scenario: Previous run still active
 
@@ -288,6 +335,27 @@ failed or publication/retirement became indeterminate.
 - **THEN** it MUST emit the candidate list and planned actions in the receipt
   and perform no source/archive/staging/quarantine mutation; atomic receipt
   publication and safe lock metadata are the sole permitted writes
+
+#### Scenario: Selected source cannot be safely retired
+
+- **WHEN** any selected forcing, runs, or states product has a source parent
+  without effective write/search or a source-tree directory without effective
+  read/write/search
+- **THEN** dry-run MUST fail non-zero without reporting a planned action
+- **AND** enforce MUST abort every selected candidate before archive
+  publication, durable-guard creation, or source mutation
+- **AND** an enforce parent capability-probe cleanup uncertainty MUST be
+  indeterminate with explicit safe root-relative residue
+
+#### Scenario: Prior durable guard exists for the verified archive
+
+- **WHEN** an existing verified archive has a prior exact hard-link guard from
+  a failed source retirement
+- **THEN** enforce MUST reconcile that matching guard before new source
+  mutation and then safely retry retirement
+- **AND** a foreign or ambiguous guard MUST remain untouched
+- **AND** matching-guard cleanup failure MUST preserve source and report
+  indeterminate safe residue
 
 #### Scenario: Cycle younger than the minimum age is not archived
 

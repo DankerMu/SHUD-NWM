@@ -1295,10 +1295,16 @@ and every #856 cascade action remain unchanged downstream consumers.
   MUST NOT be copied into the receipt or stderr. Runtime semantic validation
   recognizes this exact lane-level shape. The invocation does not enter
   candidate processing, source deletion, or archive mutation and does not claim
-  a passing receipt. Permission changes after candidate processing begins retain
-  the existing independent-candidate failed/indeterminate terminal semantics;
-  #1065 does not introduce an all-candidate transactional archive protocol.
-- The runbook MUST state the complete operator repair. Adding `nwm` to
+  a passing receipt. Before candidate processing, every selected candidate
+  participates in one batch source-retirement capability gate. One failed
+  source-parent or tree-directory check aborts the selected batch before
+  staging, publication, quarantine, durable-guard creation, or source
+  mutation. After the gate passes and candidate processing begins, later
+  permission/race changes retain the existing independent-candidate
+  failed/indeterminate terminal semantics; #1065 does not add rollback across
+  published candidates.
+- The runbook MUST state the complete operator repair for selected products in
+  all physical lanes (`forcing`, `runs`, and `states`). Adding `nwm` to
   `nfsdata` alone is insufficient when leaves are mode `0700`: existing and
   future directories need effective read/write/search because enforce performs
   verified sibling rename, claim-directory creation, and recursive tombstone
@@ -1309,6 +1315,32 @@ and every #856 cascade action remain unchanged downstream consumers.
   `getfacl`, directory `test -x`/`test -w`, file `test -r`, and a complete
   logged `find` as `nwm`. The PR does not execute `usermod`, `chmod`, `chgrp`,
   or ACL mutation.
+- Dry-run performs a descriptor-bound, no-follow effective-identity access
+  check without creating probe paths: each source parent needs write/search,
+  every directory in the selected source tree needs read/write/search, and
+  source files retain the existing read/identity verification. A failed check
+  produces a sanitized non-zero batch receipt rather than a false `planned`
+  result. Sticky-bit parents/directories require a conservative ownership proof
+  for every rename they govern; `os.access` success alone is insufficient.
+  The blocker terminal's selected identity binds the source; wire reasons carry
+  only a closed check token and never interpolate the locator, so legal spaces
+  remain unambiguous. Runtime semantics reject unknown tokens and reject
+  enforce-only probe tokens in dry-run receipts. Enforce repeats the read-only
+  gate for the entire selected batch and, before candidate one, performs one
+  randomized hidden mkdir/fsync/rmdir/fsync capability probe per unique opened
+  source parent. The deduplication key and probe both derive from the same held
+  parent fd; a namespace rebound after the probe fails closed.
+  Any probe failure aborts the batch with zero archive publication and zero
+  source mutation; uncertain cleanup is indeterminate and records the safe
+  root-relative probe residue.
+- Before a new retirement mutation, the existing-archive idempotent path
+  boundedly inventories `.archive-guards`. It automatically removes only an
+  exact two-file guard whose children are the same inode/signature pair as the
+  currently verified canonical tar/manifest, using held parent/guard fds and
+  mount checks. Foreign, malformed, extra-entry, and ambiguous guards remain
+  untouched. Matching-guard cleanup uncertainty blocks source mutation and
+  reports the safe guard-relative residue; a successful retry cannot leave a
+  matching stale hard-link guard while claiming empty terminal residue.
 - Live proof is staged: before operator permission repair, a direct mover run
   produces the single `STATES_ACCESS_DENIED` terminal diagnostic; after the
   operator repair, a default-env direct dry-run proves current production
@@ -1322,6 +1354,14 @@ and every #856 cascade action remain unchanged downstream consumers.
   receipt remain committed. The 228 DB-only forcing gaps, task 3.3 salvage,
   and follow-up complete audit are owned by the already-open #1070 Step A2
   issue and are not executed while closing #1065.
+- The first authorized 30-day live attempt exposed the missing batch gate:
+  discovery found 320 candidates and selected eight, but the old enforce path
+  published eight verified archives before all eight source tombstone renames
+  failed because the effective `nwm` identity could not write the selected
+  source parents. All eight sources remained, while verified archives and
+  durable guards were preserved as explicit residue. This is failed live
+  evidence, never a passing receipt. The repaired mover MUST stop the same
+  permission shape before publishing candidate one.
 
 ### Risk packs considered
 
@@ -1375,15 +1415,18 @@ and every #856 cascade action remain unchanged downstream consumers.
 - Governing invariant: every discovered forcing/run leaf is accepted only when
   its canonical producer URI and manifest identity bind the exact hot-store
   leaf; a state namespace that cannot be traversed terminates once with a
-  stable access diagnostic before any archive mutation.
+  stable access diagnostic before any archive mutation; every selected
+  forcing/run/state batch is also rejected before candidate one when any source
+  cannot be retired by the effective mover identity.
 - Source-of-truth contract: producer prefix `s3://nhms`; forcing exact package
   leaf; run `run_id` plus exact manifest/output locations; states filesystem
   mode/ACL as the access oracle; product-archive receipt schema as the output
   contract.
 - Producers: node-27 download/ingest and SHUD run/state writers.
 - Validators/preflight: mover locator discovery, forcing/run manifest loaders,
-  canonical URI/relative-path validators, state dirfd walk, receipt runtime and
-  JSON-Schema validation.
+  canonical URI/relative-path validators, state dirfd walk, selected-batch
+  descriptor-bound effective-access checks, enforce-only unique-parent
+  capability probes, receipt runtime and JSON-Schema validation.
 - Storage/cache/query: `/home/ghdc/nwm/object-store`, archive root, stable mover
   receipt, and read-only inventory-audit snapshot/receipt.
 - Public routes/entrypoints: `scripts/node27_product_archive.py` and
@@ -1392,7 +1435,9 @@ and every #856 cascade action remain unchanged downstream consumers.
   retention consumes only a later complete audit receipt and is not run here.
 - Failure paths/rollback/stale state: mismatched bucket, cross-leaf forcing URI,
   run identity/output drift, one or many inaccessible state leaves, partial
-  traversal, and receipt publication failure.
+  traversal, sticky ownership ambiguity, parent namespace replacement,
+  enforce-probe cleanup uncertainty, stale matching durable guards, and receipt
+  publication failure.
 - Evidence/audit/readiness: focused live-shape pytest, full existing mover
   suite, ruff, strict OpenSpec validation, pre-repair access receipt, and a
   post-repair passing mover receipt tied to the deployed commit.
@@ -1412,6 +1457,14 @@ and every #856 cascade action remain unchanged downstream consumers.
     override, `bytes.source > 0`, `bytes.archived > 0`, successful terminals,
     verify-before-delete retirement, and no pinned discovery reasons; a prior
     default 45-day dry-run may validly produce an empty queue;
+  - any selected parent/tree permission or sticky-ownership blocker -> one
+    identity-bound closed-token failure plus constant batch-aborted terminals,
+    with no locator interpolation, publication, or source mutation; legal
+    space-bearing forcing/run/state locators remain schema-valid;
+  - existing verified archive plus a prior exact matching durable guard ->
+    reconcile that guard before source mutation and retire successfully;
+    foreign/ambiguous guards remain untouched, while cleanup failure preserves
+    source and reports safe residue;
   - prior first-live failure receipt remains byte-identical and the new mover
     receipt validates and identifies the deployed commit.
 

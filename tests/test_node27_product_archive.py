@@ -575,6 +575,14 @@ def test_states_permission_runbook_requires_enforce_write_access_and_future_inhe
     assert "`rx` is only sufficient for discovery/dry-run" in normalized
     assert "POSIX default ACLs cannot express different named-user entries" in normalized
     assert "directory `test -x`/`test -w`, and file `test -r`" in normalized
+    assert "Every product selected from `forcing`, `runs`, or `states`" in normalized
+    assert "one randomized hidden probe per unique opened source parent" in normalized
+    assert "SOURCE_RETIREMENT_PREFLIGHT_FAILED" in normalized
+    assert ".selected[].source_path | @base64" in runbook
+    assert "find \"$source\" -xdev -type d" in runbook
+    assert "find \"$source\" -xdev -type f" in runbook
+    assert "Do not manually delete prior" in normalized
+    assert "foreign/ambiguous guards" in normalized
 
 
 def test_live_shape_complete_forcing_bundles_execute_real_domain_validator(
@@ -1317,6 +1325,463 @@ def test_dry_run_is_bounded_and_does_not_mutate_products(tmp_path: Path) -> None
     assert receipt["terminals"][0]["status"] == "planned"
     assert first.exists() and second.exists()
     assert list(config.archive_root.iterdir()) == []
+
+
+def test_dry_run_unwritable_source_parent_fails_without_publication(tmp_path: Path) -> None:
+    config = _config(tmp_path, enforce=False)
+    source = _run(config)
+    denied_inode = source.parent.stat().st_ino
+
+    def access_check(fd: int, mode: int) -> bool:
+        return not (os.fstat(fd).st_ino == denied_inode and mode == os.W_OK | os.X_OK)
+
+    before = _tree_snapshot(config.object_store_root)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+        access_check=access_check,
+    )
+    assert code == 1
+    assert receipt["terminals"][0]["status"] == "failed"
+    assert receipt["terminals"][0]["reason"].endswith("check=source-parent-wx")
+    assert receipt["bytes"]["archived"] == 0
+    assert receipt["events"] == []
+    assert _tree_snapshot(config.object_store_root) == before
+    assert list(config.archive_root.iterdir()) == []
+
+
+def test_enforce_parent_probe_failure_aborts_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    source = _run(config)
+    before = _tree_snapshot(config.object_store_root)
+
+    def denied(candidate, _config, _provider, _parent_fd):
+        raise archive.RetirementPreflightError(candidate.source_relative, "source-parent-probe")
+
+    monkeypatch.setattr(archive, "_probe_source_parent_capability", denied)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 1
+    assert receipt["terminals"][0]["reason"].endswith("check=source-parent-probe")
+    assert receipt["bytes"]["archived"] == 0
+    assert receipt["events"] == []
+    assert _tree_snapshot(config.object_store_root) == before
+    assert source.exists()
+    assert list(config.archive_root.iterdir()) == []
+
+
+@pytest.mark.parametrize("enforce", [False, True], ids=["dry-run", "enforce"])
+def test_internal_directory_without_write_access_fails_batch_preflight(
+    tmp_path: Path, enforce: bool
+) -> None:
+    config = _config(tmp_path, enforce=enforce)
+    source = _run(config)
+    denied_inode = (source / "output").stat().st_ino
+
+    def access_check(fd: int, mode: int) -> bool:
+        return not (
+            os.fstat(fd).st_ino == denied_inode
+            and mode == os.R_OK | os.W_OK | os.X_OK
+        )
+
+    before = _tree_snapshot(config.object_store_root)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+        access_check=access_check,
+    )
+    assert code == 1
+    assert receipt["terminals"][0]["reason"].endswith("check=tree-directory-rwx")
+    assert receipt["bytes"]["archived"] == 0
+    assert receipt["events"] == []
+    assert _tree_snapshot(config.object_store_root) == before
+    assert list(config.archive_root.iterdir()) == []
+
+
+def test_mixed_batch_one_retirement_blocker_prevents_every_publication(tmp_path: Path) -> None:
+    config = _config(tmp_path, enforce=True)
+    first = _forcing(config, "2026010100")
+    second = _forcing(config, "2026010200")
+    denied_inode = second.parent.stat().st_ino
+
+    def access_check(fd: int, mode: int) -> bool:
+        return not (os.fstat(fd).st_ino == denied_inode and mode == os.W_OK | os.X_OK)
+
+    before = _tree_snapshot(config.object_store_root)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+        access_check=access_check,
+    )
+    assert code == 1
+    assert len(receipt["selected"]) == 2
+    assert [item["status"] for item in receipt["terminals"]] == ["failed", "failed"]
+    assert receipt["terminals"][0]["reason"] == (
+        "SOURCE_RETIREMENT_PREFLIGHT_BATCH_ABORTED"
+    )
+    assert receipt["terminals"][1]["reason"].endswith("check=source-parent-wx")
+    assert receipt["bytes"]["archived"] == 0
+    assert receipt["events"] == []
+    assert _tree_snapshot(config.object_store_root) == before
+    assert first.exists() and second.exists()
+    assert list(config.archive_root.iterdir()) == []
+
+
+def test_parent_probe_failure_cleans_probe_and_reports_no_residue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    source = _run(config)
+    candidates, failures = archive.discover_candidates(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+    )
+    assert failures == [] and len(candidates) == 1
+    real_fsync = os.fsync
+    failed = False
+
+    def fail_first_fsync(fd: int) -> None:
+        nonlocal failed
+        if not failed and os.fstat(fd).st_ino == source.parent.stat().st_ino:
+            failed = True
+            raise OSError(errno.EIO, "private-probe-token", str(source.parent))
+        real_fsync(fd)
+
+    monkeypatch.setattr(archive.os, "fsync", fail_first_fsync)
+    parent_fd = archive.open_directory_no_follow(
+        source.parent, containment_root=config.object_store_root
+    )
+    try:
+        with pytest.raises(archive.RetirementPreflightError) as caught:
+            archive._probe_source_parent_capability(
+                candidates[0], config, _mount_id, parent_fd
+            )
+    finally:
+        os.close(parent_fd)
+    assert caught.value.indeterminate is False
+    assert caught.value.residue == ()
+    assert not any(path.name.startswith(".archive-preflight-") for path in source.parent.iterdir())
+    assert "private-probe-token" not in str(caught.value)
+    assert str(source.parent) not in str(caught.value)
+
+
+def test_parent_probe_cleanup_uncertainty_is_indeterminate_with_safe_residue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    source = _run(config)
+    candidates, failures = archive.discover_candidates(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+    )
+    assert failures == [] and len(candidates) == 1
+    real_rmdir = os.rmdir
+
+    def deny_probe_cleanup(path, *args, **kwargs):
+        if str(path).startswith(".archive-preflight-"):
+            raise OSError(errno.EIO, "private-cleanup-token", str(source.parent))
+        return real_rmdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(archive.os, "rmdir", deny_probe_cleanup)
+    parent_fd = archive.open_directory_no_follow(
+        source.parent, containment_root=config.object_store_root
+    )
+    try:
+        with pytest.raises(archive.RetirementPreflightError) as caught:
+            archive._probe_source_parent_capability(
+                candidates[0], config, _mount_id, parent_fd
+            )
+    finally:
+        os.close(parent_fd)
+    assert caught.value.indeterminate is True
+    assert len(caught.value.residue) == 1
+    residue = caught.value.residue[0]
+    assert residue.startswith("runs/.archive-preflight-")
+    assert "private-cleanup-token" not in str(caught.value)
+    assert str(source.parent) not in str(caught.value)
+    real_rmdir(config.object_store_root / residue)
+
+
+def test_enforce_probe_cleanup_uncertainty_is_a_safe_indeterminate_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    source = _run(config)
+    before = _tree_snapshot(config.object_store_root)
+
+    def indeterminate(candidate, _config, _provider, _parent_fd):
+        raise archive.RetirementPreflightError(
+            candidate.source_relative,
+            "source-parent-probe-cleanup",
+            indeterminate=True,
+            residue=("runs/.archive-preflight-safe-token",),
+        )
+
+    monkeypatch.setattr(archive, "_probe_source_parent_capability", indeterminate)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 1
+    assert receipt["outcome"] == "indeterminate"
+    assert receipt["terminals"] == [
+        {
+            "identity": receipt["selected"][0]["identity"],
+            "status": "indeterminate",
+            "reason": "SOURCE_RETIREMENT_PREFLIGHT_FAILED check=source-parent-probe-cleanup",
+            "source_bytes": receipt["selected"][0]["source_bytes"],
+            "archive_bytes": 0,
+            "residue": ["runs/.archive-preflight-safe-token"],
+        }
+    ]
+    assert receipt["events"] == []
+    assert _tree_snapshot(config.object_store_root) == before
+    assert source.exists()
+    assert list(config.archive_root.iterdir()) == []
+
+
+def test_enforce_probes_each_unique_source_parent_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    _run(config, "opaque-run-a")
+    _run(config, "opaque-run-b")
+    candidates, failures = archive.discover_candidates(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+    )
+    assert failures == [] and len(candidates) == 2
+    original = archive._probe_source_parent_capability
+    probed: list[Path] = []
+
+    def counted(candidate, mover_config, provider, parent_fd):
+        probed.append(candidate.source_path.parent)
+        original(candidate, mover_config, provider, parent_fd)
+
+    monkeypatch.setattr(archive, "_probe_source_parent_capability", counted)
+    archive._preflight_selected_retirement(
+        candidates,
+        config,
+        _mount_id,
+        archive._directory_effective_access,
+    )
+    assert probed == [config.object_store_root / "runs"]
+    assert not any(
+        path.name.startswith(".archive-preflight-")
+        for path in (config.object_store_root / "runs").iterdir()
+    )
+
+
+def test_retirement_preflight_receipt_never_exposes_raw_path_or_exception(
+    tmp_path: Path
+) -> None:
+    config = _config(tmp_path, enforce=False)
+    source = _run(config)
+
+    def unsafe_access(_fd: int, _mode: int) -> bool:
+        raise PermissionError(errno.EACCES, "private-preflight-token", str(source))
+
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+        access_check=unsafe_access,
+    )
+    rendered = json.dumps(receipt, sort_keys=True)
+    assert code == 1
+    assert "private-preflight-token" not in rendered
+    assert str(tmp_path) not in rendered
+    assert receipt["terminals"][0]["reason"].endswith("check=verification")
+
+
+def test_enforce_parent_probe_stays_bound_to_held_fd_across_namespace_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    source = _run(config)
+    candidates, failures = archive.discover_candidates(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+    )
+    assert failures == [] and len(candidates) == 1
+    parent = source.parent
+    displaced = parent.with_name("runs-displaced")
+    original = archive._probe_source_parent_capability
+    bound_inode = parent.stat().st_ino
+
+    def swap_then_probe(candidate, mover_config, provider, parent_fd):
+        assert os.fstat(parent_fd).st_ino == bound_inode
+        parent.rename(displaced)
+        parent.mkdir()
+        assert parent.stat().st_ino != bound_inode
+        original(candidate, mover_config, provider, parent_fd)
+
+    monkeypatch.setattr(archive, "_probe_source_parent_capability", swap_then_probe)
+    with pytest.raises(archive.RetirementPreflightError) as caught:
+        archive._preflight_selected_retirement(
+            candidates,
+            config,
+            _mount_id,
+            archive._directory_effective_access,
+        )
+    assert caught.value.check == "source-parent-identity"
+    assert not any(path.name.startswith(".archive-preflight-") for path in parent.iterdir())
+    assert not any(path.name.startswith(".archive-preflight-") for path in displaced.iterdir())
+
+
+@pytest.mark.parametrize(
+    ("sticky_target", "expected_check"),
+    [("parent", "source-parent-sticky"), ("nested", "tree-directory-sticky")],
+)
+def test_sticky_directory_without_proven_ownership_blocks_even_when_access_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sticky_target: str,
+    expected_check: str,
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    source = _run(config)
+    target = source.parent if sticky_target == "parent" else source / "output"
+    target.chmod(stat.S_IMODE(target.stat().st_mode) | stat.S_ISVTX)
+    monkeypatch.setattr(archive.os, "geteuid", lambda: target.stat().st_uid + 100_000)
+    probes = 0
+
+    def probe(*_args, **_kwargs):
+        nonlocal probes
+        probes += 1
+
+    monkeypatch.setattr(archive, "_probe_source_parent_capability", probe)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+        access_check=lambda _fd, _mode: True,
+    )
+    assert code == 1
+    assert receipt["terminals"][0]["reason"] == (
+        f"SOURCE_RETIREMENT_PREFLIGHT_FAILED check={expected_check}"
+    )
+    assert receipt["bytes"]["archived"] == 0
+    assert receipt["events"] == []
+    assert probes == 0
+    assert source.exists()
+    assert list(config.archive_root.iterdir()) == []
+
+
+@pytest.mark.parametrize("lane", ["forcing", "runs", "states"])
+def test_preflight_reason_supports_legal_space_bearing_source_locator(
+    tmp_path: Path, lane: str
+) -> None:
+    config = _config(tmp_path, enforce=False)
+    if lane == "forcing":
+        original = _forcing(config)
+        leaf = original.parent.parent / "basin a" / "model a"
+        leaf.parent.mkdir()
+        original.rename(leaf)
+        original.parent.rmdir()
+        manifest_path = leaf / "forcing_package.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["basin_version_id"] = "basin a"
+        manifest["model_id"] = "model a"
+        manifest["files"][0]["uri"] = (
+            "s3://nhms/forcing/gfs/2026010100/basin a/model a/payload.csv"
+        )
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    elif lane == "runs":
+        leaf = _run(config, "opaque run")
+    else:
+        leaf = config.object_store_root / "states/IFS/model c/2026010300"
+        leaf.mkdir(parents=True)
+        (leaf / "state.cfg.ic").write_bytes(b"state")
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+        access_check=lambda _fd, _mode: False,
+    )
+    assert code == 1, receipt
+    assert " " in receipt["selected"][0]["source_path"]
+    assert receipt["terminals"][0]["reason"] == (
+        "SOURCE_RETIREMENT_PREFLIGHT_FAILED check=source-parent-wx"
+    )
+    archive.validate_receipt_semantics(receipt)
+    assert leaf.exists()
+
+
+@pytest.mark.parametrize(
+    ("mode", "reason", "expected"),
+    [
+        ("dry-run", "SOURCE_RETIREMENT_PREFLIGHT_FAILED check=unknown-token", "check token"),
+        (
+            "dry-run",
+            "SOURCE_RETIREMENT_PREFLIGHT_FAILED check=source-parent-probe",
+            "enforce-only",
+        ),
+        (
+            "enforce",
+            "SOURCE_RETIREMENT_PREFLIGHT_FAILED check=source-parent-wx-extra",
+            "check token",
+        ),
+    ],
+)
+def test_receipt_semantics_rejects_unknown_or_mode_invalid_preflight_check(
+    tmp_path: Path, mode: str, reason: str, expected: str
+) -> None:
+    config = _config(tmp_path, enforce=False)
+    _run(config)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+        access_check=lambda _fd, _mode: False,
+    )
+    assert code == 1
+    receipt["mode"] = mode
+    receipt["terminals"][0]["reason"] = reason
+    with pytest.raises(archive.ArchiveMoverError, match=expected):
+        archive.validate_receipt_semantics(receipt)
+
+
+def test_receipt_semantics_rejects_ambiguous_batch_abort_reason(tmp_path: Path) -> None:
+    config = _config(tmp_path, enforce=True)
+    _forcing(config, "2026010100")
+    second = _forcing(config, "2026010200")
+    denied_inode = second.parent.stat().st_ino
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+        access_check=lambda fd, mode: not (
+            os.fstat(fd).st_ino == denied_inode and mode == os.W_OK | os.X_OK
+        ),
+    )
+    assert code == 1
+    receipt["terminals"][0]["reason"] += " locator=forcing/with space"
+    with pytest.raises(archive.ArchiveMoverError, match="reason is unsafe"):
+        archive.validate_receipt_semantics(receipt)
 
 
 def test_validation_bound_limits_full_tree_scans_and_defers_without_bytes(
@@ -2771,6 +3236,112 @@ def test_successful_retirement_leaves_no_durable_guard_leaf(tmp_path: Path) -> N
     guard_parent = config.archive_root / ".archive-guards"
     assert guard_parent.is_dir()
     assert list(guard_parent.iterdir()) == []
+
+
+def _leave_matching_prior_guard(
+    config: archive.MoverConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Path, Path]:
+    source = _forcing(config)
+    original = archive._retire_source_destructive
+
+    def fail_before_source_mutation(*_args, **_kwargs):
+        raise archive.ArchiveMoverError("injected pre-retirement stop")
+
+    monkeypatch.setattr(archive, "_retire_source_destructive", fail_before_source_mutation)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    monkeypatch.setattr(archive, "_retire_source_destructive", original)
+    assert code == 1
+    assert source.exists()
+    guard_relative = next(
+        item for item in receipt["terminals"][0]["residue"]
+        if item.startswith(".archive-guards/")
+    )
+    guard = config.archive_root / guard_relative
+    assert guard.is_dir()
+    return source, guard
+
+
+def test_existing_archive_reconciles_matching_prior_guard_before_retirement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    source, old_guard = _leave_matching_prior_guard(config, monkeypatch)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 0, receipt
+    assert receipt["terminals"][0]["status"] == "retired-from-existing"
+    assert receipt["terminals"][0]["residue"] == []
+    assert not source.exists()
+    assert not old_guard.exists()
+    assert list((config.archive_root / ".archive-guards").iterdir()) == []
+
+
+def test_prior_guard_reconcile_preserves_foreign_and_ambiguous_guards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    source, ambiguous = _leave_matching_prior_guard(config, monkeypatch)
+    (ambiguous / "operator-note").write_text("preserve", encoding="utf-8")
+    final = config.archive_root / "forcing/gfs/2026010100/basin-a/model-a"
+    foreign = config.archive_root / ".archive-guards/foreign"
+    foreign.mkdir()
+    shutil.copy2(final / "archive.tar.zst", foreign / "archive.tar.zst")
+    shutil.copy2(final / "manifest.json", foreign / "manifest.json")
+
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 0, receipt
+    assert not source.exists()
+    assert (ambiguous / "operator-note").read_text() == "preserve"
+    assert foreign.is_dir()
+    assert (foreign / "archive.tar.zst").stat().st_ino != (
+        final / "archive.tar.zst"
+    ).stat().st_ino
+
+
+def test_prior_matching_guard_cleanup_failure_preserves_source_and_reports_residue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, enforce=True)
+    source, old_guard = _leave_matching_prior_guard(config, monkeypatch)
+    old_guard_inode = old_guard.stat().st_ino
+    real_unlink = os.unlink
+
+    def fail_old_guard_unlink(path, *args, **kwargs):
+        dir_fd = kwargs.get("dir_fd")
+        if dir_fd is not None and os.fstat(dir_fd).st_ino == old_guard_inode:
+            raise OSError(errno.EIO, "private-old-guard-token", str(old_guard))
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(archive.os, "unlink", fail_old_guard_unlink)
+    receipt, code = archive.run(
+        config,
+        now=datetime(2026, 7, 11, tzinfo=UTC),
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+    assert code == 1
+    terminal = receipt["terminals"][0]
+    assert terminal["status"] == "indeterminate"
+    assert old_guard.relative_to(config.archive_root).as_posix() in terminal["residue"]
+    assert "private-old-guard-token" not in terminal["reason"]
+    assert str(tmp_path) not in terminal["reason"]
+    assert source.exists()
+    assert old_guard.exists()
 
 
 def test_durable_guard_mount_evidence_change_blocks_source_deletion(

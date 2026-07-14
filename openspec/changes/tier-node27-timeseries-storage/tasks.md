@@ -1237,7 +1237,10 @@ Order is load-bearing:
   with a distinct non-zero exit reason; document the complete NFS
   group/mode-or-ACL operator repair without executing it in this PR; commit a
   post-repair non-failed mover receipt while preserving the first-live failure
-  receipt. Process-stage permission changes retain the existing
+  receipt. Before process-stage mutation, preflight the complete selected
+  batch's effective source-retirement capability; one failed source-parent or
+  tree-directory check aborts all selected work before archive publication.
+  Process-stage permission changes after that gate retain the existing
   independent-candidate terminal model and are not converted into a
   transactional batch rollback by this issue. Task 3.3 salvage and its
   follow-up complete audit are routed to open issue #1070, not this row.
@@ -1270,6 +1273,35 @@ Order is load-bearing:
     login/user-manager only for group membership changes; and verifies with
     `id`, `namei`, `getfacl`, directory `test -x`/`test -w`, file `test -r`, and
     complete logged `find` as `nwm`.
+  - Input: a selected forcing/run/state source whose parent lacks effective
+    write/search, whose root/internal directory lacks effective
+    read/write/search, or whose file cannot satisfy existing read/identity
+    validation. Expected: dry-run reports one sanitized non-zero selected-batch
+    preflight failure instead of `planned`, performs no probe, and writes only
+    lock/receipt metadata. Enforce checks the entire selected batch first, then
+    performs one randomized hidden mkdir/fsync/rmdir/fsync probe per unique
+    descriptor-bound source parent before candidate one; any failure produces
+    zero archive publication and zero source mutation. A cleaned probe reports
+    no residue; cleanup uncertainty is indeterminate with explicit safe
+    root-relative probe residue. Mixed-batch tests prove one inaccessible
+    candidate prevents every candidate from publishing, and receipt reasons
+    contain no raw exception or absolute path. Parent deduplication and probe
+    use the same held fd and reject a post-probe namespace rebound. Sticky-bit
+    source parents/roots/internal directories require an ownership proof even
+    when `os.access` and the probe would succeed. The blocker is bound by its
+    selected identity; its reason contains only a closed check token, batch
+    abort reasons are constant, legal space-bearing forcing/run/state locators
+    remain valid, and semantic validation rejects unknown tokens plus dry-run
+    probe-only tokens.
+  - Input: a verified existing archive and one or more prior
+    `.archive-guards/*` residues from failed source retirement. Expected: before
+    new source mutation, bounded held-fd reconciliation removes only an exact
+    two-member guard whose tar/manifest are the same inode/signature pair as
+    the canonical verified pair. Successful retry retires source and leaves no
+    matching hard-link guard while reporting empty terminal residue. Foreign,
+    extra-entry, copied-but-not-hard-linked, or ambiguous guards are preserved;
+    matching cleanup failure preserves source, exits non-zero/indeterminate,
+    reports safe guard-relative residue, and leaks no raw exception/path.
   - Input: node-27 direct mover before permission repair. Expected: committed
     schema-valid access-failure evidence with the exact receipt/stderr/exit-2
     contract. Input: default-env direct dry-run after operator repair at the
@@ -1280,6 +1312,23 @@ Order is load-bearing:
     `bytes.source > 0`, `bytes.archived > 0`, selected terminals succeed, and
     each retired source is preceded by staged archive re-read/checksum
     verification; production env remains 45.
+  - Input: the first authorized 30-day enforce attempt on the implementation
+    without selected-batch retirement preflight. Expected: failed evidence
+    records 320 candidates, eight selected, eight verified archive
+    publications followed by eight source-parent tombstone-rename permission
+    failures, all eight sources still present, and explicit archive/guard
+    residue. This is not a passing receipt. The repaired implementation MUST
+    reproduce the same permission shape as a prepublish batch failure with
+    zero new archive publication and zero source mutation.
+  - Input: runbook selected-source closure. Expected: executable NUL-safe (or
+    equivalent encoding-safe) extraction from the receipt covers every
+    selected forcing/runs/states source, verifies source parent `wx`, all tree
+    directories `rwx`, files readable, effective ACL masks and sticky
+    ownership, repeats against real writer-created future leaves with recorded
+    writer groups/umask, and uses the mover's controlled parent probe rather
+    than a shell approximation. It forbids manual durable-guard cleanup and
+    explains exact automatic reconciliation. Failed live evidence remains
+    identified as awaiting repaired rerun; no passing receipt is fabricated.
   - Input: cascade boundary after the passing mover receipt. Expected: the 228
     audit selectors remain untouched and are explicitly handed to open issue
     #1070; no task 3.3 salvage, compression, drill, retention dry-run, or
