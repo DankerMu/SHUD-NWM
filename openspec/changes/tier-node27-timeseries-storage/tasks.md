@@ -1271,9 +1271,11 @@ Order is load-bearing:
     contract. Input: default-env direct dry-run after operator repair at the
     frozen implementation SHA. Expected: `outcome != failed` and neither pinned
     forcing/run reason appears; an empty queue is valid at the current 45-day
-    cutoff. Input: a second dry-run with explicit `--minimum-age-days 30`.
-    Expected: candidates non-empty, every selected terminal is `planned`,
-    `bytes.source > 0`, and `bytes.archived == 0`; production env remains 45.
+    cutoff. Input: the explicitly authorized controlled run with
+    `--minimum-age-days 30 --enforce`. Expected: candidates non-empty,
+    `bytes.source > 0`, `bytes.archived > 0`, selected terminals succeed, and
+    each retired source is preceded by staged archive re-read/checksum
+    verification; production env remains 45.
   - Input: the 228 exact selectors from the current incomplete audit receipt,
     executed through task 3.3's additive non-deleting salvage lane, then the
     installed recurring inventory audit. Expected: committed schema-valid
@@ -1286,5 +1288,6 @@ Order is load-bearing:
   example validation; `uv run ruff check .`; `openspec validate
   tier-node27-timeseries-storage --strict --no-interactive`; node-27 direct
   mover, receipt-scoped task 3.3 salvage, and systemd audit receipts. Retention,
-  drill, compression, source deletion, permission mutation, and every #856
-  live-cascade command are explicit non-goals.
+  drill, compression, source deletion outside the authorized product-archive
+  enforce run, permission mutation, and every #856 live-cascade command are
+  explicit non-goals.

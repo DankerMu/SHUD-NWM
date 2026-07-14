@@ -1305,17 +1305,16 @@ and every #856 cascade action remain unchanged downstream consumers.
   restart is required after supplementary-group changes. Verification covers
   `id`, `namei`, `getfacl`, `test -x`, and a bounded `find` as `nwm`. The PR does
   not execute `usermod`, `chmod`, `chgrp`, or ACL mutation.
-- Live proof is two-stage: before operator permission repair, a direct mover run
+- Live proof is staged: before operator permission repair, a direct mover run
   produces the single `STATES_ACCESS_DENIED` terminal diagnostic; after the
-  operator repair, a direct dry-run produces a schema-valid non-failed receipt
-  with non-empty candidates, `bytes.source > 0`, planned terminals,
-  `bytes.archived == 0`, and zero pinned forcing/run discovery reasons. Dry-run
-  MUST NOT fabricate a compressed archive size. Because the production 45-day
-  cutoff is currently earlier than the oldest live run eligibility end, the
-  non-empty-candidate proof uses the existing allowed minimum of 30 days by an
-  explicit CLI override and leaves the production env at 45 days. A separate
-  default-env direct run proves current production configuration succeeds even
-  when its eligible queue is empty. The recurring inventory audit can become
+  operator repair, a default-env direct dry-run proves current production
+  configuration succeeds even when its eligible queue is empty. The authorized
+  archive proof then uses the existing allowed minimum of 30 days with an
+  explicit `--minimum-age-days 30 --enforce` override while leaving production
+  env at 45 days. It produces a schema-valid non-failed receipt with non-empty
+  candidates, `bytes.source > 0`, `bytes.archived > 0`, successful terminals,
+  zero pinned forcing/run discovery reasons, and verify-before-delete source
+  retirement. The recurring inventory audit can become
   non-empty `complete` only after the 228 DB-only forcing gaps are covered by
   the already-specified task 3.3 salvage live operation; mover changes cannot
   synthesize missing products. That additive, non-deleting salvage prerequisite
@@ -1408,10 +1407,11 @@ and every #856 cascade action remain unchanged downstream consumers.
     exactly one safe lane-level
     receipt diagnostic, one exact structured stderr line, and exit code `2`,
     regardless of leaf count; non-access discovery failures retain exit `1`;
-  - accessible state leaves plus canonical forcing/runs -> non-failed dry-run,
-    non-empty candidates under explicit 30-day evidence override,
-    `bytes.source > 0`, planned terminals, `bytes.archived == 0`, and no pinned
-    discovery reasons; default 45-day env may validly produce an empty queue;
+  - accessible state leaves plus canonical forcing/runs -> non-failed enforce,
+    non-empty candidates under the explicitly authorized 30-day evidence
+    override, `bytes.source > 0`, `bytes.archived > 0`, successful terminals,
+    verify-before-delete retirement, and no pinned discovery reasons; a prior
+    default 45-day dry-run may validly produce an empty queue;
   - prior first-live failure receipt remains byte-identical and the new mover
     plus complete audit receipts validate and identify the deployed commit.
 
@@ -1424,10 +1424,11 @@ and every #856 cascade action remain unchanged downstream consumers.
 - Producer/consumer evidence boundary: producer manifest -> mover discovery ->
   archive receipt -> inventory audit -> complete receipt.
 - Stale-state/idempotency boundary: failed access cannot leave a prior passing
-  receipt looking current; repeated dry-runs over unchanged input produce the
-  same identities and diagnostic classification.
+  receipt looking current; the 30-day enforce run is bounded and retires only
+  sources whose staged archive has been re-read and verified.
 - Non-goals: no retention dry-run/enforce, compression, rebuild drill, source
-  deletion, node-22 change, DB mutation, display change, or #856 live cascade.
+  deletion outside the explicitly authorized product-archive enforce run,
+  node-22 change, DB mutation, display change, or #856 live cascade.
   Task 3.3's additive DB-export salvage is not retention and is required only
   because #1065 acceptance asks for a `complete` audit receipt; it remains
   receipt-scoped and never deletes DB rows or hot products.
