@@ -11,9 +11,14 @@ from typing import Any
 from urllib.parse import urlparse
 
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
+from packages.common.provider_atomic import (
+    ProviderAtomicError,
+    ProviderPreimage,
+    atomic_replace_provider_bytes,
+    capture_provider_preimage,
+)
 from packages.common.safe_fs import (
     SafeFilesystemError,
-    atomic_write_bytes_no_follow,
     read_bytes_limited_no_follow,
     stat_no_follow,
 )
@@ -45,6 +50,8 @@ __all__ = (
     "FileSchedulerModelRegistry",
     "REGISTRY_MANIFEST_SCHEMA_VERSION",
     "SchedulerFileProviderError",
+    "capture_scheduler_provider_preimage",
+    "load_canonical_readiness_entries_for_renewal",
     "publish_canonical_readiness_index",
     "publish_scheduler_registry_manifest",
 )
@@ -544,6 +551,7 @@ def publish_scheduler_registry_manifest(
     object_store_prefix: str | None = None,
     published_artifact_root: str | Path | None = None,
     generated_at: datetime | None = None,
+    expected_preimage: ProviderPreimage | Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
     roots = _ProviderRoots(
         object_store_root=object_store_root,
@@ -561,13 +569,20 @@ def publish_scheduler_registry_manifest(
     payload["checksum"] = checksum
     content = _canonical_json_bytes(payload, pretty=True)
     _validate_registry_manifest(payload, content=content, manifest_uri=str(destination_uri), roots=roots)
-    _write_json_bytes(str(destination_uri), content, roots=roots)
+    _write_json_bytes(
+        str(destination_uri),
+        content,
+        roots=roots,
+        max_bytes=MAX_REGISTRY_MANIFEST_BYTES,
+        expected_preimage=expected_preimage,
+    )
     return _evidence_safe(
         {
             "status": "published",
             "schema_version": REGISTRY_MANIFEST_SCHEMA_VERSION,
             "destination": _uri_evidence(destination_uri),
             "checksum": checksum,
+            "content_sha256": sha256_bytes(content),
             "generated_at": payload["generated_at"],
             "model_count": len(models),
             "manifest_last": True,
@@ -584,6 +599,8 @@ def publish_canonical_readiness_index(
     object_store_prefix: str | None = None,
     published_artifact_root: str | Path | None = None,
     generated_at: datetime | None = None,
+    expected_preimage: ProviderPreimage | Mapping[str, object] | None = None,
+    verify_external_references: bool = False,
 ) -> dict[str, Any]:
     roots = _ProviderRoots(
         object_store_root=object_store_root,
@@ -600,14 +617,27 @@ def publish_canonical_readiness_index(
     checksum = _sha256_label(content_without_checksum)
     payload["checksum"] = checksum
     content = _canonical_json_bytes(payload, pretty=True)
-    _validate_readiness_index(payload, content=content, index_uri=str(destination_uri), roots=roots)
-    _write_json_bytes(str(destination_uri), content, roots=roots)
+    _validate_readiness_index(
+        payload,
+        content=content,
+        index_uri=str(destination_uri),
+        roots=roots,
+        verify_external_references=verify_external_references,
+    )
+    _write_json_bytes(
+        str(destination_uri),
+        content,
+        roots=roots,
+        max_bytes=MAX_READINESS_INDEX_BYTES,
+        expected_preimage=expected_preimage,
+    )
     return _evidence_safe(
         {
             "status": "published",
             "schema_version": CANONICAL_READINESS_INDEX_SCHEMA_VERSION,
             "destination": _uri_evidence(destination_uri),
             "checksum": checksum,
+            "content_sha256": sha256_bytes(content),
             "generated_at": payload["generated_at"],
             "entry_count": len(entries),
             "product_row_count": sum(len(entry.get("products") or []) for entry in entries),
@@ -671,9 +701,16 @@ def _validate_readiness_index(
     content: bytes,
     index_uri: str,
     roots: _ProviderRoots,
+    enforce_freshness: bool = True,
+    verify_external_references: bool = False,
 ) -> tuple[dict[tuple[str, str, str, str, str], dict[str, Any]], dict[str, Any]]:
     _require_schema(payload, CANONICAL_READINESS_INDEX_SCHEMA_VERSION, field="schema_version")
-    generated_at = _require_fresh_generated_at(payload, field="generated_at", roots=roots)
+    generated_at = _require_fresh_generated_at(
+        payload,
+        field="generated_at",
+        roots=roots,
+        enforce_freshness=enforce_freshness,
+    )
     _require_payload_checksum(payload, field="checksum")
     entries_value = payload.get("entries", payload.get("cycles"))
     if not isinstance(entries_value, Sequence) or isinstance(entries_value, str | bytes | bytearray):
@@ -713,6 +750,13 @@ def _validate_readiness_index(
                 evidence={"source_id": key[0], "cycle_time": key[1], "model_id": key[2], "basin_id": key[3]},
             )
         entries[key] = entry
+        if verify_external_references:
+            referenced_products, _reference_evidence = _readiness_entry_products(entry, roots=roots)
+            if not referenced_products:
+                raise SchedulerFileProviderError(
+                    "readiness_renewal_products_missing",
+                    field=f"entries[{index}].products",
+                )
     evidence = {
         "status": "ready",
         "schema_version": CANONICAL_READINESS_INDEX_SCHEMA_VERSION,
@@ -1099,13 +1143,94 @@ def _read_bytes(uri: str, *, roots: _ProviderRoots, max_bytes: int) -> bytes:
     return content
 
 
-def _write_json_bytes(uri: str, content: bytes, *, roots: _ProviderRoots) -> None:
+def _provider_destination_path(uri: str, roots: _ProviderRoots) -> tuple[Path, Path | None]:
     parsed = urlparse(uri)
     if parsed.scheme in {"s3", "published"}:
-        _object_store_for(uri, roots).write_bytes_atomic(_object_key_for_uri(uri), content)
-        return
-    path = Path(uri).expanduser()
-    atomic_write_bytes_no_follow(path, content)
+        store = _object_store_for(uri, roots)
+        return store.resolve_path(_object_key_for_uri(uri)), Path(store.root)
+    if parsed.scheme:
+        raise SchedulerFileProviderError("provider_destination_unsupported", field="destination")
+    return Path(uri).expanduser(), None
+
+
+def capture_scheduler_provider_preimage(
+    uri: str | Path,
+    *,
+    object_store_root: str | Path | None = None,
+    object_store_prefix: str | None = None,
+    published_artifact_root: str | Path | None = None,
+    max_bytes: int = MAX_READINESS_INDEX_BYTES,
+) -> ProviderPreimage:
+    roots = _ProviderRoots(
+        object_store_root=object_store_root,
+        object_store_prefix=object_store_prefix,
+        published_artifact_root=published_artifact_root,
+    )
+    path, containment_root = _provider_destination_path(str(uri), roots)
+    try:
+        return capture_provider_preimage(path, containment_root=containment_root, max_bytes=max_bytes)
+    except ProviderAtomicError as error:
+        raise SchedulerFileProviderError(error.reason, field="destination") from error
+
+
+def _write_json_bytes(
+    uri: str,
+    content: bytes,
+    *,
+    roots: _ProviderRoots,
+    max_bytes: int,
+    expected_preimage: ProviderPreimage | Mapping[str, object] | None = None,
+) -> None:
+    path, containment_root = _provider_destination_path(uri, roots)
+    try:
+        atomic_replace_provider_bytes(
+            path,
+            content,
+            containment_root=containment_root,
+            max_bytes=max_bytes,
+            expected_preimage=expected_preimage,
+        )
+    except ProviderAtomicError as error:
+        raise SchedulerFileProviderError(error.reason, field="destination", evidence={"phase": error.phase}) from error
+
+
+def load_canonical_readiness_entries_for_renewal(
+    index_uri: str | Path,
+    *,
+    object_store_root: str | Path | None = None,
+    object_store_prefix: str | None = None,
+    published_artifact_root: str | Path | None = None,
+    now: datetime | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any], ProviderPreimage]:
+    roots = _ProviderRoots(
+        object_store_root=object_store_root,
+        object_store_prefix=object_store_prefix,
+        published_artifact_root=published_artifact_root,
+        now=now,
+    )
+    payload, content = _read_json_mapping(str(index_uri), roots=roots, max_bytes=MAX_READINESS_INDEX_BYTES)
+    _entries, evidence = _validate_readiness_index(
+        payload,
+        content=content,
+        index_uri=str(index_uri),
+        roots=roots,
+        enforce_freshness=False,
+    )
+    for entry in _entries.values():
+        products, _product_evidence = _readiness_entry_products(entry, roots=roots)
+        if not products:
+            raise SchedulerFileProviderError("readiness_renewal_products_missing", field="entries[].products")
+    preimage = capture_scheduler_provider_preimage(
+        index_uri,
+        object_store_root=object_store_root,
+        object_store_prefix=object_store_prefix,
+        published_artifact_root=published_artifact_root,
+        max_bytes=MAX_READINESS_INDEX_BYTES,
+    )
+    payload_entries = payload.get("entries", payload.get("cycles"))
+    if not isinstance(payload_entries, Sequence) or isinstance(payload_entries, str | bytes | bytearray):
+        raise SchedulerFileProviderError("readiness_entries_invalid", field="entries")
+    return [dict(entry) for entry in payload_entries if isinstance(entry, Mapping)], evidence, preimage
 
 
 def _object_store_for(uri: str, roots: _ProviderRoots) -> LocalObjectStore:
@@ -1250,7 +1375,13 @@ def _require_schema(payload: Mapping[str, Any], expected: str, *, field: str) ->
         raise SchedulerFileProviderError("file_manifest_schema_unsupported", field=field)
 
 
-def _require_fresh_generated_at(payload: Mapping[str, Any], *, field: str, roots: _ProviderRoots) -> datetime:
+def _require_fresh_generated_at(
+    payload: Mapping[str, Any],
+    *,
+    field: str,
+    roots: _ProviderRoots,
+    enforce_freshness: bool = True,
+) -> datetime:
     try:
         generated_at = parse_cycle_time(str(payload.get(field) or ""))
     except (TypeError, ValueError) as error:
@@ -1259,7 +1390,7 @@ def _require_fresh_generated_at(payload: Mapping[str, Any], *, field: str, roots
     max_age = timedelta(hours=max(int(roots.max_age_hours), 1))
     if generated_at > now + timedelta(minutes=5):
         raise SchedulerFileProviderError("file_manifest_generated_at_future", field=field)
-    if now - generated_at > max_age:
+    if enforce_freshness and now - generated_at > max_age:
         raise SchedulerFileProviderError(
             "file_manifest_stale",
             field=field,

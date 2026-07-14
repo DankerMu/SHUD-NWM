@@ -16,9 +16,14 @@ from typing import Any, Iterator, Protocol
 from urllib.parse import unquote, urlparse
 
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
+from packages.common.provider_atomic import (
+    ProviderAtomicError,
+    ProviderPreimage,
+    atomic_replace_provider_bytes,
+    capture_provider_preimage,
+)
 from packages.common.safe_fs import (
     SafeFilesystemError,
-    atomic_write_bytes_no_follow,
     ensure_directory_no_follow,
     read_bytes_limited_no_follow,
     stat_no_follow,
@@ -1376,7 +1381,34 @@ class FileStateSnapshotIndexRepository:
             published_artifact_root=self.published_artifact_root,
             generated_at=self.now,
             verify_objects=verify_objects,
+            lock_held=True,
         )
+
+    def validated_entries_for_renewal(self) -> tuple[list[dict[str, Any]], dict[str, Any], ProviderPreimage]:
+        snapshot = self._load_index_snapshot(
+            allow_empty=False,
+            verify_objects=True,
+            enforce_freshness=False,
+        )
+        path, containment_root = _state_index_destination_path(
+            self.index_uri,
+            object_store_root=self.object_store_root,
+            object_store_prefix=self.object_store_prefix,
+            published_artifact_root=self.published_artifact_root,
+        )
+        try:
+            preimage = capture_provider_preimage(
+                path,
+                containment_root=containment_root,
+                max_bytes=MAX_STATE_SNAPSHOT_INDEX_BYTES,
+            )
+        except ProviderAtomicError as error:
+            raise _state_index_error(error.reason, field="index", evidence={"phase": error.phase}) from error
+        payload_entries = snapshot.payload.get("entries")
+        if not isinstance(payload_entries, Sequence) or isinstance(payload_entries, str | bytes | bytearray):
+            raise _state_index_error("state_snapshot_index_entries_invalid", field="entries")
+        entries = [dict(entry) for entry in payload_entries if isinstance(entry, Mapping)]
+        return entries, dict(snapshot.evidence), preimage
 
     def _load_index_snapshot(
         self,
@@ -1510,6 +1542,8 @@ def publish_state_snapshot_index(
     published_artifact_root: str | Path | None = None,
     generated_at: datetime | None = None,
     verify_objects: bool = True,
+    expected_preimage: ProviderPreimage | Mapping[str, object] | None = None,
+    lock_held: bool = False,
 ) -> dict[str, Any]:
     generated = _ensure_utc(generated_at or datetime.now(tz=UTC))
     payload: dict[str, Any] = {
@@ -1540,6 +1574,8 @@ def publish_state_snapshot_index(
         object_store_root=object_store_root,
         object_store_prefix=object_store_prefix,
         published_artifact_root=published_artifact_root,
+        expected_preimage=expected_preimage,
+        lock_held=lock_held,
     )
     return _state_index_evidence_safe(
         {
@@ -1547,6 +1583,7 @@ def publish_state_snapshot_index(
             "schema_version": FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION,
             "destination": _state_index_uri_evidence(destination_uri),
             "checksum": payload["checksum"],
+            "content_sha256": sha256_bytes(content),
             "generated_at": payload["generated_at"],
             "entry_count": len(normalized),
             "index_last": True,
@@ -2064,33 +2101,54 @@ def _write_state_index_bytes(
     object_store_root: str | Path | None,
     object_store_prefix: str | None,
     published_artifact_root: str | Path | None,
+    expected_preimage: ProviderPreimage | Mapping[str, object] | None = None,
+    lock_held: bool = False,
 ) -> None:
+    path, containment_root = _state_index_destination_path(
+        uri,
+        object_store_root=object_store_root,
+        object_store_prefix=object_store_prefix,
+        published_artifact_root=published_artifact_root,
+    )
+    try:
+        atomic_replace_provider_bytes(
+            path,
+            content,
+            containment_root=containment_root,
+            max_bytes=MAX_STATE_SNAPSHOT_INDEX_BYTES,
+            expected_preimage=expected_preimage,
+            lock_held=lock_held,
+        )
+    except ProviderAtomicError as error:
+        reason = error.reason
+        if reason in {"provider_lock_unavailable", "provider_lock_not_regular", "provider_destination_not_regular"}:
+            reason = "state_snapshot_index_write_failed"
+        raise _state_index_error(
+            reason,
+            field="index",
+            evidence={"phase": error.phase},
+        ) from error
+
+
+def _state_index_destination_path(
+    uri: str,
+    *,
+    object_store_root: str | Path | None,
+    object_store_prefix: str | None,
+    published_artifact_root: str | Path | None,
+) -> tuple[Path, Path | None]:
     parsed = urlparse(str(uri))
     if parsed.scheme in {"s3", "published"}:
-        path, containment_root = _state_index_control_object_path(
+        return _state_index_control_object_path(
             str(uri),
             object_store_root=object_store_root,
             object_store_prefix=object_store_prefix,
             published_artifact_root=published_artifact_root,
             field="index",
         )
-        try:
-            atomic_write_bytes_no_follow(path, content, containment_root=containment_root, temp_suffix="part")
-        except (OSError, SafeFilesystemError) as error:
-            raise _state_index_error(
-                "state_snapshot_index_write_failed",
-                field="index",
-                evidence={"error_type": type(error).__name__},
-            ) from error
-        return
-    try:
-        atomic_write_bytes_no_follow(Path(uri).expanduser(), content)
-    except (OSError, SafeFilesystemError) as error:
-        raise _state_index_error(
-            "state_snapshot_index_write_failed",
-            field="index",
-            evidence={"error_type": type(error).__name__},
-        ) from error
+    if parsed.scheme:
+        raise _state_index_error("state_snapshot_index_object_unsafe_uri", field="index")
+    return Path(uri).expanduser(), None
 
 
 def _read_state_object_bytes(

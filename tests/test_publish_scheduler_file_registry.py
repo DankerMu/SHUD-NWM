@@ -99,6 +99,40 @@ def test_publish_all_basin_scheduler_registry_writes_all_publishable_models(
     assert rows["basins_zhaochen_bst_shud"]["output_segment_count"] == 7
 
 
+def test_refresh_inventory_fixture_publishes_exact_thirteen_models(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    models = [_inventory_model(f"basin-{index:02d}") for index in range(13)]
+    inventory = {
+        "schema_version": "basins.discovery.v1",
+        "root": str(tmp_path / "Basins"),
+        "resolved_root": str(tmp_path / "Basins"),
+        "model_count": len(models),
+        "models": models,
+        "warnings": [],
+    }
+    monkeypatch.setattr(registry_script, "discover_basins_inventory", lambda _root: inventory)
+    monkeypatch.setattr(registry_script, "publish_basins_package", _fake_publish_basins_package)
+    monkeypatch.setattr(
+        registry_script,
+        "prepare_basins_import_sources",
+        lambda inventory_path, package_manifest_path: _fake_sources(inventory, Path(package_manifest_path)),
+    )
+
+    summary = registry_script.publish_all_basin_scheduler_registry(
+        basins_root=tmp_path / "Basins",
+        registry_manifest=tmp_path / "objects/scheduler/registry/manifest-last.json",
+        object_store_root=tmp_path / "objects",
+        object_store_prefix="s3://nhms",
+        work_dir=tmp_path / "work",
+    )
+
+    assert summary["selected_model_count"] == 13
+    assert summary["registry"]["model_count"] == 13
+    assert summary["package_status_counts"] == {"published": 13}
+
+
 def test_missing_radiation_repair_copies_matching_template_inside_private_root(tmp_path: Path) -> None:
     isolated = tmp_path / "isolated"
     target_input = isolated / "tailanhe" / "input" / "tlh"

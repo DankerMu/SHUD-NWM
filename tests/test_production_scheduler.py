@@ -18880,6 +18880,61 @@ def test_file_canonical_readiness_publisher_and_provider_use_existing_evaluator(
     assert evidence["readiness_index"]["entry_product_row_count"] == len(GFS_REQUIRED_STANDARD_VARIABLES) * 2
 
 
+def test_file_canonical_readiness_renewal_bypasses_only_age_and_revalidates_objects(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T12:00:00Z")
+    _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        generated_at=_dt("2026-06-27T00:00:00Z"),
+    )
+
+    entries, evidence, preimage = scheduler_file_providers_module.load_canonical_readiness_entries_for_renewal(
+        paths["NHMS_SCHEDULER_CANONICAL_READINESS_INDEX"],
+        object_store_root=roots["object_store_root"],
+        object_store_prefix="s3://nhms",
+        now=_dt("2026-07-14T00:00:00Z"),
+    )
+
+    assert len(entries) == 1
+    assert evidence["status"] == "ready"
+    assert evidence["product_row_count"] == len(GFS_REQUIRED_STANDARD_VARIABLES) * 2
+    assert preimage.exists is True
+    assert preimage.sha256
+
+
+def test_file_canonical_readiness_renewal_rejects_missing_referenced_object(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T12:00:00Z")
+    _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        generated_at=_dt("2026-06-27T00:00:00Z"),
+    )
+    missing = next((roots["object_store_root"] / "canonical").rglob("*.dat"))
+    missing.unlink()
+
+    with pytest.raises(scheduler_file_providers_module.SchedulerFileProviderError) as error_info:
+        scheduler_file_providers_module.load_canonical_readiness_entries_for_renewal(
+            paths["NHMS_SCHEDULER_CANONICAL_READINESS_INDEX"],
+            object_store_root=roots["object_store_root"],
+            object_store_prefix="s3://nhms",
+            now=_dt("2026-07-14T00:00:00Z"),
+        )
+
+    assert error_info.value.reason == "readiness_product_object_missing"
+
+
 def test_file_canonical_readiness_provider_uses_product_catalog_when_index_products_are_externalized(
     monkeypatch: Any,
     tmp_path: Path,

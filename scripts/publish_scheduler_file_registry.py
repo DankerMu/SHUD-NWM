@@ -22,10 +22,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from packages.common.object_store import LocalObjectStore
 from services.orchestrator.scheduler_file_providers import (
+    ProviderPreimage,
     SchedulerFileProviderError,
     publish_scheduler_registry_manifest,
 )
@@ -105,6 +106,8 @@ def publish_all_basin_scheduler_registry(
     retain_repair_staging: bool = False,
     dry_run: bool = False,
     output_path: str | Path | None = None,
+    expected_preimage: ProviderPreimage | Mapping[str, object] | None = None,
+    precommit_validator: Callable[[Path, Sequence[Mapping[str, Any]]], None] | None = None,
 ) -> dict[str, Any]:
     root = resolve_basins_root(str(basins_root) if basins_root not in (None, "") else None)
     resolved_object_root = _required_path(
@@ -195,12 +198,35 @@ def publish_all_basin_scheduler_registry(
 
     registry_receipt: dict[str, Any] | None = None
     if not dry_run:
-        registry_receipt = publish_scheduler_registry_manifest(
-            registry_models,
-            registry_manifest,
-            object_store_root=resolved_object_root,
-            object_store_prefix=resolved_object_prefix,
-        )
+        if precommit_validator is not None:
+            precommit_validator(workspace, package_results)
+        try:
+            registry_receipt = publish_scheduler_registry_manifest(
+                registry_models,
+                registry_manifest,
+                object_store_root=resolved_object_root,
+                object_store_prefix=resolved_object_prefix,
+                expected_preimage=expected_preimage,
+            )
+        except SchedulerFileProviderError as error:
+            raise SchedulerRegistryPublishError(
+                "SCHEDULER_REGISTRY_CANONICAL_PUBLISH_FAILED",
+                "Validated packages were not committed to the canonical registry.",
+                details={
+                    "provider_reason": error.reason,
+                    "provider_phase": error.evidence.get("phase"),
+                    "packages": [
+                        {
+                            "status": item.get("status"),
+                            "orphan_id": hashlib.sha256(
+                                str(item.get("manifest_uri") or "").encode("utf-8")
+                            ).hexdigest()[:32],
+                        }
+                        for item in package_results
+                        if item.get("status") in {"published", "already_done"}
+                    ],
+                },
+            ) from error
 
     package_status_counts = dict(Counter(str(item.get("status") or "unknown") for item in package_results))
     summary = {

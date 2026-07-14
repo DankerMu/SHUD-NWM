@@ -294,6 +294,38 @@ def test_file_state_snapshot_index_strict_lookup_returns_exact_usable_checkpoint
     assert evidence["state_snapshot_index"]["schema_version"] == FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION
 
 
+def test_file_state_snapshot_index_renewal_bypasses_only_age_and_verifies_checkpoint(tmp_path: Path) -> None:
+    object_root = tmp_path / "objects"
+    object_store = LocalObjectStore(object_root, "s3://nhms")
+    content = _valid_ic_bytes(b"renew-state-index")
+    state_uri = object_store.write_bytes_atomic("states/gfs/model_a/2026052106/state.cfg.ic", content)
+    index_path = tmp_path / "state-index.json"
+    entry = _state_index_test_entry(state_uri, content, state_id="state_gfs_model_a_2026052106")
+    publish_state_snapshot_index(
+        [entry],
+        index_path,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=_dt("2026-05-21T12:00:00Z"),
+    )
+    repository = FileStateSnapshotIndexRepository(
+        str(index_path),
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        now=_dt("2026-06-21T12:00:00Z"),
+    )
+
+    entries, evidence, preimage = repository.validated_entries_for_renewal()
+
+    assert entries == [entry]
+    assert evidence["status"] == "ready"
+    assert preimage.exists is True
+    object_store.delete(state_uri)
+    with pytest.raises(StateManagerError) as error_info:
+        repository.validated_entries_for_renewal()
+    assert getattr(error_info.value, "reason", "") == "state_snapshot_index_object_missing"
+
+
 @pytest.mark.parametrize(
     ("index_uri", "object_store_prefix", "expected_index_path"),
     [

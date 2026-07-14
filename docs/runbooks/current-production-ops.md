@@ -1,6 +1,6 @@
 # Current Production Operations Runbook
 
-最后更新：2026-06-30
+最后更新：2026-07-14
 
 适用范围：node-27 active DB + ingest + display，node-22 Slurm/SHUD compute，
 以及两者共享的 NFS object-store/published 数据面。
@@ -170,6 +170,105 @@ test -d "$NHMS_BASINS_ROOT"
 现场为 13；Slurm 仍负责资源仲裁，空闲整节点会并行运行，资源不足的任务排队。
 若只读 Basins 源中某个模型仅缺 `*.tsd.rl`，脚本会在私有 scratch copy
 里复制同覆盖期 radiation 模板，原始 NFS Basins 源保持不变。
+
+#### 3.1.1 DB-free file-provider 稳态刷新
+
+Registry、canonical readiness 和 state index 的 consumer freshness 上限均为
+168 小时；不得延长上限或只修改 `generated_at`。node-22 用独立 user-systemd
+timer 每日从权威内容完整重验并重发三个 provider，scheduler consumer 仍然只读、
+fail closed。手工新增流域时原有 `publish_scheduler_file_registry.py` 参数和成功输出
+保持兼容；它与 timer、model lifecycle、readiness/state writer 使用同一个
+destination-derived lock 和 expected-preimage 检查，并发者不会覆盖较新的权威内容。
+
+首次安装必须先记录 scheduler 与 refresh unit 状态，并保持 scheduler timer 原状态：
+
+```bash
+cd /scratch/frd_muziyao/NWM
+systemctl --user is-enabled nhms-compute-scheduler.timer || true
+systemctl --user is-active nhms-compute-scheduler.timer || true
+systemctl --user is-active nhms-compute-scheduler.service || true
+squeue -h -u "$USER"
+
+install -m 0600 infra/env/compute.scheduler-provider-refresh.env.example \
+  infra/env/compute.scheduler-provider-refresh.env
+# 按现场真值核对每个绝对路径；禁止加入 DATABASE_URL 或 PG* selector。
+grep -En '^(DATABASE_URL|PIPELINE_DATABASE_URL|PGHOST|PGPORT|PGDATABASE|PGUSER)=' \
+  infra/env/compute.scheduler-provider-refresh.env && exit 1 || true
+install -d -m 0700 /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh \
+  /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/runs \
+  /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts \
+  /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/emergency
+
+scripts/install_node22_scheduler_file_provider_refresh.sh --install
+```
+
+部署窗口先 dry-run；它必须重新发现完整 Basins inventory，并让 stale readiness/state
+仅绕过年龄检查，继续校验 schema、payload checksum、identity、forecast hours、catalog、
+canonical object 和 checkpoint object。任何 missing/invalid 引用都在 canonical replace
+前失败，绝不生成空 index、DB fallback 或 timestamp-only 文件：
+
+```bash
+scripts/scheduler_file_provider_refresh_once.sh --dry-run
+jq '{outcome,reason,database_free,providers,orphans}' \
+  /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json
+
+scripts/scheduler_file_provider_refresh_once.sh
+jq '{outcome,reason,database_free,providers,orphans}' \
+  /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json
+```
+
+`published` receipt 必须绑定三个 canonical 文件的物理 SHA-256；registry 的现场模型数
+应为当前完整 inventory（2026-06-30 为 13），readiness/state entry 不能因刷新减少。
+Wrapper 会把 mode-0600 env 当作固定 key/value 数据解析并 export，不执行其中的 shell；
+systemd `UnsetEnvironment=` 与 wrapper 最终 `unset` 会同时清除 user-manager/调用 shell
+继承的 `DATABASE_URL`、`PIPELINE_DATABASE_URL` 和全部受支持 libpq selector。
+Receipt schema 为 `nhms.scheduler.file_provider_refresh_receipt.v1`，outcome 只允许
+`dry_run`、`published`、`already_running`、`failed`、`replace_uncertain`、
+`restored_previous`、`published_receipt_failed`。latest 原子替换，history 只留最新 32；
+单次 workspace 上限 64 GiB/250,000 entry/depth 32。canonical commit 前产生的 immutable
+content-addressed package 不自动删除；receipt 只记录安全相对标识，最多前 256 条、总数
+及 truncated，候选总数超过 4,096 时阻断。不要凭目录名批量删除 package 或不确定 temp
+residue。
+
+Canonical replace 前失败时旧文件完整 stat/digest tuple 不变；preimage race 返回
+`provider_preimage_changed`。读者在原子 replace 时只能看见完整 old/new。确定的 post-read
+失败会恢复经验证的旧 bytes 并报 `restored_previous`；replace/fsync 不确定时返回
+`replace_uncertain`，不要宣称回滚。provider 已 commit 但 primary receipt 发布失败时，
+预留的本地 mode-0600 emergency record 为唯一 acceptance evidence；用下列命令只重建
+receipt，绝不重发 provider：
+
+```bash
+scripts/scheduler_file_provider_refresh_once.sh \
+  --recover-emergency /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/emergency/<receipt>.json
+```
+
+恢复会先比对三个当前 canonical SHA-256。primary 与 emergency 均失败就是
+`replace_uncertain`，必须直接重验三个 provider；journal/stderr 只作诊断。
+
+成功 manual refresh 后才建立稳态：
+
+```bash
+scripts/install_node22_scheduler_file_provider_refresh.sh --enable
+systemctl --user status nhms-scheduler-file-provider-refresh.timer \
+  nhms-scheduler-file-provider-refresh.service --no-pager
+systemctl --user list-timers nhms-scheduler-file-provider-refresh.timer --no-pager
+```
+
+timer cadence 为每日 02:15 UTC 加最多 30 分钟 jitter，严格小于 168 小时；oneshot
+service 在 tick 间应为 inactive。refresh unit 的安装、失败和回滚不得 enable/disable、
+start/stop 或替换 `nhms-compute-scheduler.*`。若安装、manual refresh 或 live scheduler
+proof 任一步失败，执行：
+
+```bash
+scripts/install_node22_scheduler_file_provider_refresh.sh --rollback
+# 脚本按 install 前记录恢复 refresh 初态，并断言 scheduler units 完全未变。
+```
+
+Live acceptance 还必须把 receipt -> 三 provider digest -> scheduler pass/candidate/run ->
+实际 Slurm stage job/terminal -> 同一 run 的全新 forcing/runs/states leaf 串起来，并从
+node-27 同一 NFS 视图核对 owner/group/mode/default ACL 与 `nwm` 访问。旧 forcing 复用、
+synthetic ACL probe、未绑定/非 terminal job 都不算通过。只有这一链通过后保留 refresh
+timer enabled/active；所有退出路径恢复 scheduler 初始状态并确认无 issue-owned job。
 
 前端全国总览的静态边界/河网也必须从同一个 Basins 真相源刷新；这是新增流域后
 让公网地图立刻显示边界和基础河网的运维入口。脚本会在 `--basins-root` 下自动发现

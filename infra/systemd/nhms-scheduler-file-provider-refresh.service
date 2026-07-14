@@ -1,0 +1,15 @@
+[Unit]
+Description=NHMS node-22 DB-free scheduler file-provider refresh
+
+[Service]
+Type=oneshot
+WorkingDirectory=/scratch/frd_muziyao/NWM
+EnvironmentFile=/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-provider-refresh.env
+Environment=PATH=/scratch/frd_muziyao/NWM/.venv/bin:/usr/local/bin:/usr/bin:/bin
+UnsetEnvironment=DATABASE_URL PIPELINE_DATABASE_URL PGHOST PGPORT PGDATABASE PGUSER PGSERVICE PGSERVICEFILE
+ExecStart=/scratch/frd_muziyao/NWM/scripts/scheduler_file_provider_refresh_once.sh
+StandardOutput=journal
+StandardError=journal
+PrivateTmp=true
+UMask=0077
+TimeoutStartSec=7200
