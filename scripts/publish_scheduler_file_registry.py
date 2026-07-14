@@ -127,7 +127,10 @@ def publish_all_basin_scheduler_registry(
     dry_run: bool = False,
     output_path: str | Path | None = None,
     expected_preimage: ProviderPreimage | Mapping[str, object] | None = None,
-    precommit_validator: Callable[[Path, Sequence[Mapping[str, Any]]], None] | None = None,
+    precommit_validator: Callable[
+        [Path, Sequence[Mapping[str, Any]], Sequence[Mapping[str, Any]]], None
+    ]
+    | None = None,
     resource_validator: Callable[[Path], None] | None = None,
     workspace_budget: WorkspaceBudget | None = None,
     max_contexts: int | None = None,
@@ -227,6 +230,19 @@ def publish_all_basin_scheduler_registry(
                     "version": version,
                     "manifest_path": str(package_manifest_path),
                 }
+                suggested_ids = model.get("suggested_ids")
+                if not isinstance(suggested_ids, Mapping):
+                    raise SchedulerRegistryPublishError(
+                        "SCHEDULER_REGISTRY_DRY_RUN_IDENTITY_INVALID",
+                        "Dry-run model is missing bounded suggested identities.",
+                        details={"model_id": model_id},
+                    )
+                registry_models.append(
+                    {
+                        "model_id": str(suggested_ids.get("model_id") or model_id),
+                        "basin_id": str(suggested_ids.get("basin_id") or ""),
+                    }
+                )
             else:
                 package_result = publish_basins_package(
                     inventory_path=context.inventory_path,
@@ -280,11 +296,22 @@ def publish_all_basin_scheduler_registry(
                 message="Scheduler registry context publication failed before canonical replacement.",
             ) from error
 
+    if precommit_validator is not None:
+        try:
+            precommit_validator(workspace, package_results, registry_models)
+        except Exception as error:
+            raise _publish_failure(
+                error,
+                discovered_total=len(contexts),
+                attempted_total=attempted_total,
+                package_results=package_results,
+                error_code="SCHEDULER_REGISTRY_REFRESH_PRECOMMIT_FAILED",
+                message="Registry/readiness precommit validation failed before canonical replacement.",
+            ) from error
+
     registry_receipt: dict[str, Any] | None = None
     if not dry_run:
         try:
-            if precommit_validator is not None:
-                precommit_validator(workspace, package_results)
             registry_receipt = publish_scheduler_registry_manifest(
                 registry_models,
                 registry_manifest,

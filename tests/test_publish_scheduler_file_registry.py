@@ -8,14 +8,59 @@ from typing import Any
 import pytest
 
 import scripts.publish_scheduler_file_registry as registry_script
+from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.state_manager import publish_state_snapshot_index
 from scripts import scheduler_file_provider_refresh as refresh
 from services.orchestrator.scheduler_file_providers import (
     FileSchedulerModelRegistry,
     publish_canonical_readiness_index,
 )
+from workers.canonical_converter.converter import required_standard_variables_for_source
 from workers.model_registry.basins_radiation_template import repair_missing_tsd_rl_for_basin, repair_performed
 from workers.model_registry.basins_soil_alpha_repair import repair_soil_alpha_calibration_for_basin
+
+
+def _write_current_catalogs(object_root: Path) -> None:
+    store = LocalObjectStore(object_root, object_store_prefix="s3://nhms")
+    for source_id in ("gfs", "IFS"):
+        cycle = "2026071400"
+        policy_identity = {"source": source_id}
+        source_object_identity = {"manifest": f"raw/{source_id}/{cycle}/manifest.json"}
+        products = []
+        for variable in required_standard_variables_for_source(source_id):
+            key = f"canonical/{source_id}/{cycle}/{variable}/f003.dat"
+            content = f"{source_id}:{variable}:3".encode()
+            store.write_bytes_atomic(key, content)
+            products.append(
+                {
+                    "canonical_product_id": f"{source_id}_{cycle}_{variable}_f003",
+                    "source_id": source_id,
+                    "cycle_time": "2026-07-14T00:00:00Z",
+                    "valid_time": "2026-07-14T03:00:00Z",
+                    "lead_time_hours": 3,
+                    "variable": variable,
+                    "object_uri": store.uri_for_key(key),
+                    "checksum": f"sha256:{sha256_bytes(content)}",
+                    "quality_flag": "ok",
+                    "lineage_json": {
+                        "policy_identity": policy_identity,
+                        "source_object_identity": source_object_identity,
+                    },
+                }
+            )
+        store.write_bytes_atomic(
+            f"canonical/{source_id}/{cycle}/_catalog/catalog.json",
+            json.dumps(
+                {
+                    "schema_version": "nhms.canonical.product_catalog.v1",
+                    "source_id": source_id,
+                    "cycle_time": "2026-07-14T00:00:00Z",
+                    "products": products,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode(),
+        )
 
 
 def test_package_version_for_nested_basin_is_safe_and_content_stable() -> None:
@@ -373,6 +418,61 @@ def test_publish_all_basin_scheduler_registry_writes_all_publishable_models(
     assert rows["basins_zhaochen_bst_shud"]["output_segment_count"] == 7
 
 
+def test_registry_precommit_receives_same_generation_identities_before_manifest_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory = {
+        "schema_version": "basins.discovery.v1",
+        "root": str(tmp_path / "Basins"),
+        "resolved_root": str(tmp_path / "Basins"),
+        "model_count": 2,
+        "models": [_inventory_model("first"), _inventory_model("second")],
+        "warnings": [],
+    }
+    monkeypatch.setattr(registry_script, "discover_basins_inventory", lambda _root: inventory)
+    monkeypatch.setattr(registry_script, "publish_basins_package", _fake_publish_basins_package)
+    monkeypatch.setattr(
+        registry_script,
+        "prepare_basins_import_sources",
+        lambda inventory_path, package_manifest_path: _fake_sources(inventory, Path(package_manifest_path)),
+    )
+    destination = tmp_path / "shared/scheduler/registry/manifest-last.json"
+    observed: dict[str, object] = {}
+
+    def precommit(
+        workspace: Path,
+        packages: list[dict[str, Any]],
+        registry_models: list[dict[str, Any]],
+    ) -> None:
+        observed["workspace_exists"] = workspace.is_dir()
+        observed["package_count"] = len(packages)
+        observed["model_pairs"] = {
+            (str(model["model_id"]), str(model["basin_id"])) for model in registry_models
+        }
+        observed["destination_exists"] = destination.exists()
+
+    registry_script.publish_all_basin_scheduler_registry(
+        basins_root=tmp_path / "Basins",
+        registry_manifest=destination,
+        object_store_root=tmp_path / "private-objects",
+        object_store_prefix="s3://nhms",
+        work_dir=tmp_path / "work",
+        precommit_validator=precommit,
+    )
+
+    assert observed == {
+        "workspace_exists": True,
+        "package_count": 2,
+        "model_pairs": {
+            ("basins_first_shud", "basins_first"),
+            ("basins_second_shud", "basins_second"),
+        },
+        "destination_exists": False,
+    }
+    assert destination.is_file()
+
+
 def test_real_registry_refresh_keeps_packages_private_and_canonical_manifest_shared(
     tmp_path: Path,
 ) -> None:
@@ -416,6 +516,7 @@ def test_real_registry_refresh_keeps_packages_private_and_canonical_manifest_sha
         object_store_root=private_objects,
         object_store_prefix="s3://nhms",
     )
+    _write_current_catalogs(private_objects)
     runtime = tmp_path / "runtime"
     work = runtime / "work"
     receipts = runtime / "receipts"
@@ -439,7 +540,7 @@ def test_real_registry_refresh_keeps_packages_private_and_canonical_manifest_sha
         ),
         dry_run=False,
     )
-    assert receipt["outcome"] == "published"
+    assert receipt["outcome"] == "published", receipt
     assert [provider["name"] for provider in receipt["providers"]] == [
         "registry",
         "readiness",

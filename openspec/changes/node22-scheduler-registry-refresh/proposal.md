@@ -9,8 +9,9 @@ validated producer lifecycle before #1065 can obtain real writer evidence.
 ## What Changes
 
 - Add one auditable node-22 file-provider refresh runner which serializes every
-  canonical registry writer, reuses the full-Basins publisher, and renews the
-  canonical-readiness/state indexes only after revalidating all indexed
+  canonical registry writer, reuses the full-Basins publisher, rebuilds
+  canonical readiness from the newest private GFS/IFS catalogs plus the same
+  registry model generation, and renews state only after revalidating indexed
   identities, referenced objects, and checksums.
 - Add phase-specific atomic publication, failure, rollback, immutable-package
   orphan, bounded receipt/history, lock, and cleanup contracts.

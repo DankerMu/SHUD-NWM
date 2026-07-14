@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
+import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -36,6 +39,7 @@ MAX_REGISTRY_MANIFEST_BYTES = 4 * 1024 * 1024
 MAX_MODEL_PACKAGE_MANIFEST_BYTES = 4 * 1024 * 1024
 MAX_READINESS_INDEX_BYTES = 16 * 1024 * 1024
 MAX_CANONICAL_PRODUCT_CATALOG_BYTES = 16 * 1024 * 1024
+MAX_CANONICAL_PRODUCT_OBJECT_BYTES = 64 * 1024 * 1024 * 1024
 MAX_REGISTRY_MODELS = 500
 MAX_READINESS_ENTRIES = 5000
 MAX_READINESS_PRODUCT_ROWS = 250000
@@ -43,6 +47,10 @@ MAX_FILE_PROVIDER_OBJECT_STORE_CACHE_ENTRIES = 16
 DEFAULT_MAX_MANIFEST_AGE_HOURS = 168
 MAX_FILE_PROVIDER_JSON_DEPTH = 64
 MAX_FILE_PROVIDER_JSON_NODES = 300_000
+MAX_CANONICAL_CATALOG_CYCLE_DIRS = 4096
+READINESS_DERIVATION_SOURCES = ("gfs", "IFS")
+_COMPACT_CYCLE_RE = re.compile(r"^[0-9]{10}$")
+_SHA256_RE = re.compile(r"^(?:sha256:)?[0-9a-fA-F]{64}$")
 
 __all__ = (
     "CANONICAL_READINESS_INDEX_SCHEMA_VERSION",
@@ -52,9 +60,12 @@ __all__ = (
     "REGISTRY_MANIFEST_SCHEMA_VERSION",
     "SchedulerFileProviderError",
     "capture_scheduler_provider_preimage",
+    "derive_catalog_bound_readiness_entries",
     "load_canonical_readiness_entries_for_renewal",
     "publish_canonical_readiness_index",
     "publish_scheduler_registry_manifest",
+    "validate_catalog_bound_readiness_entries",
+    "validate_readiness_registry_model_set",
 )
 
 
@@ -351,7 +362,7 @@ class FileCanonicalReadinessProvider:
             result = evaluate_canonical_readiness(
                 source_id=source_id,
                 cycle_time=cycle_time,
-                products=[],
+                products=products,
                 forecast_hours=requested_hours,
                 policy_identity=policy_identity,
                 source_object_identity=source_object_identity,
@@ -360,13 +371,12 @@ class FileCanonicalReadinessProvider:
                 basin_id=basin_id,
             ).evidence
             result = _sanitize_file_provider_evidence(result)
-            result["reason"] = "canonical_identity_mismatch_cache_miss"
+            if not result.get("ready"):
+                result["reason"] = "canonical_identity_mismatch_cache_miss"
             result["readiness_index"] = _evidence_safe(
                 {
                     **index_evidence,
-                    "entry_status": "identity_mismatch_empty_entry"
-                    if not products
-                    else "identity_mismatch_stale_products",
+                    "entry_status": "identity_mismatch_recomputed",
                     "entry_product_row_count": len(products),
                     "entry_product_source": product_source_evidence.get("source"),
                     "entry_forecast_hours": entry_hours[:200],
@@ -374,7 +384,7 @@ class FileCanonicalReadinessProvider:
                     "requested_forecast_hours": requested_hours[:200],
                     "requested_forecast_hour_count": len(requested_hours),
                     "canonical_product_catalog": product_source_evidence,
-                    "stale_product_row_count": len(products),
+                    "recomputed_product_row_count": len(products),
                 }
             )
             return _evidence_safe(result)
@@ -648,6 +658,178 @@ def publish_canonical_readiness_index(
     )
 
 
+def derive_catalog_bound_readiness_entries(
+    registry_models: Sequence[Mapping[str, Any]],
+    *,
+    object_store_root: str | Path,
+    object_store_prefix: str,
+    sources: Sequence[str] = READINESS_DERIVATION_SOURCES,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Build a fresh readiness generation from current private catalogs.
+
+    The newest cycle directory for every configured source is authoritative.
+    An invalid newest catalog blocks the generation; older catalogs are never
+    searched as a fallback.  Only bounded catalog metadata and product rows are
+    read, and the returned index entries externalize products behind an exact
+    URI/content-digest/row-count binding.
+    """
+
+    root = Path(object_store_root).expanduser()
+    if not root.is_absolute():
+        raise SchedulerFileProviderError("canonical_catalog_root_invalid", field="object_store_root")
+    prefix = str(object_store_prefix or "").strip()
+    if not prefix:
+        raise SchedulerFileProviderError("canonical_catalog_prefix_missing", field="object_store_prefix")
+    normalized_sources = tuple(dict.fromkeys(normalize_source_id(str(source)) for source in sources))
+    if not normalized_sources:
+        raise SchedulerFileProviderError("readiness_derivation_sources_empty", field="sources")
+    models = _registry_readiness_identities(registry_models)
+    roots = _ProviderRoots(object_store_root=root, object_store_prefix=prefix)
+    entries: list[dict[str, Any]] = []
+    catalogs: list[dict[str, Any]] = []
+    for source_id in normalized_sources:
+        snapshot = _latest_canonical_catalog_snapshot(source_id=source_id, roots=roots)
+        catalog_entry = {
+            "source_id": source_id,
+            "cycle_time": snapshot["cycle_time"],
+            "canonical_product_id": snapshot["canonical_product_id"],
+            "forecast_hours": snapshot["forecast_hours"],
+            "policy_identity": snapshot["policy_identity"],
+            "source_object_identity": snapshot["source_object_identity"],
+            "products": [],
+            "catalog_uri": snapshot["catalog_uri"],
+            "catalog_sha256": snapshot["catalog_sha256"],
+            "catalog_row_count": snapshot["catalog_row_count"],
+        }
+        entries.extend(
+            {
+                **catalog_entry,
+                "model_id": model_id,
+                "basin_id": basin_id,
+            }
+            for model_id, basin_id in models
+        )
+        catalogs.append(
+            {
+                "source_id": source_id,
+                "cycle_time": snapshot["cycle_time"],
+                "catalog_sha256": _safe_checksum(snapshot["catalog_sha256"]),
+                "catalog_row_count": snapshot["catalog_row_count"],
+                "forecast_hour_count": len(snapshot["forecast_hours"]),
+            }
+        )
+    model_set_evidence = validate_readiness_registry_model_set(
+        entries,
+        registry_models,
+        sources=normalized_sources,
+    )
+    return entries, _evidence_safe(
+        {
+            "status": "ready",
+            "derivation": "current_catalog_bound",
+            "entry_count": len(entries),
+            "model_count": len(models),
+            "source_count": len(normalized_sources),
+            "catalogs": catalogs,
+            "model_set": model_set_evidence,
+        }
+    )
+
+
+def validate_catalog_bound_readiness_entries(
+    entries: Sequence[Mapping[str, Any]],
+    registry_models: Sequence[Mapping[str, Any]],
+    *,
+    destination_uri: str | Path,
+    object_store_root: str | Path,
+    object_store_prefix: str,
+    sources: Sequence[str] = READINESS_DERIVATION_SOURCES,
+    generated_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Validate a prospective readiness generation without publishing it."""
+
+    roots = _ProviderRoots(
+        object_store_root=object_store_root,
+        object_store_prefix=object_store_prefix,
+        now=generated_at,
+    )
+    payload = {
+        "schema_version": CANONICAL_READINESS_INDEX_SCHEMA_VERSION,
+        "generated_at": _format_utc(generated_at or _now(roots)),
+        "entries": [dict(entry) for entry in entries],
+    }
+    payload["checksum"] = _sha256_label(_canonical_json_bytes(payload))
+    content = _canonical_json_bytes(payload, pretty=True)
+    _entries, evidence = _validate_readiness_index(
+        payload,
+        content=content,
+        index_uri=str(destination_uri),
+        roots=roots,
+        verify_external_references=True,
+        require_catalog_binding=True,
+    )
+    model_set = validate_readiness_registry_model_set(
+        list(_entries.values()),
+        registry_models,
+        sources=sources,
+    )
+    return _evidence_safe({**evidence, "model_set": model_set})
+
+
+def validate_readiness_registry_model_set(
+    entries: Sequence[Mapping[str, Any]],
+    registry_models: Sequence[Mapping[str, Any]],
+    *,
+    sources: Sequence[str] = READINESS_DERIVATION_SOURCES,
+) -> dict[str, Any]:
+    """Require one readiness identity per registry model and source."""
+
+    models = set(_registry_readiness_identities(registry_models))
+    normalized_sources = tuple(dict.fromkeys(normalize_source_id(str(source)) for source in sources))
+    actual_by_source: dict[str, list[tuple[str, str]]] = {source: [] for source in normalized_sources}
+    for index, entry in enumerate(entries):
+        try:
+            source_id = normalize_source_id(str(entry["source_id"]))
+            identity = (str(entry["model_id"]), str(entry["basin_id"]))
+        except (KeyError, TypeError, ValueError) as error:
+            raise SchedulerFileProviderError(
+                "readiness_registry_identity_invalid",
+                field=f"entries[{index}]",
+            ) from error
+        if source_id not in actual_by_source:
+            raise SchedulerFileProviderError(
+                "readiness_registry_source_set_mismatch",
+                field=f"entries[{index}].source_id",
+            )
+        actual_by_source[source_id].append(identity)
+    for source_id, identities in actual_by_source.items():
+        if len(identities) != len(set(identities)) or set(identities) != models:
+            raise SchedulerFileProviderError(
+                "readiness_registry_model_set_mismatch",
+                field="entries[].model_id",
+                evidence={
+                    "source_id": source_id,
+                    "expected_model_count": len(models),
+                    "actual_model_count": len(identities),
+                    "actual_unique_model_count": len(set(identities)),
+                },
+            )
+    expected_count = len(models) * len(normalized_sources)
+    if len(entries) != expected_count:
+        raise SchedulerFileProviderError(
+            "readiness_registry_entry_count_mismatch",
+            field="entries",
+            evidence={"expected_entry_count": expected_count, "actual_entry_count": len(entries)},
+        )
+    return {
+        "status": "matched",
+        "model_count": len(models),
+        "source_entry_counts": {
+            source: len(actual_by_source[source]) for source in normalized_sources
+        },
+    }
+
+
 def _validate_registry_manifest(
     payload: Mapping[str, Any],
     *,
@@ -704,6 +886,7 @@ def _validate_readiness_index(
     roots: _ProviderRoots,
     enforce_freshness: bool = True,
     verify_external_references: bool = False,
+    require_catalog_binding: bool = False,
 ) -> tuple[dict[tuple[str, str, str, str, str], dict[str, Any]], dict[str, Any]]:
     _require_schema(payload, CANONICAL_READINESS_INDEX_SCHEMA_VERSION, field="schema_version")
     generated_at = _require_fresh_generated_at(
@@ -729,6 +912,11 @@ def _validate_readiness_index(
         if not isinstance(item, Mapping):
             raise SchedulerFileProviderError("readiness_entry_not_object", field=f"entries[{index}]")
         entry = _normalize_readiness_entry(item, index=index, roots=roots)
+        if require_catalog_binding and not _has_complete_catalog_binding(entry):
+            raise SchedulerFileProviderError(
+                "readiness_catalog_binding_required",
+                field=f"entries[{index}].catalog_uri",
+            )
         total_products += len(entry.get("products") or [])
         object_count += int(entry.get("object_count") or 0)
         if total_products > MAX_READINESS_PRODUCT_ROWS:
@@ -850,6 +1038,247 @@ def _normalize_registry_model(item: Mapping[str, Any], *, index: int, roots: _Pr
     }
 
 
+def _registry_readiness_identities(
+    registry_models: Sequence[Mapping[str, Any]],
+) -> list[tuple[str, str]]:
+    if not registry_models:
+        raise SchedulerFileProviderError("readiness_registry_models_empty", field="registry.models")
+    if len(registry_models) > MAX_REGISTRY_MODELS:
+        raise SchedulerFileProviderError(
+            "registry_model_limit_exceeded",
+            field="registry.models",
+            evidence={"model_count": len(registry_models), "max_models": MAX_REGISTRY_MODELS},
+        )
+    identities: list[tuple[str, str]] = []
+    model_ids: set[str] = set()
+    for index, model in enumerate(registry_models):
+        if not isinstance(model, Mapping):
+            raise SchedulerFileProviderError("registry_model_not_object", field=f"registry.models[{index}]")
+        model_id = str(model.get("model_id") or "")
+        basin_id = str(model.get("basin_id") or "")
+        if not model_id or not basin_id:
+            raise SchedulerFileProviderError(
+                "readiness_registry_identity_invalid",
+                field=f"registry.models[{index}]",
+            )
+        if model_id in model_ids:
+            raise SchedulerFileProviderError(
+                "registry_duplicate_model_id",
+                field="registry.models[].model_id",
+                evidence={"model_id": model_id},
+            )
+        model_ids.add(model_id)
+        identities.append((model_id, basin_id))
+    return sorted(identities)
+
+
+def _latest_canonical_catalog_snapshot(
+    *,
+    source_id: str,
+    roots: _ProviderRoots,
+) -> dict[str, Any]:
+    object_store_root = roots.object_store_root
+    if object_store_root in (None, ""):
+        raise SchedulerFileProviderError("canonical_catalog_root_invalid", field="object_store_root")
+    store = LocalObjectStore(object_store_root, object_store_prefix=str(roots.object_store_prefix or ""))
+    source_root = Path(store.root) / "canonical" / source_id
+    try:
+        source_metadata = stat_no_follow(source_root, containment_root=Path(store.root))
+    except (FileNotFoundError, OSError, SafeFilesystemError) as error:
+        raise SchedulerFileProviderError(
+            "canonical_catalog_source_missing",
+            field="catalog.source_id",
+        ) from error
+    if not stat.S_ISDIR(source_metadata.st_mode):
+        raise SchedulerFileProviderError("canonical_catalog_source_invalid", field="catalog.source_id")
+    cycle_names: list[str] = []
+    scanned = 0
+    try:
+        with os.scandir(source_root) as candidates:
+            for candidate in candidates:
+                scanned += 1
+                if scanned > MAX_CANONICAL_CATALOG_CYCLE_DIRS:
+                    raise SchedulerFileProviderError(
+                        "canonical_catalog_cycle_limit_exceeded",
+                        field="catalog.cycles",
+                        evidence={"max_cycle_entries": MAX_CANONICAL_CATALOG_CYCLE_DIRS},
+                    )
+                metadata = candidate.stat(follow_symlinks=False)
+                if stat.S_ISLNK(metadata.st_mode):
+                    raise SchedulerFileProviderError(
+                        "canonical_catalog_scan_unsafe_entry",
+                        field="catalog.cycles",
+                    )
+                if _COMPACT_CYCLE_RE.fullmatch(candidate.name) and stat.S_ISDIR(metadata.st_mode):
+                    cycle_names.append(candidate.name)
+    except SchedulerFileProviderError:
+        raise
+    except OSError as error:
+        raise SchedulerFileProviderError("canonical_catalog_scan_failed", field="catalog.cycles") from error
+    if not cycle_names:
+        raise SchedulerFileProviderError("canonical_catalog_cycle_missing", field="catalog.cycles")
+    latest_cycle = max(cycle_names)
+    try:
+        cycle_time = parse_cycle_time(latest_cycle)
+    except ValueError as error:
+        raise SchedulerFileProviderError("canonical_catalog_cycle_invalid", field="catalog.cycle_time") from error
+    catalog_key = f"canonical/{source_id}/{latest_cycle}/_catalog/catalog.json"
+    catalog_uri = store.uri_for_key(catalog_key)
+    payload, content = _read_json_mapping(
+        catalog_uri,
+        roots=roots,
+        max_bytes=MAX_CANONICAL_PRODUCT_CATALOG_BYTES,
+    )
+    products_value = payload.get("products")
+    if not isinstance(products_value, Sequence) or isinstance(products_value, str | bytes | bytearray):
+        raise SchedulerFileProviderError("canonical_product_catalog_products_invalid", field="products")
+    if not products_value:
+        raise SchedulerFileProviderError("canonical_product_catalog_products_empty", field="products")
+    if len(products_value) > MAX_READINESS_PRODUCT_ROWS:
+        raise SchedulerFileProviderError(
+            "readiness_product_row_limit_exceeded",
+            field="products",
+            evidence={"product_row_count": len(products_value), "max_product_rows": MAX_READINESS_PRODUCT_ROWS},
+        )
+    policy_identity = _catalog_uniform_lineage_identity(
+        products_value,
+        keys=("policy_identity", "source_policy", "canonical_policy_identity"),
+        field="products[].lineage_json.policy_identity",
+    )
+    source_object_identity = _catalog_uniform_lineage_identity(
+        products_value,
+        keys=("source_object_identity", "source_identity", "object_identity"),
+        field="products[].lineage_json.source_object_identity",
+    )
+    canonical_product_id = f"canon_{source_id.lower()}_{latest_cycle}"
+    probe_entry = {
+        "source_id": source_id,
+        "cycle_time": _format_utc(cycle_time),
+        "canonical_product_id": canonical_product_id,
+        "policy_identity": policy_identity,
+        "source_object_identity": source_object_identity,
+    }
+    products = _normalize_catalog_products(
+        payload,
+        source_id=source_id,
+        cycle_time=cycle_time,
+        entry=probe_entry,
+        roots=roots,
+    )
+    forecast_hours = sorted({int(product["lead_time_hours"]) for product in products})
+    readiness = evaluate_canonical_readiness(
+        source_id=source_id,
+        cycle_time=cycle_time,
+        products=products,
+        forecast_hours=forecast_hours,
+        policy_identity=policy_identity,
+        source_object_identity=source_object_identity,
+        canonical_product_id=canonical_product_id,
+    )
+    if not readiness.ready:
+        raise SchedulerFileProviderError(
+            "canonical_product_catalog_incomplete",
+            field="products",
+            evidence={
+                "candidate_row_count": int(readiness.evidence.get("candidate_row_count") or 0),
+                "missing_lead_count": int(readiness.evidence.get("missing_lead_count") or 0),
+            },
+        )
+    return {
+        "source_id": source_id,
+        "cycle_time": _format_utc(cycle_time),
+        "canonical_product_id": canonical_product_id,
+        "forecast_hours": forecast_hours,
+        "policy_identity": policy_identity,
+        "source_object_identity": source_object_identity,
+        "catalog_uri": catalog_uri,
+        "catalog_sha256": _sha256_label(content),
+        "catalog_row_count": len(products),
+    }
+
+
+def _catalog_uniform_lineage_identity(
+    products: Sequence[Any],
+    *,
+    keys: Sequence[str],
+    field: str,
+) -> dict[str, Any]:
+    identities: dict[str, dict[str, Any]] = {}
+    for product in products:
+        if not isinstance(product, Mapping):
+            raise SchedulerFileProviderError("canonical_product_catalog_product_not_object", field="products[]")
+        lineage = product.get("lineage_json")
+        if not isinstance(lineage, Mapping):
+            raise SchedulerFileProviderError("canonical_product_catalog_lineage_invalid", field=field)
+        identity: dict[str, Any] = {}
+        for key in keys:
+            candidate = lineage.get(key)
+            if isinstance(candidate, Mapping) and candidate:
+                identity = dict(candidate)
+                break
+        if not identity:
+            raise SchedulerFileProviderError("canonical_product_catalog_lineage_missing", field=field)
+        identities[_stable_json(identity)] = identity
+        if len(identities) > 1:
+            raise SchedulerFileProviderError("canonical_product_catalog_lineage_mismatch", field=field)
+    return next(iter(identities.values()))
+
+
+def _normalize_catalog_binding(
+    row: Mapping[str, Any],
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    field: str,
+    roots: _ProviderRoots,
+) -> dict[str, Any]:
+    values = (row.get("catalog_uri"), row.get("catalog_sha256"), row.get("catalog_row_count"))
+    present = tuple(value not in (None, "") for value in values)
+    if not any(present):
+        return {}
+    if not all(present):
+        raise SchedulerFileProviderError("readiness_catalog_binding_incomplete", field=f"{field}.catalog_uri")
+    catalog_uri = str(values[0])
+    catalog_sha256 = str(values[1])
+    if not _SHA256_RE.fullmatch(catalog_sha256):
+        raise SchedulerFileProviderError("readiness_catalog_checksum_invalid", field=f"{field}.catalog_sha256")
+    row_count_value = values[2]
+    if isinstance(row_count_value, bool):
+        raise SchedulerFileProviderError("readiness_catalog_row_count_invalid", field=f"{field}.catalog_row_count")
+    try:
+        catalog_row_count = int(row_count_value)
+    except (TypeError, ValueError) as error:
+        raise SchedulerFileProviderError(
+            "readiness_catalog_row_count_invalid",
+            field=f"{field}.catalog_row_count",
+        ) from error
+    if catalog_row_count < 1 or catalog_row_count > MAX_READINESS_PRODUCT_ROWS:
+        raise SchedulerFileProviderError("readiness_catalog_row_count_invalid", field=f"{field}.catalog_row_count")
+    _require_supported_internal_reference(
+        catalog_uri,
+        roots=roots,
+        field=f"{field}.catalog_uri",
+        reason_prefix="readiness_catalog_uri",
+    )
+    store = _object_store_for(catalog_uri, roots)
+    expected_key = f"canonical/{source_id}/{format_cycle_time(cycle_time)}/_catalog/catalog.json"
+    try:
+        actual_key = store.normalize_key(catalog_uri)
+    except (ObjectStoreError, ValueError) as error:
+        raise SchedulerFileProviderError("readiness_catalog_uri_unsafe", field=f"{field}.catalog_uri") from error
+    if actual_key != expected_key:
+        raise SchedulerFileProviderError("readiness_catalog_identity_mismatch", field=f"{field}.catalog_uri")
+    return {
+        "catalog_uri": catalog_uri,
+        "catalog_sha256": f"sha256:{_checksum_value(catalog_sha256)}",
+        "catalog_row_count": catalog_row_count,
+    }
+
+
+def _has_complete_catalog_binding(entry: Mapping[str, Any]) -> bool:
+    return all(entry.get(field) not in (None, "") for field in ("catalog_uri", "catalog_sha256", "catalog_row_count"))
+
+
 def _normalize_readiness_entry(item: Mapping[str, Any], *, index: int, roots: _ProviderRoots) -> dict[str, Any]:
     row = dict(item)
     for field in ("source_id", "cycle_time", "model_id", "basin_id"):
@@ -866,6 +1295,13 @@ def _normalize_readiness_entry(item: Mapping[str, Any], *, index: int, roots: _P
     forecast_hours = _forecast_hours(row.get("forecast_hours"), field=f"entries[{index}].forecast_hours")
     policy_identity = _mapping(row.get("policy_identity") or row.get("source_policy"))
     source_object_identity = _mapping(row.get("source_object_identity") or row.get("object_identity"))
+    catalog_binding = _normalize_catalog_binding(
+        row,
+        source_id=source_id,
+        cycle_time=cycle_time,
+        field=f"entries[{index}]",
+        roots=roots,
+    )
     products_value = row.get("products")
     if not isinstance(products_value, Sequence) or isinstance(products_value, str | bytes | bytearray):
         raise SchedulerFileProviderError("readiness_products_invalid", field=f"entries[{index}].products")
@@ -901,6 +1337,7 @@ def _normalize_readiness_entry(item: Mapping[str, Any], *, index: int, roots: _P
         "forecast_hours": forecast_hours,
         "policy_identity": policy_identity,
         "source_object_identity": source_object_identity,
+        **catalog_binding,
         "products": products,
         "product_row_count": len(products),
         "object_count": object_count,
@@ -912,6 +1349,8 @@ def _readiness_entry_products(
     *,
     roots: _ProviderRoots,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if _has_complete_catalog_binding(entry):
+        return _readiness_products_from_catalog(entry, roots=roots)
     products = list(entry.get("products") or [])
     if products:
         return products, {"status": "not_needed", "source": "index", "product_row_count": len(products)}
@@ -929,7 +1368,12 @@ def _readiness_products_from_catalog(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     source_id = normalize_source_id(str(entry["source_id"]))
     cycle_time = parse_cycle_time(entry["cycle_time"])
-    catalog_uris = _canonical_product_catalog_uris(source_id=source_id, cycle_time=cycle_time, roots=roots)
+    bound_catalog_uri = entry.get("catalog_uri")
+    catalog_uris = (
+        [str(bound_catalog_uri)]
+        if bound_catalog_uri not in (None, "")
+        else _canonical_product_catalog_uris(source_id=source_id, cycle_time=cycle_time, roots=roots)
+    )
     missing_uris: list[str] = []
     for catalog_uri in catalog_uris:
         try:
@@ -939,10 +1383,17 @@ def _readiness_products_from_catalog(
                 max_bytes=MAX_CANONICAL_PRODUCT_CATALOG_BYTES,
             )
         except SchedulerFileProviderError as error:
-            if error.reason == "file_manifest_missing":
+            if error.reason == "file_manifest_missing" and bound_catalog_uri in (None, ""):
                 missing_uris.append(_uri_evidence(catalog_uri))
                 continue
             raise
+        if bound_catalog_uri not in (None, ""):
+            expected_sha256 = str(entry.get("catalog_sha256") or "")
+            if not _checksum_matches(expected_sha256, sha256_bytes(content)):
+                raise SchedulerFileProviderError(
+                    "readiness_catalog_checksum_mismatch",
+                    field="catalog_sha256",
+                )
         products = _normalize_catalog_products(
             payload,
             source_id=source_id,
@@ -950,13 +1401,24 @@ def _readiness_products_from_catalog(
             entry=entry,
             roots=roots,
         )
+        if bound_catalog_uri not in (None, "") and len(products) != int(entry.get("catalog_row_count", -1)):
+            raise SchedulerFileProviderError(
+                "readiness_catalog_row_count_mismatch",
+                field="catalog_row_count",
+                evidence={
+                    "expected_row_count": int(entry.get("catalog_row_count", -1)),
+                    "actual_row_count": len(products),
+                },
+            )
         return products, {
             "status": "ready",
             "source": "catalog",
             "schema_version": CANONICAL_PRODUCT_CATALOG_SCHEMA_VERSION,
             "catalog": _uri_evidence(catalog_uri),
             "catalog_bytes": len(content),
+            "catalog_sha256": _safe_checksum(_sha256_label(content)),
             "product_row_count": len(products),
+            "binding_verified": bound_catalog_uri not in (None, ""),
         }
     return [], {
         "status": "missing",
@@ -1070,7 +1532,7 @@ def _normalize_product_row(
         checksum,
         roots=roots,
         field=f"entries[{index}].products[{product_index}].object_uri",
-        max_bytes=MAX_READINESS_INDEX_BYTES,
+        max_bytes=MAX_CANONICAL_PRODUCT_OBJECT_BYTES,
         reason_prefix="readiness_product_object",
         allow_embedded_checksum=False,
     )
@@ -1235,15 +1697,13 @@ def load_canonical_readiness_entries_for_renewal(
         index_uri=str(index_uri),
         roots=roots,
         enforce_freshness=False,
+        require_catalog_binding=True,
     )
     for entry in _entries.values():
         products, _product_evidence = _readiness_entry_products(entry, roots=roots)
         if not products:
             raise SchedulerFileProviderError("readiness_renewal_products_missing", field="entries[].products")
-    payload_entries = payload.get("entries", payload.get("cycles"))
-    if not isinstance(payload_entries, Sequence) or isinstance(payload_entries, str | bytes | bytearray):
-        raise SchedulerFileProviderError("readiness_entries_invalid", field="entries")
-    return [dict(entry) for entry in payload_entries if isinstance(entry, Mapping)], evidence, preimage
+    return [dict(entry) for entry in _entries.values()], evidence, preimage
 
 
 def _object_store_for(uri: str, roots: _ProviderRoots) -> LocalObjectStore:
@@ -1320,6 +1780,31 @@ def _verify_referenced_checksum(
         ) from error
     if not exists:
         raise SchedulerFileProviderError(f"{reason_prefix}_missing", field=field)
+    if not allow_embedded_checksum:
+        try:
+            store = _object_store_for(uri, roots)
+            digest = hashlib.sha256()
+            size_bytes = 0
+            for chunk in store.iter_bytes(_object_key_for_uri(uri)):
+                size_bytes += len(chunk)
+                if size_bytes > max_bytes:
+                    raise SchedulerFileProviderError(
+                        f"{reason_prefix}_size_limit_exceeded",
+                        field=field,
+                        evidence={"max_bytes": max_bytes},
+                    )
+                digest.update(chunk)
+        except SchedulerFileProviderError:
+            raise
+        except (OSError, SafeFilesystemError, ObjectStoreError, ValueError) as error:
+            raise SchedulerFileProviderError(
+                f"{reason_prefix}_unreadable",
+                field=field,
+                evidence={"error_type": type(error).__name__},
+            ) from error
+        if not _checksum_matches(expected_checksum, digest.hexdigest()):
+            raise SchedulerFileProviderError(f"{reason_prefix}_checksum_mismatch", field=field)
+        return
     try:
         content = _read_bytes(uri, roots=roots, max_bytes=max_bytes)
     except FileNotFoundError as error:

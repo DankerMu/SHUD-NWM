@@ -209,10 +209,16 @@ install -d -m 0700 /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh \
 scripts/install_node22_scheduler_file_provider_refresh.sh --install
 ```
 
-部署窗口先 dry-run；它必须重新发现完整 Basins inventory，并让 stale readiness/state
-仅绕过年龄检查，继续校验 schema、payload checksum、identity、forecast hours、catalog、
-canonical object 和 checkpoint object。任何 missing/invalid 引用都在 canonical replace
-前失败，绝不生成空 index、DB fallback 或 timestamp-only 文件：
+部署窗口先 dry-run；它必须重新发现完整 Basins inventory。Readiness 不续签旧 index：
+在任何 canonical replace 前，用同次 prospective registry model identities 分别扫描 private
+`OBJECT_STORE_ROOT` 中最新的 GFS/IFS cycle catalog，执行 bounded/no-follow、schema、
+source/cycle、统一 lineage identity、forecast hours、catalog row、canonical object checksum
+全验证，并生成每个 source/model 一条只含 `catalog_uri + catalog_sha256 +
+catalog_row_count` 绑定的 entry（当前 13 models 时应为 GFS 13 + IFS 13）。最新 catalog
+invalid 时禁止回退旧 cycle；consumer identity mismatch 必须重读同一绑定 catalog 后重算。
+State index 才允许仅绕过年龄并重验 checkpoint object。任何 missing/invalid 引用或
+registry/readiness model-set mismatch 都在 canonical replace 前失败，绝不续签 legacy
+readiness、复制巨大 products、生成空 index、DB fallback 或 timestamp-only 文件：
 
 ```bash
 scripts/scheduler_file_provider_refresh_once.sh --dry-run
@@ -225,7 +231,8 @@ jq '{outcome,reason,database_free,providers,orphans}' \
 ```
 
 `published` receipt 必须绑定三个 canonical 文件的物理 SHA-256；registry 的现场模型数
-应为当前完整 inventory（2026-06-30 为 13），readiness/state entry 不能因刷新减少。
+应为当前完整 inventory（2026-06-30 为 13），readiness 必须与同次 registry model set
+逐 source 完全一致并记录 catalog URI/SHA/row count；state entry 不能因刷新减少。
 Installer 在任何 systemd mutation 前都会用同一 strict v1 runtime validator 读取 bounded/no-follow
 latest receipt，并逐一比对三个 shared provider 的当前 SHA-256；minimal、extra、symlink、oversize、
 stale、missing 或非 `published` receipt 均拒绝启用。

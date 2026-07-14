@@ -15,6 +15,7 @@ import jsonschema
 import pytest
 
 from packages.common import provider_atomic as provider_atomic_module
+from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.provider_atomic import (
     ProviderAtomicError,
     ProviderPreimage,
@@ -26,11 +27,18 @@ from packages.common.provider_atomic import (
 from packages.common.safe_fs import SafeFilesystemError
 from packages.common.state_manager import publish_state_snapshot_index
 from scripts import scheduler_file_provider_refresh as refresh
+from services.orchestrator import scheduler_file_providers as scheduler_file_providers_module
 from services.orchestrator.scheduler_file_providers import (
+    FileCanonicalReadinessProvider,
+    SchedulerFileProviderError,
     capture_scheduler_provider_preimage,
+    derive_catalog_bound_readiness_entries,
     publish_canonical_readiness_index,
     publish_scheduler_registry_manifest,
+    validate_catalog_bound_readiness_entries,
+    validate_readiness_registry_model_set,
 )
+from workers.canonical_converter.converter import required_standard_variables_for_source
 
 
 def _config(tmp_path: Path) -> refresh.RefreshConfig:
@@ -60,6 +68,297 @@ def _config(tmp_path: Path) -> refresh.RefreshConfig:
         emergency_root=emergency,
         refresh_lock=tmp_path / "private" / "refresh",
     )
+
+
+def _write_canonical_catalog(
+    object_root: Path,
+    *,
+    source_id: str,
+    cycle: str,
+    policy_identity: dict[str, object] | None = None,
+    source_object_identity: dict[str, object] | None = None,
+) -> tuple[str, dict[str, object], dict[str, object]]:
+    store = LocalObjectStore(object_root, object_store_prefix="s3://nhms")
+    policy = policy_identity or {"source": source_id, "cycle": cycle}
+    source_object = source_object_identity or {
+        "source": source_id,
+        "manifest_object_key": f"raw/{source_id}/{cycle}/manifest.json",
+    }
+    products = []
+    for variable in required_standard_variables_for_source(source_id):
+        key = f"canonical/{source_id}/{cycle}/{variable}/f003.dat"
+        content = f"{source_id}:{cycle}:{variable}:3".encode()
+        store.write_bytes_atomic(key, content)
+        products.append(
+            {
+                "canonical_product_id": f"{source_id}_{cycle}_{variable}_f003",
+                "source_id": source_id,
+                "cycle_time": f"{cycle[:4]}-{cycle[4:6]}-{cycle[6:8]}T{cycle[8:]}:00:00Z",
+                "valid_time": f"{cycle[:4]}-{cycle[4:6]}-{cycle[6:8]}T03:00:00Z",
+                "lead_time_hours": 3,
+                "variable": variable,
+                "object_uri": store.uri_for_key(key),
+                "checksum": f"sha256:{sha256_bytes(content)}",
+                "quality_flag": "ok",
+                "lineage_json": {
+                    "policy_identity": policy,
+                    "source_object_identity": source_object,
+                },
+            }
+        )
+    catalog_key = f"canonical/{source_id}/{cycle}/_catalog/catalog.json"
+    content = json.dumps(
+        {
+            "schema_version": "nhms.canonical.product_catalog.v1",
+            "source_id": source_id,
+            "cycle_time": f"{cycle[:4]}-{cycle[4:6]}-{cycle[6:8]}T{cycle[8:]}:00:00Z",
+            "products": products,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return store.write_bytes_atomic(catalog_key, content), policy, source_object
+
+
+def test_catalog_derivation_builds_two_sources_for_exact_registry_model_set(tmp_path: Path) -> None:
+    object_root = tmp_path / "private-objects"
+    _write_canonical_catalog(object_root, source_id="gfs", cycle="2026071400")
+    _write_canonical_catalog(object_root, source_id="IFS", cycle="2026071400")
+    models = [
+        {"model_id": f"model-{index:02d}", "basin_id": f"basin-{index:02d}"}
+        for index in range(13)
+    ]
+
+    entries, evidence = derive_catalog_bound_readiness_entries(
+        models,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+    )
+    validation = validate_catalog_bound_readiness_entries(
+        entries,
+        models,
+        destination_uri=tmp_path / "shared/scheduler/canonical-readiness/index-last.json",
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+    )
+
+    assert len(entries) == 26
+    assert evidence["model_set"]["source_entry_counts"] == {"gfs": 13, "IFS": 13}
+    assert validation["model_set"]["status"] == "matched"
+    assert all(entry["products"] == [] for entry in entries)
+    assert all(entry["catalog_uri"].startswith("s3://nhms/canonical/") for entry in entries)
+    assert all(entry["catalog_sha256"].startswith("sha256:") for entry in entries)
+    assert all(entry["catalog_row_count"] > 0 for entry in entries)
+
+
+def test_catalog_bound_consumer_recomputes_identity_and_detects_catalog_mutation(tmp_path: Path) -> None:
+    object_root = tmp_path / "private-objects"
+    catalog_uri, policy, source_object = _write_canonical_catalog(
+        object_root,
+        source_id="gfs",
+        cycle="2026071400",
+    )
+    _write_canonical_catalog(object_root, source_id="IFS", cycle="2026071400")
+    models = [{"model_id": "model-a", "basin_id": "basin-a"}]
+    entries, _evidence = derive_catalog_bound_readiness_entries(
+        models,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+    )
+    for readiness_entry in entries:
+        if readiness_entry["source_id"] == "gfs":
+            readiness_entry["policy_identity"] = {"source": "gfs", "cycle": "stale"}
+            readiness_entry["source_object_identity"] = {"manifest_object_key": "raw/gfs/stale/manifest.json"}
+    destination = tmp_path / "shared/scheduler/canonical-readiness/index-last.json"
+    publish_canonical_readiness_index(
+        entries,
+        destination,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        verify_external_references=True,
+    )
+    provider = FileCanonicalReadinessProvider(
+        destination,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+    )
+    entry = next(item for item in entries if item["source_id"] == "gfs")
+    recomputed = provider.canonical_readiness(
+        source_id="gfs",
+        cycle_time=refresh.datetime(2026, 7, 14, tzinfo=refresh.UTC),
+        forecast_hours=(3,),
+        policy_identity=policy,
+        source_object_identity=source_object,
+        canonical_product_id=str(entry["canonical_product_id"]),
+        model_id="model-a",
+        basin_id="basin-a",
+    )
+    assert recomputed["ready"] is True
+    assert recomputed["readiness_index"]["entry_status"] == "identity_mismatch_recomputed"
+
+    catalog_path = LocalObjectStore(object_root, "s3://nhms").resolve_path(catalog_uri)
+    catalog_path.write_bytes(catalog_path.read_bytes() + b"\n")
+    mutated_provider = FileCanonicalReadinessProvider(
+        destination,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+    )
+    blocked = mutated_provider.canonical_readiness(
+        source_id="gfs",
+        cycle_time=refresh.datetime(2026, 7, 14, tzinfo=refresh.UTC),
+        forecast_hours=(3,),
+        policy_identity=policy,
+        source_object_identity=source_object,
+        canonical_product_id=str(entry["canonical_product_id"]),
+        model_id="model-a",
+        basin_id="basin-a",
+    )
+    assert blocked["ready"] is False
+    assert blocked["reason"] == "canonical_readiness_index_identity_mismatch"
+    assert blocked["readiness_index"]["catalog"]["reason"] == "readiness_catalog_checksum_mismatch"
+
+
+def test_catalog_derivation_fails_closed_on_invalid_newest_cycle(tmp_path: Path) -> None:
+    object_root = tmp_path / "private-objects"
+    _write_canonical_catalog(object_root, source_id="gfs", cycle="2026071300")
+    _write_canonical_catalog(object_root, source_id="IFS", cycle="2026071400")
+    newest = object_root / "canonical/gfs/2026071400/_catalog"
+    newest.mkdir(parents=True)
+    (newest / "catalog.json").write_text("not-json", encoding="utf-8")
+
+    with pytest.raises(SchedulerFileProviderError) as error_info:
+        derive_catalog_bound_readiness_entries(
+            [{"model_id": "model-a", "basin_id": "basin-a"}],
+            object_store_root=object_root,
+            object_store_prefix="s3://nhms",
+        )
+
+    assert error_info.value.reason == "file_manifest_malformed_json"
+
+
+def test_precommit_validation_rejects_catalog_changed_after_derivation(tmp_path: Path) -> None:
+    object_root = tmp_path / "private-objects"
+    catalog_uri, _policy, _source_object = _write_canonical_catalog(
+        object_root,
+        source_id="gfs",
+        cycle="2026071400",
+    )
+    _write_canonical_catalog(object_root, source_id="IFS", cycle="2026071400")
+    models = [{"model_id": "model-a", "basin_id": "basin-a"}]
+    entries, _evidence = derive_catalog_bound_readiness_entries(
+        models,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+    )
+    store = LocalObjectStore(object_root, "s3://nhms")
+    catalog_path = store.resolve_path(catalog_uri)
+    catalog_path.write_bytes(catalog_path.read_bytes() + b"\n")
+
+    with pytest.raises(SchedulerFileProviderError) as error_info:
+        validate_catalog_bound_readiness_entries(
+            entries,
+            models,
+            destination_uri=tmp_path / "shared/scheduler/canonical-readiness/index-last.json",
+            object_store_root=object_root,
+            object_store_prefix="s3://nhms",
+        )
+
+    assert error_info.value.reason == "readiness_catalog_checksum_mismatch"
+
+
+def test_catalog_derivation_rejects_symlink_and_bounded_cycle_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    object_root = tmp_path / "private-objects"
+    _write_canonical_catalog(object_root, source_id="gfs", cycle="2026071400")
+    _write_canonical_catalog(object_root, source_id="IFS", cycle="2026071400")
+    (object_root / "canonical/gfs/unsafe").symlink_to(object_root / "canonical/gfs/2026071400")
+    models = [{"model_id": "model-a", "basin_id": "basin-a"}]
+    with pytest.raises(SchedulerFileProviderError) as symlink_error:
+        derive_catalog_bound_readiness_entries(
+            models,
+            object_store_root=object_root,
+            object_store_prefix="s3://nhms",
+        )
+    assert symlink_error.value.reason == "canonical_catalog_scan_unsafe_entry"
+
+    (object_root / "canonical/gfs/unsafe").unlink()
+    monkeypatch.setattr(scheduler_file_providers_module, "MAX_CANONICAL_CATALOG_CYCLE_DIRS", 1)
+    (object_root / "canonical/gfs/grid").mkdir()
+    with pytest.raises(SchedulerFileProviderError) as limit_error:
+        derive_catalog_bound_readiness_entries(
+            models,
+            object_store_root=object_root,
+            object_store_prefix="s3://nhms",
+        )
+    assert limit_error.value.reason == "canonical_catalog_cycle_limit_exceeded"
+
+
+def test_catalog_derivation_streams_objects_under_hard_size_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    object_root = tmp_path / "private-objects"
+    _write_canonical_catalog(object_root, source_id="gfs", cycle="2026071400")
+    _write_canonical_catalog(object_root, source_id="IFS", cycle="2026071400")
+    monkeypatch.setattr(scheduler_file_providers_module, "MAX_CANONICAL_PRODUCT_OBJECT_BYTES", 4)
+
+    with pytest.raises(SchedulerFileProviderError) as error_info:
+        derive_catalog_bound_readiness_entries(
+            [{"model_id": "model-a", "basin_id": "basin-a"}],
+            object_store_root=object_root,
+            object_store_prefix="s3://nhms",
+        )
+
+    assert error_info.value.reason == "readiness_product_object_size_limit_exceeded"
+
+
+def test_registry_readiness_cross_check_rejects_missing_model() -> None:
+    with pytest.raises(SchedulerFileProviderError) as error_info:
+        validate_readiness_registry_model_set(
+            [
+                {"source_id": source, "model_id": "model-a", "basin_id": "basin-a"}
+                for source in ("gfs", "IFS")
+            ],
+            [
+                {"model_id": "model-a", "basin_id": "basin-a"},
+                {"model_id": "model-b", "basin_id": "basin-b"},
+            ],
+        )
+    assert error_info.value.reason == "readiness_registry_model_set_mismatch"
+
+
+def test_legacy_readiness_entries_are_not_renewed(tmp_path: Path) -> None:
+    object_root = tmp_path / "private-objects"
+    destination = tmp_path / "shared/scheduler/canonical-readiness/index-last.json"
+    publish_canonical_readiness_index(
+        [
+            {
+                "source_id": "gfs",
+                "cycle_time": "2026-07-14T00:00:00Z",
+                "model_id": "model-a",
+                "basin_id": "basin-a",
+                "canonical_product_id": "canon_gfs_2026071400",
+                "forecast_hours": [3],
+                "policy_identity": {"source": "gfs"},
+                "source_object_identity": {"manifest": "legacy"},
+                "products": [],
+            }
+        ],
+        destination,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+    )
+
+    with pytest.raises(SchedulerFileProviderError) as error_info:
+        scheduler_file_providers_module.load_canonical_readiness_entries_for_renewal(
+            destination,
+            object_store_root=object_root,
+            object_store_prefix="s3://nhms",
+        )
+
+    assert error_info.value.reason == "readiness_catalog_binding_required"
 
 
 def _preimage(value: str = "old") -> ProviderPreimage:
@@ -141,9 +440,10 @@ def _stub_provider_pipeline(monkeypatch: pytest.MonkeyPatch, *, committed: bool 
     )
     monkeypatch.setattr(
         refresh,
-        "load_canonical_readiness_entries_for_renewal",
-        lambda *args, **kwargs: ([{"entry": "valid"}], {"checksum": "sha256:" + "b" * 64}, preimage),
+        "derive_catalog_bound_readiness_entries",
+        lambda *args, **kwargs: ([{"entry": "valid"}], {"status": "ready", "entry_count": 26}),
     )
+    monkeypatch.setattr(refresh, "validate_catalog_bound_readiness_entries", lambda *args, **kwargs: {})
 
     class Repository:
         def __init__(self, **kwargs: object) -> None:
@@ -153,16 +453,25 @@ def _stub_provider_pipeline(monkeypatch: pytest.MonkeyPatch, *, committed: bool 
             return ([{"entry": "valid"}], {"checksum": "sha256:" + "c" * 64}, preimage)
 
     monkeypatch.setattr(refresh, "FileStateSnapshotIndexRepository", Repository)
-    monkeypatch.setattr(
-        refresh,
-        "publish_all_basin_scheduler_registry",
-        lambda **kwargs: {
+    def publish_registry(**kwargs: object) -> dict[str, object]:
+        workspace = Path(str(kwargs["work_dir"]))
+        workspace.mkdir(parents=True, exist_ok=True)
+        kwargs["precommit_validator"](
+            workspace,
+            [],
+            [
+                {"model_id": f"model-{index}", "basin_id": f"basin-{index}"}
+                for index in range(13)
+            ],
+        )
+        return {
             "selected_model_count": 13,
             "registry": None
             if kwargs["dry_run"]
             else {"checksum": "sha256:" + "d" * 64, "model_count": 13},
-        },
-    )
+        }
+
+    monkeypatch.setattr(refresh, "publish_all_basin_scheduler_registry", publish_registry)
     monkeypatch.setattr(
         refresh,
         "publish_canonical_readiness_index",
@@ -198,6 +507,15 @@ def _seed_empty_provider_files(config: refresh.RefreshConfig) -> None:
         object_store_prefix=config.object_store_prefix,
         generated_at=generated,
     )
+
+
+def _stub_catalog_bound_derivation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        refresh,
+        "derive_catalog_bound_readiness_entries",
+        lambda *args, **kwargs: ([{"catalog_bound": True}], {"status": "ready", "entry_count": 1}),
+    )
+    monkeypatch.setattr(refresh, "validate_catalog_bound_readiness_entries", lambda *args, **kwargs: {})
 
 
 def test_provider_atomic_expected_preimage_preserves_concurrent_update(tmp_path: Path) -> None:
@@ -531,6 +849,7 @@ def test_refresh_dry_run_validates_three_providers_without_replacement(
     assert receipt["database_free"] is True
     assert [provider["name"] for provider in receipt["providers"]] == ["registry", "readiness", "state"]
     assert receipt["providers"][0]["entry_count"] == 13
+    assert receipt["providers"][1]["entry_count"] == 26
     assert all(provider["after_sha256"] == provider["before_sha256"] for provider in receipt["providers"])
     assert json.loads((config.receipt_root / "latest.json").read_text()) == receipt
     assert not list(config.emergency_root.iterdir())
@@ -555,7 +874,7 @@ def test_refresh_routes_shared_provider_and_private_reference_roots(
     def readiness(*args: object, **kwargs: object):
         del args
         seen["readiness"] = Path(str(kwargs["object_store_root"]))
-        return ([{"entry": "valid"}], {"checksum": "sha256:" + "b" * 64}, preimage)
+        return ([{"entry": "valid"}], {"status": "ready", "entry_count": 26})
 
     class Repository:
         def __init__(self, **kwargs: object) -> None:
@@ -566,10 +885,17 @@ def test_refresh_routes_shared_provider_and_private_reference_roots(
 
     def registry(**kwargs: object) -> dict[str, object]:
         seen["registry_publish"] = Path(str(kwargs["object_store_root"]))
+        workspace = Path(str(kwargs["work_dir"]))
+        workspace.mkdir(parents=True, exist_ok=True)
+        kwargs["precommit_validator"](
+            workspace,
+            [],
+            [{"model_id": "model-1", "basin_id": "basin-1"}],
+        )
         return {"selected_model_count": 13, "registry": None, "packages": []}
 
     monkeypatch.setattr(refresh, "capture_scheduler_provider_preimage", capture)
-    monkeypatch.setattr(refresh, "load_canonical_readiness_entries_for_renewal", readiness)
+    monkeypatch.setattr(refresh, "derive_catalog_bound_readiness_entries", readiness)
     monkeypatch.setattr(refresh, "FileStateSnapshotIndexRepository", Repository)
     monkeypatch.setattr(refresh, "publish_all_basin_scheduler_registry", registry)
 
@@ -590,9 +916,17 @@ def test_full_refresh_preserves_newer_authoritative_provider_on_snapshot_race(
 ) -> None:
     config = _config(tmp_path)
     _seed_empty_provider_files(config)
+    _stub_catalog_bound_derivation(monkeypatch)
     authoritative: dict[str, bytes] = {}
 
     def publish_registry(**kwargs: object) -> dict[str, object]:
+        workspace = Path(str(kwargs["work_dir"]))
+        workspace.mkdir(parents=True, exist_ok=True)
+        kwargs["precommit_validator"](
+            workspace,
+            [],
+            [{"model_id": "model-a", "basin_id": "basin-a"}],
+        )
         result = publish_scheduler_registry_manifest(
             [],
             kwargs["registry_manifest"],
@@ -603,11 +937,14 @@ def test_full_refresh_preserves_newer_authoritative_provider_on_snapshot_race(
         return {"selected_model_count": 0, "registry": result, "packages": []}
 
     monkeypatch.setattr(refresh, "publish_all_basin_scheduler_registry", publish_registry)
+    monkeypatch.setattr(
+        refresh,
+        "publish_canonical_readiness_index",
+        lambda _entries, destination, **kwargs: publish_canonical_readiness_index([], destination, **kwargs),
+    )
     if lane == "readiness":
-        real_loader = refresh.load_canonical_readiness_entries_for_renewal
-
-        def load_then_replace(*args: object, **kwargs: object):
-            snapshot = real_loader(*args, **kwargs)
+        def derive_then_replace(*args: object, **kwargs: object):
+            del args, kwargs
             publish_canonical_readiness_index(
                 [],
                 config.readiness_uri,
@@ -616,9 +953,9 @@ def test_full_refresh_preserves_newer_authoritative_provider_on_snapshot_race(
                 generated_at=refresh.datetime.now(refresh.UTC) + timedelta(seconds=1),
             )
             authoritative["bytes"] = Path(config.readiness_uri).read_bytes()
-            return snapshot
+            return ([{"catalog_bound": True}], {"status": "ready", "entry_count": 1})
 
-        monkeypatch.setattr(refresh, "load_canonical_readiness_entries_for_renewal", load_then_replace)
+        monkeypatch.setattr(refresh, "derive_catalog_bound_readiness_entries", derive_then_replace)
         destination = Path(config.readiness_uri)
     else:
         repository_type = refresh.FileStateSnapshotIndexRepository
@@ -651,9 +988,17 @@ def test_full_refresh_maps_public_postread_failure_to_restored_previous_receipt(
 ) -> None:
     config = _config(tmp_path)
     _seed_empty_provider_files(config)
+    _stub_catalog_bound_derivation(monkeypatch)
     readiness_before = Path(config.readiness_uri).read_bytes()
 
     def publish_registry(**kwargs: object) -> dict[str, object]:
+        workspace = Path(str(kwargs["work_dir"]))
+        workspace.mkdir(parents=True, exist_ok=True)
+        kwargs["precommit_validator"](
+            workspace,
+            [],
+            [{"model_id": "model-a", "basin_id": "basin-a"}],
+        )
         result = publish_scheduler_registry_manifest(
             [],
             kwargs["registry_manifest"],
@@ -664,6 +1009,11 @@ def test_full_refresh_maps_public_postread_failure_to_restored_previous_receipt(
         return {"selected_model_count": 0, "registry": result, "packages": []}
 
     monkeypatch.setattr(refresh, "publish_all_basin_scheduler_registry", publish_registry)
+    monkeypatch.setattr(
+        refresh,
+        "publish_canonical_readiness_index",
+        lambda _entries, destination, **kwargs: publish_canonical_readiness_index([], destination, **kwargs),
+    )
     real_capture = provider_atomic_module.capture_provider_preimage
     readiness_capture_count = 0
 
@@ -671,7 +1021,7 @@ def test_full_refresh_maps_public_postread_failure_to_restored_previous_receipt(
         nonlocal readiness_capture_count
         if Path(path) == Path(config.readiness_uri):
             readiness_capture_count += 1
-            if readiness_capture_count == 4:
+            if readiness_capture_count == 2:
                 raise SafeFilesystemError("injected readiness post-read failure")
         return real_capture(path, *args, **kwargs)
 

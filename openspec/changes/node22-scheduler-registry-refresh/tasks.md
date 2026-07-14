@@ -7,10 +7,12 @@
 - [x] 1.2 Reuse `publish_all_basin_scheduler_registry`; permit only bounded
   immutable content-addressed package orphan candidates before canonical commit
   and never auto-delete them.
-- [x] 1.3 Renew valid-except-age readiness entries through full
-  `_validate_readiness_index` catalog/object verification and state entries
-  through `FileStateSnapshotIndexRepository` object verification; invoke only
-  the existing readiness/state publishers and reject invalid/missing inputs.
+- [x] 1.3 Before any canonical commit, derive readiness from the newest bounded
+  no-follow private GFS/IFS catalogs plus the same prospective registry model
+  set; publish exactly one catalog URI/SHA/row-count-bound entry per source/model,
+  validate consumer recomputation and model-set parity, and reject invalid
+  newest catalogs without legacy/older fallback. Renew state entries through
+  `FileStateSnapshotIndexRepository` object verification.
 - [x] 1.4 Implement pre-commit stat/digest preservation, old-or-new atomic reader
   behavior, phase-specific replace/post-read/receipt outcomes, certain rollback,
   and bounded identity-safe temp cleanup.
@@ -49,10 +51,11 @@
   commit -> expected-preimage mismatch, new entries preserved, stable reason;
   prove full refresh entrypoints take one lock only and cannot deadlock across
   providers; state checkpoint copyback serializes on that same shared lock.
-- [x] 3.4 Input invalid readiness checksum/identity/forecast hours/catalog/object
-  and invalid state checkpoint -> prior bytes unchanged, stable closed reason,
-  no empty/timestamp-only/DB output; valid-except-age cases revalidate every
-  reference before renewal.
+- [x] 3.4 Input invalid newest readiness checksum/identity/forecast hours/
+  catalog/object, scan symlink/limit, registry model-set mismatch, catalog
+  mutation, and invalid state checkpoint -> prior bytes unchanged, stable
+  closed reason, no older/legacy/empty/timestamp-only/DB output; bound consumer
+  identity mismatch recomputes against the exact catalog.
 - [x] 3.5 Input relative/symlink/non-regular/uncontained paths, receipt/workspace
   over 1 MiB/64 GiB/250k/depth32, orphan count over 4,096, publisher/pre-replace/
   replace/fsync/post-read/primary-receipt failures and repeated success ->
@@ -77,7 +80,8 @@
 - [ ] 4.1 Capture frozen SHA plus three provider hashes/evidence, unit states,
   process DB-free proof and Slurm queue; deploy by ff-only pull.
 - [ ] 4.2 Install refresh units stopped; run dry-run and manual refresh. Record
-  old/new schema/checksum/generated_at, exact 13 models, readiness/state entries
+  old/new schema/checksum/generated_at, exact 13 models, GFS/IFS readiness
+  entries (expected 13 each) and catalog URI/SHA/row-count bindings, state entries
   and referenced-object proofs, v1 receipt, no-DB proof and identical node-22/
   node-27 NFS bytes.
 - [ ] 4.3 Prove renewal used full validation/publisher paths and rejects a

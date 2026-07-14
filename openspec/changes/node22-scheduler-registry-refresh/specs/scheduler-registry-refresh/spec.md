@@ -75,14 +75,32 @@ writers.
 The refresh lifecycle SHALL cover the registry, canonical-readiness index, and
 state index without a database fallback or timestamp-only edit.
 
-#### Scenario: Canonical readiness valid except age is renewed
+#### Scenario: Canonical readiness is rebuilt from current catalog truth
 
-- **WHEN** the bounded readiness payload is valid except `generated_at`
-- **THEN** the publisher bypasses only freshness while `_validate_readiness_index`
-  rechecks schema/checksum, source-cycle-model-basin-product identities,
-  forecast hours, catalog/object containment, existence, and checksums
-- **AND** only fully validated entries are passed to
-  `publish_canonical_readiness_index`.
+- **WHEN** the same-run prospective registry contains the bounded production
+  model set and private GFS/IFS canonical cycle directories are scanned
+- **THEN** the newest cycle catalog for each source is selected with bounded
+  no-follow discovery and fully validates schema, source/cycle, uniform lineage
+  identities, forecast hours, canonical completeness, object containment,
+  existence, and checksums
+- **AND** the publisher creates exactly one readiness entry per source and
+  prospective registry model, with empty inline products and exact
+  `catalog_uri`, `catalog_sha256`, and `catalog_row_count` binding
+- **AND** registry/readiness model sets are cross-checked before any canonical
+  provider commit and only fully validated entries are passed to
+  `publish_canonical_readiness_index`
+- **AND** an invalid newest catalog fails closed without older-catalog fallback
+  or legacy readiness-entry renewal.
+
+#### Scenario: Bound readiness consumer identity mismatch is recomputed
+
+- **WHEN** the caller's current policy/object identity differs from the cached
+  readiness entry identity
+- **THEN** the consumer re-reads the exact bound catalog and verifies URI,
+  checksum, row count, products, and object checksums before recomputing
+  canonical readiness against the caller identity
+- **AND** a changed catalog, unmatched lineage, or missing object fails closed;
+  cached identity alone never admits the candidate.
 
 #### Scenario: State index valid except age is renewed
 
@@ -105,9 +123,9 @@ state index without a database fallback or timestamp-only edit.
 
 #### Scenario: Invalid provider evidence is never renewed
 
-- **WHEN** an index is missing, malformed, over-limit, checksum/identity-invalid,
-  references a missing/mismatched object, or cannot reconstruct its bounded
-  entries
+- **WHEN** a newest readiness catalog or state index is missing, malformed,
+  symlinked, over-limit, checksum/identity-invalid, references a missing/
+  mismatched object, or cannot reconstruct its bounded entries
 - **THEN** refresh fails before scheduler admission and preserves prior bytes
 - **AND** it publishes no empty replacement, `generated_at`-only edit, stale
   acceptance, or DB-derived fallback.
@@ -220,8 +238,9 @@ Slurm evidence and produces new shared-NFS artifacts visible from node-27.
 
 - **WHEN** live preflight finds stale registry/readiness/state artifacts
 - **THEN** registry is rebuilt from `NHMS_BASINS_ROOT`, readiness entries are
-  revalidated through their catalogs/objects, and state entries through their
-  checkpoint objects using the specified publishers
+  rebuilt from the newest private GFS/IFS catalogs and that same registry model
+  set, and state entries are revalidated through checkpoint objects using the
+  specified publishers
 - **AND** before/after schema/checksum/generation/entry identity evidence proves
   no timestamp forgery or freshness relaxation.
 

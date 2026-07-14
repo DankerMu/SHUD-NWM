@@ -4,9 +4,10 @@ Issue #1076 was discovered while PR #1075 verified real writer ACL
 inheritance. Node-22 pass `scheduler_2026071403_b44ab3b785f4` proved its runtime
 DB-free, but the 13-model registry had not been republished since 2026-06-30
 and failed the intentional 168-hour limit. Canonical readiness is also expired;
-the state index has the same expiring-file lifecycle. Existing bounded entries
-and referenced objects are the renewal truth: a producer may bypass only age
-while rechecking every other invariant, then invoke the existing publisher.
+the state index has the same expiring-file lifecycle. State renewal uses its
+bounded entries and referenced checkpoints. Readiness is instead rebuilt from
+the newest private GFS/IFS canonical catalogs and the same prospective registry
+generation, so legacy cached readiness identities are never re-signed.
 
 Fixture level: expanded. Repair intensity: high. Project profile: NHMS.
 
@@ -59,15 +60,22 @@ claiming inode/mtime preservation. Replace uncertainty and receipt-only failure
 are non-zero indeterminate outcomes; the consumer still sees complete old/new
 bytes. Cleanup touches only certain current-run temp identities.
 
-### D4. Readiness and state renewal revalidate indexed truth
+### D4. Readiness is derived from current catalogs; state renews indexed truth
 
-The runner reads each bounded payload with schema/checksum/complexity/path
-checks and disables only age inside the publisher. Readiness entries pass
-`_validate_readiness_index` plus catalog/object identity/existence/checksum
-checks before `publish_canonical_readiness_index`. State entries are loaded by
+Before any canonical provider commit, the runner builds the prospective
+registry generation, finds the newest bounded no-follow GFS and IFS catalog
+under the private object root, and validates every catalog row, lineage
+identity, object checksum, forecast-hour set, and canonical completeness. It
+then creates exactly one readiness entry per source and prospective registry
+model, with products externalized behind `catalog_uri + catalog_sha256 +
+catalog_row_count`. The registry/readiness model sets must match exactly. An
+invalid newest catalog fails closed without falling back to an older cycle.
+Consumer identity mismatch recomputes against the still-bound catalog instead
+of trusting cached entry identity. State entries remain loaded by
 `FileStateSnapshotIndexRepository._load_index_snapshot` with freshness disabled
 and object verification enabled before `publish_state_snapshot_index`. Missing
-or semantically invalid input fails; no empty synthesis or DB fallback exists.
+or semantically invalid input fails; no legacy-readiness renewal, empty
+synthesis, huge product copy, or DB fallback exists.
 
 ### D5. Receipt/resource contract is fixed and bounded
 
@@ -135,8 +143,9 @@ enabled/active. Scheduler state and issue-owned jobs always restore.
 
 ## Invariant Matrix
 
-Governing invariant: no expiring scheduler provider is renewed unless its
-authoritative bounded content and every reference validate, and no registry
+Governing invariant: readiness is rebuilt only from the newest fully validated
+private catalogs and the same prospective registry model set; every other
+expiring provider is renewed only from validated bounded truth, and no registry
 writer replaces canonical bytes outside the one shared transaction lock.
 
 Source-of-truth identity/contract:
@@ -144,8 +153,9 @@ Source-of-truth identity/contract:
 - `/volume/nwm/Basins` ->
   `/ghdc/data/nwm/object-store/scheduler/registry/manifest-last.json` with 13
   model/package identities.
-- Validated canonical catalog/object entries ->
-  `scheduler/canonical-readiness/index-last.json`.
+- Newest validated private GFS/IFS catalog/object entries + the same prospective
+  registry model set -> catalog-bound
+  `scheduler/canonical-readiness/index-last.json` entries.
 - Validated checkpoint objects -> `scheduler/state-index/index-last.json`.
 
 Surfaces:
@@ -156,7 +166,8 @@ Surfaces:
   `publish_state_snapshot_index`.
 - Validators/preflight: runner path/env/receipt checks,
   `_validate_registry_manifest`, `_validate_readiness_index`,
-  `_validate_state_snapshot_index` with age-only producer bypass.
+  current-catalog derivation/model-set binding, and
+  `_validate_state_snapshot_index` with state-only age bypass.
 - Storage/cache/query: three exact NFS paths above; per-destination lock and
   expected preimage; private run workspace, primary receipt history/latest and
   separately preflighted/reserved local emergency receipt.
@@ -179,8 +190,9 @@ Surfaces:
 
 Regression rows:
 
-- Valid 13-model inventory + three valid-except-age provider inputs -> fully
-  revalidated atomic outputs and published receipt; new registry packages are
+- Valid 13-model inventory + newest valid GFS/IFS catalogs + valid-except-age
+  state input -> 26 catalog-bound readiness entries, fully revalidated atomic
+  outputs and published receipt; new registry packages are
   private-only, the canonical manifest is shared, and deleting a private
   package makes the unchanged scheduler consumer fail closed.
 - Any provider writer overlap -> destination lock + expected-preimage CAS; new
@@ -194,8 +206,9 @@ Regression rows:
   leak neither descriptor nor reserved slot.
 - Workspace >64 GiB/250k/depth32 or orphan candidates >4,096 -> fail before
   canonical commit; evidence contains first 256, total and truncation flag.
-- Invalid readiness/state reference -> no renewal, no DB/timestamp bypass,
-  scheduler stays fail closed.
+- Invalid latest readiness catalog/state reference -> no publication, older-
+  catalog fallback, legacy-readiness renewal, DB/timestamp bypass; scheduler
+  stays fail closed.
 - Private state checkpoint copyback -> shared checkpoint is durable and
   checksum-valid before the merged shared index becomes visible; copy failure
   preserves the old index and concurrent refresh loses no entry.
@@ -220,9 +233,9 @@ Regression rows:
   rollback/indeterminate, capped orphans/residue.
 - Evidence boundary: digest/generation/model/entry identity and pass/run/job/
   artifact chain.
-- Stale/idempotency: daily replay, valid-except-age renewal, concurrent
-  authoritative update/preimage change, repeated success, failed retry and
-  emergency-receipt reconstruction.
+- Stale/idempotency: daily catalog-bound readiness derivation, state age-only
+  renewal, concurrent authoritative update/preimage change, repeated success,
+  failed retry and emergency-receipt reconstruction.
 - Unchanged: manual publisher interface, consumer, node-27 ingest/display, #856.
 
 ## Risks / Trade-offs
@@ -252,6 +265,8 @@ Regression rows:
 
 ## Open Questions
 
-None. Existing validated index entries and their referenced objects are the
-renewal authority; inability to revalidate blocks instead of permitting empty,
-DB-derived, or timestamp-only output.
+None. The newest private GFS/IFS catalogs plus the same prospective registry
+model identities are readiness authority; state entries and checkpoints remain
+state renewal authority. Inability to validate either blocks instead of
+permitting an older catalog, legacy readiness renewal, empty, DB-derived, or
+timestamp-only output.

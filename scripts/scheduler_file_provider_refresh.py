@@ -43,8 +43,9 @@ from services.orchestrator.scheduler_file_providers import (
     MAX_REGISTRY_MANIFEST_BYTES,
     SchedulerFileProviderError,
     capture_scheduler_provider_preimage,
-    load_canonical_readiness_entries_for_renewal,
+    derive_catalog_bound_readiness_entries,
     publish_canonical_readiness_index,
+    validate_catalog_bound_readiness_entries,
 )
 
 SCHEMA_VERSION = "nhms.scheduler.file_provider_refresh_receipt.v1"
@@ -429,12 +430,16 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                 containment_root=config.provider_store_root,
                 max_bytes=MAX_REGISTRY_MANIFEST_BYTES,
             )
-            readiness_entries, readiness_before, readiness_preimage = (
-                load_canonical_readiness_entries_for_renewal(
-                    config.readiness_uri,
-                    object_store_root=config.object_store_root,
-                    object_store_prefix=config.object_store_prefix,
-                )
+            readiness_preimage = capture_scheduler_provider_preimage(
+                config.readiness_uri,
+                object_store_root=config.provider_store_root,
+                object_store_prefix=config.object_store_prefix,
+                max_bytes=MAX_READINESS_INDEX_BYTES,
+            )
+            readiness_before = _read_provider_header(
+                Path(config.readiness_uri),
+                containment_root=config.provider_store_root,
+                max_bytes=MAX_READINESS_INDEX_BYTES,
             )
             state_repository = FileStateSnapshotIndexRepository(
                 index_uri=config.state_uri,
@@ -442,6 +447,29 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                 object_store_prefix=config.object_store_prefix,
             )
             state_entries, state_before, state_preimage = state_repository.validated_entries_for_renewal()
+            readiness_entries: list[dict[str, Any]] = []
+            readiness_derivation: dict[str, Any] = {}
+
+            def precommit_provider_generation(
+                workspace: Path,
+                packages: Sequence[Mapping[str, Any]],
+                registry_models: Sequence[Mapping[str, Any]],
+            ) -> None:
+                nonlocal readiness_entries, readiness_derivation
+                _registry_precommit_gate(workspace, packages, registry_models)
+                readiness_entries, readiness_derivation = derive_catalog_bound_readiness_entries(
+                    registry_models,
+                    object_store_root=config.object_store_root,
+                    object_store_prefix=config.object_store_prefix,
+                )
+                validate_catalog_bound_readiness_entries(
+                    readiness_entries,
+                    registry_models,
+                    destination_uri=config.readiness_uri,
+                    object_store_root=config.object_store_root,
+                    object_store_prefix=config.object_store_prefix,
+                )
+
             registry_result = publish_all_basin_scheduler_registry(
                 basins_root=config.basins_root,
                 registry_manifest=config.registry_uri,
@@ -450,11 +478,13 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                 work_dir=run_workspace / "registry",
                 dry_run=dry_run,
                 expected_preimage=registry_preimage,
-                precommit_validator=_registry_precommit_gate,
+                precommit_validator=precommit_provider_generation,
                 resource_validator=_enforce_workspace_bounds,
                 workspace_budget=workspace_budget,
                 max_contexts=MAX_ORPHANS,
             )
+            if not readiness_entries or readiness_derivation.get("status") != "ready":
+                raise RefreshError("provider_invalid")
             _enforce_workspace_bounds(run_workspace)
             orphan_paths = sorted(
                 f"package:{hashlib.sha256(str(item.get('manifest_uri') or '').encode()).hexdigest()[:32]}"
@@ -475,7 +505,7 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                     "registry", {**registry_preimage.to_dict(), **registry_before}, registry_publish_evidence
                 ),
                 _provider_evidence(
-                    "readiness", {**readiness_preimage.to_dict(), **readiness_before}, readiness_before
+                    "readiness", {**readiness_preimage.to_dict(), **readiness_before}, readiness_derivation
                 ),
                 _provider_evidence("state", {**state_preimage.to_dict(), **state_before}, state_before),
             ]
@@ -1171,11 +1201,17 @@ def _enforce_workspace_bounds(root: Path) -> None:
     )
 
 
-def _registry_precommit_gate(workspace: Path, packages: Sequence[Mapping[str, Any]]) -> None:
+def _registry_precommit_gate(
+    workspace: Path,
+    packages: Sequence[Mapping[str, Any]],
+    registry_models: Sequence[Mapping[str, Any]],
+) -> None:
     orphan_items = [item for item in packages if item.get("status") == "published"]
     try:
         _enforce_workspace_bounds(workspace)
         if len(orphan_items) > MAX_ORPHANS:
+            raise RefreshError("orphan_limit_exceeded")
+        if not registry_models or len(registry_models) > MAX_ORPHANS:
             raise RefreshError("orphan_limit_exceeded")
     except RefreshError as error:
         raise SchedulerRegistryPublishError(
