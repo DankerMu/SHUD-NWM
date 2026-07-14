@@ -19,7 +19,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from packages.common.libpq_env import LIBPQ_CONNECTION_ENV_KEYS
-from packages.common.provider_atomic import ProviderAtomicError, provider_destination_lock
+from packages.common.provider_atomic import (
+    ProviderAtomicError,
+    ProviderPreimage,
+    atomic_replace_provider_bytes,
+    provider_destination_lock,
+)
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
@@ -45,6 +50,7 @@ from services.orchestrator.scheduler_file_providers import (
     capture_scheduler_provider_preimage,
     derive_catalog_bound_readiness_entries,
     publish_canonical_readiness_index,
+    publish_scheduler_registry_manifest,
     validate_catalog_bound_readiness_entries,
 )
 
@@ -358,6 +364,7 @@ class RefreshConfig:
     receipt_root: Path
     emergency_root: Path
     refresh_lock: Path
+    worker_registry_uri: str | None = None
 
     @classmethod
     def from_env(cls) -> RefreshConfig:
@@ -375,6 +382,7 @@ class RefreshConfig:
             receipt_root=_absolute_env_path("NHMS_SCHEDULER_PROVIDER_REFRESH_RECEIPT_ROOT"),
             emergency_root=_absolute_env_path("NHMS_SCHEDULER_PROVIDER_REFRESH_EMERGENCY_ROOT"),
             refresh_lock=_absolute_env_path("NHMS_SCHEDULER_PROVIDER_REFRESH_LOCK"),
+            worker_registry_uri=_required_env("NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST"),
         )
 
 
@@ -385,6 +393,101 @@ class EmergencySlot:
     file_fd: int
     device: int
     inode: int
+
+
+@dataclass(frozen=True)
+class _ProviderRollbackRecord:
+    name: str
+    path: Path
+    containment_root: Path
+    max_bytes: int
+    previous: bytes | None
+    committed: ProviderPreimage
+
+
+def _provider_failure_reason(error: Exception) -> str | None:
+    reason = getattr(error, "reason", None) or getattr(error, "error_code", None)
+    details = getattr(error, "details", {})
+    if isinstance(details, Mapping) and details.get("provider_reason"):
+        reason = details["provider_reason"]
+    return str(reason) if reason not in (None, "") else None
+
+
+def _tracked_provider_publish(
+    *,
+    name: str,
+    path: Path,
+    containment_root: Path,
+    max_bytes: int,
+    previous_preimage: ProviderPreimage,
+    previous: bytes | None,
+    rollback_stack: list[_ProviderRollbackRecord],
+    uncertainty: list[bool],
+    publisher: Callable[[Callable[[ProviderPreimage], None]], dict[str, Any]],
+) -> dict[str, Any]:
+    commit_token: ProviderPreimage | None = None
+
+    def observe_commit(value: ProviderPreimage) -> None:
+        nonlocal commit_token
+        observed = ProviderPreimage.from_value(value)
+        if not observed.exists or observed.sha256 is None:
+            uncertainty[0] = True
+            raise RefreshError("provider_replace_uncertain", outcome="replace_uncertain", phase="postcommit")
+        if commit_token is not None and commit_token != observed:
+            uncertainty[0] = True
+            raise RefreshError("provider_replace_uncertain", outcome="replace_uncertain", phase="postcommit")
+        commit_token = observed
+
+    try:
+        result = publisher(observe_commit)
+    except Exception as error:
+        # A typed expected-preimage conflict means this lane never committed.
+        # The current generation belongs to the concurrent authoritative writer
+        # and must never be enrolled in this transaction's rollback stack.
+        if _provider_failure_reason(error) == "provider_preimage_changed":
+            raise
+        try:
+            current = capture_scheduler_provider_preimage(
+                path,
+                object_store_root=containment_root,
+                max_bytes=max_bytes,
+            )
+        except (OSError, SafeFilesystemError, ProviderAtomicError, SchedulerFileProviderError) as capture_error:
+            uncertainty[0] = True
+            raise RefreshError(
+                "provider_replace_uncertain", outcome="replace_uncertain", phase="postcommit"
+            ) from capture_error
+        if commit_token is not None and current == commit_token:
+            rollback_stack.append(
+                _ProviderRollbackRecord(name, path, containment_root, max_bytes, previous, current)
+            )
+        elif current != previous_preimage:
+            # Without an exact postimage token ownership is unknowable.  A
+            # superseding generation is preserved and the transaction reports
+            # uncertainty instead of guessing that it owns those bytes.
+            uncertainty[0] = True
+        raise
+    if commit_token is None:
+        uncertainty[0] = True
+        raise RefreshError("provider_replace_uncertain", outcome="replace_uncertain", phase="postcommit")
+    try:
+        current = capture_scheduler_provider_preimage(
+            path,
+            object_store_root=containment_root,
+            max_bytes=max_bytes,
+        )
+    except (OSError, SafeFilesystemError, ProviderAtomicError, SchedulerFileProviderError) as capture_error:
+        uncertainty[0] = True
+        raise RefreshError(
+            "provider_replace_uncertain", outcome="replace_uncertain", phase="postcommit"
+        ) from capture_error
+    if current != commit_token:
+        uncertainty[0] = True
+        raise RefreshError("provider_replace_uncertain", outcome="replace_uncertain", phase="postcommit")
+    rollback_stack.append(
+        _ProviderRollbackRecord(name, path, containment_root, max_bytes, previous, commit_token)
+    )
+    return result
 
 
 def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) -> dict[str, Any]:
@@ -410,10 +513,47 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
         raise RefreshError("primary_receipt_failed", phase="receipt") from error
     receipt: dict[str, Any]
     committed: list[dict[str, Any]] = []
+    rollback_stack: list[_ProviderRollbackRecord] = []
+    transaction_uncertainty = [False]
     orphan_paths: list[str] = []
     orphan_total = 0
     orphan_discovered_total = 0
     orphan_attempted_total = 0
+
+    def rollback_receipt_if_needed(*, preserve_failure: bool = False) -> dict[str, Any] | None:
+        if not rollback_stack:
+            return None
+        restored = _rollback_provider_transaction(rollback_stack)
+        if restored and not transaction_uncertainty[0]:
+            rollback_stack.clear()
+            committed.clear()
+            if preserve_failure:
+                return None
+            return _receipt(
+                run_id=run_id,
+                started=started,
+                outcome="restored_previous",
+                reason="provider_postread_failed",
+                phase="postcommit",
+                providers=[],
+                orphan_paths=orphan_paths,
+                orphan_total=orphan_total,
+                orphan_discovered_total=orphan_discovered_total,
+                orphan_attempted_total=orphan_attempted_total,
+            )
+        return _receipt(
+            run_id=run_id,
+            started=started,
+            outcome="replace_uncertain",
+            reason="provider_replace_uncertain",
+            phase="postcommit",
+            providers=committed,
+            orphan_paths=orphan_paths,
+            orphan_total=orphan_total,
+            orphan_discovered_total=orphan_discovered_total,
+            orphan_attempted_total=orphan_attempted_total,
+        )
+
     try:
         with provider_destination_lock(config.refresh_lock, blocking=False):
             registry_preimage = capture_scheduler_provider_preimage(
@@ -422,6 +562,20 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                 object_store_prefix=config.object_store_prefix,
                 max_bytes=MAX_REGISTRY_MANIFEST_BYTES,
             )
+            registry_previous = (
+                read_bytes_limited_no_follow(
+                    Path(config.registry_uri),
+                    max_bytes=MAX_REGISTRY_MANIFEST_BYTES,
+                    containment_root=config.provider_store_root,
+                )
+                if config.worker_registry_uri is not None and registry_preimage.exists
+                else None
+            )
+            if (
+                registry_previous is not None
+                and hashlib.sha256(registry_previous).hexdigest() != registry_preimage.sha256
+            ):
+                raise RefreshError("provider_preimage_changed")
             # Registry renewal is rebuilt independently from Basins.  The
             # header is evidence only; the preimage captured first remains the
             # commit CAS, so a concurrent registry generation cannot be lost.
@@ -430,12 +584,53 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                 containment_root=config.provider_store_root,
                 max_bytes=MAX_REGISTRY_MANIFEST_BYTES,
             )
+            worker_registry_preimage: ProviderPreimage | None = None
+            worker_registry_before: dict[str, Any] = {}
+            worker_registry_previous: bytes | None = None
+            worker_registry_result: dict[str, Any] | None = None
+            worker_registry_committed: ProviderPreimage | None = None
+            if config.worker_registry_uri is not None:
+                worker_registry_preimage = capture_scheduler_provider_preimage(
+                    config.worker_registry_uri,
+                    object_store_root=config.object_store_root,
+                    object_store_prefix=config.object_store_prefix,
+                    max_bytes=MAX_REGISTRY_MANIFEST_BYTES,
+                )
+                if worker_registry_preimage.exists:
+                    worker_registry_previous = read_bytes_limited_no_follow(
+                        Path(config.worker_registry_uri),
+                        max_bytes=MAX_REGISTRY_MANIFEST_BYTES,
+                        containment_root=config.object_store_root,
+                    )
+                    if hashlib.sha256(worker_registry_previous).hexdigest() != worker_registry_preimage.sha256:
+                        raise RefreshError("provider_preimage_changed")
+                    worker_registry_before = _read_provider_header(
+                        Path(config.worker_registry_uri),
+                        containment_root=config.object_store_root,
+                        max_bytes=MAX_REGISTRY_MANIFEST_BYTES,
+                    )
+                if dry_run and worker_registry_preimage.sha256 != registry_preimage.sha256:
+                    raise RefreshError("provider_invalid")
             readiness_preimage = capture_scheduler_provider_preimage(
                 config.readiness_uri,
                 object_store_root=config.provider_store_root,
                 object_store_prefix=config.object_store_prefix,
                 max_bytes=MAX_READINESS_INDEX_BYTES,
             )
+            readiness_previous = (
+                read_bytes_limited_no_follow(
+                    Path(config.readiness_uri),
+                    max_bytes=MAX_READINESS_INDEX_BYTES,
+                    containment_root=config.provider_store_root,
+                )
+                if config.worker_registry_uri is not None and readiness_preimage.exists
+                else None
+            )
+            if (
+                readiness_previous is not None
+                and hashlib.sha256(readiness_previous).hexdigest() != readiness_preimage.sha256
+            ):
+                raise RefreshError("provider_preimage_changed")
             readiness_before = _read_provider_header(
                 Path(config.readiness_uri),
                 containment_root=config.provider_store_root,
@@ -447,8 +642,20 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                 object_store_prefix=config.object_store_prefix,
             )
             state_entries, state_before, state_preimage = state_repository.validated_entries_for_renewal()
+            state_previous = (
+                read_bytes_limited_no_follow(
+                    Path(config.state_uri),
+                    max_bytes=MAX_STATE_SNAPSHOT_INDEX_BYTES,
+                    containment_root=config.provider_store_root,
+                )
+                if config.worker_registry_uri is not None and state_preimage.exists
+                else None
+            )
+            if state_previous is not None and hashlib.sha256(state_previous).hexdigest() != state_preimage.sha256:
+                raise RefreshError("provider_preimage_changed")
             readiness_entries: list[dict[str, Any]] = []
             readiness_derivation: dict[str, Any] = {}
+            registry_generated_at = datetime.now(UTC)
 
             def precommit_provider_generation(
                 workspace: Path,
@@ -469,20 +676,62 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                     object_store_root=config.object_store_root,
                     object_store_prefix=config.object_store_prefix,
                 )
+                if not dry_run and config.worker_registry_uri is not None:
+                    nonlocal worker_registry_result, worker_registry_committed
+                    worker_registry_result = _tracked_provider_publish(
+                        name="registry_worker_mirror",
+                        path=Path(config.worker_registry_uri),
+                        containment_root=config.object_store_root,
+                        max_bytes=MAX_REGISTRY_MANIFEST_BYTES,
+                        previous_preimage=worker_registry_preimage or ProviderPreimage(False),
+                        previous=worker_registry_previous,
+                        rollback_stack=rollback_stack,
+                        uncertainty=transaction_uncertainty,
+                        publisher=lambda observe_commit: publish_scheduler_registry_manifest(
+                            registry_models,
+                            config.worker_registry_uri or "",
+                            object_store_root=config.object_store_root,
+                            object_store_prefix=config.object_store_prefix,
+                            generated_at=registry_generated_at,
+                            expected_preimage=worker_registry_preimage,
+                            commit_observer=observe_commit,
+                        ),
+                    )
+                    worker_registry_committed = rollback_stack[-1].committed
 
-            registry_result = publish_all_basin_scheduler_registry(
-                basins_root=config.basins_root,
-                registry_manifest=config.registry_uri,
-                object_store_root=config.object_store_root,
-                object_store_prefix=config.object_store_prefix,
-                work_dir=run_workspace / "registry",
-                dry_run=dry_run,
-                expected_preimage=registry_preimage,
-                precommit_validator=precommit_provider_generation,
-                resource_validator=_enforce_workspace_bounds,
-                workspace_budget=workspace_budget,
-                max_contexts=MAX_ORPHANS,
-            )
+            def publish_registry(
+                commit_observer: Callable[[ProviderPreimage], None] | None = None,
+            ) -> dict[str, Any]:
+                return publish_all_basin_scheduler_registry(
+                    basins_root=config.basins_root,
+                    registry_manifest=config.registry_uri,
+                    object_store_root=config.object_store_root,
+                    object_store_prefix=config.object_store_prefix,
+                    work_dir=run_workspace / "registry",
+                    dry_run=dry_run,
+                    expected_preimage=registry_preimage,
+                    registry_generated_at=registry_generated_at,
+                    registry_commit_observer=commit_observer,
+                    precommit_validator=precommit_provider_generation,
+                    resource_validator=_enforce_workspace_bounds,
+                    workspace_budget=workspace_budget,
+                    max_contexts=MAX_ORPHANS,
+                )
+
+            if not dry_run and config.worker_registry_uri is not None:
+                registry_result = _tracked_provider_publish(
+                    name="registry",
+                    path=Path(config.registry_uri),
+                    containment_root=config.provider_store_root,
+                    max_bytes=MAX_REGISTRY_MANIFEST_BYTES,
+                    previous_preimage=registry_preimage,
+                    previous=registry_previous,
+                    rollback_stack=rollback_stack,
+                    uncertainty=transaction_uncertainty,
+                    publisher=lambda observe_commit: publish_registry(observe_commit),
+                )
+            else:
+                registry_result = publish_registry()
             if not readiness_entries or readiness_derivation.get("status") != "ready":
                 raise RefreshError("provider_invalid")
             _enforce_workspace_bounds(run_workspace)
@@ -504,11 +753,24 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                 _provider_evidence(
                     "registry", {**registry_preimage.to_dict(), **registry_before}, registry_publish_evidence
                 ),
-                _provider_evidence(
-                    "readiness", {**readiness_preimage.to_dict(), **readiness_before}, readiness_derivation
-                ),
-                _provider_evidence("state", {**state_preimage.to_dict(), **state_before}, state_before),
             ]
+            if config.worker_registry_uri is not None:
+                worker_evidence = _provider_evidence(
+                    "registry_worker_mirror",
+                    {**(worker_registry_preimage or ProviderPreimage(False)).to_dict(), **worker_registry_before},
+                    worker_registry_result,
+                )
+                provider_evidence.append(worker_evidence)
+                if not dry_run and worker_evidence["after_sha256"] != provider_evidence[0]["after_sha256"]:
+                    raise RefreshError("provider_invalid", phase="postcommit")
+            provider_evidence.extend(
+                [
+                    _provider_evidence(
+                        "readiness", {**readiness_preimage.to_dict(), **readiness_before}, readiness_derivation
+                    ),
+                    _provider_evidence("state", {**state_preimage.to_dict(), **state_before}, state_before),
+                ]
+            )
             if dry_run:
                 for provider in provider_evidence:
                     provider["after_sha256"] = provider["before_sha256"]
@@ -517,29 +779,75 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                     provider["after_payload_checksum"] = provider["before_payload_checksum"]
             if not dry_run:
                 committed.append(provider_evidence[0])
-                readiness_result = publish_canonical_readiness_index(
-                    readiness_entries,
-                    config.readiness_uri,
-                    object_store_root=config.object_store_root,
-                    object_store_prefix=config.object_store_prefix,
-                    expected_preimage=readiness_preimage,
-                    verify_external_references=True,
+                provider_offset = 1
+                if config.worker_registry_uri is not None:
+                    committed.append(provider_evidence[1])
+                    provider_offset = 2
+
+                def publish_readiness(
+                    commit_observer: Callable[[ProviderPreimage], None] | None = None,
+                ) -> dict[str, Any]:
+                    return publish_canonical_readiness_index(
+                        readiness_entries,
+                        config.readiness_uri,
+                        object_store_root=config.object_store_root,
+                        object_store_prefix=config.object_store_prefix,
+                        expected_preimage=readiness_preimage,
+                        verify_external_references=True,
+                        commit_observer=commit_observer,
+                    )
+
+                readiness_result = (
+                    _tracked_provider_publish(
+                        name="readiness",
+                        path=Path(config.readiness_uri),
+                        containment_root=config.provider_store_root,
+                        max_bytes=MAX_READINESS_INDEX_BYTES,
+                        previous_preimage=readiness_preimage,
+                        previous=readiness_previous,
+                        rollback_stack=rollback_stack,
+                        uncertainty=transaction_uncertainty,
+                        publisher=lambda observe_commit: publish_readiness(observe_commit),
+                    )
+                    if config.worker_registry_uri is not None
+                    else publish_readiness()
                 )
-                provider_evidence[1] = _provider_evidence(
+                provider_evidence[provider_offset] = _provider_evidence(
                     "readiness", {**readiness_preimage.to_dict(), **readiness_before}, readiness_result
                 )
-                committed.append(provider_evidence[1])
-                state_result = publish_state_snapshot_index(
-                    state_entries,
-                    config.state_uri,
-                    object_store_root=config.object_store_root,
-                    object_store_prefix=config.object_store_prefix,
-                    expected_preimage=state_preimage,
+                committed.append(provider_evidence[provider_offset])
+
+                def publish_state(
+                    commit_observer: Callable[[ProviderPreimage], None] | None = None,
+                ) -> dict[str, Any]:
+                    return publish_state_snapshot_index(
+                        state_entries,
+                        config.state_uri,
+                        object_store_root=config.object_store_root,
+                        object_store_prefix=config.object_store_prefix,
+                        expected_preimage=state_preimage,
+                        commit_observer=commit_observer,
+                    )
+
+                state_result = (
+                    _tracked_provider_publish(
+                        name="state",
+                        path=Path(config.state_uri),
+                        containment_root=config.provider_store_root,
+                        max_bytes=MAX_STATE_SNAPSHOT_INDEX_BYTES,
+                        previous_preimage=state_preimage,
+                        previous=state_previous,
+                        rollback_stack=rollback_stack,
+                        uncertainty=transaction_uncertainty,
+                        publisher=lambda observe_commit: publish_state(observe_commit),
+                    )
+                    if config.worker_registry_uri is not None
+                    else publish_state()
                 )
-                provider_evidence[2] = _provider_evidence(
+                provider_evidence[provider_offset + 1] = _provider_evidence(
                     "state", {**state_preimage.to_dict(), **state_before}, state_result
                 )
-                committed.append(provider_evidence[2])
+                committed.append(provider_evidence[provider_offset + 1])
             receipt = _receipt(
                 run_id=run_id,
                 started=started,
@@ -553,11 +861,20 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                 orphan_attempted_total=orphan_attempted_total,
             )
     except ProviderAtomicError as error:
-        receipt = _receipt(
+        rollback_receipt = rollback_receipt_if_needed(
+            preserve_failure=error.reason == "provider_preimage_changed"
+        )
+        receipt = rollback_receipt or _receipt(
             run_id=run_id,
             started=started,
             outcome="already_running" if error.reason == "provider_already_running" else "failed",
-            reason="refresh_already_running" if error.reason == "provider_already_running" else "provider_invalid",
+            reason=(
+                "refresh_already_running"
+                if error.reason == "provider_already_running"
+                else error.reason
+                if error.reason == "provider_preimage_changed"
+                else "provider_invalid"
+            ),
             phase=error.phase,
             providers=committed,
         )
@@ -591,28 +908,35 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
         detail_phase = details.get("provider_phase") if isinstance(details, Mapping) else None
         phase = str(getattr(error, "phase", None) or evidence_phase or detail_phase or "precommit")
         outcome = str(getattr(error, "outcome", "failed"))
-        if reason == "provider_preimage_changed":
-            reason = "provider_preimage_changed"
-        elif reason == "provider_restored_previous":
-            outcome, reason = "restored_previous", "provider_postread_failed"
-        elif reason == "provider_replace_uncertain":
-            outcome, reason = "replace_uncertain", "provider_replace_uncertain"
-        elif reason not in REASONS:
-            reason = "provider_invalid"
-        receipt = _receipt(
-            run_id=run_id,
-            started=started,
-            outcome=outcome,
-            reason=reason,
-            phase=phase,
-            providers=committed,
-            orphan_paths=orphan_paths,
-            orphan_total=orphan_total,
-            orphan_discovered_total=orphan_discovered_total,
-            orphan_attempted_total=orphan_attempted_total,
+        rollback_receipt = rollback_receipt_if_needed(
+            preserve_failure=reason == "provider_preimage_changed"
         )
+        if rollback_receipt is not None:
+            receipt = rollback_receipt
+        elif reason == "provider_preimage_changed":
+            reason = "provider_preimage_changed"
+        if rollback_receipt is None and reason == "provider_restored_previous":
+            outcome, reason = "restored_previous", "provider_postread_failed"
+        elif rollback_receipt is None and reason == "provider_replace_uncertain":
+            outcome, reason = "replace_uncertain", "provider_replace_uncertain"
+        elif rollback_receipt is None and reason not in REASONS:
+            reason = "provider_invalid"
+        if rollback_receipt is None:
+            receipt = _receipt(
+                run_id=run_id,
+                started=started,
+                outcome=outcome,
+                reason=reason,
+                phase=phase,
+                providers=committed,
+                orphan_paths=orphan_paths,
+                orphan_total=orphan_total,
+                orphan_discovered_total=orphan_discovered_total,
+                orphan_attempted_total=orphan_attempted_total,
+            )
     except Exception:
-        receipt = _receipt(
+        rollback_receipt = rollback_receipt_if_needed()
+        receipt = rollback_receipt or _receipt(
             run_id=run_id,
             started=started,
             outcome="failed",
@@ -632,7 +956,7 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
         emergency_slot = None
     except (OSError, SafeFilesystemError, ValueError, ProviderAtomicError):
         if committed or receipt.get("outcome") == "replace_uncertain":
-            if committed:
+            if committed and receipt.get("outcome") == "published":
                 receipt = {
                     **receipt,
                     "outcome": "published_receipt_failed",
@@ -669,18 +993,25 @@ def reconstruct_primary_receipt(config: RefreshConfig, emergency_path: Path) -> 
         raise RefreshError("emergency_record_invalid") from error
     if receipt.get("outcome") != "published_receipt_failed":
         raise RefreshError("emergency_record_invalid")
+    provider_uris = {
+        "registry": (config.registry_uri, config.provider_store_root),
+        "readiness": (config.readiness_uri, config.provider_store_root),
+        "state": (config.state_uri, config.provider_store_root),
+    }
+    if config.worker_registry_uri is not None:
+        provider_uris["registry_worker_mirror"] = (
+            config.worker_registry_uri,
+            config.object_store_root,
+        )
     for provider in receipt.get("providers", []):
-        uri = {
-            "registry": config.registry_uri,
-            "readiness": config.readiness_uri,
-            "state": config.state_uri,
-        }.get(provider.get("name"))
+        binding = provider_uris.get(provider.get("name"))
         expected = provider.get("after_sha256")
-        if uri is None or not expected:
+        if binding is None or not expected:
             raise RefreshError("emergency_record_invalid")
+        uri, containment_root = binding
         current = capture_scheduler_provider_preimage(
             uri,
-            object_store_root=config.provider_store_root,
+            object_store_root=containment_root,
             object_store_prefix=config.object_store_prefix,
             max_bytes=MAX_READINESS_INDEX_BYTES,
         )
@@ -702,27 +1033,46 @@ def validate_current_receipt(config: RefreshConfig, receipt_path: Path) -> dict[
         raise RefreshError("emergency_record_invalid", phase="receipt") from error
     if receipt.get("outcome") != "published":
         raise RefreshError("emergency_record_invalid", phase="receipt")
-    provider_contract = (
-        ("registry", config.registry_uri, MAX_REGISTRY_MANIFEST_BYTES),
-        ("readiness", config.readiness_uri, MAX_READINESS_INDEX_BYTES),
-        ("state", config.state_uri, MAX_STATE_SNAPSHOT_INDEX_BYTES),
+    provider_contract = [("registry", config.registry_uri, config.provider_store_root, MAX_REGISTRY_MANIFEST_BYTES)]
+    if config.worker_registry_uri is not None:
+        provider_contract.append(
+            (
+                "registry_worker_mirror",
+                config.worker_registry_uri,
+                config.object_store_root,
+                MAX_REGISTRY_MANIFEST_BYTES,
+            )
+        )
+    provider_contract.extend(
+        [
+            ("readiness", config.readiness_uri, config.provider_store_root, MAX_READINESS_INDEX_BYTES),
+            ("state", config.state_uri, config.provider_store_root, MAX_STATE_SNAPSHOT_INDEX_BYTES),
+        ]
     )
     providers = receipt.get("providers")
     if not isinstance(providers, list) or len(providers) != len(provider_contract):
         raise RefreshError("emergency_record_invalid", phase="receipt")
-    for provider, (name, uri, max_bytes) in zip(providers, provider_contract, strict=True):
+    for provider, (name, uri, containment_root, max_bytes) in zip(providers, provider_contract, strict=True):
         if provider.get("name") != name:
             raise RefreshError("emergency_record_invalid", phase="receipt")
         try:
             current = capture_scheduler_provider_preimage(
                 uri,
-                object_store_root=config.provider_store_root,
+                object_store_root=containment_root,
                 object_store_prefix=config.object_store_prefix,
                 max_bytes=max_bytes,
             )
         except SchedulerFileProviderError as error:
             raise RefreshError("emergency_record_invalid", phase="receipt") from error
         if not current.exists or current.sha256 != provider.get("after_sha256"):
+            raise RefreshError("emergency_record_invalid", phase="receipt")
+    if config.worker_registry_uri is not None:
+        registry_evidence = providers[0]
+        mirror_evidence = providers[1]
+        if (
+            registry_evidence.get("after_sha256") != mirror_evidence.get("after_sha256")
+            or registry_evidence.get("entry_count") != mirror_evidence.get("entry_count")
+        ):
             raise RefreshError("emergency_record_invalid", phase="receipt")
     return receipt
 
@@ -751,8 +1101,93 @@ def _preflight_config(config: RefreshConfig) -> None:
             provider_path.relative_to(config.provider_store_root)
         except ValueError as error:
             raise RefreshError("configuration_invalid") from error
+    if config.worker_registry_uri is not None:
+        worker_registry_path = Path(config.worker_registry_uri).expanduser()
+        if not worker_registry_path.is_absolute() or worker_registry_path == Path(config.registry_uri):
+            raise RefreshError("configuration_invalid")
+        try:
+            worker_registry_path.relative_to(config.object_store_root)
+        except ValueError as error:
+            raise RefreshError("configuration_invalid") from error
     if not config.object_store_prefix.startswith("s3://"):
         raise RefreshError("configuration_invalid")
+
+
+def _restore_worker_registry_mirror(
+    config: RefreshConfig,
+    *,
+    previous: bytes | None,
+    expected_current: ProviderPreimage,
+) -> None:
+    if config.worker_registry_uri is None:
+        raise RefreshError("provider_invalid", outcome="replace_uncertain", phase="postcommit")
+    _restore_provider_path(
+        Path(config.worker_registry_uri),
+        containment_root=config.object_store_root,
+        max_bytes=MAX_REGISTRY_MANIFEST_BYTES,
+        previous=previous,
+        expected_current=expected_current,
+    )
+
+
+def _restore_provider_path(
+    path: Path,
+    *,
+    containment_root: Path,
+    max_bytes: int,
+    previous: bytes | None,
+    expected_current: ProviderPreimage,
+) -> None:
+    try:
+        if previous is not None:
+            atomic_replace_provider_bytes(
+                path,
+                previous,
+                containment_root=containment_root,
+                max_bytes=max_bytes,
+                expected_preimage=expected_current,
+            )
+            return
+        with provider_destination_lock(path, containment_root=containment_root, blocking=False):
+            current = capture_scheduler_provider_preimage(
+                path,
+                object_store_root=containment_root,
+                max_bytes=max_bytes,
+            )
+            if current != expected_current:
+                raise ProviderAtomicError("provider_preimage_changed", phase="postcommit")
+            parent_fd = open_directory_no_follow(path.parent, containment_root=containment_root)
+            try:
+                os.unlink(path.name, dir_fd=parent_fd)
+                os.fsync(parent_fd)
+            finally:
+                os.close(parent_fd)
+    except (OSError, SafeFilesystemError, ProviderAtomicError, SchedulerFileProviderError) as error:
+        raise RefreshError("provider_replace_uncertain", outcome="replace_uncertain", phase="postcommit") from error
+
+
+def _rollback_provider_transaction(records: Sequence[_ProviderRollbackRecord]) -> bool:
+    uncertain = False
+    for record in reversed(records):
+        try:
+            _restore_provider_path(
+                record.path,
+                containment_root=record.containment_root,
+                max_bytes=record.max_bytes,
+                previous=record.previous,
+                expected_current=record.committed,
+            )
+            restored = capture_scheduler_provider_preimage(
+                record.path,
+                object_store_root=record.containment_root,
+                max_bytes=record.max_bytes,
+            )
+            expected_sha = hashlib.sha256(record.previous).hexdigest() if record.previous is not None else None
+            if restored.exists != (record.previous is not None) or restored.sha256 != expected_sha:
+                uncertain = True
+        except (OSError, RefreshError, ProviderAtomicError, SchedulerFileProviderError):
+            uncertain = True
+    return not uncertain
 
 
 def _ensure_private_directory(path: Path) -> None:
@@ -1061,7 +1496,7 @@ def _validate_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("receipt_provider_invalid")
         name = str(provider.get("name") or "")
         names.append(name)
-        if name not in {"registry", "readiness", "state"}:
+        if name not in {"registry", "registry_worker_mirror", "readiness", "state"}:
             raise ValueError("receipt_provider_invalid")
         for field in ("before_sha256", "after_sha256"):
             value = provider.get(field)
@@ -1096,8 +1531,19 @@ def _validate_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("receipt_provider_invalid")
     if len(names) != len(set(names)):
         raise ValueError("receipt_provider_invalid")
-    if receipt.get("outcome") in {"dry_run", "published"} and names != ["registry", "readiness", "state"]:
+    if receipt.get("outcome") in {"dry_run", "published"} and names not in (
+        ["registry", "readiness", "state"],
+        ["registry", "registry_worker_mirror", "readiness", "state"],
+    ):
         raise ValueError("receipt_provider_invalid")
+    if names == ["registry", "registry_worker_mirror", "readiness", "state"]:
+        registry_provider = providers[0]
+        mirror_provider = providers[1]
+        if receipt.get("outcome") in {"dry_run", "published"} and (
+            registry_provider.get("after_sha256") != mirror_provider.get("after_sha256")
+            or registry_provider.get("entry_count") != mirror_provider.get("entry_count")
+        ):
+            raise ValueError("receipt_provider_invalid")
     if not isinstance(residues, list) or len(residues) > MAX_RESIDUES:
         raise ValueError("receipt_residue_limit")
     if any(

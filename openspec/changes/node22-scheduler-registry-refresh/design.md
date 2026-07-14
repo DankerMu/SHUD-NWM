@@ -59,6 +59,16 @@ recomputes the expected identity before writing, so source mutation after
 version planning fails closed instead of publishing conflicting bytes under an
 old version.
 
+The registry has one additional compute-plane binding: the shared-NFS
+canonical manifest read by the scheduler and the private compute-visible
+manifest read by Slurm workers are one generation, not independent providers.
+Refresh publishes the worker mirror first and the shared canonical manifest
+last from the same prospective rows and `generated_at`, requires identical
+content SHA/model count, and restores the mirror by committed-preimage CAS if
+the shared commit fails. A stage manifest compares the two complete byte
+generations and fails closed with `SCHEDULER_REGISTRY_MIRROR_MISMATCH`; it never
+submits work against a stale mirror.
+
 ### D3. Publication failure semantics follow the commit phase
 
 Before replace, the complete old stat/digest tuple is invariant. Atomic replace
@@ -67,6 +77,18 @@ restore captured validated previous bytes (`restored_previous`) without
 claiming inode/mtime preservation. Replace uncertainty and receipt-only failure
 are non-zero indeterminate outcomes; the consumer still sees complete old/new
 bytes. Cleanup touches only certain current-run temp identities.
+All four publication lanes form one rollback transaction: worker registry
+mirror, shared registry, readiness, then state. A later-lane failure captures
+the exact postimage returned by each successful atomic replace as its commit
+token and restores owned lanes in reverse order by committed-preimage CAS. A
+typed expected-preimage conflict never supplies a token and never enrolls the
+concurrent authoritative generation in rollback; earlier owned lanes restore
+and the original `provider_preimage_changed` remains the receipt reason. An
+unknown write-after exception without a matching token is not guessed as owned
+and reports `replace_uncertain`. Only complete restoration clears committed
+evidence and reports `restored_previous`; any capture, CAS, or restore conflict
+reports `replace_uncertain`, which receipt failure handling must not relabel as
+`published_receipt_failed`.
 
 ### D4. Readiness is derived from current catalogs; state renews indexed truth
 
@@ -98,6 +120,9 @@ fsynced with `published_receipt_failed` and committed digests; recovery rebuilds
 latest/history without republishing data. Journal is diagnostic only. If both
 primary and the reserved slot fail, the outcome is `replace_uncertain` and
 direct provider validation is required.
+The provider evidence list additionally binds `registry_worker_mirror` whenever
+the required Slurm override is configured; success/current validation requires
+its SHA and model count to equal the canonical registry evidence.
 
 ### D6. Live proof follows actual stage topology
 
@@ -106,6 +131,9 @@ requires terminal accounting and genuinely new forcing/runs/states leaves;
 reused forcing is not evidence. Node-27 observes the same NFS identities and
 ACLs. On failure the new refresh units roll back; on success its timer remains
 enabled/active. Scheduler state and issue-owned jobs always restore.
+The refresh unit runs only while the scheduler service is inactive and orders
+before a concurrently requested scheduler start, so a pre-existing stage job
+cannot observe the mirror transition.
 
 ## Risk Packs Considered
 
@@ -184,6 +212,8 @@ Surfaces:
   canonical provider files, while node-22 private object storage holds registry
   packages and resolves every `s3://nhms` catalog/checkpoint reference consumed by compute.
   Neither root substitutes for the other and object verification stays enabled.
+  The private root also holds the explicit Slurm registry mirror; it is
+  generation-identical to the shared registry and is receipt/runtime gated.
 - Public entrypoints: manual publisher CLI, refresh CLI/wrapper,
   `nhms-scheduler-file-provider-refresh.service/.timer`,
   `ProductionScheduler.from_env()`.
@@ -192,8 +222,9 @@ Surfaces:
 - Failure/rollback/stale state: `provider_preimage_changed`, pre-commit failure,
   replace uncertainty, restored old bytes, primary/emergency receipt failure,
   contention, provider invalidity, capped/truncated package orphans, temp
-  residue, unit/job restore.
-- Evidence: v1 refresh receipt with three before/after digests; scheduler pass
+  residue, worker-mirror mismatch/rollback, unit/job restore.
+- Evidence: v1 refresh receipt with three canonical before/after digests plus
+  worker registry mirror binding; scheduler pass
   JSON; `squeue/sacct`; pass/candidate/run/stage-job map; three leaf identities;
   node-27 ACL/access output.
 
@@ -214,6 +245,9 @@ Regression rows:
   emergency record or becomes replace-uncertain. Reservation file+parent fsync
   precedes provider side effects; zero/short write and file/parent fsync faults
   leak neither descriptor nor reserved slot.
+- Readiness/state failure after registry publication -> reverse-order rollback
+  of every changed lane; all old bytes plus `restored_previous`, or explicit
+  `replace_uncertain` on any committed-preimage conflict.
 - Workspace >64 GiB/250k/depth32 or orphan candidates >4,096 -> fail before
   canonical commit; evidence contains first 256, total and truncation flag.
 - Invalid latest readiness catalog/state reference -> no publication, older-

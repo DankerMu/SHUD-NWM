@@ -56,6 +56,20 @@ writers.
 - **AND** writers acquire only one destination lock at a time, so the runner
   needs no multi-lock ordering and cannot deadlock across three providers.
 
+#### Scenario: Concurrent authoritative generation is never rollback-owned
+
+- **WHEN** any worker-mirror, shared-registry, readiness, or state publisher
+  reports a typed expected-preimage conflict after an authoritative writer
+  installs a newer generation
+- **THEN** that lane supplies no transaction commit token and is excluded from
+  rollback
+- **AND** every earlier lane whose atomic postimage token still matches is
+  restored in reverse order
+- **AND** the concurrent bytes remain unchanged and the receipt reports
+  `failed/provider_preimage_changed`
+- **AND** an unknown write-after exception without a matching atomic postimage
+  token reports `replace_uncertain` instead of guessing rollback ownership.
+
 #### Scenario: Pre-commit failure preserves canonical identity
 
 - **WHEN** configuration, discovery, package/reference validation, staging, or

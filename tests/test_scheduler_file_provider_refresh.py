@@ -377,13 +377,14 @@ def _preimage(value: str = "old") -> ProviderPreimage:
 
 def _write_current_published_receipt(config: refresh.RefreshConfig) -> tuple[Path, dict[str, object]]:
     providers = []
-    for name, uri in (
-        ("registry", config.registry_uri),
-        ("readiness", config.readiness_uri),
-        ("state", config.state_uri),
-    ):
+    provider_paths = [("registry", config.registry_uri)]
+    if config.worker_registry_uri is not None:
+        provider_paths.append(("registry_worker_mirror", config.worker_registry_uri))
+    provider_paths.extend((("readiness", config.readiness_uri), ("state", config.state_uri)))
+    for name, uri in provider_paths:
         path = Path(uri)
-        path.write_text(name + "\n", encoding="utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("registry\n" if name == "registry_worker_mirror" else name + "\n", encoding="utf-8")
         preimage = capture_scheduler_provider_preimage(path)
         providers.append(
             {
@@ -415,18 +416,12 @@ def _write_current_published_receipt(config: refresh.RefreshConfig) -> tuple[Pat
 
 def _stub_provider_pipeline(monkeypatch: pytest.MonkeyPatch, *, committed: bool = True) -> None:
     del committed
-    preimage = _preimage("a")
-    registry_calls = 0
+    preimage = ProviderPreimage(exists=False)
 
     def capture(uri: str, *args: object, **kwargs: object) -> ProviderPreimage:
-        nonlocal registry_calls
         del args, kwargs
-        if "registry" in str(uri):
-            registry_calls += 1
-            return preimage if registry_calls == 1 else _preimage("d")
-        if "canonical-readiness" in str(uri):
-            return _preimage("e")
-        return _preimage("f")
+        del uri
+        return preimage
 
     monkeypatch.setattr(refresh, "capture_scheduler_provider_preimage", capture)
     monkeypatch.setattr(
@@ -918,6 +913,336 @@ def test_refresh_routes_shared_provider_and_private_reference_roots(
     assert seen["state"] == config.object_store_root
 
 
+def test_refresh_commits_identical_worker_registry_generation_and_binds_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, _old, paths = _tracked_transaction_fixture(tmp_path, monkeypatch, fail_lane="")
+
+    receipt = refresh.refresh_scheduler_file_providers(config, dry_run=False)
+
+    assert receipt["outcome"] == "published"
+    assert [provider["name"] for provider in receipt["providers"]] == [
+        "registry",
+        "registry_worker_mirror",
+        "readiness",
+        "state",
+    ]
+    assert receipt["providers"][0]["after_sha256"] == receipt["providers"][1]["after_sha256"]
+    assert receipt["providers"][0]["entry_count"] == receipt["providers"][1]["entry_count"] == 13
+    assert paths["registry"].read_bytes() == paths["registry_worker_mirror"].read_bytes()
+
+
+def test_refresh_dry_run_rejects_existing_worker_registry_generation_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = replace(
+        _config(tmp_path),
+        worker_registry_uri=str(tmp_path / "objects/scheduler/worker-registry/manifest-last.json"),
+    )
+    shared = Path(config.registry_uri)
+    worker = Path(config.worker_registry_uri)
+    shared.write_text('{"generation":"new-20-model"}\n')
+    worker.parent.mkdir(parents=True)
+    worker.write_text('{"generation":"old-13-model"}\n')
+    _stub_provider_pipeline(monkeypatch)
+    monkeypatch.setattr(refresh, "capture_scheduler_provider_preimage", capture_scheduler_provider_preimage)
+
+    receipt = refresh.refresh_scheduler_file_providers(config, dry_run=True)
+
+    assert receipt["outcome"] == "failed"
+    assert receipt["reason"] == "provider_invalid"
+
+
+def test_worker_registry_restore_uses_committed_preimage_and_restores_exact_bytes(tmp_path: Path) -> None:
+    config = replace(
+        _config(tmp_path),
+        worker_registry_uri=str(tmp_path / "objects/scheduler/registry/manifest-last.json"),
+    )
+    worker = Path(config.worker_registry_uri)
+    worker.parent.mkdir(parents=True, exist_ok=True)
+    worker.write_bytes(b"old-generation")
+    before = capture_scheduler_provider_preimage(worker)
+    committed = atomic_replace_provider_bytes(
+        worker,
+        b"prospective-generation",
+        containment_root=config.object_store_root,
+        max_bytes=refresh.MAX_REGISTRY_MANIFEST_BYTES,
+        expected_preimage=before,
+    )
+
+    refresh._restore_worker_registry_mirror(config, previous=b"old-generation", expected_current=committed)
+
+    assert worker.read_bytes() == b"old-generation"
+
+
+def test_refresh_rolls_back_worker_mirror_when_shared_registry_commit_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, old, paths = _tracked_transaction_fixture(tmp_path, monkeypatch, fail_lane="registry")
+
+    receipt = refresh.refresh_scheduler_file_providers(config, dry_run=False)
+
+    assert receipt["outcome"] == "restored_previous"
+    assert {name: path.read_bytes() for name, path in paths.items()} == old
+
+
+def _tracked_transaction_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fail_lane: str,
+    conflict_lane: str = "",
+    unowned_lane: str = "",
+) -> tuple[refresh.RefreshConfig, dict[str, bytes], dict[str, Path]]:
+    config = replace(
+        _config(tmp_path),
+        worker_registry_uri=str(tmp_path / "objects/scheduler/worker-registry/manifest-last.json"),
+    )
+    paths = {
+        "registry": Path(config.registry_uri),
+        "registry_worker_mirror": Path(config.worker_registry_uri),
+        "readiness": Path(config.readiness_uri),
+        "state": Path(config.state_uri),
+    }
+    old = {
+        "registry": b"old-registry-generation",
+        "registry_worker_mirror": b"old-registry-generation",
+        "readiness": b"old-readiness-generation",
+        "state": b"old-state-generation",
+    }
+    for name, path in paths.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(old[name])
+    _stub_provider_pipeline(monkeypatch)
+    monkeypatch.setattr(refresh, "capture_scheduler_provider_preimage", capture_scheduler_provider_preimage)
+
+    class Repository:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def validated_entries_for_renewal(self):
+            return (
+                [{"entry": "valid"}],
+                {"checksum": "sha256:" + "c" * 64},
+                capture_scheduler_provider_preimage(paths["state"]),
+            )
+
+    def replace_bytes(
+        name: str,
+        content: bytes,
+        expected: ProviderPreimage,
+        commit_observer: object,
+    ) -> dict[str, object]:
+        if conflict_lane == name:
+            atomic_replace_provider_bytes(
+                paths[name],
+                f"concurrent-authoritative-{name}".encode(),
+                containment_root=(
+                    config.object_store_root
+                    if name == "registry_worker_mirror"
+                    else config.provider_store_root
+                ),
+                max_bytes=refresh.MAX_READINESS_INDEX_BYTES,
+                expected_preimage=expected,
+            )
+            raise ProviderAtomicError("provider_preimage_changed", phase="precommit")
+        committed = atomic_replace_provider_bytes(
+            paths[name],
+            content,
+            containment_root=(
+                config.object_store_root
+                if name == "registry_worker_mirror"
+                else config.provider_store_root
+            ),
+            max_bytes=refresh.MAX_READINESS_INDEX_BYTES,
+            expected_preimage=expected,
+        )
+        result = {
+            "content_sha256": committed.sha256,
+            "checksum": "sha256:" + "1" * 64,
+            "generated_at": "2026-07-14T02:00:00Z",
+            "model_count": 13,
+        }
+        if name in {"readiness", "state"}:
+            result["entry_count"] = 1
+        if unowned_lane != name:
+            assert callable(commit_observer)
+            commit_observer(committed)
+        if fail_lane == name:
+            raise refresh.RefreshError("provider_invalid", phase="postcommit")
+        if unowned_lane == name:
+            raise refresh.RefreshError("provider_invalid", phase="postcommit")
+        return result
+
+    def publish_mirror(*args: object, **kwargs: object) -> dict[str, object]:
+        del args
+        return replace_bytes(
+            "registry_worker_mirror",
+            b"new-registry-generation",
+            ProviderPreimage.from_value(kwargs["expected_preimage"]),
+            kwargs.get("commit_observer"),
+        )
+
+    def publish_registry(**kwargs: object) -> dict[str, object]:
+        workspace = Path(str(kwargs["work_dir"]))
+        workspace.mkdir(parents=True, exist_ok=True)
+        kwargs["precommit_validator"](
+            workspace,
+            [],
+            [{"model_id": "model-a", "basin_id": "basin-a"}],
+        )
+        evidence = replace_bytes(
+            "registry",
+            b"new-registry-generation",
+            ProviderPreimage.from_value(kwargs["expected_preimage"]),
+            kwargs.get("registry_commit_observer"),
+        )
+        return {
+            "selected_model_count": 13,
+            "registry": evidence,
+            "packages": [],
+        }
+
+    def publish_readiness(*args: object, **kwargs: object) -> dict[str, object]:
+        del args
+        return replace_bytes(
+            "readiness",
+            b"new-readiness-generation",
+            ProviderPreimage.from_value(kwargs["expected_preimage"]),
+            kwargs.get("commit_observer"),
+        )
+
+    def publish_state(*args: object, **kwargs: object) -> dict[str, object]:
+        del args
+        return replace_bytes(
+            "state",
+            b"new-state-generation",
+            ProviderPreimage.from_value(kwargs["expected_preimage"]),
+            kwargs.get("commit_observer"),
+        )
+
+    monkeypatch.setattr(refresh, "FileStateSnapshotIndexRepository", Repository)
+    monkeypatch.setattr(refresh, "publish_scheduler_registry_manifest", publish_mirror)
+    monkeypatch.setattr(refresh, "publish_all_basin_scheduler_registry", publish_registry)
+    monkeypatch.setattr(refresh, "publish_canonical_readiness_index", publish_readiness)
+    monkeypatch.setattr(refresh, "publish_state_snapshot_index", publish_state)
+    return config, old, paths
+
+
+def test_readiness_failure_rolls_back_registry_mirror_and_readiness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, old, paths = _tracked_transaction_fixture(tmp_path, monkeypatch, fail_lane="readiness")
+
+    receipt = refresh.refresh_scheduler_file_providers(config, dry_run=False)
+
+    assert receipt["outcome"] == "restored_previous"
+    assert receipt["providers"] == []
+    assert {name: path.read_bytes() for name, path in paths.items()} == old
+    assert not list(config.emergency_root.iterdir())
+
+
+def test_state_failure_rolls_back_all_four_provider_lanes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, old, paths = _tracked_transaction_fixture(tmp_path, monkeypatch, fail_lane="state")
+    original_restore = refresh._restore_provider_path
+    rollback_order: list[Path] = []
+
+    def record_restore(path: Path, **kwargs: object) -> None:
+        rollback_order.append(path)
+        original_restore(path, **kwargs)
+
+    monkeypatch.setattr(refresh, "_restore_provider_path", record_restore)
+
+    receipt = refresh.refresh_scheduler_file_providers(config, dry_run=False)
+
+    assert receipt["outcome"] == "restored_previous"
+    assert receipt["providers"] == []
+    assert {name: path.read_bytes() for name, path in paths.items()} == old
+    assert rollback_order == [
+        paths["state"],
+        paths["readiness"],
+        paths["registry"],
+        paths["registry_worker_mirror"],
+    ]
+
+
+def test_rollback_cas_conflict_is_uncertain_and_never_relabelled_as_receipt_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, old, paths = _tracked_transaction_fixture(tmp_path, monkeypatch, fail_lane="state")
+    original_restore = refresh._restore_provider_path
+
+    def conflict_readiness(path: Path, **kwargs: object) -> None:
+        if path == paths["readiness"]:
+            path.write_bytes(b"concurrent-authoritative-readiness")
+        original_restore(path, **kwargs)
+
+    monkeypatch.setattr(refresh, "_restore_provider_path", conflict_readiness)
+    monkeypatch.setattr(refresh, "_publish_primary_receipt", lambda *args: (_ for _ in ()).throw(OSError()))
+
+    receipt = refresh.refresh_scheduler_file_providers(config, dry_run=False)
+
+    assert receipt["outcome"] == "replace_uncertain"
+    assert receipt["reason"] == "provider_replace_uncertain"
+    assert paths["registry"].read_bytes() == old["registry"]
+    assert paths["registry_worker_mirror"].read_bytes() == old["registry_worker_mirror"]
+    assert paths["state"].read_bytes() == old["state"]
+    assert paths["readiness"].read_bytes() == b"concurrent-authoritative-readiness"
+    emergency = list(config.emergency_root.iterdir())
+    assert len(emergency) == 1
+    assert json.loads(emergency[0].read_text())["outcome"] == "replace_uncertain"
+
+
+@pytest.mark.parametrize(
+    "lane",
+    ["registry_worker_mirror", "registry", "readiness", "state"],
+)
+def test_typed_preimage_conflict_preserves_authoritative_lane_and_restores_earlier_lanes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lane: str,
+) -> None:
+    config, old, paths = _tracked_transaction_fixture(
+        tmp_path,
+        monkeypatch,
+        fail_lane="",
+        conflict_lane=lane,
+    )
+
+    receipt = refresh.refresh_scheduler_file_providers(config, dry_run=False)
+
+    assert receipt["outcome"] == "failed"
+    assert receipt["reason"] == "provider_preimage_changed"
+    assert receipt["providers"] == []
+    assert paths[lane].read_bytes() == f"concurrent-authoritative-{lane}".encode()
+    assert {name: path.read_bytes() for name, path in paths.items() if name != lane} == {
+        name: content for name, content in old.items() if name != lane
+    }
+
+
+def test_generic_write_after_exception_without_commit_token_is_uncertain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, old, paths = _tracked_transaction_fixture(
+        tmp_path,
+        monkeypatch,
+        fail_lane="",
+        unowned_lane="state",
+    )
+
+    receipt = refresh.refresh_scheduler_file_providers(config, dry_run=False)
+
+    assert receipt["outcome"] == "replace_uncertain"
+    assert receipt["reason"] == "provider_replace_uncertain"
+    assert paths["state"].read_bytes() == b"new-state-generation"
+    assert paths["registry"].read_bytes() == old["registry"]
+    assert paths["registry_worker_mirror"].read_bytes() == old["registry_worker_mirror"]
+    assert paths["readiness"].read_bytes() == old["readiness"]
+
+
 @pytest.mark.parametrize("lane", ["readiness", "state"])
 def test_full_refresh_preserves_newer_authoritative_provider_on_snapshot_race(
     tmp_path: Path,
@@ -1215,6 +1540,32 @@ def test_current_receipt_validation_rejects_untrusted_or_stale_evidence(tmp_path
         refresh.validate_current_receipt(config, receipt_path)
 
 
+def test_current_receipt_validation_rejects_worker_registry_generation_mismatch(tmp_path: Path) -> None:
+    config = replace(
+        _config(tmp_path),
+        worker_registry_uri=str(tmp_path / "objects/scheduler/worker-registry/manifest-last.json"),
+    )
+    receipt_path, receipt = _write_current_published_receipt(config)
+    shared = Path(config.registry_uri)
+    worker = Path(config.worker_registry_uri)
+    worker.write_bytes(shared.read_bytes())
+    shared_preimage = capture_scheduler_provider_preimage(shared)
+    worker_preimage = capture_scheduler_provider_preimage(worker)
+    for provider in receipt["providers"]:
+        if provider["name"] == "registry":
+            provider["after_sha256"] = shared_preimage.sha256
+        elif provider["name"] == "registry_worker_mirror":
+            provider["after_sha256"] = worker_preimage.sha256
+    receipt_path.write_bytes(refresh._receipt_bytes(receipt))
+    assert refresh.validate_current_receipt(config, receipt_path) == receipt
+
+    worker.write_text("stale-worker-generation\n")
+    with pytest.raises(refresh.RefreshError) as error_info:
+        refresh.validate_current_receipt(config, receipt_path)
+
+    assert error_info.value.reason == "emergency_record_invalid"
+
+
 def test_receipt_bounds_reject_long_strings_and_unknown_outcomes() -> None:
     receipt = refresh._receipt(
         run_id="run",
@@ -1285,6 +1636,7 @@ def test_receipt_schema_and_runtime_reject_same_expressible_negative_corpus() ->
         phase="complete",
         providers=[
             provider,
+            {**provider, "name": "registry_worker_mirror"},
             {**provider, "name": "readiness"},
             {**provider, "name": "state"},
         ],
@@ -1724,6 +2076,7 @@ def test_config_rejects_database_or_relative_runtime_paths(
     names = {
         "NHMS_BASINS_ROOT": str(tmp_path / "Basins"),
         "NHMS_SCHEDULER_REGISTRY_MANIFEST": str(tmp_path / "registry.json"),
+        "NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST": str(tmp_path / "objects/worker-registry.json"),
         "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX": str(tmp_path / "readiness.json"),
         "NHMS_SCHEDULER_STATE_INDEX": str(tmp_path / "state.json"),
         "OBJECT_STORE_ROOT": str(tmp_path / "objects"),
@@ -1760,7 +2113,12 @@ def test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent() -
     assert "RandomizedDelaySec=30m" in timer
     assert "UnsetEnvironment=DATABASE_URL PIPELINE_DATABASE_URL" in service
     assert "PGPASSWORD" in service and "PGSSLROOTCERT" in service
-    assert "nhms-compute-scheduler" not in service + timer
+    assert "Before=nhms-compute-scheduler.service" in service
+    assert (
+        "ExecCondition=/bin/sh -c '! /usr/bin/systemctl --user is-active --quiet "
+        "nhms-compute-scheduler.service'" in service
+    )
+    assert "is-active --quiet nhms-compute-scheduler.service" in wrapper
     for selector in ("DATABASE_URL=", "PIPELINE_DATABASE_URL=", "PGHOST=", "PGPORT="):
         assert selector not in environment
     assert "stat -c '%a'" in wrapper
@@ -1832,13 +2190,14 @@ def test_installer_enable_lifecycle_and_failure_restore_with_fake_systemctl(tmp_
         path.chmod(0o700)
     provider_paths = {
         "registry": shared_providers / "scheduler/registry/manifest-last.json",
+        "registry_worker_mirror": private_objects / "scheduler/registry/manifest-last.json",
         "readiness": shared_providers / "scheduler/canonical-readiness/index-last.json",
         "state": shared_providers / "scheduler/state-index/index-last.json",
     }
     providers = []
     for name, path in provider_paths.items():
         path.parent.mkdir(parents=True)
-        path.write_text(name + "\n", encoding="utf-8")
+        path.write_text("registry\n" if name == "registry_worker_mirror" else name + "\n", encoding="utf-8")
         preimage = capture_scheduler_provider_preimage(path)
         providers.append(
             {
@@ -1877,6 +2236,7 @@ def test_installer_enable_lifecycle_and_failure_restore_with_fake_systemctl(tmp_
                 f"NHMS_SCHEDULER_PROVIDER_STORE_ROOT={shared_providers}",
                 "OBJECT_STORE_PREFIX=s3://nhms",
                 f"NHMS_SCHEDULER_REGISTRY_MANIFEST={provider_paths['registry']}",
+                f"NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST={provider_paths['registry_worker_mirror']}",
                 f"NHMS_SCHEDULER_CANONICAL_READINESS_INDEX={provider_paths['readiness']}",
                 f"NHMS_SCHEDULER_STATE_INDEX={provider_paths['state']}",
                 f"NHMS_SCHEDULER_PROVIDER_REFRESH_WORK_ROOT={work}",
@@ -2012,6 +2372,7 @@ def _write_wrapper_execution_fixture(tmp_path: Path, *, include_forbidden: bool 
         "NHMS_SCHEDULER_PROVIDER_STORE_ROOT": "/trusted/provider-store",
         "OBJECT_STORE_PREFIX": "s3://nhms",
         "NHMS_SCHEDULER_REGISTRY_MANIFEST": "/trusted/object-store/scheduler/registry/manifest-last.json",
+        "NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST": "/trusted/object-store/scheduler/registry/worker-manifest-last.json",
         "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX": "/trusted/object-store/scheduler/readiness/index-last.json",
         "NHMS_SCHEDULER_STATE_INDEX": "/trusted/object-store/scheduler/state/index-last.json",
         "NHMS_SCHEDULER_PROVIDER_REFRESH_WORK_ROOT": "/private/work",
@@ -2033,6 +2394,7 @@ def _write_wrapper_execution_fixture(tmp_path: Path, *, include_forbidden: bool 
         "printf 'OBJECTS=%s\\n' \"$OBJECT_STORE_ROOT\"\n"
         "printf 'PREFIX=%s\\n' \"$OBJECT_STORE_PREFIX\"\n"
         "printf 'REGISTRY=%s\\n' \"$NHMS_SCHEDULER_REGISTRY_MANIFEST\"\n"
+        "printf 'WORKER_REGISTRY=%s\\n' \"$NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST\"\n"
         "printf 'READINESS=%s\\n' \"$NHMS_SCHEDULER_CANONICAL_READINESS_INDEX\"\n"
         "printf 'STATE=%s\\n' \"$NHMS_SCHEDULER_STATE_INDEX\"\n"
         "printf 'WORK=%s\\n' \"$NHMS_SCHEDULER_PROVIDER_REFRESH_WORK_ROOT\"\n"
@@ -2076,6 +2438,10 @@ def test_wrapper_clean_environment_loads_fixed_config_and_strips_inherited_db_se
     assert "OBJECTS=/trusted/object-store" in result.stdout
     assert "PREFIX=s3://nhms" in result.stdout
     assert "REGISTRY=/trusted/object-store/scheduler/registry/manifest-last.json" in result.stdout
+    assert (
+        "WORKER_REGISTRY=/trusted/object-store/scheduler/registry/worker-manifest-last.json"
+        in result.stdout
+    )
     assert "READINESS=/trusted/object-store/scheduler/readiness/index-last.json" in result.stdout
     assert "STATE=/trusted/object-store/scheduler/state/index-last.json" in result.stdout
     assert "WORK=/private/work" in result.stdout

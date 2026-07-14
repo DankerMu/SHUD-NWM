@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
@@ -563,6 +563,7 @@ def publish_scheduler_registry_manifest(
     published_artifact_root: str | Path | None = None,
     generated_at: datetime | None = None,
     expected_preimage: ProviderPreimage | Mapping[str, object] | None = None,
+    commit_observer: Callable[[ProviderPreimage], None] | None = None,
 ) -> dict[str, Any]:
     roots = _ProviderRoots(
         object_store_root=object_store_root,
@@ -580,13 +581,15 @@ def publish_scheduler_registry_manifest(
     payload["checksum"] = checksum
     content = _canonical_json_bytes(payload, pretty=True)
     _validate_registry_manifest(payload, content=content, manifest_uri=str(destination_uri), roots=roots)
-    _write_json_bytes(
+    committed = _write_json_bytes(
         str(destination_uri),
         content,
         roots=roots,
         max_bytes=MAX_REGISTRY_MANIFEST_BYTES,
         expected_preimage=expected_preimage,
     )
+    if commit_observer is not None:
+        commit_observer(committed)
     return _evidence_safe(
         {
             "status": "published",
@@ -612,6 +615,7 @@ def publish_canonical_readiness_index(
     generated_at: datetime | None = None,
     expected_preimage: ProviderPreimage | Mapping[str, object] | None = None,
     verify_external_references: bool = False,
+    commit_observer: Callable[[ProviderPreimage], None] | None = None,
 ) -> dict[str, Any]:
     roots = _ProviderRoots(
         object_store_root=object_store_root,
@@ -635,13 +639,15 @@ def publish_canonical_readiness_index(
         roots=roots,
         verify_external_references=verify_external_references,
     )
-    _write_json_bytes(
+    committed = _write_json_bytes(
         str(destination_uri),
         content,
         roots=roots,
         max_bytes=MAX_READINESS_INDEX_BYTES,
         expected_preimage=expected_preimage,
     )
+    if commit_observer is not None:
+        commit_observer(committed)
     return _evidence_safe(
         {
             "status": "published",
@@ -1643,10 +1649,10 @@ def _write_json_bytes(
     roots: _ProviderRoots,
     max_bytes: int,
     expected_preimage: ProviderPreimage | Mapping[str, object] | None = None,
-) -> None:
+) -> ProviderPreimage:
     path, containment_root = _provider_destination_path(uri, roots)
     try:
-        atomic_replace_provider_bytes(
+        return atomic_replace_provider_bytes(
             path,
             content,
             containment_root=containment_root,

@@ -1,8 +1,10 @@
 [Unit]
 Description=NHMS node-22 DB-free scheduler file-provider refresh
+Before=nhms-compute-scheduler.service
 
 [Service]
 Type=oneshot
+ExecCondition=/bin/sh -c '! /usr/bin/systemctl --user is-active --quiet nhms-compute-scheduler.service'
 WorkingDirectory=/scratch/frd_muziyao/NWM
 EnvironmentFile=/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-provider-refresh.env
 Environment=PATH=/scratch/frd_muziyao/NWM/.venv/bin:/usr/local/bin:/usr/bin:/bin

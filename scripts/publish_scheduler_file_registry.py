@@ -131,6 +131,8 @@ def publish_all_basin_scheduler_registry(
     dry_run: bool = False,
     output_path: str | Path | None = None,
     expected_preimage: ProviderPreimage | Mapping[str, object] | None = None,
+    registry_generated_at: datetime | None = None,
+    registry_commit_observer: Callable[[ProviderPreimage], None] | None = None,
     precommit_validator: Callable[
         [Path, Sequence[Mapping[str, Any]], Sequence[Mapping[str, Any]]], None
     ]
@@ -330,7 +332,9 @@ def publish_all_basin_scheduler_registry(
                 registry_manifest,
                 object_store_root=resolved_object_root,
                 object_store_prefix=resolved_object_prefix,
+                generated_at=registry_generated_at,
                 expected_preimage=expected_preimage,
+                commit_observer=registry_commit_observer,
             )
         except Exception as error:
             raise _publish_failure(

@@ -106,7 +106,7 @@
           "entry_count"
         ],
         "properties": {
-          "name": {"enum": ["registry", "readiness", "state"]},
+          "name": {"enum": ["registry", "registry_worker_mirror", "readiness", "state"]},
           "before_sha256": {
             "oneOf": [
               {"type": "string", "pattern": "^[0-9a-f]{64}$"},
@@ -166,12 +166,26 @@
       "then": {
         "properties": {
           "providers": {
-            "minItems": 3,
-            "maxItems": 3,
-            "prefixItems": [
-              {"properties": {"name": {"const": "registry"}}},
-              {"properties": {"name": {"const": "readiness"}}},
-              {"properties": {"name": {"const": "state"}}}
+            "oneOf": [
+              {
+                "minItems": 3,
+                "maxItems": 3,
+                "prefixItems": [
+                  {"properties": {"name": {"const": "registry"}}},
+                  {"properties": {"name": {"const": "readiness"}}},
+                  {"properties": {"name": {"const": "state"}}}
+                ]
+              },
+              {
+                "minItems": 4,
+                "maxItems": 4,
+                "prefixItems": [
+                  {"properties": {"name": {"const": "registry"}}},
+                  {"properties": {"name": {"const": "registry_worker_mirror"}}},
+                  {"properties": {"name": {"const": "readiness"}}},
+                  {"properties": {"name": {"const": "state"}}}
+                ]
+              }
             ]
           }
         }

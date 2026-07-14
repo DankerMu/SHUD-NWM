@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterator, Protocol
+from typing import Any, Callable, Iterator, Protocol
 from urllib.parse import unquote, urlparse
 
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
@@ -1569,6 +1569,7 @@ def publish_state_snapshot_index(
     expected_preimage: ProviderPreimage | Mapping[str, object] | None = None,
     lock_held: bool = False,
     destination_containment_root: Path | None = None,
+    commit_observer: Callable[[ProviderPreimage], None] | None = None,
 ) -> dict[str, Any]:
     generated = _ensure_utc(generated_at or datetime.now(tz=UTC))
     payload: dict[str, Any] = {
@@ -1593,7 +1594,7 @@ def publish_state_snapshot_index(
         max_age_hours=DEFAULT_STATE_SNAPSHOT_INDEX_MAX_AGE_HOURS,
         verify_objects=verify_objects,
     )
-    _write_state_index_bytes(
+    committed = _write_state_index_bytes(
         str(destination_uri),
         content,
         object_store_root=object_store_root,
@@ -1603,6 +1604,8 @@ def publish_state_snapshot_index(
         lock_held=lock_held,
         destination_containment_root=destination_containment_root,
     )
+    if commit_observer is not None:
+        commit_observer(committed)
     return _state_index_evidence_safe(
         {
             "status": "published",
@@ -2337,7 +2340,7 @@ def _write_state_index_bytes(
     expected_preimage: ProviderPreimage | Mapping[str, object] | None = None,
     lock_held: bool = False,
     destination_containment_root: Path | None = None,
-) -> None:
+) -> ProviderPreimage:
     path, containment_root = _state_index_destination_path(
         uri,
         object_store_root=object_store_root,
@@ -2346,7 +2349,7 @@ def _write_state_index_bytes(
     )
     containment_root = destination_containment_root or containment_root
     try:
-        atomic_replace_provider_bytes(
+        return atomic_replace_provider_bytes(
             path,
             content,
             containment_root=containment_root,

@@ -81,6 +81,16 @@
   produce a new version; a kashigeer-style existing base version therefore does
   not conflict with repaired content; mutation after planning fails before any
   immutable object or canonical provider write.
+- [x] 3.10 Bind the shared scheduler registry and private Slurm worker mirror as
+  one prospective generation: mirror-first/canonical-last publication with
+  expected-preimage rollback, identical SHA/model count in receipt/current
+  validation, scheduler-inactive systemd ordering, and stage-manifest
+  `SCHEDULER_REGISTRY_MIRROR_MISMATCH` fail-closed regression coverage. Treat
+  mirror/shared/readiness/state as one reverse-order rollback transaction;
+  exact atomic postimages are the only rollback ownership tokens, typed
+  preimage conflicts preserve the concurrent authoritative lane while earlier
+  owned lanes restore, unknown tokenless writes remain `replace_uncertain`, and
+  rollback CAS conflict is never relabelled as a receipt publication failure.
 
 ## 4. Node-22/Node-27 Live Recovery
 
