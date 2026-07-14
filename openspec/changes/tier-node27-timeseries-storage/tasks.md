@@ -1236,10 +1236,11 @@ Order is load-bearing:
   candidate processing into one sanitized `STATES_ACCESS_DENIED` diagnostic
   with a distinct non-zero exit reason; document the complete NFS
   group/mode-or-ACL operator repair without executing it in this PR; commit a
-  post-repair non-failed mover receipt and a non-empty complete inventory-audit
-  receipt while preserving the first-live failure receipt. Process-stage
-  permission changes retain the existing independent-candidate terminal model
-  and are not converted into a transactional batch rollback by this issue.
+  post-repair non-failed mover receipt while preserving the first-live failure
+  receipt. Process-stage permission changes retain the existing
+  independent-candidate terminal model and are not converted into a
+  transactional batch rollback by this issue. Task 3.3 salvage and its
+  follow-up complete audit are routed to open issue #1070, not this row.
   Test/evidence rows:
   - Input: disk-backed GFS and IFS forcing packages for qhh and heihe whose
     manifests use canonical `s3://nhms/<exact-package-leaf>/...`. Expected:
@@ -1279,18 +1280,15 @@ Order is load-bearing:
     `bytes.source > 0`, `bytes.archived > 0`, selected terminals succeed, and
     each retired source is preceded by staged archive re-read/checksum
     verification; production env remains 45.
-  - Input: the 228 exact selectors from the current incomplete audit receipt,
-    executed through task 3.3's additive non-deleting salvage lane, then the
-    installed recurring inventory audit. Expected: committed schema-valid
-    `complete` receipt with a non-empty `windows` inventory and empty
-    `salvage_selectors`, tied by SHA/provenance to the deployed commit. No #856
-    retention command runs. The original
+  - Input: cascade boundary after the passing mover receipt. Expected: the 228
+    audit selectors remain untouched and are explicitly handed to open issue
+    #1070; no task 3.3 salvage, compression, drill, retention dry-run, or
+    retention enforce command runs. The original
     `first-live-run-20260713T043808Z.json` remains unchanged.
   Verification: `uv run pytest -q tests/test_node27_product_archive.py
   tests/test_node27_storage_inventory_audit.py`; product/archive receipt schema
   example validation; `uv run ruff check .`; `openspec validate
   tier-node27-timeseries-storage --strict --no-interactive`; node-27 direct
-  mover, receipt-scoped task 3.3 salvage, and systemd audit receipts. Retention,
-  drill, compression, source deletion outside the authorized product-archive
-  enforce run, permission mutation, and every #856 live-cascade command are
-  explicit non-goals.
+  mover receipt. Task 3.3 salvage, follow-up complete audit, retention, drill,
+  compression, source deletion outside the authorized product-archive enforce
+  run, and every #856 live-cascade command are explicit non-goals.

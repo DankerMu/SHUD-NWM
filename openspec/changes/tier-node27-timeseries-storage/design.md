@@ -1318,13 +1318,10 @@ and every #856 cascade action remain unchanged downstream consumers.
   env at 45 days. It produces a schema-valid non-failed receipt with non-empty
   candidates, `bytes.source > 0`, `bytes.archived > 0`, successful terminals,
   zero pinned forcing/run discovery reasons, and verify-before-delete source
-  retirement. The recurring inventory audit can become
-  non-empty `complete` only after the 228 DB-only forcing gaps are covered by
-  the already-specified task 3.3 salvage live operation; mover changes cannot
-  synthesize missing products. That additive, non-deleting salvage prerequisite
-  may be executed and evidenced before #1065 closes, but no retention command
-  from #856 is run. Both the immutable first failure receipt and the new
-  mover/salvage/audit receipts remain committed.
+  retirement. The immutable first failure receipt and the new passing mover
+  receipt remain committed. The 228 DB-only forcing gaps, task 3.3 salvage,
+  and follow-up complete audit are owned by the already-open #1070 Step A2
+  issue and are not executed while closing #1065.
 
 ### Risk packs considered
 
@@ -1397,9 +1394,8 @@ and every #856 cascade action remain unchanged downstream consumers.
   run identity/output drift, one or many inaccessible state leaves, partial
   traversal, and receipt publication failure.
 - Evidence/audit/readiness: focused live-shape pytest, full existing mover
-  suite, ruff, strict OpenSpec validation, pre-repair access receipt, post-repair
-  passing mover receipt, and non-empty complete audit receipt tied to the
-  deployed commit.
+  suite, ruff, strict OpenSpec validation, pre-repair access receipt, and a
+  post-repair passing mover receipt tied to the deployed commit.
 - Regression rows:
   - canonical `s3://nhms` GFS/IFS forcing packages for qhh/heihe -> accepted;
     historical mismatched configured bucket or a cross-leaf file URI -> the
@@ -1417,7 +1413,7 @@ and every #856 cascade action remain unchanged downstream consumers.
     verify-before-delete retirement, and no pinned discovery reasons; a prior
     default 45-day dry-run may validly produce an empty queue;
   - prior first-live failure receipt remains byte-identical and the new mover
-    plus complete audit receipts validate and identify the deployed commit.
+    receipt validates and identifies the deployed commit.
 
 ### Boundary-surface checklist and non-goals
 
@@ -1432,7 +1428,8 @@ and every #856 cascade action remain unchanged downstream consumers.
   sources whose staged archive has been re-read and verified.
 - Non-goals: no retention dry-run/enforce, compression, rebuild drill, source
   deletion outside the explicitly authorized product-archive enforce run,
-  node-22 change, DB mutation, display change, or #856 live cascade.
-  Task 3.3's additive DB-export salvage is not retention and is required only
-  because #1065 acceptance asks for a `complete` audit receipt; it remains
-  receipt-scoped and never deletes DB rows or hot products.
+  node-22 code/config change, DB mutation, display change, task 3.3 salvage,
+  follow-up complete audit, or any #856 live-cascade issue (#1069–#1072).
+  The operator may apply the documented ACL precondition through the node-22
+  file owner because both nodes see the same states filesystem; that operational
+  repair is not a node-22 application change.
