@@ -187,6 +187,15 @@ shared-NFS canonical provider。registry JSON 位于 shared root，但其中
 `s3://nhms/models/...` 始终由 private `OBJECT_STORE_ROOT` 解析；不得依赖历史双份 package、
 合并两根或关闭 object verification。
 
+Registry package version 必须由 publisher 同一套源计划生成：required、optional SHUD
+runtime、`CALIB/` 与 forcing CSV 的相对路径、大小和内容 checksum 都参与；机器绝对路径、
+repair run workspace 路径和 object URI 不参与。因此同内容跨 run/root 必须复用同 version，
+任一上述内容变化必须生成新 version。若现场出现
+`BASINS_PACKAGE_CHECKSUM_CONFLICT`，先核对运行代码是否仍使用旧的“required/checksums +
+绝对 source path”版本算法；不得删除或覆盖已有 immutable package。新实现还会在发布前
+重算 identity，期间源内容变化会以 `BASINS_PACKAGE_SOURCE_IDENTITY_CHANGED` 在 canonical
+replace 前失败。
+
 首次安装必须先记录 scheduler 与 refresh unit 状态，并保持 scheduler timer 原状态：
 
 ```bash

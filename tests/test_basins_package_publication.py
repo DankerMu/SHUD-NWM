@@ -7,9 +7,157 @@ from pathlib import Path
 
 import pytest
 
+import scripts.publish_scheduler_file_registry as scheduler_registry
 import workers.model_registry.basins_package as basins_package
 from workers.model_registry.basins_discovery import discover_basins_inventory, write_inventory
 from workers.model_registry.cli import DEFAULT_BASINS_MIGRATION_SOURCE_URI, _argparse_main, _click_main
+
+
+def test_package_source_identity_is_stable_across_repair_workspaces(tmp_path: Path) -> None:
+    first_inventory, first_model_id = _write_valid_inventory(
+        tmp_path / "run-a" / "repaired-basins",
+        forcing_count=1,
+        calibration_count=1,
+        basin_slug="kashigeer",
+        input_name="kashigeer",
+    )
+    second_inventory, second_model_id = _write_valid_inventory(
+        tmp_path / "run-b" / "repaired-basins",
+        forcing_count=1,
+        calibration_count=1,
+        basin_slug="kashigeer",
+        input_name="kashigeer",
+    )
+
+    first_identity = basins_package.basins_package_source_identity(
+        inventory_path=first_inventory,
+        model_id=first_model_id,
+    )
+    second_identity = basins_package.basins_package_source_identity(
+        inventory_path=second_inventory,
+        model_id=second_model_id,
+    )
+    first_model = json.loads(first_inventory.read_text(encoding="utf-8"))["models"][0]
+    second_model = json.loads(second_inventory.read_text(encoding="utf-8"))["models"][0]
+
+    assert first_identity == second_identity
+    assert scheduler_registry.package_version_for_model(
+        first_model,
+        source_identity=first_identity,
+    ) == scheduler_registry.package_version_for_model(second_model, source_identity=second_identity)
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        "CALIB/top01.calib",
+        "input/kashigeer/kashigeer.lake.sp",
+        "forcing/X000001.csv",
+    ),
+    ids=("calibration", "optional-runtime", "forcing"),
+)
+def test_package_source_identity_changes_for_every_published_source_class(
+    tmp_path: Path,
+    relative_path: str,
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(
+        tmp_path,
+        forcing_count=1,
+        calibration_count=1,
+        basin_slug="kashigeer",
+        input_name="kashigeer",
+    )
+    before = basins_package.basins_package_source_identity(
+        inventory_path=inventory_path,
+        model_id=model_id,
+    )
+    model = json.loads(inventory_path.read_text(encoding="utf-8"))["models"][0]
+    before_version = scheduler_registry.package_version_for_model(model, source_identity=before)
+
+    source = tmp_path / "basins" / "kashigeer" / relative_path
+    source.write_bytes(source.read_bytes() + b"changed\n")
+    after = basins_package.basins_package_source_identity(
+        inventory_path=inventory_path,
+        model_id=model_id,
+    )
+    after_version = scheduler_registry.package_version_for_model(model, source_identity=after)
+
+    assert before["source_sha256"] == after["source_sha256"]
+    assert before["content_sha256"] != after["content_sha256"]
+    assert before_version != after_version
+
+
+def test_kash_style_existing_base_version_does_not_conflict_after_calibration_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(
+        tmp_path,
+        forcing_count=1,
+        calibration_count=1,
+        basin_slug="kashigeer",
+        input_name="kashigeer",
+    )
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    model = json.loads(inventory_path.read_text(encoding="utf-8"))["models"][0]
+    base_identity = basins_package.basins_package_source_identity(
+        inventory_path=inventory_path,
+        model_id=model_id,
+    )
+    legacy_base_version = "vbasins-kashigeer-c6459e91cc0a-7cbb06e9"
+    basins_package.publish_basins_package(
+        inventory_path=inventory_path,
+        model_id=model_id,
+        version=legacy_base_version,
+        output_path=tmp_path / "base-manifest.json",
+        expected_source_identity=base_identity,
+    )
+
+    calib = tmp_path / "basins" / "kashigeer" / "CALIB" / "top01.calib"
+    calib.write_text("calib-fixed\n", encoding="utf-8")
+    repaired_identity = basins_package.basins_package_source_identity(
+        inventory_path=inventory_path,
+        model_id=model_id,
+    )
+    repaired_version = scheduler_registry.package_version_for_model(model, source_identity=repaired_identity)
+    result = basins_package.publish_basins_package(
+        inventory_path=inventory_path,
+        model_id=model_id,
+        version=repaired_version,
+        output_path=tmp_path / "repaired-manifest.json",
+        expected_source_identity=repaired_identity,
+    )
+
+    assert repaired_version != legacy_base_version
+    assert result["status"] == "published"
+    assert (object_root / "models" / model_id / legacy_base_version / "manifest.json").is_file()
+    assert (object_root / "models" / model_id / repaired_version / "manifest.json").is_file()
+
+
+def test_publish_rejects_source_change_after_version_planning_without_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path, forcing_count=1)
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    expected_identity = basins_package.basins_package_source_identity(
+        inventory_path=inventory_path,
+        model_id=model_id,
+    )
+    forcing = tmp_path / "basins" / "basin-a" / "forcing" / "X000001.csv"
+    forcing.write_text("time,value\n2026-01-01,2\n", encoding="utf-8")
+
+    with pytest.raises(basins_package.BasinsPackageError) as exc_info:
+        basins_package.publish_basins_package(
+            inventory_path=inventory_path,
+            model_id=model_id,
+            version="vbasins-planned-before-change",
+            output_path=tmp_path / "manifest.json",
+            expected_source_identity=expected_identity,
+        )
+
+    assert exc_info.value.error_code == "BASINS_PACKAGE_SOURCE_IDENTITY_CHANGED"
+    assert not (object_root / "models" / model_id / "vbasins-planned-before-change" / "manifest.json").exists()
 
 
 def test_publish_basins_reserves_local_manifest_before_file_creation(
@@ -2724,9 +2872,16 @@ def _write_valid_inventory(
     *,
     forcing_count: int = 0,
     calibration_count: int = 0,
+    basin_slug: str = "basin-a",
+    input_name: str = "alias-a",
 ) -> tuple[Path, str]:
     root = tmp_path / "basins"
-    _make_valid_model(root / "basin-a", "alias-a", forcing_count=forcing_count, calibration_count=calibration_count)
+    _make_valid_model(
+        root / basin_slug,
+        input_name,
+        forcing_count=forcing_count,
+        calibration_count=calibration_count,
+    )
     inventory = discover_basins_inventory(root)
     inventory_path = tmp_path / "inventory.json"
     write_inventory(inventory, inventory_path)

@@ -6,7 +6,9 @@
   concurrent authoritative updates return `provider_preimage_changed`.
 - [x] 1.2 Reuse `publish_all_basin_scheduler_registry`; permit only bounded
   immutable content-addressed package orphan candidates before canonical commit
-  and never auto-delete them.
+  and never auto-delete them. Derive each package version from the publisher's
+  own validated required/optional/CALIB/forcing source plan, excluding absolute
+  host/workspace paths, and recheck that identity before immutable publication.
 - [x] 1.3 Before any canonical commit, derive readiness from the newest bounded
   no-follow private GFS/IFS catalogs plus the same prospective registry model
   set; publish exactly one catalog URI/SHA/row-count-bound entry per source/model,
@@ -74,6 +76,11 @@
 - [x] 3.8 Run focused publisher/provider/systemd/scheduler tests, `uv run ruff
   check .`, and `openspec validate node22-scheduler-registry-refresh --strict
   --no-interactive`.
+- [x] 3.9 Prove identical content under different roots/repair runs has one
+  package version; required, optional runtime, CALIB, or forcing byte changes
+  produce a new version; a kashigeer-style existing base version therefore does
+  not conflict with repaired content; mutation after planning fails before any
+  immutable object or canonical provider write.
 
 ## 4. Node-22/Node-27 Live Recovery
 

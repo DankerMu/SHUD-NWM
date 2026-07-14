@@ -20,6 +20,28 @@ from workers.model_registry.basins_radiation_template import repair_missing_tsd_
 from workers.model_registry.basins_soil_alpha_repair import repair_soil_alpha_calibration_for_basin
 
 
+@pytest.fixture(autouse=True)
+def _stub_source_identity_for_synthetic_inventories(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_source_identity = registry_script.basins_package_source_identity
+
+    def source_identity(*, inventory_path: str | Path, model_id: str) -> dict[str, str]:
+        inventory = _inventory_from_file(Path(inventory_path))
+        model = next(
+            (item for item in inventory.get("models", []) if item.get("model_id") == model_id),
+            {},
+        )
+        required_files = model.get("required_files")
+        if isinstance(required_files, dict) and len(required_files) > 10:
+            return real_source_identity(inventory_path=inventory_path, model_id=model_id)
+        return _source_identity(f"content:{model_id}", f"source:{model_id}")
+
+    monkeypatch.setattr(
+        registry_script,
+        "basins_package_source_identity",
+        source_identity,
+    )
+
+
 def _write_current_catalogs(object_root: Path) -> None:
     store = LocalObjectStore(object_root, object_store_prefix="s3://nhms")
     for source_id in ("gfs", "IFS"):
@@ -65,23 +87,28 @@ def _write_current_catalogs(object_root: Path) -> None:
 
 def test_package_version_for_nested_basin_is_safe_and_content_stable() -> None:
     model = _inventory_model("zhaochen/BST", shud_input_name="BST")
+    identity = _source_identity("a", "b")
 
-    first = registry_script.package_version_for_model(model)
-    second = registry_script.package_version_for_model(dict(model))
+    first = registry_script.package_version_for_model(model, source_identity=identity)
+    second = registry_script.package_version_for_model(dict(model), source_identity=dict(identity))
 
     assert first == second
     assert first.startswith("vbasins-zhaochen_bst-")
     assert "/" not in first
 
 
-def test_package_version_changes_when_source_identity_moves() -> None:
+def test_package_version_is_stable_when_same_source_content_moves_workspace() -> None:
     old_model = _inventory_model("kashigeer")
     new_model = dict(old_model)
     new_model["source_path"] = "/volume/nwm/Basins/kashigeer"
     new_model["resolved_source_path"] = "/volume/nwm/Basins/kashigeer"
     new_model["input_dir"] = "/volume/nwm/Basins/kashigeer/input/kashigeer"
 
-    assert registry_script.package_version_for_model(old_model) != registry_script.package_version_for_model(new_model)
+    identity = _source_identity("c", "d")
+    assert registry_script.package_version_for_model(
+        old_model,
+        source_identity=identity,
+    ) == registry_script.package_version_for_model(new_model, source_identity=identity)
 
 
 def test_package_version_template_rejects_unsafe_path_segment() -> None:
@@ -89,6 +116,7 @@ def test_package_version_template_rejects_unsafe_path_segment() -> None:
         registry_script.package_version_for_model(
             _inventory_model("qhh"),
             template="vbasins/{slug_id}",
+            source_identity=_source_identity("e", "f"),
         )
 
     assert exc_info.value.error_code == "SCHEDULER_REGISTRY_PACKAGE_VERSION_UNSAFE"
@@ -924,6 +952,14 @@ def _inventory_model(basin_slug: str, *, shud_input_name: str | None = None) -> 
     }
 
 
+def _source_identity(content_seed: str, source_seed: str) -> dict[str, str]:
+    return {
+        "schema_version": "basins.package.source_identity.v1",
+        "content_sha256": sha256_bytes(content_seed.encode("utf-8")),
+        "source_sha256": sha256_bytes(source_seed.encode("utf-8")),
+    }
+
+
 def _fake_publish_basins_package(
     *,
     inventory_path: str | Path,
@@ -934,8 +970,9 @@ def _fake_publish_basins_package(
     object_store: Any,
     output_capacity_guard: Any = None,
     output_write_guard: Any = None,
+    expected_source_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    del inventory_path, copy_forcing
+    del inventory_path, copy_forcing, expected_source_identity
     manifest_key = f"models/{model_id}/{version}/manifest.json"
     manifest_uri = object_store.uri_for_key(manifest_key)
     manifest = {

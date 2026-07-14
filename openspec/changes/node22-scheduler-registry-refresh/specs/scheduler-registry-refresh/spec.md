@@ -24,6 +24,19 @@ writers.
   package disappears
 - **AND** a bounded terminal receipt is bound to those exact bytes.
 
+#### Scenario: Immutable package versions follow complete source content
+
+- **WHEN** the same publishable Basins model is discovered under another host
+  root or bounded repair-run workspace with byte-identical content
+- **THEN** its package version is unchanged and contains no absolute path or
+  object-URI identity
+- **AND** changing any required file, optional SHUD runtime file, CALIB file, or
+  forcing CSV changes the package version before publication
+- **AND** the publisher recomputes the planned identity and fails before object
+  writes if the source changes between version planning and publication
+- **AND** a repaired kashigeer-style model never reuses an existing immutable
+  base version when the actual package or forcing content differs.
+
 #### Scenario: Timer manual and lifecycle writers contend
 
 - **WHEN** any two canonical registry writers overlap

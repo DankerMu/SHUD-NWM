@@ -36,7 +36,11 @@ from workers.model_registry.basins_discovery import (
     resolve_basins_root,
     write_inventory,
 )
-from workers.model_registry.basins_package import BasinsPackageError, publish_basins_package
+from workers.model_registry.basins_package import (
+    BasinsPackageError,
+    basins_package_source_identity,
+    publish_basins_package,
+)
 from workers.model_registry.basins_radiation_template import repair_missing_tsd_rl_for_basin, repair_performed
 from workers.model_registry.basins_registry_import import (
     BasinsRegistryImportError,
@@ -218,7 +222,15 @@ def publish_all_basin_scheduler_registry(
             _guard_resources(resource_validator, workspace)
             model = context.model
             model_id = _required_model_str(model, "model_id")
-            version = package_version_for_model(model, package_version_template)
+            source_identity = basins_package_source_identity(
+                inventory_path=context.inventory_path,
+                model_id=model_id,
+            )
+            version = package_version_for_model(
+                model,
+                package_version_template,
+                source_identity=source_identity,
+            )
             package_manifest_path = package_manifest_dir / f"{model_id}.manifest.json"
             manifest_key = f"models/{model_id}/{version}/manifest.json"
             manifest_uri = store.uri_for_key(manifest_key)
@@ -253,6 +265,7 @@ def publish_all_basin_scheduler_registry(
                     object_store=store,
                     output_capacity_guard=(workspace_budget.reserve_external_write if workspace_budget else None),
                     output_write_guard=(workspace_budget.finalize_external_write if workspace_budget else None),
+                    expected_source_identity=source_identity,
                 )
                 if workspace_budget is not None:
                     workspace_budget.verify_external_write(package_manifest_path)
@@ -520,12 +533,17 @@ def scheduler_registry_row_from_sources(
     }
 
 
-def package_version_for_model(model: Mapping[str, Any], template: str = DEFAULT_PACKAGE_VERSION_TEMPLATE) -> str:
+def package_version_for_model(
+    model: Mapping[str, Any],
+    template: str = DEFAULT_PACKAGE_VERSION_TEMPLATE,
+    *,
+    source_identity: Mapping[str, Any],
+) -> str:
     basin_slug = str(model.get("basin_slug") or "")
     model_id = _required_model_str(model, "model_id")
     slug_id = _slug_id(basin_slug)
-    content_hash = _model_content_hash(model)
-    source_hash = _model_source_hash(model)
+    content_hash = _required_source_identity_hash(source_identity, "content_sha256", model_id)[:12]
+    source_hash = _required_source_identity_hash(source_identity, "source_sha256", model_id)[:8]
     try:
         version = template.format(
             slug=basin_slug.replace("/", "_"),
@@ -898,31 +916,15 @@ def _dir_size(path: Path) -> int:
     return total
 
 
-def _model_content_hash(model: Mapping[str, Any]) -> str:
-    material = {
-        "model_id": model.get("model_id"),
-        "basin_slug": model.get("basin_slug"),
-        "shud_input_name": model.get("shud_input_name"),
-        "root_relative_resolved_path": model.get("root_relative_resolved_path"),
-        "required_files": model.get("required_files") or {},
-        "checksums": model.get("checksums") or {},
-    }
-    return hashlib.sha256(
-        json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-    ).hexdigest()[:12]
-
-
-def _model_source_hash(model: Mapping[str, Any]) -> str:
-    material = {
-        "source_path": model.get("source_path"),
-        "resolved_source_path": model.get("resolved_source_path"),
-        "root_relative_path": model.get("root_relative_path"),
-        "root_relative_resolved_path": model.get("root_relative_resolved_path"),
-        "input_dir": model.get("input_dir"),
-    }
-    return hashlib.sha256(
-        json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-    ).hexdigest()[:8]
+def _required_source_identity_hash(identity: Mapping[str, Any], field: str, model_id: str) -> str:
+    value = identity.get(field)
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise SchedulerRegistryPublishError(
+            "SCHEDULER_REGISTRY_SOURCE_IDENTITY_INVALID",
+            "Package source identity is missing a canonical SHA-256 digest.",
+            details={"model_id": model_id, "field": field},
+        )
+    return value
 
 
 def _slug_id(value: str) -> str:

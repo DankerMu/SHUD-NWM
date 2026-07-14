@@ -50,6 +50,14 @@ entries. Writers hold only one destination lock at a time, avoiding cross-
 provider lock ordering/deadlock. The manual interface stays compatible.
 Content-addressed packages created before manifest commit are permitted
 immutable side effects, capped/classified in evidence, and never auto-deleted.
+Package versions use a source identity planned by the Basins package publisher
+itself: every required, optional runtime, CALIB, and forcing source that affects
+the immutable package/forcing checksum semantics participates. Logical relative
+identity participates, but machine-specific `source_path`, `resolved_source_path`,
+`input_dir`, object URI, and repair-run workspace prefixes do not. The publisher
+recomputes the expected identity before writing, so source mutation after
+version planning fails closed instead of publishing conflicting bytes under an
+old version.
 
 ### D3. Publication failure semantics follow the commit phase
 
