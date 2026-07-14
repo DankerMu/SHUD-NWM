@@ -52,4 +52,5 @@ done
 # the final wrapper environment DB-free even when the manager was contaminated.
 unset "${db_selectors[@]}"
 
-exec "$repo/.venv/bin/python" "$repo/scripts/scheduler_file_provider_refresh.py" "$@"
+cd "$repo"
+exec "$repo/.venv/bin/python" -m scripts.scheduler_file_provider_refresh "$@"

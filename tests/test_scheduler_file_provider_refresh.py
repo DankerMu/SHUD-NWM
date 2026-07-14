@@ -1681,6 +1681,7 @@ def _write_wrapper_execution_fixture(tmp_path: Path, *, include_forbidden: bool 
         "printf 'LOCK=%s\\n' \"$NHMS_SCHEDULER_PROVIDER_REFRESH_LOCK\"\n"
         "printf 'DATABASE_URL=%s\\n' \"${DATABASE_URL-<unset>}\"\n"
         "printf 'PGHOST=%s\\n' \"${PGHOST-<unset>}\"\n"
+        "printf 'PWD=%s\\n' \"$PWD\"\n"
         "printf 'ARGS=%s\\n' \"$*\"\n"
     )
     interpreter.chmod(0o755)
@@ -1723,7 +1724,8 @@ def test_wrapper_clean_environment_loads_fixed_config_and_strips_inherited_db_se
     assert "LOCK=/private/refresh" in result.stdout
     assert "DATABASE_URL=<unset>" in result.stdout
     assert "PGHOST=<unset>" in result.stdout
-    assert result.stdout.rstrip().endswith("scheduler_file_provider_refresh.py --dry-run")
+    assert f"PWD={tmp_path / 'repo'}" in result.stdout
+    assert result.stdout.rstrip().endswith("-m scripts.scheduler_file_provider_refresh --dry-run")
 
 
 def test_wrapper_rejects_forbidden_selector_in_mode_0600_env_before_exec(tmp_path: Path) -> None:

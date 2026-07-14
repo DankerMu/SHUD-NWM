@@ -92,9 +92,12 @@ enable_failure_restore() {
 }
 
 validate_current_receipt() {
-  "$python_bin" "$repo/scripts/scheduler_file_provider_refresh.py" \
-    --env-file "$repo/infra/env/compute.scheduler-provider-refresh.env" \
-    --validate-current-receipt "$receipt" >/dev/null
+  (
+    cd "$repo"
+    "$python_bin" -m scripts.scheduler_file_provider_refresh \
+      --env-file "$repo/infra/env/compute.scheduler-provider-refresh.env" \
+      --validate-current-receipt "$receipt" >/dev/null
+  )
 }
 
 rollback_files() {
