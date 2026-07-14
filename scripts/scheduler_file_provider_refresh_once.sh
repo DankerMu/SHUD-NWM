@@ -17,7 +17,7 @@ db_selectors=(
 allowed_keys='^(NHMS_BASINS_ROOT|OBJECT_STORE_ROOT|NHMS_SCHEDULER_PROVIDER_STORE_ROOT|OBJECT_STORE_PREFIX|NHMS_SCHEDULER_REGISTRY_MANIFEST|NHMS_SCHEDULER_CANONICAL_READINESS_INDEX|NHMS_SCHEDULER_STATE_INDEX|NHMS_SCHEDULER_PROVIDER_REFRESH_WORK_ROOT|NHMS_SCHEDULER_PROVIDER_REFRESH_RECEIPT_ROOT|NHMS_SCHEDULER_PROVIDER_REFRESH_EMERGENCY_ROOT|NHMS_SCHEDULER_PROVIDER_REFRESH_LOCK)$'
 
 [[ -f "$env_file" && ! -L "$env_file" ]]
-mode=$(stat -f '%Lp' "$env_file" 2>/dev/null || stat -c '%a' "$env_file")
+mode=$(stat -c '%a' "$env_file" 2>/dev/null || stat -f '%Lp' "$env_file")
 [[ "$mode" == "600" ]]
 if grep -Eq "^[[:space:]]*($(IFS='|'; printf '%s' "${db_selectors[*]}"))=" "$env_file"; then
   exit 2
