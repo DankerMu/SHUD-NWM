@@ -214,7 +214,8 @@ scripts/install_node22_scheduler_file_provider_refresh.sh --install
 `OBJECT_STORE_ROOT` 中最新的 GFS/IFS cycle catalog，执行 bounded/no-follow、schema、
 source/cycle、统一 lineage identity、forecast hours、catalog row、canonical object checksum
 全验证，并生成每个 source/model 一条只含 `catalog_uri + catalog_sha256 +
-catalog_row_count` 绑定的 entry（当前 13 models 时应为 GFS 13 + IFS 13）。最新 catalog
+catalog_row_count` 绑定的 entry（N 个当前模型应为 GFS N + IFS N；2026-07-14
+现场为 20 个模型、每个 source 20 条、共 40 条）。最新 catalog
 invalid 时禁止回退旧 cycle；consumer identity mismatch 必须重读同一绑定 catalog 后重算。
 State index 才允许仅绕过年龄并重验 checkpoint object。任何 missing/invalid 引用或
 registry/readiness model-set mismatch 都在 canonical replace 前失败，绝不续签 legacy
@@ -231,8 +232,9 @@ jq '{outcome,reason,database_free,providers,orphans}' \
 ```
 
 `published` receipt 必须绑定三个 canonical 文件的物理 SHA-256；registry 的现场模型数
-应为当前完整 inventory（2026-06-30 为 13），readiness 必须与同次 registry model set
-逐 source 完全一致并记录 catalog URI/SHA/row count；state entry 不能因刷新减少。
+应为当前完整 inventory（2026-06-30 为 13，2026-07-14 为 20），readiness 必须与同次
+registry model set 逐 source 完全一致并记录 catalog URI/SHA/row count；state entry 不能因
+刷新减少。
 Installer 在任何 systemd mutation 前都会用同一 strict v1 runtime validator 读取 bounded/no-follow
 latest receipt，并逐一比对三个 shared provider 的当前 SHA-256；minimal、extra、symlink、oversize、
 stale、missing 或非 `published` receipt 均拒绝启用。

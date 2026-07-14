@@ -80,9 +80,10 @@
 - [ ] 4.1 Capture frozen SHA plus three provider hashes/evidence, unit states,
   process DB-free proof and Slurm queue; deploy by ff-only pull.
 - [ ] 4.2 Install refresh units stopped; run dry-run and manual refresh. Record
-  old/new schema/checksum/generated_at, exact 13 models, GFS/IFS readiness
-  entries (expected 13 each) and catalog URI/SHA/row-count bindings, state entries
-  and referenced-object proofs, v1 receipt, no-DB proof and identical node-22/
+  old/new schema/checksum/generated_at, exact current live inventory (20 models
+  on 2026-07-14), GFS/IFS readiness entries (20 each/40 total for that
+  inventory) and catalog URI/SHA/row-count bindings, state entries and
+  referenced-object proofs, v1 receipt, no-DB proof and identical node-22/
   node-27 NFS bytes.
 - [ ] 4.3 Prove renewal used full validation/publisher paths and rejects a
   timestamp-only mutation; any missing/invalid provider blocks before scheduler.

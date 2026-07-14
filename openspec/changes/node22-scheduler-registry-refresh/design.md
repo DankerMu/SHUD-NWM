@@ -113,8 +113,9 @@ enabled/active. Scheduler state and issue-owned jobs always restore.
 - Concurrency / shared state / ordering: selected - all three provider writers,
   destination lock + preimage CAS, old/new readers, no multi-lock deadlock,
   provider order and timer state.
-- Resource limits / large input / discovery: selected - exact 13-model live
-  inventory; 1 MiB receipt, 256 collection, 512-char string, 64 residue,
+- Resource limits / large input / discovery: selected - exact current live
+  inventory (20 models on 2026-07-14); 1 MiB receipt, 256 collection,
+  512-char string, 64 residue,
   32-history, 64 GiB/250k-entry/depth-32 workspace, 4,096-orphan and two-hour
   bounds.
 - Legacy compatibility / examples: selected - unchanged manual arguments/output
@@ -151,8 +152,8 @@ writer replaces canonical bytes outside the one shared transaction lock.
 Source-of-truth identity/contract:
 
 - `/volume/nwm/Basins` ->
-  `/ghdc/data/nwm/object-store/scheduler/registry/manifest-last.json` with 13
-  model/package identities.
+  `/ghdc/data/nwm/object-store/scheduler/registry/manifest-last.json` with the
+  exact current model/package identities (20 on 2026-07-14).
 - Newest validated private GFS/IFS catalog/object entries + the same prospective
   registry model set -> catalog-bound
   `scheduler/canonical-readiness/index-last.json` entries.
@@ -190,8 +191,9 @@ Surfaces:
 
 Regression rows:
 
-- Valid 13-model inventory + newest valid GFS/IFS catalogs + valid-except-age
-  state input -> 26 catalog-bound readiness entries, fully revalidated atomic
+- Valid N-model inventory + newest valid GFS/IFS catalogs + valid-except-age
+  state input -> 2N catalog-bound readiness entries (20 models/40 entries on
+  2026-07-14), fully revalidated atomic
   outputs and published receipt; new registry packages are
   private-only, the canonical manifest is shared, and deleting a private
   package makes the unchanged scheduler consumer fail closed.
@@ -256,8 +258,9 @@ Regression rows:
    states, DB-free env proof and queue.
 2. Install byte-identical refresh units stopped; route all registry writers
    through the shared lock.
-3. Run dry-run then one manual refresh; validate v1 receipt, 13-model registry,
-   renewed readiness/state and identical node-22/node-27 NFS views.
+3. Run dry-run then one manual refresh; validate v1 receipt, registry matching
+   the exact current live inventory (20 models on 2026-07-14), renewed
+   readiness/state and identical node-22/node-27 NFS views.
 4. Run one bounded scheduler pass through actual stage job(s), terminal
    accounting, three new leaves and node-27 ACL verification.
 5. On success enable/start refresh timer and restore scheduler state; on failure

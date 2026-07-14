@@ -986,8 +986,8 @@ def _provider_evidence(name: str, before: Mapping[str, Any], result: Any) -> dic
         "after_generated_at": result_map.get("generated_at") or before.get("generated_at"),
         "after_payload_checksum": result_map.get("checksum") or before.get("checksum"),
         "entry_count": int(
-            result_map.get("model_count")
-            or result_map.get("entry_count")
+            result_map.get("entry_count")
+            or result_map.get("model_count")
             or result_map.get("selected_model_count")
             or 0
         ),

@@ -855,6 +855,16 @@ def test_refresh_dry_run_validates_three_providers_without_replacement(
     assert not list(config.emergency_root.iterdir())
 
 
+def test_provider_evidence_prefers_entry_count_over_model_count() -> None:
+    evidence = refresh._provider_evidence(
+        "readiness",
+        {},
+        {"entry_count": 40, "model_count": 20},
+    )
+
+    assert evidence["entry_count"] == 40
+
+
 def test_refresh_routes_shared_provider_and_private_reference_roots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
