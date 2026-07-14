@@ -566,6 +566,17 @@ def test_live_shape_provenance_binds_projected_fixture_bytes_and_authoritative_f
     assert ifs_run["authoritative_fields"]["end_time"] == "2026-06-06T06:00:00Z"
 
 
+def test_states_permission_runbook_requires_enforce_write_access_and_future_inheritance() -> None:
+    runbook = (
+        _ROOT / "docs/runbooks/tier-node27-timeseries-storage.md"
+    ).read_text(encoding="utf-8")
+    normalized = " ".join(runbook.split())
+    assert "read/write/search (`rwx`)" in normalized
+    assert "`rx` is only sufficient for discovery/dry-run" in normalized
+    assert "POSIX default ACLs cannot express different named-user entries" in normalized
+    assert "directory `test -x`/`test -w`, and file `test -r`" in normalized
+
+
 def test_live_shape_complete_forcing_bundles_execute_real_domain_validator(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

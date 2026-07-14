@@ -142,14 +142,23 @@ must establish one complete access model across both existing and future
 `states` content:
 
 - With group access, every directory from the NFS root through each state leaf
-  grants the chosen group search (`x`) and directory read (`r`) access, state
-  files grant group read access, and newly written directories/files inherit
-  the intended group and compatible modes (for example, setgid parent
-  directories plus a writer umask that preserves group read/search).
-- With ACL access, every existing path grants the named `nwm` user, or the
-  intended group, equivalent directory read/search and file read access. The
-  writer parents also carry a default ACL so future state leaves inherit the
-  same access. The effective ACL mask must not remove those permissions.
+  grants the chosen group read/write/search (`rwx`) access, state files grant
+  group read access, and newly written directories/files inherit the intended
+  group and compatible modes (for example, setgid parent directories plus a
+  writer umask/default ACL that preserves group `rwx` on directories).
+- With ACL access, every current directory grants the named `nwm` user
+  effective `rwx` and every current state file grants effective read access.
+  Writer parents also carry a default ACL so future state directories inherit
+  `rwx`. Product-archive enforce renames each verified source leaf, creates a
+  claim directory beside it, and recursively removes the tombstone, so `rx` is
+  only sufficient for discovery/dry-run and MUST NOT be accepted as an enforce
+  precondition. POSIX default ACLs cannot express different named-user entries
+  for new directories and regular files: a default `nwm:rwx` may give `nwm`
+  write on newly created files after the creator-mode mask is applied. If that
+  extra file permission is unacceptable, the writer must apply a post-create
+  ACL that leaves directories `rwx` and files read-only; do not weaken the
+  directory permission to `rx`. The effective ACL mask must not remove the
+  required permissions.
 
 The storage and identity administrators own any group, ownership, mode, or ACL
 mutation. This PR does not run or prescribe site-specific `usermod`, `chgrp`,
@@ -184,13 +193,13 @@ done
 
 The complete `find` must exit zero. For the group model, the selected writer
 parents must have the `nfsdata` (or explicitly selected equivalent) group,
-setgid set, and group read/search after the ACL effective mask is applied.
-Their default ACL/mode and the actual writer's umask must preserve group
-read/search on new directories and group read on new files. For the ACL model,
-the writer parents must have a default named-user `nwm` or selected-group entry
-and a default/effective mask that does not reduce it below directory
-read/search and file read. A plain access ACL on today's leaves is insufficient
-because tomorrow's leaves would regress.
+setgid set, and group `rwx` after the ACL effective mask is applied. Their
+default ACL/mode and the actual writer's umask must preserve group `rwx` on new
+directories and group read on new files. For the ACL model, the writer parents
+must have a default named-user `nwm` or selected-group entry and a
+default/effective mask that preserves directory `rwx`; current files require
+read. A plain access ACL on today's leaves is insufficient because tomorrow's
+leaves would regress.
 
 Identify the process that actually creates a recent state leaf on the node
 where that process runs (normally the node-22 compute plane; do not infer its
@@ -243,6 +252,7 @@ id
 namei -l /home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/2026050100
 getfacl -p /home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/2026050100
 test -x /home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/2026050100
+test -w /home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/2026050100
 test -r /home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/2026050100/state.cfg.ic
 
 mapfile -t manager_pids < <(pgrep -u "$(id -u)" -x systemd)
@@ -256,9 +266,12 @@ systemd-run --user --wait --pipe --collect /usr/bin/id
 systemd-run --user --wait --pipe --collect \
   /usr/bin/test -r \
   /home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/2026050100/state.cfg.ic
+systemd-run --user --wait --pipe --collect \
+  /usr/bin/test -w \
+  /home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/2026050100
 ```
 
-Repeat `namei`, `getfacl`, `test -x`, and `test -r` for
+Repeat `namei`, `getfacl`, directory `test -x`/`test -w`, and file `test -r` for
 `states/gfs/basins_heihe_shud/<cycle>` and
 `states/IFS/basins_qhh_shud/<cycle>`, and run the complete logged `find` again.
 Any permission diagnostic or non-zero `find` exit, failed `test`, or `---`

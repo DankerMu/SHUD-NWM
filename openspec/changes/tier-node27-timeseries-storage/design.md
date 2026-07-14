@@ -1300,11 +1300,15 @@ and every #856 cascade action remain unchanged downstream consumers.
   #1065 does not introduce an all-candidate transactional archive protocol.
 - The runbook MUST state the complete operator repair. Adding `nwm` to
   `nfsdata` alone is insufficient when leaves are mode `0700`: existing and
-  future directories need group traversal/read bits and files need group read,
-  or an equivalent named-user plus default ACL. A new login/user-manager
-  restart is required after supplementary-group changes. Verification covers
-  `id`, `namei`, `getfacl`, `test -x`, and a bounded `find` as `nwm`. The PR does
-  not execute `usermod`, `chmod`, `chgrp`, or ACL mutation.
+  future directories need effective read/write/search because enforce performs
+  verified sibling rename, claim-directory creation, and recursive tombstone
+  retirement; files need read. An equivalent named-user plus default ACL MAY
+  be used, with its file-write inheritance tradeoff or an explicit writer-side
+  post-create ACL documented. A new login/user-manager restart is required
+  only after supplementary-group changes. Verification covers `id`, `namei`,
+  `getfacl`, directory `test -x`/`test -w`, file `test -r`, and a complete
+  logged `find` as `nwm`. The PR does not execute `usermod`, `chmod`, `chgrp`,
+  or ACL mutation.
 - Live proof is staged: before operator permission repair, a direct mover run
   produces the single `STATES_ACCESS_DENIED` terminal diagnostic; after the
   operator repair, a default-env direct dry-run proves current production

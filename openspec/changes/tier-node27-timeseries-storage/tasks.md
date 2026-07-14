@@ -1263,9 +1263,12 @@ Order is load-bearing:
     failure retains ordinary per-locator diagnostics and exit code `1`.
   - Input: runbook permission repair. Expected: it states that supplementary
     group membership alone does not fix mode-0700 leaves; documents group
-    traversal/read plus future-writer inheritance or named-user/default ACL;
-    requires a new login/user-manager restart; and verifies with `id`, `namei`,
-    `getfacl`, `test -x`, and bounded `find` as `nwm`.
+    directory `rwx` plus file read and future-writer inheritance, or an
+    equivalent named-user/default ACL with the file-write inheritance tradeoff;
+    explains that `rx` is insufficient for enforce; requires a new
+    login/user-manager only for group membership changes; and verifies with
+    `id`, `namei`, `getfacl`, directory `test -x`/`test -w`, file `test -r`, and
+    complete logged `find` as `nwm`.
   - Input: node-27 direct mover before permission repair. Expected: committed
     schema-valid access-failure evidence with the exact receipt/stderr/exit-2
     contract. Input: default-env direct dry-run after operator repair at the
