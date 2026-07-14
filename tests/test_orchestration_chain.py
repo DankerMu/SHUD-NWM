@@ -2433,6 +2433,7 @@ def test_parse_success_copybacks_active_run_trees(
             "copyback_root": str(copyback_root),
             "run_ids": ["run_0", "run_1"],
             "extra_object_keys": (),
+            "object_store_prefix": orchestrator.config.object_store_prefix,
         }
     ]
     event = next(event for event in repository.events if event["event_type"] == "object_store_copyback")
@@ -2477,6 +2478,7 @@ def test_forecast_state_save_qc_terminal_success_copybacks_active_run_trees(
             "copyback_root": str(copyback_root),
             "run_ids": ["run_0", "run_1"],
             "extra_object_keys": (),
+            "object_store_prefix": orchestrator.config.object_store_prefix,
         }
     ]
     event = next(event for event in repository.events if event["event_type"] == "object_store_copyback")

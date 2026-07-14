@@ -20,10 +20,12 @@ from packages.common.provider_atomic import (
     ProviderAtomicError,
     ProviderPreimage,
     atomic_replace_provider_bytes,
-    capture_provider_preimage,
+    provider_destination_lock,
+    read_provider_snapshot,
 )
 from packages.common.safe_fs import (
     SafeFilesystemError,
+    atomic_write_bytes_no_follow,
     ensure_directory_no_follow,
     read_bytes_limited_no_follow,
     stat_no_follow,
@@ -1385,11 +1387,6 @@ class FileStateSnapshotIndexRepository:
         )
 
     def validated_entries_for_renewal(self) -> tuple[list[dict[str, Any]], dict[str, Any], ProviderPreimage]:
-        snapshot = self._load_index_snapshot(
-            allow_empty=False,
-            verify_objects=True,
-            enforce_freshness=False,
-        )
         path, containment_root = _state_index_destination_path(
             self.index_uri,
             object_store_root=self.object_store_root,
@@ -1397,18 +1394,45 @@ class FileStateSnapshotIndexRepository:
             published_artifact_root=self.published_artifact_root,
         )
         try:
-            preimage = capture_provider_preimage(
+            content, preimage = read_provider_snapshot(
                 path,
                 containment_root=containment_root,
                 max_bytes=MAX_STATE_SNAPSHOT_INDEX_BYTES,
             )
+            payload = json.loads(content.decode("utf-8"))
         except ProviderAtomicError as error:
             raise _state_index_error(error.reason, field="index", evidence={"phase": error.phase}) from error
-        payload_entries = snapshot.payload.get("entries")
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+            raise _state_index_error("state_snapshot_index_malformed_json", field="index") from error
+        if not isinstance(payload, Mapping):
+            raise _state_index_error("state_snapshot_index_not_object", field="index")
+        entries_by_key = _validate_state_snapshot_index(
+            payload,
+            object_store_root=self.object_store_root,
+            object_store_prefix=self.object_store_prefix,
+            published_artifact_root=self.published_artifact_root,
+            now=self.now,
+            max_age_hours=self.max_age_hours,
+            verify_objects=True,
+            enforce_freshness=False,
+        )
+        evidence = _state_index_evidence_safe(
+            {
+                "status": "ready",
+                "schema_version": FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION,
+                "index": _state_index_uri_evidence(self.index_uri),
+                "generated_at": payload.get("generated_at"),
+                "checksum": _safe_checksum(payload.get("checksum")),
+                "content_checksum_verified": _checksum_matches(payload.get("checksum"), _payload_checksum(payload)),
+                "entry_count": len(entries_by_key),
+                "index_bytes": len(content),
+            }
+        )
+        payload_entries = payload.get("entries")
         if not isinstance(payload_entries, Sequence) or isinstance(payload_entries, str | bytes | bytearray):
             raise _state_index_error("state_snapshot_index_entries_invalid", field="entries")
         entries = [dict(entry) for entry in payload_entries if isinstance(entry, Mapping)]
-        return entries, dict(snapshot.evidence), preimage
+        return entries, evidence, preimage
 
     def _load_index_snapshot(
         self,
@@ -1544,6 +1568,7 @@ def publish_state_snapshot_index(
     verify_objects: bool = True,
     expected_preimage: ProviderPreimage | Mapping[str, object] | None = None,
     lock_held: bool = False,
+    destination_containment_root: Path | None = None,
 ) -> dict[str, Any]:
     generated = _ensure_utc(generated_at or datetime.now(tz=UTC))
     payload: dict[str, Any] = {
@@ -1576,6 +1601,7 @@ def publish_state_snapshot_index(
         published_artifact_root=published_artifact_root,
         expected_preimage=expected_preimage,
         lock_held=lock_held,
+        destination_containment_root=destination_containment_root,
     )
     return _state_index_evidence_safe(
         {
@@ -1590,6 +1616,213 @@ def publish_state_snapshot_index(
             "atomic_write": True,
         }
     )
+
+
+def merge_state_snapshot_index_copyback(
+    *,
+    source_path: Path,
+    destination_path: Path,
+    reference_object_store_root: str | Path,
+    object_store_prefix: str,
+    source_containment_root: Path,
+    destination_containment_root: Path,
+) -> dict[str, Any]:
+    """Merge the private lifecycle index into the shared canonical index.
+
+    Identity collisions retain the entry with the later ``created_at``; an
+    exact tie with different bytes fails closed.  This prevents either an old
+    refresh snapshot or an old copyback from deleting a concurrent state.
+    """
+
+    try:
+        source_content, _source_preimage = read_provider_snapshot(
+            source_path,
+            containment_root=source_containment_root,
+            max_bytes=MAX_STATE_SNAPSHOT_INDEX_BYTES,
+        )
+        source_payload = json.loads(source_content)
+    except (ProviderAtomicError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+        raise _state_index_error("state_snapshot_index_unreadable", field="copyback_source") from error
+    if not isinstance(source_payload, Mapping):
+        raise _state_index_error("state_snapshot_index_not_object", field="copyback_source")
+    source_validated = _validate_state_snapshot_index(
+        source_payload,
+        object_store_root=reference_object_store_root,
+        object_store_prefix=object_store_prefix,
+        published_artifact_root=None,
+        now=None,
+        max_age_hours=DEFAULT_STATE_SNAPSHOT_INDEX_MAX_AGE_HOURS,
+        verify_objects=True,
+        enforce_freshness=False,
+    )
+    source_entries = _copyback_raw_entries(source_payload, source_validated)
+    with provider_destination_lock(
+        destination_path,
+        containment_root=destination_containment_root,
+    ):
+        try:
+            destination_content, destination_preimage = read_provider_snapshot(
+                destination_path,
+                containment_root=destination_containment_root,
+                max_bytes=MAX_STATE_SNAPSHOT_INDEX_BYTES,
+            )
+            destination_payload = json.loads(destination_content)
+            if not isinstance(destination_payload, Mapping):
+                raise ValueError("destination index is not an object")
+            destination_validated = _validate_state_snapshot_index(
+                destination_payload,
+                object_store_root=destination_containment_root,
+                object_store_prefix=object_store_prefix,
+                published_artifact_root=None,
+                now=None,
+                max_age_hours=DEFAULT_STATE_SNAPSHOT_INDEX_MAX_AGE_HOURS,
+                verify_objects=True,
+                enforce_freshness=False,
+            )
+            destination_entries = _copyback_raw_entries(destination_payload, destination_validated)
+        except ProviderAtomicError as error:
+            if error.reason != "provider_destination_missing":
+                raise _state_index_error("state_snapshot_index_unreadable", field="copyback_destination") from error
+            destination_preimage = ProviderPreimage(exists=False)
+            destination_entries = {}
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as error:
+            raise _state_index_error("state_snapshot_index_unreadable", field="copyback_destination") from error
+
+        merged = dict(destination_entries)
+        for key, source_entry in source_entries.items():
+            current = merged.get(key)
+            if current is None or current == source_entry:
+                merged[key] = source_entry
+                continue
+            source_created = _copyback_entry_created_at(source_entry)
+            current_created = _copyback_entry_created_at(current)
+            if source_created > current_created:
+                merged[key] = source_entry
+            elif source_created == current_created:
+                raise _state_index_error("state_snapshot_index_copyback_conflict", field="entries[]")
+
+        checkpoint_results = [
+            _copyback_state_checkpoint(
+                entry,
+                reference_object_store_root=reference_object_store_root,
+                destination_object_store_root=destination_containment_root,
+                object_store_prefix=object_store_prefix,
+            )
+            for entry in merged.values()
+        ]
+        result = publish_state_snapshot_index(
+            [merged[key] for key in sorted(merged)],
+            destination_path,
+            object_store_root=destination_containment_root,
+            object_store_prefix=object_store_prefix,
+            verify_objects=True,
+            expected_preimage=destination_preimage,
+            lock_held=True,
+            destination_containment_root=destination_containment_root,
+        )
+        return {
+            **result,
+            "source_entry_count": len(source_entries),
+            "merged_entry_count": len(merged),
+            "checkpoint_copied_count": sum(item == "copied" for item in checkpoint_results),
+            "checkpoint_reused_count": sum(item == "reused" for item in checkpoint_results),
+        }
+
+
+def _copyback_state_checkpoint(
+    entry: Mapping[str, Any],
+    *,
+    reference_object_store_root: str | Path,
+    destination_object_store_root: str | Path,
+    object_store_prefix: str,
+) -> str:
+    uri = str(entry.get("state_uri") or "")
+    expected_checksum = str(entry.get("checksum") or "")
+    source_store = LocalObjectStore(reference_object_store_root, object_store_prefix=object_store_prefix)
+    destination_store = LocalObjectStore(destination_object_store_root, object_store_prefix=object_store_prefix)
+    try:
+        key = source_store.normalize_key(uri)
+    except (ObjectStoreError, ValueError) as error:
+        raise _state_index_error("state_snapshot_index_object_unsafe_uri", field="entries[].state_uri") from error
+    if not key.startswith("states/"):
+        raise _state_index_error("state_snapshot_index_object_unsafe_uri", field="entries[].state_uri")
+    try:
+        if destination_store.exists(key):
+            existing = destination_store.read_bytes_limited(key, max_bytes=MAX_STATE_IC_BYTES)
+            if not _checksum_matches(expected_checksum, sha256_bytes(existing)):
+                raise _state_index_error(
+                    "state_snapshot_index_object_checksum_mismatch",
+                    field="entries[].state_uri",
+                )
+            return "reused"
+        content = source_store.read_bytes_limited(key, max_bytes=MAX_STATE_IC_BYTES)
+        if not _checksum_matches(expected_checksum, sha256_bytes(content)):
+            raise _state_index_error(
+                "state_snapshot_index_object_checksum_mismatch",
+                field="entries[].state_uri",
+            )
+        destination_root = Path(destination_object_store_root).expanduser().absolute()
+        destination = destination_store.resolve_path(key)
+        _ensure_copyback_state_parent(destination.parent, destination_root)
+        atomic_write_bytes_no_follow(
+            destination,
+            content,
+            containment_root=destination_root,
+            mode=0o664,
+            require_durable_replace=True,
+        )
+        copied = destination_store.read_bytes_limited(key, max_bytes=MAX_STATE_IC_BYTES)
+        if copied != content:
+            raise _state_index_error(
+                "state_snapshot_index_object_checksum_mismatch",
+                field="entries[].state_uri",
+            )
+    except StateManagerError:
+        raise
+    except (OSError, ObjectStoreError, SafeFilesystemError, ValueError) as error:
+        raise _state_index_error("state_snapshot_index_object_unreadable", field="entries[].state_uri") from error
+    return "copied"
+
+
+def _ensure_copyback_state_parent(parent: Path, containment_root: Path) -> None:
+    root = containment_root.expanduser().absolute()
+    target = parent.expanduser().absolute()
+    try:
+        relative = target.relative_to(root)
+    except ValueError as error:
+        raise _state_index_error("state_snapshot_index_object_unsafe_uri", field="entries[].state_uri") from error
+    current = root
+    for part in relative.parts:
+        current = current / part
+        try:
+            os.lstat(current)
+            created = False
+        except FileNotFoundError:
+            created = True
+        ensure_directory_no_follow(current, containment_root=root)
+        if created:
+            os.chmod(current, 0o775, follow_symlinks=False)
+
+
+def _copyback_entry_created_at(entry: Mapping[str, Any]) -> datetime:
+    value = entry.get("created_at") or entry.get("valid_time")
+    return _ensure_utc(_parse_state_index_time(value, field="entries[].created_at"))
+
+
+def _copyback_raw_entries(
+    payload: Mapping[str, Any],
+    validated: Mapping[tuple[str, str, str, str, str], Mapping[str, Any]],
+) -> dict[tuple[str, str, str, str, str], dict[str, Any]]:
+    raw_entries = payload.get("entries")
+    if not isinstance(raw_entries, Sequence) or isinstance(raw_entries, str | bytes | bytearray):
+        raise _state_index_error("state_snapshot_index_entries_invalid", field="entries")
+    if len(raw_entries) != len(validated):
+        raise _state_index_error("state_snapshot_index_entries_invalid", field="entries")
+    return {
+        key: dict(raw)
+        for key, raw in zip(validated, raw_entries, strict=True)
+        if isinstance(raw, Mapping)
+    }
 
 
 def _validate_state_snapshot_index(
@@ -2103,6 +2336,7 @@ def _write_state_index_bytes(
     published_artifact_root: str | Path | None,
     expected_preimage: ProviderPreimage | Mapping[str, object] | None = None,
     lock_held: bool = False,
+    destination_containment_root: Path | None = None,
 ) -> None:
     path, containment_root = _state_index_destination_path(
         uri,
@@ -2110,6 +2344,7 @@ def _write_state_index_bytes(
         object_store_prefix=object_store_prefix,
         published_artifact_root=published_artifact_root,
     )
+    containment_root = destination_containment_root or containment_root
     try:
         atomic_replace_provider_bytes(
             path,
@@ -2121,7 +2356,13 @@ def _write_state_index_bytes(
         )
     except ProviderAtomicError as error:
         reason = error.reason
-        if reason in {"provider_lock_unavailable", "provider_lock_not_regular", "provider_destination_not_regular"}:
+        if reason in {
+            "provider_destination_not_regular",
+            "provider_destination_unsafe",
+            "provider_destination_unreadable",
+            "provider_lock_not_regular",
+            "provider_lock_unavailable",
+        }:
             reason = "state_snapshot_index_write_failed"
         raise _state_index_error(
             reason,

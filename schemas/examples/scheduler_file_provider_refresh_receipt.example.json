@@ -50,6 +50,13 @@
       "entry_count": 13
     }
   ],
-  "orphans": {"items": [], "total": 0, "truncated": false},
+  "orphans": {
+    "items": [],
+    "total": 0,
+    "discovered_total": 13,
+    "attempted_total": 13,
+    "created_total": 0,
+    "truncated": false
+  },
   "residues": []
 }

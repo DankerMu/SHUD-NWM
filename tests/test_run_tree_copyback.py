@@ -1,9 +1,20 @@
 from __future__ import annotations
 
+import json
+import os
+import threading
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from packages.common import state_manager as state_manager_module
+from packages.common.object_store import LocalObjectStore, sha256_bytes
+from packages.common.state_manager import (
+    FileStateSnapshotIndexRepository,
+    StateManagerError,
+    publish_state_snapshot_index,
+)
 from services.orchestrator.run_tree_copyback import RunTreeCopybackError, copyback_run_trees
 
 
@@ -80,7 +91,61 @@ def test_copyback_run_trees_copies_extra_state_index_object(tmp_path: Path) -> N
     _write_run(object_root, "fcst_gfs_2026062700_basins_heihe_shud", output_text="new\n")
     state_index = object_root / "scheduler" / "state-index" / "index-last.json"
     state_index.parent.mkdir(parents=True)
-    state_index.write_text('{"entries":[]}\n', encoding="utf-8")
+    publish_state_snapshot_index(
+        [],
+        state_index,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, tzinfo=UTC),
+    )
+
+    previous_umask = os.umask(0o077)
+    try:
+        summary = copyback_run_trees(
+            object_store_root=object_root,
+            copyback_root=copyback_root,
+            run_ids=["fcst_gfs_2026062700_basins_heihe_shud"],
+            extra_object_keys=["scheduler/state-index/index-last.json"],
+        )
+    finally:
+        os.umask(previous_umask)
+
+    assert summary is not None
+    extra = summary["extra_objects"]
+    assert len(extra) == 1
+    assert extra[0]["object_key"] == "scheduler/state-index/index-last.json"
+    assert extra[0]["merge"]["merged_entry_count"] == 0
+    assert '"schema_version": "nhms.scheduler.file_state_snapshot_index.v1"' in (
+        copyback_root / "scheduler" / "state-index" / "index-last.json"
+    ).read_text(encoding="utf-8")
+
+
+def test_state_index_copyback_merges_without_losing_shared_entry(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    _write_run(object_root, "fcst_gfs_2026062700_basins_heihe_shud")
+    store = LocalObjectStore(object_root, "s3://nhms")
+    shared_store = LocalObjectStore(copyback_root, "s3://nhms")
+    private_content = _valid_state_bytes(b"private")
+    shared_content = _valid_state_bytes(b"shared")
+    private_uri = store.write_bytes_atomic("states/gfs/model_a/private/state.cfg.ic", private_content)
+    shared_uri = shared_store.write_bytes_atomic("states/gfs/model_a/shared/state.cfg.ic", shared_content)
+    source_index = object_root / "scheduler/state-index/index-last.json"
+    destination_index = copyback_root / "scheduler/state-index/index-last.json"
+    publish_state_snapshot_index(
+        [_state_entry("private-state", private_uri, private_content, "2026-06-27T01:00:00Z")],
+        source_index,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
+    )
+    publish_state_snapshot_index(
+        [_state_entry("shared-state", shared_uri, shared_content, "2026-06-27T00:00:00Z")],
+        destination_index,
+        object_store_root=copyback_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
+    )
 
     summary = copyback_run_trees(
         object_store_root=object_root,
@@ -90,12 +155,170 @@ def test_copyback_run_trees_copies_extra_state_index_object(tmp_path: Path) -> N
     )
 
     assert summary is not None
-    assert summary["extra_objects"] == [
-        {"object_key": "scheduler/state-index/index-last.json", "file_count": 1, "byte_count": 15}
-    ]
-    assert (
-        copyback_root / "scheduler" / "state-index" / "index-last.json"
-    ).read_text(encoding="utf-8") == '{"entries":[]}\n'
+    payload = json.loads(destination_index.read_text())
+    assert {entry["state_id"] for entry in payload["entries"]} == {"private-state", "shared-state"}
+    assert summary["extra_objects"][0]["merge"]["merged_entry_count"] == 2
+    assert summary["extra_objects"][0]["merge"]["checkpoint_copied_count"] == 1
+    copied_checkpoint = copyback_root / "states/gfs/model_a/private/state.cfg.ic"
+    assert copied_checkpoint.read_bytes() == private_content
+    assert copied_checkpoint.stat().st_mode & 0o777 == 0o664
+    assert copied_checkpoint.parent.stat().st_mode & 0o777 == 0o775
+    repository = FileStateSnapshotIndexRepository(
+        index_uri=str(destination_index),
+        object_store_root=copyback_root,
+        object_store_prefix="s3://nhms",
+    )
+    entries, _header, _preimage = repository.validated_entries_for_renewal()
+    assert {entry["state_id"] for entry in entries} == {"private-state", "shared-state"}
+
+
+def test_state_index_copyback_checkpoint_failure_preserves_shared_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    _write_run(object_root, "fcst_gfs_2026062700_basins_heihe_shud")
+    private_store = LocalObjectStore(object_root, "s3://nhms")
+    shared_store = LocalObjectStore(copyback_root, "s3://nhms")
+    private_content = _valid_state_bytes(b"private")
+    shared_content = _valid_state_bytes(b"shared")
+    private_uri = private_store.write_bytes_atomic("states/gfs/model_a/private/state.cfg.ic", private_content)
+    shared_uri = shared_store.write_bytes_atomic("states/gfs/model_a/shared/state.cfg.ic", shared_content)
+    source_index = object_root / "scheduler/state-index/index-last.json"
+    destination_index = copyback_root / "scheduler/state-index/index-last.json"
+    publish_state_snapshot_index(
+        [_state_entry("private-state", private_uri, private_content, "2026-06-27T01:00:00Z")],
+        source_index,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
+    )
+    publish_state_snapshot_index(
+        [_state_entry("shared-state", shared_uri, shared_content, "2026-06-27T00:00:00Z")],
+        destination_index,
+        object_store_root=copyback_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
+    )
+    before = destination_index.read_bytes()
+
+    def fail_checkpoint(*args: object, **kwargs: object) -> str:
+        del args, kwargs
+        raise StateManagerError("checkpoint copy failed")
+
+    monkeypatch.setattr(state_manager_module, "_copyback_state_checkpoint", fail_checkpoint)
+    with pytest.raises(RunTreeCopybackError) as error_info:
+        copyback_run_trees(
+            object_store_root=object_root,
+            copyback_root=copyback_root,
+            run_ids=["fcst_gfs_2026062700_basins_heihe_shud"],
+            extra_object_keys=["scheduler/state-index/index-last.json"],
+        )
+
+    assert error_info.value.code == "OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED"
+    assert destination_index.read_bytes() == before
+    assert not (copyback_root / "states/gfs/model_a/private/state.cfg.ic").exists()
+
+
+def test_state_index_copyback_serializes_against_refresh_publisher_without_deadlock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    _write_run(object_root, "fcst_gfs_2026062700_basins_heihe_shud")
+    private_store = LocalObjectStore(object_root, "s3://nhms")
+    shared_store = LocalObjectStore(copyback_root, "s3://nhms")
+    private_content = _valid_state_bytes(b"private")
+    shared_content = _valid_state_bytes(b"shared")
+    private_uri = private_store.write_bytes_atomic("states/gfs/model_a/private/state.cfg.ic", private_content)
+    shared_uri = shared_store.write_bytes_atomic("states/gfs/model_a/shared/state.cfg.ic", shared_content)
+    source_index = object_root / "scheduler/state-index/index-last.json"
+    destination_index = copyback_root / "scheduler/state-index/index-last.json"
+    private_entry = _state_entry("private-state", private_uri, private_content, "2026-06-27T01:00:00Z")
+    shared_entry = _state_entry("shared-state", shared_uri, shared_content, "2026-06-27T00:00:00Z")
+    publish_state_snapshot_index(
+        [private_entry],
+        source_index,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
+    )
+    publish_state_snapshot_index(
+        [shared_entry],
+        destination_index,
+        object_store_root=copyback_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    real_copy_checkpoint = state_manager_module._copyback_state_checkpoint
+    copyback_errors: list[BaseException] = []
+
+    def pause_checkpoint(*args: object, **kwargs: object) -> str:
+        result = real_copy_checkpoint(*args, **kwargs)
+        entered.set()
+        assert release.wait(timeout=10)
+        return result
+
+    def run_copyback() -> None:
+        try:
+            copyback_run_trees(
+                object_store_root=object_root,
+                copyback_root=copyback_root,
+                run_ids=["fcst_gfs_2026062700_basins_heihe_shud"],
+                extra_object_keys=["scheduler/state-index/index-last.json"],
+            )
+        except BaseException as error:  # pragma: no cover - asserted below
+            copyback_errors.append(error)
+
+    monkeypatch.setattr(state_manager_module, "_copyback_state_checkpoint", pause_checkpoint)
+    copyback_thread = threading.Thread(target=run_copyback)
+    copyback_thread.start()
+    assert entered.wait(timeout=10)
+
+    with pytest.raises(StateManagerError) as error_info:
+        publish_state_snapshot_index(
+            [shared_entry],
+            destination_index,
+            object_store_root=copyback_root,
+            object_store_prefix="s3://nhms",
+            generated_at=datetime(2026, 6, 27, 3, tzinfo=UTC),
+        )
+    release.set()
+    copyback_thread.join(timeout=10)
+
+    assert "provider_already_running" in str(error_info.value)
+    assert not copyback_thread.is_alive()
+    assert not copyback_errors
+    payload = json.loads(destination_index.read_text())
+    assert {entry["state_id"] for entry in payload["entries"]} == {"private-state", "shared-state"}
+
+
+def _valid_state_bytes(seed: bytes) -> bytes:
+    minute = 27_000_000.0 + (int.from_bytes(seed[:4].ljust(4, b"\x00"), "big") % 1000)
+    return (
+        f"2\t1\t{minute:.6f}\n"
+        "1\t0.1\t0.1\t0.1\t0.1\t0.1\n"
+        "2\t0.1\t0.1\t0.1\t0.1\t0.1\n"
+        "1\t0.5\n"
+    ).encode()
+
+
+def _state_entry(state_id: str, uri: str, content: bytes, valid_time: str) -> dict[str, object]:
+    return {
+        "state_id": state_id,
+        "model_id": "model_a",
+        "run_id": f"run-{state_id}",
+        "source_id": "gfs",
+        "valid_time": valid_time,
+        "state_uri": uri,
+        "checksum": f"sha256:{sha256_bytes(content)}",
+        "usable_flag": True,
+        "created_at": valid_time,
+    }
 
 
 def test_copyback_run_trees_rejects_unsafe_run_id(tmp_path: Path) -> None:

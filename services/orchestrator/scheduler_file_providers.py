@@ -16,6 +16,7 @@ from packages.common.provider_atomic import (
     ProviderPreimage,
     atomic_replace_provider_bytes,
     capture_provider_preimage,
+    read_provider_snapshot,
 )
 from packages.common.safe_fs import (
     SafeFilesystemError,
@@ -1208,7 +1209,26 @@ def load_canonical_readiness_entries_for_renewal(
         published_artifact_root=published_artifact_root,
         now=now,
     )
-    payload, content = _read_json_mapping(str(index_uri), roots=roots, max_bytes=MAX_READINESS_INDEX_BYTES)
+    path, containment_root = _provider_destination_path(str(index_uri), roots)
+    try:
+        content, preimage = read_provider_snapshot(
+            path,
+            containment_root=containment_root,
+            max_bytes=MAX_READINESS_INDEX_BYTES,
+        )
+        payload = json.loads(content.decode("utf-8"))
+    except ProviderAtomicError as error:
+        raise SchedulerFileProviderError(
+            error.reason,
+            field="index",
+            evidence={"phase": error.phase},
+        ) from error
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+        raise SchedulerFileProviderError("file_manifest_malformed_json", field="index") from error
+    if not isinstance(payload, Mapping):
+        raise SchedulerFileProviderError("file_manifest_not_object", field="index")
+    payload = dict(payload)
+    _validate_json_complexity(payload)
     _entries, evidence = _validate_readiness_index(
         payload,
         content=content,
@@ -1220,13 +1240,6 @@ def load_canonical_readiness_entries_for_renewal(
         products, _product_evidence = _readiness_entry_products(entry, roots=roots)
         if not products:
             raise SchedulerFileProviderError("readiness_renewal_products_missing", field="entries[].products")
-    preimage = capture_scheduler_provider_preimage(
-        index_uri,
-        object_store_root=object_store_root,
-        object_store_prefix=object_store_prefix,
-        published_artifact_root=published_artifact_root,
-        max_bytes=MAX_READINESS_INDEX_BYTES,
-    )
     payload_entries = payload.get("entries", payload.get("cycles"))
     if not isinstance(payload_entries, Sequence) or isinstance(payload_entries, str | bytes | bytearray):
         raise SchedulerFileProviderError("readiness_entries_invalid", field="entries")

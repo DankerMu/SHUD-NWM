@@ -40,12 +40,15 @@
 
 - [x] 3.1 Input valid 13-model inventory plus three valid-except-age provider
   files -> exact identities/digests and published receipt; existing manual CLI
-  output and scheduler consumer behavior remain compatible.
+  output and scheduler consumer behavior remain compatible; a real split-root
+  run proves packages private-only, canonical manifest shared, consumer load
+  succeeds, and private package deletion fails closed.
 - [x] 3.2 Input timer/manual/lifecycle overlap -> one shared lock owner, contender
   already-running, no competing replacement or false success.
 - [x] 3.3 Input readiness/state authoritative replacement between snapshot and
   commit -> expected-preimage mismatch, new entries preserved, stable reason;
-  prove writers take one lock only and cannot deadlock across providers.
+  prove full refresh entrypoints take one lock only and cannot deadlock across
+  providers; state checkpoint copyback serializes on that same shared lock.
 - [x] 3.4 Input invalid readiness checksum/identity/forecast hours/catalog/object
   and invalid state checkpoint -> prior bytes unchanged, stable closed reason,
   no empty/timestamp-only/DB output; valid-except-age cases revalidate every
@@ -54,13 +57,17 @@
   over 1 MiB/64 GiB/250k/depth32, orphan count over 4,096, publisher/pre-replace/
   replace/fsync/post-read/primary-receipt failures and repeated success ->
   phase-correct preservation/rollback, complete old/new reader, first-256/
-  total/truncated orphan evidence, certain cleanup and no secret/raw path.
+  total/truncated orphan evidence, repair-internal pre-write budget rejection,
+  exact concurrent newest-32 history, certain cleanup and no secret/raw path.
 - [x] 3.6 Input primary receipt failure after commit -> reserved emergency v1
   record binds committed digests and reconstructs primary without data
-  publication; primary+emergency failure -> replace-uncertain/direct validation.
+  publication; full-refresh zero/short writes, reserve/finalize file and parent
+  fsync ordering/failures prove durability and descriptor/slot cleanup;
+  primary+emergency failure -> replace-uncertain/direct validation.
 - [x] 3.7 Input systemd install/start/failure/success/rollback -> no DB/libpq env,
   scheduler timer unchanged/restored, refresh timer rolled back on failure and
-  enabled/active on success, services inactive between ticks.
+  enabled/active on success, services inactive between ticks; exact current
+  receipt validation precedes mutation and transitional/re-entry states are safe.
 - [x] 3.8 Run focused publisher/provider/systemd/scheduler tests, `uv run ruff
   check .`, and `openspec validate node22-scheduler-registry-refresh --strict
   --no-interactive`.

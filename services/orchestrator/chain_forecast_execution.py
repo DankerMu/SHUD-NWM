@@ -576,6 +576,7 @@ def _copyback_stage_run_trees(self, context: CycleOrchestrationContext, *, stage
             copyback_root=copyback_root,
             run_ids=run_ids,
             extra_object_keys=_copyback_extra_object_keys(self.config.object_store_root, stage=stage),
+            object_store_prefix=self.config.object_store_prefix,
         )
     except RunTreeCopybackError as error:
         self.repository.insert_pipeline_event(

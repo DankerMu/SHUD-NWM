@@ -21,7 +21,7 @@
   ],
   "properties": {
     "schema_version": {"const": "nhms.scheduler.file_provider_refresh_receipt.v1"},
-    "run_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "run_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.-]+$"},
     "started_at": {"type": "string", "format": "date-time", "maxLength": 64},
     "finished_at": {"type": "string", "format": "date-time", "maxLength": 64},
     "outcome": {
@@ -107,12 +107,22 @@
         ],
         "properties": {
           "name": {"enum": ["registry", "readiness", "state"]},
-          "before_sha256": {"type": ["string", "null"], "maxLength": 64},
+          "before_sha256": {
+            "oneOf": [
+              {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              {"type": "null"}
+            ]
+          },
           "before_inode": {"type": ["integer", "null"], "minimum": 0},
           "before_schema_version": {"type": ["string", "null"], "maxLength": 128},
           "before_generated_at": {"type": ["string", "null"], "format": "date-time", "maxLength": 64},
           "before_payload_checksum": {"type": ["string", "null"], "maxLength": 128},
-          "after_sha256": {"type": ["string", "null"], "maxLength": 64},
+          "after_sha256": {
+            "oneOf": [
+              {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              {"type": "null"}
+            ]
+          },
           "after_schema_version": {"type": ["string", "null"], "maxLength": 128},
           "after_generated_at": {"type": ["string", "null"], "format": "date-time", "maxLength": 64},
           "after_payload_checksum": {"type": ["string", "null"], "maxLength": 128},
@@ -123,10 +133,24 @@
     "orphans": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["items", "total", "truncated"],
+      "required": [
+        "items",
+        "total",
+        "discovered_total",
+        "attempted_total",
+        "created_total",
+        "truncated"
+      ],
       "properties": {
-        "items": {"type": "array", "maxItems": 256, "items": {"type": "string", "maxLength": 512}},
+        "items": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {"type": "string", "pattern": "^package:[0-9a-f]{32}$"}
+        },
         "total": {"type": "integer", "minimum": 0, "maximum": 4096},
+        "discovered_total": {"type": "integer", "minimum": 0},
+        "attempted_total": {"type": "integer", "minimum": 0, "maximum": 4096},
+        "created_total": {"type": "integer", "minimum": 0, "maximum": 4096},
         "truncated": {"type": "boolean"}
       }
     },
@@ -135,5 +159,23 @@
       "maxItems": 64,
       "items": {"type": "string", "maxLength": 512, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"}
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"outcome": {"enum": ["published", "dry_run"]}}, "required": ["outcome"]},
+      "then": {
+        "properties": {
+          "providers": {
+            "minItems": 3,
+            "maxItems": 3,
+            "prefixItems": [
+              {"properties": {"name": {"const": "registry"}}},
+              {"properties": {"name": {"const": "readiness"}}},
+              {"properties": {"name": {"const": "state"}}}
+            ]
+          }
+        }
+      }
+    }
+  ]
 }

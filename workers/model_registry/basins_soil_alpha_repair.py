@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 REPAIR_SCHEMA_VERSION = "basins.calibration_repair.v1"
 SHUD_SOIL_ALPHA_MIN = 0.05
@@ -21,6 +21,7 @@ def repair_soil_alpha_calibration_for_basin(
     isolated_root: str | Path,
     basin_slug: str,
     dry_run: bool = False,
+    write_bytes: Callable[[Path, bytes], None] | None = None,
 ) -> dict[str, Any]:
     """Repair known SHUD calibration bounds inside a private basin copy."""
 
@@ -74,7 +75,13 @@ def repair_soil_alpha_calibration_for_basin(
                 }
             )
         else:
-            _repair_soil_alpha(report, cfg_calib=cfg_calib, para_soil=para_soil, dry_run=dry_run)
+            _repair_soil_alpha(
+                report,
+                cfg_calib=cfg_calib,
+                para_soil=para_soil,
+                dry_run=dry_run,
+                write_bytes=write_bytes,
+            )
 
         para_geol = _single_match(input_dir, "*.para.geol")
         if para_geol is None:
@@ -86,7 +93,13 @@ def repair_soil_alpha_calibration_for_basin(
                 }
             )
         else:
-            _repair_geol_dmac(report, cfg_calib=cfg_calib, para_geol=para_geol, dry_run=dry_run)
+            _repair_geol_dmac(
+                report,
+                cfg_calib=cfg_calib,
+                para_geol=para_geol,
+                dry_run=dry_run,
+                write_bytes=write_bytes,
+            )
     return report
 
 
@@ -107,7 +120,14 @@ def _single_match(root: Path, pattern: str) -> Path | None:
     return matches[0] if len(matches) == 1 else None
 
 
-def _repair_soil_alpha(report: dict[str, Any], *, cfg_calib: Path, para_soil: Path, dry_run: bool) -> None:
+def _repair_soil_alpha(
+    report: dict[str, Any],
+    *,
+    cfg_calib: Path,
+    para_soil: Path,
+    dry_run: bool,
+    write_bytes: Callable[[Path, bytes], None] | None,
+) -> None:
     multiplier = _read_cfg_multiplier(cfg_calib, "SOIL_ALPHA")
     if multiplier is None:
         report["skipped"].append({"reason": "soil_alpha_multiplier_missing", "cfg_calib": str(cfg_calib)})
@@ -171,7 +191,7 @@ def _repair_soil_alpha(report: dict[str, Any], *, cfg_calib: Path, para_soil: Pa
 
     old_sha256 = _sha256_file(cfg_calib)
     if not dry_run:
-        _rewrite_cfg_multiplier(cfg_calib, "SOIL_ALPHA", repaired_multiplier)
+        _rewrite_cfg_multiplier(cfg_calib, "SOIL_ALPHA", repaired_multiplier, write_bytes=write_bytes)
     report["repairs"].append(
         {
             "status": "would_repair" if dry_run else "repaired",
@@ -192,7 +212,14 @@ def _repair_soil_alpha(report: dict[str, Any], *, cfg_calib: Path, para_soil: Pa
     )
 
 
-def _repair_geol_dmac(report: dict[str, Any], *, cfg_calib: Path, para_geol: Path, dry_run: bool) -> None:
+def _repair_geol_dmac(
+    report: dict[str, Any],
+    *,
+    cfg_calib: Path,
+    para_geol: Path,
+    dry_run: bool,
+    write_bytes: Callable[[Path, bytes], None] | None,
+) -> None:
     multiplier = _read_cfg_multiplier(cfg_calib, "GEOL_DMAC")
     if multiplier is None:
         report["skipped"].append({"reason": "geol_dmac_multiplier_missing", "cfg_calib": str(cfg_calib)})
@@ -259,7 +286,7 @@ def _repair_geol_dmac(report: dict[str, Any], *, cfg_calib: Path, para_geol: Pat
 
     old_sha256 = _sha256_file(cfg_calib)
     if not dry_run:
-        _rewrite_cfg_multiplier(cfg_calib, "GEOL_DMAC", repaired_multiplier)
+        _rewrite_cfg_multiplier(cfg_calib, "GEOL_DMAC", repaired_multiplier, write_bytes=write_bytes)
     report["repairs"].append(
         {
             "status": "would_repair" if dry_run else "repaired",
@@ -317,7 +344,13 @@ def _read_tabular_column_values(path: Path, column_name: str) -> list[float]:
     return values
 
 
-def _rewrite_cfg_multiplier(path: Path, parameter: str, value: float) -> None:
+def _rewrite_cfg_multiplier(
+    path: Path,
+    parameter: str,
+    value: float,
+    *,
+    write_bytes: Callable[[Path, bytes], None] | None,
+) -> None:
     replacement = f"{value:.15g}"
     pattern = re.compile(_CFG_MULTIPLIER_RE.pattern.format(parameter=re.escape(parameter)))
     lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
@@ -332,7 +365,11 @@ def _rewrite_cfg_multiplier(path: Path, parameter: str, value: float) -> None:
         changed = True
     if not changed:
         return
-    path.write_text("".join(repaired_lines), encoding="utf-8")
+    content = "".join(repaired_lines).encode("utf-8")
+    if write_bytes is None:
+        path.write_bytes(content)
+    else:
+        write_bytes(path, content)
 
 
 def _sha256_file(path: Path) -> str:

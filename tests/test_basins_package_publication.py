@@ -12,6 +12,38 @@ from workers.model_registry.basins_discovery import discover_basins_inventory, w
 from workers.model_registry.cli import DEFAULT_BASINS_MIGRATION_SOURCE_URI, _argparse_main, _click_main
 
 
+def test_publish_basins_reserves_local_manifest_before_file_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    _object_store_env(tmp_path, monkeypatch)
+    manifest_path = tmp_path / "workspace" / "manifest.json"
+    reservations: list[tuple[Path, int]] = []
+
+    def reject_workspace_write(path: Path, size: int) -> None:
+        assert not path.exists()
+        reservations.append((path, size))
+        raise RuntimeError("workspace_limit_exceeded")
+
+    with pytest.raises(RuntimeError, match="workspace_limit_exceeded"):
+        basins_package.publish_basins_package(
+            inventory_path=inventory_path,
+            model_id=model_id,
+            version="vbasins-test",
+            output_path=manifest_path,
+            output_capacity_guard=reject_workspace_write,
+        )
+
+    assert len(reservations) == 1
+    assert reservations[0][0] == manifest_path
+    assert reservations[0][1] > 0
+    assert not manifest_path.exists()
+    assert not manifest_path.parent.exists()
+    object_root = tmp_path / "object-store" / "models" / model_id / "vbasins-test"
+    assert not any(path.is_file() for path in object_root.rglob("*"))
+
+
 def test_publish_basins_writes_manifest_package_and_success_payload(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

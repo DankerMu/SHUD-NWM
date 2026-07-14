@@ -4,7 +4,7 @@ Description=Refresh NHMS scheduler file providers daily
 [Timer]
 OnCalendar=*-*-* 02:15:00 UTC
 RandomizedDelaySec=30m
-Persistent=true
+Persistent=false
 Unit=nhms-scheduler-file-provider-refresh.service
 
 [Install]

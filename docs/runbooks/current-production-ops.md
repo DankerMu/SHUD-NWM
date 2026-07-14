@@ -179,6 +179,13 @@ timer 每日从权威内容完整重验并重发三个 provider，scheduler cons
 fail closed。手工新增流域时原有 `publish_scheduler_file_registry.py` 参数和成功输出
 保持兼容；它与 timer、model lifecycle、readiness/state writer 使用同一个
 destination-derived lock 和 expected-preimage 检查，并发者不会覆盖较新的权威内容。
+现场是 split-root：`OBJECT_STORE_ROOT` 必须保持
+`/scratch/frd_muziyao/nhms-prod/object-store`，用于发布 registry package，并校验 scheduler
+实际消费的 catalog/checkpoint 引用；`NHMS_SCHEDULER_PROVIDER_STORE_ROOT` 必须指向
+`/ghdc/data/nwm/object-store`，且只承载 registry、canonical-readiness、state-index 三个
+shared-NFS canonical provider。registry JSON 位于 shared root，但其中
+`s3://nhms/models/...` 始终由 private `OBJECT_STORE_ROOT` 解析；不得依赖历史双份 package、
+合并两根或关闭 object verification。
 
 首次安装必须先记录 scheduler 与 refresh unit 状态，并保持 scheduler timer 原状态：
 
@@ -191,8 +198,8 @@ squeue -h -u "$USER"
 
 install -m 0600 infra/env/compute.scheduler-provider-refresh.env.example \
   infra/env/compute.scheduler-provider-refresh.env
-# 按现场真值核对每个绝对路径；禁止加入 DATABASE_URL 或 PG* selector。
-grep -En '^(DATABASE_URL|PIPELINE_DATABASE_URL|PGHOST|PGPORT|PGDATABASE|PGUSER)=' \
+# 按现场真值核对每个绝对路径；installer/wrapper 会拒绝完整 libpq selector 集。
+grep -En '^(DATABASE_URL|PIPELINE_DATABASE_URL|PG[A-Z0-9_]+)=' \
   infra/env/compute.scheduler-provider-refresh.env && exit 1 || true
 install -d -m 0700 /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh \
   /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/runs \
@@ -219,6 +226,9 @@ jq '{outcome,reason,database_free,providers,orphans}' \
 
 `published` receipt 必须绑定三个 canonical 文件的物理 SHA-256；registry 的现场模型数
 应为当前完整 inventory（2026-06-30 为 13），readiness/state entry 不能因刷新减少。
+Installer 在任何 systemd mutation 前都会用同一 strict v1 runtime validator 读取 bounded/no-follow
+latest receipt，并逐一比对三个 shared provider 的当前 SHA-256；minimal、extra、symlink、oversize、
+stale、missing 或非 `published` receipt 均拒绝启用。
 Wrapper 会把 mode-0600 env 当作固定 key/value 数据解析并 export，不执行其中的 shell；
 systemd `UnsetEnvironment=` 与 wrapper 最终 `unset` 会同时清除 user-manager/调用 shell
 继承的 `DATABASE_URL`、`PIPELINE_DATABASE_URL` 和全部受支持 libpq selector。

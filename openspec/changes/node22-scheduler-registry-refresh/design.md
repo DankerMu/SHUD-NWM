@@ -23,8 +23,9 @@ Fixture level: expanded. Repair intensity: high. Project profile: NHMS.
 
 **Non-Goals:**
 
-- No node-22 DB/`:55433`, DB-backed forcing/model/readiness fallback, TTL
-  extension, timestamp-only edit, or model lifecycle change.
+- Node-22 historical local PostgreSQL `:55433` remains archived/stopped and
+  do-not-connect; no DB-backed forcing/model/readiness fallback, TTL extension,
+  timestamp-only edit, or model lifecycle change.
 - No #1065 product-archive enforce, #856, #1069-#1072, frontend/display, or
   unrelated scheduler refactor.
 
@@ -159,6 +160,10 @@ Surfaces:
 - Storage/cache/query: three exact NFS paths above; per-destination lock and
   expected preimage; private run workspace, primary receipt history/latest and
   separately preflighted/reserved local emergency receipt.
+  The live topology has two explicit roots: shared NFS holds only the three
+  canonical provider files, while node-22 private object storage holds registry
+  packages and resolves every `s3://nhms` catalog/checkpoint reference consumed by compute.
+  Neither root substitutes for the other and object verification stays enabled.
 - Public entrypoints: manual publisher CLI, refresh CLI/wrapper,
   `nhms-scheduler-file-provider-refresh.service/.timer`,
   `ProductionScheduler.from_env()`.
@@ -175,18 +180,28 @@ Surfaces:
 Regression rows:
 
 - Valid 13-model inventory + three valid-except-age provider inputs -> fully
-  revalidated atomic outputs and published receipt.
+  revalidated atomic outputs and published receipt; new registry packages are
+  private-only, the canonical manifest is shared, and deleting a private
+  package makes the unchanged scheduler consumer fail closed.
 - Any provider writer overlap -> destination lock + expected-preimage CAS; new
   authoritative entries are never overwritten and no multi-lock deadlock.
 - Pre-commit invalid/path/limit/provider failure -> complete old stat tuple;
   capped immutable orphan evidence only.
 - Replace/fsync/post-read/receipt failure -> phase-correct restored/indeterminate
   outcome; reader sees complete old/new; primary failure writes reserved fsynced
-  emergency record or becomes replace-uncertain.
+  emergency record or becomes replace-uncertain. Reservation file+parent fsync
+  precedes provider side effects; zero/short write and file/parent fsync faults
+  leak neither descriptor nor reserved slot.
 - Workspace >64 GiB/250k/depth32 or orphan candidates >4,096 -> fail before
   canonical commit; evidence contains first 256, total and truncation flag.
 - Invalid readiness/state reference -> no renewal, no DB/timestamp bypass,
   scheduler stays fail closed.
+- Private state checkpoint copyback -> shared checkpoint is durable and
+  checksum-valid before the merged shared index becomes visible; copy failure
+  preserves the old index and concurrent refresh loses no entry.
+- Installer repeated enable/transitional service state -> strict current
+  receipt validation precedes mutation, invalid evidence changes no unit state,
+  and each failure restores its own entry state.
 - Unchanged manual CLI/consumer -> existing successful output and fail-closed
   tests remain compatible.
 - Refreshed providers -> one pass/run across actual stage job(s), terminal Slurm
@@ -197,8 +212,8 @@ Regression rows:
 
 - Shared helpers: scheduler file-provider writers/validators, safe filesystem,
   Basins full publisher.
-- Read: DB-free env, Basins/packages, three provider files and referenced
-  catalogs/objects.
+- Read: DB-free env, Basins/packages, three shared provider files and private
+  compute-visible referenced catalogs/objects.
 - Write/overwrite: three provider files, immutable packages, destination lock,
   private workspace/receipt/history.
 - Stage/publish/rollback: atomic temp/fsync/replace, old/new reader, phase

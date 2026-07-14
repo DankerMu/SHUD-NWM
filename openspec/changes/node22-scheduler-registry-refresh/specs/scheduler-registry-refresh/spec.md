@@ -15,6 +15,12 @@ writers.
   `publish_scheduler_registry_manifest`
 - **AND** readers observe a complete manifest-last payload bound to schema,
   checksum, generation time, model identities, and object evidence
+- **AND** immutable registry packages exist only under the private
+  `OBJECT_STORE_ROOT`, while the shared provider root contains only the three
+  canonical provider files and their lock files
+- **AND** the unchanged scheduler consumer resolves every registry package
+  reference against the private root and fails closed if a referenced private
+  package disappears
 - **AND** a bounded terminal receipt is bound to those exact bytes.
 
 #### Scenario: Timer manual and lifecycle writers contend
@@ -86,6 +92,17 @@ state index without a database fallback or timestamp-only edit.
 - **AND** only fully validated entries are passed to
   `publish_state_snapshot_index`.
 
+#### Scenario: State checkpoint copyback precedes shared index publication
+
+- **WHEN** a private lifecycle state index contains a checkpoint not yet
+  present in the shared NFS object tree
+- **THEN** copyback copies and checksum-verifies the checkpoint under the
+  shared `states/` key before publishing the merged shared canonical index
+- **AND** the shared leaf is mode 0664 under mode-0775 created directories,
+  while a checkpoint-copy failure preserves the prior shared index
+- **AND** copyback and refresh serialize on the same state-index destination
+  lock so one contender fails closed without deadlock or lost entries.
+
 #### Scenario: Invalid provider evidence is never renewed
 
 - **WHEN** an index is missing, malformed, over-limit, checksum/identity-invalid,
@@ -132,6 +149,9 @@ provider paths and SHALL emit a bounded receipt without secrets.
   evidence stores the first 256 plus exact total and `truncated=true`
 - **AND** exceeding a workspace/orphan bound fails before canonical commit and
   performs only identity-certain current-run cleanup.
+- **AND** concurrent receipt publishers retain exactly the chronologically
+  newest 32 valid history records and an older completion cannot replace a
+  newer `latest.json`.
 
 #### Scenario: Receipt failure after provider commit has durable fallback
 
@@ -140,6 +160,9 @@ provider paths and SHALL emit a bounded receipt without secrets.
 - **THEN** a separately preflighted local-filesystem emergency slot reserved by
   exclusive create before any provider commit receives a bounded fsynced v1
   `published_receipt_failed` record bound to the committed provider digests
+- **AND** reservation fsyncs both the regular file and its pinned parent
+  directory before the first provider side effect, finalization handles short
+  writes to completion, verifies exact bytes, and fsyncs file then parent
 - **AND** the operator recovery command validates those digests and reconstructs
   primary latest/history from that record without republishing provider data
 - **AND** failure to finalize both primary and reserved emergency evidence is
@@ -157,6 +180,9 @@ whose cadence plus jitter is strictly below 168 hours.
 - **THEN** the service uses absolute node-22 repo/interpreter paths, the mode-
   0600 DB-free env, private lock/work/receipt locations, journal output and a
   bounded timeout
+- **AND** it rejects/unsets the complete libpq connection environment surface,
+  keeps the three shared provider destinations distinct from private registry-package
+  and referenced-object storage, and does not trigger a missed-run catch-up during installation
 - **AND** changing refresh units does not change scheduler units.
 
 #### Scenario: Failed deployment restores initial state
@@ -165,6 +191,18 @@ whose cadence plus jitter is strictly below 168 hours.
 - **THEN** refresh units/timer return to their recorded initial state,
   scheduler timer returns to its initial enabled/active state, services are
   inactive between ticks, and no issue-owned Slurm job remains.
+
+#### Scenario: Enable validates exact current receipt before mutation
+
+- **WHEN** install `--enable` or repeated `--enable` is requested
+- **THEN** the installer first requires both refresh units to be exactly
+  inactive and validates one bounded no-follow current v1 published receipt
+  whose ordered three provider digests match current canonical bytes
+- **AND** missing, stale, minimal, symlinked, oversized, non-published, or
+  digest-mismatched receipt evidence causes no unit-file or unit-state mutation
+- **AND** `activating`, `deactivating`, `reloading`, or `active` service state is
+  refused without stopping the service; a later failure restores that
+  invocation's exact enabled/active entry state.
 
 #### Scenario: Successful deployment establishes refresh steady state
 

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Callable
 
 from packages.common.object_store import MAX_OBJECT_MANIFEST_BYTES, LocalObjectStore, ObjectStoreError
 from packages.common.storage import validate_object_path
@@ -107,6 +107,8 @@ def publish_basins_package(
     output_path: str | Path,
     copy_forcing: bool = False,
     object_store: LocalObjectStore | None = None,
+    output_capacity_guard: Callable[[Path, int], None] | None = None,
+    output_write_guard: Callable[[Path, int], None] | None = None,
 ) -> dict[str, Any]:
     _validate_object_key_segment(model_id, "model_id", model_id=model_id, version=version)
     _validate_object_key_segment(version, "version", model_id=model_id, version=version)
@@ -208,6 +210,7 @@ def publish_basins_package(
             model_id=model_id,
             version=version,
             manifest_uri=manifest_uri,
+            before_write=output_write_guard,
         )
         return _success_payload("already_done", existing_manifest)
 
@@ -248,16 +251,20 @@ def publish_basins_package(
                 model_id=model_id,
                 version=version,
                 manifest_uri=manifest_uri,
+                before_write=output_write_guard,
             )
             return _success_payload("already_done", existing_manifest)
 
-        _preflight_json_output_path(
-            output_path,
-            error_code="BASINS_PACKAGE_OUTPUT_WRITE_FAILED",
-            model_id=model_id,
-            version=version,
-            manifest_uri=manifest_uri,
-        )
+        if output_capacity_guard is not None:
+            output_capacity_guard(Path(output_path).expanduser(), MAX_EXISTING_MANIFEST_BYTES)
+        elif output_write_guard is None:
+            _preflight_json_output_path(
+                output_path,
+                error_code="BASINS_PACKAGE_OUTPUT_WRITE_FAILED",
+                model_id=model_id,
+                version=version,
+                manifest_uri=manifest_uri,
+            )
         included_files = []
         for source_file in source_files:
             included_files.append(
@@ -315,6 +322,16 @@ def publish_basins_package(
             object_store=store,
             manifest_key=manifest_key,
         )
+        if len(manifest_bytes) > MAX_EXISTING_MANIFEST_BYTES:
+            raise BasinsPackageError(
+                "BASINS_PACKAGE_MANIFEST_TOO_LARGE",
+                "Generated Basins package manifest exceeds the bounded manifest size.",
+                model_id=model_id,
+                version=version,
+                manifest_uri=manifest_uri,
+            )
+        if output_write_guard is not None:
+            output_write_guard(Path(output_path).expanduser(), len(manifest_bytes))
         local_output_manifest = manifest
         _write_bytes_to_store_atomic(
             store,
@@ -2771,11 +2788,15 @@ def _write_json_file(
     model_id: str | None = None,
     version: str | None = None,
     manifest_uri: str | None = None,
+    before_write: Callable[[Path, int], None] | None = None,
 ) -> None:
     output = Path(path).expanduser()
     try:
+        content = _json_bytes(payload)
+        if before_write is not None:
+            before_write(output, len(content))
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(_json_bytes(payload))
+        output.write_bytes(content)
     except OSError as error:
         raise BasinsPackageError(
             error_code,

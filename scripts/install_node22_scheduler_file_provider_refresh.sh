@@ -1,12 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo=/scratch/frd_muziyao/NWM
-unit_dir="$HOME/.config/systemd/user"
-state_root=/scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/install-state
+repo=${NHMS_SCHEDULER_REFRESH_REPO:-/scratch/frd_muziyao/NWM}
+unit_dir=${NHMS_SCHEDULER_REFRESH_UNIT_DIR:-$HOME/.config/systemd/user}
+state_root=${NHMS_SCHEDULER_REFRESH_INSTALL_STATE_ROOT:-/scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/install-state}
 service=nhms-scheduler-file-provider-refresh.service
 timer=nhms-scheduler-file-provider-refresh.timer
-systemctl_bin=/usr/bin/systemctl
+systemctl_bin=${NHMS_SCHEDULER_REFRESH_SYSTEMCTL:-/usr/bin/systemctl}
+python_bin=${NHMS_SCHEDULER_REFRESH_PYTHON:-$repo/.venv/bin/python}
+receipt=${NHMS_SCHEDULER_REFRESH_RECEIPT:-/scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json}
+db_selectors=(
+  DATABASE_URL PIPELINE_DATABASE_URL PGAPPNAME PGCHANNELBINDING PGCLIENTENCODING
+  PGCONNECT_TIMEOUT PGDATABASE PGDATESTYLE PGGEQO PGGSSDELEGATION PGGSSENCMODE
+  PGGSSLIB PGHOST PGHOSTADDR PGKRBSRVNAME PGLOADBALANCEHOSTS PGLOCALEDIR
+  PGMAXPROTOCOLVERSION PGMINPROTOCOLVERSION PGOPTIONS PGPASSFILE PGPASSWORD
+  PGPORT PGREQUIREAUTH PGREQUIREPEER PGREQUIRESSL PGSERVICE PGSERVICEFILE
+  PGSSLCERT PGSSLCERTMODE PGSSLCOMPRESSION PGSSLCRL PGSSLCRLDIR PGSSLKEY
+  PGSSLMAXPROTOCOLVERSION PGSSLMINPROTOCOLVERSION PGSSLMODE PGSSLNEGOTIATION
+  PGSSLROOTCERT PGSSLSNI PGSSL_CERT_FILE PGSSL_KEY_FILE PGSSL_ROOT_CERT_FILE
+  PGSYSCONFDIR PGTARGETSESSIONATTRS PGTZ PGUSER
+)
 
 usage() {
   printf 'usage: %s --install|--enable|--rollback\n' "$0" >&2
@@ -62,6 +75,28 @@ restore_refresh_state() {
   restore_unit_state "$service" "$service_state"
 }
 
+assert_refresh_service_inactive() {
+  local active
+  active=$($systemctl_bin --user is-active "$service" 2>/dev/null || true)
+  [[ "${active:-inactive}" == inactive ]]
+}
+
+restore_invocation_state() {
+  restore_unit_state "$timer" "$invocation_timer_state"
+  restore_unit_state "$service" "$invocation_service_state"
+}
+
+enable_failure_restore() {
+  restore_invocation_state
+  assert_scheduler_unchanged
+}
+
+validate_current_receipt() {
+  "$python_bin" "$repo/scripts/scheduler_file_provider_refresh.py" \
+    --env-file "$repo/infra/env/compute.scheduler-provider-refresh.env" \
+    --validate-current-receipt "$receipt" >/dev/null
+}
+
 rollback_files() {
   $systemctl_bin --user disable --now "$timer" >/dev/null 2>&1 || true
   $systemctl_bin --user stop "$service" >/dev/null 2>&1 || true
@@ -75,10 +110,13 @@ rollback_files() {
   $systemctl_bin --user daemon-reload
 }
 
+assert_refresh_service_inactive
+
 if [[ "$action" == --install ]]; then
   env_file="$repo/infra/env/compute.scheduler-provider-refresh.env"
-  [[ -f "$env_file" && ! -L "$env_file" && "$(stat -c '%a' "$env_file")" == 600 ]]
-  if grep -Eq '^[[:space:]]*(DATABASE_URL|PIPELINE_DATABASE_URL|PGHOST|PGPORT|PGDATABASE|PGUSER|PGSERVICE|PGSERVICEFILE)=' "$env_file"; then
+  env_mode=$(stat -f '%Lp' "$env_file" 2>/dev/null || stat -c '%a' "$env_file")
+  [[ -f "$env_file" && ! -L "$env_file" && "$env_mode" == 600 ]]
+  if grep -Eq "^[[:space:]]*($(IFS='|'; printf '%s' "${db_selectors[*]}"))=" "$env_file"; then
     exit 2
   fi
   printf '%s%s' \
@@ -88,8 +126,6 @@ if [[ "$action" == --install ]]; then
     unit_state "$timer"
     unit_state "$service"
   } > "$state_root/refresh.before"
-  refresh_service_before=$(sed -n '2p' "$state_root/refresh.before")
-  [[ "$refresh_service_before" != *$'\tactive' ]]
   for unit in "$service" "$timer"; do
     if [[ -f "$unit_dir/$unit" && ! -L "$unit_dir/$unit" ]]; then
       install -m 0600 "$unit_dir/$unit" "$state_root/$unit.before"
@@ -110,14 +146,13 @@ if [[ "$action" == --install ]]; then
   trap - ERR
   printf '{"status":"installed_stopped","scheduler_unchanged":true}\n'
 elif [[ "$action" == --enable ]]; then
-  trap 'rollback_files; restore_refresh_state; assert_scheduler_unchanged' ERR
   for unit in "$service" "$timer"; do
     cmp -s "$repo/infra/systemd/$unit" "$unit_dir/$unit"
   done
-  receipt=/scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json
-  "$repo/.venv/bin/python" -c \
-    'import json,sys; p=json.load(open(sys.argv[1], encoding="utf-8")); assert p["outcome"] == "published" and p["database_free"] is True' \
-    "$receipt"
+  validate_current_receipt
+  invocation_timer_state=$(unit_state "$timer")
+  invocation_service_state=$(unit_state "$service")
+  trap enable_failure_restore ERR
   $systemctl_bin --user enable --now "$timer"
   [[ "$($systemctl_bin --user is-active "$timer")" == active ]]
   [[ "$($systemctl_bin --user is-active "$service" 2>/dev/null || true)" == inactive ]]

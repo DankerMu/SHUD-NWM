@@ -10,10 +10,13 @@ from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
+from packages.common.provider_atomic import ProviderAtomicError
 from packages.common.safe_fs import SafeFilesystemError, ensure_directory_no_follow, rmtree_no_follow
+from packages.common.state_manager import StateManagerError, merge_state_snapshot_index_copyback
 
 SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 SAFE_OBJECT_KEY_RE = re.compile(r"^[A-Za-z0-9_.=/+-]+$")
+STATE_INDEX_OBJECT_KEY = "scheduler/state-index/index-last.json"
 REQUIRED_RUN_FILES = ("input/manifest.json",)
 
 
@@ -31,6 +34,7 @@ def copyback_run_trees(
     copyback_root: str | Path | None,
     run_ids: Iterable[str],
     extra_object_keys: Iterable[str] | None = None,
+    object_store_prefix: str = "s3://nhms",
 ) -> dict[str, Any] | None:
     if copyback_root is None or not str(copyback_root).strip():
         return None
@@ -80,7 +84,29 @@ def copyback_run_trees(
             total_bytes += int(ref_summary["byte_count"])
     for object_key in sorted({_safe_object_file_key(key) for key in extra_object_keys or [] if str(key).strip()}):
         source = _validate_object_file(object_root / object_key, object_key=object_key)
-        summary = _replace_file(source=source, target=target_root / object_key, containment_root=target_root)
+        if object_key == STATE_INDEX_OBJECT_KEY:
+            try:
+                state_summary = merge_state_snapshot_index_copyback(
+                    source_path=source,
+                    destination_path=target_root / object_key,
+                    reference_object_store_root=object_root,
+                    object_store_prefix=object_store_prefix,
+                    source_containment_root=object_root,
+                    destination_containment_root=target_root,
+                )
+            except (ProviderAtomicError, StateManagerError) as error:
+                raise RunTreeCopybackError(
+                    "OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED",
+                    "State-index copyback merge failed closed.",
+                    {"object_key": object_key, "error": str(error)},
+                ) from error
+            summary = {
+                "file_count": 1,
+                "byte_count": int((target_root / object_key).stat().st_size),
+                "merge": state_summary,
+            }
+        else:
+            summary = _replace_file(source=source, target=target_root / object_key, containment_root=target_root)
         extra_objects.append({"object_key": object_key, **summary})
         total_files += 1
         total_bytes += int(summary["byte_count"])

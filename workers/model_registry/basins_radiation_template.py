@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 REPAIR_SCHEMA_VERSION = "basins.missing_tsd_rl_template_repair.v1"
 
@@ -13,6 +13,7 @@ def repair_missing_tsd_rl_for_basin(
     isolated_root: str | Path,
     basin_slug: str,
     template_search_root: str | Path | None,
+    copy_file: Callable[[Path, Path], None] | None = None,
 ) -> dict[str, Any]:
     """Repair missing ``<project>.tsd.rl`` files inside a private basin copy."""
 
@@ -54,7 +55,10 @@ def repair_missing_tsd_rl_for_basin(
             )
             continue
         _require_under_root(target, root)
-        shutil.copy2(template, target)
+        if copy_file is None:
+            shutil.copy2(template, target)
+        else:
+            copy_file(template, target)
         report["repairs"].append(
             {
                 "status": "repaired",
