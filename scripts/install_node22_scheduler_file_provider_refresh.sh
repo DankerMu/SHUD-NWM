@@ -114,7 +114,7 @@ assert_refresh_service_inactive
 
 if [[ "$action" == --install ]]; then
   env_file="$repo/infra/env/compute.scheduler-provider-refresh.env"
-  env_mode=$(stat -f '%Lp' "$env_file" 2>/dev/null || stat -c '%a' "$env_file")
+  env_mode=$(stat -c '%a' "$env_file" 2>/dev/null || stat -f '%Lp' "$env_file")
   [[ -f "$env_file" && ! -L "$env_file" && "$env_mode" == 600 ]]
   if grep -Eq "^[[:space:]]*($(IFS='|'; printf '%s' "${db_selectors[*]}"))=" "$env_file"; then
     exit 2
