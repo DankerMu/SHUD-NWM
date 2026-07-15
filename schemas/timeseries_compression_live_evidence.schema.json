@@ -5,7 +5,7 @@
   "additionalProperties": false,
   "required": [
     "schema_version", "issue", "generated_at", "node", "mutation_head_sha",
-    "verifier_head_sha", "database_identity", "authorization", "preflight",
+    "verifier_head_sha", "database_identity", "authorization", "recovery", "preflight",
     "migration", "selection", "receipts", "sizes", "catalog", "benchmarks",
     "cleanup", "out_of_scope", "verdict"
   ],
@@ -19,12 +19,35 @@
     "database_identity": {"$ref": "#/$defs/database_identity"},
     "authorization": {
       "type": "object", "additionalProperties": false,
-      "required": ["lag_seconds", "bound", "max_selected_bytes", "min_free_bytes", "timeout_seconds", "enforce_invocations"],
+      "required": ["lag_seconds", "bound", "max_selected_bytes", "min_free_bytes", "timeout_seconds", "enforce_invocations", "replay_decompression", "decompress_invocations"],
       "properties": {
         "lag_seconds": {"const": 604800}, "bound": {"const": 1},
         "max_selected_bytes": {"const": 8589934592},
         "min_free_bytes": {"const": 322122547200},
-        "timeout_seconds": {"const": 900}, "enforce_invocations": {"const": 1}
+        "timeout_seconds": {"const": 900}, "enforce_invocations": {"const": 1},
+        "replay_decompression": {"const": true}, "decompress_invocations": {"const": 1}
+      }
+    },
+    "recovery": {
+      "type": "object", "additionalProperties": false,
+      "required": ["preflight", "receipt", "authorized", "node", "mutation_head_sha", "target", "preflight_captured_at", "decompress_started_at", "decompress_finished_at", "compression_preflight_captured_at", "free_bytes_before", "before_compressed", "after_compressed", "before_row_count", "after_row_count", "row_parity", "decompress_return_relation", "exit_code"],
+      "properties": {
+        "preflight": {"$ref": "#/$defs/artifact_ref"},
+        "receipt": {"$ref": "#/$defs/artifact_ref"},
+        "authorized": {"const": true}, "node": {"const": "node-27"},
+        "mutation_head_sha": {"$ref": "#/$defs/git_sha"},
+        "target": {"$ref": "#/$defs/recovery_target"},
+        "preflight_captured_at": {"type": "string", "format": "date-time"},
+        "decompress_started_at": {"type": "string", "format": "date-time"},
+        "decompress_finished_at": {"type": "string", "format": "date-time"},
+        "compression_preflight_captured_at": {"type": "string", "format": "date-time"},
+        "free_bytes_before": {"type": "integer", "minimum": 322122547200},
+        "before_compressed": {"const": true}, "after_compressed": {"const": false},
+        "before_row_count": {"type": "integer", "minimum": 1},
+        "after_row_count": {"type": "integer", "minimum": 1},
+        "row_parity": {"const": true},
+        "decompress_return_relation": {"const": "_timescaledb_internal._hyper_3_7_chunk"},
+        "exit_code": {"const": 0}
       }
     },
     "preflight": {
@@ -120,7 +143,7 @@
       "required": ["retention_mutated", "drill_run", "node22_touched", "decompress_run", "role_mutated"],
       "properties": {
         "retention_mutated": {"const": false}, "drill_run": {"const": false},
-        "node22_touched": {"const": false}, "decompress_run": {"const": false},
+        "node22_touched": {"const": false}, "decompress_run": {"const": true},
         "role_mutated": {"const": false}
       }
     },
@@ -191,6 +214,18 @@
         "hypertable_schema": {"const": "hydro"}, "hypertable_name": {"const": "river_timeseries"},
         "chunk_schema": {"type": "string", "minLength": 1}, "chunk_name": {"type": "string", "minLength": 1},
         "range_start": {"type": "string", "format": "date-time"}, "range_end": {"type": "string", "format": "date-time"}
+      }
+    },
+    "recovery_target": {
+      "type": "object", "additionalProperties": false,
+      "required": ["hypertable_schema", "hypertable_name", "chunk_schema", "chunk_name", "range_start", "range_end"],
+      "properties": {
+        "hypertable_schema": {"const": "hydro"},
+        "hypertable_name": {"const": "river_timeseries"},
+        "chunk_schema": {"const": "_timescaledb_internal"},
+        "chunk_name": {"const": "_hyper_3_7_chunk"},
+        "range_start": {"const": "2026-05-28T00:00:00Z"},
+        "range_end": {"const": "2026-06-04T00:00:00Z"}
       }
     },
     "selection_observation": {

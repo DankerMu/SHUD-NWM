@@ -616,6 +616,13 @@ untracked unit edit is forbidden.
   thresholds without importing the runner's receipt builder, then atomically
   publishes the terminal envelope. It may read live catalogs for post-checks
   but never migrates, compresses, decompresses, drops, or changes roles.
+- `scripts/node27_timeseries_compression_benchmark.py` plus focused tests: a
+  read-only production-source capture helper. Curve SQL and all eight binds
+  come from `PsycopgForecastStore`; MVT SQL/params come from
+  `postgis_tile_sql("hydro")` and `_postgis_tile_params`. It records cold,
+  adaptive warmups, seven full plans, activity and raw result identity, then
+  merges immutable before/after slices without accepting source/query/bind
+  drift. `DATABASE_URL` is environment-only and output is atomic mode 0600.
 - `docs/runbooks/tier-node27-timeseries-storage.md`: record the controlled
   migration/install/first-run procedure, the benchmark SQL and acceptance
   threshold below, timer activation order, and the truthful partial-compression
@@ -812,8 +819,8 @@ The terminal envelope conforms to
 `schemas/timeseries_compression_live_evidence.schema.json`, schema version
 `2.0`, with required top-level keys: `schema_version`, `issue`, `generated_at`,
 `node`, `mutation_head_sha`, `verifier_head_sha`, `database_identity`,
-`authorization`, `preflight`, `migration`, `selection`, `receipts`, `sizes`,
-`catalog`, `benchmarks`, `cleanup`, `out_of_scope`, and `verdict`. Nested
+`authorization`, `recovery`, `preflight`, `migration`, `selection`, `receipts`,
+`sizes`, `catalog`, `benchmarks`, `cleanup`, `out_of_scope`, and `verdict`. Nested
 required fields bind the DB
 instance/version and truthful role flags; forensic dump/hash; first/second
 migration exit/catalog hashes; bound=1, selector hash/bytes/caps; dry-run and
@@ -831,9 +838,29 @@ envelope.
 The mutation and verifier SHAs are distinct provenance fields. The immutable
 pre-mutation preflight binds `mutation_head_sha`; the verifier may run at a
 later reviewed `verifier_head_sha` but cannot rewrite historical preflight.
+For the separately authorized evidence replay, `authorization` additionally
+freezes `replay_decompression=true` and exactly one decompression invocation.
+The required `recovery.preflight` and `recovery.receipt` are two distinct
+hashed artifacts bound to node-27, the same mutation SHA/database identity,
+and the exact six-field target
+`hydro.river_timeseries` /
+`_timescaledb_internal._hyper_3_7_chunk` /
+`[2026-05-28T00:00:00Z, 2026-06-04T00:00:00Z)`. The preflight proves the
+same complete safety boundary as the compression preflight — clean worktree,
+container/role/database identity, mode-0600 env, write guards, quiescent
+autopipe and DB writers/locks, inactive compression units, four unit states
+and their bounded journals — plus compressed target state, row count and at
+least 300 GiB free space. The receipt proves exit zero, the exact returned
+relation, decompressed post-state and the same positive row count. Chronology
+is fail-closed:
+recovery preflight <= decompression start <= decompression finish <= fresh
+compression preflight. Only that complete proof permits the truthful
+`out_of_scope.decompress_run=true`; omission, mismatch or `false` blocks PASS.
 Selection has two different timestamped artifact refs (post-dry-run and
 pre-enforce), each with the complete ordered candidate set, cutoff and selected
-tuple. The second observation is at most 60 seconds before enforce. Benchmark
+tuple. Both observations and the new dry-run/enforce receipts must reselect
+that same exact recovered target. The second observation is at most 60 seconds
+before enforce. Benchmark
 evidence stores every actual SQL bind, the cold execution, two to five
 warmups, activity samples, and seven measured plans per phase; all seven after
 plans must bind the selected `DecompressChunk`.
@@ -903,6 +930,11 @@ before each phase; material concurrent-load drift blocks PASS.
 - Migration settings may remain enabled with the timer disabled; reverting
   settings or decompressing chunks is a distinct production mutation and is
   not inferred from task 4.5 authorization.
+- The 2026-07-15 evidence replay is separately authorized for one exact
+  decompression of `_timescaledb_internal._hyper_3_7_chunk`, followed by one
+  bound-1 recompression. Its terminal must preserve both recovery artifacts;
+  it may not claim decompression was out of scope or reuse the incomplete
+  historical selector/benchmark artifacts.
 
 ### Risk packs and non-goals
 
@@ -914,8 +946,8 @@ Core risk packs:
   canonical receipt/lock paths, and installed user units.
 - File IO/path safety/overwrite: selected — lock plus runner/live receipts and
   forensic dump are mode-0600, no-follow/atomic where published, and hashed.
-- Schema/fields/contracts: selected — reachable `refused_lock` shape and a new
-  terminal-envelope 1.0 contract with negative semantic tests.
+- Schema/fields/contracts: selected — reachable `refused_lock` shape and the
+  terminal-envelope 2.0 contract with negative semantic/recovery tests.
 - Auth/permissions/secrets: selected — live `nhms` is truthfully superuser;
   credentials remain only in the untracked env and never enter argv/evidence.
 - Concurrency/shared-state/ordering: selected — autopipe quiescence, DB activity
@@ -974,6 +1006,7 @@ Invariant matrix:
 | Performance | Same cache class; seven-sample median/nearest-rank-p95 gates; after plan proves selected compressed chunk via `DecompressChunk`. |
 | Timer safety | Committed/installed unit hashes match; timer enabled but inactive; zero service activation in #1069. |
 | Failure truth | Partial mutation is immutable failed evidence; no second enforce, auto-decompress, fake rollback, or receipt relabel. |
+| Authorized recovery truth | Two distinct artifacts bind one exact compressed-to-decompressed chunk transition, row parity, space, SHA/database/node and chronology before the fresh compression preflight; final selectors/receipts reselect that target. |
 
 Regression rows:
 
@@ -1002,6 +1035,13 @@ Regression rows:
   any attempted start/service activation is out-of-scope failure.
 - Evidence contains a credential pattern or claims least privilege while
   `rolsuper=true`. Expected: schema/semantic verifier refusal.
+- Recovery preflight/receipt is omitted or tampered, carries a stale SHA/wrong
+  target, has less than 300 GiB free space, changes row count, or crosses the
+  fresh compression-preflight time. Expected: terminal FAIL before PASS.
+- Recovery proof is complete but `replay_decompression` or
+  `out_of_scope.decompress_run` says false, or either selector/new receipt
+  chooses another chunk. Expected: terminal FAIL; no historical “not run” flag
+  can hide the authorized mutation.
 
 Out of scope: retention or any `drop_chunks`; retention dry-run/enforce;
 archive rebuild drill; product archive or DB-export salvage mutation; any

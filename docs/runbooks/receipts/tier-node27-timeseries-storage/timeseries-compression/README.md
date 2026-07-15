@@ -55,3 +55,13 @@ separate human authorization for the exact decompression/recompression scope;
 it must use the hardened verifier contract and may not relabel or overwrite
 these historical receipts. Node-27-local generated artifacts and all
 credentials remain uncommitted.
+
+That separate authorization was granted on 2026-07-15 for one decompression
+and one bound-1 recompression of only
+`_timescaledb_internal._hyper_3_7_chunk`. Authorization is not completion:
+until distinct recovery preflight/receipt artifacts prove the exact target,
+mutation SHA, node/database, at least 300 GiB free space, compressed-to-
+uncompressed transition, returned relation, zero exit and row parity—and the
+fresh compression evidence reselects the same target—task 4.5 remains open.
+The accepted v2 terminal will truthfully record `decompress_run=true`; it may
+not preserve the historical “no decompression” flag after recovery occurs.

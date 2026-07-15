@@ -27,9 +27,9 @@ IDENTITY = {
     "hypertable_schema": "hydro",
     "hypertable_name": "river_timeseries",
     "chunk_schema": "_timescaledb_internal",
-    "chunk_name": "_hyper_1_42_chunk",
-    "range_start": "2026-05-01T00:00:00Z",
-    "range_end": "2026-05-08T00:00:00Z",
+    "chunk_name": "_hyper_3_7_chunk",
+    "range_start": "2026-05-28T00:00:00Z",
+    "range_end": "2026-06-04T00:00:00Z",
 }
 
 
@@ -92,8 +92,8 @@ def _catalog() -> dict[str, Any]:
 def _receipt(*, enforce: bool) -> dict[str, Any]:
     selected = {
         **IDENTITY,
-        "before_bytes": 4_294_967_296,
-        "after_bytes": 1_073_741_824 if enforce else None,
+        "before_bytes": 4_115_734_528,
+        "after_bytes": 134_119_424 if enforce else None,
     }
     return {
         "schema_version": "2.0",
@@ -121,8 +121,8 @@ def _receipt(*, enforce: bool) -> dict[str, Any]:
         "skipped": [],
         "per_table_totals": {
             "hydro.river_timeseries": {
-                "before_bytes": 4_294_967_296,
-                "after_bytes": 1_073_741_824 if enforce else None,
+                "before_bytes": 4_115_734_528,
+                "after_bytes": 134_119_424 if enforce else None,
                 "chunks_compressed": 1 if enforce else 0,
             },
             "met.forcing_station_timeseries": {
@@ -146,10 +146,10 @@ def _sizes(*, post: bool) -> dict[str, Any]:
                     [
                         {
                             "origin_chunk_schema": "_timescaledb_internal",
-                            "origin_chunk_name": "_hyper_1_42_chunk",
+                            "origin_chunk_name": "_hyper_3_7_chunk",
                             "schema": "_timescaledb_internal",
-                            "name": "compress_hyper_1_42_chunk",
-                            "bytes": 1_073_741_824,
+                            "name": "compress_hyper_7_15_chunk",
+                            "bytes": 134_119_424,
                         }
                     ]
                     if post
@@ -273,7 +273,7 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
     schema_dump = tmp_path / "schema.dump"
     schema_dump.write_bytes(b"PGDMP fixture forensic schema\n")
     migration = ROOT / "db/migrations/000047_hypertable_compression_settings.sql"
-    candidate = {**IDENTITY, "is_compressed": False, "before_bytes": 4_294_967_296}
+    candidate = {**IDENTITY, "is_compressed": False, "before_bytes": 4_115_734_528}
     deferred = {
         "hypertable_schema": "met",
         "hypertable_name": "forcing_station_timeseries",
@@ -395,6 +395,26 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
         "installed_service_matches_repo": True,
         "installed_timer_matches_repo": True,
     }
+    recovery_preflight = {
+        **preflight,
+        "captured_at": "2026-07-15T11:40:00Z",
+        "target": IDENTITY,
+        "free_bytes": 500_000_000_000,
+        "before_compressed": True,
+        "before_row_count": 12_345_678,
+    }
+    recovery_receipt = {
+        "started_at": "2026-07-15T11:41:00Z",
+        "finished_at": "2026-07-15T11:45:00Z",
+        "node": "node-27",
+        "mutation_head_sha": HEAD,
+        "database_identity": database_identity,
+        "target": IDENTITY,
+        "exit_code": 0,
+        "decompress_return_relation": "_timescaledb_internal._hyper_3_7_chunk",
+        "after_compressed": False,
+        "after_row_count": 12_345_678,
+    }
     catalog = _catalog()
     return {
         "schema_version": "2.0",
@@ -411,6 +431,14 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
             "min_free_bytes": 322_122_547_200,
             "timeout_seconds": 900,
             "enforce_invocations": 1,
+            "replay_decompression": True,
+            "decompress_invocations": 1,
+        },
+        "recovery": {
+            "preflight": _json_ref(
+                tmp_path, "recovery-preflight.json", recovery_preflight
+            ),
+            "receipt": _json_ref(tmp_path, "recovery-receipt.json", recovery_receipt),
         },
         "preflight": {
             "evidence": _json_ref(tmp_path, "preflight.json", preflight),
@@ -453,7 +481,7 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
             "retention_mutated": False,
             "drill_run": False,
             "node22_touched": False,
-            "decompress_run": False,
+            "decompress_run": True,
             "role_mutated": False,
         },
     }
@@ -465,6 +493,10 @@ def test_verifier_recomputes_complete_terminal_envelope(tmp_path: Path) -> None:
     )
     jsonschema.validate(terminal, EVIDENCE_SCHEMA)
     assert terminal["verdict"] == "PASS_TASK_4_5"
+    assert terminal["recovery"]["authorized"] is True
+    assert terminal["recovery"]["row_parity"] is True
+    assert terminal["recovery"]["target"] == IDENTITY
+    assert terminal["out_of_scope"]["decompress_run"] is True
     assert terminal["selection"]["bound"] == 1
     assert terminal["sizes"]["compressed_chunk_count_delta"] == 1
     assert terminal["sizes"]["post_combined_hypertable_size"] < terminal["sizes"][
@@ -579,7 +611,9 @@ def test_verifier_rejects_schema_valid_receipt_with_bad_arithmetic(tmp_path: Pat
         )
 
 
-@pytest.mark.parametrize("missing", ["preflight", "selection", "receipts", "benchmarks", "cleanup"])
+@pytest.mark.parametrize(
+    "missing", ["recovery", "preflight", "selection", "receipts", "benchmarks", "cleanup"]
+)
 def test_verifier_rejects_required_top_level_omission(tmp_path: Path, missing: str) -> None:
     bundle = _bundle(tmp_path)
     del bundle[missing]
@@ -603,6 +637,221 @@ def test_verifier_recomputes_query_and_result_hashes(tmp_path: Path) -> None:
 
 def _read_ref(ref: dict[str, Any]) -> dict[str, Any]:
     return json.loads(Path(ref["path"]).read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("missing", ["preflight", "receipt"])
+def test_recovery_requires_two_artifacts(tmp_path: Path, missing: str) -> None:
+    bundle = _bundle(tmp_path)
+    del bundle["recovery"][missing]
+    with pytest.raises(evidence.EvidenceError, match="recovery keys differ"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+
+def test_recovery_rejects_tampered_artifact(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    Path(bundle["recovery"]["receipt"]["path"]).write_text("{}\n", encoding="utf-8")
+    with pytest.raises(evidence.EvidenceError, match="byte count or sha256 mismatch"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+
+@pytest.mark.parametrize(
+    ("artifact_name", "missing"),
+    [
+        ("preflight", "captured_at"),
+        ("preflight", "worktree_clean"),
+        ("preflight", "units"),
+        ("preflight", "before_row_count"),
+        ("receipt", "finished_at"),
+        ("receipt", "decompress_return_relation"),
+    ],
+)
+def test_recovery_rejects_required_field_omission(
+    tmp_path: Path, artifact_name: str, missing: str
+) -> None:
+    bundle = _bundle(tmp_path)
+    raw = _read_ref(bundle["recovery"][artifact_name])
+    del raw[missing]
+    bundle["recovery"][artifact_name] = _json_ref(
+        tmp_path, f"recovery-{artifact_name}-no-{missing}.json", raw
+    )
+    with pytest.raises(evidence.EvidenceError, match="keys differ"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+
+def test_recovery_rejects_nonquiescent_safety_preflight(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    preflight = _read_ref(bundle["recovery"]["preflight"])
+    preflight["autopipe_quiescent"] = False
+    bundle["recovery"]["preflight"] = _json_ref(
+        tmp_path, "recovery-nonquiescent.json", preflight
+    )
+    with pytest.raises(evidence.EvidenceError, match="mutation-head boundary"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "timestamp"),
+    [
+        ("started_at", "2026-07-15T11:39:59Z"),
+        ("finished_at", "2026-07-15T11:50:01Z"),
+    ],
+)
+def test_recovery_rejects_invalid_chronology(
+    tmp_path: Path, field: str, timestamp: str
+) -> None:
+    bundle = _bundle(tmp_path)
+    receipt = _read_ref(bundle["recovery"]["receipt"])
+    receipt[field] = timestamp
+    bundle["recovery"]["receipt"] = _json_ref(
+        tmp_path, f"recovery-time-{field}.json", receipt
+    )
+    with pytest.raises(evidence.EvidenceError, match="chronology"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+
+@pytest.mark.parametrize("artifact_name", ["preflight", "receipt"])
+def test_recovery_rejects_mutation_head_drift(
+    tmp_path: Path, artifact_name: str
+) -> None:
+    bundle = _bundle(tmp_path)
+    raw = _read_ref(bundle["recovery"][artifact_name])
+    raw["mutation_head_sha"] = "f" * 40
+    bundle["recovery"][artifact_name] = _json_ref(
+        tmp_path, f"recovery-head-{artifact_name}.json", raw
+    )
+    with pytest.raises(evidence.EvidenceError, match="boundary"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+
+@pytest.mark.parametrize("artifact_name", ["preflight", "receipt"])
+def test_recovery_rejects_target_drift(tmp_path: Path, artifact_name: str) -> None:
+    bundle = _bundle(tmp_path)
+    raw = _read_ref(bundle["recovery"][artifact_name])
+    raw["target"]["chunk_name"] = "_hyper_3_other_chunk"
+    bundle["recovery"][artifact_name] = _json_ref(
+        tmp_path, f"recovery-target-{artifact_name}.json", raw
+    )
+    with pytest.raises(evidence.EvidenceError, match="exact authorized chunk"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+
+def test_recovery_rejects_row_parity_failure(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    receipt = _read_ref(bundle["recovery"]["receipt"])
+    receipt["after_row_count"] += 1
+    bundle["recovery"]["receipt"] = _json_ref(
+        tmp_path, "recovery-row-drift.json", receipt
+    )
+    with pytest.raises(evidence.EvidenceError, match="row parity"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+
+@pytest.mark.parametrize(
+    ("artifact_name", "field", "value", "message"),
+    [
+        ("preflight", "before_compressed", False, "compressed-to-decompressed"),
+        ("receipt", "after_compressed", True, "compressed-to-decompressed"),
+        ("receipt", "exit_code", 1, "exact target relation"),
+        (
+            "receipt",
+            "decompress_return_relation",
+            "_timescaledb_internal._hyper_3_other_chunk",
+            "exact target relation",
+        ),
+    ],
+)
+def test_recovery_rejects_false_state_or_result(
+    tmp_path: Path,
+    artifact_name: str,
+    field: str,
+    value: Any,
+    message: str,
+) -> None:
+    bundle = _bundle(tmp_path)
+    raw = _read_ref(bundle["recovery"][artifact_name])
+    raw[field] = value
+    bundle["recovery"][artifact_name] = _json_ref(
+        tmp_path, f"recovery-{artifact_name}-{field}.json", raw
+    )
+    with pytest.raises(evidence.EvidenceError, match=message):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+
+def test_recovery_rejects_insufficient_free_space(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    preflight = _read_ref(bundle["recovery"]["preflight"])
+    preflight["free_bytes"] = evidence.MIN_FREE_BYTES - 1
+    bundle["recovery"]["preflight"] = _json_ref(
+        tmp_path, "recovery-low-space.json", preflight
+    )
+    with pytest.raises(evidence.EvidenceError, match="below 300 GiB"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+
+def test_selection_must_reselect_exact_recovered_target(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    for observation in ("post_dry_run", "pre_enforce"):
+        snapshot = _read_ref(bundle["selection"][observation])
+        snapshot["candidates"][0]["chunk_name"] = "_hyper_3_70_chunk"
+        snapshot["selected"][0]["chunk_name"] = "_hyper_3_70_chunk"
+        bundle["selection"][observation] = _json_ref(
+            tmp_path, f"selection-{observation}-other-target.json", snapshot
+        )
+    with pytest.raises(evidence.EvidenceError, match="exact recovered chunk"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+
+@pytest.mark.parametrize("receipt_name", ["dry_run", "enforce"])
+def test_replay_receipts_must_reselect_exact_recovered_target(
+    tmp_path: Path, receipt_name: str
+) -> None:
+    bundle = _bundle(tmp_path)
+    receipt = _read_ref(bundle["receipts"][receipt_name])
+    receipt["selected"][0]["chunk_name"] = "_hyper_3_other_chunk"
+    bundle["receipts"][receipt_name] = _json_ref(
+        tmp_path, f"{receipt_name}-other-target.json", receipt
+    )
+    with pytest.raises(evidence.EvidenceError, match="selected tuples differ"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+
+def test_recovery_authorization_and_truth_flag_are_required(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    bundle["authorization"]["replay_decompression"] = False
+    with pytest.raises(evidence.EvidenceError, match="authorization differs"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+    bundle = _bundle(tmp_path)
+    bundle["out_of_scope"]["decompress_run"] = False
+    with pytest.raises(evidence.EvidenceError, match="out_of_scope"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
 
 
 @pytest.mark.parametrize("missing", ["captured_at", "mutation_head_sha", "container_state", "units"])

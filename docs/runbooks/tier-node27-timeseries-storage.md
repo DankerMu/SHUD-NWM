@@ -744,6 +744,49 @@ sample 4; p95 is sample 7. Gates are
 identical, concurrent-load sampling stable, and each after plan must recursively
 contain `DecompressChunk` bound to the selected chunk identity.
 
+Use the committed read-only capture helper; do not recreate the benchmark with
+ad-hoc SQL or JSON. It accepts the DB credential only through the environment,
+derives both statements/binds from production source, and writes mode-0600
+artifacts. The after invocation requires the immutable before slice and emits
+the merged verifier input:
+
+```bash
+set -a
+. infra/env/node27-timeseries-compression.env
+set +a
+
+uv run python scripts/node27_timeseries_compression_benchmark.py \
+  --phase before \
+  --output "$RUN/benchmark-before.json" \
+  --curve-basin-version-id basins_heihe_vbasins \
+  --curve-river-segment-id basins_heihe_shud_reach_000001 \
+  --curve-river-network-version-id basins_heihe_rivnet_vbasins \
+  --curve-issue-time 2026-05-31T06:00:00Z \
+  --curve-end-time 2026-06-07T06:00:00Z \
+  --curve-scenario forecast_gfs_deterministic \
+  --mvt-run-id fcst_gfs_2026053106_basins_heihe_shud \
+  --mvt-basin-version-id basins_heihe_vbasins \
+  --mvt-river-network-version-id basins_heihe_rivnet_vbasins \
+  --mvt-valid-time 2026-05-31T06:00:00Z \
+  --mvt-z 9 --mvt-x 399 --mvt-y 189
+
+uv run python scripts/node27_timeseries_compression_benchmark.py \
+  --phase after \
+  --before-path "$RUN/benchmark-before.json" \
+  --output "$RUN/benchmarks.json" \
+  --curve-basin-version-id basins_heihe_vbasins \
+  --curve-river-segment-id basins_heihe_shud_reach_000001 \
+  --curve-river-network-version-id basins_heihe_rivnet_vbasins \
+  --curve-issue-time 2026-05-31T06:00:00Z \
+  --curve-end-time 2026-06-07T06:00:00Z \
+  --curve-scenario forecast_gfs_deterministic \
+  --mvt-run-id fcst_gfs_2026053106_basins_heihe_shud \
+  --mvt-basin-version-id basins_heihe_vbasins \
+  --mvt-river-network-version-id basins_heihe_rivnet_vbasins \
+  --mvt-valid-time 2026-05-31T06:00:00Z \
+  --mvt-z 9 --mvt-x 399 --mvt-y 189
+```
+
 #### 4.0.1 Independent terminal evidence bundle
 
 `scripts/node27_timeseries_compression_live_evidence.py` has no DB connection
@@ -773,11 +816,19 @@ must name a regular non-symlink file. Canonical embedded JSON hashes are
 `jq -cS` UTF-8 including its trailing newline. The bundle has these exact
 top-level keys: `schema_version`, `issue`, `generated_at`, `node`,
 `mutation_head_sha`, `verifier_head_sha`, `database_identity`,
-`authorization`, `preflight`, `migration`, `selection`, `receipts`, `sizes`,
-`catalog`, `benchmarks`, `cleanup`, `out_of_scope`.
+`authorization`, `recovery`, `preflight`, `migration`, `selection`, `receipts`,
+`sizes`, `catalog`, `benchmarks`, `cleanup`, `out_of_scope`.
 
 Referenced JSON contracts are:
 
+- `recovery.preflight`: separately authorized replay preflight with capture
+  time, node-27/mutation-SHA/database identity, at least 300 GiB free space,
+  `before_compressed=true`, positive row count, and the exact six-field target
+  `_timescaledb_internal._hyper_3_7_chunk` covering
+  `[2026-05-28T00:00:00Z, 2026-06-04T00:00:00Z)`;
+  `recovery.receipt` is a different artifact with decompression start/finish,
+  exit zero, exact returned relation, `after_compressed=false`, and the same
+  row count. Both artifacts bind the same mutation SHA/database/node.
 - `preflight.evidence`: the facts in steps 1–4, including exact role booleans,
   guard presence, quiescence and inactive compression units;
   `preflight.schema_dump` is the raw custom dump, and
@@ -829,6 +880,38 @@ rejected because these provenance artifacts were incomplete. Its dry-run and
 enforce receipts remain historical operational evidence; they do not satisfy
 task 4.5 and must not be relabeled. Replaying the evidence requires separate
 human authorization for the exact decompression/recompression mutation.
+
+#### 4.0.2 Authorized exact-chunk evidence replay
+
+The user granted that separate authorization on 2026-07-15 for exactly one
+decompression and one bound-1 recompression of
+`_timescaledb_internal._hyper_3_7_chunk`; it does not authorize retention,
+node-22 work, timer activation, another chunk, or an additional retry.
+
+Before decompression, keep both compression units inactive and quiesce
+autopipe as in step 4. Capture `recovery.preflight` before mutation: verify the
+six-field identity and range above, `is_compressed=true`, a positive chunk-row
+count, and at least 322122547200 free filesystem bytes. It must also repeat the
+full normal safety preflight: clean worktree; node-27 primary/container/role
+identity; mode-0600 env; installed write guards; quiescent autopipe, DB writers
+and conflicting locks; inactive compression units; and exact four-unit state
+plus bounded journal artifact refs. Invoke the manual procedure only for that
+fully-qualified relation, capturing UTC start/finish, exit code and returned
+relation in the distinct `recovery.receipt`. Immediately require
+`is_compressed=false` and the exact same row count. A missing return relation,
+nonzero exit, target/SHA drift, row-count change, or low space blocks the replay
+before recompression.
+
+Only after the recovery receipt is complete may the normal compression
+preflight be captured. The enforced chronology is recovery preflight <=
+decompression start <= decompression finish <= compression preflight. The
+bundle authorization records `replay_decompression=true` and one decompression
+invocation; `out_of_scope.decompress_run` truthfully records `true` and is
+accepted only when both recovery artifacts pass. Run a fresh v2 dry-run, write
+both distinct selector snapshots, and require both snapshots plus the v2
+enforce receipt to reselect the same exact target. Then perform the sole
+bound-1, 900-second recompression and complete the full benchmark/cleanup
+contract above. Never overwrite the historical v1 receipts.
 
 ### 4.1 Write guard overview
 

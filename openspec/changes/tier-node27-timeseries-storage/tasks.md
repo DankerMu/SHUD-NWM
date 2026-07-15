@@ -1053,6 +1053,9 @@ Order is load-bearing:
   chunk (`bound=1`, at most 8 GiB, 300 GiB free-space headroom, 900-second
   external timeout). Independent schema/semantic/sha256 validation and the
   actual production curve/MVT SQL must pass the pinned warm-cache thresholds.
+  The committed read-only benchmark helper derives both SQL/bind sets from
+  production source, captures cold/warmup/activity plus seven complete plans,
+  and fail-closes before/after merge on any production identity drift.
   The compression timer is installed and enabled but remains inactive. This
   issue also closes the discovered task-4.2 lock-receipt gap and #853 wiring
   gap: contention publishes `refused_lock`, while the committed timer service
@@ -1077,6 +1080,18 @@ Order is load-bearing:
   cold/warmup/activity records, and seven measured plans. The operation is not
   rerun and the terminal is not accepted. Task 4.5 stays open until a
   separately authorized evidence replay satisfies the hardened contract.
+  The user authorized that replay on 2026-07-15 for only
+  `_timescaledb_internal._hyper_3_7_chunk`
+  (`2026-05-28T00:00:00Z` through `2026-06-04T00:00:00Z`). Closure now also
+  requires two distinct hashed recovery artifacts: a preflight proving this
+  exact target is compressed, row count is positive, and free space is at
+  least 300 GiB; and a receipt proving one successful decompression returned
+  the same relation, left it uncompressed, and preserved the row count. Both
+  bind node-27, the mutation SHA and database identity, with chronology ending
+  before the fresh compression preflight. Authorization and terminal truth
+  record decompression as performed; the two selector snapshots plus new v2
+  dry-run/enforce receipts must reselect the same exact target before one
+  bound-1 recompression.
 
 ## 5. Archive rebuild drill (`archive-rebuild-drill`)
 

@@ -47,10 +47,39 @@ EXPECTED_UNITS = (
     "nhms-node27-timeseries-compression.timer",
     "nhms-node27-timeseries-compression.service",
 )
+PREFLIGHT_KEYS = frozenset(
+    {
+        "captured_at",
+        "node",
+        "repo_path",
+        "mutation_head_sha",
+        "worktree_clean",
+        "database_identity",
+        "container_state",
+        "role",
+        "env_mode",
+        "write_guards_present",
+        "autopipe_quiescent",
+        "database_writes_quiescent",
+        "conflicting_locks_absent",
+        "units",
+    }
+)
+RECOVERY_TARGET: Mapping[str, str] = {
+    "hypertable_schema": "hydro",
+    "hypertable_name": "river_timeseries",
+    "chunk_schema": "_timescaledb_internal",
+    "chunk_name": "_hyper_3_7_chunk",
+    "range_start": "2026-05-28T00:00:00Z",
+    "range_end": "2026-06-04T00:00:00Z",
+}
+RECOVERY_RETURN_RELATION = "_timescaledb_internal._hyper_3_7_chunk"
 
 # This constant is deliberately executable documentation: tests and the
 # runbook pin the same capture contract without inventing a host-only format.
 BUNDLE_CONTRACT: Mapping[str, str] = {
+    "recovery.preflight": "JSON: separately authorized exact-chunk decompression preflight",
+    "recovery.receipt": "JSON: exact-chunk decompression result, row parity, and chronology",
     "preflight.evidence": "JSON: captured mutation SHA, container and four-unit state facts",
     "preflight.schema_dump": "custom-format pg_dump file reference",
     "preflight.catalog_before": "JSON: canonical pre-migration catalog rows",
@@ -245,22 +274,7 @@ def _validate_preflight(raw: Any, mutation_head_sha: str) -> dict[str, Any]:
     preflight = _require_mapping(raw, "preflight.evidence document")
     _require_exact_keys(
         preflight,
-        {
-            "captured_at",
-            "node",
-            "repo_path",
-            "mutation_head_sha",
-            "worktree_clean",
-            "database_identity",
-            "container_state",
-            "role",
-            "env_mode",
-            "write_guards_present",
-            "autopipe_quiescent",
-            "database_writes_quiescent",
-            "conflicting_locks_absent",
-            "units",
-        },
+        set(PREFLIGHT_KEYS),
         "preflight.evidence document",
     )
     captured_at = _parse_utc(preflight["captured_at"], "preflight.captured_at")
@@ -338,6 +352,143 @@ def _validate_preflight(raw: Any, mutation_head_sha: str) -> dict[str, Any]:
         "mutation_head_sha": mutation_head_sha,
         "container_state": dict(container),
         "units": unit_summary,
+    }
+
+
+def _validate_recovery(
+    preflight_raw: Any,
+    receipt_raw: Any,
+    *,
+    mutation_head_sha: str,
+    database_identity: Mapping[str, Any],
+    compression_preflight_captured_at: datetime,
+) -> dict[str, Any]:
+    recovery_preflight = _require_mapping(
+        preflight_raw, "recovery.preflight document"
+    )
+    _require_exact_keys(
+        recovery_preflight,
+        set(PREFLIGHT_KEYS)
+        | {
+            "target",
+            "free_bytes",
+            "before_compressed",
+            "before_row_count",
+        },
+        "recovery.preflight document",
+    )
+    recovery_safety = {
+        key: recovery_preflight[key]
+        for key in PREFLIGHT_KEYS
+    }
+    recovery_safety_summary = _validate_preflight(
+        recovery_safety, mutation_head_sha
+    )
+    recovery_receipt = _require_mapping(receipt_raw, "recovery.receipt document")
+    _require_exact_keys(
+        recovery_receipt,
+        {
+            "started_at",
+            "finished_at",
+            "node",
+            "mutation_head_sha",
+            "database_identity",
+            "target",
+            "exit_code",
+            "decompress_return_relation",
+            "after_compressed",
+            "after_row_count",
+        },
+        "recovery.receipt document",
+    )
+    preflight_target = _require_mapping(
+        recovery_preflight["target"], "recovery.preflight.target"
+    )
+    receipt_target = _require_mapping(
+        recovery_receipt["target"], "recovery.receipt.target"
+    )
+    target_keys = set(RECOVERY_TARGET)
+    _require_exact_keys(preflight_target, target_keys, "recovery.preflight.target")
+    _require_exact_keys(receipt_target, target_keys, "recovery.receipt.target")
+    if dict(preflight_target) != dict(RECOVERY_TARGET) or dict(receipt_target) != dict(
+        RECOVERY_TARGET
+    ):
+        raise EvidenceError("recovery target differs from the exact authorized chunk")
+    if (
+        recovery_preflight["node"] != "node-27"
+        or recovery_receipt["node"] != "node-27"
+        or recovery_preflight["mutation_head_sha"] != mutation_head_sha
+        or recovery_receipt["mutation_head_sha"] != mutation_head_sha
+    ):
+        raise EvidenceError("recovery node/mutation_head_sha boundary differs")
+    if (
+        recovery_preflight["database_identity"] != database_identity
+        or recovery_receipt["database_identity"] != database_identity
+    ):
+        raise EvidenceError("recovery database identity differs from compression preflight")
+    free_bytes = recovery_preflight["free_bytes"]
+    if (
+        not isinstance(free_bytes, int)
+        or isinstance(free_bytes, bool)
+        or free_bytes < MIN_FREE_BYTES
+    ):
+        raise EvidenceError("recovery free-space headroom is below 300 GiB")
+    before_rows = recovery_preflight["before_row_count"]
+    after_rows = recovery_receipt["after_row_count"]
+    if (
+        recovery_preflight["before_compressed"] is not True
+        or recovery_receipt["after_compressed"] is not False
+    ):
+        raise EvidenceError("recovery does not prove compressed-to-decompressed state")
+    if (
+        not isinstance(before_rows, int)
+        or isinstance(before_rows, bool)
+        or before_rows < 1
+        or not isinstance(after_rows, int)
+        or isinstance(after_rows, bool)
+        or after_rows < 1
+        or before_rows != after_rows
+    ):
+        raise EvidenceError("recovery row parity failed")
+    if (
+        recovery_receipt["exit_code"] != 0
+        or recovery_receipt["decompress_return_relation"]
+        != RECOVERY_RETURN_RELATION
+    ):
+        raise EvidenceError("recovery decompression result is not the exact target relation")
+    preflight_at = _parse_utc(
+        recovery_safety_summary["captured_at"], "recovery.preflight.captured_at"
+    )
+    started_at = _parse_utc(
+        recovery_receipt["started_at"], "recovery.receipt.started_at"
+    )
+    finished_at = _parse_utc(
+        recovery_receipt["finished_at"], "recovery.receipt.finished_at"
+    )
+    if not (
+        preflight_at <= started_at <= finished_at <= compression_preflight_captured_at
+    ):
+        raise EvidenceError(
+            "recovery chronology must precede the compression preflight"
+        )
+    return {
+        "node": "node-27",
+        "mutation_head_sha": mutation_head_sha,
+        "target": dict(RECOVERY_TARGET),
+        "preflight_captured_at": preflight_at.isoformat().replace("+00:00", "Z"),
+        "decompress_started_at": started_at.isoformat().replace("+00:00", "Z"),
+        "decompress_finished_at": finished_at.isoformat().replace("+00:00", "Z"),
+        "compression_preflight_captured_at": compression_preflight_captured_at.isoformat().replace(
+            "+00:00", "Z"
+        ),
+        "free_bytes_before": free_bytes,
+        "before_compressed": True,
+        "after_compressed": False,
+        "before_row_count": before_rows,
+        "after_row_count": after_rows,
+        "row_parity": True,
+        "decompress_return_relation": RECOVERY_RETURN_RELATION,
+        "exit_code": 0,
     }
 
 
@@ -825,6 +976,7 @@ def verify_bundle(
         "verifier_head_sha",
         "database_identity",
         "authorization",
+        "recovery",
         "preflight",
         "migration",
         "selection",
@@ -854,6 +1006,8 @@ def verify_bundle(
         "min_free_bytes": MIN_FREE_BYTES,
         "timeout_seconds": EXPECTED_TIMEOUT_SECONDS,
         "enforce_invocations": 1,
+        "replay_decompression": True,
+        "decompress_invocations": 1,
     }
     if authorization != expected_authorization:
         raise EvidenceError("authorization differs from the issue #1069 bound-1 envelope")
@@ -861,6 +1015,30 @@ def verify_bundle(
     preflight_bundle = _require_mapping(bundle["preflight"], "preflight")
     preflight_ref, preflight = _json_artifact(preflight_bundle.get("evidence"), "preflight.evidence")
     preflight_summary = _validate_preflight(preflight, str(bundle["mutation_head_sha"]))
+    recovery_bundle = _require_mapping(bundle["recovery"], "recovery")
+    _require_exact_keys(recovery_bundle, {"preflight", "receipt"}, "recovery")
+    recovery_preflight_ref, recovery_preflight_raw = _json_artifact(
+        recovery_bundle["preflight"], "recovery.preflight"
+    )
+    recovery_receipt_ref, recovery_receipt_raw = _json_artifact(
+        recovery_bundle["receipt"], "recovery.receipt"
+    )
+    if (
+        recovery_preflight_ref["path"] == recovery_receipt_ref["path"]
+        or recovery_preflight_ref["sha256"] == recovery_receipt_ref["sha256"]
+    ):
+        raise EvidenceError("recovery preflight and receipt must be distinct artifacts")
+    recovery_summary = _validate_recovery(
+        recovery_preflight_raw,
+        recovery_receipt_raw,
+        mutation_head_sha=str(bundle["mutation_head_sha"]),
+        database_identity=_require_mapping(
+            preflight["database_identity"], "preflight.database_identity"
+        ),
+        compression_preflight_captured_at=_parse_utc(
+            preflight_summary["captured_at"], "preflight captured_at"
+        ),
+    )
     dump_ref = _artifact_ref(preflight_bundle.get("schema_dump"), "preflight.schema_dump")
     catalog_before_ref, _ = _json_artifact(
         preflight_bundle.get("catalog_before"), "preflight.catalog_before"
@@ -907,6 +1085,8 @@ def verify_bundle(
     ]:
         raise EvidenceError("preflight was captured after the post-dry-run observation")
     identities = pre_enforce["identities"]
+    if identities != [dict(RECOVERY_TARGET)]:
+        raise EvidenceError("selection did not reselect the exact recovered chunk")
     selected = pre_enforce["selected"][0]
     selected_before = selected["before_bytes"]
 
@@ -1066,7 +1246,7 @@ def verify_bundle(
         "retention_mutated": False,
         "drill_run": False,
         "node22_touched": False,
-        "decompress_run": False,
+        "decompress_run": True,
         "role_mutated": False,
     }
     if out_of_scope != required_out_of_scope:
@@ -1084,6 +1264,12 @@ def verify_bundle(
         "verifier_head_sha": verifier_head_sha,
         "database_identity": database_identity,
         "authorization": authorization,
+        "recovery": {
+            "preflight": recovery_preflight_ref,
+            "receipt": recovery_receipt_ref,
+            "authorized": True,
+            **recovery_summary,
+        },
         "preflight": {
             "evidence": preflight_ref,
             "schema_dump": dump_ref,

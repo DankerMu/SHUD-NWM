@@ -6,7 +6,27 @@
   "mutation_head_sha": "0123456789abcdef0123456789abcdef01234567",
   "verifier_head_sha": "89abcdef0123456789abcdef0123456789abcdef",
   "database_identity": {"dbname": "nhms", "instance": "node27-primary-pg15", "postgres_version": "15.2", "timescaledb_version": "2.10.2"},
-  "authorization": {"lag_seconds": 604800, "bound": 1, "max_selected_bytes": 8589934592, "min_free_bytes": 322122547200, "timeout_seconds": 900, "enforce_invocations": 1},
+  "authorization": {"lag_seconds": 604800, "bound": 1, "max_selected_bytes": 8589934592, "min_free_bytes": 322122547200, "timeout_seconds": 900, "enforce_invocations": 1, "replay_decompression": true, "decompress_invocations": 1},
+  "recovery": {
+    "preflight": {"path": "/home/nwm/NWM/.nhms-issue1069-live/recovery-preflight.json", "sha256": "3131313131313131313131313131313131313131313131313131313131313131", "bytes": 1200},
+    "receipt": {"path": "/home/nwm/NWM/.nhms-issue1069-live/recovery-receipt.json", "sha256": "3232323232323232323232323232323232323232323232323232323232323232", "bytes": 1400},
+    "authorized": true,
+    "node": "node-27",
+    "mutation_head_sha": "0123456789abcdef0123456789abcdef01234567",
+    "target": {"hypertable_schema": "hydro", "hypertable_name": "river_timeseries", "chunk_schema": "_timescaledb_internal", "chunk_name": "_hyper_3_7_chunk", "range_start": "2026-05-28T00:00:00Z", "range_end": "2026-06-04T00:00:00Z"},
+    "preflight_captured_at": "2026-07-15T11:40:00Z",
+    "decompress_started_at": "2026-07-15T11:41:00Z",
+    "decompress_finished_at": "2026-07-15T11:45:00Z",
+    "compression_preflight_captured_at": "2026-07-15T11:50:00Z",
+    "free_bytes_before": 536870912000,
+    "before_compressed": true,
+    "after_compressed": false,
+    "before_row_count": 12345678,
+    "after_row_count": 12345678,
+    "row_parity": true,
+    "decompress_return_relation": "_timescaledb_internal._hyper_3_7_chunk",
+    "exit_code": 0
+  },
   "preflight": {
     "evidence": {"path": "/home/nwm/NWM/.nhms-issue1069-live/preflight.json", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bytes": 1000},
     "schema_dump": {"path": "/home/nwm/NWM/.nhms-issue1069-live/nhms-schema.dump", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "bytes": 2000},
@@ -33,8 +53,8 @@
   },
   "selection": {
     "bound": 1,
-    "selected": [{"hypertable_schema": "hydro", "hypertable_name": "river_timeseries", "chunk_schema": "_timescaledb_internal", "chunk_name": "_hyper_1_42_chunk", "range_start": "2026-05-01T00:00:00Z", "range_end": "2026-05-08T00:00:00Z"}],
-    "selected_before_bytes": 4294967296,
+    "selected": [{"hypertable_schema": "hydro", "hypertable_name": "river_timeseries", "chunk_schema": "_timescaledb_internal", "chunk_name": "_hyper_3_7_chunk", "range_start": "2026-05-28T00:00:00Z", "range_end": "2026-06-04T00:00:00Z"}],
+    "selected_before_bytes": 4115734528,
     "post_dry_run": {"artifact": {"path": "/home/nwm/NWM/.nhms-issue1069-live/selection-post-dry.json", "sha256": "5555555555555555555555555555555555555555555555555555555555555555", "bytes": 6000}, "observed_at": "2026-07-15T12:00:10Z", "candidates_sha256": "6666666666666666666666666666666666666666666666666666666666666666", "selector_sha256": "7777777777777777777777777777777777777777777777777777777777777777", "free_bytes": 536870912000, "cutoff_margin_seconds": 86400},
     "pre_enforce": {"artifact": {"path": "/home/nwm/NWM/.nhms-issue1069-live/selection-pre-enforce.json", "sha256": "8888888888888888888888888888888888888888888888888888888888888888", "bytes": 6000}, "observed_at": "2026-07-15T12:00:20Z", "candidates_sha256": "9999999999999999999999999999999999999999999999999999999999999999", "selector_sha256": "7777777777777777777777777777777777777777777777777777777777777777", "free_bytes": 536870912000, "cutoff_margin_seconds": 86400, "seconds_before_enforce": 10}
   },
@@ -46,7 +66,7 @@
   "sizes": {
     "pre": {"path": "/home/nwm/NWM/.nhms-issue1069-live/sizes-pre.json", "sha256": "1414141414141414141414141414141414141414141414141414141414141414", "bytes": 8000},
     "post": {"path": "/home/nwm/NWM/.nhms-issue1069-live/sizes-post.json", "sha256": "1515151515151515151515151515151515151515151515151515151515151515", "bytes": 8000},
-    "pre_combined_hypertable_size": 160000000000, "post_combined_hypertable_size": 157000000000, "compressed_chunk_count_delta": 1, "selected_before_bytes": 4294967296, "selected_after_bytes": 1073741824
+    "pre_combined_hypertable_size": 160000000000, "post_combined_hypertable_size": 157000000000, "compressed_chunk_count_delta": 1, "selected_before_bytes": 4115734528, "selected_after_bytes": 134119424
   },
   "catalog": {"post": {"path": "/home/nwm/NWM/.nhms-issue1069-live/catalog-post.json", "sha256": "1616161616161616161616161616161616161616161616161616161616161616", "bytes": 9000}, "d3_exact": true, "no_compression_policy": true, "selected_chunks_compressed": true},
   "benchmarks": {
@@ -99,6 +119,6 @@
     ]
   },
   "cleanup": {"evidence": {"path": "/home/nwm/NWM/.nhms-issue1069-live/cleanup.json", "sha256": "2525252525252525252525252525252525252525252525252525252525252525", "bytes": 14000}, "autopipe_timer_restored": true, "compression_timer_enabled": true, "compression_timer_active": false, "compression_service_active": false, "compression_service_activation_count": 0, "installed_service_matches_repo": true, "installed_timer_matches_repo": true},
-  "out_of_scope": {"retention_mutated": false, "drill_run": false, "node22_touched": false, "decompress_run": false, "role_mutated": false},
+  "out_of_scope": {"retention_mutated": false, "drill_run": false, "node22_touched": false, "decompress_run": true, "role_mutated": false},
   "verdict": "PASS_TASK_4_5"
 }
