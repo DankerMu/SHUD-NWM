@@ -1227,7 +1227,7 @@ Order is load-bearing:
   repair and every #856 dry-run/enforce live-cascade action remain explicit
   non-goals.
 
-- [ ] 8.3 Fix issue #1065's product-archive live-shape and states-access
+- [x] 8.3 Fix issue #1065's product-archive live-shape and states-access
   diagnostics.
   Evidence floor: retain strict forcing exact-leaf and run identity/output URI
   validators; add a disk-backed live-shape fixture covering canonical and

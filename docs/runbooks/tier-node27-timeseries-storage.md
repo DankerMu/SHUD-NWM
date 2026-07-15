@@ -419,8 +419,17 @@ idempotent path after the preflight passes. Do not manually delete prior
 two-file guard whose children are the same inode/signature pair as the current
 verified canonical archive, preserves foreign/ambiguous guards, and fails
 before source mutation with explicit safe residue if cleanup is uncertain.
-The repaired live receipt is still pending; this runbook records the observed
-failure and required rerun, not a fabricated PASS artifact.
+The repaired retry ran on deployed head
+`e130949c4f9d658d9e31251e5ced135147e18712` at
+2026-07-15T05:40:15Z. Its controlled 30-day enforce receipt is committed as
+`receipts/tier-node27-timeseries-storage/product-archive/controlled-enforce-20260715T054015Z.json`:
+all eight selected sources passed the batch gate, the mover re-read and
+checksum-verified the eight existing canonical archives, reconciled their
+matching guards, retired all eight identical sources, and reported eight
+`retired-from-existing` terminals with empty residue. The production env
+remained at 45 days. The failed first attempt remains evidence for the missing
+batch gate; it is not relabeled as PASS. The 228 audit gaps and the follow-up
+complete audit remain owned by #1070, and no #856 cascade command was run.
 
 ### Free-space watermark tuning
 
