@@ -1,0 +1,268 @@
+{
+  "archive_verified_count": 17,
+  "enforce_receipt": "/home/nwm/node27-product-archive-logs/issue849-authorized-enforce-20260715T070211Z.json",
+  "evidence_type": "issue849-post-enforce-product-archive-verification",
+  "generated_at": "2026-07-15T07:04:50.046453Z",
+  "head_sha": "c0778c37d5d1a16b374e3c0335c354e10891d537",
+  "node": "node-27",
+  "objects": [
+    {
+      "archive_path": "runs/gfs/2026053118/fcst_gfs_2026053118_basins_heihe_shud/archive.tar.zst",
+      "archive_sha256": "9be762d48d85b497ad6646617f44ae97e1395cd63f394931b95d3a34fd31ec25",
+      "archive_size_bytes": 1513289,
+      "identity": {
+        "cycle_identity": "2026053118",
+        "cycle_time": "2026-05-31T18:00:00Z",
+        "lane": "runs",
+        "run_id": "fcst_gfs_2026053118_basins_heihe_shud",
+        "source": "gfs"
+      },
+      "source_absent": true,
+      "source_path": "runs/fcst_gfs_2026053118_basins_heihe_shud",
+      "verified_file_count": 11
+    },
+    {
+      "archive_path": "runs/gfs/2026053118/fcst_gfs_2026053118_basins_qhh_shud/archive.tar.zst",
+      "archive_sha256": "f62ace95c60a55d211fb855f44433459cde99795e576e4a0cd53cc61be01bebf",
+      "archive_size_bytes": 1539875,
+      "identity": {
+        "cycle_identity": "2026053118",
+        "cycle_time": "2026-05-31T18:00:00Z",
+        "lane": "runs",
+        "run_id": "fcst_gfs_2026053118_basins_qhh_shud",
+        "source": "gfs"
+      },
+      "source_absent": true,
+      "source_path": "runs/fcst_gfs_2026053118_basins_qhh_shud",
+      "verified_file_count": 20
+    },
+    {
+      "archive_path": "runs/ifs/2026053118/fcst_ifs_2026053118_basins_heihe_shud/archive.tar.zst",
+      "archive_sha256": "13672f9e55f9b6bc1ee9ab92dd7503e47e7a678b4ef1e4c26ac27bc44c97d8cb",
+      "archive_size_bytes": 1753898,
+      "identity": {
+        "cycle_identity": "2026053118",
+        "cycle_time": "2026-05-31T18:00:00Z",
+        "lane": "runs",
+        "run_id": "fcst_ifs_2026053118_basins_heihe_shud",
+        "source": "IFS"
+      },
+      "source_absent": true,
+      "source_path": "runs/fcst_ifs_2026053118_basins_heihe_shud",
+      "verified_file_count": 11
+    },
+    {
+      "archive_path": "runs/ifs/2026053118/fcst_ifs_2026053118_basins_qhh_shud/archive.tar.zst",
+      "archive_sha256": "bba5dbe58f7da51c185492b325f27d2d74f833f6a46a6c922b88670a7f51bb4d",
+      "archive_size_bytes": 1376464,
+      "identity": {
+        "cycle_identity": "2026053118",
+        "cycle_time": "2026-05-31T18:00:00Z",
+        "lane": "runs",
+        "run_id": "fcst_ifs_2026053118_basins_qhh_shud",
+        "source": "IFS"
+      },
+      "source_absent": true,
+      "source_path": "runs/fcst_ifs_2026053118_basins_qhh_shud",
+      "verified_file_count": 20
+    },
+    {
+      "archive_path": "runs/gfs/2026060100/fcst_gfs_2026060100_basins_heihe_shud/archive.tar.zst",
+      "archive_sha256": "ed22ce435a5ffd48a06e7eb41279b6237834beeabeeb771f94b8060f58c6c149",
+      "archive_size_bytes": 1872620,
+      "identity": {
+        "cycle_identity": "2026060100",
+        "cycle_time": "2026-06-01T00:00:00Z",
+        "lane": "runs",
+        "run_id": "fcst_gfs_2026060100_basins_heihe_shud",
+        "source": "gfs"
+      },
+      "source_absent": true,
+      "source_path": "runs/fcst_gfs_2026060100_basins_heihe_shud",
+      "verified_file_count": 11
+    },
+    {
+      "archive_path": "runs/gfs/2026060100/fcst_gfs_2026060100_basins_qhh_shud/archive.tar.zst",
+      "archive_sha256": "a337434a6ef0c860764e82fb5de93d4fad48468a48406d197d226db32698ba6c",
+      "archive_size_bytes": 1674945,
+      "identity": {
+        "cycle_identity": "2026060100",
+        "cycle_time": "2026-06-01T00:00:00Z",
+        "lane": "runs",
+        "run_id": "fcst_gfs_2026060100_basins_qhh_shud",
+        "source": "gfs"
+      },
+      "source_absent": true,
+      "source_path": "runs/fcst_gfs_2026060100_basins_qhh_shud",
+      "verified_file_count": 20
+    },
+    {
+      "archive_path": "runs/ifs/2026060100/fcst_ifs_2026060100_basins_heihe_shud/archive.tar.zst",
+      "archive_sha256": "196507c9439ed8985bca1b2c345d573113b464c6637dce19896fd6887d549dd2",
+      "archive_size_bytes": 2220826,
+      "identity": {
+        "cycle_identity": "2026060100",
+        "cycle_time": "2026-06-01T00:00:00Z",
+        "lane": "runs",
+        "run_id": "fcst_ifs_2026060100_basins_heihe_shud",
+        "source": "IFS"
+      },
+      "source_absent": true,
+      "source_path": "runs/fcst_ifs_2026060100_basins_heihe_shud",
+      "verified_file_count": 11
+    },
+    {
+      "archive_path": "runs/ifs/2026060100/fcst_ifs_2026060100_basins_qhh_shud/archive.tar.zst",
+      "archive_sha256": "62499fd05f3093cc7f91b255e1c7711bf4e3fe113ac96448d0d4d7792f180fef",
+      "archive_size_bytes": 1657366,
+      "identity": {
+        "cycle_identity": "2026060100",
+        "cycle_time": "2026-06-01T00:00:00Z",
+        "lane": "runs",
+        "run_id": "fcst_ifs_2026060100_basins_qhh_shud",
+        "source": "IFS"
+      },
+      "source_absent": true,
+      "source_path": "runs/fcst_ifs_2026060100_basins_qhh_shud",
+      "verified_file_count": 20
+    },
+    {
+      "archive_path": "runs/gfs/2026060106/fcst_gfs_2026060106_basins_heihe_shud/archive.tar.zst",
+      "archive_sha256": "be475bbbc3eebfaf90d1104782724ad1bede1da9e24a7bd06da9a3b8efe82657",
+      "archive_size_bytes": 2034022,
+      "identity": {
+        "cycle_identity": "2026060106",
+        "cycle_time": "2026-06-01T06:00:00Z",
+        "lane": "runs",
+        "run_id": "fcst_gfs_2026060106_basins_heihe_shud",
+        "source": "gfs"
+      },
+      "source_absent": true,
+      "source_path": "runs/fcst_gfs_2026060106_basins_heihe_shud",
+      "verified_file_count": 14
+    },
+    {
+      "archive_path": "runs/gfs/2026060106/fcst_gfs_2026060106_basins_qhh_shud/archive.tar.zst",
+      "archive_sha256": "2b0ce13500a18b0b3a61275d43c7b489b05be8c657738c1a711f58d6e1aeeb77",
+      "archive_size_bytes": 1792801,
+      "identity": {
+        "cycle_identity": "2026060106",
+        "cycle_time": "2026-06-01T06:00:00Z",
+        "lane": "runs",
+        "run_id": "fcst_gfs_2026060106_basins_qhh_shud",
+        "source": "gfs"
+      },
+      "source_absent": true,
+      "source_path": "runs/fcst_gfs_2026060106_basins_qhh_shud",
+      "verified_file_count": 23
+    },
+    {
+      "archive_path": "runs/ifs/2026060106/fcst_ifs_2026060106_basins_heihe_shud/archive.tar.zst",
+      "archive_sha256": "e603c55a36e04e0ab3ea1e9592b4fe51113899eb9a9b7b5b41093c006ecfbc3a",
+      "archive_size_bytes": 1996310,
+      "identity": {
+        "cycle_identity": "2026060106",
+        "cycle_time": "2026-06-01T06:00:00Z",
+        "lane": "runs",
+        "run_id": "fcst_ifs_2026060106_basins_heihe_shud",
+        "source": "IFS"
+      },
+      "source_absent": true,
+      "source_path": "runs/fcst_ifs_2026060106_basins_heihe_shud",
+      "verified_file_count": 14
+    },
+    {
+      "archive_path": "runs/ifs/2026060106/fcst_ifs_2026060106_basins_qhh_shud/archive.tar.zst",
+      "archive_sha256": "7ad022e418688bbdbf8762a40644759f7619298bd8dcc4341926660a1757b351",
+      "archive_size_bytes": 1528486,
+      "identity": {
+        "cycle_identity": "2026060106",
+        "cycle_time": "2026-06-01T06:00:00Z",
+        "lane": "runs",
+        "run_id": "fcst_ifs_2026060106_basins_qhh_shud",
+        "source": "IFS"
+      },
+      "source_absent": true,
+      "source_path": "runs/fcst_ifs_2026060106_basins_qhh_shud",
+      "verified_file_count": 23
+    },
+    {
+      "archive_path": "runs/gfs/2026060112/fcst_gfs_2026060112_basins_heihe_shud/archive.tar.zst",
+      "archive_sha256": "ccc8958989365279da2bbe2a4e5c3e00fa00b3f7ba1a49727a4340382411b1c2",
+      "archive_size_bytes": 1958720,
+      "identity": {
+        "cycle_identity": "2026060112",
+        "cycle_time": "2026-06-01T12:00:00Z",
+        "lane": "runs",
+        "run_id": "fcst_gfs_2026060112_basins_heihe_shud",
+        "source": "gfs"
+      },
+      "source_absent": true,
+      "source_path": "runs/fcst_gfs_2026060112_basins_heihe_shud",
+      "verified_file_count": 15
+    },
+    {
+      "archive_path": "runs/gfs/2026060112/fcst_gfs_2026060112_basins_qhh_shud/archive.tar.zst",
+      "archive_sha256": "b82de0c6178bdfc7dec1e8616b57c8a744b661477230959b6b93a2702c2ee872",
+      "archive_size_bytes": 1742728,
+      "identity": {
+        "cycle_identity": "2026060112",
+        "cycle_time": "2026-06-01T12:00:00Z",
+        "lane": "runs",
+        "run_id": "fcst_gfs_2026060112_basins_qhh_shud",
+        "source": "gfs"
+      },
+      "source_absent": true,
+      "source_path": "runs/fcst_gfs_2026060112_basins_qhh_shud",
+      "verified_file_count": 24
+    },
+    {
+      "archive_path": "runs/ifs/2026060112/fcst_ifs_2026060112_basins_heihe_shud/archive.tar.zst",
+      "archive_sha256": "b30c431305ec10258ca9bca49f4cb2d982ca93ffb3f960dead1a350605dbd037",
+      "archive_size_bytes": 2280399,
+      "identity": {
+        "cycle_identity": "2026060112",
+        "cycle_time": "2026-06-01T12:00:00Z",
+        "lane": "runs",
+        "run_id": "fcst_ifs_2026060112_basins_heihe_shud",
+        "source": "IFS"
+      },
+      "source_absent": true,
+      "source_path": "runs/fcst_ifs_2026060112_basins_heihe_shud",
+      "verified_file_count": 15
+    },
+    {
+      "archive_path": "runs/ifs/2026060112/fcst_ifs_2026060112_basins_qhh_shud/archive.tar.zst",
+      "archive_sha256": "7658ff42013c4d04789545a302a7937156e8adbcb3e76d42cc240efcdfff3fb1",
+      "archive_size_bytes": 1777090,
+      "identity": {
+        "cycle_identity": "2026060112",
+        "cycle_time": "2026-06-01T12:00:00Z",
+        "lane": "runs",
+        "run_id": "fcst_ifs_2026060112_basins_qhh_shud",
+        "source": "IFS"
+      },
+      "source_absent": true,
+      "source_path": "runs/fcst_ifs_2026060112_basins_qhh_shud",
+      "verified_file_count": 24
+    },
+    {
+      "archive_path": "states/ifs/2026060112/basins_heihe_shud/archive.tar.zst",
+      "archive_sha256": "abc317378efc3e6686fe525da14a46ea4a8c7f350257d5df9d860eddc9cdd714",
+      "archive_size_bytes": 18986,
+      "identity": {
+        "cycle_identity": "2026060112",
+        "cycle_time": "2026-06-01T12:00:00Z",
+        "lane": "states",
+        "model_id": "basins_heihe_shud",
+        "source": "IFS"
+      },
+      "source_absent": true,
+      "source_path": "states/IFS/basins_heihe_shud/2026060112",
+      "verified_file_count": 1
+    }
+  ],
+  "selected_count": 17,
+  "source_absent_count": 17,
+  "verdict": "PASS"
+}

@@ -431,6 +431,31 @@ remained at 45 days. The failed first attempt remains evidence for the missing
 batch gate; it is not relabeled as PASS. The 228 audit gaps and the follow-up
 complete audit remain owned by #1070, and no #856 cascade command was run.
 
+Issue #849 task 2.5 PASS was recorded on deployed head
+`c0778c37d5d1a16b374e3c0335c354e10891d537` for one explicitly authorized
+30-day run with `per_tick_bound=17`, capped at 17 objects and 122,085,701
+source bytes. The dry-run receipt SHA-256 is
+`b4333336657dfdc4e8f96de4aab334b3bc6e52a0d92d8e2391d55fee75106ca9` and
+the enforce receipt SHA-256 is
+`096fdd5e060806833cb1ab210c81e6b09c152374b3f5c4d441ad47d798f1f17b`.
+The dry-run found 128 `runs`, 224 `states`, and zero `forcing` candidates;
+the first `states` candidate was index 16, so the bounded selection comprised
+16 `runs` and one `states` object. Enforce succeeded with 17 `archived`
+terminals, zero discovery failures, zero residue, 28,738,825 archive bytes,
+and free-space band `clean`. Post-enforce verification confirmed all 17
+sources absent and all 17 archives verified. The completeness baseline remains
+`incomplete` with 228 selectors; #1070 still owns salvage and the complete
+audit. Node-22 and the out-of-scope DB mutation, salvage, compression, drill,
+retention, and timer-enablement surfaces were not touched.
+
+Local evidence:
+
+- [`issue849-selected-source-audit-20260715T070119Z-normalized.txt`](receipts/tier-node27-timeseries-storage/product-archive/issue849-selected-source-audit-20260715T070119Z-normalized.txt)
+- [`issue849-authorized-dryrun-20260715T070211Z.json`](receipts/tier-node27-timeseries-storage/product-archive/issue849-authorized-dryrun-20260715T070211Z.json)
+- [`issue849-authorized-enforce-20260715T070211Z.json`](receipts/tier-node27-timeseries-storage/product-archive/issue849-authorized-enforce-20260715T070211Z.json)
+- [`issue849-post-enforce-verification-20260715T070448Z.json`](receipts/tier-node27-timeseries-storage/product-archive/issue849-post-enforce-verification-20260715T070448Z.json)
+- [`issue849-terminal-receipt-20260715T070211Z-corrected.json`](receipts/tier-node27-timeseries-storage/product-archive/issue849-terminal-receipt-20260715T070211Z-corrected.json)
+
 ### Free-space watermark tuning
 
 Initial values (in `infra/env/node27-product-archive.example`):

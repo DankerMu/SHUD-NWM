@@ -1,0 +1,1157 @@
+generated_at=2026-07-15T07:01:19Z
+head_sha=c0778c37d5d1a16b374e3c0335c354e10891d537
+dryrun_receipt=/home/nwm/node27-product-archive-logs/issue849-minbound17-dryrun-20260715T065610Z.json
+a2f1c113a30753d79c31680c8bff5d2e94e498ba0009a0f087d24440dcac46ca  /home/nwm/node27-product-archive-logs/issue849-minbound17-dryrun-20260715T065610Z.json
+uid=1005(nwm) gid=1005(nwm) groups=1005(nwm),27(sudo),999(docker)
+Uid:	1005	1005	1005	1005
+Gid:	1005	1005	1005	1005
+Groups:	27 999 1005
+true
+selected_lane=runs count=16
+selected_lane=states count=1
+selected=runs/fcst_gfs_2026053118_basins_heihe_shud
+f: /home/ghdc/nwm/object-store/runs/fcst_gfs_2026053118_basins_heihe_shud
+drwxr-xr-x root root    /
+drwxr-xr-x root root    home
+drwxrwxrwx root root    ghdc
+drwxrwxr-x 1103 nfsdata nwm
+drwxrwxr-x 1103 nfsdata object-store
+drwxrwxr-x 1103 nfsdata runs
+drwxrwxr-x 1103 nfsdata fcst_gfs_2026053118_basins_heihe_shud
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+selected=runs/fcst_gfs_2026053118_basins_qhh_shud
+f: /home/ghdc/nwm/object-store/runs/fcst_gfs_2026053118_basins_qhh_shud
+drwxr-xr-x root root    /
+drwxr-xr-x root root    home
+drwxrwxrwx root root    ghdc
+drwxrwxr-x 1103 nfsdata nwm
+drwxrwxr-x 1103 nfsdata object-store
+drwxrwxr-x 1103 nfsdata runs
+drwxrwxr-x 1103 nfsdata fcst_gfs_2026053118_basins_qhh_shud
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+selected=runs/fcst_ifs_2026053118_basins_heihe_shud
+f: /home/ghdc/nwm/object-store/runs/fcst_ifs_2026053118_basins_heihe_shud
+drwxr-xr-x root root    /
+drwxr-xr-x root root    home
+drwxrwxrwx root root    ghdc
+drwxrwxr-x 1103 nfsdata nwm
+drwxrwxr-x 1103 nfsdata object-store
+drwxrwxr-x 1103 nfsdata runs
+drwxrwxr-x 1103 nfsdata fcst_ifs_2026053118_basins_heihe_shud
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+selected=runs/fcst_ifs_2026053118_basins_qhh_shud
+f: /home/ghdc/nwm/object-store/runs/fcst_ifs_2026053118_basins_qhh_shud
+drwxr-xr-x root root    /
+drwxr-xr-x root root    home
+drwxrwxrwx root root    ghdc
+drwxrwxr-x 1103 nfsdata nwm
+drwxrwxr-x 1103 nfsdata object-store
+drwxrwxr-x 1103 nfsdata runs
+drwxrwxr-x 1103 nfsdata fcst_ifs_2026053118_basins_qhh_shud
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+selected=runs/fcst_gfs_2026060100_basins_heihe_shud
+f: /home/ghdc/nwm/object-store/runs/fcst_gfs_2026060100_basins_heihe_shud
+drwxr-xr-x root root    /
+drwxr-xr-x root root    home
+drwxrwxrwx root root    ghdc
+drwxrwxr-x 1103 nfsdata nwm
+drwxrwxr-x 1103 nfsdata object-store
+drwxrwxr-x 1103 nfsdata runs
+drwxrwxr-x 1103 nfsdata fcst_gfs_2026060100_basins_heihe_shud
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+selected=runs/fcst_gfs_2026060100_basins_qhh_shud
+f: /home/ghdc/nwm/object-store/runs/fcst_gfs_2026060100_basins_qhh_shud
+drwxr-xr-x root root    /
+drwxr-xr-x root root    home
+drwxrwxrwx root root    ghdc
+drwxrwxr-x 1103 nfsdata nwm
+drwxrwxr-x 1103 nfsdata object-store
+drwxrwxr-x 1103 nfsdata runs
+drwxrwxr-x 1103 nfsdata fcst_gfs_2026060100_basins_qhh_shud
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+selected=runs/fcst_ifs_2026060100_basins_heihe_shud
+f: /home/ghdc/nwm/object-store/runs/fcst_ifs_2026060100_basins_heihe_shud
+drwxr-xr-x root root    /
+drwxr-xr-x root root    home
+drwxrwxrwx root root    ghdc
+drwxrwxr-x 1103 nfsdata nwm
+drwxrwxr-x 1103 nfsdata object-store
+drwxrwxr-x 1103 nfsdata runs
+drwxrwxr-x 1103 nfsdata fcst_ifs_2026060100_basins_heihe_shud
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+selected=runs/fcst_ifs_2026060100_basins_qhh_shud
+f: /home/ghdc/nwm/object-store/runs/fcst_ifs_2026060100_basins_qhh_shud
+drwxr-xr-x root root    /
+drwxr-xr-x root root    home
+drwxrwxrwx root root    ghdc
+drwxrwxr-x 1103 nfsdata nwm
+drwxrwxr-x 1103 nfsdata object-store
+drwxrwxr-x 1103 nfsdata runs
+drwxrwxr-x 1103 nfsdata fcst_ifs_2026060100_basins_qhh_shud
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+selected=runs/fcst_gfs_2026060106_basins_heihe_shud
+f: /home/ghdc/nwm/object-store/runs/fcst_gfs_2026060106_basins_heihe_shud
+drwxr-xr-x root root    /
+drwxr-xr-x root root    home
+drwxrwxrwx root root    ghdc
+drwxrwxr-x 1103 nfsdata nwm
+drwxrwxr-x 1103 nfsdata object-store
+drwxrwxr-x 1103 nfsdata runs
+drwxrwxr-x 1103 nfsdata fcst_gfs_2026060106_basins_heihe_shud
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+selected=runs/fcst_gfs_2026060106_basins_qhh_shud
+f: /home/ghdc/nwm/object-store/runs/fcst_gfs_2026060106_basins_qhh_shud
+drwxr-xr-x root root    /
+drwxr-xr-x root root    home
+drwxrwxrwx root root    ghdc
+drwxrwxr-x 1103 nfsdata nwm
+drwxrwxr-x 1103 nfsdata object-store
+drwxrwxr-x 1103 nfsdata runs
+drwxrwxr-x 1103 nfsdata fcst_gfs_2026060106_basins_qhh_shud
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+selected=runs/fcst_ifs_2026060106_basins_heihe_shud
+f: /home/ghdc/nwm/object-store/runs/fcst_ifs_2026060106_basins_heihe_shud
+drwxr-xr-x root root    /
+drwxr-xr-x root root    home
+drwxrwxrwx root root    ghdc
+drwxrwxr-x 1103 nfsdata nwm
+drwxrwxr-x 1103 nfsdata object-store
+drwxrwxr-x 1103 nfsdata runs
+drwxrwxr-x 1103 nfsdata fcst_ifs_2026060106_basins_heihe_shud
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+selected=runs/fcst_ifs_2026060106_basins_qhh_shud
+f: /home/ghdc/nwm/object-store/runs/fcst_ifs_2026060106_basins_qhh_shud
+drwxr-xr-x root root    /
+drwxr-xr-x root root    home
+drwxrwxrwx root root    ghdc
+drwxrwxr-x 1103 nfsdata nwm
+drwxrwxr-x 1103 nfsdata object-store
+drwxrwxr-x 1103 nfsdata runs
+drwxrwxr-x 1103 nfsdata fcst_ifs_2026060106_basins_qhh_shud
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+selected=runs/fcst_gfs_2026060112_basins_heihe_shud
+f: /home/ghdc/nwm/object-store/runs/fcst_gfs_2026060112_basins_heihe_shud
+drwxr-xr-x root root    /
+drwxr-xr-x root root    home
+drwxrwxrwx root root    ghdc
+drwxrwxr-x 1103 nfsdata nwm
+drwxrwxr-x 1103 nfsdata object-store
+drwxrwxr-x 1103 nfsdata runs
+drwxrwxr-x 1103 nfsdata fcst_gfs_2026060112_basins_heihe_shud
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+selected=runs/fcst_gfs_2026060112_basins_qhh_shud
+f: /home/ghdc/nwm/object-store/runs/fcst_gfs_2026060112_basins_qhh_shud
+drwxr-xr-x root root    /
+drwxr-xr-x root root    home
+drwxrwxrwx root root    ghdc
+drwxrwxr-x 1103 nfsdata nwm
+drwxrwxr-x 1103 nfsdata object-store
+drwxrwxr-x 1103 nfsdata runs
+drwxrwxr-x 1103 nfsdata fcst_gfs_2026060112_basins_qhh_shud
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+selected=runs/fcst_ifs_2026060112_basins_heihe_shud
+f: /home/ghdc/nwm/object-store/runs/fcst_ifs_2026060112_basins_heihe_shud
+drwxr-xr-x root root    /
+drwxr-xr-x root root    home
+drwxrwxrwx root root    ghdc
+drwxrwxr-x 1103 nfsdata nwm
+drwxrwxr-x 1103 nfsdata object-store
+drwxrwxr-x 1103 nfsdata runs
+drwxrwxr-x 1103 nfsdata fcst_ifs_2026060112_basins_heihe_shud
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+selected=runs/fcst_ifs_2026060112_basins_qhh_shud
+f: /home/ghdc/nwm/object-store/runs/fcst_ifs_2026060112_basins_qhh_shud
+drwxr-xr-x root root    /
+drwxr-xr-x root root    home
+drwxrwxrwx root root    ghdc
+drwxrwxr-x 1103 nfsdata nwm
+drwxrwxr-x 1103 nfsdata object-store
+drwxrwxr-x 1103 nfsdata runs
+drwxrwxr-x 1103 nfsdata fcst_ifs_2026060112_basins_qhh_shud
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+user::rwx
+user:nwm:rwx
+group::r-x
+mask::rwx
+other::r-x
+default:user::rwx
+default:user:nwm:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x
+
+selected=states/IFS/basins_heihe_shud/2026060112
+f: /home/ghdc/nwm/object-store/states/IFS/basins_heihe_shud/2026060112
+drwxr-xr-x root root    /
+drwxr-xr-x root root    home
+drwxrwxrwx root root    ghdc
+drwxrwxr-x 1103 nfsdata nwm
+drwxrwxr-x 1103 nfsdata object-store
+drwxrwxr-x 1103 nfsdata states
+drwxrwxr-x 1103 nfsdata IFS
+drwxrwx--- 1103 nfsdata basins_heihe_shud
+drwxrwx--- 1103 nfsdata 2026060112
+user::rwx
+user:nwm:rwx
+group::---
+mask::rwx
+other::---
+default:user::rwx
+default:user:nwm:rwx
+default:group::---
+default:mask::rwx
+default:other::---
+
+user::rwx
+user:nwm:rwx
+group::---
+mask::rwx
+other::---
+default:user::rwx
+default:user:nwm:rwx
+default:group::---
+default:mask::rwx
+default:other::---
+
+verdict=PASS_SELECTED_SOURCE_AUDIT

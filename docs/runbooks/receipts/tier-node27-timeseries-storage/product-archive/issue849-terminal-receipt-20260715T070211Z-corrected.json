@@ -1,0 +1,135 @@
+{
+  "evidence_type": "issue849-node27-task2.5-terminal-receipt",
+  "generated_at": "2026-07-15T07:10:43Z",
+  "issue": 849,
+  "node": "node-27",
+  "user": "nwm",
+  "repository": "/home/nwm/NWM",
+  "head_sha": "c0778c37d5d1a16b374e3c0335c354e10891d537",
+  "authorization": {
+    "minimum_age_days": 30,
+    "per_tick_bound": 17,
+    "maximum_selected_count": 17,
+    "maximum_selected_source_bytes": 122085701,
+    "invocation_count": 1
+  },
+  "commands": {
+    "dry_run": "./scripts/node27_product_archive_once.sh --minimum-age-days 30 --per-tick-bound 17 --receipt <UTC_PATH>",
+    "enforce": "./scripts/node27_product_archive_once.sh --minimum-age-days 30 --per-tick-bound 17 --receipt <UTC_PATH> --enforce"
+  },
+  "minimum_bound_derivation": {
+    "candidate_lane_counts": [
+      {
+        "lane": "runs",
+        "count": 128
+      },
+      {
+        "lane": "states",
+        "count": 224
+      }
+    ],
+    "first_indexes": [
+      {
+        "lane": "runs",
+        "first_index": 0
+      },
+      {
+        "lane": "states",
+        "first_index": 16
+      }
+    ],
+    "selected_lane_counts": [
+      {
+        "lane": "runs",
+        "count": 16
+      },
+      {
+        "lane": "states",
+        "count": 1
+      }
+    ],
+    "selected_count": 17,
+    "selected_source_bytes": 122085701,
+    "selected_identity_sha256": "2678618da1912b5a4a3886126a846c0611b41b7396a5dd223a19cf8d8a878058"
+  },
+  "receipts": {
+    "authorized_dry_run": {
+      "remote_path": "/home/nwm/node27-product-archive-logs/issue849-authorized-dryrun-20260715T070211Z.json",
+      "committed_copy": "issue849-authorized-dryrun-20260715T070211Z.json",
+      "sha256": "b4333336657dfdc4e8f96de4aab334b3bc6e52a0d92d8e2391d55fee75106ca9"
+    },
+    "authorized_enforce": {
+      "remote_path": "/home/nwm/node27-product-archive-logs/issue849-authorized-enforce-20260715T070211Z.json",
+      "committed_copy": "issue849-authorized-enforce-20260715T070211Z.json",
+      "sha256": "096fdd5e060806833cb1ab210c81e6b09c152374b3f5c4d441ad47d798f1f17b"
+    },
+    "selected_source_audit": {
+      "remote_raw_path": "/home/nwm/node27-product-archive-logs/issue849-selected-source-audit-20260715T070119Z.txt",
+      "remote_raw_sha256": "adedf475b91ca593b6cbe886449382b32dd270c9c3c11911fefadcd9128fc3d5",
+      "committed_copy": "issue849-selected-source-audit-20260715T070119Z-normalized.txt",
+      "sha256": "76e48046db49086c732d981878229b3d740287fbf11022956ad48b20248ba312",
+      "normalization": "sed s/[[:space:]]*$// (trailing whitespace only)",
+      "verdict": "PASS_SELECTED_SOURCE_AUDIT"
+    },
+    "post_enforce_verification": {
+      "remote_path": "/home/nwm/node27-product-archive-logs/issue849-post-enforce-verification-20260715T070448Z.json",
+      "committed_copy": "issue849-post-enforce-verification-20260715T070448Z.json",
+      "sha256": "1607b89cd6af46ecf6463c66dc89745686f9918cf821405d771e529290b39100"
+    },
+    "completeness_baseline": {
+      "committed_copy": "../storage-inventory-audit/completeness-incomplete-live-20260713T155314Z.json",
+      "sha256": "e2d4f08150943f09af87d3e53e79cff26728fb438aabb545dabff07842497d04",
+      "selector_count": 228,
+      "normalized_selector_set_sha256": "ad5da1c51e1e90ec7bf2912d204186d21879be4e69536cc24a469520a486d0c6",
+      "outcome": "incomplete",
+      "follow_up_owner": 1070
+    }
+  },
+  "enforce_summary": {
+    "generated_at": "2026-07-15T07:02:58.518057Z",
+    "cutoff": "2026-06-15T07:02:58.518057Z",
+    "outcome": "success",
+    "discovery_failures": [],
+    "selected_count": 17,
+    "selected_lane_counts": [
+      {
+        "lane": "runs",
+        "count": 16
+      },
+      {
+        "lane": "states",
+        "count": 1
+      }
+    ],
+    "terminal_statuses": [
+      {
+        "status": "archived",
+        "count": 17
+      }
+    ],
+    "source_bytes": 122085701,
+    "archive_bytes": 28738825,
+    "residue_count": 0,
+    "free_space": {
+      "archive_root": "/home/ghdc/nwm/archive",
+      "band": "clean",
+      "free_bytes": 757616578560,
+      "refuse_bytes": 161061273600,
+      "warn_bytes": 322122547200
+    }
+  },
+  "post_enforce_summary": {
+    "source_absent_count": 17,
+    "archive_verified_count": 17,
+    "verdict": "PASS"
+  },
+  "out_of_scope": [
+    "db mutation",
+    "salvage",
+    "compression",
+    "drill",
+    "retention",
+    "timer enablement"
+  ],
+  "verdict": "PASS_TASK_2_5"
+}

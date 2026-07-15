@@ -881,7 +881,7 @@ Order is load-bearing:
   Test rows:
   - Input: free space below the refuse threshold, enforce requested.
     Expected: mover refuses, sources untouched, receipt warning emitted.
-- [ ] 2.5 node-27 live: first audit receipt + first enforce archive run.
+- [x] 2.5 node-27 live: first audit receipt + first enforce archive run.
   Evidence floor: committed schema-valid archive-completeness receipt whose
   salvage selector list covers the known pre-2026-06-16 forcing gap; first
   enforce archive receipt covering aged `forcing/` + `runs/` + `states/`
