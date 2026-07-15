@@ -400,6 +400,84 @@ Boundary-surface checklist:
 - Stale-state/idempotency boundaries: refusal is stateless (evaluated per tick); missing/stale receipt handled by #847 already.
 - Unchanged downstream consumers: display API/frontend/read paths, `nhms_display_ro` DB role, node-22 (all out of scope; regression rows above enforce).
 
+### Reopened task 2.5 closure (2026-07-15)
+
+Issue #849 is reopened only to close the still-unchecked node-27 live evidence
+task 2.5. Tasks 2.3 and 2.4 are already implemented and remain closed; this
+closure does not redesign their units, configuration, capacity gates, or
+archive/audit code.
+
+- The committed 2026-07-15 controlled enforce receipt from #1065 selected only
+  the `runs/` lane. It is useful prior evidence but is not the qualifying task
+  2.5 enforce receipt and must not be combined with a later partial receipt to
+  weaken the task's per-receipt lane-coverage requirement.
+- The qualifying bounded enforce receipt must itself record at least one
+  verified object for every aged source lane actually present in the current
+  rotation scope, with zero checksum failures and retirement only after object
+  verification. The qualifying enforce receipt's own complete discovery is the
+  final lane-presence oracle: it must have `outcome=success`, an empty
+  `discovery_failures` list, and committed counts derived from
+  `candidates[].identity.lane`. A zero count proves only that no aged candidate
+  for that lane existed at that receipt's cutoff; it does not prove the lane is
+  globally absent. A separate dry-run is an authorization preview, never the
+  final absence oracle.
+- A fresh read-only dry-run precedes authorization and enforce. From its full
+  ordered `candidates` list, compute the smallest `per_tick_bound` whose
+  `selected` prefix contains at least one object from every lane with a nonzero
+  candidate count. Commit the candidate counts, selected lane counts, selected
+  total source bytes, exact UTC cutoff/age/bound, non-secret command/config
+  fingerprint, and dry-run receipt SHA-256. If that minimum bound exceeds the
+  deployed bound `8`, stop for a human-go that names the exact larger count and
+  selected-byte ceiling. Only one enforce using the approved age/bound and no
+  larger selected-byte total is authorized. Candidate drift that breaks those
+  limits or lane coverage stops the run; it does not authorize a wider retry.
+  Multiple enforce receipts must not be combined to satisfy lane coverage.
+- Before enforce, node-27 must repeat the selected-source preflight for the
+  exact candidates: current and future writer access remains valid, the
+  configured archive root and free-space refuse/warn gates pass, and the
+  existing verify-before-retire invariant is active. The controlled archive
+  tick is the only source mutation authorized by task 2.5; database mutation,
+  salvage export, compression, restore drill, retention, and manual source
+  deletion remain out of scope.
+- The accepted immutable completeness baseline is
+  `storage-inventory-audit/completeness-incomplete-live-20260713T155314Z.json`:
+  receipt SHA-256
+  `e2d4f08150943f09af87d3e53e79cff26728fb438aabb545dabff07842497d04`,
+  228 selectors, normalized selector-set SHA-256
+  `ad5da1c51e1e90ec7bf2912d204186d21879be4e69536cc24a469520a486d0c6`.
+  Its terminal envelope SHA-256 is
+  `6964b13e0e7df187d4877a3f71d315f928e554fde69bd7524f354c4f63de39a7`
+  and records node-27 head `bf9124aea6667fc116c872614d92de0e74a6cab1`.
+  A replacement audit receipt is acceptable only if it is schema-valid and its
+  normalized selector set is a superset of this baseline. Its overall outcome
+  may remain `incomplete`: #1070 owns executing salvage and the follow-up audit
+  that proves complete coverage. Task 2.5 must not claim that later state
+  early.
+- Both live receipts, the lane-presence/preflight evidence, exact deployed Git
+  SHA, command/config fingerprints without secrets, receipt SHA-256 values,
+  and post-enforce source/archive verification are committed under the
+  existing runbook receipt convention. Immutable earlier receipts are not
+  edited or replaced.
+
+Reopened closure invariants:
+
+- Governing invariant: a qualifying enforce tick is bounded, passes all
+  existing fail-closed preflights, and covers every aged lane proven present
+  in that tick's rotation scope without checksum failure or unverified source
+  retirement.
+- Source-of-truth identity: the enforce receipt itself is the lane-presence
+  oracle and is bound to the exact deployed SHA, receipt UTC cutoff/window,
+  effective non-secret configuration, archive root identity, selected source
+  identities, and receipt SHA-256. The preceding dry-run controls authorization
+  scope but cannot suppress a lane discovered by enforce.
+- Failure/rollback: any ambiguous lane inventory, failed writer-access or
+  capacity preflight, checksum mismatch, publish uncertainty, or source/archive
+  post-check fails task 2.5; no follow-on issue is started and no manual cleanup
+  is used to manufacture PASS.
+- Evidence boundary: #849 commits the live audit/archive evidence only; #1070
+  consumes the selectors for salvage and owns the later complete audit, while
+  #1069/#1071/#1072 retain compression, drill, and retention ownership.
+
 ## Workflow Fixture: Issue #851 Hypertable Compression Migration + Receipted Runner
 
 Fixture level: expanded. Repair intensity: high. Project profile: NHMS.

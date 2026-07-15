@@ -888,6 +888,24 @@ Order is load-bearing:
   cycles with ≥1 verified object per source lane present in rotation scope,
   0 checksum failures, and source removal only for verified objects; both
   receipts committed under runbook receipts.
+  Reopened #849 closure note (2026-07-15): the #1065 controlled receipt is
+  `runs/`-only and is not the qualifying receipt. The qualifying bounded
+  enforce receipt must itself cover every aged lane in its complete discovery,
+  have `outcome=success` and no discovery failures, and commit candidate lane
+  counts plus cutoff/age/bound and receipt hash. A fresh dry-run must derive the
+  minimum prefix bound that spans all nonzero candidate lanes; increasing the
+  deployed bound above `8` requires a human-go naming the exact count and
+  selected-byte ceiling, after which only one same-age/bound enforce within that
+  ceiling is authorized. Multiple receipts cannot be combined. Accept the
+  immutable 228-selector baseline receipt
+  `completeness-incomplete-live-20260713T155314Z.json` at SHA-256
+  `e2d4f08150943f09af87d3e53e79cff26728fb438aabb545dabff07842497d04`
+  (normalized selector-set SHA-256
+  `ad5da1c51e1e90ec7bf2912d204186d21879be4e69536cc24a469520a486d0c6`);
+  any replacement selector set must be its superset. The receipt may remain
+  `incomplete`; #1070 owns salvage and the follow-up `complete` audit. Only the
+  archive tick's existing verify-before-retire mutation is in scope here; no DB
+  mutation, salvage, compression, drill, retention, or manual deletion.
 
 ## 3. One-time DB-export salvage (`db-export-salvage`)
 
