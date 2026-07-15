@@ -74,7 +74,40 @@ def _invocation(
         "exit_code": 0,
         "mutation_head_sha": HEAD,
         "artifact_bindings": bindings,
+        **evidence._invocation_execution_identity(kind),
     }
+
+
+def _pg_restore_record(dump_sha256: str) -> dict[str, Any]:
+    stdout = b"TABLE hydro river_timeseries\nTABLE met forcing_station_timeseries\n"
+    return {
+        "dump_sha256": dump_sha256,
+        "argv": ["/usr/bin/pg_restore", "--list", "<descriptor-bound-dump>"],
+        "exit_code": 0,
+        "tool_version": "pg_restore (PostgreSQL) 15.2",
+        "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
+        "stdout_bytes": len(stdout),
+        "stderr_sha256": hashlib.sha256(b"").hexdigest(),
+        "stderr_bytes": 0,
+        "entries": [
+            "TABLE hydro river_timeseries",
+            "TABLE met forcing_station_timeseries",
+        ],
+    }
+
+
+@pytest.fixture(autouse=True)
+def _descriptor_bound_pg_restore(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        evidence,
+        "_run_pg_restore_list",
+        lambda identity: _pg_restore_record(identity.sha256),
+    )
+    monkeypatch.setattr(
+        evidence,
+        "_git_blob_bytes",
+        lambda _head, relative_path, _label: (ROOT / relative_path).read_bytes(),
+    )
 
 
 def _catalog() -> dict[str, Any]:
@@ -241,7 +274,11 @@ def _phase(name: str, samples: list[float], *, after: bool) -> dict[str, Any]:
         ],
         "activity_samples": [
             {
-                "captured_at": f"2026-07-15T{'12:10' if after else '11:55'}:0{index}Z",
+                "captured_at": (
+                    f"2026-07-15T12:{'11' if name == 'mvt' else '10'}:0{index}Z"
+                    if after
+                    else f"2026-07-15T12:00:{12 + (5 if name == 'mvt' else 0) + index}Z"
+                ),
                 "stage": stage,
                 "sessions": [],
                 "material_load_stable": True,
@@ -260,8 +297,16 @@ def _phase(name: str, samples: list[float], *, after: bool) -> dict[str, Any]:
             "statement_timeout_ms": 60_000,
             "lock_timeout_ms": 5_000,
             "phase_timeout_seconds": 900,
-            "started_at": "2026-07-15T12:10:00Z" if after else "2026-07-15T11:55:00Z",
-            "finished_at": "2026-07-15T12:10:04Z" if after else "2026-07-15T11:55:04Z",
+            "started_at": (
+                "2026-07-15T12:11:00Z" if name == "mvt" else "2026-07-15T12:10:00Z"
+            ) if after else (
+                "2026-07-15T12:00:17Z" if name == "mvt" else "2026-07-15T12:00:12Z"
+            ),
+            "finished_at": (
+                "2026-07-15T12:11:04Z" if name == "mvt" else "2026-07-15T12:10:04Z"
+            ) if after else (
+                "2026-07-15T12:00:21Z" if name == "mvt" else "2026-07-15T12:00:16Z"
+            ),
         },
     }
 
@@ -289,9 +334,20 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
         "captured_at": "2026-07-15T11:50:00Z",
         "node": "node-27",
         "repo_path": "/home/nwm/NWM",
+        "repo_remote_identity": "DankerMu/SHUD-NWM",
         "mutation_head_sha": HEAD,
         "worktree_clean": True,
         "database_identity": database_identity,
+        "database_identity_probe": {
+            "captured_at": "2026-07-15T11:49:59Z",
+            "query": (
+                "SELECT current_database() AS dbname, "
+                "current_setting('server_version') AS postgres_version, "
+                "extversion AS timescaledb_version FROM pg_extension "
+                "WHERE extname = 'timescaledb'"
+            ),
+            "row": database_identity,
+        },
         "container_state": {
             "name": "nhms-db",
             "container_id": "container-123",
@@ -306,10 +362,18 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
         "database_writes_quiescent": True,
         "conflicting_locks_absent": True,
         "prior_autopipe_state": {
-            "enabled": "enabled",
-            "active": "active",
-            "sub": "waiting",
-            "result": "success",
+            "timer": {
+                "enabled": "enabled",
+                "active": "active",
+                "sub": "waiting",
+                "result": "success",
+            },
+            "service": {
+                "enabled": "static",
+                "active": "inactive",
+                "sub": "dead",
+                "result": "success",
+            },
         },
         "units": {},
     }
@@ -347,8 +411,8 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
     }
     pre_enforce_selection = {
         **post_dry_selection,
-        "observed_at": "2026-07-15T12:00:20Z",
-        "cutoff": "2026-07-08T12:00:20Z",
+        "observed_at": "2026-07-15T12:00:22Z",
+        "cutoff": "2026-07-08T12:00:22Z",
     }
     curve_source = ROOT / "packages/common/forecast_store.py"
     mvt_source = ROOT / "services/tiles/mvt.py"
@@ -470,6 +534,10 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
     recovery_preflight = {
         **preflight,
         "captured_at": "2026-07-15T11:40:00Z",
+        "database_identity_probe": {
+            **preflight["database_identity_probe"],
+            "captured_at": "2026-07-15T11:39:59Z",
+        },
         "target": IDENTITY,
         "free_bytes": 500_000_000_000,
         "before_compressed": True,
@@ -507,8 +575,28 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
             },
         ),
     )
-    catalog_first_ref = _json_ref(tmp_path, "catalog-first.json", catalog)
-    catalog_second_ref = _json_ref(tmp_path, "catalog-second.json", catalog)
+    catalog_first_ref = _json_ref(
+        tmp_path,
+        "catalog-first.json",
+        {
+            "captured_at": "2026-07-15T11:31:00Z",
+            "snapshot_id": "catalog-first",
+            "phase": "after-first-apply",
+            "mutation_head_sha": HEAD,
+            "catalog": catalog,
+        },
+    )
+    catalog_second_ref = _json_ref(
+        tmp_path,
+        "catalog-second.json",
+        {
+            "captured_at": "2026-07-15T11:32:00Z",
+            "snapshot_id": "catalog-second",
+            "phase": "after-second-apply",
+            "mutation_head_sha": HEAD,
+            "catalog": catalog,
+        },
+    )
     migration_ref = _file_ref(migration)
     migration_first_invocation_ref = _json_ref(
         tmp_path,
@@ -569,8 +657,57 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
             "compressed_chunk_identities": [IDENTITY],
         },
     )
+    invocation_refs = [
+        migration_first_invocation_ref,
+        migration_second_invocation_ref,
+        recovery_invocation_ref,
+        dry_invocation_ref,
+        enforce_invocation_ref,
+    ]
+    execution_journal = tmp_path / "execution-audit.log"
+    execution_journal.write_text(
+        "\n".join(
+            [
+                f"kind={kind} invocation_sha256={ref['sha256']}"
+                for kind, ref in zip(
+                    [
+                        "migration_apply",
+                        "migration_apply",
+                        "recovery_decompress",
+                        "compression_dry_run",
+                        "compression_enforce",
+                    ],
+                    invocation_refs,
+                    strict=True,
+                )
+            ]
+            + ["direct_db_mutation_statements=0", ""]
+        ),
+        encoding="utf-8",
+    )
+    execution_audit_ref = _json_ref(
+        tmp_path,
+        "execution-audit.json",
+        {
+            "captured_at": "2026-07-15T12:21:01Z",
+            "window_started_at": "2026-07-15T11:19:00Z",
+            "window_finished_at": "2026-07-15T12:21:00Z",
+            "mutation_head_sha": HEAD,
+            "audit_source": "pgaudit+systemd-journal",
+            "complete": True,
+            "namespace_counts": {
+                "migration_apply": 2,
+                "recovery_decompress": 1,
+                "compression_dry_run": 1,
+                "compression_enforce": 1,
+            },
+            "invocation_refs": invocation_refs,
+            "direct_db_mutation_statements": [],
+            "journal": _file_ref(execution_journal),
+        },
+    )
     return {
-        "schema_version": "2.0",
+        "schema_version": "3.0",
         "issue": 1069,
         "generated_at": "2026-07-15T12:00:00Z",
         "node": "node-27",
@@ -586,7 +723,15 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
             "enforce_invocations": 1,
             "replay_decompression": True,
             "decompress_invocations": 1,
+            "migration_invocations": 2,
+            "dry_run_invocations": 1,
+            "direct_db_bypass_invocations": 0,
+            "repo_path": "/home/nwm/NWM",
+            "remote_identity": "DankerMu/SHUD-NWM",
+            "reviewed_mutation_sha": HEAD,
+            "reviewed_remote_ref": "refs/remotes/origin/feat/issue-1069-live-compression",
         },
+        "execution": {"audit": execution_audit_ref},
         "recovery": {
             "preflight": recovery_preflight_ref,
             "receipt": recovery_receipt_ref,
@@ -599,25 +744,28 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
                 tmp_path,
                 "schema-dump-list.json",
                 {
-                    "dump_sha256": _file_ref(schema_dump)["sha256"],
-                    "argv": ["pg_restore", "--list", "<schema-dump-path>"],
-                    "exit_code": 0,
-                    "entries": [
-                        "TABLE hydro river_timeseries",
-                        "TABLE met forcing_station_timeseries",
-                    ],
+                    "captured_at": "2026-07-15T11:20:00Z",
+                    "snapshot_id": "schema-dump-list",
+                    "mutation_head_sha": HEAD,
+                    **_pg_restore_record(_file_ref(schema_dump)["sha256"]),
                 },
             ),
             "catalog_before": _json_ref(
                 tmp_path,
                 "catalog-before.json",
                 {
-                    "hypertables": {
-                        "hydro.river_timeseries": False,
-                        "met.forcing_station_timeseries": False,
+                    "captured_at": "2026-07-15T11:25:00Z",
+                    "snapshot_id": "catalog-before",
+                    "phase": "pre-migration",
+                    "mutation_head_sha": HEAD,
+                    "catalog": {
+                        "hypertables": {
+                            "hydro.river_timeseries": False,
+                            "met.forcing_station_timeseries": False,
+                        },
+                        "compression_settings": [],
+                        "policy_jobs": [],
                     },
-                    "compression_settings": [],
-                    "policy_jobs": [],
                 },
             ),
         },
@@ -1317,6 +1465,7 @@ def test_preexisting_selected_relation_is_not_a_transition(tmp_path: Path) -> No
             "bytes": 134_119_424,
         }
     ]
+    pre["tables"]["hydro.river_timeseries"]["compressed_chunks"] = 1
     bundle["sizes"]["pre"] = _json_ref(tmp_path, "sizes-preexisting.json", pre)
     with pytest.raises(evidence.EvidenceError, match="already existed"):
         evidence.verify_bundle(
@@ -1324,7 +1473,9 @@ def test_preexisting_selected_relation_is_not_a_transition(tmp_path: Path) -> No
         )
 
 
-def test_dump_magic_and_cleanup_execstart_are_derived(tmp_path: Path) -> None:
+def test_dump_magic_and_cleanup_execstart_are_derived(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     bundle = _bundle(tmp_path)
     dump = tmp_path / "fake.dump"
     dump.write_bytes(b"random bytes")
@@ -1334,11 +1485,23 @@ def test_dump_magic_and_cleanup_execstart_are_derived(tmp_path: Path) -> None:
     bundle["preflight"]["schema_dump_list"] = _json_ref(
         tmp_path, "fake-dump-list.json", listing
     )
-    with pytest.raises(evidence.EvidenceError, match="custom format"):
+    monkeypatch.setattr(
+        evidence,
+        "_run_pg_restore_list",
+        lambda _identity: (_ for _ in ()).throw(
+            evidence.EvidenceError("pinned pg_restore inspection failed")
+        ),
+    )
+    with pytest.raises(evidence.EvidenceError, match="pg_restore"):
         evidence.verify_bundle(
             bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
         )
 
+    monkeypatch.setattr(
+        evidence,
+        "_run_pg_restore_list",
+        lambda identity: _pg_restore_record(identity.sha256),
+    )
     bundle = _bundle(tmp_path)
     cleanup = _read_ref(bundle["cleanup"]["evidence"])
     cleanup["resolved_exec_start"].remove("--enforce")
@@ -1406,3 +1569,232 @@ def test_weak_schema_and_wrong_request_range_fail_closed(tmp_path: Path) -> None
         evidence.verify_bundle(
             bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
         )
+
+
+def test_global_chronology_rejects_benchmark_before_post_dry(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    document = _read_ref(bundle["benchmarks"]["evidence"])
+    for query_index, query in enumerate(document["queries"]):
+        phase = query["before"]
+        offset = query_index * 5
+        phase["execution_bounds"]["started_at"] = f"2026-07-15T11:55:0{offset}Z"
+        phase["execution_bounds"]["finished_at"] = f"2026-07-15T11:55:0{offset + 4}Z"
+        for index, activity in enumerate(phase["activity_samples"]):
+            activity["captured_at"] = f"2026-07-15T11:55:0{offset + index}Z"
+    bundle["benchmarks"]["evidence"] = _json_ref(
+        tmp_path, "benchmark-reversed.json", document
+    )
+    with pytest.raises(evidence.EvidenceError, match="global chronology"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+
+def test_v3_terminal_retains_provenance_and_v2_cannot_qualify(tmp_path: Path) -> None:
+    terminal = evidence.verify_bundle(
+        _bundle(tmp_path), receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+    )
+    assert terminal["qualifies_task_4_5"] is True
+    assert terminal["preflight"]["schema_dump_list"]
+    assert terminal["recovery"]["invocation"]
+    assert terminal["migration"]["first_invocation"]
+    assert terminal["migration"]["second_invocation"]
+    assert terminal["receipts"]["dry_run_invocation"]
+    assert terminal["receipts"]["enforce_invocation"]
+    missing = json.loads(json.dumps(terminal))
+    del missing["receipts"]["enforce_invocation"]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(missing, EVIDENCE_SCHEMA)
+
+    legacy = json.loads(
+        (ROOT / "docs/runbooks/receipts/tier-node27-timeseries-storage/"
+        "timeseries-compression/terminal-replay-20260715T114625Z.json").read_text()
+    )
+    legacy["qualifies_task_4_5"] = True
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(legacy, EVIDENCE_SCHEMA)
+
+
+@pytest.mark.parametrize("hardlink", [False, True])
+def test_terminal_output_alias_preserves_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hardlink: bool
+) -> None:
+    bundle = _bundle(tmp_path)
+    bundle_path = tmp_path / "bundle-alias.json"
+    bundle_path.write_bytes(_canonical(bundle))
+    input_path = Path(bundle["receipts"]["enforce"]["path"])
+    original = input_path.read_bytes()
+    output = input_path
+    if hardlink:
+        output = tmp_path / "terminal-hardlink.json"
+        output.hardlink_to(input_path)
+    monkeypatch.setattr(evidence, "_current_verifier_head", lambda: VERIFIER_HEAD)
+    assert evidence.main(["--bundle-path", str(bundle_path), "--output-path", str(output)]) == 1
+    assert input_path.read_bytes() == original
+
+
+def test_terminal_failure_replaces_stale_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bundle = _bundle(tmp_path)
+    bundle["authorization"]["bound"] = 2
+    bundle_path = tmp_path / "bad-bundle.json"
+    bundle_path.write_bytes(_canonical(bundle))
+    output = tmp_path / "terminal.json"
+    output.write_text('{"verdict":"PASS_TASK_4_5"}\n', encoding="utf-8")
+    monkeypatch.setattr(evidence, "_current_verifier_head", lambda: VERIFIER_HEAD)
+    assert evidence.main(["--bundle-path", str(bundle_path), "--output-path", str(output)]) == 1
+    marker = json.loads(output.read_text(encoding="utf-8"))
+    assert marker["qualifies_task_4_5"] is False
+    assert marker["outcome"] == "failed"
+    jsonschema.validate(marker, EVIDENCE_SCHEMA)
+
+
+@pytest.mark.parametrize(
+    "plan",
+    [
+        {
+            "Node Type": "Custom Scan",
+            "Custom Plan Provider": "DecompressChunk",
+            "Relation Name": f"prefix_{IDENTITY['chunk_name']}",
+        },
+        {
+            "Node Type": "Custom Scan",
+            "Custom Plan Provider": "DecompressChunk",
+            "Filter": f"Relation Name: {IDENTITY['chunk_name']}",
+        },
+        {
+            "Node Type": "Custom Scan",
+            "Custom Plan Provider": "DecompressChunk",
+            "Plans": [
+                {"Node Type": "Index Scan", "Relation Name": IDENTITY["chunk_name"]}
+            ],
+        },
+    ],
+)
+def test_plan_suffix_filter_and_child_decoys_fail(
+    tmp_path: Path, plan: dict[str, Any]
+) -> None:
+    bundle = _bundle(tmp_path)
+    document = _read_ref(bundle["benchmarks"]["evidence"])
+    document["queries"][0]["after"]["measurements"][0]["plan"] = plan
+    bundle["benchmarks"]["evidence"] = _json_ref(
+        tmp_path, "plan-decoy-v2.json", document
+    )
+    with pytest.raises(evidence.EvidenceError, match="lacks selected DecompressChunk"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+
+def test_snapshot_bijection_rejects_cross_table_sibling_reuse(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    post = _read_ref(bundle["sizes"]["post"])
+    copied = dict(post["tables"]["hydro.river_timeseries"]["compressed_relations"][0])
+    copied["origin_chunk_name"] = "_hyper_2_20_chunk"
+    post["tables"]["met.forcing_station_timeseries"]["compressed_chunks"] = 1
+    post["tables"]["met.forcing_station_timeseries"]["compressed_relations"] = [copied]
+    bundle["sizes"]["post"] = _json_ref(tmp_path, "cross-table-sibling.json", post)
+    with pytest.raises(evidence.EvidenceError, match="bijection"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+
+def test_repo_path_and_remote_lineage_are_pinned(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    preflight = _read_ref(bundle["preflight"]["evidence"])
+    preflight["repo_path"] = "/tmp/unrelated"
+    bundle["preflight"]["evidence"] = _json_ref(tmp_path, "wrong-repo.json", preflight)
+    with pytest.raises(evidence.EvidenceError, match="mutation-head boundary"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+    bundle = _bundle(tmp_path)
+    bundle["authorization"]["remote_identity"] = "attacker/repo"
+    with pytest.raises(evidence.EvidenceError, match="authorization differs"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+
+def test_execution_audit_rejects_extra_or_direct_db_invocation(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    audit = _read_ref(bundle["execution"]["audit"])
+    audit["direct_db_mutation_statements"] = ["compress_chunk"]
+    bundle["execution"]["audit"] = _json_ref(tmp_path, "direct-db.json", audit)
+    with pytest.raises(evidence.EvidenceError, match="direct-DB"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+
+def test_text_journal_secret_assignment_is_rejected(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    cleanup = _read_ref(bundle["cleanup"]["evidence"])
+    journal = tmp_path / "secret-journal.log"
+    journal.write_text("status=ok token=never-print-this\n", encoding="utf-8")
+    cleanup["final_units"]["nhms-node27-autopipe.service"]["journal"] = _file_ref(journal)
+    bundle["cleanup"]["evidence"] = _json_ref(tmp_path, "secret-journal.json", cleanup)
+    with pytest.raises(evidence.EvidenceError, match="credential") as caught:
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+    assert "never-print-this" not in str(caught.value)
+
+
+def test_curve_window_starting_at_selected_exclusive_end_is_rejected(
+    tmp_path: Path,
+) -> None:
+    bundle = _bundle(tmp_path)
+    document = _read_ref(bundle["benchmarks"]["evidence"])
+    query = document["queries"][0]
+    issue_time = datetime(2026, 6, 4, tzinfo=UTC)
+    end_time = datetime(2026, 6, 11, tzinfo=UTC)
+    query_text, names, parameters = benchmark._curve_query_and_binding(
+        basin_version_id=query["request"]["basin_version_id"],
+        river_segment_id=query["request"]["river_segment_id"],
+        river_network_version_id=query["request"]["river_network_version_id"],
+        issue_time=issue_time,
+        end_time=end_time,
+        scenario=query["request"]["scenario"],
+    )
+    query["request"]["issue_time"] = "2026-06-04T00:00:00Z"
+    query["request"]["end_time"] = "2026-06-11T00:00:00Z"
+    query["query_text"] = query_text
+    query["query_sha256"] = hashlib.sha256(query_text.encode()).hexdigest()
+    query["binding"] = {
+        "parameter_names": names,
+        "bound_parameters": benchmark._json_value(parameters),
+    }
+    bundle["benchmarks"]["evidence"] = _json_ref(
+        tmp_path, "exclusive-end-curve.json", document
+    )
+    with pytest.raises(evidence.EvidenceError, match="selected chunk range"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+
+def test_retained_reference_change_after_publish_replaces_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = _bundle(tmp_path)
+    bundle_path = tmp_path / "bundle-retained.json"
+    bundle_path.write_bytes(_canonical(bundle))
+    output = tmp_path / "terminal.json"
+    retained = Path(bundle["receipts"]["dry_run"]["path"])
+    original_publish = evidence.atomic_write_bytes_no_follow
+    changed = False
+
+    def publish(path: Path, payload: bytes, **kwargs: Any) -> None:
+        nonlocal changed
+        original_publish(path, payload, **kwargs)
+        if path == output and not changed:
+            retained.write_text("{}\n", encoding="utf-8")
+            changed = True
+
+    monkeypatch.setattr(evidence, "atomic_write_bytes_no_follow", publish)
+    monkeypatch.setattr(evidence, "_current_verifier_head", lambda: VERIFIER_HEAD)
+    assert evidence.main(["--bundle-path", str(bundle_path), "--output-path", str(output)]) == 1
+    marker = json.loads(output.read_text(encoding="utf-8"))
+    assert marker["qualifies_task_4_5"] is False

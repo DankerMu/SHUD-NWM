@@ -8,4 +8,4 @@ ExecStartPre=/usr/bin/mkdir -p /home/nwm/node27-timeseries-compression-logs
 ExecStart=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh --enforce
 StandardOutput=append:/home/nwm/node27-timeseries-compression-logs/systemd.log
 StandardError=append:/home/nwm/node27-timeseries-compression-logs/systemd.err
-TimeoutStartSec=0
+TimeoutStartSec=940

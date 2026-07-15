@@ -1,16 +1,22 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "NHMS Node-27 Initial Timeseries Compression Live Evidence v2",
+  "title": "NHMS Node-27 Initial Timeseries Compression Live Evidence",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "schema_version", "issue", "generated_at", "node", "mutation_head_sha",
-    "verifier_head_sha", "database_identity", "authorization", "recovery", "preflight",
-    "migration", "selection", "receipts", "sizes", "catalog", "benchmarks",
-    "cleanup", "out_of_scope", "verdict"
-  ],
+  "required": ["schema_version", "generated_at"],
   "properties": {
-    "schema_version": {"const": "2.0"},
+    "schema_version": {"enum": ["2.0", "3.0"]},
+    "qualifies_task_4_5": {"type": "boolean"},
+    "outcome": {"const": "failed"},
+    "provenance_state": {"enum": ["bound", "unavailable"]},
+    "failure": {
+      "type": "object", "additionalProperties": false,
+      "required": ["stage", "mutation_state"],
+      "properties": {
+        "stage": {"type": "string", "minLength": 1},
+        "mutation_state": {"enum": ["failed_before_mutation", "indeterminate"]}
+      }
+    },
     "issue": {"const": 1069},
     "generated_at": {"type": "string", "format": "date-time"},
     "node": {"const": "node-27"},
@@ -25,7 +31,23 @@
         "max_selected_bytes": {"const": 8589934592},
         "min_free_bytes": {"const": 322122547200},
         "timeout_seconds": {"const": 900}, "enforce_invocations": {"const": 1},
-        "replay_decompression": {"const": true}, "decompress_invocations": {"const": 1}
+        "replay_decompression": {"const": true}, "decompress_invocations": {"const": 1},
+        "migration_invocations": {"const": 2}, "dry_run_invocations": {"const": 1},
+        "direct_db_bypass_invocations": {"const": 0},
+        "repo_path": {"const": "/home/nwm/NWM"},
+        "remote_identity": {"const": "DankerMu/SHUD-NWM"},
+        "reviewed_mutation_sha": {"$ref": "#/$defs/git_sha"},
+        "reviewed_remote_ref": {"const": "refs/remotes/origin/feat/issue-1069-live-compression"}
+      }
+    },
+    "execution": {
+      "type": "object", "additionalProperties": false,
+      "required": ["audit", "journal", "namespace_counts", "direct_db_mutation_statements"],
+      "properties": {
+        "audit": {"$ref": "#/$defs/artifact_ref"},
+        "journal": {"$ref": "#/$defs/artifact_ref"},
+        "namespace_counts": {"type": "object", "minProperties": 4},
+        "direct_db_mutation_statements": {"const": 0}
       }
     },
     "recovery": {
@@ -34,6 +56,7 @@
       "properties": {
         "preflight": {"$ref": "#/$defs/artifact_ref"},
         "receipt": {"$ref": "#/$defs/artifact_ref"},
+        "invocation": {"$ref": "#/$defs/artifact_ref"},
         "authorized": {"const": true}, "node": {"const": "node-27"},
         "mutation_head_sha": {"$ref": "#/$defs/git_sha"},
         "target": {"$ref": "#/$defs/recovery_target"},
@@ -56,6 +79,7 @@
       "properties": {
         "evidence": {"$ref": "#/$defs/artifact_ref"},
         "schema_dump": {"$ref": "#/$defs/artifact_ref"},
+        "schema_dump_list": {"$ref": "#/$defs/artifact_ref"},
         "catalog_before": {"$ref": "#/$defs/artifact_ref"},
         "pg_restore_list_exit_code": {"const": 0},
         "role": {"$ref": "#/$defs/role_facts"}, "quiescent": {"const": true},
@@ -70,6 +94,8 @@
       "required": ["migration_file", "first_exit_code", "second_exit_code", "catalog_after_first", "catalog_after_second", "catalogs_identical"],
       "properties": {
         "migration_file": {"$ref": "#/$defs/artifact_ref"},
+        "first_invocation": {"$ref": "#/$defs/artifact_ref"},
+        "second_invocation": {"$ref": "#/$defs/artifact_ref"},
         "first_exit_code": {"const": 0}, "second_exit_code": {"const": 0},
         "catalog_after_first": {"$ref": "#/$defs/artifact_ref"},
         "catalog_after_second": {"$ref": "#/$defs/artifact_ref"},
@@ -97,6 +123,8 @@
       "required": ["dry_run", "enforce", "dry_run_schema_valid", "dry_run_semantic_valid", "enforce_schema_valid", "enforce_semantic_valid"],
       "properties": {
         "dry_run": {"$ref": "#/$defs/artifact_ref"}, "enforce": {"$ref": "#/$defs/artifact_ref"},
+        "dry_run_invocation": {"$ref": "#/$defs/artifact_ref"},
+        "enforce_invocation": {"$ref": "#/$defs/artifact_ref"},
         "dry_run_schema_valid": {"const": true}, "dry_run_semantic_valid": {"const": true},
         "enforce_schema_valid": {"const": true}, "enforce_semantic_valid": {"const": true}
       }
@@ -138,6 +166,18 @@
         "installed_service_matches_repo": {"const": true}, "installed_timer_matches_repo": {"const": true}
       }
     },
+    "chronology": {
+      "type": "object", "additionalProperties": false,
+      "required": ["events", "snapshot_ids"],
+      "properties": {
+        "events": {"type": "array", "minItems": 25, "items": {"$ref": "#/$defs/chronology_event"}},
+        "snapshot_ids": {"type": "array", "minItems": 7, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "source_manifest": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": {"$ref": "#/$defs/artifact_ref"}
+    },
     "out_of_scope": {
       "type": "object", "additionalProperties": false,
       "required": ["retention_mutated", "drill_run", "node22_touched", "decompress_run", "role_mutated"],
@@ -149,9 +189,45 @@
     },
     "verdict": {"const": "PASS_TASK_4_5"}
   },
+  "allOf": [
+    {
+      "if": {"required": ["outcome"]},
+      "then": {
+        "required": ["qualifies_task_4_5", "provenance_state", "failure"],
+        "properties": {"schema_version": {"const": "3.0"}, "qualifies_task_4_5": {"const": false}},
+        "not": {"required": ["verdict"]}
+      },
+      "else": {
+        "required": ["issue", "node", "mutation_head_sha", "verifier_head_sha", "database_identity", "authorization", "recovery", "preflight", "migration", "selection", "receipts", "sizes", "catalog", "benchmarks", "cleanup", "out_of_scope", "verdict"]
+      }
+    },
+    {
+      "if": {"properties": {"schema_version": {"const": "2.0"}}, "required": ["schema_version"]},
+      "then": {"not": {"properties": {"qualifies_task_4_5": {"const": true}}, "required": ["qualifies_task_4_5"]}},
+      "else": {
+        "if": {"not": {"required": ["outcome"]}},
+        "then": {
+          "required": ["qualifies_task_4_5", "execution", "chronology", "source_manifest"],
+          "properties": {"qualifies_task_4_5": {"const": true}},
+          "allOf": [
+            {"properties": {"authorization": {"required": ["migration_invocations", "dry_run_invocations", "direct_db_bypass_invocations", "repo_path", "remote_identity", "reviewed_mutation_sha", "reviewed_remote_ref"]}}},
+            {"properties": {"recovery": {"required": ["invocation"]}}},
+            {"properties": {"preflight": {"required": ["schema_dump_list"]}}},
+            {"properties": {"migration": {"required": ["first_invocation", "second_invocation"]}}},
+            {"properties": {"receipts": {"required": ["dry_run_invocation", "enforce_invocation"]}}}
+          ]
+        }
+      }
+    }
+  ],
   "$defs": {
     "git_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "chronology_event": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "at"],
+      "properties": {"name": {"type": "string", "minLength": 1}, "at": {"type": "string", "format": "date-time"}}
+    },
     "artifact_ref": {
       "type": "object", "additionalProperties": false, "required": ["path", "sha256", "bytes"],
       "properties": {

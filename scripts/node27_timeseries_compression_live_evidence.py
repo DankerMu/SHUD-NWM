@@ -18,6 +18,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import re
 import subprocess
 import sys
@@ -29,12 +30,17 @@ import jsonschema
 
 from packages.common.evidence_io import (
     BoundedEvidenceError,
-    read_bounded_bytes_no_follow,
+    FileIdentity,
+    assert_paths_disjoint,
+    inspect_bounded_file_no_follow,
+    read_bounded_bytes_with_identity_no_follow,
     read_bounded_json_no_follow,
+    read_bounded_json_with_identity_no_follow,
+    reject_secret_material,
 )
-from packages.common.safe_fs import atomic_write_bytes_no_follow
+from packages.common.safe_fs import atomic_write_bytes_no_follow, open_file_no_follow
 
-SCHEMA_VERSION = "2.0"
+SCHEMA_VERSION = "3.0"
 ISSUE = 1069
 PASS_VERDICT = "PASS_TASK_4_5"
 HYPERTABLE_KEYS = ("hydro.river_timeseries", "met.forcing_station_timeseries")
@@ -49,7 +55,13 @@ MAX_JSON_ARTIFACT_BYTES = 16 * 1024**2
 MAX_PLAN_DEPTH = 48
 MAX_JSON_NODES = 250_000
 MAX_JSON_ARRAY_ITEMS = 25_000
-MAX_BINARY_ARTIFACT_BYTES = 1024**3
+MAX_BINARY_ARTIFACT_BYTES = 512 * 1024**2
+MAX_GIT_BLOB_BYTES = 8 * 1024**2
+MAX_SUBPROCESS_OUTPUT_BYTES = 16 * 1024**2
+PG_RESTORE_TIMEOUT_SECONDS = 30
+QUALIFYING_SCHEMA_VERSION = "3.0"
+EXPECTED_REPO_PATH = "/home/nwm/NWM"
+EXPECTED_REMOTE_IDENTITY = "DankerMu/SHUD-NWM"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CANONICAL_RECEIPT_SCHEMA = REPO_ROOT / "schemas/timeseries_compression_receipt.schema.json"
 CANONICAL_EVIDENCE_SCHEMA = REPO_ROOT / "schemas/timeseries_compression_live_evidence.schema.json"
@@ -65,9 +77,11 @@ PREFLIGHT_KEYS = frozenset(
         "captured_at",
         "node",
         "repo_path",
+        "repo_remote_identity",
         "mutation_head_sha",
         "worktree_clean",
         "database_identity",
+        "database_identity_probe",
         "container_state",
         "role",
         "env_mode",
@@ -92,10 +106,12 @@ RECOVERY_RETURN_RELATION = "_timescaledb_internal._hyper_3_7_chunk"
 # This constant is deliberately executable documentation: tests and the
 # runbook pin the same capture contract without inventing a host-only format.
 BUNDLE_CONTRACT: Mapping[str, str] = {
+    "execution.audit": "JSON: exact invocation namespace plus bounded audit journal/direct-DB absence",
     "recovery.preflight": "JSON: separately authorized exact-chunk decompression preflight",
     "recovery.receipt": "JSON: exact-chunk decompression result, row parity, and chronology",
     "preflight.evidence": "JSON: captured mutation SHA, container and four-unit state facts",
     "preflight.schema_dump": "custom-format pg_dump file reference",
+    "preflight.schema_dump_list": "JSON: descriptor-bound PG15 pg_restore output identity",
     "preflight.catalog_before": "JSON: canonical pre-migration catalog rows",
     "migration.catalog_after_first": "JSON: exact D3 catalog after first apply",
     "migration.catalog_after_second": "JSON: exact D3 catalog after second apply",
@@ -137,10 +153,49 @@ INVOCATION_ARGV: Mapping[str, list[str]] = {
         "<receipt-path>",
     ],
 }
+_TIMEOUT_PREFIX = [
+    "/usr/bin/timeout",
+    "--signal=TERM",
+    "--kill-after=30s",
+    "900s",
+]
+
+
+def _invocation_execution_identity(kind: str) -> dict[str, Any]:
+    repo = EXPECTED_REPO_PATH
+    if kind in {"migration_apply", "recovery_decompress"}:
+        return {
+            "resolved_repo_path": repo,
+            "resolved_interpreter": "/usr/bin/psql",
+            "resolved_script": (
+                f"{repo}/db/migrations/000047_hypertable_compression_settings.sql"
+                if kind == "migration_apply"
+                else None
+            ),
+            "resolved_wrapper": None,
+            "resolved_env_file": f"{repo}/infra/env/node27-timeseries-compression.env",
+            "launcher_argv": [*_TIMEOUT_PREFIX, *INVOCATION_ARGV[kind]],
+        }
+    return {
+        "resolved_repo_path": repo,
+        "resolved_interpreter": f"{repo}/.venv/bin/python",
+        "resolved_script": f"{repo}/scripts/node27_timeseries_compression.py",
+        "resolved_wrapper": f"{repo}/scripts/node27_timeseries_compression_once.sh",
+        "resolved_env_file": f"{repo}/infra/env/node27-timeseries-compression.env",
+        "launcher_argv": [
+            *_TIMEOUT_PREFIX,
+            f"{repo}/.venv/bin/python",
+            f"{repo}/scripts/node27_timeseries_compression.py",
+            *INVOCATION_ARGV[kind][1:],
+        ],
+    }
 
 
 class EvidenceError(RuntimeError):
     """Fail-closed bundle, artifact, schema, or semantic error."""
+
+
+_RETAINED_IDENTITIES: list[FileIdentity] = []
 
 
 def _canonical_json_bytes(value: Any) -> bytes:
@@ -194,6 +249,14 @@ def _artifact_bytes(
     path = Path(str(ref["path"]))
     if not path.is_absolute():
         raise EvidenceError(f"{label}.path must be absolute")
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", str(ref["sha256"])) is None
+        or not isinstance(ref["bytes"], int)
+        or isinstance(ref["bytes"], bool)
+        or ref["bytes"] < 0
+        or ref["bytes"] > max_bytes
+    ):
+        raise EvidenceError(f"{label} reference metadata is invalid")
     digest = str(ref["sha256"])
     if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
         raise EvidenceError(f"{label}.sha256 must be lowercase sha256")
@@ -203,11 +266,14 @@ def _artifact_bytes(
     if size > max_bytes:
         raise EvidenceError(f"{label} exceeds the byte ceiling")
     try:
-        raw = read_bounded_bytes_no_follow(path, max_bytes=max_bytes, label=label)
+        raw, identity = read_bounded_bytes_with_identity_no_follow(
+            path, max_bytes=max_bytes, label=label
+        )
     except BoundedEvidenceError as error:
         raise EvidenceError(str(error)) from error
     if len(raw) != size or _sha256(raw) != digest:
         raise EvidenceError(f"{label} byte count or sha256 mismatch")
+    _RETAINED_IDENTITIES.append(identity)
     return {"path": str(path), "sha256": digest, "bytes": size}, raw
 
 
@@ -224,7 +290,7 @@ def _json_artifact(
     if declared_size > max_bytes:
         raise EvidenceError(f"{label} exceeds the byte ceiling")
     try:
-        raw, document = read_bounded_json_no_follow(
+        raw, identity, document = read_bounded_json_with_identity_no_follow(
             Path(str(ref_value.get("path", ""))),
             max_bytes=max_bytes,
             label=label,
@@ -235,8 +301,21 @@ def _json_artifact(
     except BoundedEvidenceError as error:
         raise EvidenceError(str(error)) from error
     ref = _artifact_ref_from_raw(ref_value, label, raw)
+    _RETAINED_IDENTITIES.append(identity)
     _reject_secrets(document, label)
     return ref, document
+
+
+def _text_artifact(
+    value: Any, label: str, *, max_bytes: int = 4 * 1024**2
+) -> tuple[dict[str, Any], str]:
+    ref, raw = _artifact_bytes(value, label, max_bytes=max_bytes)
+    try:
+        text_value = raw.decode("utf-8")
+    except UnicodeError as error:
+        raise EvidenceError(f"{label} is not valid UTF-8 text") from error
+    _reject_secrets(text_value, label)
+    return ref, text_value
 
 
 def _artifact_ref_from_raw(value: Any, label: str, raw: bytes) -> dict[str, Any]:
@@ -258,53 +337,124 @@ def _artifact_ref_from_raw(value: Any, label: str, raw: bytes) -> dict[str, Any]
     return {"path": str(path), "sha256": digest, "bytes": size}
 
 
+def _streaming_artifact_ref(
+    value: Any,
+    label: str,
+    *,
+    max_bytes: int,
+) -> tuple[dict[str, Any], FileIdentity]:
+    """Validate a large artifact by streaming once, retaining descriptor identity."""
+
+    ref = _require_mapping(value, label)
+    _require_exact_keys(ref, {"path", "sha256", "bytes"}, label)
+    path = Path(str(ref["path"]))
+    if not path.is_absolute():
+        raise EvidenceError(f"{label}.path must be absolute")
+    try:
+        identity = inspect_bounded_file_no_follow(
+            path, max_bytes=max_bytes, label=label
+        )
+    except BoundedEvidenceError as error:
+        raise EvidenceError(str(error)) from error
+    if (
+        ref["bytes"] != identity.size
+        or ref["sha256"] != identity.sha256
+    ):
+        raise EvidenceError(f"{label} byte count or sha256 mismatch")
+    _RETAINED_IDENTITIES.append(identity)
+    return {
+        "path": str(path),
+        "sha256": identity.sha256,
+        "bytes": identity.size,
+    }, identity
+
+
 def _reject_secrets(value: Any, label: str) -> None:
     """Reject credential-bearing evidence instead of trying to redact it later."""
-    if isinstance(value, Mapping):
-        for key, item in value.items():
-            lowered = str(key).lower()
-            normalized = re.sub(r"[^a-z0-9]+", "_", lowered).strip("_")
-            if (
-                normalized in {
-                    "password",
-                    "passwd",
-                    "database_url",
-                    "dsn",
-                    "api_key",
-                    "apikey",
-                    "token",
-                    "access_token",
-                    "refresh_token",
-                    "private_key",
-                    "client_secret",
-                    "authorization",
-                    "auth_credential",
-                    "credential",
-                }
-                or normalized.endswith(("_password", "_token", "_secret", "_api_key", "_private_key"))
-            ):
-                raise EvidenceError(f"{label} contains forbidden credential field")
-            _reject_secrets(item, label)
-    elif isinstance(value, list):
-        for item in value:
-            _reject_secrets(item, label)
-    elif isinstance(value, str) and re.search(
-        r"(?i)(?:postgres(?:ql)?://[^/\s]*@|-----BEGIN [A-Z ]*PRIVATE KEY-----|bearer\s+[a-z0-9._~+/=-]+)",
-        value,
-    ):
-        raise EvidenceError(f"{label} contains forbidden credential material")
+
+    try:
+        reject_secret_material(value, label=label)
+    except BoundedEvidenceError as error:
+        raise EvidenceError(str(error)) from error
 
 
 def _git_blob_bytes(head_sha: str, relative_path: str, label: str) -> bytes:
-    result = subprocess.run(
-        ["git", "show", f"{head_sha}:{relative_path}"],
-        cwd=REPO_ROOT,
-        check=False,
-        capture_output=True,
-    )
-    if result.returncode != 0:
+    object_name = f"{head_sha}:{relative_path}"
+    try:
+        size_result = subprocess.run(
+            ["git", "cat-file", "-s", object_name],
+            cwd=REPO_ROOT,
+            check=False,
+            capture_output=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise EvidenceError(f"{label} Git blob size query timed out") from error
+    if size_result.returncode != 0 or len(size_result.stdout) > 128:
+        raise EvidenceError(f"{label} cannot be bound to mutation SHA")
+    try:
+        size = int(size_result.stdout.strip())
+    except ValueError as error:
+        raise EvidenceError(f"{label} Git blob size is invalid") from error
+    if size < 0 or size > MAX_GIT_BLOB_BYTES:
+        raise EvidenceError(f"{label} Git blob exceeds the byte ceiling")
+    try:
+        result = subprocess.run(
+            ["git", "cat-file", "blob", object_name],
+            cwd=REPO_ROOT,
+            check=False,
+            capture_output=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise EvidenceError(f"{label} Git blob read timed out") from error
+    if result.returncode != 0 or len(result.stdout) != size or len(result.stderr) > 4096:
         raise EvidenceError(f"{label} cannot be bound to mutation SHA")
     return result.stdout
+
+
+def _remote_identity(url: str) -> str:
+    normalized = url.strip().removesuffix(".git")
+    if normalized.startswith("git@github.com:"):
+        return normalized.split(":", 1)[1]
+    marker = "github.com/"
+    if marker in normalized:
+        return normalized.split(marker, 1)[1]
+    return ""
+
+
+def _validate_repository_provenance(
+    *, mutation_head_sha: str, reviewed_remote_ref: str
+) -> None:
+    if not reviewed_remote_ref.startswith("refs/remotes/origin/"):
+        raise EvidenceError("reviewed mutation ref is not an origin remote-tracking ref")
+    try:
+        remote = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=REPO_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        reviewed = subprocess.run(
+            ["git", "rev-parse", "--verify", reviewed_remote_ref],
+            cwd=REPO_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise EvidenceError("repository provenance query timed out") from error
+    if (
+        remote.returncode != 0
+        or len(remote.stdout) > 4096
+        or _remote_identity(remote.stdout) != EXPECTED_REMOTE_IDENTITY
+        or reviewed.returncode != 0
+        or reviewed.stdout.strip() != mutation_head_sha
+    ):
+        raise EvidenceError("mutation SHA is not the authorization-pinned origin lineage")
 
 
 def _validate_reviewed_file_ref(
@@ -354,6 +504,12 @@ def _validate_invocation_record(
             "exit_code",
             "mutation_head_sha",
             "artifact_bindings",
+            "resolved_repo_path",
+            "resolved_interpreter",
+            "resolved_script",
+            "resolved_wrapper",
+            "resolved_env_file",
+            "launcher_argv",
         },
         label,
     )
@@ -365,6 +521,9 @@ def _validate_invocation_record(
         or record["mutation_head_sha"] != mutation_head_sha
     ):
         raise EvidenceError(f"{label} command identity, timeout, or mutation SHA differs")
+    expected_execution = _invocation_execution_identity(kind)
+    if any(record[key] != value for key, value in expected_execution.items()):
+        raise EvidenceError(f"{label} resolved launcher provenance differs")
     started = _parse_utc(record["started_at"], f"{label}.started_at")
     finished = _parse_utc(record["finished_at"], f"{label}.finished_at")
     if (
@@ -380,6 +539,77 @@ def _validate_invocation_record(
         **dict(record),
         "started_at_dt": started,
         "finished_at_dt": finished,
+    }
+
+
+def _validate_execution_audit(
+    raw: Any,
+    *,
+    expected_invocation_refs: list[Mapping[str, Any]],
+    mutation_head_sha: str,
+) -> dict[str, Any]:
+    audit = _require_mapping(raw, "execution.audit document")
+    _require_exact_keys(
+        audit,
+        {
+            "captured_at",
+            "window_started_at",
+            "window_finished_at",
+            "mutation_head_sha",
+            "audit_source",
+            "complete",
+            "namespace_counts",
+            "invocation_refs",
+            "direct_db_mutation_statements",
+            "journal",
+        },
+        "execution.audit document",
+    )
+    started = _parse_utc(audit["window_started_at"], "execution audit start")
+    finished = _parse_utc(audit["window_finished_at"], "execution audit finish")
+    captured = _parse_utc(audit["captured_at"], "execution audit captured")
+    expected_counts = {
+        "migration_apply": 2,
+        "recovery_decompress": 1,
+        "compression_dry_run": 1,
+        "compression_enforce": 1,
+    }
+    refs = _require_list(audit["invocation_refs"], "execution invocation refs")
+    expected_refs = [dict(value) for value in expected_invocation_refs]
+    if (
+        audit["mutation_head_sha"] != mutation_head_sha
+        or audit["audit_source"] != "pgaudit+systemd-journal"
+        or audit["complete"] is not True
+        or audit["namespace_counts"] != expected_counts
+        or refs != expected_refs
+        or audit["direct_db_mutation_statements"] != []
+        or not started <= finished <= captured
+    ):
+        raise EvidenceError("execution audit namespace or direct-DB boundary differs")
+    journal_ref, journal = _text_artifact(audit["journal"], "execution.audit.journal")
+    expected_lines = [
+        f"kind={kind} invocation_sha256={ref['sha256']}"
+        for kind, ref in zip(
+            [
+                "migration_apply",
+                "migration_apply",
+                "recovery_decompress",
+                "compression_dry_run",
+                "compression_enforce",
+            ],
+            expected_refs,
+            strict=True,
+        )
+    ]
+    observed_lines = [line.strip() for line in journal.splitlines() if line.strip()]
+    if observed_lines != [*expected_lines, "direct_db_mutation_statements=0"]:
+        raise EvidenceError("execution audit journal cardinality/commands differ")
+    return {
+        "artifact_window_started_at": started,
+        "artifact_window_finished_at": finished,
+        "captured_at": captured,
+        "journal": journal_ref,
+        "namespace_counts": expected_counts,
     }
 
 
@@ -475,24 +705,145 @@ def _validate_pre_migration_catalog(raw: Any, label: str) -> None:
         raise EvidenceError(f"{label} contains unexpected pre-migration settings/jobs")
 
 
-def _validate_dump_listing(raw: Any, *, dump_ref: Mapping[str, Any]) -> dict[str, Any]:
+def _catalog_snapshot(
+    raw: Any,
+    *,
+    label: str,
+    mutation_head_sha: str,
+    phase: str,
+    validator: Any,
+) -> dict[str, Any]:
+    snapshot = _require_mapping(raw, label)
+    _require_exact_keys(
+        snapshot,
+        {"captured_at", "snapshot_id", "phase", "mutation_head_sha", "catalog"},
+        label,
+    )
+    captured_at = _parse_utc(snapshot["captured_at"], f"{label}.captured_at")
+    if (
+        snapshot["phase"] != phase
+        or snapshot["mutation_head_sha"] != mutation_head_sha
+        or not isinstance(snapshot["snapshot_id"], str)
+        or not snapshot["snapshot_id"]
+    ):
+        raise EvidenceError(f"{label} snapshot identity differs")
+    validator(snapshot["catalog"], f"{label}.catalog")
+    return {
+        "captured_at_dt": captured_at,
+        "snapshot_id": snapshot["snapshot_id"],
+        "catalog": snapshot["catalog"],
+    }
+
+
+def _run_pg_restore_list(identity: FileIdentity) -> dict[str, Any]:
+    """Run the pinned PG15 tool against the exact retained dump descriptor."""
+
+    fd = open_file_no_follow(identity.path)
+    try:
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino, info.st_size) != (
+            identity.device,
+            identity.inode,
+            identity.size,
+        ):
+            raise EvidenceError("schema dump identity changed before pg_restore")
+        descriptor_path = f"/dev/fd/{fd}"
+        try:
+            version = subprocess.run(
+                ["/usr/bin/pg_restore", "--version"],
+                check=False,
+                capture_output=True,
+                timeout=PG_RESTORE_TIMEOUT_SECONDS,
+            )
+            result = subprocess.run(
+                ["/usr/bin/pg_restore", "--list", descriptor_path],
+                check=False,
+                capture_output=True,
+                timeout=PG_RESTORE_TIMEOUT_SECONDS,
+                pass_fds=(fd,),
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise EvidenceError("pinned pg_restore inspection failed") from error
+        if (
+            len(version.stdout) + len(version.stderr) > 4096
+            or len(result.stdout) > MAX_SUBPROCESS_OUTPUT_BYTES
+            or len(result.stderr) > MAX_SUBPROCESS_OUTPUT_BYTES
+        ):
+            raise EvidenceError("pg_restore output exceeds the byte ceiling")
+        after = os.fstat(fd)
+        if (after.st_dev, after.st_ino, after.st_size) != (
+            identity.device,
+            identity.inode,
+            identity.size,
+        ):
+            raise EvidenceError("schema dump changed during pg_restore")
+        version_text = (version.stdout + version.stderr).decode("utf-8", errors="strict").strip()
+        if version.returncode != 0 or re.search(r"\b15(?:\.|\b)", version_text) is None:
+            raise EvidenceError("pg_restore is not the supported PG15 tool")
+        return {
+            "dump_sha256": identity.sha256,
+            "argv": ["/usr/bin/pg_restore", "--list", "<descriptor-bound-dump>"],
+            "exit_code": result.returncode,
+            "tool_version": version_text,
+            "stdout_sha256": _sha256(result.stdout),
+            "stdout_bytes": len(result.stdout),
+            "stderr_sha256": _sha256(result.stderr),
+            "stderr_bytes": len(result.stderr),
+            "entries": result.stdout.decode("utf-8", errors="strict").splitlines(),
+        }
+    except UnicodeError as error:
+        raise EvidenceError("pg_restore output is not valid UTF-8") from error
+    finally:
+        os.close(fd)
+
+
+def _validate_dump_listing(
+    raw: Any,
+    *,
+    dump_ref: Mapping[str, Any],
+    observed: Mapping[str, Any],
+    mutation_head_sha: str,
+) -> dict[str, Any]:
     listing = _require_mapping(raw, "preflight.schema_dump_list document")
     _require_exact_keys(
         listing,
-        {"dump_sha256", "argv", "exit_code", "entries"},
+        {
+            "captured_at",
+            "snapshot_id",
+            "mutation_head_sha",
+            "dump_sha256",
+            "argv",
+            "exit_code",
+            "tool_version",
+            "stdout_sha256",
+            "stdout_bytes",
+            "stderr_sha256",
+            "stderr_bytes",
+            "entries",
+        },
         "preflight.schema_dump_list document",
     )
+    captured_at = _parse_utc(
+        listing["captured_at"], "preflight.schema_dump_list.captured_at"
+    )
+    if (
+        listing["mutation_head_sha"] != mutation_head_sha
+        or not isinstance(listing["snapshot_id"], str)
+        or not listing["snapshot_id"]
+    ):
+        raise EvidenceError("schema dump listing snapshot identity differs")
     entries = _require_list(listing["entries"], "preflight.schema_dump_list.entries")
+    observed_keys = set(observed)
     if (
         listing["dump_sha256"] != dump_ref["sha256"]
-        or listing["argv"] != ["pg_restore", "--list", "<schema-dump-path>"]
+        or {key: listing[key] for key in observed_keys} != dict(observed)
         or listing["exit_code"] != 0
         or not entries
         or any(not isinstance(item, str) or not item for item in entries)
         or not all(any(table.split(".")[1] in item for item in entries) for table in HYPERTABLE_KEYS)
     ):
         raise EvidenceError("schema forensic dump/list identity is not verifiable")
-    return dict(listing)
+    return {**dict(listing), "captured_at_dt": captured_at}
 
 
 def _validate_preflight(raw: Any, mutation_head_sha: str) -> dict[str, Any]:
@@ -505,6 +856,8 @@ def _validate_preflight(raw: Any, mutation_head_sha: str) -> dict[str, Any]:
     captured_at = _parse_utc(preflight["captured_at"], "preflight.captured_at")
     if (
         preflight["node"] != "node-27"
+        or preflight["repo_path"] != EXPECTED_REPO_PATH
+        or preflight["repo_remote_identity"] != EXPECTED_REMOTE_IDENTITY
         or preflight["mutation_head_sha"] != mutation_head_sha
         or preflight["worktree_clean"] is not True
         or preflight["env_mode"] != "0600"
@@ -537,7 +890,9 @@ def _validate_preflight(raw: Any, mutation_head_sha: str) -> dict[str, Any]:
             raise EvidenceError(f"preflight unit {unit_name} has incomplete state fields")
         if not isinstance(unit["main_pid"], int) or isinstance(unit["main_pid"], bool) or unit["main_pid"] < 0:
             raise EvidenceError(f"preflight unit {unit_name} has invalid MainPID")
-        journal_ref = _artifact_ref(unit["journal"], f"preflight.units.{unit_name}.journal")
+        journal_ref, _ = _text_artifact(
+            unit["journal"], f"preflight.units.{unit_name}.journal"
+        )
         unit_summary[unit_name] = {
             "enabled": unit["enabled"],
             "active": unit["active"],
@@ -559,13 +914,49 @@ def _validate_preflight(raw: Any, mutation_head_sha: str) -> dict[str, Any]:
     )
     _require_exact_keys(
         prior_autopipe,
-        {"enabled", "active", "sub", "result"},
+        {"timer", "service"},
         "preflight.prior_autopipe_state",
     )
-    if not all(isinstance(value, str) and value for value in prior_autopipe.values()):
-        raise EvidenceError("preflight prior autopipe state is incomplete")
+    normalized_prior: dict[str, Any] = {}
+    for kind in ("timer", "service"):
+        state = _require_mapping(
+            prior_autopipe[kind], f"preflight.prior_autopipe_state.{kind}"
+        )
+        _require_exact_keys(
+            state,
+            {"enabled", "active", "sub", "result"},
+            f"preflight.prior_autopipe_state.{kind}",
+        )
+        if not all(isinstance(value, str) and value for value in state.values()):
+            raise EvidenceError("preflight prior autopipe state is incomplete")
+        normalized_prior[kind] = dict(state)
     database = _require_mapping(preflight["database_identity"], "database_identity")
-    if database.get("dbname") != "nhms" or database.get("instance") != "node27-primary-pg15":
+    probe = _require_mapping(
+        preflight["database_identity_probe"], "preflight.database_identity_probe"
+    )
+    _require_exact_keys(
+        probe,
+        {"captured_at", "query", "row"},
+        "preflight.database_identity_probe",
+    )
+    expected_probe_query = (
+        "SELECT current_database() AS dbname, "
+        "current_setting('server_version') AS postgres_version, "
+        "extversion AS timescaledb_version FROM pg_extension "
+        "WHERE extname = 'timescaledb'"
+    )
+    probe_captured = _parse_utc(
+        probe["captured_at"], "preflight.database_identity_probe.captured_at"
+    )
+    if (
+        database.get("dbname") != "nhms"
+        or database.get("instance") != "node27-primary-pg15"
+        or re.match(r"^15(?:\.|$)", str(database.get("postgres_version", ""))) is None
+        or re.match(r"^2\.10(?:\.|$)", str(database.get("timescaledb_version", ""))) is None
+        or probe["query"] != expected_probe_query
+        or probe["row"] != database
+        or probe_captured > captured_at
+    ):
         raise EvidenceError("preflight database identity is not the node-27 nhms primary")
     role = _require_mapping(preflight["role"], "preflight.role")
     exact_role = {
@@ -587,7 +978,7 @@ def _validate_preflight(raw: Any, mutation_head_sha: str) -> dict[str, Any]:
         "mutation_head_sha": mutation_head_sha,
         "container_state": dict(container),
         "units": unit_summary,
-        "prior_autopipe_state": dict(prior_autopipe),
+        "prior_autopipe_state": normalized_prior,
     }
 
 
@@ -752,6 +1143,8 @@ def _table_snapshot(
     tables = _require_mapping(snapshot["tables"], f"{label}.tables")
     if set(tables) != set(HYPERTABLE_KEYS):
         raise EvidenceError(f"{label} must contain exactly both hypertables")
+    all_origins: set[tuple[str, str]] = set()
+    all_siblings: set[tuple[str, str]] = set()
     for key in HYPERTABLE_KEYS:
         row = _require_mapping(tables[key], f"{label}.{key}")
         _require_exact_keys(
@@ -773,8 +1166,14 @@ def _table_snapshot(
         ):
             if not isinstance(row[field], int) or isinstance(row[field], bool) or row[field] < 0:
                 raise EvidenceError(f"{label}.{key}.{field} must be non-negative integer")
-        _require_list(row["compressed_relations"], f"{label}.{key}.compressed_relations")
-        for index, relation_value in enumerate(row["compressed_relations"]):
+        relations = _require_list(
+            row["compressed_relations"], f"{label}.{key}.compressed_relations"
+        )
+        if len(relations) != row["compressed_chunks"]:
+            raise EvidenceError(f"{label}.{key} compressed count/relation list differs")
+        table_origins: set[tuple[str, str]] = set()
+        table_siblings: set[tuple[str, str]] = set()
+        for index, relation_value in enumerate(relations):
             relation = _require_mapping(
                 relation_value, f"{label}.{key}.compressed_relations[{index}]"
             )
@@ -785,6 +1184,27 @@ def _table_snapshot(
             )
             if not isinstance(relation["bytes"], int) or relation["bytes"] < 0:
                 raise EvidenceError(f"{label}.{key}.compressed_relations[{index}].bytes invalid")
+            origin = (
+                str(relation["origin_chunk_schema"]),
+                str(relation["origin_chunk_name"]),
+            )
+            sibling = (str(relation["schema"]), str(relation["name"]))
+            if (
+                not all(origin)
+                or not all(sibling)
+                or origin == sibling
+                or origin in table_origins
+                or sibling in table_siblings
+                or origin in all_origins
+                or sibling in all_siblings
+            ):
+                raise EvidenceError(f"{label}.{key} compressed relation bijection differs")
+            table_origins.add(origin)
+            table_siblings.add(sibling)
+        all_origins.update(table_origins)
+        all_siblings.update(table_siblings)
+    if all_origins & all_siblings:
+        raise EvidenceError(f"{label} origin/compressed namespaces overlap")
     return {
         "captured_at_dt": captured_at,
         "snapshot_id": snapshot["snapshot_id"],
@@ -884,7 +1304,7 @@ def _validate_selection_snapshot(raw: Any, label: str) -> dict[str, Any]:
 def _plan_binds_selected_decompress(
     plan: Any, *, selected_relation_names: set[str]
 ) -> bool:
-    """Require provider and relation in one Custom Scan node/direct subtree."""
+    """Require exact provider/relation fields on the qualifying Custom Scan."""
 
     stack = [plan]
     lowered_names = {name.lower() for name in selected_relation_names}
@@ -896,21 +1316,17 @@ def _plan_binds_selected_decompress(
         if not isinstance(value, Mapping):
             continue
         node_type = str(value.get("Node Type", "")).lower()
-        provider = str(value.get("Custom Plan Provider", "")).lower()
-        if node_type == "custom scan" and "decompresschunk" in provider:
-            # TimescaleDB versions expose the origin/sibling in different
-            # fields. Restrict the search to this node and its direct Plans,
-            # never unrelated branches elsewhere in the EXPLAIN tree.
-            local_values = [
-                item
-                for key, item in value.items()
-                if key != "Plans"
-            ]
-            direct = value.get("Plans", [])
-            if isinstance(direct, list):
-                local_values.extend(direct)
-            rendered = json.dumps(local_values, sort_keys=True).lower()
-            if any(name in rendered for name in lowered_names):
+        provider = re.sub(
+            r"[^a-z0-9]+", "", str(value.get("Custom Plan Provider", "")).lower()
+        )
+        relation = str(value.get("Relation Name", "")).lower()
+        schema = str(value.get("Schema", "")).lower()
+        if (
+            node_type == "custom scan"
+            and provider == "decompresschunk"
+            and relation in lowered_names
+            and schema in {"", "_timescaledb_internal"}
+        ):
                 return True
         stack.extend(value.values())
     return False
@@ -1030,6 +1446,7 @@ def _validate_phase(
     if len(activities) != len(expected_stages):
         raise EvidenceError(f"benchmark {query_name} {phase_name} lacks activity checkpoints")
     normalized_activities: list[dict[str, Any]] = []
+    activity_times: list[datetime] = []
     for index, value_ in enumerate(activities):
         activity = _require_mapping(value_, f"benchmark activity[{index}]")
         _require_exact_keys(
@@ -1037,7 +1454,11 @@ def _validate_phase(
             {"captured_at", "stage", "sessions", "material_load_stable"},
             f"benchmark activity[{index}]",
         )
-        _parse_utc(activity["captured_at"], f"benchmark activity[{index}].captured_at")
+        activity_times.append(
+            _parse_utc(
+                activity["captured_at"], f"benchmark activity[{index}].captured_at"
+            )
+        )
         if (
             activity["stage"] != expected_stages[index]
             or activity["material_load_stable"] is not True
@@ -1091,6 +1512,12 @@ def _validate_phase(
         or (finished_at - started_at).total_seconds() > EXPECTED_TIMEOUT_SECONDS
     ):
         raise EvidenceError(f"benchmark {query_name} {phase_name} execution bounds differ")
+    if activity_times != sorted(activity_times) or any(
+        captured < started_at or captured > finished_at for captured in activity_times
+    ):
+        raise EvidenceError(
+            f"benchmark {query_name} {phase_name} activity chronology differs"
+        )
     if query_name == "curve" and phase["rows"] < 1:
         raise EvidenceError("benchmark curve must return at least one row")
     if phase_name == "before":
@@ -1277,7 +1704,9 @@ def _validate_benchmarks(
             selected_start = _parse_utc(selected["range_start"], "selected range_start")
             selected_end = _parse_utc(selected["range_end"], "selected range_end")
             if not (
-                selected_start <= request_start < request_end <= selected_end
+                request_start < request_end
+                and request_start < selected_end
+                and request_end > selected_start
                 and bound["basin_version_id"]
                 and bound["river_segment_id"]
                 and bound["river_network_version_id"]
@@ -1458,11 +1887,11 @@ def _validate_cleanup(
         ):
             raise EvidenceError(f"cleanup installed {key} differs from reviewed repo bytes")
     exec_start = _require_list(cleanup["resolved_exec_start"], "cleanup.resolved_exec_start")
-    if (
-        sum(value == "--enforce" for value in exec_start) != 1
-        or not exec_start
-        or not str(exec_start[0]).endswith("scripts/node27_timeseries_compression_once.sh")
-    ):
+    expected_exec_start = [
+        "/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh",
+        "--enforce",
+    ]
+    if exec_start != expected_exec_start:
         raise EvidenceError("cleanup resolved ExecStart does not contain exactly one --enforce")
     final_units = _require_mapping(cleanup["final_units"], "cleanup.final_units")
     if set(final_units) != set(EXPECTED_UNITS):
@@ -1475,13 +1904,17 @@ def _validate_cleanup(
             {"enabled", "active", "sub", "result", "main_pid", "journal"},
             f"cleanup.final_units.{unit_name}",
         )
-        journal = _artifact_ref(
+        journal, _ = _text_artifact(
             state["journal"], f"cleanup.final_units.{unit_name}.journal", max_bytes=4 * 1024**2
         )
         normalized_units[unit_name] = {**dict(state), "journal": journal}
-    autopipe = normalized_units["nhms-node27-autopipe.timer"]
-    if any(autopipe[key] != prior_autopipe_state[key] for key in prior_autopipe_state):
-        raise EvidenceError("cleanup did not restore the exact prior autopipe timer state")
+    for kind in ("timer", "service"):
+        autopipe = normalized_units[f"nhms-node27-autopipe.{kind}"]
+        prior = _require_mapping(prior_autopipe_state[kind], f"prior autopipe {kind}")
+        if any(autopipe[key] != prior[key] for key in prior):
+            raise EvidenceError(
+                "cleanup did not restore the exact prior autopipe timer/service state"
+            )
     timer = normalized_units["nhms-node27-timeseries-compression.timer"]
     service = normalized_units["nhms-node27-timeseries-compression.service"]
     if (
@@ -1500,6 +1933,8 @@ def _validate_cleanup(
         raise EvidenceError("cleanup observed compression service activation in the governed window")
     return {
         "captured_at": captured.isoformat().replace("+00:00", "Z"),
+        "window_started_at": started.isoformat().replace("+00:00", "Z"),
+        "window_finished_at": finished.isoformat().replace("+00:00", "Z"),
         "repo_units": repo_refs,
         "installed_units": installed_refs,
         "resolved_exec_start": exec_start,
@@ -1508,10 +1943,82 @@ def _validate_cleanup(
     }
 
 
+def _phase_interval(query: Mapping[str, Any], phase: str) -> tuple[datetime, datetime]:
+    capture = _require_mapping(query[f"{phase}_capture"], f"benchmark {phase} capture")
+    bounds = _require_mapping(capture["execution_bounds"], f"benchmark {phase} bounds")
+    return (
+        _parse_utc(bounds["started_at"], f"benchmark {phase} started_at"),
+        _parse_utc(bounds["finished_at"], f"benchmark {phase} finished_at"),
+    )
+
+
+def _assert_global_chronology(events: list[tuple[str, datetime]]) -> None:
+    for (left_label, left), (right_label, right) in zip(events, events[1:]):
+        if left > right:
+            raise EvidenceError(
+                f"global chronology reversed: {left_label} occurs after {right_label}"
+            )
+
+
+def _artifact_refs_in(value: Any) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, Mapping):
+            if set(current) == {"path", "sha256", "bytes"}:
+                path = Path(str(current["path"]))
+                if path.is_absolute():
+                    refs.append(dict(current))
+            else:
+                stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+    unique = {
+        (str(ref["path"]), str(ref["sha256"]), int(ref["bytes"])): ref for ref in refs
+    }
+    return [unique[key] for key in sorted(unique)]
+
+
+def _reverify_retained_identities() -> None:
+    for index, retained in enumerate(_RETAINED_IDENTITIES):
+        try:
+            current = inspect_bounded_file_no_follow(
+                retained.path,
+                max_bytes=max(1, retained.size),
+                label=f"retained artifact[{index}]",
+            )
+        except BoundedEvidenceError as error:
+            raise EvidenceError(str(error)) from error
+        if current != retained:
+            raise EvidenceError("retained artifact identity changed during publication")
+
+
+def _publish_terminal_failure(path: Path, *, stage: str) -> None:
+    payload = {
+        "schema_version": QUALIFYING_SCHEMA_VERSION,
+        "qualifies_task_4_5": False,
+        "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "outcome": "failed",
+        "provenance_state": "unavailable",
+        "failure": {"stage": stage, "mutation_state": "indeterminate"},
+    }
+    try:
+        atomic_write_bytes_no_follow(
+            path,
+            _canonical_json_bytes(payload),
+            mode=0o600,
+            require_durable_replace=True,
+        )
+    except Exception:
+        return
+
+
 def verify_bundle(
     bundle: Mapping[str, Any], *, receipt_schema: Mapping[str, Any], verifier_head_sha: str
 ) -> dict[str, Any]:
     """Recompute all task-4.5 derivable gates and return the terminal envelope."""
+    _RETAINED_IDENTITIES.clear()
     try:
         _, canonical_receipt_schema = read_bounded_json_no_follow(
             CANONICAL_RECEIPT_SCHEMA,
@@ -1534,6 +2041,7 @@ def verify_bundle(
         "verifier_head_sha",
         "database_identity",
         "authorization",
+        "execution",
         "recovery",
         "preflight",
         "migration",
@@ -1566,9 +2074,22 @@ def verify_bundle(
         "enforce_invocations": 1,
         "replay_decompression": True,
         "decompress_invocations": 1,
+        "migration_invocations": 2,
+        "dry_run_invocations": 1,
+        "direct_db_bypass_invocations": 0,
+        "repo_path": EXPECTED_REPO_PATH,
+        "remote_identity": EXPECTED_REMOTE_IDENTITY,
+        "reviewed_mutation_sha": bundle["mutation_head_sha"],
+        "reviewed_remote_ref": "refs/remotes/origin/feat/issue-1069-live-compression",
     }
     if authorization != expected_authorization:
-        raise EvidenceError("authorization differs from the issue #1069 bound-1 envelope")
+        raise EvidenceError(
+            "authorization differs from the issue #1069 bound-1 envelope or mutation-head"
+        )
+    _validate_repository_provenance(
+        mutation_head_sha=str(bundle["mutation_head_sha"]),
+        reviewed_remote_ref=str(authorization["reviewed_remote_ref"]),
+    )
 
     preflight_bundle = _require_mapping(bundle["preflight"], "preflight")
     _require_exact_keys(
@@ -1602,19 +2123,30 @@ def verify_bundle(
             preflight_summary["captured_at"], "preflight captured_at"
         ),
     )
-    dump_ref, dump_raw = _artifact_bytes(
-        preflight_bundle.get("schema_dump"), "preflight.schema_dump"
+    dump_ref, dump_identity = _streaming_artifact_ref(
+        preflight_bundle.get("schema_dump"),
+        "preflight.schema_dump",
+        max_bytes=MAX_BINARY_ARTIFACT_BYTES,
     )
-    if not dump_raw.startswith(b"PGDMP"):
-        raise EvidenceError("schema forensic dump is not PostgreSQL custom format")
     dump_list_ref, dump_list_raw = _json_artifact(
         preflight_bundle.get("schema_dump_list"), "preflight.schema_dump_list"
     )
-    _validate_dump_listing(dump_list_raw, dump_ref=dump_ref)
+    dump_listing = _validate_dump_listing(
+        dump_list_raw,
+        dump_ref=dump_ref,
+        observed=_run_pg_restore_list(dump_identity),
+        mutation_head_sha=str(bundle["mutation_head_sha"]),
+    )
     catalog_before_ref, catalog_before = _json_artifact(
         preflight_bundle.get("catalog_before"), "preflight.catalog_before"
     )
-    _validate_pre_migration_catalog(catalog_before, "preflight.catalog_before")
+    catalog_before_snapshot = _catalog_snapshot(
+        catalog_before,
+        label="preflight.catalog_before",
+        mutation_head_sha=str(bundle["mutation_head_sha"]),
+        phase="pre-migration",
+        validator=_validate_pre_migration_catalog,
+    )
     recovery_invocation_ref, recovery_invocation_raw = _json_artifact(
         recovery_bundle["invocation"], "recovery.invocation"
     )
@@ -1691,9 +2223,23 @@ def verify_bundle(
         or first_invocation["finished_at_dt"] > second_invocation["started_at_dt"]
     ):
         raise EvidenceError("migration applies are not distinct ordered execution artifacts")
-    _validate_d3_catalog(first_catalog, "migration first catalog")
-    _validate_d3_catalog(second_catalog, "migration second catalog")
-    if _canonical_json_bytes(first_catalog) != _canonical_json_bytes(second_catalog):
+    first_catalog_snapshot = _catalog_snapshot(
+        first_catalog,
+        label="migration first catalog",
+        mutation_head_sha=str(bundle["mutation_head_sha"]),
+        phase="after-first-apply",
+        validator=_validate_d3_catalog,
+    )
+    second_catalog_snapshot = _catalog_snapshot(
+        second_catalog,
+        label="migration second catalog",
+        mutation_head_sha=str(bundle["mutation_head_sha"]),
+        phase="after-second-apply",
+        validator=_validate_d3_catalog,
+    )
+    if _canonical_json_bytes(first_catalog_snapshot["catalog"]) != _canonical_json_bytes(
+        second_catalog_snapshot["catalog"]
+    ):
         raise EvidenceError("first/second migration catalog snapshots differ")
 
     selection_bundle = _require_mapping(bundle["selection"], "selection")
@@ -1754,6 +2300,11 @@ def verify_bundle(
         kind="compression_enforce",
         mutation_head_sha=str(bundle["mutation_head_sha"]),
         expected_binding={"receipt_sha256": enforce_ref["sha256"]},
+    )
+    execution_bundle = _require_mapping(bundle["execution"], "execution")
+    _require_exact_keys(execution_bundle, {"audit"}, "execution")
+    execution_audit_ref, execution_audit_raw = _json_artifact(
+        execution_bundle["audit"], "execution.audit"
     )
     if dry_invocation_ref["sha256"] == enforce_invocation_ref["sha256"]:
         raise EvidenceError("dry-run and enforce need distinct invocation records")
@@ -1875,6 +2426,13 @@ def verify_bundle(
         raise EvidenceError("size snapshot/enforce chronology is invalid")
     sizes_pre = sizes_pre_snapshot["tables"]
     sizes_post = sizes_post_snapshot["tables"]
+    if any(
+        relation.get("origin_chunk_schema") == selected["chunk_schema"]
+        and relation.get("origin_chunk_name") == selected["chunk_name"]
+        for relation in sizes_pre[selected_key]["compressed_relations"]
+        if isinstance(relation, Mapping)
+    ):
+        raise EvidenceError("selected compressed relation already existed in pre snapshot")
     pre_combined = sum(sizes_pre[key]["hypertable_size"] for key in HYPERTABLE_KEYS)
     post_combined = sum(sizes_post[key]["hypertable_size"] for key in HYPERTABLE_KEYS)
     compressed_delta = sum(
@@ -1974,6 +2532,86 @@ def verify_bundle(
             recovery_summary["preflight_captured_at"], "recovery preflight captured_at"
         ),
     )
+    execution_summary = _validate_execution_audit(
+        execution_audit_raw,
+        expected_invocation_refs=[
+            first_invocation_ref,
+            second_invocation_ref,
+            recovery_invocation_ref,
+            dry_invocation_ref,
+            enforce_invocation_ref,
+        ],
+        mutation_head_sha=str(bundle["mutation_head_sha"]),
+    )
+    before_intervals = [_phase_interval(query, "before") for query in benchmark_results]
+    after_intervals = [_phase_interval(query, "after") for query in benchmark_results]
+    if any(
+        left[1] > right[0]
+        for left, right in zip(before_intervals, before_intervals[1:])
+    ) or any(
+        left[1] > right[0]
+        for left, right in zip(after_intervals, after_intervals[1:])
+    ):
+        raise EvidenceError("benchmark query phases overlap or are reversed")
+    chronology_events = [
+            ("audit-window-start", execution_summary["artifact_window_started_at"]),
+            ("dump-list", dump_listing["captured_at_dt"]),
+            ("catalog-before", catalog_before_snapshot["captured_at_dt"]),
+            ("migration-1-start", first_invocation["started_at_dt"]),
+            ("migration-1-finish", first_invocation["finished_at_dt"]),
+            ("catalog-1", first_catalog_snapshot["captured_at_dt"]),
+            ("migration-2-start", second_invocation["started_at_dt"]),
+            ("migration-2-finish", second_invocation["finished_at_dt"]),
+            ("catalog-2", second_catalog_snapshot["captured_at_dt"]),
+            (
+                "recovery-preflight",
+                _parse_utc(
+                    recovery_summary["preflight_captured_at"],
+                    "recovery preflight",
+                ),
+            ),
+            ("recovery-start", recovery_invocation["started_at_dt"]),
+            ("recovery-finish", recovery_invocation["finished_at_dt"]),
+            (
+                "compression-preflight",
+                _parse_utc(preflight_summary["captured_at"], "compression preflight"),
+            ),
+            ("dry-start", dry_invocation["started_at_dt"]),
+            ("dry-finish", dry_invocation["finished_at_dt"]),
+            ("post-dry-selector", post_dry["observed_at_dt"]),
+            ("benchmark-before-start", before_intervals[0][0]),
+            ("benchmark-before-finish", before_intervals[-1][1]),
+            ("pre-enforce-selector", pre_enforce["observed_at_dt"]),
+            ("sizes-pre", sizes_pre_snapshot["captured_at_dt"]),
+            ("enforce-start", enforce_invocation["started_at_dt"]),
+            ("enforce-finish", enforce_invocation["finished_at_dt"]),
+            ("sizes-post", sizes_post_snapshot["captured_at_dt"]),
+            ("catalog-post", catalog_captured_at),
+            ("benchmark-after-start", after_intervals[0][0]),
+            ("benchmark-after-finish", after_intervals[-1][1]),
+            (
+                "cleanup-finish",
+                _parse_utc(cleanup_summary["window_finished_at"], "cleanup finish"),
+            ),
+            (
+                "cleanup-captured",
+                _parse_utc(cleanup_summary["captured_at"], "cleanup captured"),
+            ),
+            ("audit-window-finish", execution_summary["artifact_window_finished_at"]),
+            ("audit-captured", execution_summary["captured_at"]),
+        ]
+    chronology_snapshot_ids = [
+        dump_listing["snapshot_id"],
+        catalog_before_snapshot["snapshot_id"],
+        first_catalog_snapshot["snapshot_id"],
+        second_catalog_snapshot["snapshot_id"],
+        sizes_pre_snapshot["snapshot_id"],
+        sizes_post_snapshot["snapshot_id"],
+        catalog_post["snapshot_id"],
+    ]
+    if len(set(chronology_snapshot_ids)) != len(chronology_snapshot_ids):
+        raise EvidenceError("global chronology snapshot identifiers are not unique")
+    _assert_global_chronology(chronology_events)
     derived_cleanup = {
         "autopipe_timer_restored": True,
         "compression_timer_enabled": True,
@@ -2002,6 +2640,7 @@ def verify_bundle(
         raise EvidenceError("bundle/preflight database identity mismatch")
     return {
         "schema_version": SCHEMA_VERSION,
+        "qualifies_task_4_5": True,
         "issue": ISSUE,
         "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "node": bundle["node"],
@@ -2009,15 +2648,23 @@ def verify_bundle(
         "verifier_head_sha": verifier_head_sha,
         "database_identity": database_identity,
         "authorization": authorization,
+        "execution": {
+            "audit": execution_audit_ref,
+            "journal": execution_summary["journal"],
+            "namespace_counts": execution_summary["namespace_counts"],
+            "direct_db_mutation_statements": 0,
+        },
         "recovery": {
             "preflight": recovery_preflight_ref,
             "receipt": recovery_receipt_ref,
+            "invocation": recovery_invocation_ref,
             "authorized": True,
             **recovery_summary,
         },
         "preflight": {
             "evidence": preflight_ref,
             "schema_dump": dump_ref,
+            "schema_dump_list": dump_list_ref,
             "catalog_before": catalog_before_ref,
             "pg_restore_list_exit_code": 0,
             "role": preflight["role"],
@@ -2029,9 +2676,11 @@ def verify_bundle(
         },
         "migration": {
             "migration_file": migration_ref,
+            "first_invocation": first_invocation_ref,
             "first_exit_code": 0,
             "second_exit_code": 0,
             "catalog_after_first": first_ref,
+            "second_invocation": second_invocation_ref,
             "catalog_after_second": second_ref,
             "catalogs_identical": True,
         },
@@ -2059,7 +2708,9 @@ def verify_bundle(
         },
         "receipts": {
             "dry_run": dry_ref,
+            "dry_run_invocation": dry_invocation_ref,
             "enforce": enforce_ref,
+            "enforce_invocation": enforce_invocation_ref,
             "dry_run_schema_valid": True,
             "dry_run_semantic_valid": True,
             "enforce_schema_valid": True,
@@ -2082,6 +2733,17 @@ def verify_bundle(
         },
         "benchmarks": {"evidence": benchmark_ref, "queries": benchmark_results},
         "cleanup": {"evidence": cleanup_ref, **derived_cleanup},
+        "chronology": {
+            "events": [
+                {
+                    "name": name,
+                    "at": at.isoformat().replace("+00:00", "Z"),
+                }
+                for name, at in chronology_events
+            ],
+            "snapshot_ids": chronology_snapshot_ids,
+        },
+        "source_manifest": _artifact_refs_in(bundle),
         "out_of_scope": out_of_scope,
         "verdict": PASS_VERDICT,
     }
@@ -2108,28 +2770,42 @@ def _parser() -> argparse.ArgumentParser:
 
 def _current_verifier_head() -> str:
     repo_root = Path(__file__).resolve().parents[1]
-    cleanliness = subprocess.run(
-        ["git", "diff", "--quiet", "HEAD", "--"],
-        cwd=repo_root,
-        check=False,
-    )
+    try:
+        cleanliness = subprocess.run(
+            ["git", "diff", "--quiet", "HEAD", "--"],
+            cwd=repo_root,
+            check=False,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise EvidenceError("verifier cleanliness query timed out") from error
     if cleanliness.returncode != 0:
         raise EvidenceError("executing verifier/schema differs from verifier_head_sha")
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=repo_root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise EvidenceError("verifier HEAD query timed out") from error
     head = result.stdout.strip()
-    if result.returncode != 0 or re.fullmatch(r"[0-9a-f]{40}", head) is None:
+    if (
+        result.returncode != 0
+        or len(result.stdout) > 128
+        or re.fullmatch(r"[0-9a-f]{40}", head) is None
+    ):
         raise EvidenceError("cannot bind verifier_head_sha to the executing repository")
     return head
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    output_safe = False
+    _RETAINED_IDENTITIES.clear()
     try:
         if not args.bundle_path.is_absolute() or not args.output_path.is_absolute():
             raise EvidenceError("bundle/output paths must be absolute")
@@ -2137,7 +2813,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise EvidenceError("receipt schema path must be the canonical checkout path")
         if args.evidence_schema_path != CANONICAL_EVIDENCE_SCHEMA:
             raise EvidenceError("evidence schema path must be the canonical checkout path")
-        _, bundle_raw = read_bounded_json_no_follow(
+        _, bundle_identity, bundle_raw = read_bounded_json_with_identity_no_follow(
             args.bundle_path,
             max_bytes=MAX_JSON_ARTIFACT_BYTES,
             label="bundle",
@@ -2146,13 +2822,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_array_items=MAX_JSON_ARRAY_ITEMS,
         )
         bundle = _require_mapping(bundle_raw, "bundle")
-        _, receipt_schema_raw = read_bounded_json_no_follow(
+        _reject_secrets(bundle, "bundle")
+        input_paths = [
+            args.bundle_path,
+            CANONICAL_RECEIPT_SCHEMA,
+            CANONICAL_EVIDENCE_SCHEMA,
+            *[Path(ref["path"]) for ref in _artifact_refs_in(bundle)],
+        ]
+        try:
+            assert_paths_disjoint(args.output_path, input_paths, label="terminal evidence")
+        except BoundedEvidenceError as error:
+            raise EvidenceError(str(error)) from error
+        output_safe = True
+        _, receipt_schema_identity, receipt_schema_raw = read_bounded_json_with_identity_no_follow(
             CANONICAL_RECEIPT_SCHEMA,
             max_bytes=1024**2,
             label="receipt schema",
         )
         receipt_schema = _require_mapping(receipt_schema_raw, "receipt schema")
-        _, evidence_schema_raw = read_bounded_json_no_follow(
+        _, evidence_schema_identity, evidence_schema_raw = read_bounded_json_with_identity_no_follow(
             CANONICAL_EVIDENCE_SCHEMA,
             max_bytes=1024**2,
             label="evidence schema",
@@ -2163,6 +2851,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             receipt_schema=receipt_schema,
             verifier_head_sha=_current_verifier_head(),
         )
+        _RETAINED_IDENTITIES.extend(
+            [bundle_identity, receipt_schema_identity, evidence_schema_identity]
+        )
         jsonschema.Draft7Validator(
             evidence_schema, format_checker=jsonschema.FormatChecker()
         ).validate(terminal)
@@ -2172,6 +2863,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             mode=0o600,
             require_durable_replace=True,
         )
+        _reverify_retained_identities()
     except (
         BoundedEvidenceError,
         EvidenceError,
@@ -2180,6 +2872,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         json.JSONDecodeError,
         jsonschema.ValidationError,
     ) as error:
+        if output_safe:
+            _publish_terminal_failure(args.output_path, stage="verify_or_publish")
         print(
             json.dumps({"status": "failed", "reason": str(error)}, sort_keys=True),
             file=sys.stderr,

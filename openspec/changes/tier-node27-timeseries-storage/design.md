@@ -808,7 +808,7 @@ Validate both runner receipts against
 `schemas/timeseries_compression_receipt.schema.json`, then apply the semantic
 checks above independently of the runner. New runner receipts use version
 `2.0` and freeze `head_sha` before any DB call; version `1.0` remains readable
-as historical operational evidence but cannot satisfy the live terminal v2
+as historical operational evidence but cannot satisfy the live terminal v3
 contract. Record mode-0600 receipt paths, byte counts, full sha256 values,
 deployed head, catalog hashes, size snapshots, selection hash, command exit
 codes, and final verdict in a separate atomic terminal envelope. A
@@ -816,11 +816,13 @@ schema-valid receipt with wrong scope, partial outcome, bad arithmetic, or
 failed post-catalog proof is not acceptance evidence.
 
 The terminal envelope conforms to
-`schemas/timeseries_compression_live_evidence.schema.json`, schema version
-`2.0`, with required top-level keys: `schema_version`, `issue`, `generated_at`,
+`schemas/timeseries_compression_live_evidence.schema.json`, qualifying schema
+version `3.0`, with required top-level keys: `schema_version`,
+`qualifies_task_4_5`, `issue`, `generated_at`,
 `node`, `mutation_head_sha`, `verifier_head_sha`, `database_identity`,
-`authorization`, `recovery`, `preflight`, `migration`, `selection`, `receipts`,
-`sizes`, `catalog`, `benchmarks`, `cleanup`, `out_of_scope`, and `verdict`. Nested
+`authorization`, `execution`, `recovery`, `preflight`, `migration`, `selection`,
+`receipts`, `sizes`, `catalog`, `benchmarks`, `cleanup`, `chronology`,
+`source_manifest`, `out_of_scope`, and `verdict`. Nested
 required fields bind the DB
 instance/version and truthful role flags; forensic dump/hash; first/second
 migration exit/catalog hashes; bound=1, selector hash/bytes/caps; dry-run and
@@ -881,9 +883,9 @@ requires all of the following producer-independent proof:
   have distinct ordered invocation artifacts with sanitized exact argv,
   `ON_ERROR_STOP`, mutation SHA, 900-second timeout, start/finish/exit, and
   receipt/catalog hashes. Invocation counts are derived from these records,
-  never from authorization scalars. The custom-format dump is bound to a
-  successful non-empty `pg_restore --list` artifact and exact pre-migration
-  catalog shape.
+  never from authorization scalars. The streamed dump descriptor is inspected
+  by the pinned PG15 `pg_restore --list`; its bounded raw output/version/exit
+  must match the persisted listing and exact pre-migration catalog shape.
 - Size and catalog snapshots carry distinct identities, mutation SHA, capture
   times, and enforce chronology. The selected origin is absent before and
   present after, the selected table count changes by exactly +1, and the
@@ -892,7 +894,7 @@ requires all of the following producer-independent proof:
   `ExecStart` with exactly one `--enforce`, all four final unit states and
   journals, the governed activation window, zero compression-service
   activations, and exact restoration of the preflight-recorded prior autopipe
-  timer state.
+  timer/service states.
 - Benchmark capture exercises the public `PsycopgForecastStore.forecast_series`
   owner through a recording adapter and the public MVT owner/route parameter
   construction. Frozen requests must lie inside the selected chunk, curve rows
@@ -901,13 +903,60 @@ requires all of the following producer-independent proof:
   session/query-start signatures before cold, between phases, mid-measurement,
   and after result capture. Count-stable identity drift blocks publication.
   A qualifying after plan binds `DecompressChunk` and the selected
-  origin/sibling in the same Custom Scan node or its direct subtree; an
-  unrelated plan branch cannot satisfy it, and before plans cannot already
-  use that selected decompression path.
+  origin/sibling in exact structural fields on the same Custom Scan node;
+  direct-child, Filter, alias and unrelated branches cannot satisfy it, and
+  before plans cannot already use that selected decompression path.
 - A compression exception after possible commit triggers fresh exact-target
   catalog reconciliation. Receipts distinguish `failed_before_mutation`,
   `committed`, and `indeterminate`; every failure with a known destination
   atomically replaces stale success and never copies exception credentials.
+
+#### Round-2 invariant-closure amendment
+
+- Current task-4.5 acceptance is a strict version-3 branch with
+  `qualifies_task_4_5=true`. Historical version-2 terminals remain readable as
+  superseded facts but cannot enter current acceptance. Version-1 runner
+  receipts keep only historical outcomes/fields; new failure markers are
+  version 2 with explicit provenance state.
+- Evidence files are descriptor-pinned and bounded. Large dump hashing is
+  streamed with retained canonical path/dev/inode identity; Git blobs are
+  sized by timed `git cat-file -s` before bounded reads. JSON recursion errors,
+  node/depth/array ceilings and shared all-string secret scanning fail closed.
+  Normal publication reopens every retained reference. Output is disjoint from
+  the bundle and all inputs by normalized path and inode; known-safe failures
+  replace stale success with a versioned tombstone, while unsafe/unknown/input-
+  alias paths remain untouched.
+- The terminal retains both migration invocations, recovery, dry-run and
+  enforce invocations, real dump-list proof, execution audit, chronology and
+  source manifest. The locked audit namespace derives exact counts and proves
+  no direct DB mutation bypass. Each invocation binds resolved repository/
+  interpreter/script/wrapper/env paths, actual timeout launcher argv, exit and
+  receipt/catalog association. Repo provenance is exactly `/home/nwm/NWM`,
+  `DankerMu/SHUD-NWM`, and the authorization-pinned origin remote-tracking SHA
+  with a clean tracked worktree.
+- One non-overlapping chronology covers dump/catalog-before, both migration/
+  catalog pairs, recovery, compression preflight, dry-run, post-dry selector,
+  before benchmark, pre-enforce selector/size, enforce, post-size/catalog,
+  after benchmark, cleanup and audit capture. Producer-owned timestamps and
+  unique snapshot IDs are mandatory; activity checkpoints stay ordered inside
+  each phase.
+- Every compression and benchmark connection has a finite connect timeout.
+  One benchmark-wide monotonic 900-second deadline begins before connection
+  acquisition and bounds every connection, SQL/activity operation and result;
+  acquisition is exception-safe and producer-side rows/result bytes/plans are
+  capped. The wrapper executes `/usr/bin/timeout --signal=TERM --kill-after=30s
+  900s`; the oneshot service uses finite consistent `TimeoutStartSec` while
+  preserving manual dry-run default and one service-owned literal `--enforce`.
+- Dump validity comes from timed pinned PG15 `pg_restore --list` against the
+  retained descriptor, with bounded stdout/stderr hashes, version, exit and
+  dump SHA. PostgreSQL 15 and TimescaleDB 2.10 identities come from a pinned
+  producer query artifact rather than arbitrary strings.
+- The curve is exactly seven days but uses half-open overlap with the selected
+  chunk. Starting at the exclusive end or remaining wholly outside fails. A
+  qualifying plan matches exact structural `Custom Scan` provider and
+  `Relation Name`/`Schema` fields on the same node; substring, Filter, alias
+  and child-node decoys fail. Snapshot counts and unique origin/sibling
+  relations are bijective, table-owned and cross-table disjoint.
 
 Current source/unit bytes, dump readability, catalog state, and production
 query construction are read-only-recapturable. Ordered historical migration

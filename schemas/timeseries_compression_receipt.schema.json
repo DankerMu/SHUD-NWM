@@ -6,19 +6,13 @@
   "required": [
     "schema_version",
     "generated_at",
-    "now_utc",
-    "lag_seconds",
-    "per_tick_bound",
     "mode",
-    "outcome",
-    "selected",
-    "deferred",
-    "skipped",
-    "per_table_totals"
+    "outcome"
   ],
   "properties": {
     "schema_version": {"enum": ["1.0", "2.0"]},
     "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "provenance_state": {"enum": ["bound", "unavailable"]},
     "generated_at": {"type": "string", "format": "date-time"},
     "now_utc": {"type": "string", "format": "date-time"},
     "lag_seconds": {"type": "integer", "minimum": 1},
@@ -78,16 +72,53 @@
     },
     {
       "if": {
-        "properties": {"schema_version": {"const": "2.0"}},
+        "properties": {"schema_version": {"const": "1.0"}},
         "required": ["schema_version"]
       },
-      "then": {"required": ["head_sha"]},
-      "else": {"not": {"required": ["head_sha"]}}
+      "then": {
+        "properties": {
+          "outcome": {"enum": ["clean", "partial", "refused_lock", "refused_config"]}
+        },
+        "allOf": [
+          {"not": {"required": ["head_sha"]}},
+          {"not": {"required": ["failure"]}},
+          {"not": {"required": ["provenance_state"]}}
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "schema_version": {"const": "2.0"},
+          "outcome": {"enum": ["clean", "partial", "refused_lock", "refused_config"]}
+        },
+        "required": ["schema_version", "outcome"]
+      },
+      "then": {"required": ["head_sha"]}
     },
     {
       "if": {"properties": {"outcome": {"const": "failed"}}, "required": ["outcome"]},
-      "then": {"required": ["failure"]},
-      "else": {"not": {"required": ["failure"]}}
+      "then": {
+        "required": ["failure", "provenance_state"],
+        "properties": {"schema_version": {"const": "2.0"}},
+        "allOf": [
+          {
+            "if": {
+              "properties": {"provenance_state": {"const": "bound"}},
+              "required": ["provenance_state"]
+            },
+            "then": {"required": ["head_sha"]},
+            "else": {"not": {"required": ["head_sha"]}}
+          }
+        ]
+      },
+      "else": {
+        "not": {"anyOf": [{"required": ["failure"]}, {"required": ["provenance_state"]}]},
+        "required": [
+          "now_utc", "lag_seconds", "per_tick_bound", "selected", "deferred",
+          "skipped", "per_table_totals"
+        ]
+      }
     }
   ],
   "$defs": {

@@ -115,6 +115,119 @@ def test_config_parse_happy_path(tmp_path: Path) -> None:
     assert config.database_url.startswith("postgresql://")
 
 
+def test_receipt_and_lock_alias_is_rejected(tmp_path: Path) -> None:
+    shared = tmp_path / "shared"
+    env = _base_env(
+        tmp_path,
+        override={
+            "NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH": str(shared),
+            "NODE27_TIMESERIES_COMPRESSION_LOCK_PATH": str(shared),
+        },
+    )
+    with pytest.raises(compression.CompressionConfigError, match="aliases"):
+        compression.config_from_args(_args(), env)
+
+
+def test_unsafe_early_receipt_symlink_is_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target.json"
+    target.write_text('{"outcome":"stale-clean"}\n', encoding="utf-8")
+    link = tmp_path / "receipt.json"
+    link.symlink_to(target)
+    env = _base_env(
+        tmp_path,
+        override={
+            "NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH": str(link),
+            "NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS": "bad",
+        },
+    )
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert compression.main([]) == 1
+    assert target.read_text(encoding="utf-8") == '{"outcome":"stale-clean"}\n'
+
+
+def test_invalid_config_does_not_replace_receipt_that_is_lock_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shared = tmp_path / "receipt-and-lock"
+    original = b'{"outcome":"input-must-remain"}\n'
+    shared.write_bytes(original)
+    env = _base_env(
+        tmp_path,
+        override={
+            "NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH": str(shared),
+            "NODE27_TIMESERIES_COMPRESSION_LOCK_PATH": str(shared),
+            "NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS": "bad",
+        },
+    )
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    assert compression.main([]) == 1
+    assert shared.read_bytes() == original
+
+
+def test_invalid_config_does_not_replace_receipt_hardlinked_to_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock_path = tmp_path / "runner.lock"
+    receipt_path = tmp_path / "receipt.json"
+    original = b'{"outcome":"input-must-remain"}\n'
+    lock_path.write_bytes(original)
+    os.link(lock_path, receipt_path)
+    env = _base_env(
+        tmp_path,
+        override={
+            "NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH": str(receipt_path),
+            "NODE27_TIMESERIES_COMPRESSION_LOCK_PATH": str(lock_path),
+            "NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS": "bad",
+        },
+    )
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    assert compression.main([]) == 1
+    assert receipt_path.read_bytes() == original
+    assert lock_path.read_bytes() == original
+
+
+def test_invalid_config_replaces_disjoint_known_safe_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receipt_path = tmp_path / "receipt.json"
+    receipt_path.write_text('{"outcome":"stale-clean"}\n', encoding="utf-8")
+    env = _base_env(
+        tmp_path,
+        override={"NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS": "bad"},
+    )
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    assert compression.main([]) == 1
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["schema_version"] == "2.0"
+    assert receipt["outcome"] == "failed"
+    assert receipt["failure"] == {
+        "stage": "config",
+        "mutation_state": "failed_before_mutation",
+    }
+
+
+def test_schema_rejects_v2_failure_labeled_as_v1(tmp_path: Path) -> None:
+    config = compression.config_from_args(_args(enforce=True), _base_env(tmp_path))
+    marker = compression.build_failed_receipt(
+        config,
+        now_utc=_NOW,
+        stage="freeze_head",
+        head_sha=None,
+    )
+    marker["schema_version"] = "1.0"
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(marker, _load_schema())
+
+
 # ---------------------------------------------------------------------------
 # Chunk classification
 # ---------------------------------------------------------------------------
@@ -930,6 +1043,11 @@ def test_dsn_never_appears_in_config_failure_stderr(
     err = capsys.readouterr().err
     assert "supersekret" not in err
     assert "alice" not in err
+    marker = json.loads((tmp_path / "receipt.json").read_text(encoding="utf-8"))
+    assert marker["schema_version"] == "2.0"
+    assert marker["outcome"] == "failed"
+    assert marker["provenance_state"] == "unavailable"
+    jsonschema.validate(marker, _load_schema())
 
 
 # ---------------------------------------------------------------------------
@@ -1054,8 +1172,12 @@ def test_systemd_service_enforces_but_manual_wrapper_defaults_to_dry_run() -> No
         "ExecStart=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh --enforce"
     ]
     wrapper_text = _WRAPPER_PATH.read_text(encoding="utf-8")
-    assert 'exec "$PYTHON_BIN" "$SCRIPT" "$@"' in wrapper_text
-    assert "--enforce" not in wrapper_text
+    assert (
+        'exec /usr/bin/timeout --signal=TERM --kill-after=30s 900s '
+        '"$PYTHON_BIN" "$SCRIPT" "$@"'
+    ) in wrapper_text
+    assert '"$SCRIPT" --enforce' not in wrapper_text
+    assert "TimeoutStartSec=940" in service_text
 
 
 def test_timeseries_compression_timer_oncalendar_and_unit_wiring() -> None:

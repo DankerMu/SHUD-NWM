@@ -1144,6 +1144,21 @@ Order is load-bearing:
   replay. No node-27 mutation was performed by the closure fix; task 4.5 stays
   unchecked until a terminal produced from the expanded contract passes.
 
+  Round-2 invariant closure (2026-07-15): current acceptance requires a
+  version-3 terminal with `qualifies_task_4_5=true`; a version-2 terminal is
+  readable only as superseded history. The version-3 fixture retains all five
+  invocation refs, a real descriptor-bound PG15 dump listing, authorization-
+  pinned origin lineage, one complete execution/direct-DB audit namespace,
+  one global non-overlapping chronology, exact structural plans, overlap-bound
+  production requests, bijective chunk/sibling snapshots, and a complete
+  source manifest. Runner/benchmark/verifier output paths are input-disjoint
+  by normalized path and inode and replace only known-safe stale outputs with
+  versioned failure tombstones. Compression and benchmark DB connections,
+  statements, results and phases now carry hard producer-side bounds; the
+  committed wrapper actually runs the 900-second timeout and systemd has a
+  finite consistent `TimeoutStartSec`. No live mutation was performed while
+  adding these gates; the historical replay still cannot close task 4.5.
+
 ## 5. Archive rebuild drill (`archive-rebuild-drill`)
 
 - [x] 5.1 Build the drill script

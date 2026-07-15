@@ -132,3 +132,29 @@ and the exact decompression/recompression invocations require a newly
 authorized controlled replay. No new node-27 mutation was performed during
 the invariant-closure fix. Task 4.5 remains open pending that fresh live
 evidence; retention, node-22, drill, and role mutation remain out of scope.
+
+## Version-3 qualifying contract
+
+The second invariant review confirmed that the first hardening pass still
+allowed false PASS through global chronology reversal, output/input aliasing,
+authored dump lists, incomplete invocation/service namespaces, unrelated Git
+objects, plan text decoys, unbounded connection/result phases, v1-labeled v2
+failures, secrets in otherwise benign text, contradictory compressed-relation
+lists, stale terminal outputs and a self-asserted timeout.
+
+The current verifier therefore accepts task 4.5 only from a version `3.0`
+terminal with `qualifies_task_4_5=true`. It retains all five invocation refs,
+the descriptor-bound PG15 dump-list proof, execution audit, unique snapshot
+IDs, one global chronology and the complete source manifest. The reviewed
+repository is exactly `/home/nwm/NWM`, remote identity `DankerMu/SHUD-NWM`,
+and the authorization-pinned remote-tracking SHA. Query plans use exact
+structural relation fields; the seven-day curve uses half-open overlap
+semantics. The runner wrapper now executes the real 900-second timeout launcher
+and the service has a finite consistent `TimeoutStartSec`.
+
+All committed 2026-07-15 JSON remains byte-identical and schema-readable as
+superseded version-2 history, but it cannot set the qualifying discriminator.
+It also lacks the new producer-owned global chronology, complete audit journal,
+resolved launcher provenance and descriptor-bound dump inspection. Those facts
+cannot be reconstructed by editing old envelopes. Task 4.5 remains open and a
+new controlled mutation replay still requires separate authorization.

@@ -31,11 +31,17 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
+from packages.common.evidence_io import (
+    BoundedEvidenceError,
+    assert_paths_disjoint,
+    normalized_absolute_path,
+)
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
     ensure_directory_no_follow,
     open_directory_no_follow,
+    verify_directory_no_follow,
 )
 
 SCHEMA_VERSION = "2.0"
@@ -57,6 +63,7 @@ HYPERTABLES: tuple[tuple[str, str], ...] = (
 # overall run.
 _QUERY_TIMEOUT_MS = 60_000
 _COMPRESS_TIMEOUT_MS = 300_000
+_CONNECT_TIMEOUT_SECONDS = 10
 
 
 class CompressionConfigError(RuntimeError):
@@ -66,21 +73,29 @@ class CompressionConfigError(RuntimeError):
 def _current_head_sha(*, require_clean: bool = False) -> str:
     """Freeze the exact repository HEAD before selection or mutation begins."""
     repo_root = Path(__file__).resolve().parents[1]
-    if require_clean:
-        cleanliness = subprocess.run(
-            ["git", "diff", "--quiet", "HEAD", "--"],
+    try:
+        if require_clean:
+            cleanliness = subprocess.run(
+                ["git", "diff", "--quiet", "HEAD", "--"],
+                cwd=repo_root,
+                check=False,
+                timeout=10,
+            )
+        else:
+            cleanliness = None
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
             cwd=repo_root,
             check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
+    except subprocess.TimeoutExpired as error:
+        raise CompressionConfigError("cannot bind receipt to repository HEAD") from error
+    if cleanliness is not None:
         if cleanliness.returncode != 0:
             raise CompressionConfigError("runner worktree differs from repository HEAD")
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=repo_root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
     head_sha = result.stdout.strip()
     if result.returncode != 0 or re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
         raise CompressionConfigError("cannot bind receipt to repository HEAD")
@@ -150,9 +165,24 @@ def config_from_args(
 ) -> CompressionConfig:
     """Strict env + CLI parse. No truthiness fallback. Fails closed on bad shape."""
     env = os.environ if env is None else env
-    database_url = env.get("DATABASE_URL")
-    if not database_url or not database_url.strip():
-        raise CompressionConfigError("DATABASE_URL must be set")
+    receipt_raw = (
+        args.receipt_path
+        if args.receipt_path is not None
+        else env.get("NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH")
+    )
+    lock_raw = (
+        args.lock_path
+        if args.lock_path is not None
+        else env.get("NODE27_TIMESERIES_COMPRESSION_LOCK_PATH")
+    )
+    if not receipt_raw:
+        raise CompressionConfigError(
+            "receipt path must be set via --receipt-path or "
+            "NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH"
+        )
+    receipt_path = Path(str(receipt_raw))
+    if not receipt_path.is_absolute():
+        raise CompressionConfigError("receipt path must be absolute")
     lag_seconds = _parse_positive_int(
         env.get("NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS"),
         name="NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS",
@@ -163,28 +193,21 @@ def config_from_args(
         name="NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND",
         minimum=1,
     )
-    receipt_raw = (
-        args.receipt_path if args.receipt_path is not None else env.get("NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH")
-    )
-    lock_raw = (
-        args.lock_path if args.lock_path is not None else env.get("NODE27_TIMESERIES_COMPRESSION_LOCK_PATH")
-    )
-    if not receipt_raw:
-        raise CompressionConfigError(
-            "receipt path must be set via --receipt-path or "
-            "NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH"
-        )
     if not lock_raw:
         raise CompressionConfigError(
             "lock path must be set via --lock-path or "
             "NODE27_TIMESERIES_COMPRESSION_LOCK_PATH"
         )
-    receipt_path = Path(str(receipt_raw))
     lock_path = Path(str(lock_raw))
-    if not receipt_path.is_absolute():
-        raise CompressionConfigError("receipt path must be absolute")
     if not lock_path.is_absolute():
         raise CompressionConfigError("lock path must be absolute")
+    try:
+        assert_paths_disjoint(receipt_path, [lock_path], label="compression receipt")
+    except BoundedEvidenceError as error:
+        raise CompressionConfigError(str(error)) from error
+    database_url = env.get("DATABASE_URL")
+    if not database_url or not database_url.strip():
+        raise CompressionConfigError("DATABASE_URL must be set")
     return CompressionConfig(
         database_url=database_url,
         lag_seconds=lag_seconds,
@@ -323,7 +346,11 @@ def _default_fetch_chunks(database_url: str) -> list[ChunkRow]:
     import psycopg2  # type: ignore[import-untyped]
     import psycopg2.extras  # type: ignore[import-untyped]
 
-    connection = psycopg2.connect(database_url, cursor_factory=psycopg2.extras.RealDictCursor)
+    connection = psycopg2.connect(
+        database_url,
+        connect_timeout=_CONNECT_TIMEOUT_SECONDS,
+        cursor_factory=psycopg2.extras.RealDictCursor,
+    )
     try:
         with connection:
             with connection.cursor() as cursor:
@@ -339,7 +366,7 @@ def _default_measure_chunk_bytes(
 ) -> int:
     import psycopg2  # type: ignore[import-untyped]
 
-    connection = psycopg2.connect(database_url)
+    connection = psycopg2.connect(database_url, connect_timeout=_CONNECT_TIMEOUT_SECONDS)
     try:
         with connection:
             with connection.cursor() as cursor:
@@ -383,7 +410,7 @@ def _default_measure_chunk_bytes(
 def _default_compress_chunk(database_url: str, chunk: ChunkRow) -> None:
     import psycopg2  # type: ignore[import-untyped]
 
-    connection = psycopg2.connect(database_url)
+    connection = psycopg2.connect(database_url, connect_timeout=_CONNECT_TIMEOUT_SECONDS)
     try:
         with connection:
             with connection.cursor() as cursor:
@@ -402,7 +429,7 @@ def _default_reconcile_chunk_state(database_url: str, chunk: ChunkRow) -> bool:
 
     import psycopg2  # type: ignore[import-untyped]
 
-    connection = psycopg2.connect(database_url)
+    connection = psycopg2.connect(database_url, connect_timeout=_CONNECT_TIMEOUT_SECONDS)
     try:
         connection.set_session(readonly=True, autocommit=True)
         with connection.cursor() as cursor:
@@ -734,7 +761,8 @@ def build_failed_receipt(
     """Build a non-secret terminal failure that replaces any stale success."""
 
     receipt: dict[str, Any] = {
-        "schema_version": "2.0" if head_sha is not None else "1.0",
+        "schema_version": "2.0",
+        "provenance_state": "bound" if head_sha is not None else "unavailable",
         "generated_at": _iso(datetime.now(UTC)),
         "now_utc": _iso(now_utc),
         "lag_seconds": config.lag_seconds,
@@ -753,6 +781,91 @@ def build_failed_receipt(
     if head_sha is not None:
         receipt["head_sha"] = head_sha
     return receipt
+
+
+def _known_safe_receipt_path(
+    args: argparse.Namespace, env: Mapping[str, str] | None = None
+) -> Path | None:
+    """Return an early failure destination only when it is disjoint from the lock."""
+
+    env = os.environ if env is None else env
+    receipt_raw = (
+        args.receipt_path
+        if args.receipt_path is not None
+        else env.get("NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH")
+    )
+    lock_raw = (
+        args.lock_path
+        if args.lock_path is not None
+        else env.get("NODE27_TIMESERIES_COMPRESSION_LOCK_PATH")
+    )
+    if not receipt_raw or not lock_raw:
+        return None
+    path = Path(str(receipt_raw))
+    lock_path = Path(str(lock_raw))
+    if not path.is_absolute() or not lock_path.is_absolute():
+        return None
+    if normalized_absolute_path(path) == normalized_absolute_path(lock_path):
+        return None
+    try:
+        receipt_info = os.lstat(path)
+    except FileNotFoundError:
+        receipt_info = None
+    except (OSError, ValueError):
+        return None
+    try:
+        lock_info = os.lstat(lock_path)
+    except FileNotFoundError:
+        lock_info = None
+    except (OSError, ValueError):
+        return None
+    if receipt_info is not None and not stat.S_ISREG(receipt_info.st_mode):
+        return None
+    if lock_info is not None and not stat.S_ISREG(lock_info.st_mode):
+        return None
+    if receipt_info is not None and lock_info is not None and (
+        receipt_info.st_dev,
+        receipt_info.st_ino,
+    ) == (lock_info.st_dev, lock_info.st_ino):
+        return None
+    try:
+        ensure_directory_no_follow(path.parent)
+        verify_directory_no_follow(lock_path.parent)
+    except (OSError, SafeFilesystemError, ValueError):
+        return None
+    return path
+
+
+def _replace_early_stale_with_failure(
+    path: Path,
+    *,
+    enforce: bool,
+    now_utc: datetime,
+    stage: str,
+) -> None:
+    """Publish a schema-v2 provenance-unavailable tombstone without config lies."""
+
+    payload = {
+        "schema_version": "2.0",
+        "generated_at": _iso(datetime.now(UTC)),
+        "now_utc": _iso(now_utc),
+        "mode": "enforce" if enforce else "dry-run",
+        "outcome": "failed",
+        "provenance_state": "unavailable",
+        "failure": {
+            "stage": stage,
+            "mutation_state": "failed_before_mutation",
+        },
+    }
+    try:
+        atomic_write_bytes_no_follow(
+            path,
+            (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode(),
+            mode=0o600,
+            require_durable_replace=True,
+        )
+    except SafeFilesystemError:
+        return
 
 
 def _replace_stale_with_failure(
@@ -796,13 +909,25 @@ def main(
     compress_chunk: CompressChunk | None = None,
     reconcile_chunk_state: ReconcileChunkState | None = None,
 ) -> int:
+    now = now_utc or datetime.now(UTC)
     try:
         args = _parser().parse_args(argv)
-        config = config_from_args(args)
     except CompressionConfigError as error:
         _emit_stderr_diagnostic("failed", str(error))
         return 1
-    now = now_utc or datetime.now(UTC)
+    safe_receipt_path = _known_safe_receipt_path(args)
+    try:
+        config = config_from_args(args)
+    except CompressionConfigError as error:
+        if safe_receipt_path is not None:
+            _replace_early_stale_with_failure(
+                safe_receipt_path,
+                enforce=bool(args.enforce),
+                now_utc=now,
+                stage="config",
+            )
+        _emit_stderr_diagnostic("failed", str(error))
+        return 1
     try:
         frozen_head_sha = _current_head_sha(require_clean=True)
     except CompressionConfigError as error:
@@ -832,6 +957,12 @@ def main(
         try:
             publish_receipt(config, receipt)
         except SafeFilesystemError as error:
+            _replace_stale_with_failure(
+                config,
+                now_utc=now,
+                stage="publish_refused_lock",
+                head_sha=frozen_head_sha,
+            )
             _emit_stderr_diagnostic(
                 "failed",
                 f"receipt publication error: {error}",
@@ -887,6 +1018,15 @@ def main(
         try:
             publish_receipt(config, receipt)
         except SafeFilesystemError as error:
+            _replace_stale_with_failure(
+                config,
+                now_utc=now,
+                stage="publish_receipt",
+                head_sha=frozen_head_sha,
+                mutation_state=(
+                    "indeterminate" if config.enforce else "failed_before_mutation"
+                ),
+            )
             _emit_stderr_diagnostic("failed", f"receipt publication error: {error}", dsn=config.database_url)
             return 1
         return 0 if receipt["outcome"] == "clean" else 1

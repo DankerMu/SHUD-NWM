@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import stat
 from datetime import UTC, datetime
 from pathlib import Path
@@ -435,5 +436,68 @@ def test_cli_failure_is_generic_does_not_publish_or_leak_secret(
         "1",
     ]
     assert benchmark.main(args) == 2
-    assert not output.exists()
+    marker = json.loads(output.read_text(encoding="utf-8"))
+    assert marker["schema_version"] == "2.0"
+    assert marker["outcome"] == "failed"
+    assert marker["provenance_state"] == "unavailable"
     assert secret not in capsys.readouterr().err
+
+
+def test_partial_connection_acquisition_closes_primary() -> None:
+    primary = _FakeConnection(_FakeCursor(result_rows=[], plan_reads=[]))
+    calls = 0
+
+    def connect(_database_url: str) -> _FakeConnection:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return primary
+        raise RuntimeError("monitor unavailable")
+
+    with pytest.raises(RuntimeError, match="monitor unavailable"):
+        benchmark.capture_benchmark_phase(**_inputs(), connect=connect)
+    assert primary.closed is True
+
+
+@pytest.mark.parametrize("hardlink", [False, True])
+def test_after_output_alias_preserves_before_slice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hardlink: bool
+) -> None:
+    before = tmp_path / "before.json"
+    before.write_text('{"queries":[]}\n', encoding="utf-8")
+    output = before
+    if hardlink:
+        output = tmp_path / "output.json"
+        output.hardlink_to(before)
+    original = before.read_bytes()
+    monkeypatch.setenv("DATABASE_URL", "opaque-test-dsn")
+    args = [
+        "--phase", "after", "--output", str(output), "--before-path", str(before),
+        "--curve-basin-version-id", "b", "--curve-river-segment-id", "s",
+        "--curve-river-network-version-id", "n", "--curve-issue-time", "2026-07-05T00:00:00Z",
+        "--curve-scenario", "forecast_ifs_deterministic", "--mvt-run-id", "r",
+        "--mvt-basin-version-id", "b", "--mvt-river-network-version-id", "n",
+        "--mvt-valid-time", "2026-07-06T00:00:00Z", "--mvt-z", "9",
+        "--mvt-x", "1", "--mvt-y", "1",
+    ]
+    assert benchmark.main(args) == 2
+    assert before.read_bytes() == original
+
+
+def test_secret_assignment_in_benign_string_is_rejected() -> None:
+    with pytest.raises(benchmark.BenchmarkCaptureError, match="credential") as caught:
+        benchmark._reject_secrets(
+            {"note": "status=ok token=do-not-echo"}, "opaque-test-dsn"
+        )
+    assert "do-not-echo" not in str(caught.value)
+
+
+def test_result_row_ceiling_fails_before_publication() -> None:
+    cursor = _FakeCursor(result_rows=[{"value": 1}], plan_reads=[])
+    cursor.fetchall = lambda: [{"value": 1}] * (benchmark.MAX_RESULT_ROWS + 1)  # type: ignore[method-assign]
+    with pytest.raises(benchmark.BenchmarkCaptureError, match="row ceiling"):
+        benchmark._fetch_all(
+            cursor,
+            deadline=benchmark._Deadline(),
+            label="oversized result",
+        )

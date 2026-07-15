@@ -668,11 +668,13 @@ credential in process argv.
    hypertables, and EXECUTE on installed
    `compress_chunk(regclass,boolean)`. Do not call it least privilege. Do not
    create/alter/grant a role and do not use `nhms_display_ro`.
-3. Before migration, write a custom-format schema-only `pg_dump`, require
-   `pg_restore --list` exit 0, and record the dump's absolute path/bytes/sha256.
-   Also capture canonical JSON for the two target tables' pre-migration
-   catalog. This dump is forensic DDL inventory, not a data backup, restore
-   drill, or compressed-storage rollback.
+3. Before migration, write a custom-format schema-only `pg_dump`. Retain its
+   descriptor identity and run pinned PG15 `/usr/bin/pg_restore --list` under
+   30 seconds against that descriptor; record bounded raw stdout/stderr hashes,
+   tool version, exit 0, entries and the dump's absolute path/bytes/sha256.
+   Also capture timestamped canonical JSON for the two target tables' exact
+   pre-migration catalog. This dump is forensic DDL inventory, not a data
+   backup, restore drill, or compressed-storage rollback.
 4. Capture the original autopipe/compression timer+service enabled/active/sub,
    `MainPID`, result and bounded journal. Stop only the autopipe timer. Require
    `MainPID=0`, no activating/running autopipe process, and no live writer or
@@ -725,9 +727,9 @@ credential in process argv.
 
 The representative performance proof uses production query construction, not
 handwritten lookalikes. For the selected hydro chunk, freeze a nonempty
-production-valid `q_down` identity. Curve capture calls
-`PsycopgForecastStore.get_forecast_series`, records the exact statement/params
-sent by `_fetch_forecast_segment_rows`, and hashes
+production-valid `q_down` identity. Curve capture calls the public
+`PsycopgForecastStore.forecast_series`, records the exact statement/params
+sent by that production owner, and hashes
 `packages/common/forecast_store.py`. MVT capture imports
 `postgis_tile_sql("hydro")`, uses the same parameter construction as
 `hydro_display._postgis_tile_params` at deterministic z=9, and hashes both
@@ -741,14 +743,23 @@ JSON)` samples. Before/after cache classes must match. The median is sorted
 sample 4; p95 is sample 7. Gates are
 `after_median <= max(1.5*before_median, before_median+100)` and
 `after_p95 <= max(2*before_p95, before_p95+250)`. Result rows/bytes/hash must be
-identical, concurrent-load sampling stable, and each after plan must recursively
-contain `DecompressChunk` bound to the selected chunk identity.
+identical, concurrent-load sampling stable, and each after plan must contain a
+`Custom Scan` whose normalized provider is exactly `DecompressChunk` and whose
+own `Relation Name`/`Schema` fields exactly bind the selected origin or
+compressed sibling. Filter text, aliases, suffixes and child-node relations do
+not qualify. The seven-day curve is an overlap probe: its half-open request
+must overlap the selected half-open chunk. A request starting at the chunk's
+exclusive end, or otherwise wholly outside it, fails.
 
 Use the committed read-only capture helper; do not recreate the benchmark with
 ad-hoc SQL or JSON. It accepts the DB credential only through the environment,
 derives both statements/binds from production source, and writes mode-0600
-artifacts. The after invocation requires the immutable before slice and emits
-the merged verifier input:
+artifacts. Both queries, both read-only connections, every statement/activity
+probe and result fetch share one absolute 900-second monotonic deadline;
+connections use `connect_timeout=10`, statements use the remaining deadline,
+and rows, result bytes and plans are capped while being produced. The after
+invocation requires the immutable before slice and emits the merged verifier
+input:
 
 ```bash
 set -a
@@ -795,7 +806,10 @@ every referenced artifact, verifies exact byte counts/sha256, validates both
 runner receipts, recomputes selector hashes, D3 settings, totals, size/count
 deltas, raw query/result hashes, median/p95 thresholds, and plan binding, then
 atomically publishes the terminal envelope against
-`schemas/timeseries_compression_live_evidence.schema.json` version `2.0`.
+`schemas/timeseries_compression_live_evidence.schema.json`. A current
+qualifying terminal is version `3.0` with `qualifies_task_4_5=true`. Historical
+version `2.0` terminals remain schema-readable only as superseded evidence and
+cannot set that discriminator.
 
 The terminal distinguishes immutable `mutation_head_sha` from the later
 `verifier_head_sha`. Preflight is captured before mutation and binds the
@@ -816,8 +830,9 @@ must name a regular non-symlink file. Canonical embedded JSON hashes are
 `jq -cS` UTF-8 including its trailing newline. The bundle has these exact
 top-level keys: `schema_version`, `issue`, `generated_at`, `node`,
 `mutation_head_sha`, `verifier_head_sha`, `database_identity`,
-`authorization`, `recovery`, `preflight`, `migration`, `selection`, `receipts`,
-`sizes`, `catalog`, `benchmarks`, `cleanup`, `out_of_scope`.
+`authorization`, `execution`, `recovery`, `preflight`, `migration`,
+`selection`, `receipts`, `sizes`, `catalog`, `benchmarks`, `cleanup`,
+`out_of_scope`.
 
 Referenced JSON contracts are:
 
@@ -831,8 +846,12 @@ Referenced JSON contracts are:
   row count. Both artifacts bind the same mutation SHA/database/node.
 - `preflight.evidence`: the facts in steps 1–4, including exact role booleans,
   guard presence, quiescence and inactive compression units;
-  `preflight.schema_dump` is the raw custom dump, and
-  `preflight.catalog_before` its canonical catalog neighbor.
+  `preflight.schema_dump` is streamed under a practical byte cap. The verifier
+  runs pinned PG15 `/usr/bin/pg_restore --list` against the retained dump
+  descriptor and compares bounded stdout/stderr hashes, tool version, exit
+  status and entries with `preflight.schema_dump_list`; a magic prefix or an
+  independently authored list is insufficient. `preflight.catalog_before` is
+  its timestamped canonical catalog neighbor.
 - `migration.catalog_after_first|second` and `catalog.post`:
   `{"hypertables":{"hydro.river_timeseries":true,
   "met.forcing_station_timeseries":true},"compression_settings":[...],
@@ -857,6 +876,21 @@ Referenced JSON contracts are:
 - `cleanup.evidence`: autopipe restored, compression timer enabled/inactive,
   compression service inactive with activation count zero, and installed unit
   hashes matching the repository.
+
+The version-3 execution audit enumerates exactly two migration applies, one
+recovery decompression, one dry-run and one enforce. Every invocation binds
+the authorized remote-tracking SHA, resolved repository/interpreter/script/
+wrapper/env paths, actual `/usr/bin/timeout --signal=TERM --kill-after=30s
+900s` launcher argv, exit and receipt/catalog association. Its bounded audit
+journal must report no direct DB mutation outside this namespace. The global
+chronology is one non-overlapping chain from dump/catalog-before through both
+migrations, recovery, compression preflight, dry-run, before benchmark,
+pre-enforce selector, enforce, post snapshots/benchmark, cleanup and audit
+capture. All snapshot IDs are unique. Output paths must be disjoint from the
+bundle and every referenced file by normalized path and inode; publication is
+followed by revalidation of every retained input. A safe known destination is
+atomically replaced with a versioned failed/indeterminate tombstone on failure;
+an unsafe, unknown, symlinked or input-alias destination is untouched.
 
 Example invocation (paths contain no credential):
 

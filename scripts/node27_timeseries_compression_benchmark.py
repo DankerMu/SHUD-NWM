@@ -12,7 +12,6 @@ import argparse
 import hashlib
 import json
 import os
-import re
 import stat
 import sys
 import time
@@ -29,8 +28,13 @@ from sqlalchemy.dialects import postgresql
 from apps.api.routes.hydro_display import _postgis_tile_params
 from packages.common.evidence_io import (
     BoundedEvidenceError,
+    FileIdentity,
+    assert_paths_disjoint,
+    inspect_bounded_file_no_follow,
     read_bounded_bytes_no_follow,
     read_bounded_json_no_follow,
+    reject_secret_material,
+    validate_json_complexity,
 )
 from packages.common.forecast_store import (
     ForecastStoreError,
@@ -57,10 +61,31 @@ STATEMENT_TIMEOUT_MS = 60_000
 LOCK_TIMEOUT_MS = 5_000
 PHASE_TIMEOUT_SECONDS = 900
 MAX_SLICE_BYTES = 16 * 1024**2
+MAX_RESULT_BYTES = 16 * 1024**2
+MAX_RESULT_ROWS = 100_000
+MAX_PLAN_BYTES = 8 * 1024**2
+CONNECT_TIMEOUT_SECONDS = 10
 
 
 class BenchmarkCaptureError(RuntimeError):
     """A fail-closed capture or publication error."""
+
+
+class _Deadline:
+    """One absolute monotonic wall covering connection through result capture."""
+
+    def __init__(self, seconds: int = PHASE_TIMEOUT_SECONDS) -> None:
+        self.started_at = datetime.now(UTC)
+        self.expires_at = time.monotonic() + seconds
+
+    def remaining(self, label: str) -> float:
+        value = self.expires_at - time.monotonic()
+        if value <= 0:
+            raise BenchmarkCaptureError(f"benchmark wall deadline exceeded before {label}")
+        return value
+
+    def statement_timeout_ms(self, label: str) -> int:
+        return max(1, min(STATEMENT_TIMEOUT_MS, int(self.remaining(label) * 1000)))
 
 
 class _RecordingCursor:
@@ -209,15 +234,46 @@ def _row_mapping(cursor: Any, row: Any) -> dict[str, Any]:
     return dict(zip(names, row, strict=True))
 
 
-def _fetch_all(cursor: Any) -> list[dict[str, Any]]:
-    return [_row_mapping(cursor, row) for row in cursor.fetchall()]
+def _fetch_all(
+    cursor: Any,
+    *,
+    deadline: _Deadline,
+    label: str,
+    max_rows: int = MAX_RESULT_ROWS,
+) -> list[dict[str, Any]]:
+    """Fetch in bounded batches and enforce both row and serialized byte caps."""
+
+    rows: list[dict[str, Any]] = []
+    fetchmany = getattr(cursor, "fetchmany", None)
+    while True:
+        deadline.remaining(f"{label} fetch")
+        batch = fetchmany(1000) if callable(fetchmany) else cursor.fetchall()
+        if not batch:
+            break
+        rows.extend(_row_mapping(cursor, row) for row in batch)
+        if len(rows) > max_rows:
+            raise BenchmarkCaptureError(f"{label} exceeds the row ceiling")
+        byte_values = [
+            bytes(value).hex() if isinstance(value, (bytes, bytearray, memoryview)) else value
+            for row in rows
+            for value in row.values()
+        ]
+        if len(_canonical_json_bytes(byte_values)) > MAX_RESULT_BYTES:
+            raise BenchmarkCaptureError(f"{label} exceeds the result byte ceiling")
+        if not callable(fetchmany):
+            break
+    return rows
 
 
-def _activity_snapshot(cursor: Any) -> tuple[list[dict[str, Any]], str]:
-    cursor.execute(f"SET statement_timeout = {STATEMENT_TIMEOUT_MS}", ())
+def _activity_snapshot(
+    cursor: Any, *, deadline: _Deadline
+) -> tuple[list[dict[str, Any]], str]:
+    timeout_ms = deadline.statement_timeout_ms("activity timeout setup")
+    cursor.execute(f"SET statement_timeout = {timeout_ms}", ())
     cursor.execute(f"SET lock_timeout = {LOCK_TIMEOUT_MS}", ())
+    deadline.remaining("activity query")
     cursor.execute(ACTIVITY_SQL, ())
-    rows = _fetch_all(cursor)
+    rows = _fetch_all(cursor, deadline=deadline, label="activity", max_rows=1000)
     sanitized: list[dict[str, Any]] = []
     for row in rows:
         sanitized.append(
@@ -234,13 +290,18 @@ def _activity_snapshot(cursor: Any) -> tuple[list[dict[str, Any]], str]:
     return sanitized, datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _set_statement_bounds(cursor: Any) -> None:
-    cursor.execute(f"SET LOCAL statement_timeout = {STATEMENT_TIMEOUT_MS}", ())
+def _set_statement_bounds(cursor: Any, *, deadline: _Deadline) -> None:
+    timeout_ms = deadline.statement_timeout_ms("statement timeout setup")
+    cursor.execute(f"SET LOCAL statement_timeout = {timeout_ms}", ())
     cursor.execute(f"SET LOCAL lock_timeout = {LOCK_TIMEOUT_MS}", ())
 
 
-def _plan_payload(cursor: Any, statement: str, parameters: Any) -> Any:
+def _plan_payload(
+    cursor: Any, statement: str, parameters: Any, *, deadline: _Deadline
+) -> Any:
+    deadline.remaining("EXPLAIN")
     cursor.execute(EXPLAIN_PREFIX + statement, parameters)
+    deadline.remaining("EXPLAIN result")
     row = cursor.fetchone()
     if row is None:
         raise BenchmarkCaptureError("EXPLAIN returned no plan")
@@ -250,7 +311,20 @@ def _plan_payload(cursor: Any, statement: str, parameters: Any) -> Any:
         payload = row[0]
     if not isinstance(payload, (list, Mapping)) or not payload:
         raise BenchmarkCaptureError("EXPLAIN did not return full FORMAT JSON")
-    return _json_value(payload)
+    normalized = _json_value(payload)
+    try:
+        validate_json_complexity(
+            normalized,
+            label="EXPLAIN plan",
+            max_depth=48,
+            max_nodes=100_000,
+            max_array_items=10_000,
+        )
+    except BoundedEvidenceError as error:
+        raise BenchmarkCaptureError(str(error)) from error
+    if len(_canonical_json_bytes(normalized)) > MAX_PLAN_BYTES:
+        raise BenchmarkCaptureError("EXPLAIN plan exceeds the byte ceiling")
+    return normalized
 
 
 def _walk_metric(value: Any, key: str) -> int:
@@ -264,8 +338,10 @@ def _walk_metric(value: Any, key: str) -> int:
     return 0
 
 
-def _measurement(cursor: Any, statement: str, parameters: Any) -> dict[str, Any]:
-    payload = _plan_payload(cursor, statement, parameters)
+def _measurement(
+    cursor: Any, statement: str, parameters: Any, *, deadline: _Deadline
+) -> dict[str, Any]:
+    payload = _plan_payload(cursor, statement, parameters, deadline=deadline)
     root = payload[0] if isinstance(payload, list) else payload
     if not isinstance(root, Mapping):
         raise BenchmarkCaptureError("EXPLAIN JSON root is invalid")
@@ -289,38 +365,42 @@ def _capture_phase(
     statement: str,
     parameters: Any,
     result_kind: str,
+    deadline: _Deadline | None = None,
 ) -> dict[str, Any]:
+    deadline = deadline or _Deadline()
     try:
         phase_started_at = datetime.now(UTC)
         connection.set_session(isolation_level="REPEATABLE READ", readonly=True, autocommit=False)
         cursor = connection.cursor()
         monitor_connection.set_session(readonly=True, autocommit=True)
         monitor = monitor_connection.cursor()
-        deadline = time.monotonic() + PHASE_TIMEOUT_SECONDS
-
         def bounded_measurement() -> dict[str, Any]:
-            if time.monotonic() >= deadline:
-                raise BenchmarkCaptureError("benchmark phase wall deadline exceeded")
-            _set_statement_bounds(cursor)
-            return _measurement(cursor, statement, parameters)
+            deadline.remaining("measurement")
+            _set_statement_bounds(cursor, deadline=deadline)
+            return _measurement(cursor, statement, parameters, deadline=deadline)
 
-        activity_before, activity_before_at = _activity_snapshot(monitor)
+        activity_before, activity_before_at = _activity_snapshot(monitor, deadline=deadline)
         cold = bounded_measurement()
-        activity_after_cold, activity_after_cold_at = _activity_snapshot(monitor)
+        activity_after_cold, activity_after_cold_at = _activity_snapshot(
+            monitor, deadline=deadline
+        )
         warmups = [bounded_measurement() for _ in range(2)]
         while warmups[-1]["shared_read_blocks"] > 0 and len(warmups) < 5:
             warmups.append(bounded_measurement())
-        activity_before_measurements, activity_before_measurements_at = _activity_snapshot(monitor)
+        activity_before_measurements, activity_before_measurements_at = _activity_snapshot(
+            monitor, deadline=deadline
+        )
         measurements = []
         activity_mid: list[dict[str, Any]] | None = None
         activity_mid_at = ""
         for index in range(7):
             measurements.append(bounded_measurement())
             if index == 2:
-                activity_mid, activity_mid_at = _activity_snapshot(monitor)
-        _set_statement_bounds(cursor)
+                activity_mid, activity_mid_at = _activity_snapshot(monitor, deadline=deadline)
+        _set_statement_bounds(cursor, deadline=deadline)
+        deadline.remaining("result query")
         cursor.execute(statement, parameters)
-        rows = _fetch_all(cursor)
+        rows = _fetch_all(cursor, deadline=deadline, label=f"{result_kind} result")
         if result_kind == "curve":
             result_payload: Any = _json_value(rows)
             result_raw = _canonical_json_bytes(result_payload)
@@ -336,7 +416,7 @@ def _capture_phase(
         else:
             raise BenchmarkCaptureError("unknown benchmark result kind")
 
-        activity_after, activity_after_at = _activity_snapshot(monitor)
+        activity_after, activity_after_at = _activity_snapshot(monitor, deadline=deadline)
         signatures = [
             activity_before,
             activity_after_cold,
@@ -412,17 +492,50 @@ def _default_connect(database_url: str) -> Any:
         from psycopg2.extras import RealDictCursor
     except ImportError as error:
         raise BenchmarkCaptureError("psycopg2 is required") from error
-    return psycopg2.connect(database_url, cursor_factory=RealDictCursor)
+    return psycopg2.connect(
+        database_url,
+        connect_timeout=CONNECT_TIMEOUT_SECONDS,
+        cursor_factory=RealDictCursor,
+    )
 
 
 def _reject_secrets(document: Mapping[str, Any], database_url: str) -> None:
     rendered = _canonical_json_bytes(document).decode("utf-8")
-    forbidden = [database_url] if database_url else []
-    forbidden.extend(re.findall(r"(?i)(?:password|passwd|token|secret)\s*=\s*[^\s&]+", rendered))
-    if any(value and value in rendered for value in forbidden) or re.search(
-        r"(?i)(?:postgres(?:ql)?://[^\s\"']+|password\s*=)", rendered
-    ):
-        raise BenchmarkCaptureError("refusing to publish a potential credential")
+    if database_url and database_url in rendered:
+        raise BenchmarkCaptureError("refusing to publish potential credential material")
+    try:
+        reject_secret_material(document, label="benchmark evidence")
+    except BoundedEvidenceError as error:
+        raise BenchmarkCaptureError(str(error)) from error
+
+
+def _capture_with_connections(
+    *,
+    connect: Callable[[str], Any],
+    database_url: str,
+    statement: str,
+    parameters: Any,
+    result_kind: str,
+    deadline: _Deadline,
+) -> dict[str, Any]:
+    """Acquire both connections without leaking a partially acquired primary."""
+
+    deadline.remaining(f"{result_kind} primary connection")
+    primary = connect(database_url)
+    try:
+        deadline.remaining(f"{result_kind} monitor connection")
+        monitor = connect(database_url)
+    except Exception:
+        primary.close()
+        raise
+    return _capture_phase(
+        primary,
+        monitor_connection=monitor,
+        statement=statement,
+        parameters=parameters,
+        result_kind=result_kind,
+        deadline=deadline,
+    )
 
 
 def capture_benchmark_phase(
@@ -444,6 +557,8 @@ def capture_benchmark_phase(
     mvt_y: int,
     connect: Callable[[str], Any] = _default_connect,
 ) -> dict[str, Any]:
+    deadline = _Deadline()
+    deadline.remaining("capture input validation")
     if phase not in {"before", "after"}:
         raise BenchmarkCaptureError("phase must be before or after")
     curve_query, parameter_names, curve_parameters = _curve_query_and_binding(
@@ -486,12 +601,13 @@ def capture_benchmark_phase(
                     "parameter_names": parameter_names,
                     "bound_parameters": _json_value(curve_parameters),
                 },
-                phase: _capture_phase(
-                    connect(database_url),
-                    monitor_connection=connect(database_url),
+                phase: _capture_with_connections(
+                    connect=connect,
+                    database_url=database_url,
                     statement=curve_query,
                     parameters=curve_parameters,
                     result_kind="curve",
+                    deadline=deadline,
                 ),
             },
             {
@@ -509,12 +625,13 @@ def capture_benchmark_phase(
                 "query_sha256": hashlib.sha256(mvt_query.encode()).hexdigest(),
                 "query_text": mvt_query,
                 "binding": _json_value(mvt_binding),
-                phase: _capture_phase(
-                    connect(database_url),
-                    monitor_connection=connect(database_url),
+                phase: _capture_with_connections(
+                    connect=connect,
+                    database_url=database_url,
                     statement=_named_to_pyformat(mvt_query),
                     parameters=mvt_binding,
                     result_kind="mvt",
+                    deadline=deadline,
                 ),
             },
         ]
@@ -576,6 +693,66 @@ def _read_json_file(path: Path, label: str) -> Mapping[str, Any]:
     return value
 
 
+def _referenced_paths(value: Any) -> list[Path]:
+    paths: list[Path] = []
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, Mapping):
+            if set(current) == {"path", "sha256", "bytes"}:
+                path = Path(str(current["path"]))
+                if path.is_absolute():
+                    paths.append(path)
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+    return paths
+
+
+def _snapshot_inputs(paths: list[Path]) -> list[FileIdentity]:
+    snapshots: list[FileIdentity] = []
+    for index, path in enumerate(paths):
+        snapshots.append(
+            inspect_bounded_file_no_follow(
+                path,
+                max_bytes=MAX_SLICE_BYTES,
+                label=f"benchmark retained input[{index}]",
+            )
+        )
+    return snapshots
+
+
+def _reverify_inputs(snapshots: list[FileIdentity]) -> None:
+    for index, snapshot in enumerate(snapshots):
+        current = inspect_bounded_file_no_follow(
+            snapshot.path,
+            max_bytes=MAX_SLICE_BYTES,
+            label=f"benchmark retained input[{index}]",
+        )
+        if current != snapshot:
+            raise BenchmarkCaptureError("benchmark retained input changed during publication")
+
+
+def _publish_failure_tombstone(output: Path, *, phase: str, stage: str) -> None:
+    payload = {
+        "schema_version": "2.0",
+        "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "phase": phase,
+        "outcome": "failed",
+        "provenance_state": "unavailable",
+        "failure": {"stage": stage, "mutation_state": "failed_before_mutation"},
+    }
+    try:
+        atomic_write_bytes_no_follow(
+            output,
+            _canonical_json_bytes(payload),
+            mode=stat.S_IRUSR | stat.S_IWUSR,
+            require_durable_replace=True,
+        )
+    except Exception:
+        return
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--phase", required=True, choices=("before", "after"))
@@ -599,6 +776,8 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    output_safe = False
+    retained: list[FileIdentity] = []
     try:
         database_url = os.getenv("DATABASE_URL", "")
         if not database_url:
@@ -611,6 +790,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.before_path is None or not args.before_path.is_absolute()
         ):
             raise BenchmarkCaptureError("after capture requires an absolute --before-path")
+        before_document: Mapping[str, Any] | None = None
+        input_paths = [CURVE_SOURCE, MVT_SOURCE, MVT_ROUTE_SOURCE]
+        if args.before_path is not None:
+            before_document = _read_json_file(args.before_path, "before benchmark slice")
+            input_paths.extend([args.before_path, *_referenced_paths(before_document)])
+        try:
+            assert_paths_disjoint(args.output, input_paths, label="benchmark")
+        except BoundedEvidenceError as error:
+            raise BenchmarkCaptureError(str(error)) from error
+        output_safe = True
+        retained = _snapshot_inputs(input_paths)
         issue_time = _utc(args.curve_issue_time)
         end_time = _utc(args.curve_end_time) if args.curve_end_time else issue_time + timedelta(days=7)
         document = capture_benchmark_phase(
@@ -631,7 +821,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             mvt_y=args.mvt_y,
         )
         if args.phase == "after":
-            before_document = _read_json_file(args.before_path, "before benchmark slice")
+            if before_document is None:
+                raise BenchmarkCaptureError("before benchmark slice was not retained")
             document = merge_benchmark_slices(before_document, document)
         atomic_write_bytes_no_follow(
             args.output,
@@ -639,7 +830,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             mode=stat.S_IRUSR | stat.S_IWUSR,
             require_durable_replace=True,
         )
+        _reverify_inputs(retained)
     except Exception as error:
+        if output_safe:
+            _publish_failure_tombstone(
+                args.output,
+                phase=args.phase,
+                stage="capture_or_publish",
+            )
         print(
             json.dumps(
                 {"outcome": "refused", "error": type(error).__name__},
