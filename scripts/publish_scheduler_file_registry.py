@@ -280,8 +280,8 @@ def publish_all_basin_scheduler_registry(
                 inventory_path=context.inventory_path,
                 package_manifest_path=package_manifest_path,
             )
-            registry_models.append(
-                scheduler_registry_row_from_sources(
+            try:
+                registry_row = scheduler_registry_row_from_sources(
                     sources,
                     shud_code_version=shud_code_version,
                     partition=partition,
@@ -289,7 +289,12 @@ def publish_all_basin_scheduler_registry(
                     memory_mb=memory_mb,
                     walltime_minutes=walltime_minutes,
                 )
-            )
+            finally:
+                # Parsed geometry can be much larger than the registry row.
+                # Release it before the next context starts parsing so two
+                # basin geometries are never live at the same time.
+                del sources
+            registry_models.append(registry_row)
         except Exception as error:
             if (
                 not dry_run

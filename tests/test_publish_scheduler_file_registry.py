@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -205,6 +206,62 @@ def test_context_two_import_failure_reports_all_new_packages_and_preserves_canon
     assert len(details["packages"]) == 2
     assert str(tmp_path) not in json.dumps(details)
     assert canonical.read_bytes() == before
+
+
+def test_completed_import_sources_are_released_before_preparing_next_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    models = [_inventory_model("first"), _inventory_model("second")]
+    inventory = {
+        "schema_version": "basins.discovery.v1",
+        "root": str(tmp_path / "Basins"),
+        "resolved_root": str(tmp_path / "Basins"),
+        "model_count": 2,
+        "models": models,
+        "warnings": [],
+    }
+    monkeypatch.setattr(registry_script, "discover_basins_inventory", lambda _root: inventory)
+    monkeypatch.setattr(registry_script, "publish_basins_package", _fake_publish_basins_package)
+
+    class WeakSources:
+        pass
+
+    previous_sources: weakref.ReferenceType[WeakSources] | None = None
+
+    def prepare(inventory_path: str | Path, package_manifest_path: str | Path) -> WeakSources:
+        nonlocal previous_sources
+        if previous_sources is not None:
+            assert previous_sources() is None
+        prepared = _fake_sources(_inventory_from_file(Path(inventory_path)), Path(package_manifest_path))
+        sources = WeakSources()
+        vars(sources).update(vars(prepared))
+        previous_sources = weakref.ref(sources)
+        return sources
+
+    monkeypatch.setattr(registry_script, "prepare_basins_import_sources", prepare)
+    monkeypatch.setattr(
+        registry_script,
+        "scheduler_registry_row_from_sources",
+        lambda sources, **_kwargs: {"model_id": sources.ids["model_id"]},
+    )
+    monkeypatch.setattr(
+        registry_script,
+        "publish_scheduler_registry_manifest",
+        lambda *_args, **_kwargs: {"model_count": 2},
+    )
+
+    summary = registry_script.publish_all_basin_scheduler_registry(
+        basins_root=tmp_path / "Basins",
+        registry_manifest=tmp_path / "objects" / "scheduler" / "registry" / "manifest-last.json",
+        object_store_root=tmp_path / "objects",
+        object_store_prefix="s3://nhms",
+        work_dir=tmp_path / "work",
+    )
+
+    assert summary["selected_model_count"] == 2
+    assert previous_sources is not None
+    assert previous_sources() is None
 
 
 def test_failed_package_after_immutable_manifest_is_counted_as_new_orphan(
