@@ -1,0 +1,42 @@
+{
+  "schema_version": "issue1070-dryrun-envelope/1",
+  "generated_at": "2026-07-15T07:41:19Z",
+  "deployed_git_sha": "bcd66a9f68b406463a0579aae6b6e0f57b9d0778",
+  "input": {
+    "path": "/home/nwm/node27-db-export-salvage-inputs/completeness-incomplete-live-20260713T155314Z.json",
+    "mode": "0600",
+    "full_sha256": "e2d4f08150943f09af87d3e53e79cff26728fb438aabb545dabff07842497d04",
+    "ordered_selector_sha256": "ad5da1c51e1e90ec7bf2912d204186d21879be4e69536cc24a469520a486d0c6",
+    "selector_count": 228
+  },
+  "role": {
+    "current_user": "nhms_display_ro",
+    "select_both": true,
+    "insert_update_delete_both": false,
+    "runner_guard": "PASS"
+  },
+  "streaming_preflight": {
+    "path": "/home/nwm/NWM/.nhms-issue1070-live/stream-preflight.json",
+    "sha256": "c3ea7902d958ef439ed359dfe126d6e28cd169d1a2c7c74109a85c3310d8adb6",
+    "outcome": "pass"
+  },
+  "dry_run": {
+    "path": "/home/nwm/NWM/.nhms-issue1070-live/salvage-dryrun.json",
+    "sha256": "4ffc166daa16de563b81d2c5c39092a4c2e7478f3d3de3d0dfbbde2cb668ee3d",
+    "outcome": "clean",
+    "selected_count": 228,
+    "error_count": 0,
+    "ordered_selected_descriptor_sha256": "c56ea34cbdc4d687e03cb989fd5cba6b7de52b6c8dcdbbc024c218f058725a48",
+    "ordered_selected_selector_sha256": "ad5da1c51e1e90ec7bf2912d204186d21879be4e69536cc24a469520a486d0c6"
+  },
+  "db_export_inventory": {
+    "before": "absent",
+    "after": "absent",
+    "mutation": false
+  },
+  "authorization_boundary": {
+    "enforce_executed": false,
+    "db_mutation": false,
+    "object_publication": false
+  }
+}
