@@ -22,10 +22,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Protocol
 
 from packages.common.object_store import LocalObjectStore
 from services.orchestrator.scheduler_file_providers import (
+    ProviderPreimage,
     SchedulerFileProviderError,
     publish_scheduler_registry_manifest,
 )
@@ -35,12 +36,17 @@ from workers.model_registry.basins_discovery import (
     resolve_basins_root,
     write_inventory,
 )
-from workers.model_registry.basins_package import BasinsPackageError, publish_basins_package
+from workers.model_registry.basins_package import (
+    BasinsPackageError,
+    basins_package_source_identity,
+    publish_basins_package,
+)
 from workers.model_registry.basins_radiation_template import repair_missing_tsd_rl_for_basin, repair_performed
 from workers.model_registry.basins_registry_import import (
     BasinsRegistryImportError,
     ImportSources,
     prepare_basins_import_sources,
+    prepare_relocated_basins_import_sources_after_package_verification,
 )
 from workers.model_registry.basins_soil_alpha_repair import (
     repair_blocked as calibration_repair_blocked,
@@ -74,6 +80,27 @@ class PublishContext:
     model: dict[str, Any]
     inventory_path: Path
     repair: dict[str, Any] | None = None
+    source_lineage_model: dict[str, Any] | None = None
+
+
+class WorkspaceBudget(Protocol):
+    def ensure_directory(self, path: Path) -> None: ...
+
+    def write_json(self, path: Path, payload: Mapping[str, Any]) -> None: ...
+
+    def copy_tree(self, source: Path, target: Path) -> None: ...
+
+    def copy_file(self, source: Path, target: Path) -> None: ...
+
+    def write_bytes(self, path: Path, content: bytes) -> None: ...
+
+    def reserve_external_write(self, path: Path, size: int) -> None: ...
+
+    def finalize_external_write(self, path: Path, size: int) -> None: ...
+
+    def verify_external_write(self, path: Path) -> None: ...
+
+    def rescan(self) -> None: ...
 
 
 class SchedulerRegistryPublishError(RuntimeError):
@@ -105,6 +132,16 @@ def publish_all_basin_scheduler_registry(
     retain_repair_staging: bool = False,
     dry_run: bool = False,
     output_path: str | Path | None = None,
+    expected_preimage: ProviderPreimage | Mapping[str, object] | None = None,
+    registry_generated_at: datetime | None = None,
+    registry_commit_observer: Callable[[ProviderPreimage], None] | None = None,
+    precommit_validator: Callable[
+        [Path, Sequence[Mapping[str, Any]], Sequence[Mapping[str, Any]]], None
+    ]
+    | None = None,
+    resource_validator: Callable[[Path], None] | None = None,
+    workspace_budget: WorkspaceBudget | None = None,
+    max_contexts: int | None = None,
 ) -> dict[str, Any]:
     root = resolve_basins_root(str(basins_root) if basins_root not in (None, "") else None)
     resolved_object_root = _required_path(
@@ -118,13 +155,17 @@ def publish_all_basin_scheduler_registry(
             "OBJECT_STORE_PREFIX or --object-store-prefix is required.",
         )
     workspace = Path(work_dir).expanduser()
-    workspace.mkdir(parents=True, exist_ok=True)
+    _ensure_workspace_directory(workspace, workspace_budget)
     package_manifest_dir = workspace / "package-manifests"
-    package_manifest_dir.mkdir(parents=True, exist_ok=True)
+    _guard_resources(resource_validator, workspace)
+    _ensure_workspace_directory(package_manifest_dir, workspace_budget)
+    _guard_resources(resource_validator, workspace)
 
     inventory = discover_basins_inventory(root)
     inventory_path = workspace / "basins-inventory.json"
-    write_inventory(inventory, inventory_path)
+    _guard_resources(resource_validator, workspace)
+    _write_workspace_inventory(inventory, inventory_path, workspace_budget)
+    _guard_resources(resource_validator, workspace)
 
     selected_models = _select_publishable_models(
         inventory,
@@ -132,7 +173,14 @@ def publish_all_basin_scheduler_registry(
         model_ids=model_ids,
     )
     contexts = [PublishContext(model=model, inventory_path=inventory_path) for model in selected_models]
-    contexts = _repair_calibrated_shud_contexts(contexts, workspace=workspace)
+    if max_contexts is not None and len(contexts) > max_contexts:
+        raise _context_limit_error(len(contexts), max_contexts)
+    contexts = _repair_calibrated_shud_contexts(
+        contexts,
+        workspace=workspace,
+        resource_validator=resource_validator,
+        workspace_budget=workspace_budget,
+    )
     if repair_missing_radiation:
         repaired_radiation_contexts = (
             _repair_missing_radiation_contexts(
@@ -142,9 +190,22 @@ def publish_all_basin_scheduler_registry(
                 basin_slugs=basin_slugs,
                 model_ids=model_ids,
                 already_selected_model_ids={str(model.get("model_id")) for model in selected_models},
+                resource_validator=resource_validator,
+                workspace_budget=workspace_budget,
             )
         )
-        contexts.extend(_repair_calibrated_shud_contexts(repaired_radiation_contexts, workspace=workspace))
+        if max_contexts is not None and len(contexts) + len(repaired_radiation_contexts) > max_contexts:
+            raise _context_limit_error(len(contexts) + len(repaired_radiation_contexts), max_contexts)
+        contexts.extend(
+            _repair_calibrated_shud_contexts(
+                repaired_radiation_contexts,
+                workspace=workspace,
+                resource_validator=resource_validator,
+                workspace_budget=workspace_budget,
+            )
+        )
+    if max_contexts is not None and len(contexts) > max_contexts:
+        raise _context_limit_error(len(contexts), max_contexts)
     if not contexts:
         raise SchedulerRegistryPublishError(
             "SCHEDULER_REGISTRY_NO_PUBLISHABLE_MODELS",
@@ -154,53 +215,151 @@ def publish_all_basin_scheduler_registry(
     store = LocalObjectStore(resolved_object_root, object_store_prefix=resolved_object_prefix)
     registry_models: list[dict[str, Any]] = []
     package_results: list[dict[str, Any]] = []
+    attempted_total = 0
     for context in contexts:
-        model = context.model
-        model_id = _required_model_str(model, "model_id")
-        version = package_version_for_model(model, package_version_template)
-        package_manifest_path = package_manifest_dir / f"{model_id}.manifest.json"
-        if dry_run:
-            package_result = {
-                "status": "dry_run",
-                "model_id": model_id,
-                "version": version,
-                "manifest_path": str(package_manifest_path),
-            }
-        else:
-            package_result = publish_basins_package(
+        attempted_total += 1
+        manifest_key: str | None = None
+        manifest_uri: str | None = None
+        manifest_existed_before = True
+        package_recorded = False
+        try:
+            _guard_resources(resource_validator, workspace)
+            model = context.model
+            model_id = _required_model_str(model, "model_id")
+            source_identity = basins_package_source_identity(
                 inventory_path=context.inventory_path,
                 model_id=model_id,
-                version=version,
-                output_path=package_manifest_path,
-                copy_forcing=False,
-                object_store=store,
             )
-        package_results.append(dict(package_result))
-        if dry_run:
-            continue
-        sources = prepare_basins_import_sources(
-            inventory_path=context.inventory_path,
-            package_manifest_path=package_manifest_path,
-        )
-        registry_models.append(
-            scheduler_registry_row_from_sources(
-                sources,
-                shud_code_version=shud_code_version,
-                partition=partition,
-                cpus_per_task=cpus_per_task,
-                memory_mb=memory_mb,
-                walltime_minutes=walltime_minutes,
+            version = package_version_for_model(
+                model,
+                package_version_template,
+                source_identity=source_identity,
             )
-        )
+            package_manifest_path = package_manifest_dir / f"{model_id}.manifest.json"
+            manifest_key = f"models/{model_id}/{version}/manifest.json"
+            manifest_uri = store.uri_for_key(manifest_key)
+            manifest_existed_before = store.exists(manifest_key)
+            if dry_run:
+                package_result = {
+                    "status": "dry_run",
+                    "model_id": model_id,
+                    "version": version,
+                    "manifest_path": str(package_manifest_path),
+                }
+                suggested_ids = model.get("suggested_ids")
+                if not isinstance(suggested_ids, Mapping):
+                    raise SchedulerRegistryPublishError(
+                        "SCHEDULER_REGISTRY_DRY_RUN_IDENTITY_INVALID",
+                        "Dry-run model is missing bounded suggested identities.",
+                        details={"model_id": model_id},
+                    )
+                registry_models.append(
+                    {
+                        "model_id": str(suggested_ids.get("model_id") or model_id),
+                        "basin_id": str(suggested_ids.get("basin_id") or ""),
+                    }
+                )
+            else:
+                package_result = publish_basins_package(
+                    inventory_path=context.inventory_path,
+                    model_id=model_id,
+                    version=version,
+                    output_path=package_manifest_path,
+                    copy_forcing=False,
+                    object_store=store,
+                    output_capacity_guard=(workspace_budget.reserve_external_write if workspace_budget else None),
+                    output_write_guard=(workspace_budget.finalize_external_write if workspace_budget else None),
+                    expected_source_identity=source_identity,
+                )
+                if workspace_budget is not None:
+                    workspace_budget.verify_external_write(package_manifest_path)
+            package_results.append(dict(package_result))
+            package_recorded = True
+            _guard_resources(resource_validator, workspace)
+            if dry_run:
+                continue
+            if package_result.get("status") == "already_done":
+                sources = prepare_relocated_basins_import_sources_after_package_verification(
+                    inventory_path=context.inventory_path,
+                    package_manifest_path=package_manifest_path,
+                    verified_package_checksum=str(package_result.get("package_checksum") or ""),
+                )
+            else:
+                sources = prepare_basins_import_sources(
+                    inventory_path=context.inventory_path,
+                    package_manifest_path=package_manifest_path,
+                )
+            try:
+                registry_row = scheduler_registry_row_from_sources(
+                    sources,
+                    shud_code_version=shud_code_version,
+                    partition=partition,
+                    cpus_per_task=cpus_per_task,
+                    memory_mb=memory_mb,
+                    walltime_minutes=walltime_minutes,
+                    source_lineage_model=context.source_lineage_model,
+                )
+            finally:
+                # Parsed geometry can be much larger than the registry row.
+                # Release it before the next context starts parsing so two
+                # basin geometries are never live at the same time.
+                del sources
+            registry_models.append(registry_row)
+        except Exception as error:
+            if (
+                not dry_run
+                and not package_recorded
+                and not manifest_existed_before
+                and manifest_key is not None
+                and manifest_uri is not None
+                and _object_exists_after_failure(store, manifest_key)
+            ):
+                package_results.append({"status": "published", "manifest_uri": manifest_uri})
+            if workspace_budget is not None:
+                workspace_budget.rescan()
+            raise _publish_failure(
+                error,
+                discovered_total=len(contexts),
+                attempted_total=attempted_total,
+                package_results=package_results,
+                error_code="SCHEDULER_REGISTRY_CONTEXT_PUBLISH_FAILED",
+                message="Scheduler registry context publication failed before canonical replacement.",
+            ) from error
+
+    if precommit_validator is not None:
+        try:
+            precommit_validator(workspace, package_results, registry_models)
+        except Exception as error:
+            raise _publish_failure(
+                error,
+                discovered_total=len(contexts),
+                attempted_total=attempted_total,
+                package_results=package_results,
+                error_code="SCHEDULER_REGISTRY_REFRESH_PRECOMMIT_FAILED",
+                message="Registry/readiness precommit validation failed before canonical replacement.",
+            ) from error
 
     registry_receipt: dict[str, Any] | None = None
     if not dry_run:
-        registry_receipt = publish_scheduler_registry_manifest(
-            registry_models,
-            registry_manifest,
-            object_store_root=resolved_object_root,
-            object_store_prefix=resolved_object_prefix,
-        )
+        try:
+            registry_receipt = publish_scheduler_registry_manifest(
+                registry_models,
+                registry_manifest,
+                object_store_root=resolved_object_root,
+                object_store_prefix=resolved_object_prefix,
+                generated_at=registry_generated_at,
+                expected_preimage=expected_preimage,
+                commit_observer=registry_commit_observer,
+            )
+        except Exception as error:
+            raise _publish_failure(
+                error,
+                discovered_total=len(contexts),
+                attempted_total=attempted_total,
+                package_results=package_results,
+                error_code="SCHEDULER_REGISTRY_CANONICAL_PUBLISH_FAILED",
+                message="Validated packages were not committed to the canonical registry.",
+            ) from error
 
     package_status_counts = dict(Counter(str(item.get("status") or "unknown") for item in package_results))
     summary = {
@@ -230,6 +389,109 @@ def publish_all_basin_scheduler_registry(
     return summary
 
 
+def _guard_resources(validator: Callable[[Path], None] | None, workspace: Path) -> None:
+    if validator is not None:
+        validator(workspace)
+
+
+def _object_exists_after_failure(store: LocalObjectStore, manifest_key: str) -> bool:
+    try:
+        return store.exists(manifest_key)
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+def _publish_failure(
+    error: Exception,
+    *,
+    discovered_total: int,
+    attempted_total: int,
+    package_results: Sequence[Mapping[str, Any]],
+    error_code: str,
+    message: str,
+) -> SchedulerRegistryPublishError:
+    published = [item for item in package_results if item.get("status") == "published"]
+    source_details = getattr(error, "details", {})
+    source_reason = getattr(error, "reason", None)
+    source_phase = getattr(error, "phase", None)
+    if isinstance(source_details, Mapping):
+        source_reason = source_details.get("provider_reason", source_reason)
+        source_phase = source_details.get("provider_phase", source_phase)
+    allowed_reasons = {
+        "workspace_limit_exceeded",
+        "orphan_limit_exceeded",
+        "provider_preimage_changed",
+        "provider_replace_failed",
+        "provider_replace_uncertain",
+        "provider_postread_failed",
+    }
+    provider_reason = (
+        str(source_reason)
+        if isinstance(source_reason, str) and source_reason in allowed_reasons
+        else "provider_invalid"
+    )
+    provider_phase = str(source_phase) if source_phase in {"precommit", "replace", "replace_uncertain"} else "precommit"
+    return SchedulerRegistryPublishError(
+        error_code,
+        message,
+        details={
+            "provider_reason": provider_reason,
+            "provider_phase": provider_phase,
+            "discovered_total": discovered_total,
+            "attempted_total": attempted_total,
+            "created_total": len(published),
+            "packages": [
+                {
+                    "status": "published",
+                    "orphan_id": hashlib.sha256(str(item.get("manifest_uri") or "").encode("utf-8")).hexdigest()[:32],
+                }
+                for item in published[:256]
+            ],
+        },
+    )
+
+
+def _ensure_workspace_directory(path: Path, budget: WorkspaceBudget | None) -> None:
+    if budget is None:
+        path.mkdir(parents=True, exist_ok=True)
+    else:
+        budget.ensure_directory(path)
+
+
+def _write_workspace_inventory(
+    inventory: dict[str, Any],
+    path: Path,
+    budget: WorkspaceBudget | None,
+) -> None:
+    if budget is None:
+        write_inventory(inventory, path)
+    else:
+        budget.write_json(path, inventory)
+
+
+def _copy_workspace_tree(source: Path, target: Path, budget: WorkspaceBudget | None) -> None:
+    if budget is None:
+        shutil.copytree(source, target, symlinks=False)
+    else:
+        budget.copy_tree(source, target)
+
+
+def _context_limit_error(total: int, maximum: int) -> SchedulerRegistryPublishError:
+    return SchedulerRegistryPublishError(
+        "SCHEDULER_REGISTRY_CONTEXT_LIMIT_EXCEEDED",
+        "Publishable scheduler registry contexts exceed the configured hard limit.",
+        details={
+            "provider_reason": "orphan_limit_exceeded",
+            "provider_phase": "precommit",
+            "context_total": total,
+            "context_limit": maximum,
+            "attempted_total": 0,
+            "created_total": 0,
+            "packages": [],
+        },
+    )
+
+
 def scheduler_registry_row_from_sources(
     sources: ImportSources,
     *,
@@ -238,8 +500,10 @@ def scheduler_registry_row_from_sources(
     cpus_per_task: int,
     memory_mb: int,
     walltime_minutes: int,
+    source_lineage_model: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     model = sources.model
+    lineage_model = source_lineage_model or model
     manifest = sources.manifest
     ids = sources.ids
     geometry = sources.geometry
@@ -254,19 +518,19 @@ def scheduler_registry_row_from_sources(
         "memory_mb": int(memory_mb),
         "walltime_minutes": int(walltime_minutes),
         "lineage": "basins_scheduler_file_registry",
-        "basin_slug": model.get("basin_slug"),
-        "project_name": model.get("shud_input_name") or model.get("basin_slug"),
-        "shud_input_name": model.get("shud_input_name"),
+        "basin_slug": lineage_model.get("basin_slug"),
+        "project_name": lineage_model.get("shud_input_name") or lineage_model.get("basin_slug"),
+        "shud_input_name": lineage_model.get("shud_input_name"),
         "manifest_uri": manifest["manifest_uri"],
         "package_checksum": manifest["package_checksum"],
         "model_package_uri": manifest["model_package_uri"],
         "source_inventory_checksum": manifest.get("source_inventory_checksum"),
         "source_inventory_schema_version": manifest.get("source_inventory_schema_version"),
-        "source_path": model.get("source_path"),
-        "resolved_source_path": model.get("resolved_source_path"),
-        "source_is_symlink": bool(model.get("source_is_symlink", False)),
-        "root_relative_path": model.get("root_relative_path"),
-        "root_relative_resolved_path": model.get("root_relative_resolved_path"),
+        "source_path": lineage_model.get("source_path"),
+        "resolved_source_path": lineage_model.get("resolved_source_path"),
+        "source_is_symlink": bool(lineage_model.get("source_is_symlink", False)),
+        "root_relative_path": lineage_model.get("root_relative_path"),
+        "root_relative_resolved_path": lineage_model.get("root_relative_resolved_path"),
         "segment_count": geometry.segment_count,
         "output_segment_count": geometry.output_segment_count,
         "shud_evidence_counts": dict(geometry.evidence_counts),
@@ -290,12 +554,17 @@ def scheduler_registry_row_from_sources(
     }
 
 
-def package_version_for_model(model: Mapping[str, Any], template: str = DEFAULT_PACKAGE_VERSION_TEMPLATE) -> str:
+def package_version_for_model(
+    model: Mapping[str, Any],
+    template: str = DEFAULT_PACKAGE_VERSION_TEMPLATE,
+    *,
+    source_identity: Mapping[str, Any],
+) -> str:
     basin_slug = str(model.get("basin_slug") or "")
     model_id = _required_model_str(model, "model_id")
     slug_id = _slug_id(basin_slug)
-    content_hash = _model_content_hash(model)
-    source_hash = _model_source_hash(model)
+    content_hash = _required_source_identity_hash(source_identity, "content_sha256", model_id)[:12]
+    source_hash = _required_source_identity_hash(source_identity, "source_sha256", model_id)[:8]
     try:
         version = template.format(
             slug=basin_slug.replace("/", "_"),
@@ -391,13 +660,17 @@ def _repair_missing_radiation_contexts(
     basin_slugs: Sequence[str],
     model_ids: Sequence[str],
     already_selected_model_ids: set[str],
+    resource_validator: Callable[[Path], None] | None = None,
+    workspace_budget: WorkspaceBudget | None = None,
 ) -> list[PublishContext]:
     requested_slugs = {str(value) for value in basin_slugs if str(value)}
     requested_model_ids = {str(value) for value in model_ids if str(value)}
     contexts: list[PublishContext] = []
     repaired_root_base = workspace / "repaired-basins"
     repaired_inventory_dir = workspace / "repaired-inventories"
-    repaired_inventory_dir.mkdir(parents=True, exist_ok=True)
+    _guard_resources(resource_validator, workspace)
+    _ensure_workspace_directory(repaired_inventory_dir, workspace_budget)
+    _guard_resources(resource_validator, workspace)
     for model in _repairable_missing_radiation_models(inventory):
         basin_slug = str(model.get("basin_slug") or "")
         model_id = str(model.get("model_id") or "")
@@ -413,15 +686,25 @@ def _repair_missing_radiation_contexts(
         repaired_root = repaired_root_base / _slug_id(basin_slug)
         if repaired_root.exists():
             shutil.rmtree(repaired_root, ignore_errors=True)
+            if workspace_budget is not None:
+                workspace_budget.rescan()
         repaired_target = repaired_root / basin_slug
-        repaired_target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(source_path, repaired_target, symlinks=False)
+        _guard_resources(resource_validator, workspace)
+        _ensure_workspace_directory(repaired_target.parent, workspace_budget)
+        _copy_workspace_tree(source_path, repaired_target, workspace_budget)
+        _guard_resources(resource_validator, workspace)
         _strip_synology_sidecars(repaired_target)
+        if workspace_budget is not None:
+            workspace_budget.rescan()
+        _guard_resources(resource_validator, workspace)
         repair = repair_missing_tsd_rl_for_basin(
             isolated_root=repaired_root,
             basin_slug=basin_slug,
             template_search_root=basins_root,
+            copy_file=(workspace_budget.copy_file if workspace_budget else None),
         )
+        if workspace_budget is not None:
+            workspace_budget.rescan()
         if not repair_performed(repair):
             if requested_slugs or requested_model_ids:
                 raise SchedulerRegistryPublishError(
@@ -445,8 +728,17 @@ def _repair_missing_radiation_contexts(
                 },
             )
         repaired_inventory_path = repaired_inventory_dir / f"{model_id}.inventory.json"
-        write_inventory(repaired_inventory, repaired_inventory_path)
-        contexts.append(PublishContext(model=repaired_model, inventory_path=repaired_inventory_path, repair=repair))
+        _guard_resources(resource_validator, workspace)
+        _write_workspace_inventory(repaired_inventory, repaired_inventory_path, workspace_budget)
+        _guard_resources(resource_validator, workspace)
+        contexts.append(
+            PublishContext(
+                model=repaired_model,
+                inventory_path=repaired_inventory_path,
+                repair=repair,
+                source_lineage_model=model,
+            )
+        )
     return contexts
 
 
@@ -468,11 +760,27 @@ def _repair_calibrated_shud_contexts(
     contexts: Sequence[PublishContext],
     *,
     workspace: Path,
+    resource_validator: Callable[[Path], None] | None = None,
+    workspace_budget: WorkspaceBudget | None = None,
 ) -> list[PublishContext]:
-    return [_repair_calibrated_shud_context(context, workspace=workspace) for context in contexts]
+    return [
+        _repair_calibrated_shud_context(
+            context,
+            workspace=workspace,
+            resource_validator=resource_validator,
+            workspace_budget=workspace_budget,
+        )
+        for context in contexts
+    ]
 
 
-def _repair_calibrated_shud_context(context: PublishContext, *, workspace: Path) -> PublishContext:
+def _repair_calibrated_shud_context(
+    context: PublishContext,
+    *,
+    workspace: Path,
+    resource_validator: Callable[[Path], None] | None = None,
+    workspace_budget: WorkspaceBudget | None = None,
+) -> PublishContext:
     model = context.model
     basin_slug = str(model.get("basin_slug") or "")
     model_id = str(model.get("model_id") or "")
@@ -498,19 +806,30 @@ def _repair_calibrated_shud_context(context: PublishContext, *, workspace: Path)
         repaired_root = workspace / "repaired-basins-soil-alpha" / _slug_id(basin_slug)
         if repaired_root.exists():
             shutil.rmtree(repaired_root, ignore_errors=True)
+            if workspace_budget is not None:
+                workspace_budget.rescan()
         repaired_target = repaired_root / basin_slug
-        repaired_target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(source_path, repaired_target, symlinks=False)
+        _guard_resources(resource_validator, workspace)
+        _ensure_workspace_directory(repaired_target.parent, workspace_budget)
+        _copy_workspace_tree(source_path, repaired_target, workspace_budget)
+        _guard_resources(resource_validator, workspace)
         _strip_synology_sidecars(repaired_target)
+        if workspace_budget is not None:
+            workspace_budget.rescan()
+        _guard_resources(resource_validator, workspace)
         repair = repair_shud_calibration_for_basin(
             isolated_root=repaired_root,
             basin_slug=basin_slug,
+            write_bytes=(workspace_budget.write_bytes if workspace_budget else None),
         )
+        if workspace_budget is not None:
+            workspace_budget.rescan()
     else:
         repaired_root = _isolated_root_for_source_path(source_path, basin_slug)
         repair = repair_shud_calibration_for_basin(
             isolated_root=repaired_root,
             basin_slug=basin_slug,
+            write_bytes=(workspace_budget.write_bytes if workspace_budget else None),
         )
         if not calibration_repair_needed(repair):
             return context
@@ -539,13 +858,17 @@ def _repair_calibrated_shud_context(context: PublishContext, *, workspace: Path)
             },
         )
     repaired_inventory_dir = workspace / "repaired-inventories"
-    repaired_inventory_dir.mkdir(parents=True, exist_ok=True)
+    _guard_resources(resource_validator, workspace)
+    _ensure_workspace_directory(repaired_inventory_dir, workspace_budget)
     repaired_inventory_path = repaired_inventory_dir / f"{model_id}.inventory.json"
-    write_inventory(repaired_inventory, repaired_inventory_path)
+    _guard_resources(resource_validator, workspace)
+    _write_workspace_inventory(repaired_inventory, repaired_inventory_path, workspace_budget)
+    _guard_resources(resource_validator, workspace)
     return PublishContext(
         model=repaired_model,
         inventory_path=repaired_inventory_path,
         repair=_merge_repairs(context.repair, repair, basin_slug=basin_slug),
+        source_lineage_model=context.source_lineage_model or model,
     )
 
 
@@ -622,31 +945,15 @@ def _dir_size(path: Path) -> int:
     return total
 
 
-def _model_content_hash(model: Mapping[str, Any]) -> str:
-    material = {
-        "model_id": model.get("model_id"),
-        "basin_slug": model.get("basin_slug"),
-        "shud_input_name": model.get("shud_input_name"),
-        "root_relative_resolved_path": model.get("root_relative_resolved_path"),
-        "required_files": model.get("required_files") or {},
-        "checksums": model.get("checksums") or {},
-    }
-    return hashlib.sha256(
-        json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-    ).hexdigest()[:12]
-
-
-def _model_source_hash(model: Mapping[str, Any]) -> str:
-    material = {
-        "source_path": model.get("source_path"),
-        "resolved_source_path": model.get("resolved_source_path"),
-        "root_relative_path": model.get("root_relative_path"),
-        "root_relative_resolved_path": model.get("root_relative_resolved_path"),
-        "input_dir": model.get("input_dir"),
-    }
-    return hashlib.sha256(
-        json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-    ).hexdigest()[:8]
+def _required_source_identity_hash(identity: Mapping[str, Any], field: str, model_id: str) -> str:
+    value = identity.get(field)
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise SchedulerRegistryPublishError(
+            "SCHEDULER_REGISTRY_SOURCE_IDENTITY_INVALID",
+            "Package source identity is missing a canonical SHA-256 digest.",
+            details={"model_id": model_id, "field": field},
+        )
+    return value
 
 
 def _slug_id(value: str) -> str:

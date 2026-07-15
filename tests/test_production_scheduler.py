@@ -17790,6 +17790,47 @@ def _write_db_free_file_provider_fixtures(
     }
 
 
+def _externalize_readiness_fixture_to_bound_catalog(
+    roots: Mapping[str, Path],
+    paths: Mapping[str, Path],
+    *,
+    generated_at: datetime,
+) -> tuple[list[dict[str, Any]], str]:
+    readiness = json.loads(paths["NHMS_SCHEDULER_CANONICAL_READINESS_INDEX"].read_text(encoding="utf-8"))
+    entry = dict(readiness["entries"][0])
+    products = [dict(product) for product in entry.pop("products")]
+    source_id = str(entry["source_id"])
+    cycle_time = _dt(str(entry["cycle_time"]))
+    catalog_key = f"canonical/{source_id}/{format_cycle_time(cycle_time)}/_catalog/catalog.json"
+    catalog_content = _compact_json_bytes(
+        {
+            "schema_version": "nhms.canonical.product_catalog.v1",
+            "source_id": source_id,
+            "cycle_time": _format_iso_z(cycle_time),
+            "products": products,
+        }
+    )
+    store = LocalObjectStore(roots["object_store_root"], "s3://nhms")
+    catalog_uri = store.write_bytes_atomic(catalog_key, catalog_content)
+    entry.update(
+        {
+            "products": [],
+            "catalog_uri": catalog_uri,
+            "catalog_sha256": f"sha256:{sha256_bytes(catalog_content)}",
+            "catalog_row_count": len(products),
+        }
+    )
+    scheduler_module.publish_canonical_readiness_index(
+        [entry],
+        paths["NHMS_SCHEDULER_CANONICAL_READINESS_INDEX"],
+        object_store_root=roots["object_store_root"],
+        object_store_prefix="s3://nhms",
+        generated_at=generated_at,
+        verify_external_references=True,
+    )
+    return products, catalog_uri
+
+
 def _publish_empty_state_index(
     roots: Mapping[str, Path],
     paths: Mapping[str, Path],
@@ -18880,6 +18921,72 @@ def test_file_canonical_readiness_publisher_and_provider_use_existing_evaluator(
     assert evidence["readiness_index"]["entry_product_row_count"] == len(GFS_REQUIRED_STANDARD_VARIABLES) * 2
 
 
+def test_file_canonical_readiness_renewal_bypasses_only_age_and_revalidates_objects(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T12:00:00Z")
+    _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        generated_at=_dt("2026-06-27T00:00:00Z"),
+    )
+    products, _catalog_uri = _externalize_readiness_fixture_to_bound_catalog(
+        roots,
+        paths,
+        generated_at=_dt("2026-06-27T00:00:00Z"),
+    )
+
+    entries, evidence, preimage = scheduler_file_providers_module.load_canonical_readiness_entries_for_renewal(
+        paths["NHMS_SCHEDULER_CANONICAL_READINESS_INDEX"],
+        object_store_root=roots["object_store_root"],
+        object_store_prefix="s3://nhms",
+        now=_dt("2026-07-14T00:00:00Z"),
+    )
+
+    assert len(entries) == 1
+    assert evidence["status"] == "ready"
+    assert evidence["product_row_count"] == 0
+    assert entries[0]["catalog_row_count"] == len(products)
+    assert preimage.exists is True
+    assert preimage.sha256
+
+
+def test_file_canonical_readiness_renewal_rejects_missing_referenced_object(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T12:00:00Z")
+    _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        generated_at=_dt("2026-06-27T00:00:00Z"),
+    )
+    _externalize_readiness_fixture_to_bound_catalog(
+        roots,
+        paths,
+        generated_at=_dt("2026-06-27T00:00:00Z"),
+    )
+    missing = next((roots["object_store_root"] / "canonical").rglob("*.dat"))
+    missing.unlink()
+
+    with pytest.raises(scheduler_file_providers_module.SchedulerFileProviderError) as error_info:
+        scheduler_file_providers_module.load_canonical_readiness_entries_for_renewal(
+            paths["NHMS_SCHEDULER_CANONICAL_READINESS_INDEX"],
+            object_store_root=roots["object_store_root"],
+            object_store_prefix="s3://nhms",
+            now=_dt("2026-07-14T00:00:00Z"),
+        )
+
+    assert error_info.value.reason == "readiness_product_object_missing"
+
+
 def test_file_canonical_readiness_provider_uses_product_catalog_when_index_products_are_externalized(
     monkeypatch: Any,
     tmp_path: Path,
@@ -19141,7 +19248,7 @@ def test_file_canonical_readiness_provider_treats_stale_empty_identity_as_fresh_
     assert evidence["ready"] is False
     assert evidence["status"] == "canonical_incomplete"
     assert evidence["candidate_row_count"] == 0
-    assert evidence["readiness_index"]["entry_status"] == "identity_mismatch_empty_entry"
+    assert evidence["readiness_index"]["entry_status"] == "identity_mismatch_recomputed"
     assert evidence["readiness_index"]["entry_product_row_count"] == 0
     assert scheduler_module._canonical_evidence_is_fresh_zero_row(evidence) is True
 
@@ -19192,7 +19299,7 @@ def test_file_canonical_readiness_provider_infers_root_from_scheduler_index_path
 
     assert evidence["ready"] is False
     assert evidence["candidate_row_count"] == 0
-    assert evidence["readiness_index"]["entry_status"] == "identity_mismatch_empty_entry"
+    assert evidence["readiness_index"]["entry_status"] == "identity_mismatch_recomputed"
     assert evidence["readiness_index"]["canonical_product_catalog"]["source"] == "index_empty"
     assert scheduler_module._canonical_evidence_is_fresh_zero_row(evidence) is True
 
@@ -19259,9 +19366,10 @@ def test_file_canonical_readiness_evidence_redacts_identity_paths(
 
     assert stale_cache["ready"] is False
     assert stale_cache["reason"] == "canonical_identity_mismatch_cache_miss"
-    assert stale_cache["candidate_row_count"] == 0
-    assert stale_cache["readiness_index"]["entry_status"] == "identity_mismatch_stale_products"
-    assert stale_cache["readiness_index"]["stale_product_row_count"] > 0
+    assert stale_cache["candidate_row_count"] > 0
+    assert stale_cache["identity_rejected_row_count"] > 0
+    assert stale_cache["readiness_index"]["entry_status"] == "identity_mismatch_recomputed"
+    assert stale_cache["readiness_index"]["recomputed_product_row_count"] > 0
     assert stale_cache["policy_identity"]["policy_uri"] == "[object-uri]"
     assert stale_cache["source_object_identity"]["manifest_uri"] == "[object-uri]"
     assert stale_cache["source_object_identity"]["manifest_path"] == "[local-path]"

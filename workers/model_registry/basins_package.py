@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Callable
 
 from packages.common.object_store import MAX_OBJECT_MANIFEST_BYTES, LocalObjectStore, ObjectStoreError
 from packages.common.storage import validate_object_path
@@ -27,6 +27,7 @@ from .basins_discovery import (
 )
 
 BASINS_PACKAGE_SCHEMA_VERSION = "basins.package.v1"
+BASINS_PACKAGE_SOURCE_IDENTITY_SCHEMA_VERSION = "basins.package.source_identity.v1"
 BASINS_MIGRATION_REPORT_SCHEMA_VERSION = "basins.migration.v1"
 FORCING_SAMPLE_FILE_LIMIT = 5
 FORCING_SAMPLE_BYTE_LIMIT = 64 * 1024
@@ -107,6 +108,9 @@ def publish_basins_package(
     output_path: str | Path,
     copy_forcing: bool = False,
     object_store: LocalObjectStore | None = None,
+    output_capacity_guard: Callable[[Path, int], None] | None = None,
+    output_write_guard: Callable[[Path, int], None] | None = None,
+    expected_source_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     _validate_object_key_segment(model_id, "model_id", model_id=model_id, version=version)
     _validate_object_key_segment(version, "version", model_id=model_id, version=version)
@@ -156,17 +160,21 @@ def publish_basins_package(
         version=version,
         manifest_uri=manifest_uri,
     )
-    planned_included_files = sorted(
-        [
-            _planned_file_entry(
-                source_file,
-                model_id=model_id,
-                version=version,
-                manifest_uri=manifest_uri,
-            )
-            for source_file in source_files
-        ],
-        key=lambda item: (item["role"], item["relative_path"]),
+    source_identity, planned_included_files = _source_identity_from_plan(
+        model=model,
+        package_files=source_files,
+        forcing=forcing,
+        copy_forcing=copy_forcing,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
+    _verify_expected_source_identity(
+        expected_source_identity,
+        source_identity,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
     )
     checksum_material = {
         "schema_version": BASINS_PACKAGE_SCHEMA_VERSION,
@@ -208,6 +216,7 @@ def publish_basins_package(
             model_id=model_id,
             version=version,
             manifest_uri=manifest_uri,
+            before_write=output_write_guard,
         )
         return _success_payload("already_done", existing_manifest)
 
@@ -248,16 +257,20 @@ def publish_basins_package(
                 model_id=model_id,
                 version=version,
                 manifest_uri=manifest_uri,
+                before_write=output_write_guard,
             )
             return _success_payload("already_done", existing_manifest)
 
-        _preflight_json_output_path(
-            output_path,
-            error_code="BASINS_PACKAGE_OUTPUT_WRITE_FAILED",
-            model_id=model_id,
-            version=version,
-            manifest_uri=manifest_uri,
-        )
+        if output_capacity_guard is not None:
+            output_capacity_guard(Path(output_path).expanduser(), MAX_EXISTING_MANIFEST_BYTES)
+        elif output_write_guard is None:
+            _preflight_json_output_path(
+                output_path,
+                error_code="BASINS_PACKAGE_OUTPUT_WRITE_FAILED",
+                model_id=model_id,
+                version=version,
+                manifest_uri=manifest_uri,
+            )
         included_files = []
         for source_file in source_files:
             included_files.append(
@@ -315,6 +328,16 @@ def publish_basins_package(
             object_store=store,
             manifest_key=manifest_key,
         )
+        if len(manifest_bytes) > MAX_EXISTING_MANIFEST_BYTES:
+            raise BasinsPackageError(
+                "BASINS_PACKAGE_MANIFEST_TOO_LARGE",
+                "Generated Basins package manifest exceeds the bounded manifest size.",
+                model_id=model_id,
+                version=version,
+                manifest_uri=manifest_uri,
+            )
+        if output_write_guard is not None:
+            output_write_guard(Path(output_path).expanduser(), len(manifest_bytes))
         local_output_manifest = manifest
         _write_bytes_to_store_atomic(
             store,
@@ -362,6 +385,55 @@ def publish_basins_package(
             manifest_uri=manifest_uri,
         )
     return _success_payload("published", local_output_manifest)
+
+
+def basins_package_source_identity(
+    *,
+    inventory_path: str | Path,
+    model_id: str,
+) -> dict[str, Any]:
+    """Plan a root-independent identity for every source affecting a package."""
+
+    version = "source-identity"
+    inventory, _inventory_bytes = _read_inventory(inventory_path)
+    model = _find_publishable_model(inventory, model_id, version)
+    inventory_root = _resolved_inventory_root(inventory, model_id, version)
+    inventory_relative_root = _recorded_relative_inventory_root(inventory)
+    source_root = _resolved_source_root(model, inventory_root, model_id, version)
+    package_files = _package_source_files(
+        model,
+        inventory_root,
+        inventory_relative_root,
+        source_root,
+        None,
+        "",
+        model_id=model_id,
+        version=version,
+        manifest_uri=None,
+    )
+    forcing, forcing_files = _forcing_metadata(
+        model=model,
+        inventory_root=inventory_root,
+        inventory_relative_root=inventory_relative_root,
+        source_root=source_root,
+        object_store=None,
+        forcing_key="",
+        copy_forcing=False,
+        model_id=model_id,
+        version=version,
+        manifest_uri=None,
+    )
+    source_files = [*package_files, *forcing_files]
+    identity, _planned_entries = _source_identity_from_plan(
+        model=model,
+        package_files=source_files,
+        forcing=forcing,
+        copy_forcing=False,
+        model_id=model_id,
+        version=version,
+        manifest_uri=None,
+    )
+    return identity
 
 
 def write_basins_migration_report(
@@ -653,12 +725,12 @@ def _package_source_files(
     inventory_root: Path,
     inventory_relative_root: Path | None,
     source_root: Path,
-    object_store: LocalObjectStore,
+    object_store: LocalObjectStore | None,
     package_key: str,
     *,
     model_id: str,
     version: str,
-    manifest_uri: str,
+    manifest_uri: str | None,
 ) -> list[SourceFile]:
     expected_input_dir = _expected_input_dir(model, source_root, model_id=model_id, version=version)
     input_dir = _safe_source_dir(
@@ -736,8 +808,12 @@ def _package_source_files(
                     source_path=path,
                     source_root=source_root,
                     relative_path=relative_path,
-                    object_key=f"{package_key}/{relative_path}",
-                    object_uri=object_store.uri_for_key(f"{package_key}/{relative_path}"),
+                    object_key=f"{package_key}/{relative_path}" if object_store is not None else "",
+                    object_uri=(
+                        object_store.uri_for_key(f"{package_key}/{relative_path}")
+                        if object_store is not None
+                        else ""
+                    ),
                     role="calibration",
                 )
             )
@@ -747,12 +823,12 @@ def _package_source_files(
 def _optional_shud_runtime_files(
     input_dir: Path,
     source_root: Path,
-    object_store: LocalObjectStore,
+    object_store: LocalObjectStore | None,
     package_key: str,
     *,
     model_id: str,
     version: str,
-    manifest_uri: str,
+    manifest_uri: str | None,
 ) -> list[SourceFile]:
     optional_names = (
         f"{input_dir.name}.lake.sp",
@@ -788,12 +864,12 @@ def _validated_canonical_required_source_files(
     required_files: dict[str, Any],
     input_dir: Path,
     source_root: Path,
-    object_store: LocalObjectStore,
+    object_store: LocalObjectStore | None,
     package_key: str,
     *,
     model_id: str,
     version: str,
-    manifest_uri: str,
+    manifest_uri: str | None,
 ) -> list[SourceFile]:
     missing: list[str] = []
     extras: list[str] = []
@@ -921,19 +997,19 @@ def _canonical_shud_required_file_name(input_name: str, pattern: str) -> str:
 def _source_file_for_package(
     source_path: Path,
     relative_path: str,
-    object_store: LocalObjectStore,
+    object_store: LocalObjectStore | None,
     package_key: str,
     *,
     source_root: Path,
     role: str,
 ) -> SourceFile:
-    object_key = f"{package_key}/{relative_path}"
+    object_key = f"{package_key}/{relative_path}" if object_store is not None else ""
     return SourceFile(
         source_path=source_path,
         source_root=source_root,
         relative_path=relative_path,
         object_key=object_key,
-        object_uri=object_store.uri_for_key(object_key),
+        object_uri=object_store.uri_for_key(object_key) if object_store is not None else "",
         role=role,
     )
 
@@ -1018,7 +1094,7 @@ def _forcing_metadata(
     inventory_root: Path,
     inventory_relative_root: Path | None,
     source_root: Path,
-    object_store: LocalObjectStore,
+    object_store: LocalObjectStore | None,
     forcing_key: str,
     copy_forcing: bool,
     model_id: str,
@@ -1105,6 +1181,14 @@ def _forcing_metadata(
                 time_end = last_time if time_end is None else max(time_end, last_time)
             parsed_time_rows += row_count
         if copy_forcing:
+            if object_store is None:
+                raise BasinsPackageError(
+                    "BASINS_INVENTORY_INVALID",
+                    "Forcing payload planning requires an object store.",
+                    model_id=model_id,
+                    version=version,
+                    manifest_uri=manifest_uri,
+                )
             source_files.append(
                 SourceFile(
                     source_path=path,
@@ -1116,7 +1200,7 @@ def _forcing_metadata(
                 )
             )
 
-    forcing_payload_uri = _directory_uri(object_store, forcing_key) if copy_forcing else None
+    forcing_payload_uri = _directory_uri(object_store, forcing_key) if copy_forcing and object_store else None
     metadata = {
         "policy": "copied_explicitly" if copy_forcing else "excluded_by_default",
         "forcing_dir": str(forcing_dir),
@@ -1146,7 +1230,7 @@ def _planned_file_entry(
     *,
     model_id: str,
     version: str,
-    manifest_uri: str,
+    manifest_uri: str | None,
 ) -> dict[str, Any]:
     size_bytes, sha256 = _source_file_evidence(
         source_file.source_path,
@@ -1161,6 +1245,74 @@ def _planned_file_entry(
         "size_bytes": size_bytes,
         "sha256": sha256,
     }
+
+
+def _source_identity_from_plan(
+    *,
+    model: dict[str, Any],
+    package_files: list[SourceFile],
+    forcing: dict[str, Any],
+    copy_forcing: bool,
+    model_id: str,
+    version: str,
+    manifest_uri: str | None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    planned_entries = sorted(
+        [
+            _planned_file_entry(
+                source_file,
+                model_id=model_id,
+                version=version,
+                manifest_uri=manifest_uri,
+            )
+            for source_file in package_files
+        ],
+        key=lambda item: (item["role"], item["relative_path"]),
+    )
+    content_material = {
+        "package_schema_version": BASINS_PACKAGE_SCHEMA_VERSION,
+        "included_files": planned_entries,
+        "forcing": _forcing_checksum_material(forcing),
+        "copy_forcing": copy_forcing,
+    }
+    source_material = {
+        "model_id": model_id,
+        "basin_slug": model.get("basin_slug"),
+        "shud_input_name": model.get("shud_input_name"),
+        "root_relative_resolved_path": model.get("root_relative_resolved_path"),
+        "forcing_dir_original_name": model.get("forcing_dir_original_name"),
+    }
+    return (
+        {
+            "schema_version": BASINS_PACKAGE_SOURCE_IDENTITY_SCHEMA_VERSION,
+            "content_sha256": _sha256_json(content_material),
+            "source_sha256": _sha256_json(source_material),
+        },
+        planned_entries,
+    )
+
+
+def _verify_expected_source_identity(
+    expected: dict[str, Any] | None,
+    actual: dict[str, Any],
+    *,
+    model_id: str,
+    version: str,
+    manifest_uri: str,
+) -> None:
+    if expected is None:
+        return
+    required_fields = ("schema_version", "content_sha256", "source_sha256")
+    expected_identity = {field: expected.get(field) for field in required_fields}
+    actual_identity = {field: actual.get(field) for field in required_fields}
+    if expected_identity != actual_identity:
+        raise BasinsPackageError(
+            "BASINS_PACKAGE_SOURCE_IDENTITY_CHANGED",
+            "Basins package sources changed after the immutable version was planned.",
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
 
 
 def _source_file_evidence(
@@ -2771,11 +2923,15 @@ def _write_json_file(
     model_id: str | None = None,
     version: str | None = None,
     manifest_uri: str | None = None,
+    before_write: Callable[[Path, int], None] | None = None,
 ) -> None:
     output = Path(path).expanduser()
     try:
+        content = _json_bytes(payload)
+        if before_write is not None:
+            before_write(output, len(content))
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(_json_bytes(payload))
+        output.write_bytes(content)
     except OSError as error:
         raise BasinsPackageError(
             error_code,

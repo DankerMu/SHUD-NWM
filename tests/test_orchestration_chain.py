@@ -1442,6 +1442,10 @@ def test_cycle_stage_manifest_prefers_slurm_runtime_db_free_paths(
     monkeypatch.setenv("NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST", str(slurm_registry_manifest))
     monkeypatch.setenv("NHMS_SLURM_SCHEDULER_CANONICAL_READINESS_INDEX", str(slurm_readiness_index))
     monkeypatch.setenv("NHMS_SLURM_SCHEDULER_STATE_INDEX", str(slurm_state_index))
+    control_registry_manifest.parent.mkdir(parents=True)
+    slurm_registry_manifest.parent.mkdir(parents=True)
+    control_registry_manifest.write_text("same-registry-generation\n")
+    slurm_registry_manifest.write_text("same-registry-generation\n")
     orchestrator = types.SimpleNamespace(
         config=OrchestratorConfig(
             workspace_root=tmp_path / "workspace",
@@ -1475,6 +1479,31 @@ def test_cycle_stage_manifest_prefers_slurm_runtime_db_free_paths(
     assert str(control_registry_manifest) not in json.dumps(manifest)
     assert str(control_readiness_index) not in json.dumps(manifest)
     assert str(control_state_index) not in json.dumps(manifest)
+
+
+def test_cycle_stage_manifest_rejects_stale_slurm_registry_mirror(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from services.orchestrator import chain_manifests
+
+    control = tmp_path / "shared/registry.json"
+    worker = tmp_path / "private/registry.json"
+    control.parent.mkdir()
+    worker.parent.mkdir()
+    control.write_text("new-20-model-generation\n")
+    worker.write_text("old-13-model-generation\n")
+    monkeypatch.setenv("NHMS_SCHEDULER_REGISTRY_MANIFEST", str(control))
+    monkeypatch.setenv("NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST", str(worker))
+
+    with pytest.raises(OrchestratorError) as error_info:
+        chain_manifests._slurm_runtime_scheduler_path(
+            "NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST",
+            "NHMS_SCHEDULER_REGISTRY_MANIFEST",
+            require_generation_match=True,
+        )
+
+    assert error_info.value.error_code == "SCHEDULER_REGISTRY_MIRROR_MISMATCH"
 
 
 def test_chain_array_accounting_legacy_parse_uses_current_array_task_log_uri_binding(
@@ -2433,6 +2462,7 @@ def test_parse_success_copybacks_active_run_trees(
             "copyback_root": str(copyback_root),
             "run_ids": ["run_0", "run_1"],
             "extra_object_keys": (),
+            "object_store_prefix": orchestrator.config.object_store_prefix,
         }
     ]
     event = next(event for event in repository.events if event["event_type"] == "object_store_copyback")
@@ -2477,6 +2507,7 @@ def test_forecast_state_save_qc_terminal_success_copybacks_active_run_trees(
             "copyback_root": str(copyback_root),
             "run_ids": ["run_0", "run_1"],
             "extra_object_keys": (),
+            "object_store_prefix": orchestrator.config.object_store_prefix,
         }
     ]
     event = next(event for event in repository.events if event["event_type"] == "object_store_copyback")

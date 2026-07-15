@@ -1,0 +1,75 @@
+{
+  "schema_version": "nhms.scheduler.file_provider_refresh_receipt.v1",
+  "run_id": "refresh_20260714T120000Z_0123456789ab",
+  "started_at": "2026-07-14T12:00:00Z",
+  "finished_at": "2026-07-14T12:04:00Z",
+  "outcome": "published",
+  "reason": "success",
+  "operation_outcome": "published",
+  "operation_reason": "success",
+  "phase": "complete",
+  "database_free": true,
+  "providers": [
+    {
+      "name": "registry",
+      "before_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "before_inode": 1001,
+      "before_schema_version": "nhms.scheduler.file_model_registry.v1",
+      "before_generated_at": "2026-07-13T12:00:00Z",
+      "before_payload_checksum": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "after_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "after_schema_version": "nhms.scheduler.file_model_registry.v1",
+      "after_generated_at": "2026-07-14T12:03:00Z",
+      "after_payload_checksum": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "entry_count": 20
+    },
+    {
+      "name": "registry_worker_mirror",
+      "before_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "before_inode": 1004,
+      "before_schema_version": "nhms.scheduler.file_model_registry.v1",
+      "before_generated_at": "2026-07-13T12:00:00Z",
+      "before_payload_checksum": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "after_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "after_schema_version": "nhms.scheduler.file_model_registry.v1",
+      "after_generated_at": "2026-07-14T12:03:00Z",
+      "after_payload_checksum": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "entry_count": 20
+    },
+    {
+      "name": "readiness",
+      "before_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "before_inode": 1002,
+      "before_schema_version": "nhms.scheduler.canonical_readiness_index.v1",
+      "before_generated_at": "2026-07-13T12:00:00Z",
+      "before_payload_checksum": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "after_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "after_schema_version": "nhms.scheduler.canonical_readiness_index.v1",
+      "after_generated_at": "2026-07-14T12:03:00Z",
+      "after_payload_checksum": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "entry_count": 40
+    },
+    {
+      "name": "state",
+      "before_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "before_inode": 1003,
+      "before_schema_version": "nhms.scheduler.file_state_snapshot_index.v1",
+      "before_generated_at": "2026-07-13T12:00:00Z",
+      "before_payload_checksum": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "after_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+      "after_schema_version": "nhms.scheduler.file_state_snapshot_index.v1",
+      "after_generated_at": "2026-07-14T12:03:00Z",
+      "after_payload_checksum": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "entry_count": 528
+    }
+  ],
+  "orphans": {
+    "items": [],
+    "total": 0,
+    "discovered_total": 20,
+    "attempted_total": 20,
+    "created_total": 0,
+    "truncated": false
+  },
+  "residues": []
+}

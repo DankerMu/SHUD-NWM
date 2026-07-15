@@ -1,6 +1,6 @@
 # Current Production Operations Runbook
 
-最后更新：2026-06-30
+最后更新：2026-07-15
 
 适用范围：node-27 active DB + ingest + display，node-22 Slurm/SHUD compute，
 以及两者共享的 NFS object-store/published 数据面。
@@ -170,6 +170,151 @@ test -d "$NHMS_BASINS_ROOT"
 现场为 13；Slurm 仍负责资源仲裁，空闲整节点会并行运行，资源不足的任务排队。
 若只读 Basins 源中某个模型仅缺 `*.tsd.rl`，脚本会在私有 scratch copy
 里复制同覆盖期 radiation 模板，原始 NFS Basins 源保持不变。
+
+#### 3.1.1 DB-free file-provider 稳态刷新
+
+Registry、canonical readiness 和 state index 的 consumer freshness 上限均为
+168 小时；不得延长上限或只修改 `generated_at`。node-22 用独立 user-systemd
+timer 每日从权威内容完整重验并重发三个 provider，scheduler consumer 仍然只读、
+fail closed。手工新增流域时原有 `publish_scheduler_file_registry.py` 参数和成功输出
+保持兼容；它与 timer、model lifecycle、readiness/state writer 使用同一个
+destination-derived lock 和 expected-preimage 检查，并发者不会覆盖较新的权威内容。
+现场是 split-root：`OBJECT_STORE_ROOT` 必须保持
+`/scratch/frd_muziyao/nhms-prod/object-store`，用于发布 registry package，并校验 scheduler
+实际消费的 catalog/checkpoint 引用；`NHMS_SCHEDULER_PROVIDER_STORE_ROOT` 必须指向
+`/ghdc/data/nwm/object-store`，且只承载 registry、canonical-readiness、state-index 三个
+shared-NFS canonical provider。registry JSON 位于 shared root，但其中
+`s3://nhms/models/...` 始终由 private `OBJECT_STORE_ROOT` 解析；不得依赖历史双份 package、
+合并两根或关闭 object verification。
+
+Registry package version 必须由 publisher 同一套源计划生成：required、optional SHUD
+runtime、`CALIB/` 与 forcing CSV 的相对路径、大小和内容 checksum 都参与；机器绝对路径、
+repair run workspace 路径和 object URI 不参与。因此同内容跨 run/root 必须复用同 version，
+任一上述内容变化必须生成新 version。若现场出现
+`BASINS_PACKAGE_CHECKSUM_CONFLICT`，先核对运行代码是否仍使用旧的“required/checksums +
+绝对 source path”版本算法；不得删除或覆盖已有 immutable package。新实现还会在发布前
+重算 identity，期间源内容变化会以 `BASINS_PACKAGE_SOURCE_IDENTITY_CHANGED` 在 canonical
+replace 前失败。
+
+首次安装必须先记录 scheduler 与 refresh unit 状态，并保持 scheduler timer 原状态：
+
+```bash
+cd /scratch/frd_muziyao/NWM
+systemctl --user is-enabled nhms-compute-scheduler.timer || true
+systemctl --user is-active nhms-compute-scheduler.timer || true
+systemctl --user is-active nhms-compute-scheduler.service || true
+squeue -h -u "$USER"
+
+install -m 0600 infra/env/compute.scheduler-provider-refresh.env.example \
+  infra/env/compute.scheduler-provider-refresh.env
+# 按现场真值核对每个绝对路径；installer/wrapper 会拒绝完整 libpq selector 集。
+grep -En '^(DATABASE_URL|PIPELINE_DATABASE_URL|PG[A-Z0-9_]+)=' \
+  infra/env/compute.scheduler-provider-refresh.env && exit 1 || true
+install -d -m 0700 /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh \
+  /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/runs \
+  /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts \
+  /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/emergency
+
+scripts/install_node22_scheduler_file_provider_refresh.sh --install
+```
+
+部署窗口先 dry-run；它必须重新发现完整 Basins inventory。Readiness 不续签旧 index：
+在任何 canonical replace 前，用同次 prospective registry model identities 分别扫描 private
+`OBJECT_STORE_ROOT` 中最新的 GFS/IFS cycle catalog，执行 bounded/no-follow、schema、
+source/cycle、统一 lineage identity、forecast hours、catalog row、canonical object checksum
+全验证，并生成每个 source/model 一条只含 `catalog_uri + catalog_sha256 +
+catalog_row_count` 绑定的 entry（N 个当前模型应为 GFS N + IFS N；移除被
+`HHe` 完整覆盖的重复目录 `HHe-MAIN-02` 后，2026-07-15 现场为 19 个模型、
+每个 source 19 条、共 38 条）。最新 catalog
+invalid 时禁止回退旧 cycle；consumer identity mismatch 必须重读同一绑定 catalog 后重算。
+State index 才允许仅绕过年龄并重验 checkpoint object。任何 missing/invalid 引用或
+registry/readiness model-set mismatch 都在 canonical replace 前失败，绝不续签 legacy
+readiness、复制巨大 products、生成空 index、DB fallback 或 timestamp-only 文件：
+
+```bash
+scripts/scheduler_file_provider_refresh_once.sh --dry-run
+jq '{outcome,reason,database_free,providers,orphans}' \
+  /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json
+
+scripts/scheduler_file_provider_refresh_once.sh
+jq '{outcome,reason,database_free,providers,orphans}' \
+  /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json
+```
+
+`published` receipt 必须绑定三个 shared canonical 文件以及
+`NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST` 指向的 private compute-visible registry mirror。
+shared registry 与 worker mirror 必须具有完全相同的物理 SHA-256 和 model count；registry 的现场模型数
+应为当前完整 inventory（2026-06-30 为 13，2026-07-14 为 20；移除重复的
+`HHe-MAIN-02` 后，2026-07-15 为 19），readiness 必须与同次
+registry model set 逐 source 完全一致并记录 catalog URI/SHA/row count；state entry 不能因
+刷新减少。
+Installer 在任何 systemd mutation 前都会用同一 strict v1 runtime validator 读取 bounded/no-follow
+latest receipt，并逐一比对三个 shared provider、worker registry mirror 的当前 SHA-256 及
+shared/mirror model count；minimal、extra、symlink、oversize、
+stale、missing 或非 `published` receipt 均拒绝启用。
+Wrapper 会把 mode-0600 env 当作固定 key/value 数据解析并 export，不执行其中的 shell；
+systemd `UnsetEnvironment=` 与 wrapper 最终 `unset` 会同时清除 user-manager/调用 shell
+继承的 `DATABASE_URL`、`PIPELINE_DATABASE_URL` 和全部受支持 libpq selector。
+Receipt schema 为 `nhms.scheduler.file_provider_refresh_receipt.v1`，outcome 只允许
+`dry_run`、`published`、`already_running`、`failed`、`replace_uncertain`、
+`restored_previous`、`published_receipt_failed`。latest 原子替换，history 只留最新 32；
+单次 workspace 上限 64 GiB/250,000 entry/depth 32。canonical commit 前产生的 immutable
+content-addressed package 不自动删除；receipt 只记录安全相对标识，最多前 256 条、总数
+及 truncated，候选总数超过 4,096 时阻断。不要凭目录名批量删除 package 或不确定 temp
+residue。
+
+refresh unit 仅在 `nhms-compute-scheduler.service` inactive 时运行，并声明在 scheduler
+service 之前排序。registry 提交顺序固定为 worker mirror 先、shared canonical 后；两者使用
+同一 prospective model rows 与 `generated_at`，所以成功字节必须完全一致。shared CAS 失败时，
+worker mirror 按其 committed preimage 恢复旧 bytes；任何恢复不确定都报
+`replace_uncertain`。短暂的 mirror-new/shared-old 窗口不会被当作可执行 generation：每个
+Slurm stage manifest 建立前会逐字核对两份 registry，不一致以
+`SCHEDULER_REGISTRY_MIRROR_MISMATCH` fail closed，不提交 job。禁止用 `cp` 手工追平 mirror。
+registry/mirror 成功后若 readiness 或 state 发布失败，runner 会按
+state → readiness → shared registry → worker mirror 的逆提交顺序，用每条 lane 的
+committed preimage CAS 恢复旧 bytes。全部恢复才允许 `restored_previous`，并清空 committed
+provider evidence；任一 lane 被并发替换、无法读取或无法恢复都保持
+`replace_uncertain`，primary receipt 失败时也不得改写成 `published_receipt_failed`。
+
+Canonical replace 前失败时旧文件完整 stat/digest tuple 不变；preimage race 返回
+`provider_preimage_changed`。读者在原子 replace 时只能看见完整 old/new。确定的 post-read
+失败会恢复经验证的旧 bytes 并报 `restored_previous`；replace/fsync 不确定时返回
+`replace_uncertain`，不要宣称回滚。provider 已 commit 但 primary receipt 发布失败时，
+预留的本地 mode-0600 emergency record 为唯一 acceptance evidence；用下列命令只重建
+receipt，绝不重发 provider：
+
+```bash
+scripts/scheduler_file_provider_refresh_once.sh \
+  --recover-emergency /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/emergency/<receipt>.json
+```
+
+恢复会先比对三个当前 canonical SHA-256 与 worker registry mirror。primary 与 emergency
+均失败就是 `replace_uncertain`，必须直接重验四个绑定；journal/stderr 只作诊断。
+
+成功 manual refresh 后才建立稳态：
+
+```bash
+scripts/install_node22_scheduler_file_provider_refresh.sh --enable
+systemctl --user status nhms-scheduler-file-provider-refresh.timer \
+  nhms-scheduler-file-provider-refresh.service --no-pager
+systemctl --user list-timers nhms-scheduler-file-provider-refresh.timer --no-pager
+```
+
+timer cadence 为每日 02:15 UTC 加最多 30 分钟 jitter，严格小于 168 小时；oneshot
+service 在 tick 间应为 inactive。refresh unit 的安装、失败和回滚不得 enable/disable、
+start/stop 或替换 `nhms-compute-scheduler.*`。若安装、manual refresh 或 live scheduler
+proof 任一步失败，执行：
+
+```bash
+scripts/install_node22_scheduler_file_provider_refresh.sh --rollback
+# 脚本按 install 前记录恢复 refresh 初态，并断言 scheduler units 完全未变。
+```
+
+Live acceptance 还必须把 receipt -> 三 provider digest -> scheduler pass/candidate/run ->
+实际 Slurm stage job/terminal -> 同一 run 的全新 forcing/runs/states leaf 串起来，并从
+node-27 同一 NFS 视图核对 owner/group/mode/default ACL 与 `nwm` 访问。旧 forcing 复用、
+synthetic ACL probe、未绑定/非 terminal job 都不算通过。只有这一链通过后保留 refresh
+timer enabled/active；所有退出路径恢复 scheduler 初始状态并确认无 issue-owned job。
 
 前端全国总览的静态边界/河网也必须从同一个 Basins 真相源刷新；这是新增流域后
 让公网地图立刻显示边界和基础河网的运维入口。脚本会在 `--basins-root` 下自动发现

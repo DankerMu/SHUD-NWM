@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nhms.invalid/schemas/scheduler_file_provider_refresh_receipt.schema.json",
+  "title": "NHMS scheduler file-provider refresh receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "started_at",
+    "finished_at",
+    "outcome",
+    "reason",
+    "operation_outcome",
+    "operation_reason",
+    "phase",
+    "database_free",
+    "providers",
+    "orphans",
+    "residues"
+  ],
+  "properties": {
+    "schema_version": {"const": "nhms.scheduler.file_provider_refresh_receipt.v1"},
+    "run_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.-]+$"},
+    "started_at": {"type": "string", "format": "date-time", "maxLength": 64},
+    "finished_at": {"type": "string", "format": "date-time", "maxLength": 64},
+    "outcome": {
+      "enum": [
+        "dry_run",
+        "published",
+        "already_running",
+        "failed",
+        "replace_uncertain",
+        "restored_previous",
+        "published_receipt_failed"
+      ]
+    },
+    "reason": {
+      "enum": [
+        "success",
+        "dry_run_complete",
+        "refresh_already_running",
+        "configuration_invalid",
+        "provider_invalid",
+        "provider_preimage_changed",
+        "provider_replace_failed",
+        "provider_replace_uncertain",
+        "provider_postread_failed",
+        "workspace_limit_exceeded",
+        "orphan_limit_exceeded",
+        "primary_receipt_failed",
+        "receipt_channels_failed",
+        "emergency_record_invalid"
+      ],
+      "maxLength": 64
+    },
+    "operation_outcome": {
+      "enum": [
+        "dry_run",
+        "published",
+        "already_running",
+        "failed",
+        "replace_uncertain",
+        "restored_previous",
+        "published_receipt_failed"
+      ]
+    },
+    "operation_reason": {
+      "enum": [
+        "success",
+        "dry_run_complete",
+        "refresh_already_running",
+        "configuration_invalid",
+        "provider_invalid",
+        "provider_preimage_changed",
+        "provider_replace_failed",
+        "provider_replace_uncertain",
+        "provider_postread_failed",
+        "workspace_limit_exceeded",
+        "orphan_limit_exceeded",
+        "primary_receipt_failed",
+        "receipt_channels_failed",
+        "emergency_record_invalid"
+      ],
+      "maxLength": 64
+    },
+    "phase": {"type": "string", "minLength": 1, "maxLength": 64},
+    "database_free": {"const": true},
+    "providers": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "before_sha256",
+          "before_inode",
+          "before_schema_version",
+          "before_generated_at",
+          "before_payload_checksum",
+          "after_sha256",
+          "after_schema_version",
+          "after_generated_at",
+          "after_payload_checksum",
+          "entry_count"
+        ],
+        "properties": {
+          "name": {"enum": ["registry", "registry_worker_mirror", "readiness", "state"]},
+          "before_sha256": {
+            "oneOf": [
+              {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              {"type": "null"}
+            ]
+          },
+          "before_inode": {"type": ["integer", "null"], "minimum": 0},
+          "before_schema_version": {"type": ["string", "null"], "maxLength": 128},
+          "before_generated_at": {"type": ["string", "null"], "format": "date-time", "maxLength": 64},
+          "before_payload_checksum": {"type": ["string", "null"], "maxLength": 128},
+          "after_sha256": {
+            "oneOf": [
+              {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              {"type": "null"}
+            ]
+          },
+          "after_schema_version": {"type": ["string", "null"], "maxLength": 128},
+          "after_generated_at": {"type": ["string", "null"], "format": "date-time", "maxLength": 64},
+          "after_payload_checksum": {"type": ["string", "null"], "maxLength": 128},
+          "entry_count": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "orphans": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items",
+        "total",
+        "discovered_total",
+        "attempted_total",
+        "created_total",
+        "truncated"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {"type": "string", "pattern": "^package:[0-9a-f]{32}$"}
+        },
+        "total": {"type": "integer", "minimum": 0, "maximum": 4096},
+        "discovered_total": {"type": "integer", "minimum": 0},
+        "attempted_total": {"type": "integer", "minimum": 0, "maximum": 4096},
+        "created_total": {"type": "integer", "minimum": 0, "maximum": 4096},
+        "truncated": {"type": "boolean"}
+      }
+    },
+    "residues": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {"type": "string", "maxLength": 512, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"}
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"outcome": {"enum": ["published", "dry_run"]}}, "required": ["outcome"]},
+      "then": {
+        "properties": {
+          "providers": {
+            "oneOf": [
+              {
+                "minItems": 3,
+                "maxItems": 3,
+                "prefixItems": [
+                  {"properties": {"name": {"const": "registry"}}},
+                  {"properties": {"name": {"const": "readiness"}}},
+                  {"properties": {"name": {"const": "state"}}}
+                ]
+              },
+              {
+                "minItems": 4,
+                "maxItems": 4,
+                "prefixItems": [
+                  {"properties": {"name": {"const": "registry"}}},
+                  {"properties": {"name": {"const": "registry_worker_mirror"}}},
+                  {"properties": {"name": {"const": "readiness"}}},
+                  {"properties": {"name": {"const": "state"}}}
+                ]
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

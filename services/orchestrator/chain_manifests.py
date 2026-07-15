@@ -8,7 +8,7 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from packages.common.manifest_index import ManifestValidationError, serialize_manifest_index
 from packages.common.object_store import LocalObjectStore
-from packages.common.safe_fs import SafeFilesystemError
+from packages.common.safe_fs import SafeFilesystemError, read_bytes_limited_no_follow
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.chain_manifest_contracts import (
     _assembly_from_entry,
@@ -208,6 +208,7 @@ def build_cycle_stage_manifest(
         "scheduler_registry_manifest": _slurm_runtime_scheduler_path(
             "NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST",
             "NHMS_SCHEDULER_REGISTRY_MANIFEST",
+            require_generation_match=True,
         ),
         "scheduler_canonical_readiness_backend": os.getenv("NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND", ""),
         "scheduler_canonical_readiness_index": _slurm_runtime_scheduler_path(
@@ -258,10 +259,33 @@ def build_cycle_stage_manifest(
     return manifest
 
 
-def _slurm_runtime_scheduler_path(slurm_env_key: str, control_env_key: str) -> str:
+def _slurm_runtime_scheduler_path(
+    slurm_env_key: str,
+    control_env_key: str,
+    *,
+    require_generation_match: bool = False,
+) -> str:
     """Return the compute-node-visible scheduler path for Slurm stage manifests."""
 
-    return str(os.getenv(slurm_env_key) or os.getenv(control_env_key) or "")
+    control = str(os.getenv(control_env_key) or "")
+    worker = str(os.getenv(slurm_env_key) or control)
+    if require_generation_match and control and worker != control:
+        try:
+            control_bytes = read_bytes_limited_no_follow(Path(control), max_bytes=16 * 1024 * 1024)
+            worker_bytes = read_bytes_limited_no_follow(Path(worker), max_bytes=16 * 1024 * 1024)
+        except (OSError, SafeFilesystemError) as error:
+            raise OrchestratorError(
+                "SCHEDULER_REGISTRY_MIRROR_MISMATCH",
+                "The Slurm registry mirror generation cannot be verified against the scheduler provider.",
+                {"provider": "registry", "reason": "mirror_unreadable"},
+            ) from error
+        if control_bytes != worker_bytes:
+            raise OrchestratorError(
+                "SCHEDULER_REGISTRY_MIRROR_MISMATCH",
+                "The Slurm registry mirror is not the scheduler provider generation.",
+                {"provider": "registry", "reason": "generation_mismatch"},
+            )
+    return worker
 
 
 def write_cycle_manifest_index(
