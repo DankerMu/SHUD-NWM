@@ -941,6 +941,26 @@ Order is load-bearing:
   verified salvage objects and emits an empty salvage list. Any
   non-salvageable state gap remains `gap` and keeps retention fail-closed
   until product coverage is restored.
+  Issue #1070 live closure note (2026-07-15): consume only the immutable
+  228-selector audit baseline at SHA-256
+  `e2d4f08150943f09af87d3e53e79cff26728fb438aabb545dabff07842497d04`
+  (normalized selector-set SHA-256
+  `ad5da1c51e1e90ec7bf2912d204186d21879be4e69536cc24a469520a486d0c6`).
+  Hard-coded fallback scope is forbidden. Use an explicitly read-only role,
+  prove SELECT plus write refusal, and use `per_tick_bound=228` so dry-run and
+  enforce each enumerate the entire input list; default 32 is insufficient.
+  Install the accepted receipt at a frozen mode-0600 non-timer path and bind
+  full/ordered-selector hashes before and after. A streaming read-only COPY
+  preflight must prove every selector has `row_count > 0`, exact CSV bytes below
+  the tightened 512 MiB cap, `4 * max_bytes` below available/cgroup memory,
+  aggregate uncompressed bytes preserve 300 GiB free-space headroom, and a
+  doubled observed duration plus fixed overhead fits a four-hour external
+  timeout. Otherwise create/fix a streaming-export blocker before live enforce.
+  Require clean/no-error export or verified skips for all selectors; treat the
+  object/manifest pair as non-transactional and independently verify both. A
+  zero-row manifest must not provide audit coverage. Commit the fresh follow-up
+  audit with an empty salvage list. Secrets, DB mutation, object deletion,
+  compression, drill, retention, timers, and node-22 remain out of scope.
 
 ## 4. Hypertable compression (`hypertable-compression`)
 

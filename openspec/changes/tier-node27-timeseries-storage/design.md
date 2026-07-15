@@ -667,10 +667,113 @@ Boundary-surface checklist:
 - Public entrypoints added: 1 exporter + 1 wrapper + 1 env example + 1 runbook section.
 - Read surfaces: archive-completeness receipt file (schema-validated); `met.forcing_station_timeseries`, `hydro.river_timeseries` via `COPY (SELECT … WHERE PK-scoped) TO STDOUT WITH (FORMAT CSV, HEADER)`; sentinel write preflight against a scratch table (or `SELECT has_table_privilege`).
 - Write/delete/overwrite surfaces: per exported selector, one `data.csv.zst` object + one `manifest.json` sibling published under `NHMS_ARCHIVE_ROOT/db-export/<lane>/<identity>/` (one directory per selector, `manifest.exports` length 1); receipt publication outside the archive root. All via `atomic_write_bytes_no_follow` at mode 0600. Zero DB writes. Zero deletes anywhere.
-- Staging/publish/rollback surfaces: same-directory temp + atomic rename via `require_durable_replace=True`; partial-write is impossible; rollback = re-run (idempotent skip).
+- Staging/publish/rollback surfaces: each individual object or manifest uses a
+  same-directory temp + atomic replace via `require_durable_replace=True`, but
+  the two-file pair is not transactionally atomic. Object-only, manifest-only,
+  checksum/selector mismatch, or uncertain publication is failed evidence and
+  provides no audit coverage. Retry may re-export only the same exact selector
+  path; a run becomes qualifying only after every pair independently verifies.
+  Rollback/recovery is idempotent re-run, not deletion or relabeling.
 - Producer/consumer evidence boundaries: input = audit's `salvage_selectors`; output = manifest with `provenance: "db-export"`; downstream drill (#854) verifies salvage objects by sha256 + manifest row-count parity, not by reingest.
 - Stale-state/idempotency boundaries: re-run over verified existing objects skips them; a stale receipt (older than audit's next scheduled tick) is not a runtime hazard because the operation is one-time and the audit refresh cadence is already gated in #849.
 - Unchanged downstream consumers: display API/frontend/read paths (ADR 0001), archive mover (#848), storage inventory audit (#847), resource governance (#849 extension), raw retention (pre-existing), hypertable compression (#851), write-guard (#852 owns), retention gate (#855 owns). None touched.
+
+### Issue #1070 live task 3.3 closure (2026-07-15)
+
+Issue #1070 closes only the deferred node-27 live task 3.3. The exporter and
+manual restore runbook from tasks 3.1/3.2 remain unchanged. Upstream issues
+#1066/#1067 and #849 are complete, so the stale issue-body hard-coded-window
+fallback is forbidden: design D6 remains authoritative and the live exporter
+must consume the audit receipt's selector list verbatim.
+
+- The immutable input baseline is
+  `storage-inventory-audit/completeness-incomplete-live-20260713T155314Z.json`
+  at SHA-256
+  `e2d4f08150943f09af87d3e53e79cff26728fb438aabb545dabff07842497d04`.
+  It has `outcome=incomplete`, exactly 228 selectors, all for
+  `met.forcing_station_timeseries`, and normalized selector-set SHA-256
+  `ad5da1c51e1e90ec7bf2912d204186d21879be4e69536cc24a469520a486d0c6`.
+  Before any runner invocation, install those committed bytes mode `0600` at a
+  task-specific path outside every timer's write target (for example
+  `/home/nwm/node27-db-export-salvage-inputs/completeness-incomplete-live-20260713T155314Z.json`).
+  Dry-run and enforce use only that frozen path. Verify the full receipt hash
+  before and after both invocations. The normalized selector-set hash algorithm
+  is exactly `jq -cS '.salvage_selectors' <receipt>` (including jq's trailing
+  newline) piped to SHA-256. The dry-run/enforce terminal envelope also records
+  the ordered selected-descriptor SHA-256. Selector injection, omission,
+  reordering, live timer-path replacement, or a hard-coded list blocks
+  execution.
+- The role guard is authoritative. The live env uses `nhms_display_ro` (or an
+  equivalently explicit read-only role) only after proving SELECT access to
+  both target hypertables and proving INSERT/UPDATE/DELETE refusal. A writer
+  DSN is never an operational workaround. The mode-0600 env and captured
+  evidence must redact the DSN password.
+- Because the runner slices the input list to `per_tick_bound` and does not
+  emit a deferred-selector list, the qualifying dry-run and enforce receipt
+  both use `per_tick_bound=228` and must contain all 228 baseline selectors in
+  exact order. The default bound 32 cannot satisfy task 3.3. This count increase
+  does not weaken resource controls. Before enforce, a separate read-only,
+  streaming preflight executes the same fixed-column COPY query and exact
+  selector predicate while discarding chunks after counting them; it records
+  exact CSV bytes, row count, and elapsed time per selector without buffering a
+  selector or publishing an object. Every row count must be `>0`. The live env
+  tightens `NODE27_DB_EXPORT_SALVAGE_MAX_SELECTOR_BYTES` to 512 MiB. Enforce is
+  blocked unless: every exact streamed selector size is below that cap;
+  `4 * max_selector_bytes_observed` is below the smaller of host
+  `MemAvailable` and any finite remaining cgroup memory; the sum of uncompressed
+  CSV bytes is no more than `free_bytes - 322122547200` (preserving the 300 GiB
+  archive warning headroom even under a no-compression bound); and
+  `2 * observed_preflight_seconds + 228 * 5 seconds <= 4 hours`. The wrapper is
+  then bounded by an external four-hour timeout. The existing per-selector
+  statement timeout remains active. If the exact streaming preflight cannot
+  establish these bounds, first replace the buffered exporter with a streaming
+  hard-limit implementation in a separate blocker issue/PR; do not run live.
+- The dry-run must be `outcome=clean`, contain 228 descriptors with no `error`,
+  and write no `db-export` object. Enforce is the only authorized archive-side
+  mutation; it may publish only the 228 selector-derived `data.csv.zst` and
+  manifest pairs plus its receipt. DB mutation, hard-coded scope, object
+  deletion, automated restore, compression, drill, retention, timer enablement,
+  and node-22 activity remain out of scope.
+- A qualifying enforce receipt has `outcome=clean`, covers all 228 selectors,
+  contains only `exported` or `skipped_verified` states, and has zero errors.
+  Every descriptor's exported/preflight row count must be `>0`; a zero-row
+  selector is not salvage and blocks publication/closure. Every committed
+  object is re-verified against the manifest schema, SHA-256, selector
+  identity, fixed columns, and exported row count. Because object and manifest
+  publication are individually atomic but not pair-atomic, object-only,
+  manifest-only, mismatch, and uncertain pairs remain failed evidence and
+  provide no completeness coverage. A partial or
+  all-failed attempt is immutable failed evidence and cannot be relabeled; an
+  idempotent retry may close only the remaining selectors and the final
+  qualifying receipt must still enumerate all 228.
+- After object verification, run a fresh storage inventory audit. Task 3.3
+  closes only when every baseline selector has verified `db-export` coverage,
+  the follow-up receipt has an empty `salvage_selectors` list, and all formerly
+  salvageable forcing gaps are `complete`. A zero-row manifest must never
+  provide coverage; if the live preflight finds a zero-row selector, stop and
+  fix both exporter publication and audit coverage semantics in a blocker PR
+  before resuming. Any remaining non-salvageable gap keeps the receipt truthful
+  and retention fail-closed; it must not be hidden to manufacture a global
+  `complete` outcome.
+- Commit the input baseline reference, role/row-count/free-space preflight,
+  dry-run, enforce, object post-verification, follow-up completeness audit, and
+  a terminal envelope tied to the exact deployed Git SHA. Secrets and the live
+  env file remain uncommitted.
+
+Live closure invariants:
+
+- Governing invariant: input selector-set identity is byte- and set-bound to
+  the accepted audit baseline; output coverage is one verified DB-export pair
+  per selector, with no DB write capability.
+- Failure/rollback: any role ambiguity, selector drift, dry-run error,
+  zero-row selector, per-selector oversize/timeout, total memory/disk/wall-clock
+  budget failure, partial pair publication, checksum/row-count
+  mismatch, or follow-up audit gap blocks closure. Published verified salvage
+  is additive and retained for idempotent retry; no cleanup is used to convert
+  failed evidence into PASS.
+- Evidence boundary: #1070 owns salvage plus the follow-up audit only. #1069
+  retains compression ownership, #1071 owns drill/retention dry-run, and #1072
+  retains the separately authorized irreversible retention enforce.
 
 ## Workflow Fixture: Issue #852 Fail-Closed Compressed-Chunk Write Guard
 
