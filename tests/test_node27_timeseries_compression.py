@@ -559,6 +559,7 @@ def test_main_publishes_refused_lock_receipt_without_db_calls(
     env = _base_env(tmp_path)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
+    monkeypatch.setattr(compression, "_current_head_sha", lambda **_kwargs: "a" * 40)
     # Pre-hold the lock in the same process.
     lock_path = Path(env["NODE27_TIMESERIES_COMPRESSION_LOCK_PATH"])
     fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
@@ -625,6 +626,8 @@ def test_receipt_validates_against_schema(tmp_path: Path, monkeypatch: pytest.Mo
         fetch_chunks=fake_fetch, measure_chunk_bytes=fake_measure, compress_chunk=fake_compress,
     )
     jsonschema.validate(receipt, _load_schema())
+    assert receipt["schema_version"] == "2.0"
+    assert receipt["head_sha"] == compression._current_head_sha()
     assert len(receipt["selected"]) == 5
     assert len(receipt["deferred"]) == 1
     assert len(receipt["skipped"]) == 1
@@ -651,6 +654,15 @@ def test_receipt_validates_against_schema(tmp_path: Path, monkeypatch: pytest.Mo
 def test_example_validates_against_schema() -> None:
     example = json.loads((_ROOT / "schemas/examples/timeseries_compression_receipt.example.json").read_text())
     jsonschema.validate(example, _load_schema())
+
+
+def test_schema_keeps_v1_read_compatibility_but_v2_requires_head_sha() -> None:
+    receipt = _example_receipt()
+    del receipt["head_sha"]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(receipt, _load_schema())
+    receipt["schema_version"] = "1.0"
+    jsonschema.validate(receipt, _load_schema())
 
 
 # ---------------------------------------------------------------------------

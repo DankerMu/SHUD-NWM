@@ -1,119 +1,104 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "2.0",
   "issue": 1069,
-  "generated_at": "2026-07-15T12:00:00Z",
+  "generated_at": "2026-07-15T12:20:00Z",
   "node": "node-27",
-  "head_sha": "0123456789abcdef0123456789abcdef01234567",
-  "database_identity": {
-    "dbname": "nhms",
-    "instance": "node27-primary-pg15",
-    "postgres_version": "15.2",
-    "timescaledb_version": "2.10.2"
-  },
-  "authorization": {
-    "lag_seconds": 604800,
-    "bound": 1,
-    "max_selected_bytes": 8589934592,
-    "min_free_bytes": 322122547200,
-    "timeout_seconds": 900,
-    "enforce_invocations": 1
-  },
+  "mutation_head_sha": "0123456789abcdef0123456789abcdef01234567",
+  "verifier_head_sha": "89abcdef0123456789abcdef0123456789abcdef",
+  "database_identity": {"dbname": "nhms", "instance": "node27-primary-pg15", "postgres_version": "15.2", "timescaledb_version": "2.10.2"},
+  "authorization": {"lag_seconds": 604800, "bound": 1, "max_selected_bytes": 8589934592, "min_free_bytes": 322122547200, "timeout_seconds": 900, "enforce_invocations": 1},
   "preflight": {
     "evidence": {"path": "/home/nwm/NWM/.nhms-issue1069-live/preflight.json", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bytes": 1000},
     "schema_dump": {"path": "/home/nwm/NWM/.nhms-issue1069-live/nhms-schema.dump", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "bytes": 2000},
     "catalog_before": {"path": "/home/nwm/NWM/.nhms-issue1069-live/catalog-before.json", "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "bytes": 3000},
     "pg_restore_list_exit_code": 0,
-    "role": {
-      "current_user": "nhms", "rolsuper": true, "rolcreaterole": true,
-      "rolcreatedb": true, "owns_hydro_river_timeseries": true,
-      "owns_met_forcing_station_timeseries": true,
-      "execute_compress_chunk_regclass_boolean": true, "role_created": false,
-      "grant_executed": false, "role_mutated": false
-    },
-    "quiescent": true
+    "role": {"current_user": "nhms", "rolsuper": true, "rolcreaterole": true, "rolcreatedb": true, "owns_hydro_river_timeseries": true, "owns_met_forcing_station_timeseries": true, "execute_compress_chunk_regclass_boolean": true, "role_created": false, "grant_executed": false, "role_mutated": false},
+    "quiescent": true,
+    "captured_at": "2026-07-15T11:50:00Z",
+    "mutation_head_sha": "0123456789abcdef0123456789abcdef01234567",
+    "container_state": {"name": "nhms-db", "container_id": "container-123", "image": "timescale/timescaledb:2.10.2-pg15", "status": "running", "running": true},
+    "units": {
+      "nhms-node27-autopipe.timer": {"enabled": "enabled", "active": "inactive", "sub": "dead", "result": "success", "main_pid": 0, "journal": {"path": "/home/nwm/NWM/.nhms-issue1069-live/autopipe-timer.log", "sha256": "1111111111111111111111111111111111111111111111111111111111111111", "bytes": 100}},
+      "nhms-node27-autopipe.service": {"enabled": "static", "active": "failed", "sub": "failed", "result": "exit-code", "main_pid": 0, "journal": {"path": "/home/nwm/NWM/.nhms-issue1069-live/autopipe-service.log", "sha256": "2222222222222222222222222222222222222222222222222222222222222222", "bytes": 100}},
+      "nhms-node27-timeseries-compression.timer": {"enabled": "disabled", "active": "inactive", "sub": "dead", "result": "success", "main_pid": 0, "journal": {"path": "/home/nwm/NWM/.nhms-issue1069-live/compression-timer.log", "sha256": "3333333333333333333333333333333333333333333333333333333333333333", "bytes": 100}},
+      "nhms-node27-timeseries-compression.service": {"enabled": "static", "active": "inactive", "sub": "dead", "result": "success", "main_pid": 0, "journal": {"path": "/home/nwm/NWM/.nhms-issue1069-live/compression-service.log", "sha256": "4444444444444444444444444444444444444444444444444444444444444444", "bytes": 100}}
+    }
   },
   "migration": {
     "migration_file": {"path": "/home/nwm/NWM/db/migrations/000047_hypertable_compression_settings.sql", "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "bytes": 4000},
-    "first_exit_code": 0,
-    "second_exit_code": 0,
+    "first_exit_code": 0, "second_exit_code": 0,
     "catalog_after_first": {"path": "/home/nwm/NWM/.nhms-issue1069-live/catalog-first.json", "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "bytes": 5000},
     "catalog_after_second": {"path": "/home/nwm/NWM/.nhms-issue1069-live/catalog-second.json", "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "bytes": 5000},
     "catalogs_identical": true
   },
   "selection": {
-    "snapshot": {"path": "/home/nwm/NWM/.nhms-issue1069-live/selection.json", "sha256": "1111111111111111111111111111111111111111111111111111111111111111", "bytes": 6000},
-    "selector_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
     "bound": 1,
-    "selected": [{
-      "hypertable_schema": "hydro", "hypertable_name": "river_timeseries",
-      "chunk_schema": "_timescaledb_internal", "chunk_name": "_hyper_1_42_chunk",
-      "range_start": "2026-05-01T00:00:00Z", "range_end": "2026-05-08T00:00:00Z"
-    }],
+    "selected": [{"hypertable_schema": "hydro", "hypertable_name": "river_timeseries", "chunk_schema": "_timescaledb_internal", "chunk_name": "_hyper_1_42_chunk", "range_start": "2026-05-01T00:00:00Z", "range_end": "2026-05-08T00:00:00Z"}],
     "selected_before_bytes": 4294967296,
-    "free_bytes": 536870912000,
-    "cutoff_margin_seconds": 86400
+    "post_dry_run": {"artifact": {"path": "/home/nwm/NWM/.nhms-issue1069-live/selection-post-dry.json", "sha256": "5555555555555555555555555555555555555555555555555555555555555555", "bytes": 6000}, "observed_at": "2026-07-15T12:00:10Z", "candidates_sha256": "6666666666666666666666666666666666666666666666666666666666666666", "selector_sha256": "7777777777777777777777777777777777777777777777777777777777777777", "free_bytes": 536870912000, "cutoff_margin_seconds": 86400},
+    "pre_enforce": {"artifact": {"path": "/home/nwm/NWM/.nhms-issue1069-live/selection-pre-enforce.json", "sha256": "8888888888888888888888888888888888888888888888888888888888888888", "bytes": 6000}, "observed_at": "2026-07-15T12:00:20Z", "candidates_sha256": "9999999999999999999999999999999999999999999999999999999999999999", "selector_sha256": "7777777777777777777777777777777777777777777777777777777777777777", "free_bytes": 536870912000, "cutoff_margin_seconds": 86400, "seconds_before_enforce": 10}
   },
   "receipts": {
-    "dry_run": {"path": "/home/nwm/NWM/.nhms-issue1069-live/dry-run.json", "sha256": "3333333333333333333333333333333333333333333333333333333333333333", "bytes": 7000},
-    "enforce": {"path": "/home/nwm/NWM/.nhms-issue1069-live/enforce.json", "sha256": "4444444444444444444444444444444444444444444444444444444444444444", "bytes": 7000},
-    "dry_run_schema_valid": true, "dry_run_semantic_valid": true,
-    "enforce_schema_valid": true, "enforce_semantic_valid": true
+    "dry_run": {"path": "/home/nwm/NWM/.nhms-issue1069-live/dry-run.json", "sha256": "1212121212121212121212121212121212121212121212121212121212121212", "bytes": 7000},
+    "enforce": {"path": "/home/nwm/NWM/.nhms-issue1069-live/enforce.json", "sha256": "1313131313131313131313131313131313131313131313131313131313131313", "bytes": 7000},
+    "dry_run_schema_valid": true, "dry_run_semantic_valid": true, "enforce_schema_valid": true, "enforce_semantic_valid": true
   },
   "sizes": {
-    "pre": {"path": "/home/nwm/NWM/.nhms-issue1069-live/sizes-pre.json", "sha256": "5555555555555555555555555555555555555555555555555555555555555555", "bytes": 8000},
-    "post": {"path": "/home/nwm/NWM/.nhms-issue1069-live/sizes-post.json", "sha256": "6666666666666666666666666666666666666666666666666666666666666666", "bytes": 8000},
-    "pre_combined_hypertable_size": 160000000000,
-    "post_combined_hypertable_size": 157000000000,
-    "compressed_chunk_count_delta": 1,
-    "selected_before_bytes": 4294967296,
-    "selected_after_bytes": 1073741824
+    "pre": {"path": "/home/nwm/NWM/.nhms-issue1069-live/sizes-pre.json", "sha256": "1414141414141414141414141414141414141414141414141414141414141414", "bytes": 8000},
+    "post": {"path": "/home/nwm/NWM/.nhms-issue1069-live/sizes-post.json", "sha256": "1515151515151515151515151515151515151515151515151515151515151515", "bytes": 8000},
+    "pre_combined_hypertable_size": 160000000000, "post_combined_hypertable_size": 157000000000, "compressed_chunk_count_delta": 1, "selected_before_bytes": 4294967296, "selected_after_bytes": 1073741824
   },
-  "catalog": {
-    "post": {"path": "/home/nwm/NWM/.nhms-issue1069-live/catalog-post.json", "sha256": "7777777777777777777777777777777777777777777777777777777777777777", "bytes": 9000},
-    "d3_exact": true, "no_compression_policy": true, "selected_chunks_compressed": true
-  },
+  "catalog": {"post": {"path": "/home/nwm/NWM/.nhms-issue1069-live/catalog-post.json", "sha256": "1616161616161616161616161616161616161616161616161616161616161616", "bytes": 9000}, "d3_exact": true, "no_compression_policy": true, "selected_chunks_compressed": true},
   "benchmarks": {
-    "evidence": {"path": "/home/nwm/NWM/.nhms-issue1069-live/benchmarks.json", "sha256": "8888888888888888888888888888888888888888888888888888888888888888", "bytes": 10000},
+    "evidence": {"path": "/home/nwm/NWM/.nhms-issue1069-live/benchmarks.json", "sha256": "1717171717171717171717171717171717171717171717171717171717171717", "bytes": 10000},
     "queries": [
       {
         "name": "curve",
-        "source_refs": [{"path": "/home/nwm/NWM/packages/common/forecast_store.py", "sha256": "9999999999999999999999999999999999999999999999999999999999999999", "bytes": 11000}],
-        "query_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "result_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "rows": 169, "bytes": 16384, "cache_class": "warm-cache",
-        "before_samples_ms": [10, 11, 12, 13, 14, 15, 16],
-        "after_samples_ms": [12, 13, 14, 15, 16, 17, 18],
-        "before_median_ms": 13, "after_median_ms": 15, "median_threshold_ms": 113,
-        "before_p95_ms": 16, "after_p95_ms": 18, "p95_threshold_ms": 266,
-        "decompress_chunk_plan_bound": true, "concurrent_load_stable": true
+        "source_refs": [{"path": "/home/nwm/NWM/packages/common/forecast_store.py", "sha256": "1818181818181818181818181818181818181818181818181818181818181818", "bytes": 11000}],
+        "query_sha256": "1919191919191919191919191919191919191919191919191919191919191919",
+        "binding": {"parameter_names": ["basin_version_id", "river_segment_id", "river_network_version_id", "issue_time", "start_time", "end_time"], "bound_parameters": ["basin-v1", "segment-1", "network-v1", "2026-05-01T00:00:00Z", "2026-05-01T00:00:00Z", "2026-05-08T00:00:00Z"]},
+        "result_sha256": "2020202020202020202020202020202020202020202020202020202020202020", "rows": 1, "bytes": 64, "cache_class": "warm-cache",
+        "before_capture": {
+          "result_payload": [{"valid_time": "2026-05-02T00:00:00Z", "value": 1.25}], "result_sha256": "2020202020202020202020202020202020202020202020202020202020202020", "rows": 1, "bytes": 64, "cache_class": "warm-cache",
+          "cold": {"plan": {"Node Type": "Index Scan"}, "planning_ms": 1, "execution_ms": 30, "shared_hit_blocks": 10, "shared_read_blocks": 0},
+          "warmups": [{"plan": {"Node Type": "Index Scan"}, "planning_ms": 1, "execution_ms": 15, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Index Scan"}, "planning_ms": 1, "execution_ms": 12, "shared_hit_blocks": 10, "shared_read_blocks": 0}],
+          "measurements": [{"plan": {"Node Type": "Index Scan"}, "planning_ms": 1, "execution_ms": 10, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Index Scan"}, "planning_ms": 1, "execution_ms": 11, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Index Scan"}, "planning_ms": 1, "execution_ms": 12, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Index Scan"}, "planning_ms": 1, "execution_ms": 13, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Index Scan"}, "planning_ms": 1, "execution_ms": 14, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Index Scan"}, "planning_ms": 1, "execution_ms": 15, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Index Scan"}, "planning_ms": 1, "execution_ms": 16, "shared_hit_blocks": 10, "shared_read_blocks": 0}],
+          "activity_samples": [{"captured_at": "2026-07-15T11:55:00Z", "active_sessions": 1, "material_load_stable": true}], "samples_ms": [10, 11, 12, 13, 14, 15, 16], "median_ms": 13, "p95_ms": 16
+        },
+        "after_capture": {
+          "result_payload": [{"valid_time": "2026-05-02T00:00:00Z", "value": 1.25}], "result_sha256": "2020202020202020202020202020202020202020202020202020202020202020", "rows": 1, "bytes": 64, "cache_class": "warm-cache",
+          "cold": {"plan": {"Node Type": "Custom Scan", "Custom Plan Provider": "DecompressChunk"}, "planning_ms": 1, "execution_ms": 32, "shared_hit_blocks": 10, "shared_read_blocks": 0},
+          "warmups": [{"plan": {"Node Type": "Custom Scan", "Custom Plan Provider": "DecompressChunk"}, "planning_ms": 1, "execution_ms": 17, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Custom Scan", "Custom Plan Provider": "DecompressChunk"}, "planning_ms": 1, "execution_ms": 14, "shared_hit_blocks": 10, "shared_read_blocks": 0}],
+          "measurements": [{"plan": {"Node Type": "Custom Scan", "Custom Plan Provider": "DecompressChunk"}, "planning_ms": 1, "execution_ms": 12, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Custom Scan", "Custom Plan Provider": "DecompressChunk"}, "planning_ms": 1, "execution_ms": 13, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Custom Scan", "Custom Plan Provider": "DecompressChunk"}, "planning_ms": 1, "execution_ms": 14, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Custom Scan", "Custom Plan Provider": "DecompressChunk"}, "planning_ms": 1, "execution_ms": 15, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Custom Scan", "Custom Plan Provider": "DecompressChunk"}, "planning_ms": 1, "execution_ms": 16, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Custom Scan", "Custom Plan Provider": "DecompressChunk"}, "planning_ms": 1, "execution_ms": 17, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Custom Scan", "Custom Plan Provider": "DecompressChunk"}, "planning_ms": 1, "execution_ms": 18, "shared_hit_blocks": 10, "shared_read_blocks": 0}],
+          "activity_samples": [{"captured_at": "2026-07-15T12:10:00Z", "active_sessions": 1, "material_load_stable": true}], "samples_ms": [12, 13, 14, 15, 16, 17, 18], "median_ms": 15, "p95_ms": 18
+        },
+        "before_median_ms": 13, "after_median_ms": 15, "median_threshold_ms": 113, "before_p95_ms": 16, "after_p95_ms": 18, "p95_threshold_ms": 266, "decompress_chunk_plan_bound": true
       },
       {
         "name": "mvt",
-        "source_refs": [
-          {"path": "/home/nwm/NWM/services/tiles/mvt.py", "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "bytes": 12000},
-          {"path": "/home/nwm/NWM/apps/api/routes/hydro_display.py", "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "bytes": 13000}
-        ],
-        "query_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-        "result_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-        "rows": 1, "bytes": 4096, "cache_class": "mixed-cache",
-        "before_samples_ms": [20, 21, 22, 23, 24, 25, 26],
-        "after_samples_ms": [21, 22, 23, 24, 25, 26, 27],
-        "before_median_ms": 23, "after_median_ms": 24, "median_threshold_ms": 123,
-        "before_p95_ms": 26, "after_p95_ms": 27, "p95_threshold_ms": 276,
-        "decompress_chunk_plan_bound": true, "concurrent_load_stable": true
+        "source_refs": [{"path": "/home/nwm/NWM/services/tiles/mvt.py", "sha256": "2121212121212121212121212121212121212121212121212121212121212121", "bytes": 12000}, {"path": "/home/nwm/NWM/apps/api/routes/hydro_display.py", "sha256": "2222222222222222222222222222222222222222222222222222222222222222", "bytes": 13000}],
+        "query_sha256": "2323232323232323232323232323232323232323232323232323232323232323",
+        "binding": {"run_id": "run-1", "basin_version_id": "basin-v1", "river_network_version_id": "network-v1", "variable": "q_down", "valid_time": "2026-05-02T00:00:00Z", "z": 9, "x": 420, "y": 210, "feature_limit": 10000, "feature_coordinate_limit": 50000, "collection_coordinate_limit": 50000, "max_coordinate_dimensions": 3, "extent": 4096, "buffer": 64, "simplification_tolerance_m": 9.554628535646124},
+        "result_sha256": "2424242424242424242424242424242424242424242424242424242424242424", "rows": 1, "bytes": 4, "cache_class": "warm-cache",
+        "before_capture": {
+          "result_payload": "deadbeef", "result_sha256": "2424242424242424242424242424242424242424242424242424242424242424", "rows": 1, "bytes": 4, "cache_class": "warm-cache",
+          "cold": {"plan": {"Node Type": "Index Scan"}, "planning_ms": 1, "execution_ms": 40, "shared_hit_blocks": 10, "shared_read_blocks": 0},
+          "warmups": [{"plan": {"Node Type": "Index Scan"}, "planning_ms": 1, "execution_ms": 25, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Index Scan"}, "planning_ms": 1, "execution_ms": 22, "shared_hit_blocks": 10, "shared_read_blocks": 0}],
+          "measurements": [{"plan": {"Node Type": "Index Scan"}, "planning_ms": 1, "execution_ms": 20, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Index Scan"}, "planning_ms": 1, "execution_ms": 21, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Index Scan"}, "planning_ms": 1, "execution_ms": 22, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Index Scan"}, "planning_ms": 1, "execution_ms": 23, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Index Scan"}, "planning_ms": 1, "execution_ms": 24, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Index Scan"}, "planning_ms": 1, "execution_ms": 25, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Index Scan"}, "planning_ms": 1, "execution_ms": 26, "shared_hit_blocks": 10, "shared_read_blocks": 0}],
+          "activity_samples": [{"captured_at": "2026-07-15T11:55:00Z", "active_sessions": 1, "material_load_stable": true}], "samples_ms": [20, 21, 22, 23, 24, 25, 26], "median_ms": 23, "p95_ms": 26
+        },
+        "after_capture": {
+          "result_payload": "deadbeef", "result_sha256": "2424242424242424242424242424242424242424242424242424242424242424", "rows": 1, "bytes": 4, "cache_class": "warm-cache",
+          "cold": {"plan": {"Node Type": "Custom Scan", "Custom Plan Provider": "DecompressChunk"}, "planning_ms": 1, "execution_ms": 41, "shared_hit_blocks": 10, "shared_read_blocks": 0},
+          "warmups": [{"plan": {"Node Type": "Custom Scan", "Custom Plan Provider": "DecompressChunk"}, "planning_ms": 1, "execution_ms": 26, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Custom Scan", "Custom Plan Provider": "DecompressChunk"}, "planning_ms": 1, "execution_ms": 23, "shared_hit_blocks": 10, "shared_read_blocks": 0}],
+          "measurements": [{"plan": {"Node Type": "Custom Scan", "Custom Plan Provider": "DecompressChunk"}, "planning_ms": 1, "execution_ms": 21, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Custom Scan", "Custom Plan Provider": "DecompressChunk"}, "planning_ms": 1, "execution_ms": 22, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Custom Scan", "Custom Plan Provider": "DecompressChunk"}, "planning_ms": 1, "execution_ms": 23, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Custom Scan", "Custom Plan Provider": "DecompressChunk"}, "planning_ms": 1, "execution_ms": 24, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Custom Scan", "Custom Plan Provider": "DecompressChunk"}, "planning_ms": 1, "execution_ms": 25, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Custom Scan", "Custom Plan Provider": "DecompressChunk"}, "planning_ms": 1, "execution_ms": 26, "shared_hit_blocks": 10, "shared_read_blocks": 0}, {"plan": {"Node Type": "Custom Scan", "Custom Plan Provider": "DecompressChunk"}, "planning_ms": 1, "execution_ms": 27, "shared_hit_blocks": 10, "shared_read_blocks": 0}],
+          "activity_samples": [{"captured_at": "2026-07-15T12:10:00Z", "active_sessions": 1, "material_load_stable": true}], "samples_ms": [21, 22, 23, 24, 25, 26, 27], "median_ms": 24, "p95_ms": 27
+        },
+        "before_median_ms": 23, "after_median_ms": 24, "median_threshold_ms": 123, "before_p95_ms": 26, "after_p95_ms": 27, "p95_threshold_ms": 276, "decompress_chunk_plan_bound": true
       }
     ]
   },
-  "cleanup": {
-    "evidence": {"path": "/home/nwm/NWM/.nhms-issue1069-live/cleanup.json", "sha256": "1234123412341234123412341234123412341234123412341234123412341234", "bytes": 14000},
-    "autopipe_timer_restored": true, "compression_timer_enabled": true,
-    "compression_timer_active": false, "compression_service_active": false,
-    "compression_service_activation_count": 0,
-    "installed_service_matches_repo": true, "installed_timer_matches_repo": true
-  },
-  "out_of_scope": {
-    "retention_mutated": false, "drill_run": false, "node22_touched": false,
-    "decompress_run": false, "role_mutated": false
-  },
+  "cleanup": {"evidence": {"path": "/home/nwm/NWM/.nhms-issue1069-live/cleanup.json", "sha256": "2525252525252525252525252525252525252525252525252525252525252525", "bytes": 14000}, "autopipe_timer_restored": true, "compression_timer_enabled": true, "compression_timer_active": false, "compression_service_active": false, "compression_service_activation_count": 0, "installed_service_matches_repo": true, "installed_timer_matches_repo": true},
+  "out_of_scope": {"retention_mutated": false, "drill_run": false, "node22_touched": false, "decompress_run": false, "role_mutated": false},
   "verdict": "PASS_TASK_4_5"
 }

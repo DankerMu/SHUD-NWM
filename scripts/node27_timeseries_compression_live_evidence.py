@@ -20,6 +20,7 @@ import json
 import math
 import re
 import stat
+import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,7 +30,7 @@ import jsonschema
 
 from packages.common.safe_fs import atomic_write_bytes_no_follow
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "2.0"
 ISSUE = 1069
 PASS_VERDICT = "PASS_TASK_4_5"
 HYPERTABLE_KEYS = ("hydro.river_timeseries", "met.forcing_station_timeseries")
@@ -39,16 +40,24 @@ EXPECTED_LAG_SECONDS = 604_800
 EXPECTED_BOUND = 1
 EXPECTED_TIMEOUT_SECONDS = 900
 MAX_POST_MEASUREMENT_DRIFT_BYTES = 1024**2
+MAX_PREFLIGHT_TO_ENFORCE_SECONDS = 60
+EXPECTED_UNITS = (
+    "nhms-node27-autopipe.timer",
+    "nhms-node27-autopipe.service",
+    "nhms-node27-timeseries-compression.timer",
+    "nhms-node27-timeseries-compression.service",
+)
 
 # This constant is deliberately executable documentation: tests and the
 # runbook pin the same capture contract without inventing a host-only format.
 BUNDLE_CONTRACT: Mapping[str, str] = {
-    "preflight.evidence": "JSON: host/repo/head/role/quiescence/unit state facts",
+    "preflight.evidence": "JSON: captured mutation SHA, container and four-unit state facts",
     "preflight.schema_dump": "custom-format pg_dump file reference",
     "preflight.catalog_before": "JSON: canonical pre-migration catalog rows",
     "migration.catalog_after_first": "JSON: exact D3 catalog after first apply",
     "migration.catalog_after_second": "JSON: exact D3 catalog after second apply",
-    "selection.snapshot": "JSON: now/cutoff/free bytes and ordered selected tuples",
+    "selection.post_dry_run": "JSON: timestamp/cutoff/free bytes and complete ordered candidates",
+    "selection.pre_enforce": "distinct JSON captured <=60s before enforce invocation",
     "receipts.dry_run": "JSON: runner dry-run receipt",
     "receipts.enforce": "JSON: runner enforce receipt",
     "sizes.pre": "JSON: both-table pre size/count snapshot",
@@ -232,38 +241,80 @@ def _validate_d3_catalog(raw: Any, label: str) -> None:
         raise EvidenceError(f"{label} does not match exact D3 settings/no-policy contract")
 
 
-def _validate_preflight(raw: Any, head_sha: str) -> None:
+def _validate_preflight(raw: Any, mutation_head_sha: str) -> dict[str, Any]:
     preflight = _require_mapping(raw, "preflight.evidence document")
-    required = {
-        "node",
-        "repo_path",
-        "head_sha",
-        "worktree_clean",
-        "database_identity",
-        "role",
-        "env_mode",
-        "write_guards_present",
-        "autopipe_quiescent",
-        "database_writes_quiescent",
-        "conflicting_locks_absent",
-        "compression_timer_active",
-        "compression_service_active",
-    }
-    if not required <= set(preflight):
-        raise EvidenceError("preflight.evidence is missing required live facts")
+    _require_exact_keys(
+        preflight,
+        {
+            "captured_at",
+            "node",
+            "repo_path",
+            "mutation_head_sha",
+            "worktree_clean",
+            "database_identity",
+            "container_state",
+            "role",
+            "env_mode",
+            "write_guards_present",
+            "autopipe_quiescent",
+            "database_writes_quiescent",
+            "conflicting_locks_absent",
+            "units",
+        },
+        "preflight.evidence document",
+    )
+    captured_at = _parse_utc(preflight["captured_at"], "preflight.captured_at")
     if (
         preflight["node"] != "node-27"
-        or preflight["head_sha"] != head_sha
+        or preflight["mutation_head_sha"] != mutation_head_sha
         or preflight["worktree_clean"] is not True
         or preflight["env_mode"] != "0600"
         or preflight["write_guards_present"] is not True
         or preflight["autopipe_quiescent"] is not True
         or preflight["database_writes_quiescent"] is not True
         or preflight["conflicting_locks_absent"] is not True
-        or preflight["compression_timer_active"] is not False
-        or preflight["compression_service_active"] is not False
     ):
-        raise EvidenceError("preflight.evidence does not prove the controlled quiescent boundary")
+        raise EvidenceError("preflight.evidence does not prove the mutation-head boundary")
+    container = _require_mapping(preflight["container_state"], "preflight.container_state")
+    _require_exact_keys(container, {"name", "container_id", "image", "status", "running"}, "preflight.container_state")
+    if (
+        container["name"] != "nhms-db"
+        or container["running"] is not True
+        or not all(isinstance(container[key], str) and container[key] for key in ("container_id", "image", "status"))
+    ):
+        raise EvidenceError("preflight container state is not the running nhms-db instance")
+    units = _require_mapping(preflight["units"], "preflight.units")
+    if set(units) != set(EXPECTED_UNITS):
+        raise EvidenceError("preflight must capture exactly the four governed units")
+    unit_summary: dict[str, Any] = {}
+    for unit_name in EXPECTED_UNITS:
+        unit = _require_mapping(units[unit_name], f"preflight.units.{unit_name}")
+        _require_exact_keys(
+            unit,
+            {"enabled", "active", "sub", "result", "main_pid", "journal"},
+            f"preflight.units.{unit_name}",
+        )
+        if not all(isinstance(unit[key], str) and unit[key] for key in ("enabled", "active", "sub", "result")):
+            raise EvidenceError(f"preflight unit {unit_name} has incomplete state fields")
+        if not isinstance(unit["main_pid"], int) or isinstance(unit["main_pid"], bool) or unit["main_pid"] < 0:
+            raise EvidenceError(f"preflight unit {unit_name} has invalid MainPID")
+        journal_ref = _artifact_ref(unit["journal"], f"preflight.units.{unit_name}.journal")
+        unit_summary[unit_name] = {
+            "enabled": unit["enabled"],
+            "active": unit["active"],
+            "sub": unit["sub"],
+            "result": unit["result"],
+            "main_pid": unit["main_pid"],
+            "journal": journal_ref,
+        }
+    for unit_name in EXPECTED_UNITS:
+        unit = units[unit_name]
+        if unit_name.endswith(".service") and unit["main_pid"] != 0:
+            raise EvidenceError(f"preflight service {unit_name} is not quiescent")
+    for unit_name in EXPECTED_UNITS[2:]:
+        unit = units[unit_name]
+        if unit["active"] != "inactive" or unit["main_pid"] != 0:
+            raise EvidenceError(f"preflight compression unit {unit_name} must remain inactive")
     database = _require_mapping(preflight["database_identity"], "database_identity")
     if database.get("dbname") != "nhms" or database.get("instance") != "node27-primary-pg15":
         raise EvidenceError("preflight database identity is not the node-27 nhms primary")
@@ -282,6 +333,12 @@ def _validate_preflight(raw: Any, head_sha: str) -> None:
     }
     if role != exact_role:
         raise EvidenceError("preflight role facts/authority boundary differ from the fixture")
+    return {
+        "captured_at": captured_at.isoformat().replace("+00:00", "Z"),
+        "mutation_head_sha": mutation_head_sha,
+        "container_state": dict(container),
+        "units": unit_summary,
+    }
 
 
 def _table_snapshot(raw: Any, label: str) -> Mapping[str, Any]:
@@ -326,6 +383,92 @@ def _table_snapshot(raw: Any, label: str) -> Mapping[str, Any]:
     return tables
 
 
+def _validate_selection_snapshot(raw: Any, label: str) -> dict[str, Any]:
+    snapshot = _require_mapping(raw, f"{label} document")
+    _require_exact_keys(
+        snapshot,
+        {"observed_at", "cutoff", "free_bytes", "candidates", "selected"},
+        f"{label} document",
+    )
+    observed_at = _parse_utc(snapshot["observed_at"], f"{label}.observed_at")
+    cutoff = _parse_utc(snapshot["cutoff"], f"{label}.cutoff")
+    free_bytes = snapshot["free_bytes"]
+    if not isinstance(free_bytes, int) or isinstance(free_bytes, bool) or free_bytes < MIN_FREE_BYTES:
+        raise EvidenceError(f"{label} free-space headroom is below 300 GiB")
+    candidates_raw = _require_list(snapshot["candidates"], f"{label}.candidates")
+    selected_raw = _require_list(snapshot["selected"], f"{label}.selected")
+    if not candidates_raw or len(selected_raw) != EXPECTED_BOUND:
+        raise EvidenceError(f"{label} must contain full candidates and exactly bound-1 selected")
+    candidates: list[dict[str, Any]] = []
+    for index, value in enumerate(candidates_raw):
+        candidate = _require_mapping(value, f"{label}.candidates[{index}]")
+        _require_exact_keys(
+            candidate,
+            {
+                "hypertable_schema",
+                "hypertable_name",
+                "chunk_schema",
+                "chunk_name",
+                "range_start",
+                "range_end",
+                "is_compressed",
+                "before_bytes",
+            },
+            f"{label}.candidates[{index}]",
+        )
+        key = f"{candidate['hypertable_schema']}.{candidate['hypertable_name']}"
+        if key not in HYPERTABLE_KEYS or candidate["is_compressed"] is not False:
+            raise EvidenceError(f"{label} candidate is outside the uncompressed D3 allowlist")
+        before_bytes = candidate["before_bytes"]
+        if not isinstance(before_bytes, int) or isinstance(before_bytes, bool) or before_bytes < 1:
+            raise EvidenceError(f"{label} candidate before_bytes must be positive")
+        range_start = _parse_utc(candidate["range_start"], f"{label} candidate range_start")
+        range_end = _parse_utc(candidate["range_end"], f"{label} candidate range_end")
+        if range_start >= range_end or range_end >= cutoff:
+            raise EvidenceError(f"{label} candidate is not strictly terminal")
+        candidates.append(dict(candidate))
+    ordered = sorted(
+        candidates,
+        key=lambda item: (
+            item["hypertable_schema"],
+            item["hypertable_name"],
+            _parse_utc(item["range_end"], "candidate range_end"),
+            item["chunk_schema"],
+            item["chunk_name"],
+        ),
+    )
+    if candidates != ordered:
+        raise EvidenceError(f"{label} candidates are not in complete stable runner order")
+    selected = [_require_mapping(value, f"{label}.selected") for value in selected_raw]
+    if [dict(value) for value in selected] != candidates[:EXPECTED_BOUND]:
+        raise EvidenceError(f"{label} selected is not the bound-1 prefix of candidates")
+    selected_row = candidates[0]
+    if (
+        selected_row["hypertable_schema"] != "hydro"
+        or selected_row["hypertable_name"] != "river_timeseries"
+        or selected_row["before_bytes"] > MAX_SELECTED_BYTES
+    ):
+        raise EvidenceError(f"{label} selected row violates hydro/bound/8-GiB authorization")
+    cutoff_margin = int(
+        (cutoff - _parse_utc(selected_row["range_end"], f"{label} selected range_end")).total_seconds()
+    )
+    if cutoff_margin < 600:
+        raise EvidenceError(f"{label} selected chunk is within ten minutes of cutoff")
+    identities = [_selected_identity(value) for value in selected]
+    return {
+        "observed_at_dt": observed_at,
+        "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
+        "cutoff": cutoff.isoformat().replace("+00:00", "Z"),
+        "free_bytes": free_bytes,
+        "candidates": candidates,
+        "selected": [dict(value) for value in selected],
+        "identities": identities,
+        "candidates_sha256": _sha256(_canonical_json_bytes(candidates)),
+        "selector_sha256": _sha256(_canonical_json_bytes(identities)),
+        "cutoff_margin_seconds": cutoff_margin,
+    }
+
+
 def _plan_contains(plan: Any, needles: Sequence[str]) -> bool:
     lowered = json.dumps(plan, sort_keys=True).lower()
     return all(needle.lower() in lowered for needle in needles)
@@ -357,6 +500,128 @@ def _result_bytes(name: str, payload: Any) -> tuple[bytes, int]:
     raise EvidenceError(f"unknown benchmark query {name!r}")
 
 
+def _validate_measurement(value: Any, label: str) -> dict[str, Any]:
+    measurement = _require_mapping(value, label)
+    _require_exact_keys(
+        measurement,
+        {"plan", "planning_ms", "execution_ms", "shared_hit_blocks", "shared_read_blocks"},
+        label,
+    )
+    if not isinstance(measurement["plan"], (Mapping, list)) or not measurement["plan"]:
+        raise EvidenceError(f"{label}.plan must preserve the full EXPLAIN JSON plan")
+    for field in ("planning_ms", "execution_ms"):
+        value_ = measurement[field]
+        if (
+            not isinstance(value_, (int, float))
+            or isinstance(value_, bool)
+            or not math.isfinite(float(value_))
+            or value_ < 0
+        ):
+            raise EvidenceError(f"{label}.{field} must be finite and non-negative")
+    for field in ("shared_hit_blocks", "shared_read_blocks"):
+        value_ = measurement[field]
+        if not isinstance(value_, int) or isinstance(value_, bool) or value_ < 0:
+            raise EvidenceError(f"{label}.{field} must be a non-negative integer")
+    return dict(measurement)
+
+
+def _validate_phase(
+    value: Any,
+    *,
+    query_name: str,
+    phase_name: str,
+    selected_relation_names: set[str],
+) -> dict[str, Any]:
+    phase = _require_mapping(value, f"benchmark {query_name} {phase_name}")
+    _require_exact_keys(
+        phase,
+        {
+            "result_payload",
+            "result_sha256",
+            "rows",
+            "bytes",
+            "cache_class",
+            "cold",
+            "warmups",
+            "measurements",
+            "activity_samples",
+        },
+        f"benchmark {query_name} {phase_name}",
+    )
+    result_bytes, result_rows = _result_bytes(query_name, phase["result_payload"])
+    if (
+        _sha256(result_bytes) != phase["result_sha256"]
+        or len(result_bytes) != phase["bytes"]
+        or result_rows != phase["rows"]
+    ):
+        raise EvidenceError(f"benchmark {query_name} {phase_name} result hash/count mismatch")
+    cold = _validate_measurement(phase["cold"], f"benchmark {query_name} {phase_name}.cold")
+    warmups = [
+        _validate_measurement(item, f"benchmark {query_name} {phase_name}.warmups[{index}]")
+        for index, item in enumerate(_require_list(phase["warmups"], "benchmark warmups"))
+    ]
+    if not 2 <= len(warmups) <= 5:
+        raise EvidenceError(f"benchmark {query_name} {phase_name} needs 2-5 warmups")
+    measurements = [
+        _validate_measurement(item, f"benchmark {query_name} {phase_name}.measurements[{index}]")
+        for index, item in enumerate(
+            _require_list(phase["measurements"], "benchmark measurements")
+        )
+    ]
+    if len(measurements) != 7:
+        raise EvidenceError(f"benchmark {query_name} {phase_name} needs seven measurements")
+    last_warmup_reads = warmups[-1]["shared_read_blocks"]
+    derived_cache_class = "warm-cache" if last_warmup_reads == 0 else "mixed-cache"
+    if derived_cache_class == "mixed-cache" and len(warmups) != 5:
+        raise EvidenceError(f"benchmark {query_name} {phase_name} stopped warmups before five")
+    if phase["cache_class"] != derived_cache_class:
+        raise EvidenceError(f"benchmark {query_name} {phase_name} cache class mismatch")
+    activities = _require_list(phase["activity_samples"], "benchmark activity_samples")
+    if not activities:
+        raise EvidenceError(f"benchmark {query_name} {phase_name} lacks activity samples")
+    normalized_activities: list[dict[str, Any]] = []
+    for index, value_ in enumerate(activities):
+        activity = _require_mapping(value_, f"benchmark activity[{index}]")
+        _require_exact_keys(
+            activity,
+            {"captured_at", "active_sessions", "material_load_stable"},
+            f"benchmark activity[{index}]",
+        )
+        _parse_utc(activity["captured_at"], f"benchmark activity[{index}].captured_at")
+        if (
+            not isinstance(activity["active_sessions"], int)
+            or isinstance(activity["active_sessions"], bool)
+            or activity["active_sessions"] < 0
+            or activity["material_load_stable"] is not True
+        ):
+            raise EvidenceError(f"benchmark {query_name} {phase_name} has load drift")
+        normalized_activities.append(dict(activity))
+    if phase_name == "after":
+        for index, measurement in enumerate(measurements):
+            if not _plan_contains(measurement["plan"], ["DecompressChunk"]) or not any(
+                _plan_contains(measurement["plan"], [name]) for name in selected_relation_names
+            ):
+                raise EvidenceError(
+                    f"benchmark {query_name} after measurement {index} lacks selected DecompressChunk"
+                )
+    samples = [float(measurement["execution_ms"]) for measurement in measurements]
+    _, median, p95 = _stats(samples, f"benchmark {query_name} {phase_name} samples")
+    return {
+        "result_payload": phase["result_payload"],
+        "result_sha256": phase["result_sha256"],
+        "rows": phase["rows"],
+        "bytes": phase["bytes"],
+        "cache_class": derived_cache_class,
+        "cold": cold,
+        "warmups": warmups,
+        "measurements": measurements,
+        "activity_samples": normalized_activities,
+        "samples_ms": samples,
+        "median_ms": median,
+        "p95_ms": p95,
+    }
+
+
 def _validate_benchmarks(
     raw: Any,
     selected: Mapping[str, Any],
@@ -370,19 +635,19 @@ def _validate_benchmarks(
     output: list[dict[str, Any]] = []
     for query_value in queries:
         query = _require_mapping(query_value, "benchmark query")
-        required = {
-            "name",
-            "source_refs",
-            "query_sha256",
-            "query_text",
-            "parameters",
-            "before",
-            "after",
-            "after_plan",
-            "concurrent_load_stable",
-        }
-        if not required <= set(query):
-            raise EvidenceError(f"benchmark {query.get('name')} missing required fields")
+        _require_exact_keys(
+            query,
+            {
+                "name",
+                "source_refs",
+                "query_sha256",
+                "query_text",
+                "binding",
+                "before",
+                "after",
+            },
+            f"benchmark {query.get('name')}",
+        )
         source_refs = [
             _artifact_ref(value, f"benchmark {query['name']} source[{index}]")
             for index, value in enumerate(_require_list(query["source_refs"], "source_refs"))
@@ -392,13 +657,11 @@ def _validate_benchmarks(
         source_paths = {str(ref["path"]) for ref in source_refs}
         if query["name"] == "curve":
             required_source_suffixes = {"/packages/common/forecast_store.py"}
-            required_parameter_keys = {
+            required_parameter_names = {
                 "basin_version_id",
                 "river_segment_id",
                 "river_network_version_id",
                 "issue_time",
-                "run_type",
-                "scenario",
                 "start_time",
                 "end_time",
             }
@@ -422,10 +685,18 @@ def _validate_benchmarks(
                 "run_id",
                 "basin_version_id",
                 "river_network_version_id",
+                "variable",
                 "valid_time",
                 "z",
                 "x",
                 "y",
+                "feature_limit",
+                "feature_coordinate_limit",
+                "collection_coordinate_limit",
+                "max_coordinate_dimensions",
+                "extent",
+                "buffer",
+                "simplification_tolerance_m",
             }
             required_query_tokens = {
                 "FROM hydro.river_timeseries",
@@ -439,9 +710,53 @@ def _validate_benchmarks(
             }
         if not all(any(path.endswith(suffix) for path in source_paths) for suffix in required_source_suffixes):
             raise EvidenceError(f"benchmark {query['name']} is not bound to production source files")
-        parameters = _require_mapping(query["parameters"], f"benchmark {query['name']} parameters")
-        if not required_parameter_keys <= set(parameters):
-            raise EvidenceError(f"benchmark {query['name']} lacks production identity parameters")
+        binding = _require_mapping(query["binding"], f"benchmark {query['name']} binding")
+        if query["name"] == "curve":
+            _require_exact_keys(
+                binding,
+                {"parameter_names", "bound_parameters"},
+                "benchmark curve binding",
+            )
+            parameter_names = _require_list(
+                binding["parameter_names"], "benchmark curve parameter_names"
+            )
+            bound_parameters = _require_list(
+                binding["bound_parameters"], "benchmark curve bound_parameters"
+            )
+            placeholder_count = len(re.findall(r"(?<!%)%s", str(query["query_text"])))
+            if (
+                len(parameter_names) != placeholder_count
+                or len(bound_parameters) != placeholder_count
+                or not required_parameter_names <= set(parameter_names)
+            ):
+                raise EvidenceError("benchmark curve positional binding does not match %s count")
+        else:
+            if set(binding) != required_parameter_keys:
+                raise EvidenceError("benchmark mvt binding is not the exact production parameter map")
+            expected_mvt_values = {
+                "variable": "q_down",
+                "z": 9,
+                "feature_limit": 10_000,
+                "feature_coordinate_limit": 50_000,
+                "collection_coordinate_limit": 50_000,
+                "max_coordinate_dimensions": 3,
+                "extent": 4096,
+                "buffer": 64,
+            }
+            if any(binding[key] != value for key, value in expected_mvt_values.items()):
+                raise EvidenceError("benchmark mvt budget/identity binding differs from production")
+            z = binding["z"]
+            expected_tolerance = min(
+                256.0,
+                max(0.5, ((40_075_016.68557849 / float(1 << z)) / 4096.0) / 2.0),
+            )
+            if not math.isclose(
+                float(binding["simplification_tolerance_m"]),
+                expected_tolerance,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            ):
+                raise EvidenceError("benchmark mvt simplification binding differs from production")
         if re.fullmatch(r"[0-9a-f]{64}", str(query["query_sha256"])) is None:
             raise EvidenceError("benchmark query_sha256 is invalid")
         if not isinstance(query["query_text"], str) or not query["query_text"]:
@@ -450,74 +765,41 @@ def _validate_benchmarks(
             raise EvidenceError(f"benchmark {query['name']} query is not the production SQL shape")
         if _sha256(query["query_text"].encode("utf-8")) != query["query_sha256"]:
             raise EvidenceError(f"benchmark {query['name']} query hash mismatch")
-        before = _require_mapping(query["before"], "benchmark before")
-        after = _require_mapping(query["after"], "benchmark after")
-        phase_keys = {
-            "result_sha256",
-            "rows",
-            "bytes",
-            "cache_class",
-            "samples_ms",
-            "planning_ms",
-            "execution_ms",
-            "shared_hit_blocks",
-            "shared_read_blocks",
-            "result_payload",
-        }
-        if not phase_keys <= set(before) or not phase_keys <= set(after):
-            raise EvidenceError("benchmark phase is missing raw result/cache/timing evidence")
-        for phase, phase_name in ((before, "before"), (after, "after")):
-            result_bytes, result_rows = _result_bytes(str(query["name"]), phase["result_payload"])
-            if (
-                _sha256(result_bytes) != phase["result_sha256"]
-                or len(result_bytes) != phase["bytes"]
-                or result_rows != phase["rows"]
-            ):
-                raise EvidenceError(
-                    f"benchmark {query['name']} {phase_name} result hash/count mismatch"
-                )
+        before = _validate_phase(
+            query["before"],
+            query_name=str(query["name"]),
+            phase_name="before",
+            selected_relation_names=selected_relation_names,
+        )
+        after = _validate_phase(
+            query["after"],
+            query_name=str(query["name"]),
+            phase_name="after",
+            selected_relation_names=selected_relation_names,
+        )
         for field in ("result_sha256", "rows", "bytes"):
             if before[field] != after[field]:
                 raise EvidenceError(f"benchmark {query['name']} changed {field}")
-        if before["cache_class"] not in {"warm-cache", "mixed-cache"}:
-            raise EvidenceError("benchmark cache_class is invalid")
         if before["cache_class"] != after["cache_class"]:
             raise EvidenceError("benchmark before/after cache classes differ")
-        for phase, phase_name in ((before, "before"), (after, "after")):
-            read_blocks = phase["shared_read_blocks"]
-            if not isinstance(read_blocks, int) or isinstance(read_blocks, bool) or read_blocks < 0:
-                raise EvidenceError(f"benchmark {query['name']} {phase_name} read blocks invalid")
-            if (phase["cache_class"] == "warm-cache") != (read_blocks == 0):
-                raise EvidenceError(f"benchmark {query['name']} {phase_name} cache class mismatch")
-        _, before_median, before_p95 = _stats(
-            before["samples_ms"], f"benchmark {query['name']} before samples"
-        )
-        _, after_median, after_p95 = _stats(
-            after["samples_ms"], f"benchmark {query['name']} after samples"
-        )
+        before_median, before_p95 = before["median_ms"], before["p95_ms"]
+        after_median, after_p95 = after["median_ms"], after["p95_ms"]
         median_threshold = max(1.5 * before_median, before_median + 100.0)
         p95_threshold = max(2.0 * before_p95, before_p95 + 250.0)
         if after_median > median_threshold or after_p95 > p95_threshold:
             raise EvidenceError(f"benchmark {query['name']} exceeds timing threshold")
-        if query["concurrent_load_stable"] is not True:
-            raise EvidenceError(f"benchmark {query['name']} has concurrent-load drift")
-        if not _plan_contains(query["after_plan"], ["DecompressChunk"]) or not any(
-            _plan_contains(query["after_plan"], [name]) for name in selected_relation_names
-        ):
-            raise EvidenceError(
-                f"benchmark {query['name']} after plan does not bind selected DecompressChunk"
-            )
         output.append(
             {
                 "name": query["name"],
                 "source_refs": source_refs,
                 "query_sha256": query["query_sha256"],
+                "binding": dict(binding),
                 "result_sha256": before["result_sha256"],
                 "rows": before["rows"],
                 "bytes": before["bytes"],
                 "cache_class": before["cache_class"],
-                "before_samples_ms": before["samples_ms"],
-                "after_samples_ms": after["samples_ms"],
+                "before_capture": before,
+                "after_capture": after,
                 "before_median_ms": before_median,
                 "after_median_ms": after_median,
                 "median_threshold_ms": median_threshold,
@@ -525,14 +807,13 @@ def _validate_benchmarks(
                 "after_p95_ms": after_p95,
                 "p95_threshold_ms": p95_threshold,
                 "decompress_chunk_plan_bound": True,
-                "concurrent_load_stable": True,
             }
         )
     return output
 
 
 def verify_bundle(
-    bundle: Mapping[str, Any], *, receipt_schema: Mapping[str, Any]
+    bundle: Mapping[str, Any], *, receipt_schema: Mapping[str, Any], verifier_head_sha: str
 ) -> dict[str, Any]:
     """Recompute all task-4.5 derivable gates and return the terminal envelope."""
     top_keys = {
@@ -540,7 +821,8 @@ def verify_bundle(
         "issue",
         "generated_at",
         "node",
-        "head_sha",
+        "mutation_head_sha",
+        "verifier_head_sha",
         "database_identity",
         "authorization",
         "preflight",
@@ -556,8 +838,13 @@ def verify_bundle(
     _require_exact_keys(bundle, top_keys, "bundle")
     if bundle["schema_version"] != SCHEMA_VERSION or bundle["issue"] != ISSUE:
         raise EvidenceError("bundle schema_version/issue mismatch")
-    if bundle["node"] != "node-27" or re.fullmatch(r"[0-9a-f]{40}", str(bundle["head_sha"])) is None:
-        raise EvidenceError("bundle node/head_sha mismatch")
+    if (
+        bundle["node"] != "node-27"
+        or re.fullmatch(r"[0-9a-f]{40}", str(bundle["mutation_head_sha"])) is None
+        or re.fullmatch(r"[0-9a-f]{40}", str(bundle["verifier_head_sha"])) is None
+        or bundle["verifier_head_sha"] != verifier_head_sha
+    ):
+        raise EvidenceError("bundle node/mutation/verifier SHA mismatch")
     _parse_utc(bundle["generated_at"], "generated_at")
     authorization = _require_mapping(bundle["authorization"], "authorization")
     expected_authorization = {
@@ -573,7 +860,7 @@ def verify_bundle(
 
     preflight_bundle = _require_mapping(bundle["preflight"], "preflight")
     preflight_ref, preflight = _json_artifact(preflight_bundle.get("evidence"), "preflight.evidence")
-    _validate_preflight(preflight, str(bundle["head_sha"]))
+    preflight_summary = _validate_preflight(preflight, str(bundle["mutation_head_sha"]))
     dump_ref = _artifact_ref(preflight_bundle.get("schema_dump"), "preflight.schema_dump")
     catalog_before_ref, _ = _json_artifact(
         preflight_bundle.get("catalog_before"), "preflight.catalog_before"
@@ -597,43 +884,54 @@ def verify_bundle(
         raise EvidenceError("first/second migration catalog snapshots differ")
 
     selection_bundle = _require_mapping(bundle["selection"], "selection")
-    selection_ref, selection_raw = _json_artifact(
-        selection_bundle.get("snapshot"), "selection.snapshot"
+    _require_exact_keys(
+        selection_bundle, {"post_dry_run", "pre_enforce"}, "selection"
     )
-    selection = _require_mapping(selection_raw, "selection.snapshot document")
-    selected_rows = _require_list(selection.get("selected"), "selection.selected")
-    if len(selected_rows) != EXPECTED_BOUND:
-        raise EvidenceError("selection must contain exactly one chunk")
-    selected = _require_mapping(selected_rows[0], "selection.selected[0]")
+    post_dry_ref, post_dry_raw = _json_artifact(
+        selection_bundle["post_dry_run"], "selection.post_dry_run"
+    )
+    pre_enforce_ref, pre_enforce_raw = _json_artifact(
+        selection_bundle["pre_enforce"], "selection.pre_enforce"
+    )
     if (
-        selected.get("hypertable_schema") != "hydro"
-        or selected.get("hypertable_name") != "river_timeseries"
+        post_dry_ref["path"] == pre_enforce_ref["path"]
+        or post_dry_ref["sha256"] == pre_enforce_ref["sha256"]
     ):
-        raise EvidenceError("bound-1 live selection must be a hydro river chunk")
-    if selection.get("free_bytes", -1) < MIN_FREE_BYTES:
-        raise EvidenceError("selection free-space headroom is below 300 GiB")
-    selected_before = selected.get("before_bytes")
-    if not isinstance(selected_before, int) or selected_before > MAX_SELECTED_BYTES:
-        raise EvidenceError("selected chunk exceeds the 8 GiB cap")
-    cutoff = _parse_utc(selection.get("cutoff"), "selection.cutoff")
-    range_end = _parse_utc(selected.get("range_end"), "selection.selected.range_end")
-    cutoff_margin = int((cutoff - range_end).total_seconds())
-    if cutoff_margin < 600:
-        raise EvidenceError("selected chunk is within ten minutes of cutoff")
-    identities = [_selected_identity(row) for row in selected_rows]
-    selector_sha = _sha256(_canonical_json_bytes(identities))
-    if selection_bundle.get("dry_run_selector_sha256") != selector_sha:
-        raise EvidenceError("dry-run selector hash mismatch")
-    if selection_bundle.get("pre_enforce_selector_sha256") != selector_sha:
-        raise EvidenceError("pre-enforce selector hash mismatch")
+        raise EvidenceError("selection snapshots must be distinct observations")
+    post_dry = _validate_selection_snapshot(post_dry_raw, "selection.post_dry_run")
+    pre_enforce = _validate_selection_snapshot(pre_enforce_raw, "selection.pre_enforce")
+    if post_dry["identities"] != pre_enforce["identities"]:
+        raise EvidenceError("post-dry-run and pre-enforce selected tuples differ")
+    if _parse_utc(preflight_summary["captured_at"], "preflight captured_at") > post_dry[
+        "observed_at_dt"
+    ]:
+        raise EvidenceError("preflight was captured after the post-dry-run observation")
+    identities = pre_enforce["identities"]
+    selected = pre_enforce["selected"][0]
+    selected_before = selected["before_bytes"]
 
     receipts_bundle = _require_mapping(bundle["receipts"], "receipts")
     dry_ref, dry = _load_receipt(receipts_bundle.get("dry_run"), "receipts.dry_run", receipt_schema)
     enforce_ref, enforce = _load_receipt(
         receipts_bundle.get("enforce"), "receipts.enforce", receipt_schema
     )
+    dry_generated_at = _parse_utc(dry["generated_at"], "dry-run generated_at")
+    enforce_started_at = _parse_utc(enforce["now_utc"], "enforce now_utc")
+    if post_dry["observed_at_dt"] < dry_generated_at:
+        raise EvidenceError("post-dry-run selection was observed before dry-run completion")
+    pre_enforce_delta = (
+        enforce_started_at - pre_enforce["observed_at_dt"]
+    ).total_seconds()
+    if not 0 <= pre_enforce_delta <= MAX_PREFLIGHT_TO_ENFORCE_SECONDS:
+        raise EvidenceError("pre-enforce selection is not within 60 seconds of enforce")
+    if post_dry["observed_at_dt"] > pre_enforce["observed_at_dt"]:
+        raise EvidenceError("selection observation order is reversed")
     if (
-        dry["mode"] != "dry-run"
+        dry["schema_version"] != "2.0"
+        or enforce["schema_version"] != "2.0"
+        or dry.get("head_sha") != bundle["mutation_head_sha"]
+        or enforce.get("head_sha") != bundle["mutation_head_sha"]
+        or dry["mode"] != "dry-run"
         or dry["outcome"] != "clean"
         or dry["lag_seconds"] != EXPECTED_LAG_SECONDS
         or dry["per_tick_bound"] != EXPECTED_BOUND
@@ -654,14 +952,32 @@ def verify_bundle(
     enforce_identity = [
         _selected_identity(_require_mapping(row, "enforce selected")) for row in enforce["selected"]
     ]
-    if dry_identity != identities or enforce_identity != identities:
+    if dry_identity != post_dry["identities"] or enforce_identity != identities:
         raise EvidenceError("selection/dry-run/enforce selected tuples differ")
+    dry_candidate_identities = [
+        _selected_identity(_require_mapping(row, "dry candidate"))
+        for row in [*dry["selected"], *dry["deferred"]]
+    ]
+    enforce_candidate_identities = [
+        _selected_identity(_require_mapping(row, "enforce candidate"))
+        for row in [*enforce["selected"], *enforce["deferred"]]
+    ]
+    if (
+        [_selected_identity(row) for row in post_dry["candidates"]]
+        != dry_candidate_identities
+        or [_selected_identity(row) for row in pre_enforce["candidates"]]
+        != enforce_candidate_identities
+    ):
+        raise EvidenceError("selection candidates do not cover the complete ordered receipt scope")
     expected_totals = {
         key: {"before_bytes": 0, "after_bytes": None, "chunks_compressed": 0}
         for key in HYPERTABLE_KEYS
     }
     enforce_row = _require_mapping(enforce["selected"][0], "enforce selected")
-    if selected_before != enforce_row["before_bytes"]:
+    if (
+        post_dry["selected"][0]["before_bytes"] != dry["selected"][0]["before_bytes"]
+        or selected_before != enforce_row["before_bytes"]
+    ):
         raise EvidenceError("selection and enforce before_bytes differ")
     selected_key = f"{enforce_row['hypertable_schema']}.{enforce_row['hypertable_name']}"
     expected_totals[selected_key] = {
@@ -764,7 +1080,8 @@ def verify_bundle(
         "issue": ISSUE,
         "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "node": bundle["node"],
-        "head_sha": bundle["head_sha"],
+        "mutation_head_sha": bundle["mutation_head_sha"],
+        "verifier_head_sha": verifier_head_sha,
         "database_identity": database_identity,
         "authorization": authorization,
         "preflight": {
@@ -774,6 +1091,7 @@ def verify_bundle(
             "pg_restore_list_exit_code": 0,
             "role": preflight["role"],
             "quiescent": True,
+            **preflight_summary,
         },
         "migration": {
             "migration_file": migration_ref,
@@ -784,13 +1102,26 @@ def verify_bundle(
             "catalogs_identical": True,
         },
         "selection": {
-            "snapshot": selection_ref,
-            "selector_sha256": selector_sha,
             "bound": 1,
             "selected": identities,
             "selected_before_bytes": selected_before,
-            "free_bytes": selection["free_bytes"],
-            "cutoff_margin_seconds": cutoff_margin,
+            "post_dry_run": {
+                "artifact": post_dry_ref,
+                "observed_at": post_dry["observed_at"],
+                "candidates_sha256": post_dry["candidates_sha256"],
+                "selector_sha256": post_dry["selector_sha256"],
+                "free_bytes": post_dry["free_bytes"],
+                "cutoff_margin_seconds": post_dry["cutoff_margin_seconds"],
+            },
+            "pre_enforce": {
+                "artifact": pre_enforce_ref,
+                "observed_at": pre_enforce["observed_at"],
+                "candidates_sha256": pre_enforce["candidates_sha256"],
+                "selector_sha256": pre_enforce["selector_sha256"],
+                "free_bytes": pre_enforce["free_bytes"],
+                "cutoff_margin_seconds": pre_enforce["cutoff_margin_seconds"],
+                "seconds_before_enforce": pre_enforce_delta,
+            },
         },
         "receipts": {
             "dry_run": dry_ref,
@@ -841,6 +1172,28 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _current_verifier_head() -> str:
+    repo_root = Path(__file__).resolve().parents[1]
+    cleanliness = subprocess.run(
+        ["git", "diff", "--quiet", "HEAD", "--"],
+        cwd=repo_root,
+        check=False,
+    )
+    if cleanliness.returncode != 0:
+        raise EvidenceError("executing verifier/schema differs from verifier_head_sha")
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    head = result.stdout.strip()
+    if result.returncode != 0 or re.fullmatch(r"[0-9a-f]{40}", head) is None:
+        raise EvidenceError("cannot bind verifier_head_sha to the executing repository")
+    return head
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -857,7 +1210,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             json.loads(args.evidence_schema_path.read_text(encoding="utf-8")),
             "evidence schema",
         )
-        terminal = verify_bundle(bundle, receipt_schema=receipt_schema)
+        terminal = verify_bundle(
+            bundle,
+            receipt_schema=receipt_schema,
+            verifier_head_sha=_current_verifier_head(),
+        )
         jsonschema.Draft7Validator(
             evidence_schema, format_checker=jsonschema.FormatChecker()
         ).validate(terminal)

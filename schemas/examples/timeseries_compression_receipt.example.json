@@ -1,5 +1,6 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "2.0",
+  "head_sha": "0123456789abcdef0123456789abcdef01234567",
   "generated_at": "2026-07-15T12:00:00Z",
   "now_utc": "2026-07-15T12:00:00Z",
   "lag_seconds": 604800,

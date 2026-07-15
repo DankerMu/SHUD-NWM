@@ -752,15 +752,29 @@ every referenced artifact, verifies exact byte counts/sha256, validates both
 runner receipts, recomputes selector hashes, D3 settings, totals, size/count
 deltas, raw query/result hashes, median/p95 thresholds, and plan binding, then
 atomically publishes the terminal envelope against
-`schemas/timeseries_compression_live_evidence.schema.json`.
+`schemas/timeseries_compression_live_evidence.schema.json` version `2.0`.
+
+The terminal distinguishes immutable `mutation_head_sha` from the later
+`verifier_head_sha`. Preflight is captured before mutation and binds the
+former; both runner receipts must be version `2.0` and independently bind that
+same SHA before any DB call. Version `1.0` receipts remain readable historical
+operational evidence but cannot satisfy this terminal contract. A
+post-mutation preflight rewrite is invalid. Selection uses two distinct
+artifact references: one immediately after dry-run and one within 60 seconds
+before enforce. Each contains its observation time, cutoff, complete ordered
+candidate list and selected tuple. Benchmark phases persist every actual
+positional or named bind, the cold execution, two to five warmups, activity
+samples, and seven measured execution/plan records. Every after plan must
+independently bind the selected `DecompressChunk`.
 
 Every bundle artifact reference is exactly
 `{"path":"/absolute/path","sha256":"<lowercase-64hex>","bytes":N}` and
 must name a regular non-symlink file. Canonical embedded JSON hashes are
 `jq -cS` UTF-8 including its trailing newline. The bundle has these exact
-top-level keys: `schema_version`, `issue`, `generated_at`, `node`, `head_sha`,
-`database_identity`, `authorization`, `preflight`, `migration`, `selection`,
-`receipts`, `sizes`, `catalog`, `benchmarks`, `cleanup`, `out_of_scope`.
+top-level keys: `schema_version`, `issue`, `generated_at`, `node`,
+`mutation_head_sha`, `verifier_head_sha`, `database_identity`,
+`authorization`, `preflight`, `migration`, `selection`, `receipts`, `sizes`,
+`catalog`, `benchmarks`, `cleanup`, `out_of_scope`.
 
 Referenced JSON contracts are:
 
@@ -774,18 +788,21 @@ Referenced JSON contracts are:
   "policy_jobs":[]}`. Each setting row has exactly schema/table/`attname`,
   `segmentby_column_index`, `orderby_column_index`, `orderby_asc`, and
   `orderby_nullsfirst`, in the D3 order pinned by the fixture.
-- `selection.snapshot`: `cutoff`, `free_bytes`, and ordered `selected`; the
-  sole selected row adds `before_bytes` to the six-field identity tuple.
+- `selection.post_dry_run|pre_enforce`: distinct timestamped
+  artifacts containing cutoff, free bytes, complete ordered candidates and
+  the bound-1 selected tuple. Their selected identities must match both runner
+  receipts; the pre-enforce observation is at most 60 seconds before enforce.
 - `sizes.pre|post`: `tables` keyed by both D3 hypertables. Each row has
   `hypertable_size`, `parent_relation_size`, `compressed_chunks`,
   `uncompressed_chunks`, and `compressed_relations`. Each compressed relation
   binds `origin_chunk_schema`/`origin_chunk_name` to its sibling
   `schema`/`name` and measured `bytes`.
 - `benchmarks.evidence`: exactly `curve`, then `mvt`. Each stores source refs,
-  exact `query_text` + sha256, non-secret parameters, before/after raw
-  `result_payload` + hash/row/byte counts, cache/timing/buffer fields, seven
-  samples, raw after plan, and concurrent-load verdict. Curve payload is a JSON
-  row array; MVT payload is nonempty even-length hex.
+  exact `query_text` + sha256, every non-secret positional/named bind,
+  before/after raw result payload + identity, cold execution, two to five
+  warmups, activity samples, and seven measurements with raw plan/timing/buffer
+  fields. Curve payload is a JSON row array; MVT payload is nonempty even-
+  length hex.
 - `cleanup.evidence`: autopipe restored, compression timer enabled/inactive,
   compression service inactive with activation count zero, and installed unit
   hashes matching the repository.
@@ -806,6 +823,12 @@ the outcome remains failed/partial. Do not rerun enforce, auto-decompress,
 claim rollback from the schema dump, or relabel the evidence. Any later
 `decompress_chunk` recovery is a separate authorization bound to the exact
 successful receipt list, followed by fresh catalog/size/result/query checks.
+
+The 2026-07-15 bound-1 operation succeeded, but its first terminal attempt was
+rejected because these provenance artifacts were incomplete. Its dry-run and
+enforce receipts remain historical operational evidence; they do not satisfy
+task 4.5 and must not be relabeled. Replaying the evidence requires separate
+human authorization for the exact decompression/recompression mutation.
 
 ### 4.1 Write guard overview
 

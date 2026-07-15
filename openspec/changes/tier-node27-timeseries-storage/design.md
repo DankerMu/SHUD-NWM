@@ -799,18 +799,22 @@ when this first bounded batch selects chunks from only one table.
 
 Validate both runner receipts against
 `schemas/timeseries_compression_receipt.schema.json`, then apply the semantic
-checks above independently of the runner. Record mode-0600 receipt paths,
-byte counts, full sha256 values, deployed head, catalog hashes, size snapshots,
-selection hash, command exit codes, and final verdict in a separate atomic
-terminal envelope. A schema-valid receipt with wrong scope, partial outcome,
-bad arithmetic, or failed post-catalog proof is not acceptance evidence.
+checks above independently of the runner. New runner receipts use version
+`2.0` and freeze `head_sha` before any DB call; version `1.0` remains readable
+as historical operational evidence but cannot satisfy the live terminal v2
+contract. Record mode-0600 receipt paths, byte counts, full sha256 values,
+deployed head, catalog hashes, size snapshots, selection hash, command exit
+codes, and final verdict in a separate atomic terminal envelope. A
+schema-valid receipt with wrong scope, partial outcome, bad arithmetic, or
+failed post-catalog proof is not acceptance evidence.
 
 The terminal envelope conforms to
 `schemas/timeseries_compression_live_evidence.schema.json`, schema version
-`1.0`, with required top-level keys: `schema_version`, `issue`, `generated_at`,
-`node`, `head_sha`, `database_identity`, `authorization`, `preflight`,
-`migration`, `selection`, `receipts`, `sizes`, `catalog`, `benchmarks`,
-`cleanup`, `out_of_scope`, and `verdict`. Nested required fields bind the DB
+`2.0`, with required top-level keys: `schema_version`, `issue`, `generated_at`,
+`node`, `mutation_head_sha`, `verifier_head_sha`, `database_identity`,
+`authorization`, `preflight`, `migration`, `selection`, `receipts`, `sizes`,
+`catalog`, `benchmarks`, `cleanup`, `out_of_scope`, and `verdict`. Nested
+required fields bind the DB
 instance/version and truthful role flags; forensic dump/hash; first/second
 migration exit/catalog hashes; bound=1, selector hash/bytes/caps; dry-run and
 enforce paths/hashes/schema+semantic verdicts; pre/post table sizes and chunk
@@ -823,6 +827,16 @@ of the compression runner recomputes every derivable count/hash/arithmetic and
 validates this schema before it may emit `PASS_TASK_4_5`; unit tests cover each
 required-field omission and a semantically inconsistent but schema-valid
 envelope.
+
+The mutation and verifier SHAs are distinct provenance fields. The immutable
+pre-mutation preflight binds `mutation_head_sha`; the verifier may run at a
+later reviewed `verifier_head_sha` but cannot rewrite historical preflight.
+Selection has two different timestamped artifact refs (post-dry-run and
+pre-enforce), each with the complete ordered candidate set, cutoff and selected
+tuple. The second observation is at most 60 seconds before enforce. Benchmark
+evidence stores every actual SQL bind, the cold execution, two to five
+warmups, activity samples, and seven measured plans per phase; all seven after
+plans must bind the selected `DecompressChunk`.
 
 ### Reproducible representative curve/MVT timing
 

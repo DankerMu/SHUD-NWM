@@ -17,7 +17,8 @@
     "per_table_totals"
   ],
   "properties": {
-    "schema_version": {"enum": ["1.0"]},
+    "schema_version": {"enum": ["1.0", "2.0"]},
+    "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "generated_at": {"type": "string", "format": "date-time"},
     "now_utc": {"type": "string", "format": "date-time"},
     "lag_seconds": {"type": "integer", "minimum": 1},
@@ -65,6 +66,14 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {"schema_version": {"const": "2.0"}},
+        "required": ["schema_version"]
+      },
+      "then": {"required": ["head_sha"]},
+      "else": {"not": {"required": ["head_sha"]}}
     }
   ],
   "$defs": {

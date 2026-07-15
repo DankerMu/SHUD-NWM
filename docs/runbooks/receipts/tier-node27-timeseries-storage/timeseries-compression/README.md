@@ -1,4 +1,4 @@
-# Issue #1069 task 4.5 live compression evidence
+# Issue #1069 controlled compression receipts
 
 This directory preserves the immutable node-27 receipts for the controlled
 initial TimescaleDB compression run on 2026-07-15. The run applied migration
@@ -20,8 +20,10 @@ as required by the exact bound-1 authorization.
 Production curve and MVT result hashes were byte-identical before/after. The
 curve median changed from 0.475 ms to 0.413 ms and p95 from 0.860 ms to
 0.432 ms. The MVT median changed from 4.614 ms to 5.044 ms and p95 from
-4.628 ms to 5.053 ms. Both remained warm-cache and all seven after plans for
-each query contained a `DecompressChunk` bound to the selected relation.
+4.628 ms to 5.053 ms. Both remained warm-cache. The live command checked all
+seven in-memory after plans, but persisted only one plan per query and omitted
+the cold/warmup/activity records and several actual bind values. Those facts
+are therefore operational observations, not sufficient terminal evidence.
 
 The autopipe timer was restored to its original enabled/active state while its
 pre-existing failed service remained `MainPID=0`. The compression timer is
@@ -35,10 +37,21 @@ operation was performed.
   `78fde19433177fd53435c1c9f09a24a509b50e7ebd0cd63ce102f4413e829c3e`
 - `enforce-live-20260715T091543Z.json` —
   `0d7ca6184d0c636cb88670c24223c44bc1a9e8eacacf6029401aaff39ed3a891`
-- `terminal-live-20260715T092119Z.json` —
-  `c295329e3342c8f91aa4856b98f78230b26e8fe8a0edc5ad59003360ccc05339`
-  with verdict `PASS_TASK_4_5`.
+The first terminal attempt was rejected during final cross-review and is not
+committed as acceptance evidence. Three provenance gaps are confirmed:
 
-The terminal receipt references the node-27-local schema forensic dump,
-catalog, size, benchmark, and cleanup artifacts by absolute path, byte count,
-and SHA-256. Those generated artifacts and all credentials remain uncommitted.
+- the mutation ran at `2f1fa6a52cce456c4d2ce3b9b263ec3e22ad4ddf`, while a
+  later verifier-only head was written over the preflight artifact;
+- the independent selector was executed again immediately before enforce, but
+  no second complete timestamped snapshot was persisted;
+- the benchmark artifact lacks complete bind, cold/warmup/activity and seven-
+  plan records.
+
+The dry-run/enforce receipts and successful database outcome remain immutable.
+They are runner schema version `1.0` and do not contain a runner-frozen Git
+SHA, so they do not close task 4.5 under the hardened live-evidence v2
+contract. A new controlled evidence replay would require
+separate human authorization for the exact decompression/recompression scope;
+it must use the hardened verifier contract and may not relabel or overwrite
+these historical receipts. Node-27-local generated artifacts and all
+credentials remain uncommitted.

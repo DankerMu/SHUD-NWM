@@ -1,104 +1,88 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "NHMS Node-27 Initial Timeseries Compression Live Evidence",
+  "title": "NHMS Node-27 Initial Timeseries Compression Live Evidence v2",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema_version", "issue", "generated_at", "node", "head_sha",
-    "database_identity", "authorization", "preflight", "migration",
-    "selection", "receipts", "sizes", "catalog", "benchmarks", "cleanup",
-    "out_of_scope", "verdict"
+    "schema_version", "issue", "generated_at", "node", "mutation_head_sha",
+    "verifier_head_sha", "database_identity", "authorization", "preflight",
+    "migration", "selection", "receipts", "sizes", "catalog", "benchmarks",
+    "cleanup", "out_of_scope", "verdict"
   ],
   "properties": {
-    "schema_version": {"const": "1.0"},
+    "schema_version": {"const": "2.0"},
     "issue": {"const": 1069},
     "generated_at": {"type": "string", "format": "date-time"},
     "node": {"const": "node-27"},
-    "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-    "database_identity": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["dbname", "instance", "postgres_version", "timescaledb_version"],
-      "properties": {
-        "dbname": {"const": "nhms"},
-        "instance": {"const": "node27-primary-pg15"},
-        "postgres_version": {"type": "string", "minLength": 1},
-        "timescaledb_version": {"type": "string", "minLength": 1}
-      }
-    },
+    "mutation_head_sha": {"$ref": "#/$defs/git_sha"},
+    "verifier_head_sha": {"$ref": "#/$defs/git_sha"},
+    "database_identity": {"$ref": "#/$defs/database_identity"},
     "authorization": {
-      "type": "object",
-      "additionalProperties": false,
+      "type": "object", "additionalProperties": false,
       "required": ["lag_seconds", "bound", "max_selected_bytes", "min_free_bytes", "timeout_seconds", "enforce_invocations"],
       "properties": {
-        "lag_seconds": {"const": 604800},
-        "bound": {"const": 1},
+        "lag_seconds": {"const": 604800}, "bound": {"const": 1},
         "max_selected_bytes": {"const": 8589934592},
         "min_free_bytes": {"const": 322122547200},
-        "timeout_seconds": {"const": 900},
-        "enforce_invocations": {"const": 1}
+        "timeout_seconds": {"const": 900}, "enforce_invocations": {"const": 1}
       }
     },
     "preflight": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["evidence", "schema_dump", "catalog_before", "pg_restore_list_exit_code", "role", "quiescent"],
+      "type": "object", "additionalProperties": false,
+      "required": ["evidence", "schema_dump", "catalog_before", "pg_restore_list_exit_code", "role", "quiescent", "captured_at", "mutation_head_sha", "container_state", "units"],
       "properties": {
         "evidence": {"$ref": "#/$defs/artifact_ref"},
         "schema_dump": {"$ref": "#/$defs/artifact_ref"},
         "catalog_before": {"$ref": "#/$defs/artifact_ref"},
         "pg_restore_list_exit_code": {"const": 0},
-        "role": {"$ref": "#/$defs/role_facts"},
-        "quiescent": {"const": true}
+        "role": {"$ref": "#/$defs/role_facts"}, "quiescent": {"const": true},
+        "captured_at": {"type": "string", "format": "date-time"},
+        "mutation_head_sha": {"$ref": "#/$defs/git_sha"},
+        "container_state": {"$ref": "#/$defs/container_state"},
+        "units": {"$ref": "#/$defs/four_units"}
       }
     },
     "migration": {
-      "type": "object",
-      "additionalProperties": false,
+      "type": "object", "additionalProperties": false,
       "required": ["migration_file", "first_exit_code", "second_exit_code", "catalog_after_first", "catalog_after_second", "catalogs_identical"],
       "properties": {
         "migration_file": {"$ref": "#/$defs/artifact_ref"},
-        "first_exit_code": {"const": 0},
-        "second_exit_code": {"const": 0},
+        "first_exit_code": {"const": 0}, "second_exit_code": {"const": 0},
         "catalog_after_first": {"$ref": "#/$defs/artifact_ref"},
         "catalog_after_second": {"$ref": "#/$defs/artifact_ref"},
         "catalogs_identical": {"const": true}
       }
     },
     "selection": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["snapshot", "selector_sha256", "bound", "selected", "selected_before_bytes", "free_bytes", "cutoff_margin_seconds"],
+      "type": "object", "additionalProperties": false,
+      "required": ["bound", "selected", "selected_before_bytes", "post_dry_run", "pre_enforce"],
       "properties": {
-        "snapshot": {"$ref": "#/$defs/artifact_ref"},
-        "selector_sha256": {"$ref": "#/$defs/sha256"},
         "bound": {"const": 1},
         "selected": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"$ref": "#/$defs/chunk_identity"}},
         "selected_before_bytes": {"type": "integer", "minimum": 1, "maximum": 8589934592},
-        "free_bytes": {"type": "integer", "minimum": 322122547200},
-        "cutoff_margin_seconds": {"type": "integer", "minimum": 600}
+        "post_dry_run": {"$ref": "#/$defs/selection_observation"},
+        "pre_enforce": {
+          "allOf": [
+            {"$ref": "#/$defs/selection_observation"},
+            {"type": "object", "required": ["seconds_before_enforce"], "properties": {"seconds_before_enforce": {"type": "number", "minimum": 0, "maximum": 60}}}
+          ]
+        }
       }
     },
     "receipts": {
-      "type": "object",
-      "additionalProperties": false,
+      "type": "object", "additionalProperties": false,
       "required": ["dry_run", "enforce", "dry_run_schema_valid", "dry_run_semantic_valid", "enforce_schema_valid", "enforce_semantic_valid"],
       "properties": {
-        "dry_run": {"$ref": "#/$defs/artifact_ref"},
-        "enforce": {"$ref": "#/$defs/artifact_ref"},
-        "dry_run_schema_valid": {"const": true},
-        "dry_run_semantic_valid": {"const": true},
-        "enforce_schema_valid": {"const": true},
-        "enforce_semantic_valid": {"const": true}
+        "dry_run": {"$ref": "#/$defs/artifact_ref"}, "enforce": {"$ref": "#/$defs/artifact_ref"},
+        "dry_run_schema_valid": {"const": true}, "dry_run_semantic_valid": {"const": true},
+        "enforce_schema_valid": {"const": true}, "enforce_semantic_valid": {"const": true}
       }
     },
     "sizes": {
-      "type": "object",
-      "additionalProperties": false,
+      "type": "object", "additionalProperties": false,
       "required": ["pre", "post", "pre_combined_hypertable_size", "post_combined_hypertable_size", "compressed_chunk_count_delta", "selected_before_bytes", "selected_after_bytes"],
       "properties": {
-        "pre": {"$ref": "#/$defs/artifact_ref"},
-        "post": {"$ref": "#/$defs/artifact_ref"},
+        "pre": {"$ref": "#/$defs/artifact_ref"}, "post": {"$ref": "#/$defs/artifact_ref"},
         "pre_combined_hypertable_size": {"type": "integer", "minimum": 1},
         "post_combined_hypertable_size": {"type": "integer", "minimum": 0},
         "compressed_chunk_count_delta": {"const": 1},
@@ -107,122 +91,191 @@
       }
     },
     "catalog": {
-      "type": "object",
-      "additionalProperties": false,
+      "type": "object", "additionalProperties": false,
       "required": ["post", "d3_exact", "no_compression_policy", "selected_chunks_compressed"],
       "properties": {
-        "post": {"$ref": "#/$defs/artifact_ref"},
-        "d3_exact": {"const": true},
-        "no_compression_policy": {"const": true},
-        "selected_chunks_compressed": {"const": true}
+        "post": {"$ref": "#/$defs/artifact_ref"}, "d3_exact": {"const": true},
+        "no_compression_policy": {"const": true}, "selected_chunks_compressed": {"const": true}
       }
     },
     "benchmarks": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["evidence", "queries"],
+      "type": "object", "additionalProperties": false, "required": ["evidence", "queries"],
       "properties": {
         "evidence": {"$ref": "#/$defs/artifact_ref"},
-        "queries": {
-          "type": "array", "minItems": 2, "maxItems": 2,
-          "items": {"$ref": "#/$defs/query_evidence"}
-        }
+        "queries": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/query_evidence"}}
       }
     },
     "cleanup": {
-      "type": "object",
-      "additionalProperties": false,
+      "type": "object", "additionalProperties": false,
       "required": ["evidence", "autopipe_timer_restored", "compression_timer_enabled", "compression_timer_active", "compression_service_active", "compression_service_activation_count", "installed_service_matches_repo", "installed_timer_matches_repo"],
       "properties": {
-        "evidence": {"$ref": "#/$defs/artifact_ref"},
-        "autopipe_timer_restored": {"const": true},
-        "compression_timer_enabled": {"const": true},
-        "compression_timer_active": {"const": false},
-        "compression_service_active": {"const": false},
-        "compression_service_activation_count": {"const": 0},
-        "installed_service_matches_repo": {"const": true},
-        "installed_timer_matches_repo": {"const": true}
+        "evidence": {"$ref": "#/$defs/artifact_ref"}, "autopipe_timer_restored": {"const": true},
+        "compression_timer_enabled": {"const": true}, "compression_timer_active": {"const": false},
+        "compression_service_active": {"const": false}, "compression_service_activation_count": {"const": 0},
+        "installed_service_matches_repo": {"const": true}, "installed_timer_matches_repo": {"const": true}
       }
     },
     "out_of_scope": {
-      "type": "object",
-      "additionalProperties": false,
+      "type": "object", "additionalProperties": false,
       "required": ["retention_mutated", "drill_run", "node22_touched", "decompress_run", "role_mutated"],
       "properties": {
-        "retention_mutated": {"const": false},
-        "drill_run": {"const": false},
-        "node22_touched": {"const": false},
-        "decompress_run": {"const": false},
+        "retention_mutated": {"const": false}, "drill_run": {"const": false},
+        "node22_touched": {"const": false}, "decompress_run": {"const": false},
         "role_mutated": {"const": false}
       }
     },
     "verdict": {"const": "PASS_TASK_4_5"}
   },
   "$defs": {
+    "git_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "artifact_ref": {
-      "type": "object", "additionalProperties": false,
-      "required": ["path", "sha256", "bytes"],
+      "type": "object", "additionalProperties": false, "required": ["path", "sha256", "bytes"],
       "properties": {
         "path": {"type": "string", "pattern": "^/[^\\u0000-\\u001f]*$"},
-        "sha256": {"$ref": "#/$defs/sha256"},
-        "bytes": {"type": "integer", "minimum": 0}
+        "sha256": {"$ref": "#/$defs/sha256"}, "bytes": {"type": "integer", "minimum": 0}
       }
     },
-    "chunk_identity": {
+    "database_identity": {
       "type": "object", "additionalProperties": false,
-      "required": ["hypertable_schema", "hypertable_name", "chunk_schema", "chunk_name", "range_start", "range_end"],
+      "required": ["dbname", "instance", "postgres_version", "timescaledb_version"],
       "properties": {
-        "hypertable_schema": {"const": "hydro"},
-        "hypertable_name": {"const": "river_timeseries"},
-        "chunk_schema": {"type": "string", "minLength": 1},
-        "chunk_name": {"type": "string", "minLength": 1},
-        "range_start": {"type": "string", "format": "date-time"},
-        "range_end": {"type": "string", "format": "date-time"}
+        "dbname": {"const": "nhms"}, "instance": {"const": "node27-primary-pg15"},
+        "postgres_version": {"type": "string", "minLength": 1},
+        "timescaledb_version": {"type": "string", "minLength": 1}
+      }
+    },
+    "container_state": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "container_id", "image", "status", "running"],
+      "properties": {
+        "name": {"const": "nhms-db"}, "container_id": {"type": "string", "minLength": 1},
+        "image": {"type": "string", "minLength": 1}, "status": {"type": "string", "minLength": 1},
+        "running": {"const": true}
+      }
+    },
+    "unit_state": {
+      "type": "object", "additionalProperties": false,
+      "required": ["enabled", "active", "sub", "result", "main_pid", "journal"],
+      "properties": {
+        "enabled": {"type": "string", "minLength": 1}, "active": {"type": "string", "minLength": 1},
+        "sub": {"type": "string", "minLength": 1}, "result": {"type": "string", "minLength": 1},
+        "main_pid": {"type": "integer", "minimum": 0}, "journal": {"$ref": "#/$defs/artifact_ref"}
+      }
+    },
+    "four_units": {
+      "type": "object", "additionalProperties": false,
+      "required": ["nhms-node27-autopipe.timer", "nhms-node27-autopipe.service", "nhms-node27-timeseries-compression.timer", "nhms-node27-timeseries-compression.service"],
+      "properties": {
+        "nhms-node27-autopipe.timer": {"$ref": "#/$defs/unit_state"},
+        "nhms-node27-autopipe.service": {"$ref": "#/$defs/unit_state"},
+        "nhms-node27-timeseries-compression.timer": {"$ref": "#/$defs/unit_state"},
+        "nhms-node27-timeseries-compression.service": {"$ref": "#/$defs/unit_state"}
       }
     },
     "role_facts": {
       "type": "object", "additionalProperties": false,
       "required": ["current_user", "rolsuper", "rolcreaterole", "rolcreatedb", "owns_hydro_river_timeseries", "owns_met_forcing_station_timeseries", "execute_compress_chunk_regclass_boolean", "role_created", "grant_executed", "role_mutated"],
       "properties": {
-        "current_user": {"const": "nhms"},
-        "rolsuper": {"const": true},
-        "rolcreaterole": {"const": true},
-        "rolcreatedb": {"const": true},
-        "owns_hydro_river_timeseries": {"const": true},
-        "owns_met_forcing_station_timeseries": {"const": true},
-        "execute_compress_chunk_regclass_boolean": {"const": true},
-        "role_created": {"const": false},
-        "grant_executed": {"const": false},
-        "role_mutated": {"const": false}
+        "current_user": {"const": "nhms"}, "rolsuper": {"const": true},
+        "rolcreaterole": {"const": true}, "rolcreatedb": {"const": true},
+        "owns_hydro_river_timeseries": {"const": true}, "owns_met_forcing_station_timeseries": {"const": true},
+        "execute_compress_chunk_regclass_boolean": {"const": true}, "role_created": {"const": false},
+        "grant_executed": {"const": false}, "role_mutated": {"const": false}
+      }
+    },
+    "chunk_identity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["hypertable_schema", "hypertable_name", "chunk_schema", "chunk_name", "range_start", "range_end"],
+      "properties": {
+        "hypertable_schema": {"const": "hydro"}, "hypertable_name": {"const": "river_timeseries"},
+        "chunk_schema": {"type": "string", "minLength": 1}, "chunk_name": {"type": "string", "minLength": 1},
+        "range_start": {"type": "string", "format": "date-time"}, "range_end": {"type": "string", "format": "date-time"}
+      }
+    },
+    "selection_observation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["artifact", "observed_at", "candidates_sha256", "selector_sha256", "free_bytes", "cutoff_margin_seconds"],
+      "properties": {
+        "artifact": {"$ref": "#/$defs/artifact_ref"}, "observed_at": {"type": "string", "format": "date-time"},
+        "candidates_sha256": {"$ref": "#/$defs/sha256"}, "selector_sha256": {"$ref": "#/$defs/sha256"},
+        "free_bytes": {"type": "integer", "minimum": 322122547200},
+        "cutoff_margin_seconds": {"type": "integer", "minimum": 600},
+        "seconds_before_enforce": {"type": "number", "minimum": 0, "maximum": 60}
+      }
+    },
+    "measurement": {
+      "type": "object", "additionalProperties": false,
+      "required": ["plan", "planning_ms", "execution_ms", "shared_hit_blocks", "shared_read_blocks"],
+      "properties": {
+        "plan": {}, "planning_ms": {"type": "number", "minimum": 0},
+        "execution_ms": {"type": "number", "minimum": 0},
+        "shared_hit_blocks": {"type": "integer", "minimum": 0},
+        "shared_read_blocks": {"type": "integer", "minimum": 0}
+      }
+    },
+    "activity_sample": {
+      "type": "object", "additionalProperties": false,
+      "required": ["captured_at", "active_sessions", "material_load_stable"],
+      "properties": {
+        "captured_at": {"type": "string", "format": "date-time"},
+        "active_sessions": {"type": "integer", "minimum": 0}, "material_load_stable": {"const": true}
+      }
+    },
+    "phase_capture": {
+      "type": "object", "additionalProperties": false,
+      "required": ["result_payload", "result_sha256", "rows", "bytes", "cache_class", "cold", "warmups", "measurements", "activity_samples", "samples_ms", "median_ms", "p95_ms"],
+      "properties": {
+        "result_payload": {}, "result_sha256": {"$ref": "#/$defs/sha256"},
+        "rows": {"type": "integer", "minimum": 1}, "bytes": {"type": "integer", "minimum": 1},
+        "cache_class": {"enum": ["warm-cache", "mixed-cache"]}, "cold": {"$ref": "#/$defs/measurement"},
+        "warmups": {"type": "array", "minItems": 2, "maxItems": 5, "items": {"$ref": "#/$defs/measurement"}},
+        "measurements": {"type": "array", "minItems": 7, "maxItems": 7, "items": {"$ref": "#/$defs/measurement"}},
+        "activity_samples": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/activity_sample"}},
+        "samples_ms": {"$ref": "#/$defs/seven_samples"}, "median_ms": {"type": "number", "minimum": 0},
+        "p95_ms": {"type": "number", "minimum": 0}
+      }
+    },
+    "curve_binding": {
+      "type": "object", "additionalProperties": false, "required": ["parameter_names", "bound_parameters"],
+      "properties": {
+        "parameter_names": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "bound_parameters": {"type": "array", "minItems": 1}
+      }
+    },
+    "mvt_binding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_id", "basin_version_id", "river_network_version_id", "variable", "valid_time", "z", "x", "y", "feature_limit", "feature_coordinate_limit", "collection_coordinate_limit", "max_coordinate_dimensions", "extent", "buffer", "simplification_tolerance_m"],
+      "properties": {
+        "run_id": {"type": "string", "minLength": 1}, "basin_version_id": {"type": "string", "minLength": 1},
+        "river_network_version_id": {"type": "string", "minLength": 1}, "variable": {"const": "q_down"},
+        "valid_time": {"type": "string", "format": "date-time"}, "z": {"const": 9},
+        "x": {"type": "integer", "minimum": 0, "maximum": 511}, "y": {"type": "integer", "minimum": 0, "maximum": 511},
+        "feature_limit": {"const": 10000}, "feature_coordinate_limit": {"const": 50000},
+        "collection_coordinate_limit": {"const": 50000}, "max_coordinate_dimensions": {"const": 3},
+        "extent": {"const": 4096}, "buffer": {"const": 64},
+        "simplification_tolerance_m": {"type": "number", "exclusiveMinimum": 0}
       }
     },
     "query_evidence": {
       "type": "object", "additionalProperties": false,
-      "required": ["name", "source_refs", "query_sha256", "result_sha256", "rows", "bytes", "cache_class", "before_samples_ms", "after_samples_ms", "before_median_ms", "after_median_ms", "median_threshold_ms", "before_p95_ms", "after_p95_ms", "p95_threshold_ms", "decompress_chunk_plan_bound", "concurrent_load_stable"],
+      "required": ["name", "source_refs", "query_sha256", "binding", "result_sha256", "rows", "bytes", "cache_class", "before_capture", "after_capture", "before_median_ms", "after_median_ms", "median_threshold_ms", "before_p95_ms", "after_p95_ms", "p95_threshold_ms", "decompress_chunk_plan_bound"],
       "properties": {
-        "name": {"enum": ["curve", "mvt"]},
-        "source_refs": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/artifact_ref"}},
-        "query_sha256": {"$ref": "#/$defs/sha256"},
-        "result_sha256": {"$ref": "#/$defs/sha256"},
-        "rows": {"type": "integer", "minimum": 1},
-        "bytes": {"type": "integer", "minimum": 1},
+        "name": {"enum": ["curve", "mvt"]}, "source_refs": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/artifact_ref"}},
+        "query_sha256": {"$ref": "#/$defs/sha256"}, "binding": {}, "result_sha256": {"$ref": "#/$defs/sha256"},
+        "rows": {"type": "integer", "minimum": 1}, "bytes": {"type": "integer", "minimum": 1},
         "cache_class": {"enum": ["warm-cache", "mixed-cache"]},
-        "before_samples_ms": {"$ref": "#/$defs/seven_samples"},
-        "after_samples_ms": {"$ref": "#/$defs/seven_samples"},
-        "before_median_ms": {"type": "number", "minimum": 0},
-        "after_median_ms": {"type": "number", "minimum": 0},
-        "median_threshold_ms": {"type": "number", "minimum": 0},
-        "before_p95_ms": {"type": "number", "minimum": 0},
-        "after_p95_ms": {"type": "number", "minimum": 0},
-        "p95_threshold_ms": {"type": "number", "minimum": 0},
-        "decompress_chunk_plan_bound": {"const": true},
-        "concurrent_load_stable": {"const": true}
-      }
+        "before_capture": {"$ref": "#/$defs/phase_capture"}, "after_capture": {"$ref": "#/$defs/phase_capture"},
+        "before_median_ms": {"type": "number", "minimum": 0}, "after_median_ms": {"type": "number", "minimum": 0},
+        "median_threshold_ms": {"type": "number", "minimum": 0}, "before_p95_ms": {"type": "number", "minimum": 0},
+        "after_p95_ms": {"type": "number", "minimum": 0}, "p95_threshold_ms": {"type": "number", "minimum": 0},
+        "decompress_chunk_plan_bound": {"const": true}
+      },
+      "allOf": [
+        {"if": {"properties": {"name": {"const": "curve"}}}, "then": {"properties": {"binding": {"$ref": "#/$defs/curve_binding"}}}},
+        {"if": {"properties": {"name": {"const": "mvt"}}}, "then": {"properties": {"binding": {"$ref": "#/$defs/mvt_binding"}}}}
+      ]
     },
-    "seven_samples": {
-      "type": "array", "minItems": 7, "maxItems": 7,
-      "items": {"type": "number", "minimum": 0}
-    }
+    "seven_samples": {"type": "array", "minItems": 7, "maxItems": 7, "items": {"type": "number", "minimum": 0}}
   }
 }

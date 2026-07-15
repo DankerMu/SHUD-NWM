@@ -21,7 +21,9 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import stat
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -36,8 +38,8 @@ from packages.common.safe_fs import (
     open_directory_no_follow,
 )
 
-SCHEMA_VERSION = "1.0"
-TOOL_VERSION = "node27-timeseries-compression/1"
+SCHEMA_VERSION = "2.0"
+TOOL_VERSION = "node27-timeseries-compression/2"
 
 # The two detail hypertables gated by D3. Ordering here is the tie-break in
 # chunk selection and per-table totals — do not reorder without matching the
@@ -59,6 +61,30 @@ _COMPRESS_TIMEOUT_MS = 300_000
 
 class CompressionConfigError(RuntimeError):
     """Fail-closed configuration parse error before any DB call."""
+
+
+def _current_head_sha(*, require_clean: bool = False) -> str:
+    """Freeze the exact repository HEAD before selection or mutation begins."""
+    repo_root = Path(__file__).resolve().parents[1]
+    if require_clean:
+        cleanliness = subprocess.run(
+            ["git", "diff", "--quiet", "HEAD", "--"],
+            cwd=repo_root,
+            check=False,
+        )
+        if cleanliness.returncode != 0:
+            raise CompressionConfigError("runner worktree differs from repository HEAD")
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    head_sha = result.stdout.strip()
+    if result.returncode != 0 or re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
+        raise CompressionConfigError("cannot bind receipt to repository HEAD")
+    return head_sha
 
 
 @dataclass(frozen=True)
@@ -427,8 +453,12 @@ def build_receipt(
     fetch_chunks: FetchChunks,
     measure_chunk_bytes: MeasureChunkBytes,
     compress_chunk: CompressChunk,
+    head_sha: str | None = None,
 ) -> dict[str, Any]:
     """Perform the selection + (optionally) compression and return the receipt."""
+    frozen_head_sha = head_sha or _current_head_sha()
+    if re.fullmatch(r"[0-9a-f]{40}", frozen_head_sha) is None:
+        raise CompressionConfigError("receipt head_sha must be a lowercase 40-hex Git SHA")
     chunks = fetch_chunks(config.database_url)
     selected_rows, deferred_rows, skipped_rows = _classify(
         chunks,
@@ -544,6 +574,7 @@ def build_receipt(
     ]
     return {
         "schema_version": SCHEMA_VERSION,
+        "head_sha": frozen_head_sha,
         "generated_at": _iso(datetime.now(UTC)),
         "now_utc": _iso(now_utc),
         "lag_seconds": config.lag_seconds,
@@ -565,7 +596,7 @@ def publish_receipt(config: CompressionConfig, receipt: Mapping[str, Any]) -> No
 
 
 def build_refused_lock_receipt(
-    config: CompressionConfig, *, now_utc: datetime
+    config: CompressionConfig, *, now_utc: datetime, head_sha: str | None = None
 ) -> dict[str, Any]:
     """Build the mutation-free terminal receipt for a contended runner lock.
 
@@ -574,8 +605,12 @@ def build_refused_lock_receipt(
     success receipt so governance sees the current invocation's terminal
     state.
     """
+    frozen_head_sha = head_sha or _current_head_sha()
+    if re.fullmatch(r"[0-9a-f]{40}", frozen_head_sha) is None:
+        raise CompressionConfigError("receipt head_sha must be a lowercase 40-hex Git SHA")
     return {
         "schema_version": SCHEMA_VERSION,
+        "head_sha": frozen_head_sha,
         "generated_at": _iso(datetime.now(UTC)),
         "now_utc": _iso(now_utc),
         "lag_seconds": config.lag_seconds,
@@ -619,12 +654,19 @@ def main(
         return 1
     now = now_utc or datetime.now(UTC)
     try:
+        frozen_head_sha = _current_head_sha(require_clean=True)
+    except CompressionConfigError as error:
+        _emit_stderr_diagnostic("failed", str(error), dsn=config.database_url)
+        return 1
+    try:
         lock_fd = acquire_lock(config.lock_path)
     except CompressionConfigError as error:
         _emit_stderr_diagnostic("failed", str(error))
         return 1
     if lock_fd is None:
-        receipt = build_refused_lock_receipt(config, now_utc=now)
+        receipt = build_refused_lock_receipt(
+            config, now_utc=now, head_sha=frozen_head_sha
+        )
         try:
             publish_receipt(config, receipt)
         except SafeFilesystemError as error:
@@ -644,6 +686,7 @@ def main(
                 fetch_chunks=fetch_chunks or _default_fetch_chunks,
                 measure_chunk_bytes=measure_chunk_bytes or _default_measure_chunk_bytes,
                 compress_chunk=compress_chunk or _default_compress_chunk,
+                head_sha=frozen_head_sha,
             )
         except CompressionConfigError as error:
             _emit_stderr_diagnostic("failed", str(error), dsn=config.database_url)
