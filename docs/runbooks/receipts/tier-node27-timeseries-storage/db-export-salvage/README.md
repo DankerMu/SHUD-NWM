@@ -2,7 +2,15 @@
 
 This directory preserves the immutable node-27 receipts for the explicitly authorized #1070 Task 3.3 live database-export salvage run on 2026-07-15.
 
-The run was bound to the frozen 228-selector input and executed once under the read-only `nhms_display_ro` database role. It performed no database writes; mutations were limited to archive-side export objects and manifests. The enforce run exported 228/228 selectors, and independent verification passed for all 228 objects and manifests: 75,922,800 rows and 1,065,525,623 compressed bytes. The fresh follow-up inventory classified 1,585/1,585 windows as complete and returned an empty salvage list. Retention, the compression drill, and node-22 business scheduling were outside this task's authorization and were not executed.
+The run was bound to the frozen 228-selector input and executed once under the
+read-only `nhms_display_ro` database role. It performed no database writes;
+mutations were limited to archive-side export objects and manifests. The
+enforce run exported 228/228 selectors, and independent verification passed
+for all 228 objects and manifests: 75,922,800 rows and 1,065,525,623 compressed
+bytes. The fresh follow-up inventory classified 1,585/1,585 windows as complete
+and returned an empty salvage list. Retention, the compression drill, and
+node-22 business scheduling were outside this task's authorization and were not
+executed.
 
 ## Receipts
 
