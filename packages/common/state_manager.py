@@ -1823,11 +1823,19 @@ def _copyback_raw_entries(
         raise _state_index_error("state_snapshot_index_entries_invalid", field="entries")
     if len(raw_entries) != len(validated):
         raise _state_index_error("state_snapshot_index_entries_invalid", field="entries")
-    return {
-        key: dict(raw)
-        for key, raw in zip(validated, raw_entries, strict=True)
-        if isinstance(raw, Mapping)
-    }
+    normalized: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+    for key, raw in zip(validated, raw_entries, strict=True):
+        if not isinstance(raw, Mapping):
+            raise _state_index_error("state_snapshot_index_entry_not_object", field="entries[]")
+        entry = dict(raw)
+        # These fields are injected by validation for in-memory evidence and
+        # can be regenerated from the provider header/object on every read.
+        # They are not state identity or lineage and must not create a merge
+        # conflict or leak stale provider evidence into the next index.
+        entry.pop("index_generated_at", None)
+        entry.pop("object_evidence", None)
+        normalized[key] = entry
+    return normalized
 
 
 def _validate_state_snapshot_index(

@@ -175,6 +175,97 @@ def test_state_index_copyback_merges_split_root_checkpoint_only_in_private(tmp_p
     assert {entry["state_id"] for entry in entries} == {"private-state", "shared-state"}
 
 
+def test_state_index_copyback_ignores_derived_entry_evidence_for_same_identity(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    _write_run(object_root, "fcst_gfs_2026062700_basins_heihe_shud")
+    store = LocalObjectStore(object_root, "s3://nhms")
+    content = _valid_state_bytes(b"same-state")
+    state_uri = store.write_bytes_atomic("states/gfs/model_a/same/state.cfg.ic", content)
+    base_entry = _state_entry("same-state", state_uri, content, "2026-06-27T01:00:00Z")
+    source_entry = {
+        **base_entry,
+        "index_generated_at": "2026-06-27T03:00:00Z",
+        "object_evidence": {"checksum_verified": True, "provider": "stale"},
+    }
+    destination_entry = {
+        **base_entry,
+        "index_generated_at": "2026-06-27T02:00:00Z",
+        "object_evidence": {"checksum_verified": True, "provider": "stale"},
+    }
+    source_index = object_root / "scheduler/state-index/index-last.json"
+    destination_index = copyback_root / "scheduler/state-index/index-last.json"
+    publish_state_snapshot_index(
+        [source_entry],
+        source_index,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, 3, tzinfo=UTC),
+    )
+    publish_state_snapshot_index(
+        [destination_entry],
+        destination_index,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
+    )
+
+    summary = copyback_run_trees(
+        object_store_root=object_root,
+        copyback_root=copyback_root,
+        run_ids=["fcst_gfs_2026062700_basins_heihe_shud"],
+        extra_object_keys=["scheduler/state-index/index-last.json"],
+    )
+
+    assert summary is not None
+    merge = summary["extra_objects"][0]["merge"]
+    assert merge["merged_entry_count"] == 1
+    assert merge["checkpoint_copied_count"] == 1
+    payload = json.loads(destination_index.read_text(encoding="utf-8"))
+    assert payload["entries"] == [base_entry]
+
+
+def test_state_index_copyback_same_timestamp_semantic_conflict_fails_closed(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    _write_run(object_root, "fcst_gfs_2026062700_basins_heihe_shud")
+    store = LocalObjectStore(object_root, "s3://nhms")
+    content = _valid_state_bytes(b"conflict")
+    state_uri = store.write_bytes_atomic("states/gfs/model_a/conflict/state.cfg.ic", content)
+    source_entry = _state_entry("same-state", state_uri, content, "2026-06-27T01:00:00Z")
+    destination_entry = {**source_entry, "run_id": "different-real-run"}
+    source_index = object_root / "scheduler/state-index/index-last.json"
+    destination_index = copyback_root / "scheduler/state-index/index-last.json"
+    publish_state_snapshot_index(
+        [source_entry],
+        source_index,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, 3, tzinfo=UTC),
+    )
+    publish_state_snapshot_index(
+        [destination_entry],
+        destination_index,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
+    )
+    before = destination_index.read_bytes()
+
+    with pytest.raises(RunTreeCopybackError) as error_info:
+        copyback_run_trees(
+            object_store_root=object_root,
+            copyback_root=copyback_root,
+            run_ids=["fcst_gfs_2026062700_basins_heihe_shud"],
+            extra_object_keys=["scheduler/state-index/index-last.json"],
+        )
+
+    assert error_info.value.code == "OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED"
+    assert "state_snapshot_index_copyback_conflict" in error_info.value.details["error"]
+    assert destination_index.read_bytes() == before
+    assert not (copyback_root / "states").exists()
+
+
 def test_state_index_copyback_checkpoint_failure_preserves_shared_index(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
