@@ -156,7 +156,7 @@ receipt file. At the time of the first failed receipt, the consequences were:
   the archive tier stays empty even after mover runs.
 
 The wrapper/import and canonical-prefix defects were later fixed by #1067 and
-#1066, and the passing controlled mover receipt above closes #1065's archive
+Issue #1066, and the passing controlled mover receipt above closes #1065's archive
 lane. The remaining 228 DB-only gaps and complete-audit refresh are explicitly
 handed to #1070; they are not silently folded into this issue or treated as
 authorization to enter #856.
@@ -186,7 +186,7 @@ systemctl --user start nhms-node27-product-archive.service
 
 ## Status
 
-#1065's product-archive mover closure is proven by the passing receipt above;
+Issue #1065's product-archive mover closure is proven by the passing receipt above;
 the immutable first-live failure remains the red baseline. The next archive
 completeness work is #1070, not automatic entry into Step A1/B/C of #856.
 The raw-retention pattern (14-day `raw/` prune) remains independent of this
