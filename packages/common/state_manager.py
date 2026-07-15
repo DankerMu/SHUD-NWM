@@ -1635,6 +1635,8 @@ def merge_state_snapshot_index_copyback(
     Identity collisions retain the entry with the later ``created_at``; an
     exact tie with different bytes fails closed.  This prevents either an old
     refresh snapshot or an old copyback from deleting a concurrent state.
+    Both indexes are verified against the private reference root before their
+    merged checkpoints are checksum-copied into the shared destination.
     """
 
     try:
@@ -1674,7 +1676,7 @@ def merge_state_snapshot_index_copyback(
                 raise ValueError("destination index is not an object")
             destination_validated = _validate_state_snapshot_index(
                 destination_payload,
-                object_store_root=destination_containment_root,
+                object_store_root=reference_object_store_root,
                 object_store_prefix=object_store_prefix,
                 published_artifact_root=None,
                 now=None,

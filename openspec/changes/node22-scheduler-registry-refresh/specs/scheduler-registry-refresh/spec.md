@@ -10,7 +10,8 @@ writers.
 #### Scenario: Valid full inventory is published
 
 - **WHEN** the authoritative Basins source validates as the exact current live
-  inventory (20 models on 2026-07-14) and the destination-derived lock is
+  inventory (19 models on 2026-07-15 after removing duplicate
+  `HHe-MAIN-02`) and the destination-derived lock is
   acquired
 - **THEN** `publish_all_basin_scheduler_registry` validates packages and invokes
   `publish_scheduler_registry_manifest`

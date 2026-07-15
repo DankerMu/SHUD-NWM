@@ -120,16 +120,15 @@ def test_copyback_run_trees_copies_extra_state_index_object(tmp_path: Path) -> N
     ).read_text(encoding="utf-8")
 
 
-def test_state_index_copyback_merges_without_losing_shared_entry(tmp_path: Path) -> None:
+def test_state_index_copyback_merges_split_root_checkpoint_only_in_private(tmp_path: Path) -> None:
     object_root = tmp_path / "object-store"
     copyback_root = tmp_path / "shared-object-store"
     _write_run(object_root, "fcst_gfs_2026062700_basins_heihe_shud")
     store = LocalObjectStore(object_root, "s3://nhms")
-    shared_store = LocalObjectStore(copyback_root, "s3://nhms")
     private_content = _valid_state_bytes(b"private")
     shared_content = _valid_state_bytes(b"shared")
     private_uri = store.write_bytes_atomic("states/gfs/model_a/private/state.cfg.ic", private_content)
-    shared_uri = shared_store.write_bytes_atomic("states/gfs/model_a/shared/state.cfg.ic", shared_content)
+    shared_uri = store.write_bytes_atomic("states/gfs/model_a/shared/state.cfg.ic", shared_content)
     source_index = object_root / "scheduler/state-index/index-last.json"
     destination_index = copyback_root / "scheduler/state-index/index-last.json"
     publish_state_snapshot_index(
@@ -142,10 +141,12 @@ def test_state_index_copyback_merges_without_losing_shared_entry(tmp_path: Path)
     publish_state_snapshot_index(
         [_state_entry("shared-state", shared_uri, shared_content, "2026-06-27T00:00:00Z")],
         destination_index,
-        object_store_root=copyback_root,
+        object_store_root=object_root,
         object_store_prefix="s3://nhms",
         generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
     )
+
+    assert not (copyback_root / "states/gfs/model_a/shared/state.cfg.ic").exists()
 
     summary = copyback_run_trees(
         object_store_root=object_root,
@@ -158,9 +159,11 @@ def test_state_index_copyback_merges_without_losing_shared_entry(tmp_path: Path)
     payload = json.loads(destination_index.read_text())
     assert {entry["state_id"] for entry in payload["entries"]} == {"private-state", "shared-state"}
     assert summary["extra_objects"][0]["merge"]["merged_entry_count"] == 2
-    assert summary["extra_objects"][0]["merge"]["checkpoint_copied_count"] == 1
+    assert summary["extra_objects"][0]["merge"]["checkpoint_copied_count"] == 2
+    assert summary["extra_objects"][0]["merge"]["checkpoint_reused_count"] == 0
     copied_checkpoint = copyback_root / "states/gfs/model_a/private/state.cfg.ic"
     assert copied_checkpoint.read_bytes() == private_content
+    assert (copyback_root / "states/gfs/model_a/shared/state.cfg.ic").read_bytes() == shared_content
     assert copied_checkpoint.stat().st_mode & 0o777 == 0o664
     assert copied_checkpoint.parent.stat().st_mode & 0o777 == 0o775
     repository = FileStateSnapshotIndexRepository(
@@ -184,6 +187,7 @@ def test_state_index_copyback_checkpoint_failure_preserves_shared_index(
     private_content = _valid_state_bytes(b"private")
     shared_content = _valid_state_bytes(b"shared")
     private_uri = private_store.write_bytes_atomic("states/gfs/model_a/private/state.cfg.ic", private_content)
+    private_store.write_bytes_atomic("states/gfs/model_a/shared/state.cfg.ic", shared_content)
     shared_uri = shared_store.write_bytes_atomic("states/gfs/model_a/shared/state.cfg.ic", shared_content)
     source_index = object_root / "scheduler/state-index/index-last.json"
     destination_index = copyback_root / "scheduler/state-index/index-last.json"
@@ -221,6 +225,62 @@ def test_state_index_copyback_checkpoint_failure_preserves_shared_index(
     assert not (copyback_root / "states/gfs/model_a/private/state.cfg.ic").exists()
 
 
+def test_state_index_copyback_split_root_checksum_failure_preserves_shared_index(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    _write_run(object_root, "fcst_gfs_2026062700_basins_heihe_shud")
+    private_store = LocalObjectStore(object_root, "s3://nhms")
+    private_content = _valid_state_bytes(b"private")
+    stale_shared_content = _valid_state_bytes(b"stale-shared")
+    expected_shared_content = _valid_state_bytes(b"expected-shared")
+    private_uri = private_store.write_bytes_atomic(
+        "states/gfs/model_a/private/state.cfg.ic",
+        private_content,
+    )
+    shared_uri = private_store.write_bytes_atomic(
+        "states/gfs/model_a/shared/state.cfg.ic",
+        stale_shared_content,
+    )
+    source_index = object_root / "scheduler/state-index/index-last.json"
+    destination_index = copyback_root / "scheduler/state-index/index-last.json"
+    publish_state_snapshot_index(
+        [_state_entry("private-state", private_uri, private_content, "2026-06-27T01:00:00Z")],
+        source_index,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
+    )
+    publish_state_snapshot_index(
+        [
+            _state_entry(
+                "shared-state",
+                shared_uri,
+                expected_shared_content,
+                "2026-06-27T00:00:00Z",
+            )
+        ],
+        destination_index,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
+        verify_objects=False,
+    )
+    before = destination_index.read_bytes()
+
+    with pytest.raises(RunTreeCopybackError) as error_info:
+        copyback_run_trees(
+            object_store_root=object_root,
+            copyback_root=copyback_root,
+            run_ids=["fcst_gfs_2026062700_basins_heihe_shud"],
+            extra_object_keys=["scheduler/state-index/index-last.json"],
+        )
+
+    assert error_info.value.code == "OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED"
+    assert "state_snapshot_index_object_checksum_mismatch" in error_info.value.details["error"]
+    assert destination_index.read_bytes() == before
+    assert not (copyback_root / "states").exists()
+
+
 def test_state_index_copyback_serializes_against_refresh_publisher_without_deadlock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -233,6 +293,7 @@ def test_state_index_copyback_serializes_against_refresh_publisher_without_deadl
     private_content = _valid_state_bytes(b"private")
     shared_content = _valid_state_bytes(b"shared")
     private_uri = private_store.write_bytes_atomic("states/gfs/model_a/private/state.cfg.ic", private_content)
+    private_store.write_bytes_atomic("states/gfs/model_a/shared/state.cfg.ic", shared_content)
     shared_uri = shared_store.write_bytes_atomic("states/gfs/model_a/shared/state.cfg.ic", shared_content)
     source_index = object_root / "scheduler/state-index/index-last.json"
     destination_index = copyback_root / "scheduler/state-index/index-last.json"

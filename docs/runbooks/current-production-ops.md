@@ -1,6 +1,6 @@
 # Current Production Operations Runbook
 
-最后更新：2026-07-14
+最后更新：2026-07-15
 
 适用范围：node-27 active DB + ingest + display，node-22 Slurm/SHUD compute，
 以及两者共享的 NFS object-store/published 数据面。
@@ -223,8 +223,9 @@ scripts/install_node22_scheduler_file_provider_refresh.sh --install
 `OBJECT_STORE_ROOT` 中最新的 GFS/IFS cycle catalog，执行 bounded/no-follow、schema、
 source/cycle、统一 lineage identity、forecast hours、catalog row、canonical object checksum
 全验证，并生成每个 source/model 一条只含 `catalog_uri + catalog_sha256 +
-catalog_row_count` 绑定的 entry（N 个当前模型应为 GFS N + IFS N；2026-07-14
-现场为 20 个模型、每个 source 20 条、共 40 条）。最新 catalog
+catalog_row_count` 绑定的 entry（N 个当前模型应为 GFS N + IFS N；移除被
+`HHe` 完整覆盖的重复目录 `HHe-MAIN-02` 后，2026-07-15 现场为 19 个模型、
+每个 source 19 条、共 38 条）。最新 catalog
 invalid 时禁止回退旧 cycle；consumer identity mismatch 必须重读同一绑定 catalog 后重算。
 State index 才允许仅绕过年龄并重验 checkpoint object。任何 missing/invalid 引用或
 registry/readiness model-set mismatch 都在 canonical replace 前失败，绝不续签 legacy
@@ -243,7 +244,8 @@ jq '{outcome,reason,database_free,providers,orphans}' \
 `published` receipt 必须绑定三个 shared canonical 文件以及
 `NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST` 指向的 private compute-visible registry mirror。
 shared registry 与 worker mirror 必须具有完全相同的物理 SHA-256 和 model count；registry 的现场模型数
-应为当前完整 inventory（2026-06-30 为 13，2026-07-14 为 20），readiness 必须与同次
+应为当前完整 inventory（2026-06-30 为 13，2026-07-14 为 20；移除重复的
+`HHe-MAIN-02` 后，2026-07-15 为 19），readiness 必须与同次
 registry model set 逐 source 完全一致并记录 catalog URI/SHA/row count；state entry 不能因
 刷新减少。
 Installer 在任何 systemd mutation 前都会用同一 strict v1 runtime validator 读取 bounded/no-follow
