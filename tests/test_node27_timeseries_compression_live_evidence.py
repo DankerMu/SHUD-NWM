@@ -381,6 +381,26 @@ def test_verifier_recomputes_complete_terminal_envelope(tmp_path: Path) -> None:
     ]
 
 
+def test_verifier_accepts_bounded_post_relation_measurement_drift(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    post = _sizes(post=True)
+    post["tables"]["hydro.river_timeseries"]["compressed_relations"][0]["bytes"] += 8192
+    bundle["sizes"]["post"] = _json_ref(tmp_path, "sizes-post-drift.json", post)
+    terminal = evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA)
+    assert terminal["verdict"] == "PASS_TASK_4_5"
+
+
+def test_verifier_rejects_excessive_post_relation_measurement_drift(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    post = _sizes(post=True)
+    post["tables"]["hydro.river_timeseries"]["compressed_relations"][0]["bytes"] += (
+        evidence.MAX_POST_MEASUREMENT_DRIFT_BYTES + 1
+    )
+    bundle["sizes"]["post"] = _json_ref(tmp_path, "sizes-post-large-drift.json", post)
+    with pytest.raises(evidence.EvidenceError, match="measurement-time drift"):
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA)
+
+
 def test_live_evidence_example_and_required_top_level_contract() -> None:
     example = json.loads(
         (ROOT / "schemas/examples/timeseries_compression_live_evidence.example.json").read_text(

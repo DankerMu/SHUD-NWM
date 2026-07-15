@@ -1055,7 +1055,10 @@ Order is load-bearing:
   their real node-27 evidence passes. The node-27 pre-mutation probe also
   proved that TimescaleDB 2.10 requires compressed-sibling resolution through
   `_timescaledb_catalog.chunk.compressed_chunk_id`; the runner and regression
-  test pin that live-compatible lookup before any `compress_chunk` call.
+  test pin that live-compatible lookup before any `compress_chunk` call. The
+  independent verifier also binds the exact sibling while allowing at most
+  1 MiB of post-measurement FSM/VM drift; larger drift or failure to reduce
+  below the origin remains terminal failure.
 
 ## 5. Archive rebuild drill (`archive-rebuild-drill`)
 

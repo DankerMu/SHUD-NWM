@@ -38,6 +38,7 @@ MIN_FREE_BYTES = 300 * 1024**3
 EXPECTED_LAG_SECONDS = 604_800
 EXPECTED_BOUND = 1
 EXPECTED_TIMEOUT_SECONDS = 900
+MAX_POST_MEASUREMENT_DRIFT_BYTES = 1024**2
 
 # This constant is deliberately executable documentation: tests and the
 # runbook pin the same capture contract without inventing a host-only format.
@@ -693,8 +694,18 @@ def verify_bundle(
         and value.get("origin_chunk_schema") == selected["chunk_schema"]
         and value.get("origin_chunk_name") == selected["chunk_name"]
     ]
-    if len(selected_relations) != 1 or selected_relations[0]["bytes"] != enforce_row["after_bytes"]:
+    if len(selected_relations) != 1:
         raise EvidenceError("post size snapshot does not bind the selected compressed sibling")
+    post_relation_bytes = selected_relations[0]["bytes"]
+    receipt_after_bytes = enforce_row["after_bytes"]
+    if (
+        post_relation_bytes >= enforce_row["before_bytes"]
+        or abs(post_relation_bytes - receipt_after_bytes) > MAX_POST_MEASUREMENT_DRIFT_BYTES
+    ):
+        raise EvidenceError(
+            "post compressed sibling size is not reduced or exceeds the 1 MiB "
+            "measurement-time drift bound"
+        )
     selected_relation_names = {
         str(selected["chunk_name"]),
         str(selected_relations[0]["name"]),

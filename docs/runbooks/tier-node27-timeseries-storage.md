@@ -717,6 +717,11 @@ credential in process argv.
     sibling rows in `_timescaledb_catalog.chunk` through
     `origin.compressed_chunk_id`; the 2.10 information view does not expose
     `compressed_chunk_schema` or `compressed_chunk_name` columns.
+    The receipt and post snapshot are separate measurement instants:
+    `pg_total_relation_size` includes one-page FSM/VM growth. Require exact
+    sibling identity, both measurements below the origin size, and at most
+    1 MiB absolute receipt-to-snapshot drift; do not require byte identity or
+    rerun compression to chase an 8 KiB auxiliary-page change.
 
 The representative performance proof uses production query construction, not
 handwritten lookalikes. For the selected hydro chunk, freeze a nonempty
