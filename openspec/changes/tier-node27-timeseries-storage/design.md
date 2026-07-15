@@ -551,7 +551,10 @@ Invariant Matrix:
 - Terminal-chunk-only: chunk-select query filter `range_end < now - lag` yields only chunks strictly older than the lag window; active chunk (whose `range_end` >= now) never selected. Test: two chunks — one `range_end = now - 3d` (skipped), one `range_end = now - 10d` (eligible).
 - Per-tick bound respected: `SELECT ... LIMIT bound` (or explicit slice after ordering) — no more than `bound` chunks fully compressed; deferred remainder listed in receipt with reason "beyond per-tick bound".
 - Dry-run isolation: `mode=dry-run` writes only the receipt; no `compress_chunk` call; per-chunk `after_bytes` = null.
-- Flock lock-holder-only publish: contender receives structured JSON skip on stderr; **does not** touch the shared receipt path.
+- Flock lock-holder-only mutation: contender performs no DB call or compression,
+  emits a redacted structured stderr diagnostic, and atomically replaces the
+  configured receipt with a schema-valid `refused_lock` receipt so the required
+  lock-skip state is governance-visible rather than leaving stale evidence.
 - Strict config parse: invalid lag (empty, negative, non-numeric, `"0"`) → exit non-zero before any DB call; no stale receipt overwrite.
 - Migration idempotent on partial state: re-applying after only one table's ALTER succeeded must fix the second table without erroring on the first.
 - Compression `segmentby` covers PK columns (TimescaleDB 2.10 unique-constraint requirement) — asserted via test that reads the migration text and cross-references the expected PK column list per table.
@@ -572,6 +575,425 @@ Boundary-surface checklist:
 - Producer/consumer evidence boundaries: receipt → task 4.5 live receipt (#853 consumes); `timescaledb_information.compression_settings` → task 4.1 verification (real-DB oracle in #853).
 - Stale-state/idempotency boundaries: re-running the runner over already-compressed chunks must skip them (chunk-select query filters on `is_compressed = false` from `timescaledb_information.chunks`, which on TimescaleDB 2.10 exposes an `is_compressed` boolean column on this view — do NOT reach into `_timescaledb_catalog.chunk.compressed_chunk_id` for the same signal).
 - Unchanged downstream consumers: display API/frontend/read paths (ADR 0001), ingest write paths (#852 owns write-guard coupling), retention gate (#855 owns receipt consumption).
+
+## Workflow Fixture: Issue #1069 Node-27 Live Initial Compression Closure
+
+Fixture level: expanded. Repair intensity: high. Project profile: NHMS.
+
+This fixture closes only task 4.5 on the node-27 real-DB oracle. It consumes
+the migration/runner/schema delivered by #851, the fail-closed write guard
+delivered by #852, and the systemd/governance wiring delivered by #853. Ground
+truth inspection found one adjacent wiring defect that the earlier #853 issue
+body did not close: the committed compression service invokes the wrapper
+without `--enforce`, so its timer can publish dry-run receipts but can never
+apply D3/D7 compression. #1069 therefore includes the smallest committed fix
+needed to make the installed timer operational; a host-only drop-in or an
+untracked unit edit is forbidden.
+
+### Exact change surface
+
+- `infra/systemd/nhms-node27-timeseries-compression.service`: append the
+  literal `--enforce` argument to `ExecStart`. The timer-owned service is the
+  recurring mutation entrypoint; an operator dry-run continues to invoke
+  `scripts/node27_timeseries_compression_once.sh` directly without the flag.
+- `scripts/node27_timeseries_compression.py`: close the already-specified task
+  4.2 lock contract by atomically publishing a schema-valid `refused_lock`
+  receipt when flock is contended. The receipt records no selected/deferred/
+  skipped chunks and no mutation; stderr remains a redacted diagnostic.
+- `schemas/timeseries_compression_receipt.schema.json` and its example: make
+  the lock-refusal shape reachable and unambiguous without weakening the
+  existing dry-run/enforce shapes.
+- `tests/test_node27_timeseries_compression.py`: extend the unit-file wiring
+  invariant so the committed service must call the wrapper with the literal
+  `--enforce`, while the wrapper remains dry-run by default when invoked
+  manually; add exact lock-receipt publication, schema, no-mutation, and
+  pre-existing-receipt replacement tests.
+- `schemas/timeseries_compression_live_evidence.schema.json` plus a positive
+  example: pin the task-4.5 terminal envelope described below.
+- `scripts/node27_timeseries_compression_live_evidence.py` plus focused tests:
+  an independent verifier that consumes the two runner receipts and captured
+  pre/post/catalog/benchmark evidence, recomputes hashes/counts/arithmetic and
+  thresholds without importing the runner's receipt builder, then atomically
+  publishes the terminal envelope. It may read live catalogs for post-checks
+  but never migrates, compresses, decompresses, drops, or changes roles.
+- `docs/runbooks/tier-node27-timeseries-storage.md`: record the controlled
+  migration/install/first-run procedure, the benchmark SQL and acceptance
+  threshold below, timer activation order, and the truthful partial-compression
+  recovery boundary.
+- `docs/runbooks/receipts/tier-node27-timeseries-storage/timeseries-compression/`:
+  add the schema-valid dry-run/enforce receipts plus one terminal envelope and
+  README. The terminal envelope references node-27-local backup/preflight
+  artifacts by absolute path + sha256; credentials and the backup payload are
+  not committed.
+- `openspec/changes/tier-node27-timeseries-storage/tasks.md`: tick 4.2 after
+  the lock-receipt blocker is fixed and verified; tick 4.1 only after the live
+  migration/catalog proof; tick 4.5 only after every terminal acceptance below
+  passes. Each tick links its evidence.
+- `openspec/changes/tier-node27-timeseries-storage/design.md`: this fixture.
+
+Runner/schema semantics change only for the missing lock-refusal receipt above;
+migration, chunk selection, compression, and ordinary dry-run/enforce receipt
+semantics remain unchanged. Do not add a new selector flag, compression policy,
+alternate host-only receipt format, or host-only script. The live operator uses
+the exact branch head under review; node-27 is ff-only synchronized and its
+existing unrelated generated evidence remains untouched. The stale #851
+fixture sentence that says a contender does not touch the receipt is corrected
+to require the new immutable `refused_lock` receipt, matching tasks/spec.
+
+### Node-27 preflight, recoverability, and secret boundary
+
+Before any migration or compression mutation:
+
+1. Bind the host, UTC time, repository absolute path, branch head SHA,
+   TimescaleDB/PostgreSQL versions, database name, database instance identity,
+   and container/service state into a mode-0600 preflight JSON under
+   `/home/nwm/NWM/.nhms-issue1069-live/`. Refuse a dirty tracked worktree,
+   wrong DB/host, missing extension, or branch-head mismatch.
+2. Copy `infra/env/node27-timeseries-compression.example` to the canonical
+   untracked env path, source the existing node-27 ingest writer credential
+   without printing it, replace placeholders, and `chmod 0600`. Evidence may
+   record only `current_user`, host/port/dbname, booleans for required
+   privileges, env path/mode, and a redacted DSN. It MUST NOT contain the
+   password, full `DATABASE_URL`, environment dump, shell tracing, or process
+   argv containing credentials.
+3. Use the existing `nhms` writer identity only. Do not create a role, grant
+   privileges, promote a role, or reuse `nhms_display_ro`. Truthfully record
+   `current_user=nhms`, `rolsuper`, `rolcreaterole`, `rolcreatedb`, both target
+   relations' `relowner = current_user`, and EXECUTE on the exact installed
+   `compress_chunk(regclass,boolean)` signature. Current node-27 truth is that
+   `nhms` is a superuser; the envelope must not call this least privilege or
+   omit it. The run nevertheless executes no CREATE ROLE, GRANT, role mutation,
+   or table outside the migration/runner's fixed two-table allowlist.
+4. Create a mode-0600, custom-format, schema-only `pg_dump` of the live `nhms`
+   DB before migration, run `pg_restore --list` successfully, and bind its
+   path, byte count and sha256 in the preflight receipt. Also capture the two
+   target tables' pre-migration catalog state as canonical JSON + sha256. This
+   is a schema forensic snapshot / DDL inventory only: it is not a restore
+   test, data backup, recoverability proof, or compressed-chunk rollback proof.
+5. Record the currently enabled/active/sub states, `MainPID`, result, and a
+   bounded journal tail for
+   `nhms-node27-autopipe.{timer,service}` and the compression service/timer.
+   Stop only the autopipe timer for the controlled window. Quiescence requires
+   `MainPID=0`, no activating/running autopipe process, and no non-idle
+   `pg_stat_activity` write statement or conflicting relation lock touching
+   either target hypertable or selected chunk. `ActiveState=failed` with
+   `MainPID=0` is allowed and preserved as prior evidence; do not call
+   `reset-failed` merely to manufacture `inactive`. Restore only the timer's
+   exact prior enabled/active state in terminal cleanup and record the service's
+   original failed/result state without claiming #1069 fixed it. Manual
+   historical reingest remains prohibited during the window.
+
+The write guard in all three #852 wire sites must be present at the deployed
+SHA before migration. It remains the fail-closed boundary after compression,
+but it does not remove the need to quiesce ingestion: the guard/catalog check
+and `compress_chunk` are not one transaction and therefore do not eliminate a
+race with a simultaneous historical write.
+
+### Migration idempotency and D3 catalog proof
+
+Apply `db/migrations/000047_hypertable_compression_settings.sql` with
+`ON_ERROR_STOP=1`, capture the redacted exit/result, then apply the same file a
+second time with `ON_ERROR_STOP=1` **only if the first apply exited zero**.
+Both successful invocations must exit zero and the canonical catalog JSON after
+the first and second apply must be byte-identical. If the first apply exits
+nonzero, preserve its exit/catalog evidence and stop. Any partial-apply recovery
+reapply is a separately authorized production mutation; it is not disguised as
+the routine idempotency proof and never edits Timescale catalogs directly.
+
+The real-DB catalog proof is exact, not merely "non-empty": both rows in
+`timescaledb_information.hypertables` have `compression_enabled = true`, and
+`timescaledb_information.compression_settings` has exactly the following
+indexed settings (no missing or additional segment/order column):
+
+| Hypertable | segmentby `(index: column)` | orderby `(index: column)` |
+|---|---|---|
+| `hydro.river_timeseries` | `1: run_id`, `2: river_network_version_id`, `3: river_segment_id` | `1: variable`, `2: valid_time` |
+| `met.forcing_station_timeseries` | `1: forcing_version_id`, `2: station_id` | `1: variable`, `2: valid_time` |
+
+The catalog query records `attname`, `segmentby_column_index`,
+`orderby_column_index`, `orderby_asc`, and `orderby_nullsfirst`, ordered by
+schema/table and the non-null index. Its canonical JSON and sha256 are included
+in the terminal envelope. No `add_compression_policy` job may exist for either
+table before or after the run.
+
+### Timer installation without an accidental first mutation
+
+Copy the committed service/timer byte-for-byte to
+`~/.config/systemd/user/`, prove both sha256 pairs match the deployed repository
+files, create the log directory, and run `systemctl --user daemon-reload`.
+Run `systemctl --user enable nhms-node27-timeseries-compression.timer` without
+`--now`; require the timer and service to remain inactive through migration,
+dry-run, the explicit enforce, query benchmarking, and terminal validation.
+Because the service now contains `--enforce` and the timer has
+`Persistent=true`, starting it before the controlled run is a mutation race.
+
+Task 4.5 follows #1069's stated acceptance exactly: the timer is enabled but
+remains inactive. Capture `is-enabled=enabled`, `is-active=inactive`, the
+service's resolved `ExecStart`, and the absence of any service activation after
+installation. Do **not** start the `Persistent=true` timer in this issue; a
+first start can catch up the missed 04:25 UTC event and cause an unauthorized
+second compression batch. Timer activation is a later, separately controlled
+operation after its catch-up behavior is protected by the schema-valid
+`refused_lock` path. This issue never uses "start and see whether it mutated"
+as a safety test.
+
+### Dry-run scope and controlled enforce
+
+Use lag `604800` seconds and **exact live bound `1`**. Node-27 discovery before
+fixture review found five eligible chunks in each table; the runner's stable
+schema/name ordering would make the example default bound `5` select only
+hydro and mutate about 106.47 GB in one invocation. That scope is not
+authorized here. The qualifying single selected chunk must have independently
+measured pre-compression `pg_total_relation_size <= 8589934592` (8 GiB), the
+same selected-total cap, at least 300 GiB filesystem free-space headroom, and a
+wrapper-level external timeout of 900 seconds. Otherwise stop before enforce.
+The independent catalog preflight reproduces the runner predicate and order:
+uncompressed chunks from only the two D3 hypertables, strict
+`range_end < now_utc - interval '604800 seconds'`, ordered by
+`hypertable_schema, hypertable_name, range_end ASC`, with the first `bound`
+selected and the rest deferred. Refuse the live run unless at least one
+selected `hydro.river_timeseries` chunk exists, all selected chunks are
+terminal, none intersects the active/lag window, and no candidate lies within
+ten minutes of the cutoff (avoids dry-run/enforce scope drift as wall time
+advances).
+
+Run the wrapper once without `--enforce` to a task-specific receipt path.
+Require `mode=dry-run`, `outcome=clean`, `selected length = bound = 1`, every
+`after_bytes=null`, zero DB catalog mutation, and no timer activation. Freeze
+the ordered selected identity tuple
+`(hypertable_schema,hypertable_name,chunk_schema,chunk_name,range_start,range_end)`
+as canonical compact JSON and record its sha256. Immediately before enforce,
+repeat the independent catalog query and require the exact selected tuple hash
+to match.
+
+The single authorized first enforce is the direct wrapper invocation with
+literal `--enforce`, the same env, lag, bound, lock, and a distinct receipt
+path. Its permitted mutation set is exactly the dry-run selected tuple list;
+the enforce receipt must name the same ordered list. A mismatch is failed
+evidence even if some chunks were already compressed; it does not authorize a
+second enforce. No background timer, manual `compress_chunk`, retention job,
+or other compressor may run concurrently.
+
+### Size, compressed-count, and receipt evidence
+
+Immediately before dry-run and immediately after enforce, collect one
+canonical relation snapshot for both hypertables with:
+
+- `hypertable_size('<schema>.<table>'::regclass)` as the acceptance size that
+  includes TimescaleDB chunks;
+- `pg_total_relation_size('<schema>.<table>'::regclass)` as the parent-relation
+  diagnostic only (it MUST NOT substitute for `hypertable_size`);
+- counts from `timescaledb_information.chunks` grouped by hypertable and
+  `is_compressed`, plus the exact compressed sibling relation names and their
+  `pg_total_relation_size` values.
+
+Acceptance requires: enforce `mode=enforce`, `outcome=clean`, no selected
+descriptor has `error` or null `after_bytes`; `per_table_totals` arithmetic
+recomputes exactly from selected descriptors; every selected chunk is now
+`is_compressed=true`; compressed-chunk count increases by exactly the number
+of successfully selected chunks; total selected `after_bytes` is strictly
+less than total selected `before_bytes`; and the combined post-enforce
+`hypertable_size` of the two tables is strictly less than its pre-enforce
+value. Both tables must have before/after size and compressed-count rows even
+when this first bounded batch selects chunks from only one table.
+
+Validate both runner receipts against
+`schemas/timeseries_compression_receipt.schema.json`, then apply the semantic
+checks above independently of the runner. Record mode-0600 receipt paths,
+byte counts, full sha256 values, deployed head, catalog hashes, size snapshots,
+selection hash, command exit codes, and final verdict in a separate atomic
+terminal envelope. A schema-valid receipt with wrong scope, partial outcome,
+bad arithmetic, or failed post-catalog proof is not acceptance evidence.
+
+The terminal envelope conforms to
+`schemas/timeseries_compression_live_evidence.schema.json`, schema version
+`1.0`, with required top-level keys: `schema_version`, `issue`, `generated_at`,
+`node`, `head_sha`, `database_identity`, `authorization`, `preflight`,
+`migration`, `selection`, `receipts`, `sizes`, `catalog`, `benchmarks`,
+`cleanup`, `out_of_scope`, and `verdict`. Nested required fields bind the DB
+instance/version and truthful role flags; forensic dump/hash; first/second
+migration exit/catalog hashes; bound=1, selector hash/bytes/caps; dry-run and
+enforce paths/hashes/schema+semantic verdicts; pre/post table sizes and chunk
+counts; D3/policy verdict; per-query source/query/result hashes, raw samples,
+cache class and thresholds; autopipe timer restoration; compression timer
+enabled/inactive state; and explicit false flags for retention/drill/node-22.
+Canonicalization for all embedded JSON hashes is UTF-8
+`jq -cS <expression>` including its trailing newline. A verifier independent
+of the compression runner recomputes every derivable count/hash/arithmetic and
+validates this schema before it may emit `PASS_TASK_4_5`; unit tests cover each
+required-field omission and a semantically inconsistent but schema-valid
+envelope.
+
+### Reproducible representative curve/MVT timing
+
+Benchmark only the bound-1 selected hydro chunk that enforce will compress.
+Before compression, deterministically freeze one non-empty production-valid
+`q_down` request identity in that chunk. The benchmark harness MUST use the
+deployed production code rather than a handwritten approximation:
+
+- curve: call `PsycopgForecastStore.get_forecast_series` with a frozen
+  `basin_version_id`, translated public `river_segment_id`,
+  `river_network_version_id`, historical `issue_time`, run-type/scenario
+  filters and seven-day window. Capture the exact SQL/params actually sent by
+  `_fetch_forecast_segment_rows` in `packages/common/forecast_store.py`,
+  including the `hydro.hydro_run` join and cycle/run-type/scenario predicates,
+  and run EXPLAIN on that captured statement. The source-file SHA and captured
+  query-text SHA are evidence.
+- MVT: import `services.tiles.mvt.postgis_tile_sql` and execute
+  `postgis_tile_sql("hydro")` with the same parameter construction as
+  `apps/api/routes/hydro_display.py::_postgis_tile_params`, using a frozen
+  `run_id`, basin/network identity, `valid_time`, and deterministic z=9 tile
+  containing a non-null source segment. This preserves production source
+  identity/property/budget columns, `ST_MakeValid`, simplification and final
+  tile row shape. Record the source-file SHA and generated query-text SHA.
+
+Store all bound request/SQL parameters (never credentials). Curve output uses
+a documented canonical JSON serialization before sha256; MVT hashes the raw
+`bytea`. Before and after row/byte counts and result hashes must be identical.
+For each query/phase use a new read-only connection, record the first execution
+as informational cold-biased evidence, run two warmups, then seven measured
+`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` executions in fixed curve/MVT order.
+If warmup 2 still has `shared_read_blocks > 0`, allow warmups 3--5. Remaining
+reads after warmup 5 classify the phase as `mixed-cache`; before and after must
+both have the same classification, otherwise performance comparison is
+BLOCKED. Do not flush OS/Postgres caches, restart DB, or use the cold-biased
+first execution for the gate.
+
+Median is the fourth value of seven sorted samples. p95 is nearest-rank
+`sorted[ceil(0.95*n)-1]`, therefore the seventh/max value for n=7. For each
+query, acceptance is both
+`after_median_ms <= max(1.50 * before_median_ms, before_median_ms + 100)` and
+`after_p95_ms <= max(2.00 * before_p95_ms, before_p95_ms + 250)`. Record all
+samples, median/p95, planning/execution time, shared hit/read counts, returned
+rows/bytes, cache classification and calculated thresholds. Recursively walk
+the TimescaleDB 2.10 JSON plan; after compression it must contain a Custom Scan
+whose provider/node is `DecompressChunk` and whose relation/chunk predicate is
+bound to the selected original/compressed chunk identity. Otherwise the query
+did not exercise changed storage and evidence fails. Sample `pg_stat_activity`
+before each phase; material concurrent-load drift blocks PASS.
+
+### Failure, recovery, and truthful rollback
+
+- Preflight/migration/dry-run failure: keep both compression units inactive,
+  restore the autopipe timer's prior state, preserve artifacts, and stop.
+- Enforce `partial`, selected-scope mismatch, missing post-measurement, or
+  query regression: disable/stop the compression timer and preserve the exact
+  receipt/catalog state. Chunks already compressed remain compressed; do not
+  relabel the run as rolled back and do not rerun enforce.
+- Compression has no transactional batch rollback. The schema-only dump does
+  not restore row storage and is not recoverability proof. A later, separately
+  authorized recovery may invoke
+  `decompress_chunk` only on the receipt-proven successfully compressed chunk
+  list, one chunk at a time, then re-run catalog, size, result-hash, and query
+  checks. Until that completes, the terminal outcome remains failed/partial.
+- Migration settings may remain enabled with the timer disabled; reverting
+  settings or decompressing chunks is a distinct production mutation and is
+  not inferred from task 4.5 authorization.
+
+### Risk packs and non-goals
+
+Core risk packs:
+
+- Public CLI/script entry: selected — manual wrapper remains dry-run default;
+  committed service alone adds literal `--enforce`.
+- Config/project setup: selected — canonical mode-0600 env, exact lag/bound,
+  canonical receipt/lock paths, and installed user units.
+- File IO/path safety/overwrite: selected — lock plus runner/live receipts and
+  forensic dump are mode-0600, no-follow/atomic where published, and hashed.
+- Schema/fields/contracts: selected — reachable `refused_lock` shape and a new
+  terminal-envelope 1.0 contract with negative semantic tests.
+- Auth/permissions/secrets: selected — live `nhms` is truthfully superuser;
+  credentials remain only in the untracked env and never enter argv/evidence.
+- Concurrency/shared-state/ordering: selected — autopipe quiescence, DB activity
+  and lock gates, flock refusal receipt, exact selected ordering, inactive
+  Persistent timer.
+- Resource limits/large mutation: selected — bound=1, 8 GiB selected cap,
+  300 GiB free-space headroom, 900 s external timeout.
+- Legacy compatibility: selected — ordinary dry-run/enforce receipt shapes and
+  wrapper argument passthrough remain unchanged while lock behavior is fixed.
+- DB migration/DDL: selected — live double-apply-on-success and exact D3 catalog
+  proof on TimescaleDB 2.10.2.
+- Error/retry/rollback: selected — no automatic retry after a nonzero first
+  migration or partial compression; compressed chunks remain truthful state.
+- Testing/evidence rigor: selected — independent schema/semantic verifier,
+  source/query/result hashes and cache-aware performance gates.
+- Documentation/migration notes: selected — runbook gains the exact operator
+  sequence and failure boundary.
+- Release/dependency compatibility: not selected — no dependency or packaging
+  change.
+
+NHMS domain risk packs:
+
+- Geospatial/CRS/basin geometry: selected for evidence only — the production
+  MVT benchmark exercises existing PostGIS transforms/tile geometry; no geometry
+  or CRS contract changes.
+- Hydro-met timeseries/windows: selected — exact terminal chunk ranges and
+  production curve/MVT identities must preserve rows and bytes.
+- PostGIS/TimescaleDB behavior: selected — compression settings, chunk catalog,
+  compressed sibling sizes and `DecompressChunk` plan semantics are central.
+- Published/display identity: selected for regression evidence — live display
+  SQL/result identity must remain byte-stable; API/frontend code is unchanged.
+- SHUD numerical/conservation: not selected — no model execution or numerical
+  output mutation.
+- Slurm/mock-vs-real lifecycle: not selected — node-22 is untouched.
+- External providers/snapshot reproducibility: not selected — no fetch or GRIB
+  processing.
+- Run manifest/QC provenance: not selected — no run/product manifest changes.
+
+The six-perspective review floor is correctness, DB/catalog integration,
+security/secret handling, systemd/concurrency, test/evidence rigor, and
+spec/invariant compliance.
+
+Invariant matrix:
+
+| Invariant | Producer / validator / evidence |
+|---|---|
+| Governing scope | Independent chunk query + dry-run produce one ordered tuple; selector hash and bound=1 gate the sole enforce. |
+| Terminal-only | Runner predicate and verifier require strict range-end cutoff, ten-minute drift margin, and no active/lag chunk. |
+| Lock contention is observable and mutation-free | Runner atomically publishes `refused_lock`; tests prove empty selections, no DB call, and replacement of stale receipt. |
+| Migration truth | First apply must succeed before the idempotency apply; exact catalog JSON is identical and no policy job exists. |
+| Ingest/compression exclusion | Autopipe timer stopped, MainPID/process/DB-write/lock gates clear; prior failed service status preserved. |
+| Secret/authority truth | Envelope records superuser/owner/function facts but never DSN/password; role/grant mutation flags remain false. |
+| Bounded mutation | One selected chunk, <=8 GiB, >=300 GiB free headroom, <=900 s external wall limit. |
+| Receipt arithmetic | Independent verifier recomputes selected, deferred, per-table totals, chunk count delta, size delta and hashes. |
+| Query identity | Production forecast-store and `postgis_tile_sql("hydro")` source/query hashes fixed; before/after result hashes identical. |
+| Performance | Same cache class; seven-sample median/nearest-rank-p95 gates; after plan proves selected compressed chunk via `DecompressChunk`. |
+| Timer safety | Committed/installed unit hashes match; timer enabled but inactive; zero service activation in #1069. |
+| Failure truth | Partial mutation is immutable failed evidence; no second enforce, auto-decompress, fake rollback, or receipt relabel. |
+
+Regression rows:
+
+- Flock held with a stale prior receipt. Expected: zero DB/compression calls and
+  atomic schema-valid `refused_lock` receipt replacing the stale receipt.
+- Manual wrapper without `--enforce`. Expected: dry-run receipt and zero
+  `compress_chunk`; systemd service text includes exactly one `--enforce`.
+- First migration apply exits nonzero after any partial catalog effect.
+  Expected: preserve catalog/exit evidence, no routine second apply or runner.
+- First and second successful migration applies. Expected: identical exact D3
+  catalog JSON and no compression policy.
+- Autopipe service is `failed` with MainPID 0. Expected: preserve failure,
+  accept process quiescence after stopping timer, never `reset-failed`.
+- Dry-run candidate list with ten eligible chunks and bound=1. Expected: exact
+  oldest hydro tuple selected, nine deferred, selector hash stable at enforce.
+- Selected chunk exceeds 8 GiB, free headroom falls below 300 GiB, or tuple is
+  within ten minutes of cutoff. Expected: refuse before enforce.
+- Enforce receipt is schema-valid but partial, has null after bytes, wrong tuple,
+  wrong totals, or catalog count mismatch. Expected: terminal FAIL and no retry.
+- Bound-1 hydro compression leaves met compressed count at zero. Expected:
+  evidence says met settings-only for this batch while still recording both
+  tables' before/after size/count rows; it never claims both tables compressed.
+- Curve/MVT output hash changes, cache class differs, threshold regresses, or
+  after plan lacks selected-chunk `DecompressChunk`. Expected: terminal FAIL.
+- `systemctl enable` leaves timer inactive. Expected: PASS installation gate;
+  any attempted start/service activation is out-of-scope failure.
+- Evidence contains a credential pattern or claims least privilege while
+  `rolsuper=true`. Expected: schema/semantic verifier refusal.
+
+Out of scope: retention or any `drop_chunks`; retention dry-run/enforce;
+archive rebuild drill; product archive or DB-export salvage mutation; any
+node-22/Slurm action; TimescaleDB upgrade; v2/star-schema or index changes;
+display API/frontend behavior changes; automated `decompress_chunk`; and any
+manual deletion. #1071/#1072 and the node-22 epic retain those owners.
 
 ## Workflow Fixture: Issue #850 DB-Export Salvage Exporter + Manual Restore Runbook + Live Salvage Run
 

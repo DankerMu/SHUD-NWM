@@ -1034,6 +1034,17 @@ Order is load-bearing:
   reduced; compressed-chunk count > 0) and representative curve/MVT query
   timings before/after (acceptance: no representative query regresses past
   the threshold documented in the receipt).
+  Issue #1069 closure note: the mandatory fixture in `design.md` additionally
+  requires exact D3 catalog proof, a schema forensic snapshot, successful-first
+  idempotency evidence, quiesced ingest, and one dry-run-bound exact selected
+  chunk (`bound=1`, at most 8 GiB, 300 GiB free-space headroom, 900-second
+  external timeout). Independent schema/semantic/sha256 validation and the
+  actual production curve/MVT SQL must pass the pinned warm-cache thresholds.
+  The compression timer is installed and enabled but remains inactive. This
+  issue also closes the discovered task-4.2 lock-receipt gap and #853 wiring
+  gap: contention publishes `refused_lock`, while the committed timer service
+  invokes the wrapper with literal `--enforce`. Tasks 4.1, 4.2, and 4.5 remain
+  open until their respective code/live evidence passes.
 
 ## 5. Archive rebuild drill (`archive-rebuild-drill`)
 
