@@ -147,11 +147,55 @@ def prepare_basins_import_sources(
     return _prepare_sources(inventory, manifest, inventory_raw_checksum=_sha256_bytes(inventory_bytes))
 
 
+def prepare_relocated_basins_import_sources_after_package_verification(
+    *,
+    inventory_path: str | Path,
+    package_manifest_path: str | Path,
+    verified_package_checksum: str,
+) -> ImportSources:
+    """Prepare a byte-verified source snapshot relocated from an immutable package manifest.
+
+    Scheduler repair workspaces are deliberately run-scoped while immutable
+    package versions are root-independent.  Reusing an existing package must
+    therefore tolerate only the recorded absolute source paths and whole-
+    inventory checksum changing.  The selected model identity, package file
+    checksums, canonical required files, and parsed geometry remain fully
+    validated by ``_prepare_sources``.  The caller must first complete the
+    package publisher's full content and stored-object verification and pass
+    its verified package checksum here.
+    """
+
+    inventory, inventory_bytes = _read_json_document(
+        inventory_path,
+        error_code="BASINS_REGISTRY_INVENTORY_INVALID",
+        not_found_code="BASINS_REGISTRY_INVENTORY_NOT_FOUND",
+    )
+    manifest = _read_json_object(
+        package_manifest_path,
+        error_code="BASINS_REGISTRY_PACKAGE_MANIFEST_INVALID",
+        not_found_code="BASINS_REGISTRY_PACKAGE_MANIFEST_NOT_FOUND",
+    )
+    if not verified_package_checksum or manifest.get("package_checksum") != verified_package_checksum:
+        raise BasinsRegistryImportError(
+            "BASINS_REGISTRY_SOURCE_MISMATCH",
+            "Relocated Basins sources require a matching verified package checksum.",
+            model_id=str(manifest.get("model_id") or "") or None,
+            details={"fields": ["package_checksum"]},
+        )
+    return _prepare_sources(
+        inventory,
+        manifest,
+        inventory_raw_checksum=_sha256_bytes(inventory_bytes),
+        allow_source_relocation=True,
+    )
+
+
 def _prepare_sources(
     inventory: dict[str, Any],
     manifest: dict[str, Any],
     *,
     inventory_raw_checksum: str | None = None,
+    allow_source_relocation: bool = False,
 ) -> ImportSources:
     model_id = _required_str(manifest, "model_id", "BASINS_REGISTRY_PACKAGE_MANIFEST_INVALID")
     model = _find_inventory_model(inventory, model_id)
@@ -196,6 +240,7 @@ def _prepare_sources(
         source_root,
         model_id,
         inventory_raw_checksum=inventory_raw_checksum,
+        allow_source_relocation=allow_source_relocation,
     )
     _verify_model_id_matches_canonical_identity(model, model_id)
     required_files = model.get("required_files")
@@ -1812,6 +1857,7 @@ def _validate_manifest_source_identity(
     source_root: Path,
     model_id: str,
     inventory_raw_checksum: str | None,
+    allow_source_relocation: bool = False,
 ) -> None:
     expected = {
         "basin_slug": model.get("basin_slug"),
@@ -1825,7 +1871,9 @@ def _validate_manifest_source_identity(
     mismatches = [
         key
         for key, expected_value in expected.items()
-        if key not in missing and manifest.get(key) != expected_value
+        if key not in missing
+        and manifest.get(key) != expected_value
+        and not (allow_source_relocation and key in {"source_path", "resolved_source_path"})
     ]
     source_inventory_checksum = manifest.get("source_inventory_checksum")
     if not isinstance(source_inventory_checksum, str) or not source_inventory_checksum:
@@ -1838,7 +1886,7 @@ def _validate_manifest_source_identity(
             details={"fields": sorted({*missing, *mismatches})},
         )
     actual_inventory_checksum = inventory_raw_checksum or _sha256_json(inventory)
-    if source_inventory_checksum != actual_inventory_checksum:
+    if not allow_source_relocation and source_inventory_checksum != actual_inventory_checksum:
         raise BasinsRegistryImportError(
             "BASINS_REGISTRY_SOURCE_MISMATCH",
             "Basins package manifest source inventory checksum does not match selected inventory.",

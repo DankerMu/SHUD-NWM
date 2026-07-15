@@ -981,6 +981,53 @@ def test_publish_all_basin_scheduler_registry_repairs_calibrated_soil_alpha_mode
     assert {row["model_id"] for row in payload["models"]} == {"basins_hetianhe_shud"}
 
 
+def test_repaired_package_is_reused_across_run_scoped_workspaces(tmp_path: Path) -> None:
+    from tests.test_basins_registry_import import _write_registry_fixture
+
+    basins_root, input_dir, _inventory_path, _manifest_path, model_id = _write_registry_fixture(
+        tmp_path / "fixture"
+    )
+    repair_template = _write_soil_alpha_model_files(
+        tmp_path / "repair-template",
+        "basin-a",
+        "alias-a",
+    )
+    for suffix in ("cfg.calib", "para.soil"):
+        (input_dir / f"alias-a.{suffix}").write_bytes(
+            (repair_template / f"alias-a.{suffix}").read_bytes()
+        )
+
+    object_root = tmp_path / "object-store"
+    first_registry = tmp_path / "providers" / "first.json"
+    second_registry = tmp_path / "providers" / "second.json"
+    first = registry_script.publish_all_basin_scheduler_registry(
+        basins_root=basins_root,
+        registry_manifest=first_registry,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        work_dir=tmp_path / "run-one" / "registry",
+        repair_missing_radiation=False,
+    )
+    second = registry_script.publish_all_basin_scheduler_registry(
+        basins_root=basins_root,
+        registry_manifest=second_registry,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        work_dir=tmp_path / "run-two" / "registry",
+        repair_missing_radiation=False,
+    )
+
+    assert first["package_status_counts"] == {"published": 1}
+    assert second["package_status_counts"] == {"already_done": 1}
+    assert first["packages"][0]["version"] == second["packages"][0]["version"]
+    row = json.loads(second_registry.read_text(encoding="utf-8"))["models"][0]
+    assert row["model_id"] == model_id
+    assert row["resource_profile"]["source_path"] == str(basins_root / "basin-a")
+    assert "run-one" not in json.dumps(row)
+    assert "run-two" not in json.dumps(row)
+    assert not (tmp_path / "run-two" / "registry" / "repaired-basins-soil-alpha").exists()
+
+
 def _inventory_model(basin_slug: str, *, shud_input_name: str | None = None) -> dict[str, Any]:
     slug_id = registry_script._slug_id(basin_slug)
     input_name = shud_input_name or basin_slug.rsplit("/", maxsplit=1)[-1]

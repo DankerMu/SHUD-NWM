@@ -46,6 +46,7 @@ from workers.model_registry.basins_registry_import import (
     BasinsRegistryImportError,
     ImportSources,
     prepare_basins_import_sources,
+    prepare_relocated_basins_import_sources_after_package_verification,
 )
 from workers.model_registry.basins_soil_alpha_repair import (
     repair_blocked as calibration_repair_blocked,
@@ -79,6 +80,7 @@ class PublishContext:
     model: dict[str, Any]
     inventory_path: Path
     repair: dict[str, Any] | None = None
+    source_lineage_model: dict[str, Any] | None = None
 
 
 class WorkspaceBudget(Protocol):
@@ -276,10 +278,17 @@ def publish_all_basin_scheduler_registry(
             _guard_resources(resource_validator, workspace)
             if dry_run:
                 continue
-            sources = prepare_basins_import_sources(
-                inventory_path=context.inventory_path,
-                package_manifest_path=package_manifest_path,
-            )
+            if package_result.get("status") == "already_done":
+                sources = prepare_relocated_basins_import_sources_after_package_verification(
+                    inventory_path=context.inventory_path,
+                    package_manifest_path=package_manifest_path,
+                    verified_package_checksum=str(package_result.get("package_checksum") or ""),
+                )
+            else:
+                sources = prepare_basins_import_sources(
+                    inventory_path=context.inventory_path,
+                    package_manifest_path=package_manifest_path,
+                )
             try:
                 registry_row = scheduler_registry_row_from_sources(
                     sources,
@@ -288,6 +297,7 @@ def publish_all_basin_scheduler_registry(
                     cpus_per_task=cpus_per_task,
                     memory_mb=memory_mb,
                     walltime_minutes=walltime_minutes,
+                    source_lineage_model=context.source_lineage_model,
                 )
             finally:
                 # Parsed geometry can be much larger than the registry row.
@@ -490,8 +500,10 @@ def scheduler_registry_row_from_sources(
     cpus_per_task: int,
     memory_mb: int,
     walltime_minutes: int,
+    source_lineage_model: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     model = sources.model
+    lineage_model = source_lineage_model or model
     manifest = sources.manifest
     ids = sources.ids
     geometry = sources.geometry
@@ -506,19 +518,19 @@ def scheduler_registry_row_from_sources(
         "memory_mb": int(memory_mb),
         "walltime_minutes": int(walltime_minutes),
         "lineage": "basins_scheduler_file_registry",
-        "basin_slug": model.get("basin_slug"),
-        "project_name": model.get("shud_input_name") or model.get("basin_slug"),
-        "shud_input_name": model.get("shud_input_name"),
+        "basin_slug": lineage_model.get("basin_slug"),
+        "project_name": lineage_model.get("shud_input_name") or lineage_model.get("basin_slug"),
+        "shud_input_name": lineage_model.get("shud_input_name"),
         "manifest_uri": manifest["manifest_uri"],
         "package_checksum": manifest["package_checksum"],
         "model_package_uri": manifest["model_package_uri"],
         "source_inventory_checksum": manifest.get("source_inventory_checksum"),
         "source_inventory_schema_version": manifest.get("source_inventory_schema_version"),
-        "source_path": model.get("source_path"),
-        "resolved_source_path": model.get("resolved_source_path"),
-        "source_is_symlink": bool(model.get("source_is_symlink", False)),
-        "root_relative_path": model.get("root_relative_path"),
-        "root_relative_resolved_path": model.get("root_relative_resolved_path"),
+        "source_path": lineage_model.get("source_path"),
+        "resolved_source_path": lineage_model.get("resolved_source_path"),
+        "source_is_symlink": bool(lineage_model.get("source_is_symlink", False)),
+        "root_relative_path": lineage_model.get("root_relative_path"),
+        "root_relative_resolved_path": lineage_model.get("root_relative_resolved_path"),
         "segment_count": geometry.segment_count,
         "output_segment_count": geometry.output_segment_count,
         "shud_evidence_counts": dict(geometry.evidence_counts),
@@ -719,7 +731,14 @@ def _repair_missing_radiation_contexts(
         _guard_resources(resource_validator, workspace)
         _write_workspace_inventory(repaired_inventory, repaired_inventory_path, workspace_budget)
         _guard_resources(resource_validator, workspace)
-        contexts.append(PublishContext(model=repaired_model, inventory_path=repaired_inventory_path, repair=repair))
+        contexts.append(
+            PublishContext(
+                model=repaired_model,
+                inventory_path=repaired_inventory_path,
+                repair=repair,
+                source_lineage_model=model,
+            )
+        )
     return contexts
 
 
@@ -849,6 +868,7 @@ def _repair_calibrated_shud_context(
         model=repaired_model,
         inventory_path=repaired_inventory_path,
         repair=_merge_repairs(context.repair, repair, basin_slug=basin_slug),
+        source_lineage_model=context.source_lineage_model or model,
     )
 
 

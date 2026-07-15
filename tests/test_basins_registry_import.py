@@ -33,6 +33,7 @@ from workers.model_registry.basins_registry_import import (
     _river_segment_digest_row,
     import_basins_registry,
     prepare_basins_import_sources,
+    prepare_relocated_basins_import_sources_after_package_verification,
 )
 from workers.model_registry.cli import _argparse_main, _click_main
 
@@ -268,6 +269,40 @@ def test_import_rejects_wrong_raw_inventory_byte_checksum(
     assert error["model_id"] == model_id
     assert error["fields"] == ["source_inventory_checksum"]
     assert error["expected"] == hashlib.sha256(raw_inventory).hexdigest()
+
+
+def test_relocated_sources_require_matching_verified_package_checksum(tmp_path: Path) -> None:
+    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
+
+    with pytest.raises(BasinsRegistryImportError) as error:
+        prepare_relocated_basins_import_sources_after_package_verification(
+            inventory_path=inventory_path,
+            package_manifest_path=manifest_path,
+            verified_package_checksum="0" * 64,
+        )
+
+    assert error.value.error_code == "BASINS_REGISTRY_SOURCE_MISMATCH"
+    assert error.value.model_id == model_id
+    assert error.value.details["fields"] == ["package_checksum"]
+
+
+def test_relocated_sources_still_reject_model_identity_mismatch(tmp_path: Path) -> None:
+    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    verified_package_checksum = manifest["package_checksum"]
+    manifest["shud_input_name"] = "other-alias"
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(BasinsRegistryImportError) as error:
+        prepare_relocated_basins_import_sources_after_package_verification(
+            inventory_path=inventory_path,
+            package_manifest_path=manifest_path,
+            verified_package_checksum=verified_package_checksum,
+        )
+
+    assert error.value.error_code == "BASINS_REGISTRY_SOURCE_MISMATCH"
+    assert error.value.model_id == model_id
+    assert error.value.details["fields"] == ["shud_input_name"]
 
 
 def test_manifest_checksum_conflict_fails_before_database(
