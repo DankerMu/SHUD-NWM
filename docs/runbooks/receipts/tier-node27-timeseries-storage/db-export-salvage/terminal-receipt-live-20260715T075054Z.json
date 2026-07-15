@@ -1,0 +1,83 @@
+{
+  "evidence_type": "node27-db-export-salvage-live-closure",
+  "issue": 1070,
+  "generated_at": "2026-07-15T07:55:34Z",
+  "node": "node-27",
+  "repository": "/home/nwm/NWM",
+  "head_sha": "bcd66a9f68b406463a0579aae6b6e0f57b9d0778",
+  "authorization": {
+    "decision": "approved",
+    "user_text": "同意执行",
+    "scope": {
+      "selector_count": 228,
+      "max_selector_bytes": 536870912,
+      "maximum_invocations": 1,
+      "external_timeout_seconds": 14400
+    }
+  },
+  "safety": {
+    "database_role": "nhms_display_ro",
+    "database_writes": false,
+    "archive_side_writes_only": true,
+    "secret_material_emitted": false,
+    "retention_executed": false,
+    "compression_drill_executed": false,
+    "node22_touched": false
+  },
+  "frozen_input": {
+    "remote_path": "/home/nwm/node27-db-export-salvage-inputs/completeness-incomplete-live-20260713T155314Z.json",
+    "committed_copy": "../storage-inventory-audit/completeness-incomplete-live-20260713T155314Z.json",
+    "sha256": "e2d4f08150943f09af87d3e53e79cff26728fb438aabb545dabff07842497d04",
+    "normalized_selector_set_sha256": "ad5da1c51e1e90ec7bf2912d204186d21879be4e69536cc24a469520a486d0c6",
+    "selector_count": 228
+  },
+  "receipts": {
+    "stream_preflight": {
+      "remote_path": "/home/nwm/NWM/.nhms-issue1070-live/stream-preflight.json",
+      "committed_copy": "stream-preflight-live-20260715T074343Z.json",
+      "sha256": "c3ea7902d958ef439ed359dfe126d6e28cd169d1a2c7c74109a85c3310d8adb6"
+    },
+    "dry_run": {
+      "remote_path": "/home/nwm/NWM/.nhms-issue1070-live/salvage-dryrun.json",
+      "committed_copy": "salvage-dryrun-live-20260715T074343Z.json",
+      "sha256": "4ffc166daa16de563b81d2c5c39092a4c2e7478f3d3de3d0dfbbde2cb668ee3d"
+    },
+    "preflight_dryrun_envelope": {
+      "remote_path": "/home/nwm/NWM/.nhms-issue1070-live/preflight-dryrun-envelope.json",
+      "committed_copy": "preflight-dryrun-envelope-live-20260715T074343Z.json",
+      "sha256": "27ee230b8f72742e3294154d0fd568993e3c1c5e1c28979234fefc4aa92c9522"
+    },
+    "enforce": {
+      "remote_path": "/home/nwm/NWM/.nhms-issue1070-live/salvage-enforce-20260715T074343Z.json",
+      "committed_copy": "salvage-enforce-live-20260715T074343Z.json",
+      "sha256": "11237018decbb0768dba7c6f59d90a1bee741f48b82f847780b5a03ea29e09bb"
+    },
+    "post_enforce_verification": {
+      "remote_path": "/home/nwm/NWM/.nhms-issue1070-live/post-enforce-object-verification.json",
+      "committed_copy": "post-enforce-object-verification-live-20260715T074343Z.json",
+      "sha256": "8e4f963e51e03e856c268e1a68ed4ad0ca80dcc9f4db59b82f3340b8c6bbb9ab"
+    },
+    "follow_up_inventory": {
+      "remote_path": "/home/nwm/NWM/.nhms-issue1070-live/completeness-followup-20260715T075054Z.json",
+      "committed_copy": "completeness-followup-live-20260715T075054Z.json",
+      "sha256": "2277c617900a62f5eca1253ff967650da6790b5952bd4658c10eb1a6d281bb54"
+    }
+  },
+  "results": {
+    "exported_selector_count": 228,
+    "verified_selector_count": 228,
+    "total_rows": 75922800,
+    "total_compressed_bytes": 1065525623,
+    "follow_up_subject_count": 1585,
+    "follow_up_complete_count": 1585,
+    "follow_up_salvage_selector_count": 0,
+    "baseline_selector_reconciled_count": 228,
+    "baseline_selector_missing_count": 0
+  },
+  "out_of_scope": [
+    "retention",
+    "compression drill",
+    "node-22 business scheduling"
+  ],
+  "verdict": "PASS_TASK_3_3"
+}

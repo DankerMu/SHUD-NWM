@@ -1,0 +1,6228 @@
+{
+  "db_export_inventory_after": {
+    "file_count": 0,
+    "inventory_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "total_bytes": 0
+  },
+  "db_export_inventory_before": {
+    "file_count": 0,
+    "inventory_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "total_bytes": 0
+  },
+  "deployed_git_sha": "bcd66a9f68b406463a0579aae6b6e0f57b9d0778",
+  "gates": {
+    "all_rows_positive": true,
+    "four_x_max_below_effective_available": true,
+    "max_below_512_mib": true,
+    "selector_count_228": true,
+    "sum_preserves_300_gib_headroom": true,
+    "wall_estimate_within_4h": true
+  },
+  "generated_at": "2026-07-15T07:39:24.679398Z",
+  "input": {
+    "full_sha256_after": "e2d4f08150943f09af87d3e53e79cff26728fb438aabb545dabff07842497d04",
+    "full_sha256_before": "e2d4f08150943f09af87d3e53e79cff26728fb438aabb545dabff07842497d04",
+    "mode": "0o600",
+    "path": "/home/nwm/node27-db-export-salvage-inputs/completeness-incomplete-live-20260713T155314Z.json",
+    "selector_count": 228,
+    "selector_sha256_after": "ad5da1c51e1e90ec7bf2912d204186d21879be4e69536cc24a469520a486d0c6",
+    "selector_sha256_before": "ad5da1c51e1e90ec7bf2912d204186d21879be4e69536cc24a469520a486d0c6"
+  },
+  "outcome": "pass",
+  "query_contract": {
+    "copy": "COPY (SELECT <fixed columns> FROM <selector table> WHERE <identity> = %s AND valid_time >= %s AND valid_time < %s) TO STDOUT WITH (FORMAT CSV, HEADER)",
+    "statement_timeout_ms": 300000,
+    "streaming_discard": true
+  },
+  "role": {
+    "current_user": "nhms_display_ro",
+    "forcing_delete": false,
+    "forcing_insert": false,
+    "forcing_select": true,
+    "forcing_update": false,
+    "river_delete": false,
+    "river_insert": false,
+    "river_select": true,
+    "river_update": false
+  },
+  "role_gate_pass": true,
+  "schema_version": "issue1070-preflight/1",
+  "selectors": [
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75975744,
+      "elapsed_seconds": 1.452081,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026053106_basins_heihe_shud"
+      },
+      "index": 0,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-07T06:00:00Z",
+        "start": "2026-05-31T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16441281,
+      "elapsed_seconds": 0.347636,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026053106_basins_qhh_shud"
+      },
+      "index": 1,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-07T06:00:00Z",
+        "start": "2026-05-31T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 76075312,
+      "elapsed_seconds": 1.436403,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026053112_basins_heihe_shud"
+      },
+      "index": 2,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-07T12:00:00Z",
+        "start": "2026-05-31T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16387929,
+      "elapsed_seconds": 0.373726,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026053112_basins_qhh_shud"
+      },
+      "index": 3,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-07T12:00:00Z",
+        "start": "2026-05-31T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75967287,
+      "elapsed_seconds": 1.451131,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026053118_basins_heihe_shud"
+      },
+      "index": 4,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-07T18:00:00Z",
+        "start": "2026-05-31T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16414076,
+      "elapsed_seconds": 0.347173,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026053118_basins_qhh_shud"
+      },
+      "index": 5,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-07T18:00:00Z",
+        "start": "2026-05-31T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75960258,
+      "elapsed_seconds": 1.433587,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060100_basins_heihe_shud"
+      },
+      "index": 6,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-08T00:00:00Z",
+        "start": "2026-06-01T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16403050,
+      "elapsed_seconds": 0.344489,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060100_basins_qhh_shud"
+      },
+      "index": 7,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-08T00:00:00Z",
+        "start": "2026-06-01T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75994887,
+      "elapsed_seconds": 1.423398,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060106_basins_heihe_shud"
+      },
+      "index": 8,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-08T06:00:00Z",
+        "start": "2026-06-01T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16434740,
+      "elapsed_seconds": 0.328628,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060106_basins_qhh_shud"
+      },
+      "index": 9,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-08T06:00:00Z",
+        "start": "2026-06-01T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75954361,
+      "elapsed_seconds": 1.472227,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060112_basins_heihe_shud"
+      },
+      "index": 10,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-08T12:00:00Z",
+        "start": "2026-06-01T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16413980,
+      "elapsed_seconds": 0.344614,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060112_basins_qhh_shud"
+      },
+      "index": 11,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-08T12:00:00Z",
+        "start": "2026-06-01T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75967271,
+      "elapsed_seconds": 1.464122,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060118_basins_heihe_shud"
+      },
+      "index": 12,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-08T18:00:00Z",
+        "start": "2026-06-01T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16435744,
+      "elapsed_seconds": 0.353377,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060118_basins_qhh_shud"
+      },
+      "index": 13,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-08T18:00:00Z",
+        "start": "2026-06-01T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75991956,
+      "elapsed_seconds": 1.50449,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060200_basins_heihe_shud"
+      },
+      "index": 14,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-09T00:00:00Z",
+        "start": "2026-06-02T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16432265,
+      "elapsed_seconds": 0.335353,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060200_basins_qhh_shud"
+      },
+      "index": 15,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-09T00:00:00Z",
+        "start": "2026-06-02T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75972124,
+      "elapsed_seconds": 1.459718,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060206_basins_heihe_shud"
+      },
+      "index": 16,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-09T06:00:00Z",
+        "start": "2026-06-02T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16433601,
+      "elapsed_seconds": 0.326717,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060206_basins_qhh_shud"
+      },
+      "index": 17,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-09T06:00:00Z",
+        "start": "2026-06-02T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75982985,
+      "elapsed_seconds": 1.474754,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060212_basins_heihe_shud"
+      },
+      "index": 18,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-09T12:00:00Z",
+        "start": "2026-06-02T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16462018,
+      "elapsed_seconds": 0.356355,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060212_basins_qhh_shud"
+      },
+      "index": 19,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-09T12:00:00Z",
+        "start": "2026-06-02T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 76001248,
+      "elapsed_seconds": 1.461962,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060218_basins_heihe_shud"
+      },
+      "index": 20,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-09T18:00:00Z",
+        "start": "2026-06-02T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16458825,
+      "elapsed_seconds": 0.345497,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060218_basins_qhh_shud"
+      },
+      "index": 21,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-09T18:00:00Z",
+        "start": "2026-06-02T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75918607,
+      "elapsed_seconds": 1.477421,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060300_basins_heihe_shud"
+      },
+      "index": 22,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-10T00:00:00Z",
+        "start": "2026-06-03T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16452854,
+      "elapsed_seconds": 0.348154,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060300_basins_qhh_shud"
+      },
+      "index": 23,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-10T00:00:00Z",
+        "start": "2026-06-03T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75875730,
+      "elapsed_seconds": 1.504337,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060306_basins_heihe_shud"
+      },
+      "index": 24,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-10T06:00:00Z",
+        "start": "2026-06-03T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16439739,
+      "elapsed_seconds": 0.340495,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060306_basins_qhh_shud"
+      },
+      "index": 25,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-10T06:00:00Z",
+        "start": "2026-06-03T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75992514,
+      "elapsed_seconds": 1.454423,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060312_basins_heihe_shud"
+      },
+      "index": 26,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-10T12:00:00Z",
+        "start": "2026-06-03T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16468344,
+      "elapsed_seconds": 0.348523,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060312_basins_qhh_shud"
+      },
+      "index": 27,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-10T12:00:00Z",
+        "start": "2026-06-03T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75998915,
+      "elapsed_seconds": 1.492857,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060318_basins_heihe_shud"
+      },
+      "index": 28,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-10T18:00:00Z",
+        "start": "2026-06-03T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16475657,
+      "elapsed_seconds": 0.353833,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060318_basins_qhh_shud"
+      },
+      "index": 29,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-10T18:00:00Z",
+        "start": "2026-06-03T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 76023301,
+      "elapsed_seconds": 1.473078,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060400_basins_heihe_shud"
+      },
+      "index": 30,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-11T00:00:00Z",
+        "start": "2026-06-04T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16507197,
+      "elapsed_seconds": 0.357272,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060400_basins_qhh_shud"
+      },
+      "index": 31,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-11T00:00:00Z",
+        "start": "2026-06-04T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75923188,
+      "elapsed_seconds": 1.489647,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060406_basins_heihe_shud"
+      },
+      "index": 32,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-11T06:00:00Z",
+        "start": "2026-06-04T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16510212,
+      "elapsed_seconds": 0.350079,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060406_basins_qhh_shud"
+      },
+      "index": 33,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-11T06:00:00Z",
+        "start": "2026-06-04T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75959980,
+      "elapsed_seconds": 1.491033,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060412_basins_heihe_shud"
+      },
+      "index": 34,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-11T12:00:00Z",
+        "start": "2026-06-04T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16489398,
+      "elapsed_seconds": 0.340563,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060412_basins_qhh_shud"
+      },
+      "index": 35,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-11T12:00:00Z",
+        "start": "2026-06-04T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 76038438,
+      "elapsed_seconds": 1.599384,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060418_basins_heihe_shud"
+      },
+      "index": 36,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-11T18:00:00Z",
+        "start": "2026-06-04T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16473446,
+      "elapsed_seconds": 0.340051,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060418_basins_qhh_shud"
+      },
+      "index": 37,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-11T18:00:00Z",
+        "start": "2026-06-04T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 76003545,
+      "elapsed_seconds": 1.613479,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060500_basins_heihe_shud"
+      },
+      "index": 38,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-12T00:00:00Z",
+        "start": "2026-06-05T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16492955,
+      "elapsed_seconds": 0.420005,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060500_basins_qhh_shud"
+      },
+      "index": 39,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-12T00:00:00Z",
+        "start": "2026-06-05T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75986035,
+      "elapsed_seconds": 1.421905,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060506_basins_heihe_shud"
+      },
+      "index": 40,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-12T06:00:00Z",
+        "start": "2026-06-05T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16525944,
+      "elapsed_seconds": 0.331165,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060506_basins_qhh_shud"
+      },
+      "index": 41,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-12T06:00:00Z",
+        "start": "2026-06-05T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75968090,
+      "elapsed_seconds": 1.42186,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060512_basins_heihe_shud"
+      },
+      "index": 42,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-12T12:00:00Z",
+        "start": "2026-06-05T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16497493,
+      "elapsed_seconds": 0.32731,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060512_basins_qhh_shud"
+      },
+      "index": 43,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-12T12:00:00Z",
+        "start": "2026-06-05T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75980801,
+      "elapsed_seconds": 1.4262,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060518_basins_heihe_shud"
+      },
+      "index": 44,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-12T18:00:00Z",
+        "start": "2026-06-05T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16504506,
+      "elapsed_seconds": 0.349125,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060518_basins_qhh_shud"
+      },
+      "index": 45,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-12T18:00:00Z",
+        "start": "2026-06-05T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75966621,
+      "elapsed_seconds": 1.530108,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060600_basins_heihe_shud"
+      },
+      "index": 46,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-13T00:00:00Z",
+        "start": "2026-06-06T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16492613,
+      "elapsed_seconds": 0.334623,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060600_basins_qhh_shud"
+      },
+      "index": 47,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-13T00:00:00Z",
+        "start": "2026-06-06T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75955219,
+      "elapsed_seconds": 1.417995,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060606_basins_heihe_shud"
+      },
+      "index": 48,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-13T06:00:00Z",
+        "start": "2026-06-06T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16483828,
+      "elapsed_seconds": 0.327987,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060606_basins_qhh_shud"
+      },
+      "index": 49,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-13T06:00:00Z",
+        "start": "2026-06-06T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75938665,
+      "elapsed_seconds": 1.394779,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060612_basins_heihe_shud"
+      },
+      "index": 50,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-13T12:00:00Z",
+        "start": "2026-06-06T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16475877,
+      "elapsed_seconds": 0.338703,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060612_basins_qhh_shud"
+      },
+      "index": 51,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-13T12:00:00Z",
+        "start": "2026-06-06T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75902621,
+      "elapsed_seconds": 1.418126,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060618_basins_heihe_shud"
+      },
+      "index": 52,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-13T18:00:00Z",
+        "start": "2026-06-06T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16457156,
+      "elapsed_seconds": 0.356225,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060618_basins_qhh_shud"
+      },
+      "index": 53,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-13T18:00:00Z",
+        "start": "2026-06-06T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75941430,
+      "elapsed_seconds": 1.424712,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060700_basins_heihe_shud"
+      },
+      "index": 54,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-14T00:00:00Z",
+        "start": "2026-06-07T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16478591,
+      "elapsed_seconds": 0.339137,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060700_basins_qhh_shud"
+      },
+      "index": 55,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-14T00:00:00Z",
+        "start": "2026-06-07T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75926517,
+      "elapsed_seconds": 1.418412,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060706_basins_heihe_shud"
+      },
+      "index": 56,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-14T06:00:00Z",
+        "start": "2026-06-07T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16475522,
+      "elapsed_seconds": 0.342803,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060706_basins_qhh_shud"
+      },
+      "index": 57,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-14T06:00:00Z",
+        "start": "2026-06-07T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75975096,
+      "elapsed_seconds": 1.391151,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060712_basins_heihe_shud"
+      },
+      "index": 58,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-14T12:00:00Z",
+        "start": "2026-06-07T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16471755,
+      "elapsed_seconds": 0.343923,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060712_basins_qhh_shud"
+      },
+      "index": 59,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-14T12:00:00Z",
+        "start": "2026-06-07T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75980227,
+      "elapsed_seconds": 1.381134,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060718_basins_heihe_shud"
+      },
+      "index": 60,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-14T18:00:00Z",
+        "start": "2026-06-07T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16481374,
+      "elapsed_seconds": 0.333562,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060718_basins_qhh_shud"
+      },
+      "index": 61,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-14T18:00:00Z",
+        "start": "2026-06-07T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 76005027,
+      "elapsed_seconds": 1.373953,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060800_basins_heihe_shud"
+      },
+      "index": 62,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-15T00:00:00Z",
+        "start": "2026-06-08T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16456508,
+      "elapsed_seconds": 0.329583,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060800_basins_qhh_shud"
+      },
+      "index": 63,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-15T00:00:00Z",
+        "start": "2026-06-08T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75937274,
+      "elapsed_seconds": 1.391479,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060806_basins_heihe_shud"
+      },
+      "index": 64,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-15T06:00:00Z",
+        "start": "2026-06-08T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16457849,
+      "elapsed_seconds": 0.346569,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060806_basins_qhh_shud"
+      },
+      "index": 65,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-15T06:00:00Z",
+        "start": "2026-06-08T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75967201,
+      "elapsed_seconds": 1.3876,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060812_basins_heihe_shud"
+      },
+      "index": 66,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-15T12:00:00Z",
+        "start": "2026-06-08T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16461553,
+      "elapsed_seconds": 0.342828,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060812_basins_qhh_shud"
+      },
+      "index": 67,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-15T12:00:00Z",
+        "start": "2026-06-08T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75941851,
+      "elapsed_seconds": 1.34931,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060818_basins_heihe_shud"
+      },
+      "index": 68,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-15T18:00:00Z",
+        "start": "2026-06-08T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16443831,
+      "elapsed_seconds": 0.338191,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060818_basins_qhh_shud"
+      },
+      "index": 69,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-15T18:00:00Z",
+        "start": "2026-06-08T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75930478,
+      "elapsed_seconds": 1.530629,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060900_basins_heihe_shud"
+      },
+      "index": 70,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-16T00:00:00Z",
+        "start": "2026-06-09T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16448225,
+      "elapsed_seconds": 0.328349,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060900_basins_qhh_shud"
+      },
+      "index": 71,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-16T00:00:00Z",
+        "start": "2026-06-09T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75968875,
+      "elapsed_seconds": 1.357454,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060906_basins_heihe_shud"
+      },
+      "index": 72,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-16T06:00:00Z",
+        "start": "2026-06-09T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16484061,
+      "elapsed_seconds": 0.31513,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060906_basins_qhh_shud"
+      },
+      "index": 73,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-16T06:00:00Z",
+        "start": "2026-06-09T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75907650,
+      "elapsed_seconds": 1.390544,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060912_basins_heihe_shud"
+      },
+      "index": 74,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-16T12:00:00Z",
+        "start": "2026-06-09T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16456568,
+      "elapsed_seconds": 0.383914,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060912_basins_qhh_shud"
+      },
+      "index": 75,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-16T12:00:00Z",
+        "start": "2026-06-09T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75929574,
+      "elapsed_seconds": 1.346042,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060918_basins_heihe_shud"
+      },
+      "index": 76,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-16T18:00:00Z",
+        "start": "2026-06-09T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16478363,
+      "elapsed_seconds": 0.333648,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026060918_basins_qhh_shud"
+      },
+      "index": 77,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-16T18:00:00Z",
+        "start": "2026-06-09T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75931902,
+      "elapsed_seconds": 1.373029,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061000_basins_heihe_shud"
+      },
+      "index": 78,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-17T00:00:00Z",
+        "start": "2026-06-10T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16493498,
+      "elapsed_seconds": 0.326985,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061000_basins_qhh_shud"
+      },
+      "index": 79,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-17T00:00:00Z",
+        "start": "2026-06-10T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75907699,
+      "elapsed_seconds": 1.362879,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061006_basins_heihe_shud"
+      },
+      "index": 80,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-17T06:00:00Z",
+        "start": "2026-06-10T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16467519,
+      "elapsed_seconds": 0.325091,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061006_basins_qhh_shud"
+      },
+      "index": 81,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-17T06:00:00Z",
+        "start": "2026-06-10T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75908640,
+      "elapsed_seconds": 1.37274,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061012_basins_heihe_shud"
+      },
+      "index": 82,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-17T12:00:00Z",
+        "start": "2026-06-10T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16465433,
+      "elapsed_seconds": 0.335491,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061012_basins_qhh_shud"
+      },
+      "index": 83,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-17T12:00:00Z",
+        "start": "2026-06-10T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75900898,
+      "elapsed_seconds": 1.370972,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061018_basins_heihe_shud"
+      },
+      "index": 84,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-17T18:00:00Z",
+        "start": "2026-06-10T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16481488,
+      "elapsed_seconds": 0.333987,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061018_basins_qhh_shud"
+      },
+      "index": 85,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-17T18:00:00Z",
+        "start": "2026-06-10T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75929497,
+      "elapsed_seconds": 1.311168,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061100_basins_heihe_shud"
+      },
+      "index": 86,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-18T00:00:00Z",
+        "start": "2026-06-11T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16447160,
+      "elapsed_seconds": 0.326329,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061100_basins_qhh_shud"
+      },
+      "index": 87,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-18T00:00:00Z",
+        "start": "2026-06-11T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75914783,
+      "elapsed_seconds": 1.390657,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061106_basins_heihe_shud"
+      },
+      "index": 88,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-18T06:00:00Z",
+        "start": "2026-06-11T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16463731,
+      "elapsed_seconds": 0.340951,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061106_basins_qhh_shud"
+      },
+      "index": 89,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-18T06:00:00Z",
+        "start": "2026-06-11T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75937787,
+      "elapsed_seconds": 1.358304,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061112_basins_heihe_shud"
+      },
+      "index": 90,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-18T12:00:00Z",
+        "start": "2026-06-11T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16441039,
+      "elapsed_seconds": 0.349306,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061112_basins_qhh_shud"
+      },
+      "index": 91,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-18T12:00:00Z",
+        "start": "2026-06-11T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75948982,
+      "elapsed_seconds": 1.349523,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061118_basins_heihe_shud"
+      },
+      "index": 92,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-18T18:00:00Z",
+        "start": "2026-06-11T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16445538,
+      "elapsed_seconds": 0.352095,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061118_basins_qhh_shud"
+      },
+      "index": 93,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-18T18:00:00Z",
+        "start": "2026-06-11T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75950202,
+      "elapsed_seconds": 1.385875,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061200_basins_heihe_shud"
+      },
+      "index": 94,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-19T00:00:00Z",
+        "start": "2026-06-12T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16443972,
+      "elapsed_seconds": 0.313941,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061200_basins_qhh_shud"
+      },
+      "index": 95,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-19T00:00:00Z",
+        "start": "2026-06-12T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75973406,
+      "elapsed_seconds": 1.379989,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061206_basins_heihe_shud"
+      },
+      "index": 96,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-19T06:00:00Z",
+        "start": "2026-06-12T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16457211,
+      "elapsed_seconds": 0.324027,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061206_basins_qhh_shud"
+      },
+      "index": 97,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-19T06:00:00Z",
+        "start": "2026-06-12T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75989165,
+      "elapsed_seconds": 1.381778,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061212_basins_heihe_shud"
+      },
+      "index": 98,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-19T12:00:00Z",
+        "start": "2026-06-12T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16457819,
+      "elapsed_seconds": 0.33247,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061212_basins_qhh_shud"
+      },
+      "index": 99,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-19T12:00:00Z",
+        "start": "2026-06-12T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75983411,
+      "elapsed_seconds": 1.353805,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061218_basins_heihe_shud"
+      },
+      "index": 100,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-19T18:00:00Z",
+        "start": "2026-06-12T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16447373,
+      "elapsed_seconds": 0.31725,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061218_basins_qhh_shud"
+      },
+      "index": 101,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-19T18:00:00Z",
+        "start": "2026-06-12T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75997554,
+      "elapsed_seconds": 1.336962,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061300_basins_heihe_shud"
+      },
+      "index": 102,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-20T00:00:00Z",
+        "start": "2026-06-13T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16458104,
+      "elapsed_seconds": 0.314263,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061300_basins_qhh_shud"
+      },
+      "index": 103,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-20T00:00:00Z",
+        "start": "2026-06-13T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 75994557,
+      "elapsed_seconds": 1.333737,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061306_basins_heihe_shud"
+      },
+      "index": 104,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-20T06:00:00Z",
+        "start": "2026-06-13T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16476083,
+      "elapsed_seconds": 0.306707,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061306_basins_qhh_shud"
+      },
+      "index": 105,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-20T06:00:00Z",
+        "start": "2026-06-13T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 76037088,
+      "elapsed_seconds": 1.37586,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061312_basins_heihe_shud"
+      },
+      "index": 106,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-20T12:00:00Z",
+        "start": "2026-06-13T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16493770,
+      "elapsed_seconds": 0.297554,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061312_basins_qhh_shud"
+      },
+      "index": 107,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-20T12:00:00Z",
+        "start": "2026-06-13T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 76052311,
+      "elapsed_seconds": 1.342359,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061318_basins_heihe_shud"
+      },
+      "index": 108,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-20T18:00:00Z",
+        "start": "2026-06-13T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16494357,
+      "elapsed_seconds": 0.349137,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061318_basins_qhh_shud"
+      },
+      "index": 109,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-20T18:00:00Z",
+        "start": "2026-06-13T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 76106438,
+      "elapsed_seconds": 1.451688,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061400_basins_heihe_shud"
+      },
+      "index": 110,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-21T00:00:00Z",
+        "start": "2026-06-14T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16488673,
+      "elapsed_seconds": 0.34441,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061400_basins_qhh_shud"
+      },
+      "index": 111,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-21T00:00:00Z",
+        "start": "2026-06-14T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 76140167,
+      "elapsed_seconds": 1.460877,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061406_basins_heihe_shud"
+      },
+      "index": 112,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 574224,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-21T06:00:00Z",
+        "start": "2026-06-14T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 16478580,
+      "elapsed_seconds": 0.643314,
+      "identity": {
+        "forcing_version_id": "forc_gfs_2026061406_basins_qhh_shud"
+      },
+      "index": 113,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 129696,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-21T06:00:00Z",
+        "start": "2026-06-14T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65192574,
+      "elapsed_seconds": 1.251562,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026053106_basins_heihe_shud"
+      },
+      "index": 114,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-06T06:00:00Z",
+        "start": "2026-05-31T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14106358,
+      "elapsed_seconds": 0.287667,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026053106_basins_qhh_shud"
+      },
+      "index": 115,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-06T06:00:00Z",
+        "start": "2026-05-31T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70676741,
+      "elapsed_seconds": 1.323942,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026053112_basins_heihe_shud"
+      },
+      "index": 116,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-07T12:00:00Z",
+        "start": "2026-05-31T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15318905,
+      "elapsed_seconds": 0.296731,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026053112_basins_qhh_shud"
+      },
+      "index": 117,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-07T12:00:00Z",
+        "start": "2026-05-31T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65282362,
+      "elapsed_seconds": 1.242065,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026053118_basins_heihe_shud"
+      },
+      "index": 118,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-06T18:00:00Z",
+        "start": "2026-05-31T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14147183,
+      "elapsed_seconds": 0.269883,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026053118_basins_qhh_shud"
+      },
+      "index": 119,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-06T18:00:00Z",
+        "start": "2026-05-31T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70577216,
+      "elapsed_seconds": 1.30721,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060100_basins_heihe_shud"
+      },
+      "index": 120,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-08T00:00:00Z",
+        "start": "2026-06-01T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15298277,
+      "elapsed_seconds": 0.300022,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060100_basins_qhh_shud"
+      },
+      "index": 121,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-08T00:00:00Z",
+        "start": "2026-06-01T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65178052,
+      "elapsed_seconds": 1.212979,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060106_basins_heihe_shud"
+      },
+      "index": 122,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-07T06:00:00Z",
+        "start": "2026-06-01T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14113822,
+      "elapsed_seconds": 0.282787,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060106_basins_qhh_shud"
+      },
+      "index": 123,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-07T06:00:00Z",
+        "start": "2026-06-01T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70645503,
+      "elapsed_seconds": 1.319402,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060112_basins_heihe_shud"
+      },
+      "index": 124,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-08T12:00:00Z",
+        "start": "2026-06-01T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15322453,
+      "elapsed_seconds": 0.297296,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060112_basins_qhh_shud"
+      },
+      "index": 125,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-08T12:00:00Z",
+        "start": "2026-06-01T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65257624,
+      "elapsed_seconds": 1.203164,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060118_basins_heihe_shud"
+      },
+      "index": 126,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-07T18:00:00Z",
+        "start": "2026-06-01T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14133443,
+      "elapsed_seconds": 0.279314,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060118_basins_qhh_shud"
+      },
+      "index": 127,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-07T18:00:00Z",
+        "start": "2026-06-01T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70600297,
+      "elapsed_seconds": 1.318576,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060200_basins_heihe_shud"
+      },
+      "index": 128,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-09T00:00:00Z",
+        "start": "2026-06-02T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15306502,
+      "elapsed_seconds": 0.302821,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060200_basins_qhh_shud"
+      },
+      "index": 129,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-09T00:00:00Z",
+        "start": "2026-06-02T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65175637,
+      "elapsed_seconds": 1.216754,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060206_basins_heihe_shud"
+      },
+      "index": 130,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-08T06:00:00Z",
+        "start": "2026-06-02T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14109873,
+      "elapsed_seconds": 0.281888,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060206_basins_qhh_shud"
+      },
+      "index": 131,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-08T06:00:00Z",
+        "start": "2026-06-02T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70653857,
+      "elapsed_seconds": 1.431236,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060212_basins_heihe_shud"
+      },
+      "index": 132,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-09T12:00:00Z",
+        "start": "2026-06-02T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15312276,
+      "elapsed_seconds": 0.300316,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060212_basins_qhh_shud"
+      },
+      "index": 133,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-09T12:00:00Z",
+        "start": "2026-06-02T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65266002,
+      "elapsed_seconds": 1.228851,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060218_basins_heihe_shud"
+      },
+      "index": 134,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-08T18:00:00Z",
+        "start": "2026-06-02T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14167179,
+      "elapsed_seconds": 0.28064,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060218_basins_qhh_shud"
+      },
+      "index": 135,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-08T18:00:00Z",
+        "start": "2026-06-02T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70568062,
+      "elapsed_seconds": 1.321572,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060300_basins_heihe_shud"
+      },
+      "index": 136,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-10T00:00:00Z",
+        "start": "2026-06-03T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15355149,
+      "elapsed_seconds": 0.280436,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060300_basins_qhh_shud"
+      },
+      "index": 137,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-10T00:00:00Z",
+        "start": "2026-06-03T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65102124,
+      "elapsed_seconds": 1.205065,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060306_basins_heihe_shud"
+      },
+      "index": 138,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-09T06:00:00Z",
+        "start": "2026-06-03T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14156893,
+      "elapsed_seconds": 0.281878,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060306_basins_qhh_shud"
+      },
+      "index": 139,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-09T06:00:00Z",
+        "start": "2026-06-03T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70576365,
+      "elapsed_seconds": 1.362651,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060312_basins_heihe_shud"
+      },
+      "index": 140,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-10T12:00:00Z",
+        "start": "2026-06-03T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15345855,
+      "elapsed_seconds": 0.306294,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060312_basins_qhh_shud"
+      },
+      "index": 141,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-10T12:00:00Z",
+        "start": "2026-06-03T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65151555,
+      "elapsed_seconds": 1.303657,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060318_basins_heihe_shud"
+      },
+      "index": 142,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-09T18:00:00Z",
+        "start": "2026-06-03T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14177162,
+      "elapsed_seconds": 0.281148,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060318_basins_qhh_shud"
+      },
+      "index": 143,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-09T18:00:00Z",
+        "start": "2026-06-03T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70526738,
+      "elapsed_seconds": 1.33937,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060400_basins_heihe_shud"
+      },
+      "index": 144,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-11T00:00:00Z",
+        "start": "2026-06-04T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15332432,
+      "elapsed_seconds": 0.285049,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060400_basins_qhh_shud"
+      },
+      "index": 145,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-11T00:00:00Z",
+        "start": "2026-06-04T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65016273,
+      "elapsed_seconds": 1.224922,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060406_basins_heihe_shud"
+      },
+      "index": 146,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-10T06:00:00Z",
+        "start": "2026-06-04T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14137817,
+      "elapsed_seconds": 0.296898,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060406_basins_qhh_shud"
+      },
+      "index": 147,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-10T06:00:00Z",
+        "start": "2026-06-04T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70565200,
+      "elapsed_seconds": 1.323279,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060412_basins_heihe_shud"
+      },
+      "index": 148,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-11T12:00:00Z",
+        "start": "2026-06-04T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15344335,
+      "elapsed_seconds": 0.301157,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060412_basins_qhh_shud"
+      },
+      "index": 149,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-11T12:00:00Z",
+        "start": "2026-06-04T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65132083,
+      "elapsed_seconds": 1.18135,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060418_basins_heihe_shud"
+      },
+      "index": 150,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-10T18:00:00Z",
+        "start": "2026-06-04T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14170295,
+      "elapsed_seconds": 0.286619,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060418_basins_qhh_shud"
+      },
+      "index": 151,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-10T18:00:00Z",
+        "start": "2026-06-04T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70526518,
+      "elapsed_seconds": 1.302838,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060500_basins_heihe_shud"
+      },
+      "index": 152,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-12T00:00:00Z",
+        "start": "2026-06-05T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15354189,
+      "elapsed_seconds": 0.31928,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060500_basins_qhh_shud"
+      },
+      "index": 153,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-12T00:00:00Z",
+        "start": "2026-06-05T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65054390,
+      "elapsed_seconds": 1.253572,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060506_basins_heihe_shud"
+      },
+      "index": 154,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-11T06:00:00Z",
+        "start": "2026-06-05T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14171776,
+      "elapsed_seconds": 0.289286,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060506_basins_qhh_shud"
+      },
+      "index": 155,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-11T06:00:00Z",
+        "start": "2026-06-05T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70581738,
+      "elapsed_seconds": 1.309949,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060512_basins_heihe_shud"
+      },
+      "index": 156,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-12T12:00:00Z",
+        "start": "2026-06-05T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15377392,
+      "elapsed_seconds": 0.30158,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060512_basins_qhh_shud"
+      },
+      "index": 157,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-12T12:00:00Z",
+        "start": "2026-06-05T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65151142,
+      "elapsed_seconds": 1.190125,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060518_basins_heihe_shud"
+      },
+      "index": 158,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-11T18:00:00Z",
+        "start": "2026-06-05T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14214798,
+      "elapsed_seconds": 0.278045,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060518_basins_qhh_shud"
+      },
+      "index": 159,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-11T18:00:00Z",
+        "start": "2026-06-05T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70446667,
+      "elapsed_seconds": 1.58645,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060600_basins_heihe_shud"
+      },
+      "index": 160,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-13T00:00:00Z",
+        "start": "2026-06-06T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15350160,
+      "elapsed_seconds": 0.319187,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060600_basins_qhh_shud"
+      },
+      "index": 161,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-13T00:00:00Z",
+        "start": "2026-06-06T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 64979729,
+      "elapsed_seconds": 1.24771,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060606_basins_heihe_shud"
+      },
+      "index": 162,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-12T06:00:00Z",
+        "start": "2026-06-06T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14169654,
+      "elapsed_seconds": 0.285729,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060606_basins_qhh_shud"
+      },
+      "index": 163,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-12T06:00:00Z",
+        "start": "2026-06-06T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70519729,
+      "elapsed_seconds": 1.302364,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060612_basins_heihe_shud"
+      },
+      "index": 164,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-13T12:00:00Z",
+        "start": "2026-06-06T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15360220,
+      "elapsed_seconds": 0.305443,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060612_basins_qhh_shud"
+      },
+      "index": 165,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-13T12:00:00Z",
+        "start": "2026-06-06T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65124954,
+      "elapsed_seconds": 1.235091,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060618_basins_heihe_shud"
+      },
+      "index": 166,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-12T18:00:00Z",
+        "start": "2026-06-06T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14198337,
+      "elapsed_seconds": 0.283007,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060618_basins_qhh_shud"
+      },
+      "index": 167,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-12T18:00:00Z",
+        "start": "2026-06-06T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70483026,
+      "elapsed_seconds": 1.283905,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060700_basins_heihe_shud"
+      },
+      "index": 168,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-14T00:00:00Z",
+        "start": "2026-06-07T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15339178,
+      "elapsed_seconds": 0.284506,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060700_basins_qhh_shud"
+      },
+      "index": 169,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-14T00:00:00Z",
+        "start": "2026-06-07T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65011900,
+      "elapsed_seconds": 1.185485,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060706_basins_heihe_shud"
+      },
+      "index": 170,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-13T06:00:00Z",
+        "start": "2026-06-07T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14148075,
+      "elapsed_seconds": 0.28554,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060706_basins_qhh_shud"
+      },
+      "index": 171,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-13T06:00:00Z",
+        "start": "2026-06-07T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70604702,
+      "elapsed_seconds": 2.497152,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060712_basins_heihe_shud"
+      },
+      "index": 172,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-14T12:00:00Z",
+        "start": "2026-06-07T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15354158,
+      "elapsed_seconds": 0.302552,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060712_basins_qhh_shud"
+      },
+      "index": 173,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-14T12:00:00Z",
+        "start": "2026-06-07T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65151346,
+      "elapsed_seconds": 2.259581,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060718_basins_heihe_shud"
+      },
+      "index": 174,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-13T18:00:00Z",
+        "start": "2026-06-07T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14176614,
+      "elapsed_seconds": 0.282506,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060718_basins_qhh_shud"
+      },
+      "index": 175,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-13T18:00:00Z",
+        "start": "2026-06-07T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70457850,
+      "elapsed_seconds": 2.423667,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060800_basins_heihe_shud"
+      },
+      "index": 176,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-15T00:00:00Z",
+        "start": "2026-06-08T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15341802,
+      "elapsed_seconds": 0.304721,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060800_basins_qhh_shud"
+      },
+      "index": 177,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-15T00:00:00Z",
+        "start": "2026-06-08T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65030241,
+      "elapsed_seconds": 2.114445,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060806_basins_heihe_shud"
+      },
+      "index": 178,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-14T06:00:00Z",
+        "start": "2026-06-08T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14163021,
+      "elapsed_seconds": 0.284119,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060806_basins_qhh_shud"
+      },
+      "index": 179,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-14T06:00:00Z",
+        "start": "2026-06-08T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70608930,
+      "elapsed_seconds": 2.18539,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060812_basins_heihe_shud"
+      },
+      "index": 180,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-15T12:00:00Z",
+        "start": "2026-06-08T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15372681,
+      "elapsed_seconds": 0.29923,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060812_basins_qhh_shud"
+      },
+      "index": 181,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-15T12:00:00Z",
+        "start": "2026-06-08T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65176258,
+      "elapsed_seconds": 1.927989,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060818_basins_heihe_shud"
+      },
+      "index": 182,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-14T18:00:00Z",
+        "start": "2026-06-08T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14180291,
+      "elapsed_seconds": 0.279672,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060818_basins_qhh_shud"
+      },
+      "index": 183,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-14T18:00:00Z",
+        "start": "2026-06-08T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70549484,
+      "elapsed_seconds": 1.911793,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060900_basins_heihe_shud"
+      },
+      "index": 184,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-16T00:00:00Z",
+        "start": "2026-06-09T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15362340,
+      "elapsed_seconds": 0.306275,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060900_basins_qhh_shud"
+      },
+      "index": 185,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-16T00:00:00Z",
+        "start": "2026-06-09T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65118078,
+      "elapsed_seconds": 1.570994,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060906_basins_heihe_shud"
+      },
+      "index": 186,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-15T06:00:00Z",
+        "start": "2026-06-09T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14175656,
+      "elapsed_seconds": 0.282574,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060906_basins_qhh_shud"
+      },
+      "index": 187,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-15T06:00:00Z",
+        "start": "2026-06-09T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70698707,
+      "elapsed_seconds": 1.74722,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060912_basins_heihe_shud"
+      },
+      "index": 188,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-16T12:00:00Z",
+        "start": "2026-06-09T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15385268,
+      "elapsed_seconds": 0.285325,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060912_basins_qhh_shud"
+      },
+      "index": 189,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-16T12:00:00Z",
+        "start": "2026-06-09T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65232946,
+      "elapsed_seconds": 1.485187,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060918_basins_heihe_shud"
+      },
+      "index": 190,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-15T18:00:00Z",
+        "start": "2026-06-09T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14201503,
+      "elapsed_seconds": 0.280197,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026060918_basins_qhh_shud"
+      },
+      "index": 191,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-15T18:00:00Z",
+        "start": "2026-06-09T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70601864,
+      "elapsed_seconds": 1.534573,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061000_basins_heihe_shud"
+      },
+      "index": 192,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-17T00:00:00Z",
+        "start": "2026-06-10T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15345220,
+      "elapsed_seconds": 0.306558,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061000_basins_qhh_shud"
+      },
+      "index": 193,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-17T00:00:00Z",
+        "start": "2026-06-10T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65196422,
+      "elapsed_seconds": 1.368147,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061006_basins_heihe_shud"
+      },
+      "index": 194,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-16T06:00:00Z",
+        "start": "2026-06-10T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14180063,
+      "elapsed_seconds": 0.279987,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061006_basins_qhh_shud"
+      },
+      "index": 195,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-16T06:00:00Z",
+        "start": "2026-06-10T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70731874,
+      "elapsed_seconds": 1.377982,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061012_basins_heihe_shud"
+      },
+      "index": 196,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-17T12:00:00Z",
+        "start": "2026-06-10T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15365217,
+      "elapsed_seconds": 0.303289,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061012_basins_qhh_shud"
+      },
+      "index": 197,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-17T12:00:00Z",
+        "start": "2026-06-10T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65308802,
+      "elapsed_seconds": 1.248106,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061018_basins_heihe_shud"
+      },
+      "index": 198,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-16T18:00:00Z",
+        "start": "2026-06-10T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14207821,
+      "elapsed_seconds": 0.275723,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061018_basins_qhh_shud"
+      },
+      "index": 199,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-16T18:00:00Z",
+        "start": "2026-06-10T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70641805,
+      "elapsed_seconds": 1.207579,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061100_basins_heihe_shud"
+      },
+      "index": 200,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-18T00:00:00Z",
+        "start": "2026-06-11T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15336653,
+      "elapsed_seconds": 0.29607,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061100_basins_qhh_shud"
+      },
+      "index": 201,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-18T00:00:00Z",
+        "start": "2026-06-11T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65168010,
+      "elapsed_seconds": 1.161077,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061106_basins_heihe_shud"
+      },
+      "index": 202,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-17T06:00:00Z",
+        "start": "2026-06-11T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14147955,
+      "elapsed_seconds": 0.257861,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061106_basins_qhh_shud"
+      },
+      "index": 203,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-17T06:00:00Z",
+        "start": "2026-06-11T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70778046,
+      "elapsed_seconds": 1.283585,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061112_basins_heihe_shud"
+      },
+      "index": 204,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-18T12:00:00Z",
+        "start": "2026-06-11T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15370210,
+      "elapsed_seconds": 0.29365,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061112_basins_qhh_shud"
+      },
+      "index": 205,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-18T12:00:00Z",
+        "start": "2026-06-11T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65319580,
+      "elapsed_seconds": 1.166788,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061118_basins_heihe_shud"
+      },
+      "index": 206,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-17T18:00:00Z",
+        "start": "2026-06-11T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14172770,
+      "elapsed_seconds": 0.255447,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061118_basins_qhh_shud"
+      },
+      "index": 207,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-17T18:00:00Z",
+        "start": "2026-06-11T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70732285,
+      "elapsed_seconds": 1.363451,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061200_basins_heihe_shud"
+      },
+      "index": 208,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-19T00:00:00Z",
+        "start": "2026-06-12T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15347348,
+      "elapsed_seconds": 0.285404,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061200_basins_qhh_shud"
+      },
+      "index": 209,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-19T00:00:00Z",
+        "start": "2026-06-12T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65285933,
+      "elapsed_seconds": 1.188288,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061206_basins_heihe_shud"
+      },
+      "index": 210,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-18T06:00:00Z",
+        "start": "2026-06-12T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14148785,
+      "elapsed_seconds": 0.28994,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061206_basins_qhh_shud"
+      },
+      "index": 211,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-18T06:00:00Z",
+        "start": "2026-06-12T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70776889,
+      "elapsed_seconds": 1.275352,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061212_basins_heihe_shud"
+      },
+      "index": 212,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-19T12:00:00Z",
+        "start": "2026-06-12T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15357291,
+      "elapsed_seconds": 0.287104,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061212_basins_qhh_shud"
+      },
+      "index": 213,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-19T12:00:00Z",
+        "start": "2026-06-12T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65285920,
+      "elapsed_seconds": 1.173261,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061218_basins_heihe_shud"
+      },
+      "index": 214,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-18T18:00:00Z",
+        "start": "2026-06-12T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14196265,
+      "elapsed_seconds": 0.284424,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061218_basins_qhh_shud"
+      },
+      "index": 215,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-18T18:00:00Z",
+        "start": "2026-06-12T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70686806,
+      "elapsed_seconds": 1.281911,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061300_basins_heihe_shud"
+      },
+      "index": 216,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-20T00:00:00Z",
+        "start": "2026-06-13T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15339367,
+      "elapsed_seconds": 0.273183,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061300_basins_qhh_shud"
+      },
+      "index": 217,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-20T00:00:00Z",
+        "start": "2026-06-13T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65332265,
+      "elapsed_seconds": 1.151087,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061306_basins_heihe_shud"
+      },
+      "index": 218,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-19T06:00:00Z",
+        "start": "2026-06-13T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14182659,
+      "elapsed_seconds": 0.299492,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061306_basins_qhh_shud"
+      },
+      "index": 219,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-19T06:00:00Z",
+        "start": "2026-06-13T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70924446,
+      "elapsed_seconds": 1.298827,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061312_basins_heihe_shud"
+      },
+      "index": 220,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-20T12:00:00Z",
+        "start": "2026-06-13T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15385717,
+      "elapsed_seconds": 0.270935,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061312_basins_qhh_shud"
+      },
+      "index": 221,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-20T12:00:00Z",
+        "start": "2026-06-13T12:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65576852,
+      "elapsed_seconds": 1.140966,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061318_basins_heihe_shud"
+      },
+      "index": 222,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-19T18:00:00Z",
+        "start": "2026-06-13T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14217973,
+      "elapsed_seconds": 0.260143,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061318_basins_qhh_shud"
+      },
+      "index": 223,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-19T18:00:00Z",
+        "start": "2026-06-13T18:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 70915316,
+      "elapsed_seconds": 1.189679,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061400_basins_heihe_shud"
+      },
+      "index": 224,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 533208,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-21T00:00:00Z",
+        "start": "2026-06-14T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 15363010,
+      "elapsed_seconds": 0.262805,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061400_basins_qhh_shud"
+      },
+      "index": 225,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 120432,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-21T00:00:00Z",
+        "start": "2026-06-14T00:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 65346242,
+      "elapsed_seconds": 2.107688,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061406_basins_heihe_shud"
+      },
+      "index": 226,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 492192,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-20T06:00:00Z",
+        "start": "2026-06-14T06:00:00Z"
+      }
+    },
+    {
+      "columns": [
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag"
+      ],
+      "csv_bytes": 14156766,
+      "elapsed_seconds": 0.583717,
+      "identity": {
+        "forcing_version_id": "forc_ifs_2026061406_basins_qhh_shud"
+      },
+      "index": 227,
+      "predicate_template": "forcing_version_id = %s AND valid_time >= %s AND valid_time < %s",
+      "row_count": 111168,
+      "table": "met.forcing_station_timeseries",
+      "window": {
+        "end": "2026-06-20T06:00:00Z",
+        "start": "2026-06-14T06:00:00Z"
+      }
+    }
+  ],
+  "summary": {
+    "archive_free_bytes": 757709824000,
+    "archive_headroom_bytes": 322122547200,
+    "cgroup": {
+      "current_bytes": 22892544,
+      "limit_bytes": null,
+      "path": "/user.slice/user-1005.slice/session-108869.scope",
+      "remaining_bytes": null,
+      "version": "v2"
+    },
+    "csv_bytes_max": 76140167,
+    "csv_bytes_total": 9977588035,
+    "effective_available_memory_bytes": 94652284928,
+    "elapsed_seconds": 204.572937,
+    "host_mem_available_bytes": 94652284928,
+    "max_selector_bytes_cap": 536870912,
+    "row_count_total": 75922800,
+    "selector_count": 228,
+    "wall_estimate_seconds": 1549.145873
+  }
+}
