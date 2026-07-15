@@ -19,15 +19,19 @@ import hashlib
 import json
 import math
 import re
-import stat
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import jsonschema
 
+from packages.common.evidence_io import (
+    BoundedEvidenceError,
+    read_bounded_bytes_no_follow,
+    read_bounded_json_no_follow,
+)
 from packages.common.safe_fs import atomic_write_bytes_no_follow
 
 SCHEMA_VERSION = "2.0"
@@ -41,6 +45,15 @@ EXPECTED_BOUND = 1
 EXPECTED_TIMEOUT_SECONDS = 900
 MAX_POST_MEASUREMENT_DRIFT_BYTES = 1024**2
 MAX_PREFLIGHT_TO_ENFORCE_SECONDS = 60
+MAX_JSON_ARTIFACT_BYTES = 16 * 1024**2
+MAX_PLAN_DEPTH = 48
+MAX_JSON_NODES = 250_000
+MAX_JSON_ARRAY_ITEMS = 25_000
+MAX_BINARY_ARTIFACT_BYTES = 1024**3
+REPO_ROOT = Path(__file__).resolve().parents[1]
+CANONICAL_RECEIPT_SCHEMA = REPO_ROOT / "schemas/timeseries_compression_receipt.schema.json"
+CANONICAL_EVIDENCE_SCHEMA = REPO_ROOT / "schemas/timeseries_compression_live_evidence.schema.json"
+CANONICAL_MIGRATION = REPO_ROOT / "db/migrations/000047_hypertable_compression_settings.sql"
 EXPECTED_UNITS = (
     "nhms-node27-autopipe.timer",
     "nhms-node27-autopipe.service",
@@ -63,6 +76,7 @@ PREFLIGHT_KEYS = frozenset(
         "database_writes_quiescent",
         "conflicting_locks_absent",
         "units",
+        "prior_autopipe_state",
     }
 )
 RECOVERY_TARGET: Mapping[str, str] = {
@@ -94,6 +108,34 @@ BUNDLE_CONTRACT: Mapping[str, str] = {
     "catalog.post": "JSON: exact post-run D3 settings and policy jobs",
     "benchmarks.evidence": "JSON: raw curve/MVT plans, samples, result identities",
     "cleanup.evidence": "JSON: restored autopipe and enabled/inactive compression timer",
+}
+
+INVOCATION_ARGV: Mapping[str, list[str]] = {
+    "migration_apply": [
+        "psql",
+        "--set",
+        "ON_ERROR_STOP=1",
+        "--file",
+        "db/migrations/000047_hypertable_compression_settings.sql",
+    ],
+    "recovery_decompress": [
+        "psql",
+        "--set",
+        "ON_ERROR_STOP=1",
+        "--command",
+        "SELECT decompress_" "chunk($1::regclass);",
+    ],
+    "compression_dry_run": [
+        "scripts/node27_timeseries_compression_once.sh",
+        "--receipt-path",
+        "<receipt-path>",
+    ],
+    "compression_enforce": [
+        "scripts/node27_timeseries_compression_once.sh",
+        "--enforce",
+        "--receipt-path",
+        "<receipt-path>",
+    ],
 }
 
 
@@ -131,7 +173,22 @@ def _require_exact_keys(value: Mapping[str, Any], keys: set[str], label: str) ->
         )
 
 
-def _artifact_ref(value: Any, label: str) -> dict[str, Any]:
+def _artifact_ref(
+    value: Any,
+    label: str,
+    *,
+    max_bytes: int = MAX_BINARY_ARTIFACT_BYTES,
+) -> dict[str, Any]:
+    ref, _ = _artifact_bytes(value, label, max_bytes=max_bytes)
+    return ref
+
+
+def _artifact_bytes(
+    value: Any,
+    label: str,
+    *,
+    max_bytes: int = MAX_BINARY_ARTIFACT_BYTES,
+) -> tuple[dict[str, Any], bytes]:
     ref = _require_mapping(value, label)
     _require_exact_keys(ref, {"path", "sha256", "bytes"}, label)
     path = Path(str(ref["path"]))
@@ -143,26 +200,62 @@ def _artifact_ref(value: Any, label: str) -> dict[str, Any]:
     size = ref["bytes"]
     if not isinstance(size, int) or isinstance(size, bool) or size < 0:
         raise EvidenceError(f"{label}.bytes must be a non-negative integer")
+    if size > max_bytes:
+        raise EvidenceError(f"{label} exceeds the byte ceiling")
     try:
-        info = path.lstat()
-    except OSError as error:
-        raise EvidenceError(f"{label} is unavailable: {error}") from error
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        raise EvidenceError(f"{label} must reference a regular non-symlink file")
-    raw = path.read_bytes()
+        raw = read_bounded_bytes_no_follow(path, max_bytes=max_bytes, label=label)
+    except BoundedEvidenceError as error:
+        raise EvidenceError(str(error)) from error
+    if len(raw) != size or _sha256(raw) != digest:
+        raise EvidenceError(f"{label} byte count or sha256 mismatch")
+    return {"path": str(path), "sha256": digest, "bytes": size}, raw
+
+
+def _json_artifact(
+    value: Any,
+    label: str,
+    *,
+    max_bytes: int = MAX_JSON_ARTIFACT_BYTES,
+) -> tuple[dict[str, Any], Any]:
+    ref_value = _require_mapping(value, label)
+    declared_size = ref_value.get("bytes")
+    if not isinstance(declared_size, int) or isinstance(declared_size, bool):
+        raise EvidenceError(f"{label}.bytes must be a non-negative integer")
+    if declared_size > max_bytes:
+        raise EvidenceError(f"{label} exceeds the byte ceiling")
+    try:
+        raw, document = read_bounded_json_no_follow(
+            Path(str(ref_value.get("path", ""))),
+            max_bytes=max_bytes,
+            label=label,
+            max_depth=MAX_PLAN_DEPTH,
+            max_nodes=MAX_JSON_NODES,
+            max_array_items=MAX_JSON_ARRAY_ITEMS,
+        )
+    except BoundedEvidenceError as error:
+        raise EvidenceError(str(error)) from error
+    ref = _artifact_ref_from_raw(ref_value, label, raw)
+    _reject_secrets(document, label)
+    return ref, document
+
+
+def _artifact_ref_from_raw(value: Any, label: str, raw: bytes) -> dict[str, Any]:
+    """Validate a ref against bytes already read from its pinned descriptor."""
+
+    ref = _require_mapping(value, label)
+    _require_exact_keys(ref, {"path", "sha256", "bytes"}, label)
+    path = Path(str(ref["path"]))
+    if not path.is_absolute():
+        raise EvidenceError(f"{label}.path must be absolute")
+    digest = str(ref["sha256"])
+    size = ref["bytes"]
+    if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise EvidenceError(f"{label}.sha256 must be lowercase sha256")
+    if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+        raise EvidenceError(f"{label}.bytes must be a non-negative integer")
     if len(raw) != size or _sha256(raw) != digest:
         raise EvidenceError(f"{label} byte count or sha256 mismatch")
     return {"path": str(path), "sha256": digest, "bytes": size}
-
-
-def _json_artifact(value: Any, label: str) -> tuple[dict[str, Any], Any]:
-    ref = _artifact_ref(value, label)
-    try:
-        document = json.loads(Path(ref["path"]).read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise EvidenceError(f"{label} is not valid UTF-8 JSON: {error}") from error
-    _reject_secrets(document, label)
-    return ref, document
 
 
 def _reject_secrets(value: Any, label: str) -> None:
@@ -170,14 +263,65 @@ def _reject_secrets(value: Any, label: str) -> None:
     if isinstance(value, Mapping):
         for key, item in value.items():
             lowered = str(key).lower()
-            if lowered in {"password", "database_url", "dsn"} or lowered.endswith("_password"):
+            normalized = re.sub(r"[^a-z0-9]+", "_", lowered).strip("_")
+            if (
+                normalized in {
+                    "password",
+                    "passwd",
+                    "database_url",
+                    "dsn",
+                    "api_key",
+                    "apikey",
+                    "token",
+                    "access_token",
+                    "refresh_token",
+                    "private_key",
+                    "client_secret",
+                    "authorization",
+                    "auth_credential",
+                    "credential",
+                }
+                or normalized.endswith(("_password", "_token", "_secret", "_api_key", "_private_key"))
+            ):
                 raise EvidenceError(f"{label} contains forbidden credential field")
             _reject_secrets(item, label)
     elif isinstance(value, list):
         for item in value:
             _reject_secrets(item, label)
-    elif isinstance(value, str) and re.search(r"postgres(?:ql)?://[^/\s]*@", value):
-        raise EvidenceError(f"{label} contains a credential-bearing database URL")
+    elif isinstance(value, str) and re.search(
+        r"(?i)(?:postgres(?:ql)?://[^/\s]*@|-----BEGIN [A-Z ]*PRIVATE KEY-----|bearer\s+[a-z0-9._~+/=-]+)",
+        value,
+    ):
+        raise EvidenceError(f"{label} contains forbidden credential material")
+
+
+def _git_blob_bytes(head_sha: str, relative_path: str, label: str) -> bytes:
+    result = subprocess.run(
+        ["git", "show", f"{head_sha}:{relative_path}"],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise EvidenceError(f"{label} cannot be bound to mutation SHA")
+    return result.stdout
+
+
+def _validate_reviewed_file_ref(
+    value: Any,
+    *,
+    label: str,
+    mutation_head_sha: str,
+    relative_path: str,
+) -> dict[str, Any]:
+    expected_path = REPO_ROOT / relative_path
+    ref = _artifact_ref(value, label, max_bytes=MAX_JSON_ARTIFACT_BYTES)
+    if Path(ref["path"]) != expected_path:
+        raise EvidenceError(f"{label} path is not the canonical checkout path")
+    expected = _git_blob_bytes(mutation_head_sha, relative_path, label)
+    if ref["bytes"] != len(expected) or ref["sha256"] != _sha256(expected):
+        raise EvidenceError(f"{label} differs from the reviewed mutation-SHA blob")
+    return ref
 
 
 def _parse_utc(value: Any, label: str) -> datetime:
@@ -188,6 +332,55 @@ def _parse_utc(value: Any, label: str) -> datetime:
     if parsed.tzinfo is None:
         raise EvidenceError(f"{label} must carry a timezone")
     return parsed.astimezone(UTC)
+
+
+def _validate_invocation_record(
+    raw: Any,
+    *,
+    label: str,
+    kind: str,
+    mutation_head_sha: str,
+    expected_binding: Mapping[str, Any],
+) -> dict[str, Any]:
+    record = _require_mapping(raw, label)
+    _require_exact_keys(
+        record,
+        {
+            "kind",
+            "argv",
+            "timeout_seconds",
+            "started_at",
+            "finished_at",
+            "exit_code",
+            "mutation_head_sha",
+            "artifact_bindings",
+        },
+        label,
+    )
+    _reject_secrets(record, label)
+    if (
+        record["kind"] != kind
+        or record["argv"] != INVOCATION_ARGV[kind]
+        or record["timeout_seconds"] != EXPECTED_TIMEOUT_SECONDS
+        or record["mutation_head_sha"] != mutation_head_sha
+    ):
+        raise EvidenceError(f"{label} command identity, timeout, or mutation SHA differs")
+    started = _parse_utc(record["started_at"], f"{label}.started_at")
+    finished = _parse_utc(record["finished_at"], f"{label}.finished_at")
+    if (
+        not started <= finished
+        or (finished - started).total_seconds() > EXPECTED_TIMEOUT_SECONDS
+        or record["exit_code"] != 0
+    ):
+        raise EvidenceError(f"{label} timing/exit does not prove bounded success")
+    bindings = _require_mapping(record["artifact_bindings"], f"{label}.artifact_bindings")
+    if dict(bindings) != dict(expected_binding):
+        raise EvidenceError(f"{label} artifact association differs")
+    return {
+        **dict(record),
+        "started_at_dt": started,
+        "finished_at_dt": finished,
+    }
 
 
 def _selected_identity(descriptor: Mapping[str, Any]) -> dict[str, Any]:
@@ -270,6 +463,38 @@ def _validate_d3_catalog(raw: Any, label: str) -> None:
         raise EvidenceError(f"{label} does not match exact D3 settings/no-policy contract")
 
 
+def _validate_pre_migration_catalog(raw: Any, label: str) -> None:
+    catalog = _require_mapping(raw, label)
+    _require_exact_keys(catalog, {"hypertables", "compression_settings", "policy_jobs"}, label)
+    hypertables = _require_mapping(catalog["hypertables"], f"{label}.hypertables")
+    if set(hypertables) != set(HYPERTABLE_KEYS) or any(
+        value is not False for value in hypertables.values()
+    ):
+        raise EvidenceError(f"{label} does not prove the exact pre-migration catalog")
+    if catalog["compression_settings"] != [] or catalog["policy_jobs"] != []:
+        raise EvidenceError(f"{label} contains unexpected pre-migration settings/jobs")
+
+
+def _validate_dump_listing(raw: Any, *, dump_ref: Mapping[str, Any]) -> dict[str, Any]:
+    listing = _require_mapping(raw, "preflight.schema_dump_list document")
+    _require_exact_keys(
+        listing,
+        {"dump_sha256", "argv", "exit_code", "entries"},
+        "preflight.schema_dump_list document",
+    )
+    entries = _require_list(listing["entries"], "preflight.schema_dump_list.entries")
+    if (
+        listing["dump_sha256"] != dump_ref["sha256"]
+        or listing["argv"] != ["pg_restore", "--list", "<schema-dump-path>"]
+        or listing["exit_code"] != 0
+        or not entries
+        or any(not isinstance(item, str) or not item for item in entries)
+        or not all(any(table.split(".")[1] in item for item in entries) for table in HYPERTABLE_KEYS)
+    ):
+        raise EvidenceError("schema forensic dump/list identity is not verifiable")
+    return dict(listing)
+
+
 def _validate_preflight(raw: Any, mutation_head_sha: str) -> dict[str, Any]:
     preflight = _require_mapping(raw, "preflight.evidence document")
     _require_exact_keys(
@@ -329,6 +554,16 @@ def _validate_preflight(raw: Any, mutation_head_sha: str) -> dict[str, Any]:
         unit = units[unit_name]
         if unit["active"] != "inactive" or unit["main_pid"] != 0:
             raise EvidenceError(f"preflight compression unit {unit_name} must remain inactive")
+    prior_autopipe = _require_mapping(
+        preflight["prior_autopipe_state"], "preflight.prior_autopipe_state"
+    )
+    _require_exact_keys(
+        prior_autopipe,
+        {"enabled", "active", "sub", "result"},
+        "preflight.prior_autopipe_state",
+    )
+    if not all(isinstance(value, str) and value for value in prior_autopipe.values()):
+        raise EvidenceError("preflight prior autopipe state is incomplete")
     database = _require_mapping(preflight["database_identity"], "database_identity")
     if database.get("dbname") != "nhms" or database.get("instance") != "node27-primary-pg15":
         raise EvidenceError("preflight database identity is not the node-27 nhms primary")
@@ -352,6 +587,7 @@ def _validate_preflight(raw: Any, mutation_head_sha: str) -> dict[str, Any]:
         "mutation_head_sha": mutation_head_sha,
         "container_state": dict(container),
         "units": unit_summary,
+        "prior_autopipe_state": dict(prior_autopipe),
     }
 
 
@@ -492,9 +728,27 @@ def _validate_recovery(
     }
 
 
-def _table_snapshot(raw: Any, label: str) -> Mapping[str, Any]:
+def _table_snapshot(
+    raw: Any,
+    label: str,
+    *,
+    mutation_head_sha: str,
+    expected_phase: str,
+) -> dict[str, Any]:
     snapshot = _require_mapping(raw, label)
-    _require_exact_keys(snapshot, {"tables"}, label)
+    _require_exact_keys(
+        snapshot,
+        {"captured_at", "snapshot_id", "phase", "mutation_head_sha", "tables"},
+        label,
+    )
+    captured_at = _parse_utc(snapshot["captured_at"], f"{label}.captured_at")
+    if (
+        snapshot["phase"] != expected_phase
+        or snapshot["mutation_head_sha"] != mutation_head_sha
+        or not isinstance(snapshot["snapshot_id"], str)
+        or not snapshot["snapshot_id"]
+    ):
+        raise EvidenceError(f"{label} snapshot identity differs")
     tables = _require_mapping(snapshot["tables"], f"{label}.tables")
     if set(tables) != set(HYPERTABLE_KEYS):
         raise EvidenceError(f"{label} must contain exactly both hypertables")
@@ -531,7 +785,11 @@ def _table_snapshot(raw: Any, label: str) -> Mapping[str, Any]:
             )
             if not isinstance(relation["bytes"], int) or relation["bytes"] < 0:
                 raise EvidenceError(f"{label}.{key}.compressed_relations[{index}].bytes invalid")
-    return tables
+    return {
+        "captured_at_dt": captured_at,
+        "snapshot_id": snapshot["snapshot_id"],
+        "tables": tables,
+    }
 
 
 def _validate_selection_snapshot(raw: Any, label: str) -> dict[str, Any]:
@@ -543,6 +801,9 @@ def _validate_selection_snapshot(raw: Any, label: str) -> dict[str, Any]:
     )
     observed_at = _parse_utc(snapshot["observed_at"], f"{label}.observed_at")
     cutoff = _parse_utc(snapshot["cutoff"], f"{label}.cutoff")
+    derived_cutoff = observed_at - timedelta(seconds=EXPECTED_LAG_SECONDS)
+    if cutoff != derived_cutoff:
+        raise EvidenceError(f"{label} cutoff is not observed_at minus the authorized lag")
     free_bytes = snapshot["free_bytes"]
     if not isinstance(free_bytes, int) or isinstance(free_bytes, bool) or free_bytes < MIN_FREE_BYTES:
         raise EvidenceError(f"{label} free-space headroom is below 300 GiB")
@@ -620,9 +881,39 @@ def _validate_selection_snapshot(raw: Any, label: str) -> dict[str, Any]:
     }
 
 
-def _plan_contains(plan: Any, needles: Sequence[str]) -> bool:
-    lowered = json.dumps(plan, sort_keys=True).lower()
-    return all(needle.lower() in lowered for needle in needles)
+def _plan_binds_selected_decompress(
+    plan: Any, *, selected_relation_names: set[str]
+) -> bool:
+    """Require provider and relation in one Custom Scan node/direct subtree."""
+
+    stack = [plan]
+    lowered_names = {name.lower() for name in selected_relation_names}
+    while stack:
+        value = stack.pop()
+        if isinstance(value, list):
+            stack.extend(value)
+            continue
+        if not isinstance(value, Mapping):
+            continue
+        node_type = str(value.get("Node Type", "")).lower()
+        provider = str(value.get("Custom Plan Provider", "")).lower()
+        if node_type == "custom scan" and "decompresschunk" in provider:
+            # TimescaleDB versions expose the origin/sibling in different
+            # fields. Restrict the search to this node and its direct Plans,
+            # never unrelated branches elsewhere in the EXPLAIN tree.
+            local_values = [
+                item
+                for key, item in value.items()
+                if key != "Plans"
+            ]
+            direct = value.get("Plans", [])
+            if isinstance(direct, list):
+                local_values.extend(direct)
+            rendered = json.dumps(local_values, sort_keys=True).lower()
+            if any(name in rendered for name in lowered_names):
+                return True
+        stack.extend(value.values())
+    return False
 
 
 def _stats(samples_value: Any, label: str) -> tuple[list[float], float, float]:
@@ -696,6 +987,7 @@ def _validate_phase(
             "warmups",
             "measurements",
             "activity_samples",
+            "execution_bounds",
         },
         f"benchmark {query_name} {phase_name}",
     )
@@ -728,29 +1020,91 @@ def _validate_phase(
     if phase["cache_class"] != derived_cache_class:
         raise EvidenceError(f"benchmark {query_name} {phase_name} cache class mismatch")
     activities = _require_list(phase["activity_samples"], "benchmark activity_samples")
-    if not activities:
-        raise EvidenceError(f"benchmark {query_name} {phase_name} lacks activity samples")
+    expected_stages = [
+        "before_cold",
+        "after_cold",
+        "before_measurements",
+        "mid_measurements",
+        "after_result",
+    ]
+    if len(activities) != len(expected_stages):
+        raise EvidenceError(f"benchmark {query_name} {phase_name} lacks activity checkpoints")
     normalized_activities: list[dict[str, Any]] = []
     for index, value_ in enumerate(activities):
         activity = _require_mapping(value_, f"benchmark activity[{index}]")
         _require_exact_keys(
             activity,
-            {"captured_at", "active_sessions", "material_load_stable"},
+            {"captured_at", "stage", "sessions", "material_load_stable"},
             f"benchmark activity[{index}]",
         )
         _parse_utc(activity["captured_at"], f"benchmark activity[{index}].captured_at")
         if (
-            not isinstance(activity["active_sessions"], int)
-            or isinstance(activity["active_sessions"], bool)
-            or activity["active_sessions"] < 0
+            activity["stage"] != expected_stages[index]
             or activity["material_load_stable"] is not True
         ):
             raise EvidenceError(f"benchmark {query_name} {phase_name} has load drift")
+        sessions = _require_list(activity["sessions"], f"benchmark activity[{index}].sessions")
+        for session_index, session_value in enumerate(sessions):
+            session = _require_mapping(
+                session_value, f"benchmark activity[{index}].sessions[{session_index}]"
+            )
+            _require_exact_keys(
+                session,
+                {
+                    "pid",
+                    "backend_start",
+                    "xact_start",
+                    "query_start",
+                    "state",
+                    "wait_event_type",
+                    "query_signature",
+                },
+                f"benchmark activity[{index}].sessions[{session_index}]",
+            )
         normalized_activities.append(dict(activity))
-    if phase_name == "after":
+    if any(
+        item["sessions"] != normalized_activities[0]["sessions"]
+        for item in normalized_activities[1:]
+    ):
+        raise EvidenceError(f"benchmark {query_name} {phase_name} has session-identity drift")
+    bounds = _require_mapping(
+        phase["execution_bounds"], f"benchmark {query_name} {phase_name}.execution_bounds"
+    )
+    _require_exact_keys(
+        bounds,
+        {
+            "statement_timeout_ms",
+            "lock_timeout_ms",
+            "phase_timeout_seconds",
+            "started_at",
+            "finished_at",
+        },
+        f"benchmark {query_name} {phase_name}.execution_bounds",
+    )
+    started_at = _parse_utc(bounds["started_at"], "benchmark phase started_at")
+    finished_at = _parse_utc(bounds["finished_at"], "benchmark phase finished_at")
+    if (
+        bounds["statement_timeout_ms"] != 60_000
+        or bounds["lock_timeout_ms"] != 5_000
+        or bounds["phase_timeout_seconds"] != EXPECTED_TIMEOUT_SECONDS
+        or not started_at <= finished_at
+        or (finished_at - started_at).total_seconds() > EXPECTED_TIMEOUT_SECONDS
+    ):
+        raise EvidenceError(f"benchmark {query_name} {phase_name} execution bounds differ")
+    if query_name == "curve" and phase["rows"] < 1:
+        raise EvidenceError("benchmark curve must return at least one row")
+    if phase_name == "before":
         for index, measurement in enumerate(measurements):
-            if not _plan_contains(measurement["plan"], ["DecompressChunk"]) or not any(
-                _plan_contains(measurement["plan"], [name]) for name in selected_relation_names
+            if _plan_binds_selected_decompress(
+                measurement["plan"], selected_relation_names=selected_relation_names
+            ):
+                raise EvidenceError(
+                    f"benchmark {query_name} before measurement {index} already uses selected DecompressChunk"
+                )
+    else:
+        for index, measurement in enumerate(measurements):
+            if not _plan_binds_selected_decompress(
+                measurement["plan"], selected_relation_names=selected_relation_names
             ):
                 raise EvidenceError(
                     f"benchmark {query_name} after measurement {index} lacks selected DecompressChunk"
@@ -767,6 +1121,7 @@ def _validate_phase(
         "warmups": warmups,
         "measurements": measurements,
         "activity_samples": normalized_activities,
+        "execution_bounds": dict(bounds),
         "samples_ms": samples,
         "median_ms": median,
         "p95_ms": p95,
@@ -778,6 +1133,7 @@ def _validate_benchmarks(
     selected: Mapping[str, Any],
     *,
     selected_relation_names: set[str],
+    mutation_head_sha: str,
 ) -> list[dict[str, Any]]:
     benchmark = _require_mapping(raw, "benchmarks.evidence document")
     queries = _require_list(benchmark.get("queries"), "benchmarks.queries")
@@ -790,6 +1146,7 @@ def _validate_benchmarks(
             query,
             {
                 "name",
+                "request",
                 "source_refs",
                 "query_sha256",
                 "query_text",
@@ -799,15 +1156,8 @@ def _validate_benchmarks(
             },
             f"benchmark {query.get('name')}",
         )
-        source_refs = [
-            _artifact_ref(value, f"benchmark {query['name']} source[{index}]")
-            for index, value in enumerate(_require_list(query["source_refs"], "source_refs"))
-        ]
-        if not source_refs:
-            raise EvidenceError("benchmark source_refs must not be empty")
-        source_paths = {str(ref["path"]) for ref in source_refs}
         if query["name"] == "curve":
-            required_source_suffixes = {"/packages/common/forecast_store.py"}
+            source_paths = ["packages/common/forecast_store.py"]
             required_parameter_names = {
                 "basin_version_id",
                 "river_segment_id",
@@ -828,10 +1178,7 @@ def _validate_benchmarks(
                 "rt.valid_time",
             }
         else:
-            required_source_suffixes = {
-                "/services/tiles/mvt.py",
-                "/apps/api/routes/hydro_display.py",
-            }
+            source_paths = ["services/tiles/mvt.py", "apps/api/routes/hydro_display.py"]
             required_parameter_keys = {
                 "run_id",
                 "basin_version_id",
@@ -859,10 +1206,46 @@ def _validate_benchmarks(
                 ":valid_time",
                 "ST_TileEnvelope",
             }
-        if not all(any(path.endswith(suffix) for path in source_paths) for suffix in required_source_suffixes):
-            raise EvidenceError(f"benchmark {query['name']} is not bound to production source files")
+        raw_source_refs = _require_list(query["source_refs"], "source_refs")
+        if len(raw_source_refs) != len(source_paths):
+            raise EvidenceError(f"benchmark {query['name']} source set differs from production owners")
+        source_refs = [
+            _validate_reviewed_file_ref(
+                value,
+                label=f"benchmark {query['name']} source[{index}]",
+                mutation_head_sha=mutation_head_sha,
+                relative_path=source_paths[index],
+            )
+            for index, value in enumerate(raw_source_refs)
+        ]
         binding = _require_mapping(query["binding"], f"benchmark {query['name']} binding")
+        request = _require_mapping(query["request"], f"benchmark {query['name']} request")
         if query["name"] == "curve":
+            from scripts.node27_timeseries_compression_benchmark import (
+                _curve_query_and_binding,
+                _json_value,
+            )
+
+            _require_exact_keys(
+                request,
+                {
+                    "basin_version_id",
+                    "river_segment_id",
+                    "river_network_version_id",
+                    "issue_time",
+                    "end_time",
+                    "scenario",
+                },
+                "benchmark curve request",
+            )
+            expected_query, expected_names, expected_parameters = _curve_query_and_binding(
+                basin_version_id=str(request["basin_version_id"]),
+                river_segment_id=str(request["river_segment_id"]),
+                river_network_version_id=str(request["river_network_version_id"]),
+                issue_time=_parse_utc(request["issue_time"], "curve request issue_time"),
+                end_time=_parse_utc(request["end_time"], "curve request end_time"),
+                scenario=str(request["scenario"]),
+            )
             _require_exact_keys(
                 binding,
                 {"parameter_names", "bound_parameters"},
@@ -881,9 +1264,60 @@ def _validate_benchmarks(
                 or not required_parameter_names <= set(parameter_names)
             ):
                 raise EvidenceError("benchmark curve positional binding does not match %s count")
+            if (
+                query["query_text"] != expected_query
+                or parameter_names != expected_names
+                or _canonical_json_bytes(bound_parameters)
+                != _canonical_json_bytes(_json_value(list(expected_parameters)))
+            ):
+                raise EvidenceError("benchmark curve query/binding differs from the public production owner")
+            bound = dict(zip(parameter_names, bound_parameters, strict=True))
+            request_start = _parse_utc(bound["start_time"], "benchmark curve start_time")
+            request_end = _parse_utc(bound["end_time"], "benchmark curve end_time")
+            selected_start = _parse_utc(selected["range_start"], "selected range_start")
+            selected_end = _parse_utc(selected["range_end"], "selected range_end")
+            if not (
+                selected_start <= request_start < request_end <= selected_end
+                and bound["basin_version_id"]
+                and bound["river_segment_id"]
+                and bound["river_network_version_id"]
+            ):
+                raise EvidenceError("benchmark curve request is not bound to the selected chunk range")
         else:
+            from apps.api.routes.hydro_display import _postgis_tile_params
+            from services.tiles.mvt import postgis_tile_sql
+
+            _require_exact_keys(
+                request,
+                {
+                    "run_id",
+                    "basin_version_id",
+                    "river_network_version_id",
+                    "valid_time",
+                    "z",
+                    "x",
+                    "y",
+                },
+                "benchmark mvt request",
+            )
             if set(binding) != required_parameter_keys:
                 raise EvidenceError("benchmark mvt binding is not the exact production parameter map")
+            expected_binding = _postgis_tile_params(
+                {
+                    "run_id": request["run_id"],
+                    "basin_version_id": request["basin_version_id"],
+                    "river_network_version_id": request["river_network_version_id"],
+                    "variable": "q_down",
+                    "valid_time": _parse_utc(request["valid_time"], "mvt request valid_time"),
+                },
+                z=int(request["z"]),
+                x=int(request["x"]),
+                y=int(request["y"]),
+            )
+            if query["query_text"] != postgis_tile_sql("hydro") or _canonical_json_bytes(
+                dict(binding)
+            ) != _canonical_json_bytes(_json_value(dict(expected_binding))):
+                raise EvidenceError("benchmark mvt query/binding differs from the public production owner")
             expected_mvt_values = {
                 "variable": "q_down",
                 "z": 9,
@@ -896,6 +1330,13 @@ def _validate_benchmarks(
             }
             if any(binding[key] != value for key, value in expected_mvt_values.items()):
                 raise EvidenceError("benchmark mvt budget/identity binding differs from production")
+            valid_time = _parse_utc(binding["valid_time"], "benchmark mvt valid_time")
+            if not (
+                _parse_utc(selected["range_start"], "selected range_start")
+                <= valid_time
+                < _parse_utc(selected["range_end"], "selected range_end")
+            ):
+                raise EvidenceError("benchmark mvt request is not bound to the selected chunk range")
             z = binding["z"]
             expected_tolerance = min(
                 256.0,
@@ -944,6 +1385,7 @@ def _validate_benchmarks(
                 "name": query["name"],
                 "source_refs": source_refs,
                 "query_sha256": query["query_sha256"],
+                "request": dict(request),
                 "binding": dict(binding),
                 "result_sha256": before["result_sha256"],
                 "rows": before["rows"],
@@ -963,10 +1405,126 @@ def _validate_benchmarks(
     return output
 
 
+def _validate_cleanup(
+    raw: Any,
+    *,
+    mutation_head_sha: str,
+    prior_autopipe_state: Mapping[str, Any],
+    window_started_at: datetime,
+) -> dict[str, Any]:
+    cleanup = _require_mapping(raw, "cleanup.evidence document")
+    _require_exact_keys(
+        cleanup,
+        {
+            "captured_at",
+            "window_started_at",
+            "window_finished_at",
+            "repo_units",
+            "installed_units",
+            "resolved_exec_start",
+            "final_units",
+            "compression_service_activations",
+        },
+        "cleanup.evidence document",
+    )
+    started = _parse_utc(cleanup["window_started_at"], "cleanup.window_started_at")
+    finished = _parse_utc(cleanup["window_finished_at"], "cleanup.window_finished_at")
+    captured = _parse_utc(cleanup["captured_at"], "cleanup.captured_at")
+    if not window_started_at <= started <= finished <= captured:
+        raise EvidenceError("cleanup activation-window chronology differs")
+    expected_repo = {
+        "service": "infra/systemd/nhms-node27-timeseries-compression.service",
+        "timer": "infra/systemd/nhms-node27-timeseries-compression.timer",
+    }
+    repo_units = _require_mapping(cleanup["repo_units"], "cleanup.repo_units")
+    installed_units = _require_mapping(cleanup["installed_units"], "cleanup.installed_units")
+    if set(repo_units) != set(expected_repo) or set(installed_units) != set(expected_repo):
+        raise EvidenceError("cleanup unit evidence set differs")
+    repo_refs: dict[str, Any] = {}
+    installed_refs: dict[str, Any] = {}
+    for key, relative_path in expected_repo.items():
+        repo_refs[key] = _validate_reviewed_file_ref(
+            repo_units[key],
+            label=f"cleanup.repo_units.{key}",
+            mutation_head_sha=mutation_head_sha,
+            relative_path=relative_path,
+        )
+        installed_refs[key] = _artifact_ref(
+            installed_units[key], f"cleanup.installed_units.{key}", max_bytes=1024**2
+        )
+        if (
+            repo_refs[key]["sha256"] != installed_refs[key]["sha256"]
+            or repo_refs[key]["bytes"] != installed_refs[key]["bytes"]
+        ):
+            raise EvidenceError(f"cleanup installed {key} differs from reviewed repo bytes")
+    exec_start = _require_list(cleanup["resolved_exec_start"], "cleanup.resolved_exec_start")
+    if (
+        sum(value == "--enforce" for value in exec_start) != 1
+        or not exec_start
+        or not str(exec_start[0]).endswith("scripts/node27_timeseries_compression_once.sh")
+    ):
+        raise EvidenceError("cleanup resolved ExecStart does not contain exactly one --enforce")
+    final_units = _require_mapping(cleanup["final_units"], "cleanup.final_units")
+    if set(final_units) != set(EXPECTED_UNITS):
+        raise EvidenceError("cleanup must capture exactly four final unit states")
+    normalized_units: dict[str, Any] = {}
+    for unit_name in EXPECTED_UNITS:
+        state = _require_mapping(final_units[unit_name], f"cleanup.final_units.{unit_name}")
+        _require_exact_keys(
+            state,
+            {"enabled", "active", "sub", "result", "main_pid", "journal"},
+            f"cleanup.final_units.{unit_name}",
+        )
+        journal = _artifact_ref(
+            state["journal"], f"cleanup.final_units.{unit_name}.journal", max_bytes=4 * 1024**2
+        )
+        normalized_units[unit_name] = {**dict(state), "journal": journal}
+    autopipe = normalized_units["nhms-node27-autopipe.timer"]
+    if any(autopipe[key] != prior_autopipe_state[key] for key in prior_autopipe_state):
+        raise EvidenceError("cleanup did not restore the exact prior autopipe timer state")
+    timer = normalized_units["nhms-node27-timeseries-compression.timer"]
+    service = normalized_units["nhms-node27-timeseries-compression.service"]
+    if (
+        timer["enabled"] != "enabled"
+        or timer["active"] != "inactive"
+        or timer["main_pid"] != 0
+        or service["active"] != "inactive"
+        or service["main_pid"] != 0
+    ):
+        raise EvidenceError("cleanup final compression timer/service state differs")
+    activations = _require_list(
+        cleanup["compression_service_activations"],
+        "cleanup.compression_service_activations",
+    )
+    if activations:
+        raise EvidenceError("cleanup observed compression service activation in the governed window")
+    return {
+        "captured_at": captured.isoformat().replace("+00:00", "Z"),
+        "repo_units": repo_refs,
+        "installed_units": installed_refs,
+        "resolved_exec_start": exec_start,
+        "final_units": normalized_units,
+        "compression_service_activation_count": 0,
+    }
+
+
 def verify_bundle(
     bundle: Mapping[str, Any], *, receipt_schema: Mapping[str, Any], verifier_head_sha: str
 ) -> dict[str, Any]:
     """Recompute all task-4.5 derivable gates and return the terminal envelope."""
+    try:
+        _, canonical_receipt_schema = read_bounded_json_no_follow(
+            CANONICAL_RECEIPT_SCHEMA,
+            max_bytes=1024**2,
+            label="canonical receipt schema",
+            max_depth=32,
+            max_nodes=50_000,
+            max_array_items=10_000,
+        )
+    except BoundedEvidenceError as error:
+        raise EvidenceError(str(error)) from error
+    if _canonical_json_bytes(receipt_schema) != _canonical_json_bytes(canonical_receipt_schema):
+        raise EvidenceError("receipt schema differs from the canonical verifier checkout schema")
     top_keys = {
         "schema_version",
         "issue",
@@ -1013,10 +1571,15 @@ def verify_bundle(
         raise EvidenceError("authorization differs from the issue #1069 bound-1 envelope")
 
     preflight_bundle = _require_mapping(bundle["preflight"], "preflight")
+    _require_exact_keys(
+        preflight_bundle,
+        {"evidence", "schema_dump", "schema_dump_list", "catalog_before"},
+        "preflight",
+    )
     preflight_ref, preflight = _json_artifact(preflight_bundle.get("evidence"), "preflight.evidence")
     preflight_summary = _validate_preflight(preflight, str(bundle["mutation_head_sha"]))
     recovery_bundle = _require_mapping(bundle["recovery"], "recovery")
-    _require_exact_keys(recovery_bundle, {"preflight", "receipt"}, "recovery")
+    _require_exact_keys(recovery_bundle, {"preflight", "receipt", "invocation"}, "recovery")
     recovery_preflight_ref, recovery_preflight_raw = _json_artifact(
         recovery_bundle["preflight"], "recovery.preflight"
     )
@@ -1039,23 +1602,95 @@ def verify_bundle(
             preflight_summary["captured_at"], "preflight captured_at"
         ),
     )
-    dump_ref = _artifact_ref(preflight_bundle.get("schema_dump"), "preflight.schema_dump")
-    catalog_before_ref, _ = _json_artifact(
+    dump_ref, dump_raw = _artifact_bytes(
+        preflight_bundle.get("schema_dump"), "preflight.schema_dump"
+    )
+    if not dump_raw.startswith(b"PGDMP"):
+        raise EvidenceError("schema forensic dump is not PostgreSQL custom format")
+    dump_list_ref, dump_list_raw = _json_artifact(
+        preflight_bundle.get("schema_dump_list"), "preflight.schema_dump_list"
+    )
+    _validate_dump_listing(dump_list_raw, dump_ref=dump_ref)
+    catalog_before_ref, catalog_before = _json_artifact(
         preflight_bundle.get("catalog_before"), "preflight.catalog_before"
     )
-    if preflight_bundle.get("pg_restore_list_exit_code") != 0:
-        raise EvidenceError("schema forensic dump pg_restore --list did not pass")
+    _validate_pre_migration_catalog(catalog_before, "preflight.catalog_before")
+    recovery_invocation_ref, recovery_invocation_raw = _json_artifact(
+        recovery_bundle["invocation"], "recovery.invocation"
+    )
+    recovery_invocation = _validate_invocation_record(
+        recovery_invocation_raw,
+        label="recovery.invocation",
+        kind="recovery_decompress",
+        mutation_head_sha=str(bundle["mutation_head_sha"]),
+        expected_binding={
+            "receipt_sha256": recovery_receipt_ref["sha256"],
+            "target": dict(RECOVERY_TARGET),
+        },
+    )
+    if (
+        recovery_invocation["started_at_dt"]
+        != _parse_utc(recovery_receipt_raw["started_at"], "recovery receipt started")
+        or recovery_invocation["finished_at_dt"]
+        != _parse_utc(recovery_receipt_raw["finished_at"], "recovery receipt finished")
+    ):
+        raise EvidenceError("recovery invocation does not bind receipt chronology")
 
     migration = _require_mapping(bundle["migration"], "migration")
-    migration_ref = _artifact_ref(migration.get("migration_file"), "migration.migration_file")
+    _require_exact_keys(
+        migration,
+        {
+            "migration_file",
+            "first_invocation",
+            "catalog_after_first",
+            "second_invocation",
+            "catalog_after_second",
+        },
+        "migration",
+    )
+    migration_ref = _validate_reviewed_file_ref(
+        migration.get("migration_file"),
+        label="migration.migration_file",
+        mutation_head_sha=str(bundle["mutation_head_sha"]),
+        relative_path="db/migrations/000047_hypertable_compression_settings.sql",
+    )
     first_ref, first_catalog = _json_artifact(
         migration.get("catalog_after_first"), "migration.catalog_after_first"
     )
     second_ref, second_catalog = _json_artifact(
         migration.get("catalog_after_second"), "migration.catalog_after_second"
     )
-    if migration.get("first_exit_code") != 0 or migration.get("second_exit_code") != 0:
-        raise EvidenceError("both migration applies must exit zero")
+    first_invocation_ref, first_invocation_raw = _json_artifact(
+        migration["first_invocation"], "migration.first_invocation"
+    )
+    second_invocation_ref, second_invocation_raw = _json_artifact(
+        migration["second_invocation"], "migration.second_invocation"
+    )
+    first_invocation = _validate_invocation_record(
+        first_invocation_raw,
+        label="migration.first_invocation",
+        kind="migration_apply",
+        mutation_head_sha=str(bundle["mutation_head_sha"]),
+        expected_binding={
+            "migration_sha256": migration_ref["sha256"],
+            "catalog_sha256": first_ref["sha256"],
+        },
+    )
+    second_invocation = _validate_invocation_record(
+        second_invocation_raw,
+        label="migration.second_invocation",
+        kind="migration_apply",
+        mutation_head_sha=str(bundle["mutation_head_sha"]),
+        expected_binding={
+            "migration_sha256": migration_ref["sha256"],
+            "catalog_sha256": second_ref["sha256"],
+        },
+    )
+    if (
+        first_invocation_ref["sha256"] == second_invocation_ref["sha256"]
+        or first_invocation["finished_at_dt"] > second_invocation["started_at_dt"]
+    ):
+        raise EvidenceError("migration applies are not distinct ordered execution artifacts")
     _validate_d3_catalog(first_catalog, "migration first catalog")
     _validate_d3_catalog(second_catalog, "migration second catalog")
     if _canonical_json_bytes(first_catalog) != _canonical_json_bytes(second_catalog):
@@ -1091,10 +1726,46 @@ def verify_bundle(
     selected_before = selected["before_bytes"]
 
     receipts_bundle = _require_mapping(bundle["receipts"], "receipts")
+    _require_exact_keys(
+        receipts_bundle,
+        {"dry_run", "dry_run_invocation", "enforce", "enforce_invocation"},
+        "receipts",
+    )
     dry_ref, dry = _load_receipt(receipts_bundle.get("dry_run"), "receipts.dry_run", receipt_schema)
     enforce_ref, enforce = _load_receipt(
         receipts_bundle.get("enforce"), "receipts.enforce", receipt_schema
     )
+    dry_invocation_ref, dry_invocation_raw = _json_artifact(
+        receipts_bundle["dry_run_invocation"], "receipts.dry_run_invocation"
+    )
+    enforce_invocation_ref, enforce_invocation_raw = _json_artifact(
+        receipts_bundle["enforce_invocation"], "receipts.enforce_invocation"
+    )
+    dry_invocation = _validate_invocation_record(
+        dry_invocation_raw,
+        label="receipts.dry_run_invocation",
+        kind="compression_dry_run",
+        mutation_head_sha=str(bundle["mutation_head_sha"]),
+        expected_binding={"receipt_sha256": dry_ref["sha256"]},
+    )
+    enforce_invocation = _validate_invocation_record(
+        enforce_invocation_raw,
+        label="receipts.enforce_invocation",
+        kind="compression_enforce",
+        mutation_head_sha=str(bundle["mutation_head_sha"]),
+        expected_binding={"receipt_sha256": enforce_ref["sha256"]},
+    )
+    if dry_invocation_ref["sha256"] == enforce_invocation_ref["sha256"]:
+        raise EvidenceError("dry-run and enforce need distinct invocation records")
+    if not (
+        dry_invocation["started_at_dt"]
+        <= _parse_utc(dry["generated_at"], "dry generated_at")
+        <= dry_invocation["finished_at_dt"]
+        <= enforce_invocation["started_at_dt"]
+        <= _parse_utc(enforce["generated_at"], "enforce generated_at")
+        <= enforce_invocation["finished_at_dt"]
+    ):
+        raise EvidenceError("dry-run/enforce invocation chronology differs")
     dry_generated_at = _parse_utc(dry["generated_at"], "dry-run generated_at")
     enforce_started_at = _parse_utc(enforce["now_utc"], "enforce now_utc")
     if post_dry["observed_at_dt"] < dry_generated_at:
@@ -1116,6 +1787,7 @@ def verify_bundle(
         or dry["lag_seconds"] != EXPECTED_LAG_SECONDS
         or dry["per_tick_bound"] != EXPECTED_BOUND
         or len(dry["selected"]) != 1
+        or any(row.get("mutation_state") != "not_applicable" for row in dry["selected"])
         or any(row["after_bytes"] is not None for row in dry["selected"])
     ):
         raise EvidenceError("dry-run receipt fails exact bound-1 semantics")
@@ -1125,6 +1797,7 @@ def verify_bundle(
         or enforce["lag_seconds"] != EXPECTED_LAG_SECONDS
         or enforce["per_tick_bound"] != EXPECTED_BOUND
         or len(enforce["selected"]) != 1
+        or any(row.get("mutation_state") != "committed" for row in enforce["selected"])
         or any(row.get("error") or row["after_bytes"] is None for row in enforce["selected"])
     ):
         raise EvidenceError("enforce receipt fails exact bound-1 clean semantics")
@@ -1160,6 +1833,13 @@ def verify_bundle(
     ):
         raise EvidenceError("selection and enforce before_bytes differ")
     selected_key = f"{enforce_row['hypertable_schema']}.{enforce_row['hypertable_name']}"
+    expected_dry_totals = {
+        key: {"before_bytes": 0, "after_bytes": None, "chunks_compressed": 0}
+        for key in HYPERTABLE_KEYS
+    }
+    expected_dry_totals[selected_key]["before_bytes"] = dry["selected"][0]["before_bytes"]
+    if dry["per_table_totals"] != expected_dry_totals:
+        raise EvidenceError("dry-run per_table_totals arithmetic mismatch")
     expected_totals[selected_key] = {
         "before_bytes": enforce_row["before_bytes"],
         "after_bytes": enforce_row["after_bytes"],
@@ -1173,8 +1853,28 @@ def verify_bundle(
     sizes_bundle = _require_mapping(bundle["sizes"], "sizes")
     sizes_pre_ref, sizes_pre_raw = _json_artifact(sizes_bundle.get("pre"), "sizes.pre")
     sizes_post_ref, sizes_post_raw = _json_artifact(sizes_bundle.get("post"), "sizes.post")
-    sizes_pre = _table_snapshot(sizes_pre_raw, "sizes.pre")
-    sizes_post = _table_snapshot(sizes_post_raw, "sizes.post")
+    sizes_pre_snapshot = _table_snapshot(
+        sizes_pre_raw,
+        "sizes.pre",
+        mutation_head_sha=str(bundle["mutation_head_sha"]),
+        expected_phase="pre-enforce",
+    )
+    sizes_post_snapshot = _table_snapshot(
+        sizes_post_raw,
+        "sizes.post",
+        mutation_head_sha=str(bundle["mutation_head_sha"]),
+        expected_phase="post-enforce",
+    )
+    if (
+        sizes_pre_snapshot["snapshot_id"] == sizes_post_snapshot["snapshot_id"]
+        or not sizes_pre_snapshot["captured_at_dt"]
+        <= enforce_invocation["started_at_dt"]
+        <= enforce_invocation["finished_at_dt"]
+        <= sizes_post_snapshot["captured_at_dt"]
+    ):
+        raise EvidenceError("size snapshot/enforce chronology is invalid")
+    sizes_pre = sizes_pre_snapshot["tables"]
+    sizes_post = sizes_post_snapshot["tables"]
     pre_combined = sum(sizes_pre[key]["hypertable_size"] for key in HYPERTABLE_KEYS)
     post_combined = sum(sizes_post[key]["hypertable_size"] for key in HYPERTABLE_KEYS)
     compressed_delta = sum(
@@ -1183,6 +1883,19 @@ def verify_bundle(
     )
     if post_combined >= pre_combined or compressed_delta != 1:
         raise EvidenceError("size/compressed-count acceptance arithmetic failed")
+    if any(
+        sizes_post[key]["compressed_chunks"] - sizes_pre[key]["compressed_chunks"]
+        != (1 if key == selected_key else 0)
+        for key in HYPERTABLE_KEYS
+    ):
+        raise EvidenceError("selected/sibling compressed-count transition differs")
+    if any(
+        relation.get("origin_chunk_schema") == selected["chunk_schema"]
+        and relation.get("origin_chunk_name") == selected["chunk_name"]
+        for relation in sizes_pre[selected_key]["compressed_relations"]
+        if isinstance(relation, Mapping)
+    ):
+        raise EvidenceError("selected compressed relation already existed in pre snapshot")
     selected_relations = [
         _require_mapping(value, "selected compressed relation")
         for value in sizes_post[selected_key]["compressed_relations"]
@@ -1208,10 +1921,34 @@ def verify_bundle(
     }
 
     catalog_bundle = _require_mapping(bundle["catalog"], "catalog")
-    catalog_post_ref, catalog_post = _json_artifact(catalog_bundle.get("post"), "catalog.post")
-    _validate_d3_catalog(catalog_post, "catalog.post")
+    _require_exact_keys(catalog_bundle, {"post"}, "catalog")
+    catalog_post_ref, catalog_post_raw = _json_artifact(
+        catalog_bundle.get("post"), "catalog.post"
+    )
+    catalog_post = _require_mapping(catalog_post_raw, "catalog.post document")
+    _require_exact_keys(
+        catalog_post,
+        {
+            "captured_at",
+            "snapshot_id",
+            "mutation_head_sha",
+            "catalog",
+            "compressed_chunk_identities",
+        },
+        "catalog.post document",
+    )
+    catalog_captured_at = _parse_utc(catalog_post["captured_at"], "catalog.post.captured_at")
+    if (
+        catalog_post["mutation_head_sha"] != bundle["mutation_head_sha"]
+        or not isinstance(catalog_post["snapshot_id"], str)
+        or not catalog_post["snapshot_id"]
+        or catalog_captured_at < sizes_post_snapshot["captured_at_dt"]
+    ):
+        raise EvidenceError("catalog.post snapshot identity/chronology differs")
+    _validate_d3_catalog(catalog_post["catalog"], "catalog.post.catalog")
     compressed_identities = _require_list(
-        catalog_bundle.get("compressed_chunk_identities"), "catalog.compressed_chunk_identities"
+        catalog_post["compressed_chunk_identities"],
+        "catalog.post.compressed_chunk_identities",
     )
     if identities[0] not in compressed_identities:
         raise EvidenceError("post catalog does not prove selected chunk is compressed")
@@ -1224,22 +1961,30 @@ def verify_bundle(
         benchmark_raw,
         selected,
         selected_relation_names=selected_relation_names,
+        mutation_head_sha=str(bundle["mutation_head_sha"]),
     )
 
     cleanup_bundle = _require_mapping(bundle["cleanup"], "cleanup")
     cleanup_ref, cleanup_raw = _json_artifact(cleanup_bundle.get("evidence"), "cleanup.evidence")
-    cleanup = _require_mapping(cleanup_raw, "cleanup.evidence document")
-    required_cleanup = {
+    cleanup_summary = _validate_cleanup(
+        cleanup_raw,
+        mutation_head_sha=str(bundle["mutation_head_sha"]),
+        prior_autopipe_state=preflight_summary["prior_autopipe_state"],
+        window_started_at=_parse_utc(
+            recovery_summary["preflight_captured_at"], "recovery preflight captured_at"
+        ),
+    )
+    derived_cleanup = {
         "autopipe_timer_restored": True,
         "compression_timer_enabled": True,
         "compression_timer_active": False,
         "compression_service_active": False,
-        "compression_service_activation_count": 0,
+        "compression_service_activation_count": cleanup_summary[
+            "compression_service_activation_count"
+        ],
         "installed_service_matches_repo": True,
         "installed_timer_matches_repo": True,
     }
-    if any(cleanup.get(key) != value for key, value in required_cleanup.items()):
-        raise EvidenceError("cleanup does not prove restored autopipe and inactive timer boundary")
 
     out_of_scope = _require_mapping(bundle["out_of_scope"], "out_of_scope")
     required_out_of_scope = {
@@ -1277,7 +2022,10 @@ def verify_bundle(
             "pg_restore_list_exit_code": 0,
             "role": preflight["role"],
             "quiescent": True,
-            **preflight_summary,
+            "captured_at": preflight_summary["captured_at"],
+            "mutation_head_sha": preflight_summary["mutation_head_sha"],
+            "container_state": preflight_summary["container_state"],
+            "units": preflight_summary["units"],
         },
         "migration": {
             "migration_file": migration_ref,
@@ -1333,7 +2081,7 @@ def verify_bundle(
             "selected_chunks_compressed": True,
         },
         "benchmarks": {"evidence": benchmark_ref, "queries": benchmark_results},
-        "cleanup": {"evidence": cleanup_ref, **required_cleanup},
+        "cleanup": {"evidence": cleanup_ref, **derived_cleanup},
         "out_of_scope": out_of_scope,
         "verdict": PASS_VERDICT,
     }
@@ -1385,17 +2133,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if not args.bundle_path.is_absolute() or not args.output_path.is_absolute():
             raise EvidenceError("bundle/output paths must be absolute")
-        bundle = _require_mapping(
-            json.loads(args.bundle_path.read_text(encoding="utf-8")), "bundle"
+        if args.receipt_schema_path != CANONICAL_RECEIPT_SCHEMA:
+            raise EvidenceError("receipt schema path must be the canonical checkout path")
+        if args.evidence_schema_path != CANONICAL_EVIDENCE_SCHEMA:
+            raise EvidenceError("evidence schema path must be the canonical checkout path")
+        _, bundle_raw = read_bounded_json_no_follow(
+            args.bundle_path,
+            max_bytes=MAX_JSON_ARTIFACT_BYTES,
+            label="bundle",
+            max_depth=MAX_PLAN_DEPTH,
+            max_nodes=MAX_JSON_NODES,
+            max_array_items=MAX_JSON_ARRAY_ITEMS,
         )
-        receipt_schema = _require_mapping(
-            json.loads(args.receipt_schema_path.read_text(encoding="utf-8")),
-            "receipt schema",
+        bundle = _require_mapping(bundle_raw, "bundle")
+        _, receipt_schema_raw = read_bounded_json_no_follow(
+            CANONICAL_RECEIPT_SCHEMA,
+            max_bytes=1024**2,
+            label="receipt schema",
         )
-        evidence_schema = _require_mapping(
-            json.loads(args.evidence_schema_path.read_text(encoding="utf-8")),
-            "evidence schema",
+        receipt_schema = _require_mapping(receipt_schema_raw, "receipt schema")
+        _, evidence_schema_raw = read_bounded_json_no_follow(
+            CANONICAL_EVIDENCE_SCHEMA,
+            max_bytes=1024**2,
+            label="evidence schema",
         )
+        evidence_schema = _require_mapping(evidence_schema_raw, "evidence schema")
         terminal = verify_bundle(
             bundle,
             receipt_schema=receipt_schema,
@@ -1410,7 +2172,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             mode=0o600,
             require_durable_replace=True,
         )
-    except (EvidenceError, OSError, UnicodeError, json.JSONDecodeError, jsonschema.ValidationError) as error:
+    except (
+        BoundedEvidenceError,
+        EvidenceError,
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        jsonschema.ValidationError,
+    ) as error:
         print(
             json.dumps({"status": "failed", "reason": str(error)}, sort_keys=True),
             file=sys.stderr,

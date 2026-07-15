@@ -865,6 +865,57 @@ evidence stores every actual SQL bind, the cold execution, two to five
 warmups, activity samples, and seven measured plans per phase; all seven after
 plans must bind the selected `DecompressChunk`.
 
+#### Invariant-closure amendment after full cross-review
+
+The 2026-07-15 v2 replay remains immutable database history, but its terminal
+is not accepted by the expanded fixture. A passing terminal now additionally
+requires all of the following producer-independent proof:
+
+- Every artifact is opened through one no-follow descriptor, rejected against
+  its type-specific byte ceiling before allocation, and the same bytes are
+  hashed, UTF-8 decoded, JSON parsed, and complexity-bounded. Receipt/evidence
+  schemas, migration, production source, and repository unit refs bind the
+  canonical checkout paths and reviewed Git blobs; copies, symlinks, weak
+  schemas, and credential-bearing fields fail closed.
+- Migration apply 1/apply 2, authorized decompression, dry-run, and enforce each
+  have distinct ordered invocation artifacts with sanitized exact argv,
+  `ON_ERROR_STOP`, mutation SHA, 900-second timeout, start/finish/exit, and
+  receipt/catalog hashes. Invocation counts are derived from these records,
+  never from authorization scalars. The custom-format dump is bound to a
+  successful non-empty `pg_restore --list` artifact and exact pre-migration
+  catalog shape.
+- Size and catalog snapshots carry distinct identities, mutation SHA, capture
+  times, and enforce chronology. The selected origin is absent before and
+  present after, the selected table count changes by exactly +1, and the
+  sibling table by exactly +0. Both dry-run and enforce totals are recomputed.
+- Cleanup binds reviewed repository and installed service/timer bytes, resolved
+  `ExecStart` with exactly one `--enforce`, all four final unit states and
+  journals, the governed activation window, zero compression-service
+  activations, and exact restoration of the preflight-recorded prior autopipe
+  timer state.
+- Benchmark capture exercises the public `PsycopgForecastStore.forecast_series`
+  owner through a recording adapter and the public MVT owner/route parameter
+  construction. Frozen requests must lie inside the selected chunk, curve rows
+  must be non-empty, each statement has fixed statement/lock timeouts, the
+  phase has a wall deadline, and an independent autocommit monitor records
+  session/query-start signatures before cold, between phases, mid-measurement,
+  and after result capture. Count-stable identity drift blocks publication.
+  A qualifying after plan binds `DecompressChunk` and the selected
+  origin/sibling in the same Custom Scan node or its direct subtree; an
+  unrelated plan branch cannot satisfy it, and before plans cannot already
+  use that selected decompression path.
+- A compression exception after possible commit triggers fresh exact-target
+  catalog reconciliation. Receipts distinguish `failed_before_mutation`,
+  `committed`, and `indeterminate`; every failure with a known destination
+  atomically replaces stale success and never copies exception credentials.
+
+Current source/unit bytes, dump readability, catalog state, and production
+query construction are read-only-recapturable. Ordered historical migration
+and command execution, prior/final activation state, before-compression plans,
+and storage transition chronology are not. Closing task 4.5 therefore needs a
+newly authorized controlled replay; the invariant-closure implementation
+performs no node-27, retention, node-22, drill, or role mutation.
+
 ### Reproducible representative curve/MVT timing
 
 Benchmark only the bound-1 selected hydro chunk that enforce will compress.
@@ -872,7 +923,7 @@ Before compression, deterministically freeze one non-empty production-valid
 `q_down` request identity in that chunk. The benchmark harness MUST use the
 deployed production code rather than a handwritten approximation:
 
-- curve: call `PsycopgForecastStore.get_forecast_series` with a frozen
+- curve: call `PsycopgForecastStore.forecast_series` with a frozen
   `basin_version_id`, translated public `river_segment_id`,
   `river_network_version_id`, historical `issue_time`, run-type/scenario
   filters and seven-day window. Capture the exact SQL/params actually sent by

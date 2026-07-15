@@ -54,13 +54,13 @@ The v1 dry-run/enforce receipts and successful database outcome remain
 immutable. They are runner schema version `1.0` and do not contain a
 runner-frozen Git SHA, so they do not close task 4.5 under the hardened
 live-evidence v2 contract. They have not been relabeled or overwritten by the
-accepted replay.
+later replay.
 
 That separate authorization was granted on 2026-07-15 for one decompression
 and one bound-1 recompression of only
 `_timescaledb_internal._hyper_3_7_chunk`.
 
-## Accepted v2 evidence replay
+## Recorded v2 replay (terminal acceptance superseded)
 
 The authorized replay ran from
 `/home/nwm/NWM/.nhms-issue1069-live/replay-20260715T113531Z` at mutation SHA
@@ -99,7 +99,7 @@ drill, and role mutation remained out of scope and false. The terminal
 truthfully records `decompress_run=true` for the separately authorized
 recovery.
 
-### Accepted v2 receipts
+### Recorded v2 receipts
 
 - `dry-run-replay-20260715T114310Z.json` —
   `5804660072c640634de6200c42b9cecd46308ca66c9ae85c20adc7b73e64ed5b`
@@ -108,7 +108,27 @@ recovery.
 - `terminal-replay-20260715T114625Z.json` —
   `f4b1cbf9a0a8f60a30ddb8b4787584542aabeec35799fa7a9dd1de7242deff65`
 
-The independent terminal verifier generated the final receipt at
-`2026-07-15T11:46:25.062814Z` with verdict `PASS_TASK_4_5`. Node-27-local
-supporting artifacts and all credentials remain uncommitted; the terminal
-receipt binds their paths, hashes, sizes, chronology, and semantic checks.
+The then-current independent verifier generated the terminal receipt at
+`2026-07-15T11:46:25.062814Z` with verdict `PASS_TASK_4_5`. The replay's
+database outcome and three committed receipts remain immutable historical
+facts, but full cross-review subsequently expanded the evidence fixture and
+found reusable false-PASS paths. The terminal verdict is therefore no longer
+task-4.5 acceptance evidence; it is not edited or relabeled.
+
+The strengthened contract requires evidence that the recorded replay did not
+persist: ordered immutable invocation ledgers for both migration applies,
+decompression, dry-run, and enforce; a dump-bound `pg_restore --list` artifact
+and exact pre-migration catalog shape; timestamped pre/post/catalog snapshot
+identities; prior-to-final systemd state, installed/repository unit bytes,
+resolved `ExecStart`, activation-window journals; production-owner request
+identity inside the selected chunk; independent session-identity samples and
+per-statement/phase timeout records. These are not derivable retroactively
+from asserted scalar fields or from the committed terminal envelope.
+
+Current unit files, source blobs, dump readability, catalog state, and
+production queries can be recaptured read-only. Migration execution order,
+the original pre-state/activation window, the before-compression query plans,
+and the exact decompression/recompression invocations require a newly
+authorized controlled replay. No new node-27 mutation was performed during
+the invariant-closure fix. Task 4.5 remains open pending that fresh live
+evidence; retention, node-22, drill, and role mutation remain out of scope.

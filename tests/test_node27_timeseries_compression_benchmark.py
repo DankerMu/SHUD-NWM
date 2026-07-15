@@ -20,12 +20,14 @@ class _FakeCursor:
         *,
         result_rows: list[dict[str, Any]],
         plan_reads: list[int],
-        activity_counts: tuple[int, int] = (2, 2),
+        activity_sessions: list[list[dict[str, Any]]] | None = None,
+        decompress: bool = True,
     ) -> None:
         self.result_rows = result_rows
         self.plan_reads = iter(plan_reads)
-        self.activity_counts = iter(activity_counts)
+        self.activity_sessions = iter(activity_sessions or [[] for _ in range(5)])
         self.current = ""
+        self.decompress = decompress
         self.executions: list[tuple[str, Any]] = []
 
     def execute(self, statement: str, parameters: Any) -> None:
@@ -34,11 +36,11 @@ class _FakeCursor:
 
     def fetchall(self) -> list[dict[str, Any]]:
         assert not self.current.startswith(benchmark.EXPLAIN_PREFIX)
+        if "pg_stat_activity" in self.current:
+            return next(self.activity_sessions)
         return self.result_rows
 
     def fetchone(self) -> dict[str, Any]:
-        if "pg_stat_activity" in self.current:
-            return {"active_sessions": next(self.activity_counts)}
         reads = next(self.plan_reads)
         return {
             "QUERY PLAN": [
@@ -46,9 +48,13 @@ class _FakeCursor:
                     "Planning Time": 1.25,
                     "Execution Time": 5.5,
                     "Plan": {
-                        "Node Type": "Custom Scan",
-                        "Custom Plan Provider": "DecompressChunk",
-                        "Relation Name": "_hyper_3_7_chunk",
+                        "Node Type": "Custom Scan" if self.decompress else "Index Scan",
+                        **(
+                            {"Custom Plan Provider": "DecompressChunk"}
+                            if self.decompress
+                            else {}
+                        ),
+                        "Relation Name": "_hyper_3_7_chunk" if self.decompress else "river_timeseries",
                         "Shared Hit Blocks": 3,
                         "Shared Read Blocks": reads,
                         "Plans": [
@@ -123,9 +129,21 @@ def _capture(
             }
         ],
         plan_reads=curve_reads,
+        decompress=phase == "after",
     )
-    mvt_cursor = _FakeCursor(result_rows=[{"tile": b"\x1a\x02ok"}], plan_reads=mvt_reads)
-    connections = [_FakeConnection(curve_cursor), _FakeConnection(mvt_cursor)]
+    mvt_cursor = _FakeCursor(
+        result_rows=[{"tile": b"\x1a\x02ok"}],
+        plan_reads=mvt_reads,
+        decompress=phase == "after",
+    )
+    curve_monitor = _FakeCursor(result_rows=[], plan_reads=[])
+    mvt_monitor = _FakeCursor(result_rows=[], plan_reads=[])
+    connections = [
+        _FakeConnection(curve_cursor),
+        _FakeConnection(curve_monitor),
+        _FakeConnection(mvt_cursor),
+        _FakeConnection(mvt_monitor),
+    ]
 
     def connect(database_url: str) -> _FakeConnection:
         assert database_url == "opaque-test-dsn"
@@ -182,12 +200,17 @@ def test_capture_uses_exact_production_queries_bindings_and_new_readonly_connect
     assert all(
         connection.session
         == {"isolation_level": "REPEATABLE READ", "readonly": True, "autocommit": False}
-        for connection in connections
+        for connection in (connections[0], connections[2])
     )
-    assert all(connection.rolled_back and connection.closed for connection in connections)
+    assert all(
+        connection.session == {"readonly": True, "autocommit": True}
+        for connection in (connections[1], connections[3])
+    )
+    assert all(connection.rolled_back and connection.closed for connection in (connections[0], connections[2]))
+    assert all(connection.closed for connection in (connections[1], connections[3]))
     mvt_statements = [
         statement
-        for statement, _parameters in connections[1].fake_cursor.executions
+        for statement, _parameters in connections[2].fake_cursor.executions
         if "hydro.river_timeseries ts" in statement
     ]
     assert mvt_statements
@@ -212,8 +235,8 @@ def test_capture_has_full_plans_two_warmups_seven_measurements_hashes_and_activi
     assert curve_phase["rows"] == 1
     assert mvt_phase["result_payload"] == b"\x1a\x02ok".hex()
     assert mvt_phase["result_sha256"] == hashlib.sha256(b"\x1a\x02ok").hexdigest()
-    assert len(curve_phase["activity_samples"]) == 2
-    assert {sample["active_sessions"] for sample in curve_phase["activity_samples"]} == {2}
+    assert len(curve_phase["activity_samples"]) == 5
+    assert {tuple(sample["sessions"]) for sample in curve_phase["activity_samples"]} == {()}
     assert all(sample["material_load_stable"] for sample in curve_phase["activity_samples"])
 
 
@@ -250,8 +273,14 @@ def test_before_and_after_slices_merge_into_exact_live_evidence_contract() -> No
 
     normalized = live_evidence._validate_benchmarks(
         merged,
-        {},
+        {
+            "range_start": "2026-07-05T00:00:00Z",
+            "range_end": "2026-07-12T00:00:01Z",
+        },
         selected_relation_names={"_hyper_3_7_chunk"},
+        mutation_head_sha=live_evidence.subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+        ).stdout.strip(),
     )
     assert [query["name"] for query in normalized] == ["curve", "mvt"]
 
@@ -265,16 +294,55 @@ def test_merge_rejects_production_identity_drift() -> None:
 
 
 def test_activity_drift_is_preserved_not_claimed_stable() -> None:
-    cursor = _FakeCursor(result_rows=[{"value": 1}], plan_reads=[0] * 10, activity_counts=(1, 2))
+    cursor = _FakeCursor(result_rows=[{"value": 1}], plan_reads=[0] * 10)
+    session = {
+        "pid": 42,
+        "backend_start": datetime(2026, 7, 15, tzinfo=UTC),
+        "xact_start": None,
+        "query_start": datetime(2026, 7, 15, tzinfo=UTC),
+        "state": "active",
+        "wait_event_type": None,
+        "query_signature": "a" * 32,
+    }
+    monitor_cursor = _FakeCursor(
+        result_rows=[],
+        plan_reads=[],
+        activity_sessions=[[], [session], [session], [session], [session]],
+    )
     connection = _FakeConnection(cursor)
+    monitor = _FakeConnection(monitor_cursor)
     phase = benchmark._capture_phase(
         connection,
+        monitor_connection=monitor,
         statement="SELECT 1 AS value",
         parameters=(),
         result_kind="curve",
     )
-    assert [sample["active_sessions"] for sample in phase["activity_samples"]] == [1, 2]
+    assert [len(sample["sessions"]) for sample in phase["activity_samples"]] == [0, 1, 1, 1, 1]
     assert not any(sample["material_load_stable"] for sample in phase["activity_samples"])
+
+
+def test_phase_deadline_rolls_back_and_closes_both_connections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cursor = _FakeCursor(result_rows=[{"value": 1}], plan_reads=[0] * 10)
+    monitor_cursor = _FakeCursor(result_rows=[], plan_reads=[])
+    connection = _FakeConnection(cursor)
+    monitor = _FakeConnection(monitor_cursor)
+    ticks = iter([0.0, 901.0])
+    monkeypatch.setattr(benchmark.time, "monotonic", lambda: next(ticks))
+
+    with pytest.raises(benchmark.BenchmarkCaptureError, match="wall deadline"):
+        benchmark._capture_phase(
+            connection,
+            monitor_connection=monitor,
+            statement="SELECT 1 AS value",
+            parameters=(),
+            result_kind="curve",
+        )
+
+    assert connection.rolled_back and connection.closed
+    assert monitor.closed
 
 
 def test_rejects_credentials_in_document() -> None:

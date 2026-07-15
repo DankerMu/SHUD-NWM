@@ -15,7 +15,9 @@ import os
 import re
 import stat
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -25,10 +27,14 @@ from sqlalchemy import text
 from sqlalchemy.dialects import postgresql
 
 from apps.api.routes.hydro_display import _postgis_tile_params
+from packages.common.evidence_io import (
+    BoundedEvidenceError,
+    read_bounded_bytes_no_follow,
+    read_bounded_json_no_follow,
+)
 from packages.common.forecast_store import (
+    ForecastStoreError,
     PsycopgForecastStore,
-    _scenario_filter,
-    _timeseries_segment_id,
 )
 from packages.common.safe_fs import atomic_write_bytes_no_follow
 from services.tiles.mvt import postgis_tile_sql
@@ -39,12 +45,18 @@ MVT_SOURCE = ROOT / "services/tiles/mvt.py"
 MVT_ROUTE_SOURCE = ROOT / "apps/api/routes/hydro_display.py"
 EXPLAIN_PREFIX = "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "
 ACTIVITY_SQL = """
-SELECT COUNT(*) AS active_sessions
+SELECT pid, backend_start, xact_start, query_start, state, wait_event_type,
+       md5(regexp_replace(query, '\\s+', ' ', 'g')) AS query_signature
 FROM pg_stat_activity
 WHERE datname = current_database()
   AND pid <> pg_backend_pid()
   AND state = 'active'
+ORDER BY pid, backend_start
 """
+STATEMENT_TIMEOUT_MS = 60_000
+LOCK_TIMEOUT_MS = 5_000
+PHASE_TIMEOUT_SECONDS = 900
+MAX_SLICE_BYTES = 16 * 1024**2
 
 
 class BenchmarkCaptureError(RuntimeError):
@@ -60,6 +72,23 @@ class _RecordingCursor:
 
     def fetchall(self) -> list[dict[str, Any]]:
         return []
+
+
+class _CaptureForecastStore(PsycopgForecastStore):
+    """Recording adapter that exercises the public forecast-series owner."""
+
+    def __init__(self, cursor: _RecordingCursor) -> None:
+        super().__init__("recording-only")
+        object.__setattr__(self, "_capture_cursor", cursor)
+
+    @contextmanager
+    def _transaction(self):  # type: ignore[no-untyped-def]
+        yield self._capture_cursor
+
+    def _validate_series_target(self, *args: Any, **kwargs: Any) -> None:
+        # Target existence is a separate production query. The benchmark is
+        # recording the public curve-owner's primary timeseries statement.
+        return None
 
 
 def _utc(value: str) -> datetime:
@@ -104,9 +133,13 @@ def _canonical_json_bytes(value: Any) -> bytes:
 
 
 def _file_ref(path: Path) -> dict[str, Any]:
-    resolved = path.resolve(strict=True)
-    raw = resolved.read_bytes()
-    return {"path": str(resolved), "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
+    if not path.is_absolute() or path not in {CURVE_SOURCE, MVT_SOURCE, MVT_ROUTE_SOURCE}:
+        raise BenchmarkCaptureError("source path is not a canonical production owner")
+    try:
+        raw = read_bounded_bytes_no_follow(path, max_bytes=4 * 1024**2, label="production source")
+    except BoundedEvidenceError as error:
+        raise BenchmarkCaptureError(str(error)) from error
+    return {"path": str(path), "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
 
 
 def _curve_query_and_binding(
@@ -118,19 +151,35 @@ def _curve_query_and_binding(
     end_time: datetime,
     scenario: str,
 ) -> tuple[str, list[str], tuple[Any, ...]]:
+    if end_time != issue_time + timedelta(days=7):
+        raise BenchmarkCaptureError("public curve owner supports the frozen seven-day window only")
     cursor = _RecordingCursor()
-    PsycopgForecastStore("recording-only")._fetch_forecast_segment_rows(
-        cursor,
-        basin_version_id=basin_version_id,
-        segment_id=river_segment_id,
-        river_network_version_id=river_network_version_id,
-        issue_time=issue_time,
-        scenario_filter=_scenario_filter([scenario]),
-        end_time=end_time,
-    )
-    if len(cursor.calls) != 1:
+    try:
+        _CaptureForecastStore(cursor).forecast_series(
+            basin_version_id=basin_version_id,
+            segment_id=river_segment_id,
+            river_network_version_id=river_network_version_id,
+            issue_time=issue_time.isoformat(),
+            variables=["q_down"],
+            scenarios=[scenario],
+            include_analysis=False,
+            run_types=["forecast"],
+        )
+    except ForecastStoreError as error:
+        # The recording adapter intentionally returns no result rows. The
+        # public owner raises after issuing its production query; only that
+        # expected no-published-run outcome is admissible here.
+        if error.code != "RUN_NOT_PUBLISHED":
+            raise
+    primary = [
+        call
+        for call in cursor.calls
+        if "FROM hydro.river_timeseries rt" in call[0]
+        and "h.run_type = 'forecast'" in call[0]
+    ]
+    if len(primary) != 1:
         raise BenchmarkCaptureError("production curve path did not yield exactly one primary SQL call")
-    query_text, parameters = cursor.calls[0]
+    query_text, parameters = primary[0]
     names = [
         "basin_version_id",
         "river_segment_id",
@@ -164,16 +213,30 @@ def _fetch_all(cursor: Any) -> list[dict[str, Any]]:
     return [_row_mapping(cursor, row) for row in cursor.fetchall()]
 
 
-def _active_sessions(cursor: Any) -> tuple[int, str]:
+def _activity_snapshot(cursor: Any) -> tuple[list[dict[str, Any]], str]:
+    cursor.execute(f"SET statement_timeout = {STATEMENT_TIMEOUT_MS}", ())
+    cursor.execute(f"SET lock_timeout = {LOCK_TIMEOUT_MS}", ())
     cursor.execute(ACTIVITY_SQL, ())
-    row = cursor.fetchone()
-    if row is None:
-        raise BenchmarkCaptureError("pg_stat_activity returned no count")
-    mapped = _row_mapping(cursor, row)
-    value = mapped.get("active_sessions")
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise BenchmarkCaptureError("pg_stat_activity returned an invalid count")
-    return value, datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    rows = _fetch_all(cursor)
+    sanitized: list[dict[str, Any]] = []
+    for row in rows:
+        sanitized.append(
+            {
+                "pid": row.get("pid"),
+                "backend_start": _json_value(row.get("backend_start")),
+                "xact_start": _json_value(row.get("xact_start")),
+                "query_start": _json_value(row.get("query_start")),
+                "state": row.get("state"),
+                "wait_event_type": row.get("wait_event_type"),
+                "query_signature": row.get("query_signature"),
+            }
+        )
+    return sanitized, datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _set_statement_bounds(cursor: Any) -> None:
+    cursor.execute(f"SET LOCAL statement_timeout = {STATEMENT_TIMEOUT_MS}", ())
+    cursor.execute(f"SET LOCAL lock_timeout = {LOCK_TIMEOUT_MS}", ())
 
 
 def _plan_payload(cursor: Any, statement: str, parameters: Any) -> Any:
@@ -222,19 +285,40 @@ def _measurement(cursor: Any, statement: str, parameters: Any) -> dict[str, Any]
 def _capture_phase(
     connection: Any,
     *,
+    monitor_connection: Any,
     statement: str,
     parameters: Any,
     result_kind: str,
 ) -> dict[str, Any]:
     try:
+        phase_started_at = datetime.now(UTC)
         connection.set_session(isolation_level="REPEATABLE READ", readonly=True, autocommit=False)
         cursor = connection.cursor()
-        activity_before, activity_before_at = _active_sessions(cursor)
-        cold = _measurement(cursor, statement, parameters)
-        warmups = [_measurement(cursor, statement, parameters) for _ in range(2)]
+        monitor_connection.set_session(readonly=True, autocommit=True)
+        monitor = monitor_connection.cursor()
+        deadline = time.monotonic() + PHASE_TIMEOUT_SECONDS
+
+        def bounded_measurement() -> dict[str, Any]:
+            if time.monotonic() >= deadline:
+                raise BenchmarkCaptureError("benchmark phase wall deadline exceeded")
+            _set_statement_bounds(cursor)
+            return _measurement(cursor, statement, parameters)
+
+        activity_before, activity_before_at = _activity_snapshot(monitor)
+        cold = bounded_measurement()
+        activity_after_cold, activity_after_cold_at = _activity_snapshot(monitor)
+        warmups = [bounded_measurement() for _ in range(2)]
         while warmups[-1]["shared_read_blocks"] > 0 and len(warmups) < 5:
-            warmups.append(_measurement(cursor, statement, parameters))
-        measurements = [_measurement(cursor, statement, parameters) for _ in range(7)]
+            warmups.append(bounded_measurement())
+        activity_before_measurements, activity_before_measurements_at = _activity_snapshot(monitor)
+        measurements = []
+        activity_mid: list[dict[str, Any]] | None = None
+        activity_mid_at = ""
+        for index in range(7):
+            measurements.append(bounded_measurement())
+            if index == 2:
+                activity_mid, activity_mid_at = _activity_snapshot(monitor)
+        _set_statement_bounds(cursor)
         cursor.execute(statement, parameters)
         rows = _fetch_all(cursor)
         if result_kind == "curve":
@@ -252,20 +336,48 @@ def _capture_phase(
         else:
             raise BenchmarkCaptureError("unknown benchmark result kind")
 
-        activity_after, activity_after_at = _active_sessions(cursor)
-        stable = activity_before == activity_after
+        activity_after, activity_after_at = _activity_snapshot(monitor)
+        signatures = [
+            activity_before,
+            activity_after_cold,
+            activity_before_measurements,
+            activity_mid or [],
+            activity_after,
+        ]
+        stable = all(value == signatures[0] for value in signatures[1:])
         activities = [
             {
                 "captured_at": activity_before_at,
-                "active_sessions": activity_before,
+                "stage": "before_cold",
+                "sessions": activity_before,
+                "material_load_stable": stable,
+            },
+            {
+                "captured_at": activity_after_cold_at,
+                "stage": "after_cold",
+                "sessions": activity_after_cold,
+                "material_load_stable": stable,
+            },
+            {
+                "captured_at": activity_before_measurements_at,
+                "stage": "before_measurements",
+                "sessions": activity_before_measurements,
+                "material_load_stable": stable,
+            },
+            {
+                "captured_at": activity_mid_at,
+                "stage": "mid_measurements",
+                "sessions": activity_mid or [],
                 "material_load_stable": stable,
             },
             {
                 "captured_at": activity_after_at,
-                "active_sessions": activity_after,
+                "stage": "after_result",
+                "sessions": activity_after,
                 "material_load_stable": stable,
             },
         ]
+        phase_finished_at = datetime.now(UTC)
         return {
             "result_payload": result_payload,
             "result_sha256": hashlib.sha256(result_raw).hexdigest(),
@@ -276,12 +388,22 @@ def _capture_phase(
             "warmups": warmups,
             "measurements": measurements,
             "activity_samples": activities,
+            "execution_bounds": {
+                "statement_timeout_ms": STATEMENT_TIMEOUT_MS,
+                "lock_timeout_ms": LOCK_TIMEOUT_MS,
+                "phase_timeout_seconds": PHASE_TIMEOUT_SECONDS,
+                "started_at": phase_started_at.isoformat().replace("+00:00", "Z"),
+                "finished_at": phase_finished_at.isoformat().replace("+00:00", "Z"),
+            },
         }
     finally:
         try:
             connection.rollback()
         finally:
-            connection.close()
+            try:
+                connection.close()
+            finally:
+                monitor_connection.close()
 
 
 def _default_connect(database_url: str) -> Any:
@@ -326,7 +448,7 @@ def capture_benchmark_phase(
         raise BenchmarkCaptureError("phase must be before or after")
     curve_query, parameter_names, curve_parameters = _curve_query_and_binding(
         basin_version_id=curve_basin_version_id,
-        river_segment_id=_timeseries_segment_id(curve_river_segment_id),
+        river_segment_id=curve_river_segment_id,
         river_network_version_id=curve_river_network_version_id,
         issue_time=curve_issue_time,
         end_time=curve_end_time,
@@ -349,6 +471,14 @@ def capture_benchmark_phase(
         "queries": [
             {
                 "name": "curve",
+                "request": {
+                    "basin_version_id": curve_basin_version_id,
+                    "river_segment_id": curve_river_segment_id,
+                    "river_network_version_id": curve_river_network_version_id,
+                    "issue_time": _json_value(curve_issue_time),
+                    "end_time": _json_value(curve_end_time),
+                    "scenario": curve_scenario,
+                },
                 "source_refs": [_file_ref(CURVE_SOURCE)],
                 "query_sha256": hashlib.sha256(curve_query.encode()).hexdigest(),
                 "query_text": curve_query,
@@ -358,6 +488,7 @@ def capture_benchmark_phase(
                 },
                 phase: _capture_phase(
                     connect(database_url),
+                    monitor_connection=connect(database_url),
                     statement=curve_query,
                     parameters=curve_parameters,
                     result_kind="curve",
@@ -365,12 +496,22 @@ def capture_benchmark_phase(
             },
             {
                 "name": "mvt",
+                "request": {
+                    "run_id": mvt_run_id,
+                    "basin_version_id": mvt_basin_version_id,
+                    "river_network_version_id": mvt_river_network_version_id,
+                    "valid_time": _json_value(mvt_valid_time),
+                    "z": mvt_z,
+                    "x": mvt_x,
+                    "y": mvt_y,
+                },
                 "source_refs": [_file_ref(MVT_SOURCE), _file_ref(MVT_ROUTE_SOURCE)],
                 "query_sha256": hashlib.sha256(mvt_query.encode()).hexdigest(),
                 "query_text": mvt_query,
                 "binding": _json_value(mvt_binding),
                 phase: _capture_phase(
                     connect(database_url),
+                    monitor_connection=connect(database_url),
                     statement=_named_to_pyformat(mvt_query),
                     parameters=mvt_binding,
                     result_kind="mvt",
@@ -395,6 +536,7 @@ def merge_benchmark_slices(
     merged: list[dict[str, Any]] = []
     static_keys = {
         "name",
+        "request",
         "source_refs",
         "query_sha256",
         "query_text",
@@ -419,12 +561,16 @@ def merge_benchmark_slices(
 
 def _read_json_file(path: Path, label: str) -> Mapping[str, Any]:
     try:
-        info = path.lstat()
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-            raise BenchmarkCaptureError(f"{label} must be a regular non-symlink file")
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise BenchmarkCaptureError(f"{label} is not valid UTF-8 JSON") from error
+        _, value = read_bounded_json_no_follow(
+            path,
+            max_bytes=MAX_SLICE_BYTES,
+            label=label,
+            max_depth=48,
+            max_nodes=250_000,
+            max_array_items=25_000,
+        )
+    except BoundedEvidenceError as error:
+        raise BenchmarkCaptureError(str(error)) from error
     if not isinstance(value, Mapping):
         raise BenchmarkCaptureError(f"{label} must be a JSON object")
     return value

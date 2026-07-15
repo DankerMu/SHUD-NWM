@@ -24,7 +24,7 @@
     "lag_seconds": {"type": "integer", "minimum": 1},
     "per_tick_bound": {"type": "integer", "minimum": 1},
     "mode": {"enum": ["dry-run", "enforce"]},
-    "outcome": {"enum": ["clean", "partial", "refused_lock", "refused_config"]},
+    "outcome": {"enum": ["clean", "partial", "refused_lock", "refused_config", "failed"]},
     "selected": {
       "type": "array",
       "maxItems": 100000,
@@ -47,6 +47,15 @@
       "properties": {
         "hydro.river_timeseries": {"$ref": "#/$defs/table_total"},
         "met.forcing_station_timeseries": {"$ref": "#/$defs/table_total"}
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "mutation_state"],
+      "properties": {
+        "stage": {"type": "string", "minLength": 1},
+        "mutation_state": {"enum": ["failed_before_mutation", "indeterminate"]}
       }
     }
   },
@@ -74,6 +83,11 @@
       },
       "then": {"required": ["head_sha"]},
       "else": {"not": {"required": ["head_sha"]}}
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "failed"}}, "required": ["outcome"]},
+      "then": {"required": ["failure"]},
+      "else": {"not": {"required": ["failure"]}}
     }
   ],
   "$defs": {
@@ -99,7 +113,10 @@
         "range_end": {"type": "string", "format": "date-time"},
         "before_bytes": {"type": "integer", "minimum": 0},
         "after_bytes": {"type": ["integer", "null"], "minimum": 0},
-        "error": {"type": "string", "minLength": 1}
+        "error": {"type": "string", "minLength": 1},
+        "mutation_state": {
+          "enum": ["not_applicable", "failed_before_mutation", "committed", "indeterminate"]
+        }
       }
     },
     "deferred_descriptor": {

@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import jsonschema
 import pytest
 
+from apps.api.routes.hydro_display import _postgis_tile_params
+from scripts import node27_timeseries_compression_benchmark as benchmark
 from scripts import node27_timeseries_compression_live_evidence as evidence
+from services.tiles.mvt import postgis_tile_sql
 
 ROOT = Path(__file__).resolve().parents[1]
 RECEIPT_SCHEMA = json.loads(
@@ -21,7 +26,9 @@ EVIDENCE_SCHEMA = json.loads(
         encoding="utf-8"
     )
 )
-HEAD = "0123456789abcdef0123456789abcdef01234567"
+HEAD = subprocess.run(
+    ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True
+).stdout.strip()
 VERIFIER_HEAD = "89abcdef0123456789abcdef0123456789abcdef"
 IDENTITY = {
     "hypertable_schema": "hydro",
@@ -49,6 +56,25 @@ def _json_ref(tmp_path: Path, name: str, value: Any) -> dict[str, Any]:
 def _file_ref(path: Path) -> dict[str, Any]:
     raw = path.read_bytes()
     return {"path": str(path), "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
+
+
+def _invocation(
+    *,
+    kind: str,
+    started_at: str,
+    finished_at: str,
+    bindings: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "kind": kind,
+        "argv": evidence.INVOCATION_ARGV[kind],
+        "timeout_seconds": 900,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "exit_code": 0,
+        "mutation_head_sha": HEAD,
+        "artifact_bindings": bindings,
+    }
 
 
 def _catalog() -> dict[str, Any]:
@@ -94,6 +120,7 @@ def _receipt(*, enforce: bool) -> dict[str, Any]:
         **IDENTITY,
         "before_bytes": 4_115_734_528,
         "after_bytes": 134_119_424 if enforce else None,
+        "mutation_state": "committed" if enforce else "not_applicable",
     }
     return {
         "schema_version": "2.0",
@@ -136,6 +163,10 @@ def _receipt(*, enforce: bool) -> dict[str, Any]:
 
 def _sizes(*, post: bool) -> dict[str, Any]:
     return {
+        "captured_at": "2026-07-15T12:05:02Z" if post else "2026-07-15T12:00:24Z",
+        "snapshot_id": "sizes-post" if post else "sizes-pre",
+        "phase": "post-enforce" if post else "pre-enforce",
+        "mutation_head_sha": HEAD,
         "tables": {
             "hydro.river_timeseries": {
                 "hypertable_size": 90_000_000_000 if post else 94_000_000_000,
@@ -186,7 +217,7 @@ def _measurement(*, name: str, after: bool, execution_ms: float, read_blocks: in
 
 
 def _phase(name: str, samples: list[float], *, after: bool) -> dict[str, Any]:
-    payload: Any = [{"valid_time": "2026-05-02T00:00:00Z", "value": 1.25}]
+    payload: Any = [{"valid_time": "2026-05-29T00:00:00Z", "value": 1.25}]
     if name == "mvt":
         payload = "deadbeef"
         raw = bytes.fromhex(payload)
@@ -210,11 +241,28 @@ def _phase(name: str, samples: list[float], *, after: bool) -> dict[str, Any]:
         ],
         "activity_samples": [
             {
-                "captured_at": "2026-07-15T12:10:00Z" if after else "2026-07-15T11:55:00Z",
-                "active_sessions": 1,
+                "captured_at": f"2026-07-15T{'12:10' if after else '11:55'}:0{index}Z",
+                "stage": stage,
+                "sessions": [],
                 "material_load_stable": True,
             }
+            for index, stage in enumerate(
+                [
+                    "before_cold",
+                    "after_cold",
+                    "before_measurements",
+                    "mid_measurements",
+                    "after_result",
+                ]
+            )
         ],
+        "execution_bounds": {
+            "statement_timeout_ms": 60_000,
+            "lock_timeout_ms": 5_000,
+            "phase_timeout_seconds": 900,
+            "started_at": "2026-07-15T12:10:00Z" if after else "2026-07-15T11:55:00Z",
+            "finished_at": "2026-07-15T12:10:04Z" if after else "2026-07-15T11:55:04Z",
+        },
     }
 
 
@@ -257,6 +305,12 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
         "autopipe_quiescent": True,
         "database_writes_quiescent": True,
         "conflicting_locks_absent": True,
+        "prior_autopipe_state": {
+            "enabled": "enabled",
+            "active": "active",
+            "sub": "waiting",
+            "result": "success",
+        },
         "units": {},
     }
     for unit_name in evidence.EXPECTED_UNITS:
@@ -286,7 +340,7 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
     }
     post_dry_selection = {
         "observed_at": "2026-07-15T12:00:10Z",
-        "cutoff": "2026-07-08T12:00:00Z",
+        "cutoff": "2026-07-08T12:00:10Z",
         "free_bytes": 500_000_000_000,
         "candidates": [candidate, deferred],
         "selected": [candidate],
@@ -294,91 +348,75 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
     pre_enforce_selection = {
         **post_dry_selection,
         "observed_at": "2026-07-15T12:00:20Z",
+        "cutoff": "2026-07-08T12:00:20Z",
     }
     curve_source = ROOT / "packages/common/forecast_store.py"
     mvt_source = ROOT / "services/tiles/mvt.py"
     route_source = ROOT / "apps/api/routes/hydro_display.py"
+    curve_query, curve_names, curve_parameters = benchmark._curve_query_and_binding(
+        basin_version_id="basin-v1",
+        river_segment_id="model_reach_000001",
+        river_network_version_id="network-v1",
+        issue_time=datetime(2026, 5, 28, tzinfo=UTC),
+        end_time=datetime(2026, 6, 4, tzinfo=UTC),
+        scenario="gfs",
+    )
+    mvt_request = {
+        "run_id": "run-1",
+        "basin_version_id": "basin-v1",
+        "river_network_version_id": "network-v1",
+        "valid_time": "2026-05-29T00:00:00Z",
+        "z": 9,
+        "x": 420,
+        "y": 210,
+    }
+    mvt_query = postgis_tile_sql("hydro")
+    mvt_binding = benchmark._json_value(
+        _postgis_tile_params(
+            {
+                "run_id": mvt_request["run_id"],
+                "basin_version_id": mvt_request["basin_version_id"],
+                "river_network_version_id": mvt_request["river_network_version_id"],
+                "variable": "q_down",
+                "valid_time": datetime(2026, 5, 29, tzinfo=UTC),
+            },
+            z=9,
+            x=420,
+            y=210,
+        )
+    )
     benchmarks = {
         "queries": [
             {
                 "name": name,
+                "request": (
+                    {
+                        "basin_version_id": "basin-v1",
+                        "river_segment_id": "model_reach_000001",
+                        "river_network_version_id": "network-v1",
+                        "issue_time": "2026-05-28T00:00:00Z",
+                        "end_time": "2026-06-04T00:00:00Z",
+                        "scenario": "gfs",
+                    }
+                    if name == "curve"
+                    else mvt_request
+                ),
                 "source_refs": (
                     [_file_ref(curve_source)]
                     if name == "curve"
                     else [_file_ref(mvt_source), _file_ref(route_source)]
                 ),
                 "query_sha256": hashlib.sha256(
-                    (
-                        "SELECT rt.valid_time FROM hydro.river_timeseries rt "
-                        "JOIN hydro.hydro_run h ON h.run_id=rt.run_id "
-                        "WHERE rt.basin_version_id=%s AND rt.river_segment_id=%s "
-                        "AND rt.river_network_version_id=%s AND rt.variable = 'q_down' "
-                        "AND h.run_type = 'forecast' AND h.cycle_time=%s "
-                        "AND rt.valid_time BETWEEN %s AND %s"
-                        if name == "curve"
-                        else "WITH bounds AS (SELECT ST_TileEnvelope(:z,:x,:y)) "
-                        "SELECT * FROM hydro.river_timeseries ts "
-                        "JOIN core.river_segment rs ON rs.river_segment_id=ts.river_segment_id "
-                        "WHERE ts.run_id=:run_id AND ts.basin_version_id=:basin_version_id "
-                        "AND ts.river_network_version_id=:river_network_version_id "
-                        "AND ts.variable=:variable AND ts.valid_time=:valid_time"
-                    ).encode()
+                    (curve_query if name == "curve" else mvt_query).encode()
                 ).hexdigest(),
-                "query_text": (
-                    "SELECT rt.valid_time FROM hydro.river_timeseries rt "
-                    "JOIN hydro.hydro_run h ON h.run_id=rt.run_id "
-                    "WHERE rt.basin_version_id=%s AND rt.river_segment_id=%s "
-                    "AND rt.river_network_version_id=%s AND rt.variable = 'q_down' "
-                    "AND h.run_type = 'forecast' AND h.cycle_time=%s "
-                    "AND rt.valid_time BETWEEN %s AND %s"
-                    if name == "curve"
-                    else "WITH bounds AS (SELECT ST_TileEnvelope(:z,:x,:y)) "
-                    "SELECT * FROM hydro.river_timeseries ts "
-                    "JOIN core.river_segment rs ON rs.river_segment_id=ts.river_segment_id "
-                    "WHERE ts.run_id=:run_id AND ts.basin_version_id=:basin_version_id "
-                    "AND ts.river_network_version_id=:river_network_version_id "
-                    "AND ts.variable=:variable AND ts.valid_time=:valid_time"
-                ),
+                "query_text": curve_query if name == "curve" else mvt_query,
                 "binding": (
                     {
-                        "parameter_names": [
-                            "basin_version_id",
-                            "river_segment_id",
-                            "river_network_version_id",
-                            "issue_time",
-                            "start_time",
-                            "end_time",
-                        ],
-                        "bound_parameters": [
-                            "basin-v1",
-                            "segment-1",
-                            "network-v1",
-                            "2026-05-01T00:00:00Z",
-                            "2026-05-01T00:00:00Z",
-                            "2026-05-08T00:00:00Z",
-                        ],
+                        "parameter_names": curve_names,
+                        "bound_parameters": benchmark._json_value(curve_parameters),
                     }
                     if name == "curve"
-                    else {
-                        "run_id": "run-1",
-                        "basin_version_id": "basin-v1",
-                        "river_network_version_id": "network-v1",
-                        "variable": "q_down",
-                        "valid_time": "2026-05-02T00:00:00Z",
-                        "z": 9,
-                        "x": 420,
-                        "y": 210,
-                        "feature_limit": 10_000,
-                        "feature_coordinate_limit": 50_000,
-                        "collection_coordinate_limit": 50_000,
-                        "max_coordinate_dimensions": 3,
-                        "extent": 4096,
-                        "buffer": 64,
-                        "simplification_tolerance_m": (
-                            (40_075_016.68557849 / float(1 << 9)) / 4096.0
-                        )
-                        / 2.0,
-                    }
+                    else mvt_binding
                 ),
                 "before": _phase(name, [10, 11, 12, 13, 14, 15, 16], after=False),
                 "after": _phase(name, [12, 13, 14, 15, 16, 17, 18], after=True),
@@ -386,14 +424,48 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
             for name in ("curve", "mvt")
         ]
     }
+    repo_service = ROOT / "infra/systemd/nhms-node27-timeseries-compression.service"
+    repo_timer = ROOT / "infra/systemd/nhms-node27-timeseries-compression.timer"
+    installed_service = tmp_path / "installed-compression.service"
+    installed_timer = tmp_path / "installed-compression.timer"
+    installed_service.write_bytes(repo_service.read_bytes())
+    installed_timer.write_bytes(repo_timer.read_bytes())
+    final_units: dict[str, Any] = {}
+    for unit_name in evidence.EXPECTED_UNITS:
+        journal = tmp_path / f"final-{unit_name}.journal.log"
+        journal.write_text("bounded final journal evidence\n", encoding="utf-8")
+        if unit_name == "nhms-node27-autopipe.timer":
+            enabled, active, sub = "enabled", "active", "waiting"
+        elif unit_name.endswith(".timer"):
+            enabled, active, sub = "enabled", "inactive", "dead"
+        else:
+            enabled, active, sub = "static", "inactive", "dead"
+        final_units[unit_name] = {
+            "enabled": enabled,
+            "active": active,
+            "sub": sub,
+            "result": "success",
+            "main_pid": 0,
+            "journal": _file_ref(journal),
+        }
     cleanup = {
-        "autopipe_timer_restored": True,
-        "compression_timer_enabled": True,
-        "compression_timer_active": False,
-        "compression_service_active": False,
-        "compression_service_activation_count": 0,
-        "installed_service_matches_repo": True,
-        "installed_timer_matches_repo": True,
+        "captured_at": "2026-07-15T12:20:01Z",
+        "window_started_at": "2026-07-15T11:40:00Z",
+        "window_finished_at": "2026-07-15T12:20:00Z",
+        "repo_units": {
+            "service": _file_ref(repo_service),
+            "timer": _file_ref(repo_timer),
+        },
+        "installed_units": {
+            "service": _file_ref(installed_service),
+            "timer": _file_ref(installed_timer),
+        },
+        "resolved_exec_start": [
+            "/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh",
+            "--enforce",
+        ],
+        "final_units": final_units,
+        "compression_service_activations": [],
     }
     recovery_preflight = {
         **preflight,
@@ -416,6 +488,87 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
         "after_row_count": 12_345_678,
     }
     catalog = _catalog()
+    recovery_preflight_ref = _json_ref(
+        tmp_path, "recovery-preflight.json", recovery_preflight
+    )
+    recovery_receipt_ref = _json_ref(
+        tmp_path, "recovery-receipt.json", recovery_receipt
+    )
+    recovery_invocation_ref = _json_ref(
+        tmp_path,
+        "recovery-invocation.json",
+        _invocation(
+            kind="recovery_decompress",
+            started_at="2026-07-15T11:41:00Z",
+            finished_at="2026-07-15T11:45:00Z",
+            bindings={
+                "receipt_sha256": recovery_receipt_ref["sha256"],
+                "target": IDENTITY,
+            },
+        ),
+    )
+    catalog_first_ref = _json_ref(tmp_path, "catalog-first.json", catalog)
+    catalog_second_ref = _json_ref(tmp_path, "catalog-second.json", catalog)
+    migration_ref = _file_ref(migration)
+    migration_first_invocation_ref = _json_ref(
+        tmp_path,
+        "migration-first-invocation.json",
+        _invocation(
+            kind="migration_apply",
+            started_at="2026-07-15T11:30:00Z",
+            finished_at="2026-07-15T11:31:00Z",
+            bindings={
+                "migration_sha256": migration_ref["sha256"],
+                "catalog_sha256": catalog_first_ref["sha256"],
+            },
+        ),
+    )
+    migration_second_invocation_ref = _json_ref(
+        tmp_path,
+        "migration-second-invocation.json",
+        _invocation(
+            kind="migration_apply",
+            started_at="2026-07-15T11:31:01Z",
+            finished_at="2026-07-15T11:32:00Z",
+            bindings={
+                "migration_sha256": migration_ref["sha256"],
+                "catalog_sha256": catalog_second_ref["sha256"],
+            },
+        ),
+    )
+    dry_ref = _json_ref(tmp_path, "dry.json", _receipt(enforce=False))
+    enforce_ref = _json_ref(tmp_path, "enforce.json", _receipt(enforce=True))
+    dry_invocation_ref = _json_ref(
+        tmp_path,
+        "dry-invocation.json",
+        _invocation(
+            kind="compression_dry_run",
+            started_at="2026-07-15T11:59:50Z",
+            finished_at="2026-07-15T12:00:00Z",
+            bindings={"receipt_sha256": dry_ref["sha256"]},
+        ),
+    )
+    enforce_invocation_ref = _json_ref(
+        tmp_path,
+        "enforce-invocation.json",
+        _invocation(
+            kind="compression_enforce",
+            started_at="2026-07-15T12:00:25Z",
+            finished_at="2026-07-15T12:05:01Z",
+            bindings={"receipt_sha256": enforce_ref["sha256"]},
+        ),
+    )
+    catalog_post_ref = _json_ref(
+        tmp_path,
+        "catalog-post.json",
+        {
+            "captured_at": "2026-07-15T12:05:03Z",
+            "snapshot_id": "catalog-post",
+            "mutation_head_sha": HEAD,
+            "catalog": catalog,
+            "compressed_chunk_identities": [IDENTITY],
+        },
+    )
     return {
         "schema_version": "2.0",
         "issue": 1069,
@@ -435,23 +588,45 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
             "decompress_invocations": 1,
         },
         "recovery": {
-            "preflight": _json_ref(
-                tmp_path, "recovery-preflight.json", recovery_preflight
-            ),
-            "receipt": _json_ref(tmp_path, "recovery-receipt.json", recovery_receipt),
+            "preflight": recovery_preflight_ref,
+            "receipt": recovery_receipt_ref,
+            "invocation": recovery_invocation_ref,
         },
         "preflight": {
             "evidence": _json_ref(tmp_path, "preflight.json", preflight),
             "schema_dump": _file_ref(schema_dump),
-            "catalog_before": _json_ref(tmp_path, "catalog-before.json", {"before": True}),
-            "pg_restore_list_exit_code": 0,
+            "schema_dump_list": _json_ref(
+                tmp_path,
+                "schema-dump-list.json",
+                {
+                    "dump_sha256": _file_ref(schema_dump)["sha256"],
+                    "argv": ["pg_restore", "--list", "<schema-dump-path>"],
+                    "exit_code": 0,
+                    "entries": [
+                        "TABLE hydro river_timeseries",
+                        "TABLE met forcing_station_timeseries",
+                    ],
+                },
+            ),
+            "catalog_before": _json_ref(
+                tmp_path,
+                "catalog-before.json",
+                {
+                    "hypertables": {
+                        "hydro.river_timeseries": False,
+                        "met.forcing_station_timeseries": False,
+                    },
+                    "compression_settings": [],
+                    "policy_jobs": [],
+                },
+            ),
         },
         "migration": {
-            "migration_file": _file_ref(migration),
-            "first_exit_code": 0,
-            "second_exit_code": 0,
-            "catalog_after_first": _json_ref(tmp_path, "catalog-first.json", catalog),
-            "catalog_after_second": _json_ref(tmp_path, "catalog-second.json", catalog),
+            "migration_file": migration_ref,
+            "first_invocation": migration_first_invocation_ref,
+            "catalog_after_first": catalog_first_ref,
+            "second_invocation": migration_second_invocation_ref,
+            "catalog_after_second": catalog_second_ref,
         },
         "selection": {
             "post_dry_run": _json_ref(
@@ -462,17 +637,16 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
             ),
         },
         "receipts": {
-            "dry_run": _json_ref(tmp_path, "dry.json", _receipt(enforce=False)),
-            "enforce": _json_ref(tmp_path, "enforce.json", _receipt(enforce=True)),
+            "dry_run": dry_ref,
+            "dry_run_invocation": dry_invocation_ref,
+            "enforce": enforce_ref,
+            "enforce_invocation": enforce_invocation_ref,
         },
         "sizes": {
             "pre": _json_ref(tmp_path, "sizes-pre.json", _sizes(post=False)),
             "post": _json_ref(tmp_path, "sizes-post.json", _sizes(post=True)),
         },
-        "catalog": {
-            "post": _json_ref(tmp_path, "catalog-post.json", catalog),
-            "compressed_chunk_identities": [IDENTITY],
-        },
+        "catalog": {"post": catalog_post_ref},
         "benchmarks": {
             "evidence": _json_ref(tmp_path, "benchmarks.json", benchmarks),
         },
@@ -594,7 +768,7 @@ def test_verifier_requires_v2_receipts_bound_to_mutation_head(
     bundle["receipts"]["enforce"] = _json_ref(
         tmp_path, f"enforce-{schema_version}.json", receipt
     )
-    with pytest.raises(evidence.EvidenceError, match="bound-1 semantics"):
+    with pytest.raises(evidence.EvidenceError, match="artifact association|bound-1 semantics"):
         evidence.verify_bundle(
             bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
         )
@@ -605,6 +779,13 @@ def test_verifier_rejects_schema_valid_receipt_with_bad_arithmetic(tmp_path: Pat
     receipt = _receipt(enforce=True)
     receipt["per_table_totals"]["hydro.river_timeseries"]["before_bytes"] = 1
     bundle["receipts"]["enforce"] = _json_ref(tmp_path, "bad-enforce.json", receipt)
+    invocation = _read_ref(bundle["receipts"]["enforce_invocation"])
+    invocation["artifact_bindings"]["receipt_sha256"] = bundle["receipts"]["enforce"][
+        "sha256"
+    ]
+    bundle["receipts"]["enforce_invocation"] = _json_ref(
+        tmp_path, "bad-enforce-invocation.json", invocation
+    )
     with pytest.raises(evidence.EvidenceError, match="arithmetic"):
         evidence.verify_bundle(
             bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
@@ -629,7 +810,7 @@ def test_verifier_recomputes_query_and_result_hashes(tmp_path: Path) -> None:
     benchmark = json.loads(Path(benchmark_ref["path"]).read_text(encoding="utf-8"))
     benchmark["queries"][0]["query_text"] += " -- tampered"
     bundle["benchmarks"]["evidence"] = _json_ref(tmp_path, "bad-benchmark.json", benchmark)
-    with pytest.raises(evidence.EvidenceError, match="query hash mismatch"):
+    with pytest.raises(evidence.EvidenceError, match="public production owner|query hash mismatch"):
         evidence.verify_bundle(
             bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
         )
@@ -833,7 +1014,7 @@ def test_replay_receipts_must_reselect_exact_recovered_target(
     bundle["receipts"][receipt_name] = _json_ref(
         tmp_path, f"{receipt_name}-other-target.json", receipt
     )
-    with pytest.raises(evidence.EvidenceError, match="selected tuples differ"):
+    with pytest.raises(evidence.EvidenceError, match="artifact association|selected tuples differ"):
         evidence.verify_bundle(
             bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
         )
@@ -937,6 +1118,7 @@ def test_selection_rejects_pre_enforce_observation_older_than_60_seconds(tmp_pat
     bundle = _bundle(tmp_path)
     selection = _read_ref(bundle["selection"]["pre_enforce"])
     selection["observed_at"] = "2026-07-15T11:59:00Z"
+    selection["cutoff"] = "2026-07-08T11:59:00Z"
     bundle["selection"]["pre_enforce"] = _json_ref(tmp_path, "selection-stale.json", selection)
     with pytest.raises(evidence.EvidenceError, match="within 60 seconds"):
         evidence.verify_bundle(
@@ -1050,3 +1232,177 @@ def test_verifier_has_no_mutation_entrypoints() -> None:
         "GRANT ",
     ):
         assert forbidden not in source
+
+
+def test_selector_cutoff_is_derived_and_strict(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    snapshot = _read_ref(bundle["selection"]["pre_enforce"])
+    snapshot["cutoff"] = "2026-07-08T12:00:21Z"
+    bundle["selection"]["pre_enforce"] = _json_ref(
+        tmp_path, "selection-future-cutoff.json", snapshot
+    )
+    with pytest.raises(evidence.EvidenceError, match="observed_at minus"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+
+@pytest.mark.parametrize("failure", ["reused", "nonzero", "timeout"])
+def test_execution_ledgers_reject_false_migration_or_timeout_proof(
+    tmp_path: Path, failure: str
+) -> None:
+    bundle = _bundle(tmp_path)
+    if failure == "reused":
+        bundle["migration"]["second_invocation"] = bundle["migration"]["first_invocation"]
+    else:
+        key = "first_invocation" if failure == "nonzero" else "second_invocation"
+        invocation = _read_ref(bundle["migration"][key])
+        if failure == "nonzero":
+            invocation["exit_code"] = 1
+        else:
+            invocation["timeout_seconds"] = 901
+        bundle["migration"][key] = _json_ref(
+            tmp_path, f"migration-{failure}.json", invocation
+        )
+    with pytest.raises(evidence.EvidenceError):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+
+def test_dry_run_totals_are_recomputed(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    receipt = _read_ref(bundle["receipts"]["dry_run"])
+    receipt["per_table_totals"]["hydro.river_timeseries"]["chunks_compressed"] = 1
+    bundle["receipts"]["dry_run"] = _json_ref(tmp_path, "dry-bad-totals.json", receipt)
+    invocation = _read_ref(bundle["receipts"]["dry_run_invocation"])
+    invocation["artifact_bindings"]["receipt_sha256"] = bundle["receipts"]["dry_run"][
+        "sha256"
+    ]
+    bundle["receipts"]["dry_run_invocation"] = _json_ref(
+        tmp_path, "dry-bad-totals-invocation.json", invocation
+    )
+    with pytest.raises(evidence.EvidenceError, match="dry-run per_table_totals"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+
+def test_decoy_plan_cannot_split_provider_from_selected_relation(tmp_path: Path) -> None:
+    def mutate(document: dict[str, Any]) -> None:
+        document["queries"][0]["after"]["measurements"][0]["plan"] = {
+            "Node Type": "Append",
+            "Plans": [
+                {"Node Type": "Custom Scan", "Custom Plan Provider": "DecompressChunk"},
+                {"Node Type": "Index Scan", "Relation Name": IDENTITY["chunk_name"]},
+            ],
+        }
+
+    bundle = _mutated_benchmark_bundle(tmp_path, mutate)
+    with pytest.raises(evidence.EvidenceError, match="after measurement 0"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+
+def test_preexisting_selected_relation_is_not_a_transition(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    pre = _read_ref(bundle["sizes"]["pre"])
+    pre["tables"]["hydro.river_timeseries"]["compressed_relations"] = [
+        {
+            "origin_chunk_schema": IDENTITY["chunk_schema"],
+            "origin_chunk_name": IDENTITY["chunk_name"],
+            "schema": "_timescaledb_internal",
+            "name": "compress_hyper_7_15_chunk",
+            "bytes": 134_119_424,
+        }
+    ]
+    bundle["sizes"]["pre"] = _json_ref(tmp_path, "sizes-preexisting.json", pre)
+    with pytest.raises(evidence.EvidenceError, match="already existed"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+
+def test_dump_magic_and_cleanup_execstart_are_derived(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    dump = tmp_path / "fake.dump"
+    dump.write_bytes(b"random bytes")
+    bundle["preflight"]["schema_dump"] = _file_ref(dump)
+    listing = _read_ref(bundle["preflight"]["schema_dump_list"])
+    listing["dump_sha256"] = bundle["preflight"]["schema_dump"]["sha256"]
+    bundle["preflight"]["schema_dump_list"] = _json_ref(
+        tmp_path, "fake-dump-list.json", listing
+    )
+    with pytest.raises(evidence.EvidenceError, match="custom format"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+    bundle = _bundle(tmp_path)
+    cleanup = _read_ref(bundle["cleanup"]["evidence"])
+    cleanup["resolved_exec_start"].remove("--enforce")
+    bundle["cleanup"]["evidence"] = _json_ref(tmp_path, "cleanup-no-enforce.json", cleanup)
+    with pytest.raises(evidence.EvidenceError, match="--enforce"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+
+def test_evidence_reader_rejects_symlink_oversize_depth_and_credentials(
+    tmp_path: Path,
+) -> None:
+    bundle = _bundle(tmp_path)
+    original = Path(bundle["receipts"]["dry_run"]["path"])
+    link = tmp_path / "dry-link.json"
+    link.symlink_to(original)
+    bundle["receipts"]["dry_run"] = {
+        **bundle["receipts"]["dry_run"],
+        "path": str(link),
+    }
+    with pytest.raises(evidence.EvidenceError, match="unsafe|symlink"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+    bundle = _bundle(tmp_path)
+    bundle["benchmarks"]["evidence"]["bytes"] = evidence.MAX_JSON_ARTIFACT_BYTES + 1
+    with pytest.raises(evidence.EvidenceError, match="byte ceiling"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+    bundle = _bundle(tmp_path)
+    nested: Any = {"leaf": True}
+    for _ in range(evidence.MAX_PLAN_DEPTH + 2):
+        nested = {"next": nested}
+    bundle["benchmarks"]["evidence"] = _json_ref(tmp_path, "too-deep.json", nested)
+    with pytest.raises(evidence.EvidenceError, match="depth ceiling"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+    bundle = _bundle(tmp_path)
+    cleanup = _read_ref(bundle["cleanup"]["evidence"])
+    cleanup["api_key"] = "must-never-be-echoed"
+    bundle["cleanup"]["evidence"] = _json_ref(tmp_path, "cleanup-secret.json", cleanup)
+    with pytest.raises(evidence.EvidenceError, match="forbidden credential field"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )
+
+
+def test_weak_schema_and_wrong_request_range_fail_closed(tmp_path: Path) -> None:
+    with pytest.raises(evidence.EvidenceError, match="canonical verifier checkout schema"):
+        evidence.verify_bundle(
+            _bundle(tmp_path), receipt_schema={}, verifier_head_sha=VERIFIER_HEAD
+        )
+
+    def mutate(document: dict[str, Any]) -> None:
+        document["queries"][1]["request"]["valid_time"] = "2026-06-05T00:00:00Z"
+
+    bundle = _mutated_benchmark_bundle(tmp_path, mutate)
+    with pytest.raises(evidence.EvidenceError, match="public production owner|selected chunk range"):
+        evidence.verify_bundle(
+            bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD
+        )

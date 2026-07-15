@@ -262,21 +262,80 @@ def test_per_chunk_failure_isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     receipt = compression.build_receipt(
         config, now_utc=_NOW,
         fetch_chunks=fake_fetch, measure_chunk_bytes=fake_measure, compress_chunk=fake_compress,
+        reconcile_chunk_state=lambda _dsn, _chunk: False,
     )
     by_name = {d["chunk_name"]: d for d in receipt["selected"]}
     assert "error" not in by_name["good"]
     assert by_name["good"]["after_bytes"] == 100
     assert "error" in by_name["bad"]
-    assert by_name["bad"]["error"].startswith("compress_chunk failed:")
+    assert by_name["bad"]["error"] == "compress_chunk before mutation failed (RuntimeError)"
     assert by_name["bad"]["after_bytes"] is None
     assert receipt["outcome"] == "partial"
-    river = receipt["per_table_totals"]["hydro.river_timeseries"]
-    # Only A reached compressed state; B contributes nothing to either total.
-    assert river["chunks_compressed"] == 1
-    assert river["before_bytes"] == 100
-    # B's compress-fail poisons the whole table's after_bytes.
-    assert river["after_bytes"] is None
-    # F-INVSTATE-02: partial-outcome receipts stay schema-conformant.
+
+
+def test_lost_commit_ack_reconciles_to_committed_truth(tmp_path: Path) -> None:
+    config = compression.config_from_args(_args(enforce=True), _base_env(tmp_path))
+    chunk = _chunk("hydro", "river_timeseries", "ack-lost", delta_days=10)
+
+    receipt = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=lambda _dsn: [chunk],
+        measure_chunk_bytes=lambda _dsn, _chunk, *, after=False: 40 if after else 100,
+        compress_chunk=lambda _dsn, _chunk: (_ for _ in ()).throw(RuntimeError("lost ack")),
+        reconcile_chunk_state=lambda _dsn, _chunk: True,
+    )
+
+    selected = receipt["selected"][0]
+    assert selected["mutation_state"] == "committed"
+    assert selected["after_bytes"] == 40
+    assert receipt["outcome"] == "partial"
+    assert receipt["per_table_totals"]["hydro.river_timeseries"] == {
+        "before_bytes": 100,
+        "after_bytes": 40,
+        "chunks_compressed": 1,
+    }
+
+
+def test_lost_commit_ack_with_unavailable_reconciliation_is_indeterminate(
+    tmp_path: Path,
+) -> None:
+    config = compression.config_from_args(_args(enforce=True), _base_env(tmp_path))
+    chunk = _chunk("hydro", "river_timeseries", "unknown", delta_days=10)
+
+    receipt = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=lambda _dsn: [chunk],
+        measure_chunk_bytes=lambda _dsn, _chunk, *, after=False: 100,
+        compress_chunk=lambda _dsn, _chunk: (_ for _ in ()).throw(RuntimeError("lost ack")),
+        reconcile_chunk_state=lambda _dsn, _chunk: (_ for _ in ()).throw(
+            RuntimeError("catalog unavailable")
+        ),
+    )
+
+    assert receipt["selected"][0]["mutation_state"] == "indeterminate"
+    assert receipt["per_table_totals"]["hydro.river_timeseries"]["chunks_compressed"] == 0
+
+
+def test_known_failure_destination_atomically_replaces_stale_success(tmp_path: Path) -> None:
+    config = compression.config_from_args(_args(enforce=True), _base_env(tmp_path))
+    config.receipt_path.write_text('{"outcome":"clean"}\n', encoding="utf-8")
+
+    compression._replace_stale_with_failure(
+        config,
+        now_utc=_NOW,
+        stage="runner",
+        head_sha="a" * 40,
+        mutation_state="indeterminate",
+    )
+
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "failed"
+    assert receipt["failure"] == {
+        "stage": "runner",
+        "mutation_state": "indeterminate",
+    }
     jsonschema.validate(receipt, _load_schema())
 
 
@@ -408,6 +467,7 @@ def test_compress_fail_poisons_per_table_after_bytes(
         fetch_chunks=fake_fetch,
         measure_chunk_bytes=fake_measure,
         compress_chunk=fake_compress,
+        reconcile_chunk_state=lambda _dsn, _chunk: False,
     )
     river = receipt["per_table_totals"]["hydro.river_timeseries"]
     assert river["chunks_compressed"] == 1
@@ -416,7 +476,7 @@ def test_compress_fail_poisons_per_table_after_bytes(
     by_name = {d["chunk_name"]: d for d in receipt["selected"]}
     assert by_name["mixed-A"]["after_bytes"] == 200
     assert by_name["mixed-B"]["after_bytes"] is None
-    assert by_name["mixed-B"]["error"].startswith("compress_chunk failed:")
+    assert by_name["mixed-B"]["error"] == "compress_chunk before mutation failed (RuntimeError)"
     assert receipt["outcome"] == "partial"
     # F-INVSTATE-02: partial-outcome receipts stay schema-conformant.
     jsonschema.validate(receipt, _load_schema())

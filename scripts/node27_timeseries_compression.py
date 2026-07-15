@@ -316,6 +316,7 @@ def _iso(value: datetime) -> str:
 FetchChunks = Callable[[str], list[ChunkRow]]
 MeasureChunkBytes = Callable[..., int]
 CompressChunk = Callable[[str, ChunkRow], None]
+ReconcileChunkState = Callable[[str, ChunkRow], bool]
 
 
 def _default_fetch_chunks(database_url: str) -> list[ChunkRow]:
@@ -396,6 +397,40 @@ def _default_compress_chunk(database_url: str, chunk: ChunkRow) -> None:
         connection.close()
 
 
+def _default_reconcile_chunk_state(database_url: str, chunk: ChunkRow) -> bool:
+    """Read the exact target through a fresh catalog connection after uncertainty."""
+
+    import psycopg2  # type: ignore[import-untyped]
+
+    connection = psycopg2.connect(database_url)
+    try:
+        connection.set_session(readonly=True, autocommit=True)
+        with connection.cursor() as cursor:
+            cursor.execute(f"SET statement_timeout = {_QUERY_TIMEOUT_MS}")
+            cursor.execute(
+                """
+                SELECT is_compressed
+                FROM timescaledb_information.chunks
+                WHERE hypertable_schema = %s
+                  AND hypertable_name = %s
+                  AND chunk_schema = %s
+                  AND chunk_name = %s
+                """,
+                (
+                    chunk.hypertable_schema,
+                    chunk.hypertable_name,
+                    chunk.chunk_schema,
+                    chunk.chunk_name,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None or not isinstance(row[0], bool):
+                raise RuntimeError("exact target catalog state unavailable")
+            return row[0]
+    finally:
+        connection.close()
+
+
 # ---------------------------------------------------------------------------
 # Runner core
 # ---------------------------------------------------------------------------
@@ -443,7 +478,14 @@ def _descriptor(chunk: ChunkRow, *, before: int, after: int | None) -> dict[str,
         "range_end": _iso(chunk.range_end),
         "before_bytes": before,
         "after_bytes": after,
+        "mutation_state": "not_applicable",
     }
+
+
+def _safe_failure(operation: str, error: Exception) -> str:
+    """Describe failure class without copying credential-bearing exception text."""
+
+    return f"{operation} failed ({type(error).__name__})"
 
 
 def build_receipt(
@@ -453,6 +495,7 @@ def build_receipt(
     fetch_chunks: FetchChunks,
     measure_chunk_bytes: MeasureChunkBytes,
     compress_chunk: CompressChunk,
+    reconcile_chunk_state: ReconcileChunkState = _default_reconcile_chunk_state,
     head_sha: str | None = None,
 ) -> dict[str, Any]:
     """Perform the selection + (optionally) compression and return the receipt."""
@@ -496,7 +539,9 @@ def build_receipt(
             before = int(measure_chunk_bytes(config.database_url, chunk))
         except Exception as error:
             descriptor = _descriptor(chunk, before=0, after=None)
-            descriptor["error"] = f"measure_chunk_bytes(before) failed: {error}"
+            if config.enforce:
+                descriptor["mutation_state"] = "failed_before_mutation"
+            descriptor["error"] = _safe_failure("measure_chunk_bytes(before)", error)
             any_errors = True
             # Chunk never reached compressed state — do NOT contribute to any
             # totals — but poison after_bytes so successful siblings in the
@@ -511,23 +556,55 @@ def build_receipt(
             try:
                 compress_chunk(config.database_url, chunk)
             except Exception as error:  # per-chunk isolation per issue spec
-                descriptor = _descriptor(chunk, before=before, after=None)
-                descriptor["error"] = f"compress_chunk failed: {error}"
+                try:
+                    reconciled_compressed = reconcile_chunk_state(config.database_url, chunk)
+                except Exception:
+                    descriptor = _descriptor(chunk, before=before, after=None)
+                    descriptor["mutation_state"] = "indeterminate"
+                    descriptor["error"] = "compress_chunk result indeterminate; exact-target reconciliation unavailable"
+                    any_errors = True
+                    after_poisoned[chunk.hypertable_key] = True
+                    selected_descriptors.append(descriptor)
+                    continue
+                if not reconciled_compressed:
+                    descriptor = _descriptor(chunk, before=before, after=None)
+                    descriptor["mutation_state"] = "failed_before_mutation"
+                    descriptor["error"] = _safe_failure(
+                        "compress_chunk before mutation", error
+                    )
+                    any_errors = True
+                    after_poisoned[chunk.hypertable_key] = True
+                    selected_descriptors.append(descriptor)
+                    continue
+                # The commit happened even though its acknowledgement was
+                # lost. Preserve committed truth and continue to a fresh size
+                # measurement; the top-level result remains partial because
+                # the invocation itself did not complete normally.
                 any_errors = True
-                # Chunk never reached compressed state — do NOT contribute to
-                # chunks_compressed OR before_bytes (round-3 closure R3-01:
-                # including a failed chunk's before while excluding it from
-                # chunks_compressed would inflate the (before-after)/before
-                # savings ratio computed by any downstream consumer). Poison
-                # after_bytes so successful siblings cannot masquerade either.
-                after_poisoned[chunk.hypertable_key] = True
+                totals[chunk.hypertable_key]["before_bytes"] += before
+                totals[chunk.hypertable_key]["chunks_compressed"] += 1
+                try:
+                    after = int(measure_chunk_bytes(config.database_url, chunk, after=True))
+                except Exception:
+                    descriptor = _descriptor(chunk, before=before, after=None)
+                    descriptor["mutation_state"] = "committed"
+                    descriptor["error"] = "compression committed; post-measurement unavailable"
+                    after_poisoned[chunk.hypertable_key] = True
+                    selected_descriptors.append(descriptor)
+                    continue
+                descriptor = _descriptor(chunk, before=before, after=after)
+                descriptor["mutation_state"] = "committed"
+                descriptor["error"] = "compression committed after lost acknowledgement"
+                totals[chunk.hypertable_key]["after_bytes"] += after
+                saw_after[chunk.hypertable_key] = True
                 selected_descriptors.append(descriptor)
                 continue
             try:
                 after = int(measure_chunk_bytes(config.database_url, chunk, after=True))
             except Exception as error:
                 descriptor = _descriptor(chunk, before=before, after=None)
-                descriptor["error"] = f"measure_chunk_bytes(after) failed: {error}"
+                descriptor["mutation_state"] = "committed"
+                descriptor["error"] = _safe_failure("measure_chunk_bytes(after)", error)
                 any_errors = True
                 # The compression itself did succeed, so the chunk reached the
                 # compressed state — record chunks_compressed + before_bytes.
@@ -539,6 +616,7 @@ def build_receipt(
                 selected_descriptors.append(descriptor)
                 continue
             descriptor = _descriptor(chunk, before=before, after=after)
+            descriptor["mutation_state"] = "committed"
             key = chunk.hypertable_key
             totals[key]["chunks_compressed"] += 1
             totals[key]["before_bytes"] += before
@@ -565,11 +643,25 @@ def build_receipt(
         outcome = "clean"
 
     deferred_descriptors = [
-        {**_descriptor(chunk, before=0, after=None), "defer_reason": "per-tick bound reached"}
+        {
+            **{
+                key: value
+                for key, value in _descriptor(chunk, before=0, after=None).items()
+                if key != "mutation_state"
+            },
+            "defer_reason": "per-tick bound reached",
+        }
         for chunk in deferred_rows
     ]
     skipped_descriptors = [
-        {**_descriptor(chunk, before=0, after=None), "skip_reason": "range_end inside lag window"}
+        {
+            **{
+                key: value
+                for key, value in _descriptor(chunk, before=0, after=None).items()
+                if key != "mutation_state"
+            },
+            "skip_reason": "range_end inside lag window",
+        }
         for chunk in skipped_rows
     ]
     return {
@@ -631,6 +723,63 @@ def build_refused_lock_receipt(
     }
 
 
+def build_failed_receipt(
+    config: CompressionConfig,
+    *,
+    now_utc: datetime,
+    stage: str,
+    head_sha: str | None,
+    mutation_state: str = "failed_before_mutation",
+) -> dict[str, Any]:
+    """Build a non-secret terminal failure that replaces any stale success."""
+
+    receipt: dict[str, Any] = {
+        "schema_version": "2.0" if head_sha is not None else "1.0",
+        "generated_at": _iso(datetime.now(UTC)),
+        "now_utc": _iso(now_utc),
+        "lag_seconds": config.lag_seconds,
+        "per_tick_bound": config.per_tick_bound,
+        "mode": "enforce" if config.enforce else "dry-run",
+        "outcome": "failed",
+        "selected": [],
+        "deferred": [],
+        "skipped": [],
+        "per_table_totals": {
+            key: {"before_bytes": 0, "after_bytes": None, "chunks_compressed": 0}
+            for key in _blank_totals()
+        },
+        "failure": {"stage": stage, "mutation_state": mutation_state},
+    }
+    if head_sha is not None:
+        receipt["head_sha"] = head_sha
+    return receipt
+
+
+def _replace_stale_with_failure(
+    config: CompressionConfig,
+    *,
+    now_utc: datetime,
+    stage: str,
+    head_sha: str | None,
+    mutation_state: str = "failed_before_mutation",
+) -> None:
+    try:
+        publish_receipt(
+            config,
+            build_failed_receipt(
+                config,
+                now_utc=now_utc,
+                stage=stage,
+                head_sha=head_sha,
+                mutation_state=mutation_state,
+            ),
+        )
+    except SafeFilesystemError:
+        # Publication failure is reported by the caller; no claim that the
+        # stale destination was replaced is made.
+        return
+
+
 def _emit_stderr_diagnostic(status: str, reason: str, dsn: str | None = None) -> None:
     payload: dict[str, Any] = {"status": status, "reason": reason}
     if dsn is not None:
@@ -645,6 +794,7 @@ def main(
     fetch_chunks: FetchChunks | None = None,
     measure_chunk_bytes: MeasureChunkBytes | None = None,
     compress_chunk: CompressChunk | None = None,
+    reconcile_chunk_state: ReconcileChunkState | None = None,
 ) -> int:
     try:
         args = _parser().parse_args(argv)
@@ -656,11 +806,23 @@ def main(
     try:
         frozen_head_sha = _current_head_sha(require_clean=True)
     except CompressionConfigError as error:
+        _replace_stale_with_failure(
+            config,
+            now_utc=now,
+            stage="freeze_head",
+            head_sha=None,
+        )
         _emit_stderr_diagnostic("failed", str(error), dsn=config.database_url)
         return 1
     try:
         lock_fd = acquire_lock(config.lock_path)
     except CompressionConfigError as error:
+        _replace_stale_with_failure(
+            config,
+            now_utc=now,
+            stage="acquire_lock",
+            head_sha=frozen_head_sha,
+        )
         _emit_stderr_diagnostic("failed", str(error))
         return 1
     if lock_fd is None:
@@ -686,16 +848,41 @@ def main(
                 fetch_chunks=fetch_chunks or _default_fetch_chunks,
                 measure_chunk_bytes=measure_chunk_bytes or _default_measure_chunk_bytes,
                 compress_chunk=compress_chunk or _default_compress_chunk,
+                reconcile_chunk_state=reconcile_chunk_state
+                or _default_reconcile_chunk_state,
                 head_sha=frozen_head_sha,
             )
         except CompressionConfigError as error:
+            _replace_stale_with_failure(
+                config,
+                now_utc=now,
+                stage="runner",
+                head_sha=frozen_head_sha,
+            )
             _emit_stderr_diagnostic("failed", str(error), dsn=config.database_url)
             return 1
         except SafeFilesystemError as error:
+            _replace_stale_with_failure(
+                config,
+                now_utc=now,
+                stage="runner",
+                head_sha=frozen_head_sha,
+            )
             _emit_stderr_diagnostic("failed", f"receipt publication error: {error}", dsn=config.database_url)
             return 1
         except Exception as error:
-            _emit_stderr_diagnostic("failed", f"compression runner error: {error}", dsn=config.database_url)
+            _replace_stale_with_failure(
+                config,
+                now_utc=now,
+                stage="runner",
+                head_sha=frozen_head_sha,
+                mutation_state="indeterminate" if config.enforce else "failed_before_mutation",
+            )
+            _emit_stderr_diagnostic(
+                "failed",
+                f"compression runner error ({type(error).__name__})",
+                dsn=config.database_url,
+            )
             return 1
         try:
             publish_receipt(config, receipt)

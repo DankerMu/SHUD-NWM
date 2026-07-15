@@ -1012,8 +1012,9 @@ Order is load-bearing:
   runner plus independent live-evidence verifier focused suites, storage
   schema suite, ruff, both schema examples/metaschemas, strict OpenSpec, and
   `git diff --check` pass locally. Task 4.1 is closed by the live catalog
-  evidence; task 4.5 was left open pending the hardened replay and is now
-  closed by the accepted v2 evidence below.
+  evidence. The recorded v2 replay later exposed expanded-fixture invariant
+  gaps; task 4.5 remains open pending fresh live evidence under the strengthened
+  contract below.
 - [x] 4.3 Add the fail-closed compressed-chunk write guard to all three
   hypertable write paths.
   Evidence floor: one shared pre-write helper detects compressed-chunk
@@ -1041,7 +1042,7 @@ Order is load-bearing:
   Test rows:
   - Input: resource-governance audit run (systemctl mocked).
     Expected: receipt includes compression service/timer states.
-- [x] 4.5 node-27 live: apply the migration and run the initial
+- [ ] 4.5 node-27 live: apply the migration and run the initial
   terminal-chunk compression.
   Evidence floor: committed receipt with per-table before/after totals
   (acceptance: combined on-disk size of the two hypertables strictly
@@ -1062,7 +1063,7 @@ Order is load-bearing:
   gap: contention publishes `refused_lock`, while the committed timer service
   invokes the wrapper with literal `--enforce`. Task 4.2 is closed by the
   local implementation evidence above and task 4.1 by the catalog proof;
-  task 4.5 is closed by the accepted replay below. The node-27 pre-mutation
+  task 4.5 is not closed by the recorded replay below. The node-27 pre-mutation
   probe also
   proved that TimescaleDB 2.10 requires compressed-sibling resolution through
   `_timescaledb_catalog.chunk.compressed_chunk_id`; the runner and regression
@@ -1094,7 +1095,8 @@ Order is load-bearing:
   dry-run/enforce receipts reselected the same exact target before one bound-1
   recompression.
 
-  Accepted v2 replay evidence (#1069, 2026-07-15): the exact recovery target
+  Recorded v2 replay evidence (#1069, 2026-07-15; acceptance superseded): the
+  exact recovery target
   retained 5,738,400 rows across its sole decompression, then one v2 enforce
   recompressed it with `bound=1`, compression lag 604800 seconds (7 days), and
   no second target. The selected chunk fell from 3,088,285,696 to 134,119,424
@@ -1126,9 +1128,21 @@ Order is load-bearing:
   - `docs/runbooks/receipts/tier-node27-timeseries-storage/timeseries-compression/terminal-replay-20260715T114625Z.json`
     — `f4b1cbf9a0a8f60a30ddb8b4787584542aabeec35799fa7a9dd1de7242deff65`.
 
-  The independent verifier generated the terminal at
-  `2026-07-15T11:46:25.062814Z` with verdict `PASS_TASK_4_5`; task 4.5 is
-  accepted and closed.
+  The then-current verifier generated the terminal at
+  `2026-07-15T11:46:25.062814Z` with verdict `PASS_TASK_4_5`. Full cross-review
+  subsequently confirmed false-PASS gaps in path ingestion, execution and
+  unit provenance, production query/plan/load identity, selector/snapshot
+  transition proof, and mutation uncertainty. The immutable receipt remains
+  historical evidence, not current acceptance.
+
+  Invariant-closure evidence gap: read-only recapture can prove current source
+  and unit bytes, dump readability, current catalog, and current production
+  query construction. It cannot retroactively prove the two ordered migration
+  executions, the prior/final activation window, invocation cardinality and
+  timeout, the pre-compression plans/snapshots, or the possible-mutation
+  reconciliation state. Those require a newly authorized controlled live
+  replay. No node-27 mutation was performed by the closure fix; task 4.5 stays
+  unchecked until a terminal produced from the expanded contract passes.
 
 ## 5. Archive rebuild drill (`archive-rebuild-drill`)
 
