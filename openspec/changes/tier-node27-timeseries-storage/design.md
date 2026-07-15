@@ -555,7 +555,11 @@ Invariant Matrix:
   emits a redacted structured stderr diagnostic, and atomically replaces the
   configured receipt with a schema-valid `refused_lock` receipt so the required
   lock-skip state is governance-visible rather than leaving stale evidence.
-- Strict config parse: invalid lag (empty, negative, non-numeric, `"0"`) → exit non-zero before any DB call; no stale receipt overwrite.
+- Strict config parse: invalid lag (empty, negative, non-numeric, `"0"`) →
+  exit non-zero before any DB call. When the absolute receipt destination is
+  independently known-safe and path/inode-disjoint from the lock input, replace
+  stale success with a schema-v2 config-failure tombstone; when the destination
+  is missing, relative, unsafe, unknown, or aliases the lock, touch nothing.
 - Migration idempotent on partial state: re-applying after only one table's ALTER succeeded must fix the second table without erroring on the first.
 - Compression `segmentby` covers PK columns (TimescaleDB 2.10 unique-constraint requirement) — asserted via test that reads the migration text and cross-references the expected PK column list per table.
 - Compressed-chunk catalog verifiable: after migration, `timescaledb_information.compression_settings` rows for both hypertables list exactly the D3-specified columns (segmentby + orderby); this is task 4.1 acceptance and is unit-testable by parsing the migration file plus a real-DB smoke marker (deferred to #853 for the live oracle).
