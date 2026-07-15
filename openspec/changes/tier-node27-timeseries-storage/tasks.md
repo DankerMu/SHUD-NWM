@@ -1012,7 +1012,8 @@ Order is load-bearing:
   runner plus independent live-evidence verifier focused suites, storage
   schema suite, ruff, both schema examples/metaschemas, strict OpenSpec, and
   `git diff --check` pass locally. Task 4.1 is closed by the live catalog
-  evidence; task 4.5 remains open on the evidence replay described below.
+  evidence; task 4.5 was left open pending the hardened replay and is now
+  closed by the accepted v2 evidence below.
 - [x] 4.3 Add the fail-closed compressed-chunk write guard to all three
   hypertable write paths.
   Evidence floor: one shared pre-write helper detects compressed-chunk
@@ -1040,7 +1041,7 @@ Order is load-bearing:
   Test rows:
   - Input: resource-governance audit run (systemctl mocked).
     Expected: receipt includes compression service/timer states.
-- [ ] 4.5 node-27 live: apply the migration and run the initial
+- [x] 4.5 node-27 live: apply the migration and run the initial
   terminal-chunk compression.
   Evidence floor: committed receipt with per-table before/after totals
   (acceptance: combined on-disk size of the two hypertables strictly
@@ -1061,14 +1062,15 @@ Order is load-bearing:
   gap: contention publishes `refused_lock`, while the committed timer service
   invokes the wrapper with literal `--enforce`. Task 4.2 is closed by the
   local implementation evidence above and task 4.1 by the catalog proof;
-  task 4.5 remains open. The node-27 pre-mutation probe also
+  task 4.5 is closed by the accepted replay below. The node-27 pre-mutation
+  probe also
   proved that TimescaleDB 2.10 requires compressed-sibling resolution through
   `_timescaledb_catalog.chunk.compressed_chunk_id`; the runner and regression
   test pin that live-compatible lookup before any `compress_chunk` call. The
   independent verifier also binds the exact sibling while allowing at most
   1 MiB of post-measurement FSM/VM drift; larger drift or failure to reduce
   below the origin remains terminal failure.
-  Live outcome and evidence gap (#1069, 2026-07-15): committed receipts are
+  Historical v1 outcome and evidence gap (#1069, 2026-07-15): receipts are
   `docs/runbooks/receipts/tier-node27-timeseries-storage/timeseries-compression/`.
   The exact bound-1 enforce compressed one hydro terminal chunk from
   4,115,734,528 to 134,119,424 bytes; combined two-table hypertable size fell
@@ -1077,21 +1079,56 @@ Order is load-bearing:
   inactive with zero service activations. Final review rejected the terminal
   envelope because it rewrote the mutation SHA in preflight, persisted only
   one selector snapshot, and omitted complete benchmark bindings,
-  cold/warmup/activity records, and seven measured plans. The operation is not
-  rerun and the terminal is not accepted. Task 4.5 stays open until a
-  separately authorized evidence replay satisfies the hardened contract.
-  The user authorized that replay on 2026-07-15 for only
+  cold/warmup/activity records, and seven measured plans. That historical
+  terminal remains rejected and has not been relabeled. The user separately
+  authorized an evidence replay on 2026-07-15 for only
   `_timescaledb_internal._hyper_3_7_chunk`
-  (`2026-05-28T00:00:00Z` through `2026-06-04T00:00:00Z`). Closure now also
-  requires two distinct hashed recovery artifacts: a preflight proving this
+  (`2026-05-28T00:00:00Z` through `2026-06-04T00:00:00Z`). The replay required
+  two distinct hashed recovery artifacts: a preflight proving this
   exact target is compressed, row count is positive, and free space is at
   least 300 GiB; and a receipt proving one successful decompression returned
   the same relation, left it uncompressed, and preserved the row count. Both
   bind node-27, the mutation SHA and database identity, with chronology ending
   before the fresh compression preflight. Authorization and terminal truth
   record decompression as performed; the two selector snapshots plus new v2
-  dry-run/enforce receipts must reselect the same exact target before one
-  bound-1 recompression.
+  dry-run/enforce receipts reselected the same exact target before one bound-1
+  recompression.
+
+  Accepted v2 replay evidence (#1069, 2026-07-15): the exact recovery target
+  retained 5,738,400 rows across its sole decompression, then one v2 enforce
+  recompressed it with `bound=1`, compression lag 604800 seconds (7 days), and
+  no second target. The selected chunk fell from 3,088,285,696 to 134,119,424
+  bytes. Direct hypertable-size evidence was:
+
+  | Hypertable | Before bytes | After bytes | Compressed chunks after |
+  | --- | ---: | ---: | ---: |
+  | `hydro.river_timeseries` | 180,168,245,248 | 177,214,144,512 | 1 |
+  | `met.forcing_station_timeseries` | 85,404,286,976 | 85,404,286,976 | 0 |
+  | **Combined** | **265,572,532,224** | **262,618,431,488** | **1** |
+
+  Combined size therefore strictly decreased by 2,954,100,736 bytes and total
+  compressed-chunk count is 1 (> 0). Curve results were identical with median
+  0.435 ms -> 0.432 ms and p95 0.499 ms -> 0.434 ms. MVT bytes/hash were
+  identical with median 4.583 ms -> 4.951 ms and p95 4.618 ms -> 4.972 ms;
+  both passed their pinned thresholds and all seven after plans for each query
+  bound `DecompressChunk`. Cleanup restored autopipe enabled/active, left the
+  compression timer enabled/inactive and service inactive, recorded zero
+  activations, and proved installed units byte-identical. Retention, node-22,
+  drill, and role mutation remained false; `decompress_run=true` truthfully
+  records the separately authorized recovery.
+
+  Committed immutable receipts and SHA256:
+
+  - `docs/runbooks/receipts/tier-node27-timeseries-storage/timeseries-compression/dry-run-replay-20260715T114310Z.json`
+    — `5804660072c640634de6200c42b9cecd46308ca66c9ae85c20adc7b73e64ed5b`.
+  - `docs/runbooks/receipts/tier-node27-timeseries-storage/timeseries-compression/enforce-replay-20260715T114420Z.json`
+    — `634205e8f367bae88bd72cd476046e1bef3aa86bf43afe6bbca055d60a5c573c`.
+  - `docs/runbooks/receipts/tier-node27-timeseries-storage/timeseries-compression/terminal-replay-20260715T114625Z.json`
+    — `f4b1cbf9a0a8f60a30ddb8b4787584542aabeec35799fa7a9dd1de7242deff65`.
+
+  The independent verifier generated the terminal at
+  `2026-07-15T11:46:25.062814Z` with verdict `PASS_TASK_4_5`; task 4.5 is
+  accepted and closed.
 
 ## 5. Archive rebuild drill (`archive-rebuild-drill`)
 
