@@ -218,3 +218,4 @@
 {"issue":1076,"pr":1077,"date":"2026-07-15","fixture":"expanded","rounds":1,"gate_net_catch":23,"verdicts":{"confirmed":23,"plausible":0,"refuted":0},"residual_deferred":0,"premerge_skip_blocks":0}
 {"issue":1065,"pr":1075,"date":"2026-07-15","fixture":"expanded","rounds":1,"gate_net_catch":9,"verdicts":{"confirmed":9,"plausible":0,"refuted":0},"residual_deferred":1,"premerge_skip_blocks":0}
 {"issue":849,"pr":1083,"date":"2026-07-15","fixture":"expanded","rounds":1,"gate_net_catch":3,"verdicts":{"confirmed":3,"plausible":0,"refuted":0},"residual_deferred":1,"premerge_skip_blocks":0}
+{"issue":1070,"pr":1084,"date":"2026-07-15","fixture":"expanded","rounds":1,"gate_net_catch":5,"verdicts":{"confirmed":5,"plausible":0,"refuted":0},"residual_deferred":3,"premerge_skip_blocks":0}
