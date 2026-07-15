@@ -713,6 +713,10 @@ credential in process argv.
     selected chunk must become compressed; selected and combined hypertable
     bytes must decrease. It is truthful and expected that the met table can
     remain settings-only with compressed count zero in this bounded batch.
+    On node-27's TimescaleDB 2.10.2, resolve the sibling by joining origin and
+    sibling rows in `_timescaledb_catalog.chunk` through
+    `origin.compressed_chunk_id`; the 2.10 information view does not expose
+    `compressed_chunk_schema` or `compressed_chunk_name` columns.
 
 The representative performance proof uses production query construction, not
 handwritten lookalikes. For the selected hydro chunk, freeze a nonempty

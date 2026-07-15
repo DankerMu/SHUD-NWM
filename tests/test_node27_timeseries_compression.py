@@ -962,6 +962,19 @@ def test_timeseries_compression_service_bootstraps_log_dir() -> None:
     assert pre_index < start_index
 
 
+def test_compressed_sibling_lookup_matches_timescaledb_210_catalog() -> None:
+    query = compression._COMPRESSED_SIBLING_QUERY
+    assert "_timescaledb_catalog.chunk AS origin" in query
+    assert "_timescaledb_catalog.chunk AS sibling" in query
+    assert "sibling.id = origin.compressed_chunk_id" in query
+    assert "origin.schema_name = %s" in query
+    assert "origin.table_name = %s" in query
+    assert "NOT origin.dropped" in query
+    assert "NOT sibling.dropped" in query
+    assert "compressed_chunk_schema" not in query
+    assert "compressed_chunk_name" not in query
+
+
 def test_systemd_service_enforces_but_manual_wrapper_defaults_to_dry_run() -> None:
     service_text = _SYSTEMD_SERVICE_PATH.read_text(encoding="utf-8")
     exec_lines = [line for line in service_text.splitlines() if line.startswith("ExecStart=")]

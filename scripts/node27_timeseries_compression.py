@@ -235,6 +235,24 @@ ORDER BY hypertable_schema, hypertable_name, range_end ASC
 """
 
 
+# TimescaleDB 2.10 exposes compression state in
+# ``timescaledb_information.chunks`` but does not expose the compressed
+# sibling relation name there.  Resolve the origin -> sibling mapping from
+# the extension's chunk catalog instead.  The node-27 live oracle runs 2.10.2;
+# querying non-existent ``compressed_chunk_schema/name`` information-view
+# columns would fail only after ``compress_chunk`` had already mutated data.
+_COMPRESSED_SIBLING_QUERY = """
+SELECT sibling.schema_name, sibling.table_name
+FROM _timescaledb_catalog.chunk AS origin
+JOIN _timescaledb_catalog.chunk AS sibling
+  ON sibling.id = origin.compressed_chunk_id
+WHERE origin.schema_name = %s
+  AND origin.table_name = %s
+  AND NOT origin.dropped
+  AND NOT sibling.dropped
+"""
+
+
 def _row_to_chunk(row: Mapping[str, Any]) -> ChunkRow:
     range_start = row["range_start"]
     range_end = row["range_end"]
@@ -310,11 +328,7 @@ def _default_measure_chunk_bytes(
                     # the outer per-chunk try/except records ``after_bytes =
                     # null`` in the descriptor and marks outcome=partial.
                     cursor.execute(
-                        """
-                        SELECT compressed_chunk_schema, compressed_chunk_name
-                        FROM timescaledb_information.chunks
-                        WHERE chunk_schema = %s AND chunk_name = %s
-                        """,
+                        _COMPRESSED_SIBLING_QUERY,
                         (chunk.chunk_schema, chunk.chunk_name),
                     )
                     row = cursor.fetchone()

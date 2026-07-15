@@ -1052,7 +1052,10 @@ Order is load-bearing:
   gap: contention publishes `refused_lock`, while the committed timer service
   invokes the wrapper with literal `--enforce`. Task 4.2 is closed by the
   local implementation evidence above; tasks 4.1 and 4.5 remain open until
-  their real node-27 evidence passes.
+  their real node-27 evidence passes. The node-27 pre-mutation probe also
+  proved that TimescaleDB 2.10 requires compressed-sibling resolution through
+  `_timescaledb_catalog.chunk.compressed_chunk_id`; the runner and regression
+  test pin that live-compatible lookup before any `compress_chunk` call.
 
 ## 5. Archive rebuild drill (`archive-rebuild-drill`)
 
