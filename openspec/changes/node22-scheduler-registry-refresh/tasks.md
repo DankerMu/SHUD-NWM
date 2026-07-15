@@ -94,25 +94,25 @@
 
 ## 4. Node-22/Node-27 Live Recovery
 
-- [ ] 4.1 Capture frozen SHA plus three provider hashes/evidence, unit states,
+- [x] 4.1 Capture frozen SHA plus three provider hashes/evidence, unit states,
   process DB-free proof and Slurm queue; deploy by ff-only pull.
-- [ ] 4.2 Install refresh units stopped; run dry-run and manual refresh. Record
+- [x] 4.2 Install refresh units stopped; run dry-run and manual refresh. Record
   old/new schema/checksum/generated_at, exact current live inventory (19 models
   on 2026-07-15 after removing duplicate `HHe-MAIN-02`), GFS/IFS readiness
   entries (19 each/38 total for that
   inventory) and catalog URI/SHA/row-count bindings, state entries and
   referenced-object proofs, v1 receipt, no-DB proof and identical node-22/
   node-27 NFS bytes.
-- [ ] 4.3 Prove renewal used full validation/publisher paths and rejects a
+- [x] 4.3 Prove renewal used full validation/publisher paths and rejects a
   timestamp-only mutation; any missing/invalid provider blocks before scheduler.
-- [ ] 4.4 Run one bounded pass no longer `db_free_registry_blocked`; bind one
+- [x] 4.4 Run one bounded pass no longer `db_free_registry_blocked`; bind one
   candidate/run to every actual Slurm stage job and at least one terminal
   accounting result; prove actual stages create genuinely new forcing/runs/
   states leaves rather than reuse old forcing.
-- [ ] 4.5 From node-27 verify exact new source/cycle/model/run identities,
+- [x] 4.5 From node-27 verify exact new source/cycle/model/run identities,
   owner/group/mode/default ACL and `nwm` access. Restore scheduler and issue-owned
   jobs; on success leave refresh timer enabled/active, on failure roll it back.
-- [ ] 4.6 Commit redacted live receipts and tick this section only for the frozen
+- [x] 4.6 Commit redacted live receipts and tick this section only for the frozen
   implementation SHA after local, node-22 scheduling and node-27 NFS gates pass.
   Execute no product-archive or #856 cascade command.
 
