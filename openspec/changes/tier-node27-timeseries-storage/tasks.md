@@ -974,7 +974,7 @@ Order is load-bearing:
 
 ## 4. Hypertable compression (`hypertable-compression`)
 
-- [ ] 4.1 Migration `000047`: compression settings for both hypertables. (Issue #851 body still cites `000043` from the earlier planning window; slot 000043–000046 are now occupied, so this task uses the next free slot 000047. #851 fixture in `design.md` records the deviation.)
+- [x] 4.1 Migration `000047`: compression settings for both hypertables. (Issue #851 body still cites `000043` from the earlier planning window; slot 000043–000046 are now occupied, so this task uses the next free slot 000047. #851 fixture in `design.md` records the deviation.)
   Evidence floor: `ALTER TABLE ... SET (timescaledb.compress,
   compress_segmentby, compress_orderby)` per design D3; no policy job.
   Verification on the real-DB oracle:
@@ -986,6 +986,11 @@ Order is load-bearing:
   Test rows:
   - Input: migration applied on the node-27 real-DB oracle.
     Expected: both catalog assertions above pass for both hypertables.
+  Closure evidence (#1069, 2026-07-15): both guarded applies exited zero;
+  their canonical catalog documents were byte-identical. Both hypertables
+  report compression enabled, the nine indexed D3 segment/order settings
+  match exactly, and no compression-policy job exists. The independently
+  verified terminal receipt is linked under task 4.5.
 - [x] 4.2 Build the compression runner
   (`scripts/node27_timeseries_compression.py` + `_once.sh`).
   Evidence floor: compresses only chunks whose `range_end` is older than the
@@ -1006,7 +1011,8 @@ Order is load-bearing:
   `--enforce` wiring and the manual wrapper remains dry-run by default. The
   runner plus independent live-evidence verifier focused suites, storage
   schema suite, ruff, both schema examples/metaschemas, strict OpenSpec, and
-  `git diff --check` pass locally. Tasks 4.1 and 4.5 remain live-only.
+  `git diff --check` pass locally. Tasks 4.1 and 4.5 are closed by the live
+  evidence below.
 - [x] 4.3 Add the fail-closed compressed-chunk write guard to all three
   hypertable write paths.
   Evidence floor: one shared pre-write helper detects compressed-chunk
@@ -1034,7 +1040,7 @@ Order is load-bearing:
   Test rows:
   - Input: resource-governance audit run (systemctl mocked).
     Expected: receipt includes compression service/timer states.
-- [ ] 4.5 node-27 live: apply the migration and run the initial
+- [x] 4.5 node-27 live: apply the migration and run the initial
   terminal-chunk compression.
   Evidence floor: committed receipt with per-table before/after totals
   (acceptance: combined on-disk size of the two hypertables strictly
@@ -1051,14 +1057,25 @@ Order is load-bearing:
   issue also closes the discovered task-4.2 lock-receipt gap and #853 wiring
   gap: contention publishes `refused_lock`, while the committed timer service
   invokes the wrapper with literal `--enforce`. Task 4.2 is closed by the
-  local implementation evidence above; tasks 4.1 and 4.5 remain open until
-  their real node-27 evidence passes. The node-27 pre-mutation probe also
+  local implementation evidence above; tasks 4.1 and 4.5 are closed by the
+  real node-27 evidence below. The node-27 pre-mutation probe also
   proved that TimescaleDB 2.10 requires compressed-sibling resolution through
   `_timescaledb_catalog.chunk.compressed_chunk_id`; the runner and regression
   test pin that live-compatible lookup before any `compress_chunk` call. The
   independent verifier also binds the exact sibling while allowing at most
   1 MiB of post-measurement FSM/VM drift; larger drift or failure to reduce
   below the origin remains terminal failure.
+  Closure evidence (#1069, 2026-07-15): committed receipts are
+  `docs/runbooks/receipts/tier-node27-timeseries-storage/timeseries-compression/`.
+  The exact bound-1 enforce compressed one hydro terminal chunk from
+  4,115,734,528 to 134,119,424 bytes; combined two-table hypertable size fell
+  from 266,599,981,056 to 262,618,431,488 bytes and compressed count increased
+  by one. Production curve/MVT outputs retained byte-identical hashes, stayed
+  warm-cache, passed median/p95 gates, and all after plans bound the selected
+  `DecompressChunk`. Terminal SHA-256
+  `c295329e3342c8f91aa4856b98f78230b26e8fe8a0edc5ad59003360ccc05339`
+  has verdict `PASS_TASK_4_5`; cleanup restored autopipe and left the enabled
+  compression timer inactive with zero service activations.
 
 ## 5. Archive rebuild drill (`archive-rebuild-drill`)
 
