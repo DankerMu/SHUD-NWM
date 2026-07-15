@@ -49,6 +49,24 @@
       }
     }
   },
+  "allOf": [
+    {
+      "if": {"properties": {"outcome": {"const": "refused_lock"}}, "required": ["outcome"]},
+      "then": {
+        "properties": {
+          "selected": {"maxItems": 0},
+          "deferred": {"maxItems": 0},
+          "skipped": {"maxItems": 0},
+          "per_table_totals": {
+            "properties": {
+              "hydro.river_timeseries": {"$ref": "#/$defs/refused_table_total"},
+              "met.forcing_station_timeseries": {"$ref": "#/$defs/refused_table_total"}
+            }
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "selected_descriptor": {
       "type": "object",
@@ -135,6 +153,16 @@
         "before_bytes": {"type": "integer", "minimum": 0},
         "after_bytes": {"type": ["integer", "null"], "minimum": 0},
         "chunks_compressed": {"type": "integer", "minimum": 0}
+      }
+    },
+    "refused_table_total": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["before_bytes", "after_bytes", "chunks_compressed"],
+      "properties": {
+        "before_bytes": {"const": 0},
+        "after_bytes": {"type": "null"},
+        "chunks_compressed": {"const": 0}
       }
     }
   }

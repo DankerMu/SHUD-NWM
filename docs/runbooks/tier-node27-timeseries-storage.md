@@ -638,6 +638,166 @@ runner (`scripts/node27_timeseries_compression.py`, `#851`), never to the
 active write-target chunk. This section covers the fail-closed write guard
 and the manual decompress procedure that pairs with it.
 
+### 4.0 Controlled initial live run (`#1069`)
+
+The first production compression is a one-chunk controlled operation, not a
+normal timer tick. The committed service is the only recurring mutation
+entrypoint and therefore has the literal invocation
+`node27_timeseries_compression_once.sh --enforce`. Direct operator invocation
+of the wrapper **without** that flag remains dry-run. A contended wrapper
+publishes a mode-0600, schema-valid `outcome=refused_lock` receipt with empty
+`selected`/`deferred`/`skipped`, null/zero totals, no DB call, and a redacted
+stderr diagnostic; this deliberately replaces a stale shared receipt.
+
+Run this sequence only from an ff-only-synchronized, tracked-clean node-27
+worktree whose SHA is the reviewed #1069 head. Keep all generated evidence
+under `/home/nwm/NWM/.nhms-issue1069-live/` mode 0600. Never print or commit the
+writer password/full DSN, run shell tracing, dump the environment, or place a
+credential in process argv.
+
+1. Capture preflight JSON binding node-27, repository path/SHA, UTC time,
+   PostgreSQL/TimescaleDB versions, `dbname=nhms`, instance
+   `node27-primary-pg15`, container/service state, exact pre-run unit state,
+   and the three deployed #852 write-guard sites. Source the existing ingest
+   writer credential into the canonical untracked
+   `infra/env/node27-timeseries-compression.env` and require mode 0600. The
+   evidence records only host/port/dbname/current user, redacted connection
+   identity, and privilege booleans.
+2. Record the role truth exactly: `current_user=nhms`, `rolsuper=true`,
+   `rolcreaterole=true`, `rolcreatedb=true`, ownership of both target
+   hypertables, and EXECUTE on installed
+   `compress_chunk(regclass,boolean)`. Do not call it least privilege. Do not
+   create/alter/grant a role and do not use `nhms_display_ro`.
+3. Before migration, write a custom-format schema-only `pg_dump`, require
+   `pg_restore --list` exit 0, and record the dump's absolute path/bytes/sha256.
+   Also capture canonical JSON for the two target tables' pre-migration
+   catalog. This dump is forensic DDL inventory, not a data backup, restore
+   drill, or compressed-storage rollback.
+4. Capture the original autopipe/compression timer+service enabled/active/sub,
+   `MainPID`, result and bounded journal. Stop only the autopipe timer. Require
+   `MainPID=0`, no activating/running autopipe process, and no live writer or
+   conflicting lock on either target/chosen chunk. A pre-existing failed
+   autopipe service with `MainPID=0` is preserved; do not `reset-failed` to
+   manufacture a clean state.
+5. Apply `db/migrations/000047_hypertable_compression_settings.sql` with
+   `ON_ERROR_STOP=1`. Only after exit 0, apply the same file a second time.
+   The two canonical post-apply catalog documents must be byte-identical and
+   must contain exactly D3's indexed segment/order columns, both hypertables
+   compression-enabled, and no compression-policy job. A nonzero first apply
+   stops the run; repairing partial DDL is separately authorized.
+6. Install the committed service/timer byte-for-byte under
+   `~/.config/systemd/user/`, verify both file hashes, `daemon-reload`, then run
+   `systemctl --user enable nhms-node27-timeseries-compression.timer` **without
+   `--now`**. Require `is-enabled=enabled` while timer and service stay
+   inactive throughout this issue. `Persistent=true` means starting the timer
+   can catch up the missed 04:25 event and create an unauthorized second batch.
+7. Independently reproduce the runner's exact catalog predicate/order with
+   lag 604800 and bound 1. Freeze compact sorted JSON for the selected identity
+   tuple `(hypertable_schema, hypertable_name, chunk_schema, chunk_name,
+   range_start, range_end)` and its sha256. The selection must be one terminal
+   `hydro.river_timeseries` chunk, more than ten minutes outside the cutoff,
+   `pg_total_relation_size <= 8589934592`, with at least 322122547200 free
+   filesystem bytes. Stop on any mismatch.
+8. Invoke the wrapper once without `--enforce` using a task-specific receipt.
+   Require a clean dry-run, exact bound-1 tuple, every `after_bytes=null`, no
+   catalog mutation and no service activation. Immediately repeat the
+   independent selector query and require the same selector hash.
+9. The sole authorized mutation is one direct wrapper invocation with literal
+   `--enforce`, the same env/lag/bound/lock, a distinct receipt, and an external
+   900-second timeout. Do not use the timer or call `compress_chunk` manually.
+   A timeout, partial result, scope mismatch or null/error `after_bytes` is
+   terminal failed evidence and does not authorize a retry.
+10. Capture both-table pre/post snapshots with `hypertable_size(regclass)`
+    (acceptance size), parent `pg_total_relation_size` (diagnostic only),
+    compressed/uncompressed counts, and compressed sibling names/sizes. One
+    selected chunk must become compressed; selected and combined hypertable
+    bytes must decrease. It is truthful and expected that the met table can
+    remain settings-only with compressed count zero in this bounded batch.
+
+The representative performance proof uses production query construction, not
+handwritten lookalikes. For the selected hydro chunk, freeze a nonempty
+production-valid `q_down` identity. Curve capture calls
+`PsycopgForecastStore.get_forecast_series`, records the exact statement/params
+sent by `_fetch_forecast_segment_rows`, and hashes
+`packages/common/forecast_store.py`. MVT capture imports
+`postgis_tile_sql("hydro")`, uses the same parameter construction as
+`hydro_display._postgis_tile_params` at deterministic z=9, and hashes both
+source files. Curve result bytes are compact sorted UTF-8 JSON plus a trailing
+newline; MVT result bytes are recorded as hex and hashed as decoded raw bytea.
+
+For each query and each phase, use a new read-only connection: retain the first
+execution as cold-biased information, perform two warmups (up to five while
+reads remain), then record exactly seven `EXPLAIN (ANALYZE, BUFFERS, FORMAT
+JSON)` samples. Before/after cache classes must match. The median is sorted
+sample 4; p95 is sample 7. Gates are
+`after_median <= max(1.5*before_median, before_median+100)` and
+`after_p95 <= max(2*before_p95, before_p95+250)`. Result rows/bytes/hash must be
+identical, concurrent-load sampling stable, and each after plan must recursively
+contain `DecompressChunk` bound to the selected chunk identity.
+
+#### 4.0.1 Independent terminal evidence bundle
+
+`scripts/node27_timeseries_compression_live_evidence.py` has no DB connection
+or mutation entrypoint. It reads one operator bundle, independently reopens
+every referenced artifact, verifies exact byte counts/sha256, validates both
+runner receipts, recomputes selector hashes, D3 settings, totals, size/count
+deltas, raw query/result hashes, median/p95 thresholds, and plan binding, then
+atomically publishes the terminal envelope against
+`schemas/timeseries_compression_live_evidence.schema.json`.
+
+Every bundle artifact reference is exactly
+`{"path":"/absolute/path","sha256":"<lowercase-64hex>","bytes":N}` and
+must name a regular non-symlink file. Canonical embedded JSON hashes are
+`jq -cS` UTF-8 including its trailing newline. The bundle has these exact
+top-level keys: `schema_version`, `issue`, `generated_at`, `node`, `head_sha`,
+`database_identity`, `authorization`, `preflight`, `migration`, `selection`,
+`receipts`, `sizes`, `catalog`, `benchmarks`, `cleanup`, `out_of_scope`.
+
+Referenced JSON contracts are:
+
+- `preflight.evidence`: the facts in steps 1–4, including exact role booleans,
+  guard presence, quiescence and inactive compression units;
+  `preflight.schema_dump` is the raw custom dump, and
+  `preflight.catalog_before` its canonical catalog neighbor.
+- `migration.catalog_after_first|second` and `catalog.post`:
+  `{"hypertables":{"hydro.river_timeseries":true,
+  "met.forcing_station_timeseries":true},"compression_settings":[...],
+  "policy_jobs":[]}`. Each setting row has exactly schema/table/`attname`,
+  `segmentby_column_index`, `orderby_column_index`, `orderby_asc`, and
+  `orderby_nullsfirst`, in the D3 order pinned by the fixture.
+- `selection.snapshot`: `cutoff`, `free_bytes`, and ordered `selected`; the
+  sole selected row adds `before_bytes` to the six-field identity tuple.
+- `sizes.pre|post`: `tables` keyed by both D3 hypertables. Each row has
+  `hypertable_size`, `parent_relation_size`, `compressed_chunks`,
+  `uncompressed_chunks`, and `compressed_relations`. Each compressed relation
+  binds `origin_chunk_schema`/`origin_chunk_name` to its sibling
+  `schema`/`name` and measured `bytes`.
+- `benchmarks.evidence`: exactly `curve`, then `mvt`. Each stores source refs,
+  exact `query_text` + sha256, non-secret parameters, before/after raw
+  `result_payload` + hash/row/byte counts, cache/timing/buffer fields, seven
+  samples, raw after plan, and concurrent-load verdict. Curve payload is a JSON
+  row array; MVT payload is nonempty even-length hex.
+- `cleanup.evidence`: autopipe restored, compression timer enabled/inactive,
+  compression service inactive with activation count zero, and installed unit
+  hashes matching the repository.
+
+Example invocation (paths contain no credential):
+
+```
+uv run python scripts/node27_timeseries_compression_live_evidence.py \
+  --bundle-path /home/nwm/NWM/.nhms-issue1069-live/bundle.json \
+  --output-path /home/nwm/NWM/.nhms-issue1069-live/terminal.json
+```
+
+`PASS_TASK_4_5` is emitted only after all gates pass. On any failure, keep both
+compression units inactive, restore the autopipe timer's exact prior state,
+and preserve artifacts. Compression is not a transactional batch: a chunk
+already compressed after a partial/timeout/regression remains compressed and
+the outcome remains failed/partial. Do not rerun enforce, auto-decompress,
+claim rollback from the schema dump, or relabel the evidence. Any later
+`decompress_chunk` recovery is a separate authorization bound to the exact
+successful receipt list, followed by fresh catalog/size/result/query checks.
+
 ### 4.1 Write guard overview
 
 The three ingest write paths —

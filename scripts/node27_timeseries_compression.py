@@ -550,6 +550,38 @@ def publish_receipt(config: CompressionConfig, receipt: Mapping[str, Any]) -> No
     )
 
 
+def build_refused_lock_receipt(
+    config: CompressionConfig, *, now_utc: datetime
+) -> dict[str, Any]:
+    """Build the mutation-free terminal receipt for a contended runner lock.
+
+    This path deliberately does not discover chunks: lock ownership is the
+    boundary before every DB call.  Publishing the refusal replaces any stale
+    success receipt so governance sees the current invocation's terminal
+    state.
+    """
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": _iso(datetime.now(UTC)),
+        "now_utc": _iso(now_utc),
+        "lag_seconds": config.lag_seconds,
+        "per_tick_bound": config.per_tick_bound,
+        "mode": "enforce" if config.enforce else "dry-run",
+        "outcome": "refused_lock",
+        "selected": [],
+        "deferred": [],
+        "skipped": [],
+        "per_table_totals": {
+            key: {
+                "before_bytes": 0,
+                "after_bytes": None,
+                "chunks_compressed": 0,
+            }
+            for key in _blank_totals()
+        },
+    }
+
+
 def _emit_stderr_diagnostic(status: str, reason: str, dsn: str | None = None) -> None:
     payload: dict[str, Any] = {"status": status, "reason": reason}
     if dsn is not None:
@@ -578,7 +610,17 @@ def main(
         _emit_stderr_diagnostic("failed", str(error))
         return 1
     if lock_fd is None:
-        _emit_stderr_diagnostic("skipped", "lock-contended", dsn=config.database_url)
+        receipt = build_refused_lock_receipt(config, now_utc=now)
+        try:
+            publish_receipt(config, receipt)
+        except SafeFilesystemError as error:
+            _emit_stderr_diagnostic(
+                "failed",
+                f"receipt publication error: {error}",
+                dsn=config.database_url,
+            )
+            return 1
+        _emit_stderr_diagnostic("refused_lock", "lock-contended", dsn=config.database_url)
         return 0
     try:
         try:

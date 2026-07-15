@@ -986,7 +986,7 @@ Order is load-bearing:
   Test rows:
   - Input: migration applied on the node-27 real-DB oracle.
     Expected: both catalog assertions above pass for both hypertables.
-- [ ] 4.2 Build the compression runner
+- [x] 4.2 Build the compression runner
   (`scripts/node27_timeseries_compression.py` + `_once.sh`).
   Evidence floor: compresses only chunks whose `range_end` is older than the
   configurable lag (default 7d), never the active chunk; dry-run default +
@@ -1000,6 +1000,13 @@ Order is load-bearing:
   - Input: run without the enforce flag, or with the flock already held.
     Expected: nothing compressed; dry-run candidate list or lock-skip
     receipt emitted.
+  Implementation evidence (#1069, 2026-07-15): lock contention atomically
+  replaces stale evidence with a schema-valid `refused_lock` receipt while
+  making zero DB calls; the committed service has the sole literal
+  `--enforce` wiring and the manual wrapper remains dry-run by default. The
+  runner plus independent live-evidence verifier focused suites, storage
+  schema suite, ruff, both schema examples/metaschemas, strict OpenSpec, and
+  `git diff --check` pass locally. Tasks 4.1 and 4.5 remain live-only.
 - [x] 4.3 Add the fail-closed compressed-chunk write guard to all three
   hypertable write paths.
   Evidence floor: one shared pre-write helper detects compressed-chunk
@@ -1043,8 +1050,9 @@ Order is load-bearing:
   The compression timer is installed and enabled but remains inactive. This
   issue also closes the discovered task-4.2 lock-receipt gap and #853 wiring
   gap: contention publishes `refused_lock`, while the committed timer service
-  invokes the wrapper with literal `--enforce`. Tasks 4.1, 4.2, and 4.5 remain
-  open until their respective code/live evidence passes.
+  invokes the wrapper with literal `--enforce`. Task 4.2 is closed by the
+  local implementation evidence above; tasks 4.1 and 4.5 remain open until
+  their real node-27 evidence passes.
 
 ## 5. Archive rebuild drill (`archive-rebuild-drill`)
 

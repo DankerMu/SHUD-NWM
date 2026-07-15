@@ -553,7 +553,7 @@ def test_partial_receipt_totals_stay_locked_across_all_failure_paths(
 # ---------------------------------------------------------------------------
 
 
-def test_main_exits_zero_on_lock_contention(
+def test_main_publishes_refused_lock_receipt_without_db_calls(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     env = _base_env(tmp_path)
@@ -564,18 +564,41 @@ def test_main_exits_zero_on_lock_contention(
     fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     receipt_path = Path(env["NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH"])
-    receipt_before = receipt_path.exists()
+    receipt_path.write_text('{"outcome":"stale-clean"}\n', encoding="utf-8")
+    receipt_path.chmod(0o600)
+    db_calls: list[str] = []
+
+    def fail_fetch(dsn: str) -> list[compression.ChunkRow]:
+        db_calls.append(dsn)
+        raise AssertionError("lock contender must not call the database")
     try:
-        code = compression.main(argv=[], now_utc=_NOW)
+        code = compression.main(argv=[], now_utc=_NOW, fetch_chunks=fail_fetch)
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
     assert code == 0
     diagnostic = json.loads(capsys.readouterr().err.strip())
-    assert diagnostic["status"] == "skipped"
+    assert diagnostic["status"] == "refused_lock"
     assert diagnostic["reason"] == "lock-contended"
     assert "secretpw" not in json.dumps(diagnostic)
-    assert receipt_path.exists() == receipt_before
+    assert db_calls == []
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "refused_lock"
+    assert receipt["selected"] == receipt["deferred"] == receipt["skipped"] == []
+    assert receipt["per_table_totals"] == {
+        "hydro.river_timeseries": {
+            "before_bytes": 0,
+            "after_bytes": None,
+            "chunks_compressed": 0,
+        },
+        "met.forcing_station_timeseries": {
+            "before_bytes": 0,
+            "after_bytes": None,
+            "chunks_compressed": 0,
+        },
+    }
+    jsonschema.validate(receipt, _load_schema())
+    assert receipt_path.stat().st_mode & 0o777 == 0o600
 
 
 # ---------------------------------------------------------------------------
@@ -646,6 +669,19 @@ def _example_receipt() -> dict:
 
 def test_schema_rejects_selected_entry_without_chunk_name() -> None:
     receipt = _example_receipt()
+    receipt["outcome"] = "clean"
+    receipt["selected"] = [
+        {
+            "hypertable_schema": "hydro",
+            "hypertable_name": "river_timeseries",
+            "chunk_schema": "_timescaledb_internal",
+            "chunk_name": "_hyper_1_42_chunk",
+            "range_start": "2026-05-01T00:00:00Z",
+            "range_end": "2026-05-08T00:00:00Z",
+            "before_bytes": 1,
+            "after_bytes": None,
+        }
+    ]
     del receipt["selected"][0]["chunk_name"]
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(receipt, _load_schema())
@@ -675,6 +711,24 @@ def test_schema_rejects_unknown_top_level_key() -> None:
 def test_schema_rejects_per_table_totals_missing_forcing_key() -> None:
     receipt = _example_receipt()
     del receipt["per_table_totals"]["met.forcing_station_timeseries"]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(receipt, _load_schema())
+
+
+def test_schema_rejects_refused_lock_with_mutation_evidence() -> None:
+    receipt = _example_receipt()
+    receipt["selected"] = [
+        {
+            "hypertable_schema": "hydro",
+            "hypertable_name": "river_timeseries",
+            "chunk_schema": "_timescaledb_internal",
+            "chunk_name": "_hyper_1_42_chunk",
+            "range_start": "2026-05-01T00:00:00Z",
+            "range_end": "2026-05-08T00:00:00Z",
+            "before_bytes": 1,
+            "after_bytes": None,
+        }
+    ]
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(receipt, _load_schema())
 
@@ -906,6 +960,17 @@ def test_timeseries_compression_service_bootstraps_log_dir() -> None:
         i for i, line in enumerate(lines) if line.startswith("ExecStart=")
     )
     assert pre_index < start_index
+
+
+def test_systemd_service_enforces_but_manual_wrapper_defaults_to_dry_run() -> None:
+    service_text = _SYSTEMD_SERVICE_PATH.read_text(encoding="utf-8")
+    exec_lines = [line for line in service_text.splitlines() if line.startswith("ExecStart=")]
+    assert exec_lines == [
+        "ExecStart=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh --enforce"
+    ]
+    wrapper_text = _WRAPPER_PATH.read_text(encoding="utf-8")
+    assert 'exec "$PYTHON_BIN" "$SCRIPT" "$@"' in wrapper_text
+    assert "--enforce" not in wrapper_text
 
 
 def test_timeseries_compression_timer_oncalendar_and_unit_wiring() -> None:
