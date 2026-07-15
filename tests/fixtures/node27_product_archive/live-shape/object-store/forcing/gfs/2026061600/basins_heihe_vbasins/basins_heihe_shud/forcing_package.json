@@ -1,0 +1,17 @@
+{
+  "forcing_version_id": "forc_gfs_2026061600_basins_heihe_shud",
+  "source_id": "gfs",
+  "cycle_time": "2026-06-16T00:00:00Z",
+  "start_time": "2026-06-16T00:00:00Z",
+  "end_time": "2026-06-23T00:00:00Z",
+  "basin_version_id": "basins_heihe_vbasins",
+  "model_id": "basins_heihe_shud",
+  "files": [
+    {
+      "role": "tsd_forc",
+      "relative_path": "forcing.tsd.forc",
+      "uri": "s3://nhms/forcing/gfs/2026061600/basins_heihe_vbasins/basins_heihe_shud/forcing.tsd.forc",
+      "checksum": "ec5b14becff5576f5a7835fc50025ffc97bee36aa334ee1e4c4dac309af03b64"
+    }
+  ]
+}

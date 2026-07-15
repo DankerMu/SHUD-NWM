@@ -1,0 +1,15 @@
+{
+  "run_id": "fcst_ifs_2026053106_basins_qhh_shud",
+  "source_id": "IFS",
+  "cycle_time": "2026-05-31T06:00:00Z",
+  "start_time": "2026-05-31T06:00:00Z",
+  "end_time": "2026-06-06T06:00:00Z",
+  "model": {
+    "model_id": "basins_qhh_shud",
+    "basin_version_id": "basins_qhh_vbasins"
+  },
+  "outputs": {
+    "run_manifest_uri": "s3://nhms/runs/fcst_ifs_2026053106_basins_qhh_shud/input/manifest.json",
+    "output_uri": "s3://nhms/runs/fcst_ifs_2026053106_basins_qhh_shud/output/"
+  }
+}

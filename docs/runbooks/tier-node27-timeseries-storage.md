@@ -123,6 +123,314 @@ extending the retention receipt validity window first.**
   distinguish an on-disk blocked terminal from a missing audit receipt; live
   downstream refusal behavior remains part of #856.
 
+### States access precondition (`STATES_ACCESS_DENIED`)
+
+The product-archive mover treats an `EACCES` while traversing one or more
+`states` leaves as one lane-level operational precondition failure. It first
+publishes a mode-0600 receipt whose only access entry has
+`lane_hint=states`, `locator=states`, and
+`STATES_ACCESS_DENIED count=N euid=UID egid=GID`; the CLI then writes one
+compact JSON diagnostic with `exit_reason=STATES_ACCESS_DENIED` and exits `2`.
+No candidate is selected and no archive or source mutation is attempted.
+Other discovery failures remain per-locator failures and retain exit `1`.
+
+Choose exactly one access model before changing anything. Adding `nwm` to the
+`nfsdata` supplementary group is required only for the group model; the ACL
+model does not require `id` to contain `nfsdata`. Group membership alone is not
+sufficient for a leaf that remains mode `0700`. An authorized storage operator
+must establish one complete access model across both existing and future
+`states` content:
+
+- With group access, every directory from the NFS root through each state leaf
+  grants the chosen group read/write/search (`rwx`) access, state files grant
+  group read access, and newly written directories/files inherit the intended
+  group and compatible modes (for example, setgid parent directories plus a
+  writer umask/default ACL that preserves group `rwx` on directories).
+- With ACL access, every current directory grants the named `nwm` user
+  effective `rwx` and every current state file grants effective read access.
+  Writer parents also carry a default ACL so future state directories inherit
+  `rwx`. Product-archive enforce renames each verified source leaf, creates a
+  claim directory beside it, and recursively removes the tombstone, so `rx` is
+  only sufficient for discovery/dry-run and MUST NOT be accepted as an enforce
+  precondition. POSIX default ACLs cannot express different named-user entries
+  for new directories and regular files: a default `nwm:rwx` may give `nwm`
+  write on newly created files after the creator-mode mask is applied. If that
+  extra file permission is unacceptable, the writer must apply a post-create
+  ACL that leaves directories `rwx` and files read-only; do not weaken the
+  directory permission to `rx`. The effective ACL mask must not remove the
+  required permissions.
+
+The storage and identity administrators own any group, ownership, mode, or ACL
+mutation. This PR does not run or prescribe site-specific `usermod`, `chgrp`,
+`chmod`, or `setfacl` commands. Before they choose a repair, capture the current
+tree and both future-inheritance surfaces. Do not truncate `find` with a pipe:
+that would replace its permission-error exit status with `head`'s success.
+
+```bash
+states_root=/home/ghdc/nwm/object-store/states
+inspection_log=$(mktemp /tmp/node27-states-tree.XXXXXX.log)
+set +e
+find "$states_root" -xdev -maxdepth 4 \
+  -printf '%M %u %g %p\n' >"$inspection_log" 2>&1
+find_rc=$?
+set -e
+sed -n '1,200p' "$inspection_log"
+printf 'complete find exit=%s log=%s\n' "$find_rc" "$inspection_log"
+test "$find_rc" -eq 0
+
+for path in \
+  /home/ghdc/nwm/object-store \
+  "$states_root" \
+  "$states_root/gfs" \
+  "$states_root/IFS" \
+  "$states_root/gfs/basins_heihe_shud" \
+  "$states_root/IFS/basins_qhh_shud"
+do
+  stat -c '%A %a %U %G %n' "$path"
+  getfacl -cp "$path"
+done
+```
+
+The complete `find` must exit zero. For the group model, the selected writer
+parents must have the `nfsdata` (or explicitly selected equivalent) group,
+setgid set, and group `rwx` after the ACL effective mask is applied. Their
+default ACL/mode and the actual writer's umask must preserve group `rwx` on new
+directories and group read on new files. For the ACL model, the writer parents
+must have a default named-user `nwm` or selected-group entry and a
+default/effective mask that preserves directory `rwx`; current files require
+read. A plain access ACL on today's leaves is insufficient because tomorrow's
+leaves would regress.
+
+Identify the process that actually creates a recent state leaf on the node
+where that process runs (normally the node-22 compute plane; do not infer its
+umask from node-27's mover). During an authorized observation window, use the
+real writer PID or service/job evidence and record its live supplementary
+groups and umask:
+
+```bash
+# Obtain the cycle/PID from the active service/job and confirm it against the
+# recent state leaf. fuser may report no PID when no writer is active.
+cycle=2026050100
+fuser -v "/home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/$cycle"
+writer_pid=12345
+grep -E '^(Name|Pid|Uid|Gid|Groups|Umask):' "/proc/$writer_pid/status"
+sed -n '1,120p' "/proc/$writer_pid/cgroup"
+ps -o pid,ppid,user,group,lstart,args -p "$writer_pid"
+```
+
+If `/proc/<writer-pid>/cgroup` binds the process to a systemd unit, also record
+the configured value rather than assuming the process default:
+
+```bash
+writer_unit=replace-with-observed-unit.service
+systemctl show "$writer_unit" \
+  -p User -p Group -p SupplementaryGroups -p UMask -p MainPID
+```
+
+For a Slurm writer, bind the PID to its job and record `scontrol show job
+<job-id>`/`sacct -j <job-id>` plus `/proc/<writer-pid>/status`; a login-shell
+`umask` is not evidence for a running batch step. The repair is incomplete
+until a newly created probe leaf from that real writer inherits the chosen
+group/default ACL and effective mask.
+
+After a group-membership change, every old login and the long-lived `nwm`
+systemd user manager still has the old supplementary groups. Coordinate a
+maintenance window with the ingest/display operators first: record enabled and
+active `nwm` user units, wait for archive/audit work to finish, and announce
+that refreshing the user manager terminates **all** `nwm` login sessions and
+stops its user services/timers. An authorized login administrator then
+terminates the old `nwm` session/user manager with the site's login-manager
+procedure (for systemd-logind, `loginctl terminate-user nwm`). Reconnect as
+`nwm`, restore only the previously enabled units, and verify service health.
+Do not merely restart the archive service inside the stale user manager.
+
+From that fresh `nwm` login, verify the effective identity and access without
+changing the object-store:
+
+```
+id
+namei -l /home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/2026050100
+getfacl -p /home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/2026050100
+test -x /home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/2026050100
+test -w /home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/2026050100
+test -r /home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/2026050100/state.cfg.ic
+
+mapfile -t manager_pids < <(pgrep -u "$(id -u)" -x systemd)
+test "${#manager_pids[@]}" -eq 1
+grep -E '^(Name|Pid|Uid|Gid|Groups|Umask):' \
+  "/proc/${manager_pids[0]}/status"
+
+# systemd-run uses the same user manager and supplementary groups as timer
+# services. Both commands must succeed; the first output is retained as proof.
+systemd-run --user --wait --pipe --collect /usr/bin/id
+systemd-run --user --wait --pipe --collect \
+  /usr/bin/test -r \
+  /home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/2026050100/state.cfg.ic
+systemd-run --user --wait --pipe --collect \
+  /usr/bin/test -w \
+  /home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/2026050100
+```
+
+Repeat `namei`, `getfacl`, directory `test -x`/`test -w`, and file `test -r` for
+`states/gfs/basins_heihe_shud/<cycle>` and
+`states/IFS/basins_qhh_shud/<cycle>`, and run the complete logged `find` again.
+Any permission diagnostic or non-zero `find` exit, failed `test`, or `---`
+component in `namei` means the precondition is unresolved. Under the group
+model, a missing selected group (for example `nfsdata`) in the fresh login,
+`/proc/<user-manager-pid>/status`, or `systemd-run --user ... id` is also a
+failure. Under the named-user ACL model, missing `nfsdata` is not a failure;
+the effective/default ACL plus the successful timer-context tests are the
+oracle. Only after the chosen model, current full tree, new writer-created
+leaf, fresh user manager, and timer context all pass should the operator rerun
+the mover dry-run and confirm the new receipt has no
+`STATES_ACCESS_DENIED` entry.
+
+### Selected-batch source-retirement preflight
+
+The state discovery gate above is not the complete enforce permission gate.
+Every product selected from `forcing`, `runs`, or `states` must also be
+retirable by the effective mover identity. For every selected source, its
+parent needs effective write/search (`wx`), its root and every internal
+directory need effective read/write/search (`rwx`), and every regular file
+must remain readable and bound to the validated preimage. Apply the chosen
+group/default-ACL or named-user/default-ACL model to all selected product
+lanes, including future writer-created content; fixing only `states` is not
+sufficient when an eligible `runs` or `forcing` parent remains mode `0755`.
+
+The mover checks these permissions through opened no-follow descriptors and
+the actual effective uid/groups/ACL result; mode-bit inspection is only
+operator context, not the runtime oracle. Dry-run performs the complete
+read-only tree check and writes no probe path. A failed check produces a
+non-zero `SOURCE_RETIREMENT_PREFLIGHT_FAILED` receipt, not a false `planned`
+terminal. Enforce first completes that read-only check for the entire selected
+batch, then creates, fsyncs, removes, and fsyncs one randomized hidden probe per
+unique opened source parent. This happens before staging, archive publication,
+quarantine, durable-guard creation, or source mutation. One failed check or
+probe aborts every selected candidate. A probe that is certainly removed has
+no residue; uncertain cleanup is `indeterminate` and names only its safe
+object-store-relative residue. Do not manually remove an indeterminate probe
+until its receipt and filesystem identity have been captured.
+
+Run the selected-source audit as `nwm` after an ordinary 30-day dry-run. This
+loop is NUL-safe through base64 and therefore also covers legal spaces in run,
+model, or basin identifiers. It audits every selected lane rather than a
+hand-picked state sample:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+cd /home/nwm/NWM
+NODE27_PRODUCT_ARCHIVE_ENV_FILE=/home/nwm/NWM/infra/env/node27-product-archive.env \
+  ./scripts/node27_product_archive_once.sh --minimum-age-days 30
+
+receipt=/home/nwm/node27-product-archive-logs/receipt.json
+object_root=/home/ghdc/nwm/object-store
+jq -e '.mode == "dry-run" and (.selected | length > 0)' "$receipt"
+jq -r '.selected | group_by(.identity.lane)[] |
+  "\(.[0].identity.lane) \(length)"' "$receipt"
+
+jq -r '.selected[].source_path | @base64' "$receipt" |
+while IFS= read -r encoded
+do
+  relative=$(printf '%s' "$encoded" | base64 -d)
+  source=$object_root/$relative
+  parent=${source%/*}
+  printf 'selected=%s\n' "$relative"
+  namei -l "$source"
+  getfacl -cp "$parent"
+  test -x "$parent"
+  test -w "$parent"
+  find "$source" -xdev -type d -exec sh -eu -c '
+    for directory do
+      test -r "$directory"
+      test -w "$directory"
+      test -x "$directory"
+      getfacl -cp "$directory"
+    done
+  ' sh {} +
+  find "$source" -xdev -type f -exec sh -eu -c '
+    for file do test -r "$file"; done
+  ' sh {} +
+  # Sticky directories require the same ownership proof as rename(2); a
+  # successful test(1) access check alone is not enough.
+  euid=$(id -u)
+  if [[ -k $parent ]] &&
+     (( euid != 0 && euid != $(stat -c %u "$parent") &&
+        euid != $(stat -c %u "$source") ))
+  then
+    printf 'unproved sticky parent: %s\n' "$parent" >&2
+    exit 1
+  fi
+  find "$source" -xdev -type d -perm -1000 -exec bash -eu -c '
+    euid=$1
+    shift
+    for directory do
+      if (( euid != 0 && euid != $(stat -c %u "$directory") )); then
+        foreign=$(find "$directory" -xdev -mindepth 1 -maxdepth 1 \
+          ! -uid "$euid" -print -quit)
+        test -z "$foreign" || {
+          printf "unproved sticky directory: %s\n" "$directory" >&2
+          exit 1
+        }
+      fi
+    done
+  ' bash "$euid" {} +
+done
+```
+
+Any failed command, missing lane expected for the authorized batch, sticky
+directory without an ownership proof for the child being renamed, or ACL mask
+that removes `wx`/`rwx` keeps enforce blocked. Preserve this output with the
+dry-run receipt. For future inheritance, capture the selected paths before a
+real forcing/run/state writer cycle, then rerun the same loop against each new
+writer-created leaf; record the writer PID/unit/job, effective groups and
+umask as described above. Parent default ACLs and each new directory/file must
+still satisfy the same parent `wx`, directory `rwx`, and file-read checks.
+Do not use an operator-created dummy file as writer-inheritance evidence.
+
+Only after both current-tree and real future-writer checks pass may the
+authorized enforce command run. The mover itself performs the descriptor-bound
+randomized parent probes; do not substitute a shell `touch` test for them:
+
+```bash
+cd /home/nwm/NWM
+NODE27_PRODUCT_ARCHIVE_ENV_FILE=/home/nwm/NWM/infra/env/node27-product-archive.env \
+  ./scripts/node27_product_archive_once.sh \
+  --minimum-age-days 30 --enforce
+jq -e '
+  .mode == "enforce" and .outcome == "success" and
+  (.selected | length > 0) and
+  ([.terminals[].status] | all(. == "archived" or . == "retired-from-existing"))
+' /home/nwm/node27-product-archive-logs/receipt.json
+```
+
+The first authorized 30-day enforce attempt on deployed head
+`cec39013167bc7ce6585ed34e3a9194832f99900` is failed evidence for this gate:
+the preceding dry-run discovered 320 candidates and selected eight, but
+enforce published eight verified archives before all eight source tombstone
+renames failed because `nwm` could not write the selected source parents. The
+eight sources remained present and the verified archives/durable guards were
+preserved as residue. This outcome is not a PASS and the old head must not be
+used for another enforce run. On the repaired head, the same permission shape
+must fail before candidate one with zero new archive publication and zero
+source mutation. Existing verified archives remain governed by the normal
+idempotent path after the preflight passes. Do not manually delete prior
+`.archive-guards/*`: on retry the mover boundedly reconciles only an exact
+two-file guard whose children are the same inode/signature pair as the current
+verified canonical archive, preserves foreign/ambiguous guards, and fails
+before source mutation with explicit safe residue if cleanup is uncertain.
+The repaired retry ran on deployed head
+`e130949c4f9d658d9e31251e5ced135147e18712` at
+2026-07-15T05:40:15Z. Its controlled 30-day enforce receipt is committed as
+`receipts/tier-node27-timeseries-storage/product-archive/controlled-enforce-20260715T054015Z.json`:
+all eight selected sources passed the batch gate, the mover re-read and
+checksum-verified the eight existing canonical archives, reconciled their
+matching guards, retired all eight identical sources, and reported eight
+`retired-from-existing` terminals with empty residue. The production env
+remained at 45 days. The failed first attempt remains evidence for the missing
+batch gate; it is not relabeled as PASS. The 228 audit gaps and the follow-up
+complete audit remain owned by #1070, and no #856 cascade command was run.
+
 ### Free-space watermark tuning
 
 Initial values (in `infra/env/node27-product-archive.example`):

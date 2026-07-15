@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -91,6 +92,37 @@ _FORCING_DOMAIN_PAYLOAD_PATHS = {
     "station_timeseries": "payloads/station_timeseries.json",
     "interpolation_weights": "payloads/interp_weights.json",
 }
+_STATES_ACCESS_DENIED_PATTERN = re.compile(
+    r"\ASTATES_ACCESS_DENIED count=([1-9][0-9]*) euid=(0|[1-9][0-9]*) egid=(0|[1-9][0-9]*)\Z"
+)
+_RETIREMENT_PREFLIGHT_FAILED_PATTERN = re.compile(
+    r"\ASOURCE_RETIREMENT_PREFLIGHT_FAILED check=([a-z][a-z0-9-]*)\Z"
+)
+_RETIREMENT_PREFLIGHT_ABORTED_REASON = "SOURCE_RETIREMENT_PREFLIGHT_BATCH_ABORTED"
+_RETIREMENT_PREFLIGHT_CHECKS = frozenset(
+    {
+        "source-identity",
+        "source-mount",
+        "source-parent-identity",
+        "source-parent-mount",
+        "source-parent-probe",
+        "source-parent-probe-cleanup",
+        "source-parent-sticky",
+        "source-parent-wx",
+        "source-preimage",
+        "source-root-rwx",
+        "source-root-sticky",
+        "tree-boundary",
+        "tree-directory-rwx",
+        "tree-directory-sticky",
+        "tree-identity",
+        "tree-traversal",
+        "verification",
+    }
+)
+_ENFORCE_ONLY_RETIREMENT_PREFLIGHT_CHECKS = frozenset(
+    {"source-parent-probe", "source-parent-probe-cleanup"}
+)
 
 
 class ArchiveMoverError(RuntimeError):
@@ -233,6 +265,45 @@ class MoverConfig:
     free_space_refuse_bytes: int | None = None
 
 
+def _is_eacces(error: BaseException) -> bool:
+    """Recognize EACCES through safety-wrapper exception chains."""
+    pending: list[BaseException] = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, OSError) and current.errno == errno.EACCES:
+            return True
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+    return False
+
+
+def _states_access_denied_context(reason: Any) -> dict[str, int] | None:
+    if not isinstance(reason, str):
+        return None
+    matched = _STATES_ACCESS_DENIED_PATTERN.fullmatch(reason)
+    if matched is None:
+        return None
+    count, euid, egid = (int(value) for value in matched.groups())
+    return {"count": count, "euid": euid, "egid": egid}
+
+
+def _receipt_states_access_denied(receipt: Mapping[str, Any]) -> dict[str, int] | None:
+    for failure in receipt.get("discovery_failures", ()):
+        if not isinstance(failure, Mapping):
+            continue
+        if failure.get("lane_hint") == "states" and failure.get("locator") == "states":
+            context = _states_access_denied_context(failure.get("reason"))
+            if context is not None:
+                return context
+    return None
+
+
 @dataclass(frozen=True)
 class DurableArchiveGuard:
     path: Path
@@ -249,6 +320,7 @@ class DurableArchiveGuard:
 
 MountIdProvider = Callable[[int], int]
 RenameNoReplace = Callable[[int, str, int, str], None]
+DirectoryAccessCheck = Callable[[int, int], bool]
 
 
 def fd_mount_id(fd: int) -> int:
@@ -278,6 +350,43 @@ def rename_no_replace(src_fd: int, src: str, dst_fd: int, dst: str) -> None:
     if function(src_fd, os.fsencode(src), dst_fd, os.fsencode(dst), 1) != 0:
         code = ctypes.get_errno()
         raise OSError(code, os.strerror(code), dst)
+
+
+class RetirementPreflightError(ArchiveMoverError):
+    """Sanitized batch blocker raised before archive/source publication."""
+
+    def __init__(
+        self,
+        locator: str,
+        check: str,
+        *,
+        indeterminate: bool = False,
+        residue: Sequence[str] = (),
+    ) -> None:
+        self.locator = locator
+        self.check = check
+        if check not in _RETIREMENT_PREFLIGHT_CHECKS:
+            raise ValueError("unknown retirement preflight check token")
+        super().__init__(
+            f"SOURCE_RETIREMENT_PREFLIGHT_FAILED check={check}",
+            indeterminate=indeterminate,
+            residue=residue,
+            kind="operational",
+        )
+
+
+def _directory_effective_access(fd: int, mode: int) -> bool:
+    """Check the effective identity against an already-opened directory."""
+    try:
+        return os.access(
+            ".",
+            mode,
+            dir_fd=fd,
+            effective_ids=True,
+            follow_symlinks=False,
+        )
+    except (NotImplementedError, TypeError, ValueError, OSError):
+        return False
 
 
 def _safe_names(fd: int, label: str, *, remaining: int) -> list[str]:
@@ -879,9 +988,28 @@ def discover_candidate_locators(
     candidates: list[CandidateLocator] = []
     failures: list[DiscoveryFailure] = []
     observed = 0
+    states_access_denied_count = 0
     cutoff = now - timedelta(days=config.minimum_age_days)
 
-    def lane_exists(lane: str, path: Path) -> bool:
+    def record_failure(
+        lane: str,
+        locator: str,
+        error: BaseException,
+        *,
+        aggregate_states_access: bool = False,
+    ) -> None:
+        nonlocal states_access_denied_count
+        if aggregate_states_access and _is_eacces(error):
+            states_access_denied_count += 1
+            return
+        failures.append(DiscoveryFailure(lane, locator, str(error)))
+
+    def lane_exists(
+        lane: str,
+        path: Path,
+        *,
+        aggregate_states_access: bool = False,
+    ) -> bool:
         nonlocal observed
         try:
             return _entry_exists(path, root)
@@ -889,10 +1017,21 @@ def discover_candidate_locators(
             observed += 1
             if observed > MAX_DISCOVERY:
                 raise ArchiveMoverError(f"discovery exceeds {MAX_DISCOVERY} candidates/failures") from error
-            failures.append(DiscoveryFailure(lane, lane, str(error)))
+            record_failure(
+                lane,
+                lane,
+                error,
+                aggregate_states_access=aggregate_states_access,
+            )
             return False
 
-    def add_leaf(lane: str, relative: str, manifest_rel: str | None) -> None:
+    def add_leaf(
+        lane: str,
+        relative: str,
+        manifest_rel: str | None,
+        *,
+        aggregate_states_access: bool = False,
+    ) -> None:
         nonlocal observed
         observed += 1
         if observed > MAX_DISCOVERY:
@@ -944,13 +1083,36 @@ def discover_candidate_locators(
             finally:
                 os.close(leaf_fd)
         except Exception as error:
-            failures.append(DiscoveryFailure(lane, relative, str(error)))
+            record_failure(
+                lane,
+                relative,
+                error,
+                aggregate_states_access=aggregate_states_access,
+            )
 
     try:
         # A deliberately shallow locator pass; full leaf safety is proven by scan_tree.
-        def shallow_dirs(lane: str, path: Path, relative: str) -> list[str]:
+        def shallow_dirs(
+            lane: str,
+            path: Path,
+            relative: str,
+            *,
+            aggregate_states_access: bool = False,
+        ) -> list[str]:
             nonlocal observed
-            names = _path_entries(path, root)
+            try:
+                names = _path_entries(path, root)
+            except Exception as error:
+                observed += 1
+                if observed > MAX_DISCOVERY:
+                    raise ArchiveMoverError(f"discovery exceeds {MAX_DISCOVERY} candidates/failures") from error
+                record_failure(
+                    lane,
+                    relative,
+                    error,
+                    aggregate_states_access=aggregate_states_access,
+                )
+                return []
             valid: list[str] = []
             for name in names:
                 child_relative = f"{relative}/{name}"
@@ -966,7 +1128,12 @@ def discover_candidate_locators(
                     observed += 1
                     if observed > MAX_DISCOVERY:
                         raise ArchiveMoverError(f"discovery exceeds {MAX_DISCOVERY} candidates/failures") from error
-                    failures.append(DiscoveryFailure(lane, child_relative, str(error)))
+                    record_failure(
+                        lane,
+                        child_relative,
+                        error,
+                        aggregate_states_access=aggregate_states_access,
+                    )
                     continue
                 valid.append(name)
             return valid
@@ -982,34 +1149,79 @@ def discover_candidate_locators(
                             for model in _path_entries(forcing / source / cycle / basin, root):
                                 add_leaf("forcing", f"forcing/{source}/{cycle}/{basin}/{model}", "forcing_package.json")
             except Exception as error:
-                failures.append(DiscoveryFailure("forcing", "forcing", str(error)))
+                record_failure("forcing", "forcing", error)
         runs = root / "runs"
         if lane_exists("runs", runs):
             try:
                 for run_id in _path_entries(runs, root):
                     add_leaf("runs", f"runs/{run_id}", "input/manifest.json")
             except Exception as error:
-                failures.append(DiscoveryFailure("runs", "runs", str(error)))
+                record_failure("runs", "runs", error)
         states = root / "states"
-        if lane_exists("states", states):
+        if lane_exists("states", states, aggregate_states_access=True):
             try:
-                for first in shallow_dirs("states", states, "states"):
+                for first in shallow_dirs(
+                    "states",
+                    states,
+                    "states",
+                    aggregate_states_access=True,
+                ):
                     first_path = states / first
                     try:
                         provider = normalize_source_id(first)
                     except ValueError:
                         provider = None
                     if provider is not None:
-                        for model in shallow_dirs("states", first_path, f"states/{first}"):
-                            for cycle in _path_entries(first_path / model, root):
-                                add_leaf("states", f"states/{first}/{model}/{cycle}", None)
+                        for model in shallow_dirs(
+                            "states",
+                            first_path,
+                            f"states/{first}",
+                            aggregate_states_access=True,
+                        ):
+                            model_relative = f"states/{first}/{model}"
+                            for cycle in shallow_dirs(
+                                "states",
+                                first_path / model,
+                                model_relative,
+                                aggregate_states_access=True,
+                            ):
+                                add_leaf(
+                                    "states",
+                                    f"{model_relative}/{cycle}",
+                                    None,
+                                    aggregate_states_access=True,
+                                )
                     else:
-                        for cycle in _path_entries(first_path, root):
-                            add_leaf("states", f"states/{first}/{cycle}", None)
+                        for cycle in shallow_dirs(
+                            "states",
+                            first_path,
+                            f"states/{first}",
+                            aggregate_states_access=True,
+                        ):
+                            add_leaf(
+                                "states",
+                                f"states/{first}/{cycle}",
+                                None,
+                                aggregate_states_access=True,
+                            )
             except Exception as error:
-                failures.append(DiscoveryFailure("states", "states", str(error)))
+                record_failure(
+                    "states",
+                    "states/discovery" if states_access_denied_count else "states",
+                    error,
+                    aggregate_states_access=True,
+                )
     finally:
         os.close(root_fd)
+    if states_access_denied_count:
+        failures.append(
+            DiscoveryFailure(
+                "states",
+                "states",
+                "STATES_ACCESS_DENIED "
+                f"count={states_access_denied_count} euid={os.geteuid()} egid={os.getegid()}",
+            )
+        )
     candidates.sort(key=lambda value: value.sort_key)
     failures.sort(key=lambda value: (value.lane_hint, value.locator, value.reason))
     return candidates, failures
@@ -1108,13 +1320,40 @@ def discover_candidates(
     """Compatibility helper that fully validates every discovered locator."""
     locators, failures = discover_candidate_locators(config, now=now, mount_id_provider=mount_id_provider)
     candidates: list[Candidate] = []
+    states_access_denied_count = 0
+    retained_failures: list[DiscoveryFailure] = []
+    for failure in failures:
+        context = (
+            _states_access_denied_context(failure.reason)
+            if failure.lane_hint == "states" and failure.locator == "states"
+            else None
+        )
+        if context is not None:
+            states_access_denied_count += context["count"]
+        else:
+            retained_failures.append(failure)
+    failures = retained_failures
     for locator in locators:
         try:
             candidates.append(
                 _validate_candidate_locator(locator, config, mount_id_provider=mount_id_provider)
             )
         except Exception as error:
-            failures.append(DiscoveryFailure(locator.identity.lane, locator.source_relative, str(error)))
+            if locator.identity.lane == "states" and _is_eacces(error):
+                states_access_denied_count += 1
+            else:
+                failures.append(
+                    DiscoveryFailure(locator.identity.lane, locator.source_relative, str(error))
+                )
+    if states_access_denied_count:
+        failures.append(
+            DiscoveryFailure(
+                "states",
+                "states",
+                "STATES_ACCESS_DENIED "
+                f"count={states_access_denied_count} euid={os.geteuid()} egid={os.getegid()}",
+            )
+        )
     failures.sort(key=lambda value: (value.lane_hint, value.locator, value.reason))
     return candidates, failures
 
@@ -2045,6 +2284,317 @@ def _same_snapshot(candidate: Candidate, root_fd: int, provider: MountIdProvider
     return files == candidate.files and directories == candidate.directories
 
 
+def _check_retirement_tree_access(
+    candidate: Candidate,
+    root_fd: int,
+    provider: MountIdProvider,
+    access_check: DirectoryAccessCheck,
+) -> None:
+    """Prove effective rwx on every directory in one immutable source tree."""
+    expected_directories = {record.path: record for record in candidate.directories}
+    seen: set[str] = set()
+    count = 0
+
+    def walk(fd: int, prefix: str, depth: int) -> None:
+        nonlocal count
+        if depth > MAX_TREE_DEPTH:
+            raise RetirementPreflightError(candidate.source_relative, "tree-boundary")
+        directory = os.fstat(fd)
+        if not access_check(fd, os.R_OK | os.W_OK | os.X_OK):
+            check = "source-root-rwx" if not prefix else "tree-directory-rwx"
+            raise RetirementPreflightError(candidate.source_relative, check)
+        try:
+            names = _safe_names(fd, prefix or ".", remaining=MAX_TREE_ENTRIES - count)
+        except Exception as error:
+            raise RetirementPreflightError(candidate.source_relative, "tree-traversal") from error
+        for name in names:
+            count += 1
+            if count > MAX_TREE_ENTRIES:
+                raise RetirementPreflightError(candidate.source_relative, "tree-boundary")
+            relative = f"{prefix}/{name}" if prefix else name
+            try:
+                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            except OSError as error:
+                raise RetirementPreflightError(candidate.source_relative, "tree-traversal") from error
+            euid = os.geteuid()
+            if (
+                directory.st_mode & stat.S_ISVTX
+                and euid != 0
+                and euid != directory.st_uid
+                and euid != info.st_uid
+            ):
+                check = "source-root-sticky" if not prefix else "tree-directory-sticky"
+                raise RetirementPreflightError(candidate.source_relative, check)
+            if not stat.S_ISDIR(info.st_mode):
+                continue
+            expected = expected_directories.get(relative)
+            if expected is None:
+                raise RetirementPreflightError(candidate.source_relative, "tree-identity")
+            try:
+                child_fd = _open_child_dir(
+                    fd,
+                    name,
+                    relative,
+                    candidate.source_mount_id,
+                    provider,
+                    candidate.source_root_stat[0],
+                )
+            except Exception as error:
+                raise RetirementPreflightError(candidate.source_relative, "tree-traversal") from error
+            try:
+                opened = os.fstat(child_fd)
+                if (
+                    opened.st_dev,
+                    opened.st_ino,
+                    opened.st_mode,
+                    opened.st_mtime_ns,
+                ) != (
+                    expected.device,
+                    expected.inode,
+                    expected.mode,
+                    expected.mtime_ns,
+                ):
+                    raise RetirementPreflightError(candidate.source_relative, "tree-identity")
+                seen.add(relative)
+                walk(child_fd, relative, depth + 1)
+            finally:
+                os.close(child_fd)
+
+    walk(root_fd, "", 0)
+    if seen != set(expected_directories):
+        raise RetirementPreflightError(candidate.source_relative, "tree-identity")
+
+
+def _retirement_preflight_snapshot_matches(
+    candidate: Candidate,
+    root_fd: int,
+    provider: MountIdProvider,
+) -> bool:
+    current_root = os.fstat(root_fd)
+    if (
+        current_root.st_dev,
+        current_root.st_ino,
+        current_root.st_mtime_ns,
+    ) != candidate.source_root_stat:
+        return False
+    files, directories = scan_tree_snapshot(
+        root_fd,
+        mount_id=candidate.source_mount_id,
+        mount_id_provider=provider,
+    )
+    return files == candidate.files and directories == candidate.directories
+
+
+def _preflight_candidate_retirement(
+    candidate: Candidate,
+    config: MoverConfig,
+    provider: MountIdProvider,
+    access_check: DirectoryAccessCheck,
+) -> None:
+    """Read-only, descriptor-bound retirement capability check for one source."""
+    source_fd: int | None = None
+    parent_fd: int | None = None
+    try:
+        source_fd = open_directory_no_follow(
+            candidate.source_path,
+            containment_root=config.object_store_root,
+        )
+        parent_fd = open_directory_no_follow(
+            candidate.source_path.parent,
+            containment_root=config.object_store_root,
+        )
+        source = os.fstat(source_fd)
+        parent = os.fstat(parent_fd)
+        expected = os.stat(
+            candidate.source_path.name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        if (
+            source.st_dev,
+            source.st_ino,
+            source.st_mtime_ns,
+        ) != candidate.source_root_stat or (
+            expected.st_dev,
+            expected.st_ino,
+        ) != (
+            source.st_dev,
+            source.st_ino,
+        ):
+            raise RetirementPreflightError(candidate.source_relative, "source-identity")
+        if provider(source_fd) != candidate.source_mount_id or provider(parent_fd) != candidate.source_mount_id:
+            raise RetirementPreflightError(candidate.source_relative, "source-mount")
+        euid = os.geteuid()
+        if (
+            parent.st_mode & stat.S_ISVTX
+            and euid != 0
+            and euid != parent.st_uid
+            and euid != source.st_uid
+        ):
+            raise RetirementPreflightError(candidate.source_relative, "source-parent-sticky")
+        if not access_check(parent_fd, os.W_OK | os.X_OK):
+            raise RetirementPreflightError(candidate.source_relative, "source-parent-wx")
+        _check_retirement_tree_access(candidate, source_fd, provider, access_check)
+        if not _retirement_preflight_snapshot_matches(candidate, source_fd, provider):
+            raise RetirementPreflightError(candidate.source_relative, "source-preimage")
+    except RetirementPreflightError:
+        raise
+    except Exception as error:
+        raise RetirementPreflightError(candidate.source_relative, "verification") from error
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
+        if source_fd is not None:
+            os.close(source_fd)
+
+
+def _probe_source_parent_capability(
+    candidate: Candidate,
+    config: MoverConfig,
+    provider: MountIdProvider,
+    parent_fd: int,
+) -> None:
+    """Create and durably remove one empty hidden sibling in an enforce preflight."""
+    probe_fd: int | None = None
+    created = False
+    probe_name = f".archive-preflight-{uuid.uuid4().hex}"
+    probe_path = candidate.source_path.parent / probe_name
+    probe_relative = probe_path.relative_to(config.object_store_root).as_posix()
+    failure_check = "source-parent-probe"
+    removal_unflushed = False
+    try:
+        if provider(parent_fd) != candidate.source_mount_id:
+            raise RetirementPreflightError(candidate.source_relative, "source-parent-mount")
+        source = os.stat(
+            candidate.source_path.name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        if (
+            source.st_dev,
+            source.st_ino,
+            source.st_mtime_ns,
+        ) != candidate.source_root_stat:
+            raise RetirementPreflightError(candidate.source_relative, "source-parent-identity")
+        os.mkdir(probe_name, 0o700, dir_fd=parent_fd)
+        created = True
+        os.fsync(parent_fd)
+        probe_fd = _open_child_dir(
+            parent_fd,
+            probe_name,
+            probe_relative,
+            candidate.source_mount_id,
+            provider,
+            candidate.source_root_stat[0],
+        )
+        os.fsync(probe_fd)
+        os.close(probe_fd)
+        probe_fd = None
+        os.rmdir(probe_name, dir_fd=parent_fd)
+        created = False
+        removal_unflushed = True
+        os.fsync(parent_fd)
+        removal_unflushed = False
+    except RetirementPreflightError:
+        raise
+    except Exception:
+        if removal_unflushed:
+            raise RetirementPreflightError(
+                candidate.source_relative,
+                "source-parent-probe-cleanup",
+                indeterminate=True,
+                residue=(probe_relative,),
+            )
+        if created:
+            if probe_fd is not None:
+                os.close(probe_fd)
+                probe_fd = None
+            try:
+                os.rmdir(probe_name, dir_fd=parent_fd)
+                created = False
+                os.fsync(parent_fd)
+            except Exception as cleanup_error:
+                raise RetirementPreflightError(
+                    candidate.source_relative,
+                    "source-parent-probe-cleanup",
+                    indeterminate=True,
+                    residue=(probe_relative,),
+                ) from cleanup_error
+        raise RetirementPreflightError(candidate.source_relative, failure_check)
+    finally:
+        if probe_fd is not None:
+            os.close(probe_fd)
+
+
+def _preflight_selected_retirement(
+    selected: Sequence[Candidate],
+    config: MoverConfig,
+    provider: MountIdProvider,
+    access_check: DirectoryAccessCheck,
+) -> None:
+    """Fail the selected batch before any staging/publish/guard operation."""
+    for candidate in selected:
+        _preflight_candidate_retirement(candidate, config, provider, access_check)
+    if not config.enforce:
+        return
+    probed_parents: set[tuple[int, int]] = set()
+    for candidate in selected:
+        parent_fd: int | None = None
+        try:
+            parent_fd = open_directory_no_follow(
+                candidate.source_path.parent,
+                containment_root=config.object_store_root,
+            )
+            parent = os.fstat(parent_fd)
+            if provider(parent_fd) != candidate.source_mount_id:
+                raise RetirementPreflightError(candidate.source_relative, "source-parent-mount")
+            source = os.stat(
+                candidate.source_path.name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+            if (
+                source.st_dev,
+                source.st_ino,
+                source.st_mtime_ns,
+            ) != candidate.source_root_stat:
+                raise RetirementPreflightError(candidate.source_relative, "source-parent-identity")
+            euid = os.geteuid()
+            if (
+                parent.st_mode & stat.S_ISVTX
+                and euid != 0
+                and euid != parent.st_uid
+                and euid != source.st_uid
+            ):
+                raise RetirementPreflightError(candidate.source_relative, "source-parent-sticky")
+            if not access_check(parent_fd, os.W_OK | os.X_OK):
+                raise RetirementPreflightError(candidate.source_relative, "source-parent-wx")
+        except Exception as error:
+            if isinstance(error, RetirementPreflightError):
+                raise
+            raise RetirementPreflightError(candidate.source_relative, "source-parent-identity") from error
+        try:
+            parent_key = (parent.st_dev, parent.st_ino)
+            if parent_key in probed_parents:
+                continue
+            _probe_source_parent_capability(candidate, config, provider, parent_fd)
+            try:
+                rebound = stat_no_follow(
+                    candidate.source_path.parent,
+                    containment_root=config.object_store_root,
+                )
+            except Exception as error:
+                raise RetirementPreflightError(
+                    candidate.source_relative, "source-parent-identity"
+                ) from error
+            if (rebound.st_dev, rebound.st_ino) != parent_key:
+                raise RetirementPreflightError(candidate.source_relative, "source-parent-identity")
+            probed_parents.add(parent_key)
+        finally:
+            if parent_fd is not None:
+                os.close(parent_fd)
+
+
 def process_candidate(
     candidate: Candidate,
     config: MoverConfig,
@@ -2648,6 +3198,162 @@ def _cleanup_durable_archive_guard(
         os.close(parent_fd)
 
 
+def _reconcile_prior_durable_archive_guards(
+    config: MoverConfig,
+    archive_guard: tuple[int, Path, Path],
+    provider: MountIdProvider,
+) -> tuple[str, ...]:
+    """Remove only old guards hard-linked to the currently verified pair."""
+    leaf_fd, _final_leaf, archive_root = archive_guard
+    guard_parent = archive_root / ".archive-guards"
+    try:
+        if not _lexists_no_follow(guard_parent, archive_root):
+            return ()
+    except Exception as error:
+        raise ArchiveOperationalError("cannot prove prior durable guard inventory") from error
+
+    root_fd: int | None = None
+    parent_fd: int | None = None
+    cleaned: list[str] = []
+    try:
+        root_fd = open_directory_no_follow(archive_root)
+        root = os.fstat(root_fd)
+        archive_device = root.st_dev
+        archive_mount_id = provider(root_fd)
+        if os.fstat(leaf_fd).st_dev != archive_device or provider(leaf_fd) != archive_mount_id:
+            raise ArchiveOperationalError("canonical archive pair crossed the archive mount")
+        canonical = _guard_pair_signatures(
+            leaf_fd,
+            archive_device=archive_device,
+            archive_mount_id=archive_mount_id,
+            provider=provider,
+        )
+        parent_fd = open_directory_no_follow(guard_parent, containment_root=archive_root)
+        parent = os.fstat(parent_fd)
+        if parent.st_dev != archive_device or provider(parent_fd) != archive_mount_id:
+            raise ArchiveOperationalError("prior durable guard root crossed the archive mount")
+        try:
+            names = _safe_names(parent_fd, ".archive-guards", remaining=MAX_TREE_ENTRIES)
+        except Exception as error:
+            raise ArchiveOperationalError("prior durable guard inventory exceeds safety boundary") from error
+        for name in names:
+            if not _safe_segment(name):
+                continue
+            relative = f".archive-guards/{name}"
+            try:
+                entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            except OSError as error:
+                raise ArchiveOperationalError("prior durable guard inventory changed") from error
+            if not stat.S_ISDIR(entry.st_mode):
+                continue
+            guard_fd: int | None = None
+            try:
+                guard_fd = _open_child_dir(
+                    parent_fd,
+                    name,
+                    relative,
+                    archive_mount_id,
+                    provider,
+                    archive_device,
+                )
+                try:
+                    members = _safe_names(guard_fd, relative, remaining=3)
+                except Exception:
+                    continue
+                if members != ["archive.tar.zst", "manifest.json"]:
+                    continue
+                try:
+                    guarded = _guard_pair_signatures(
+                        guard_fd,
+                        archive_device=archive_device,
+                        archive_mount_id=archive_mount_id,
+                        provider=provider,
+                    )
+                except (OSError, ArchiveMoverError):
+                    continue
+                if guarded != canonical:
+                    continue
+                try:
+                    verify_archive_pair(
+                        guard_parent / name,
+                        archive_root,
+                        zstd_path=config.zstd_path,
+                        object_store_prefix=config.object_store_prefix,
+                        require_canonical_location=False,
+                        mount_id_provider=provider,
+                    )
+                except Exception as error:
+                    raise ArchiveMoverError(
+                        "matching prior durable guard verification is indeterminate",
+                        indeterminate=True,
+                        residue=(relative,),
+                        kind="operational",
+                    ) from error
+                try:
+                    current_entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                except OSError as error:
+                    raise ArchiveMoverError(
+                        "matching prior durable guard namespace is indeterminate",
+                        indeterminate=True,
+                        residue=(relative,),
+                        kind="operational",
+                    ) from error
+                if (current_entry.st_dev, current_entry.st_ino) != (
+                    os.fstat(guard_fd).st_dev,
+                    os.fstat(guard_fd).st_ino,
+                ):
+                    raise ArchiveMoverError(
+                        "matching prior durable guard namespace changed",
+                        indeterminate=True,
+                        residue=(relative,),
+                        kind="operational",
+                    )
+                if _guard_pair_signatures(
+                    leaf_fd,
+                    archive_device=archive_device,
+                    archive_mount_id=archive_mount_id,
+                    provider=provider,
+                ) != canonical or _guard_pair_signatures(
+                    guard_fd,
+                    archive_device=archive_device,
+                    archive_mount_id=archive_mount_id,
+                    provider=provider,
+                ) != canonical:
+                    raise ArchiveMoverError(
+                        "matching prior durable guard changed",
+                        indeterminate=True,
+                        residue=(relative,),
+                        kind="operational",
+                    )
+                try:
+                    os.unlink("archive.tar.zst", dir_fd=guard_fd)
+                    os.unlink("manifest.json", dir_fd=guard_fd)
+                    os.fsync(guard_fd)
+                    os.rmdir(name, dir_fd=parent_fd)
+                    os.fsync(parent_fd)
+                except OSError as error:
+                    raise ArchiveMoverError(
+                        "prior durable guard cleanup is indeterminate",
+                        indeterminate=True,
+                        residue=(relative,),
+                        kind="operational",
+                    ) from error
+                cleaned.append(relative)
+            finally:
+                if guard_fd is not None:
+                    os.close(guard_fd)
+        return tuple(cleaned)
+    except ArchiveMoverError:
+        raise
+    except Exception as error:
+        raise ArchiveOperationalError("prior durable guard reconciliation failed") from error
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
+        if root_fd is not None:
+            os.close(root_fd)
+
+
 def _retire_source(
     candidate: Candidate,
     config: MoverConfig,
@@ -2663,6 +3369,10 @@ def _retire_source(
     if not _same_snapshot(candidate, source_fd, provider):
         raise ArchiveMoverError("source preimage changed immediately before retirement")
     _verify_guarded_archive_pair(config, archive_guard, provider)
+    _reconcile_prior_durable_archive_guards(config, archive_guard, provider)
+    _verify_guarded_archive_pair(config, archive_guard, provider)
+    if not _same_snapshot(candidate, source_fd, provider):
+        raise ArchiveMoverError("source preimage changed during durable guard reconciliation")
     durable = _install_durable_archive_guard(config, archive_guard, provider)
     relative = durable.path.relative_to(config.archive_root).as_posix()
     try:
@@ -3201,6 +3911,7 @@ def run(
     now: datetime | None = None,
     mount_id_provider: MountIdProvider = fd_mount_id,
     rename_impl: RenameNoReplace = rename_no_replace,
+    access_check: DirectoryAccessCheck = _directory_effective_access,
 ) -> tuple[dict[str, Any], int]:
     now = (now or datetime.now(UTC)).astimezone(UTC)
     _validate_config(config)
@@ -3209,8 +3920,17 @@ def run(
         receipt = _publish_refusal_receipt(config, now=now, free_space=free_space)
         return receipt, 1
     locators, failures = discover_candidate_locators(config, now=now, mount_id_provider=mount_id_provider)
-    discovery_incomplete = any(failure.reason.startswith("discovery exceeds") for failure in failures)
+    states_access_denied = any(
+        failure.lane_hint == "states"
+        and failure.locator == "states"
+        and _states_access_denied_context(failure.reason) is not None
+        for failure in failures
+    )
+    discovery_incomplete = states_access_denied or any(
+        failure.reason.startswith("discovery exceeds") for failure in failures
+    )
     selected: list[Candidate] = []
+    validation_failed_locators: set[str] = set()
     validation_attempts = 0
     next_locator = 0
     if not discovery_incomplete:
@@ -3223,21 +3943,92 @@ def run(
                     _validate_candidate_locator(locator, config, mount_id_provider=mount_id_provider)
                 )
             except Exception as error:
-                failures.append(
-                    DiscoveryFailure(locator.identity.lane, locator.source_relative, str(error))
-                )
-    deferred_locators = locators if discovery_incomplete else locators[next_locator:]
+                if locator.identity.lane == "states" and _is_eacces(error):
+                    failures.append(
+                        DiscoveryFailure(
+                            "states",
+                            "states",
+                            f"STATES_ACCESS_DENIED count=1 euid={os.geteuid()} egid={os.getegid()}",
+                        )
+                    )
+                    states_access_denied = True
+                else:
+                    failures.append(
+                        DiscoveryFailure(locator.identity.lane, locator.source_relative, str(error))
+                    )
+                    validation_failed_locators.add(locator.source_relative)
+    if states_access_denied:
+        access_count = sum(
+            context["count"]
+            for failure in failures
+            if failure.lane_hint == "states"
+            and failure.locator == "states"
+            and (context := _states_access_denied_context(failure.reason)) is not None
+        )
+        failures = [
+            failure
+            for failure in failures
+            if not (
+                failure.lane_hint == "states"
+                and failure.locator == "states"
+                and _states_access_denied_context(failure.reason) is not None
+            )
+        ]
+        failures.append(
+            DiscoveryFailure(
+                "states",
+                "states",
+                f"STATES_ACCESS_DENIED count={access_count} euid={os.geteuid()} egid={os.getegid()}",
+            )
+        )
+        selected = []
+    deferred_locators = (
+        [
+            locator
+            for locator in locators
+            if locator.source_relative not in validation_failed_locators
+        ]
+        if discovery_incomplete or states_access_denied
+        else locators[next_locator:]
+    )
     failures.sort(key=lambda value: (value.lane_hint, value.locator, value.reason))
     terminals: list[dict[str, Any]] = []
     events: list[dict[str, Any]] = []
-    for candidate in selected:
-        terminal, side_events = process_candidate(
-            candidate, config, now=now, mount_id_provider=mount_id_provider, rename_impl=rename_impl
-        )
-        for event in side_events:
-            event["sequence"] = len(events)
-            events.append(event)
-        terminals.append(terminal)
+    preflight_error: RetirementPreflightError | None = None
+    if selected:
+        try:
+            _preflight_selected_retirement(
+                selected,
+                config,
+                mount_id_provider,
+                access_check,
+            )
+        except RetirementPreflightError as error:
+            preflight_error = error
+    if preflight_error is not None:
+        for candidate in selected:
+            is_blocker = candidate.source_relative == preflight_error.locator
+            terminals.append(
+                _terminal(
+                    _identity_dict(candidate.identity),
+                    "indeterminate" if is_blocker and preflight_error.indeterminate else "failed",
+                    str(preflight_error)
+                    if is_blocker
+                    else _RETIREMENT_PREFLIGHT_ABORTED_REASON,
+                    candidate.source_bytes,
+                    0,
+                    list(preflight_error.residue) if is_blocker else [],
+                )
+            )
+    else:
+        for candidate in selected:
+            terminal, side_events = process_candidate(
+                candidate, config, now=now, mount_id_provider=mount_id_provider, rename_impl=rename_impl
+            )
+            for event in side_events:
+                event["sequence"] = len(events)
+                events.append(event)
+            terminals.append(terminal)
     has_indeterminate = any(item["status"] == "indeterminate" for item in terminals)
     has_failure = bool(failures) or any(item["status"] == "failed" for item in terminals)
     receipt = {
@@ -3371,9 +4162,52 @@ def validate_receipt_semantics(receipt: Mapping[str, Any]) -> None:
         sortable.append((identity.cycle_time, identity.lane, _identity_key(identity)))
     if sortable != sorted(sortable):
         raise ArchiveMoverError("receipt candidates are not in stable order")
+    candidate_sources = {item["source_path"] for item in receipt["candidates"]}
     terminal_keys = [key(item) for item in receipt["terminals"]]
     if terminal_keys != selected_keys or len(set(terminal_keys)) != len(terminal_keys):
         raise ArchiveMoverError("receipt must contain exactly one terminal per selected identity")
+    preflight_terminals = [
+        item
+        for item in receipt["terminals"]
+        if isinstance(item.get("reason"), str)
+        and item["reason"].startswith("SOURCE_RETIREMENT_PREFLIGHT_")
+    ]
+    if preflight_terminals:
+        if len(preflight_terminals) != len(receipt["terminals"]):
+            raise ArchiveMoverError("receipt retirement preflight must abort the entire selected batch")
+        blockers: list[tuple[Mapping[str, Any], str]] = []
+        for item in preflight_terminals:
+            reason = item["reason"]
+            failed = _RETIREMENT_PREFLIGHT_FAILED_PATTERN.fullmatch(reason)
+            if failed is not None:
+                check = failed.group(1)
+                if check not in _RETIREMENT_PREFLIGHT_CHECKS:
+                    raise ArchiveMoverError("receipt retirement preflight check token is invalid")
+                if (
+                    receipt["mode"] == "dry-run"
+                    and check in _ENFORCE_ONLY_RETIREMENT_PREFLIGHT_CHECKS
+                ):
+                    raise ArchiveMoverError("dry-run receipt claims an enforce-only preflight check")
+                blockers.append((item, check))
+                if item["status"] not in {"failed", "indeterminate"}:
+                    raise ArchiveMoverError("receipt retirement preflight blocker status is invalid")
+                if item["status"] == "indeterminate" and check != "source-parent-probe-cleanup":
+                    raise ArchiveMoverError("receipt retirement preflight indeterminate reason is invalid")
+                if item["status"] == "indeterminate" and not item["residue"]:
+                    raise ArchiveMoverError("receipt retirement preflight uncertainty must identify residue")
+                if item["status"] == "failed" and item["residue"]:
+                    raise ArchiveMoverError("receipt retirement preflight failure cannot claim residue")
+            elif reason == _RETIREMENT_PREFLIGHT_ABORTED_REASON:
+                if item["status"] != "failed" or item["residue"]:
+                    raise ArchiveMoverError("receipt retirement preflight aborted terminal is invalid")
+            else:
+                raise ArchiveMoverError("receipt retirement preflight reason is unsafe")
+            if item["archive_bytes"] != 0:
+                raise ArchiveMoverError("receipt retirement preflight cannot report archive publication")
+        if len(blockers) != 1:
+            raise ArchiveMoverError("receipt retirement preflight must identify exactly one blocker")
+        if receipt["events"]:
+            raise ArchiveMoverError("receipt retirement preflight cannot report mutation events")
     if any(event["sequence"] != index for index, event in enumerate(receipt["events"])):
         raise ArchiveMoverError("receipt event sequence is not contiguous")
     if any(key(event) not in set(selected_keys) for event in receipt["events"]):
@@ -3387,6 +4221,34 @@ def validate_receipt_semantics(receipt: Mapping[str, Any]) -> None:
     failure_keys = [(item["lane_hint"], item["locator"]) for item in receipt["discovery_failures"]]
     if len(failure_keys) != len(set(failure_keys)):
         raise ArchiveMoverError("receipt discovery failures must be unique by lane/locator")
+    for item in receipt["discovery_failures"]:
+        is_states_access_aggregate = (
+            item.get("lane_hint") == "states"
+            and item.get("locator") == "states"
+            and _states_access_denied_context(item.get("reason")) is not None
+        )
+        if not is_states_access_aggregate and item.get("locator") in candidate_sources:
+            raise ArchiveMoverError(
+                "receipt failed locator must not also appear as a candidate/deferred source"
+            )
+    states_access_failures: list[dict[str, int]] = []
+    for item in receipt["discovery_failures"]:
+        reason = item.get("reason")
+        context = _states_access_denied_context(reason)
+        if isinstance(reason, str) and reason.startswith("STATES_ACCESS_DENIED"):
+            if item.get("lane_hint") != "states" or item.get("locator") != "states" or context is None:
+                raise ArchiveMoverError("receipt states access diagnostic shape is invalid")
+            states_access_failures.append(context)
+    if len(states_access_failures) > 1:
+        raise ArchiveMoverError("receipt must aggregate states access denial exactly once")
+    if states_access_failures and (
+        receipt["selected"]
+        or receipt["terminals"]
+        or receipt["events"]
+        or receipt["bytes"] != {"source": 0, "archived": 0}
+        or receipt["candidates"] != receipt["deferred"]
+    ):
+        raise ArchiveMoverError("receipt states access denial must precede candidate mutation")
     expected = (
         "indeterminate"
         if any(item["status"] == "indeterminate" for item in receipt["terminals"])
@@ -3631,7 +4493,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps({"status": "skipped", "reason": "lock-contended"}, sort_keys=True), file=sys.stderr)
             return 0
         try:
-            _receipt, code = run(config)
+            receipt, code = run(config)
+            states_access = _receipt_states_access_denied(receipt)
+            if states_access is not None:
+                print(
+                    json.dumps(
+                        {
+                            **states_access,
+                            "exit_reason": "STATES_ACCESS_DENIED",
+                            "status": "failed",
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    file=sys.stderr,
+                )
+                return 2
             return code
         finally:
             os.close(lock_fd)

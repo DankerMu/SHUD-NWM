@@ -6,6 +6,41 @@ worktree `/home/nwm/NWM`).
 
 ## Receipts
 
+### `controlled-enforce-20260715T054015Z.json`
+
+Passing node-27 receipt for issue #1065's explicitly authorized controlled
+30-day product-archive enforce, run at 2026-07-15T05:40:15.662341Z UTC on
+deployed head `e130949c4f9d658d9e31251e5ced135147e18712`:
+
+| Field | Value |
+|---|---|
+| mode | `enforce` |
+| outcome | **`success`** |
+| minimum_age_days | 30 (one-invocation override) |
+| production env minimum age | 45 (unchanged) |
+| candidates / selected / deferred | 352 / 8 / 344 |
+| bytes.source / bytes.archived | 58,423,578 / 13,708,476 |
+| terminals | 8 `retired-from-existing` |
+| discovery_failures | 0 |
+| terminal residue | 0 |
+| receipt SHA-256 | `4f72e61e8beb63476a6ca08328b84647f54f2b9606232227d8d6d4c5da64aae2` |
+
+The preceding 30-day dry-run selected the same eight run products. A complete
+selected-source audit as `nwm` covered 32 directories and 124 files and proved
+parent `wx`, directory `rwx`, file readability, effective ACL masks, and sticky
+ownership. Enforce then used the mover's descriptor-bound parent probes before
+candidate one. Each canonical tar/manifest pair already existed from the
+preserved failed attempt; the repaired idempotent path re-read and verified
+each pair, reconciled only its exact matching durable guard, retired the
+identical source, and left no matching guard residue. Post-run verification
+proved all eight sources absent and all eight archive SHA-256 and size values
+equal to their committed manifests.
+
+This receipt closes only #1065 task 8.3. The 228 audit selectors, task 3.3
+salvage, and follow-up complete inventory audit remain owned by #1070. No
+compression, rebuild drill, retention dry-run/enforce, or other #856 cascade
+command was run.
+
 ### `first-live-run-20260713T043808Z.json`
 
 First-ever live invocation of the node-27 product-archive mover, run at
@@ -108,11 +143,10 @@ issues were filed via issue-scribe:
   on. Tracked as
   [#1066](https://github.com/DankerMu/SHUD-NWM/issues/1066).
 
-## Downstream impact on the retention live cascade
+## Historical downstream impact on the retention live cascade
 
 The retention runner (#855) hard-gates on the audit's completeness
-receipt file. As long as the audit cannot produce a receipt against the
-real object-store layout:
+receipt file. At the time of the first failed receipt, the consequences were:
 
 - Retention `--dry-run` will still refuse with
   `COMPLETENESS_RECEIPT_MISSING` (same as PR #1063's committed refusal
@@ -121,10 +155,11 @@ real object-store layout:
 - Archive rebuild drill (#854) can't be exercised end-to-end because
   the archive tier stays empty even after mover runs.
 
-**Step A0 evidence goal: partially achieved** — end-to-end wiring
-demonstrated + first live receipt schema-conformant + free-space guard
-operational. **Step A1/B/C: structurally blocked** on Bug #1/#2/#3
-landing.
+The wrapper/import and canonical-prefix defects were later fixed by #1067 and
+Issue #1066, and the passing controlled mover receipt above closes #1065's archive
+lane. The remaining 228 DB-only gaps and complete-audit refresh are explicitly
+handed to #1070; they are not silently folded into this issue or treated as
+authorization to enter #856.
 
 ## Reproduction
 
@@ -151,10 +186,8 @@ systemctl --user start nhms-node27-product-archive.service
 
 ## Status
 
-Step A0 has landed as much as it can under the current code state.
-Continuing to Step A1 (compression migration + timer) is not
-recommended until Bug #1/#3 are fixed — Bug #2's import contract is
-resolved by PR #1073, while the archive-completeness
-gate is a prerequisite for every downstream retention step. Coordinated
-with the operator: the raw-retention pattern (14-day `raw/` prune)
-already runs correctly on node-27 and does not depend on this cascade.
+Issue #1065's product-archive mover closure is proven by the passing receipt above;
+the immutable first-live failure remains the red baseline. The next archive
+completeness work is #1070, not automatic entry into Step A1/B/C of #856.
+The raw-retention pattern (14-day `raw/` prune) remains independent of this
+cascade.

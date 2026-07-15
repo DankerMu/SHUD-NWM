@@ -1,0 +1,132 @@
+{
+  "schema_version": "1.0",
+  "captured_from": "node-27 read-only object-store inspection",
+  "projection_rules": [
+    "Keep each source lane, provider, cycle, basin/model identity, authoritative time window, and canonical s3://nhms URI binding.",
+    "Replace large forcing/run/state payloads with deterministic minimal bytes; recompute every fixture checksum and sidecar binding against those fixture bytes.",
+    "Keep the fixed forcing-domain bundle complete in both forcing leaves. The GFS upstream leaf had no domain bundle, so its fixture bundle is a contract-shaped projection; the IFS upstream bundle was present but is minimized rather than copied.",
+    "Do not copy credentials, database rows, user data, or absolute source paths into the object-store fixture itself. Absolute paths exist only in this provenance record.",
+    "A fixture_sha256 identifies projected fixture bytes and is intentionally distinct from original_manifest_sha256."
+  ],
+  "samples": [
+    {
+      "lane": "forcing",
+      "source_path": "/home/ghdc/nwm/object-store/forcing/gfs/2026061600/basins_heihe_vbasins/basins_heihe_shud/forcing_package.json",
+      "original_manifest_sha256": "db02667e8bd4ca402d3ab06399bf06c260781c425af4d2b597f080e90fd4754b",
+      "fixture_path": "object-store/forcing/gfs/2026061600/basins_heihe_vbasins/basins_heihe_shud/forcing_package.json",
+      "fixture_sha256": "eaebff354f5be1930e6afe78dc21cd66b28102919d17d09abd6b94d1f14a2b15",
+      "authoritative_fields": {
+        "forcing_version_id": "forc_gfs_2026061600_basins_heihe_shud",
+        "source_id": "gfs",
+        "cycle_time": "2026-06-16T00:00:00Z",
+        "start_time": "2026-06-16T00:00:00Z",
+        "end_time": "2026-06-23T00:00:00Z",
+        "basin_version_id": "basins_heihe_vbasins",
+        "model_id": "basins_heihe_shud",
+        "object_prefix": "s3://nhms"
+      },
+      "upstream_domain_bundle": "absent",
+      "fixture_bundle_sha256": {
+        "forcing_domain_package.json": "08e69c8087fca2043611c490319e8b38be9115296dad1e3d2e83b571fdf31c31",
+        "forcing_version_record.json": "55fae7ae5a4e4af61a34564597c1d261088c838e46a8105aced4b695bacc59e6",
+        "payloads/interp_weights.json": "fe20076a12af0489c22ac8c6e1e0fcebf6f5e1106337c97bea098d802cff34d4",
+        "payloads/station_inventory.json": "36b1241beb0fcee18ed64beafa64e1497a9453eae1f1e396f20c28f1a5ef0652",
+        "payloads/station_timeseries.json": "0aedc2c4299b9d326a9f40e7fb3de027bb65eb1cfdf9c0dfa762f234df90ca91"
+      }
+    },
+    {
+      "lane": "forcing",
+      "source_path": "/home/ghdc/nwm/object-store/forcing/ifs/2026070500/basins_qhh_vbasins/basins_qhh_shud/forcing_package.json",
+      "original_manifest_sha256": "8db1e31384826d410056bfa1a08246bd8d39c88731997d87423c9fa4956be768",
+      "fixture_path": "object-store/forcing/ifs/2026070500/basins_qhh_vbasins/basins_qhh_shud/forcing_package.json",
+      "fixture_sha256": "ef9b7771255246a04388cc733eb08c3cf919e3968cf4ebe3200e9958f1e60316",
+      "authoritative_fields": {
+        "forcing_version_id": "forc_ifs_2026070500_basins_qhh_shud",
+        "source_id": "IFS",
+        "cycle_time": "2026-07-05T00:00:00Z",
+        "start_time": "2026-07-05T00:00:00Z",
+        "end_time": "2026-07-12T00:00:00Z",
+        "basin_version_id": "basins_qhh_vbasins",
+        "model_id": "basins_qhh_shud",
+        "object_prefix": "s3://nhms"
+      },
+      "upstream_domain_bundle": "present",
+      "upstream_bundle_sha256": {
+        "forcing_domain_package.json": "f505cd36f672ffef743cd48a89fadca72b84d97eb0e46c5edcb3b8aabfde6e8b",
+        "forcing_version_record.json": "49dde9530bdaa97de06395cc76d936b2f8e6dfa1b213e06713a45b9cc83aef5b",
+        "payloads/interp_weights.json": "9eed048fab1decd844bd1d54c92f56496cd54024d8baa5170f109c0f9b854714",
+        "payloads/station_inventory.json": "aa7105d08b467f8a26378bdeac9ad11f5766191bdef3d1ab4eee86aa6c8a2d43",
+        "payloads/station_timeseries.json": "10d4f613f268b59918c1b359bef5d11eb537948443aca8582546525fbc5539be"
+      },
+      "fixture_bundle_sha256": {
+        "forcing_domain_package.json": "66422c58ff50f5bd78eff94afa2aa182c112391cea059a78be8b095b7ef3b41a",
+        "forcing_version_record.json": "02967cae49d7798d04a2e8c7b134ed6143b88422c9f2f5c61f7723d6a98e040b",
+        "payloads/interp_weights.json": "c8f729f78cc28db69480e1f0a5651bc13ee9e3a3fd2aa2f1677d2eafe1fe2c64",
+        "payloads/station_inventory.json": "8d9d426620b2d5b8ebdd3fe53af3de3cc065a5612634aad905a044661c30c923",
+        "payloads/station_timeseries.json": "67f55e1d6e56a120c9794500f0f79da1592c29bf90668231c207f93d7395365e"
+      }
+    },
+    {
+      "lane": "runs",
+      "source_path": "/home/ghdc/nwm/object-store/runs/fcst_gfs_2026053106_basins_heihe_shud/input/manifest.json",
+      "original_manifest_sha256": "c833e6a7b820bd81000753b632f9574064ba99b0734598c4ef06aaa0cfdd11d5",
+      "fixture_path": "object-store/runs/fcst_gfs_2026053106_basins_heihe_shud/input/manifest.json",
+      "fixture_sha256": "da19fbc6b39c2195fdcf8384a77734a7849b2d9e11db8b6a8d5f6432b85f8059",
+      "authoritative_fields": {
+        "run_id": "fcst_gfs_2026053106_basins_heihe_shud",
+        "source_id": "gfs",
+        "cycle_time": "2026-05-31T06:00:00Z",
+        "start_time": "2026-05-31T06:00:00Z",
+        "end_time": "2026-06-07T06:00:00Z",
+        "basin_version_id": "basins_heihe_vbasins",
+        "model_id": "basins_heihe_shud",
+        "run_manifest_uri": "s3://nhms/runs/fcst_gfs_2026053106_basins_heihe_shud/input/manifest.json",
+        "output_uri": "s3://nhms/runs/fcst_gfs_2026053106_basins_heihe_shud/output/"
+      }
+    },
+    {
+      "lane": "runs",
+      "source_path": "/home/ghdc/nwm/object-store/runs/fcst_ifs_2026053106_basins_qhh_shud/input/manifest.json",
+      "original_manifest_sha256": "c74a99b9dede8cdd4b1e33f5ca533aa136b3f58ca09260ea318432c52d6f93d7",
+      "fixture_path": "object-store/runs/fcst_ifs_2026053106_basins_qhh_shud/input/manifest.json",
+      "fixture_sha256": "f0fa214326521b60f18cd64592bf084f9bf970b7e8fe23b06ba8c0972db78bd3",
+      "authoritative_fields": {
+        "run_id": "fcst_ifs_2026053106_basins_qhh_shud",
+        "source_id": "IFS",
+        "cycle_time": "2026-05-31T06:00:00Z",
+        "start_time": "2026-05-31T06:00:00Z",
+        "end_time": "2026-06-06T06:00:00Z",
+        "basin_version_id": "basins_qhh_vbasins",
+        "model_id": "basins_qhh_shud",
+        "run_manifest_uri": "s3://nhms/runs/fcst_ifs_2026053106_basins_qhh_shud/input/manifest.json",
+        "output_uri": "s3://nhms/runs/fcst_ifs_2026053106_basins_qhh_shud/output/"
+      }
+    },
+    {
+      "lane": "states",
+      "source_path": "/home/ghdc/nwm/object-store/states/gfs/basins_heihe_shud/2026050100/state.cfg.ic",
+      "original_manifest_sha256": null,
+      "fixture_path": "object-store/states/gfs/basins_heihe_shud/2026050100/state.cfg.ic",
+      "fixture_sha256": "1afc8bf2a3a1ef6074f36d6b2196f9c7587fa3c403567fd658ab3a31665e2634",
+      "authoritative_fields": {
+        "source_id": "gfs",
+        "model_id": "basins_heihe_shud",
+        "valid_time": "2026-05-01T00:00:00Z"
+      },
+      "upstream_readability": "EACCES"
+    },
+    {
+      "lane": "states",
+      "source_path": "/home/ghdc/nwm/object-store/states/IFS/basins_qhh_shud/2026050100/state.cfg.ic",
+      "original_manifest_sha256": null,
+      "fixture_path": "object-store/states/IFS/basins_qhh_shud/2026050100/state.cfg.ic",
+      "fixture_sha256": "6be7379af39392394dc6e69990f15c3bf3e92be9442feeabb7779716932e34b4",
+      "authoritative_fields": {
+        "source_id": "IFS",
+        "model_id": "basins_qhh_shud",
+        "valid_time": "2026-05-01T00:00:00Z"
+      },
+      "upstream_readability": "EACCES"
+    }
+  ]
+}

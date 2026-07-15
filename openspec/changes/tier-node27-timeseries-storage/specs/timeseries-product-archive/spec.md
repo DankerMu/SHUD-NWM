@@ -150,6 +150,47 @@ been renamed to a tombstone, every later failure path SHALL discover and report
 the actual surviving tombstone/claim/guard locations even before the first
 child removal.
 
+Before any selected candidate creates staging, publishes/quarantines an
+archive leaf, creates a durable guard, or mutates a source, the mover SHALL
+preflight source-retirement capability for the entire selected batch. The
+read-only phase SHALL use descriptor-bound, no-follow traversal and the
+effective mover identity rather than mode-bit inference: every source parent
+requires write/search, every source root and internal directory requires
+read/write/search, and files retain the existing read plus exact preimage
+identity verification. It SHALL retain the existing tree entry/depth/device/
+mount/symlink bounds. Dry-run SHALL execute this read-only phase and fail
+non-zero with a sanitized selected-batch receipt instead of reporting
+`planned` when retirement is unavailable. Sticky-bit source parents, roots and
+internal directories SHALL require a conservative ownership proof for each
+governed rename; effective-access success alone SHALL NOT authorize deletion.
+The selected terminal identity SHALL bind the blocker. Its reason SHALL carry
+one closed check token without interpolating the source locator; other selected
+terminals SHALL carry one constant batch-aborted reason. Unknown tokens and
+probe-only tokens in dry-run receipts SHALL fail semantic validation, while
+legal space-bearing forcing/run/state locators remain unambiguous. Enforce
+SHALL complete the read-only phase for every selected candidate and then
+perform one randomized hidden mkdir/fsync/rmdir/fsync capability probe per
+unique opened source parent. The unique-parent key and probe SHALL derive from
+the same held parent fd and a post-probe namespace rebound SHALL fail closed. Any
+failure SHALL abort the entire selected batch with zero archive publication
+and zero source mutation. Probe cleanup SHALL be attempted before reporting;
+cleanup uncertainty SHALL be indeterminate and record only safe root-relative
+probe residue. After this prepublish gate succeeds, later candidate-specific
+permission/race failures retain the independent terminal model and do not
+imply rollback of already published candidates.
+
+Before a new source-retirement mutation against an existing verified archive,
+the mover SHALL boundedly reconcile prior `.archive-guards` residue. It SHALL
+remove only an exact two-member guard whose opened tar/manifest children have
+the same inode/signature pair as the current verified canonical pair, with
+descriptor, namespace, device and mount identity rechecks before unlink.
+Foreign, extra-entry, copied-but-not-hard-linked, malformed or ambiguous guards
+SHALL remain untouched. Matching-guard cleanup uncertainty SHALL occur before
+source mutation, preserve the source, exit non-zero/indeterminate and report
+safe guard-relative residue. A successful retry SHALL NOT report empty
+terminal residue while leaving a matching stale hard-link guard. Operators
+SHALL NOT manually delete an unclassified durable guard.
+
 Source/archive discovery, tar reads and retirement SHALL remain
 descriptor-bound with no-follow component opens, fixed-root-device checks and
 bounded traversal. Every opened FD SHALL match the pinned Linux mount ID as
@@ -247,7 +288,10 @@ executable SHALL resolve to a configured absolute regular non-symlink path
 Malformed/unreadable entries that cannot form canonical identity SHALL be
 separate deterministic discovery failures keyed by lane hint + safe
 root-relative locator; they count toward discovery/overall failure and the
-full-validation attempt bound but never enter selected/deferred.
+full-validation attempt bound but never enter selected/deferred. The sole
+aggregation exception is one invocation's state-leaf filesystem permission
+denials, which SHALL collapse to the lane-level `STATES_ACCESS_DENIED` contract
+below; non-permission state failures remain separate and locator-keyed.
 
 The lock file is absolute mode-0600 safe coordination metadata opened from a
 trusted dirfd with no-follow; existing files are fstat-bound without
@@ -268,9 +312,15 @@ terminal outcome and zero or more ordered side events (including quarantine);
 locator-keyed discovery failures remain disjoint. Ordering is deterministic,
 bytes are non-negative and overall outcome matches terminal/discovery failures.
 Lock metadata plus the receipt are the only writes allowed during dry-run.
-Enforce requires an explicit flag, may continue
-over bounded independent candidates, and exits non-zero if any candidate
-failed or publication/retirement became indeterminate.
+Enforce requires an explicit flag. The selected batch retirement-capability
+gate above is fail-closed before candidate one; after it passes, enforce may
+continue over bounded independent candidates and exits non-zero if any
+candidate failed or publication/retirement became indeterminate. Preflight
+terminal reasons SHALL use only deterministic safe check tokens, with source
+binding supplied by the selected terminal identity rather than interpolated
+locator text; they SHALL NOT contain absolute paths or raw exception text.
+Candidate/selected/deferred partitions and locator-keyed discovery-failure
+disjointness remain unchanged.
 
 #### Scenario: Previous run still active
 
@@ -285,6 +335,27 @@ failed or publication/retirement became indeterminate.
 - **THEN** it MUST emit the candidate list and planned actions in the receipt
   and perform no source/archive/staging/quarantine mutation; atomic receipt
   publication and safe lock metadata are the sole permitted writes
+
+#### Scenario: Selected source cannot be safely retired
+
+- **WHEN** any selected forcing, runs, or states product has a source parent
+  without effective write/search or a source-tree directory without effective
+  read/write/search
+- **THEN** dry-run MUST fail non-zero without reporting a planned action
+- **AND** enforce MUST abort every selected candidate before archive
+  publication, durable-guard creation, or source mutation
+- **AND** an enforce parent capability-probe cleanup uncertainty MUST be
+  indeterminate with explicit safe root-relative residue
+
+#### Scenario: Prior durable guard exists for the verified archive
+
+- **WHEN** an existing verified archive has a prior exact hard-link guard from
+  a failed source retirement
+- **THEN** enforce MUST reconcile that matching guard before new source
+  mutation and then safely retry retirement
+- **AND** a foreign or ambiguous guard MUST remain untouched
+- **AND** matching-guard cleanup failure MUST preserve source and report
+  indeterminate safe residue
 
 #### Scenario: Cycle younger than the minimum age is not archived
 
@@ -625,3 +696,59 @@ failures terminate in `blocked` before the publication attempt.
 - **THEN** the audit MUST publish `blocked` and exit non-zero
 - **AND** a missing-value, duplicate/ambiguous, absent, or unsafe receipt-path
   bootstrap MUST remain the explicit stderr-only unwriteable exception
+
+### Requirement: Product discovery binds the canonical producer shape and fails access once
+
+The product-archive mover SHALL treat the configured object-store prefix as an
+exact producer identity, not an alias or bucket-normalization hint. A forcing
+manifest file URI SHALL remain below its exact package leaf. A run manifest
+SHALL bind its `run_id`, input manifest URI, and output directory URI to the
+discovered run directory; one canonical directory trailing slash MAY be
+normalized without changing identity. A configured prefix that differs from
+the manifest producer prefix SHALL fail these bindings rather than broaden URI
+containment. When locator discovery or bounded full validation cannot traverse
+one or more state leaves due to filesystem permission denial before candidate
+processing begins, it SHALL emit exactly one deterministic, sanitized
+`STATES_ACCESS_DENIED` diagnostic with the affected count and effective uid/gid
+context, terminate with the exact stderr/exit contract below, and perform no
+archive/source mutation. Permission changes after candidate processing begins
+retain the existing independent-candidate failed/indeterminate terminal
+semantics; this requirement does not add transactional rollback across the
+batch. The receipt uses exactly one
+existing-schema discovery-failure item: `lane_hint=states`, `locator=states`,
+and reason
+`STATES_ACCESS_DENIED count=<decimal> euid=<decimal> egid=<decimal>`. After
+durable receipt publication the CLI emits exactly one compact stderr JSON line
+with `status=failed`, `exit_reason=STATES_ACCESS_DENIED`, and the same numeric
+`count`, `euid`, and `egid`, then exits `2`. Other receipt-declared failures
+retain exit `1`; this requirement does not add receipt-schema fields.
+
+#### Scenario: Canonical forcing and run products bind their live leaf
+
+- **WHEN** GFS or IFS forcing/run manifests use producer prefix `s3://nhms` and
+  bind the exact discovered package or run directory
+- **THEN** product discovery MUST accept the manifest, including a run output
+  directory URI that differs only by one canonical trailing slash
+- **AND** qhh/heihe basin naming layers MUST NOT be collapsed or inferred away
+
+#### Scenario: Historical configured bucket mismatch remains fail-closed
+
+- **WHEN** a real producer-shaped `s3://nhms/...` forcing or run manifest is
+  validated with configured prefix `s3://nhms-object-store`
+- **THEN** forcing MUST fail its exact-package binding and runs MUST fail their
+  run-directory identity/output binding
+- **AND** the mover MUST NOT accept cross-bucket or cross-leaf aliases as a
+  compatibility fallback
+
+#### Scenario: Multiple inaccessible state leaves produce one terminal access diagnostic
+
+- **WHEN** state discovery or bounded full validation encounters filesystem
+  permission denial across one or more GFS/IFS basin leaves before candidate
+  processing
+- **THEN** the receipt and structured stderr MUST expose one safe
+  `STATES_ACCESS_DENIED` diagnostic with the affected count and effective
+  uid/gid context, not one failure per leaf, using the exact receipt and stderr
+  shapes above
+- **AND** raw absolute paths, credentials, and raw exception text MUST be absent
+- **AND** the invocation MUST exit `2` before source/archive mutation and
+  MUST NOT claim a passing receipt
