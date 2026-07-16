@@ -24,6 +24,7 @@
     "tests/test_node27_timeseries_compression.py",
     "tests/test_node27_timeseries_compression_live_evidence.py",
     "tests/test_node27_timeseries_compression_supervisor.py",
+    "schemas/examples/timeseries_compression_live_evidence.example.json",
     "docs/runbooks/receipts/tier-node27-timeseries-storage/**/*.json"
   ]
 }

@@ -54,6 +54,11 @@ RUN_ID_PATTERN = r"[0-9A-Za-z._-]{1,64}"
 EXPECTED_REPO = "/home/nwm/NWM"
 EXPECTED_DATABASE = "nhms"
 EXPECTED_CONTAINER = "nhms-db"
+# MEASURED (Round-5 gate §G2): inside timescaledb-ha:pg15, `/usr/bin/pg_restore`
+# is a symlink whose realpath is the pg_wrapper dispatcher (the stable entrypoint
+# the child actually invokes), NOT `/usr/bin/pg_restore`.  Bind the wrapper and
+# fail closed on any drift.
+CONTAINER_PG_RESTORE_REALPATH = "/usr/share/postgresql-common/pg_wrapper"
 EXPECTED_REVIEWED_REMOTE_REF = "refs/remotes/origin/feat/issue-1069-live-compression"
 EXPECTED_REMOTE_IDENTITY = "DankerMu/SHUD-NWM"
 MAX_LEDGER_BYTES = 16 * 1024**2
@@ -1013,7 +1018,11 @@ def resolve_container_pg_restore_identity(*, wall: HardWall, dump_path: str) -> 
         .decode()
         .splitlines()
     )
-    if not image_id.startswith("sha256:") or realpath != "/usr/bin/pg_restore" or len(hashes) != 2:
+    if (
+        not image_id.startswith("sha256:")
+        or realpath != CONTAINER_PG_RESTORE_REALPATH
+        or len(hashes) != 2
+    ):
         raise SupervisorError("container pg_restore identity differs")
     binary_sha256 = hashes[0].split()[0]
     dump_sha256 = hashes[1].split()[0]
@@ -1208,17 +1217,21 @@ def capture_checkpoint(
     show_document = {"recurring": recurring_show, "replay": replay_show}
     # The governed-unit window is purely the "no extra activation" assertion.
     # With the governed units silent during replay, `--after-cursor` positions
-    # past the last matching entry, so journalctl yields zero rows and NO cursor
-    # line (sd_journal_get_cursor -> -EADDRNOTAVAIL) and exits 0.  An empty window
-    # is therefore the expected steady state, not a lost cursor.
+    # past the last matching entry, so journalctl yields zero rows and exits 0.
+    # An empty window is therefore the expected steady state, not a lost cursor.
+    # MEASURED (Round-5 gate §G1): this SAME argv WITH `--show-cursor` exits 1 on
+    # an empty match, so `--show-cursor` is omitted here -- the end cursor comes
+    # from the positioned `-n 0` boundary probe below, and the parse loop never
+    # relied on a window cursor line.  `--user` matches the boundary/start-cursor
+    # sibling probes (measured harmless on the silent unit).
     window_raw = _run_capture_argv(
         [
             _host_bin("journalctl"),
+            "--user",
             "--user-unit=nhms-node27-timeseries-compression.service",
             "--user-unit=nhms-node27-timeseries-compression-replay.service",
             "--after-cursor",
             journal_cursor,
-            "--show-cursor",
             "--no-pager",
             "--output=json",
         ],

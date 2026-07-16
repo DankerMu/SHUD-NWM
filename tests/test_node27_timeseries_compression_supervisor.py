@@ -578,7 +578,7 @@ def test_harmless_full_state_machine_has_no_fixture_prewrite_or_out_of_band_owne
             restore_identity_resolver=lambda _wall, _dump: {
                 "dump_sha256": "1" * 64,
                 "container_image_id": "sha256:" + "2" * 64,
-                "binary_realpath": "/usr/bin/pg_restore",
+                "binary_realpath": "/usr/share/postgresql-common/pg_wrapper",
                 "binary_sha256": "3" * 64,
             },
         )
@@ -1078,7 +1078,9 @@ class _MainHarness:
     surfaces stubbed, and every path lives under ``tmp_path``.
     """
 
-    def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def __init__(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, live_journal: bool = False
+    ) -> None:
         for key in supervisor.FORBIDDEN_INHERITED_ENV:
             monkeypatch.delenv(key, raising=False)
         self.plan = _plan()
@@ -1099,7 +1101,13 @@ class _MainHarness:
             "NODE27_COMPRESSION_EXPECTED_STALE_SHA256", hashlib.sha256(STALE_RECEIPT).hexdigest()
         )
         monkeypatch.setattr(supervisor, "_verify_checkout_lineage", lambda plan, *, wall: None)
-        monkeypatch.setattr(supervisor, "_run_capture_argv", self._journal_cursor)
+        # When live_journal is set the caller has installed a real journalctl
+        # binary stub under SUPERVISOR_BIN_DIR, so main() drives the REAL
+        # start-cursor probe (_run_capture_argv) through it; otherwise the probe
+        # is stubbed with a canned cursor. execute_producer_state_machine stays
+        # stubbed either way, so nothing mutates.
+        if not live_journal:
+            monkeypatch.setattr(supervisor, "_run_capture_argv", self._journal_cursor)
         monkeypatch.setattr(supervisor, "execute_producer_state_machine", self._state_machine)
 
     def _journal_cursor(self, argv: list[str], **_: Any) -> bytes:
@@ -1259,6 +1267,37 @@ def test_main_missing_replay_inputs_fail_before_mutation(
 
     assert harness.executed == []
     assert not harness.state_path.exists()
+
+
+def test_main_binds_the_real_journal_start_cursor_through_the_probe(
+    probe_bin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # F2 positive: exercise the REAL start-cursor journalctl probe (main() start
+    # gate) through the binary stub -- not the canned-cursor shortcut -- so the
+    # `len(cursor_lines) != 1` bind path is actually driven.
+    probe_bin("journalctl", _journalctl_responses())
+    harness = _MainHarness(tmp_path, monkeypatch, live_journal=True)
+    assert supervisor.main(harness.argv()) == 0
+    assert len(harness.executed) == 1
+    assert not harness.state_path.exists()
+
+
+@pytest.mark.parametrize("boundary", ["missing", "duplicate"])
+def test_main_fails_closed_when_the_journal_start_cursor_cannot_bind(
+    probe_bin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    # F2 negative: the start-cursor probe must bind EXACTLY one cursor. A probe
+    # that returns no cursor (or two) fails the bind guard before any child runs.
+    if boundary == "missing":
+        responses = _journalctl_responses(boundary_cursor=None)
+    else:
+        responses = _journalctl_responses()
+        responses[-1]["stdout"] += "-- cursor: s=extra;i=2;b=x;m=2;t=2;x=2\n"
+    probe_bin("journalctl", responses)
+    harness = _MainHarness(tmp_path, monkeypatch, live_journal=True)
+    with pytest.raises(supervisor.SupervisorError, match="cannot bind the journal start cursor"):
+        supervisor.main(harness.argv())
+    assert harness.executed == []
 
 
 def test_finalizer_state_run_id_cannot_escape_its_marker_path(tmp_path: Path) -> None:
@@ -1870,24 +1909,43 @@ def _systemctl_responses(invocation_id: str = PROBE_INVOCATION_ID, *, require_xd
 def _journalctl_responses(
     *, window_rows: list[dict[str, Any]] | None = None, boundary_cursor: str | None = BOUNDARY_CURSOR
 ) -> list[dict[str, Any]]:
-    window_stdout = "".join(json.dumps(row) + "\n" for row in (window_rows or []))
-    # Measured node-27 contract: an empty governed-unit `--after-cursor` window
-    # emits ZERO bytes and exits 0 (no cursor line). The `-n 0` boundary probe is
-    # always positioned and emits a cursor even over an empty tail.
+    rows = window_rows or []
+    window_stdout = "".join(json.dumps(row) + "\n" for row in rows)
+    # Measured node-27 contract (Round-5 gate §G1): the `-n 0 --show-cursor`
+    # boundary probe is always positioned at the tail and emits exactly one
+    # cursor line (exit 0) even over an empty tail.
     boundary_stdout = "-- No entries --\n"
     if boundary_cursor is not None:
         boundary_stdout += f"-- cursor: {boundary_cursor}\n"
-    return [
-        {"match": ["--after-cursor"], "stdout": window_stdout},
-        {"match": ["-n 0"], "stdout": boundary_stdout},
-    ]
+    responses: list[dict[str, Any]] = []
+    # Measured node-27 contract (Round-5 gate §G1): the SAME governed-unit
+    # `--after-cursor` window argv exits 1 WITH `--show-cursor` on an empty match
+    # (0 rows) but exits 0 WITHOUT it. Encoding both is the regression lock: if
+    # the vestigial `--show-cursor` is re-added to the window query, every silent
+    # steady-state checkpoint aborts (RED), exactly as it does live. The token
+    # match is order-sensitive, so the `--show-cursor` variant must precede the
+    # plain `--after-cursor` response.
+    if rows:
+        # A non-empty match WITH --show-cursor emits its rows plus a trailing
+        # cursor line and exits 0.
+        cursor_tail = f"-- cursor: {boundary_cursor}\n" if boundary_cursor is not None else ""
+        responses.append({"match": ["--after-cursor", "--show-cursor"], "stdout": window_stdout + cursor_tail})
+    else:
+        responses.append({"match": ["--after-cursor", "--show-cursor"], "stdout": "", "exit": 1})
+    # The current window query omits --show-cursor: an empty match emits ZERO
+    # bytes and exits 0 (no cursor line); a non-empty match emits its rows.
+    responses.append({"match": ["--after-cursor"], "stdout": window_stdout})
+    responses.append({"match": ["-n 0"], "stdout": boundary_stdout})
+    return responses
 
 
 def _docker_responses(
     *,
     dump_path: str,
     image: str = "sha256:" + "a" * 64,
-    realpath: str = "/usr/bin/pg_restore",
+    # Measured node-27 contract (Round-5 gate §G2): `readlink -f /usr/bin/pg_restore`
+    # inside nhms-db resolves to the pg_wrapper dispatcher, NOT /usr/bin/pg_restore.
+    realpath: str = "/usr/share/postgresql-common/pg_wrapper",
     binary_sha: str = "b" * 64,
     dump_sha: str = "c" * 64,
 ) -> list[dict[str, Any]]:
@@ -2053,6 +2111,70 @@ def test_checkpoint_fails_when_the_positioned_boundary_probe_loses_its_cursor(
             )
 
 
+def test_checkpoint_window_query_is_user_scoped_without_show_cursor(
+    probe_bin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Direct argv lock for the §G1 fix: the governed-unit window query is --user
+    # scoped and MUST NOT carry the vestigial --show-cursor (which exits 1 on an
+    # empty match live). The `-n 0` boundary probe keeps --show-cursor -- it is
+    # the sole end-cursor source.
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run-user"))
+    probe_bin("psql", _psql_responses())
+    probe_bin("systemctl", _systemctl_responses())
+    probe_bin("journalctl", _journalctl_responses())
+    seen: list[list[str]] = []
+    real = supervisor._run_capture_argv
+
+    def recording(argv: list[str], **kwargs: Any) -> bytes:
+        seen.append(list(argv))
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(supervisor, "_run_capture_argv", recording)
+    with _ledger(tmp_path / "ledger.jsonl") as ledger:
+        supervisor.capture_checkpoint(
+            _checkpoint(),
+            wall=supervisor.HardWall.start(30),
+            ledger=ledger,
+            artifact_dir=tmp_path,
+            journal_cursor="s=stub;i=start;b=stub;m=0;t=0;x=0",
+            invocation_id=PROBE_INVOCATION_ID,
+        )
+    window = next(argv for argv in seen if "--after-cursor" in argv)
+    assert "--user" in window
+    assert "--output=json" in window
+    assert "--show-cursor" not in window
+    boundary = next(argv for argv in seen if "-n" in argv and "--after-cursor" not in argv)
+    assert "--user" in boundary and "0" in boundary and "--show-cursor" in boundary
+
+
+def test_checkpoint_survives_empty_window_because_the_show_cursor_regression_is_locked(
+    probe_bin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # §G1 behavioral lock: the journalctl stub exits 1 for an empty --after-cursor
+    # window that carries --show-cursor (the measured live behavior). Because the
+    # fixed window query omits --show-cursor the checkpoint completes; re-adding
+    # --show-cursor would make the stub abort this checkpoint (RED).
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run-user"))
+    probe_bin("psql", _psql_responses())
+    probe_bin("systemctl", _systemctl_responses())
+    responses = _journalctl_responses(window_rows=[])
+    # Guard the guard: the stub must really encode the exit-1 contract, so a
+    # future refactor of _journalctl_responses cannot silently defang the lock.
+    show_cursor_empty = next(r for r in responses if r["match"] == ["--after-cursor", "--show-cursor"])
+    assert show_cursor_empty["exit"] == 1 and show_cursor_empty["stdout"] == ""
+    probe_bin("journalctl", responses)
+    with _ledger(tmp_path / "ledger.jsonl") as ledger:
+        end_cursor = supervisor.capture_checkpoint(
+            _checkpoint(),
+            wall=supervisor.HardWall.start(30),
+            ledger=ledger,
+            artifact_dir=tmp_path,
+            journal_cursor="s=stub;i=start;b=stub;m=0;t=0;x=0",
+            invocation_id=PROBE_INVOCATION_ID,
+        )
+    assert end_cursor == BOUNDARY_CURSOR
+
+
 def test_checkpoint_rejects_recurring_activation_in_the_journal_window(
     probe_bin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2166,7 +2288,8 @@ def test_resolve_container_pg_restore_identity_reads_real_docker_probes(
     assert identity == {
         "dump_sha256": "c" * 64,
         "container_image_id": "sha256:" + "a" * 64,
-        "binary_realpath": "/usr/bin/pg_restore",
+        # Measured (Round-5 gate §G2): the resolver binds the pg_wrapper realpath.
+        "binary_realpath": "/usr/share/postgresql-common/pg_wrapper",
         "binary_sha256": "b" * 64,
     }
 
@@ -2178,11 +2301,20 @@ def test_resolve_container_pg_restore_identity_rejects_out_of_mount_dump() -> No
         )
 
 
+@pytest.mark.parametrize(
+    "relocated",
+    [
+        "/opt/pg_restore",
+        # The old assumption the gate refuted: re-pinning /usr/bin/pg_restore (the
+        # symlink, not its wrapper realpath) must now fail closed as drift.
+        "/usr/bin/pg_restore",
+    ],
+)
 def test_resolve_container_pg_restore_identity_rejects_relocated_binary(
-    probe_bin, tmp_path: Path
+    probe_bin, tmp_path: Path, relocated: str
 ) -> None:
     dump_path = "/var/lib/postgresql/evidence/schema.dump"
-    probe_bin("docker", _docker_responses(dump_path=dump_path, realpath="/opt/pg_restore"))
+    probe_bin("docker", _docker_responses(dump_path=dump_path, realpath=relocated))
     with pytest.raises(supervisor.SupervisorError, match="container pg_restore identity differs"):
         supervisor.resolve_container_pg_restore_identity(
             wall=supervisor.HardWall.start(30), dump_path=dump_path
@@ -2280,6 +2412,99 @@ def test_finite_over_limit_child_is_ledgered_as_truncated_even_after_exit(tmp_pa
     event = json.loads(ledger_path.read_text().strip())
     assert event["stdout"]["bytes"] == limit
     assert event["stdout"]["truncated"] is True
+
+
+def test_capture_step_fails_closed_when_dropped_without_termination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # S-F1 for run_capture_step: a probe whose stdout overran the ceiling AFTER
+    # the child already exited (terminated=False, dropped>0 -- the exact state
+    # `test_drain_child_reports_truncation_from_dropped_bytes_not_termination`
+    # proves _drain_child can return) MUST still fail closed. This deterministically
+    # kills the supervisor.py:903 mutant `... or dropped[...]` -> `if terminated:`,
+    # which would let the truncated capture publish + ledger instead of aborting.
+    output = tmp_path / "capture-dropped.json"
+    capture = {
+        "capture_id": "capture-dropped",
+        "kind": "preflight_evidence",
+        "argv": [sys.executable, "-c", "pass"],
+        "output_path": str(output),
+    }
+
+    def fake_drain(process: Any, **_: Any) -> tuple[bytes, bytes, bool, dict[str, int]]:
+        process.wait()  # keep process.returncode == 0 so the mutant reaches publish
+        return (b"x" * 10, b"", False, {"stdout": 5, "stderr": 0})
+
+    monkeypatch.setattr(supervisor, "_drain_child", fake_drain)
+    ledger_path = tmp_path / "capture-dropped-ledger.jsonl"
+    with supervisor.AppendOnlyLedger(
+        ledger_path, run_id="run", run_plan_id="plan", invocation_id="1" * 32
+    ) as ledger:
+        with pytest.raises(supervisor.HardWallExpired):
+            supervisor.run_capture_step(
+                capture, wall=supervisor.HardWall.start(5), ledger=ledger, artifact_dir=tmp_path
+            )
+    # Fail closed BEFORE publish or ledger: unlike run_child (which ledgers the
+    # truncated child then raises), the capture writer raises on `dropped` ahead
+    # of any write, so a truncated probe leaks neither artifact nor ledger row.
+    assert not output.exists()
+    assert ledger_path.read_text() == ""
+
+
+def test_capture_step_over_limit_finite_writer_fails_closed(tmp_path: Path) -> None:
+    # The live-child companion (finite writer, limit + N, child exits): a real
+    # over-limit capture aborts and publishes/ledgers nothing.
+    output = tmp_path / "capture-over.json"
+    limit = 1024
+    capture = {
+        "capture_id": "capture-overlimit",
+        "kind": "preflight_evidence",
+        "argv": _finite_writer(limit + 512),
+        "output_path": str(output),
+    }
+    ledger_path = tmp_path / "capture-over-ledger.jsonl"
+    with supervisor.AppendOnlyLedger(
+        ledger_path, run_id="run", run_plan_id="plan", invocation_id="1" * 32
+    ) as ledger:
+        with pytest.raises(supervisor.HardWallExpired):
+            supervisor.run_capture_step(
+                capture,
+                wall=supervisor.HardWall.start(5),
+                ledger=ledger,
+                artifact_dir=tmp_path,
+                stdout_limit=limit,
+                term_grace=0.05,
+            )
+    assert not output.exists()
+    assert ledger_path.read_text() == ""
+
+
+def test_capture_step_at_the_ceiling_publishes_untruncated_stdout(tmp_path: Path) -> None:
+    # Complement to the over-limit lock: a child at exactly the ceiling is NOT
+    # truncated, so it publishes cleanly and the ledger records truncated=False.
+    output = tmp_path / "capture-exact.json"
+    limit = 1024
+    capture = {
+        "capture_id": "capture-exact",
+        "kind": "preflight_evidence",
+        "argv": _finite_writer(limit),
+        "output_path": str(output),
+    }
+    ledger_path = tmp_path / "capture-exact-ledger.jsonl"
+    with supervisor.AppendOnlyLedger(
+        ledger_path, run_id="run", run_plan_id="plan", invocation_id="1" * 32
+    ) as ledger:
+        event = supervisor.run_capture_step(
+            capture,
+            wall=supervisor.HardWall.start(5),
+            ledger=ledger,
+            artifact_dir=tmp_path,
+            stdout_limit=limit,
+            term_grace=0.05,
+        )
+    assert output.stat().st_size == limit
+    assert event["stdout"]["bytes"] == limit
+    assert event["stdout"]["truncated"] is False
 
 
 # --- C-F1: decompress argv guard order -------------------------------------

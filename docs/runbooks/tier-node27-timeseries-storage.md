@@ -699,6 +699,23 @@ credential in process argv.
    Also capture timestamped canonical JSON for the two target tables' exact
    pre-migration catalog. This dump is forensic DDL inventory, not a data
    backup, restore drill, or compressed-storage rollback.
+
+   Before the live replay, run a read-only dry-probe of the container
+   `pg_restore` identity the supervisor binds, so a drifted image/realpath is
+   caught here rather than burning the one-shot replay window at preflight:
+
+   ```bash
+   docker inspect --format='{{.Image}}' nhms-db          # -> sha256:...
+   docker exec nhms-db /usr/bin/readlink -f /usr/bin/pg_restore
+                                                         # -> /usr/share/postgresql-common/pg_wrapper
+   docker exec nhms-db /usr/bin/pg_restore --version     # -> pg_restore (PostgreSQL) 15.2
+   ```
+
+   `readlink -f /usr/bin/pg_restore` resolves to the `pg_wrapper` dispatcher,
+   NOT `/usr/bin/pg_restore` (which is a symlink to it); the supervisor binds
+   that wrapper realpath plus its sha256 and the image ID, and binds the dump
+   descriptor digest at run time against the freshly written schema dump. Stop
+   before live execution if the realpath, image, or version differ.
 4. Capture the original autopipe/compression timer+service enabled/active/sub,
    `MainPID`, result and bounded journal. Stop only the autopipe timer. Require
    `MainPID=0`, no activating/running autopipe process, and no live writer or
