@@ -26,6 +26,7 @@ from apps.api.routes.hydro_display import _postgis_tile_params
 from packages.common import compression_terminal_state as terminal_state
 from packages.common.evidence_io import resolve_artifact_closure
 from scripts import node27_timeseries_compression_benchmark as benchmark
+from scripts import node27_timeseries_compression_bundle_author as bundle_author
 from scripts import node27_timeseries_compression_live_evidence as evidence
 from scripts import node27_timeseries_compression_supervisor as supervisor
 from services.tiles.mvt import postgis_tile_sql
@@ -1585,6 +1586,115 @@ def test_verifier_recomputes_complete_terminal_envelope(tmp_path: Path) -> None:
     assert curve["after_capture"]["samples_ms"] == [
         measurement["execution_ms"] for measurement in curve["after_capture"]["measurements"]
     ]
+
+
+# --- G10: committed bundle-author round-trip ----------------------------------------
+# `build_bundle` is the committed assembler that replaces the hand-assembled
+# "ten-step procedure".  `_bundle(tmp_path)` lays a complete supervisor replay
+# work directory on disk (run-plan.json, supervisor-ledger.jsonl, and every
+# capture/child artifact) and returns the hand-assembled reference bundle; the
+# author must reconstruct a verifier-ACCEPTED bundle purely by reading that
+# work directory's ledger + artifacts.
+_TOP_LEVEL_BUNDLE_KEYS = {
+    "schema_version",
+    "issue",
+    "generated_at",
+    "node",
+    "mutation_head_sha",
+    "verifier_head_sha",
+    "database_identity",
+    "authorization",
+    "execution",
+    "recovery",
+    "preflight",
+    "migration",
+    "selection",
+    "receipts",
+    "sizes",
+    "catalog",
+    "benchmarks",
+    "cleanup",
+    "out_of_scope",
+}
+
+
+def _author_bundle_from_workdir(tmp_path: Path, reference: dict[str, Any]) -> dict[str, Any]:
+    return bundle_author.build_bundle(
+        work_dir=tmp_path,
+        repo_path=evidence.REPO_ROOT,
+        run_plan_path=tmp_path / "run-plan.json",
+        ledger_path=tmp_path / "supervisor-ledger.jsonl",
+        schema_dump_path=reference["preflight"]["schema_dump"]["path"],
+        mutation_head_sha=HEAD,
+        verifier_head_sha=VERIFIER_HEAD,
+        generated_at="2026-07-15T12:00:00Z",
+    )
+
+
+def _iter_refs(value: Any) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    stack: list[Any] = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, Mapping):
+            if set(current) == {"path", "sha256", "bytes"}:
+                refs.append(dict(current))
+            else:
+                stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+    return refs
+
+
+def test_bundle_author_reconstructs_a_verifier_accepted_bundle(tmp_path: Path) -> None:
+    """The committed author, fed a real work dir, yields a PASS terminal."""
+    reference = _bundle(tmp_path)
+    built = _author_bundle_from_workdir(tmp_path, reference)
+
+    terminal = evidence.verify_bundle(built, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    assert terminal["qualifies_task_4_5"] is True
+    assert terminal["verdict"] == evidence.PASS_VERDICT
+
+
+def test_bundle_author_emits_exact_top_level_keys_and_well_formed_refs(tmp_path: Path) -> None:
+    """Every top-level key is present and every artifact ref is a {path,sha256,bytes} triple."""
+    reference = _bundle(tmp_path)
+    built = _author_bundle_from_workdir(tmp_path, reference)
+
+    assert set(built) == _TOP_LEVEL_BUNDLE_KEYS
+    assert built["schema_version"] == evidence.SCHEMA_VERSION
+    assert built["issue"] == evidence.ISSUE
+    assert built["node"] == "node-27"
+    assert built["mutation_head_sha"] == HEAD
+    assert built["verifier_head_sha"] == VERIFIER_HEAD
+    # The author sources the authorization envelope from the module constants.
+    assert built["authorization"]["reviewed_mutation_sha"] == HEAD
+    assert built["authorization"]["max_selected_bytes"] == evidence.MAX_SELECTED_BYTES
+
+    refs = _iter_refs(built)
+    assert refs, "bundle must carry artifact references"
+    import re as _re
+
+    for ref in refs:
+        assert set(ref) == {"path", "sha256", "bytes"}
+        assert Path(ref["path"]).is_absolute()
+        assert _re.fullmatch(r"[0-9a-f]{64}", ref["sha256"]) is not None
+        assert isinstance(ref["bytes"], int) and not isinstance(ref["bytes"], bool)
+        assert ref["bytes"] > 0
+        # The digest and size are recomputed from the exact on-disk bytes.
+        raw = Path(ref["path"]).read_bytes()
+        assert ref["sha256"] == hashlib.sha256(raw).hexdigest()
+        assert ref["bytes"] == len(raw)
+
+
+def test_bundle_author_mutation_wrong_file_is_rejected_by_the_verifier(tmp_path: Path) -> None:
+    """Swapping one artifact ref onto the wrong file must fail the verifier (mutation guard)."""
+    reference = _bundle(tmp_path)
+    built = _author_bundle_from_workdir(tmp_path, reference)
+    # Point catalog_after_first at the pre-migration catalog_before artifact.
+    built["migration"]["catalog_after_first"] = dict(built["preflight"]["catalog_before"])
+    with pytest.raises(evidence.EvidenceError):
+        evidence.verify_bundle(built, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
 
 
 # --- SC-F1: trust-boundary regression lock ------------------------------------------

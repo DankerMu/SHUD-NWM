@@ -27,6 +27,7 @@ from typing import Any
 
 import pytest
 
+from scripts import node27_timeseries_compression_bundle_author as bundle_author
 from scripts import node27_timeseries_compression_live_evidence as evidence
 from scripts import node27_timeseries_compression_plan_author as plan_author
 from scripts import node27_timeseries_compression_supervisor as supervisor
@@ -453,3 +454,94 @@ def test_authored_plan_survives_the_real_state_machine_and_verifier_validators(
     ):
         evidence._catalog_snapshot(produced(kind), label=kind, mutation_head_sha=HEAD, phase=phase, validator=validator)
     evidence._validate_d3_catalog(produced("catalog_post")["catalog"], "catalog.post.catalog")
+
+    # G10: the committed bundle-author must assemble its input bundle from THIS
+    # real supervisor replay work dir -- discovering every artifact's on-disk
+    # path from the genuine ledger the state machine just wrote, not from a
+    # hand-maintained filename list.  This is the deliverable that closes the
+    # "hand-assembled ten-step procedure" gap: the assembler is exercised
+    # against real supervisor output, not a synthetic fixture.
+    run_plan_path = tmp_path / "run-plan.json"
+    run_plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    built = bundle_author.build_bundle(
+        work_dir=tmp_path,
+        repo_path=evidence.REPO_ROOT,
+        run_plan_path=run_plan_path,
+        ledger_path=ledger_path,
+        schema_dump_path=schema_dump_host,
+        mutation_head_sha=HEAD,
+        verifier_head_sha="89abcdef0123456789abcdef0123456789abcdef",
+        generated_at="2026-07-15T12:00:00Z",
+    )
+
+    # Exact top-level contract shape the verifier's `verify_bundle` requires.
+    assert set(built) == {
+        "schema_version",
+        "issue",
+        "generated_at",
+        "node",
+        "mutation_head_sha",
+        "verifier_head_sha",
+        "database_identity",
+        "authorization",
+        "execution",
+        "recovery",
+        "preflight",
+        "migration",
+        "selection",
+        "receipts",
+        "sizes",
+        "catalog",
+        "benchmarks",
+        "cleanup",
+        "out_of_scope",
+    }
+
+    # The author bound its capture-sourced references to the exact artifacts the
+    # real supervisor published in the ledger -- discovered, not hardcoded.
+    ledger_capture_path = {
+        e["kind"]: e["artifact_association"]["artifact"]["path"] for e in capture_events
+    }
+    assert built["preflight"]["catalog_before"]["path"] == ledger_capture_path["catalog_before"]
+    assert built["migration"]["catalog_after_first"]["path"] == ledger_capture_path["catalog_after_first"]
+    assert built["migration"]["catalog_after_second"]["path"] == ledger_capture_path["catalog_after_second"]
+    assert built["catalog"]["post"]["path"] == ledger_capture_path["catalog_post"]
+    assert built["cleanup"]["evidence"]["path"] == ledger_capture_path["cleanup"]
+
+    # Child-produced (decompress) receipt is discovered from the child event.
+    child_events = [e for e in events if e["event_type"] == "child_exit"]
+    decompress_receipt = next(
+        e["artifact_associations"]["recovery_receipt"]["artifact"]["path"]
+        for e in child_events
+        if e["kind"] == "decompress"
+    )
+    assert built["recovery"]["receipt"]["path"] == decompress_receipt
+
+    # database_identity is echoed from the real preflight evidence document.
+    assert built["database_identity"] == produced("preflight_evidence")["database_identity"]
+
+    # Every reference is a real {path,sha256,bytes} triple recomputed from bytes.
+    def _refs(value: Any) -> list[dict[str, Any]]:
+        found: list[dict[str, Any]] = []
+        stack: list[Any] = [value]
+        while stack:
+            current = stack.pop()
+            if isinstance(current, dict):
+                if set(current) == {"path", "sha256", "bytes"}:
+                    found.append(current)
+                else:
+                    stack.extend(current.values())
+            elif isinstance(current, list):
+                stack.extend(current)
+        return found
+
+    import hashlib as _hashlib
+    import re as _re
+
+    for reference in _refs(built):
+        path = Path(reference["path"])
+        assert path.is_file() and not path.is_symlink()
+        raw = path.read_bytes()
+        assert _re.fullmatch(r"[0-9a-f]{64}", reference["sha256"]) is not None
+        assert reference["sha256"] == _hashlib.sha256(raw).hexdigest()
+        assert reference["bytes"] == len(raw) > 0
