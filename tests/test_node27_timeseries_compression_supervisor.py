@@ -1270,59 +1270,261 @@ def _leave_pending_intent(receipt: Path) -> Any:
     return expected
 
 
-def _tear_gate(receipt: Path, *, keep_bytes: int) -> None:
-    """Simulate SIGKILL inside the gate's non-atomic ftruncate/write pair."""
-
-    gate = terminal_state._terminal_intent_gate_path(receipt)
-    assert len(gate.read_bytes()) > keep_bytes
-    fd = os.open(gate, os.O_RDWR)
-    try:
-        os.ftruncate(fd, keep_bytes)
-    finally:
-        os.close(fd)
-
-
-@pytest.mark.parametrize("keep_bytes", [0, 20])
-def test_torn_intent_gate_recovers_pending_from_cross_bound_identity(
-    tmp_path: Path, keep_bytes: int
+def test_gate_lock_inode_anchors_bindings_while_state_document_is_replaced(
+    tmp_path: Path,
 ) -> None:
-    """An empty/torn gate beside a live intent must recover, not deadlock."""
+    """Only the contentless lock inode may be bound; the state document is not.
+
+    The sidecar pins the lock's `(dev, ino)`, which must survive every
+    transition, while the state document is a fresh inode after each atomic
+    rename -- so binding to it would be incoherent by construction.
+    """
 
     receipt = tmp_path / "terminal.json"
     receipt.write_bytes(STALE_RECEIPT)
     expected = _leave_pending_intent(receipt)
-    _tear_gate(receipt, keep_bytes=keep_bytes)
+    lock_path = terminal_state._terminal_intent_gate_path(receipt)
+    state_path = terminal_state._terminal_intent_state_path(receipt)
 
-    # The crash prefix stays classified as a pending intent.
-    with pytest.raises(terminal_state.TerminalStateError, match="intent is pending"):
-        terminal_state.read_authoritative_terminal(receipt)
-    with terminal_state._locked_intent_gate(receipt, label="torn gate audit") as (gate_fd, _):
-        rebuilt = terminal_state._read_gate_state(gate_fd)
-    assert rebuilt["state"] == "pending"
-    assert rebuilt["intent_directory"] == terminal_state._terminal_intent_root_path(receipt).name
+    # The lock object is contentless; the state document carries the state.
+    assert lock_path.read_bytes() == b""
+    sidecar = json.loads(
+        (terminal_state._terminal_intent_root_path(receipt) / "identity.json").read_text()
+    )
+    assert sidecar["gate"] == {
+        "device": lock_path.stat().st_dev,
+        "inode": lock_path.stat().st_ino,
+    }
+    lock_inode = lock_path.stat().st_ino
+    pending_state_inode = state_path.stat().st_ino
+    assert json.loads(state_path.read_text())["state"] == "pending"
+    assert oct(state_path.stat().st_mode)[-3:] == "600"
 
-    # The rebuilt gate is durable, so recovery is idempotent, and the intent
-    # still completes exactly one bound publication.
     assert supervisor.finalize_receipt(
         receipt,
         expected_stale_sha256=expected.sha256,
-        run_id="torn-gate-run",
+        run_id="inode-anchor-run",
+        stage="timeout",
+        possible_mutation=True,
+        mutation_head_sha="a" * 40,
+    )
+    # The anchor the sidecar bound is stable across the whole lifecycle...
+    assert lock_path.stat().st_ino == lock_inode
+    assert lock_path.read_bytes() == b""
+    # ...while the state document is a different, deliberately unstable inode.
+    assert json.loads(state_path.read_text())["state"] == "idle"
+    assert state_path.stat().st_ino != pending_state_inode
+    assert state_path.stat().st_ino != lock_inode
+    # No temp file from the rename-replace survives.
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_gate_lock_rejects_a_hardlinked_lock_object(tmp_path: Path) -> None:
+    """Splitting out the state document must not relax the lock's nlink pin."""
+
+    receipt = tmp_path / "terminal.json"
+    receipt.write_bytes(STALE_RECEIPT)
+    other = tmp_path / "evidence-input.json"
+    other.write_bytes(b'{"input":true}\n')
+    other.chmod(0o600)
+    os.link(other, terminal_state._terminal_intent_gate_path(receipt))
+
+    with pytest.raises(terminal_state.TerminalStateError, match="gate identity/mode differs"):
+        terminal_state.read_authoritative_terminal(receipt)
+    assert other.read_bytes() == b'{"input":true}\n'
+
+
+@pytest.mark.parametrize("alias", ["hardlink", "symlink"])
+def test_gate_state_document_alias_fails_closed_without_touching_the_input(
+    tmp_path: Path, alias: str
+) -> None:
+    """A state document aliasing an input is rejected, and rename never writes through it."""
+
+    receipt = tmp_path / "terminal.json"
+    receipt.write_bytes(STALE_RECEIPT)
+    other = tmp_path / "evidence-input.json"
+    other.write_bytes(b'{"input":true}\n')
+    other.chmod(0o600)
+    state_path = terminal_state._terminal_intent_state_path(receipt)
+    if alias == "hardlink":
+        os.link(other, state_path)
+    else:
+        state_path.symlink_to(other)
+
+    with pytest.raises(terminal_state.TerminalStateError, match="state file identity/mode differs"):
+        terminal_state.read_authoritative_terminal(receipt)
+    assert other.read_bytes() == b'{"input":true}\n'
+    assert not terminal_state.publish_bound_failure(
+        receipt,
+        stage="timeout",
+        expected=terminal_state.terminal_identity(receipt),
+        run_id="alias-run",
+        mutation_head_sha="a" * 40,
+        possible_mutation=True,
+    )
+    assert other.read_bytes() == b'{"input":true}\n'
+    assert receipt.read_bytes() == STALE_RECEIPT
+
+
+def _clear_gate_state(receipt: Path) -> None:
+    """Reproduce the durable prefix of a SIGKILL before the gate state landed.
+
+    The gate state document is replaced by rename, so the only prefixes a crash
+    can leave are the previous document and the new one.  Removing it is the
+    "no state document was ever written" prefix of a first-ever transition.
+    """
+
+    state_path = terminal_state._terminal_intent_state_path(receipt)
+    assert state_path.is_file()
+    state_path.unlink()
+
+
+def _write_idle_gate_state(receipt: Path) -> None:
+    """The other idle prefix: a canonical idle document from a prior lifecycle."""
+
+    _write_canonical(
+        terminal_state._terminal_intent_state_path(receipt),
+        {"schema_version": terminal_state.INTENT_STATE_SCHEMA_VERSION, "state": "idle"},
+    )
+    terminal_state._terminal_intent_state_path(receipt).chmod(0o600)
+
+
+def _apply_idle_gate(receipt: Path, gate: str) -> None:
+    if gate == "absent":
+        _clear_gate_state(receipt)
+    else:
+        _write_idle_gate_state(receipt)
+
+
+def _apply_create_prefix(receipt: Path, files: int) -> None:
+    """Reproduce a SIGKILL between os.mkdir and the pending gate write."""
+
+    root = terminal_state._terminal_intent_root_path(receipt)
+    assert {entry.name for entry in root.iterdir()} == {"intent.json", "identity.json"}
+    (root / "identity.json").unlink()
+    if files == 0:
+        (root / "intent.json").unlink()
+    assert len(list(root.iterdir())) == files
+
+
+@pytest.mark.parametrize("gate", ["absent", "canonical-idle"])
+@pytest.mark.parametrize("files", [0, 1])
+def test_idle_gate_create_crash_prefix_is_collected_not_bricked(
+    tmp_path: Path, gate: str, files: int
+) -> None:
+    """A KILL inside intent creation must not brick the lane forever.
+
+    An idle gate is durable proof that no intent reached its commit point, so a
+    strict create prefix is provable garbage: it is collected, the terminal
+    classifies, and the next publisher succeeds.
+    """
+
+    receipt = tmp_path / "terminal.json"
+    receipt.write_bytes(STALE_RECEIPT)
+    expected = _leave_pending_intent(receipt)
+    _apply_create_prefix(receipt, files)
+    _apply_idle_gate(receipt, gate)
+    root = terminal_state._terminal_intent_root_path(receipt)
+    assert root.is_dir()
+
+    # The loader classifies rather than bricking: it reaches the terminal, which
+    # only then fails on these fixture bytes' own deliberate non-canonicality.
+    # The remnant is collected on the way.
+    with pytest.raises(terminal_state.TerminalStateError, match="not canonical JSON"):
+        terminal_state.read_authoritative_terminal(receipt)
+    assert not root.exists()
+    # Recovery is idempotent across a second independent load.
+    with pytest.raises(terminal_state.TerminalStateError, match="not canonical JSON"):
+        terminal_state.read_authoritative_terminal(receipt)
+    assert not root.exists()
+
+    # The lane still works: a later tombstone publishes exactly once.
+    assert supervisor.finalize_receipt(
+        receipt,
+        expected_stale_sha256=expected.sha256,
+        run_id="create-crash-run",
         stage="timeout",
         possible_mutation=True,
         mutation_head_sha="a" * 40,
     )
     terminal = terminal_state.read_authoritative_terminal(receipt)
     assert terminal["provenance_state"] == "bound"
-    assert terminal["run_id"] == "torn-gate-run"
+    assert terminal["run_id"] == "create-crash-run"
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("gate", ["absent", "canonical-idle"])
+@pytest.mark.parametrize("files", [0, 1])
+def test_idle_gate_create_crash_prefix_publishes_bound_failure_directly(
+    tmp_path: Path, gate: str, files: int
+) -> None:
+    """publish_bound_failure must not silently return False on a create prefix."""
+
+    receipt = tmp_path / "terminal.json"
+    receipt.write_bytes(STALE_RECEIPT)
+    expected = _leave_pending_intent(receipt)
+    _apply_create_prefix(receipt, files)
+    _apply_idle_gate(receipt, gate)
+
+    assert terminal_state.publish_bound_failure(
+        receipt,
+        stage="timeout",
+        expected=expected,
+        run_id="create-crash-direct",
+        mutation_head_sha="a" * 40,
+        possible_mutation=True,
+    )
+    terminal = terminal_state.read_authoritative_terminal(receipt)
+    assert terminal["run_id"] == "create-crash-direct"
     assert not terminal_state._terminal_intent_root_path(receipt).exists()
+
+
+@pytest.mark.parametrize("gate", ["absent", "canonical-idle"])
+def test_idle_gate_fully_bound_intent_is_committed_not_collected(
+    tmp_path: Path, gate: str
+) -> None:
+    """A complete directory is a durable decision: finish its commit, never drop it."""
+
+    receipt = tmp_path / "terminal.json"
+    receipt.write_bytes(STALE_RECEIPT)
+    expected = _leave_pending_intent(receipt)
+    _apply_idle_gate(receipt, gate)
+    root = terminal_state._terminal_intent_root_path(receipt)
+
+    # The intent survives and keeps invalidating the stale terminal.
+    with pytest.raises(terminal_state.TerminalStateError, match="intent is pending"):
+        terminal_state.read_authoritative_terminal(receipt)
+    assert root.is_dir()
+    with terminal_state._locked_intent_gate(receipt, label="commit audit") as (_, parent_fd):
+        committed = terminal_state._read_gate_state(parent_fd, receipt)
+    assert committed["state"] == "pending"
+    assert committed["intent_directory"] == root.name
+
+    assert supervisor.finalize_receipt(
+        receipt,
+        expected_stale_sha256=expected.sha256,
+        run_id="create-commit-run",
+        stage="timeout",
+        possible_mutation=True,
+        mutation_head_sha="a" * 40,
+    )
+    terminal = terminal_state.read_authoritative_terminal(receipt)
+    assert terminal["provenance_state"] == "bound"
+    assert terminal["run_id"] == "create-commit-run"
+    assert not root.exists()
 
 
 @pytest.mark.parametrize(
     "tamper", ["gate_inode", "intent_identity", "payload_digest", "output_path", "intent_payload"]
 )
-def test_torn_intent_gate_stays_fail_closed_on_identity_tampering(
-    tmp_path: Path, tamper: str
-) -> None:
+def test_idle_gate_unbound_complete_intent_stays_fail_closed(tmp_path: Path, tamper: str) -> None:
+    """A complete directory that does not cross-bind is neither committed nor dropped.
+
+    Each case mutates exactly one artifact, so the surviving artifacts refute it.
+    This does not prove resistance to a self-consistent rewrite of the whole
+    directory; see the consistent-pair test below for the true behaviour.
+    """
+
     receipt = tmp_path / "terminal.json"
     receipt.write_bytes(STALE_RECEIPT)
     _leave_pending_intent(receipt)
@@ -1344,62 +1546,133 @@ def test_torn_intent_gate_stays_fail_closed_on_identity_tampering(
         else:
             sidecar["output_path"] = str(tmp_path / "other-terminal.json")
         _write_canonical(sidecar_path, sidecar)
-    _tear_gate(receipt, keep_bytes=0)
+    _clear_gate_state(receipt)
 
     with pytest.raises(terminal_state.TerminalStateError, match="without durable gate state"):
         terminal_state.read_authoritative_terminal(receipt)
-    # No rebuild and no publication: the stale terminal is untouched and the
-    # rejection is stable rather than a one-shot.
+    # No commit and no publication: the stale terminal is untouched, the
+    # directory is not collected, and the rejection is stable, not a one-shot.
     assert receipt.read_bytes() == STALE_RECEIPT
     with pytest.raises(terminal_state.TerminalStateError, match="without durable gate state"):
         terminal_state.read_authoritative_terminal(receipt)
-    assert terminal_state._terminal_intent_root_path(receipt).is_dir()
+    assert root.is_dir()
 
 
-def test_torn_committed_gate_leaves_no_blocking_or_permanent_consumed_residue(
+def test_idle_gate_consistent_pair_rewrite_is_accepted_and_non_escalating(
     tmp_path: Path,
 ) -> None:
-    """A torn consuming->committed write leaves recoverable, non-blocking residue."""
+    """The sidecar pin proves durable self-consistency, not authorship.
+
+    Every input to the commit is a mode-0600 file inside a mode-0700 directory
+    owned by the same uid as the terminal, so an actor able to rewrite both
+    artifacts consistently can already replace the terminal directly.  This
+    asserts the property the code actually has, so no later reader can mistake
+    the single-artifact tamper cases above for forgery resistance.
+    """
+
+    receipt = tmp_path / "terminal.json"
+    receipt.write_bytes(STALE_RECEIPT)
+    _leave_pending_intent(receipt)
+    root = terminal_state._terminal_intent_root_path(receipt)
+    intent_path = root / "intent.json"
+    sidecar_path = root / "identity.json"
+
+    intent = json.loads(intent_path.read_text())
+    intent["payload"]["failure"]["stage"] = "attacker-stage"
+    intent["payload"]["failure_context"]["reason_category"] = "attacker-stage"
+    _write_canonical(intent_path, intent)
+    intent_path.chmod(0o600)
+    sidecar = json.loads(sidecar_path.read_text())
+    sidecar["intent"] = {
+        "device": intent_path.stat().st_dev,
+        "inode": intent_path.stat().st_ino,
+        "bytes": intent_path.stat().st_size,
+        "sha256": hashlib.sha256(intent_path.read_bytes()).hexdigest(),
+    }
+    sidecar["failure_payload_sha256"] = hashlib.sha256(
+        _canonical_bytes(intent["payload"])
+    ).hexdigest()
+    _write_canonical(sidecar_path, sidecar)
+    _clear_gate_state(receipt)
+
+    with pytest.raises(terminal_state.TerminalStateError, match="intent is pending"):
+        terminal_state.read_authoritative_terminal(receipt)
+    with terminal_state._locked_intent_gate(receipt, label="consistent pair audit") as (_, parent_fd):
+        committed = terminal_state._read_gate_state(parent_fd, receipt)
+    assert committed["state"] == "pending"
+    assert committed["failure_payload_sha256"] == sidecar["failure_payload_sha256"]
+    # The rewritten payload is still only a failure tombstone: the same-uid
+    # actor gains no qualifying PASS and no path outside this directory.
+    assert terminal_state._validate_failure_payload(intent["payload"])["qualifies_task_4_5"] is False
+    assert sorted(item.name for item in tmp_path.iterdir()) == sorted(
+        [
+            root.name,
+            terminal_state._terminal_intent_gate_path(receipt).name,
+            terminal_state._terminal_intent_state_path(receipt).name,
+            terminal_state._terminal_lock_path(receipt).name,
+            receipt.name,
+        ]
+    )
+
+
+def test_consuming_crash_leaves_no_blocking_or_permanent_consumed_residue(
+    tmp_path: Path,
+) -> None:
+    """A KILL before the committed_cleanup state lands must stay recoverable.
+
+    The gate cannot tear, so this prefix is durably `consuming` with the intent
+    already renamed aside and the terminal already published.
+    """
 
     receipt = tmp_path / "terminal.json"
     receipt.write_bytes(STALE_RECEIPT)
     expected = _leave_pending_intent(receipt)
     root = terminal_state._terminal_intent_root_path(receipt)
     original_write = terminal_state._write_gate_state
-    torn: list[str] = []
+    crashed: list[str] = []
+    consuming_durable_before_rename: list[bool] = []
 
-    def tearing_write(gate_fd: int, state: Any) -> None:
-        # Simulate SIGKILL after ftruncate(0) of the committed_cleanup write.
+    def crashing_write(parent_fd: int, path: Path, state: Any) -> None:
+        # Simulate SIGKILL before the committed_cleanup rename lands.
         if state.get("state") == "committed_cleanup":
-            torn.append("committed_cleanup")
-            os.ftruncate(gate_fd, 0)
-            raise KeyboardInterrupt("simulated SIGKILL inside the gate write")
-        original_write(gate_fd, state)
+            crashed.append("committed_cleanup")
+            raise KeyboardInterrupt("simulated SIGKILL before the gate rename")
+        original_write(parent_fd, path, state)
+        if state.get("state") == "consuming":
+            # The consuming state must already be durable while the directory is
+            # still active.  A rename that outran its gate state would strand the
+            # directory behind a gate that never recorded the transition.
+            state_path = terminal_state._terminal_intent_state_path(receipt)
+            consuming_durable_before_rename.append(
+                root.is_dir() and json.loads(state_path.read_text())["state"] == "consuming"
+            )
 
-    terminal_state._write_gate_state = tearing_write
+    terminal_state._write_gate_state = crashing_write
     try:
         with pytest.raises(KeyboardInterrupt):
             supervisor.finalize_receipt(
                 receipt,
                 expected_stale_sha256=expected.sha256,
-                run_id="torn-commit-run",
+                run_id="consuming-crash-run",
                 stage="timeout",
                 possible_mutation=True,
                 mutation_head_sha="a" * 40,
             )
     finally:
         terminal_state._write_gate_state = original_write
-    assert torn == ["committed_cleanup"]
+    assert crashed == ["committed_cleanup"]
+    assert consuming_durable_before_rename == [True]
     # The terminal is published and the active intent was renamed aside.
     assert not root.exists()
     residue = sorted(tmp_path.glob(f"{root.name}.consumed-*"))
     assert len(residue) == 1
+    with terminal_state._locked_intent_gate(receipt, label="consuming audit") as (_, parent_fd):
+        assert terminal_state._read_gate_state(parent_fd, receipt)["state"] == "consuming"
 
-    # The loader classifies the prefix (no deadlock) and idempotently drops the
-    # provable residue rather than leaving it forever.
+    # The loader finishes the state machine (no deadlock) and drops the residue.
     terminal = terminal_state.read_authoritative_terminal(receipt)
     assert terminal["provenance_state"] == "bound"
-    assert terminal["run_id"] == "torn-commit-run"
+    assert terminal["run_id"] == "consuming-crash-run"
     assert sorted(tmp_path.glob(f"{root.name}.consumed-*")) == []
     assert terminal_state.read_authoritative_terminal(receipt) == terminal
 

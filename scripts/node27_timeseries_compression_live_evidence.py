@@ -2840,6 +2840,7 @@ def _reverify_retained_identities() -> None:
 _output_identity = terminal_state.terminal_identity
 _terminal_lock_path = terminal_state._terminal_lock_path
 _terminal_intent_gate_path = terminal_state._terminal_intent_gate_path
+_terminal_intent_state_path = terminal_state._terminal_intent_state_path
 _terminal_intent_root_path = terminal_state._terminal_intent_root_path
 _terminal_intent_path = terminal_state._terminal_intent_path
 _terminal_intent_identity_path = terminal_state._terminal_intent_identity_path
@@ -2868,6 +2869,7 @@ def _assert_terminal_state_paths_disjoint(
         "terminal failure intent": _terminal_intent_path(output_path),
         "terminal failure identity": _terminal_intent_identity_path(output_path),
         "terminal intent gate": _terminal_intent_gate_path(output_path),
+        "terminal intent gate state": _terminal_intent_state_path(output_path),
         "terminal publication lock": _terminal_lock_path(output_path),
     }
     fixed_inputs = [bundle_path, CANONICAL_RECEIPT_SCHEMA, CANONICAL_EVIDENCE_SCHEMA]

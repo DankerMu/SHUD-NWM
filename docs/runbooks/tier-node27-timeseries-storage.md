@@ -999,6 +999,16 @@ first, then `.terminal.json.publish.lock` when terminal access is needed.
 `read_authoritative_terminal()` follows that order and rejects pending or
 malformed durable state before reading the terminal.
 
+The gate's lock object and its state document are deliberately separate files.
+`.terminal.json.intent-gate.lock` is contentless: it exists only to serialize
+the state machine and to give the intent sidecar a stable `(device, inode)`
+anchor. Gate state lives in `.terminal.json.intent-gate.json`, which is written
+to a temporary sibling, fsynced, and atomically renamed into place under the
+held lock, then parent-fsynced. No gate transition is therefore ever partially
+durable: a crash leaves either the previous complete document or the next one.
+Nothing binds to the state document's inode, which changes on every transition.
+An absent state document and a canonical `idle` document mean the same thing.
+
 `packages/common/compression_terminal_state.py` is the single owner of this
 state machine. The live verifier, replay supervisor, normal failure path and
 systemd `ExecStopPost` finalizer all call that shared API; the supervisor does
@@ -1013,27 +1023,46 @@ malformed terminal fails closed.
 The active intent directory contains only `intent.json` and `identity.json`.
 Both are created mode 0600 through an exclusively created no-follow directory
 descriptor, file-fsynced, directory-fsynced, and bound to the revalidated
-parent identity. The stable intent-gate inode records the exact sidecar
-identity; the sidecar records the exact intent `(device,inode,bytes,sha256)`,
+parent identity. The gate state document records the exact sidecar identity;
+the sidecar records the exact intent `(device,inode,bytes,sha256)`,
 failure-payload digest, schema version, and run/verifier/mutation identity,
-and binds back to the gate inode. This cross-binding is revalidated in every
-fresh process, so replacing either file—even with identical bytes—fails
-closed. Parent-fsync failure removes or quarantines only entries exclusively
-created by that attempt and leaves no active authoritative pair.
+and binds back to the stable gate *lock* inode. This cross-binding is
+revalidated in every fresh process, so replacing either file—even with
+identical bytes—fails closed. Because both files are mode 0600 inside a mode
+0700 directory owned by the same uid as the terminal, the binding proves
+durable self-consistency, not authorship: an actor that can rewrite the whole
+directory consistently can already replace the terminal directly, and gains
+nothing beyond a failure tombstone. Parent-fsync failure removes or
+quarantines only entries exclusively created by that attempt and leaves no
+active authoritative pair.
+
+A crash between `mkdir` and the pending gate transition leaves an idle gate
+beside an intent directory. The idle gate is durable proof that no intent
+reached its commit point, so a strict create prefix—neither entry, or just one
+of them—is provable garbage: it is collected through the anchored directory
+descriptor, unlinking only the two known mode-0600 single-link names, and the
+loader reports no intent. A complete, fully cross-bound directory is instead a
+durable decision, so its interrupted commit is finished rather than dropped. A
+complete directory that does not cross-bind is neither: it fails closed and is
+left untouched. Refused failure publications log the exact refusal reason, so a
+lane that cannot publish never presents as merely "the finalizer did not
+replace the receipt".
 
 A held terminal lock does not suppress failure invalidation: the publisher
 durably creates the pair under the intent gate, releases that gate, then may
 time out trying the ordered gate→terminal CAS while the pending state continues
 to block readers. Successful failure/PASS publication consumes both files by
-an atomic intent-directory rename, parent fsync, exact-identity cleanup, and
-durable idle-gate update. The rename alone never authorizes deletion. After the
-terminal replacement and parent fsync, the gate first persists and fsyncs a
+a durable `consuming` gate state, an atomic intent-directory rename, parent
+fsync, exact-identity cleanup, and a durable idle gate state. The `consuming`
+state is durable *before* the rename, so a renamed directory can never sit
+behind an idle gate. The rename alone never authorizes deletion. After the
+terminal replacement and parent fsync, the gate atomically persists a
 `committed_cleanup` phase containing the published terminal's complete
 identity, the prior expected identity, both original entry names and complete
 identities, the consumed-directory inode, payload digest, and provenance
 context. Only then may cleanup
 delete `intent.json`, fsync the child directory, delete `identity.json`, fsync
-again, remove the consumed directory, fsync the parent, and finally fsync an
+again, remove the consumed directory, fsync the parent, and finally persist an
 idle gate. This fixed order makes an identity-missing/intent-surviving prefix
 explicitly unreachable and unsafe.
 
@@ -1049,9 +1078,10 @@ newer-wins relation. The terminal publication lock is
 opened by basename through the already anchored parent descriptor, with
 no-follow, regular-file, single-link, mode and inode validation; a parent
 namespace replacement cannot redirect lock creation and is detected when the
-gate releases. Terminal, intent directory/files, intent gate, and publication
-lock remain normalized-path/symlink/inode/hardlink-disjoint from the bundle,
-canonical schemas, and complete recursive input closure.
+gate releases. Terminal, intent directory/files, intent gate lock, intent gate
+state document, and publication lock remain
+normalized-path/symlink/inode/hardlink-disjoint from the bundle, canonical
+schemas, and complete recursive input closure.
 
 The version-3 schema mirrors the state machine branches. An unavailable-
 provenance failure must carry the exact three-key `failure_context` and cannot

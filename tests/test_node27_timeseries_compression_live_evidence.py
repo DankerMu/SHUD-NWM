@@ -1585,8 +1585,8 @@ def test_committed_cleanup_fresh_invocation_recovers_every_crash_prefix(
         assert terminal["run_id"] == "cleanup-finalizer-run"
     assert not evidence._terminal_intent_root_path(output).exists()
     assert not list(tmp_path.glob(f"{evidence._terminal_intent_root_path(output).name}.consumed-*"))
-    with terminal_state._locked_intent_gate(output, label="committed cleanup final audit") as (gate_fd, _):
-        assert terminal_state._read_gate_state(gate_fd)["state"] == "idle"
+    with terminal_state._locked_intent_gate(output, label="committed cleanup final audit") as (_, parent_fd):
+        assert terminal_state._read_gate_state(parent_fd, output)["state"] == "idle"
 
 
 def test_committed_cleanup_tampered_single_survivor_is_not_deleted(
@@ -1807,8 +1807,8 @@ def test_failure_intent_parent_fsync_failure_leaves_no_authoritative_pair(
     assert failed
     assert output.read_bytes() == old
     assert not evidence._terminal_intent_root_path(output).exists()
-    with evidence._locked_intent_gate(output, label="test gate audit") as (gate_fd, _):
-        assert evidence._read_gate_state(gate_fd)["state"] == "idle"
+    with evidence._locked_intent_gate(output, label="test gate audit") as (_, parent_fd):
+        assert evidence._read_gate_state(parent_fd, output)["state"] == "idle"
 
 
 def test_reader_cannot_pass_concurrent_failure_invalidation_gate(
@@ -1990,7 +1990,9 @@ def test_pending_failure_intent_rejects_link_aliases(
     assert intent_path.exists()
 
 
-@pytest.mark.parametrize("derived_kind", ["intent-root", "intent", "identity", "gate", "lock"])
+@pytest.mark.parametrize(
+    "derived_kind", ["intent-root", "intent", "identity", "gate", "gate-state", "lock"]
+)
 @pytest.mark.parametrize("alias", ["path", "symlink", "hardlink"])
 def test_terminal_derived_paths_cannot_alias_complete_input_closure(
     tmp_path: Path,
@@ -2005,6 +2007,7 @@ def test_terminal_derived_paths_cannot_alias_complete_input_closure(
         "intent": evidence._terminal_intent_path(output),
         "identity": evidence._terminal_intent_identity_path(output),
         "gate": evidence._terminal_intent_gate_path(output),
+        "gate-state": evidence._terminal_intent_state_path(output),
         "lock": evidence._terminal_lock_path(output),
     }[derived_kind]
     if derived_kind in {"intent", "identity"}:
@@ -2786,6 +2789,7 @@ def test_terminal_output_alias_preserves_input(tmp_path: Path, monkeypatch: pyte
     assert input_path.read_bytes() == original
     assert not evidence._terminal_intent_root_path(output).exists()
     assert not evidence._terminal_intent_gate_path(output).exists()
+    assert not evidence._terminal_intent_state_path(output).exists()
 
 
 def test_terminal_failure_replaces_stale_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

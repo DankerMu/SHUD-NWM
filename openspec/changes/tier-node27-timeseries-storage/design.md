@@ -1187,6 +1187,26 @@ Regression rows (each row requires a focused positive and negative test):
   fresh CLI process rejects same-byte/new-inode replacement; process-local
   memory is not an identity source. Success/failure consumes the exact intent
   and identity record atomically under the same gate.
+- The gate's `flock` object and its state document are separate files. The lock
+  is contentless and its inode is the stable anchor the identity record binds
+  to; the state document is written to a temp sibling and atomically renamed
+  under the held lock, so no gate transition can ever be partially durable and
+  no torn gate state exists to recover. Nothing binds the state document's
+  inode. Absent state document == canonical idle. The `consuming` state is
+  durable before the intent-directory rename, so a renamed directory can never
+  sit behind an idle gate.
+- An idle gate beside an intent directory is a create crash, not a committed
+  intent. A strict create prefix (zero or one of the two entries) is collected
+  through the anchored 0700 descriptor, unlinking only the two known mode-0600
+  single-link names, and the loader reports no intent; a fully cross-bound
+  directory has its interrupted commit finished so no durable decision is lost;
+  a complete but unbound directory fails closed, untouched. No create prefix may
+  brick the lane, and every refused failure publication logs its exact reason.
+  The identity record's cross-binding proves durable self-consistency, not
+  authorship: every artifact is same-uid writable, so a consistent whole-
+  directory rewrite is accepted and remains non-escalating (a same-uid actor can
+  already replace the terminal, and the rewrite still yields only a failure
+  tombstone, never a qualifying PASS).
 
 Current source/unit bytes, dump readability, catalog state, and production
 query construction are read-only-recapturable. Ordered historical migration
