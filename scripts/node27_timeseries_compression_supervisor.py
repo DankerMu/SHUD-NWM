@@ -40,7 +40,10 @@ from packages.common.evidence_io import (
     read_bounded_json_with_identity_no_follow,
     reject_secret_material,
 )
-from packages.common.node27_container_contract import CONTAINER_PG_RESTORE_REALPATH
+from packages.common.node27_container_contract import (
+    CONTAINER_PG_RESTORE_REALPATH,
+    SYSTEMD_UNSET_TIMESTAMP,
+)
 from packages.common.safe_fs import atomic_write_bytes_no_follow
 
 SCHEMA_VERSION = "3.0"
@@ -1198,7 +1201,9 @@ def capture_checkpoint(
         "SubState": "dead",
         "MainPID": 0,
         "InvocationID": "",
-        "ExecMainStartTimestamp": "",
+        # MEASURED: systemd renders the never-started unit's unset start
+        # timestamp as the literal "n/a" (not empty).
+        "ExecMainStartTimestamp": SYSTEMD_UNSET_TIMESTAMP,
         "ExecMainStartTimestampMonotonic": 0,
     }:
         raise SupervisorError("checkpoint recurring compression unit is not inactive")
@@ -1209,7 +1214,10 @@ def capture_checkpoint(
         or replay_show["SubState"] != "start"
         or replay_show["MainPID"] != os.getpid()
         or replay_show["InvocationID"] != invocation_id
+        # An actively-starting unit must carry a real timestamp; systemd's unset
+        # "n/a" sentinel is truthy, so reject it explicitly here.
         or not replay_show["ExecMainStartTimestamp"]
+        or replay_show["ExecMainStartTimestamp"] == SYSTEMD_UNSET_TIMESTAMP
         or replay_show["ExecMainStartTimestampMonotonic"] <= 0
     ):
         raise SupervisorError("checkpoint replay supervisor unit is not the active owner")

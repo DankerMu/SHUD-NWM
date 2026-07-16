@@ -1881,7 +1881,10 @@ def _systemctl_responses(invocation_id: str = PROBE_INVOCATION_ID, *, require_xd
             "SubState=dead",
             "MainPID=0",
             "InvocationID=",
-            "ExecMainStartTimestamp=",
+            # MEASURED node-27 contract (#1069 gap G6): systemd renders the
+            # never-started recurring unit's unset start timestamp as literal
+            # "n/a", not empty.
+            f"ExecMainStartTimestamp={supervisor.SYSTEMD_UNSET_TIMESTAMP}",
             "ExecMainStartTimestampMonotonic=0",
         ]
     )

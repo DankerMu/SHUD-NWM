@@ -741,7 +741,23 @@ credential in process argv.
    `infra/env/node27-timeseries-compression-replay.example` to the untracked
    mode-0600 replay env, replace its placeholders, and verify the reviewed
    run-plan plus expected stale-terminal digest before starting the no-timer
-   replay service exactly once. Its own active state and `MainPID` are expected
+   replay service exactly once. The run-plan is not hand-authored: emit it with
+   the committed author, whose ten command argvs match the supervisor's
+   exact-argv contract and whose twelve captures are real invocations of the
+   committed read-only capture-producer (each producing a verifier-content-valid
+   evidence document — never a placeholder). Author it, pin its digest into the
+   replay env `NODE27_COMPRESSION_RUN_PLAN_SHA256`, and place it at the pinned
+   path:
+
+   ```bash
+   .venv/bin/python -m scripts.node27_timeseries_compression_plan_author \
+     --mutation-head-sha "$(git rev-parse --verify \
+       refs/remotes/origin/feat/issue-1069-live-compression)" \
+     --output /home/nwm/node27-timeseries-compression-replay/run-plan.json
+   # prints run_plan_id + sha256; the printed sha256 is the run-plan digest pin.
+   ```
+
+   Its own active state and `MainPID` are expected
    while every checkpoint still proves the recurring service/timer inactive.
    `Persistent=true` means starting the timer
    can catch up the missed 04:25 event and create an unauthorized second batch.

@@ -46,7 +46,10 @@ from packages.common.evidence_io import (
     reverify_artifact_closure,
     validate_json_complexity,
 )
-from packages.common.node27_container_contract import CONTAINER_PG_RESTORE_REALPATH
+from packages.common.node27_container_contract import (
+    CONTAINER_PG_RESTORE_REALPATH,
+    SYSTEMD_UNSET_TIMESTAMP,
+)
 
 SCHEMA_VERSION = "3.0"
 ISSUE = 1069
@@ -924,7 +927,9 @@ def _validate_checkpoint_artifacts(
         "SubState": "dead",
         "MainPID": 0,
         "InvocationID": "",
-        "ExecMainStartTimestamp": "",
+        # MEASURED: systemd renders the never-started unit's unset start
+        # timestamp as the literal "n/a" (not empty).
+        "ExecMainStartTimestamp": SYSTEMD_UNSET_TIMESTAMP,
         "ExecMainStartTimestampMonotonic": 0,
     }:
         raise EvidenceError(f"{label} recurring compression unit is not canonically inactive")
@@ -936,6 +941,9 @@ def _validate_checkpoint_artifacts(
         or replay.get("InvocationID") != invocation_id
         or not isinstance(replay.get("ExecMainStartTimestamp"), str)
         or not replay["ExecMainStartTimestamp"]
+        # An actively-starting unit must carry a real timestamp; systemd's unset
+        # "n/a" sentinel is a non-empty string, so reject it explicitly here.
+        or replay["ExecMainStartTimestamp"] == SYSTEMD_UNSET_TIMESTAMP
         or not isinstance(replay.get("ExecMainStartTimestampMonotonic"), int)
         or replay["ExecMainStartTimestampMonotonic"] <= 0
     ):

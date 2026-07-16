@@ -1261,7 +1261,9 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
                     "SubState": "dead",
                     "MainPID": 0,
                     "InvocationID": "",
-                    "ExecMainStartTimestamp": "",
+                    # MEASURED node-27 contract (#1069 gap G6): the inactive
+                    # recurring unit renders its unset start timestamp as "n/a".
+                    "ExecMainStartTimestamp": evidence.SYSTEMD_UNSET_TIMESTAMP,
                     "ExecMainStartTimestampMonotonic": 0,
                 },
                 "replay": {
@@ -3935,6 +3937,9 @@ def test_round3_active_running_variant_and_wrong_manager_invocation_fail(tmp_pat
         ("InvocationID", ""),
         ("MainPID", 9999),
         ("ExecMainStartTimestamp", ""),
+        # An actively-starting replay unit that reports systemd's unset "n/a"
+        # sentinel never really started and must be rejected as the active owner.
+        ("ExecMainStartTimestamp", evidence.SYSTEMD_UNSET_TIMESTAMP),
         ("ExecMainStartTimestampMonotonic", 0),
     ],
 )
