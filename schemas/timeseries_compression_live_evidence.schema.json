@@ -1,5 +1,5 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "NHMS Node-27 Initial Timeseries Compression Live Evidence",
   "type": "object",
   "additionalProperties": false,
@@ -17,8 +17,32 @@
         "mutation_state": {"enum": ["failed_before_mutation", "indeterminate"]}
       }
     },
+    "failure_context": {
+      "type": "object", "additionalProperties": false,
+      "required": ["reason_category", "expected_output", "verifier_head_sha"],
+      "properties": {
+        "reason_category": {"type": "string", "minLength": 1},
+        "expected_output": {
+          "anyOf": [
+            {"type": "null"},
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["device", "inode", "bytes", "sha256"],
+              "properties": {
+                "device": {"type": "integer", "minimum": 0},
+                "inode": {"type": "integer", "minimum": 0},
+                "bytes": {"type": "integer", "minimum": 0},
+                "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+              }
+            }
+          ]
+        },
+        "verifier_head_sha": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/git_sha"}]}
+      }
+    },
     "issue": {"const": 1069},
     "generated_at": {"type": "string", "format": "date-time"},
+    "run_id": {"type": "string", "minLength": 1},
     "node": {"const": "node-27"},
     "mutation_head_sha": {"$ref": "#/$defs/git_sha"},
     "verifier_head_sha": {"$ref": "#/$defs/git_sha"},
@@ -33,7 +57,9 @@
         "timeout_seconds": {"const": 900}, "enforce_invocations": {"const": 1},
         "replay_decompression": {"const": true}, "decompress_invocations": {"const": 1},
         "migration_invocations": {"const": 2}, "dry_run_invocations": {"const": 1},
-        "direct_db_bypass_invocations": {"const": 0},
+        "sole_db_user_during_window": {"const": true},
+        "database_audit_proof": {"const": false},
+        "acceptance_claim": {"const": "controlled lane executed exactly once with no observed conflict"},
         "repo_path": {"const": "/home/nwm/NWM"},
         "remote_identity": {"const": "DankerMu/SHUD-NWM"},
         "reviewed_mutation_sha": {"$ref": "#/$defs/git_sha"},
@@ -42,12 +68,17 @@
     },
     "execution": {
       "type": "object", "additionalProperties": false,
-      "required": ["audit", "journal", "namespace_counts", "direct_db_mutation_statements"],
+      "required": ["run_plan", "ledger", "run_id", "namespace_counts", "checkpoint_artifacts", "claim", "sole_db_user_attested", "database_audit_proof", "trust_limit"],
       "properties": {
-        "audit": {"$ref": "#/$defs/artifact_ref"},
-        "journal": {"$ref": "#/$defs/artifact_ref"},
-        "namespace_counts": {"type": "object", "minProperties": 4},
-        "direct_db_mutation_statements": {"const": 0}
+        "run_plan": {"$ref": "#/$defs/artifact_ref"},
+        "ledger": {"$ref": "#/$defs/artifact_ref"},
+        "run_id": {"type": "string", "minLength": 1},
+        "namespace_counts": {"$ref": "#/$defs/supervisor_counts"},
+        "checkpoint_artifacts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/artifact_ref"}},
+        "claim": {"const": "controlled lane executed exactly once with no observed conflict"},
+        "sole_db_user_attested": {"const": true},
+        "database_audit_proof": {"const": false},
+        "trust_limit": {"const": "discrete observations; no absolute direct-SQL bypass proof"}
       }
     },
     "recovery": {
@@ -195,7 +226,23 @@
       "then": {
         "required": ["qualifies_task_4_5", "provenance_state", "failure"],
         "properties": {"schema_version": {"const": "3.0"}, "qualifies_task_4_5": {"const": false}},
-        "not": {"required": ["verdict"]}
+        "not": {"required": ["verdict"]},
+        "allOf": [
+          {
+            "if": {"properties": {"provenance_state": {"const": "bound"}}, "required": ["provenance_state"]},
+            "then": {
+              "required": ["run_id", "mutation_head_sha"],
+              "not": {"required": ["failure_context"]}
+            },
+            "else": {
+              "required": ["failure_context"],
+              "allOf": [
+                {"not": {"required": ["run_id"]}},
+                {"not": {"required": ["mutation_head_sha"]}}
+              ]
+            }
+          }
+        ]
       },
       "else": {
         "required": ["issue", "node", "mutation_head_sha", "verifier_head_sha", "database_identity", "authorization", "recovery", "preflight", "migration", "selection", "receipts", "sizes", "catalog", "benchmarks", "cleanup", "out_of_scope", "verdict"]
@@ -209,12 +256,27 @@
         "then": {
           "required": ["qualifies_task_4_5", "execution", "chronology", "source_manifest"],
           "properties": {"qualifies_task_4_5": {"const": true}},
+          "not": {
+            "anyOf": [
+              {"required": ["failure"]},
+              {"required": ["failure_context"]},
+              {"required": ["provenance_state"]},
+              {"required": ["outcome"]}
+            ]
+          },
           "allOf": [
-            {"properties": {"authorization": {"required": ["migration_invocations", "dry_run_invocations", "direct_db_bypass_invocations", "repo_path", "remote_identity", "reviewed_mutation_sha", "reviewed_remote_ref"]}}},
+            {"properties": {"authorization": {"required": ["migration_invocations", "dry_run_invocations", "sole_db_user_during_window", "database_audit_proof", "acceptance_claim", "repo_path", "remote_identity", "reviewed_mutation_sha", "reviewed_remote_ref"]}}},
             {"properties": {"recovery": {"required": ["invocation"]}}},
             {"properties": {"preflight": {"required": ["schema_dump_list"]}}},
             {"properties": {"migration": {"required": ["first_invocation", "second_invocation"]}}},
-            {"properties": {"receipts": {"required": ["dry_run_invocation", "enforce_invocation"]}}}
+            {"properties": {"receipts": {"required": ["dry_run_invocation", "enforce_invocation"]}}},
+            {"properties": {"benchmarks": {"properties": {"queries": {"items": {
+              "required": ["request"],
+              "properties": {
+                "before_capture": {"required": ["execution_bounds"]},
+                "after_capture": {"required": ["execution_bounds"]}
+              }
+            }}}}}}
           ]
         }
       }
@@ -233,6 +295,19 @@
       "properties": {
         "path": {"type": "string", "pattern": "^/[^\\u0000-\\u001f]*$"},
         "sha256": {"$ref": "#/$defs/sha256"}, "bytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "supervisor_counts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["migration_apply", "decompress", "compression_dry_run", "compression_enforce", "compression_service_activation", "retention", "drill", "role", "node22", "pg_dump", "pg_restore_version", "pg_restore_list", "benchmark_before", "benchmark_after", "replay_supervisor_activation"],
+      "properties": {
+        "migration_apply": {"const": 2}, "decompress": {"const": 1},
+        "compression_dry_run": {"const": 1}, "compression_enforce": {"const": 1},
+        "compression_service_activation": {"const": 0}, "retention": {"const": 0},
+        "drill": {"const": 0}, "role": {"const": 0}, "node22": {"const": 0},
+        "pg_dump": {"const": 1}, "pg_restore_version": {"const": 1},
+        "pg_restore_list": {"const": 1}, "benchmark_before": {"const": 1},
+        "benchmark_after": {"const": 1}, "replay_supervisor_activation": {"const": 1}
       }
     },
     "database_identity": {
@@ -264,12 +339,13 @@
     },
     "four_units": {
       "type": "object", "additionalProperties": false,
-      "required": ["nhms-node27-autopipe.timer", "nhms-node27-autopipe.service", "nhms-node27-timeseries-compression.timer", "nhms-node27-timeseries-compression.service"],
+          "required": ["nhms-node27-autopipe.timer", "nhms-node27-autopipe.service", "nhms-node27-timeseries-compression.timer", "nhms-node27-timeseries-compression.service"],
       "properties": {
         "nhms-node27-autopipe.timer": {"$ref": "#/$defs/unit_state"},
         "nhms-node27-autopipe.service": {"$ref": "#/$defs/unit_state"},
         "nhms-node27-timeseries-compression.timer": {"$ref": "#/$defs/unit_state"},
-        "nhms-node27-timeseries-compression.service": {"$ref": "#/$defs/unit_state"}
+            "nhms-node27-timeseries-compression.service": {"$ref": "#/$defs/unit_state"},
+            "nhms-node27-timeseries-compression-replay.service": {"$ref": "#/$defs/unit_state"}
       }
     },
     "role_facts": {

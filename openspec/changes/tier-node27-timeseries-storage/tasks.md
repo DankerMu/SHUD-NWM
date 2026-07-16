@@ -1148,8 +1148,8 @@ Order is load-bearing:
   version-3 terminal with `qualifies_task_4_5=true`; a version-2 terminal is
   readable only as superseded history. The version-3 fixture retains all five
   invocation refs, a real descriptor-bound PG15 dump listing, authorization-
-  pinned origin lineage, one complete execution/direct-DB audit namespace,
-  one global non-overlapping chronology, exact structural plans, overlap-bound
+  pinned origin lineage, one complete supervisor-owned execution ledger, one
+  global non-overlapping chronology, exact structural plans, overlap-bound
   production requests, bijective chunk/sibling snapshots, and a complete
   source manifest. Runner/benchmark/verifier output paths are input-disjoint
   by normalized path and inode and replace only known-safe stale outputs with
@@ -1158,6 +1158,54 @@ Order is load-bearing:
   committed wrapper actually runs the 900-second timeout and systemd has a
   finite consistent `TimeoutStartSec`. No live mutation was performed while
   adding these gates; the historical replay still cannot close task 4.5.
+
+  Round-3 retro decision (2026-07-15): node-27 lacks a complete database
+  statement-audit source, and the user selected the explicit supervisor-ledger
+  trust boundary because they are the only DB user. A qualifying terminal must
+  derive exact controlled invocations from supervisor-produced events, prove
+  pre/post quiescence with DB lock/activity and systemd observations, and bind
+  the operator's sole-DB-user attestation. It may claim only “controlled lane
+  executed exactly once with no observed conflict”; it MUST NOT claim
+  database-audit proof of absolute zero direct SQL bypass. This decision does
+  not waive any of the other 14 confirmed Round-3 blockers or the required new
+  controlled live replay. Required implementation evidence maps one-for-one to
+  the `Round-3 invariant matrix and regression contract` in `design.md`: exact
+  producer event cardinality and raw quiescence refs; canonical installed-unit
+  show/journals; pre-write bounded transitive graph and alias freeze; one
+  supervisor hard wall plus shared CAS finalizer/tombstones; streamed bounded
+  container `pg_restore`; exact VERBOSE plan identity and raw-plan-derived
+  summaries; bounded catalog discovery; full snapshot bijection; no-touch
+  config failure; strict positive-duration chronology; and nested v3 schema
+  requirements. Every row requires a focused positive and negative test before
+  another comprehensive review. The live floor additionally requires a fresh
+  v3 terminal from that reviewed producer; local fixtures cannot tick 4.5.
+  The recurring compression service/timer MUST remain the normal bounded
+  wrapper `--enforce` lane. The issue-specific supervisor runs only from a
+  separate no-timer replay service with explicit reviewed plan/env/state paths,
+  one expected activation and an `ExecStopPost` CAS-finalizer backstop.
+  Local evidence MUST include a harmless end-to-end supervisor-plan run that
+  creates every semantic output through its declared child/capture owner in
+  true state-machine order, with no out-of-band fixture writer. Canonical
+  replay-unit `systemctl show` proves the current InvocationID/MainPID/start;
+  journals prove absence of extra replay/recurring activations. Git probes and
+  publisher locks remain inside the same hard wall.
+  The exact decompression argv MUST invoke a committed JSON-receipt producer
+  covered by a real-Timescale integration test. Replay-unit checkpoints accept
+  only the canonical executing `Type=oneshot` state `activating/start` with the
+  bound MainPID/InvocationID. Main-wall operations reserve termination/drain/
+  CAS time, and a held-lock finalizer preserves its state for a later bounded
+  `ExecStopPost` retry.
+  User-service activation tests MUST exercise `_SYSTEMD_USER_UNIT` with the
+  enclosing `_SYSTEMD_UNIT=user@<uid>.service`. Terminal consumers and
+  publishers treat a pending verifier failure intent as authoritative invalid
+  state until the exact schema-valid intent is either published as failure or
+  reconciled by a later successful/newer terminal under the same lock; tampered
+  PASS/secret/symlink/hardlink/input-alias sidecars must fail closed.
+  Manager-shaped journal tests MUST cover `_SYSTEMD_USER_UNIT=init.scope` plus
+  governed `USER_UNIT`. Failure intent durability tests MUST inject parent-dir
+  fsync failure, reader/publisher concurrency and a two-process same-byte inode
+  swap; only the persisted identity record, never in-memory state, may authorize
+  later reconciliation.
 
 ## 5. Archive rebuild drill (`archive-rebuild-drill`)
 

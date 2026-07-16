@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -50,12 +51,10 @@ class _FakeCursor:
                     "Execution Time": 5.5,
                     "Plan": {
                         "Node Type": "Custom Scan" if self.decompress else "Index Scan",
-                        **(
-                            {"Custom Plan Provider": "DecompressChunk"}
-                            if self.decompress
-                            else {}
-                        ),
+                        **({"Custom Plan Provider": "DecompressChunk"} if self.decompress else {}),
                         "Relation Name": "_hyper_3_7_chunk" if self.decompress else "river_timeseries",
+                        "Schema": "_timescaledb_internal" if self.decompress else "hydro",
+                        "Alias": "rt_1" if self.decompress else "river_timeseries",
                         "Shared Hit Blocks": 3,
                         "Shared Read Blocks": reads,
                         "Plans": [
@@ -109,6 +108,21 @@ def _inputs() -> dict[str, Any]:
         "mvt_x": 420,
         "mvt_y": 210,
     }
+
+
+def test_blocking_driver_cleanup_cannot_extend_hard_wall() -> None:
+    class BlockingConnection:
+        def rollback(self) -> None:
+            time.sleep(1)
+
+        def close(self) -> None:
+            time.sleep(1)
+
+    deadline = benchmark._Deadline(0.05)
+    started = time.monotonic()
+    with pytest.raises(benchmark.BenchmarkCaptureError, match="connection cleanup"):
+        benchmark._bounded_connection_cleanup(deadline, BlockingConnection())
+    assert time.monotonic() - started < 0.25
 
 
 def _capture(
@@ -199,13 +213,11 @@ def test_capture_uses_exact_production_queries_bindings_and_new_readonly_connect
         )
     )
     assert all(
-        connection.session
-        == {"isolation_level": "REPEATABLE READ", "readonly": True, "autocommit": False}
+        connection.session == {"isolation_level": "REPEATABLE READ", "readonly": True, "autocommit": False}
         for connection in (connections[0], connections[2])
     )
     assert all(
-        connection.session == {"readonly": True, "autocommit": True}
-        for connection in (connections[1], connections[3])
+        connection.session == {"readonly": True, "autocommit": True} for connection in (connections[1], connections[3])
     )
     assert all(connection.rolled_back and connection.closed for connection in (connections[0], connections[2]))
     assert all(connection.closed for connection in (connections[1], connections[3]))
@@ -331,7 +343,7 @@ def test_phase_deadline_rolls_back_and_closes_both_connections(
     connection = _FakeConnection(cursor)
     monitor = _FakeConnection(monitor_cursor)
     ticks = iter([0.0, 901.0])
-    monkeypatch.setattr(benchmark.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(benchmark.time, "monotonic", lambda: next(ticks, 901.0))
 
     with pytest.raises(benchmark.BenchmarkCaptureError, match="wall deadline"):
         benchmark._capture_phase(
@@ -459,6 +471,37 @@ def test_partial_connection_acquisition_closes_primary() -> None:
     assert primary.closed is True
 
 
+def test_monitor_connect_failure_bounds_blocking_primary_close() -> None:
+    class BlockingPrimary(_FakeConnection):
+        def close(self) -> None:
+            while True:
+                time.sleep(1)
+
+    primary = BlockingPrimary(_FakeCursor(result_rows=[], plan_reads=[]))
+    calls = 0
+
+    def connect(_database_url: str) -> _FakeConnection:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return primary
+        raise RuntimeError("monitor unavailable")
+
+    started = time.monotonic()
+    deadline = benchmark._Deadline(seconds=1)
+    deadline.expires_at = time.monotonic() + 0.05
+    with pytest.raises(benchmark.BenchmarkCaptureError, match="connection cleanup"):
+        benchmark._capture_with_connections(
+            connect=connect,
+            database_url="opaque-test-dsn",
+            statement="SELECT 1",
+            parameters=(),
+            result_kind="curve",
+            deadline=deadline,
+        )
+    assert time.monotonic() - started < 1
+
+
 @pytest.mark.parametrize("hardlink", [False, True])
 def test_after_output_alias_preserves_before_slice(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hardlink: bool
@@ -472,13 +515,36 @@ def test_after_output_alias_preserves_before_slice(
     original = before.read_bytes()
     monkeypatch.setenv("DATABASE_URL", "opaque-test-dsn")
     args = [
-        "--phase", "after", "--output", str(output), "--before-path", str(before),
-        "--curve-basin-version-id", "b", "--curve-river-segment-id", "s",
-        "--curve-river-network-version-id", "n", "--curve-issue-time", "2026-07-05T00:00:00Z",
-        "--curve-scenario", "forecast_ifs_deterministic", "--mvt-run-id", "r",
-        "--mvt-basin-version-id", "b", "--mvt-river-network-version-id", "n",
-        "--mvt-valid-time", "2026-07-06T00:00:00Z", "--mvt-z", "9",
-        "--mvt-x", "1", "--mvt-y", "1",
+        "--phase",
+        "after",
+        "--output",
+        str(output),
+        "--before-path",
+        str(before),
+        "--curve-basin-version-id",
+        "b",
+        "--curve-river-segment-id",
+        "s",
+        "--curve-river-network-version-id",
+        "n",
+        "--curve-issue-time",
+        "2026-07-05T00:00:00Z",
+        "--curve-scenario",
+        "forecast_ifs_deterministic",
+        "--mvt-run-id",
+        "r",
+        "--mvt-basin-version-id",
+        "b",
+        "--mvt-river-network-version-id",
+        "n",
+        "--mvt-valid-time",
+        "2026-07-06T00:00:00Z",
+        "--mvt-z",
+        "9",
+        "--mvt-x",
+        "1",
+        "--mvt-y",
+        "1",
     ]
     assert benchmark.main(args) == 2
     assert before.read_bytes() == original
@@ -486,9 +552,7 @@ def test_after_output_alias_preserves_before_slice(
 
 def test_secret_assignment_in_benign_string_is_rejected() -> None:
     with pytest.raises(benchmark.BenchmarkCaptureError, match="credential") as caught:
-        benchmark._reject_secrets(
-            {"note": "status=ok token=do-not-echo"}, "opaque-test-dsn"
-        )
+        benchmark._reject_secrets({"note": "status=ok token=do-not-echo"}, "opaque-test-dsn")
     assert "do-not-echo" not in str(caught.value)
 
 

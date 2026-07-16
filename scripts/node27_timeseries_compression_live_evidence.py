@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Independently validate and publish issue #1069 live compression evidence.
 
-The input bundle is an operator-authored JSON document whose artifact fields
-are absolute ``{path, sha256, bytes}`` references.  Referenced JSON files are
-re-read, size/hash checked, and interpreted here.  This verifier never imports
-the compression runner and never executes SQL: it can publish evidence, but it
-cannot migrate, compress, decompress, drop chunks, or mutate roles.
+The input bundle points to a supervisor-owned immutable run plan, append-only
+ledger, and absolute ``{path, sha256, bytes}`` artifact references. Referenced
+files are recursively resolved, size/hash checked, and interpreted here. This
+verifier never imports the compression runner or executes DB/container/systemd
+commands: it can publish evidence, but cannot migrate, compress, decompress,
+drop chunks, or mutate roles.
 
 Required referenced JSON shapes are documented by ``BUNDLE_CONTRACT`` below
 and in the node-27 storage runbook.  JSON hashes use canonical compact sorted
@@ -22,27 +23,34 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import jsonschema
 
+from packages.common import compression_terminal_state as terminal_state
 from packages.common.evidence_io import (
+    ArtifactClosure,
     BoundedEvidenceError,
     FileIdentity,
+    assert_output_disjoint_from_closure,
     assert_paths_disjoint,
     inspect_bounded_file_no_follow,
     read_bounded_bytes_with_identity_no_follow,
     read_bounded_json_no_follow,
     read_bounded_json_with_identity_no_follow,
     reject_secret_material,
+    resolve_artifact_closure,
+    reverify_artifact_closure,
+    validate_json_complexity,
 )
-from packages.common.safe_fs import atomic_write_bytes_no_follow, open_file_no_follow
 
 SCHEMA_VERSION = "3.0"
 ISSUE = 1069
 PASS_VERDICT = "PASS_TASK_4_5"
+PASS_CLAIM = "controlled lane executed exactly once with no observed conflict"
 HYPERTABLE_KEYS = ("hydro.river_timeseries", "met.forcing_station_timeseries")
 MAX_SELECTED_BYTES = 8 * 1024**3
 MIN_FREE_BYTES = 300 * 1024**3
@@ -58,7 +66,7 @@ MAX_JSON_ARRAY_ITEMS = 25_000
 MAX_BINARY_ARTIFACT_BYTES = 512 * 1024**2
 MAX_GIT_BLOB_BYTES = 8 * 1024**2
 MAX_SUBPROCESS_OUTPUT_BYTES = 16 * 1024**2
-PG_RESTORE_TIMEOUT_SECONDS = 30
+PUBLISH_LOCK_TIMEOUT_SECONDS = 5.0
 QUALIFYING_SCHEMA_VERSION = "3.0"
 EXPECTED_REPO_PATH = "/home/nwm/NWM"
 EXPECTED_REMOTE_IDENTITY = "DankerMu/SHUD-NWM"
@@ -71,7 +79,87 @@ EXPECTED_UNITS = (
     "nhms-node27-autopipe.service",
     "nhms-node27-timeseries-compression.timer",
     "nhms-node27-timeseries-compression.service",
+    "nhms-node27-timeseries-compression-replay.service",
 )
+EXPECTED_LEDGER_COUNTS: Mapping[str, int] = {
+    "migration_apply": 2,
+    "decompress": 1,
+    "compression_dry_run": 1,
+    "compression_enforce": 1,
+    "compression_service_activation": 0,
+    "retention": 0,
+    "drill": 0,
+    "role": 0,
+    "node22": 0,
+    "pg_dump": 1,
+    "pg_restore_version": 1,
+    "pg_restore_list": 1,
+    "benchmark_before": 1,
+    "benchmark_after": 1,
+    "replay_supervisor_activation": 1,
+}
+EXPECTED_COMMAND_COUNTS: Mapping[str, int] = {
+    kind: count for kind, count in EXPECTED_LEDGER_COUNTS.items() if kind != "replay_supervisor_activation"
+}
+EXPECTED_LEDGER_SEQUENCE = (
+    "pg_dump",
+    "pg_restore_version",
+    "pg_restore_list",
+    "migration_apply",
+    "migration_apply",
+    "decompress",
+    "compression_dry_run",
+    "benchmark_before",
+    "compression_enforce",
+    "benchmark_after",
+)
+EXPECTED_CAPTURE_SEQUENCE = (
+    "preflight_evidence",
+    "schema_dump_list",
+    "catalog_before",
+    "catalog_after_first",
+    "catalog_after_second",
+    "recovery_preflight",
+    "post_dry_selection",
+    "pre_enforce_selection",
+    "sizes_pre",
+    "sizes_post",
+    "catalog_post",
+    "cleanup",
+)
+EXPECTED_PRODUCER_SEQUENCE = (
+    "capture:preflight_evidence",
+    "child:pg_dump:0",
+    "child:pg_restore_version:0",
+    "child:pg_restore_list:0",
+    "capture:schema_dump_list",
+    "capture:catalog_before",
+    "child:migration_apply:0",
+    "capture:catalog_after_first",
+    "child:migration_apply:1",
+    "capture:catalog_after_second",
+    "capture:recovery_preflight",
+    "child:decompress:0",
+    "child:compression_dry_run:0",
+    "capture:post_dry_selection",
+    "child:benchmark_before:0",
+    "capture:pre_enforce_selection",
+    "capture:sizes_pre",
+    "child:compression_enforce:0",
+    "capture:sizes_post",
+    "capture:catalog_post",
+    "child:benchmark_after:0",
+    "capture:cleanup",
+)
+EXPECTED_OUTPUT_OWNERS: Mapping[str, tuple[str, int]] = {
+    "schema_dump": ("pg_dump", 0),
+    "recovery_receipt": ("decompress", 0),
+    "dry_run_receipt": ("compression_dry_run", 0),
+    "benchmark_before": ("benchmark_before", 0),
+    "enforce_receipt": ("compression_enforce", 0),
+    "benchmarks": ("benchmark_after", 0),
+    **{kind: (f"capture:{kind}", 0) for kind in EXPECTED_CAPTURE_SEQUENCE},
+}
 PREFLIGHT_KEYS = frozenset(
     {
         "captured_at",
@@ -106,7 +194,8 @@ RECOVERY_RETURN_RELATION = "_timescaledb_internal._hyper_3_7_chunk"
 # This constant is deliberately executable documentation: tests and the
 # runbook pin the same capture contract without inventing a host-only format.
 BUNDLE_CONTRACT: Mapping[str, str] = {
-    "execution.audit": "JSON: exact invocation namespace plus bounded audit journal/direct-DB absence",
+    "execution.run_plan": "JSON: immutable concrete supervisor plan/cardinality/checkpoints",
+    "execution.ledger": "JSONL: producer-owned children plus raw quiescence refs",
     "recovery.preflight": "JSON: separately authorized exact-chunk decompression preflight",
     "recovery.receipt": "JSON: exact-chunk decompression result, row parity, and chronology",
     "preflight.evidence": "JSON: captured mutation SHA, container and four-unit state facts",
@@ -139,7 +228,7 @@ INVOCATION_ARGV: Mapping[str, list[str]] = {
         "--set",
         "ON_ERROR_STOP=1",
         "--command",
-        "SELECT decompress_" "chunk($1::regclass);",
+        "SELECT decompress_" + "chunk($1::regclass);",
     ],
     "compression_dry_run": [
         "scripts/node27_timeseries_compression_once.sh",
@@ -191,17 +280,17 @@ def _invocation_execution_identity(kind: str) -> dict[str, Any]:
     }
 
 
-class EvidenceError(RuntimeError):
-    """Fail-closed bundle, artifact, schema, or semantic error."""
+EvidenceError = terminal_state.TerminalStateError
 
 
 _RETAINED_IDENTITIES: list[FileIdentity] = []
+_ANY_EXPECTED_IDENTITY = terminal_state._ANY_EXPECTED_IDENTITY
+INTENT_STATE_SCHEMA_VERSION = terminal_state.INTENT_STATE_SCHEMA_VERSION
+MAX_INTENT_STATE_BYTES = terminal_state.MAX_INTENT_STATE_BYTES
 
 
 def _canonical_json_bytes(value: Any) -> bytes:
-    return (
-        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
-    ).encode("utf-8")
+    return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
 
 
 def _sha256(raw: bytes) -> str:
@@ -223,9 +312,7 @@ def _require_list(value: Any, label: str) -> list[Any]:
 def _require_exact_keys(value: Mapping[str, Any], keys: set[str], label: str) -> None:
     actual = set(value)
     if actual != keys:
-        raise EvidenceError(
-            f"{label} keys differ: missing={sorted(keys - actual)} extra={sorted(actual - keys)}"
-        )
+        raise EvidenceError(f"{label} keys differ: missing={sorted(keys - actual)} extra={sorted(actual - keys)}")
 
 
 def _artifact_ref(
@@ -266,9 +353,7 @@ def _artifact_bytes(
     if size > max_bytes:
         raise EvidenceError(f"{label} exceeds the byte ceiling")
     try:
-        raw, identity = read_bounded_bytes_with_identity_no_follow(
-            path, max_bytes=max_bytes, label=label
-        )
+        raw, identity = read_bounded_bytes_with_identity_no_follow(path, max_bytes=max_bytes, label=label)
     except BoundedEvidenceError as error:
         raise EvidenceError(str(error)) from error
     if len(raw) != size or _sha256(raw) != digest:
@@ -306,9 +391,7 @@ def _json_artifact(
     return ref, document
 
 
-def _text_artifact(
-    value: Any, label: str, *, max_bytes: int = 4 * 1024**2
-) -> tuple[dict[str, Any], str]:
+def _text_artifact(value: Any, label: str, *, max_bytes: int = 4 * 1024**2) -> tuple[dict[str, Any], str]:
     ref, raw = _artifact_bytes(value, label, max_bytes=max_bytes)
     try:
         text_value = raw.decode("utf-8")
@@ -351,15 +434,10 @@ def _streaming_artifact_ref(
     if not path.is_absolute():
         raise EvidenceError(f"{label}.path must be absolute")
     try:
-        identity = inspect_bounded_file_no_follow(
-            path, max_bytes=max_bytes, label=label
-        )
+        identity = inspect_bounded_file_no_follow(path, max_bytes=max_bytes, label=label)
     except BoundedEvidenceError as error:
         raise EvidenceError(str(error)) from error
-    if (
-        ref["bytes"] != identity.size
-        or ref["sha256"] != identity.sha256
-    ):
+    if ref["bytes"] != identity.size or ref["sha256"] != identity.sha256:
         raise EvidenceError(f"{label} byte count or sha256 mismatch")
     _RETAINED_IDENTITIES.append(identity)
     return {
@@ -423,9 +501,7 @@ def _remote_identity(url: str) -> str:
     return ""
 
 
-def _validate_repository_provenance(
-    *, mutation_head_sha: str, reviewed_remote_ref: str
-) -> None:
+def _validate_repository_provenance(*, mutation_head_sha: str, reviewed_remote_ref: str) -> None:
     if not reviewed_remote_ref.startswith("refs/remotes/origin/"):
         raise EvidenceError("reviewed mutation ref is not an origin remote-tracking ref")
     try:
@@ -503,6 +579,7 @@ def _validate_invocation_record(
             "finished_at",
             "exit_code",
             "mutation_head_sha",
+            "reviewed_remote_ref",
             "artifact_bindings",
             "resolved_repo_path",
             "resolved_interpreter",
@@ -527,7 +604,7 @@ def _validate_invocation_record(
     started = _parse_utc(record["started_at"], f"{label}.started_at")
     finished = _parse_utc(record["finished_at"], f"{label}.finished_at")
     if (
-        not started <= finished
+        not started < finished
         or (finished - started).total_seconds() > EXPECTED_TIMEOUT_SECONDS
         or record["exit_code"] != 0
     ):
@@ -583,7 +660,7 @@ def _validate_execution_audit(
         or audit["namespace_counts"] != expected_counts
         or refs != expected_refs
         or audit["direct_db_mutation_statements"] != []
-        or not started <= finished <= captured
+        or not started < finished < captured
     ):
         raise EvidenceError("execution audit namespace or direct-DB boundary differs")
     journal_ref, journal = _text_artifact(audit["journal"], "execution.audit.journal")
@@ -613,6 +690,828 @@ def _validate_execution_audit(
     }
 
 
+def _concrete_argv(value: Any, label: str) -> list[str]:
+    argv = _require_list(value, label)
+    if not argv or not all(isinstance(item, str) and item for item in argv):
+        raise EvidenceError(f"{label} must contain concrete executable arguments")
+    forbidden = ("<", ">", "${", "$(", "{{", "}}", "*", "?")
+    if any(any(marker in item for marker in forbidden) for item in argv):
+        raise EvidenceError(f"{label} contains a placeholder or shell template")
+    if not Path(argv[0]).is_absolute():
+        raise EvidenceError(f"{label} executable is not absolute")
+    return list(argv)
+
+
+def _validate_exact_command_argv(argv: list[str], *, kind: str, associations: Mapping[str, Any], label: str) -> None:
+    expected_executable = {
+        "pg_dump": "/usr/bin/pg_dump",
+        "pg_restore_version": "/usr/bin/docker",
+        "pg_restore_list": "/usr/bin/docker",
+        "migration_apply": "/usr/bin/psql",
+        "decompress": f"{EXPECTED_REPO_PATH}/.venv/bin/python",
+        "compression_dry_run": f"{EXPECTED_REPO_PATH}/scripts/node27_timeseries_compression_once.sh",
+        "compression_enforce": f"{EXPECTED_REPO_PATH}/scripts/node27_timeseries_compression_once.sh",
+        "benchmark_before": f"{EXPECTED_REPO_PATH}/.venv/bin/python",
+        "benchmark_after": f"{EXPECTED_REPO_PATH}/.venv/bin/python",
+    }[kind]
+    if argv[0] != expected_executable:
+        raise EvidenceError(f"{label} executable differs from the canonical {kind} contract")
+    if kind == "pg_dump" and argv != [
+        "/usr/bin/pg_dump",
+        "--dbname",
+        "nhms",
+        "--format=custom",
+        "--schema-only",
+        "--file",
+        str(associations.get("schema_dump", "")),
+    ]:
+        raise EvidenceError("pg_dump argv differs")
+    if kind == "pg_restore_version" and argv != [
+        "/usr/bin/docker",
+        "exec",
+        "nhms-db",
+        "/usr/bin/pg_restore",
+        "--version",
+    ]:
+        raise EvidenceError("pg_restore version argv differs")
+    if kind == "pg_restore_list" and (
+        argv[:5] != ["/usr/bin/docker", "exec", "nhms-db", "/usr/bin/pg_restore", "--list"]
+        or len(argv) != 6
+        or not argv[-1].startswith("/var/lib/postgresql/")
+    ):
+        raise EvidenceError("pg_restore list argv differs")
+    migration_argv = [
+        "/usr/bin/psql",
+        "--dbname",
+        "nhms",
+        "--no-psqlrc",
+        "--set",
+        "ON_ERROR_STOP=1",
+        "--file",
+        f"{EXPECTED_REPO_PATH}/db/migrations/000047_hypertable_compression_settings.sql",
+    ]
+    if kind == "migration_apply" and argv != migration_argv:
+        raise EvidenceError("migration argv differs")
+    if kind == "decompress" and (
+        len(argv) != 20
+        or argv[:5]
+        != [
+            f"{EXPECTED_REPO_PATH}/.venv/bin/python",
+            f"{EXPECTED_REPO_PATH}/scripts/node27_timeseries_decompression_replay.py",
+            "--database",
+            "nhms",
+            "--mutation-head-sha",
+        ]
+        or re.fullmatch(r"[0-9a-f]{40}", argv[5]) is None
+        or argv[6:]
+        != [
+            "--receipt-path",
+            str(associations.get("recovery_receipt", "")),
+            "--hypertable-schema",
+            "hydro",
+            "--hypertable-name",
+            "river_timeseries",
+            "--chunk-schema",
+            "_timescaledb_internal",
+            "--chunk-name",
+            "_hyper_3_7_chunk",
+            "--range-start",
+            "2026-05-28T00:00:00Z",
+            "--range-end",
+            "2026-06-04T00:00:00Z",
+        ]
+    ):
+        raise EvidenceError("decompress argv differs")
+    if kind.startswith("compression_"):
+        enforce = kind == "compression_enforce"
+        prefix = [expected_executable, *(["--enforce"] if enforce else [])]
+        if (
+            argv[: len(prefix)] != prefix
+            or len(argv) != len(prefix) + 4
+            or set(argv[len(prefix) :: 2])
+            != {
+                "--receipt-path",
+                "--lock-path",
+            }
+        ):
+            raise EvidenceError(f"{kind} option contract differs")
+        receipt = "enforce_receipt" if enforce else "dry_run_receipt"
+        if argv[argv.index("--receipt-path") + 1] != associations.get(receipt):
+            raise EvidenceError(f"{kind} receipt output differs")
+    if kind.startswith("benchmark_"):
+        if len(argv) < 4 or argv[1] != f"{EXPECTED_REPO_PATH}/scripts/node27_timeseries_compression_benchmark.py":
+            raise EvidenceError(f"{kind} benchmark entrypoint differs")
+        flags = argv[2::2]
+        expected_flags = [
+            "--phase",
+            *(["--before-path"] if kind == "benchmark_after" else []),
+            "--output",
+            "--curve-basin-version-id",
+            "--curve-river-segment-id",
+            "--curve-river-network-version-id",
+            "--curve-issue-time",
+            "--curve-end-time",
+            "--curve-scenario",
+            "--mvt-run-id",
+            "--mvt-basin-version-id",
+            "--mvt-river-network-version-id",
+            "--mvt-valid-time",
+            "--mvt-z",
+            "--mvt-x",
+            "--mvt-y",
+        ]
+        if flags != expected_flags:
+            raise EvidenceError(f"{kind} benchmark option order differs")
+
+
+def _supervisor_run_plan_id(plan: Mapping[str, Any]) -> str:
+    return _sha256(_canonical_json_bytes({**dict(plan), "run_plan_id": ""}))
+
+
+def _observed_artifact(value: Any, label: str, *, json_value: bool = False) -> tuple[dict[str, Any], Any]:
+    observed = _require_mapping(value, label)
+    _require_exact_keys(observed, {"artifact", "device", "inode"}, label)
+    if not isinstance(observed["device"], int) or not isinstance(observed["inode"], int):
+        raise EvidenceError(f"{label} descriptor identity is invalid")
+    if json_value:
+        ref, raw = _json_artifact(observed["artifact"], f"{label}.artifact")
+    else:
+        ref, raw = _artifact_bytes(observed["artifact"], f"{label}.artifact", max_bytes=MAX_BINARY_ARTIFACT_BYTES)
+    try:
+        identity = inspect_bounded_file_no_follow(Path(ref["path"]), max_bytes=max(ref["bytes"], 1), label=label)
+    except BoundedEvidenceError as error:
+        raise EvidenceError(str(error)) from error
+    if (identity.device, identity.inode) != (observed["device"], observed["inode"]):
+        raise EvidenceError(f"{label} inode identity changed")
+    return ref, raw
+
+
+def _journal_governed_user_unit(row: Mapping[str, Any], *, label: str) -> str | None:
+    governed = {
+        "nhms-node27-timeseries-compression.service",
+        "nhms-node27-timeseries-compression-replay.service",
+    }
+    user_fields_present = "_SYSTEMD_USER_UNIT" in row or "USER_UNIT" in row
+    user_units = {
+        str(row[key])
+        for key in ("_SYSTEMD_USER_UNIT", "USER_UNIT")
+        if key in row and str(row[key]) in governed
+    }
+    if len(user_units) > 1:
+        raise EvidenceError(f"{label} journal user-unit fields conflict")
+    if user_units:
+        return next(iter(user_units))
+    if user_fields_present:
+        return None
+    fallback_units = {
+        str(row[key])
+        for key in ("_SYSTEMD_UNIT", "UNIT")
+        if key in row and str(row[key]) in governed
+    }
+    if len(fallback_units) > 1:
+        raise EvidenceError(f"{label} journal fallback unit fields conflict")
+    return next(iter(fallback_units)) if fallback_units else None
+
+
+def _validate_checkpoint_artifacts(
+    event: Mapping[str, Any], label: str, *, invocation_id: str, supervisor_pid: int
+) -> dict[str, Any]:
+    activity_ref, activity_raw = _observed_artifact(
+        event["database_activity"], f"{label}.database_activity", json_value=True
+    )
+    locks_ref, locks_raw = _observed_artifact(event["relation_locks"], f"{label}.relation_locks", json_value=True)
+    catalog_ref, catalog_raw = _observed_artifact(event["catalog"], f"{label}.catalog", json_value=True)
+    show_ref, show_raw = _observed_artifact(event["systemd_show"], f"{label}.systemd_show", json_value=True)
+    journal_ref, journal_raw = _observed_artifact(event["journal"], f"{label}.journal")
+    try:
+        journal = journal_raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise EvidenceError(f"{label}.journal is not UTF-8") from error
+    _reject_secrets(journal, f"{label}.journal")
+    activity = _require_mapping(activity_raw, f"{label}.database_activity document")
+    locks = _require_mapping(locks_raw, f"{label}.relation_locks document")
+    show = _require_mapping(show_raw, f"{label}.systemd_show document")
+    if activity != {"sessions": []} or locks != {"conflicts": []}:
+        raise EvidenceError(f"{label} observed a conflicting writer or relation lock")
+    _validate_d3_catalog(catalog_raw, f"{label}.catalog document")
+    recurring = _require_mapping(show.get("recurring"), f"{label}.systemd_show.recurring")
+    replay = _require_mapping(show.get("replay"), f"{label}.systemd_show.replay")
+    if recurring != {
+        "FragmentPath": "/home/nwm/.config/systemd/user/nhms-node27-timeseries-compression.service",
+        "ActiveState": "inactive",
+        "SubState": "dead",
+        "MainPID": 0,
+        "InvocationID": "",
+        "ExecMainStartTimestamp": "",
+        "ExecMainStartTimestampMonotonic": 0,
+    }:
+        raise EvidenceError(f"{label} recurring compression unit is not canonically inactive")
+    if (
+        replay.get("FragmentPath") != "/home/nwm/.config/systemd/user/nhms-node27-timeseries-compression-replay.service"
+        or replay.get("ActiveState") != "activating"
+        or replay.get("SubState") != "start"
+        or replay.get("MainPID") != supervisor_pid
+        or replay.get("InvocationID") != invocation_id
+        or not isinstance(replay.get("ExecMainStartTimestamp"), str)
+        or not replay["ExecMainStartTimestamp"]
+        or not isinstance(replay.get("ExecMainStartTimestampMonotonic"), int)
+        or replay["ExecMainStartTimestampMonotonic"] <= 0
+    ):
+        raise EvidenceError(f"{label} replay supervisor unit is not the active owner")
+    start_cursor = event.get("journal_start_cursor")
+    end_cursor = event.get("journal_end_cursor")
+    if not isinstance(start_cursor, str) or not start_cursor or not isinstance(end_cursor, str) or not end_cursor:
+        raise EvidenceError(f"{label} journal cursor boundary is missing")
+    cursor_lines = [line.removeprefix("-- cursor: ") for line in journal.splitlines() if line.startswith("-- cursor: ")]
+    if not cursor_lines or cursor_lines[-1] != end_cursor:
+        raise EvidenceError(f"{label} journal ending cursor differs")
+    replay_ids: set[str] = set()
+    recurring_ids: set[str] = set()
+    for line in journal.splitlines():
+        if not line or line.startswith("-- cursor: "):
+            continue
+        try:
+            row = _require_mapping(json.loads(line), f"{label}.journal row")
+        except json.JSONDecodeError as error:
+            raise EvidenceError(f"{label}.journal is not structured JSON") from error
+        unit = _journal_governed_user_unit(row, label=label)
+        observed_id = row.get("_SYSTEMD_INVOCATION_ID") or row.get("INVOCATION_ID")
+        if unit == "nhms-node27-timeseries-compression-replay.service" and observed_id:
+            replay_ids.add(str(observed_id))
+        if unit == "nhms-node27-timeseries-compression.service" and observed_id:
+            recurring_ids.add(str(observed_id))
+    if recurring_ids:
+        raise EvidenceError(f"{label} journal observed recurring compression activation")
+    if any(value != invocation_id for value in replay_ids):
+        raise EvidenceError(f"{label} journal observed an additional replay activation")
+    return {
+        "database_activity": activity_ref,
+        "relation_locks": locks_ref,
+        "catalog": catalog_ref,
+        "systemd_show": show_ref,
+        "journal": journal_ref,
+        "journal_start_cursor": start_cursor,
+        "journal_end_cursor": end_cursor,
+        "replay_activation": {
+            "InvocationID": replay["InvocationID"],
+            "MainPID": replay["MainPID"],
+            "ExecMainStartTimestamp": replay["ExecMainStartTimestamp"],
+            "ExecMainStartTimestampMonotonic": replay["ExecMainStartTimestampMonotonic"],
+        },
+    }
+
+
+def _validate_supervisor_execution(
+    execution: Mapping[str, Any], *, mutation_head_sha: str, database: str
+) -> dict[str, Any]:
+    """Derive controlled-lane cardinality and quiescence from producer raw facts."""
+
+    _require_exact_keys(execution, {"run_plan", "ledger"}, "execution")
+    run_plan_ref, run_plan_raw = _json_artifact(execution["run_plan"], "execution.run_plan")
+    plan = _require_mapping(run_plan_raw, "execution.run_plan document")
+    _require_exact_keys(
+        plan,
+        {
+            "plan_version",
+            "run_plan_id",
+            "mutation_head_sha",
+            "reviewed_remote_ref",
+            "database",
+            "repo_path",
+            "operator_attestation",
+            "commands",
+            "captures",
+            "checkpoints",
+        },
+        "execution.run_plan document",
+    )
+    if (
+        plan["plan_version"] != "1.0"
+        or plan["run_plan_id"] != _supervisor_run_plan_id(plan)
+        or plan["mutation_head_sha"] != mutation_head_sha
+        or plan["database"] != database
+        or plan["repo_path"] != EXPECTED_REPO_PATH
+        or plan["reviewed_remote_ref"] != "refs/remotes/origin/feat/issue-1069-live-compression"
+    ):
+        raise EvidenceError("supervisor run plan provenance differs")
+    attestation = _require_mapping(plan["operator_attestation"], "execution.run_plan.operator_attestation")
+    expected_attestation = {
+        "sole_db_user_during_window": True,
+        "database_audit_proof": False,
+        "trust_limit": "discrete observations; no absolute direct-SQL bypass proof",
+    }
+    if attestation != expected_attestation:
+        raise EvidenceError("supervisor sole-user attestation/trust limit differs")
+    commands = _require_list(plan["commands"], "execution.run_plan.commands")
+    command_by_id: dict[str, Mapping[str, Any]] = {}
+    planned_counts: dict[str, int] = {key: 0 for key in EXPECTED_COMMAND_COUNTS}
+    planned_output_owners: dict[str, tuple[str, int]] = {}
+    for index, command_value in enumerate(commands):
+        command = _require_mapping(command_value, f"run plan command[{index}]")
+        _require_exact_keys(
+            command,
+            {"command_id", "kind", "argv", "artifact_associations"},
+            f"run plan command[{index}]",
+        )
+        command_id = str(command["command_id"])
+        kind = str(command["kind"])
+        if command_id in command_by_id or kind not in EXPECTED_LEDGER_SEQUENCE:
+            raise EvidenceError("run plan command ID/kind is unowned")
+        argv = _concrete_argv(command["argv"], f"run plan command[{index}].argv")
+        associations = _require_mapping(command["artifact_associations"], f"run plan command[{index}].artifacts")
+        if any(
+            not isinstance(name, str) or not name or not isinstance(path, str) or not Path(path).is_absolute()
+            for name, path in associations.items()
+        ):
+            raise EvidenceError("run plan produced-artifact paths are not concrete")
+        _validate_exact_command_argv(argv, kind=kind, associations=associations, label=f"run plan command[{index}]")
+        ordinal = planned_counts[kind]
+        for name in associations:
+            if name in planned_output_owners:
+                raise EvidenceError("run plan output label has duplicate producers")
+            planned_output_owners[name] = (kind, ordinal)
+        command_by_id[command_id] = command
+        planned_counts[kind] += 1
+    if planned_counts != dict(EXPECTED_COMMAND_COUNTS):
+        raise EvidenceError("supervisor run plan cardinality differs")
+    if tuple(str(command["kind"]) for command in commands) != EXPECTED_LEDGER_SEQUENCE:
+        raise EvidenceError("supervisor run plan command order differs")
+    decompression = next(command for command in commands if command["kind"] == "decompress")
+    if decompression["argv"][5] != mutation_head_sha:
+        raise EvidenceError("decompression producer mutation SHA differs")
+    captures = _require_list(plan["captures"], "execution.run_plan.captures")
+    capture_by_id: dict[str, Mapping[str, Any]] = {}
+    for index, capture_value in enumerate(captures):
+        capture = _require_mapping(capture_value, f"run plan capture[{index}]")
+        _require_exact_keys(
+            capture,
+            {"capture_id", "kind", "argv", "output_path"},
+            f"run plan capture[{index}]",
+        )
+        capture_id = str(capture["capture_id"])
+        kind = str(capture["kind"])
+        output_path = capture["output_path"]
+        if (
+            not capture_id
+            or capture_id in capture_by_id
+            or not isinstance(output_path, str)
+            or not Path(output_path).is_absolute()
+        ):
+            raise EvidenceError("run plan capture identity/output differs")
+        _concrete_argv(capture["argv"], f"run plan capture[{index}].argv")
+        if kind in planned_output_owners:
+            raise EvidenceError("run plan output label has duplicate producers")
+        planned_output_owners[kind] = (f"capture:{kind}", 0)
+        capture_by_id[capture_id] = capture
+    if tuple(str(item["kind"]) for item in captures) != EXPECTED_CAPTURE_SEQUENCE:
+        raise EvidenceError("run plan capture order/cardinality differs")
+    if planned_output_owners != dict(EXPECTED_OUTPUT_OWNERS):
+        raise EvidenceError("run plan semantic output ownership bijection differs")
+    checkpoints = _require_list(plan["checkpoints"], "execution.run_plan.checkpoints")
+    planned_checkpoint_by_id: dict[str, Mapping[str, Any]] = {}
+    for item in checkpoints:
+        checkpoint = _require_mapping(item, "run plan checkpoint")
+        _require_exact_keys(checkpoint, {"checkpoint_id", "phase", "command_id"}, "run plan checkpoint")
+        checkpoint_id = str(checkpoint["checkpoint_id"])
+        if checkpoint_id in planned_checkpoint_by_id:
+            raise EvidenceError("supervisor checkpoint IDs are not unique")
+        planned_checkpoint_by_id[checkpoint_id] = checkpoint
+    planned_checkpoint_ids = set(planned_checkpoint_by_id)
+    if len(planned_checkpoint_ids) != len(checkpoints):
+        raise EvidenceError("supervisor checkpoint IDs are not unique")
+    mutation_command_ids = {
+        command_id
+        for command_id, command in command_by_id.items()
+        if command["kind"] in {"migration_apply", "decompress", "compression_enforce"}
+    }
+    global_phases = [
+        checkpoint["phase"] for checkpoint in planned_checkpoint_by_id.values() if checkpoint["command_id"] is None
+    ]
+    before_ids = {
+        str(checkpoint["command_id"])
+        for checkpoint in planned_checkpoint_by_id.values()
+        if checkpoint["phase"] == "before_mutation"
+    }
+    after_ids = {
+        str(checkpoint["command_id"])
+        for checkpoint in planned_checkpoint_by_id.values()
+        if checkpoint["phase"] == "after_mutation"
+    }
+    if (
+        sorted(global_phases) != ["cleanup", "postflight", "preflight"]
+        or before_ids != mutation_command_ids
+        or after_ids != mutation_command_ids
+    ):
+        raise EvidenceError("supervisor checkpoint/run-plan bijection differs")
+
+    ledger_ref, ledger_text = _text_artifact(execution["ledger"], "execution.ledger", max_bytes=MAX_JSON_ARTIFACT_BYTES)
+    try:
+        events = [json.loads(line) for line in ledger_text.splitlines() if line.strip()]
+    except json.JSONDecodeError as error:
+        raise EvidenceError("supervisor ledger is not append-only JSONL") from error
+    if not events:
+        raise EvidenceError("supervisor ledger is empty")
+    event_ids: set[str] = set()
+    observed_commands: set[str] = set()
+    observed_command_order: list[str] = []
+    observed_captures: set[str] = set()
+    observed_capture_order: list[str] = []
+    observed_producer_sequence: list[str] = []
+    observed_checkpoints: set[str] = set()
+    observed_counts: dict[str, int] = {key: 0 for key in EXPECTED_LEDGER_COUNTS}
+    run_ids: set[str] = set()
+    invocation_ids: set[str] = set()
+    supervisor_pids: set[int] = set()
+    replay_activations: set[tuple[Any, ...]] = set()
+    monotonic_finishes: list[float] = []
+    child_intervals: dict[str, tuple[datetime, datetime]] = {}
+    child_mono_intervals: dict[str, tuple[float, float]] = {}
+    child_event_indexes: dict[str, int] = {}
+    child_indexes_by_kind: dict[str, list[int]] = {kind: [] for kind in EXPECTED_LEDGER_SEQUENCE}
+    capture_event_indexes: dict[str, int] = {}
+    checkpoint_times: dict[str, datetime] = {}
+    checkpoint_monos: dict[str, float] = {}
+    checkpoint_event_indexes: dict[str, int] = {}
+    checkpoint_refs: list[dict[str, Any]] = []
+    events_by_kind: dict[str, list[dict[str, Any]]] = {key: [] for key in EXPECTED_LEDGER_COUNTS}
+    capture_events_by_kind: dict[str, dict[str, Any]] = {}
+    started: datetime | None = None
+    finished: datetime | None = None
+    previous_event_mono = float("-inf")
+    previous_journal_end: str | None = None
+    for index, event_value in enumerate(events):
+        event = _require_mapping(event_value, f"supervisor ledger event[{index}]")
+        event_id = str(event.get("event_id", ""))
+        if not event_id or event_id in event_ids:
+            raise EvidenceError("supervisor ledger event IDs are not unique")
+        event_ids.add(event_id)
+        if event.get("schema_version") != SCHEMA_VERSION or event.get("run_plan_id") != plan["run_plan_id"]:
+            raise EvidenceError("supervisor ledger run-plan identity differs")
+        run_ids.add(str(event.get("run_id", "")))
+        invocation_id = str(event.get("invocation_id", ""))
+        if re.fullmatch(r"[0-9a-f]{32}", invocation_id) is None:
+            raise EvidenceError("supervisor ledger INVOCATION_ID is invalid")
+        invocation_ids.add(invocation_id)
+        supervisor_pid = event.get("supervisor_pid")
+        if not isinstance(supervisor_pid, int) or supervisor_pid < 1:
+            raise EvidenceError("supervisor ledger PID is invalid")
+        supervisor_pids.add(supervisor_pid)
+        event_type = event.get("event_type")
+        if event_type == "child_exit":
+            _require_exact_keys(
+                event,
+                {
+                    "schema_version",
+                    "run_id",
+                    "run_plan_id",
+                    "invocation_id",
+                    "supervisor_pid",
+                    "event_id",
+                    "event_type",
+                    "command_id",
+                    "kind",
+                    "argv",
+                    "pid",
+                    "started_at",
+                    "finished_at",
+                    "started_monotonic",
+                    "finished_monotonic",
+                    "exit_code",
+                    "terminated_by_supervisor",
+                    "possible_mutation",
+                    "stdout",
+                    "stderr",
+                    "mutation_head_sha",
+                    "database",
+                    "artifact_associations",
+                },
+                f"supervisor child[{index}]",
+            )
+            command_id = str(event.get("command_id", ""))
+            if command_id in observed_commands or command_id not in command_by_id:
+                raise EvidenceError("supervisor ledger has a missing/extra/unowned child")
+            command = command_by_id[command_id]
+            if (
+                event.get("kind") != command["kind"]
+                or event.get("argv") != command["argv"]
+                or event.get("mutation_head_sha") != mutation_head_sha
+                or event.get("database") != database
+                or not isinstance(event.get("pid"), int)
+                or event["pid"] < 1
+                or event.get("exit_code") != 0
+                or event.get("terminated_by_supervisor") is not False
+                or event.get("possible_mutation") is not False
+            ):
+                raise EvidenceError("supervisor child execution differs from the immutable plan")
+            observed_associations = _require_mapping(
+                event.get("artifact_associations"), f"supervisor child[{index}].artifact_associations"
+            )
+            planned_associations = _require_mapping(
+                command["artifact_associations"], f"run plan command[{index}].artifact_associations"
+            )
+            if str(event["kind"]) == "pg_restore_version":
+                required_identity = {"dump_sha256", "container_image_id", "binary_realpath", "binary_sha256"}
+                if set(observed_associations) != required_identity:
+                    raise EvidenceError("pg_restore observed identity is incomplete")
+            else:
+                identity_names = (
+                    {"dump_sha256", "container_image_id", "binary_realpath", "binary_sha256"}
+                    if str(event["kind"]) == "pg_restore_list"
+                    else set()
+                )
+                if set(observed_associations) != set(planned_associations) | identity_names:
+                    raise EvidenceError("supervisor produced-artifact association set differs")
+                for name, path in planned_associations.items():
+                    ref, _ = _observed_artifact(
+                        observed_associations[name],
+                        f"supervisor child[{index}].artifact_associations.{name}",
+                    )
+                    if ref["path"] != path:
+                        raise EvidenceError("supervisor observed artifact path differs from run plan output")
+            started_at = _parse_utc(event.get("started_at"), "supervisor child start")
+            finished_at = _parse_utc(event.get("finished_at"), "supervisor child finish")
+            started_mono = event.get("started_monotonic")
+            finished_mono = event.get("finished_monotonic")
+            if (
+                not started_at < finished_at
+                or not isinstance(started_mono, (int, float))
+                or not isinstance(finished_mono, (int, float))
+                or not started_mono < finished_mono
+                or started_mono <= previous_event_mono
+                or not math.isclose(
+                    (finished_at - started_at).total_seconds(),
+                    float(finished_mono) - float(started_mono),
+                    abs_tol=0.5,
+                )
+            ):
+                raise EvidenceError("supervisor child chronology is not strictly ordered")
+            for stream in ("stdout", "stderr"):
+                identity = _require_mapping(event.get(stream), f"supervisor child {stream}")
+                stream_ref, stream_raw = _observed_artifact(
+                    identity.get("artifact"),
+                    f"supervisor child {stream}.artifact",
+                )
+                if (
+                    set(identity) != {"bytes", "sha256", "truncated", "artifact"}
+                    or not isinstance(identity["bytes"], int)
+                    or not 0 <= identity["bytes"] <= MAX_SUBPROCESS_OUTPUT_BYTES
+                    or re.fullmatch(r"[0-9a-f]{64}", str(identity["sha256"])) is None
+                    or identity["truncated"] is not False
+                    or identity["bytes"] != len(stream_raw)
+                    or identity["sha256"] != _sha256(stream_raw)
+                    or stream_ref["bytes"] != identity["bytes"]
+                ):
+                    raise EvidenceError("supervisor child output identity differs")
+            monotonic_finishes.append(float(finished_mono))
+            previous_event_mono = float(finished_mono)
+            observed_commands.add(command_id)
+            observed_command_order.append(command_id)
+            child_intervals[command_id] = (started_at, finished_at)
+            child_mono_intervals[command_id] = (float(started_mono), float(finished_mono))
+            child_event_indexes[command_id] = index
+            child_indexes_by_kind[str(event["kind"])].append(index)
+            observed_counts[str(event["kind"])] += 1
+            observed_producer_sequence.append(
+                f"child:{event['kind']}:{observed_counts[str(event['kind'])] - 1}"
+            )
+            events_by_kind[str(event["kind"])].append(dict(event))
+            started = min(started or started_at, started_at)
+            finished = max(finished or finished_at, finished_at)
+        elif event_type == "capture":
+            _require_exact_keys(
+                event,
+                {
+                    "schema_version",
+                    "run_id",
+                    "run_plan_id",
+                    "invocation_id",
+                    "supervisor_pid",
+                    "event_id",
+                    "event_type",
+                    "capture_id",
+                    "kind",
+                    "argv",
+                    "pid",
+                    "started_at",
+                    "finished_at",
+                    "started_monotonic",
+                    "finished_monotonic",
+                    "exit_code",
+                    "terminated_by_supervisor",
+                    "stdout",
+                    "stderr",
+                    "artifact_association",
+                },
+                f"supervisor capture[{index}]",
+            )
+            capture_id = str(event["capture_id"])
+            if capture_id in observed_captures or capture_id not in capture_by_id:
+                raise EvidenceError("supervisor ledger has an extra/missing capture owner")
+            capture = capture_by_id[capture_id]
+            if (
+                event["kind"] != capture["kind"]
+                or event["argv"] != capture["argv"]
+                or event["exit_code"] != 0
+                or event["terminated_by_supervisor"] is not False
+                or not isinstance(event["pid"], int)
+                or event["pid"] < 1
+            ):
+                raise EvidenceError("supervisor capture execution differs from its plan")
+            ref, _ = _observed_artifact(
+                event["artifact_association"],
+                f"supervisor capture[{index}].artifact_association",
+            )
+            if ref["path"] != capture["output_path"]:
+                raise EvidenceError("supervisor capture output path differs")
+            started_at = _parse_utc(event["started_at"], "supervisor capture start")
+            finished_at = _parse_utc(event["finished_at"], "supervisor capture finish")
+            started_mono = event["started_monotonic"]
+            finished_mono = event["finished_monotonic"]
+            if (
+                not started_at < finished_at
+                or not isinstance(started_mono, (int, float))
+                or not isinstance(finished_mono, (int, float))
+                or not started_mono < finished_mono
+                or started_mono <= previous_event_mono
+            ):
+                raise EvidenceError("supervisor capture chronology is not strict")
+            for stream in ("stdout", "stderr"):
+                identity = _require_mapping(event[stream], f"supervisor capture {stream}")
+                stream_ref, stream_raw = _observed_artifact(
+                    identity.get("artifact"), f"supervisor capture {stream}.artifact"
+                )
+                if (
+                    set(identity) != {"bytes", "sha256", "truncated", "artifact"}
+                    or identity["truncated"] is not False
+                    or identity["bytes"] != len(stream_raw)
+                    or identity["sha256"] != _sha256(stream_raw)
+                    or stream_ref["bytes"] != identity["bytes"]
+                ):
+                    raise EvidenceError("supervisor capture output identity differs")
+            previous_event_mono = float(finished_mono)
+            monotonic_finishes.append(float(finished_mono))
+            observed_captures.add(capture_id)
+            observed_capture_order.append(capture_id)
+            observed_producer_sequence.append(f"capture:{event['kind']}")
+            capture_event_indexes[str(event["kind"])] = index
+            capture_events_by_kind[str(event["kind"])] = dict(event)
+            started = min(started or started_at, started_at)
+            finished = max(finished or finished_at, finished_at)
+        elif event_type == "checkpoint":
+            _require_exact_keys(
+                event,
+                {
+                    "schema_version",
+                    "run_id",
+                    "run_plan_id",
+                    "invocation_id",
+                    "supervisor_pid",
+                    "event_id",
+                    "event_type",
+                    "checkpoint_id",
+                    "phase",
+                    "command_id",
+                    "captured_at",
+                    "monotonic",
+                    "database_activity",
+                    "relation_locks",
+                    "catalog",
+                    "systemd_show",
+                    "journal",
+                    "journal_start_cursor",
+                    "journal_end_cursor",
+                },
+                f"supervisor checkpoint[{index}]",
+            )
+            checkpoint_id = str(event.get("checkpoint_id", ""))
+            if checkpoint_id in observed_checkpoints or checkpoint_id not in planned_checkpoint_ids:
+                raise EvidenceError("supervisor ledger checkpoint differs from the run plan")
+            planned_checkpoint = planned_checkpoint_by_id[checkpoint_id]
+            if event["phase"] != planned_checkpoint["phase"] or event["command_id"] != planned_checkpoint["command_id"]:
+                raise EvidenceError("supervisor checkpoint binding differs from the run plan")
+            checkpoint_result = _validate_checkpoint_artifacts(
+                event,
+                f"supervisor checkpoint[{index}]",
+                invocation_id=invocation_id,
+                supervisor_pid=supervisor_pid,
+            )
+            activation = checkpoint_result["replay_activation"]
+            replay_activations.add(
+                (
+                    activation["InvocationID"],
+                    activation["MainPID"],
+                    activation["ExecMainStartTimestamp"],
+                    activation["ExecMainStartTimestampMonotonic"],
+                )
+            )
+            if previous_journal_end is not None and checkpoint_result["journal_start_cursor"] != previous_journal_end:
+                raise EvidenceError("supervisor journal cursor continuity differs")
+            previous_journal_end = str(checkpoint_result["journal_end_cursor"])
+            checkpoint_refs.extend(
+                value
+                for key, value in checkpoint_result.items()
+                if key not in {"journal_start_cursor", "journal_end_cursor", "replay_activation"}
+            )
+            checkpoint_at = _parse_utc(event["captured_at"], f"supervisor checkpoint[{index}].captured_at")
+            checkpoint_times[checkpoint_id] = checkpoint_at
+            checkpoint_mono = event["monotonic"]
+            if not isinstance(checkpoint_mono, (int, float)) or checkpoint_mono <= previous_event_mono:
+                raise EvidenceError("supervisor checkpoint monotonic value is invalid")
+            previous_event_mono = float(checkpoint_mono)
+            checkpoint_monos[checkpoint_id] = float(checkpoint_mono)
+            checkpoint_event_indexes[checkpoint_id] = index
+            started = min(started or checkpoint_at, checkpoint_at)
+            finished = max(finished or checkpoint_at, checkpoint_at)
+            observed_checkpoints.add(checkpoint_id)
+        else:
+            raise EvidenceError("supervisor ledger contains an unowned event type")
+    if tuple(observed_producer_sequence) != EXPECTED_PRODUCER_SEQUENCE:
+        raise EvidenceError("supervisor capture owner chronology differs")
+    if (
+        len(run_ids) != 1
+        or "" in run_ids
+        or len(invocation_ids) != 1
+        or len(supervisor_pids) != 1
+        or len(replay_activations) != 1
+        or observed_commands != set(command_by_id)
+        or observed_command_order != list(command_by_id)
+        or observed_captures != set(capture_by_id)
+        or observed_capture_order != list(capture_by_id)
+        or observed_checkpoints != planned_checkpoint_ids
+        or {**observed_counts, "replay_supervisor_activation": len(replay_activations)}
+        != dict(EXPECTED_LEDGER_COUNTS)
+        or started is None
+        or finished is None
+    ):
+        raise EvidenceError("supervisor ledger cardinality/checkpoint coverage differs")
+    capture_constraints = (
+        ("preflight_evidence", "before", "pg_dump", 0),
+        ("schema_dump_list", "after", "pg_restore_list", 0),
+        ("catalog_before", "after", "schema_dump_list", 0),
+        ("catalog_after_first", "after", "migration_apply", 0),
+        ("catalog_after_second", "after", "migration_apply", 1),
+        ("recovery_preflight", "before", "decompress", 0),
+        ("post_dry_selection", "after", "compression_dry_run", 0),
+        ("pre_enforce_selection", "before", "compression_enforce", 0),
+        ("sizes_pre", "before", "compression_enforce", 0),
+        ("sizes_post", "after", "compression_enforce", 0),
+        ("catalog_post", "after", "sizes_post", 0),
+        ("cleanup", "after", "benchmark_after", 0),
+    )
+    for capture_kind, relation, owner_kind, ordinal in capture_constraints:
+        capture_index = capture_event_indexes[capture_kind]
+        if owner_kind in capture_event_indexes:
+            owner_index = capture_event_indexes[owner_kind]
+        else:
+            owner_index = child_indexes_by_kind[owner_kind][ordinal]
+        if (relation == "before" and capture_index >= owner_index) or (
+            relation == "after" and capture_index <= owner_index
+        ):
+            raise EvidenceError("supervisor capture owner chronology differs")
+    for checkpoint_id, checkpoint in planned_checkpoint_by_id.items():
+        command_id = checkpoint["command_id"]
+        if command_id is None:
+            continue
+        child_started, child_finished = child_intervals[str(command_id)]
+        child_started_mono, child_finished_mono = child_mono_intervals[str(command_id)]
+        checkpoint_at = checkpoint_times[checkpoint_id]
+        checkpoint_mono = checkpoint_monos[checkpoint_id]
+        checkpoint_index = checkpoint_event_indexes[checkpoint_id]
+        child_index = child_event_indexes[str(command_id)]
+        if checkpoint["phase"] == "before_mutation" and not (
+            checkpoint_at < child_started and checkpoint_mono < child_started_mono and checkpoint_index < child_index
+        ):
+            raise EvidenceError("supervisor before-mutation checkpoint is not strict")
+        if checkpoint["phase"] == "after_mutation" and not (
+            child_finished < checkpoint_at and child_finished_mono < checkpoint_mono and child_index < checkpoint_index
+        ):
+            raise EvidenceError("supervisor after-mutation checkpoint is not strict")
+    global_times = {
+        str(checkpoint["phase"]): checkpoint_times[checkpoint_id]
+        for checkpoint_id, checkpoint in planned_checkpoint_by_id.items()
+        if checkpoint["command_id"] is None
+    }
+    first_child = min(value[0] for value in child_intervals.values())
+    last_child = max(value[1] for value in child_intervals.values())
+    if not (
+        global_times["preflight"] < first_child and last_child < global_times["postflight"] < global_times["cleanup"]
+    ):
+        raise EvidenceError("supervisor global checkpoint chronology is not strict")
+    return {
+        "run_plan": run_plan_ref,
+        "ledger": ledger_ref,
+        "run_id": next(iter(run_ids)),
+        "namespace_counts": {**observed_counts, "replay_supervisor_activation": len(replay_activations)},
+        "invocation_id": next(iter(invocation_ids)),
+        "checkpoint_artifacts": checkpoint_refs,
+        "artifact_window_started_at": started,
+        "artifact_window_finished_at": finished,
+        "attestation": expected_attestation,
+        "events_by_kind": events_by_kind,
+        "capture_events_by_kind": capture_events_by_kind,
+    }
+
+
 def _selected_identity(descriptor: Mapping[str, Any]) -> dict[str, Any]:
     keys = (
         "hypertable_schema",
@@ -634,9 +1533,7 @@ def _load_receipt(
     ref, raw = _json_artifact(ref_value, label)
     receipt = _require_mapping(raw, label)
     try:
-        jsonschema.Draft7Validator(receipt_schema, format_checker=jsonschema.FormatChecker()).validate(
-            receipt
-        )
+        jsonschema.Draft7Validator(receipt_schema, format_checker=jsonschema.FormatChecker()).validate(receipt)
     except jsonschema.ValidationError as error:
         raise EvidenceError(f"{label} fails runner receipt schema: {error.message}") from error
     return ref, receipt
@@ -646,9 +1543,7 @@ def _validate_d3_catalog(raw: Any, label: str) -> None:
     catalog = _require_mapping(raw, label)
     _require_exact_keys(catalog, {"hypertables", "compression_settings", "policy_jobs"}, label)
     hypertables = _require_mapping(catalog["hypertables"], f"{label}.hypertables")
-    if set(hypertables) != set(HYPERTABLE_KEYS) or not all(
-        hypertables[key] is True for key in HYPERTABLE_KEYS
-    ):
+    if set(hypertables) != set(HYPERTABLE_KEYS) or not all(hypertables[key] is True for key in HYPERTABLE_KEYS):
         raise EvidenceError(f"{label} must enable compression on exactly both hypertables")
     expected = [
         ["hydro", "river_timeseries", "run_id", 1, None, None, None],
@@ -697,12 +1592,15 @@ def _validate_pre_migration_catalog(raw: Any, label: str) -> None:
     catalog = _require_mapping(raw, label)
     _require_exact_keys(catalog, {"hypertables", "compression_settings", "policy_jobs"}, label)
     hypertables = _require_mapping(catalog["hypertables"], f"{label}.hypertables")
-    if set(hypertables) != set(HYPERTABLE_KEYS) or any(
-        value is not False for value in hypertables.values()
-    ):
+    if set(hypertables) != set(HYPERTABLE_KEYS):
         raise EvidenceError(f"{label} does not prove the exact pre-migration catalog")
-    if catalog["compression_settings"] != [] or catalog["policy_jobs"] != []:
-        raise EvidenceError(f"{label} contains unexpected pre-migration settings/jobs")
+    if all(value is True for value in hypertables.values()):
+        _validate_d3_catalog(catalog, label)
+        return
+    if all(value is False for value in hypertables.values()):
+        if catalog["compression_settings"] == [] and catalog["policy_jobs"] == []:
+            return
+    raise EvidenceError(f"{label} is neither pristine nor exact current D3 state")
 
 
 def _catalog_snapshot(
@@ -735,73 +1633,10 @@ def _catalog_snapshot(
     }
 
 
-def _run_pg_restore_list(identity: FileIdentity) -> dict[str, Any]:
-    """Run the pinned PG15 tool against the exact retained dump descriptor."""
-
-    fd = open_file_no_follow(identity.path)
-    try:
-        info = os.fstat(fd)
-        if (info.st_dev, info.st_ino, info.st_size) != (
-            identity.device,
-            identity.inode,
-            identity.size,
-        ):
-            raise EvidenceError("schema dump identity changed before pg_restore")
-        descriptor_path = f"/dev/fd/{fd}"
-        try:
-            version = subprocess.run(
-                ["/usr/bin/pg_restore", "--version"],
-                check=False,
-                capture_output=True,
-                timeout=PG_RESTORE_TIMEOUT_SECONDS,
-            )
-            result = subprocess.run(
-                ["/usr/bin/pg_restore", "--list", descriptor_path],
-                check=False,
-                capture_output=True,
-                timeout=PG_RESTORE_TIMEOUT_SECONDS,
-                pass_fds=(fd,),
-            )
-        except (OSError, subprocess.TimeoutExpired) as error:
-            raise EvidenceError("pinned pg_restore inspection failed") from error
-        if (
-            len(version.stdout) + len(version.stderr) > 4096
-            or len(result.stdout) > MAX_SUBPROCESS_OUTPUT_BYTES
-            or len(result.stderr) > MAX_SUBPROCESS_OUTPUT_BYTES
-        ):
-            raise EvidenceError("pg_restore output exceeds the byte ceiling")
-        after = os.fstat(fd)
-        if (after.st_dev, after.st_ino, after.st_size) != (
-            identity.device,
-            identity.inode,
-            identity.size,
-        ):
-            raise EvidenceError("schema dump changed during pg_restore")
-        version_text = (version.stdout + version.stderr).decode("utf-8", errors="strict").strip()
-        if version.returncode != 0 or re.search(r"\b15(?:\.|\b)", version_text) is None:
-            raise EvidenceError("pg_restore is not the supported PG15 tool")
-        return {
-            "dump_sha256": identity.sha256,
-            "argv": ["/usr/bin/pg_restore", "--list", "<descriptor-bound-dump>"],
-            "exit_code": result.returncode,
-            "tool_version": version_text,
-            "stdout_sha256": _sha256(result.stdout),
-            "stdout_bytes": len(result.stdout),
-            "stderr_sha256": _sha256(result.stderr),
-            "stderr_bytes": len(result.stderr),
-            "entries": result.stdout.decode("utf-8", errors="strict").splitlines(),
-        }
-    except UnicodeError as error:
-        raise EvidenceError("pg_restore output is not valid UTF-8") from error
-    finally:
-        os.close(fd)
-
-
 def _validate_dump_listing(
     raw: Any,
     *,
     dump_ref: Mapping[str, Any],
-    observed: Mapping[str, Any],
     mutation_head_sha: str,
 ) -> dict[str, Any]:
     listing = _require_mapping(raw, "preflight.schema_dump_list document")
@@ -811,10 +1646,16 @@ def _validate_dump_listing(
             "captured_at",
             "snapshot_id",
             "mutation_head_sha",
-            "dump_sha256",
-            "argv",
+            "dump_descriptor_sha256",
+            "container_image_id",
+            "binary_realpath",
+            "binary_sha256",
+            "version_argv",
+            "list_argv",
             "exit_code",
             "tool_version",
+            "version_stdout_sha256",
+            "version_stdout_bytes",
             "stdout_sha256",
             "stdout_bytes",
             "stderr_sha256",
@@ -823,9 +1664,7 @@ def _validate_dump_listing(
         },
         "preflight.schema_dump_list document",
     )
-    captured_at = _parse_utc(
-        listing["captured_at"], "preflight.schema_dump_list.captured_at"
-    )
+    captured_at = _parse_utc(listing["captured_at"], "preflight.schema_dump_list.captured_at")
     if (
         listing["mutation_head_sha"] != mutation_head_sha
         or not isinstance(listing["snapshot_id"], str)
@@ -833,17 +1672,48 @@ def _validate_dump_listing(
     ):
         raise EvidenceError("schema dump listing snapshot identity differs")
     entries = _require_list(listing["entries"], "preflight.schema_dump_list.entries")
-    observed_keys = set(observed)
+    version_argv = _concrete_argv(listing["version_argv"], "pg_restore version argv")
+    list_argv = _concrete_argv(listing["list_argv"], "pg_restore list argv")
     if (
-        listing["dump_sha256"] != dump_ref["sha256"]
-        or {key: listing[key] for key in observed_keys} != dict(observed)
+        listing["dump_descriptor_sha256"] != dump_ref["sha256"]
+        or version_argv != ["/usr/bin/docker", "exec", "nhms-db", "/usr/bin/pg_restore", "--version"]
+        or list_argv[:5] != ["/usr/bin/docker", "exec", "nhms-db", "/usr/bin/pg_restore", "--list"]
+        or len(list_argv) != 6
+        or not list_argv[-1].startswith("/var/lib/postgresql/")
+        or not isinstance(listing["container_image_id"], str)
+        or not listing["container_image_id"].startswith("sha256:")
+        or listing["binary_realpath"] != "/usr/bin/pg_restore"
+        or re.fullmatch(r"[0-9a-f]{64}", str(listing["binary_sha256"])) is None
+        or re.search(r"\b15(?:\.|\b)", str(listing["tool_version"])) is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(listing["version_stdout_sha256"])) is None
+        or not isinstance(listing["version_stdout_bytes"], int)
+        or not 1 <= listing["version_stdout_bytes"] <= 4096
         or listing["exit_code"] != 0
+        or not isinstance(listing["stdout_bytes"], int)
+        or not 0 <= listing["stdout_bytes"] <= MAX_SUBPROCESS_OUTPUT_BYTES
+        or not isinstance(listing["stderr_bytes"], int)
+        or not 0 <= listing["stderr_bytes"] <= MAX_SUBPROCESS_OUTPUT_BYTES
+        or re.fullmatch(r"[0-9a-f]{64}", str(listing["stdout_sha256"])) is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(listing["stderr_sha256"])) is None
         or not entries
         or any(not isinstance(item, str) or not item for item in entries)
         or not all(any(table.split(".")[1] in item for item in entries) for table in HYPERTABLE_KEYS)
     ):
         raise EvidenceError("schema forensic dump/list identity is not verifiable")
     return {**dict(listing), "captured_at_dt": captured_at}
+
+
+def _require_custom_dump_magic(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+        try:
+            if os.read(fd, 5) != b"PGDMP":
+                raise EvidenceError("schema dump is not PostgreSQL custom format")
+        finally:
+            os.close(fd)
+    except OSError as error:
+        raise EvidenceError("schema dump magic is unavailable") from error
 
 
 def _validate_preflight(raw: Any, mutation_head_sha: str) -> dict[str, Any]:
@@ -890,9 +1760,7 @@ def _validate_preflight(raw: Any, mutation_head_sha: str) -> dict[str, Any]:
             raise EvidenceError(f"preflight unit {unit_name} has incomplete state fields")
         if not isinstance(unit["main_pid"], int) or isinstance(unit["main_pid"], bool) or unit["main_pid"] < 0:
             raise EvidenceError(f"preflight unit {unit_name} has invalid MainPID")
-        journal_ref, _ = _text_artifact(
-            unit["journal"], f"preflight.units.{unit_name}.journal"
-        )
+        journal_ref, _ = _text_artifact(unit["journal"], f"preflight.units.{unit_name}.journal")
         unit_summary[unit_name] = {
             "enabled": unit["enabled"],
             "active": unit["active"],
@@ -909,9 +1777,7 @@ def _validate_preflight(raw: Any, mutation_head_sha: str) -> dict[str, Any]:
         unit = units[unit_name]
         if unit["active"] != "inactive" or unit["main_pid"] != 0:
             raise EvidenceError(f"preflight compression unit {unit_name} must remain inactive")
-    prior_autopipe = _require_mapping(
-        preflight["prior_autopipe_state"], "preflight.prior_autopipe_state"
-    )
+    prior_autopipe = _require_mapping(preflight["prior_autopipe_state"], "preflight.prior_autopipe_state")
     _require_exact_keys(
         prior_autopipe,
         {"timer", "service"},
@@ -919,9 +1785,7 @@ def _validate_preflight(raw: Any, mutation_head_sha: str) -> dict[str, Any]:
     )
     normalized_prior: dict[str, Any] = {}
     for kind in ("timer", "service"):
-        state = _require_mapping(
-            prior_autopipe[kind], f"preflight.prior_autopipe_state.{kind}"
-        )
+        state = _require_mapping(prior_autopipe[kind], f"preflight.prior_autopipe_state.{kind}")
         _require_exact_keys(
             state,
             {"enabled", "active", "sub", "result"},
@@ -931,9 +1795,7 @@ def _validate_preflight(raw: Any, mutation_head_sha: str) -> dict[str, Any]:
             raise EvidenceError("preflight prior autopipe state is incomplete")
         normalized_prior[kind] = dict(state)
     database = _require_mapping(preflight["database_identity"], "database_identity")
-    probe = _require_mapping(
-        preflight["database_identity_probe"], "preflight.database_identity_probe"
-    )
+    probe = _require_mapping(preflight["database_identity_probe"], "preflight.database_identity_probe")
     _require_exact_keys(
         probe,
         {"captured_at", "query", "row"},
@@ -945,9 +1807,7 @@ def _validate_preflight(raw: Any, mutation_head_sha: str) -> dict[str, Any]:
         "extversion AS timescaledb_version FROM pg_extension "
         "WHERE extname = 'timescaledb'"
     )
-    probe_captured = _parse_utc(
-        probe["captured_at"], "preflight.database_identity_probe.captured_at"
-    )
+    probe_captured = _parse_utc(probe["captured_at"], "preflight.database_identity_probe.captured_at")
     if (
         database.get("dbname") != "nhms"
         or database.get("instance") != "node27-primary-pg15"
@@ -990,9 +1850,7 @@ def _validate_recovery(
     database_identity: Mapping[str, Any],
     compression_preflight_captured_at: datetime,
 ) -> dict[str, Any]:
-    recovery_preflight = _require_mapping(
-        preflight_raw, "recovery.preflight document"
-    )
+    recovery_preflight = _require_mapping(preflight_raw, "recovery.preflight document")
     _require_exact_keys(
         recovery_preflight,
         set(PREFLIGHT_KEYS)
@@ -1004,13 +1862,8 @@ def _validate_recovery(
         },
         "recovery.preflight document",
     )
-    recovery_safety = {
-        key: recovery_preflight[key]
-        for key in PREFLIGHT_KEYS
-    }
-    recovery_safety_summary = _validate_preflight(
-        recovery_safety, mutation_head_sha
-    )
+    recovery_safety = {key: recovery_preflight[key] for key in PREFLIGHT_KEYS}
+    recovery_safety_summary = _validate_preflight(recovery_safety, mutation_head_sha)
     recovery_receipt = _require_mapping(receipt_raw, "recovery.receipt document")
     _require_exact_keys(
         recovery_receipt,
@@ -1028,18 +1881,12 @@ def _validate_recovery(
         },
         "recovery.receipt document",
     )
-    preflight_target = _require_mapping(
-        recovery_preflight["target"], "recovery.preflight.target"
-    )
-    receipt_target = _require_mapping(
-        recovery_receipt["target"], "recovery.receipt.target"
-    )
+    preflight_target = _require_mapping(recovery_preflight["target"], "recovery.preflight.target")
+    receipt_target = _require_mapping(recovery_receipt["target"], "recovery.receipt.target")
     target_keys = set(RECOVERY_TARGET)
     _require_exact_keys(preflight_target, target_keys, "recovery.preflight.target")
     _require_exact_keys(receipt_target, target_keys, "recovery.receipt.target")
-    if dict(preflight_target) != dict(RECOVERY_TARGET) or dict(receipt_target) != dict(
-        RECOVERY_TARGET
-    ):
+    if dict(preflight_target) != dict(RECOVERY_TARGET) or dict(receipt_target) != dict(RECOVERY_TARGET):
         raise EvidenceError("recovery target differs from the exact authorized chunk")
     if (
         recovery_preflight["node"] != "node-27"
@@ -1054,18 +1901,11 @@ def _validate_recovery(
     ):
         raise EvidenceError("recovery database identity differs from compression preflight")
     free_bytes = recovery_preflight["free_bytes"]
-    if (
-        not isinstance(free_bytes, int)
-        or isinstance(free_bytes, bool)
-        or free_bytes < MIN_FREE_BYTES
-    ):
+    if not isinstance(free_bytes, int) or isinstance(free_bytes, bool) or free_bytes < MIN_FREE_BYTES:
         raise EvidenceError("recovery free-space headroom is below 300 GiB")
     before_rows = recovery_preflight["before_row_count"]
     after_rows = recovery_receipt["after_row_count"]
-    if (
-        recovery_preflight["before_compressed"] is not True
-        or recovery_receipt["after_compressed"] is not False
-    ):
+    if recovery_preflight["before_compressed"] is not True or recovery_receipt["after_compressed"] is not False:
         raise EvidenceError("recovery does not prove compressed-to-decompressed state")
     if (
         not isinstance(before_rows, int)
@@ -1077,27 +1917,13 @@ def _validate_recovery(
         or before_rows != after_rows
     ):
         raise EvidenceError("recovery row parity failed")
-    if (
-        recovery_receipt["exit_code"] != 0
-        or recovery_receipt["decompress_return_relation"]
-        != RECOVERY_RETURN_RELATION
-    ):
+    if recovery_receipt["exit_code"] != 0 or recovery_receipt["decompress_return_relation"] != RECOVERY_RETURN_RELATION:
         raise EvidenceError("recovery decompression result is not the exact target relation")
-    preflight_at = _parse_utc(
-        recovery_safety_summary["captured_at"], "recovery.preflight.captured_at"
-    )
-    started_at = _parse_utc(
-        recovery_receipt["started_at"], "recovery.receipt.started_at"
-    )
-    finished_at = _parse_utc(
-        recovery_receipt["finished_at"], "recovery.receipt.finished_at"
-    )
-    if not (
-        preflight_at <= started_at <= finished_at <= compression_preflight_captured_at
-    ):
-        raise EvidenceError(
-            "recovery chronology must precede the compression preflight"
-        )
+    preflight_at = _parse_utc(recovery_safety_summary["captured_at"], "recovery.preflight.captured_at")
+    started_at = _parse_utc(recovery_receipt["started_at"], "recovery.receipt.started_at")
+    finished_at = _parse_utc(recovery_receipt["finished_at"], "recovery.receipt.finished_at")
+    if not (preflight_at < started_at < finished_at < compression_preflight_captured_at):
+        raise EvidenceError("recovery chronology must precede the compression preflight")
     return {
         "node": "node-27",
         "mutation_head_sha": mutation_head_sha,
@@ -1105,9 +1931,7 @@ def _validate_recovery(
         "preflight_captured_at": preflight_at.isoformat().replace("+00:00", "Z"),
         "decompress_started_at": started_at.isoformat().replace("+00:00", "Z"),
         "decompress_finished_at": finished_at.isoformat().replace("+00:00", "Z"),
-        "compression_preflight_captured_at": compression_preflight_captured_at.isoformat().replace(
-            "+00:00", "Z"
-        ),
+        "compression_preflight_captured_at": compression_preflight_captured_at.isoformat().replace("+00:00", "Z"),
         "free_bytes_before": free_bytes,
         "before_compressed": True,
         "after_compressed": False,
@@ -1129,7 +1953,14 @@ def _table_snapshot(
     snapshot = _require_mapping(raw, label)
     _require_exact_keys(
         snapshot,
-        {"captured_at", "snapshot_id", "phase", "mutation_head_sha", "tables"},
+        {
+            "captured_at",
+            "snapshot_id",
+            "phase",
+            "mutation_head_sha",
+            "selected_origin_uncompressed_index",
+            "tables",
+        },
         label,
     )
     captured_at = _parse_utc(snapshot["captured_at"], f"{label}.captured_at")
@@ -1140,6 +1971,9 @@ def _table_snapshot(
         or not snapshot["snapshot_id"]
     ):
         raise EvidenceError(f"{label} snapshot identity differs")
+    expected_uncompressed = -1 if expected_phase == "pre-enforce" else None
+    if snapshot["selected_origin_uncompressed_index"] != expected_uncompressed:
+        raise EvidenceError(f"{label} selected origin uncompressed-state differs")
     tables = _require_mapping(snapshot["tables"], f"{label}.tables")
     if set(tables) != set(HYPERTABLE_KEYS):
         raise EvidenceError(f"{label} must contain exactly both hypertables")
@@ -1166,17 +2000,13 @@ def _table_snapshot(
         ):
             if not isinstance(row[field], int) or isinstance(row[field], bool) or row[field] < 0:
                 raise EvidenceError(f"{label}.{key}.{field} must be non-negative integer")
-        relations = _require_list(
-            row["compressed_relations"], f"{label}.{key}.compressed_relations"
-        )
+        relations = _require_list(row["compressed_relations"], f"{label}.{key}.compressed_relations")
         if len(relations) != row["compressed_chunks"]:
             raise EvidenceError(f"{label}.{key} compressed count/relation list differs")
         table_origins: set[tuple[str, str]] = set()
         table_siblings: set[tuple[str, str]] = set()
         for index, relation_value in enumerate(relations):
-            relation = _require_mapping(
-                relation_value, f"{label}.{key}.compressed_relations[{index}]"
-            )
+            relation = _require_mapping(relation_value, f"{label}.{key}.compressed_relations[{index}]")
             _require_exact_keys(
                 relation,
                 {"origin_chunk_schema", "origin_chunk_name", "schema", "name", "bytes"},
@@ -1209,6 +2039,7 @@ def _table_snapshot(
         "captured_at_dt": captured_at,
         "snapshot_id": snapshot["snapshot_id"],
         "tables": tables,
+        "selected_origin_uncompressed_index": snapshot["selected_origin_uncompressed_index"],
     }
 
 
@@ -1281,9 +2112,7 @@ def _validate_selection_snapshot(raw: Any, label: str) -> dict[str, Any]:
         or selected_row["before_bytes"] > MAX_SELECTED_BYTES
     ):
         raise EvidenceError(f"{label} selected row violates hydro/bound/8-GiB authorization")
-    cutoff_margin = int(
-        (cutoff - _parse_utc(selected_row["range_end"], f"{label} selected range_end")).total_seconds()
-    )
+    cutoff_margin = int((cutoff - _parse_utc(selected_row["range_end"], f"{label} selected range_end")).total_seconds())
     if cutoff_margin < 600:
         raise EvidenceError(f"{label} selected chunk is within ten minutes of cutoff")
     identities = [_selected_identity(value) for value in selected]
@@ -1301,9 +2130,7 @@ def _validate_selection_snapshot(raw: Any, label: str) -> dict[str, Any]:
     }
 
 
-def _plan_binds_selected_decompress(
-    plan: Any, *, selected_relation_names: set[str]
-) -> bool:
+def _plan_binds_selected_decompress(plan: Any, *, selected_relation_names: set[str]) -> bool:
     """Require exact provider/relation fields on the qualifying Custom Scan."""
 
     stack = [plan]
@@ -1316,18 +2143,18 @@ def _plan_binds_selected_decompress(
         if not isinstance(value, Mapping):
             continue
         node_type = str(value.get("Node Type", "")).lower()
-        provider = re.sub(
-            r"[^a-z0-9]+", "", str(value.get("Custom Plan Provider", "")).lower()
-        )
+        provider = re.sub(r"[^a-z0-9]+", "", str(value.get("Custom Plan Provider", "")).lower())
         relation = str(value.get("Relation Name", "")).lower()
         schema = str(value.get("Schema", "")).lower()
+        alias = str(value.get("Alias", "")).lower()
         if (
             node_type == "custom scan"
             and provider == "decompresschunk"
             and relation in lowered_names
-            and schema in {"", "_timescaledb_internal"}
+            and schema == "_timescaledb_internal"
+            and alias == "rt_1"
         ):
-                return True
+            return True
         stack.extend(value.values())
     return False
 
@@ -1335,10 +2162,7 @@ def _plan_binds_selected_decompress(
 def _stats(samples_value: Any, label: str) -> tuple[list[float], float, float]:
     samples = _require_list(samples_value, label)
     if len(samples) != 7 or any(
-        not isinstance(value, (int, float))
-        or isinstance(value, bool)
-        or not math.isfinite(float(value))
-        or value < 0
+        not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)) or value < 0
         for value in samples
     ):
         raise EvidenceError(f"{label} must contain seven finite non-negative samples")
@@ -1380,6 +2204,28 @@ def _validate_measurement(value: Any, label: str) -> dict[str, Any]:
         value_ = measurement[field]
         if not isinstance(value_, int) or isinstance(value_, bool) or value_ < 0:
             raise EvidenceError(f"{label}.{field} must be a non-negative integer")
+    raw_plan = measurement["plan"]
+    root = raw_plan[0] if isinstance(raw_plan, list) else raw_plan
+    root = _require_mapping(root, f"{label}.plan root")
+    derived_planning = root.get("Planning Time")
+    derived_execution = root.get("Execution Time")
+    plan_tree = root.get("Plan", root)
+    if (
+        not isinstance(derived_planning, (int, float))
+        or not isinstance(derived_execution, (int, float))
+        or float(measurement["planning_ms"]) != float(derived_planning)
+        or float(measurement["execution_ms"]) != float(derived_execution)
+    ):
+        raise EvidenceError(f"{label} authored timing differs from the raw plan")
+    from scripts.node27_timeseries_compression_benchmark import _walk_metric
+
+    try:
+        derived_hits = _walk_metric(plan_tree, "Shared Hit Blocks")
+        derived_reads = _walk_metric(plan_tree, "Shared Read Blocks")
+    except Exception as error:
+        raise EvidenceError(f"{label} raw buffer metrics are invalid") from error
+    if measurement["shared_hit_blocks"] != derived_hits or measurement["shared_read_blocks"] != derived_reads:
+        raise EvidenceError(f"{label} authored buffers differ from the raw plan")
     return dict(measurement)
 
 
@@ -1414,6 +2260,21 @@ def _validate_phase(
         or result_rows != phase["rows"]
     ):
         raise EvidenceError(f"benchmark {query_name} {phase_name} result hash/count mismatch")
+    raw_measurements = _require_list(phase["measurements"], "benchmark measurements")
+    for index, raw_measurement_value in enumerate(raw_measurements):
+        raw_measurement = _require_mapping(
+            raw_measurement_value,
+            f"benchmark {query_name} {phase_name}.measurements[{index}]",
+        )
+        binds = _plan_binds_selected_decompress(
+            raw_measurement.get("plan"), selected_relation_names=selected_relation_names
+        )
+        if phase_name == "before" and binds:
+            raise EvidenceError(
+                f"benchmark {query_name} before measurement {index} already uses selected DecompressChunk"
+            )
+        if phase_name == "after" and not binds:
+            raise EvidenceError(f"benchmark {query_name} after measurement {index} lacks selected DecompressChunk")
     cold = _validate_measurement(phase["cold"], f"benchmark {query_name} {phase_name}.cold")
     warmups = [
         _validate_measurement(item, f"benchmark {query_name} {phase_name}.warmups[{index}]")
@@ -1423,9 +2284,7 @@ def _validate_phase(
         raise EvidenceError(f"benchmark {query_name} {phase_name} needs 2-5 warmups")
     measurements = [
         _validate_measurement(item, f"benchmark {query_name} {phase_name}.measurements[{index}]")
-        for index, item in enumerate(
-            _require_list(phase["measurements"], "benchmark measurements")
-        )
+        for index, item in enumerate(raw_measurements)
     ]
     if len(measurements) != 7:
         raise EvidenceError(f"benchmark {query_name} {phase_name} needs seven measurements")
@@ -1454,21 +2313,12 @@ def _validate_phase(
             {"captured_at", "stage", "sessions", "material_load_stable"},
             f"benchmark activity[{index}]",
         )
-        activity_times.append(
-            _parse_utc(
-                activity["captured_at"], f"benchmark activity[{index}].captured_at"
-            )
-        )
-        if (
-            activity["stage"] != expected_stages[index]
-            or activity["material_load_stable"] is not True
-        ):
+        activity_times.append(_parse_utc(activity["captured_at"], f"benchmark activity[{index}].captured_at"))
+        if activity["stage"] != expected_stages[index] or activity["material_load_stable"] is not True:
             raise EvidenceError(f"benchmark {query_name} {phase_name} has load drift")
         sessions = _require_list(activity["sessions"], f"benchmark activity[{index}].sessions")
         for session_index, session_value in enumerate(sessions):
-            session = _require_mapping(
-                session_value, f"benchmark activity[{index}].sessions[{session_index}]"
-            )
+            session = _require_mapping(session_value, f"benchmark activity[{index}].sessions[{session_index}]")
             _require_exact_keys(
                 session,
                 {
@@ -1483,14 +2333,9 @@ def _validate_phase(
                 f"benchmark activity[{index}].sessions[{session_index}]",
             )
         normalized_activities.append(dict(activity))
-    if any(
-        item["sessions"] != normalized_activities[0]["sessions"]
-        for item in normalized_activities[1:]
-    ):
+    if any(item["sessions"] != normalized_activities[0]["sessions"] for item in normalized_activities[1:]):
         raise EvidenceError(f"benchmark {query_name} {phase_name} has session-identity drift")
-    bounds = _require_mapping(
-        phase["execution_bounds"], f"benchmark {query_name} {phase_name}.execution_bounds"
-    )
+    bounds = _require_mapping(phase["execution_bounds"], f"benchmark {query_name} {phase_name}.execution_bounds")
     _require_exact_keys(
         bounds,
         {
@@ -1508,34 +2353,16 @@ def _validate_phase(
         bounds["statement_timeout_ms"] != 60_000
         or bounds["lock_timeout_ms"] != 5_000
         or bounds["phase_timeout_seconds"] != EXPECTED_TIMEOUT_SECONDS
-        or not started_at <= finished_at
+        or not started_at < finished_at
         or (finished_at - started_at).total_seconds() > EXPECTED_TIMEOUT_SECONDS
     ):
         raise EvidenceError(f"benchmark {query_name} {phase_name} execution bounds differ")
     if activity_times != sorted(activity_times) or any(
         captured < started_at or captured > finished_at for captured in activity_times
     ):
-        raise EvidenceError(
-            f"benchmark {query_name} {phase_name} activity chronology differs"
-        )
+        raise EvidenceError(f"benchmark {query_name} {phase_name} activity chronology differs")
     if query_name == "curve" and phase["rows"] < 1:
         raise EvidenceError("benchmark curve must return at least one row")
-    if phase_name == "before":
-        for index, measurement in enumerate(measurements):
-            if _plan_binds_selected_decompress(
-                measurement["plan"], selected_relation_names=selected_relation_names
-            ):
-                raise EvidenceError(
-                    f"benchmark {query_name} before measurement {index} already uses selected DecompressChunk"
-                )
-    else:
-        for index, measurement in enumerate(measurements):
-            if not _plan_binds_selected_decompress(
-                measurement["plan"], selected_relation_names=selected_relation_names
-            ):
-                raise EvidenceError(
-                    f"benchmark {query_name} after measurement {index} lacks selected DecompressChunk"
-                )
     samples = [float(measurement["execution_ms"]) for measurement in measurements]
     _, median, p95 = _stats(samples, f"benchmark {query_name} {phase_name} samples")
     return {
@@ -1563,6 +2390,9 @@ def _validate_benchmarks(
     mutation_head_sha: str,
 ) -> list[dict[str, Any]]:
     benchmark = _require_mapping(raw, "benchmarks.evidence document")
+    _require_exact_keys(benchmark, {"execution_bounds", "queries"}, "benchmarks.evidence document")
+    capture_bounds = _require_mapping(benchmark["execution_bounds"], "benchmarks.execution_bounds")
+    _require_exact_keys(capture_bounds, {"before", "after"}, "benchmarks.execution_bounds")
     queries = _require_list(benchmark.get("queries"), "benchmarks.queries")
     if [query.get("name") for query in queries if isinstance(query, Mapping)] != ["curve", "mvt"]:
         raise EvidenceError("benchmarks must contain curve then mvt")
@@ -1678,12 +2508,8 @@ def _validate_benchmarks(
                 {"parameter_names", "bound_parameters"},
                 "benchmark curve binding",
             )
-            parameter_names = _require_list(
-                binding["parameter_names"], "benchmark curve parameter_names"
-            )
-            bound_parameters = _require_list(
-                binding["bound_parameters"], "benchmark curve bound_parameters"
-            )
+            parameter_names = _require_list(binding["parameter_names"], "benchmark curve parameter_names")
+            bound_parameters = _require_list(binding["bound_parameters"], "benchmark curve bound_parameters")
             placeholder_count = len(re.findall(r"(?<!%)%s", str(query["query_text"])))
             if (
                 len(parameter_names) != placeholder_count
@@ -1831,6 +2657,24 @@ def _validate_benchmarks(
                 "decompress_chunk_plan_bound": True,
             }
         )
+    for phase_name in ("before", "after"):
+        bounds = _require_mapping(capture_bounds[phase_name], f"benchmarks.execution_bounds.{phase_name}")
+        _require_exact_keys(
+            bounds,
+            {"started_at", "finished_at", "wall_seconds"},
+            f"benchmarks.execution_bounds.{phase_name}",
+        )
+        capture_started = _parse_utc(bounds["started_at"], f"benchmark {phase_name} capture-wide start")
+        capture_finished = _parse_utc(bounds["finished_at"], f"benchmark {phase_name} capture-wide finish")
+        phase_intervals = [_phase_interval(query, phase_name) for query in output]
+        if (
+            bounds["wall_seconds"] != EXPECTED_TIMEOUT_SECONDS
+            or not capture_started < phase_intervals[0][0]
+            or not phase_intervals[-1][1] < capture_finished
+            or not capture_started < capture_finished
+            or (capture_finished - capture_started).total_seconds() > EXPECTED_TIMEOUT_SECONDS
+        ):
+            raise EvidenceError(f"benchmark {phase_name} capture-wide deadline differs")
     return output
 
 
@@ -1850,6 +2694,7 @@ def _validate_cleanup(
             "window_finished_at",
             "repo_units",
             "installed_units",
+            "installed_unit_paths",
             "resolved_exec_start",
             "final_units",
             "compression_service_activations",
@@ -1859,7 +2704,7 @@ def _validate_cleanup(
     started = _parse_utc(cleanup["window_started_at"], "cleanup.window_started_at")
     finished = _parse_utc(cleanup["window_finished_at"], "cleanup.window_finished_at")
     captured = _parse_utc(cleanup["captured_at"], "cleanup.captured_at")
-    if not window_started_at <= started <= finished <= captured:
+    if not window_started_at < started < finished < captured:
         raise EvidenceError("cleanup activation-window chronology differs")
     expected_repo = {
         "service": "infra/systemd/nhms-node27-timeseries-compression.service",
@@ -1867,8 +2712,14 @@ def _validate_cleanup(
     }
     repo_units = _require_mapping(cleanup["repo_units"], "cleanup.repo_units")
     installed_units = _require_mapping(cleanup["installed_units"], "cleanup.installed_units")
+    installed_unit_paths = _require_mapping(cleanup["installed_unit_paths"], "cleanup.installed_unit_paths")
     if set(repo_units) != set(expected_repo) or set(installed_units) != set(expected_repo):
         raise EvidenceError("cleanup unit evidence set differs")
+    if installed_unit_paths != {
+        "service": "/home/nwm/.config/systemd/user/nhms-node27-timeseries-compression.service",
+        "timer": "/home/nwm/.config/systemd/user/nhms-node27-timeseries-compression.timer",
+    }:
+        raise EvidenceError("cleanup installed unit paths are not canonical user units")
     repo_refs: dict[str, Any] = {}
     installed_refs: dict[str, Any] = {}
     for key, relative_path in expected_repo.items():
@@ -1878,9 +2729,7 @@ def _validate_cleanup(
             mutation_head_sha=mutation_head_sha,
             relative_path=relative_path,
         )
-        installed_refs[key] = _artifact_ref(
-            installed_units[key], f"cleanup.installed_units.{key}", max_bytes=1024**2
-        )
+        installed_refs[key] = _artifact_ref(installed_units[key], f"cleanup.installed_units.{key}", max_bytes=1024**2)
         if (
             repo_refs[key]["sha256"] != installed_refs[key]["sha256"]
             or repo_refs[key]["bytes"] != installed_refs[key]["bytes"]
@@ -1888,7 +2737,8 @@ def _validate_cleanup(
             raise EvidenceError(f"cleanup installed {key} differs from reviewed repo bytes")
     exec_start = _require_list(cleanup["resolved_exec_start"], "cleanup.resolved_exec_start")
     expected_exec_start = [
-        "/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh",
+        "/home/nwm/NWM/.venv/bin/python",
+        "/home/nwm/NWM/scripts/node27_timeseries_compression_supervisor.py",
         "--enforce",
     ]
     if exec_start != expected_exec_start:
@@ -1904,17 +2754,13 @@ def _validate_cleanup(
             {"enabled", "active", "sub", "result", "main_pid", "journal"},
             f"cleanup.final_units.{unit_name}",
         )
-        journal, _ = _text_artifact(
-            state["journal"], f"cleanup.final_units.{unit_name}.journal", max_bytes=4 * 1024**2
-        )
+        journal, _ = _text_artifact(state["journal"], f"cleanup.final_units.{unit_name}.journal", max_bytes=4 * 1024**2)
         normalized_units[unit_name] = {**dict(state), "journal": journal}
     for kind in ("timer", "service"):
         autopipe = normalized_units[f"nhms-node27-autopipe.{kind}"]
         prior = _require_mapping(prior_autopipe_state[kind], f"prior autopipe {kind}")
         if any(autopipe[key] != prior[key] for key in prior):
-            raise EvidenceError(
-                "cleanup did not restore the exact prior autopipe timer/service state"
-            )
+            raise EvidenceError("cleanup did not restore the exact prior autopipe timer/service state")
     timer = normalized_units["nhms-node27-timeseries-compression.timer"]
     service = normalized_units["nhms-node27-timeseries-compression.service"]
     if (
@@ -1937,6 +2783,7 @@ def _validate_cleanup(
         "window_finished_at": finished.isoformat().replace("+00:00", "Z"),
         "repo_units": repo_refs,
         "installed_units": installed_refs,
+        "installed_unit_paths": dict(installed_unit_paths),
         "resolved_exec_start": exec_start,
         "final_units": normalized_units,
         "compression_service_activation_count": 0,
@@ -1954,10 +2801,8 @@ def _phase_interval(query: Mapping[str, Any], phase: str) -> tuple[datetime, dat
 
 def _assert_global_chronology(events: list[tuple[str, datetime]]) -> None:
     for (left_label, left), (right_label, right) in zip(events, events[1:]):
-        if left > right:
-            raise EvidenceError(
-                f"global chronology reversed: {left_label} occurs after {right_label}"
-            )
+        if left >= right:
+            raise EvidenceError(f"global chronology is not strict: {left_label} is not before {right_label}")
 
 
 def _artifact_refs_in(value: Any) -> list[dict[str, Any]]:
@@ -1974,9 +2819,7 @@ def _artifact_refs_in(value: Any) -> list[dict[str, Any]]:
                 stack.extend(current.values())
         elif isinstance(current, list):
             stack.extend(current)
-    unique = {
-        (str(ref["path"]), str(ref["sha256"]), int(ref["bytes"])): ref for ref in refs
-    }
+    unique = {(str(ref["path"]), str(ref["sha256"]), int(ref["bytes"])): ref for ref in refs}
     return [unique[key] for key in sorted(unique)]
 
 
@@ -1994,28 +2837,163 @@ def _reverify_retained_identities() -> None:
             raise EvidenceError("retained artifact identity changed during publication")
 
 
-def _publish_terminal_failure(path: Path, *, stage: str) -> None:
-    payload = {
-        "schema_version": QUALIFYING_SCHEMA_VERSION,
-        "qualifies_task_4_5": False,
-        "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        "outcome": "failed",
-        "provenance_state": "unavailable",
-        "failure": {"stage": stage, "mutation_state": "indeterminate"},
-    }
-    try:
-        atomic_write_bytes_no_follow(
-            path,
-            _canonical_json_bytes(payload),
-            mode=0o600,
-            require_durable_replace=True,
-        )
-    except Exception:
-        return
+_output_identity = terminal_state.terminal_identity
+_terminal_lock_path = terminal_state._terminal_lock_path
+_terminal_intent_gate_path = terminal_state._terminal_intent_gate_path
+_terminal_intent_root_path = terminal_state._terminal_intent_root_path
+_terminal_intent_path = terminal_state._terminal_intent_path
+_terminal_intent_identity_path = terminal_state._terminal_intent_identity_path
+_identity_document = terminal_state._identity_document
+_validate_identity_document = terminal_state._validate_identity_document
+_validate_intent_context = terminal_state._validate_intent_context
+_intent_context_from_terminal = terminal_state._intent_context_from_terminal
+_unavailable_intent_context = terminal_state.unavailable_intent_context
+_locked_intent_gate = terminal_state._locked_intent_gate
+_read_gate_state = terminal_state._read_gate_state
+_create_pending_intent_locked = terminal_state._create_pending_intent_locked
+_consume_pending_intent_locked = terminal_state._consume_pending_intent_locked
+_open_terminal_lock = terminal_state._open_terminal_lock
 
+
+def _assert_terminal_state_paths_disjoint(
+    output_path: Path,
+    *,
+    bundle_path: Path,
+    closure: ArtifactClosure,
+) -> None:
+    """Keep terminal, lock, and intent outside the complete immutable input graph."""
+
+    derived = {
+        "terminal failure intent directory": _terminal_intent_root_path(output_path),
+        "terminal failure intent": _terminal_intent_path(output_path),
+        "terminal failure identity": _terminal_intent_identity_path(output_path),
+        "terminal intent gate": _terminal_intent_gate_path(output_path),
+        "terminal publication lock": _terminal_lock_path(output_path),
+    }
+    fixed_inputs = [bundle_path, CANONICAL_RECEIPT_SCHEMA, CANONICAL_EVIDENCE_SCHEMA]
+    assert_paths_disjoint(output_path, fixed_inputs, label="terminal evidence")
+    assert_output_disjoint_from_closure(output_path, closure, label="terminal evidence")
+    for label, path in derived.items():
+        assert_paths_disjoint(path, [output_path, *fixed_inputs], label=label)
+        assert_output_disjoint_from_closure(path, closure, label=label)
+    derived_items = list(derived.items())
+    for index, (left_label, left_path) in enumerate(derived_items):
+        for right_label, right_path in derived_items[index + 1 :]:
+            assert_paths_disjoint(left_path, [right_path], label=f"{left_label}/{right_label}")
+
+
+def _intent_context_from_bundle(bundle: Mapping[str, Any], *, verifier_head_sha: str) -> dict[str, Any]:
+    mutation_head_sha = str(bundle.get("mutation_head_sha", ""))
+    if str(bundle.get("verifier_head_sha", "")) != verifier_head_sha:
+        raise EvidenceError("bundle verifier identity differs from the executing verifier")
+    execution = _require_mapping(bundle.get("execution"), "bundle execution for failure identity")
+    run_plan_ref = _require_mapping(execution.get("run_plan"), "bundle run plan for failure identity")
+    _require_exact_keys(run_plan_ref, {"path", "sha256", "bytes"}, "bundle run plan reference")
+    run_plan_path = Path(str(run_plan_ref["path"]))
+    if not run_plan_path.is_absolute():
+        raise EvidenceError("bundle run plan path for failure identity must be absolute")
+    try:
+        raw, _, run_plan_raw = read_bounded_json_with_identity_no_follow(
+            run_plan_path,
+            max_bytes=MAX_JSON_ARTIFACT_BYTES,
+            label="bundle run plan for failure identity",
+            max_depth=MAX_PLAN_DEPTH,
+            max_nodes=MAX_JSON_NODES,
+            max_array_items=MAX_JSON_ARRAY_ITEMS,
+        )
+    except BoundedEvidenceError as error:
+        raise EvidenceError(str(error)) from error
+    if len(raw) != run_plan_ref["bytes"] or _sha256(raw) != run_plan_ref["sha256"]:
+        raise EvidenceError("bundle run plan failure identity reference differs")
+    run_plan = _require_mapping(run_plan_raw, "bundle run plan failure identity")
+    if str(run_plan.get("mutation_head_sha", "")) != mutation_head_sha:
+        raise EvidenceError("bundle/run-plan mutation identity differs")
+    ledger_ref = _require_mapping(execution.get("ledger"), "bundle ledger for failure identity")
+    _require_exact_keys(ledger_ref, {"path", "sha256", "bytes"}, "bundle ledger reference")
+    ledger_path = Path(str(ledger_ref["path"]))
+    if not ledger_path.is_absolute():
+        raise EvidenceError("bundle ledger path for failure identity must be absolute")
+    try:
+        ledger_raw, _ = read_bounded_bytes_with_identity_no_follow(
+            ledger_path,
+            max_bytes=MAX_BINARY_ARTIFACT_BYTES,
+            label="bundle ledger for failure identity",
+        )
+    except BoundedEvidenceError as error:
+        raise EvidenceError(str(error)) from error
+    if len(ledger_raw) != ledger_ref["bytes"] or _sha256(ledger_raw) != ledger_ref["sha256"]:
+        raise EvidenceError("bundle ledger failure identity reference differs")
+    run_ids: set[str] = set()
+    for raw_line in ledger_raw.splitlines():
+        try:
+            event = _require_mapping(json.loads(raw_line), "bundle ledger event for failure identity")
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise EvidenceError("bundle ledger failure identity is not JSONL") from error
+        validate_json_complexity(
+            event,
+            label="bundle ledger event for failure identity",
+            max_depth=MAX_PLAN_DEPTH,
+            max_nodes=MAX_JSON_NODES,
+            max_array_items=MAX_JSON_ARRAY_ITEMS,
+        )
+        run_ids.add(str(event.get("run_id", "")))
+    if len(run_ids) != 1:
+        raise EvidenceError("bundle ledger run identity differs")
+    return terminal_state.bound_intent_context(
+        run_id=next(iter(run_ids)),
+        verifier_head_sha=verifier_head_sha,
+        mutation_head_sha=mutation_head_sha,
+    )
+
+
+def read_authoritative_terminal(
+    path: Path, *, max_bytes: int = MAX_JSON_ARTIFACT_BYTES
+) -> Mapping[str, Any]:
+    return terminal_state.read_authoritative_terminal(
+        path,
+        max_bytes=max_bytes,
+        deadline_monotonic=time.monotonic() + PUBLISH_LOCK_TIMEOUT_SECONDS,
+    )
+
+
+def _publish_terminal_cas(
+    path: Path,
+    payload: bytes,
+    expected: FileIdentity | None,
+    *,
+    intent_context: Mapping[str, Any] | None = None,
+) -> FileIdentity:
+    return terminal_state.publish_terminal_cas(
+        path,
+        payload,
+        expected,
+        intent_context=intent_context,
+        deadline_monotonic=time.monotonic() + PUBLISH_LOCK_TIMEOUT_SECONDS,
+    )
+
+
+def _publish_terminal_failure(
+    path: Path,
+    *,
+    stage: str,
+    expected: FileIdentity | None,
+    intent_context: Mapping[str, Any],
+) -> bool:
+    context = _validate_intent_context(intent_context)
+    return terminal_state.publish_unavailable_failure(
+        path,
+        stage=stage,
+        expected=expected,
+        verifier_head_sha=context["verifier_head_sha"],
+        deadline_monotonic=time.monotonic() + PUBLISH_LOCK_TIMEOUT_SECONDS,
+    )
 
 def verify_bundle(
-    bundle: Mapping[str, Any], *, receipt_schema: Mapping[str, Any], verifier_head_sha: str
+    bundle: Mapping[str, Any],
+    *,
+    receipt_schema: Mapping[str, Any],
+    verifier_head_sha: str,
+    artifact_manifest: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Recompute all task-4.5 derivable gates and return the terminal envelope."""
     _RETAINED_IDENTITIES.clear()
@@ -2076,20 +3054,54 @@ def verify_bundle(
         "decompress_invocations": 1,
         "migration_invocations": 2,
         "dry_run_invocations": 1,
-        "direct_db_bypass_invocations": 0,
+        "sole_db_user_during_window": True,
+        "database_audit_proof": False,
+        "acceptance_claim": PASS_CLAIM,
         "repo_path": EXPECTED_REPO_PATH,
         "remote_identity": EXPECTED_REMOTE_IDENTITY,
         "reviewed_mutation_sha": bundle["mutation_head_sha"],
         "reviewed_remote_ref": "refs/remotes/origin/feat/issue-1069-live-compression",
     }
     if authorization != expected_authorization:
-        raise EvidenceError(
-            "authorization differs from the issue #1069 bound-1 envelope or mutation-head"
-        )
+        raise EvidenceError("authorization differs from the issue #1069 bound-1 envelope or mutation-head")
     _validate_repository_provenance(
         mutation_head_sha=str(bundle["mutation_head_sha"]),
         reviewed_remote_ref=str(authorization["reviewed_remote_ref"]),
     )
+    database_identity_for_execution = _require_mapping(bundle["database_identity"], "database_identity")
+    execution_summary = _validate_supervisor_execution(
+        _require_mapping(bundle["execution"], "execution"),
+        mutation_head_sha=str(bundle["mutation_head_sha"]),
+        database=str(database_identity_for_execution.get("dbname", "")),
+    )
+    observed_requirements: dict[str, tuple[Mapping[str, Any], Mapping[str, Any]]] = {}
+
+    def ledger_invocation(kind: str, ordinal: int = 0) -> dict[str, Any]:
+        event = execution_summary["events_by_kind"][kind][ordinal]
+        return {
+            "started_at_dt": _parse_utc(event["started_at"], f"{kind} ledger start"),
+            "finished_at_dt": _parse_utc(event["finished_at"], f"{kind} ledger finish"),
+            "artifact_associations": _require_mapping(event["artifact_associations"], f"{kind} artifacts"),
+            "kind": kind,
+            "ordinal": ordinal,
+        }
+
+    def capture_invocation(kind: str) -> dict[str, Any]:
+        event = execution_summary["capture_events_by_kind"][kind]
+        return {
+            "started_at_dt": _parse_utc(event["started_at"], f"capture {kind} ledger start"),
+            "finished_at_dt": _parse_utc(event["finished_at"], f"capture {kind} ledger finish"),
+            "artifact_associations": {kind: event["artifact_association"]},
+            "kind": f"capture:{kind}",
+            "ordinal": 0,
+        }
+
+    def require_observed_artifact(invocation: Mapping[str, Any], name: str, ref: Mapping[str, Any]) -> None:
+        if name in observed_requirements:
+            raise EvidenceError(f"{name} has duplicate semantic associations")
+        if EXPECTED_OUTPUT_OWNERS.get(name) != (invocation["kind"], invocation["ordinal"]):
+            raise EvidenceError(f"{name} is associated with the wrong producer")
+        observed_requirements[name] = (invocation, ref)
 
     preflight_bundle = _require_mapping(bundle["preflight"], "preflight")
     _require_exact_keys(
@@ -2098,15 +3110,13 @@ def verify_bundle(
         "preflight",
     )
     preflight_ref, preflight = _json_artifact(preflight_bundle.get("evidence"), "preflight.evidence")
+    pg_dump_invocation = ledger_invocation("pg_dump")
+    require_observed_artifact(capture_invocation("preflight_evidence"), "preflight_evidence", preflight_ref)
     preflight_summary = _validate_preflight(preflight, str(bundle["mutation_head_sha"]))
     recovery_bundle = _require_mapping(bundle["recovery"], "recovery")
     _require_exact_keys(recovery_bundle, {"preflight", "receipt", "invocation"}, "recovery")
-    recovery_preflight_ref, recovery_preflight_raw = _json_artifact(
-        recovery_bundle["preflight"], "recovery.preflight"
-    )
-    recovery_receipt_ref, recovery_receipt_raw = _json_artifact(
-        recovery_bundle["receipt"], "recovery.receipt"
-    )
+    recovery_preflight_ref, recovery_preflight_raw = _json_artifact(recovery_bundle["preflight"], "recovery.preflight")
+    recovery_receipt_ref, recovery_receipt_raw = _json_artifact(recovery_bundle["receipt"], "recovery.receipt")
     if (
         recovery_preflight_ref["path"] == recovery_receipt_ref["path"]
         or recovery_preflight_ref["sha256"] == recovery_receipt_ref["sha256"]
@@ -2116,27 +3126,43 @@ def verify_bundle(
         recovery_preflight_raw,
         recovery_receipt_raw,
         mutation_head_sha=str(bundle["mutation_head_sha"]),
-        database_identity=_require_mapping(
-            preflight["database_identity"], "preflight.database_identity"
-        ),
-        compression_preflight_captured_at=_parse_utc(
-            preflight_summary["captured_at"], "preflight captured_at"
-        ),
+        database_identity=_require_mapping(preflight["database_identity"], "preflight.database_identity"),
+        compression_preflight_captured_at=_parse_utc(preflight_summary["captured_at"], "preflight captured_at"),
     )
-    dump_ref, dump_identity = _streaming_artifact_ref(
+    dump_ref, _ = _streaming_artifact_ref(
         preflight_bundle.get("schema_dump"),
         "preflight.schema_dump",
         max_bytes=MAX_BINARY_ARTIFACT_BYTES,
     )
+    _require_custom_dump_magic(Path(dump_ref["path"]))
+    require_observed_artifact(pg_dump_invocation, "schema_dump", dump_ref)
     dump_list_ref, dump_list_raw = _json_artifact(
         preflight_bundle.get("schema_dump_list"), "preflight.schema_dump_list"
     )
     dump_listing = _validate_dump_listing(
         dump_list_raw,
         dump_ref=dump_ref,
-        observed=_run_pg_restore_list(dump_identity),
         mutation_head_sha=str(bundle["mutation_head_sha"]),
     )
+    require_observed_artifact(capture_invocation("schema_dump_list"), "schema_dump_list", dump_list_ref)
+    version_event = execution_summary["events_by_kind"]["pg_restore_version"][0]
+    list_event = execution_summary["events_by_kind"]["pg_restore_list"][0]
+    expected_tool_association = {
+        "dump_sha256": dump_ref["sha256"],
+        "container_image_id": dump_listing["container_image_id"],
+        "binary_realpath": dump_listing["binary_realpath"],
+        "binary_sha256": dump_listing["binary_sha256"],
+    }
+    if (
+        version_event["stdout"]["sha256"] != dump_listing["version_stdout_sha256"]
+        or version_event["stdout"]["bytes"] != dump_listing["version_stdout_bytes"]
+        or list_event["stdout"]["sha256"] != dump_listing["stdout_sha256"]
+        or list_event["stdout"]["bytes"] != dump_listing["stdout_bytes"]
+        or version_event["artifact_associations"] != expected_tool_association
+        or {key: list_event["artifact_associations"].get(key) for key in expected_tool_association}
+        != expected_tool_association
+    ):
+        raise EvidenceError("container pg_restore ledger/listing association differs")
     catalog_before_ref, catalog_before = _json_artifact(
         preflight_bundle.get("catalog_before"), "preflight.catalog_before"
     )
@@ -2147,24 +3173,15 @@ def verify_bundle(
         phase="pre-migration",
         validator=_validate_pre_migration_catalog,
     )
-    recovery_invocation_ref, recovery_invocation_raw = _json_artifact(
-        recovery_bundle["invocation"], "recovery.invocation"
-    )
-    recovery_invocation = _validate_invocation_record(
-        recovery_invocation_raw,
-        label="recovery.invocation",
-        kind="recovery_decompress",
-        mutation_head_sha=str(bundle["mutation_head_sha"]),
-        expected_binding={
-            "receipt_sha256": recovery_receipt_ref["sha256"],
-            "target": dict(RECOVERY_TARGET),
-        },
-    )
-    if (
-        recovery_invocation["started_at_dt"]
-        != _parse_utc(recovery_receipt_raw["started_at"], "recovery receipt started")
-        or recovery_invocation["finished_at_dt"]
-        != _parse_utc(recovery_receipt_raw["finished_at"], "recovery receipt finished")
+    require_observed_artifact(capture_invocation("catalog_before"), "catalog_before", catalog_before_ref)
+    recovery_invocation_ref = execution_summary["ledger"]
+    recovery_invocation = ledger_invocation("decompress")
+    require_observed_artifact(capture_invocation("recovery_preflight"), "recovery_preflight", recovery_preflight_ref)
+    require_observed_artifact(recovery_invocation, "recovery_receipt", recovery_receipt_ref)
+    if recovery_invocation["started_at_dt"] != _parse_utc(
+        recovery_receipt_raw["started_at"], "recovery receipt started"
+    ) or recovery_invocation["finished_at_dt"] != _parse_utc(
+        recovery_receipt_raw["finished_at"], "recovery receipt finished"
     ):
         raise EvidenceError("recovery invocation does not bind receipt chronology")
 
@@ -2186,42 +3203,15 @@ def verify_bundle(
         mutation_head_sha=str(bundle["mutation_head_sha"]),
         relative_path="db/migrations/000047_hypertable_compression_settings.sql",
     )
-    first_ref, first_catalog = _json_artifact(
-        migration.get("catalog_after_first"), "migration.catalog_after_first"
-    )
-    second_ref, second_catalog = _json_artifact(
-        migration.get("catalog_after_second"), "migration.catalog_after_second"
-    )
-    first_invocation_ref, first_invocation_raw = _json_artifact(
-        migration["first_invocation"], "migration.first_invocation"
-    )
-    second_invocation_ref, second_invocation_raw = _json_artifact(
-        migration["second_invocation"], "migration.second_invocation"
-    )
-    first_invocation = _validate_invocation_record(
-        first_invocation_raw,
-        label="migration.first_invocation",
-        kind="migration_apply",
-        mutation_head_sha=str(bundle["mutation_head_sha"]),
-        expected_binding={
-            "migration_sha256": migration_ref["sha256"],
-            "catalog_sha256": first_ref["sha256"],
-        },
-    )
-    second_invocation = _validate_invocation_record(
-        second_invocation_raw,
-        label="migration.second_invocation",
-        kind="migration_apply",
-        mutation_head_sha=str(bundle["mutation_head_sha"]),
-        expected_binding={
-            "migration_sha256": migration_ref["sha256"],
-            "catalog_sha256": second_ref["sha256"],
-        },
-    )
-    if (
-        first_invocation_ref["sha256"] == second_invocation_ref["sha256"]
-        or first_invocation["finished_at_dt"] > second_invocation["started_at_dt"]
-    ):
+    first_ref, first_catalog = _json_artifact(migration.get("catalog_after_first"), "migration.catalog_after_first")
+    second_ref, second_catalog = _json_artifact(migration.get("catalog_after_second"), "migration.catalog_after_second")
+    first_invocation_ref = execution_summary["ledger"]
+    second_invocation_ref = execution_summary["ledger"]
+    first_invocation = ledger_invocation("migration_apply", 0)
+    second_invocation = ledger_invocation("migration_apply", 1)
+    require_observed_artifact(capture_invocation("catalog_after_first"), "catalog_after_first", first_ref)
+    require_observed_artifact(capture_invocation("catalog_after_second"), "catalog_after_second", second_ref)
+    if first_invocation["finished_at_dt"] > second_invocation["started_at_dt"]:
         raise EvidenceError("migration applies are not distinct ordered execution artifacts")
     first_catalog_snapshot = _catalog_snapshot(
         first_catalog,
@@ -2243,27 +3233,16 @@ def verify_bundle(
         raise EvidenceError("first/second migration catalog snapshots differ")
 
     selection_bundle = _require_mapping(bundle["selection"], "selection")
-    _require_exact_keys(
-        selection_bundle, {"post_dry_run", "pre_enforce"}, "selection"
-    )
-    post_dry_ref, post_dry_raw = _json_artifact(
-        selection_bundle["post_dry_run"], "selection.post_dry_run"
-    )
-    pre_enforce_ref, pre_enforce_raw = _json_artifact(
-        selection_bundle["pre_enforce"], "selection.pre_enforce"
-    )
-    if (
-        post_dry_ref["path"] == pre_enforce_ref["path"]
-        or post_dry_ref["sha256"] == pre_enforce_ref["sha256"]
-    ):
+    _require_exact_keys(selection_bundle, {"post_dry_run", "pre_enforce"}, "selection")
+    post_dry_ref, post_dry_raw = _json_artifact(selection_bundle["post_dry_run"], "selection.post_dry_run")
+    pre_enforce_ref, pre_enforce_raw = _json_artifact(selection_bundle["pre_enforce"], "selection.pre_enforce")
+    if post_dry_ref["path"] == pre_enforce_ref["path"] or post_dry_ref["sha256"] == pre_enforce_ref["sha256"]:
         raise EvidenceError("selection snapshots must be distinct observations")
     post_dry = _validate_selection_snapshot(post_dry_raw, "selection.post_dry_run")
     pre_enforce = _validate_selection_snapshot(pre_enforce_raw, "selection.pre_enforce")
     if post_dry["identities"] != pre_enforce["identities"]:
         raise EvidenceError("post-dry-run and pre-enforce selected tuples differ")
-    if _parse_utc(preflight_summary["captured_at"], "preflight captured_at") > post_dry[
-        "observed_at_dt"
-    ]:
+    if _parse_utc(preflight_summary["captured_at"], "preflight captured_at") > post_dry["observed_at_dt"]:
         raise EvidenceError("preflight was captured after the post-dry-run observation")
     identities = pre_enforce["identities"]
     if identities != [dict(RECOVERY_TARGET)]:
@@ -2278,36 +3257,15 @@ def verify_bundle(
         "receipts",
     )
     dry_ref, dry = _load_receipt(receipts_bundle.get("dry_run"), "receipts.dry_run", receipt_schema)
-    enforce_ref, enforce = _load_receipt(
-        receipts_bundle.get("enforce"), "receipts.enforce", receipt_schema
-    )
-    dry_invocation_ref, dry_invocation_raw = _json_artifact(
-        receipts_bundle["dry_run_invocation"], "receipts.dry_run_invocation"
-    )
-    enforce_invocation_ref, enforce_invocation_raw = _json_artifact(
-        receipts_bundle["enforce_invocation"], "receipts.enforce_invocation"
-    )
-    dry_invocation = _validate_invocation_record(
-        dry_invocation_raw,
-        label="receipts.dry_run_invocation",
-        kind="compression_dry_run",
-        mutation_head_sha=str(bundle["mutation_head_sha"]),
-        expected_binding={"receipt_sha256": dry_ref["sha256"]},
-    )
-    enforce_invocation = _validate_invocation_record(
-        enforce_invocation_raw,
-        label="receipts.enforce_invocation",
-        kind="compression_enforce",
-        mutation_head_sha=str(bundle["mutation_head_sha"]),
-        expected_binding={"receipt_sha256": enforce_ref["sha256"]},
-    )
-    execution_bundle = _require_mapping(bundle["execution"], "execution")
-    _require_exact_keys(execution_bundle, {"audit"}, "execution")
-    execution_audit_ref, execution_audit_raw = _json_artifact(
-        execution_bundle["audit"], "execution.audit"
-    )
-    if dry_invocation_ref["sha256"] == enforce_invocation_ref["sha256"]:
-        raise EvidenceError("dry-run and enforce need distinct invocation records")
+    enforce_ref, enforce = _load_receipt(receipts_bundle.get("enforce"), "receipts.enforce", receipt_schema)
+    dry_invocation_ref = execution_summary["ledger"]
+    enforce_invocation_ref = execution_summary["ledger"]
+    dry_invocation = ledger_invocation("compression_dry_run")
+    enforce_invocation = ledger_invocation("compression_enforce")
+    require_observed_artifact(dry_invocation, "dry_run_receipt", dry_ref)
+    require_observed_artifact(capture_invocation("post_dry_selection"), "post_dry_selection", post_dry_ref)
+    require_observed_artifact(capture_invocation("pre_enforce_selection"), "pre_enforce_selection", pre_enforce_ref)
+    require_observed_artifact(enforce_invocation, "enforce_receipt", enforce_ref)
     if not (
         dry_invocation["started_at_dt"]
         <= _parse_utc(dry["generated_at"], "dry generated_at")
@@ -2321,9 +3279,7 @@ def verify_bundle(
     enforce_started_at = _parse_utc(enforce["now_utc"], "enforce now_utc")
     if post_dry["observed_at_dt"] < dry_generated_at:
         raise EvidenceError("post-dry-run selection was observed before dry-run completion")
-    pre_enforce_delta = (
-        enforce_started_at - pre_enforce["observed_at_dt"]
-    ).total_seconds()
+    pre_enforce_delta = (enforce_started_at - pre_enforce["observed_at_dt"]).total_seconds()
     if not 0 <= pre_enforce_delta <= MAX_PREFLIGHT_TO_ENFORCE_SECONDS:
         raise EvidenceError("pre-enforce selection is not within 60 seconds of enforce")
     if post_dry["observed_at_dt"] > pre_enforce["observed_at_dt"]:
@@ -2353,30 +3309,21 @@ def verify_bundle(
     ):
         raise EvidenceError("enforce receipt fails exact bound-1 clean semantics")
     dry_identity = [_selected_identity(_require_mapping(row, "dry selected")) for row in dry["selected"]]
-    enforce_identity = [
-        _selected_identity(_require_mapping(row, "enforce selected")) for row in enforce["selected"]
-    ]
+    enforce_identity = [_selected_identity(_require_mapping(row, "enforce selected")) for row in enforce["selected"]]
     if dry_identity != post_dry["identities"] or enforce_identity != identities:
         raise EvidenceError("selection/dry-run/enforce selected tuples differ")
     dry_candidate_identities = [
-        _selected_identity(_require_mapping(row, "dry candidate"))
-        for row in [*dry["selected"], *dry["deferred"]]
+        _selected_identity(_require_mapping(row, "dry candidate")) for row in [*dry["selected"], *dry["deferred"]]
     ]
     enforce_candidate_identities = [
         _selected_identity(_require_mapping(row, "enforce candidate"))
         for row in [*enforce["selected"], *enforce["deferred"]]
     ]
-    if (
-        [_selected_identity(row) for row in post_dry["candidates"]]
-        != dry_candidate_identities
-        or [_selected_identity(row) for row in pre_enforce["candidates"]]
-        != enforce_candidate_identities
-    ):
+    if [_selected_identity(row) for row in post_dry["candidates"]] != dry_candidate_identities or [
+        _selected_identity(row) for row in pre_enforce["candidates"]
+    ] != enforce_candidate_identities:
         raise EvidenceError("selection candidates do not cover the complete ordered receipt scope")
-    expected_totals = {
-        key: {"before_bytes": 0, "after_bytes": None, "chunks_compressed": 0}
-        for key in HYPERTABLE_KEYS
-    }
+    expected_totals = {key: {"before_bytes": 0, "after_bytes": None, "chunks_compressed": 0} for key in HYPERTABLE_KEYS}
     enforce_row = _require_mapping(enforce["selected"][0], "enforce selected")
     if (
         post_dry["selected"][0]["before_bytes"] != dry["selected"][0]["before_bytes"]
@@ -2385,8 +3332,7 @@ def verify_bundle(
         raise EvidenceError("selection and enforce before_bytes differ")
     selected_key = f"{enforce_row['hypertable_schema']}.{enforce_row['hypertable_name']}"
     expected_dry_totals = {
-        key: {"before_bytes": 0, "after_bytes": None, "chunks_compressed": 0}
-        for key in HYPERTABLE_KEYS
+        key: {"before_bytes": 0, "after_bytes": None, "chunks_compressed": 0} for key in HYPERTABLE_KEYS
     }
     expected_dry_totals[selected_key]["before_bytes"] = dry["selected"][0]["before_bytes"]
     if dry["per_table_totals"] != expected_dry_totals:
@@ -2404,6 +3350,8 @@ def verify_bundle(
     sizes_bundle = _require_mapping(bundle["sizes"], "sizes")
     sizes_pre_ref, sizes_pre_raw = _json_artifact(sizes_bundle.get("pre"), "sizes.pre")
     sizes_post_ref, sizes_post_raw = _json_artifact(sizes_bundle.get("post"), "sizes.post")
+    require_observed_artifact(capture_invocation("sizes_pre"), "sizes_pre", sizes_pre_ref)
+    require_observed_artifact(capture_invocation("sizes_post"), "sizes_post", sizes_post_ref)
     sizes_pre_snapshot = _table_snapshot(
         sizes_pre_raw,
         "sizes.pre",
@@ -2433,17 +3381,39 @@ def verify_bundle(
         if isinstance(relation, Mapping)
     ):
         raise EvidenceError("selected compressed relation already existed in pre snapshot")
+    for table_key in HYPERTABLE_KEYS:
+        pre_total = sizes_pre[table_key]["compressed_chunks"] + sizes_pre[table_key]["uncompressed_chunks"]
+        post_total = sizes_post[table_key]["compressed_chunks"] + sizes_post[table_key]["uncompressed_chunks"]
+        if pre_total != post_total:
+            raise EvidenceError("snapshot total chunk count drifted")
+
+    def relation_map(table: Mapping[str, Any]) -> dict[tuple[str, str], tuple[str, str]]:
+        return {
+            (str(row["origin_chunk_schema"]), str(row["origin_chunk_name"])): (
+                str(row["schema"]),
+                str(row["name"]),
+            )
+            for row in table["compressed_relations"]
+        }
+
+    pre_maps = {key: relation_map(sizes_pre[key]) for key in HYPERTABLE_KEYS}
+    post_maps = {key: relation_map(sizes_post[key]) for key in HYPERTABLE_KEYS}
+    if any(
+        relation.get("origin_chunk_schema") == selected["chunk_schema"]
+        and relation.get("origin_chunk_name") == selected["chunk_name"]
+        for relation in sizes_pre[selected_key]["compressed_relations"]
+        if isinstance(relation, Mapping)
+    ):
+        raise EvidenceError("selected compressed relation already existed in pre snapshot")
     pre_combined = sum(sizes_pre[key]["hypertable_size"] for key in HYPERTABLE_KEYS)
     post_combined = sum(sizes_post[key]["hypertable_size"] for key in HYPERTABLE_KEYS)
     compressed_delta = sum(
-        sizes_post[key]["compressed_chunks"] - sizes_pre[key]["compressed_chunks"]
-        for key in HYPERTABLE_KEYS
+        sizes_post[key]["compressed_chunks"] - sizes_pre[key]["compressed_chunks"] for key in HYPERTABLE_KEYS
     )
     if post_combined >= pre_combined or compressed_delta != 1:
         raise EvidenceError("size/compressed-count acceptance arithmetic failed")
     if any(
-        sizes_post[key]["compressed_chunks"] - sizes_pre[key]["compressed_chunks"]
-        != (1 if key == selected_key else 0)
+        sizes_post[key]["compressed_chunks"] - sizes_pre[key]["compressed_chunks"] != (1 if key == selected_key else 0)
         for key in HYPERTABLE_KEYS
     ):
         raise EvidenceError("selected/sibling compressed-count transition differs")
@@ -2463,6 +3433,16 @@ def verify_bundle(
     ]
     if len(selected_relations) != 1:
         raise EvidenceError("post size snapshot does not bind the selected compressed sibling")
+    selected_origin = (str(selected["chunk_schema"]), str(selected["chunk_name"]))
+    for table_key in HYPERTABLE_KEYS:
+        expected_map = dict(pre_maps[table_key])
+        if table_key == selected_key:
+            expected_map[selected_origin] = (
+                str(selected_relations[0]["schema"]),
+                str(selected_relations[0]["name"]),
+            )
+        if post_maps[table_key] != expected_map:
+            raise EvidenceError("snapshot origin/compressed-sibling map drifted")
     post_relation_bytes = selected_relations[0]["bytes"]
     receipt_after_bytes = enforce_row["after_bytes"]
     if (
@@ -2470,8 +3450,7 @@ def verify_bundle(
         or abs(post_relation_bytes - receipt_after_bytes) > MAX_POST_MEASUREMENT_DRIFT_BYTES
     ):
         raise EvidenceError(
-            "post compressed sibling size is not reduced or exceeds the 1 MiB "
-            "measurement-time drift bound"
+            "post compressed sibling size is not reduced or exceeds the 1 MiB measurement-time drift bound"
         )
     selected_relation_names = {
         str(selected["chunk_name"]),
@@ -2480,9 +3459,8 @@ def verify_bundle(
 
     catalog_bundle = _require_mapping(bundle["catalog"], "catalog")
     _require_exact_keys(catalog_bundle, {"post"}, "catalog")
-    catalog_post_ref, catalog_post_raw = _json_artifact(
-        catalog_bundle.get("post"), "catalog.post"
-    )
+    catalog_post_ref, catalog_post_raw = _json_artifact(catalog_bundle.get("post"), "catalog.post")
+    require_observed_artifact(capture_invocation("catalog_post"), "catalog_post", catalog_post_ref)
     catalog_post = _require_mapping(catalog_post_raw, "catalog.post document")
     _require_exact_keys(
         catalog_post,
@@ -2512,9 +3490,9 @@ def verify_bundle(
         raise EvidenceError("post catalog does not prove selected chunk is compressed")
 
     benchmarks_bundle = _require_mapping(bundle["benchmarks"], "benchmarks")
-    benchmark_ref, benchmark_raw = _json_artifact(
-        benchmarks_bundle.get("evidence"), "benchmarks.evidence"
-    )
+    benchmark_ref, benchmark_raw = _json_artifact(benchmarks_bundle.get("evidence"), "benchmarks.evidence")
+    benchmark_after_invocation = ledger_invocation("benchmark_after")
+    require_observed_artifact(benchmark_after_invocation, "benchmarks", benchmark_ref)
     benchmark_results = _validate_benchmarks(
         benchmark_raw,
         selected,
@@ -2528,78 +3506,73 @@ def verify_bundle(
         cleanup_raw,
         mutation_head_sha=str(bundle["mutation_head_sha"]),
         prior_autopipe_state=preflight_summary["prior_autopipe_state"],
-        window_started_at=_parse_utc(
-            recovery_summary["preflight_captured_at"], "recovery preflight captured_at"
-        ),
+        window_started_at=_parse_utc(recovery_summary["preflight_captured_at"], "recovery preflight captured_at"),
     )
-    execution_summary = _validate_execution_audit(
-        execution_audit_raw,
-        expected_invocation_refs=[
-            first_invocation_ref,
-            second_invocation_ref,
-            recovery_invocation_ref,
-            dry_invocation_ref,
-            enforce_invocation_ref,
-        ],
-        mutation_head_sha=str(bundle["mutation_head_sha"]),
-    )
+    require_observed_artifact(capture_invocation("cleanup"), "cleanup", cleanup_ref)
     before_intervals = [_phase_interval(query, "before") for query in benchmark_results]
     after_intervals = [_phase_interval(query, "after") for query in benchmark_results]
-    if any(
-        left[1] > right[0]
-        for left, right in zip(before_intervals, before_intervals[1:])
-    ) or any(
-        left[1] > right[0]
-        for left, right in zip(after_intervals, after_intervals[1:])
+    benchmark_before_invocation = ledger_invocation("benchmark_before")
+    if any(left[1] >= right[0] for left, right in zip(before_intervals, before_intervals[1:])) or any(
+        left[1] >= right[0] for left, right in zip(after_intervals, after_intervals[1:])
     ):
         raise EvidenceError("benchmark query phases overlap or are reversed")
+    if not (
+        benchmark_before_invocation["started_at_dt"]
+        <= before_intervals[0][0]
+        < before_intervals[-1][1]
+        <= benchmark_before_invocation["finished_at_dt"]
+        < benchmark_after_invocation["started_at_dt"]
+        <= after_intervals[0][0]
+        < after_intervals[-1][1]
+        <= benchmark_after_invocation["finished_at_dt"]
+    ):
+        raise EvidenceError("benchmark artifact intervals escape their supervisor child events")
     chronology_events = [
-            ("audit-window-start", execution_summary["artifact_window_started_at"]),
-            ("dump-list", dump_listing["captured_at_dt"]),
-            ("catalog-before", catalog_before_snapshot["captured_at_dt"]),
-            ("migration-1-start", first_invocation["started_at_dt"]),
-            ("migration-1-finish", first_invocation["finished_at_dt"]),
-            ("catalog-1", first_catalog_snapshot["captured_at_dt"]),
-            ("migration-2-start", second_invocation["started_at_dt"]),
-            ("migration-2-finish", second_invocation["finished_at_dt"]),
-            ("catalog-2", second_catalog_snapshot["captured_at_dt"]),
-            (
-                "recovery-preflight",
-                _parse_utc(
-                    recovery_summary["preflight_captured_at"],
-                    "recovery preflight",
-                ),
+        ("audit-window-start", execution_summary["artifact_window_started_at"]),
+        ("dump-list", dump_listing["captured_at_dt"]),
+        ("catalog-before", catalog_before_snapshot["captured_at_dt"]),
+        ("migration-1-start", first_invocation["started_at_dt"]),
+        ("migration-1-finish", first_invocation["finished_at_dt"]),
+        ("catalog-1", first_catalog_snapshot["captured_at_dt"]),
+        ("migration-2-start", second_invocation["started_at_dt"]),
+        ("migration-2-finish", second_invocation["finished_at_dt"]),
+        ("catalog-2", second_catalog_snapshot["captured_at_dt"]),
+        (
+            "recovery-preflight",
+            _parse_utc(
+                recovery_summary["preflight_captured_at"],
+                "recovery preflight",
             ),
-            ("recovery-start", recovery_invocation["started_at_dt"]),
-            ("recovery-finish", recovery_invocation["finished_at_dt"]),
-            (
-                "compression-preflight",
-                _parse_utc(preflight_summary["captured_at"], "compression preflight"),
-            ),
-            ("dry-start", dry_invocation["started_at_dt"]),
-            ("dry-finish", dry_invocation["finished_at_dt"]),
-            ("post-dry-selector", post_dry["observed_at_dt"]),
-            ("benchmark-before-start", before_intervals[0][0]),
-            ("benchmark-before-finish", before_intervals[-1][1]),
-            ("pre-enforce-selector", pre_enforce["observed_at_dt"]),
-            ("sizes-pre", sizes_pre_snapshot["captured_at_dt"]),
-            ("enforce-start", enforce_invocation["started_at_dt"]),
-            ("enforce-finish", enforce_invocation["finished_at_dt"]),
-            ("sizes-post", sizes_post_snapshot["captured_at_dt"]),
-            ("catalog-post", catalog_captured_at),
-            ("benchmark-after-start", after_intervals[0][0]),
-            ("benchmark-after-finish", after_intervals[-1][1]),
-            (
-                "cleanup-finish",
-                _parse_utc(cleanup_summary["window_finished_at"], "cleanup finish"),
-            ),
-            (
-                "cleanup-captured",
-                _parse_utc(cleanup_summary["captured_at"], "cleanup captured"),
-            ),
-            ("audit-window-finish", execution_summary["artifact_window_finished_at"]),
-            ("audit-captured", execution_summary["captured_at"]),
-        ]
+        ),
+        ("recovery-start", recovery_invocation["started_at_dt"]),
+        ("recovery-finish", recovery_invocation["finished_at_dt"]),
+        (
+            "compression-preflight",
+            _parse_utc(preflight_summary["captured_at"], "compression preflight"),
+        ),
+        ("dry-start", dry_invocation["started_at_dt"]),
+        ("dry-finish", dry_invocation["finished_at_dt"]),
+        ("post-dry-selector", post_dry["observed_at_dt"]),
+        ("benchmark-before-start", benchmark_before_invocation["started_at_dt"]),
+        ("benchmark-before-finish", benchmark_before_invocation["finished_at_dt"]),
+        ("pre-enforce-selector", pre_enforce["observed_at_dt"]),
+        ("sizes-pre", sizes_pre_snapshot["captured_at_dt"]),
+        ("enforce-start", enforce_invocation["started_at_dt"]),
+        ("enforce-finish", enforce_invocation["finished_at_dt"]),
+        ("sizes-post", sizes_post_snapshot["captured_at_dt"]),
+        ("catalog-post", catalog_captured_at),
+        ("benchmark-after-start", benchmark_after_invocation["started_at_dt"]),
+        ("benchmark-after-finish", benchmark_after_invocation["finished_at_dt"]),
+        (
+            "cleanup-finish",
+            _parse_utc(cleanup_summary["window_finished_at"], "cleanup finish"),
+        ),
+        (
+            "cleanup-captured",
+            _parse_utc(cleanup_summary["captured_at"], "cleanup captured"),
+        ),
+        ("audit-window-finish", execution_summary["artifact_window_finished_at"]),
+    ]
     chronology_snapshot_ids = [
         dump_listing["snapshot_id"],
         catalog_before_snapshot["snapshot_id"],
@@ -2617,9 +3590,7 @@ def verify_bundle(
         "compression_timer_enabled": True,
         "compression_timer_active": False,
         "compression_service_active": False,
-        "compression_service_activation_count": cleanup_summary[
-            "compression_service_activation_count"
-        ],
+        "compression_service_activation_count": cleanup_summary["compression_service_activation_count"],
         "installed_service_matches_repo": True,
         "installed_timer_matches_repo": True,
     }
@@ -2635,6 +3606,16 @@ def verify_bundle(
     if out_of_scope != required_out_of_scope:
         raise EvidenceError("out_of_scope flags differ from the fixture")
 
+    if set(observed_requirements) | {"benchmark_before"} != set(EXPECTED_OUTPUT_OWNERS):
+        raise EvidenceError("semantic output ownership coverage differs")
+    for name, (invocation, ref) in observed_requirements.items():
+        observed = _require_mapping(
+            invocation["artifact_associations"].get(name),
+            f"{invocation['kind']}.{name}",
+        )
+        if observed.get("artifact") != ref:
+            raise EvidenceError(f"{name} artifact association is not the supervisor-observed child output")
+
     database_identity = _require_mapping(bundle["database_identity"], "database_identity")
     if database_identity != preflight["database_identity"]:
         raise EvidenceError("bundle/preflight database identity mismatch")
@@ -2649,10 +3630,15 @@ def verify_bundle(
         "database_identity": database_identity,
         "authorization": authorization,
         "execution": {
-            "audit": execution_audit_ref,
-            "journal": execution_summary["journal"],
+            "run_plan": execution_summary["run_plan"],
+            "ledger": execution_summary["ledger"],
+            "run_id": execution_summary["run_id"],
             "namespace_counts": execution_summary["namespace_counts"],
-            "direct_db_mutation_statements": 0,
+            "checkpoint_artifacts": execution_summary["checkpoint_artifacts"],
+            "claim": PASS_CLAIM,
+            "sole_db_user_attested": True,
+            "database_audit_proof": False,
+            "trust_limit": execution_summary["attestation"]["trust_limit"],
         },
         "recovery": {
             "preflight": recovery_preflight_ref,
@@ -2743,7 +3729,9 @@ def verify_bundle(
             ],
             "snapshot_ids": chronology_snapshot_ids,
         },
-        "source_manifest": _artifact_refs_in(bundle),
+        "source_manifest": [dict(ref) for ref in artifact_manifest]
+        if artifact_manifest is not None
+        else list(resolve_artifact_closure(bundle).manifest),
         "out_of_scope": out_of_scope,
         "verdict": PASS_VERDICT,
     }
@@ -2756,14 +3744,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--receipt-schema-path",
         type=Path,
-        default=Path(__file__).resolve().parents[1]
-        / "schemas/timeseries_compression_receipt.schema.json",
+        default=Path(__file__).resolve().parents[1] / "schemas/timeseries_compression_receipt.schema.json",
     )
     parser.add_argument(
         "--evidence-schema-path",
         type=Path,
-        default=Path(__file__).resolve().parents[1]
-        / "schemas/timeseries_compression_live_evidence.schema.json",
+        default=Path(__file__).resolve().parents[1] / "schemas/timeseries_compression_live_evidence.schema.json",
     )
     return parser
 
@@ -2793,11 +3779,7 @@ def _current_verifier_head() -> str:
     except subprocess.TimeoutExpired as error:
         raise EvidenceError("verifier HEAD query timed out") from error
     head = result.stdout.strip()
-    if (
-        result.returncode != 0
-        or len(result.stdout) > 128
-        or re.fullmatch(r"[0-9a-f]{40}", head) is None
-    ):
+    if result.returncode != 0 or len(result.stdout) > 128 or re.fullmatch(r"[0-9a-f]{40}", head) is None:
         raise EvidenceError("cannot bind verifier_head_sha to the executing repository")
     return head
 
@@ -2805,6 +3787,10 @@ def _current_verifier_head() -> str:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     output_safe = False
+    expected_output_identity: FileIdentity | None = None
+    failure_publication_pending = False
+    intent_context: dict[str, Any] | None = None
+    failure_stage = "provenance_unavailable"
     _RETAINED_IDENTITIES.clear()
     try:
         if not args.bundle_path.is_absolute() or not args.output_path.is_absolute():
@@ -2823,17 +3809,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         bundle = _require_mapping(bundle_raw, "bundle")
         _reject_secrets(bundle, "bundle")
-        input_paths = [
-            args.bundle_path,
-            CANONICAL_RECEIPT_SCHEMA,
-            CANONICAL_EVIDENCE_SCHEMA,
-            *[Path(ref["path"]) for ref in _artifact_refs_in(bundle)],
-        ]
         try:
-            assert_paths_disjoint(args.output_path, input_paths, label="terminal evidence")
+            closure = resolve_artifact_closure(bundle)
+            _assert_terminal_state_paths_disjoint(
+                args.output_path,
+                bundle_path=args.bundle_path,
+                closure=closure,
+            )
         except BoundedEvidenceError as error:
             raise EvidenceError(str(error)) from error
+        expected_output_identity = _output_identity(args.output_path)
         output_safe = True
+        intent_context = _unavailable_intent_context(None)
+        verifier_head_sha = _current_verifier_head()
+        intent_context = _unavailable_intent_context(verifier_head_sha)
+        intent_context = _intent_context_from_bundle(bundle, verifier_head_sha=verifier_head_sha)
+        failure_stage = "verify_or_publish"
         _, receipt_schema_identity, receipt_schema_raw = read_bounded_json_with_identity_no_follow(
             CANONICAL_RECEIPT_SCHEMA,
             max_bytes=1024**2,
@@ -2849,21 +3840,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         terminal = verify_bundle(
             bundle,
             receipt_schema=receipt_schema,
-            verifier_head_sha=_current_verifier_head(),
+            verifier_head_sha=verifier_head_sha,
+            artifact_manifest=closure.manifest,
         )
-        _RETAINED_IDENTITIES.extend(
-            [bundle_identity, receipt_schema_identity, evidence_schema_identity]
-        )
-        jsonschema.Draft7Validator(
-            evidence_schema, format_checker=jsonschema.FormatChecker()
-        ).validate(terminal)
-        atomic_write_bytes_no_follow(
+        _RETAINED_IDENTITIES.extend([bundle_identity, receipt_schema_identity, evidence_schema_identity])
+        jsonschema.Draft7Validator(evidence_schema, format_checker=jsonschema.FormatChecker()).validate(terminal)
+        expected_output_identity = _publish_terminal_cas(
             args.output_path,
             _canonical_json_bytes(terminal),
-            mode=0o600,
-            require_durable_replace=True,
+            expected_output_identity,
         )
         _reverify_retained_identities()
+        reverify_artifact_closure(closure)
     except (
         BoundedEvidenceError,
         EvidenceError,
@@ -2872,10 +3860,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         json.JSONDecodeError,
         jsonschema.ValidationError,
     ) as error:
-        if output_safe:
-            _publish_terminal_failure(args.output_path, stage="verify_or_publish")
+        if output_safe and intent_context is not None:
+            failure_publication_pending = not _publish_terminal_failure(
+                args.output_path,
+                stage=failure_stage,
+                expected=expected_output_identity,
+                intent_context=intent_context,
+            )
         print(
-            json.dumps({"status": "failed", "reason": str(error)}, sort_keys=True),
+            json.dumps(
+                {
+                    "status": "failed",
+                    "reason": str(error),
+                    "failure_publication_pending": failure_publication_pending,
+                },
+                sort_keys=True,
+            ),
             file=sys.stderr,
         )
         return 1

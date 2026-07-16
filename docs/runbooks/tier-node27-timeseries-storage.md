@@ -641,10 +641,14 @@ and the manual decompress procedure that pairs with it.
 ### 4.0 Controlled initial live run (`#1069`)
 
 The first production compression is a one-chunk controlled operation, not a
-normal timer tick. The committed service is the only recurring mutation
-entrypoint and therefore has the literal invocation
-`node27_timeseries_compression_once.sh --enforce`. Direct operator invocation
-of the wrapper **without** that flag remains dry-run. A contended wrapper
+normal timer tick. The recurring
+`nhms-node27-timeseries-compression.service` remains the bounded wrapper
+`--enforce` lane used only by its timer and never consumes the one-off replay
+plan. A qualifying replay is instead owned by the separate no-timer
+`nhms-node27-timeseries-compression-replay.service`. Its `ExecStart` pins the
+reviewed run-plan, ledger, terminal and run-scoped finalizer-state paths; its
+`ExecStopPost --finalize-only` is the outer CAS backstop. Direct operator invocation of the
+legacy runner wrapper **without** `--enforce` remains dry-run. A contended wrapper
 publishes a mode-0600, schema-valid `outcome=refused_lock` receipt with empty
 `selected`/`deferred`/`skipped`, null/zero totals, no DB call, and a redacted
 stderr diagnostic; this deliberately replaces a stale shared receipt.
@@ -669,9 +673,11 @@ credential in process argv.
    `compress_chunk(regclass,boolean)`. Do not call it least privilege. Do not
    create/alter/grant a role and do not use `nhms_display_ro`.
 3. Before migration, write a custom-format schema-only `pg_dump`. Retain its
-   descriptor identity and run pinned PG15 `/usr/bin/pg_restore --list` under
-   30 seconds against that descriptor; record bounded raw stdout/stderr hashes,
-   tool version, exit 0, entries and the dump's absolute path/bytes/sha256.
+   descriptor identity. The supervisor resolves PG15 `pg_restore` inside the
+   `nhms-db` container (the host has no `pg_restore`) and streams
+   `--version`/`--list` under independent stdout/stderr ceilings. Record the
+   container image ID, binary realpath/version/hash, concrete argv, dump
+   descriptor digest, exit 0 and bounded output identities.
    Also capture timestamped canonical JSON for the two target tables' exact
    pre-migration catalog. This dump is forensic DDL inventory, not a data
    backup, restore drill, or compressed-storage rollback.
@@ -687,12 +693,38 @@ credential in process argv.
    must contain exactly D3's indexed segment/order columns, both hypertables
    compression-enabled, and no compression-policy job. A nonzero first apply
    stops the run; repairing partial DDL is separately authorized.
-6. Install the committed service/timer byte-for-byte under
+6. Install the committed recurring service/timer and replay service byte-for-byte under
    `~/.config/systemd/user/`, verify both file hashes, `daemon-reload`, then run
    `systemctl --user enable nhms-node27-timeseries-compression.timer` **without
    `--now`**. Require `is-enabled=enabled` while timer and service stay
-   inactive throughout this issue. `Persistent=true` means starting the timer
+   inactive throughout this issue. Copy
+   `infra/env/node27-timeseries-compression-replay.example` to the untracked
+   mode-0600 replay env, replace its placeholders, and verify the reviewed
+   run-plan plus expected stale-terminal digest before starting the no-timer
+   replay service exactly once. Its own active state and `MainPID` are expected
+   while every checkpoint still proves the recurring service/timer inactive.
+   `Persistent=true` means starting the timer
    can catch up the missed 04:25 event and create an unauthorized second batch.
+   Before the live start, retain one real JSON journal sample from both user
+   units and inspect its field shape:
+
+   ```bash
+   journalctl --user \
+     --user-unit=nhms-node27-timeseries-compression.service \
+     --user-unit=nhms-node27-timeseries-compression-replay.service \
+     --output=json --no-pager --lines=50 > /tmp/issue1069-user-journal-shape.jsonl
+   jq -c '{_SYSTEMD_USER_UNIT,USER_UNIT,_SYSTEMD_UNIT,UNIT,
+     _SYSTEMD_INVOCATION_ID,INVOCATION_ID}' \
+     /tmp/issue1069-user-journal-shape.jsonl
+   ```
+
+   Inspect `_SYSTEMD_USER_UNIT` and `USER_UNIT` independently. Either field may
+   exactly identify the governed child, so `_SYSTEMD_USER_UNIT=init.scope`
+   cannot hide a governed `USER_UNIT`. If they name different governed units,
+   stop on the conflict. `_SYSTEMD_UNIT=user@<uid>.service` is user-manager
+   context, not the child service. Only records lacking both user-unit fields
+   may use an exact, unambiguous governed `_SYSTEMD_UNIT`/`UNIT` fallback. Stop
+   before live execution if the host journal cannot satisfy this contract.
 7. Independently reproduce the runner's exact catalog predicate/order with
    lag 604800 and bound 1. Freeze compact sorted JSON for the selected identity
    tuple `(hypertable_schema, hypertable_name, chunk_schema, chunk_name,
@@ -738,16 +770,16 @@ newline; MVT result bytes are recorded as hex and hashed as decoded raw bytea.
 
 For each query and each phase, use a new read-only connection: retain the first
 execution as cold-biased information, perform two warmups (up to five while
-reads remain), then record exactly seven `EXPLAIN (ANALYZE, BUFFERS, FORMAT
-JSON)` samples. Before/after cache classes must match. The median is sorted
+reads remain), then record exactly seven `EXPLAIN (ANALYZE, BUFFERS, VERBOSE,
+FORMAT JSON)` samples. Before/after cache classes must match. The median is sorted
 sample 4; p95 is sample 7. Gates are
 `after_median <= max(1.5*before_median, before_median+100)` and
 `after_p95 <= max(2*before_p95, before_p95+250)`. Result rows/bytes/hash must be
 identical, concurrent-load sampling stable, and each after plan must contain a
 `Custom Scan` whose normalized provider is exactly `DecompressChunk` and whose
-own `Relation Name`/`Schema` fields exactly bind the selected origin or
-compressed sibling. Filter text, aliases, suffixes and child-node relations do
-not qualify. The seven-day curve is an overlap probe: its half-open request
+own nonempty `Schema`, `Relation Name`, and `Alias` exactly bind the selected
+origin or compressed sibling on the same node. Filter text, suffixes and
+child-node relations do not qualify. The seven-day curve is an overlap probe: its half-open request
 must overlap the selected half-open chunk. A request starting at the chunk's
 exclusive end, or otherwise wholly outside it, fails.
 
@@ -800,9 +832,11 @@ uv run python scripts/node27_timeseries_compression_benchmark.py \
 
 #### 4.0.1 Independent terminal evidence bundle
 
-`scripts/node27_timeseries_compression_live_evidence.py` has no DB connection
-or mutation entrypoint. It reads one operator bundle, independently reopens
-every referenced artifact, verifies exact byte counts/sha256, validates both
+`scripts/node27_timeseries_compression_live_evidence.py` has no DB connection,
+command-execution, or mutation entrypoint. It reads one supervisor bundle,
+resolves the complete transitive artifact graph before any output write,
+freezes normalized path and inode aliases, verifies exact byte counts/sha256,
+and validates both
 runner receipts, recomputes selector hashes, D3 settings, totals, size/count
 deltas, raw query/result hashes, median/p95 thresholds, and plan binding, then
 atomically publishes the terminal envelope against
@@ -836,6 +870,11 @@ top-level keys: `schema_version`, `issue`, `generated_at`, `node`,
 
 Referenced JSON contracts are:
 
+- `execution.run_plan` is the immutable concrete command/checkpoint plan and
+  `execution.ledger` is the append-only producer truth. The verifier recomputes
+  the plan hash, exact event state machine, cursor continuity and every
+  produced artifact association from ledger events. Legacy authored invocation
+  JSON may remain in a historical input envelope but contributes no v3 fact.
 - `recovery.preflight`: separately authorized replay preflight with capture
   time, node-27/mutation-SHA/database identity, at least 300 GiB free space,
   `before_compressed=true`, positive row count, and the exact six-field target
@@ -847,10 +886,10 @@ Referenced JSON contracts are:
 - `preflight.evidence`: the facts in steps 1–4, including exact role booleans,
   guard presence, quiescence and inactive compression units;
   `preflight.schema_dump` is streamed under a practical byte cap. The verifier
-  runs pinned PG15 `/usr/bin/pg_restore --list` against the retained dump
-  descriptor and compares bounded stdout/stderr hashes, tool version, exit
-  status and entries with `preflight.schema_dump_list`; a magic prefix or an
-  independently authored list is insufficient. `preflight.catalog_before` is
+  validates the supervisor's container-bound PG15 `pg_restore --version/--list`
+  identity, bounded stdout/stderr hashes, tool/container identity, exit status
+  and entries in `preflight.schema_dump_list`; it does not execute a tool.
+  `preflight.catalog_before` is
   its timestamped canonical catalog neighbor.
 - `migration.catalog_after_first|second` and `catalog.post`:
   `{"hypertables":{"hydro.river_timeseries":true,
@@ -862,7 +901,8 @@ Referenced JSON contracts are:
   artifacts containing cutoff, free bytes, complete ordered candidates and
   the bound-1 selected tuple. Their selected identities must match both runner
   receipts; the pre-enforce observation is at most 60 seconds before enforce.
-- `sizes.pre|post`: `tables` keyed by both D3 hypertables. Each row has
+- `sizes.pre|post`: `tables` keyed by both D3 hypertables, plus the selected
+  origin's pre-enforce uncompressed index (`-1`). Each row has
   `hypertable_size`, `parent_relation_size`, `compressed_chunks`,
   `uncompressed_chunks`, and `compressed_relations`. Each compressed relation
   binds `origin_chunk_schema`/`origin_chunk_name` to its sibling
@@ -877,20 +917,149 @@ Referenced JSON contracts are:
   compression service inactive with activation count zero, and installed unit
   hashes matching the repository.
 
-The version-3 execution audit enumerates exactly two migration applies, one
-recovery decompression, one dry-run and one enforce. Every invocation binds
-the authorized remote-tracking SHA, resolved repository/interpreter/script/
-wrapper/env paths, actual `/usr/bin/timeout --signal=TERM --kill-after=30s
-900s` launcher argv, exit and receipt/catalog association. Its bounded audit
-journal must report no direct DB mutation outside this namespace. The global
+The version-3 supervisor ledger derives exactly two migration applies, one
+recovery decompression, one dry-run, one enforce, one dump, two container
+`pg_restore` probes and before/after benchmark children. Replay-supervisor
+activation is exactly one; recurring compression-service activation,
+retention, drill, role and node-22 mutation counts are zero. Each event carries
+a unique ID, concrete argv, PID, strict UTC/monotonic interval, bounded output
+identity, exit, mutation SHA/database/run-plan/run identity and artifact
+associations. Raw activity, relation-lock, canonical user-unit `systemctl show`
+and cursor-bounded journal artifacts are captured before/after every mutation
+and at preflight/postflight/cleanup. Acceptance means “controlled lane executed
+exactly once with no observed conflict”. The operator attests that they are the
+sole DB user during the window; this is a trust prerequisite and is not
+database-audit proof of absolute direct-SQL bypass absence. The global
 chronology is one non-overlapping chain from dump/catalog-before through both
 migrations, recovery, compression preflight, dry-run, before benchmark,
 pre-enforce selector, enforce, post snapshots/benchmark, cleanup and audit
-capture. All snapshot IDs are unique. Output paths must be disjoint from the
-bundle and every referenced file by normalized path and inode; publication is
-followed by revalidation of every retained input. A safe known destination is
+capture. All boundaries are strict (`<`) and snapshot IDs are unique. Output
+paths must be disjoint from the bundle and the complete recursively retained
+graph by normalized path and inode; the terminal manifest equals that closure,
+and publication is followed by revalidation. A safe known destination is
 atomically replaced with a versioned failed/indeterminate tombstone on failure;
 an unsafe, unknown, symlinked or input-alias destination is untouched.
+After closure/disjointness validation and freezing the old output identity,
+an inability to establish bundle provenance invalidates any prior PASS with a
+schema-valid version-3 nonqualifying tombstone. That tombstone declares
+`provenance_state=unavailable` and records only its safe failure stage/reason,
+the expected old output identity, and an independently established verifier
+SHA when available; it must not invent run or mutation identity. Failures
+before that safety boundary do not create a gate, intent, lock, or terminal.
+
+The replay env must externally pin the descriptor-read run plan with
+`NODE27_COMPRESSION_RUN_PLAN_SHA256`; the supervisor checks that digest before
+JSON parsing, recomputes `run_plan_id`, then requires a clean
+`/home/nwm/NWM` checkout whose `HEAD`, reviewed origin ref, and GitHub origin
+lineage all bind the mutation SHA. Every command kind has one canonical argv
+contract; changing only its executable to `/bin/true` is a hard failure. Every
+semantic output has exactly one planned producer. Child associations are
+limited to files their exact argv writes (`pg_dump --file`, the committed
+bounded decompression producer `--receipt-path`, runner `--receipt-path`, and
+benchmark `--output`). The decompression producer verifies the exact compressed
+target and positive row count, executes one timeout-bounded
+`decompress_chunk`, reconciles returned relation/uncompressed state/row parity,
+and atomically emits the recovery receipt; uncertainty emits indeterminate
+evidence and is never automatically retried. Preflight, dump-list,
+catalog, selector, size and cleanup documents are separate supervisor capture
+steps: each runs its immutable-plan probe, requires its output to be absent,
+atomically publishes that probe's stdout, then ledgers path, byte count,
+digest, device and inode. Ledger order proves each capture occurred at its
+true pre/post state-machine boundary rather than being prewritten or attached
+to an unrelated child.
+The verifier rechecks that descriptor identity, so replacing a file with the
+same bytes still fails. Supervisor checkpoint observations use the same
+descriptor-bound form.
+
+Replay activation count is derived, not authored: systemd supplies
+`INVOCATION_ID`, every ledger event carries it, and canonical replay
+`systemctl show` must report the canonical executing `Type=oneshot` state
+`activating/start`, that same non-empty ID, the
+current supervisor `MainPID`, and non-empty UTC/nonzero monotonic start
+timestamps. This one current manager identity contributes the count of one.
+Cursor-bounded journal is negative evidence only: arbitrary rows for that same
+ID do not increase the count, while any other replay ID or any recurring-unit
+activation fails closed. Failure
+finalizer state retains `mutation_head_sha`, and every provenance-bound
+failure tombstone must publish that same SHA across normal failure,
+`ExecStopPost`, repeated-finalizer, and publish-race paths.
+Git lineage probes and every success/failure CAS publication acquire their
+process group or publish lock under the same finite wall. The 900-second main
+wall creates a shorter operation wall that reserves TERM/KILL/drain plus
+terminal lock/CAS/finalizer time; Git, cursor, checkpoints, captures, DB
+producer and every child receive only that operation wall. Held locks time out
+without overwriting a newer terminal. Finalizer/failure-publication intent is
+retained on lock timeout and consumed only after replacement or proof that a
+newer inode/digest won, allowing one bounded `ExecStopPost` retry.
+
+The terminal is not authoritative whenever the adjacent
+`.terminal.json.failure-intent/` state is pending. Every readiness/failure/
+success path follows one bounded lock order: `.terminal.json.intent-gate.lock`
+first, then `.terminal.json.publish.lock` when terminal access is needed.
+`read_authoritative_terminal()` follows that order and rejects pending or
+malformed durable state before reading the terminal.
+
+`packages/common/compression_terminal_state.py` is the single owner of this
+state machine. The live verifier, replay supervisor, normal failure path and
+systemd `ExecStopPost` finalizer all call that shared API; the supervisor does
+not open the publication lock or replace the terminal directly. Finalizer
+state freezes the stale terminal's device, inode, byte count and digest plus
+run/mutation SHA. A pending unavailable-provenance verifier intent may be
+upgraded to a bound supervisor tombstone only when the complete expected
+terminal identity agrees. A timeout preserves both retry states; a schema-valid
+authoritative newer terminal consumes finalizer state, while an unrelated or
+malformed terminal fails closed.
+
+The active intent directory contains only `intent.json` and `identity.json`.
+Both are created mode 0600 through an exclusively created no-follow directory
+descriptor, file-fsynced, directory-fsynced, and bound to the revalidated
+parent identity. The stable intent-gate inode records the exact sidecar
+identity; the sidecar records the exact intent `(device,inode,bytes,sha256)`,
+failure-payload digest, schema version, and run/verifier/mutation identity,
+and binds back to the gate inode. This cross-binding is revalidated in every
+fresh process, so replacing either file—even with identical bytes—fails
+closed. Parent-fsync failure removes or quarantines only entries exclusively
+created by that attempt and leaves no active authoritative pair.
+
+A held terminal lock does not suppress failure invalidation: the publisher
+durably creates the pair under the intent gate, releases that gate, then may
+time out trying the ordered gate→terminal CAS while the pending state continues
+to block readers. Successful failure/PASS publication consumes both files by
+an atomic intent-directory rename, parent fsync, exact-identity cleanup, and
+durable idle-gate update. The rename alone never authorizes deletion. After the
+terminal replacement and parent fsync, the gate first persists and fsyncs a
+`committed_cleanup` phase containing the published terminal's complete
+identity, the prior expected identity, both original entry names and complete
+identities, the consumed-directory inode, payload digest, and provenance
+context. Only then may cleanup
+delete `intent.json`, fsync the child directory, delete `identity.json`, fsync
+again, remove the consumed directory, fsync the parent, and finally fsync an
+idle gate. This fixed order makes an identity-missing/intent-surviving prefix
+explicitly unreachable and unsafe.
+
+Every fresh reader or publisher can idempotently finish the legal crash
+prefixes: both files, sidecar only, empty consumed directory, or consumed
+directory already absent. Each survivor is descriptor-read immediately before
+unlink and must retain its device/inode/bytes/SHA-256 plus canonical
+cross-binding. Missing entries are accepted only from `committed_cleanup`.
+Equal-length tampering, an incompatible replacement terminal, or a foreign
+entry fails closed without deletion. Cleanup proceeds across a changed
+terminal only when its schema-valid provenance satisfies the explicit
+newer-wins relation. The terminal publication lock is
+opened by basename through the already anchored parent descriptor, with
+no-follow, regular-file, single-link, mode and inode validation; a parent
+namespace replacement cannot redirect lock creation and is detected when the
+gate releases. Terminal, intent directory/files, intent gate, and publication
+lock remain normalized-path/symlink/inode/hardlink-disjoint from the bundle,
+canonical schemas, and complete recursive input closure.
+
+The version-3 schema mirrors the state machine branches. An unavailable-
+provenance failure must carry the exact three-key `failure_context` and cannot
+carry run/mutation identity. A bound supervisor/finalizer failure must carry
+`run_id` and `mutation_head_sha` and cannot carry `failure_context`. A
+qualifying version-3 PASS explicitly rejects `outcome`, `failure`,
+`failure_context`, and `provenance_state`; historical version-2 receipts remain
+schema-readable but nonqualifying.
 
 Example invocation (paths contain no credential):
 

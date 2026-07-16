@@ -11,9 +11,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import stat
 import sys
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
@@ -47,7 +49,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CURVE_SOURCE = ROOT / "packages/common/forecast_store.py"
 MVT_SOURCE = ROOT / "services/tiles/mvt.py"
 MVT_ROUTE_SOURCE = ROOT / "apps/api/routes/hydro_display.py"
-EXPLAIN_PREFIX = "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "
+EXPLAIN_PREFIX = "EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON) "
 ACTIVITY_SQL = """
 SELECT pid, backend_start, xact_start, query_start, state, wait_event_type,
        md5(regexp_replace(query, '\\s+', ' ', 'g')) AS query_signature
@@ -86,6 +88,29 @@ class _Deadline:
 
     def statement_timeout_ms(self, label: str) -> int:
         return max(1, min(STATEMENT_TIMEOUT_MS, int(self.remaining(label) * 1000)))
+
+
+def _bounded_connection_cleanup(deadline: _Deadline, *connections: Any) -> None:
+    """Bound driver rollback/close hooks without blocking the hard-wall owner."""
+
+    errors: list[BaseException] = []
+
+    def cleanup() -> None:
+        try:
+            for index, connection in enumerate(connections):
+                if index == 0:
+                    connection.rollback()
+                connection.close()
+        except BaseException as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=cleanup, name="benchmark-connection-cleanup", daemon=True)
+    worker.start()
+    worker.join(deadline.remaining("connection cleanup"))
+    if worker.is_alive():
+        raise BenchmarkCaptureError("benchmark wall deadline exceeded during connection cleanup")
+    if errors:
+        raise BenchmarkCaptureError("benchmark connection cleanup failed") from errors[0]
 
 
 class _RecordingCursor:
@@ -199,8 +224,7 @@ def _curve_query_and_binding(
     primary = [
         call
         for call in cursor.calls
-        if "FROM hydro.river_timeseries rt" in call[0]
-        and "h.run_type = 'forecast'" in call[0]
+        if "FROM hydro.river_timeseries rt" in call[0] and "h.run_type = 'forecast'" in call[0]
     ]
     if len(primary) != 1:
         raise BenchmarkCaptureError("production curve path did not yield exactly one primary SQL call")
@@ -265,12 +289,10 @@ def _fetch_all(
     return rows
 
 
-def _activity_snapshot(
-    cursor: Any, *, deadline: _Deadline
-) -> tuple[list[dict[str, Any]], str]:
+def _activity_snapshot(cursor: Any, *, deadline: _Deadline) -> tuple[list[dict[str, Any]], str]:
     timeout_ms = deadline.statement_timeout_ms("activity timeout setup")
     cursor.execute(f"SET statement_timeout = {timeout_ms}", ())
-    cursor.execute(f"SET lock_timeout = {LOCK_TIMEOUT_MS}", ())
+    cursor.execute(f"SET lock_timeout = {min(LOCK_TIMEOUT_MS, timeout_ms)}", ())
     deadline.remaining("activity query")
     cursor.execute(ACTIVITY_SQL, ())
     rows = _fetch_all(cursor, deadline=deadline, label="activity", max_rows=1000)
@@ -293,12 +315,10 @@ def _activity_snapshot(
 def _set_statement_bounds(cursor: Any, *, deadline: _Deadline) -> None:
     timeout_ms = deadline.statement_timeout_ms("statement timeout setup")
     cursor.execute(f"SET LOCAL statement_timeout = {timeout_ms}", ())
-    cursor.execute(f"SET LOCAL lock_timeout = {LOCK_TIMEOUT_MS}", ())
+    cursor.execute(f"SET LOCAL lock_timeout = {min(LOCK_TIMEOUT_MS, timeout_ms)}", ())
 
 
-def _plan_payload(
-    cursor: Any, statement: str, parameters: Any, *, deadline: _Deadline
-) -> Any:
+def _plan_payload(cursor: Any, statement: str, parameters: Any, *, deadline: _Deadline) -> Any:
     deadline.remaining("EXPLAIN")
     cursor.execute(EXPLAIN_PREFIX + statement, parameters)
     deadline.remaining("EXPLAIN result")
@@ -338,9 +358,7 @@ def _walk_metric(value: Any, key: str) -> int:
     return 0
 
 
-def _measurement(
-    cursor: Any, statement: str, parameters: Any, *, deadline: _Deadline
-) -> dict[str, Any]:
+def _measurement(cursor: Any, statement: str, parameters: Any, *, deadline: _Deadline) -> dict[str, Any]:
     payload = _plan_payload(cursor, statement, parameters, deadline=deadline)
     root = payload[0] if isinstance(payload, list) else payload
     if not isinstance(root, Mapping):
@@ -374,6 +392,7 @@ def _capture_phase(
         cursor = connection.cursor()
         monitor_connection.set_session(readonly=True, autocommit=True)
         monitor = monitor_connection.cursor()
+
         def bounded_measurement() -> dict[str, Any]:
             deadline.remaining("measurement")
             _set_statement_bounds(cursor, deadline=deadline)
@@ -381,15 +400,11 @@ def _capture_phase(
 
         activity_before, activity_before_at = _activity_snapshot(monitor, deadline=deadline)
         cold = bounded_measurement()
-        activity_after_cold, activity_after_cold_at = _activity_snapshot(
-            monitor, deadline=deadline
-        )
+        activity_after_cold, activity_after_cold_at = _activity_snapshot(monitor, deadline=deadline)
         warmups = [bounded_measurement() for _ in range(2)]
         while warmups[-1]["shared_read_blocks"] > 0 and len(warmups) < 5:
             warmups.append(bounded_measurement())
-        activity_before_measurements, activity_before_measurements_at = _activity_snapshot(
-            monitor, deadline=deadline
-        )
+        activity_before_measurements, activity_before_measurements_at = _activity_snapshot(monitor, deadline=deadline)
         measurements = []
         activity_mid: list[dict[str, Any]] | None = None
         activity_mid_at = ""
@@ -477,16 +492,15 @@ def _capture_phase(
             },
         }
     finally:
+        failure_in_flight = sys.exc_info()[0] is not None
         try:
-            connection.rollback()
-        finally:
-            try:
-                connection.close()
-            finally:
-                monitor_connection.close()
+            _bounded_connection_cleanup(deadline, connection, monitor_connection)
+        except BenchmarkCaptureError:
+            if not failure_in_flight:
+                raise
 
 
-def _default_connect(database_url: str) -> Any:
+def _default_connect(database_url: str, *, connect_timeout: int = CONNECT_TIMEOUT_SECONDS) -> Any:
     try:
         import psycopg2
         from psycopg2.extras import RealDictCursor
@@ -494,7 +508,7 @@ def _default_connect(database_url: str) -> Any:
         raise BenchmarkCaptureError("psycopg2 is required") from error
     return psycopg2.connect(
         database_url,
-        connect_timeout=CONNECT_TIMEOUT_SECONDS,
+        connect_timeout=connect_timeout,
         cursor_factory=RealDictCursor,
     )
 
@@ -521,12 +535,20 @@ def _capture_with_connections(
     """Acquire both connections without leaking a partially acquired primary."""
 
     deadline.remaining(f"{result_kind} primary connection")
-    primary = connect(database_url)
+    remaining = max(1, math.ceil(deadline.remaining(f"{result_kind} primary connect bound")))
+    if connect is _default_connect:
+        primary = connect(database_url, connect_timeout=min(CONNECT_TIMEOUT_SECONDS, remaining))
+    else:
+        primary = connect(database_url)
     try:
         deadline.remaining(f"{result_kind} monitor connection")
-        monitor = connect(database_url)
+        remaining = max(1, math.ceil(deadline.remaining(f"{result_kind} monitor connect bound")))
+        if connect is _default_connect:
+            monitor = connect(database_url, connect_timeout=min(CONNECT_TIMEOUT_SECONDS, remaining))
+        else:
+            monitor = connect(database_url)
     except Exception:
-        primary.close()
+        _bounded_connection_cleanup(deadline, primary)
         raise
     return _capture_phase(
         primary,
@@ -558,6 +580,7 @@ def capture_benchmark_phase(
     connect: Callable[[str], Any] = _default_connect,
 ) -> dict[str, Any]:
     deadline = _Deadline()
+    capture_started_at = deadline.started_at
     deadline.remaining("capture input validation")
     if phase not in {"before", "after"}:
         raise BenchmarkCaptureError("phase must be before or after")
@@ -583,6 +606,11 @@ def capture_benchmark_phase(
         y=mvt_y,
     )
     document = {
+        "execution_bounds": {
+            "started_at": capture_started_at.isoformat().replace("+00:00", "Z"),
+            "finished_at": None,
+            "wall_seconds": PHASE_TIMEOUT_SECONDS,
+        },
         "queries": [
             {
                 "name": "curve",
@@ -634,15 +662,15 @@ def capture_benchmark_phase(
                     deadline=deadline,
                 ),
             },
-        ]
+        ],
     }
+    deadline.remaining("capture finalization")
+    document["execution_bounds"]["finished_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     _reject_secrets(document, database_url)
     return document
 
 
-def merge_benchmark_slices(
-    before_document: Mapping[str, Any], after_document: Mapping[str, Any]
-) -> dict[str, Any]:
+def merge_benchmark_slices(before_document: Mapping[str, Any], after_document: Mapping[str, Any]) -> dict[str, Any]:
     """Merge two immutable phase slices without weakening production identity."""
     before_queries = before_document.get("queries")
     after_queries = after_document.get("queries")
@@ -659,9 +687,7 @@ def merge_benchmark_slices(
         "query_text",
         "binding",
     }
-    for index, (before_value, after_value) in enumerate(
-        zip(before_queries, after_queries, strict=True)
-    ):
+    for index, (before_value, after_value) in enumerate(zip(before_queries, after_queries, strict=True)):
         if not isinstance(before_value, Mapping) or not isinstance(after_value, Mapping):
             raise BenchmarkCaptureError("benchmark query slice must be an object")
         if set(before_value) != static_keys | {"before"}:
@@ -673,7 +699,13 @@ def merge_benchmark_slices(
         merged.append({**dict(before_value), "after": after_value["after"]})
     if [query["name"] for query in merged] != ["curve", "mvt"]:
         raise BenchmarkCaptureError("benchmark query order differs")
-    return {"queries": merged}
+    return {
+        "execution_bounds": {
+            "before": before_document.get("execution_bounds"),
+            "after": after_document.get("execution_bounds"),
+        },
+        "queries": merged,
+    }
 
 
 def _read_json_file(path: Path, label: str) -> Mapping[str, Any]:
@@ -786,9 +818,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise BenchmarkCaptureError("output path must be absolute")
         if args.phase == "before" and args.before_path is not None:
             raise BenchmarkCaptureError("before capture cannot merge a prior slice")
-        if args.phase == "after" and (
-            args.before_path is None or not args.before_path.is_absolute()
-        ):
+        if args.phase == "after" and (args.before_path is None or not args.before_path.is_absolute()):
             raise BenchmarkCaptureError("after capture requires an absolute --before-path")
         before_document: Mapping[str, Any] | None = None
         input_paths = [CURVE_SOURCE, MVT_SOURCE, MVT_ROUTE_SOURCE]

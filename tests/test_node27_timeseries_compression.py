@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
+import inspect
 import json
 import os
 import re
 import subprocess
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -22,6 +25,7 @@ _MIGRATION_PATH = _ROOT / "db/migrations/000047_hypertable_compression_settings.
 _RUNNER_SOURCE_PATH = _ROOT / "scripts/node27_timeseries_compression.py"
 _WRAPPER_PATH = _ROOT / "scripts/node27_timeseries_compression_once.sh"
 _SYSTEMD_SERVICE_PATH = _ROOT / "infra/systemd/nhms-node27-timeseries-compression.service"
+_SYSTEMD_REPLAY_SERVICE_PATH = _ROOT / "infra/systemd/nhms-node27-timeseries-compression-replay.service"
 _SYSTEMD_TIMER_PATH = _ROOT / "infra/systemd/nhms-node27-timeseries-compression.timer"
 
 _NOW = datetime(2026, 7, 11, 12, 0, tzinfo=UTC)
@@ -128,9 +132,7 @@ def test_receipt_and_lock_alias_is_rejected(tmp_path: Path) -> None:
         compression.config_from_args(_args(), env)
 
 
-def test_unsafe_early_receipt_symlink_is_untouched(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_unsafe_early_receipt_symlink_is_untouched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     target = tmp_path / "target.json"
     target.write_text('{"outcome":"stale-clean"}\n', encoding="utf-8")
     link = tmp_path / "receipt.json"
@@ -193,9 +195,7 @@ def test_invalid_config_does_not_replace_receipt_hardlinked_to_lock(
     assert lock_path.read_bytes() == original
 
 
-def test_invalid_config_replaces_disjoint_known_safe_receipt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_invalid_config_replaces_disjoint_known_safe_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     receipt_path = tmp_path / "receipt.json"
     receipt_path.write_text('{"outcome":"stale-clean"}\n', encoding="utf-8")
     env = _base_env(
@@ -211,6 +211,55 @@ def test_invalid_config_replaces_disjoint_known_safe_receipt(
     assert receipt["outcome"] == "failed"
     assert receipt["failure"] == {
         "stage": "config",
+        "mutation_state": "failed_before_mutation",
+    }
+
+
+@pytest.mark.parametrize("missing_parent", [False, True])
+def test_invalid_config_missing_receipt_creates_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing_parent: bool
+) -> None:
+    receipt_path = tmp_path / ("missing/receipt.json" if missing_parent else "receipt.json")
+    env = _base_env(
+        tmp_path,
+        override={
+            "NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH": str(receipt_path),
+            "NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS": "bad",
+        },
+    )
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert compression.main([]) == 1
+    assert not receipt_path.exists()
+    if missing_parent:
+        assert not receipt_path.parent.exists()
+
+
+def test_catalog_discovery_uses_bounded_server_cursor_and_limit() -> None:
+    source = inspect.getsource(compression._default_fetch_chunks)
+    assert "cursor(name=cursor_name" in source
+    assert "LIMIT %s" in source
+    assert "min(_MAX_CATALOG_ROWS, _MAX_CANDIDATES) + 1" in source
+    assert "fetchmany(1000)" in source
+
+
+def test_catalog_over_limit_replaces_known_stale_with_failed_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = _base_env(tmp_path)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    receipt_path = Path(env["NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH"])
+    receipt_path.write_text('{"outcome":"stale-clean"}\n')
+    monkeypatch.setattr(compression, "_current_head_sha", lambda **_kwargs: "a" * 40)
+
+    def over_limit(_dsn: str) -> list[compression.ChunkRow]:
+        raise compression.CompressionConfigError("catalog discovery exceeds the row/candidate ceiling")
+
+    assert compression.main([], now_utc=_NOW, fetch_chunks=over_limit) == 1
+    marker = json.loads(receipt_path.read_text())
+    assert marker["failure"] == {
+        "stage": "runner",
         "mutation_state": "failed_before_mutation",
     }
 
@@ -245,13 +294,8 @@ def test_classify_partitions_by_lag_window() -> None:
 
 
 def test_classify_respects_per_tick_bound() -> None:
-    chunks = [
-        _chunk("hydro", "river_timeseries", f"c{i:02d}", delta_days=30 - i)
-        for i in range(8)
-    ]
-    selected, deferred, skipped = compression._classify(
-        chunks, now_utc=_NOW, lag_seconds=7 * 86400, per_tick_bound=3
-    )
+    chunks = [_chunk("hydro", "river_timeseries", f"c{i:02d}", delta_days=30 - i) for i in range(8)]
+    selected, deferred, skipped = compression._classify(chunks, now_utc=_NOW, lag_seconds=7 * 86400, per_tick_bound=3)
     assert len(selected) == 3
     assert len(deferred) == 5
     assert skipped == []
@@ -300,8 +344,11 @@ def test_dry_run_never_compresses(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     ]
     calls, fake_fetch, fake_measure, fake_compress = _install_stubs(monkeypatch, chunks=chunks)
     receipt = compression.build_receipt(
-        config, now_utc=_NOW,
-        fetch_chunks=fake_fetch, measure_chunk_bytes=fake_measure, compress_chunk=fake_compress,
+        config,
+        now_utc=_NOW,
+        fetch_chunks=fake_fetch,
+        measure_chunk_bytes=fake_measure,
+        compress_chunk=fake_compress,
     )
     assert calls["compress"] == []
     assert receipt["mode"] == "dry-run"
@@ -320,8 +367,11 @@ def test_enforce_calls_compress_for_each_selected(tmp_path: Path, monkeypatch: p
     ]
     calls, fake_fetch, fake_measure, fake_compress = _install_stubs(monkeypatch, chunks=chunks)
     receipt = compression.build_receipt(
-        config, now_utc=_NOW,
-        fetch_chunks=fake_fetch, measure_chunk_bytes=fake_measure, compress_chunk=fake_compress,
+        config,
+        now_utc=_NOW,
+        fetch_chunks=fake_fetch,
+        measure_chunk_bytes=fake_measure,
+        compress_chunk=fake_compress,
     )
     assert calls["compress"] == ["old-a", "old-b", "old-c"]
     # cand-A: the second measure call must be routed with after=True so that
@@ -373,8 +423,11 @@ def test_per_chunk_failure_isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPa
             raise RuntimeError("simulated compress_chunk failure")
 
     receipt = compression.build_receipt(
-        config, now_utc=_NOW,
-        fetch_chunks=fake_fetch, measure_chunk_bytes=fake_measure, compress_chunk=fake_compress,
+        config,
+        now_utc=_NOW,
+        fetch_chunks=fake_fetch,
+        measure_chunk_bytes=fake_measure,
+        compress_chunk=fake_compress,
         reconcile_chunk_state=lambda _dsn, _chunk: False,
     )
     by_name = {d["chunk_name"]: d for d in receipt["selected"]}
@@ -422,9 +475,7 @@ def test_lost_commit_ack_with_unavailable_reconciliation_is_indeterminate(
         fetch_chunks=lambda _dsn: [chunk],
         measure_chunk_bytes=lambda _dsn, _chunk, *, after=False: 100,
         compress_chunk=lambda _dsn, _chunk: (_ for _ in ()).throw(RuntimeError("lost ack")),
-        reconcile_chunk_state=lambda _dsn, _chunk: (_ for _ in ()).throw(
-            RuntimeError("catalog unavailable")
-        ),
+        reconcile_chunk_state=lambda _dsn, _chunk: (_ for _ in ()).throw(RuntimeError("catalog unavailable")),
     )
 
     assert receipt["selected"][0]["mutation_state"] == "indeterminate"
@@ -473,8 +524,11 @@ def test_measure_after_failure_isolated(tmp_path: Path, monkeypatch: pytest.Monk
         return None
 
     receipt = compression.build_receipt(
-        config, now_utc=_NOW,
-        fetch_chunks=fake_fetch, measure_chunk_bytes=fake_measure, compress_chunk=fake_compress,
+        config,
+        now_utc=_NOW,
+        fetch_chunks=fake_fetch,
+        measure_chunk_bytes=fake_measure,
+        compress_chunk=fake_compress,
     )
     by_name = {d["chunk_name"]: d for d in receipt["selected"]}
     assert "error" not in by_name["good"]
@@ -495,9 +549,7 @@ def test_measure_after_failure_isolated(tmp_path: Path, monkeypatch: pytest.Monk
     jsonschema.validate(receipt, _load_schema())
 
 
-def test_after_fail_poisons_per_table_after_bytes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_after_fail_poisons_per_table_after_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """cand-H: mixed success + after-fail in one hypertable nulls after_bytes.
 
     Constructs two chunks in ``hydro.river_timeseries``: A succeeds with a
@@ -541,9 +593,7 @@ def test_after_fail_poisons_per_table_after_bytes(
     jsonschema.validate(receipt, _load_schema())
 
 
-def test_compress_fail_poisons_per_table_after_bytes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_compress_fail_poisons_per_table_after_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Round-3 R3-01: mixed success + compress-fail in one hypertable.
 
     Direct analog of ``test_after_fail_poisons_per_table_after_bytes`` but for
@@ -623,8 +673,11 @@ def test_measure_before_failure_isolated(tmp_path: Path, monkeypatch: pytest.Mon
         compressed_names.append(chunk.chunk_name)
 
     receipt = compression.build_receipt(
-        config, now_utc=_NOW,
-        fetch_chunks=fake_fetch, measure_chunk_bytes=fake_measure, compress_chunk=fake_compress,
+        config,
+        now_utc=_NOW,
+        fetch_chunks=fake_fetch,
+        measure_chunk_bytes=fake_measure,
+        compress_chunk=fake_compress,
     )
     by_name = {d["chunk_name"]: d for d in receipt["selected"]}
     # Failing chunk carries the error and never entered compress_chunk.
@@ -650,9 +703,7 @@ def test_measure_before_failure_isolated(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 @pytest.mark.parametrize("failure_path", ["before-fail", "compress-fail", "after-fail"])
-def test_partial_receipt_totals_stay_locked_across_all_failure_paths(
-    tmp_path: Path, failure_path: str
-) -> None:
+def test_partial_receipt_totals_stay_locked_across_all_failure_paths(tmp_path: Path, failure_path: str) -> None:
     """One high-level invariant test across all three per-chunk failure paths.
 
     For every failure path (before-measurement, compress_chunk, after-measurement)
@@ -745,6 +796,7 @@ def test_main_publishes_refused_lock_receipt_without_db_calls(
     def fail_fetch(dsn: str) -> list[compression.ChunkRow]:
         db_calls.append(dsn)
         raise AssertionError("lock contender must not call the database")
+
     try:
         code = compression.main(argv=[], now_utc=_NOW, fetch_chunks=fail_fetch)
     finally:
@@ -795,8 +847,11 @@ def test_receipt_validates_against_schema(tmp_path: Path, monkeypatch: pytest.Mo
     calls, fake_fetch, fake_measure, fake_compress = _install_stubs(monkeypatch, chunks=chunks)
     # per_tick_bound=5, we should see 5 selected, 1 deferred, 1 skipped
     receipt = compression.build_receipt(
-        config, now_utc=_NOW,
-        fetch_chunks=fake_fetch, measure_chunk_bytes=fake_measure, compress_chunk=fake_compress,
+        config,
+        now_utc=_NOW,
+        fetch_chunks=fake_fetch,
+        measure_chunk_bytes=fake_measure,
+        compress_chunk=fake_compress,
     )
     jsonschema.validate(receipt, _load_schema())
     assert receipt["schema_version"] == "2.0"
@@ -804,9 +859,11 @@ def test_receipt_validates_against_schema(tmp_path: Path, monkeypatch: pytest.Mo
     assert len(receipt["selected"]) == 5
     assert len(receipt["deferred"]) == 1
     assert len(receipt["skipped"]) == 1
+
     # Disjointness by (hypertable_schema, hypertable_name, chunk_name)
     def _key(d):
         return (d["hypertable_schema"], d["hypertable_name"], d["chunk_name"])
+
     selected_keys = {_key(d) for d in receipt["selected"]}
     deferred_keys = {_key(d) for d in receipt["deferred"]}
     skipped_keys = {_key(d) for d in receipt["skipped"]}
@@ -846,9 +903,7 @@ def test_schema_keeps_v1_read_compatibility_but_v2_requires_head_sha() -> None:
 
 def _example_receipt() -> dict:
     return json.loads(
-        (_ROOT / "schemas/examples/timeseries_compression_receipt.example.json").read_text(
-            encoding="utf-8"
-        )
+        (_ROOT / "schemas/examples/timeseries_compression_receipt.example.json").read_text(encoding="utf-8")
     )
 
 
@@ -967,9 +1022,7 @@ def test_migration_has_no_transaction_wrapper() -> None:
         executable,
         flags=re.IGNORECASE,
     )
-    assert forbidden is None, (
-        f"migration must not wrap ALTERs in a transaction block; matched: {forbidden.group(0)!r}"
-    )
+    assert forbidden is None, f"migration must not wrap ALTERs in a transaction block; matched: {forbidden.group(0)!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -1043,11 +1096,7 @@ def test_dsn_never_appears_in_config_failure_stderr(
     err = capsys.readouterr().err
     assert "supersekret" not in err
     assert "alice" not in err
-    marker = json.loads((tmp_path / "receipt.json").read_text(encoding="utf-8"))
-    assert marker["schema_version"] == "2.0"
-    assert marker["outcome"] == "failed"
-    assert marker["provenance_state"] == "unavailable"
-    jsonschema.validate(marker, _load_schema())
+    assert not (tmp_path / "receipt.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -1066,9 +1115,7 @@ def test_dsn_never_appears_in_config_failure_stderr(
         ("symlink-script", "compression entrypoint is unavailable or a symlink"),
     ],
 )
-def test_compression_wrapper_rejects_unsafe_runtime_contract(
-    tmp_path: Path, case: str, expected_reason: str
-) -> None:
+def test_compression_wrapper_rejects_unsafe_runtime_contract(tmp_path: Path, case: str, expected_reason: str) -> None:
     wrapper = _WRAPPER_PATH
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -1076,7 +1123,7 @@ def test_compression_wrapper_rejects_unsafe_runtime_contract(
     stat_shim.write_text(
         "#!/bin/sh\n"
         "for last do :; done\n"
-        "case \"$last\" in\n"
+        'case "$last" in\n'
         "  *bad-mode.env) printf '644\\n' ;;\n"
         "  *) printf '600\\n' ;;\n"
         "esac\n",
@@ -1134,21 +1181,11 @@ def test_compression_wrapper_rejects_unsafe_runtime_contract(
 
 def test_timeseries_compression_service_bootstraps_log_dir() -> None:
     service_text = _SYSTEMD_SERVICE_PATH.read_text(encoding="utf-8")
-    assert (
-        "ExecStartPre=/usr/bin/mkdir -p /home/nwm/node27-timeseries-compression-logs"
-        in service_text
-    )
-    assert (
-        "StandardOutput=append:/home/nwm/node27-timeseries-compression-logs/systemd.log"
-        in service_text
-    )
+    assert "ExecStartPre=/usr/bin/mkdir -p /home/nwm/node27-timeseries-compression-logs" in service_text
+    assert "StandardOutput=append:/home/nwm/node27-timeseries-compression-logs/systemd.log" in service_text
     lines = service_text.splitlines()
-    pre_index = next(
-        i for i, line in enumerate(lines) if line.startswith("ExecStartPre=")
-    )
-    start_index = next(
-        i for i, line in enumerate(lines) if line.startswith("ExecStart=")
-    )
+    pre_index = next(i for i, line in enumerate(lines) if line.startswith("ExecStartPre="))
+    start_index = next(i for i, line in enumerate(lines) if line.startswith("ExecStart="))
     assert pre_index < start_index
 
 
@@ -1168,19 +1205,64 @@ def test_compressed_sibling_lookup_matches_timescaledb_210_catalog() -> None:
 def test_systemd_service_enforces_but_manual_wrapper_defaults_to_dry_run() -> None:
     service_text = _SYSTEMD_SERVICE_PATH.read_text(encoding="utf-8")
     exec_lines = [line for line in service_text.splitlines() if line.startswith("ExecStart=")]
-    assert exec_lines == [
-        "ExecStart=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh --enforce"
-    ]
-    wrapper_text = _WRAPPER_PATH.read_text(encoding="utf-8")
-    assert (
-        'exec /usr/bin/timeout --signal=TERM --kill-after=30s 900s '
-        '"$PYTHON_BIN" "$SCRIPT" "$@"'
-    ) in wrapper_text
-    assert '"$SCRIPT" --enforce' not in wrapper_text
+    assert exec_lines == ["ExecStart=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh --enforce"]
+    assert "node27_timeseries_compression_supervisor.py" not in service_text
     assert "TimeoutStartSec=940" in service_text
+    wrapper_text = _WRAPPER_PATH.read_text(encoding="utf-8")
+    assert ('exec /usr/bin/timeout --signal=TERM --kill-after=30s 900s "$PYTHON_BIN" "$SCRIPT" "$@"') in wrapper_text
+    assert '"$SCRIPT" --enforce' not in wrapper_text
+
+
+def test_replay_service_is_explicit_no_timer_supervisor_lane() -> None:
+    replay = _SYSTEMD_REPLAY_SERVICE_PATH.read_text(encoding="utf-8")
+    assert "node27_timeseries_compression_supervisor.py --enforce" in replay
+    for option in (
+        "--run-plan-path /home/nwm/node27-timeseries-compression-replay/run-plan.json",
+        "--ledger-path /home/nwm/node27-timeseries-compression-replay/supervisor-ledger.jsonl",
+        "--receipt-path /home/nwm/node27-timeseries-compression-replay/terminal-evidence.json",
+        "--finalizer-state-path /home/nwm/node27-timeseries-compression-replay/finalizer-state.json",
+        "--wall-seconds 900",
+    ):
+        assert option in replay
+    assert "ExecStopPost=" in replay and "--finalize-only" in replay
+    assert "TimeoutStartSec=920" in replay
+    assert not (_ROOT / "infra/systemd/nhms-node27-timeseries-compression-replay.timer").exists()
+    env_example = (_ROOT / "infra/env/node27-timeseries-compression-replay.example").read_text()
+    assert "NODE27_COMPRESSION_EXPECTED_STALE_SHA256=REPLACE_WITH_64_HEX_DIGEST" in env_example
 
 
 def test_timeseries_compression_timer_oncalendar_and_unit_wiring() -> None:
     timer_text = _SYSTEMD_TIMER_PATH.read_text(encoding="utf-8")
     assert "OnCalendar=*-*-* 04:25:00 UTC" in timer_text
     assert "Unit=nhms-node27-timeseries-compression.service" in timer_text
+
+
+def test_early_failure_publisher_lock_is_deadline_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receipt = tmp_path / "receipt.json"
+    raw = b'{"outcome":"newer"}\n'
+    receipt.write_bytes(raw)
+    info = receipt.stat()
+    target = compression._SafeReceiptTarget(
+        receipt,
+        info.st_dev,
+        info.st_ino,
+        hashlib.sha256(raw).hexdigest(),
+    )
+    lock_fd = os.open(receipt.with_name(f".{receipt.name}.publish.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    monkeypatch.setattr(compression, "PUBLISH_LOCK_TIMEOUT_SECONDS", 0.05)
+    started = time.monotonic()
+    try:
+        compression._replace_early_stale_with_failure(
+            target,
+            enforce=True,
+            now_utc=_NOW,
+            stage="held-lock",
+        )
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+    assert time.monotonic() - started < 0.5
+    assert receipt.read_bytes() == raw

@@ -116,8 +116,9 @@ found reusable false-PASS paths. The terminal verdict is therefore no longer
 task-4.5 acceptance evidence; it is not edited or relabeled.
 
 The strengthened contract requires evidence that the recorded replay did not
-persist: ordered immutable invocation ledgers for both migration applies,
-decompression, dry-run, and enforce; a dump-bound `pg_restore --list` artifact
+persist: one supervisor-owned append-only ledger for both migration applies,
+decompression, dry-run, enforce, dump/container `pg_restore`, and benchmarks;
+a dump-bound container `pg_restore --list` artifact
 and exact pre-migration catalog shape; timestamped pre/post/catalog snapshot
 identities; prior-to-final systemd state, installed/repository unit bytes,
 resolved `ExecStart`, activation-window journals; production-owner request
@@ -143,18 +144,111 @@ failures, secrets in otherwise benign text, contradictory compressed-relation
 lists, stale terminal outputs and a self-asserted timeout.
 
 The current verifier therefore accepts task 4.5 only from a version `3.0`
-terminal with `qualifies_task_4_5=true`. It retains all five invocation refs,
-the descriptor-bound PG15 dump-list proof, execution audit, unique snapshot
+terminal with `qualifies_task_4_5=true`. It derives invocation identity and
+chronology from the supervisor ledger rather than the legacy authored
+invocation JSON. It retains the descriptor-bound PG15 dump-list proof, unique snapshot
 IDs, one global chronology and the complete source manifest. The reviewed
 repository is exactly `/home/nwm/NWM`, remote identity `DankerMu/SHUD-NWM`,
 and the authorization-pinned remote-tracking SHA. Query plans use exact
 structural relation fields; the seven-day curve uses half-open overlap
-semantics. The runner wrapper now executes the real 900-second timeout launcher
-and the service has a finite consistent `TimeoutStartSec`.
+semantics. The recurring service remains the finite bounded wrapper `--enforce`
+lane. The one-off supervisor is isolated in the separate no-timer replay
+service, whose explicit reviewed paths, finite `TimeoutStartSec`, process-group
+hard wall and single-use CAS finalizer in `ExecStopPost` cannot leak into the
+timer lane. A qualifying replay records exactly one replay-service activation
+while the recurring timer/service activation count stays zero.
+
+The qualifying v3 producer additionally requires an external SHA-256 pin for
+the immutable run plan, exact per-kind argv, and clean checkout/origin/SHA
+lineage before the first spawn. Semantic outputs are in one producer
+bijection: children own only files their argv writes; all catalog, selector,
+size, preflight and cleanup facts are explicit supervisor capture steps at
+their real state-machine positions. Each owner requires an absent destination
+and every ledger association stores path/bytes/hash plus device/inode for
+later identity revalidation. Raw checkpoints are supervisor-produced under
+the same rule. The sole-DB-user
+attestation is the explicitly selected operating model; it remains a stated
+trust limit rather than an invented database audit.
+
+The single replay activation is derived from canonical `systemctl show`: the
+`Type=oneshot` unit is executing as `activating/start`, its `MainPID` equals the supervisor, its non-empty
+`INVOCATION_ID` matches every ledger event, and its UTC/monotonic start stamps
+are present. Cursor-bounded journal proves only that no second replay ID and no
+recurring activation occurred; same-ID log noise is ignored. Real user-journal
+records evaluate `_SYSTEMD_USER_UNIT` and `USER_UNIT` independently: either
+exact governed value is classified, differing governed values conflict, and
+`_SYSTEMD_USER_UNIT=init.scope` cannot hide a governed `USER_UNIT`.
+`_SYSTEMD_UNIT=user@<uid>.service` is only manager context; exact
+`_SYSTEMD_UNIT`/`UNIT` fallback is allowed only when both user-unit fields are
+absent. This shape must be checked on node-27 before live start. It is never
+injected as a scalar count. Git probes and all CAS publication locks share the
+finite hard wall, including reserved finalizer budget. Provenance-bound finalizer
+state and failure tombstones retain the mutation SHA even through
+`ExecStopPost`, repeat, timeout, and publish-race handling.
+Once closure/disjointness is proven and the old terminal identity is frozen,
+failure to establish provenance replaces a prior PASS with a schema-valid v3
+nonqualifying `provenance_state=unavailable` tombstone. It carries only the
+safe stage/reason, expected old identity, and independently trusted verifier
+SHA when one exists; it never fabricates run or mutation identity. A failure
+before that safety boundary leaves the terminal and all adjacent state absent
+or unchanged.
+
+The recovery child is the committed bounded Python producer, not plain `psql`
+output: its pinned argv names the exact target, mutation SHA and receipt path;
+it verifies compressed pre-state/positive rows, performs one decompression,
+reconciles relation/state/row parity, and atomically writes the receipt. The
+main wall gives every ordinary step only a shorter operation wall, reserving
+TERM/KILL/drain and terminal publication time. Lock timeout keeps finalizer or
+verifier failure intent retryable; only successful replacement or proof of a
+newer terminal consumes that state.
+
+A terminal is not authoritative while its adjacent active intent directory is
+pending. Consumers, failure invalidation, and publishers all acquire the
+bounded intent gate before any terminal lock. The active directory contains
+mode-0600 canonical `intent.json` plus `identity.json`; file and parent fsync,
+parent identity revalidation, and gate↔sidecar↔intent inode/digest cross-binding
+make the state durable across fresh processes. The sidecar also pins the exact
+failure-payload digest, schema and run/verifier/mutation identities. Same-byte
+inode replacement, sidecar tampering/replacement, secrets, links, or evidence
+input aliases remain fail-closed. A verified failure/PASS atomically renames
+the exact pair out of the active namespace, fsyncs the parent, removes only the
+validated pair, and durably returns the gate to idle. Immediately before
+unlink, the consumer first persists a fsynced `committed_cleanup` gate phase
+that binds the durable terminal identity, expected predecessor, both entry
+names/full identities, consumed-directory inode, digest, and provenance
+context. Deletion is strictly
+intent then sidecar, with a child-directory fsync after each unlink; directory
+removal is parent-fsynced before the gate can become durably idle. Fresh
+processes recover both-files, sidecar-only, zero-files, and directory-absent
+prefixes. The reverse one-file prefix is unreachable by construction and is
+rejected. Every survivor is descriptor-read for exact identity and canonical
+binding immediately before deletion, so tampering or foreign entries remain
+untouched. A changed terminal permits cleanup only under schema-valid explicit
+newer-wins provenance. Terminal locks are
+opened by basename through the gate's already anchored parent descriptor and
+validated as no-follow, regular, single-link, mode-0600 files with matching
+inode; swapping the visible parent namespace cannot redirect lock creation.
+The implementation is singular:
+`packages/common/compression_terminal_state.py` serves the verifier,
+supervisor and `ExecStopPost` finalizer. The supervisor never opens the
+publication lock or atomically replaces the terminal itself. Its retry state
+binds the exact stale device/inode/bytes/digest and run/mutation SHA. Shared
+reconciliation permits an unavailable verifier intent to become a bound
+finalizer tombstone only for that same expected terminal identity, retains
+pending/finalizer state on timeout or ambiguity, and consumes state only after
+a complete publication or a schema-valid authoritative newer terminal.
+
+Version-3 failure branches are disjoint in the schema:
+`provenance_state=unavailable` requires the exact safe `failure_context` and
+forbids run/mutation
+identity, while `provenance_state=bound` requires `run_id` plus
+`mutation_head_sha` and forbids `failure_context`. A qualifying version-3 PASS
+explicitly forbids every failure-only field. Historical version-2 JSON remains
+readable and nonqualifying.
 
 All committed 2026-07-15 JSON remains byte-identical and schema-readable as
 superseded version-2 history, but it cannot set the qualifying discriminator.
-It also lacks the new producer-owned global chronology, complete audit journal,
-resolved launcher provenance and descriptor-bound dump inspection. Those facts
+It also lacks the new producer-owned global chronology, raw quiescence
+checkpoints, resolved launcher provenance and descriptor-bound dump inspection. Those facts
 cannot be reconstructed by editing old envelopes. Task 4.5 remains open and a
 new controlled mutation replay still requires separate authorization.

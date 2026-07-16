@@ -1,5 +1,5 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "NHMS Node-27 Timeseries Compression Runner Receipt",
   "type": "object",
   "additionalProperties": false,
@@ -12,6 +12,7 @@
   "properties": {
     "schema_version": {"enum": ["1.0", "2.0"]},
     "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "mutation_head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "provenance_state": {"enum": ["bound", "unavailable"]},
     "generated_at": {"type": "string", "format": "date-time"},
     "now_utc": {"type": "string", "format": "date-time"},
@@ -107,8 +108,8 @@
               "properties": {"provenance_state": {"const": "bound"}},
               "required": ["provenance_state"]
             },
-            "then": {"required": ["head_sha"]},
-            "else": {"not": {"required": ["head_sha"]}}
+            "then": {"required": ["head_sha", "mutation_head_sha"]},
+            "else": {"not": {"anyOf": [{"required": ["head_sha"]}, {"required": ["mutation_head_sha"]}]}}
           }
         ]
       },

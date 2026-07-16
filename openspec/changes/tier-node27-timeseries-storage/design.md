@@ -931,13 +931,13 @@ requires all of the following producer-independent proof:
   replace stale success with a versioned tombstone, while unsafe/unknown/input-
   alias paths remain untouched.
 - The terminal retains both migration invocations, recovery, dry-run and
-  enforce invocations, real dump-list proof, execution audit, chronology and
-  source manifest. The locked audit namespace derives exact counts and proves
-  no direct DB mutation bypass. Each invocation binds resolved repository/
-  interpreter/script/wrapper/env paths, actual timeout launcher argv, exit and
-  receipt/catalog association. Repo provenance is exactly `/home/nwm/NWM`,
-  `DankerMu/SHUD-NWM`, and the authorization-pinned origin remote-tracking SHA
-  with a clean tracked worktree.
+  enforce invocations, real dump-list proof, supervisor-owned execution
+  ledger, chronology and source manifest. The locked ledger namespace derives
+  exact counts for the controlled lane. Each invocation binds resolved
+  repository/interpreter/script/wrapper/env paths, actual timeout launcher
+  argv, exit and receipt/catalog association. Repo provenance is exactly
+  `/home/nwm/NWM`, `DankerMu/SHUD-NWM`, and the authorization-pinned origin
+  remote-tracking SHA with a clean tracked worktree.
 - One non-overlapping chronology covers dump/catalog-before, both migration/
   catalog pairs, recovery, compression preflight, dry-run, post-dry selector,
   before benchmark, pre-enforce selector/size, enforce, post-size/catalog,
@@ -961,6 +961,232 @@ requires all of the following producer-independent proof:
   `Relation Name`/`Schema` fields on the same node; substring, Filter, alias
   and child-node decoys fail. Snapshot counts and unique origin/sibling
   relations are bijective, table-owned and cross-table disjoint.
+
+#### Round-3 Review Failure Retro decision: supervisor ledger trust boundary
+
+The user selected the supervisor-ledger acceptance contract after the
+read-only node-27 capability audit established that PostgreSQL 15.2 on this
+host has no `pgaudit`, `pg_stat_statements`, or complete successful-statement
+logging. Task 4.5 therefore does **not** claim database-audit proof that no
+other session could have issued direct mutation SQL. The qualifying v3 replay
+instead requires all of the following, and the terminal must describe this
+limit without stronger wording:
+
+- One persistent controlled supervisor owns every authorized migration,
+  decompression, dry-run, enforce, dump inspection and benchmark child. It
+  writes the concrete executable argv, monotonic start/finish, child PID,
+  bounded stdout/stderr identities, exit status and associated artifact hashes
+  directly from the execution path; operator-authored summary JSON cannot
+  substitute for these records.
+- The supervisor ledger is append-only within the run, invocation IDs are
+  unique, ledger order and artifact associations are derived rather than
+  declared, and the pure verifier recomputes exact authorized cardinality and
+  chronology from retained ledger events. The mutation allowlist and exact
+  cardinality are `migration_apply=2`, `decompress=1`, `compression_dry_run=1`,
+  `compression_enforce=1`, `compression_service_activation=0`, and every
+  retention/drill/role/node-22 mutation kind `=0`. Read-only subprocess
+  cardinality is `pg_dump=1`, `pg_restore_version=1`, `pg_restore_list=1`,
+  `benchmark_before=1`, `benchmark_after=1`, and
+  `replay_supervisor_activation=1`; capture checkpoints are enumerated by the
+  immutable run plan and must match it bijectively. The existing recurring
+  compression service activation remains zero during the replay.
+- Immediately before and after every mutation invocation, plus at preflight,
+  postflight and cleanup, the supervisor captures raw `pg_stat_activity`,
+  conflicting relation-lock, `systemctl show`, and cursor-bounded journal
+  artifacts. Acceptance means all retained checkpoints and the complete
+  bounded journal window contain no observed conflicting writer, lock or
+  service activation, and the ledger contains no unowned event. These are
+  discrete observations plus retained manager journals, not continuous
+  database statement auditing.
+- Authorization records the explicit operator attestation that this replay's
+  operator is the only DB user permitted to issue mutation SQL during the
+  window. This attestation is a trust prerequisite, not database-level audit
+  evidence. The terminal verdict is therefore “controlled lane executed
+  exactly once with no observed conflict”, never “absolute zero direct DB
+  bypass”.
+
+This decision resolves only the execution-audit truth-source ambiguity. All
+other Round-3 confirmed blockers remain mandatory: current-D3 replay support,
+concrete argv binding, canonical installed-unit evidence, transitive artifact
+closure and alias freeze, process-level timeout/finalization, bounded
+`pg_restore` capture, strict plan derivation, producer resource ceilings,
+complete snapshot bijection, strict chronology and nested schema requirements.
+
+##### Round-3 invariant matrix and regression contract
+
+Governing invariant: only a controlled supervisor may produce qualifying v3
+evidence; it owns execution and raw observations, an immutable bounded graph
+retains their identity, and a pure verifier derives every acceptance summary
+without treating operator-authored summaries as facts.
+
+Source-of-truth identity/contract: immutable run-plan ID, supervisor run ID,
+append-only event IDs, concrete argv/PID/monotonic time/exit identity,
+descriptor-pinned artifact `(path, dev, ino, size, sha256)`, mutation SHA,
+database identity, canonical user-unit path, and schema version `3.0`.
+
+Surfaces:
+
+- Producers: one persistent supervisor plus the existing compression runner
+  and benchmark child; no verifier-owned command execution or summary authoring.
+- Validators/preflight: run-plan/argv allowlist, current exact-D3 catalog,
+  canonical repo/Git/container/tool/unit identity, sole-DB-user attestation,
+  discrete DB/systemd quiescence checkpoints, and output/input alias freeze.
+- Storage/cache/query: append-only supervisor ledger, descriptor-pinned raw
+  observations, bounded transitive artifact graph, selector/catalog/size/plan
+  snapshots, and schema-valid failure tombstones.
+- Public routes/entrypoints: supervisor CLI, compression wrapper/runner,
+  benchmark CLI, live-evidence pure-verifier CLI, and finite user-systemd unit.
+- Failure paths/rollback/stale state: process timeout TERM/KILL/reap, shared
+  idempotent compare-and-swap finalizer, safe stale-success replacement,
+  partial-commit reconciliation, and untouched unsafe/aliased destinations.
+- Evidence/audit/readiness: run plan -> supervisor ledger/raw observations ->
+  bounded transitive graph -> pure verifier -> v3 terminal -> Task 4.5. The
+  sole-DB-user attestation is a trust prerequisite and cannot be promoted to
+  database-level bypass proof.
+- Unchanged consumers: historical v1/v2 receipts remain byte-identical and
+  readable but cannot qualify; display, ingest, retention, drill and node-22
+  remain outside this replay's mutation set. The recurring
+  `nhms-node27-timeseries-compression.service` and its timer keep their bounded
+  wrapper `--enforce` behavior; the one-off replay supervisor runs from a
+  separate no-timer `nhms-node27-timeseries-compression-replay.service`.
+
+Hard-wall owner: one supervisor deadline starts before the first connection or
+child. Every connect timeout, SQL timeout, child wait, bounded output drain and
+cleanup/finalizer step is capped by the remaining budget. On expiry the
+supervisor signals the complete child process group with TERM, then KILL after
+the fixed grace, caps post-KILL pipe drain, closes inherited descriptors, reaps
+the direct child, reconciles possible mutation, and invokes the shared
+idempotent compare-and-swap finalizer. A known safe stale success is atomically
+replaced with a schema-valid `indeterminate` tombstone; missing/unsafe/aliased
+destinations remain untouched. All success/failure publishers use the same
+lock/CAS primitive, and finalizer state is run-scoped and consumed exactly
+once. Finite timeout plus `ExecStopPost` on the separate no-timer replay unit
+is an outer backstop using the same finalizer contract, not the primary truth
+owner. The recurring timer service remains the bounded wrapper entrypoint and
+does not run migration, decompression, or the issue-specific replay plan.
+
+Regression rows (each row requires a focused positive and negative test):
+
+- Current exact D3 + the two idempotent migration applies -> pass without
+  fabricated false/empty pre-state; non-D3 drift -> fail before compression.
+- Concrete executable argv exactly matching the immutable run plan -> pass;
+  placeholder, shell template, inherited path/runtime override or wrong argv ->
+  fail before execution or terminal qualification.
+- Exact mutation/read-only event cardinality plus raw checkpoint/journal refs ->
+  controlled-lane proof; missing/extra/unowned event or authored count -> fail.
+- Supervisor hashes every produced receipt/catalog/selection/size/benchmark
+  artifact after child exit and records the observed association in the child
+  event; legacy authored invocation JSON/timestamps/placeholder argv cannot
+  contribute to v3 truth. All terminal chronology and bindings derive only
+  from ordered ledger events and their observed artifact associations.
+- Child ownership is restricted to files the exact child command actually
+  emits. Preflight, recovery preflight, catalog, selector, size and cleanup
+  observations are explicit supervisor-owned capture events at their truthful
+  pre/post state-machine positions; each capture executes the pinned query or
+  canonical systemd probe and atomically writes its own artifact. No command
+  event may claim an observation that must exist before it starts or after a
+  later state transition. A harmless end-to-end producer fixture must execute
+  the real state machine and create every owned output without an out-of-band
+  writer.
+- Canonical `/home/nwm/.config/systemd/user` regular unit paths plus raw
+  `systemctl show` and cursor-bounded journal artifacts -> pass; arbitrary
+  same-byte path or authored state/activation summary -> fail.
+- Before any write, recursively resolve the complete artifact closure with
+  cycle, depth, node and byte ceilings, freeze normalized path and inode aliases,
+  and require manifest equality to that closure; nested output alias, hardlink,
+  cycle, late ref or incomplete manifest -> no write and unchanged inputs.
+- Child blocks beyond remaining wall budget -> TERM/KILL/drain/reap,
+  reconciliation and schema-valid indeterminate tombstone; stale PASS cannot
+  survive a possible commit or timeout. A forked grandchild that ignores TERM
+  and holds pipes must also be killed and bounded; blocking connection cleanup
+  cannot extend the capture-wide wall.
+- Benchmark deadline begins before connection acquisition and bounds connects,
+  SQL, activity/result/plan capture and cleanup by remaining time; any
+  capture-wide span over the wall, blocking cleanup, or fixed connect timeout
+  exceeding remaining time -> fail.
+- Container-bound PG15 `pg_restore --version/--list` streams stdout/stderr to
+  independent byte ceilings while the child runs; over-limit output terminates
+  and reaps the child without full allocation, while valid bounded output binds
+  image ID, binary realpath/version/hash, argv and dump descriptor digest.
+- Plans use `EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON)` and the same
+  `Custom Scan` node must bind non-empty exact Schema, Relation Name, Alias and
+  `DecompressChunk`; missing schema, cross-schema same-name, Filter/child/alias
+  decoy or pre-plan decompression -> fail.
+- Timing, row and buffer summaries are recomputed only from retained raw plan
+  trees and samples; any authored/redundant summary mismatch -> fail.
+- Catalog discovery is streamed or paged under one shared runner/verifier row,
+  byte and candidate ceiling; boundary count preserves stable order, over-limit
+  input writes a bounded failed-before-mutation tombstone.
+- Pre/post snapshots prove exact full origin-to-compressed-sibling maps,
+  selected mapping, uncompressed `-1` for the selected origin before enforce,
+  total chunk stability, selected-table `+1`, sibling-table `+0`, and no other
+  add/delete/rename; any drift -> fail.
+- Invalid configuration with a missing receipt or parent creates nothing;
+  only a disjoint existing regular stale receipt may receive a config-failure
+  tombstone; symlink/hardlink/alias/unknown destination stays untouched.
+- Every state-changing invocation has `start < finish`, and every global state
+  boundary is strictly ordered with `<`; equality, zero duration or collapsed
+  catalog/size/selector boundary -> fail.
+- The v3 schema requires benchmark `request` and each phase's
+  `execution_bounds`; deleting either fails schema validation. Historical v2
+  readability never supplies `qualifies_task_4_5=true`.
+- Recurring timer unit + ordinary tick -> unchanged bounded wrapper `--enforce`
+  behavior; one-off replay unit + reviewed plan/env/state -> exactly one
+  supervisor activation whose MainPID is allowed while all recurring
+  compression unit activations remain zero. Missing replay inputs fail before
+  mutation without affecting the recurring service.
+- Replay activation count `1` derives from canonical replay-unit
+  `systemctl show` fields whose executing `Type=oneshot` state is the canonical
+  `activating/start`, and whose nonzero `MainPID`, `InvocationID`, start
+  timestamps and unit path match the running supervisor. Cursor-bounded
+  structured journals prove no additional replay invocation and no recurring
+  compression activation; they are not required to recreate a manager start
+  line that necessarily predates the process's first cursor. Arbitrary
+  service-output rows never count as activation.
+- User-systemd journal classification uses `_SYSTEMD_USER_UNIT` / `USER_UNIT`
+  as the primary unit identity. `_SYSTEMD_UNIT=user@<uid>.service` is manager
+  context, not the governed child unit; constrained fallbacks may be used only
+  when the user-unit fields are absent and unambiguous.
+  The two user-unit fields are evaluated independently: either exact governed
+  value is recognized, conflicting governed values fail, and a manager's
+  `_SYSTEMD_USER_UNIT=init.scope` cannot hide a governed `USER_UNIT` subject.
+- Git checkout/lineage probes and every publisher/finalizer lock acquisition
+  consume the same remaining hard-wall budget. Git children use the same
+  process-group TERM/KILL/reap contract; `flock` uses bounded nonblocking retry.
+  A blocked Git probe or held publish lock must terminate within the wall and
+  cannot preserve or overwrite stale success.
+- The authorized decompression command is a committed bounded producer, not a
+  plain `psql --output` assumption. It performs the exact one-chunk mutation,
+  reconciles catalog/row state, and atomically emits the structured recovery
+  receipt consumed by the verifier. A real-Timescale integration test exercises
+  its production argv/receipt contract; the node-27 exact target remains live-
+  authorized only during the later controlled replay.
+- The 900-second main wall is partitioned: every ordinary probe/capture/child
+  receives an operation deadline that reserves the fixed TERM/KILL/drain and
+  terminal-CAS budget. Failure handling uses the reserved main-wall remainder.
+  Finalizer state is consumed/deleted only after successful replacement or
+  proof the expected stale identity has already changed; lock timeout preserves
+  state for bounded `ExecStopPost` retry after release.
+- Terminal output plus verifier failure intent form one locked authoritative
+  state machine. An intent is descriptor-pinned, single-link regular,
+  input/output-disjoint, secret-scanned, schema-valid, and canonically equal to
+  the failure payload computed by the current verifier. Arbitrary or qualifying
+  content can never be published from a sidecar. Any pending intent invalidates
+  the prior terminal for consumption; a later successful/newer publication
+  must reconcile and consume exactly that intent under the same lock. Symlink,
+  hardlink, tampered, secret-bearing, or evidence-input-alias intents fail
+  closed without unlinking the input.
+- Intent creation and terminal publication use one documented lock order:
+  bounded intent gate first, then bounded terminal CAS. Authoritative readers
+  and success publishers take the same intent gate, so invalidation creation
+  cannot race outside the state machine even when the terminal lock is held.
+  Intent bytes and a separate identity record are created through dirfd-anchored
+  no-follow files, file-fsynced, parent-directory-fsynced, parent identity
+  revalidated, and only then become authoritative. The identity record persists
+  `(dev, ino, size, sha256, failure-payload digest, run/verifier identity)` so a
+  fresh CLI process rejects same-byte/new-inode replacement; process-local
+  memory is not an identity source. Success/failure consumes the exact intent
+  and identity record atomically under the same gate.
 
 Current source/unit bytes, dump readability, catalog state, and production
 query construction are read-only-recapturable. Ordered historical migration

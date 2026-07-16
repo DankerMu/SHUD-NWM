@@ -1,0 +1,11 @@
+# Copy to node27-timeseries-compression-replay.env on node-27 and chmod 0600.
+# This file is an example only; never commit the real database URL or digest.
+DATABASE_URL=postgresql://USER:PASSWORD@127.0.0.1:55432/nhms
+PGHOST=127.0.0.1
+PGPORT=55432
+PGDATABASE=nhms
+PGUSER=USER
+PGPASSWORD=PASSWORD
+PGSSLMODE=disable
+NODE27_COMPRESSION_EXPECTED_STALE_SHA256=REPLACE_WITH_64_HEX_DIGEST
+NODE27_COMPRESSION_RUN_PLAN_SHA256=REPLACE_WITH_64_HEX_DIGEST
