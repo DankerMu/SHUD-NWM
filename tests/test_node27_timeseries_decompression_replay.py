@@ -127,7 +127,7 @@ def test_real_timescaledb_production_entrypoint_decompresses_ephemeral_exact_fix
                 )
                 cursor.execute("ALTER TABLE recovery_replay_test.series SET (timescaledb.compress)")
                 cursor.execute(
-                    "INSERT INTO recovery_replay_test.series SELECT ts, 1 FROM generate_series(" 
+                    "INSERT INTO recovery_replay_test.series SELECT ts, 1 FROM generate_series("
                     "'2026-05-28T00:00:00Z'::timestamptz,'2026-06-03T00:00:00Z','1 day') ts"
                 )
                 cursor.execute(

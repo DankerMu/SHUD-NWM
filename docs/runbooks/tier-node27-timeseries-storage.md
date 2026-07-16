@@ -654,8 +654,26 @@ publishes a mode-0600, schema-valid `outcome=refused_lock` receipt with empty
 stderr diagnostic; this deliberately replaces a stale shared receipt.
 
 Run this sequence only from an ff-only-synchronized, tracked-clean node-27
-worktree whose SHA is the reviewed #1069 head. Keep all generated evidence
-under `/home/nwm/NWM/.nhms-issue1069-live/` mode 0600. Never print or commit the
+worktree whose SHA is the reviewed #1069 head. The supervisor and verifier both
+bind the terminal to the authorization-pinned lineage by exact equality: they
+`git rev-parse --verify refs/remotes/origin/feat/issue-1069-live-compression`
+and require it to equal the immutable `mutation_head_sha`. That remote-tracking
+ref advances only on `git fetch` (a `git pull --ff-only` fetches first, so it
+suffices) — a worktree checked out to the right SHA by any means that leaves the
+remote ref stale still fails provenance. This is fail-closed and the replay is
+one-shot, so **before starting the replay service, fetch node-27 to the exact
+head and confirm the remote ref resolves to it**:
+
+```bash
+cd /home/nwm/NWM && git status --porcelain   # must be clean of tracked changes
+git fetch origin feat/issue-1069-live-compression
+git rev-parse --verify refs/remotes/origin/feat/issue-1069-live-compression
+# ^ must equal the run plan's mutation_head_sha before the service starts.
+```
+
+Never `git stash pop` and never touch the gitignored `.nhms-issue*-live/`
+evidence directories during the sync. Keep all generated evidence under
+`/home/nwm/NWM/.nhms-issue1069-live/` mode 0600. Never print or commit the
 writer password/full DSN, run shell tracing, dump the environment, or place a
 credential in process argv.
 

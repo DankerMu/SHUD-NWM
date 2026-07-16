@@ -77,6 +77,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # separate name only so the lineage contract can be exercised against a purpose-built
 # repository instead of whatever state the ambient checkout happens to be in.
 PROVENANCE_REPO_ROOT = REPO_ROOT
+# The checkout `_current_verifier_head` binds the executing verifier to.  In
+# production this is always the ambient checkout; it is a separate name only so
+# the head/cleanliness contract can be exercised against a purpose-built
+# repository.  Repointable solely by in-process `monkeypatch.setattr`, which
+# already presupposes verifier code execution, so it grants no new authority.
+VERIFIER_REPO_ROOT = REPO_ROOT
 CANONICAL_RECEIPT_SCHEMA = REPO_ROOT / "schemas/timeseries_compression_receipt.schema.json"
 CANONICAL_EVIDENCE_SCHEMA = REPO_ROOT / "schemas/timeseries_compression_live_evidence.schema.json"
 CANONICAL_MIGRATION = REPO_ROOT / "db/migrations/000047_hypertable_compression_settings.sql"
@@ -498,12 +504,21 @@ def _git_blob_bytes(head_sha: str, relative_path: str, label: str) -> bytes:
 
 
 def _remote_identity(url: str) -> str:
+    """Extract ``owner/repo`` only when github.com is the anchored host.
+
+    A bare ``"github.com/" in url`` substring test would accept a hostile authority
+    such as ``https://evil.com/github.com/owner/repo`` or a look-alike host such as
+    ``https://github.com.evil.com/owner/repo``.  Each accepted form below pins
+    github.com as the actual host, so a foreign origin can never masquerade as the
+    authorization-pinned remote.
+    """
     normalized = url.strip().removesuffix(".git")
-    if normalized.startswith("git@github.com:"):
-        return normalized.split(":", 1)[1]
-    marker = "github.com/"
-    if marker in normalized:
-        return normalized.split(marker, 1)[1]
+    for prefix in ("https://github.com/", "http://github.com/", "ssh://git@github.com/"):
+        if normalized.startswith(prefix):
+            return normalized[len(prefix):]
+    scp_prefix = "git@github.com:"
+    if normalized.startswith(scp_prefix):
+        return normalized[len(scp_prefix):]
     return ""
 
 
@@ -3763,7 +3778,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _current_verifier_head() -> str:
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = VERIFIER_REPO_ROOT
     try:
         cleanliness = subprocess.run(
             ["git", "diff", "--quiet", "HEAD", "--"],

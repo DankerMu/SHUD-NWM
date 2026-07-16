@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -23,6 +24,7 @@ from packages.common.evidence_io import (
     assert_output_disjoint_from_closure,
     resolve_artifact_closure,
 )
+from scripts import node27_timeseries_compression_live_evidence as evidence
 from scripts import node27_timeseries_compression_supervisor as supervisor
 
 
@@ -350,6 +352,49 @@ def test_each_command_kind_rejects_true_substitution(kind: str) -> None:
     command["argv"] = ["/bin/true"]
     plan["run_plan_id"] = supervisor.run_plan_id(plan)
     with pytest.raises(supervisor.SupervisorError, match="argv|executable|contract|differs"):
+        supervisor.validate_run_plan(plan, inherited_env={})
+
+
+# --- SC-F1 (producer side): the run plan that authorizes the mutating lane must carry
+# exactly the round-3 operator attestation triple and nothing else, so a future drift on
+# the producer that emits the run plan is caught before spawn (mirror of the verifier
+# gate at live_evidence.py:1009-1016).
+
+_EXPECTED_OPERATOR_ATTESTATION = {
+    "sole_db_user_during_window": True,
+    "database_audit_proof": False,
+    "trust_limit": "discrete observations; no absolute direct-SQL bypass proof",
+}
+
+
+def test_run_plan_binds_exact_operator_attestation_triple() -> None:
+    plan = _plan()
+    validated = supervisor.validate_run_plan(plan, inherited_env={})
+    assert validated["operator_attestation"] == _EXPECTED_OPERATOR_ATTESTATION
+    # Identity-level booleans, so a truthy `1`/`0` producer drift cannot pass.
+    assert validated["operator_attestation"]["sole_db_user_during_window"] is True
+    assert validated["operator_attestation"]["database_audit_proof"] is False
+
+
+_OPERATOR_ATTESTATION_DRIFTS = {
+    "sole_db_user_denied": lambda plan: plan["operator_attestation"].__setitem__("sole_db_user_during_window", False),
+    "audit_proof_promoted": lambda plan: plan["operator_attestation"].__setitem__("database_audit_proof", True),
+    "trust_limit_weakened": lambda plan: plan["operator_attestation"].__setitem__(
+        "trust_limit", "absolute direct-SQL bypass proof obtained"
+    ),
+    "sole_db_user_absent": lambda plan: plan["operator_attestation"].pop("sole_db_user_during_window"),
+    "audit_proof_absent": lambda plan: plan["operator_attestation"].pop("database_audit_proof"),
+    "trust_limit_absent": lambda plan: plan["operator_attestation"].pop("trust_limit"),
+    "extra_key": lambda plan: plan["operator_attestation"].__setitem__("database_audit_proof_extra", True),
+    "not_a_mapping": lambda plan: plan.__setitem__("operator_attestation", "sole-user"),
+}
+
+
+@pytest.mark.parametrize("drift", sorted(_OPERATOR_ATTESTATION_DRIFTS))
+def test_run_plan_rejects_operator_attestation_drift(drift: str) -> None:
+    plan = _plan()
+    _OPERATOR_ATTESTATION_DRIFTS[drift](plan)
+    with pytest.raises(supervisor.SupervisorError, match="sole-DB-user attestation"):
         supervisor.validate_run_plan(plan, inherited_env={})
 
 
@@ -1684,3 +1729,651 @@ def test_catalog_boundary_and_over_limit_tombstone_input() -> None:
         supervisor.bounded_rows(rows, max_rows=2)
     with pytest.raises(supervisor.SupervisorError, match="byte ceiling"):
         supervisor.bounded_rows(rows, max_bytes=4)
+
+
+# ---------------------------------------------------------------------------
+# Binary-level stub harness for the supervisor-owned probes.
+#
+# The producers (`capture_checkpoint`, `resolve_container_pg_restore_identity`,
+# `_verify_checkout_lineage`) pin absolute argv[0] paths under `SUPERVISOR_BIN_DIR`
+# and never resolve through $PATH, so a callable substitution is the only way the
+# suite could reach them -- which is exactly the seam that let I-F1/I-F2 ship
+# green.  These tests instead repoint `SUPERVISOR_BIN_DIR` at a directory of stub
+# executables that reproduce the *measured* node-27 contracts for
+# systemctl/journalctl/psql/docker/git, so the real producer code executes end to
+# end offline.  Every stub encodes an observed external behaviour, not an assumed
+# one (see the deviation ledger in the task report for the residue).
+# ---------------------------------------------------------------------------
+
+PROBE_INVOCATION_ID = "1" * 32
+BOUNDARY_CURSOR = "s=stub;i=00000abc;b=stub;m=1;t=1;x=1"
+
+_STUB_TEMPLATE = """#!{python}
+import json
+import os
+import sys
+
+_here = os.path.dirname(os.path.abspath(__file__))
+_name = os.path.basename(__file__)
+with open(os.path.join(_here, _name + ".responses.json"), encoding="utf-8") as _fh:
+    _responses = json.load(_fh)
+_argv = " ".join(sys.argv[1:])
+for _response in _responses:
+    _require_env = _response.get("require_env")
+    if _require_env is not None:
+        if os.environ.get(_require_env):
+            continue
+        sys.stderr.write(_response.get("stderr", ""))
+        sys.stdout.write(_response.get("stdout", ""))
+        sys.exit(_response.get("exit", 1))
+    if all(_token in _argv for _token in _response["match"]):
+        sys.stdout.write(_response.get("stdout", "").replace("__PPID__", str(os.getppid())))
+        sys.stderr.write(_response.get("stderr", ""))
+        sys.exit(_response.get("exit", 0))
+sys.stderr.write("no stub response for argv: " + _argv + "\\n")
+sys.exit(97)
+"""
+
+
+def _write_stub(bindir: Path, name: str, responses: list[dict[str, Any]]) -> None:
+    script = bindir / name
+    script.write_text(_STUB_TEMPLATE.replace("{python}", sys.executable), encoding="utf-8")
+    script.chmod(0o755)
+    (bindir / f"{name}.responses.json").write_text(json.dumps(responses), encoding="utf-8")
+
+
+def _d3_catalog() -> dict[str, Any]:
+    fields = (
+        "hypertable_schema",
+        "hypertable_name",
+        "attname",
+        "segmentby_column_index",
+        "orderby_column_index",
+        "orderby_asc",
+        "orderby_nullsfirst",
+    )
+    rows = [
+        ("hydro", "river_timeseries", "run_id", 1, None, None, None),
+        ("hydro", "river_timeseries", "river_network_version_id", 2, None, None, None),
+        ("hydro", "river_timeseries", "river_segment_id", 3, None, None, None),
+        ("hydro", "river_timeseries", "variable", None, 1, True, False),
+        ("hydro", "river_timeseries", "valid_time", None, 2, True, False),
+        ("met", "forcing_station_timeseries", "forcing_version_id", 1, None, None, None),
+        ("met", "forcing_station_timeseries", "station_id", 2, None, None, None),
+        ("met", "forcing_station_timeseries", "variable", None, 1, True, False),
+        ("met", "forcing_station_timeseries", "valid_time", None, 2, True, False),
+    ]
+    return {
+        "hypertables": {"hydro.river_timeseries": True, "met.forcing_station_timeseries": True},
+        "compression_settings": [dict(zip(fields, row, strict=True)) for row in rows],
+        "policy_jobs": [],
+    }
+
+
+def _psql_responses(*, activity: Any = None, locks: Any = None, catalog: Any = None) -> list[dict[str, Any]]:
+    activity = {"sessions": []} if activity is None else activity
+    locks = {"conflicts": []} if locks is None else locks
+    catalog = _d3_catalog() if catalog is None else catalog
+    return [
+        {"match": ["pg_stat_activity"], "stdout": json.dumps(activity) + "\n"},
+        {"match": ["pg_locks"], "stdout": json.dumps(locks) + "\n"},
+        {"match": ["timescaledb_information.hypertables"], "stdout": json.dumps(catalog) + "\n"},
+    ]
+
+
+def _systemctl_responses(invocation_id: str = PROBE_INVOCATION_ID, *, require_xdg: bool = True) -> list[dict[str, Any]]:
+    replay = "".join(
+        line + "\n"
+        for line in [
+            "FragmentPath=/home/nwm/.config/systemd/user/nhms-node27-timeseries-compression-replay.service",
+            "ActiveState=activating",
+            "SubState=start",
+            "MainPID=__PPID__",
+            f"InvocationID={invocation_id}",
+            "ExecMainStartTimestamp=Thu 2026-07-16 00:00:00 UTC",
+            "ExecMainStartTimestampMonotonic=999",
+        ]
+    )
+    recurring = "".join(
+        line + "\n"
+        for line in [
+            "FragmentPath=/home/nwm/.config/systemd/user/nhms-node27-timeseries-compression.service",
+            "ActiveState=inactive",
+            "SubState=dead",
+            "MainPID=0",
+            "InvocationID=",
+            "ExecMainStartTimestamp=",
+            "ExecMainStartTimestampMonotonic=0",
+        ]
+    )
+    responses: list[dict[str, Any]] = []
+    if require_xdg:
+        # Measured node-27 contract: with $XDG_RUNTIME_DIR unset, `systemctl --user`
+        # cannot reach the user bus and exits non-zero. Forwarding XDG alone is
+        # sufficient; the gate is skipped once it is present.
+        responses.append(
+            {
+                "require_env": "XDG_RUNTIME_DIR",
+                "stderr": "Failed to connect to bus: $DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined\n",
+                "exit": 1,
+            }
+        )
+    responses.extend(
+        [
+            {"match": ["compression-replay.service"], "stdout": replay},
+            {"match": ["compression.service"], "stdout": recurring},
+        ]
+    )
+    return responses
+
+
+def _journalctl_responses(
+    *, window_rows: list[dict[str, Any]] | None = None, boundary_cursor: str | None = BOUNDARY_CURSOR
+) -> list[dict[str, Any]]:
+    window_stdout = "".join(json.dumps(row) + "\n" for row in (window_rows or []))
+    # Measured node-27 contract: an empty governed-unit `--after-cursor` window
+    # emits ZERO bytes and exits 0 (no cursor line). The `-n 0` boundary probe is
+    # always positioned and emits a cursor even over an empty tail.
+    boundary_stdout = "-- No entries --\n"
+    if boundary_cursor is not None:
+        boundary_stdout += f"-- cursor: {boundary_cursor}\n"
+    return [
+        {"match": ["--after-cursor"], "stdout": window_stdout},
+        {"match": ["-n 0"], "stdout": boundary_stdout},
+    ]
+
+
+def _docker_responses(
+    *,
+    dump_path: str,
+    image: str = "sha256:" + "a" * 64,
+    realpath: str = "/usr/bin/pg_restore",
+    binary_sha: str = "b" * 64,
+    dump_sha: str = "c" * 64,
+) -> list[dict[str, Any]]:
+    return [
+        {"match": ["inspect"], "stdout": image + "\n"},
+        {"match": ["readlink"], "stdout": realpath + "\n"},
+        {"match": ["sha256sum"], "stdout": f"{binary_sha}  {realpath}\n{dump_sha}  {dump_path}\n"},
+    ]
+
+
+def _git_responses(
+    *,
+    status: str = "",
+    head: str = "a" * 40,
+    reviewed: str = "a" * 40,
+    remote: str = "https://github.com/DankerMu/SHUD-NWM.git",
+) -> list[dict[str, Any]]:
+    return [
+        {"match": ["status"], "stdout": status},
+        {"match": ["rev-parse", "HEAD"], "stdout": head + "\n"},
+        {"match": ["rev-parse"], "stdout": reviewed + "\n"},
+        {"match": ["remote", "get-url"], "stdout": remote + "\n"},
+    ]
+
+
+@pytest.fixture
+def probe_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Repoint SUPERVISOR_BIN_DIR at a fixture directory of stub executables."""
+    bindir = tmp_path / "probe-bin"
+    bindir.mkdir()
+    monkeypatch.setattr(supervisor, "SUPERVISOR_BIN_DIR", bindir)
+
+    def install(name: str, responses: list[dict[str, Any]]) -> None:
+        _write_stub(bindir, name, responses)
+
+    return install
+
+
+def _ledger(path: Path, *, invocation_id: str = PROBE_INVOCATION_ID) -> supervisor.AppendOnlyLedger:
+    return supervisor.AppendOnlyLedger(path, run_id="run", run_plan_id="plan", invocation_id=invocation_id)
+
+
+def _checkpoint(checkpoint_id: str = "preflight", phase: str = "preflight") -> dict[str, Any]:
+    return {"checkpoint_id": checkpoint_id, "phase": phase, "command_id": None}
+
+
+def test_supervisor_bin_dir_defaults_to_the_pinned_system_path() -> None:
+    # The seam MUST default to the production location, or a live run would look
+    # for its probes in a test directory that does not exist on node-27.
+    assert supervisor.SUPERVISOR_BIN_DIR == Path("/usr/bin")
+    assert supervisor._host_bin("systemctl") == "/usr/bin/systemctl"
+
+
+# --- I-F1: systemd user-bus reachability -----------------------------------
+
+
+def test_child_environment_never_carries_the_systemd_bus_locator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Authorized DB/compression children must stay maximally scrubbed: the bus
+    # locator is a supervisor-probe concern only.
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1005")
+    assert "XDG_RUNTIME_DIR" not in supervisor._child_environment()
+
+
+def test_probe_environment_forwards_only_the_bus_locator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1005")
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1005/bus")
+    probe_env = supervisor._probe_environment()
+    # Measured contract: XDG alone is load-bearing; DBUS must stay out.
+    assert probe_env["XDG_RUNTIME_DIR"] == "/run/user/1005"
+    assert "DBUS_SESSION_BUS_ADDRESS" not in probe_env
+
+
+def test_checkpoint_reaches_the_user_bus_only_because_the_probe_env_forwards_xdg(
+    probe_bin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run-user"))
+    probe_bin("psql", _psql_responses())
+    probe_bin("systemctl", _systemctl_responses())
+    probe_bin("journalctl", _journalctl_responses())
+    with _ledger(tmp_path / "ledger.jsonl") as ledger:
+        end_cursor = supervisor.capture_checkpoint(
+            _checkpoint(),
+            wall=supervisor.HardWall.start(30),
+            ledger=ledger,
+            artifact_dir=tmp_path,
+            journal_cursor="s=stub;i=start;b=stub;m=0;t=0;x=0",
+            invocation_id=PROBE_INVOCATION_ID,
+        )
+    assert end_cursor == BOUNDARY_CURSOR
+
+
+def test_checkpoint_dies_at_the_first_systemd_probe_without_xdg(
+    probe_bin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    probe_bin("psql", _psql_responses())
+    probe_bin("systemctl", _systemctl_responses())
+    probe_bin("journalctl", _journalctl_responses())
+    with _ledger(tmp_path / "ledger.jsonl") as ledger:
+        with pytest.raises(supervisor.SupervisorError, match="systemd show"):
+            supervisor.capture_checkpoint(
+                _checkpoint(),
+                wall=supervisor.HardWall.start(30),
+                ledger=ledger,
+                artifact_dir=tmp_path,
+                journal_cursor="s=stub;i=start;b=stub;m=0;t=0;x=0",
+                invocation_id=PROBE_INVOCATION_ID,
+            )
+
+
+# --- I-F2: empty governed-unit journal window is the steady state ----------
+
+
+def test_checkpoint_accepts_empty_journal_window_and_carries_the_boundary_cursor(
+    probe_bin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run-user"))
+    probe_bin("psql", _psql_responses())
+    probe_bin("systemctl", _systemctl_responses())
+    # Empty window (no governed activation) + positioned boundary cursor: the
+    # exact steady state that aborted all 11 checkpoints before the fix.
+    probe_bin("journalctl", _journalctl_responses(window_rows=[]))
+    ledger_path = tmp_path / "ledger.jsonl"
+    with _ledger(ledger_path) as ledger:
+        end_cursor = supervisor.capture_checkpoint(
+            _checkpoint(),
+            wall=supervisor.HardWall.start(30),
+            ledger=ledger,
+            artifact_dir=tmp_path,
+            journal_cursor="s=stub;i=start;b=stub;m=0;t=0;x=0",
+            invocation_id=PROBE_INVOCATION_ID,
+        )
+    assert end_cursor == BOUNDARY_CURSOR
+    event = json.loads(ledger_path.read_text().strip())
+    assert event["journal_start_cursor"] == "s=stub;i=start;b=stub;m=0;t=0;x=0"
+    assert event["journal_end_cursor"] == BOUNDARY_CURSOR
+    journal_bytes = Path(event["journal"]["artifact"]["path"]).read_bytes()
+    assert journal_bytes == b"-- cursor: " + BOUNDARY_CURSOR.encode() + b"\n"
+
+
+def test_checkpoint_fails_when_the_positioned_boundary_probe_loses_its_cursor(
+    probe_bin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run-user"))
+    probe_bin("psql", _psql_responses())
+    probe_bin("systemctl", _systemctl_responses())
+    # A boundary probe with no cursor line is a genuine "cursor lost" -- distinct
+    # from an empty governed-unit window, which is normal.
+    probe_bin("journalctl", _journalctl_responses(boundary_cursor=None))
+    with _ledger(tmp_path / "ledger.jsonl") as ledger:
+        with pytest.raises(supervisor.SupervisorError, match="did not retain its ending cursor"):
+            supervisor.capture_checkpoint(
+                _checkpoint(),
+                wall=supervisor.HardWall.start(30),
+                ledger=ledger,
+                artifact_dir=tmp_path,
+                journal_cursor="s=stub;i=start;b=stub;m=0;t=0;x=0",
+                invocation_id=PROBE_INVOCATION_ID,
+            )
+
+
+def test_checkpoint_rejects_recurring_activation_in_the_journal_window(
+    probe_bin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run-user"))
+    probe_bin("psql", _psql_responses())
+    probe_bin("systemctl", _systemctl_responses())
+    probe_bin(
+        "journalctl",
+        _journalctl_responses(
+            window_rows=[
+                {
+                    "_SYSTEMD_USER_UNIT": "nhms-node27-timeseries-compression.service",
+                    "_SYSTEMD_INVOCATION_ID": "deadbeefdeadbeefdeadbeefdeadbeef",
+                }
+            ]
+        ),
+    )
+    with _ledger(tmp_path / "ledger.jsonl") as ledger:
+        with pytest.raises(supervisor.SupervisorError, match="recurring compression activation"):
+            supervisor.capture_checkpoint(
+                _checkpoint(),
+                wall=supervisor.HardWall.start(30),
+                ledger=ledger,
+                artifact_dir=tmp_path,
+                journal_cursor="s=stub;i=start;b=stub;m=0;t=0;x=0",
+                invocation_id=PROBE_INVOCATION_ID,
+            )
+
+
+def test_checkpoint_rejects_a_conflicting_database_session(
+    probe_bin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run-user"))
+    probe_bin("psql", _psql_responses(activity={"sessions": [{"pid": 42, "state": "active"}]}))
+    probe_bin("systemctl", _systemctl_responses())
+    probe_bin("journalctl", _journalctl_responses())
+    with _ledger(tmp_path / "ledger.jsonl") as ledger:
+        with pytest.raises(supervisor.SupervisorError, match="conflicting database session"):
+            supervisor.capture_checkpoint(
+                _checkpoint(),
+                wall=supervisor.HardWall.start(30),
+                ledger=ledger,
+                artifact_dir=tmp_path,
+                journal_cursor="s=stub;i=start;b=stub;m=0;t=0;x=0",
+                invocation_id=PROBE_INVOCATION_ID,
+            )
+
+
+def test_checkpoint_rejects_drifted_d3_catalog(
+    probe_bin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run-user"))
+    drifted = _d3_catalog()
+    drifted["hypertables"]["hydro.river_timeseries"] = False
+    probe_bin("psql", _psql_responses(catalog=drifted))
+    probe_bin("systemctl", _systemctl_responses())
+    probe_bin("journalctl", _journalctl_responses())
+    with _ledger(tmp_path / "ledger.jsonl") as ledger:
+        with pytest.raises(supervisor.SupervisorError, match="current D3 state"):
+            supervisor.capture_checkpoint(
+                _checkpoint(),
+                wall=supervisor.HardWall.start(30),
+                ledger=ledger,
+                artifact_dir=tmp_path,
+                journal_cursor="s=stub;i=start;b=stub;m=0;t=0;x=0",
+                invocation_id=PROBE_INVOCATION_ID,
+            )
+
+
+def test_producer_checkpoint_artifacts_satisfy_the_verifier(
+    probe_bin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The producer/consumer seam, closed end to end: the bytes capture_checkpoint
+    # emits must pass the verifier's own _validate_checkpoint_artifacts.
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run-user"))
+    probe_bin("psql", _psql_responses())
+    probe_bin("systemctl", _systemctl_responses())
+    probe_bin("journalctl", _journalctl_responses())
+    ledger_path = tmp_path / "ledger.jsonl"
+    with _ledger(ledger_path) as ledger:
+        supervisor.capture_checkpoint(
+            _checkpoint(),
+            wall=supervisor.HardWall.start(30),
+            ledger=ledger,
+            artifact_dir=tmp_path,
+            journal_cursor="s=stub;i=start;b=stub;m=0;t=0;x=0",
+            invocation_id=PROBE_INVOCATION_ID,
+        )
+    event = json.loads(ledger_path.read_text().strip())
+    result = evidence._validate_checkpoint_artifacts(
+        event,
+        "supervisor checkpoint[0]",
+        invocation_id=PROBE_INVOCATION_ID,
+        supervisor_pid=os.getpid(),
+    )
+    assert result["journal_end_cursor"] == BOUNDARY_CURSOR
+    assert result["replay_activation"]["MainPID"] == os.getpid()
+
+
+# --- resolve_container_pg_restore_identity ---------------------------------
+
+
+def test_resolve_container_pg_restore_identity_reads_real_docker_probes(
+    probe_bin, tmp_path: Path
+) -> None:
+    dump_path = "/var/lib/postgresql/evidence/schema.dump"
+    probe_bin("docker", _docker_responses(dump_path=dump_path))
+    identity = supervisor.resolve_container_pg_restore_identity(
+        wall=supervisor.HardWall.start(30), dump_path=dump_path
+    )
+    assert identity == {
+        "dump_sha256": "c" * 64,
+        "container_image_id": "sha256:" + "a" * 64,
+        "binary_realpath": "/usr/bin/pg_restore",
+        "binary_sha256": "b" * 64,
+    }
+
+
+def test_resolve_container_pg_restore_identity_rejects_out_of_mount_dump() -> None:
+    with pytest.raises(supervisor.SupervisorError, match="outside the DB container data mount"):
+        supervisor.resolve_container_pg_restore_identity(
+            wall=supervisor.HardWall.start(30), dump_path="/tmp/schema.dump"
+        )
+
+
+def test_resolve_container_pg_restore_identity_rejects_relocated_binary(
+    probe_bin, tmp_path: Path
+) -> None:
+    dump_path = "/var/lib/postgresql/evidence/schema.dump"
+    probe_bin("docker", _docker_responses(dump_path=dump_path, realpath="/opt/pg_restore"))
+    with pytest.raises(supervisor.SupervisorError, match="container pg_restore identity differs"):
+        supervisor.resolve_container_pg_restore_identity(
+            wall=supervisor.HardWall.start(30), dump_path=dump_path
+        )
+
+
+# --- _verify_checkout_lineage ----------------------------------------------
+
+
+def _lineage_plan() -> dict[str, Any]:
+    return {
+        "mutation_head_sha": "a" * 40,
+        "reviewed_remote_ref": supervisor.EXPECTED_REVIEWED_REMOTE_REF,
+    }
+
+
+def test_verify_checkout_lineage_accepts_clean_reviewed_origin(probe_bin) -> None:
+    probe_bin("git", _git_responses())
+    supervisor._verify_checkout_lineage(_lineage_plan(), wall=supervisor.HardWall.start(30))
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"status": " M scripts/x.py\n"},
+        {"head": "b" * 40},
+        {"reviewed": "b" * 40},
+        {"remote": "https://github.com/evil/other.git"},
+    ],
+)
+def test_verify_checkout_lineage_rejects_broken_lineage(probe_bin, override: dict[str, str]) -> None:
+    probe_bin("git", _git_responses(**override))
+    with pytest.raises(supervisor.SupervisorError, match="lineage differs"):
+        supervisor._verify_checkout_lineage(_lineage_plan(), wall=supervisor.HardWall.start(30))
+
+
+# --- S-F1: truncation accounting is a function of dropped bytes -------------
+
+
+def _finite_writer(total: int) -> list[str]:
+    # `bytes(total)` yields `total` NUL bytes and avoids `*`, which
+    # `_assert_concrete_argv` forbids as a shell-template token.
+    return [
+        sys.executable,
+        "-c",
+        f"import os,sys\nb=bytes({total})\nwhile b:\n b=b[os.write(1,b):]\nsys.exit(0)",
+    ]
+
+
+def test_drain_child_reports_truncation_from_dropped_bytes_not_termination(tmp_path: Path) -> None:
+    limit = 1024
+    process = subprocess.Popen(
+        _finite_writer(limit + 512),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    process.wait()  # the child has fully exited before we drain the pipe
+    stdout, stderr, terminated, dropped = supervisor._drain_child(
+        process,
+        wall=supervisor.HardWall.start(5),
+        stdout_limit=limit,
+        stderr_limit=limit,
+        term_grace=0.05,
+    )
+    assert process.returncode == 0
+    assert len(stdout) == limit
+    # The supervisor never had to intervene, yet bytes were dropped: the truthful
+    # truncation signal is `dropped`, independent of `terminated`.
+    assert terminated is False
+    assert dropped["stdout"] == 512
+
+
+def test_finite_over_limit_child_is_ledgered_as_truncated_even_after_exit(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "ledger.jsonl"
+    limit = 1024
+    command = {
+        "command_id": "finite-flood",
+        "kind": "pg_dump",
+        "argv": _finite_writer(limit + 512),
+        "artifact_associations": {},
+    }
+    with _ledger(ledger_path) as ledger:
+        with pytest.raises(supervisor.HardWallExpired):
+            supervisor.run_child(
+                command,
+                wall=supervisor.HardWall.start(5),
+                ledger=ledger,
+                mutation_head_sha="a" * 40,
+                database="nhms",
+                stdout_limit=limit,
+                term_grace=0.05,
+            )
+    event = json.loads(ledger_path.read_text().strip())
+    assert event["stdout"]["bytes"] == limit
+    assert event["stdout"]["truncated"] is True
+
+
+# --- C-F1: decompress argv guard order -------------------------------------
+
+
+def test_decompress_argv_rejects_wrong_association_label_as_supervisor_error() -> None:
+    argv = [
+        "/home/nwm/NWM/.venv/bin/python",
+        "/home/nwm/NWM/scripts/node27_timeseries_decompression_replay.py",
+        "--database",
+        "nhms",
+        "--mutation-head-sha",
+        "a" * 40,
+    ]
+    with pytest.raises(supervisor.SupervisorError, match="ownership differs"):
+        supervisor._assert_exact_argv(
+            argv, kind="decompress", associations={"dry_run_receipt": "/tmp/x.json"}
+        )
+
+
+# --- F3: full producer state machine drives the real producers -------------
+
+
+def test_full_state_machine_executes_real_producers_against_stub_binaries(
+    probe_bin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run-user"))
+    probe_bin("psql", _psql_responses())
+    probe_bin("systemctl", _systemctl_responses())
+    probe_bin("journalctl", _journalctl_responses())
+    probe_bin("docker", _docker_responses(dump_path="/var/lib/postgresql/evidence/schema.dump"))
+    plan = _plan()
+    for command in plan["commands"]:
+        associations: dict[str, str] = {}
+        for name in command["artifact_associations"]:
+            path = tmp_path / f"child-{command['command_id']}-{name}.json"
+            associations[name] = str(path)
+        command["artifact_associations"] = associations
+        writes = "; ".join(
+            f"Path({path!r}).write_text('{{\"owner\":\"{name}\"}}\\n')" for name, path in associations.items()
+        )
+        command["argv"] = [sys.executable, "-c", f"from pathlib import Path; {writes or 'pass'}"]
+    for capture in plan["captures"]:
+        path = tmp_path / f"capture-{capture['kind']}.json"
+        capture["output_path"] = str(path)
+        capture["argv"] = [sys.executable, "-c", f"print('{{\"owner\":\"{capture['kind']}\"}}')"]
+    # The real resolver reads the dump path from the list command's argv[-1].
+    # Append it as an EXTRA arg the python stub ignores (sys.argv[1:]), so the
+    # child stays a runnable no-op while argv[-1] is the mount-internal path the
+    # resolver validates.
+    for command in plan["commands"]:
+        if command["kind"] == "pg_restore_list":
+            command["argv"] = [sys.executable, "-c", "pass", "/var/lib/postgresql/evidence/schema.dump"]
+
+    ledger_path = tmp_path / "state-machine-ledger.jsonl"
+    cursor = {"value": "s=stub;i=start;b=stub;m=0;t=0;x=0"}
+    checkpoints_by_phase = {
+        (str(item["phase"]), item["command_id"]): item for item in plan["checkpoints"]
+    }
+    with _ledger(ledger_path) as ledger:
+
+        def live_checkpoint(phase: str, command_id: str | None) -> None:
+            cursor["value"] = supervisor.capture_checkpoint(
+                checkpoints_by_phase[(phase, command_id)],
+                wall=supervisor.HardWall.start(60),
+                ledger=ledger,
+                artifact_dir=tmp_path,
+                journal_cursor=cursor["value"],
+                invocation_id=PROBE_INVOCATION_ID,
+            )
+
+        supervisor.execute_producer_state_machine(
+            plan,
+            wall=supervisor.HardWall.start(60),
+            ledger=ledger,
+            artifact_dir=tmp_path,
+            checkpoint_runner=live_checkpoint,
+            restore_identity_resolver=lambda probe_wall, dump: supervisor.resolve_container_pg_restore_identity(
+                wall=probe_wall, dump_path=dump
+            ),
+        )
+
+    events = [json.loads(line) for line in ledger_path.read_text().splitlines()]
+    checkpoint_events = [event for event in events if event["event_type"] == "checkpoint"]
+    assert len(checkpoint_events) == len(plan["checkpoints"])
+    for index, event in enumerate(checkpoint_events):
+        result = evidence._validate_checkpoint_artifacts(
+            event,
+            f"supervisor checkpoint[{index}]",
+            invocation_id=PROBE_INVOCATION_ID,
+            supervisor_pid=os.getpid(),
+        )
+        assert result["journal_end_cursor"] == BOUNDARY_CURSOR
+    # The real docker resolver's identity is bound onto the pg_restore children.
+    restore_event = next(event for event in events if event.get("kind") == "pg_restore_version")
+    assert restore_event["artifact_associations"]["dump_sha256"] == "c" * 64
+    assert restore_event["artifact_associations"]["container_image_id"] == "sha256:" + "a" * 64

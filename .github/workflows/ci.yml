@@ -51,6 +51,7 @@ jobs:
             database:
               - 'db/**'
               - 'packages/common/migrate.py'
+              - 'scripts/node27_timeseries_decompression_replay.py'
               - 'pyproject.toml'
               - 'uv.lock'
               - 'tests/conftest.py'
@@ -60,6 +61,7 @@ jobs:
               - 'tests/test_basins_registry_import.py'
               - 'tests/test_basins_reingest.py'
               - 'tests/test_migrations.py'
+              - 'tests/test_node27_timeseries_decompression_replay.py'
               - 'tests/test_qhh_production_bootstrap.py'
               - 'tests/test_real_*.py'
               - 'tests/test_worker_chain_smoke.py'

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import copy
 import fcntl
 import hashlib
 import json
@@ -30,6 +31,13 @@ from scripts import node27_timeseries_compression_supervisor as supervisor
 from services.tiles.mvt import postgis_tile_sql
 
 ROOT = Path(__file__).resolve().parents[1]
+# Captured before the autouse `_descriptor_bound_git_blobs` fixture replaces the
+# module attribute, so the real Git-backed producer can be exercised directly.
+_REAL_GIT_BLOB_BYTES = evidence._git_blob_bytes
+# Captured before the autouse `_owned_provenance_lineage` fixture repoints the
+# provenance seam, so the source-level default can be asserted.
+_DEFAULT_PROVENANCE_REPO_ROOT = evidence.PROVENANCE_REPO_ROOT
+_DEFAULT_VERIFIER_REPO_ROOT = evidence.VERIFIER_REPO_ROOT
 RECEIPT_SCHEMA = json.loads((ROOT / "schemas/timeseries_compression_receipt.schema.json").read_text(encoding="utf-8"))
 EVIDENCE_SCHEMA = json.loads(
     (ROOT / "schemas/timeseries_compression_live_evidence.schema.json").read_text(encoding="utf-8")
@@ -1364,6 +1372,49 @@ def test_repository_provenance_accepts_the_reviewed_pushed_origin_lineage(
     )
 
 
+def test_repo_root_seams_default_to_the_checkout() -> None:
+    # A live verifier must audit its own ambient checkout; the seams exist only so
+    # tests can repoint them. If a default ever drifts off REPO_ROOT, a real run
+    # would audit the wrong repository.
+    assert _DEFAULT_PROVENANCE_REPO_ROOT == evidence.REPO_ROOT
+    assert _DEFAULT_VERIFIER_REPO_ROOT == evidence.REPO_ROOT
+
+
+def test_git_blob_bytes_reads_the_reviewed_blob_from_the_mutation_sha(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, head = _lineage_repo(tmp_path, remote_url=None)
+    monkeypatch.setattr(evidence, "REPO_ROOT", root)
+    assert _REAL_GIT_BLOB_BYTES(head, "reviewed.txt", "reviewed file") == b"reviewed mutation lineage\n"
+
+
+def test_git_blob_bytes_rejects_a_path_absent_at_the_mutation_sha(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, head = _lineage_repo(tmp_path, remote_url=None)
+    monkeypatch.setattr(evidence, "REPO_ROOT", root)
+    with pytest.raises(evidence.EvidenceError, match="cannot be bound to mutation SHA"):
+        _REAL_GIT_BLOB_BYTES(head, "never-committed.txt", "missing blob")
+
+
+def test_current_verifier_head_binds_a_clean_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, head = _lineage_repo(tmp_path, remote_url=None)
+    monkeypatch.setattr(evidence, "VERIFIER_REPO_ROOT", root)
+    assert evidence._current_verifier_head() == head
+
+
+def test_current_verifier_head_refuses_a_dirty_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _head = _lineage_repo(tmp_path, remote_url=None)
+    (root / "reviewed.txt").write_text("tampered after commit\n", encoding="utf-8")
+    monkeypatch.setattr(evidence, "VERIFIER_REPO_ROOT", root)
+    with pytest.raises(evidence.EvidenceError, match="differs from verifier_head_sha"):
+        evidence._current_verifier_head()
+
+
 _NON_ORIGIN_REFS = (
     "refs/heads/reviewed",
     "refs/remotes/upstream/reviewed",
@@ -1448,6 +1499,37 @@ def test_repository_provenance_refuses_a_foreign_or_absent_origin(
         )
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"https://github.com/{evidence.EXPECTED_REMOTE_IDENTITY}.git",
+        f"http://github.com/{evidence.EXPECTED_REMOTE_IDENTITY}.git",
+        f"git@github.com:{evidence.EXPECTED_REMOTE_IDENTITY}.git",
+        f"ssh://git@github.com/{evidence.EXPECTED_REMOTE_IDENTITY}.git",
+    ],
+)
+def test_remote_identity_accepts_only_github_host_anchored_forms(url: str) -> None:
+    """Every accepted remote form must anchor github.com as the actual host."""
+    assert evidence._remote_identity(url) == evidence.EXPECTED_REMOTE_IDENTITY
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # github.com as a path segment behind a hostile authority.
+        f"https://evil.com/github.com/{evidence.EXPECTED_REMOTE_IDENTITY}.git",
+        # github.com as a look-alike host prefix.
+        f"https://github.com.evil.com/{evidence.EXPECTED_REMOTE_IDENTITY}.git",
+        # A different host that merely ends in the same registrable string.
+        f"https://notgithub.com/{evidence.EXPECTED_REMOTE_IDENTITY}.git",
+    ],
+)
+def test_remote_identity_rejects_hosts_that_are_not_github(url: str) -> None:
+    """A substring match would let a foreign origin masquerade as the reviewed remote."""
+    assert evidence._remote_identity(url) != evidence.EXPECTED_REMOTE_IDENTITY
+    assert evidence._remote_identity(url) == ""
+
+
 def test_verify_bundle_refuses_evidence_whose_mutation_sha_left_the_reviewed_lineage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1477,6 +1559,114 @@ def test_verifier_recomputes_complete_terminal_envelope(tmp_path: Path) -> None:
     assert curve["after_capture"]["samples_ms"] == [
         measurement["execution_ms"] for measurement in curve["after_capture"]["measurements"]
     ]
+
+
+# --- SC-F1: trust-boundary regression lock ------------------------------------------
+# The trust boundary the user personally decided (round-3 audit-contract-decision) is
+# enforced redundantly by schema `const` (schema:60-62,78-81) and verifier exact
+# equality (live_evidence.py:1009-1016). These tests fail if either the schema pins are
+# relaxed to permit an overclaim, or the verifier stops binding the run-plan attestation.
+
+_TRUST_BOUNDARY_TERMINAL_OVERCLAIMS = {
+    # authorization side (schema:60-62)
+    "authorization.database_audit_proof=true": (
+        lambda terminal: terminal["authorization"].__setitem__("database_audit_proof", True)
+    ),
+    "authorization.acceptance_claim-strengthened": (
+        lambda terminal: terminal["authorization"].__setitem__(
+            "acceptance_claim", "database-level proof no other session could mutate"
+        )
+    ),
+    "authorization.sole_db_user_during_window=false": (
+        lambda terminal: terminal["authorization"].__setitem__("sole_db_user_during_window", False)
+    ),
+    # execution side (schema:78-81)
+    "execution.claim-strengthened": (
+        lambda terminal: terminal["execution"].__setitem__(
+            "claim", "database-level proof no other session could mutate"
+        )
+    ),
+    "execution.database_audit_proof=true": (
+        lambda terminal: terminal["execution"].__setitem__("database_audit_proof", True)
+    ),
+    "execution.sole_db_user_attested=false": (
+        lambda terminal: terminal["execution"].__setitem__("sole_db_user_attested", False)
+    ),
+    "execution.trust_limit-weakened": (
+        lambda terminal: terminal["execution"].__setitem__(
+            "trust_limit", "absolute direct-SQL bypass proof obtained"
+        )
+    ),
+}
+
+
+@pytest.mark.parametrize("overclaim", sorted(_TRUST_BOUNDARY_TERMINAL_OVERCLAIMS))
+def test_trust_boundary_schema_rejects_single_field_overclaim(tmp_path: Path, overclaim: str) -> None:
+    """A qualifying v3 terminal must fail schema if any single trust-boundary field is promoted."""
+    terminal = evidence.verify_bundle(_bundle(tmp_path), receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    # Non-vacuity: the unmutated terminal validates, so the failure below is caused by the mutation.
+    jsonschema.validate(terminal, EVIDENCE_SCHEMA)
+    mutated = copy.deepcopy(terminal)
+    _TRUST_BOUNDARY_TERMINAL_OVERCLAIMS[overclaim](mutated)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(mutated, EVIDENCE_SCHEMA)
+
+
+def test_trust_boundary_terminal_carries_bounded_claim_not_overclaim(tmp_path: Path) -> None:
+    """The produced terminal claims exactly the user-decided boundary and nothing stronger."""
+    terminal = evidence.verify_bundle(_bundle(tmp_path), receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    execution = terminal["execution"]
+    assert execution["claim"] == evidence.PASS_CLAIM
+    assert execution["database_audit_proof"] is False
+    assert execution["sole_db_user_attested"] is True
+    assert execution["trust_limit"] == "discrete observations; no absolute direct-SQL bypass proof"
+    authorization = terminal["authorization"]
+    assert authorization["acceptance_claim"] == evidence.PASS_CLAIM
+    assert authorization["database_audit_proof"] is False
+    assert authorization["sole_db_user_during_window"] is True
+
+
+def _rewrite_run_plan(bundle: dict[str, Any], tmp_path: Path, mutate: Any) -> None:
+    """Apply `mutate` to the run plan, rebind its id, and propagate to the ledger events."""
+    plan = _read_ref(bundle["execution"]["run_plan"])
+    mutate(plan)
+    plan["run_plan_id"] = evidence._supervisor_run_plan_id(plan)
+    bundle["execution"]["run_plan"] = _json_ref(tmp_path, "attestation-plan.json", plan)
+    events = [json.loads(line) for line in Path(bundle["execution"]["ledger"]["path"]).read_text().splitlines()]
+    for event in events:
+        event["run_plan_id"] = plan["run_plan_id"]
+    ledger = tmp_path / "attestation-ledger.jsonl"
+    ledger.write_bytes(b"".join(_canonical(event) for event in events))
+    bundle["execution"]["ledger"] = _file_ref(ledger)
+
+
+_OPERATOR_ATTESTATION_DRIFTS = {
+    "sole_db_user_denied": lambda plan: plan["operator_attestation"].__setitem__("sole_db_user_during_window", False),
+    "audit_proof_promoted": lambda plan: plan["operator_attestation"].__setitem__("database_audit_proof", True),
+    "trust_limit_weakened": lambda plan: plan["operator_attestation"].__setitem__(
+        "trust_limit", "absolute direct-SQL bypass proof obtained"
+    ),
+    "sole_db_user_absent": lambda plan: plan["operator_attestation"].pop("sole_db_user_during_window"),
+    "audit_proof_absent": lambda plan: plan["operator_attestation"].pop("database_audit_proof"),
+    "trust_limit_absent": lambda plan: plan["operator_attestation"].pop("trust_limit"),
+}
+
+
+@pytest.mark.parametrize("drift", sorted(_OPERATOR_ATTESTATION_DRIFTS))
+def test_verifier_rejects_operator_attestation_drift(tmp_path: Path, drift: str) -> None:
+    """A run plan whose attestation triple differs from the bound decision cannot verify."""
+    bundle = _bundle(tmp_path)
+    _rewrite_run_plan(bundle, tmp_path, _OPERATOR_ATTESTATION_DRIFTS[drift])
+    with pytest.raises(evidence.EvidenceError, match="sole-user attestation"):
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+
+def test_verifier_rejects_absent_operator_attestation_key(tmp_path: Path) -> None:
+    """Deleting the whole attestation key is refused before any command is trusted."""
+    bundle = _bundle(tmp_path)
+    _rewrite_run_plan(bundle, tmp_path, lambda plan: plan.pop("operator_attestation"))
+    with pytest.raises(evidence.EvidenceError):
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
 
 
 def test_verifier_publish_lock_is_deadline_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2279,6 +2469,51 @@ def test_live_evidence_example_and_required_top_level_contract() -> None:
         del candidate[key]
         with pytest.raises(jsonschema.ValidationError):
             jsonschema.validate(candidate, EVIDENCE_SCHEMA)
+
+
+_V3_ONLY_REQUIRED_REMOVERS = {
+    "execution": lambda doc: doc.pop("execution"),
+    "chronology": lambda doc: doc.pop("chronology"),
+    "source_manifest": lambda doc: doc.pop("source_manifest"),
+    "qualifies_task_4_5": lambda doc: doc.pop("qualifies_task_4_5"),
+    "authorization.sole_db_user_during_window": lambda doc: doc["authorization"].pop("sole_db_user_during_window"),
+    "authorization.database_audit_proof": lambda doc: doc["authorization"].pop("database_audit_proof"),
+    "authorization.acceptance_claim": lambda doc: doc["authorization"].pop("acceptance_claim"),
+    "execution.claim": lambda doc: doc["execution"].pop("claim"),
+    "execution.database_audit_proof": lambda doc: doc["execution"].pop("database_audit_proof"),
+    "execution.sole_db_user_attested": lambda doc: doc["execution"].pop("sole_db_user_attested"),
+    "execution.trust_limit": lambda doc: doc["execution"].pop("trust_limit"),
+    "recovery.invocation": lambda doc: doc["recovery"].pop("invocation"),
+    "preflight.schema_dump_list": lambda doc: doc["preflight"].pop("schema_dump_list"),
+    "benchmarks.queries[0].request": lambda doc: doc["benchmarks"]["queries"][0].pop("request"),
+}
+
+
+def _live_evidence_example() -> dict[str, Any]:
+    return json.loads(
+        (ROOT / "schemas/examples/timeseries_compression_live_evidence.example.json").read_text(encoding="utf-8")
+    )
+
+
+def test_live_evidence_example_is_the_qualifying_v3_shape() -> None:
+    """The committed example must exercise the v3 `allOf` branch CI validates, not the v2 shape."""
+    example = _live_evidence_example()
+    jsonschema.validate(example, EVIDENCE_SCHEMA)
+    assert example["schema_version"] == "3.0"
+    assert example["qualifies_task_4_5"] is True
+    assert example["verdict"] == "PASS_TASK_4_5"
+    assert example["execution"]["claim"] == evidence.PASS_CLAIM
+    assert example["execution"]["database_audit_proof"] is False
+
+
+@pytest.mark.parametrize("removed", sorted(_V3_ONLY_REQUIRED_REMOVERS))
+def test_live_evidence_v3_example_requires_each_v3_only_key(removed: str) -> None:
+    """Every v3-only required key is load-bearing: removing it must fail schema validation."""
+    example = _live_evidence_example()
+    jsonschema.validate(example, EVIDENCE_SCHEMA)  # non-vacuity: clean example is valid
+    _V3_ONLY_REQUIRED_REMOVERS[removed](example)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(example, EVIDENCE_SCHEMA)
 
 
 @pytest.mark.parametrize(

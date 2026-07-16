@@ -150,6 +150,21 @@ CHILD_ENV_ALLOWLIST = (
     "PGPASSWORD",
     "PGSSLMODE",
 )
+# The supervisor pins an absolute argv[0] for every probe it owns, so no PATH
+# entry can substitute one.  Tests repoint this seam at a directory of stub
+# binaries to execute the real probe code paths offline; production must always
+# read /usr/bin, which `test_supervisor_bin_dir_defaults_to_the_pinned_system_path`
+# asserts.  Only host-side binaries resolve through it -- paths that name a
+# binary inside the DB container stay literal, because they are not this host's.
+SUPERVISOR_BIN_DIR = Path("/usr/bin")
+# `systemctl --user` locates the user manager through $XDG_RUNTIME_DIR; with it
+# unset, bus_set_address_user() returns -ENOMEDIUM and the probe exits non-zero
+# with "Failed to connect to bus", killing the first preflight checkpoint.
+# Measured on node-27: forwarding XDG_RUNTIME_DIR alone is sufficient, so
+# DBUS_SESSION_BUS_ADDRESS stays out and the authorized DB/compression children
+# keep the maximally scrubbed CHILD_ENV_ALLOWLIST.  This applies only to the
+# read-only probes the supervisor itself owns.
+PROBE_ENV_ALLOWLIST = ("XDG_RUNTIME_DIR",)
 
 
 class SupervisorError(RuntimeError):
@@ -168,9 +183,29 @@ def _utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
+def _host_bin(name: str) -> str:
+    """Resolve one host-side pinned binary through the injectable bin directory."""
+
+    return str(SUPERVISOR_BIN_DIR / name)
+
+
 def _child_environment() -> dict[str, str]:
     environment = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
     environment.update({key: os.environ[key] for key in CHILD_ENV_ALLOWLIST if os.environ.get(key)})
+    return environment
+
+
+def _probe_environment() -> dict[str, str]:
+    """Environment for supervisor-owned read-only probes.
+
+    Adds only the systemd user-bus locator (`$XDG_RUNTIME_DIR`) on top of the
+    scrubbed child environment, so `systemctl --user` can reach the user manager.
+    The authorized DB/compression children keep `_child_environment` and never
+    receive it.
+    """
+
+    environment = _child_environment()
+    environment.update({key: os.environ[key] for key in PROBE_ENV_ALLOWLIST if os.environ.get(key)})
     return environment
 
 
@@ -317,6 +352,8 @@ def _assert_exact_argv(argv: list[str], *, kind: str, associations: Mapping[str,
         ]:
             raise SupervisorError("migration argv/output ownership differs")
     elif kind == "decompress":
+        if set(associations) != {"recovery_receipt"}:
+            raise SupervisorError("decompress argv/output ownership differs")
         expected_prefix = [
             f"{EXPECTED_REPO}/.venv/bin/python",
             f"{EXPECTED_REPO}/scripts/node27_timeseries_decompression_replay.py",
@@ -636,9 +673,10 @@ def _drain_child(
     stdout_limit: int,
     stderr_limit: int,
     term_grace: float,
-) -> tuple[bytes, bytes, bool]:
+) -> tuple[bytes, bytes, bool, dict[str, int]]:
     selector = selectors.DefaultSelector()
     buffers: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
+    dropped: dict[str, int] = {"stdout": 0, "stderr": 0}
     streams: list[tuple[str, BinaryIO | None, int]] = [
         ("stdout", process.stdout, stdout_limit),
         ("stderr", process.stderr, stderr_limit),
@@ -652,9 +690,11 @@ def _drain_child(
     stop_drain_at: float | None = None
 
     def signal_group(sig: signal.Signals) -> None:
+        # os.killpg on a group whose only member is a zombie returns EPERM on
+        # Darwin, so catch OSError, not just ProcessLookupError.
         try:
             os.killpg(process.pid, sig)
-        except ProcessLookupError:
+        except OSError:
             pass
 
     while selector.get_map() or process.poll() is None:
@@ -686,6 +726,10 @@ def _drain_child(
                     terminated = True
                     kill_at = time.monotonic() + term_grace
                 allowed = max(0, limit - len(target))
+                # Bytes over the ceiling are dropped whether or not the child is
+                # still alive to be terminated; the dropped count is the truthful
+                # truncation signal, independent of `terminated`.
+                dropped[name] += len(chunk) - allowed
                 target.extend(chunk[:allowed])
             else:
                 target.extend(chunk)
@@ -706,7 +750,7 @@ def _drain_child(
     except subprocess.TimeoutExpired:
         signal_group(signal.SIGKILL)
         process.wait(timeout=max(term_grace, 0.1))
-    return bytes(buffers["stdout"]), bytes(buffers["stderr"]), terminated
+    return bytes(buffers["stdout"]), bytes(buffers["stderr"]), terminated, dropped
 
 
 def run_child(
@@ -743,7 +787,7 @@ def run_child(
         start_new_session=True,
         env=_child_environment(),
     )
-    stdout, stderr, terminated = _drain_child(
+    stdout, stderr, terminated, dropped = _drain_child(
         process,
         wall=wall,
         stdout_limit=stdout_limit,
@@ -755,12 +799,12 @@ def run_child(
     stdout_identity: dict[str, Any] = {
         "bytes": len(stdout),
         "sha256": hashlib.sha256(stdout).hexdigest(),
-        "truncated": terminated and len(stdout) == stdout_limit,
+        "truncated": dropped["stdout"] > 0,
     }
     stderr_identity: dict[str, Any] = {
         "bytes": len(stderr),
         "sha256": hashlib.sha256(stderr).hexdigest(),
-        "truncated": terminated and len(stderr) == stderr_limit,
+        "truncated": dropped["stderr"] > 0,
     }
     if artifact_dir is not None:
         safe_id = str(command["command_id"]).replace("/", "-")
@@ -807,7 +851,7 @@ def run_child(
             "artifact_associations": complete_associations,
         }
     )
-    if terminated:
+    if terminated or dropped["stdout"] or dropped["stderr"]:
         raise HardWallExpired(f"{kind} exceeded the hard wall or output ceiling")
     if process.returncode != 0:
         raise SupervisorError(f"{kind} exited non-zero")
@@ -845,9 +889,9 @@ def run_capture_step(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         start_new_session=True,
-        env=_child_environment(),
+        env=_probe_environment(),
     )
-    stdout, stderr, terminated = _drain_child(
+    stdout, stderr, terminated, dropped = _drain_child(
         process,
         wall=wall,
         stdout_limit=stdout_limit,
@@ -856,7 +900,7 @@ def run_capture_step(
     )
     finished_monotonic = time.monotonic()
     finished_at = _utc_now()
-    if terminated:
+    if terminated or dropped["stdout"] or dropped["stderr"]:
         raise HardWallExpired(f"capture {kind} exceeded the hard wall or output ceiling")
     if process.returncode != 0 or stderr.strip() or not stdout:
         raise SupervisorError(f"capture {kind} probe failed")
@@ -879,13 +923,13 @@ def run_capture_step(
             "stdout": {
                 "bytes": len(stdout),
                 "sha256": hashlib.sha256(stdout).hexdigest(),
-                "truncated": False,
+                "truncated": dropped["stdout"] > 0,
                 "artifact": _observed_ref(artifact_dir / f"{safe_id}-stdout.bin", stdout),
             },
             "stderr": {
                 "bytes": len(stderr),
                 "sha256": hashlib.sha256(stderr).hexdigest(),
-                "truncated": False,
+                "truncated": dropped["stderr"] > 0,
                 "artifact": _observed_ref(artifact_dir / f"{safe_id}-stderr.bin", stderr),
             },
             "artifact_association": artifact,
@@ -904,16 +948,16 @@ def _run_capture_argv(argv: list[str], *, wall: HardWall, label: str, max_bytes:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         start_new_session=True,
-        env=_child_environment(),
+        env=_probe_environment(),
     )
-    stdout, stderr, terminated = _drain_child(
+    stdout, stderr, terminated, dropped = _drain_child(
         process,
         wall=wall,
         stdout_limit=max_bytes,
         stderr_limit=max_bytes,
         term_grace=TERM_GRACE_SECONDS,
     )
-    if terminated or process.returncode != 0:
+    if dropped["stdout"] or dropped["stderr"] or terminated or process.returncode != 0:
         raise SupervisorError(f"{label} checkpoint probe failed")
     if stderr.strip():
         raise SupervisorError(f"{label} checkpoint probe wrote stderr")
@@ -927,7 +971,7 @@ def resolve_container_pg_restore_identity(*, wall: HardWall, dump_path: str) -> 
         raise SupervisorError("pg_restore dump path is outside the DB container data mount")
     image_id = (
         _run_capture_argv(
-            ["/usr/bin/docker", "inspect", "--format={{.Image}}", EXPECTED_CONTAINER],
+            [_host_bin("docker"), "inspect", "--format={{.Image}}", EXPECTED_CONTAINER],
             wall=wall,
             label="DB container image identity",
             max_bytes=4096,
@@ -938,7 +982,7 @@ def resolve_container_pg_restore_identity(*, wall: HardWall, dump_path: str) -> 
     realpath = (
         _run_capture_argv(
             [
-                "/usr/bin/docker",
+                _host_bin("docker"),
                 "exec",
                 EXPECTED_CONTAINER,
                 "/usr/bin/readlink",
@@ -955,7 +999,7 @@ def resolve_container_pg_restore_identity(*, wall: HardWall, dump_path: str) -> 
     hashes = (
         _run_capture_argv(
             [
-                "/usr/bin/docker",
+                _host_bin("docker"),
                 "exec",
                 EXPECTED_CONTAINER,
                 "/usr/bin/sha256sum",
@@ -1030,7 +1074,7 @@ def _governed_user_unit(row: Mapping[str, Any]) -> str | None:
 def _verify_checkout_lineage(plan: Mapping[str, Any], *, wall: HardWall) -> None:
     def git(*args: str) -> str:
         raw = _run_capture_argv(
-            ["/usr/bin/git", "-C", EXPECTED_REPO, *args],
+            [_host_bin("git"), "-C", EXPECTED_REPO, *args],
             wall=wall,
             label=f"Git lineage {' '.join(args)}",
             max_bytes=MAX_STREAM_BYTES,
@@ -1093,7 +1137,7 @@ def capture_checkpoint(
         "(('hydro','river_timeseries'),('met','forcing_station_timeseries'))))"
     )
     psql_prefix = [
-        "/usr/bin/psql",
+        _host_bin("psql"),
         "--dbname",
         EXPECTED_DATABASE,
         "--no-psqlrc",
@@ -1118,7 +1162,7 @@ def capture_checkpoint(
     def unit_show(unit: str) -> dict[str, Any]:
         raw = _run_capture_argv(
             [
-                "/usr/bin/systemctl",
+                _host_bin("systemctl"),
                 "--user",
                 "show",
                 unit,
@@ -1162,9 +1206,14 @@ def capture_checkpoint(
     ):
         raise SupervisorError("checkpoint replay supervisor unit is not the active owner")
     show_document = {"recurring": recurring_show, "replay": replay_show}
-    journal_raw = _run_capture_argv(
+    # The governed-unit window is purely the "no extra activation" assertion.
+    # With the governed units silent during replay, `--after-cursor` positions
+    # past the last matching entry, so journalctl yields zero rows and NO cursor
+    # line (sd_journal_get_cursor -> -EADDRNOTAVAIL) and exits 0.  An empty window
+    # is therefore the expected steady state, not a lost cursor.
+    window_raw = _run_capture_argv(
         [
-            "/usr/bin/journalctl",
+            _host_bin("journalctl"),
             "--user-unit=nhms-node27-timeseries-compression.service",
             "--user-unit=nhms-node27-timeseries-compression-replay.service",
             "--after-cursor",
@@ -1177,14 +1226,7 @@ def capture_checkpoint(
         label="systemd journal",
         max_bytes=4 * 1024**2,
     )
-    cursor_lines = [
-        line.removeprefix(b"-- cursor: ").decode()
-        for line in journal_raw.splitlines()
-        if line.startswith(b"-- cursor: ")
-    ]
-    if not cursor_lines:
-        raise SupervisorError("checkpoint journal did not retain its ending cursor")
-    for raw_line in journal_raw.splitlines():
+    for raw_line in window_raw.splitlines():
         if not raw_line or raw_line.startswith(b"-- cursor: "):
             continue
         try:
@@ -1203,12 +1245,34 @@ def capture_checkpoint(
             and str(observed_id) != invocation_id
         ):
             raise SupervisorError("checkpoint journal observed another replay activation")
+    # Advance the boundary from a probe guaranteed to be positioned: `-n 0`
+    # positions at the journal tail, so a cursor is always emitted even over an
+    # empty tail.  A missing cursor here is a genuine "cursor lost", distinct
+    # from the empty governed-unit window above.
+    boundary_raw = _run_capture_argv(
+        [_host_bin("journalctl"), "--user", "-n", "0", "--show-cursor", "--no-pager"],
+        wall=wall,
+        label="systemd journal boundary cursor",
+        max_bytes=16 * 1024,
+    )
+    boundary_cursors = [
+        line.removeprefix(b"-- cursor: ").decode()
+        for line in boundary_raw.splitlines()
+        if line.startswith(b"-- cursor: ")
+    ]
+    if len(boundary_cursors) != 1:
+        raise SupervisorError("checkpoint journal did not retain its ending cursor")
+    end_cursor = boundary_cursors[0]
+    # The persisted artifact carries the assertion window plus the positioned end
+    # cursor, so the verifier can re-derive both the no-activation evidence and
+    # the chronology boundary (journal_end_cursor) from one file.
+    journal_artifact = window_raw + b"-- cursor: " + end_cursor.encode() + b"\n"
     refs = {
         "database_activity": _observed_ref(artifact_dir / f"{safe_id}-activity.json", activity_raw),
         "relation_locks": _observed_ref(artifact_dir / f"{safe_id}-locks.json", locks_raw),
         "catalog": _observed_ref(artifact_dir / f"{safe_id}-catalog.json", catalog_raw),
         "systemd_show": _observed_ref(artifact_dir / f"{safe_id}-systemd-show.json", _canonical(show_document)),
-        "journal": _observed_ref(artifact_dir / f"{safe_id}-journal.log", journal_raw),
+        "journal": _observed_ref(artifact_dir / f"{safe_id}-journal.log", journal_artifact),
     }
     ledger.append(
         {
@@ -1220,11 +1284,11 @@ def capture_checkpoint(
             "captured_at": _utc_now(),
             "monotonic": time.monotonic(),
             "journal_start_cursor": journal_cursor,
-            "journal_end_cursor": cursor_lines[-1],
+            "journal_end_cursor": end_cursor,
             **refs,
         }
     )
-    return cursor_lines[-1]
+    return end_cursor
 
 
 def _safe_regular_identity(path: Path) -> FileIdentity | None:
@@ -1628,7 +1692,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         raise
     cursor_raw = _run_capture_argv(
-        ["/usr/bin/journalctl", "--user", "-n", "0", "--show-cursor", "--no-pager"],
+        [_host_bin("journalctl"), "--user", "-n", "0", "--show-cursor", "--no-pager"],
         wall=operation_wall,
         label="journal start cursor",
         max_bytes=16 * 1024,

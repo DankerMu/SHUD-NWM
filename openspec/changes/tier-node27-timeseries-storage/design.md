@@ -1207,6 +1207,23 @@ Regression rows (each row requires a focused positive and negative test):
   directory rewrite is accepted and remains non-escalating (a same-uid actor can
   already replace the terminal, and the rewrite still yields only a failure
   tombstone, never a qualifying PASS).
+- The sole-DB-user trust boundary created by the Round-3 decision is
+  regression-locked at every layer, not just enforced. The operator-attestation
+  triple `sole_db_user_during_window=true`, `database_audit_proof=false`,
+  `trust_limit="discrete observations; no absolute direct-SQL bypass proof"` and
+  the qualifying claim `"controlled lane executed exactly once with no observed
+  conflict"` are pinned by schema `const` in both the authorization and
+  execution blocks, written verbatim by the supervisor into the run plan, and
+  re-required by exact equality in the verifier. Positive: a real qualifying v3
+  terminal carries `claim == PASS_CLAIM`, `database_audit_proof is False`,
+  `sole_db_user_attested is True`, and validates. Negative: relaxing any of
+  those `const` subschemas to a wider type, flipping `database_audit_proof` to
+  `true`, strengthening either claim string, setting `sole_db_user_attested`
+  false, or mutating/deleting `run_plan.operator_attestation` -> schema
+  validation error or verifier `EvidenceError`. No code path — schema, producer,
+  verifier, or test — may promote the attestation to a database-level
+  direct-SQL bypass proof; same-uid tampering is out of the threat model and the
+  terminal never claims otherwise.
 
 Current source/unit bytes, dump readability, catalog state, and production
 query construction are read-only-recapturable. Ordered historical migration
@@ -1721,7 +1738,17 @@ The delivered PR (#1058, feat/issue-852-write-guard) departs from the fixture te
 
 - **`pre_write_cursor_hook` on `_replace_values` (forcing_producer/store.py)** — The design directed "wire BEFORE `_replace_values(...)` call" as a literal source-order injection. The wire actually threads the guard through `_replace_values` via a new `pre_write_cursor_hook: Callable[[cursor], None] | None` keyword. This preserves the "guard runs on the same cursor as the DELETE, in the same transaction" invariant more strictly than an external call would (which would need to either open its own cursor or plumb one through). The wired test `test_forcing_producer_guard_runs_before_delete_on_uncompressed_batch` asserts execution ordering by inspecting the `_RecordingConnection` execution log — the shape check is byte-identical to the "literal before the call" formulation.
 - **`SET LOCAL statement_timeout = DEFAULT` reset in `finally:`** — The design directed a plain "reset after the catalog lookup" sequence. The implementation moves the reset into a `finally:` block so the session default is restored even when the catalog SELECT raises. Rationale: if the SELECT raises, the plain sequence leaves the caller's transaction still bound to the guard's 5s cap, silently clipping downstream DELETE + INSERT statements. The `finally:` reset is best-effort (suppressed if it itself raises against an aborted transaction). Unit-tested by `test_set_local_default_resets_even_when_select_raises`.
-- **`.large-file-guard.json` exclude-list extension** — The design did not touch large-file plumbing. The PR extended the large-file guard's exclude list for four files total (initial: `packages/common/forcing_domain_handoff_apply.py`, `workers/output_parser/parser.py`; R2/F1 additions: `workers/forcing_producer/producer.py`, `tests/test_forcing_producer.py` — both were pre-existing large files that the R2 fix edited to add the dedicated `except CompressedChunkGuardError` arm + regression test). Verified as documented exceptions, not bypasses; orthogonal to the guard semantics; does not affect the invariant matrix. Recorded here for evidence completeness.
+- **`.large-file-guard.json` exclude-list extension (#1058/#852)** — The design did not touch large-file plumbing. The PR extended the large-file guard's exclude list for four files total (initial: `packages/common/forcing_domain_handoff_apply.py`, `workers/output_parser/parser.py`; R2/F1 additions: `workers/forcing_producer/producer.py`, `tests/test_forcing_producer.py` — both were pre-existing large files that the R2 fix edited to add the dedicated `except CompressedChunkGuardError` arm + regression test). Verified as documented exceptions, not bypasses; orthogonal to the guard semantics; does not affect the invariant matrix. Recorded here for evidence completeness.
+- **`.large-file-guard.json` exclude-list extension (#1069 live-compression evidence lane)** — This issue's evidence lane is a large, single-purpose subsystem (supervisor ledger / immutable artifact graph / shared v3 terminal state machine / pure verifier), and several of its modules and their requirement-driven test suites materially exceed the guard's 1000-line ceiling. Following the #1058 precedent above (documented exception, not a bypass), the PR added **eight** exclusions, recorded here because a prior reviewer judged four such exclusions worth documenting and these are larger and more numerous. Line counts at the reviewed head (all > 1000):
+  - `scripts/node27_timeseries_compression_live_evidence.py` (~3.9k) — the pure verifier
+  - `tests/test_node27_timeseries_compression_live_evidence.py` (~3.7k) — its requirement suite
+  - `tests/test_node27_timeseries_compression_supervisor.py` (~2.3k) — supervisor requirement suite
+  - `packages/common/compression_terminal_state.py` (~1.9k) — shared terminal state machine
+  - `scripts/node27_timeseries_compression_supervisor.py` (~1.75k) — supervisor/ledger/hard wall
+  - `docs/runbooks/tier-node27-timeseries-storage.md` (~1.73k) — the tier runbook
+  - `tests/test_node27_timeseries_compression.py` (~1.27k) — runner suite
+  - `scripts/node27_timeseries_compression.py` (~1.07k) — the receipted runner
+  These are documented size exceptions for a cohesive lane, not guard-semantics bypasses, and do not affect the invariant matrix. The verifier + its suite are the two largest; splitting them is a candidate follow-up (tracked separately), not a #1069 deliverable.
 
 Caller-observable SHAPE asymmetry across the three-plus-one paths (design cheatsheet — the "why does each path have a different error shape" answer):
 
