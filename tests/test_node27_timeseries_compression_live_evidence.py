@@ -499,15 +499,20 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
         },
         "units": {},
     }
+    replay_unit = "nhms-node27-timeseries-compression-replay.service"
     for unit_name in evidence.EXPECTED_UNITS:
         journal = tmp_path / f"{unit_name}.journal.log"
         journal.write_text("bounded journal evidence\n", encoding="utf-8")
+        # MEASURED (node-27 launch 8): the replay supervisor is the process that
+        # captures this preflight, so it is legitimately activating with a live
+        # MainPID; the other four governed units are quiescent.
+        is_replay = unit_name == replay_unit
         preflight["units"][unit_name] = {
             "enabled": "enabled" if unit_name.endswith(".timer") else "static",
-            "active": "inactive",
-            "sub": "dead",
+            "active": "activating" if is_replay else "inactive",
+            "sub": "start" if is_replay else "dead",
             "result": "success",
-            "main_pid": 0,
+            "main_pid": 4137040 if is_replay else 0,
             "journal": _file_ref(journal),
         }
     schema_dump = tmp_path / "schema.dump"
@@ -2934,6 +2939,56 @@ def test_preflight_rejects_incomplete_unit_state(tmp_path: Path, missing: str) -
     del preflight["units"]["nhms-node27-autopipe.service"][missing]
     bundle["preflight"]["evidence"] = _json_ref(tmp_path, f"preflight-unit-no-{missing}.json", preflight)
     with pytest.raises(evidence.EvidenceError):
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+
+def test_preflight_rejects_quiescent_replay_supervisor(tmp_path: Path) -> None:
+    # The replay supervisor captures this preflight from INSIDE its own running
+    # process; a quiescent/dead/zero-pid replay unit means the active owner is
+    # missing, so the verifier must fail closed.
+    bundle = _bundle(tmp_path)
+    preflight = _read_ref(bundle["preflight"]["evidence"])
+    replay = preflight["units"]["nhms-node27-timeseries-compression-replay.service"]
+    replay["active"] = "inactive"
+    replay["sub"] = "dead"
+    replay["main_pid"] = 0
+    bundle["preflight"]["evidence"] = _json_ref(tmp_path, "preflight-quiescent-replay.json", preflight)
+    with pytest.raises(evidence.EvidenceError, match="replay supervisor unit is not the active owner"):
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+
+@pytest.mark.parametrize(
+    "unit_name",
+    ["nhms-node27-autopipe.service", "nhms-node27-timeseries-compression.service"],
+)
+def test_preflight_rejects_nonquiescent_governed_service(tmp_path: Path, unit_name: str) -> None:
+    # The non-replay governed .service units must be quiescent (MainPID 0) at
+    # preflight; a live PID means a competing writer.
+    bundle = _bundle(tmp_path)
+    preflight = _read_ref(bundle["preflight"]["evidence"])
+    preflight["units"][unit_name]["main_pid"] = 9999
+    bundle["preflight"]["evidence"] = _json_ref(tmp_path, "preflight-nonquiescent-service.json", preflight)
+    with pytest.raises(evidence.EvidenceError, match="is not quiescent"):
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+
+@pytest.mark.parametrize(
+    ("unit_name", "field", "value"),
+    [
+        ("nhms-node27-timeseries-compression.timer", "active", "active"),
+        ("nhms-node27-timeseries-compression.timer", "main_pid", 4242),
+        ("nhms-node27-timeseries-compression.service", "active", "active"),
+    ],
+)
+def test_preflight_rejects_active_compression_unit(
+    tmp_path: Path, unit_name: str, field: str, value: Any
+) -> None:
+    # The recurring compression timer/service must remain inactive with no PID.
+    bundle = _bundle(tmp_path)
+    preflight = _read_ref(bundle["preflight"]["evidence"])
+    preflight["units"][unit_name][field] = value
+    bundle["preflight"]["evidence"] = _json_ref(tmp_path, "preflight-active-compression.json", preflight)
+    with pytest.raises(evidence.EvidenceError, match="must remain inactive"):
         evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
 
 

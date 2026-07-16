@@ -1813,14 +1813,31 @@ def _validate_preflight(raw: Any, mutation_head_sha: str) -> dict[str, Any]:
             "main_pid": unit["main_pid"],
             "journal": journal_ref,
         }
+    # The replay supervisor captures this preflight from INSIDE its own running
+    # process, so it is legitimately activating with a live MainPID -- only the
+    # OTHER governed .service units (autopipe, recurring compression) must be
+    # quiescent here.
+    replay_unit = "nhms-node27-timeseries-compression-replay.service"
     for unit_name in EXPECTED_UNITS:
         unit = units[unit_name]
-        if unit_name.endswith(".service") and unit["main_pid"] != 0:
+        if unit_name.endswith(".service") and unit_name != replay_unit and unit["main_pid"] != 0:
             raise EvidenceError(f"preflight service {unit_name} is not quiescent")
-    for unit_name in EXPECTED_UNITS[2:]:
+    for unit_name in EXPECTED_UNITS[2:4]:
         unit = units[unit_name]
         if unit["active"] != "inactive" or unit["main_pid"] != 0:
             raise EvidenceError(f"preflight compression unit {unit_name} must remain inactive")
+    # Fail closed: the replay supervisor MUST be the active owner (activating with
+    # a live MainPID), mirroring _validate_checkpoint_artifacts' replay contract.
+    # A quiescent/dead/zero-pid replay unit at preflight is invalid.
+    replay = units[replay_unit]
+    if (
+        replay["active"] != "activating"
+        or replay["sub"] != "start"
+        or not isinstance(replay["main_pid"], int)
+        or isinstance(replay["main_pid"], bool)
+        or replay["main_pid"] <= 0
+    ):
+        raise EvidenceError("preflight replay supervisor unit is not the active owner")
     prior_autopipe = _require_mapping(preflight["prior_autopipe_state"], "preflight.prior_autopipe_state")
     _require_exact_keys(
         prior_autopipe,

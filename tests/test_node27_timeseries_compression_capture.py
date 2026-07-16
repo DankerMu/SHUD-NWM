@@ -201,7 +201,9 @@ def _capture_stub_dir(bindir: Path, *, schema_dump_container: str) -> None:
         "nhms-node27-autopipe.service": ("static", "inactive", "dead", 0),
         "nhms-node27-timeseries-compression.timer": ("enabled", "inactive", "dead", 0),
         "nhms-node27-timeseries-compression.service": ("static", "inactive", "dead", 0),
-        "nhms-node27-timeseries-compression-replay.service": ("static", "inactive", "dead", 0),
+        # MEASURED: the replay supervisor captures this preflight from INSIDE its
+        # own running process, so it is activating with a live MainPID.
+        "nhms-node27-timeseries-compression-replay.service": ("static", "activating", "start", 4137040),
     }.items():
         systemctl.append({"match": ["UnitFileState", unit], "stdout": _unit_show(enabled, active, sub, "success", pid)})
     _write_stub(bindir, "systemctl", systemctl)
