@@ -729,7 +729,12 @@ credential in process argv.
    compression-enabled, and no compression-policy job. A nonzero first apply
    stops the run; repairing partial DDL is separately authorized.
 6. Install the committed recurring service/timer and replay service byte-for-byte under
-   `~/.config/systemd/user/`, verify both file hashes, `daemon-reload`, then run
+   `~/.config/systemd/user/`, verify both file hashes, `daemon-reload`. The replay
+   unit refuses to start — a clean systemd condition failure — until the run-plan,
+   the replay env, AND `~/node27-timeseries-compression-logs` from install step 1
+   all exist: systemd must open the `StandardOutput=append:` log targets BEFORE
+   `ExecStartPre` runs, so the log directory can never be created by the unit itself
+   (measured on node-27 as `status=209/STDOUT` without the guard). Then run
    `systemctl --user enable nhms-node27-timeseries-compression.timer` **without
    `--now`**. Require `is-enabled=enabled` while timer and service stay
    inactive throughout this issue. Copy

@@ -1,7 +1,8 @@
 [Unit]
 Description=NHMS node-27 one-off controlled timeseries compression replay
-ConditionPathIsRegular=/home/nwm/node27-timeseries-compression-replay/run-plan.json
-ConditionPathIsRegular=/home/nwm/NWM/infra/env/node27-timeseries-compression-replay.env
+ConditionPathExists=/home/nwm/node27-timeseries-compression-replay/run-plan.json
+ConditionPathExists=/home/nwm/NWM/infra/env/node27-timeseries-compression-replay.env
+ConditionPathIsDirectory=/home/nwm/node27-timeseries-compression-logs
 
 [Service]
 Type=oneshot
