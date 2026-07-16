@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import atexit
 import fcntl
 import hashlib
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import UTC, datetime
@@ -31,7 +34,55 @@ RECEIPT_SCHEMA = json.loads((ROOT / "schemas/timeseries_compression_receipt.sche
 EVIDENCE_SCHEMA = json.loads(
     (ROOT / "schemas/timeseries_compression_live_evidence.schema.json").read_text(encoding="utf-8")
 )
-HEAD = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
+
+
+def _git(root: Path, *args: str) -> str:
+    """Run git against a repository this suite owns, isolated from ambient git state."""
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("GIT_")
+    }
+    env.update(
+        {
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_AUTHOR_NAME": "issue-1069 provenance fixture",
+            "GIT_AUTHOR_EMAIL": "provenance@example.invalid",
+            "GIT_COMMITTER_NAME": "issue-1069 provenance fixture",
+            "GIT_COMMITTER_EMAIL": "provenance@example.invalid",
+        }
+    )
+    return subprocess.run(
+        ["git", *args], cwd=root, env=env, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def _build_provenance_repo() -> tuple[Path, str]:
+    """Build the reviewed origin lineage the verifier's provenance contract asks git about.
+
+    `_validate_repository_provenance` asks real git whether the mutation SHA is exactly
+    the tip of a reviewed, pushed `refs/remotes/origin/*` ref on the expected remote.
+    Asking that of the ambient checkout only answers "yes" when the developer happens to
+    be sitting on the pushed tip of one branch, so the suite would report on push state
+    rather than on the contract, and would fail outright on a pull_request merge ref or
+    once the branch is deleted.  Owning a purpose-built repository makes the SHA, the
+    ref and the remote inputs this suite controls, so every lineage outcome -- including
+    the negative ones -- can be driven deliberately.
+    """
+    root = Path(tempfile.mkdtemp(prefix="node27-1069-provenance-"))
+    atexit.register(shutil.rmtree, root, True)
+    _git(root, "init", "--quiet")
+    (root / "reviewed.txt").write_text("reviewed mutation lineage\n", encoding="utf-8")
+    _git(root, "add", "reviewed.txt")
+    _git(root, "commit", "--quiet", "--message", "reviewed mutation")
+    head = _git(root, "rev-parse", "HEAD")
+    _git(root, "remote", "add", "origin", f"git@github.com:{evidence.EXPECTED_REMOTE_IDENTITY}.git")
+    _git(root, "update-ref", evidence.EXPECTED_REVIEWED_REMOTE_REF, head)
+    return root, head
+
+
+PROVENANCE_REPO, HEAD = _build_provenance_repo()
 VERIFIER_HEAD = "89abcdef0123456789abcdef0123456789abcdef"
 INVOCATION_ID = "1" * 32
 IDENTITY = {
@@ -134,6 +185,12 @@ def _descriptor_bound_git_blobs(monkeypatch: pytest.MonkeyPatch) -> None:
         "_git_blob_bytes",
         lambda _head, relative_path, _label: (ROOT / relative_path).read_bytes(),
     )
+
+
+@pytest.fixture(autouse=True)
+def _owned_provenance_lineage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Audit the lineage this suite built rather than the ambient checkout's."""
+    monkeypatch.setattr(evidence, "PROVENANCE_REPO_ROOT", PROVENANCE_REPO)
 
 
 def _catalog() -> dict[str, Any]:
@@ -724,7 +781,7 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
             "repo_path": "/home/nwm/NWM",
             "remote_identity": "DankerMu/SHUD-NWM",
             "reviewed_mutation_sha": HEAD,
-            "reviewed_remote_ref": "refs/remotes/origin/feat/issue-1069-live-compression",
+            "reviewed_remote_ref": evidence.EXPECTED_REVIEWED_REMOTE_REF,
         },
         "execution": {},
         "recovery": {
@@ -1025,7 +1082,7 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
         "plan_version": "1.0",
         "run_plan_id": "",
         "mutation_head_sha": HEAD,
-        "reviewed_remote_ref": "refs/remotes/origin/feat/issue-1069-live-compression",
+        "reviewed_remote_ref": evidence.EXPECTED_REVIEWED_REMOTE_REF,
         "database": "nhms",
         "repo_path": "/home/nwm/NWM",
         "operator_attestation": {
@@ -1262,6 +1319,144 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
         "ledger": _file_ref(ledger_path),
     }
     return bundle
+
+
+def test_verifier_and_supervisor_agree_on_the_reviewed_authorization_pin() -> None:
+    """The verifier re-declares the pin rather than importing the supervisor's, so that it
+    stays an independent oracle -- which means a drift between the two would silently make
+    real supervisor evidence unverifiable."""
+    assert evidence.EXPECTED_REVIEWED_REMOTE_REF == supervisor.EXPECTED_REVIEWED_REMOTE_REF
+    assert evidence.EXPECTED_REMOTE_IDENTITY == supervisor.EXPECTED_REMOTE_IDENTITY
+    assert evidence.EXPECTED_REPO_PATH == supervisor.EXPECTED_REPO
+
+
+def _lineage_repo(tmp_path: Path, *, remote_url: str | None) -> tuple[Path, str]:
+    """Build a checkout with one reviewed commit and, optionally, an origin remote."""
+    root = tmp_path / "checkout"
+    root.mkdir()
+    _git(root, "init", "--quiet")
+    (root / "reviewed.txt").write_text("reviewed mutation lineage\n", encoding="utf-8")
+    _git(root, "add", "reviewed.txt")
+    _git(root, "commit", "--quiet", "--message", "reviewed mutation")
+    if remote_url is not None:
+        _git(root, "remote", "add", "origin", remote_url)
+    return root, _git(root, "rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize(
+    "remote_url",
+    [
+        "git@github.com:DankerMu/SHUD-NWM.git",
+        "git@github.com:DankerMu/SHUD-NWM",
+        "https://github.com/DankerMu/SHUD-NWM.git",
+        "https://github.com/DankerMu/SHUD-NWM",
+    ],
+)
+def test_repository_provenance_accepts_the_reviewed_pushed_origin_lineage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remote_url: str
+) -> None:
+    root, head = _lineage_repo(tmp_path, remote_url=remote_url)
+    _git(root, "update-ref", evidence.EXPECTED_REVIEWED_REMOTE_REF, head)
+    monkeypatch.setattr(evidence, "PROVENANCE_REPO_ROOT", root)
+
+    evidence._validate_repository_provenance(
+        mutation_head_sha=head, reviewed_remote_ref=evidence.EXPECTED_REVIEWED_REMOTE_REF
+    )
+
+
+_NON_ORIGIN_REFS = (
+    "refs/heads/reviewed",
+    "refs/remotes/upstream/reviewed",
+    "refs/tags/reviewed",
+    "refs/remotes/originx/reviewed",
+)
+
+
+@pytest.mark.parametrize("reviewed_remote_ref", [*_NON_ORIGIN_REFS, "HEAD", ""])
+def test_repository_provenance_requires_an_origin_remote_tracking_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reviewed_remote_ref: str
+) -> None:
+    """A ref outside `refs/remotes/origin/` is refused even when it resolves to exactly the
+    mutation SHA, so unpushed local lineage can never stand in for reviewed lineage."""
+    root, head = _lineage_repo(
+        tmp_path, remote_url=f"git@github.com:{evidence.EXPECTED_REMOTE_IDENTITY}.git"
+    )
+    for ref in _NON_ORIGIN_REFS:
+        _git(root, "update-ref", ref, head)
+    monkeypatch.setattr(evidence, "PROVENANCE_REPO_ROOT", root)
+
+    with pytest.raises(evidence.EvidenceError, match="not an origin remote-tracking ref"):
+        evidence._validate_repository_provenance(
+            mutation_head_sha=head, reviewed_remote_ref=reviewed_remote_ref
+        )
+
+
+def test_repository_provenance_refuses_a_reviewed_ref_git_cannot_resolve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewed branch may never have been pushed, or may have been deleted."""
+    root, head = _lineage_repo(tmp_path, remote_url=f"git@github.com:{evidence.EXPECTED_REMOTE_IDENTITY}.git")
+    monkeypatch.setattr(evidence, "PROVENANCE_REPO_ROOT", root)
+
+    with pytest.raises(evidence.EvidenceError, match="not the authorization-pinned origin lineage"):
+        evidence._validate_repository_provenance(
+            mutation_head_sha=head, reviewed_remote_ref=evidence.EXPECTED_REVIEWED_REMOTE_REF
+        )
+
+
+def test_repository_provenance_refuses_a_mutation_sha_the_reviewed_ref_never_carried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Evidence built on a commit that was never pushed to the reviewed ref cannot qualify."""
+    root, reviewed_head = _lineage_repo(tmp_path, remote_url=f"git@github.com:{evidence.EXPECTED_REMOTE_IDENTITY}.git")
+    _git(root, "update-ref", evidence.EXPECTED_REVIEWED_REMOTE_REF, reviewed_head)
+    (root / "unreviewed.txt").write_text("local-only mutation\n", encoding="utf-8")
+    _git(root, "add", "unreviewed.txt")
+    _git(root, "commit", "--quiet", "--message", "unreviewed local mutation")
+    unreviewed_head = _git(root, "rev-parse", "HEAD")
+    assert unreviewed_head != reviewed_head
+    monkeypatch.setattr(evidence, "PROVENANCE_REPO_ROOT", root)
+
+    with pytest.raises(evidence.EvidenceError, match="not the authorization-pinned origin lineage"):
+        evidence._validate_repository_provenance(
+            mutation_head_sha=unreviewed_head, reviewed_remote_ref=evidence.EXPECTED_REVIEWED_REMOTE_REF
+        )
+
+
+@pytest.mark.parametrize(
+    "remote_url",
+    [
+        "git@github.com:attacker/SHUD-NWM.git",
+        "https://github.com/attacker/SHUD-NWM.git",
+        "git@github.com:DankerMu/OTHER-REPO.git",
+        "git@example.com:DankerMu/SHUD-NWM.git",
+        "/tmp/local-mirror",
+        None,
+    ],
+)
+def test_repository_provenance_refuses_a_foreign_or_absent_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remote_url: str | None
+) -> None:
+    """Reviewed lineage only counts when it is pushed to the expected GitHub remote."""
+    root, head = _lineage_repo(tmp_path, remote_url=remote_url)
+    _git(root, "update-ref", evidence.EXPECTED_REVIEWED_REMOTE_REF, head)
+    monkeypatch.setattr(evidence, "PROVENANCE_REPO_ROOT", root)
+
+    with pytest.raises(evidence.EvidenceError, match="not the authorization-pinned origin lineage"):
+        evidence._validate_repository_provenance(
+            mutation_head_sha=head, reviewed_remote_ref=evidence.EXPECTED_REVIEWED_REMOTE_REF
+        )
+
+
+def test_verify_bundle_refuses_evidence_whose_mutation_sha_left_the_reviewed_lineage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lineage gate is wired into the bundle path, not merely importable."""
+    root, _ = _lineage_repo(tmp_path, remote_url=f"git@github.com:{evidence.EXPECTED_REMOTE_IDENTITY}.git")
+    monkeypatch.setattr(evidence, "PROVENANCE_REPO_ROOT", root)
+
+    with pytest.raises(evidence.EvidenceError, match="not the authorization-pinned origin lineage"):
+        evidence.verify_bundle(_bundle(tmp_path), receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
 
 
 def test_verifier_recomputes_complete_terminal_envelope(tmp_path: Path) -> None:

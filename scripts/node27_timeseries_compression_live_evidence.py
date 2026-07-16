@@ -70,7 +70,13 @@ PUBLISH_LOCK_TIMEOUT_SECONDS = 5.0
 QUALIFYING_SCHEMA_VERSION = "3.0"
 EXPECTED_REPO_PATH = "/home/nwm/NWM"
 EXPECTED_REMOTE_IDENTITY = "DankerMu/SHUD-NWM"
+EXPECTED_REVIEWED_REMOTE_REF = "refs/remotes/origin/feat/issue-1069-live-compression"
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# The checkout whose origin lineage `_validate_repository_provenance` audits.  In
+# production this is always the ambient checkout the verifier runs from; it is a
+# separate name only so the lineage contract can be exercised against a purpose-built
+# repository instead of whatever state the ambient checkout happens to be in.
+PROVENANCE_REPO_ROOT = REPO_ROOT
 CANONICAL_RECEIPT_SCHEMA = REPO_ROOT / "schemas/timeseries_compression_receipt.schema.json"
 CANONICAL_EVIDENCE_SCHEMA = REPO_ROOT / "schemas/timeseries_compression_live_evidence.schema.json"
 CANONICAL_MIGRATION = REPO_ROOT / "db/migrations/000047_hypertable_compression_settings.sql"
@@ -507,7 +513,7 @@ def _validate_repository_provenance(*, mutation_head_sha: str, reviewed_remote_r
     try:
         remote = subprocess.run(
             ["git", "remote", "get-url", "origin"],
-            cwd=REPO_ROOT,
+            cwd=PROVENANCE_REPO_ROOT,
             check=False,
             capture_output=True,
             text=True,
@@ -515,7 +521,7 @@ def _validate_repository_provenance(*, mutation_head_sha: str, reviewed_remote_r
         )
         reviewed = subprocess.run(
             ["git", "rev-parse", "--verify", reviewed_remote_ref],
-            cwd=REPO_ROOT,
+            cwd=PROVENANCE_REPO_ROOT,
             check=False,
             capture_output=True,
             text=True,
@@ -991,7 +997,7 @@ def _validate_supervisor_execution(
         or plan["mutation_head_sha"] != mutation_head_sha
         or plan["database"] != database
         or plan["repo_path"] != EXPECTED_REPO_PATH
-        or plan["reviewed_remote_ref"] != "refs/remotes/origin/feat/issue-1069-live-compression"
+        or plan["reviewed_remote_ref"] != EXPECTED_REVIEWED_REMOTE_REF
     ):
         raise EvidenceError("supervisor run plan provenance differs")
     attestation = _require_mapping(plan["operator_attestation"], "execution.run_plan.operator_attestation")
@@ -3062,7 +3068,7 @@ def verify_bundle(
         "repo_path": EXPECTED_REPO_PATH,
         "remote_identity": EXPECTED_REMOTE_IDENTITY,
         "reviewed_mutation_sha": bundle["mutation_head_sha"],
-        "reviewed_remote_ref": "refs/remotes/origin/feat/issue-1069-live-compression",
+        "reviewed_remote_ref": EXPECTED_REVIEWED_REMOTE_REF,
     }
     if authorization != expected_authorization:
         raise EvidenceError("authorization differs from the issue #1069 bound-1 envelope or mutation-head")

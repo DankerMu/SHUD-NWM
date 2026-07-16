@@ -263,7 +263,7 @@ def _plan() -> dict[str, Any]:
         "plan_version": "1.0",
         "run_plan_id": "",
         "mutation_head_sha": "a" * 40,
-        "reviewed_remote_ref": "refs/remotes/origin/feat/issue-1069-live-compression",
+        "reviewed_remote_ref": supervisor.EXPECTED_REVIEWED_REMOTE_REF,
         "database": "nhms",
         "repo_path": "/home/nwm/NWM",
         "operator_attestation": {
