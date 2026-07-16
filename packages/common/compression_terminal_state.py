@@ -730,6 +730,177 @@ def _validate_intent_sidecar(
     _reject_secrets(sidecar, "terminal intent identity sidecar")
 
 
+def _bound_intent_directory_locked(
+    path: Path, *, gate_fd: int, parent_fd: int, directory_name: str
+) -> dict[str, Any] | None:
+    """Return a fully cross-bound intent directory, or ``None`` when it is not.
+
+    The binding proves the directory is this gate's own durable intent: the
+    sidecar names this gate inode, the observed ``intent.json`` identity, the
+    payload digest, and a context the payload agrees with.
+    """
+
+    parent_path = path.parent
+    try:
+        directory_fd = _open_intent_directory(parent_fd, parent_path, directory_name)
+    except (OSError, TerminalStateError):
+        return None
+    try:
+        if set(os.listdir(directory_fd)) != {"intent.json", "identity.json"}:
+            return None
+        _, intent_identity, intent_raw = _read_json_at(
+            directory_fd,
+            name="intent.json",
+            path=parent_path / directory_name / "intent.json",
+            max_bytes=MAX_INTENT_STATE_BYTES,
+            require_mode=0o600,
+        )
+        _, identity_identity, sidecar_raw = _read_json_at(
+            directory_fd,
+            name="identity.json",
+            path=parent_path / directory_name / "identity.json",
+            max_bytes=MAX_INTENT_STATE_BYTES,
+            require_mode=0o600,
+        )
+        sidecar = _require_mapping(sidecar_raw, "terminal intent identity sidecar")
+        _require_exact_keys(
+            sidecar,
+            {"schema_version", "output_path", "gate", "intent", "failure_payload_sha256", "context"},
+            "terminal intent identity sidecar",
+        )
+        intent = _require_mapping(intent_raw, "terminal publication intent")
+        _require_exact_keys(
+            intent, {"output_path", "expected", "payload"}, "terminal publication intent"
+        )
+        _validate_identity_document(intent["expected"])
+        payload = _validate_failure_payload(intent["payload"])
+        context = _validate_intent_context(sidecar["context"])
+        payload_digest = _sha256(_canonical(payload))
+        if (
+            sidecar["schema_version"] != INTENT_STATE_SCHEMA_VERSION
+            or sidecar["output_path"] != str(path)
+            or intent["output_path"] != str(path)
+            or _validate_gate_identity_document(sidecar["gate"])
+            != _gate_identity_document(os.fstat(gate_fd))
+            or _validate_identity_document(sidecar["intent"]) != _identity_document(intent_identity)
+            or sidecar["failure_payload_sha256"] != payload_digest
+            or not _payload_context_matches(_intent_context_from_terminal(payload), context)
+        ):
+            return None
+        _reject_secrets(intent, "terminal publication intent")
+        _reject_secrets(sidecar, "terminal intent identity sidecar")
+    except (OSError, TerminalStateError):
+        # Every rejection is fail-closed: callers either keep the original
+        # error or refuse to rebuild, and never see a foreign exception class.
+        return None
+    finally:
+        os.close(directory_fd)
+    return {
+        "intent_identity": intent_identity,
+        "identity_identity": identity_identity,
+        "payload_digest": payload_digest,
+        "context": context,
+    }
+
+
+def _remove_orphan_consumed_residue_locked(path: Path, *, gate_fd: int, parent_fd: int, root_name: str) -> None:
+    """Idempotently drop provable residue of a torn consuming->committed write.
+
+    A crash inside the ``committed_cleanup`` gate write leaves the terminal
+    published and only a renamed ``.consumed-*`` directory behind.  The loader
+    already classifies that prefix as idle, so it never blocks; this removes
+    the residue when -- and only when -- it still cross-binds to this gate and
+    the terminal it was consumed for.  Anything unprovable is left untouched.
+    """
+
+    if _terminal_identity_at(parent_fd, path) is None:
+        return
+    prefix = f"{root_name}.consumed-"
+    try:
+        names = sorted(name for name in os.listdir(parent_fd) if name.startswith(prefix))
+    except OSError:
+        return
+    parent_path = path.parent
+    removed = False
+    for name in names:
+        bound = _bound_intent_directory_locked(
+            path, gate_fd=gate_fd, parent_fd=parent_fd, directory_name=name
+        )
+        if bound is None:
+            continue
+        try:
+            directory_fd = _open_intent_directory(parent_fd, parent_path, name)
+        except (OSError, TerminalStateError):
+            continue
+        try:
+            for entry, identity in (
+                ("intent.json", bound["intent_identity"]),
+                ("identity.json", bound["identity_identity"]),
+            ):
+                current = os.stat(entry, dir_fd=directory_fd, follow_symlinks=False)
+                if (current.st_dev, current.st_ino, current.st_size) != (
+                    identity.device,
+                    identity.inode,
+                    identity.size,
+                ):
+                    raise TerminalStateError("orphan consumed residue changed before unlink")
+                os.unlink(entry, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+            if os.listdir(directory_fd):
+                raise TerminalStateError("orphan consumed residue is not empty after exact deletion")
+        except (OSError, TerminalStateError):
+            continue
+        finally:
+            os.close(directory_fd)
+        try:
+            os.rmdir(name, dir_fd=parent_fd)
+        except OSError:
+            # Residue collection is opportunistic: it must never turn an
+            # otherwise valid read or publication into a failure.
+            continue
+        removed = True
+    if removed:
+        _fsync_directory_fd(parent_fd, parent_path, label="terminal intent parent")
+
+
+def _rebuild_torn_gate_pending_locked(
+    path: Path, *, gate_fd: int, parent_fd: int, root_name: str
+) -> dict[str, Any]:
+    """Rebuild the ``pending`` gate a crash tore away, or stay fail-closed.
+
+    The gate file is the flock object, so it cannot be replaced by rename and
+    an ``ftruncate``/``write`` pair is not atomic.  Only the idle->pending and
+    pending->consuming writes can be interrupted while the *active* intent
+    directory is present, and both recover to ``pending``: the terminal is not
+    published yet, and a torn consume had not yet renamed the directory.
+
+    The rebuild is accepted only when the durable sidecar still cross-binds
+    this gate inode, the observed intent identity, the payload digest, and the
+    run context.  Anything else keeps the original fail-closed behaviour.
+    """
+
+    bound = _bound_intent_directory_locked(
+        path, gate_fd=gate_fd, parent_fd=parent_fd, directory_name=root_name
+    )
+    if bound is None:
+        raise TerminalStateError("terminal intent exists without durable gate state")
+    _write_gate_state(
+        gate_fd,
+        {
+            "schema_version": INTENT_STATE_SCHEMA_VERSION,
+            "state": "pending",
+            "intent_directory": root_name,
+            "output_path": str(path),
+            "intent": _identity_document(bound["intent_identity"]),
+            "identity": _identity_document(bound["identity_identity"]),
+            "failure_payload_sha256": bound["payload_digest"],
+            "context": bound["context"],
+        },
+    )
+    _fsync_directory_fd(parent_fd, path.parent, label="terminal intent parent")
+    return _read_gate_state(gate_fd)
+
+
 def _load_pending_intent_locked(
     path: Path,
     *,
@@ -737,17 +908,32 @@ def _load_pending_intent_locked(
     parent_fd: int,
     expected: FileIdentity | None | object = _ANY_EXPECTED_IDENTITY,
 ) -> dict[str, Any] | None:
-    state = _read_gate_state(gate_fd)
     root_name = _terminal_intent_root_path(path).name
     try:
         os.stat(root_name, dir_fd=parent_fd, follow_symlinks=False)
         active_exists = True
     except FileNotFoundError:
         active_exists = False
+    try:
+        state = _read_gate_state(gate_fd)
+    except TerminalStateError:
+        # A torn half-write is unparseable/non-canonical.  With no durable
+        # intent directory there is nothing to reconstruct and the original
+        # error stands.
+        if not active_exists:
+            raise
+        state = _rebuild_torn_gate_pending_locked(
+            path, gate_fd=gate_fd, parent_fd=parent_fd, root_name=root_name
+        )
     if state["state"] == "idle":
-        if active_exists:
-            raise TerminalStateError("terminal intent exists without durable gate state")
-        return None
+        if not active_exists:
+            _remove_orphan_consumed_residue_locked(
+                path, gate_fd=gate_fd, parent_fd=parent_fd, root_name=root_name
+            )
+            return None
+        state = _rebuild_torn_gate_pending_locked(
+            path, gate_fd=gate_fd, parent_fd=parent_fd, root_name=root_name
+        )
     if state["intent_directory"] != root_name:
         raise TerminalStateError("terminal intent directory differs from gate state")
 

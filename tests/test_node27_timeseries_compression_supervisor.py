@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -16,6 +17,7 @@ import jsonschema
 import pytest
 
 from packages.common import compression_terminal_state as terminal_state
+from packages.common import evidence_io
 from packages.common.evidence_io import (
     BoundedEvidenceError,
     assert_output_disjoint_from_closure,
@@ -1018,6 +1020,388 @@ def test_replay_unit_requires_external_run_plan_digest_pin() -> None:
     unit = (root / "infra/systemd/nhms-node27-timeseries-compression-replay.service").read_text()
     assert "NODE27_COMPRESSION_RUN_PLAN_SHA256=REPLACE_WITH_64_HEX_DIGEST" in env_example
     assert "EnvironmentFile=/home/nwm/NWM/infra/env/node27-timeseries-compression-replay.env" in unit
+
+
+STALE_RECEIPT = b'{"schema_version":"3.0","qualifies_task_4_5":true}\n'
+
+
+class _MainHarness:
+    """Drive ``supervisor.main()`` start-gate wiring with harmless local inputs.
+
+    Nothing here touches a database, systemd, or any live receipt: the child
+    state machine, the Git lineage probe, and the journal cursor are the only
+    surfaces stubbed, and every path lives under ``tmp_path``.
+    """
+
+    def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        for key in supervisor.FORBIDDEN_INHERITED_ENV:
+            monkeypatch.delenv(key, raising=False)
+        self.plan = _plan()
+        self.plan_raw = _canonical_bytes(self.plan)
+        self.plan_path = tmp_path / "run-plan.json"
+        self.plan_path.write_bytes(self.plan_raw)
+        self.receipt = tmp_path / "terminal-evidence.json"
+        self.receipt.write_bytes(STALE_RECEIPT)
+        self.state_path = tmp_path / "finalizer-state.json"
+        self.ledger_path = tmp_path / "supervisor-ledger.jsonl"
+        self.executed: list[dict[str, Any]] = []
+        self.armed: list[dict[str, Any]] = []
+        self.ledgers: list[supervisor.AppendOnlyLedger] = []
+        self.plan_opens: list[int] = []
+        monkeypatch.setenv("INVOCATION_ID", "1" * 32)
+        monkeypatch.setenv("NODE27_COMPRESSION_RUN_PLAN_SHA256", hashlib.sha256(self.plan_raw).hexdigest())
+        monkeypatch.setenv(
+            "NODE27_COMPRESSION_EXPECTED_STALE_SHA256", hashlib.sha256(STALE_RECEIPT).hexdigest()
+        )
+        monkeypatch.setattr(supervisor, "_verify_checkout_lineage", lambda plan, *, wall: None)
+        monkeypatch.setattr(supervisor, "_run_capture_argv", self._journal_cursor)
+        monkeypatch.setattr(supervisor, "execute_producer_state_machine", self._state_machine)
+
+    def _journal_cursor(self, argv: list[str], **_: Any) -> bytes:
+        assert argv[0] == "/usr/bin/journalctl"
+        return b"-- cursor: s=cursor;i=1\n"
+
+    def _state_machine(self, plan: dict[str, Any], **kwargs: Any) -> None:
+        self.executed.append(plan)
+        self.ledgers.append(kwargs["ledger"])
+        # The finalizer must already be armed before any child can mutate.
+        self.armed.append(json.loads(self.state_path.read_text()))
+
+    def argv(self) -> list[str]:
+        return [
+            "--enforce",
+            "--run-plan-path",
+            str(self.plan_path),
+            "--ledger-path",
+            str(self.ledger_path),
+            "--receipt-path",
+            str(self.receipt),
+            "--finalizer-state-path",
+            str(self.state_path),
+            "--wall-seconds",
+            "30",
+        ]
+
+    def assert_failed_before_mutation(self) -> None:
+        assert self.executed == []
+        assert not self.state_path.exists()
+        assert self.receipt.read_bytes() == STALE_RECEIPT
+
+
+def _canonical_bytes(value: Any) -> bytes:
+    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def test_main_start_gate_passes_and_arms_finalizer_for_reviewed_replay_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _MainHarness(tmp_path, monkeypatch)
+
+    assert supervisor.main(harness.argv()) == 0
+
+    assert len(harness.executed) == 1
+    assert harness.executed[0]["run_plan_id"] == harness.plan["run_plan_id"]
+    armed = harness.armed[0]
+    assert armed["receipt_path"] == str(harness.receipt)
+    assert armed["expected_stale_sha256"] == hashlib.sha256(STALE_RECEIPT).hexdigest()
+    assert armed["mutation_head_sha"] == harness.plan["mutation_head_sha"]
+    assert re.fullmatch(supervisor.RUN_ID_PATTERN, armed["run_id"]) is not None
+    # A successful run disarms exactly its own state and leaves no residue.
+    assert not harness.state_path.exists()
+    # The ledger the state machine writes through is bound to the live systemd
+    # invocation and to the same run_id the finalizer was armed with.
+    ledger = harness.ledgers[0]
+    assert ledger.invocation_id == "1" * 32
+    assert ledger.run_id == armed["run_id"]
+    assert ledger.run_plan_id == harness.plan["run_plan_id"]
+
+
+def test_main_run_plan_digest_pin_binds_the_bytes_that_are_parsed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An inode ABA must not slip an unpinned plan body past the digest pin."""
+
+    harness = _MainHarness(tmp_path, monkeypatch)
+    attacker = _plan()
+    attacker["captures"][0]["capture_id"] = "attacker-substituted-capture"
+    attacker["run_plan_id"] = supervisor.run_plan_id(attacker)
+    attacker_raw = _canonical_bytes(attacker)
+    assert attacker_raw != harness.plan_raw
+    # A self-consistent swap survives plan validation on its own merits, so
+    # only same-read digest binding can reject it.
+    supervisor.validate_run_plan(attacker, inherited_env={})
+    # A hardlink keeps the reviewed inode alive so the swap can be undone with
+    # the original device/inode/size/sha256 intact -- a real ABA, not a
+    # detectable one-way replacement.
+    reviewed_inode = tmp_path / "reviewed-inode.json"
+    os.link(harness.plan_path, reviewed_inode)
+    attacker_path = tmp_path / "attacker-plan.json"
+    attacker_path.write_bytes(attacker_raw)
+    real_open = evidence_io.open_file_no_follow
+
+    def swapping_open(path: Any, *args: Any, **kwargs: Any) -> int:
+        if Path(path) == harness.plan_path:
+            index = len(harness.plan_opens)
+            harness.plan_opens.append(index)
+            if index == 1:
+                os.replace(attacker_path, harness.plan_path)
+            elif index == 2:
+                os.replace(reviewed_inode, harness.plan_path)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(evidence_io, "open_file_no_follow", swapping_open)
+
+    assert supervisor.main(harness.argv()) == 0
+
+    # The swapped-in body must never become the executed body.
+    executed_captures = {capture["capture_id"] for capture in harness.executed[0]["captures"]}
+    assert "attacker-substituted-capture" not in executed_captures
+    assert harness.executed[0]["run_plan_id"] == harness.plan["run_plan_id"]
+    # ...because exactly one descriptor read owns the plan: the bytes that are
+    # digested are the bytes that are parsed.
+    assert harness.plan_opens == [0]
+
+
+@pytest.mark.parametrize(
+    ("scenario", "match"),
+    [
+        ("wrong_plan_pin", "run-plan SHA256 pin differs"),
+        ("missing_plan_pin", "run-plan SHA256 pin is required"),
+        ("wrong_stale_digest", "expected stale receipt identity/digest is required"),
+        ("missing_stale_digest", "expected stale receipt identity/digest is required"),
+        ("missing_invocation_id", "INVOCATION_ID is required"),
+        ("missing_enforce", "requires literal --enforce"),
+    ],
+)
+def test_main_start_gate_fails_closed_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str, match: str
+) -> None:
+    harness = _MainHarness(tmp_path, monkeypatch)
+    argv = harness.argv()
+    if scenario == "wrong_plan_pin":
+        monkeypatch.setenv("NODE27_COMPRESSION_RUN_PLAN_SHA256", "0" * 64)
+    elif scenario == "missing_plan_pin":
+        monkeypatch.delenv("NODE27_COMPRESSION_RUN_PLAN_SHA256")
+    elif scenario == "wrong_stale_digest":
+        monkeypatch.setenv("NODE27_COMPRESSION_EXPECTED_STALE_SHA256", "0" * 64)
+    elif scenario == "missing_stale_digest":
+        monkeypatch.delenv("NODE27_COMPRESSION_EXPECTED_STALE_SHA256")
+    elif scenario == "missing_invocation_id":
+        monkeypatch.delenv("INVOCATION_ID")
+    else:
+        argv = [item for item in argv if item != "--enforce"]
+
+    with pytest.raises(supervisor.SupervisorError, match=match):
+        supervisor.main(argv)
+
+    harness.assert_failed_before_mutation()
+
+
+@pytest.mark.parametrize("missing", ["run_plan", "receipt"])
+def test_main_missing_replay_inputs_fail_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: str
+) -> None:
+    harness = _MainHarness(tmp_path, monkeypatch)
+    if missing == "run_plan":
+        harness.plan_path.unlink()
+        expected: type[Exception] = BoundedEvidenceError
+    else:
+        harness.receipt.unlink()
+        expected = supervisor.SupervisorError
+
+    with pytest.raises(expected):
+        supervisor.main(harness.argv())
+
+    assert harness.executed == []
+    assert not harness.state_path.exists()
+
+
+def test_finalizer_state_run_id_cannot_escape_its_marker_path(tmp_path: Path) -> None:
+    """A tampered run_id must fail closed, not crash ExecStopPost or escape."""
+
+    receipt = tmp_path / "receipt.json"
+    stale = b'{"outcome":"stale"}\n'
+    receipt.write_bytes(stale)
+    state = tmp_path / "state.json"
+    supervisor._write_finalizer_state(
+        state,
+        receipt_path=receipt,
+        expected_stale_sha256=hashlib.sha256(stale).hexdigest(),
+        run_id="legit-run",
+        mutation_head_sha="a" * 40,
+    )
+    tampered = json.loads(state.read_text())
+    tampered["run_id"] = "../../escape"
+    _write_canonical(state, tampered)
+
+    # Returns False instead of raising an uncaught ValueError out of the unit's
+    # ExecStopPost, and writes no marker anywhere.
+    assert supervisor.finalize_from_state(state, stage="systemd-stop-post") is False
+    assert receipt.read_bytes() == stale
+    assert not list(tmp_path.parent.glob("*escape*"))
+    assert sorted(item.name for item in tmp_path.iterdir()) == ["receipt.json", "state.json"]
+
+
+def _write_canonical(path: Path, value: Any) -> None:
+    path.write_bytes(
+        (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
+    )
+
+
+def _leave_pending_intent(receipt: Path) -> Any:
+    """Leave one durable pending failure intent by holding the publish lock."""
+
+    expected = terminal_state.terminal_identity(receipt)
+    assert expected is not None
+    lock_fd = os.open(terminal_state._terminal_lock_path(receipt), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        assert not terminal_state.publish_unavailable_failure(
+            receipt,
+            stage="verifier-provenance",
+            expected=expected,
+            verifier_head_sha="b" * 40,
+            deadline_monotonic=time.monotonic() + 0.05,
+        )
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+    assert terminal_state._terminal_intent_root_path(receipt).is_dir()
+    return expected
+
+
+def _tear_gate(receipt: Path, *, keep_bytes: int) -> None:
+    """Simulate SIGKILL inside the gate's non-atomic ftruncate/write pair."""
+
+    gate = terminal_state._terminal_intent_gate_path(receipt)
+    assert len(gate.read_bytes()) > keep_bytes
+    fd = os.open(gate, os.O_RDWR)
+    try:
+        os.ftruncate(fd, keep_bytes)
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("keep_bytes", [0, 20])
+def test_torn_intent_gate_recovers_pending_from_cross_bound_identity(
+    tmp_path: Path, keep_bytes: int
+) -> None:
+    """An empty/torn gate beside a live intent must recover, not deadlock."""
+
+    receipt = tmp_path / "terminal.json"
+    receipt.write_bytes(STALE_RECEIPT)
+    expected = _leave_pending_intent(receipt)
+    _tear_gate(receipt, keep_bytes=keep_bytes)
+
+    # The crash prefix stays classified as a pending intent.
+    with pytest.raises(terminal_state.TerminalStateError, match="intent is pending"):
+        terminal_state.read_authoritative_terminal(receipt)
+    with terminal_state._locked_intent_gate(receipt, label="torn gate audit") as (gate_fd, _):
+        rebuilt = terminal_state._read_gate_state(gate_fd)
+    assert rebuilt["state"] == "pending"
+    assert rebuilt["intent_directory"] == terminal_state._terminal_intent_root_path(receipt).name
+
+    # The rebuilt gate is durable, so recovery is idempotent, and the intent
+    # still completes exactly one bound publication.
+    assert supervisor.finalize_receipt(
+        receipt,
+        expected_stale_sha256=expected.sha256,
+        run_id="torn-gate-run",
+        stage="timeout",
+        possible_mutation=True,
+        mutation_head_sha="a" * 40,
+    )
+    terminal = terminal_state.read_authoritative_terminal(receipt)
+    assert terminal["provenance_state"] == "bound"
+    assert terminal["run_id"] == "torn-gate-run"
+    assert not terminal_state._terminal_intent_root_path(receipt).exists()
+
+
+@pytest.mark.parametrize(
+    "tamper", ["gate_inode", "intent_identity", "payload_digest", "output_path", "intent_payload"]
+)
+def test_torn_intent_gate_stays_fail_closed_on_identity_tampering(
+    tmp_path: Path, tamper: str
+) -> None:
+    receipt = tmp_path / "terminal.json"
+    receipt.write_bytes(STALE_RECEIPT)
+    _leave_pending_intent(receipt)
+    root = terminal_state._terminal_intent_root_path(receipt)
+    sidecar_path = root / "identity.json"
+    sidecar = json.loads(sidecar_path.read_text())
+    if tamper == "intent_payload":
+        intent_path = root / "intent.json"
+        intent = json.loads(intent_path.read_text())
+        intent["payload"]["failure"]["stage"] = "attacker-stage"
+        _write_canonical(intent_path, intent)
+    else:
+        if tamper == "gate_inode":
+            sidecar["gate"]["inode"] += 1
+        elif tamper == "intent_identity":
+            sidecar["intent"]["sha256"] = "0" * 64
+        elif tamper == "payload_digest":
+            sidecar["failure_payload_sha256"] = "0" * 64
+        else:
+            sidecar["output_path"] = str(tmp_path / "other-terminal.json")
+        _write_canonical(sidecar_path, sidecar)
+    _tear_gate(receipt, keep_bytes=0)
+
+    with pytest.raises(terminal_state.TerminalStateError, match="without durable gate state"):
+        terminal_state.read_authoritative_terminal(receipt)
+    # No rebuild and no publication: the stale terminal is untouched and the
+    # rejection is stable rather than a one-shot.
+    assert receipt.read_bytes() == STALE_RECEIPT
+    with pytest.raises(terminal_state.TerminalStateError, match="without durable gate state"):
+        terminal_state.read_authoritative_terminal(receipt)
+    assert terminal_state._terminal_intent_root_path(receipt).is_dir()
+
+
+def test_torn_committed_gate_leaves_no_blocking_or_permanent_consumed_residue(
+    tmp_path: Path,
+) -> None:
+    """A torn consuming->committed write leaves recoverable, non-blocking residue."""
+
+    receipt = tmp_path / "terminal.json"
+    receipt.write_bytes(STALE_RECEIPT)
+    expected = _leave_pending_intent(receipt)
+    root = terminal_state._terminal_intent_root_path(receipt)
+    original_write = terminal_state._write_gate_state
+    torn: list[str] = []
+
+    def tearing_write(gate_fd: int, state: Any) -> None:
+        # Simulate SIGKILL after ftruncate(0) of the committed_cleanup write.
+        if state.get("state") == "committed_cleanup":
+            torn.append("committed_cleanup")
+            os.ftruncate(gate_fd, 0)
+            raise KeyboardInterrupt("simulated SIGKILL inside the gate write")
+        original_write(gate_fd, state)
+
+    terminal_state._write_gate_state = tearing_write
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            supervisor.finalize_receipt(
+                receipt,
+                expected_stale_sha256=expected.sha256,
+                run_id="torn-commit-run",
+                stage="timeout",
+                possible_mutation=True,
+                mutation_head_sha="a" * 40,
+            )
+    finally:
+        terminal_state._write_gate_state = original_write
+    assert torn == ["committed_cleanup"]
+    # The terminal is published and the active intent was renamed aside.
+    assert not root.exists()
+    residue = sorted(tmp_path.glob(f"{root.name}.consumed-*"))
+    assert len(residue) == 1
+
+    # The loader classifies the prefix (no deadlock) and idempotently drops the
+    # provable residue rather than leaving it forever.
+    terminal = terminal_state.read_authoritative_terminal(receipt)
+    assert terminal["provenance_state"] == "bound"
+    assert terminal["run_id"] == "torn-commit-run"
+    assert sorted(tmp_path.glob(f"{root.name}.consumed-*")) == []
+    assert terminal_state.read_authoritative_terminal(receipt) == terminal
 
 
 def test_catalog_boundary_and_over_limit_tombstone_input() -> None:

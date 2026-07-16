@@ -34,14 +34,23 @@ from typing import Any, BinaryIO
 from packages.common import compression_terminal_state as terminal_state
 from packages.common.evidence_io import (
     BoundedEvidenceError,
+    FileIdentity,
     inspect_bounded_file_no_follow,
     read_bounded_json_no_follow,
+    read_bounded_json_with_identity_no_follow,
     reject_secret_material,
 )
 from packages.common.safe_fs import atomic_write_bytes_no_follow
 
 SCHEMA_VERSION = "3.0"
 RUN_PLAN_VERSION = "1.0"
+# The finalizer state is a durable file an untrusted party could rewrite
+# between ExecStart and ExecStopPost, and its run_id is interpolated into a
+# sibling marker filename.  This allowlist is a superset of the uuid4 the
+# producer emits and excludes every path separator, NUL and traversal
+# character, so the interpolation can only ever name one bounded, ordinary
+# entry inside the state directory.
+RUN_ID_PATTERN = r"[0-9A-Za-z._-]{1,64}"
 EXPECTED_REPO = "/home/nwm/NWM"
 EXPECTED_DATABASE = "nhms"
 EXPECTED_CONTAINER = "nhms-db"
@@ -1218,14 +1227,26 @@ def capture_checkpoint(
     return cursor_lines[-1]
 
 
-def _safe_regular_identity(path: Path) -> tuple[int, int, int, str] | None:
+def _safe_regular_identity(path: Path) -> FileIdentity | None:
+    """Return one pinned regular-file identity, or ``None`` when unreadable.
+
+    The identity is returned as a named structure on purpose: callers compare
+    digests and inode metadata that are trivially confused by position.
+    """
+
     try:
-        identity = terminal_state.terminal_identity(path)
+        return terminal_state.terminal_identity(path)
     except terminal_state.TerminalStateError:
         return None
-    if identity is None:
-        return None
-    return identity.device, identity.inode, identity.size, identity.sha256
+
+
+def _stale_identity_document(identity: FileIdentity) -> dict[str, Any]:
+    return {
+        "device": identity.device,
+        "inode": identity.inode,
+        "bytes": identity.size,
+        "sha256": identity.sha256,
+    }
 
 
 def finalize_receipt(
@@ -1256,14 +1277,9 @@ def finalize_receipt(
         }
     else:
         current = _safe_regular_identity(receipt_path)
-        if current is None or current[3] != expected_stale_sha256:
+        if current is None or current.sha256 != expected_stale_sha256:
             return False
-        expected_document = {
-            "device": current[0],
-            "inode": current[1],
-            "bytes": current[2],
-            "sha256": current[3],
-        }
+        expected_document = _stale_identity_document(current)
     try:
         expected = terminal_state.identity_from_document(receipt_path, expected_document)
     except terminal_state.TerminalStateError:
@@ -1298,15 +1314,15 @@ def _write_finalizer_state(
     else:
         raise SupervisorError("finalizer state path already exists")
     stale_identity = _safe_regular_identity(receipt_path)
-    if stale_identity is None or stale_identity[3] != expected_stale_sha256:
+    if stale_identity is None or stale_identity.sha256 != expected_stale_sha256:
         raise SupervisorError("finalizer stale receipt identity differs")
     state = {
         "schema_version": SCHEMA_VERSION,
         "receipt_path": str(receipt_path),
         "expected_stale_sha256": expected_stale_sha256,
-        "expected_stale_device": stale_identity[0],
-        "expected_stale_inode": stale_identity[1],
-        "expected_stale_bytes": stale_identity[2],
+        "expected_stale_device": stale_identity.device,
+        "expected_stale_inode": stale_identity.inode,
+        "expected_stale_bytes": stale_identity.size,
         "run_id": run_id,
         "mutation_head_sha": mutation_head_sha,
     }
@@ -1346,6 +1362,9 @@ def finalize_from_state(
         or not receipt.is_absolute()
         or re.fullmatch(r"[0-9a-f]{40}", str(value["mutation_head_sha"])) is None
         or re.fullmatch(r"[0-9a-f]{64}", str(value["expected_stale_sha256"])) is None
+        # The run_id reaches a sibling marker filename below, so it must be a
+        # bounded, separator-free name before it touches any path.
+        or re.fullmatch(RUN_ID_PATTERN, str(value["run_id"])) is None
         or any(
             not isinstance(value[key], int)
             or isinstance(value[key], bool)
@@ -1374,14 +1393,14 @@ def finalize_from_state(
         deadline_monotonic=deadline,
     )
     current = _safe_regular_identity(receipt)
-    expected_identity = (
-        int(value["expected_stale_device"]),
-        int(value["expected_stale_inode"]),
-        int(value["expected_stale_bytes"]),
-        str(value["expected_stale_sha256"]),
-    )
+    expected_identity = {
+        "device": int(value["expected_stale_device"]),
+        "inode": int(value["expected_stale_inode"]),
+        "bytes": int(value["expected_stale_bytes"]),
+        "sha256": str(value["expected_stale_sha256"]),
+    }
     if not replaced:
-        if current is None or current == expected_identity:
+        if current is None or _stale_identity_document(current) == expected_identity:
             return False
         if not terminal_state.terminal_is_authoritative(
             receipt, deadline_monotonic=deadline
@@ -1564,14 +1583,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SupervisorError("systemd INVOCATION_ID is required")
     if re.fullmatch(r"[0-9a-f]{64}", expected_plan_sha256) is None:
         raise SupervisorError("external run-plan SHA256 pin is required")
-    plan_identity = inspect_bounded_file_no_follow(
-        args.run_plan_path,
-        max_bytes=1024**2,
-        label="supervisor run plan descriptor",
-    )
-    if plan_identity.sha256 != expected_plan_sha256:
-        raise SupervisorError("external run-plan SHA256 pin differs")
-    _, plan_value = read_bounded_json_no_follow(
+    # One read owns the plan: the bytes that are digested are the bytes that
+    # are parsed and executed.  Digesting a separate pathname read would let an
+    # inode ABA swap an unpinned plan body between the pin and the parse.
+    _, plan_identity, plan_value = read_bounded_json_with_identity_no_follow(
         args.run_plan_path,
         max_bytes=1024**2,
         label="supervisor run plan",
@@ -1579,14 +1594,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_nodes=20_000,
         max_array_items=1000,
     )
+    if plan_identity.sha256 != expected_plan_sha256:
+        raise SupervisorError("external run-plan SHA256 pin differs")
     plan = validate_run_plan(plan_value, inherited_env=os.environ)
-    final_plan_identity = inspect_bounded_file_no_follow(
-        args.run_plan_path,
-        max_bytes=1024**2,
-        label="supervisor run plan post-parse descriptor",
-    )
-    if final_plan_identity != plan_identity:
-        raise SupervisorError("run plan descriptor changed while being parsed")
     if run_plan_id(plan) != plan["run_plan_id"]:
         raise SupervisorError("run_plan_id differs from the immutable plan content")
     expected_stale_sha256 = args.expected_stale_sha256 or os.environ.get("NODE27_COMPRESSION_EXPECTED_STALE_SHA256", "")
@@ -1594,7 +1604,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if (
         re.fullmatch(r"[0-9a-f]{64}", expected_stale_sha256) is None
         or stale_identity is None
-        or stale_identity[2] != expected_stale_sha256
+        or stale_identity.sha256 != expected_stale_sha256
     ):
         raise SupervisorError("expected stale receipt identity/digest is required")
     run_id = str(uuid.uuid4())
