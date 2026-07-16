@@ -134,6 +134,27 @@ def _observed(ref: dict[str, Any]) -> dict[str, Any]:
     return {"artifact": ref, "device": info.st_dev, "inode": info.st_ino}
 
 
+def _checkpoint_session(backend_type: str, *, pid: int = 999) -> dict[str, Any]:
+    """A checkpoint-shape pg_stat_activity session (verifier exact-key set)."""
+
+    return {"pid": pid, "state": "active", "wait_event_type": None, "backend_type": backend_type}
+
+
+def _benchmark_session(backend_type: str, *, pid: int = 1135) -> dict[str, Any]:
+    """A benchmark-shape activity session (producer/verifier exact-key set)."""
+
+    return {
+        "pid": pid,
+        "backend_start": "2026-07-15T12:00:00Z",
+        "xact_start": None,
+        "query_start": "2026-07-15T12:00:01Z",
+        "state": "active",
+        "wait_event_type": None,
+        "backend_type": backend_type,
+        "query_signature": "a" * 32,
+    }
+
+
 def _invocation(
     *,
     kind: str,
@@ -3459,6 +3480,29 @@ def test_retained_reference_change_after_publish_replaces_pass(tmp_path: Path, m
     assert marker["qualifies_task_4_5"] is False
 
 
+def test_evidence_schema_requires_backend_type_on_activity_sessions() -> None:
+    # Locks the schema contract (G9 item F): the activity_session $def must
+    # require backend_type, so a session missing it fails the canonical schema
+    # even though additionalProperties otherwise governs the shape. Dropping
+    # backend_type from the $def's required list makes this test RED.
+    session_def = EVIDENCE_SCHEMA["$defs"]["activity_session"]
+    assert "backend_type" in session_def["required"]
+    validator = jsonschema.Draft7Validator(session_def, format_checker=jsonschema.FormatChecker())
+    complete = {
+        "pid": 1135,
+        "backend_start": "2026-07-15T12:00:00Z",
+        "xact_start": None,
+        "query_start": "2026-07-15T12:00:01Z",
+        "state": "active",
+        "wait_event_type": None,
+        "backend_type": "autovacuum worker",
+        "query_signature": "a" * 32,
+    }
+    validator.validate(complete)
+    without_backend_type = {key: value for key, value in complete.items() if key != "backend_type"}
+    assert not validator.is_valid(without_backend_type)
+
+
 def test_round3_current_d3_passes_and_catalog_drift_fails(tmp_path: Path) -> None:
     bundle = _bundle(tmp_path)
     assert (
@@ -3487,12 +3531,77 @@ def test_round3_checkpoint_bijection_and_raw_refs_are_required(tmp_path: Path) -
     events = [json.loads(line) for line in Path(bundle["execution"]["ledger"]["path"]).read_text().splitlines()]
     checkpoint = next(item for item in events if item["event_type"] == "checkpoint")
     activity = _read_ref(checkpoint["database_activity"]["artifact"])
-    activity["sessions"] = [{"pid": 999}]
+    activity["sessions"] = [_checkpoint_session(evidence.CLIENT_BACKEND_TYPE)]
     checkpoint["database_activity"] = _observed(_json_ref(tmp_path, "conflicting-session.json", activity))
     ledger = tmp_path / "conflicting-session-ledger.jsonl"
     ledger.write_bytes(b"".join(_canonical(item) for item in events))
     bundle["execution"]["ledger"] = _file_ref(ledger)
     with pytest.raises(evidence.EvidenceError, match="conflicting writer"):
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+
+def test_checkpoint_verifier_tolerates_an_autovacuum_worker_session(tmp_path: Path) -> None:
+    # G9 verifier twin: the launch-7 aborter -- an autovacuum worker vacuuming
+    # the chunk the mutation just created -- must now pass the checkpoint.
+    bundle = _bundle(tmp_path)
+    events = [json.loads(line) for line in Path(bundle["execution"]["ledger"]["path"]).read_text().splitlines()]
+    checkpoint = next(item for item in events if item["event_type"] == "checkpoint")
+    activity = _read_ref(checkpoint["database_activity"]["artifact"])
+    activity["sessions"] = [_checkpoint_session("autovacuum worker", pid=1135)]
+    checkpoint["database_activity"] = _observed(_json_ref(tmp_path, "autovacuum-session.json", activity))
+    ledger = tmp_path / "autovacuum-session-ledger.jsonl"
+    ledger.write_bytes(b"".join(_canonical(item) for item in events))
+    bundle["execution"]["ledger"] = _file_ref(ledger)
+    assert (
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)["preflight"][
+            "quiescent"
+        ]
+        is True
+    )
+
+
+def test_checkpoint_verifier_rejects_a_session_missing_backend_type(tmp_path: Path) -> None:
+    # Fail-closed shape gate: a session missing backend_type cannot be silently
+    # tolerated by the client-only judgment.
+    bundle = _bundle(tmp_path)
+    events = [json.loads(line) for line in Path(bundle["execution"]["ledger"]["path"]).read_text().splitlines()]
+    checkpoint = next(item for item in events if item["event_type"] == "checkpoint")
+    activity = _read_ref(checkpoint["database_activity"]["artifact"])
+    activity["sessions"] = [{"pid": 999, "state": "active", "wait_event_type": None}]
+    checkpoint["database_activity"] = _observed(_json_ref(tmp_path, "shapeless-session.json", activity))
+    ledger = tmp_path / "shapeless-session-ledger.jsonl"
+    ledger.write_bytes(b"".join(_canonical(item) for item in events))
+    bundle["execution"]["ledger"] = _file_ref(ledger)
+    with pytest.raises(evidence.EvidenceError, match="keys differ"):
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+
+def test_benchmark_verifier_tolerates_transient_background_worker(tmp_path: Path) -> None:
+    # G9 benchmark twin: an autovacuum worker appearing in only some activity
+    # stages is not session-identity drift; the full lists stay persisted. This
+    # re-points the produced-artifact association so the tolerance is exercised
+    # on the SUCCESS path, not short-circuited by an ownership guard.
+    bundle = _bundle(tmp_path)
+    document = _read_ref(bundle["benchmarks"]["evidence"])
+    samples = document["queries"][0]["before"]["activity_samples"]
+    for index in (1, 3):
+        samples[index]["sessions"] = [_benchmark_session("autovacuum worker")]
+    ref = _json_ref(tmp_path, "benchmark-transient-worker.json", document)
+    bundle["benchmarks"]["evidence"] = ref
+    _replace_produced_artifact(bundle, "benchmark_after", "benchmarks", ref, tmp_path)
+    terminal = evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    assert [query["name"] for query in terminal["benchmarks"]["queries"]] == ["curve", "mvt"]
+
+
+def test_benchmark_verifier_rejects_client_backend_drift(tmp_path: Path) -> None:
+    # A client backend appearing in only some stages IS session-identity drift.
+    def mutate(document: dict[str, Any]) -> None:
+        samples = document["queries"][0]["before"]["activity_samples"]
+        for index in (1, 3):
+            samples[index]["sessions"] = [_benchmark_session(evidence.CLIENT_BACKEND_TYPE)]
+
+    bundle = _mutated_benchmark_bundle(tmp_path, mutate)
+    with pytest.raises(evidence.EvidenceError, match="session-identity drift"):
         evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
 
 

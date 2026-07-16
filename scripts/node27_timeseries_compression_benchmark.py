@@ -42,6 +42,7 @@ from packages.common.forecast_store import (
     ForecastStoreError,
     PsycopgForecastStore,
 )
+from packages.common.node27_container_contract import CLIENT_BACKEND_TYPE
 from packages.common.safe_fs import atomic_write_bytes_no_follow
 from services.tiles.mvt import postgis_tile_sql
 
@@ -52,6 +53,7 @@ MVT_ROUTE_SOURCE = ROOT / "apps/api/routes/hydro_display.py"
 EXPLAIN_PREFIX = "EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON) "
 ACTIVITY_SQL = """
 SELECT pid, backend_start, xact_start, query_start, state, wait_event_type,
+       backend_type,
        md5(regexp_replace(query, '\\s+', ' ', 'g')) AS query_signature
 FROM pg_stat_activity
 WHERE datname = current_database()
@@ -306,10 +308,17 @@ def _activity_snapshot(cursor: Any, *, deadline: _Deadline) -> tuple[list[dict[s
                 "query_start": _json_value(row.get("query_start")),
                 "state": row.get("state"),
                 "wait_event_type": row.get("wait_event_type"),
+                "backend_type": row.get("backend_type"),
                 "query_signature": row.get("query_signature"),
             }
         )
     return sanitized, datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _client_backend_sessions(sessions: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """Project an activity snapshot onto the sessions the trust boundary targets."""
+
+    return [session for session in sessions if session.get("backend_type") == CLIENT_BACKEND_TYPE]
 
 
 def _set_statement_bounds(cursor: Any, *, deadline: _Deadline) -> None:
@@ -439,7 +448,13 @@ def _capture_phase(
             activity_mid or [],
             activity_after,
         ]
-        stable = all(value == signatures[0] for value in signatures[1:])
+        # G9: the stability judgment considers external client backends only.
+        # PostgreSQL-owned workers (autovacuum, TimescaleDB background workers)
+        # deterministically start/stop around a real mutation and are not the
+        # concurrent-writer identity this flag guards; the full session lists
+        # (all backend types) stay persisted unchanged in the samples below.
+        client_signatures = [_client_backend_sessions(value) for value in signatures]
+        stable = all(value == client_signatures[0] for value in client_signatures[1:])
         activities = [
             {
                 "captured_at": activity_before_at,

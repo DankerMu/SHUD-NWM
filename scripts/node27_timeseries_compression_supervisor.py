@@ -41,6 +41,7 @@ from packages.common.evidence_io import (
     reject_secret_material,
 )
 from packages.common.node27_container_contract import (
+    CLIENT_BACKEND_TYPE,
     CONTAINER_PG_RESTORE_REALPATH,
     SYSTEMD_UNSET_TIMESTAMP,
 )
@@ -1110,6 +1111,27 @@ def _verify_checkout_lineage(plan: Mapping[str, Any], *, wall: HardWall) -> None
         raise SupervisorError("clean checkout/origin/reviewed SHA lineage differs")
 
 
+def _assert_no_client_backend_session(activity: Any) -> None:
+    """Fail closed on external client sessions; tolerate PostgreSQL's own workers.
+
+    MEASURED (launch 7, G9): the recompress mutation wakes autovacuum on the
+    chunk it just created within seconds, so "ANY non-idle session = conflict"
+    can essentially never pass a post-mutation checkpoint.  Only sessions with
+    ``backend_type == 'client backend'`` can be the external writers the trust
+    boundary targets; every captured session stays persisted in the artifact
+    either way.  The exact-key shape gate keeps the judgment fail-closed: a
+    session missing ``backend_type`` cannot be silently tolerated.
+    """
+
+    if not isinstance(activity, Mapping) or set(activity) != {"sessions"} or not isinstance(activity["sessions"], list):
+        raise SupervisorError("checkpoint activity document shape differs")
+    for session in activity["sessions"]:
+        if not isinstance(session, Mapping) or set(session) != {"pid", "state", "wait_event_type", "backend_type"}:
+            raise SupervisorError("checkpoint activity session shape differs")
+        if session["backend_type"] == CLIENT_BACKEND_TYPE:
+            raise SupervisorError("checkpoint observed a conflicting database session")
+
+
 def capture_checkpoint(
     checkpoint: Mapping[str, Any],
     *,
@@ -1125,7 +1147,7 @@ def capture_checkpoint(
     safe_id = checkpoint_id.replace("/", "-")
     activity_sql = (
         "SELECT json_build_object('sessions',COALESCE(json_agg(s ORDER BY pid),'[]'::json)) "
-        "FROM (SELECT pid,state,wait_event_type FROM pg_stat_activity "
+        "FROM (SELECT pid,state,wait_event_type,backend_type FROM pg_stat_activity "
         "WHERE datname=current_database() AND pid<>pg_backend_pid() "
         "AND state<>'idle') s"
     )
@@ -1161,9 +1183,17 @@ def capture_checkpoint(
     activity_raw = _run_capture_argv([*psql_prefix, activity_sql], wall=wall, label="database activity").strip() + b"\n"
     locks_raw = _run_capture_argv([*psql_prefix, lock_sql], wall=wall, label="relation locks").strip() + b"\n"
     catalog_raw = _run_capture_argv([*psql_prefix, catalog_sql], wall=wall, label="D3 catalog").strip() + b"\n"
+    # G9a: persist the raw database observations BEFORE any conflict judgment,
+    # so a failed checkpoint leaves the observed sessions/locks/catalog on disk
+    # for diagnosis instead of destroying the very evidence that triggered the
+    # abort (launch 7 raised with no postflight-activity.json on disk).
+    refs = {
+        "database_activity": _observed_ref(artifact_dir / f"{safe_id}-activity.json", activity_raw),
+        "relation_locks": _observed_ref(artifact_dir / f"{safe_id}-locks.json", locks_raw),
+        "catalog": _observed_ref(artifact_dir / f"{safe_id}-catalog.json", catalog_raw),
+    }
     try:
-        if json.loads(activity_raw) != {"sessions": []}:
-            raise SupervisorError("checkpoint observed a conflicting database session")
+        _assert_no_client_backend_session(json.loads(activity_raw))
         if json.loads(locks_raw) != {"conflicts": []}:
             raise SupervisorError("checkpoint observed a conflicting relation lock")
         validate_current_d3(json.loads(catalog_raw))
@@ -1287,13 +1317,8 @@ def capture_checkpoint(
     # cursor, so the verifier can re-derive both the no-activation evidence and
     # the chronology boundary (journal_end_cursor) from one file.
     journal_artifact = window_raw + b"-- cursor: " + end_cursor.encode() + b"\n"
-    refs = {
-        "database_activity": _observed_ref(artifact_dir / f"{safe_id}-activity.json", activity_raw),
-        "relation_locks": _observed_ref(artifact_dir / f"{safe_id}-locks.json", locks_raw),
-        "catalog": _observed_ref(artifact_dir / f"{safe_id}-catalog.json", catalog_raw),
-        "systemd_show": _observed_ref(artifact_dir / f"{safe_id}-systemd-show.json", _canonical(show_document)),
-        "journal": _observed_ref(artifact_dir / f"{safe_id}-journal.log", journal_artifact),
-    }
+    refs["systemd_show"] = _observed_ref(artifact_dir / f"{safe_id}-systemd-show.json", _canonical(show_document))
+    refs["journal"] = _observed_ref(artifact_dir / f"{safe_id}-journal.log", journal_artifact)
     ledger.append(
         {
             "event_id": str(uuid.uuid4()),

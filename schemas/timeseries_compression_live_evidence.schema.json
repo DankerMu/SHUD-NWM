@@ -428,12 +428,13 @@
     },
     "activity_session": {
       "type": "object", "additionalProperties": false,
-      "required": ["pid", "backend_start", "xact_start", "query_start", "state", "wait_event_type", "query_signature"],
+      "required": ["pid", "backend_start", "xact_start", "query_start", "state", "wait_event_type", "backend_type", "query_signature"],
       "properties": {
         "pid": {"type": "integer", "minimum": 1},
         "backend_start": {"type": ["string", "null"]}, "xact_start": {"type": ["string", "null"]},
         "query_start": {"type": ["string", "null"]}, "state": {"type": ["string", "null"]},
-        "wait_event_type": {"type": ["string", "null"]}, "query_signature": {"type": ["string", "null"]}
+        "wait_event_type": {"type": ["string", "null"]}, "backend_type": {"type": ["string", "null"]},
+        "query_signature": {"type": ["string", "null"]}
       }
     },
     "execution_bounds": {

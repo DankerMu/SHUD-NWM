@@ -47,6 +47,7 @@ from packages.common.evidence_io import (
     validate_json_complexity,
 )
 from packages.common.node27_container_contract import (
+    CLIENT_BACKEND_TYPE,
     CONTAINER_PG_RESTORE_REALPATH,
     SYSTEMD_UNSET_TIMESTAMP,
 )
@@ -916,7 +917,20 @@ def _validate_checkpoint_artifacts(
     activity = _require_mapping(activity_raw, f"{label}.database_activity document")
     locks = _require_mapping(locks_raw, f"{label}.relation_locks document")
     show = _require_mapping(show_raw, f"{label}.systemd_show document")
-    if activity != {"sessions": []} or locks != {"conflicts": []}:
+    # Same measured contract as the supervisor twin (G9): every captured
+    # session is preserved at full fidelity, but only an external client
+    # backend is a conflict -- PostgreSQL's own workers (autovacuum,
+    # TimescaleDB background workers, ...) are the deterministic wake-up after
+    # a real mutation, not a trust-boundary breach.
+    _require_exact_keys(activity, {"sessions"}, f"{label}.database_activity document")
+    sessions = _require_list(activity["sessions"], f"{label}.database_activity.sessions")
+    for session_index, session_value in enumerate(sessions):
+        session_label = f"{label}.database_activity.sessions[{session_index}]"
+        session = _require_mapping(session_value, session_label)
+        _require_exact_keys(session, {"pid", "state", "wait_event_type", "backend_type"}, session_label)
+        if session["backend_type"] == CLIENT_BACKEND_TYPE:
+            raise EvidenceError(f"{label} observed a conflicting writer or relation lock")
+    if locks != {"conflicts": []}:
         raise EvidenceError(f"{label} observed a conflicting writer or relation lock")
     _validate_d3_catalog(catalog_raw, f"{label}.catalog document")
     recurring = _require_mapping(show.get("recurring"), f"{label}.systemd_show.recurring")
@@ -2259,6 +2273,12 @@ def _validate_measurement(value: Any, label: str) -> dict[str, Any]:
     return dict(measurement)
 
 
+def _client_backend_sessions(sessions: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """Project an activity sample onto the sessions the trust boundary targets."""
+
+    return [session for session in sessions if session["backend_type"] == CLIENT_BACKEND_TYPE]
+
+
 def _validate_phase(
     value: Any,
     *,
@@ -2358,12 +2378,18 @@ def _validate_phase(
                     "query_start",
                     "state",
                     "wait_event_type",
+                    "backend_type",
                     "query_signature",
                 },
                 f"benchmark activity[{index}].sessions[{session_index}]",
             )
         normalized_activities.append(dict(activity))
-    if any(item["sessions"] != normalized_activities[0]["sessions"] for item in normalized_activities[1:]):
+    # G9 twin of the producer's stability judgment: only external client
+    # backends can be the concurrent-writer identity the drift check guards;
+    # PostgreSQL-owned workers starting/stopping between stages are tolerated
+    # (they remain persisted at full fidelity in the samples above).
+    baseline_clients = _client_backend_sessions(normalized_activities[0]["sessions"])
+    if any(_client_backend_sessions(item["sessions"]) != baseline_clients for item in normalized_activities[1:]):
         raise EvidenceError(f"benchmark {query_name} {phase_name} has session-identity drift")
     bounds = _require_mapping(phase["execution_bounds"], f"benchmark {query_name} {phase_name}.execution_bounds")
     _require_exact_keys(

@@ -306,17 +306,24 @@ def test_merge_rejects_production_identity_drift() -> None:
         benchmark.merge_benchmark_slices(before, after)
 
 
-def test_activity_drift_is_preserved_not_claimed_stable() -> None:
-    cursor = _FakeCursor(result_rows=[{"value": 1}], plan_reads=[0] * 10)
-    session = {
-        "pid": 42,
+def _fake_session(backend_type: str, *, pid: int = 42) -> dict[str, Any]:
+    return {
+        "pid": pid,
         "backend_start": datetime(2026, 7, 15, tzinfo=UTC),
         "xact_start": None,
         "query_start": datetime(2026, 7, 15, tzinfo=UTC),
         "state": "active",
         "wait_event_type": None,
+        "backend_type": backend_type,
         "query_signature": "a" * 32,
     }
+
+
+def test_activity_drift_is_preserved_not_claimed_stable() -> None:
+    # G9: a client backend drifting across stages IS the concurrent-writer
+    # identity the stability flag guards, so it must still flip stable to False.
+    cursor = _FakeCursor(result_rows=[{"value": 1}], plan_reads=[0] * 10)
+    session = _fake_session("client backend")
     monitor_cursor = _FakeCursor(
         result_rows=[],
         plan_reads=[],
@@ -333,6 +340,29 @@ def test_activity_drift_is_preserved_not_claimed_stable() -> None:
     )
     assert [len(sample["sessions"]) for sample in phase["activity_samples"]] == [0, 1, 1, 1, 1]
     assert not any(sample["material_load_stable"] for sample in phase["activity_samples"])
+
+
+def test_transient_background_worker_is_tolerated_and_persisted() -> None:
+    # G9: an autovacuum worker appearing in only some stages is NOT drift; the
+    # phase stays material_load_stable while the full session lists persist.
+    cursor = _FakeCursor(result_rows=[{"value": 1}], plan_reads=[0] * 10)
+    worker = _fake_session("autovacuum worker", pid=1135)
+    monitor_cursor = _FakeCursor(
+        result_rows=[],
+        plan_reads=[],
+        activity_sessions=[[], [worker], [], [worker], []],
+    )
+    connection = _FakeConnection(cursor)
+    monitor = _FakeConnection(monitor_cursor)
+    phase = benchmark._capture_phase(
+        connection,
+        monitor_connection=monitor,
+        statement="SELECT 1 AS value",
+        parameters=(),
+        result_kind="curve",
+    )
+    assert [len(sample["sessions"]) for sample in phase["activity_samples"]] == [0, 1, 0, 1, 0]
+    assert all(sample["material_load_stable"] for sample in phase["activity_samples"])
 
 
 def test_phase_deadline_rolls_back_and_closes_both_connections(

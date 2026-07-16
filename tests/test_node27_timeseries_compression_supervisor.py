@@ -2207,15 +2207,90 @@ def test_checkpoint_rejects_recurring_activation_in_the_journal_window(
             )
 
 
-def test_checkpoint_rejects_a_conflicting_database_session(
+def _session(backend_type: str, *, pid: int = 42) -> dict[str, Any]:
+    """A full-shape pg_stat_activity session as the checkpoint SQL emits it."""
+
+    return {"pid": pid, "state": "active", "wait_event_type": None, "backend_type": backend_type}
+
+
+def test_checkpoint_rejects_a_conflicting_client_backend_session_and_persists_the_evidence(
     probe_bin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # G9 + G9a: an external client backend is still a hard conflict, AND the
+    # observed sessions must already be on disk when the checkpoint raises --
+    # launch 7 destroyed the very evidence that triggered the abort.
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run-user"))
-    probe_bin("psql", _psql_responses(activity={"sessions": [{"pid": 42, "state": "active"}]}))
+    offending = _session(supervisor.CLIENT_BACKEND_TYPE)
+    probe_bin("psql", _psql_responses(activity={"sessions": [offending]}))
     probe_bin("systemctl", _systemctl_responses())
     probe_bin("journalctl", _journalctl_responses())
     with _ledger(tmp_path / "ledger.jsonl") as ledger:
         with pytest.raises(supervisor.SupervisorError, match="conflicting database session"):
+            supervisor.capture_checkpoint(
+                _checkpoint(),
+                wall=supervisor.HardWall.start(30),
+                ledger=ledger,
+                artifact_dir=tmp_path,
+                journal_cursor="s=stub;i=start;b=stub;m=0;t=0;x=0",
+                invocation_id=PROBE_INVOCATION_ID,
+            )
+    activity_artifact = tmp_path / "preflight-activity.json"
+    assert activity_artifact.exists()
+    assert json.loads(activity_artifact.read_text(encoding="utf-8")) == {"sessions": [offending]}
+    # The sibling probes captured in the same batch are persisted too.
+    assert (tmp_path / "preflight-locks.json").exists()
+    assert (tmp_path / "preflight-catalog.json").exists()
+
+
+def test_checkpoint_tolerates_postgres_background_workers_and_persists_them(
+    probe_bin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # G9: the measured launch-7 aborter -- PostgreSQL's own autovacuum worker
+    # vacuuming the chunk our own mutation just created -- must pass the
+    # checkpoint while staying persisted at full fidelity in the artifact.
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run-user"))
+    autovacuum = _session("autovacuum worker", pid=1135)
+    probe_bin("psql", _psql_responses(activity={"sessions": [autovacuum]}))
+    probe_bin("systemctl", _systemctl_responses())
+    probe_bin("journalctl", _journalctl_responses())
+    ledger_path = tmp_path / "ledger.jsonl"
+    with _ledger(ledger_path) as ledger:
+        end_cursor = supervisor.capture_checkpoint(
+            _checkpoint(),
+            wall=supervisor.HardWall.start(30),
+            ledger=ledger,
+            artifact_dir=tmp_path,
+            journal_cursor="s=stub;i=start;b=stub;m=0;t=0;x=0",
+            invocation_id=PROBE_INVOCATION_ID,
+        )
+    assert end_cursor == BOUNDARY_CURSOR
+    event = json.loads(ledger_path.read_text().strip())
+    persisted = json.loads(Path(event["database_activity"]["artifact"]["path"]).read_text(encoding="utf-8"))
+    assert persisted == {"sessions": [autovacuum]}
+    # Producer/consumer seam: the verifier twin accepts the same tolerance.
+    result = evidence._validate_checkpoint_artifacts(
+        event,
+        "supervisor checkpoint[0]",
+        invocation_id=PROBE_INVOCATION_ID,
+        supervisor_pid=os.getpid(),
+    )
+    assert result["journal_end_cursor"] == BOUNDARY_CURSOR
+
+
+def test_checkpoint_rejects_a_session_without_backend_type(
+    probe_bin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Fail-closed shape gate: the client-only judgment would be fail-open if a
+    # session missing backend_type could be silently tolerated.
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run-user"))
+    probe_bin(
+        "psql",
+        _psql_responses(activity={"sessions": [{"pid": 42, "state": "active", "wait_event_type": None}]}),
+    )
+    probe_bin("systemctl", _systemctl_responses())
+    probe_bin("journalctl", _journalctl_responses())
+    with _ledger(tmp_path / "ledger.jsonl") as ledger:
+        with pytest.raises(supervisor.SupervisorError, match="activity session shape"):
             supervisor.capture_checkpoint(
                 _checkpoint(),
                 wall=supervisor.HardWall.start(30),
