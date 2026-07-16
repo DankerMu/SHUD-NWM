@@ -160,7 +160,9 @@ def _pg_restore_record(dump_sha256: str) -> dict[str, Any]:
     return {
         "dump_descriptor_sha256": dump_sha256,
         "container_image_id": "sha256:" + "1" * 64,
-        "binary_realpath": "/usr/bin/pg_restore",
+        # Anchored to the shared measured contract, never re-hard-coded, so the
+        # fixture can never drift from the verifier's own pinned realpath.
+        "binary_realpath": evidence.CONTAINER_PG_RESTORE_REALPATH,
         "binary_sha256": "2" * 64,
         "version_argv": ["/usr/bin/docker", "exec", "nhms-db", "/usr/bin/pg_restore", "--version"],
         "list_argv": [
@@ -1063,7 +1065,8 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
     dump_tool_association = {
         "dump_sha256": bundle["preflight"]["schema_dump"]["sha256"],
         "container_image_id": "sha256:" + "1" * 64,
-        "binary_realpath": "/usr/bin/pg_restore",
+        # Anchored to the shared measured contract (matches the dump listing).
+        "binary_realpath": evidence.CONTAINER_PG_RESTORE_REALPATH,
         "binary_sha256": "2" * 64,
     }
     mutation_ids = ["migration-1", "migration-2", "decompress", "enforce"]
@@ -3565,6 +3568,105 @@ def test_round3_canonical_unit_and_container_pg_restore_are_bound(tmp_path: Path
     bundle["preflight"]["schema_dump_list"] = _json_ref(tmp_path, "host-pg-restore.json", listing)
     with pytest.raises(evidence.EvidenceError, match="not verifiable"):
         evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+
+# A minimal docker stub equivalent to the supervisor suite's `_docker_responses`
+# machinery: it dispatches on the argv tokens the real resolver emits so the REAL
+# producer can run in-process here without a container.
+_CROSS_PLANE_DOCKER_STUB = """#!{python}
+import json
+import os
+import sys
+
+_here = os.path.dirname(os.path.abspath(__file__))
+with open(os.path.join(_here, "docker.responses.json"), encoding="utf-8") as _fh:
+    _responses = json.load(_fh)
+_argv = " ".join(sys.argv[1:])
+for _response in _responses:
+    if all(_token in _argv for _token in _response["match"]):
+        sys.stdout.write(_response.get("stdout", ""))
+        sys.exit(_response.get("exit", 0))
+sys.stderr.write("no docker stub response for argv: " + _argv + "\\n")
+sys.exit(97)
+"""
+
+
+def _supervisor_pg_restore_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, realpath: str
+) -> dict[str, str]:
+    """Run the REAL supervisor producer through a docker stub, so the verifier's
+    expected pg_restore identity is derived from the producer rather than a
+    hand-authored constant.  The stub reproduces the MEASURED (Round-5 gate §G2)
+    container contract.
+    """
+    bindir = tmp_path / "supervisor-bin"
+    bindir.mkdir()
+    dump_path = "/var/lib/postgresql/evidence/schema.dump"
+    image = "sha256:" + "1" * 64
+    binary_sha = "2" * 64
+    dump_sha = "3" * 64
+    responses = [
+        {"match": ["inspect"], "stdout": image + "\n"},
+        {"match": ["readlink"], "stdout": realpath + "\n"},
+        {"match": ["sha256sum"], "stdout": f"{binary_sha}  {realpath}\n{dump_sha}  {dump_path}\n"},
+    ]
+    stub = bindir / "docker"
+    stub.write_text(_CROSS_PLANE_DOCKER_STUB.replace("{python}", sys.executable), encoding="utf-8")
+    stub.chmod(0o755)
+    (bindir / "docker.responses.json").write_text(json.dumps(responses), encoding="utf-8")
+    monkeypatch.setattr(supervisor, "SUPERVISOR_BIN_DIR", bindir)
+    return supervisor.resolve_container_pg_restore_identity(
+        wall=supervisor.HardWall.start(30), dump_path=dump_path
+    )
+
+
+def _ledger_events(bundle: dict[str, Any]) -> list[dict[str, Any]]:
+    ledger_path = Path(bundle["execution"]["ledger"]["path"])
+    return [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_cross_plane_pg_restore_realpath_binds_producer_to_verifier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression lock for the issue-1069 defect class (an external-contract value
+    # hard-coded independently in two planes, where a fix updates one and leaves
+    # the twin rotted).  Derive the verifier's expected pg_restore realpath from
+    # the REAL supervisor producer -- never a hand-authored assumption -- and
+    # require the verifier to ACCEPT exactly that realpath end to end.
+    identity = _supervisor_pg_restore_identity(
+        tmp_path, monkeypatch, realpath="/usr/share/postgresql-common/pg_wrapper"
+    )
+    assert identity["binary_realpath"] == evidence.CONTAINER_PG_RESTORE_REALPATH
+
+    bundle = _bundle(tmp_path)
+    listing = _read_ref(bundle["preflight"]["schema_dump_list"])
+    version_event = next(
+        event for event in _ledger_events(bundle) if event.get("kind") == "pg_restore_version"
+    )
+    list_event = next(
+        event for event in _ledger_events(bundle) if event.get("kind") == "pg_restore_list"
+    )
+    # The terminal document the fixed supervisor produces carries the producer's
+    # realpath in BOTH planes -- the dump-listing document AND the ledger
+    # association the verifier cross-checks:
+    assert listing["binary_realpath"] == identity["binary_realpath"]
+    assert version_event["artifact_associations"]["binary_realpath"] == identity["binary_realpath"]
+    assert list_event["artifact_associations"]["binary_realpath"] == identity["binary_realpath"]
+    # ... and the verifier ACCEPTS it end to end (dump-listing guard + association
+    # cross-check).  No EvidenceError.
+    evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+    # Negative: reverting the dump-listing realpath to the refuted
+    # /usr/bin/pg_restore symlink path (the exact value the fix removed) must turn
+    # this suite RED, so any regression re-pinning the old value is caught.
+    reverted = _bundle(tmp_path)
+    reverted_listing = _read_ref(reverted["preflight"]["schema_dump_list"])
+    reverted_listing["binary_realpath"] = "/usr/bin/pg_restore"
+    reverted["preflight"]["schema_dump_list"] = _json_ref(
+        tmp_path, "reverted-realpath-dump-list.json", reverted_listing
+    )
+    with pytest.raises(evidence.EvidenceError, match="not verifiable"):
+        evidence.verify_bundle(reverted, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
 
 
 def test_round3_raw_plan_summaries_and_snapshot_maps_are_derived(tmp_path: Path) -> None:

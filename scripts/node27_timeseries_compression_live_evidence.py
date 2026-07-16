@@ -46,6 +46,7 @@ from packages.common.evidence_io import (
     reverify_artifact_closure,
     validate_json_complexity,
 )
+from packages.common.node27_container_contract import CONTAINER_PG_RESTORE_REALPATH
 
 SCHEMA_VERSION = "3.0"
 ISSUE = 1069
@@ -1703,7 +1704,7 @@ def _validate_dump_listing(
         or not list_argv[-1].startswith("/var/lib/postgresql/")
         or not isinstance(listing["container_image_id"], str)
         or not listing["container_image_id"].startswith("sha256:")
-        or listing["binary_realpath"] != "/usr/bin/pg_restore"
+        or listing["binary_realpath"] != CONTAINER_PG_RESTORE_REALPATH
         or re.fullmatch(r"[0-9a-f]{64}", str(listing["binary_sha256"])) is None
         or re.search(r"\b15(?:\.|\b)", str(listing["tool_version"])) is None
         or re.fullmatch(r"[0-9a-f]{64}", str(listing["version_stdout_sha256"])) is None

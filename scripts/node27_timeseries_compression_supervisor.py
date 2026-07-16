@@ -40,6 +40,7 @@ from packages.common.evidence_io import (
     read_bounded_json_with_identity_no_follow,
     reject_secret_material,
 )
+from packages.common.node27_container_contract import CONTAINER_PG_RESTORE_REALPATH
 from packages.common.safe_fs import atomic_write_bytes_no_follow
 
 SCHEMA_VERSION = "3.0"
@@ -54,11 +55,9 @@ RUN_ID_PATTERN = r"[0-9A-Za-z._-]{1,64}"
 EXPECTED_REPO = "/home/nwm/NWM"
 EXPECTED_DATABASE = "nhms"
 EXPECTED_CONTAINER = "nhms-db"
-# MEASURED (Round-5 gate §G2): inside timescaledb-ha:pg15, `/usr/bin/pg_restore`
-# is a symlink whose realpath is the pg_wrapper dispatcher (the stable entrypoint
-# the child actually invokes), NOT `/usr/bin/pg_restore`.  Bind the wrapper and
-# fail closed on any drift.
-CONTAINER_PG_RESTORE_REALPATH = "/usr/share/postgresql-common/pg_wrapper"
+# The container pg_restore entrypoint realpath is the single-source-of-truth
+# external contract shared with the verifier; see node27_container_contract.
+# Bind the wrapper and fail closed on any drift.
 EXPECTED_REVIEWED_REMOTE_REF = "refs/remotes/origin/feat/issue-1069-live-compression"
 EXPECTED_REMOTE_IDENTITY = "DankerMu/SHUD-NWM"
 MAX_LEDGER_BYTES = 16 * 1024**2
