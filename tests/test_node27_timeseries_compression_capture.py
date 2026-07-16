@@ -212,16 +212,12 @@ def _capture_stub_dir(bindir: Path, *, schema_dump_container: str) -> None:
         "docker",
         [
             {
-                "match": ["inspect", "container_id"],
-                "stdout": json.dumps(
-                    {
-                        "container_id": "container-123",
-                        "image": "timescale/timescaledb:2.10.2-pg15",
-                        "status": "running",
-                        "running": True,
-                    }
-                )
-                + "\n",
+                # MEASURED node-27 shape: docker templates have no `dict`
+                # function, so the producer asks for tab-separated fields.
+                "match": ["inspect", ".State.Running"],
+                "stdout": (
+                    "/nhms-db\tcontainer-123\ttimescale/timescaledb:2.10.2-pg15\trunning\ttrue\n"
+                ),
             },
             {"match": ["inspect", ".Image"], "stdout": "sha256:" + "a" * 64 + "\n"},
             {"match": ["exec", "--version"], "stdout": "pg_restore (PostgreSQL) 15.2\n"},

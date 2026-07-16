@@ -254,25 +254,27 @@ def _prior_autopipe_state(ctx: Context) -> dict[str, Any]:
 
 
 def _container_state(ctx: Context) -> dict[str, Any]:
+    # MEASURED on node-27: docker's Go template has no `dict` function
+    # ("function \"dict\" not defined"), so emit tab-separated simple fields.
     raw = _run(
         [
             ctx.docker,
             "inspect",
-            "--format={{json (dict "
-            '"name" .Name "container_id" .Id "image" .Config.Image '
-            '"status" .State.Status "running" .State.Running)}}',
+            "--format={{.Name}}\t{{.Id}}\t{{.Config.Image}}\t{{.State.Status}}\t{{.State.Running}}",
             ctx.container,
         ],
         label="docker inspect",
         max_bytes=64 * 1024,
     )
-    state = json.loads(raw.decode("utf-8", "strict").strip())
+    fields = raw.decode("utf-8", "strict").strip().split("\t")
+    if len(fields) != 5:
+        raise CaptureError("docker inspect emitted an unexpected field count")
     return {
         "name": ctx.container,
-        "container_id": str(state["container_id"]),
-        "image": str(state["image"]),
-        "status": str(state["status"]),
-        "running": bool(state["running"]),
+        "container_id": fields[1],
+        "image": fields[2],
+        "status": fields[3],
+        "running": fields[4] == "true",
     }
 
 
