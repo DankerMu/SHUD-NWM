@@ -17,6 +17,7 @@ from pathlib import Path
 import jsonschema
 import pytest
 
+from packages.common.migrate import split_sql_statements
 from scripts import node27_timeseries_compression as compression
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -995,34 +996,73 @@ def test_migration_does_not_add_compression_policy() -> None:
     assert "add_compression_policy" not in executable
 
 
+def _migration_statements() -> list[str]:
+    """Top-level executable statements, via the real apply-lane splitter oracle."""
+    return split_sql_statements(_MIGRATION_PATH.read_text(encoding="utf-8"))
+
+
+def _strip_comment_lines(sql: str) -> str:
+    return "\n".join(line for line in sql.splitlines() if not line.lstrip().startswith("--"))
+
+
 def test_migration_alter_statements_are_disjoint_and_order_independent() -> None:
-    text = _MIGRATION_PATH.read_text(encoding="utf-8")
-    # Strip comment lines, then split on the ALTER-TABLE boundary.
-    executable = "\n".join(line for line in text.splitlines() if not line.startswith("--"))
-    alters = re.findall(r"ALTER\s+TABLE\s+(\S+)\s+SET\s*\(", executable)
-    assert alters == ["hydro.river_timeseries", "met.forcing_station_timeseries"]
-    # Both statements touch disjoint tables so their apply order is
-    # semantically irrelevant.
-    assert set(alters) == {"hydro.river_timeseries", "met.forcing_station_timeseries"}
+    # `split_sql_statements` is the same splitter `packages.common.migrate`
+    # uses to apply migrations, so it is the authoritative statement oracle.
+    statements = [_strip_comment_lines(s) for s in _migration_statements()]
+    assert len(statements) == 2
+    river, forcing = statements
+    # Statement 1 touches only hydro.river_timeseries, statement 2 only
+    # met.forcing_station_timeseries: disjoint tables, order-independent.
+    assert "hydro.river_timeseries" in river
+    assert "met.forcing_station_timeseries" not in river
+    assert "met.forcing_station_timeseries" in forcing
+    assert "hydro.river_timeseries" not in forcing
+    assert len(re.findall(r"ALTER\s+TABLE\s+hydro\.river_timeseries\s+SET\s*\(", river)) == 1
+    assert len(re.findall(r"ALTER\s+TABLE\s+met\.forcing_station_timeseries\s+SET\s*\(", forcing)) == 1
 
 
-def test_migration_has_no_transaction_wrapper() -> None:
-    """cand-D: partial-apply idempotency assumes each ALTER runs standalone.
+def test_migration_statements_are_guarded_do_blocks_without_transaction_verbs() -> None:
+    """G8 (#1069): unconditional bare ALTERs are NOT re-runnable.
 
-    A ``DO $$``/``BEGIN``/``END $$`` block, or the explicit
-    ``START TRANSACTION`` / ``COMMIT`` / ``ROLLBACK`` / ``SAVEPOINT`` verbs,
-    would collapse both statements into one transaction and break the
-    "re-run the migration after a partial apply completes the second
-    statement" guarantee that the header prose (and design D3) promises.
+    Measured on node-27 (PG 15.2 + TimescaleDB 2.10.2, 2026-07-16):
+    ``ALTER TABLE ... SET (timescaledb.compress ...)`` fails with
+    ``cannot change configuration on already compressed chunks`` whenever the
+    hypertable has ANY compressed chunk — even when the requested settings
+    exactly match the catalog. The per-table guarded ``DO $$`` block (skip
+    when the catalog already matches D3, otherwise ALTER) is what makes the
+    header's partial-apply/re-run promise actually true.
+
+    Session-level transaction verbs stay forbidden: each of the two DO
+    blocks must run as its own implicit transaction under the autocommit
+    apply lanes, so a partial apply is completed by a plain re-run.
     """
     text = _MIGRATION_PATH.read_text(encoding="utf-8")
-    executable = "\n".join(line for line in text.splitlines() if not line.startswith("--"))
+    executable = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("--"))
     forbidden = re.search(
-        r"\bDO\s*\$\$|\bBEGIN\b|\bEND\s*\$\$|\bSTART\s+TRANSACTION\b|\bCOMMIT\b|\bROLLBACK\b|\bSAVEPOINT\b",
+        r"\bSTART\s+TRANSACTION\b|\bCOMMIT\b|\bROLLBACK\b|\bSAVEPOINT\b",
         executable,
         flags=re.IGNORECASE,
     )
-    assert forbidden is None, f"migration must not wrap ALTERs in a transaction block; matched: {forbidden.group(0)!r}"
+    assert forbidden is None, f"migration must not use session-level transaction verbs; matched: {forbidden.group(0)!r}"
+    statements = [_strip_comment_lines(s).strip() for s in _migration_statements()]
+    assert len(statements) == 2
+    for statement in statements:
+        assert re.match(r"DO\s*\$\$", statement), f"expected a DO $$ block, got: {statement[:40]!r}"
+
+
+def test_migration_g8_guard_reads_catalog_and_pins_expected_rows() -> None:
+    """G8 regression lock: each DO block guards on the live catalog vs the
+    D3-expected `timescaledb_information.compression_settings` rows."""
+    statements = _migration_statements()
+    assert len(statements) == 2
+    river, forcing = statements
+    for statement in statements:
+        assert "timescaledb_information.compression_settings" in statement
+    # Sentinel expected-row literals from the measured node-27 catalog oracle.
+    assert "('river_segment_id'::text, 3::int" in river
+    assert "('valid_time'::text, NULL::int, 2::int" in river
+    assert "('station_id'::text, 2::int" in forcing
+    assert "('valid_time'::text, NULL::int, 2::int" in forcing
 
 
 # ---------------------------------------------------------------------------

@@ -514,7 +514,7 @@ Must preserve:
 
 Must add/change:
 
-- Migration `000047` adding compression settings, matching the house style (no BEGIN/COMMIT wrap; `--` prose header citing #845 / #851 / OpenSpec change; idempotent enough that a re-apply on already-compressed table does not error — TimescaleDB `SET (...)` is idempotent, but the migration must handle the case where a previous partial apply left settings on one table but not the other).
+- Migration `000047` adding compression settings, matching the house style (no BEGIN/COMMIT wrap; `--` prose header citing #845 / #851 / OpenSpec change; idempotent enough that a re-apply on already-compressed table does not error — measured on node-27 (PG 15.2 + TimescaleDB 2.10.2), re-applying `SET (timescaledb.compress ...)` errors with `cannot change configuration on already compressed chunks` whenever any chunk is compressed, even with identical settings, so the migration guards each table with a catalog-match check against `timescaledb_information.compression_settings` — skip when the live rows already exactly match D3 — and only then issues the ALTER).
 - Compression runner emitting receipt with:
   - `schema_version: "1.0"` (matches #848 mover schema-version discipline).
   - Top-level: `now_utc`, `lag_seconds`, `per_tick_bound`, `mode` (`dry-run` | `enforce`), `outcome` (`clean` | `partial` | `refused_lock` | `refused_config`), `selected` (list of chunk descriptors with before/after bytes), `deferred` (list of chunk descriptors beyond bound), `skipped` (list of chunk descriptors inside lag window), `per_table_totals` (`{table_name → {before_bytes, after_bytes, chunks_compressed}}`).
@@ -560,7 +560,7 @@ Invariant Matrix:
   independently known-safe and path/inode-disjoint from the lock input, replace
   stale success with a schema-v2 config-failure tombstone; when the destination
   is missing, relative, unsafe, unknown, or aliases the lock, touch nothing.
-- Migration idempotent on partial state: re-applying after only one table's ALTER succeeded must fix the second table without erroring on the first.
+- Migration idempotent on partial state: re-applying after only one table's guarded DO block succeeded must no-op the first table (its guard sees a catalog that already exactly matches D3 and skips the ALTER) and let the second table's guard apply, completing the migration without erroring on the first.
 - Compression `segmentby` covers PK columns (TimescaleDB 2.10 unique-constraint requirement) — asserted via test that reads the migration text and cross-references the expected PK column list per table.
 - Compressed-chunk catalog verifiable: after migration, `timescaledb_information.compression_settings` rows for both hypertables list exactly the D3-specified columns (segmentby + orderby); this is task 4.1 acceptance and is unit-testable by parsing the migration file plus a real-DB smoke marker (deferred to #853 for the live oracle).
 - Ingest write-guard NOT weakened: this issue delivers zero coupling to `workers/output_parser/parser.py`, `workers/forcing_producer/store.py`, `packages/common/forcing_domain_handoff_apply.py` — #852 owns that. Runner has no import graph reaching those modules.
