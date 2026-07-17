@@ -289,3 +289,126 @@ Slurm evidence and produces new shared-NFS artifacts visible from node-27.
 - **THEN** node-27 observes the exact new run/source/model/cycle leaves on the
   same NFS and verifies owner/group/mode/default ACL plus `nwm` access
 - **AND** scheduler/unit/job restoration and refresh steady state are recorded.
+
+### Requirement: Registry refresh classifies every row against the prior canonical registry
+
+The refresh runner SHALL diff the prospective registry rows against the
+previous canonical `manifest-last.json` before canonical replacement and SHALL
+publish a bounded per-model classification into the v1 receipt.
+
+#### Scenario: Adding a new basin does not disturb existing model identities
+
+- **WHEN** the prospective registry is a superset of the previous canonical
+  registry (one or more model IDs added, every previously canonical model still
+  present with identical `model_package_uri`, `manifest_uri`,
+  `package_checksum`, `source_inventory_checksum`, and model identity fields)
+- **THEN** the refresh classifies each new model as `added`, each preserved
+  model as `unchanged`, and no model as `package_changed` or `refused`
+- **AND** the receipt lists every classification group with bounded model IDs
+  and reports the previous and new canonical registry SHA-256
+- **AND** existing readiness/state and Slurm mirror generations continue to
+  bind the byte-identical existing rows.
+
+#### Scenario: Absent previous canonical registry is a legitimate first publication
+
+- **WHEN** no prior `manifest-last.json` exists (bootstrap or explicit
+  operator-initiated rebuild after the previous canonical bytes have been
+  archived)
+- **THEN** every prospective row is classified as `added`
+- **AND** the receipt records `previous_registry_sha256: null` alongside the
+  new canonical SHA-256.
+
+### Requirement: Existing-model package checksum drift requires an explicit cutover declaration
+
+The refresh runner SHALL refuse canonical replacement whenever any previously
+canonical model appears in the prospective registry with a different
+`package_checksum` unless a schema-validated cutover declaration accepts that
+specific transition.
+
+#### Scenario: Undeclared package_changed row is refused before commit
+
+- **WHEN** at least one prospective row has the same `model_id` as a previous
+  canonical row but a different `package_checksum`, and no matching cutover
+  declaration is present
+- **THEN** the runner exits non-zero with reason
+  `registry_cutover_undeclared` before any canonical provider replace
+- **AND** the previous canonical registry file's SHA-256, content, inode,
+  mtime, and consumer-visible identity remain unchanged
+- **AND** the receipt records every refused model with its previous and
+  proposed package checksum, without leaking absolute local paths or
+  credentials.
+
+#### Scenario: Removed previously canonical model is refused
+
+- **WHEN** a `model_id` present in the previous canonical registry is missing
+  from the prospective registry
+- **THEN** the runner classifies that model as `removed` and refuses canonical
+  replacement with reason `registry_cutover_removal_refused`
+- **AND** the previous canonical bytes remain unchanged; deliberate
+  decommission requires a separate declared workflow outside this refresh.
+
+#### Scenario: Valid cutover declaration accepts a specific package cutover
+
+- **WHEN** a `nhms.scheduler.registry_package_cutover.v1` declaration is
+  configured, its `generation` equals the prospective registry generation, each
+  entry names an existing `model_id` with matching `old_checksum` (equal to the
+  previous canonical `package_checksum`) and matching `new_checksum` (equal to
+  the prospective `package_checksum`), `effective_cycle_utc` is aligned to
+  either 00:00 or 12:00 UTC, and `transition_mode` is a supported value
+- **THEN** the runner classifies the row as `package_changed` under
+  `declared_cutovers`, allows canonical replacement, and lists the accepted
+  declaration in the receipt.
+
+#### Scenario: Invalid cutover declaration fails closed
+
+- **WHEN** any of the following holds: the declaration file schema is invalid;
+  a declaration `model_id` is absent from the prospective registry; the
+  declaration's `old_checksum` mismatches the previous canonical
+  `package_checksum` or its `new_checksum` mismatches the prospective
+  `package_checksum`; the declaration `generation` does not equal the
+  prospective registry generation; `effective_cycle_utc` is not aligned to
+  00:00 or 12:00 UTC; the declaration contains duplicate model IDs; the
+  declaration `effective_cycle_utc` is in the past by more than the
+  configured tolerance (24 hours) or unreachably far in the future (more than
+  168 hours); the declaration file is symlinked, non-regular, or exceeds the
+  bounded read limit
+- **THEN** the runner fails closed with reason
+  `registry_cutover_declaration_invalid` before canonical replacement
+- **AND** the previous canonical registry file's bytes, digest, and identity
+  remain unchanged.
+
+### Requirement: Receipt reports bounded per-model registry classification
+
+The v1 receipt SHALL include a `registry_classification` object on every
+`dry_run`, `published`, and refusal outcome that reflects the diff between the
+previous canonical registry and the prospective registry.
+
+#### Scenario: Classification counts are bounded and sanitized
+
+- **WHEN** the runner completes any outcome that touched classification
+- **THEN** `registry_classification` reports `added`, `unchanged`, `removed`,
+  `package_changed`, `refused`, and `declared_cutovers` as bounded arrays with
+  the previous and new canonical registry SHA-256
+- **AND** each list caps at 256 entries with a `truncated` boolean and exact
+  `total`
+- **AND** entries expose only `model_id`, `old_checksum`, `new_checksum`, and
+  matching declaration identity; absolute filesystem paths, absolute object
+  URIs, and credentials never appear
+- **AND** counts reconcile the previous and prospective model sets:
+  `unchanged + package_changed + removed` equals the previously canonical
+  model count, `added + unchanged + package_changed` equals the prospective
+  model count, `declared_cutovers` is a subset of `package_changed`, and
+  `refused` equals every `removed` entry plus every `package_changed` entry
+  not present in `declared_cutovers` plus every entry rejected by
+  `registry_cutover_declaration_invalid`.
+
+#### Scenario: 19-model live inventory records the actual classification shape
+
+- **WHEN** the current 19-model live inventory refreshes against a 13-model
+  previous canonical registry after adding six new basin models
+- **THEN** the receipt records exactly six `added` entries, exactly thirteen
+  `unchanged` entries (byte-identical model/package identities), zero
+  `package_changed`, zero `refused`, and zero `declared_cutovers`
+- **AND** an intentional simultaneous package cutover for one existing model
+  produces one `declared_cutovers` entry and twelve `unchanged` entries with
+  the same `added` count.

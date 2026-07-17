@@ -71,5 +71,44 @@
     "created_total": 0,
     "truncated": false
   },
-  "residues": []
+  "residues": [],
+  "registry_classification": {
+    "previous_registry_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "new_registry_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "added": {
+      "items": [
+        "basin-001",
+        "basin-002",
+        "basin-003",
+        "basin-004",
+        "basin-005",
+        "basin-006"
+      ],
+      "total": 6,
+      "truncated": false
+    },
+    "unchanged": {
+      "items": [
+        "basin-101",
+        "basin-102",
+        "basin-103",
+        "basin-104",
+        "basin-105",
+        "basin-106",
+        "basin-107",
+        "basin-108",
+        "basin-109",
+        "basin-110",
+        "basin-111",
+        "basin-112",
+        "basin-113"
+      ],
+      "total": 13,
+      "truncated": false
+    },
+    "removed": {"items": [], "total": 0, "truncated": false},
+    "package_changed": {"items": [], "total": 0, "truncated": false},
+    "refused": {"items": [], "total": 0, "truncated": false},
+    "declared_cutovers": {"items": [], "total": 0, "truncated": false}
+  }
 }

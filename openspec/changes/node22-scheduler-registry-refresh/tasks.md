@@ -116,17 +116,83 @@
   implementation SHA after local, node-22 scheduling and node-27 NFS gates pass.
   Execute no product-archive or #856 cascade command.
 
+## 5. Registry Cutover Gate (#1080 follow-up)
+
+- [x] 5.1 Add `nhms.scheduler.registry_package_cutover.v1` JSON schema at
+  `schemas/scheduler_registry_package_cutover.schema.json` plus a valid
+  example fixture: `schema_version`, `generated_at`, `generation`, bounded
+  `entries: [{model_id, old_checksum, new_checksum, effective_cycle_utc,
+  transition_mode}]`; wire the schema into the existing
+  `check-jsonschema` metaschema/example loop in `.github/workflows/ci.yml`.
+- [x] 5.2 Extend `schemas/scheduler_file_provider_refresh_receipt.schema.json`
+  with a top-level `registry_classification` object bound to
+  `previous_registry_sha256` (nullable, 64-hex or null) and
+  `new_registry_sha256` (nullable), plus bounded (256-cap, `total`,
+  `truncated`) arrays for `added`, `unchanged`, `removed`, `package_changed`,
+  `refused`, and `declared_cutovers`. Add schema conditionals that require
+  `registry_classification` on every `dry_run`/`published` outcome AND on
+  every `failed` outcome whose `reason` is one of
+  `registry_cutover_undeclared`,
+  `registry_cutover_removal_refused`, or
+  `registry_cutover_declaration_invalid`; add a corresponding receipt example.
+- [x] 5.3 In `scripts/scheduler_file_provider_refresh.py`, extend
+  `_registry_precommit_gate` (or introduce a helper it calls) to: bounded
+  no-follow read of the previous canonical `manifest-last.json` (missing =
+  first publication), classify prospective vs previous by `model_id`, load
+  the cutover declaration file when `NHMS_REGISTRY_CUTOVER_DECLARATION_PATH`
+  is set (bounded no-follow), validate it against the schema, and enforce
+  `old_checksum/new_checksum/generation/model_id/effective_cycle_utc/
+  transition_mode` semantics with UTC-cycle alignment and the 24h past /
+  168h future window. Emit refusal reasons
+  `registry_cutover_undeclared`,
+  `registry_cutover_removal_refused`, or
+  `registry_cutover_declaration_invalid` before any canonical replace.
+- [x] 5.4 Attach the classification payload to the primary and emergency
+  receipt paths; sanitize `model_id` and checksum fields under the existing
+  bounded/redaction rules; assert canonical bytes remain unchanged on every
+  refusal outcome.
+- [x] 5.5 Add regression tests under
+  `tests/test_scheduler_file_provider_refresh.py` (and companion fixtures)
+  covering: (a) 13 previous + 6 new -> 6 added + 13 unchanged; (b) 1 existing
+  `package_changed` without declaration -> refusal + previous bytes intact;
+  (c) valid declaration accepts the same transition; (d) each invalid
+  declaration mode (schema-invalid, wrong generation, wrong old_checksum,
+  wrong new_checksum, non-cycle-aligned effective_cycle_utc, out-of-window
+  effective_cycle_utc, duplicate model_id, unknown model_id, symlinked/
+  non-regular declaration file, over-size declaration file); (e) previously
+  canonical model removed -> refusal; (f) missing previous canonical
+  registry -> every row classified as `added`.
+- [x] 5.6 Extend `tests/test_publish_scheduler_file_registry.py` with a
+  concurrency assertion that the precommit gate runs while the same
+  destination lock is held that governs canonical replacement, and that a
+  refusal releases the lock without touching canonical bytes.
+- [x] 5.7 Update `docs/runbooks/current-production-ops.md` operator section
+  with: what a `registry_cutover_*` refusal means, how to file a valid
+  declaration (schema, path env, cycle alignment, generation binding), and
+  how the receipt's `registry_classification` should be inspected before
+  enabling the refresh timer after a cutover.
+- [x] 5.8 Run `uv run pytest -q tests/test_scheduler_file_provider_refresh.py
+  tests/test_publish_scheduler_file_registry.py`, `uv run ruff check .`, and
+  `openspec validate node22-scheduler-registry-refresh --strict
+  --no-interactive`; capture the receipt example through the CI
+  `check-jsonschema` metaschema/example loop.
+
 ## Evidence Floor
 
 - Fixture: expanded; repair intensity: high; all selected packs and concrete
-  scenario rows are in `design.md` and sections 1-4.
+  scenario rows are in `design.md` and sections 1-5.
 - Required identity chain: v1 receipt -> exact registry/readiness/state digests
-  -> scheduler pass/candidate/run -> actual stage job(s)/terminal -> three new
+  + `registry_classification` bound to previous/new canonical SHA-256 ->
+  scheduler pass/candidate/run -> actual stage job(s)/terminal -> three new
   leaves -> node-27 ACL/access proof.
 - Merge blockers: timestamp-only/DB/empty renewal, missing authoritative object
   validation, false success/rollback, partial canonical bytes, unbounded orphan/
   residue/receipt/workspace, synthetic/reused leaf, nonterminal/unbound jobs,
-  incomplete unit/job restoration, or any #1065/#856 command.
+  incomplete unit/job restoration, undeclared `package_changed`/`removed`
+  admitted to canonical replacement, `registry_classification` totals that do
+  not reconcile with previous+prospective model sets, or any #1065/#856
+  command.
 - Explicit non-goals: product-archive enforce, #856/#1069-#1072, DB restoration,
   model lifecycle change, retention/compression/salvage/drill, frontend/display,
-  numerical result changes and unrelated refactors.
+  numerical result changes, cross-plane consumer changes (owned by #1081), live
+  2026070600 recovery (owned by #1082), and unrelated refactors.

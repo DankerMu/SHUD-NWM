@@ -291,6 +291,67 @@ scripts/scheduler_file_provider_refresh_once.sh \
 恢复会先比对三个当前 canonical SHA-256 与 worker registry mirror。primary 与 emergency
 均失败就是 `replace_uncertain`，必须直接重验四个绑定；journal/stderr 只作诊断。
 
+**Registry cutover gate (#1080) refusal semantics**：refresh 在 canonical registry
+replace 前对 prospective vs 上一份 canonical `manifest-last.json` 做逐行分类，并把
+`registry_classification` 写进 v1 receipt（`dry_run` / `published` / cutover refusal
+outcome 都必须带）。分类桶：`added`（prospective 有、previous 无）、`unchanged`
+（同 `model_id` 且 `model_package_uri` / `manifest_uri` / `package_checksum` 逐字节
+相等）、`package_changed`（同 `model_id`，`package_checksum` 不同）、`removed`
+（previous 有、prospective 无）、`refused`、`declared_cutovers`。三个 refusal 原因均在
+canonical replace 前退出、非零：
+
+- `registry_cutover_undeclared`：某个已存在 `model_id` 的 `package_checksum` 变了但没有
+  匹配的 cutover declaration。先看 `registry_classification.refused` 找到具体 model 与
+  old/new checksum；确认漂移是有意后按下述格式提交 declaration，再重跑。
+- `registry_cutover_removal_refused`：previous canonical 里的某个 `model_id` 在
+  prospective 里消失。#1080 不允许 removal；需要下线一个流域走单独的 declared workflow，
+  否则不要动 `NHMS_BASINS_ROOT` 里的对应目录。
+- `registry_cutover_declaration_invalid`：declaration 文件本身或某条 entry 无效。常见
+  原因：schema 不匹配、`generation` 与 prospective 不一致、`old_checksum`/`new_checksum`
+  与实际不符、`effective_cycle_utc` 未对齐 00:00 或 12:00 UTC、超出 24h 过期 / 168h
+  未来窗口、entry 里有 duplicate `model_id`、declaration 文件是 symlink/非常规文件、
+  超过 256 KiB。
+
+Cutover declaration 是 `nhms.scheduler.registry_package_cutover.v1`（schema：
+`schemas/scheduler_registry_package_cutover.schema.json`；参考 example：
+`schemas/examples/scheduler_registry_package_cutover.example.json`）。文件路径通过
+新增的 optional env `NHMS_REGISTRY_CUTOVER_DECLARATION_PATH` 传入 refresh 进程；
+env 未设置或空值等同于"无 declaration"（只有当没有 `package_changed`/`removed`
+时才允许）。示例：
+
+```json
+{
+  "schema_version": "nhms.scheduler.registry_package_cutover.v1",
+  "generated_at": "2026-07-15T11:45:00Z",
+  "generation": "manifest-202607151200-b44ab3b785f4",
+  "entries": [
+    {
+      "model_id": "basins_kashigeer_shud",
+      "old_checksum": "<previous canonical package_checksum>",
+      "new_checksum": "<prospective package_checksum>",
+      "effective_cycle_utc": "2026-07-16T00:00:00Z",
+      "transition_mode": "replace"
+    }
+  ]
+}
+```
+
+`generation` 必须等于本次 prospective 的 registry generation；这个值是
+`manifest-YYYYMMDDHHMM-<12hex>`（YYYYMMDDHHMM 来自 refresh 使用的 `generated_at`，
+12hex 来自 prospective payload 的 content SHA-256 前 12 位）。它出现在被拒 refresh 的
+`registry_classification.new_registry_sha256`（同源）以及日志里；操作流程：先看被拒
+receipt -> 拷 generation / old/new checksum 到 declaration -> 提交 declaration 到
+mode-0600 路径 -> `export NHMS_REGISTRY_CUTOVER_DECLARATION_PATH=<path>` -> 重跑
+refresh。`effective_cycle_utc` 必须精确对齐 00:00 或 12:00 UTC，且落在 `[now-24h,
+now+168h]` 区间；`transition_mode` 目前仅支持 `replace`。
+
+启用 refresh timer 前必须 `jq '.registry_classification'
+/scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json`
+核对：`previous_registry_sha256` 等于 shared canonical 的实际 SHA-256、`new_registry_sha256`
+等于本次刚 commit 的 canonical SHA-256、`refused.total == 0`、`declared_cutovers`
+里的 entry 与 `entries` 数量与 declaration 完全一致。任何 `refused` 都禁止把 timer
+enable；那说明当前 declaration 与 prospective 不匹配、需要重新提交。
+
 成功 manual refresh 后才建立稳态：
 
 ```bash

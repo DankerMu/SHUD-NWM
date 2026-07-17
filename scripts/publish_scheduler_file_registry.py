@@ -424,6 +424,12 @@ def _publish_failure(
         "provider_replace_failed",
         "provider_replace_uncertain",
         "provider_postread_failed",
+        # #1080 registry-cutover refusal tokens flow through the same details
+        # channel as other precommit rejections; keep them out of the generic
+        # provider_invalid collapse so operators see the actual reason.
+        "registry_cutover_undeclared",
+        "registry_cutover_removal_refused",
+        "registry_cutover_declaration_invalid",
     }
     provider_reason = (
         str(source_reason)
