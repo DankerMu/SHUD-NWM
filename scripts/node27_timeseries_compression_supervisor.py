@@ -108,12 +108,12 @@ EXPECTED_COMMAND_SEQUENCE = (
     "benchmark_after",
 )
 EXPECTED_CAPTURE_SEQUENCE = (
-    "preflight_evidence",
     "schema_dump_list",
     "catalog_before",
     "catalog_after_first",
     "catalog_after_second",
     "recovery_preflight",
+    "preflight_evidence",
     "post_dry_selection",
     "pre_enforce_selection",
     "sizes_pre",
@@ -1632,7 +1632,6 @@ def execute_producer_state_machine(
         )
 
     checkpoint_runner("preflight", None)
-    capture("preflight_evidence")
     pg_restore_identity: Mapping[str, Any] | None = None
     migration_ordinal = 0
     for command in plan["commands"]:
@@ -1667,6 +1666,8 @@ def execute_producer_state_machine(
         if kind == "migration_apply":
             capture("catalog_after_first" if migration_ordinal == 0 else "catalog_after_second")
             migration_ordinal += 1
+        elif kind == "decompress":
+            capture("preflight_evidence")
         elif kind == "compression_dry_run":
             capture("post_dry_selection")
         elif kind == "compression_enforce":

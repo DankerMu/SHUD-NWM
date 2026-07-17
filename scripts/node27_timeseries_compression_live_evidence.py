@@ -131,12 +131,12 @@ EXPECTED_LEDGER_SEQUENCE = (
     "benchmark_after",
 )
 EXPECTED_CAPTURE_SEQUENCE = (
-    "preflight_evidence",
     "schema_dump_list",
     "catalog_before",
     "catalog_after_first",
     "catalog_after_second",
     "recovery_preflight",
+    "preflight_evidence",
     "post_dry_selection",
     "pre_enforce_selection",
     "sizes_pre",
@@ -145,7 +145,6 @@ EXPECTED_CAPTURE_SEQUENCE = (
     "cleanup",
 )
 EXPECTED_PRODUCER_SEQUENCE = (
-    "capture:preflight_evidence",
     "child:pg_dump:0",
     "child:pg_restore_version:0",
     "child:pg_restore_list:0",
@@ -157,6 +156,7 @@ EXPECTED_PRODUCER_SEQUENCE = (
     "capture:catalog_after_second",
     "capture:recovery_preflight",
     "child:decompress:0",
+    "capture:preflight_evidence",
     "child:compression_dry_run:0",
     "capture:post_dry_selection",
     "child:benchmark_before:0",
@@ -1489,12 +1489,13 @@ def _validate_supervisor_execution(
     ):
         raise EvidenceError("supervisor ledger cardinality/checkpoint coverage differs")
     capture_constraints = (
-        ("preflight_evidence", "before", "pg_dump", 0),
         ("schema_dump_list", "after", "pg_restore_list", 0),
         ("catalog_before", "after", "schema_dump_list", 0),
         ("catalog_after_first", "after", "migration_apply", 0),
         ("catalog_after_second", "after", "migration_apply", 1),
         ("recovery_preflight", "before", "decompress", 0),
+        ("preflight_evidence", "after", "decompress", 0),
+        ("preflight_evidence", "before", "compression_dry_run", 0),
         ("post_dry_selection", "after", "compression_dry_run", 0),
         ("pre_enforce_selection", "before", "compression_enforce", 0),
         ("sizes_pre", "before", "compression_enforce", 0),
