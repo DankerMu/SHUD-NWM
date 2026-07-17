@@ -237,11 +237,14 @@ def test_generation_scoped_history_signal_wrong_generation_no_exact_predecessor(
 def test_generation_scoped_history_signal_quarantines_wrong_generation_at_expected_key(
     tmp_path: Path,
 ) -> None:
-    """Round-1 A1+A3 fix: a wrong-generation entry sitting AT the expected
-    predecessor key surfaces both ``wrong_generation_predecessor_present`` and
-    a bounded ``history_entry_count_quarantined`` counter so the transition
-    decision matrix can emit ``block_wrong_generation`` and audit can trace
-    how many entries were filtered from readiness scoring."""
+    """Round-1 A1+A3 fix + R2-C2 rename: a wrong-generation entry sitting AT
+    the expected predecessor key surfaces both
+    ``wrong_generation_predecessor_present`` and a boolean
+    ``expected_key_predecessor_quarantined`` flag so the transition decision
+    matrix can emit ``block_wrong_generation`` and audit can trace that the
+    predecessor slot held a stale-lineage entry (state-index dedups by
+    identity key, so this is a 0/1 signal — renamed from the misnomer
+    ``history_entry_count_quarantined``)."""
     object_root = tmp_path / "objects"
     object_root.mkdir(parents=True)
     stale_entry = _entry(
@@ -271,11 +274,11 @@ def test_generation_scoped_history_signal_quarantines_wrong_generation_at_expect
     )
     assert signal["wrong_generation_predecessor_present"] is True
     assert signal["wrong_generation_predecessor_checksum"] == OLD_CHECKSUM
-    assert signal["history_entry_count_quarantined"] == 1
-    # State-index evidence carries the same counter for audit under a
-    # bounded key so downstream evidence readers can pin the field.
+    assert signal["expected_key_predecessor_quarantined"] is True
+    # State-index evidence carries the same flag for audit under a bounded
+    # key so downstream evidence readers can pin the field.
     assert (
-        signal["state_snapshot_index"]["history_entry_count_quarantined"] == 1
+        signal["state_snapshot_index"]["expected_key_predecessor_quarantined"] is True
     )
 
 

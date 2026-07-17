@@ -34,11 +34,15 @@ Constraints
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+from services.orchestrator.scheduler_discovery import SchedulerResourceLimitError
 from workers.data_adapters.base import CycleDiscovery
+
+log = logging.getLogger(__name__)
 
 # Bounded per-pass so a malformed evidence stream cannot drive unbounded
 # construction; the scheduler pass max candidate cap (10000) still applies.
@@ -107,26 +111,93 @@ def _predecessor_cycle_id(source_id: str, cycle_time: datetime) -> str:
     return f"{source_id}_{stamp}"
 
 
-def _predecessor_raw_manifest_ready(source_id: str, cycle_time: datetime) -> bool:
-    """Return True when the raw manifest for the predecessor cycle is ready.
+def _predecessor_raw_manifest_ready(source_id: str, cycle_time: datetime) -> tuple[bool, str]:
+    """Probe raw-manifest readiness for the predecessor cycle.
+
+    Returns ``(ready, reason)`` — R2-B4 distinguishes:
+
+    * ``(True, "ready")`` — the raw manifest for the predecessor exists on
+      disk (or in the object store) and can back a synthesized discovery.
+    * ``(False, "predecessor_raw_manifest_env_unwired")`` — neither
+      ``NHMS_SCHEDULER_NFS_RAW_MANIFEST_ENABLED`` nor
+      ``NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST`` is set.  §8.6 emission is
+      silently disabled in that environment; operators must wire the env to
+      re-enable the backfill gate.  This is a config decision, distinct from
+      "manifest genuinely not landed yet".
+    * ``(False, "predecessor_raw_manifest_not_ready")`` — env is wired but
+      the manifest is not yet ready on disk (the transient case §8.6 spec
+      Scenario "Predecessor selected before successor" targets).
 
     §8.6 spec Scenario "Predecessor selected before successor" gates emission
-    on the raw manifest for the predecessor existing.  We probe via the
-    ``nfs_raw_manifest_readiness_from_env`` helper — same code path the
-    scheduler discovery layer uses — so a NFS-raw-manifest that has not yet
-    landed on disk cannot drive predecessor emission.  Import is local to
+    on the raw manifest for the predecessor existing.  Import is local to
     avoid a module-load-time cycle with ``services.orchestrator.scheduler``.
     """
     try:
         from services.orchestrator import source_cycle_raw_manifest
     except ImportError:  # pragma: no cover - defensive
-        return False
+        return False, "predecessor_raw_manifest_not_ready"
     readiness = source_cycle_raw_manifest.nfs_raw_manifest_readiness_from_env(
         source_id, cycle_time
     )
+    if readiness is None:
+        # Env unset — the manifest gate is not wired on this deployment.
+        # Return the distinct reason so operators can trace the config gap.
+        return False, "predecessor_raw_manifest_env_unwired"
     if not isinstance(readiness, Mapping):
-        return False
-    return str(readiness.get("status") or "") == "ready"
+        return False, "predecessor_raw_manifest_not_ready"
+    if str(readiness.get("status") or "") == "ready":
+        return True, "ready"
+    return False, "predecessor_raw_manifest_not_ready"
+
+
+def _attach_successor_marker(
+    blocked: list[Any],
+    *,
+    successor_candidate_id: str,
+    marker: dict[str, Any],
+) -> None:
+    """Attach a diagnostic marker to the successor's blocked entry.
+
+    R2-C3 uses this to record ``predecessor_backfill_active_pipeline`` on
+    the successor whose §8.6 backfill got skipped because a prior scheduler
+    pass already dispatched the predecessor.  Silently no-ops if the
+    successor cannot be located or its ``state_evidence`` cannot be updated;
+    the marker is auxiliary observability, not gating.
+    """
+    if not successor_candidate_id:
+        return
+    for entry in blocked:
+        if str(getattr(entry, "candidate_id", "") or "") != str(successor_candidate_id):
+            continue
+        existing = dict(getattr(entry, "state_evidence", None) or {})
+        markers = dict(existing.get("predecessor_backfill_marker") or {})
+        markers.update(marker)
+        existing["predecessor_backfill_marker"] = markers
+        try:
+            import dataclasses as _dataclasses
+            from dataclasses import replace as _dataclass_replace
+
+            updated = _dataclass_replace(entry, state_evidence=existing)
+        except (TypeError, ValueError):
+            updated = None
+        if updated is not None:
+            try:
+                index = blocked.index(entry)
+            except ValueError:  # pragma: no cover — defensive
+                return
+            blocked[index] = updated
+            return
+        try:
+            entry.state_evidence = existing  # type: ignore[misc]
+        except (_dataclasses.FrozenInstanceError, AttributeError, TypeError):
+            log.warning(
+                "scheduler_backfill_predecessor: could not attach "
+                "predecessor_backfill_marker=%s to successor candidate_id=%s "
+                "(dataclass rejected update)",
+                marker,
+                successor_candidate_id,
+            )
+        return
 
 
 def emit_predecessor_candidates(
@@ -138,6 +209,8 @@ def emit_predecessor_candidates(
     candidate_factory: Any,
     strict_warm_start_for_candidate: Any,
     blocked_candidate_factory: Any,
+    active_repository: Any | None = None,
+    max_candidates: int | None = None,
 ) -> list[dict[str, Any]]:
     """Emit predecessor candidates for §8.6 predecessor-pending blocks.
 
@@ -147,6 +220,24 @@ def emit_predecessor_candidates(
     candidates (§8.6 "predecessor first" ordering); predecessor candidates
     whose own §8 gate blocks are appended to ``blocked`` so the operator can
     trace WHY the gap could not close.
+
+    ``active_repository``:
+        Optional ``ActiveCandidateRepository`` — when provided and it exposes
+        ``has_active_pipeline`` the emitter skips predecessor cycles whose
+        prior pipeline is still in-flight (R2-C3 defence-in-depth: a prior
+        scheduler pass already dispatched the predecessor).  The skip records
+        a ``predecessor_backfill_active_pipeline`` marker on the successor's
+        blocked entry so the operator can trace WHY §8.6 held off.
+
+    ``max_candidates``:
+        Optional fail-closed governance cap (R2-B3).  When set, the emitter
+        raises :class:`SchedulerResourceLimitError` before appending an
+        admitted predecessor that would drive
+        ``len(candidates) + len(blocked) + len(skipped)`` past the cap.  The
+        cap is applied AFTER the main-loop check in
+        :func:`services.orchestrator.scheduler_candidates.build_candidates`
+        so admitted predecessors can never bypass the 10000-per-pass limit
+        by prepending after the loop finishes.
     """
     pending = _extract_pending_predecessors(blocked)
     if not pending:
@@ -196,6 +287,15 @@ def emit_predecessor_candidates(
     emission_evidence: list[dict[str, Any]] = []
     total_attempted = 0
     truncated = False
+    # R2-B4: track whether the "env-unset" warning has already been emitted
+    # this pass so we do not spam identical log lines for every candidate.
+    env_unwired_warning_emitted = False
+    # R2-C3: probe active_repository.has_active_pipeline only when it exists.
+    has_active_pipeline_probe = None
+    if active_repository is not None:
+        probe = getattr(active_repository, "has_active_pipeline", None)
+        if callable(probe):
+            has_active_pipeline_probe = probe
     for record in pending:
         if total_attempted >= MAX_PREDECESSOR_EMISSIONS:
             truncated = True
@@ -227,6 +327,44 @@ def emit_predecessor_candidates(
                 }
             )
             continue
+        # R2-C3: skip when a prior pipeline is still in-flight so §8.6 does
+        # not double-emit predecessor work across scheduler passes.  The
+        # successor's blocked entry gains a marker so operators can trace
+        # WHY the emission held off.
+        if has_active_pipeline_probe is not None:
+            try:
+                pipeline_active = bool(
+                    has_active_pipeline_probe(
+                        source_id=record["source_id"],
+                        cycle_time=record["cycle_time"],
+                        model_id=record["model_id"],
+                    )
+                )
+            except Exception:  # noqa: BLE001 — bounded evidence on failure
+                pipeline_active = False
+            if pipeline_active:
+                _attach_successor_marker(
+                    blocked,
+                    successor_candidate_id=record["successor_candidate_id"],
+                    marker={
+                        "predecessor_backfill_active_pipeline": True,
+                        "predecessor_cycle_time": record["cycle_time"].astimezone(
+                            UTC
+                        ).isoformat(),
+                        "predecessor_model_id": record["model_id"],
+                    },
+                )
+                emission_evidence.append(
+                    {
+                        "status": "skipped",
+                        "reason": "predecessor_backfill_active_pipeline",
+                        "successor_candidate_id": record["successor_candidate_id"],
+                        "predecessor_source_id": record["source_id"],
+                        "predecessor_cycle_time": record["cycle_time"].isoformat(),
+                        "predecessor_model_id": record["model_id"],
+                    }
+                )
+                continue
         # Reuse an existing cycle discovery when the predecessor happens to
         # sit at a source cycle already discovered this pass; otherwise
         # synthesize a minimal ready discovery — BUT only after the raw
@@ -240,13 +378,29 @@ def emit_predecessor_candidates(
             predecessor_cycle = existing_cycle
             predecessor_discovery = existing_cycle.discovery
         else:
-            if not _predecessor_raw_manifest_ready(
+            manifest_ready, manifest_reason = _predecessor_raw_manifest_ready(
                 record["source_id"], record["cycle_time"]
-            ):
+            )
+            if not manifest_ready:
+                # R2-B4: emit a one-per-pass warning when the env is
+                # unwired so operators are not misled by an indistinguishable
+                # "not_ready" reason.  A wired env reporting "not ready" is
+                # a legitimate transient state and does not log.
+                if (
+                    manifest_reason == "predecessor_raw_manifest_env_unwired"
+                    and not env_unwired_warning_emitted
+                ):
+                    log.warning(
+                        "scheduler_backfill_predecessor: raw-manifest env "
+                        "not wired (NHMS_SCHEDULER_NFS_RAW_MANIFEST_ENABLED / "
+                        "NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST) — §8.6 "
+                        "predecessor emission is silently disabled",
+                    )
+                    env_unwired_warning_emitted = True
                 emission_evidence.append(
                     {
                         "status": "skipped",
-                        "reason": "predecessor_raw_manifest_not_ready",
+                        "reason": manifest_reason,
                         "successor_candidate_id": record["successor_candidate_id"],
                         "predecessor_source_id": record["source_id"],
                         "predecessor_cycle_time": cycle_time_iso,
@@ -368,16 +522,53 @@ def emit_predecessor_candidates(
         if isinstance(gate, Mapping):
             existing_state.setdefault("predecessor_backfill_gate", dict(gate))
         try:
+            import dataclasses as _dataclasses
             from dataclasses import replace as _dataclass_replace
 
             predecessor_candidate = _dataclass_replace(
                 predecessor_candidate, state_evidence=existing_state
             )
         except (TypeError, ValueError):
+            # R2-C1: narrow the fallback except so genuine bugs surface.
+            # Only frozen-dataclass FrozenInstanceError and closely-related
+            # attribute / type errors are silently swallowed; anything else
+            # re-raises so the pass fails loudly instead of dropping the
+            # marker.  Log the swallow so an operator can see the drop.
             try:
                 predecessor_candidate.state_evidence = existing_state  # type: ignore[misc]
-            except Exception:  # pragma: no cover - opportunistic
-                pass
+            except (
+                _dataclasses.FrozenInstanceError,
+                AttributeError,
+                TypeError,
+            ):
+                log.warning(
+                    "scheduler_backfill_predecessor: dropped "
+                    "predecessor_backfill_marker on candidate=%s (frozen "
+                    "dataclass rejected setattr fallback)",
+                    getattr(predecessor_candidate, "candidate_id", ""),
+                )
+        # R2-B3: enforce the fail-closed governance cap AFTER the main-loop
+        # check.  ``max_candidates`` is None when the caller opts out
+        # (test-only paths); when set, admitted predecessor prepends must
+        # not push the total past the cap or the 10000/pass guarantee is
+        # silently broken.
+        if max_candidates is not None:
+            projected_total = (
+                len(candidates)
+                + len(blocked)
+                + len(admitted)
+                + 1  # this candidate is about to be admitted
+            )
+            if projected_total > int(max_candidates):
+                raise SchedulerResourceLimitError(
+                    "predecessor_emission_max_candidates_exceeded",
+                    {
+                        "max_candidates": int(max_candidates),
+                        "current_candidates": len(candidates),
+                        "current_blocked": len(blocked),
+                        "predecessor_admitted": len(admitted),
+                    },
+                )
         admitted.append(predecessor_candidate)
         existing_candidate_keys.add(key)
         emission_evidence.append(
@@ -409,7 +600,88 @@ def emit_predecessor_candidates(
     return emission_evidence
 
 
+def attach_emission_summary_to_blocked(
+    blocked: list[Any],
+    emission_evidence: list[dict[str, Any]],
+) -> None:
+    """Attach the §8.6 emission summary to affected successor blocked entries.
+
+    R2-C4: build a compact ``{totals, records}`` summary and attach it under
+    ``state_evidence["predecessor_backfill"]["summary"]`` on each blocked
+    successor referenced by ``emission_evidence``.  Global operator audit
+    surface — for a given blocked successor an operator can now see WHY
+    §8.6 fired or did not fire, in the same evidence chain that gated the
+    successor.
+
+    No-op when no successor is referenced (e.g. a truncation record).  The
+    attach is best-effort: frozen-dataclass update failures fall back to
+    direct setattr; unrecoverable failures log and drop the marker.
+    """
+    if not emission_evidence:
+        return
+    # Compact totals across all records for a discoverable top-level count.
+    totals: dict[str, int] = {}
+    for record in emission_evidence:
+        status = str(record.get("status") or "unknown")
+        totals[status] = totals.get(status, 0) + 1
+    # Group records by successor_candidate_id so each successor's block
+    # entry only carries its own subset.
+    by_successor: dict[str, list[dict[str, Any]]] = {}
+    for record in emission_evidence:
+        successor_id = str(record.get("successor_candidate_id") or "")
+        if not successor_id:
+            continue
+        by_successor.setdefault(successor_id, []).append(record)
+    for successor_id, records in by_successor.items():
+        _attach_summary_to_single_blocked(
+            blocked, successor_id, records, totals
+        )
+
+
+def _attach_summary_to_single_blocked(
+    blocked: list[Any],
+    successor_id: str,
+    records: list[dict[str, Any]],
+    totals: dict[str, int],
+) -> None:
+    per_successor_totals: dict[str, int] = {}
+    for record in records:
+        status = str(record.get("status") or "unknown")
+        per_successor_totals[status] = per_successor_totals.get(status, 0) + 1
+    summary_payload = {
+        "totals": per_successor_totals,
+        "records": records,
+        "pass_totals": totals,
+    }
+    for index, entry in enumerate(blocked):
+        if str(getattr(entry, "candidate_id", "") or "") != successor_id:
+            continue
+        existing = dict(getattr(entry, "state_evidence", None) or {})
+        backfill = dict(existing.get("predecessor_backfill") or {})
+        backfill["summary"] = summary_payload
+        existing["predecessor_backfill"] = backfill
+        try:
+            import dataclasses as _dataclasses
+            from dataclasses import replace as _dataclass_replace
+
+            blocked[index] = _dataclass_replace(entry, state_evidence=existing)
+            return
+        except (TypeError, ValueError):
+            try:
+                entry.state_evidence = existing  # type: ignore[misc]
+                return
+            except (_dataclasses.FrozenInstanceError, AttributeError, TypeError):
+                log.warning(
+                    "scheduler_backfill_predecessor: could not attach "
+                    "predecessor_backfill.summary to successor candidate_id=%s "
+                    "(dataclass rejected update)",
+                    successor_id,
+                )
+                return
+
+
 __all__ = (
     "MAX_PREDECESSOR_EMISSIONS",
+    "attach_emission_summary_to_blocked",
     "emit_predecessor_candidates",
 )

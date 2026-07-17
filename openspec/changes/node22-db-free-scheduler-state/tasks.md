@@ -350,6 +350,10 @@ Scenario evidence rows for section 5:
   `generation_mismatch`.
 
 - [x] 8.7 Generation-lineage quarantine for stale journal / output evidence.
+  (partial: state-index side landed via
+  `expected_key_predecessor_quarantined` observability flag + BLOCK_WRONG_
+  GENERATION admit-matrix branch; full journal-side predecessor_identity
+  filter beyond `init_state_id` mismatch routing is tracked in #1107.)
   Evidence floor: completed / failed journal entries whose recorded
   predecessor identity does not match the required predecessor for the
   current generation are quarantined from canonical readiness scoring **at
@@ -357,6 +361,12 @@ Scenario evidence rows for section 5:
   are performed by the quarantine path) while remaining readable as
   immutable audit entries; correct backfill selection is not suppressed by
   their presence.
+
+  §8 follow-ups filed:
+  - #1107 — full §8.7 journal-side predecessor_identity filter.
+  - #1108 — A4 orphaned pre-§8 `strict_warm_start_successor_checkpoint_
+    missing` branch fixture (this PR's shift to
+    `strict_warm_start_terminal_init_state_mismatch` no longer covers it).
 
 - [x] 8.8 Evidence emission for every decision path.
   Evidence floor: scheduler evidence records `model_id`, `generation`,

@@ -1390,7 +1390,13 @@ class FileStateSnapshotIndexRepository:
 
         exact_predecessor_entry = None
         wrong_generation_predecessor_entry: Mapping[str, Any] | None = None
-        history_entry_count_quarantined = 0
+        # R2-C2 (round-2 review): renamed from ``history_entry_count_quarantined``
+        # to reflect boolean semantics.  The state-index dedups by identity key
+        # so at most one entry per expected_key can match; the guard on
+        # ``wrong_generation_predecessor_entry is None`` also keeps it to 0/1.
+        # Name now matches the actual observability signal: "is there a
+        # wrong-generation entry sitting at the expected predecessor key?".
+        expected_key_predecessor_quarantined = False
         if expected_key is not None:
             for key, entry in entries_for_model:
                 if key == expected_key:
@@ -1403,7 +1409,7 @@ class FileStateSnapshotIndexRepository:
                         entry.get("model_package_checksum") or ""
                     ) != current_checksum:
                         wrong_generation_predecessor_entry = entry
-                        history_entry_count_quarantined += 1
+                        expected_key_predecessor_quarantined = True
 
         latest_current_summary = None
         if latest_current is not None:
@@ -1456,7 +1462,7 @@ class FileStateSnapshotIndexRepository:
                 "history_exists_current_generation": bool(current_entries),
                 "history_entry_count_any": len(any_entries),
                 "history_entry_count_current": len(current_entries),
-                "history_entry_count_quarantined": history_entry_count_quarantined,
+                "expected_key_predecessor_quarantined": expected_key_predecessor_quarantined,
                 "latest_current_generation_checkpoint": latest_current_summary,
                 "latest_any_generation_checkpoint": latest_any_summary,
                 "wrong_generation_predecessor_present": (
@@ -1467,7 +1473,7 @@ class FileStateSnapshotIndexRepository:
                     **index_snapshot.evidence,
                     "history_entry_count_any": len(any_entries),
                     "history_entry_count_current": len(current_entries),
-                    "history_entry_count_quarantined": history_entry_count_quarantined,
+                    "expected_key_predecessor_quarantined": expected_key_predecessor_quarantined,
                 },
             }
         )

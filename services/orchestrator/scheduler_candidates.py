@@ -868,13 +868,30 @@ def build_candidates(
     # runs the same strict-warm-start gate on each emitted candidate so a
     # predecessor whose own §8 gate blocks lands in ``blocked`` with its
     # own typed reason rather than silently masquerading as admittable.
+    #
+    # R2-B3 (round-2 review): pass ``max_candidates`` so an admitted
+    # predecessor prepend cannot bypass the fail-closed governance cap.
+    # R2-C3: hand the active_repository down so §8.6 can skip predecessor
+    # cycles whose prior pipeline is still in-flight.
+    # R2-C4: bind the emission summary + attach the summary to the affected
+    # successor blocked entries so operators can audit
+    # ``emitted / blocked / skipped / truncated`` counts without needing a
+    # new tuple slot on the caller-facing shape.  The natural home is the
+    # successor block's ``state_evidence`` — that block is the reason the
+    # emitter fired in the first place.
     from services.orchestrator import scheduler_backfill_predecessor as _bf
-    _bf.emit_predecessor_candidates(
+    predecessor_emission_evidence = _bf.emit_predecessor_candidates(
         models=models, cycles=cycles, candidates=candidates, blocked=blocked,
         candidate_factory=context.candidate_factory,
         strict_warm_start_for_candidate=context.strict_warm_start_for_candidate,
         blocked_candidate_factory=_blocked_candidate,
+        active_repository=context.active_repository,
+        max_candidates=max_candidates,
     )
+    if predecessor_emission_evidence:
+        _bf.attach_emission_summary_to_blocked(
+            blocked, predecessor_emission_evidence
+        )
     return candidates, blocked, skipped, duplicate_exclusions, slurm_status_sync_evidence
 
 

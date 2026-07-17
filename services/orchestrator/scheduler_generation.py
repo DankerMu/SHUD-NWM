@@ -129,8 +129,30 @@ except (OSError, json.JSONDecodeError) as _cutover_schema_load_error:  # pragma:
     raise RuntimeError(
         f"cutover declaration schema unavailable: {_cutover_schema_load_error}"
     ) from _cutover_schema_load_error
+# R2-B6 (round-2 review): attach the Draft-2020-12 FormatChecker so
+# ``format`` keywords are enforced at validator time rather than being
+# silently symbolic.  ``date-time`` is not part of the default
+# jsonschema built-ins without the ``rfc3339-validator`` extra, so we
+# register a custom check via ``FormatChecker.checks`` that mirrors what
+# ``_parse_effective_cycle`` accepts.  The publisher-side validator at
+# ``scripts/scheduler_file_provider_refresh.py`` mirrors this instantiation.
+_CUTOVER_FORMAT_CHECKER = jsonschema.FormatChecker()
+
+
+@_CUTOVER_FORMAT_CHECKER.checks("date-time", raises=(TypeError, ValueError))
+def _check_declaration_datetime_format(value: Any) -> bool:  # pragma: no cover - trivial
+    """Return True when ``value`` parses as an aware RFC 3339 date-time."""
+    if not isinstance(value, str):
+        return False
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("naive datetime not permitted")
+    return True
+
+
 _CUTOVER_DECLARATION_VALIDATOR = jsonschema.Draft202012Validator(
-    _CUTOVER_DECLARATION_SCHEMA
+    _CUTOVER_DECLARATION_SCHEMA,
+    format_checker=_CUTOVER_FORMAT_CHECKER,
 )
 
 
