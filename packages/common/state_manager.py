@@ -1389,13 +1389,21 @@ class FileStateSnapshotIndexRepository:
         latest_any = _latest(any_entries)
 
         exact_predecessor_entry = None
+        wrong_generation_predecessor_entry: Mapping[str, Any] | None = None
+        history_entry_count_quarantined = 0
         if expected_key is not None:
             for key, entry in entries_for_model:
-                if key == expected_key and current_checksum and (
-                    str(entry.get("model_package_checksum") or "") == current_checksum
-                ):
-                    exact_predecessor_entry = entry
-                    break
+                if key == expected_key:
+                    if current_checksum and (
+                        str(entry.get("model_package_checksum") or "") == current_checksum
+                    ):
+                        exact_predecessor_entry = entry
+                        break
+                    if wrong_generation_predecessor_entry is None and str(
+                        entry.get("model_package_checksum") or ""
+                    ) != current_checksum:
+                        wrong_generation_predecessor_entry = entry
+                        history_entry_count_quarantined += 1
 
         latest_current_summary = None
         if latest_current is not None:
@@ -1431,6 +1439,11 @@ class FileStateSnapshotIndexRepository:
                 "cycle_id": str(latest_any.get("cycle_id") or ""),
                 "lead_hours": latest_any.get("lead_hours"),
             }
+        wrong_generation_predecessor_checksum = ""
+        if wrong_generation_predecessor_entry is not None:
+            wrong_generation_predecessor_checksum = str(
+                wrong_generation_predecessor_entry.get("model_package_checksum") or ""
+            )
         return _state_index_evidence_safe(
             {
                 "status": "ready",
@@ -1443,12 +1456,18 @@ class FileStateSnapshotIndexRepository:
                 "history_exists_current_generation": bool(current_entries),
                 "history_entry_count_any": len(any_entries),
                 "history_entry_count_current": len(current_entries),
+                "history_entry_count_quarantined": history_entry_count_quarantined,
                 "latest_current_generation_checkpoint": latest_current_summary,
                 "latest_any_generation_checkpoint": latest_any_summary,
+                "wrong_generation_predecessor_present": (
+                    wrong_generation_predecessor_entry is not None
+                ),
+                "wrong_generation_predecessor_checksum": wrong_generation_predecessor_checksum,
                 "state_snapshot_index": {
                     **index_snapshot.evidence,
                     "history_entry_count_any": len(any_entries),
                     "history_entry_count_current": len(current_entries),
+                    "history_entry_count_quarantined": history_entry_count_quarantined,
                 },
             }
         )

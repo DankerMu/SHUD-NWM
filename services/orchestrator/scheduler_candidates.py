@@ -862,6 +862,19 @@ def build_candidates(
                 skipped.append({**candidate.to_dict(), "reason": "active_duplicate_pipeline"})
                 continue
             candidates.append(candidate)
+    # Issue #1081 §8.6: emit predecessor-select candidates for every §8
+    # ``block_predecessor_pending`` block AFTER the main loop so the deep
+    # candidate-factory / decision plumbing stays untouched.  The helper
+    # runs the same strict-warm-start gate on each emitted candidate so a
+    # predecessor whose own §8 gate blocks lands in ``blocked`` with its
+    # own typed reason rather than silently masquerading as admittable.
+    from services.orchestrator import scheduler_backfill_predecessor as _bf
+    _bf.emit_predecessor_candidates(
+        models=models, cycles=cycles, candidates=candidates, blocked=blocked,
+        candidate_factory=context.candidate_factory,
+        strict_warm_start_for_candidate=context.strict_warm_start_for_candidate,
+        blocked_candidate_factory=_blocked_candidate,
+    )
     return candidates, blocked, skipped, duplicate_exclusions, slurm_status_sync_evidence
 
 

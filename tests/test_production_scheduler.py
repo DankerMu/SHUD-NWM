@@ -20584,17 +20584,34 @@ def test_db_free_strict_warm_start_reopens_completed_producer_missing_successor_
     # §8.4 (#1081): an empty state index for a candidate cycle before
     # ``required_from`` now admits ``cold_new_model`` — no prior state
     # history in ANY generation.  The completed-producer retry logic still
-    # reopens the terminal decision (state_evidence carries the retry
-    # marker) but the specific pre-§8 reason
-    # ``strict_warm_start_successor_checkpoint_missing`` no longer applies
-    # because the candidate itself is a cold-start.  We assert the cold
-    # admit + terminal retry evidence instead.
+    # reopens the terminal decision so state_evidence carries the retry
+    # marker.  Under the strict-warm-start §8 admit shape, the fixture with
+    # ``init_state_id=None`` deterministically drives the
+    # ``strict_warm_start_terminal_init_state_mismatch`` branch of the
+    # retry ladder in ``scheduler_candidates.py`` (the successor-checkpoint
+    # branch requires a matching init_state_id first).
+    #
+    # A4 round-1 fix: restore the pre-§8 deterministic single-value
+    # assertion and the two structural sub-field asserts that survive the
+    # branch change — ``restart_stage`` and ``strict_warm_start.*`` (the
+    # branch-specific ``successor_state`` field of the pre-§8 fixture does
+    # not appear on this branch; a dedicated test would need a fixture
+    # whose terminal decision matches init_state_id but not successor
+    # checkpoint — filed as out-of-scope follow-up).
     assert evidence["registry_cutover_transition"]["decision"] == "cold_new_model"
     assert evidence["generation"].startswith("manifest-")
-    assert evidence["reason"] in {
-        "strict_warm_start_terminal_init_state_mismatch",
-        "strict_warm_start_successor_checkpoint_missing",
-    }
+    assert evidence["reason"] == "strict_warm_start_terminal_init_state_mismatch"
+    assert evidence["restart_stage"] == "forecast"
+    # ``strict_warm_start`` carries the §8 admit shape — proving the §8
+    # gating fired at ready=True and that the retry evidence composed the
+    # terminal-mismatch marker on top of the cold-start admit rather than
+    # silently swallowing either signal.
+    assert evidence["strict_warm_start"]["ready"] is True
+    assert evidence["strict_warm_start"]["mode"] == "db_free_cold_new_model"
+    assert (
+        evidence["strict_warm_start"]["registry_cutover_transition"]["decision"]
+        == "cold_new_model"
+    )
 
 
 def test_db_free_strict_warm_start_required_lead_uses_previous_allowed_cycle_f006(

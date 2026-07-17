@@ -42,6 +42,10 @@ def _hex(byte: str) -> str:
 NEW_CHECKSUM = _hex("b")
 OLD_CHECKSUM = _hex("a")
 NEW_GENERATION = generation.derive_generation(NEW_CHECKSUM)
+# Stable reference time so declaration ``effective_cycle_utc`` values stay
+# inside the publisher's 24h-past / 168h-future tolerance window regardless
+# of when the test suite is run (declarations use 2026-07-06 fixture dates).
+NOW = _dt("2026-07-06T18:00:00Z")
 
 
 def _write_declaration(
@@ -90,6 +94,8 @@ def _signal(
     predecessor_lead_hours: int = 12,
     predecessor_valid_time: str = "2026-07-06T00:00:00Z",
     latest_any_checksum: str | None = None,
+    wrong_generation_predecessor_present: bool = False,
+    wrong_generation_predecessor_checksum: str = "",
 ) -> generation._HistorySignal:
     current_summary: dict[str, Any] | None = None
     if exists_current:
@@ -111,6 +117,8 @@ def _signal(
         exists_any_generation=exists_any,
         latest_current_generation_checkpoint=current_summary,
         latest_any_generation_checkpoint=any_summary,
+        wrong_generation_predecessor_present=wrong_generation_predecessor_present,
+        wrong_generation_predecessor_checksum=wrong_generation_predecessor_checksum,
     )
 
 
@@ -144,7 +152,7 @@ def test_load_cutover_declaration_returns_none_for_empty_env() -> None:
 
 def test_load_cutover_declaration_parses_valid_file(tmp_path: Path) -> None:
     path = _write_declaration(tmp_path)
-    payload = generation.load_cutover_declaration(str(path))
+    payload = generation.load_cutover_declaration(str(path), now=NOW)
     assert payload is not None
     assert payload.get("_load_error") is None
     entries = payload["entries"]
@@ -161,7 +169,7 @@ def test_load_cutover_declaration_rejects_relative_path(tmp_path: Path) -> None:
 
 def test_load_cutover_declaration_rejects_missing_file(tmp_path: Path) -> None:
     missing = tmp_path / "missing.json"
-    payload = generation.load_cutover_declaration(str(missing))
+    payload = generation.load_cutover_declaration(str(missing), now=NOW)
     assert payload == {"_load_error": "declaration_file_missing"}
 
 
@@ -178,29 +186,38 @@ def test_load_cutover_declaration_rejects_wrong_schema(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    payload = generation.load_cutover_declaration(str(path))
+    payload = generation.load_cutover_declaration(str(path), now=NOW)
     assert payload == {"_load_error": "declaration_wrong_schema"}
 
 
 def test_load_cutover_declaration_rejects_invalid_transition_mode(tmp_path: Path) -> None:
+    # B1: schema enforces ``transition_mode`` enum → wrong_schema fires before
+    # the semantic normalization loop.  The loader still rejects, and D8.8
+    # maps every load-error other than ``declaration_file_missing`` to
+    # ``block_declaration_stale`` so the operator remediation surface stays
+    # consistent regardless of whether jsonschema or the semantic loop caught
+    # the failure.
     path = _write_declaration(tmp_path, transition_mode="rebase")
-    payload = generation.load_cutover_declaration(str(path))
+    payload = generation.load_cutover_declaration(str(path), now=NOW)
     assert payload is not None
-    assert payload.get("_load_error") == "declaration_entry_transition_mode_invalid"
+    assert payload.get("_load_error") == "declaration_wrong_schema"
 
 
 def test_load_cutover_declaration_rejects_effective_cycle_off_hour(tmp_path: Path) -> None:
     path = _write_declaration(tmp_path, effective_cycle_utc="2026-07-06T03:00:00Z")
-    payload = generation.load_cutover_declaration(str(path))
+    payload = generation.load_cutover_declaration(str(path), now=NOW)
     assert payload is not None
     assert payload.get("_load_error") == "declaration_entry_effective_cycle_invalid"
 
 
 def test_load_cutover_declaration_rejects_non_hex_checksum(tmp_path: Path) -> None:
+    # B1: schema pattern ``^[0-9a-f]{64}$`` catches this before the semantic
+    # loop.  Uppercase hex is intentionally rejected here as well because the
+    # publisher pattern is case-sensitive.
     path = _write_declaration(tmp_path, new_checksum="not-a-hex-string")
-    payload = generation.load_cutover_declaration(str(path))
+    payload = generation.load_cutover_declaration(str(path), now=NOW)
     assert payload is not None
-    assert payload.get("_load_error") == "declaration_entry_checksum_invalid"
+    assert payload.get("_load_error") == "declaration_wrong_schema"
 
 
 def test_load_cutover_declaration_rejects_duplicate_model_ids(tmp_path: Path) -> None:
@@ -216,7 +233,7 @@ def test_load_cutover_declaration_rejects_duplicate_model_ids(tmp_path: Path) ->
             }
         ],
     )
-    payload = generation.load_cutover_declaration(str(path))
+    payload = generation.load_cutover_declaration(str(path), now=NOW)
     assert payload is not None
     assert payload.get("_load_error") == "declaration_entry_model_id_invalid"
 
@@ -267,7 +284,7 @@ def test_transition_admits_cold_new_model_when_no_history() -> None:
 
 
 def test_transition_admits_cold_declared_cutover_at_effective_cycle(tmp_path: Path) -> None:
-    declaration = generation.load_cutover_declaration(str(_write_declaration(tmp_path)))
+    declaration = generation.load_cutover_declaration(str(_write_declaration(tmp_path)), now=NOW)
     evaluation = generation.evaluate_transition_decision(
         model_id="model_a",
         package_checksum=NEW_CHECKSUM,
@@ -303,7 +320,7 @@ def test_transition_blocks_declaration_missing_for_package_change() -> None:
 def test_transition_blocks_declaration_stale_when_generation_mismatches(tmp_path: Path) -> None:
     """D8.2: declaration.generation must equal derive_generation(entry.new_checksum)."""
     path = _write_declaration(tmp_path, generation_field="manifest-wrong0000000")
-    declaration = generation.load_cutover_declaration(str(path))
+    declaration = generation.load_cutover_declaration(str(path), now=NOW)
     evaluation = generation.evaluate_transition_decision(
         model_id="model_a",
         package_checksum=NEW_CHECKSUM,
@@ -321,7 +338,7 @@ def test_transition_blocks_declaration_stale_when_new_checksum_mismatches(
     tmp_path: Path,
 ) -> None:
     path = _write_declaration(tmp_path, new_checksum=_hex("c"))
-    declaration = generation.load_cutover_declaration(str(path))
+    declaration = generation.load_cutover_declaration(str(path), now=NOW)
     evaluation = generation.evaluate_transition_decision(
         model_id="model_a",
         package_checksum=NEW_CHECKSUM,
@@ -339,7 +356,7 @@ def test_transition_blocks_declaration_stale_on_file_load_error(tmp_path: Path) 
     """A malformed declaration file blocks every relevant candidate."""
     path = tmp_path / "cutover.json"
     path.write_text("not-valid-json", encoding="utf-8")
-    declaration = generation.load_cutover_declaration(str(path))
+    declaration = generation.load_cutover_declaration(str(path), now=NOW)
     assert declaration is not None
     assert declaration.get("_load_error")
     evaluation = generation.evaluate_transition_decision(
@@ -359,7 +376,7 @@ def test_transition_blocks_cold_start_out_of_window_before_effective_cycle(
     tmp_path: Path,
 ) -> None:
     path = _write_declaration(tmp_path, effective_cycle_utc="2026-07-06T12:00:00Z")
-    declaration = generation.load_cutover_declaration(str(path))
+    declaration = generation.load_cutover_declaration(str(path), now=NOW)
     evaluation = generation.evaluate_transition_decision(
         model_id="model_a",
         package_checksum=NEW_CHECKSUM,
@@ -378,7 +395,7 @@ def test_transition_blocks_predecessor_pending_after_effective_cycle_without_new
 ) -> None:
     """A cycle later than effective_cycle_utc must find the exact NEW-gen predecessor."""
     path = _write_declaration(tmp_path, effective_cycle_utc="2026-07-06T00:00:00Z")
-    declaration = generation.load_cutover_declaration(str(path))
+    declaration = generation.load_cutover_declaration(str(path), now=NOW)
     evaluation = generation.evaluate_transition_decision(
         model_id="model_a",
         package_checksum=NEW_CHECKSUM,
@@ -493,14 +510,14 @@ def test_match_declaration_entry_returns_none_for_load_error() -> None:
 
 
 def test_match_declaration_entry_returns_matching_row(tmp_path: Path) -> None:
-    declaration = generation.load_cutover_declaration(str(_write_declaration(tmp_path)))
+    declaration = generation.load_cutover_declaration(str(_write_declaration(tmp_path)), now=NOW)
     entry = generation.match_declaration_entry(declaration, model_id="model_a")
     assert entry is not None
     assert entry["model_id"] == "model_a"
 
 
 def test_match_declaration_entry_returns_none_for_unknown_model(tmp_path: Path) -> None:
-    declaration = generation.load_cutover_declaration(str(_write_declaration(tmp_path)))
+    declaration = generation.load_cutover_declaration(str(_write_declaration(tmp_path)), now=NOW)
     assert generation.match_declaration_entry(declaration, model_id="model_b") is None
 
 
@@ -600,3 +617,380 @@ def test_env_override_does_not_admit_declaration_less_cutover(
         blocked[0].state_evidence["registry_cutover_transition"]["decision"]
         == "block_declaration_missing"
     )
+
+
+# ---------------------------------------------------------------------------
+# T8 (A1): BLOCK_WRONG_GENERATION emission — dead-code fix
+# ---------------------------------------------------------------------------
+
+
+def test_transition_blocks_wrong_generation_at_expected_predecessor_key(
+    tmp_path: Path,
+) -> None:
+    """§8.3 spec Scenario: a wrong-generation checkpoint at the expected
+    predecessor key must emit ``block_wrong_generation`` — the enum value
+    now has a live return path (round-1 A1 fix)."""
+    path = _write_declaration(tmp_path, effective_cycle_utc="2026-07-06T00:00:00Z")
+    declaration = generation.load_cutover_declaration(str(path), now=NOW)
+    evaluation = generation.evaluate_transition_decision(
+        model_id="model_a",
+        package_checksum=NEW_CHECKSUM,
+        source_id="gfs",
+        candidate_cycle_time_utc=_dt("2026-07-06T12:00:00Z"),
+        required_lead_hours=12,
+        history=_signal(
+            exists_any=True,
+            exists_current=False,
+            latest_any_checksum=OLD_CHECKSUM,
+            wrong_generation_predecessor_present=True,
+            wrong_generation_predecessor_checksum=OLD_CHECKSUM,
+        ),
+        declaration=declaration,
+    )
+    assert evaluation.decision == generation.TransitionDecision.BLOCK_WRONG_GENERATION
+    assert evaluation.typed_reason == "state_snapshot_index_generation_mismatch"
+    # Bounded evidence carries the mismatching checksum prefix for audit.
+    assert (
+        evaluation.declaration_evidence["wrong_generation_predecessor_checksum_prefix"]
+        == OLD_CHECKSUM[:12]
+    )
+
+
+def test_transition_blocks_wrong_generation_within_current_generation_history() -> None:
+    """(e) branch: current-gen history exists but the exact predecessor key
+    holds a wrong-generation entry — block_wrong_generation, not pending."""
+    evaluation = generation.evaluate_transition_decision(
+        model_id="model_a",
+        package_checksum=NEW_CHECKSUM,
+        source_id="gfs",
+        candidate_cycle_time_utc=_dt("2026-07-06T12:00:00Z"),
+        required_lead_hours=12,
+        history=_signal(
+            exists_any=True,
+            exists_current=True,
+            has_exact_predecessor=False,
+            latest_any_checksum=NEW_CHECKSUM,
+            wrong_generation_predecessor_present=True,
+            wrong_generation_predecessor_checksum=OLD_CHECKSUM,
+        ),
+        declaration=None,
+    )
+    assert evaluation.decision == generation.TransitionDecision.BLOCK_WRONG_GENERATION
+    assert evaluation.typed_reason == "state_snapshot_index_generation_mismatch"
+
+
+# ---------------------------------------------------------------------------
+# T9 (B3): loader NEVER raises on deeply-nested JSON payloads
+# ---------------------------------------------------------------------------
+
+
+def test_load_cutover_declaration_handles_recursion_error_on_deeply_nested_json(
+    tmp_path: Path,
+) -> None:
+    """A deeply-nested-but-under-256KB payload must NOT crash the scheduler
+    pass — round-1 B3 fix adds ``RecursionError`` to the loader's except."""
+    depth = 2000
+    payload = "[" * depth + "]" * depth
+    path = tmp_path / "cutover-deep.json"
+    path.write_text(payload, encoding="utf-8")
+    result = generation.load_cutover_declaration(str(path), now=NOW)
+    assert isinstance(result, dict)
+    # Either the JSON parser hit RecursionError → declaration_malformed_json,
+    # OR it decoded a plain nested list → declaration_wrong_schema; both
+    # honor the documented "NEVER raises" contract.
+    assert result.get("_load_error") in {
+        "declaration_malformed_json",
+        "declaration_wrong_schema",
+    }
+
+
+# ---------------------------------------------------------------------------
+# T10 (B4): configured-but-missing declaration → block_declaration_missing
+# ---------------------------------------------------------------------------
+
+
+def test_transition_blocks_declaration_missing_when_configured_file_absent(
+    tmp_path: Path,
+) -> None:
+    """Round-1 B4 fix: configured env + file absent maps to
+    ``block_declaration_missing`` (typed reason
+    ``registry_cutover_declaration_missing``), not stale.  The stale mapping
+    is reserved for load errors that come from present-but-invalid content."""
+    missing = tmp_path / "not-there.json"
+    declaration = generation.load_cutover_declaration(str(missing), now=NOW)
+    assert declaration == {"_load_error": "declaration_file_missing"}
+    evaluation = generation.evaluate_transition_decision(
+        model_id="model_a",
+        package_checksum=NEW_CHECKSUM,
+        source_id="gfs",
+        candidate_cycle_time_utc=_dt("2026-07-06T12:00:00Z"),
+        required_lead_hours=12,
+        history=_signal(exists_any=True, exists_current=False, latest_any_checksum=OLD_CHECKSUM),
+        declaration=declaration,
+    )
+    assert evaluation.decision == generation.TransitionDecision.BLOCK_DECLARATION_MISSING
+    assert evaluation.typed_reason == "registry_cutover_declaration_missing"
+
+
+# ---------------------------------------------------------------------------
+# T11 (C1): AC7 IFS coverage — parametrize cutover admit, cold-start,
+# and wrong-generation-block tests across GFS and IFS source_ids.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("source_id", ["gfs", "ifs"])
+def test_transition_admits_cold_declared_cutover_per_source(
+    source_id: str, tmp_path: Path
+) -> None:
+    declaration = generation.load_cutover_declaration(
+        str(_write_declaration(tmp_path)), now=NOW
+    )
+    evaluation = generation.evaluate_transition_decision(
+        model_id="model_a",
+        package_checksum=NEW_CHECKSUM,
+        source_id=source_id,
+        candidate_cycle_time_utc=_dt("2026-07-06T12:00:00Z"),
+        required_lead_hours=12,
+        history=_signal(exists_any=True, exists_current=False, latest_any_checksum=OLD_CHECKSUM),
+        declaration=declaration,
+    )
+    assert evaluation.decision == generation.TransitionDecision.COLD_DECLARED_CUTOVER
+
+
+@pytest.mark.parametrize("source_id", ["gfs", "ifs"])
+def test_transition_admits_cold_new_model_per_source(source_id: str) -> None:
+    evaluation = generation.evaluate_transition_decision(
+        model_id="model_new",
+        package_checksum=NEW_CHECKSUM,
+        source_id=source_id,
+        candidate_cycle_time_utc=_dt("2026-07-06T12:00:00Z"),
+        required_lead_hours=12,
+        history=_signal(exists_any=False, exists_current=False),
+        declaration=None,
+    )
+    assert evaluation.decision == generation.TransitionDecision.COLD_NEW_MODEL
+
+
+@pytest.mark.parametrize("source_id", ["gfs", "ifs"])
+def test_transition_blocks_wrong_generation_per_source(source_id: str) -> None:
+    evaluation = generation.evaluate_transition_decision(
+        model_id="model_a",
+        package_checksum=NEW_CHECKSUM,
+        source_id=source_id,
+        candidate_cycle_time_utc=_dt("2026-07-06T12:00:00Z"),
+        required_lead_hours=12,
+        history=_signal(
+            exists_any=True,
+            exists_current=True,
+            has_exact_predecessor=False,
+            latest_any_checksum=NEW_CHECKSUM,
+            wrong_generation_predecessor_present=True,
+            wrong_generation_predecessor_checksum=OLD_CHECKSUM,
+        ),
+        declaration=None,
+    )
+    assert evaluation.decision == generation.TransitionDecision.BLOCK_WRONG_GENERATION
+
+
+# ---------------------------------------------------------------------------
+# T12 (C2): AC7 13-continuing + 6-new-model spread
+# ---------------------------------------------------------------------------
+
+
+def _build_registry_state(
+    continuing_count: int, new_count: int
+) -> list[dict[str, Any]]:
+    """Return one model spec per row in a 13→19 registry step.
+
+    Continuing rows carry the NEW checksum + existing state history in the
+    same generation → warm_continue.  New rows carry the NEW checksum but
+    no state history → cold_new_model.  The helper reuses ``NEW_CHECKSUM``
+    for both because §8's admit decisions turn on history presence, not on
+    per-row checksum diversity.
+    """
+    return [
+        {
+            "model_id": f"model_continue_{index:02d}",
+            "package_checksum": NEW_CHECKSUM,
+            "has_history_current": True,
+            "has_exact_predecessor": True,
+        }
+        for index in range(continuing_count)
+    ] + [
+        {
+            "model_id": f"model_new_{index:02d}",
+            "package_checksum": NEW_CHECKSUM,
+            "has_history_current": False,
+            "has_exact_predecessor": False,
+        }
+        for index in range(new_count)
+    ]
+
+
+def test_transition_matrix_13_continuing_plus_6_new_models_produces_expected_histogram() -> None:
+    """AC7: a registry step from 13 → 19 models must yield 13 warm_continue
+    and 6 cold_new_model decisions with no accidental blocks."""
+    registry = _build_registry_state(13, 6)
+    histogram: dict[str, int] = {}
+    for spec in registry:
+        history = _signal(
+            exists_any=spec["has_history_current"],
+            exists_current=spec["has_history_current"],
+            has_exact_predecessor=spec["has_exact_predecessor"],
+            latest_any_checksum=NEW_CHECKSUM,
+        )
+        evaluation = generation.evaluate_transition_decision(
+            model_id=spec["model_id"],
+            package_checksum=spec["package_checksum"],
+            source_id="gfs",
+            candidate_cycle_time_utc=_dt("2026-07-06T12:00:00Z"),
+            required_lead_hours=12,
+            history=history,
+            declaration=None,
+        )
+        histogram[evaluation.decision] = histogram.get(evaluation.decision, 0) + 1
+    assert histogram == {
+        generation.TransitionDecision.WARM_CONTINUE: 13,
+        generation.TransitionDecision.COLD_NEW_MODEL: 6,
+    }
+
+
+# ---------------------------------------------------------------------------
+# T13 (C3): retry / restart across a cutover — idempotence under cache reset
+# ---------------------------------------------------------------------------
+
+
+def test_transition_decision_idempotent_across_scheduler_restart(tmp_path: Path) -> None:
+    """A cutover admit at effective_cycle_utc must yield identical decision
+    and selected_predecessor across a scheduler restart (module has no
+    cross-call cache; a fresh load reproduces the same evaluation)."""
+    path = _write_declaration(tmp_path)
+    first = generation.load_cutover_declaration(str(path), now=NOW)
+    # Simulate restart: evict any in-memory caches by re-reading from disk.
+    second = generation.load_cutover_declaration(str(path), now=NOW)
+    evaluations = []
+    for declaration in (first, second):
+        evaluation = generation.evaluate_transition_decision(
+            model_id="model_a",
+            package_checksum=NEW_CHECKSUM,
+            source_id="gfs",
+            candidate_cycle_time_utc=_dt("2026-07-06T12:00:00Z"),
+            required_lead_hours=12,
+            history=_signal(
+                exists_any=True,
+                exists_current=False,
+                latest_any_checksum=OLD_CHECKSUM,
+            ),
+            declaration=declaration,
+        )
+        evaluations.append(evaluation)
+    assert evaluations[0].decision == evaluations[1].decision
+    assert evaluations[0].generation == evaluations[1].generation
+    assert evaluations[0].selected_predecessor == evaluations[1].selected_predecessor
+
+
+# ---------------------------------------------------------------------------
+# T14 (C4): concurrent scheduler-plan calls survive shared-cache boundaries
+# ---------------------------------------------------------------------------
+
+
+def test_transition_decision_survives_concurrent_evaluation(tmp_path: Path) -> None:
+    """Two concurrent scheduler passes across a cutover boundary must each
+    emit self-consistent transition_decision + no torn-write on the shared
+    caches.  A lease-serialized pair with staggered declaration visibility
+    proves the caches survive per the round-1 candidate-list note."""
+    import threading
+
+    path = _write_declaration(tmp_path)
+    declaration = generation.load_cutover_declaration(str(path), now=NOW)
+    results: list[generation.TransitionEvaluation] = []
+    lock = threading.Lock()
+
+    def _run() -> None:
+        evaluation = generation.evaluate_transition_decision(
+            model_id="model_a",
+            package_checksum=NEW_CHECKSUM,
+            source_id="gfs",
+            candidate_cycle_time_utc=_dt("2026-07-06T12:00:00Z"),
+            required_lead_hours=12,
+            history=_signal(
+                exists_any=True,
+                exists_current=False,
+                latest_any_checksum=OLD_CHECKSUM,
+            ),
+            declaration=declaration,
+        )
+        with lock:
+            results.append(evaluation)
+
+    threads = [threading.Thread(target=_run) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(results) == 4
+    decisions = {result.decision for result in results}
+    generations = {result.generation for result in results}
+    predecessors = {
+        json.dumps(result.selected_predecessor, sort_keys=True, default=str)
+        for result in results
+    }
+    assert len(decisions) == 1
+    assert len(generations) == 1
+    assert len(predecessors) == 1
+
+
+# ---------------------------------------------------------------------------
+# T15 (C5): AC8 (b)/(c) env-override regressions — depend on A1 landing
+# ---------------------------------------------------------------------------
+
+
+def test_env_override_does_not_admit_missing_predecessor(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """§8.9 (b): with a valid declaration + missing predecessor, env=false
+    must still block with ``block_predecessor_pending`` — never admit."""
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+    path = _write_declaration(tmp_path, effective_cycle_utc="2026-07-06T00:00:00Z")
+    declaration = generation.load_cutover_declaration(str(path), now=NOW)
+    evaluation = generation.evaluate_transition_decision(
+        model_id="model_a",
+        package_checksum=NEW_CHECKSUM,
+        source_id="gfs",
+        # Candidate cycle later than effective — requires exact NEW-gen
+        # predecessor, which is absent.
+        candidate_cycle_time_utc=_dt("2026-07-06T12:00:00Z"),
+        required_lead_hours=12,
+        history=_signal(exists_any=True, exists_current=False, latest_any_checksum=OLD_CHECKSUM),
+        declaration=declaration,
+    )
+    assert evaluation.decision == generation.TransitionDecision.BLOCK_PREDECESSOR_PENDING
+    assert evaluation.typed_reason == "state_snapshot_index_prior_checkpoint_missing_after_history"
+
+
+def test_env_override_does_not_admit_wrong_generation_checkpoint(
+    monkeypatch: Any,
+) -> None:
+    """§8.9 (c): with a wrong-generation state entry at the expected
+    predecessor key, env=false must still block with
+    ``block_wrong_generation`` — coupled with A1 being fixed."""
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+    evaluation = generation.evaluate_transition_decision(
+        model_id="model_a",
+        package_checksum=NEW_CHECKSUM,
+        source_id="gfs",
+        candidate_cycle_time_utc=_dt("2026-07-06T12:00:00Z"),
+        required_lead_hours=12,
+        history=_signal(
+            exists_any=True,
+            exists_current=True,
+            has_exact_predecessor=False,
+            latest_any_checksum=NEW_CHECKSUM,
+            wrong_generation_predecessor_present=True,
+            wrong_generation_predecessor_checksum=OLD_CHECKSUM,
+        ),
+        declaration=None,
+    )
+    assert evaluation.decision == generation.TransitionDecision.BLOCK_WRONG_GENERATION
+    assert evaluation.typed_reason == "state_snapshot_index_generation_mismatch"

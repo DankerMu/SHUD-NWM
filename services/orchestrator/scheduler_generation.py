@@ -53,11 +53,13 @@ import hashlib
 import json
 import os
 import stat
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+import jsonschema
 
 from packages.common.safe_fs import SafeFilesystemError, read_bytes_limited_no_follow
 
@@ -95,13 +97,41 @@ MAX_CUTOVER_DECLARATION_BYTES = 256 * 1024
 
 CUTOVER_TRANSITION_MODES = frozenset({"replace"})
 
-#: Allowed cycle hours for a declared cutover ``effective_cycle_utc``.  D8.5
-#: pins 00/12 for the current GFS/IFS cadence; the same rule extrapolates to a
-#: 6h cadence source when one is introduced.  We accept 00 / 06 / 12 / 18 here
-#: so a future 6h source does not require a spec update in this module.
-_ALLOWED_EFFECTIVE_CYCLE_HOURS = frozenset({0, 6, 12, 18})
+#: Allowed cycle hours for a declared cutover ``effective_cycle_utc``.  This
+#: MUST mirror the publisher constant (``CUTOVER_CYCLE_HOURS`` in
+#: ``scripts/scheduler_file_provider_refresh.py``).  A future 6h source
+#: requires publisher + schema + consumer + spec revision together — do NOT
+#: relax unilaterally here.
+_ALLOWED_EFFECTIVE_CYCLE_HOURS = frozenset({0, 12})
+
+#: Past / future tolerance windows for ``effective_cycle_utc`` — mirrors
+#: publisher ``CUTOVER_PAST_TOLERANCE`` / ``CUTOVER_FUTURE_TOLERANCE`` so a
+#: declaration that survived the publisher gate cannot be re-injected outside
+#: the same 24h-past / 168h-future envelope on the consumer side.
+_CUTOVER_PAST_TOLERANCE = timedelta(hours=24)
+_CUTOVER_FUTURE_TOLERANCE = timedelta(hours=168)
 
 _PACKAGE_CHECKSUM_HEX_RE = None  # accept any string; the derivation is total
+
+#: JSON Schema for the declaration payload, shared with the publisher.  We
+#: build a ``Draft202012Validator`` at import time so per-request loads do not
+#: pay the metaschema resolution cost that ``jsonschema.validate`` does.
+_CUTOVER_DECLARATION_SCHEMA_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "schemas"
+    / "scheduler_registry_package_cutover.schema.json"
+)
+try:
+    _CUTOVER_DECLARATION_SCHEMA = json.loads(
+        _CUTOVER_DECLARATION_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
+except (OSError, json.JSONDecodeError) as _cutover_schema_load_error:  # pragma: no cover
+    raise RuntimeError(
+        f"cutover declaration schema unavailable: {_cutover_schema_load_error}"
+    ) from _cutover_schema_load_error
+_CUTOVER_DECLARATION_VALIDATOR = jsonschema.Draft202012Validator(
+    _CUTOVER_DECLARATION_SCHEMA
+)
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +267,13 @@ def _iso_utc(value: datetime) -> str:
 
 
 def _parse_effective_cycle(raw: Any) -> datetime | None:
+    """Parse ``effective_cycle_utc`` into an aware UTC ``datetime``.
+
+    Structural validation (pattern / maxLength / date-time format) is enforced
+    by the module-level ``_CUTOVER_DECLARATION_VALIDATOR``; this helper is a
+    permissive parser that only rejects timezone-naive values, off-minute
+    boundaries, and hours outside ``_ALLOWED_EFFECTIVE_CYCLE_HOURS`` (D8.5).
+    """
     try:
         parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
     except (TypeError, ValueError):
@@ -249,17 +286,6 @@ def _parse_effective_cycle(raw: Any) -> datetime | None:
     if parsed.hour not in _ALLOWED_EFFECTIVE_CYCLE_HOURS:
         return None
     return parsed
-
-
-def _valid_hex64(value: Any) -> bool:
-    text = str(value or "")
-    if len(text) != 64:
-        return False
-    try:
-        int(text, 16)
-    except ValueError:
-        return False
-    return True
 
 
 def load_cutover_declaration(
@@ -282,11 +308,21 @@ def load_cutover_declaration(
         the file is present, readable, and passes the structural checks
         mirrored from the publisher-side ``_load_cutover_declaration``.
 
+    Structural validation is delegated to the shared
+    ``schemas/scheduler_registry_package_cutover.schema.json`` via
+    ``jsonschema.Draft202012Validator`` so consumer and publisher cannot
+    silently diverge on generation pattern, model_id pattern, checksum case,
+    ``entries`` bounds, or ``effective_cycle_utc`` maxLength.  The
+    consumer additionally re-enforces the publisher's cycle-hour set and
+    past/future tolerance window so a declaration that skipped the publisher
+    gate (e.g. hand-edited on disk) still fails closed here.
+
     Raises:
         This function NEVER raises; a malformed / stale declaration returns
-        ``None`` with the failure recorded in the returned envelope's
-        ``_load_error`` field so the scheduler can emit a
-        ``block_declaration_stale`` on candidates that need it.
+        an envelope with a populated ``_load_error`` field so the scheduler
+        can emit ``block_declaration_missing`` (file absent while configured)
+        or ``block_declaration_stale`` (present but invalid) on candidates
+        that need it.
     """
     if not env_path:
         return None
@@ -314,38 +350,52 @@ def load_cutover_declaration(
         return {"_load_error": "declaration_oversize"}
     try:
         payload = json.loads(content)
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        # RecursionError arises on deeply-nested JSON — mirror the peer at
+        # ``packages/common/state_manager.py:1720`` so this loader honors the
+        # documented "NEVER raises" contract on operator-controlled files.
         return {"_load_error": "declaration_malformed_json"}
     if not isinstance(payload, Mapping):
         return {"_load_error": "declaration_not_object"}
-    if payload.get("schema_version") != CUTOVER_DECLARATION_SCHEMA_VERSION:
+    try:
+        _CUTOVER_DECLARATION_VALIDATOR.validate(payload)
+    except jsonschema.ValidationError:
         return {"_load_error": "declaration_wrong_schema"}
-    if not isinstance(payload.get("generation"), str) or not payload["generation"].strip():
-        return {"_load_error": "declaration_generation_missing"}
-    entries_raw = payload.get("entries")
-    if not isinstance(entries_raw, Sequence) or isinstance(entries_raw, str | bytes | bytearray):
-        return {"_load_error": "declaration_entries_invalid"}
-    if not entries_raw:
-        return {"_load_error": "declaration_entries_empty"}
+    # jsonschema enforces every structural bound; the semantic loops below only
+    # apply publisher-side rules that are not schema-encoded: cycle-hour set,
+    # past/future tolerance, and normalization to typed values.
     normalized_entries: list[dict[str, Any]] = []
     seen_model_ids: set[str] = set()
-    for index, entry in enumerate(entries_raw):
-        if not isinstance(entry, Mapping):
-            return {"_load_error": "declaration_entry_not_object", "_load_error_index": index}
-        model_id = str(entry.get("model_id") or "").strip()
-        if not model_id or model_id in seen_model_ids:
-            return {"_load_error": "declaration_entry_model_id_invalid"}
+    for index, entry in enumerate(payload["entries"]):
+        model_id = str(entry["model_id"]).strip()
+        if model_id in seen_model_ids:
+            return {
+                "_load_error": "declaration_entry_model_id_invalid",
+                "_load_error_index": index,
+            }
         seen_model_ids.add(model_id)
-        old_checksum = str(entry.get("old_checksum") or "").strip()
-        new_checksum = str(entry.get("new_checksum") or "").strip()
-        if not _valid_hex64(old_checksum) or not _valid_hex64(new_checksum):
-            return {"_load_error": "declaration_entry_checksum_invalid"}
-        effective_cycle = _parse_effective_cycle(entry.get("effective_cycle_utc"))
+        old_checksum = str(entry["old_checksum"]).strip()
+        new_checksum = str(entry["new_checksum"]).strip()
+        effective_cycle = _parse_effective_cycle(entry["effective_cycle_utc"])
         if effective_cycle is None:
-            return {"_load_error": "declaration_entry_effective_cycle_invalid"}
-        transition_mode = str(entry.get("transition_mode") or "").strip()
+            return {
+                "_load_error": "declaration_entry_effective_cycle_invalid",
+                "_load_error_index": index,
+            }
+        if (
+            effective_cycle < reference_now - _CUTOVER_PAST_TOLERANCE
+            or effective_cycle > reference_now + _CUTOVER_FUTURE_TOLERANCE
+        ):
+            return {
+                "_load_error": "declaration_entry_effective_cycle_out_of_window",
+                "_load_error_index": index,
+            }
+        transition_mode = str(entry["transition_mode"]).strip()
         if transition_mode not in CUTOVER_TRANSITION_MODES:
-            return {"_load_error": "declaration_entry_transition_mode_invalid"}
+            return {
+                "_load_error": "declaration_entry_transition_mode_invalid",
+                "_load_error_index": index,
+            }
         normalized_entries.append(
             {
                 "model_id": model_id,
@@ -390,12 +440,24 @@ def match_declaration_entry(
 
 @dataclass(frozen=True)
 class _HistorySignal:
-    """Bounded state-index history summary consumed by the decision matrix."""
+    """Bounded state-index history summary consumed by the decision matrix.
+
+    ``wrong_generation_predecessor_present`` is True when a state-index entry
+    sits at the expected predecessor key (same model / source / valid_time /
+    cycle_id / lead_hours) but its ``model_package_checksum`` differs from the
+    candidate's ``package_checksum`` — the exact case §8.3 spec Scenario
+    "Wrong-generation checkpoint never satisfies strict warm-start" targets.
+    ``wrong_generation_predecessor_checksum`` carries the mismatching
+    checksum (audit only) so evidence can surface the generation that was
+    seen; the field is empty when no such entry exists.
+    """
 
     exists_current_generation: bool
     exists_any_generation: bool
     latest_current_generation_checkpoint: dict[str, Any] | None = None
     latest_any_generation_checkpoint: dict[str, Any] | None = None
+    wrong_generation_predecessor_present: bool = False
+    wrong_generation_predecessor_checksum: str = ""
 
 
 def _predecessor_identity(
@@ -505,19 +567,24 @@ def evaluate_transition_decision(
     entry = match_declaration_entry(declaration, model_id=model_id)
     entry_evidence = _bound_entry_evidence(entry)
 
-    # (b) Declaration file present but its file-level load failed — every
-    # candidate blocks with ``block_declaration_stale`` until the operator
-    # replaces the file.  This mirrors the fail-closed semantics from #1080
-    # publisher-side and prevents an unusable declaration file from silently
-    # gating in the wrong direction.
+    # (b) Declaration file present but its file-level load failed — split
+    # ``declaration_file_missing`` (env configured + file absent, D8.8
+    # ``registry_cutover_declaration_missing``) from content-mismatch errors
+    # (present + invalid, ``registry_cutover_declaration_stale``) so the
+    # operator remediation surface is unambiguous.  Every other load-error
+    # token keeps the STALE mapping.
     if declaration is not None and declaration.get("_load_error"):
+        load_error = str(declaration.get("_load_error") or "")
+        decision = (
+            TransitionDecision.BLOCK_DECLARATION_MISSING
+            if load_error == "declaration_file_missing"
+            else TransitionDecision.BLOCK_DECLARATION_STALE
+        )
         return TransitionEvaluation(
-            decision=TransitionDecision.BLOCK_DECLARATION_STALE,
+            decision=decision,
             generation=candidate_generation,
             package_checksum=checksum_text,
-            typed_reason=TRANSITION_DECISION_REASONS[
-                TransitionDecision.BLOCK_DECLARATION_STALE
-            ],
+            typed_reason=TRANSITION_DECISION_REASONS[decision],
             selected_predecessor=None,
             cold_start_reason=None,
             declaration_evidence=declaration_evidence,
@@ -651,12 +718,35 @@ def evaluate_transition_decision(
                 },
             )
         # candidate_time > effective: require exact NEW-generation predecessor.
+        # A wrong-generation entry sitting at the exact predecessor key must
+        # NOT be admitted — emit ``block_wrong_generation`` per §8.3 spec
+        # Scenario "Wrong-generation checkpoint never satisfies strict
+        # warm-start".  Otherwise fall through to the pending block.
         selected_predecessor = _predecessor_identity(
             source_id=source_id,
             valid_time=candidate_time,
             lead_hours=required_lead_hours,
             generation=candidate_generation,
         )
+        if history.wrong_generation_predecessor_present:
+            return TransitionEvaluation(
+                decision=TransitionDecision.BLOCK_WRONG_GENERATION,
+                generation=candidate_generation,
+                package_checksum=checksum_text,
+                typed_reason=TRANSITION_DECISION_REASONS[
+                    TransitionDecision.BLOCK_WRONG_GENERATION
+                ],
+                selected_predecessor=selected_predecessor,
+                cold_start_reason=None,
+                declaration_evidence={
+                    **declaration_evidence,
+                    "bound_entry": entry_evidence,
+                    "window_direction": "after_effective_cycle",
+                    "wrong_generation_predecessor_checksum_prefix": (
+                        history.wrong_generation_predecessor_checksum[:12]
+                    ),
+                },
+            )
         return TransitionEvaluation(
             decision=TransitionDecision.BLOCK_PREDECESSOR_PENDING,
             generation=candidate_generation,
@@ -695,12 +785,35 @@ def evaluate_transition_decision(
             },
         )
     # Current-generation history exists but exact predecessor missing.
+    # Same wrong-generation guard as branch (d): a state-index entry at the
+    # exact predecessor key that carries the OLD checksum blocks with
+    # ``block_wrong_generation`` rather than pending, so operators know the
+    # index is not merely missing an entry but holding a stale-lineage one.
     selected_predecessor = _predecessor_identity(
         source_id=source_id,
         valid_time=candidate_cycle_time_utc,
         lead_hours=required_lead_hours,
         generation=candidate_generation,
     )
+    if history.wrong_generation_predecessor_present:
+        return TransitionEvaluation(
+            decision=TransitionDecision.BLOCK_WRONG_GENERATION,
+            generation=candidate_generation,
+            package_checksum=checksum_text,
+            typed_reason=TRANSITION_DECISION_REASONS[
+                TransitionDecision.BLOCK_WRONG_GENERATION
+            ],
+            selected_predecessor=selected_predecessor,
+            cold_start_reason=None,
+            declaration_evidence={
+                **declaration_evidence,
+                "bound_entry": entry_evidence,
+                "window_direction": "current_generation_history",
+                "wrong_generation_predecessor_checksum_prefix": (
+                    history.wrong_generation_predecessor_checksum[:12]
+                ),
+            },
+        )
     return TransitionEvaluation(
         decision=TransitionDecision.BLOCK_PREDECESSOR_PENDING,
         generation=candidate_generation,

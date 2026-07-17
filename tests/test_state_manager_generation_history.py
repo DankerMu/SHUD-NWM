@@ -234,6 +234,51 @@ def test_generation_scoped_history_signal_wrong_generation_no_exact_predecessor(
     assert signal["latest_current_generation_checkpoint"] is None
 
 
+def test_generation_scoped_history_signal_quarantines_wrong_generation_at_expected_key(
+    tmp_path: Path,
+) -> None:
+    """Round-1 A1+A3 fix: a wrong-generation entry sitting AT the expected
+    predecessor key surfaces both ``wrong_generation_predecessor_present`` and
+    a bounded ``history_entry_count_quarantined`` counter so the transition
+    decision matrix can emit ``block_wrong_generation`` and audit can trace
+    how many entries were filtered from readiness scoring."""
+    object_root = tmp_path / "objects"
+    object_root.mkdir(parents=True)
+    stale_entry = _entry(
+        state_id="state_stale_at_expected_key",
+        valid_time="2026-07-06T12:00:00Z",
+        cycle_id="gfs_2026070600",
+        lead_hours=12,
+        checksum_seed=b"stale1",
+        package_checksum=OLD_CHECKSUM,
+        object_root=object_root,
+    )
+    index_path = _publish_entries(tmp_path, [stale_entry])
+
+    repo = FileStateSnapshotIndexRepository(
+        str(index_path),
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        now=_dt("2026-07-06T12:00:00Z"),
+    )
+    signal = repo.generation_scoped_history_signal(
+        model_id="model_a",
+        source_id="gfs",
+        before_time=_dt("2026-07-06T12:00:00Z"),
+        current_package_checksum=NEW_CHECKSUM,
+        expected_predecessor_cycle_id="gfs_2026070600",
+        expected_predecessor_lead_hours=12,
+    )
+    assert signal["wrong_generation_predecessor_present"] is True
+    assert signal["wrong_generation_predecessor_checksum"] == OLD_CHECKSUM
+    assert signal["history_entry_count_quarantined"] == 1
+    # State-index evidence carries the same counter for audit under a
+    # bounded key so downstream evidence readers can pin the field.
+    assert (
+        signal["state_snapshot_index"]["history_entry_count_quarantined"] == 1
+    )
+
+
 def test_generation_scoped_history_signal_blocked_when_index_malformed(tmp_path: Path) -> None:
     index_path = tmp_path / "state-index.json"
     index_path.write_text("not-json", encoding="utf-8")

@@ -32,7 +32,7 @@
     "tests/test_publish_scheduler_file_registry.py",
     "docs/runbooks/current-production-ops.md",
     "packages/common/state_manager.py",
-    "services/orchestrator/scheduler_core.py",
+    "services/orchestrator/scheduler_candidates.py",
     "tests/test_production_scheduler.py"
   ]
 }
