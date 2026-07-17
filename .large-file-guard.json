@@ -30,6 +30,10 @@
     "scripts/publish_scheduler_file_registry.py",
     "tests/test_scheduler_file_provider_refresh.py",
     "tests/test_publish_scheduler_file_registry.py",
-    "docs/runbooks/current-production-ops.md"
+    "docs/runbooks/current-production-ops.md",
+    "packages/common/state_manager.py",
+    "services/orchestrator/scheduler_candidates.py",
+    "tests/test_production_scheduler.py",
+    "tests/test_scheduler_generation.py"
   ]
 }

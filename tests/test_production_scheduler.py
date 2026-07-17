@@ -17852,6 +17852,47 @@ def _publish_empty_state_index(
     )
 
 
+def _old_generation_state_entry(
+    roots: Mapping[str, Path],
+    *,
+    old_package_checksum: str = "package-model-a-legacy",
+    state_id: str = "state_gfs_model_a_2026051112_legacy",
+    valid_time: str = "2026-05-11T12:00:00Z",
+    cycle_id: str = "gfs_2026051100",
+    lead_hours: int = 12,
+    content: bytes = b"legacy-generation-state-fixture\n",
+) -> dict[str, Any]:
+    """Return a state-index entry representing OLD-generation history.
+
+    Added for Issue #1081 §8 — many pre-§8 warm-start tests started with an
+    empty state index to force ``state_snapshot_index_exact_checkpoint_missing``.
+    Under §8.4 a truly-empty index admits ``cold_new_model``, so those tests
+    now stage one old-generation entry (with a distinct
+    ``model_package_checksum``) so the block-strict intent is preserved via
+    ``block_declaration_missing`` — the tests still exercise the strict
+    warm-start gate; only the typed reason has moved by design.
+    """
+    store = LocalObjectStore(roots["object_store_root"], "s3://nhms")
+    state_uri = store.write_bytes_atomic(
+        f"states/gfs/model_a/legacy/{state_id}.cfg.ic",
+        content,
+    )
+    return {
+        "state_id": state_id,
+        "model_id": "model_a",
+        "run_id": "analysis_gfs_2026051100_model_a",
+        "source_id": "gfs",
+        "valid_time": valid_time,
+        "state_uri": state_uri,
+        "checksum": f"sha256:{sha256_bytes(content)}",
+        "usable_flag": True,
+        "cycle_id": cycle_id,
+        "lead_hours": lead_hours,
+        "model_package_version": "s3://nhms/models/model_a/package/",
+        "model_package_checksum": old_package_checksum,
+    }
+
+
 def _write_db_free_state_index_fixture(
     roots: Mapping[str, Path],
     paths: Mapping[str, Path],
@@ -20540,10 +20581,37 @@ def test_db_free_strict_warm_start_reopens_completed_producer_missing_successor_
     assert duplicate_exclusions == []
     assert slurm_sync == []
     evidence = candidates[0].state_evidence
-    assert evidence["reason"] == "strict_warm_start_successor_checkpoint_missing"
+    # §8.4 (#1081): an empty state index for a candidate cycle before
+    # ``required_from`` now admits ``cold_new_model`` — no prior state
+    # history in ANY generation.  The completed-producer retry logic still
+    # reopens the terminal decision so state_evidence carries the retry
+    # marker.  Under the strict-warm-start §8 admit shape, the fixture with
+    # ``init_state_id=None`` deterministically drives the
+    # ``strict_warm_start_terminal_init_state_mismatch`` branch of the
+    # retry ladder in ``scheduler_candidates.py`` (the successor-checkpoint
+    # branch requires a matching init_state_id first).
+    #
+    # A4 round-1 fix: restore the pre-§8 deterministic single-value
+    # assertion and the two structural sub-field asserts that survive the
+    # branch change — ``restart_stage`` and ``strict_warm_start.*`` (the
+    # branch-specific ``successor_state`` field of the pre-§8 fixture does
+    # not appear on this branch; a dedicated test would need a fixture
+    # whose terminal decision matches init_state_id but not successor
+    # checkpoint — tracked as #1108).
+    assert evidence["registry_cutover_transition"]["decision"] == "cold_new_model"
+    assert evidence["generation"].startswith("manifest-")
+    assert evidence["reason"] == "strict_warm_start_terminal_init_state_mismatch"
     assert evidence["restart_stage"] == "forecast"
-    assert evidence["successor_state"]["successor_cycle_time"] == _format_iso_z(required_from)
-    assert evidence["successor_state"]["reason"] == "state_snapshot_index_exact_checkpoint_missing"
+    # ``strict_warm_start`` carries the §8 admit shape — proving the §8
+    # gating fired at ready=True and that the retry evidence composed the
+    # terminal-mismatch marker on top of the cold-start admit rather than
+    # silently swallowing either signal.
+    assert evidence["strict_warm_start"]["ready"] is True
+    assert evidence["strict_warm_start"]["mode"] == "db_free_cold_new_model"
+    assert (
+        evidence["strict_warm_start"]["registry_cutover_transition"]["decision"]
+        == "cold_new_model"
+    )
 
 
 def test_db_free_strict_warm_start_required_lead_uses_previous_allowed_cycle_f006(
@@ -20735,13 +20803,18 @@ def test_db_free_strict_warm_start_blocks_missing_file_state_index_without_lates
         forecast_hours=_gfs_default_forecast_hours(),
         generated_at=generated_at,
     )
+    # §8.5 (#1081): stage one old-generation entry so this candidate is NOT a
+    # truly-new model — that preserves the strict-mode block-before-mutation
+    # intent this test verifies (the fresh cutover instead surfaces
+    # ``registry_cutover_declaration_missing``, not
+    # ``state_snapshot_index_exact_checkpoint_missing``).
     _write_db_free_state_index_fixture(
         roots,
         paths,
         cycle_time=cycle_time,
         package_checksum=fixture["package_checksum"],
         generated_at=generated_at,
-        entries=[],
+        entries=[_old_generation_state_entry(roots)],
     )
     model = {
         **fixture["model"],
@@ -20789,12 +20862,16 @@ def test_db_free_strict_warm_start_blocks_missing_file_state_index_without_lates
     assert skipped == []
     assert duplicate_exclusions == []
     assert slurm_sync == []
-    assert blocked[0].reason == "state_snapshot_index_exact_checkpoint_missing"
+    # §8.5 typed reason for an existing model whose registry checksum drifted
+    # without a valid cutover declaration.
+    assert blocked[0].reason == "registry_cutover_declaration_missing"
     state_evidence = blocked[0].state_evidence
     assert state_evidence["ready"] is False
-    assert state_evidence["reason"] == "state_snapshot_index_exact_checkpoint_missing"
-    assert state_evidence["state_snapshot_index"]["status"] == "ready"
-    assert state_evidence["state_snapshot_index"]["entry_count"] == 0
+    assert state_evidence["reason"] == "registry_cutover_declaration_missing"
+    assert (
+        state_evidence["registry_cutover_transition"]["decision"]
+        == "block_declaration_missing"
+    )
     assert "candidate_state" not in state_evidence
     assert "latest" not in json.dumps(state_evidence, sort_keys=True).lower()
 
@@ -21021,13 +21098,17 @@ def test_db_free_strict_warm_start_refreshes_file_state_index_between_passes(
         forecast_hours=_gfs_default_forecast_hours(),
         generated_at=generated_at,
     )
+    # §8.5 (#1081): stage old-generation history so the first pass exercises
+    # a strict block (via block_declaration_missing) instead of the §8.4
+    # cold_new_model admit path — this preserves the "block-then-refresh"
+    # semantic this test was written to verify.
     _write_db_free_state_index_fixture(
         roots,
         paths,
         cycle_time=cycle_time,
         package_checksum=fixture["package_checksum"],
         generated_at=generated_at,
-        entries=[],
+        entries=[_old_generation_state_entry(roots)],
     )
     model = {
         **fixture["model"],
@@ -21057,7 +21138,10 @@ def test_db_free_strict_warm_start_refreshes_file_state_index_between_passes(
     second = scheduler.run_once()
 
     assert first.evidence["counts"]["submitted_count"] == 0
-    assert first.evidence["blocked_candidates"][0]["reason"] == "state_snapshot_index_exact_checkpoint_missing"
+    assert (
+        first.evidence["blocked_candidates"][0]["reason"]
+        == "registry_cutover_declaration_missing"
+    )
     assert second.status == "submitted"
     assert second.evidence["counts"]["submitted_count"] == 1
     assert orchestrator.calls
@@ -21137,13 +21221,16 @@ def test_db_free_strict_warm_start_blocks_active_slurm_before_status_sync(
         forecast_hours=_gfs_default_forecast_hours(),
         generated_at=generated_at,
     )
+    # §8.5 (#1081): stage old-generation history so the strict warm-start
+    # gate blocks via ``block_declaration_missing`` before slurm-status-sync
+    # (preserving the pre-status-sync ordering intent this test verifies).
     _write_db_free_state_index_fixture(
         roots,
         paths,
         cycle_time=cycle_time,
         package_checksum=fixture["package_checksum"],
         generated_at=generated_at,
-        entries=[],
+        entries=[_old_generation_state_entry(roots)],
     )
     model = {
         **fixture["model"],
@@ -21192,9 +21279,12 @@ def test_db_free_strict_warm_start_blocks_active_slurm_before_status_sync(
     assert result.evidence["counts"]["submitted_count"] == 0
     assert result.evidence["counts"]["slurm_status_sync_count"] == 0
     assert result.evidence["no_mutation_proof"]["slurm_status_sync_called"] is False
-    assert result.evidence["blocked_candidates"][0]["reason"] == "state_snapshot_index_exact_checkpoint_missing"
+    assert (
+        result.evidence["blocked_candidates"][0]["reason"]
+        == "registry_cutover_declaration_missing"
+    )
     assert result.evidence["blocked_candidates"][0]["state_evidence"]["reason"] == (
-        "state_snapshot_index_exact_checkpoint_missing"
+        "registry_cutover_declaration_missing"
     )
 
 

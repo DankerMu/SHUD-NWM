@@ -1286,6 +1286,198 @@ class FileStateSnapshotIndexRepository:
             }
         )
 
+    def generation_scoped_history_signal(
+        self,
+        *,
+        model_id: str,
+        source_id: str,
+        before_time: datetime,
+        current_package_checksum: str | None,
+        expected_predecessor_cycle_id: str | None = None,
+        expected_predecessor_lead_hours: int | None = None,
+    ) -> dict[str, Any]:
+        """Return a bounded history summary scoped by model generation.
+
+        Introduced for Issue #1081 §8.3 — §8.7.  The scheduler-side transition
+        decision matrix in ``services.orchestrator.scheduler_generation``
+        needs to know:
+
+        - whether ANY usable state-index history exists for ``model_id``
+          (drives the ``cold_new_model`` admit),
+        - whether current-generation history exists (a state-index entry with
+          ``model_package_checksum == current_package_checksum`` counts;
+          drives the boundary between ``warm_continue`` /
+          ``block_predecessor_pending`` and the declared-cutover path),
+        - the latest usable checkpoint in each generation (bounded to one
+          entry each) so evidence can reference the exact predecessor
+          identity without leaking full index contents.
+
+        The method is read-only and never raises; a load failure returns
+        ``ready=False`` with a stable reason so the scheduler decision can
+        surface the same fail-closed evidence as the strict-warm-start path.
+        """
+        try:
+            index_snapshot = self._load_index_snapshot(allow_empty=False)
+        except StateManagerError as error:
+            index_evidence = self._blocked_index_evidence(error)
+            reason = _first_state_index_blocker_reason(index_evidence) or "state_snapshot_index_unavailable"
+            return _state_index_evidence_safe(
+                {
+                    "status": "blocked",
+                    "ready": False,
+                    "reason": reason,
+                    "model_id": model_id,
+                    "source_id": source_id,
+                    "before_time": _format_time(before_time),
+                    "history_exists_any_generation": None,
+                    "history_exists_current_generation": None,
+                    "state_snapshot_index": index_evidence,
+                }
+            )
+        source = _normalize_state_index_source_id(source_id, field="identity.source_id")
+        cutoff = _ensure_utc(before_time)
+        expected_key: tuple[str, str, str, str, str] | None = None
+        if expected_predecessor_cycle_id and expected_predecessor_lead_hours is not None:
+            # An exact "warm-start predecessor" entry has
+            # ``valid_time == candidate.cycle_time_utc`` (the state's forecast
+            # target is the candidate's own cycle time); the producing cycle
+            # sits ``required_lead_hours`` earlier.  The lookup key therefore
+            # uses ``cutoff`` (the candidate valid_time) NOT ``cutoff -
+            # lead_hours``.  Mirrors ``strict_warm_start_evidence`` semantics.
+            expected_key = _state_index_identity_key(
+                model_id=model_id,
+                source_id=source,
+                valid_time=cutoff,
+                cycle_id=str(expected_predecessor_cycle_id),
+                lead_hours=int(expected_predecessor_lead_hours),
+            )
+        current_checksum = str(current_package_checksum or "").strip()
+        # For §8 history-existence semantics we accept ANY usable entry for
+        # this ``model_id + source_id`` regardless of valid_time — a state
+        # snapshot at valid_time == cutoff (the exact-predecessor location)
+        # still counts as history because it proves the model was previously
+        # exercised.  The stricter "valid_time < cutoff" filter belongs to
+        # ``usable_state_history_evidence`` which powers different semantics.
+        entries_for_model = [
+            (key, entry)
+            for key, entry in index_snapshot.entries.items()
+            if key[0] == str(model_id)
+            and key[1] == source
+            and _require_state_index_bool(entry.get("usable_flag"), field="usable_flag")
+        ]
+        any_entries = [entry for _key, entry in entries_for_model]
+        current_entries = [
+            entry
+            for entry in any_entries
+            if current_checksum
+            and str(entry.get("model_package_checksum") or "") == current_checksum
+        ]
+
+        def _latest(entries: list[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+            if not entries:
+                return None
+            return sorted(
+                entries,
+                key=lambda item: (
+                    _ensure_utc(_parse_state_index_time(item["valid_time"], field="valid_time")),
+                    str(item.get("state_id") or ""),
+                ),
+                reverse=True,
+            )[0]
+
+        latest_current = _latest(current_entries)
+        latest_any = _latest(any_entries)
+
+        exact_predecessor_entry = None
+        wrong_generation_predecessor_entry: Mapping[str, Any] | None = None
+        # R2-C2 (round-2 review): renamed from ``history_entry_count_quarantined``
+        # to reflect boolean semantics.  The state-index dedups by identity key
+        # so at most one entry per expected_key can match; the guard on
+        # ``wrong_generation_predecessor_entry is None`` also keeps it to 0/1.
+        # Name now matches the actual observability signal: "is there a
+        # wrong-generation entry sitting at the expected predecessor key?".
+        expected_key_predecessor_quarantined = False
+        if expected_key is not None:
+            for key, entry in entries_for_model:
+                if key == expected_key:
+                    if current_checksum and (
+                        str(entry.get("model_package_checksum") or "") == current_checksum
+                    ):
+                        exact_predecessor_entry = entry
+                        break
+                    if wrong_generation_predecessor_entry is None and str(
+                        entry.get("model_package_checksum") or ""
+                    ) != current_checksum:
+                        wrong_generation_predecessor_entry = entry
+                        expected_key_predecessor_quarantined = True
+
+        latest_current_summary = None
+        if latest_current is not None:
+            latest_current_summary = {
+                "state_id": str(latest_current.get("state_id") or ""),
+                "model_package_checksum": str(latest_current.get("model_package_checksum") or ""),
+                "valid_time": str(latest_current.get("valid_time") or ""),
+                "cycle_id": str(latest_current.get("cycle_id") or ""),
+                "lead_hours": latest_current.get("lead_hours"),
+                "has_exact_predecessor": exact_predecessor_entry is not None,
+                "predecessor_valid_time": str(
+                    exact_predecessor_entry.get("valid_time")
+                    if exact_predecessor_entry is not None
+                    else ""
+                ),
+                "predecessor_cycle_id": str(
+                    exact_predecessor_entry.get("cycle_id")
+                    if exact_predecessor_entry is not None
+                    else ""
+                ),
+                "predecessor_lead_hours": (
+                    exact_predecessor_entry.get("lead_hours")
+                    if exact_predecessor_entry is not None
+                    else None
+                ),
+            }
+        latest_any_summary = None
+        if latest_any is not None:
+            latest_any_summary = {
+                "state_id": str(latest_any.get("state_id") or ""),
+                "model_package_checksum": str(latest_any.get("model_package_checksum") or ""),
+                "valid_time": str(latest_any.get("valid_time") or ""),
+                "cycle_id": str(latest_any.get("cycle_id") or ""),
+                "lead_hours": latest_any.get("lead_hours"),
+            }
+        wrong_generation_predecessor_checksum = ""
+        if wrong_generation_predecessor_entry is not None:
+            wrong_generation_predecessor_checksum = str(
+                wrong_generation_predecessor_entry.get("model_package_checksum") or ""
+            )
+        return _state_index_evidence_safe(
+            {
+                "status": "ready",
+                "ready": True,
+                "reason": None,
+                "model_id": model_id,
+                "source_id": source,
+                "before_time": _format_time(cutoff),
+                "history_exists_any_generation": bool(any_entries),
+                "history_exists_current_generation": bool(current_entries),
+                "history_entry_count_any": len(any_entries),
+                "history_entry_count_current": len(current_entries),
+                "expected_key_predecessor_quarantined": expected_key_predecessor_quarantined,
+                "latest_current_generation_checkpoint": latest_current_summary,
+                "latest_any_generation_checkpoint": latest_any_summary,
+                "wrong_generation_predecessor_present": (
+                    wrong_generation_predecessor_entry is not None
+                ),
+                "wrong_generation_predecessor_checksum": wrong_generation_predecessor_checksum,
+                "state_snapshot_index": {
+                    **index_snapshot.evidence,
+                    "history_entry_count_any": len(any_entries),
+                    "history_entry_count_current": len(current_entries),
+                    "expected_key_predecessor_quarantined": expected_key_predecessor_quarantined,
+                },
+            }
+        )
+
     def state_index_evidence(self) -> dict[str, Any]:
         try:
             return dict(self._load_index_snapshot(allow_empty=False).evidence)

@@ -348,6 +348,17 @@ declaration 到 mode-0600 路径 -> `export NHMS_REGISTRY_CUTOVER_DECLARATION_PA
 重跑 refresh。`effective_cycle_utc` 必须精确对齐 00:00 或 12:00 UTC，且落在
 `[now-24h, now+168h]` 区间；`transition_mode` 目前仅支持 `replace`。
 
+**Consumer-side note (Issue #1081 §8)**：`NHMS_REGISTRY_CUTOVER_DECLARATION_PATH`
+同时被 scheduler consumer (`services/orchestrator/scheduler_generation.load_
+cutover_declaration`) 读取，用于生成 §8 transition decision（warm_continue /
+cold_new_model / cold_declared_cutover / 5 个 block_* reasons）。scheduler 在
+每次 pass 开始时读一次（D8.1: read-once-per-pass, cached per ProductionScheduler
+lifetime），中途修改 declaration 文件不会被生效，直到下一次 scheduler 重启或
+下一次 pass 时才重新加载。node-22 systemd EnvironmentFile
+`compute.scheduler-dbfree.env` 里必须显式设置这个 env 才能 §8 gating 生效；
+未设置 = declaration 缺席 -> 每个 declared-cutover 候选会 block 为
+`registry_cutover_declaration_missing`。
+
 **手动 publisher CLI**（`scripts/publish_scheduler_file_registry.py`）：为兼容 #1080 gate，
 manual publisher 默认也会跑 cutover gate，语义与 refresh runner 一致；未通过 gate 就
 不会替换 canonical。仅在 bootstrap（没有 previous canonical `manifest-last.json`）或

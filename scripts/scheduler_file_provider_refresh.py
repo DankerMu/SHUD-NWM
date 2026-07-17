@@ -2311,8 +2311,28 @@ except (OSError, json.JSONDecodeError) as _cutover_schema_load_error:  # pragma:
 # Module-level validator: jsonschema.validate() re-resolves the metaschema on
 # every call and builds a fresh validator instance.  We hold the validator
 # once (finding C-F3) so the gate pays the metaschema hop only at import.
+# R2-B6 (round-2 review): attach a FormatChecker with a registered
+# ``date-time`` check (the default Draft202012Validator FORMAT_CHECKER only
+# ships date-time when ``rfc3339-validator`` is installed).  The check
+# mirrors the consumer at ``services/orchestrator/scheduler_generation.py``
+# so publisher and consumer accept and reject the same set of values.
+_CUTOVER_DECLARATION_FORMAT_CHECKER = jsonschema.FormatChecker()
+
+
+@_CUTOVER_DECLARATION_FORMAT_CHECKER.checks("date-time", raises=(TypeError, ValueError))
+def _cutover_datetime_format_check(value: Any) -> bool:  # pragma: no cover - trivial
+    """Return True when ``value`` parses as an aware RFC 3339 date-time."""
+    if not isinstance(value, str):
+        return False
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("naive datetime not permitted")
+    return True
+
+
 _CUTOVER_DECLARATION_VALIDATOR = jsonschema.Draft202012Validator(
-    _CUTOVER_DECLARATION_SCHEMA
+    _CUTOVER_DECLARATION_SCHEMA,
+    format_checker=_CUTOVER_DECLARATION_FORMAT_CHECKER,
 )
 
 

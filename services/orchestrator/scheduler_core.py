@@ -1,6 +1,14 @@
 # ruff: noqa: E501,F401,F821,I001
 from __future__ import annotations
 from services.orchestrator import scheduler as _scheduler
+from services.orchestrator import scheduler_generation as _generation
+from services.orchestrator import scheduler_generation_gate as _generation_gate
+
+# Issue #1081 §8.1: sentinel that separates "declaration not yet loaded" from
+# "loaded and returned ``None``" (env unset — no declaration configured).
+# Re-exported from :mod:`scheduler_generation_gate` so the extraction stays
+# a single-source-of-truth (see A5 split under PR #1105 round-1 review).
+_CUTOVER_DECLARATION_UNLOADED = _generation_gate.CUTOVER_DECLARATION_UNLOADED
 
 
 def _db_free_file_registry_from_config(config: _scheduler.ProductionSchedulerConfig) -> _scheduler.ModelRegistryReader:
@@ -122,6 +130,12 @@ class ProductionScheduler:
         # ``SchedulerPassTiming`` so SUB-3 / SUB-4 can call ``stage_span`` /
         # ``candidate_span`` via ``SchedulerExecutionContext.timing``.
         self._scheduler_pass_timing: _scheduler.Any | None = None
+        # Issue #1081 §8.1: registry cutover declaration is loaded once per
+        # scheduler pass and cached — D8.1 requires planning-time binding so a
+        # mid-plan declaration change cannot corrupt in-flight candidates.
+        # Sentinel ``_UNLOADED`` distinguishes "not yet loaded" from "loaded
+        # and returned None" (env unset — no declaration configured).
+        self._cutover_declaration_cache: _scheduler.Any = _CUTOVER_DECLARATION_UNLOADED
 
     @classmethod
     def from_env(cls, config: _scheduler.ProductionSchedulerConfig | None = None) -> _scheduler.ProductionScheduler:
@@ -284,6 +298,11 @@ class ProductionScheduler:
             refresh = getattr(provider, "refresh", None)
             if callable(refresh):
                 refresh()
+        # Issue #1081 §8.1 / D8.1: the declaration reload happens at
+        # planning-time.  Clearing the cache here keeps multi-pass runs
+        # aligned with a single-pass reload while ``run_once`` remains the
+        # planning boundary.
+        self._cutover_declaration_cache = _CUTOVER_DECLARATION_UNLOADED
 
     def _produce_forcing_for_candidates(
         self, candidates: _scheduler.Sequence[_scheduler.SchedulerCandidate]
@@ -642,71 +661,71 @@ class ProductionScheduler:
             )
         return self._db_free_state_index_repository
 
+    # Issue #1081 §8 helpers now live in ``scheduler_generation_gate`` — this
+    # class keeps thin instance-method delegators so callsites (tests + the
+    # ``_scheduler_execution_context``) can continue to bind to
+    # ``self._load_cutover_declaration`` etc.  Total size reduction lets
+    # ``scheduler_core.py`` stay below the 1000-line governance guard.
+
+    def _load_cutover_declaration(self) -> _scheduler.Any:
+        return _generation_gate.load_cutover_declaration(self)
+
+    def _evaluate_transition_decision(
+        self,
+        candidate: _scheduler.SchedulerCandidate,
+        cycle: _scheduler.SchedulerSourceCycle,
+        *,
+        required_lead_hours: int,
+        package_checksum: str | None,
+    ) -> _generation.TransitionEvaluation | None:
+        return _generation_gate.evaluate_transition_decision(
+            self,
+            candidate,
+            cycle,
+            required_lead_hours=required_lead_hours,
+            package_checksum=package_checksum,
+        )
+
+    def _legacy_strict_warm_start_evidence(
+        self,
+        candidate: _scheduler.SchedulerCandidate,
+        *,
+        required_lead_hours: int,
+        package_checksum: str | None,
+    ) -> dict[str, _scheduler.Any] | None:
+        return _generation_gate.legacy_strict_warm_start_evidence(
+            self,
+            candidate,
+            required_lead_hours=required_lead_hours,
+            package_checksum=package_checksum,
+        )
+
+    def _forecast_warm_start_env_enabled(self) -> bool:
+        return _generation_gate.forecast_warm_start_env_enabled(self)
+
+    def _candidate_pipeline_already_complete(
+        self, candidate: _scheduler.SchedulerCandidate
+    ) -> bool:
+        return _generation_gate.candidate_pipeline_already_complete(self, candidate)
+
     def _strict_warm_start_for_candidate(
         self, candidate: _scheduler.SchedulerCandidate, cycle: _scheduler.SchedulerSourceCycle
     ) -> dict[str, _scheduler.Any] | None:
         if not self.config.db_free_required:
             return None
-        required_lead_hours = self._required_warm_start_lead_hours(candidate, cycle)
-        model_package_checksum = (
-            candidate.resource_profile.get("package_checksum")
-            or candidate.resource_profile.get("model_package_checksum")
-        )
-        evidence = self._db_free_state_index_provider().strict_warm_start_evidence(
-            model_id=candidate.model_id,
-            source_id=candidate.source_id,
-            valid_time=candidate.cycle_time_utc,
-            model_package_version=candidate.model_package_uri,
-            model_package_checksum=str(model_package_checksum) if model_package_checksum not in (None, "") else None,
-            required_lead_hours=required_lead_hours,
-        )
-        if self._db_free_strict_warm_start_required_for(candidate):
-            return evidence
-        if bool(evidence.get("ready")):
-            evidence["mode"] = "db_free_exact_warm_start"
-            return evidence
-        if str(evidence.get("reason") or "") != "state_snapshot_index_exact_checkpoint_missing":
-            evidence["mode"] = "db_free_state_continuity"
-            return evidence
-
-        history = self._db_free_state_index_provider().usable_state_history_evidence(
-            model_id=candidate.model_id,
-            source_id=candidate.source_id,
-            before_time=candidate.cycle_time_utc,
-        )
-        if not bool(history.get("ready")):
-            history["mode"] = "db_free_state_continuity"
-            return history
-        if not bool(history.get("history_exists")):
+        # D8.9 compat toggle: if the operator ran with strict warm-start OFF
+        # and the journal already recognises a completed pipeline for this
+        # cycle, defer to the pre-§8 terminal-skip path so admitting or
+        # blocking a cutover on a durably-complete cycle is a no-op.  §8's
+        # gating still fires for admittable new work (env=true) and cannot
+        # ADMIT a declaration-less cutover / missing predecessor /
+        # wrong-generation checkpoint — see ``scheduler_generation_gate``.
+        if (
+            not _generation_gate.forecast_warm_start_env_enabled(self)
+            and _generation_gate.candidate_pipeline_already_complete(self, candidate)
+        ):
             return None
-        producer_cycle_time = _scheduler._ensure_utc(candidate.cycle_time_utc) - _scheduler.timedelta(
-            hours=required_lead_hours
-        )
-        return _scheduler._evidence_safe(
-            {
-                **dict(evidence),
-                "status": "blocked",
-                "ready": False,
-                "reason": "state_snapshot_index_prior_checkpoint_missing_after_history",
-                "mode": "db_free_state_continuity",
-                "required_lead_hours": required_lead_hours,
-                "required_prior_cycle_time": _scheduler._format_utc(producer_cycle_time),
-                "required_prior_cycle_id": _scheduler.cycle_id_for(candidate.source_id, producer_cycle_time),
-                "continuity_policy": {
-                    "decision": "block_or_backfill_prior_cycle",
-                    "first_cold_seed_allowed": False,
-                    "history_required_exact_successor": True,
-                },
-                "state_history": history,
-                "failure": {
-                    "classifier": "file_state_snapshot_index_unavailable",
-                    "reason_code": "STATE_SNAPSHOT_INDEX_PRIOR_CHECKPOINT_MISSING_AFTER_HISTORY",
-                    "dependency": "file_state_snapshot_index",
-                    "retryable": True,
-                    "permanent": False,
-                },
-            }
-        )
+        return _generation_gate.strict_warm_start_evidence(self, candidate, cycle)
 
     def _required_warm_start_lead_hours(
         self,
