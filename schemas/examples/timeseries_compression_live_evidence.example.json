@@ -1,0 +1,2110 @@
+{
+  "authorization": {
+    "acceptance_claim": "controlled lane executed exactly once with no observed conflict",
+    "bound": 1,
+    "database_audit_proof": false,
+    "decompress_invocations": 1,
+    "dry_run_invocations": 1,
+    "enforce_invocations": 1,
+    "lag_seconds": 604800,
+    "max_selected_bytes": 8589934592,
+    "migration_invocations": 2,
+    "min_free_bytes": 322122547200,
+    "remote_identity": "DankerMu/SHUD-NWM",
+    "replay_decompression": true,
+    "repo_path": "/home/nwm/NWM",
+    "reviewed_mutation_sha": "02b5909462fd6cce8b6c252a3044787742063f2d",
+    "reviewed_remote_ref": "refs/remotes/origin/feat/issue-1069-live-compression",
+    "sole_db_user_during_window": true,
+    "timeout_seconds": 900
+  },
+  "benchmarks": {
+    "evidence": {
+      "bytes": 28514,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/benchmarks.json",
+      "sha256": "174d2015a89ce35d7770a36ddf68a05c84cb2e5abacc4d0bd2d11fe290d45793"
+    },
+    "queries": [
+      {
+        "after_capture": {
+          "activity_samples": [
+            {
+              "captured_at": "2026-07-15T12:10:00Z",
+              "material_load_stable": true,
+              "sessions": [],
+              "stage": "before_cold"
+            },
+            {
+              "captured_at": "2026-07-15T12:10:01Z",
+              "material_load_stable": true,
+              "sessions": [],
+              "stage": "after_cold"
+            },
+            {
+              "captured_at": "2026-07-15T12:10:02Z",
+              "material_load_stable": true,
+              "sessions": [],
+              "stage": "before_measurements"
+            },
+            {
+              "captured_at": "2026-07-15T12:10:03Z",
+              "material_load_stable": true,
+              "sessions": [],
+              "stage": "mid_measurements"
+            },
+            {
+              "captured_at": "2026-07-15T12:10:04Z",
+              "material_load_stable": true,
+              "sessions": [],
+              "stage": "after_result"
+            }
+          ],
+          "bytes": 53,
+          "cache_class": "warm-cache",
+          "cold": {
+            "execution_ms": 32,
+            "plan": {
+              "Execution Time": 32,
+              "Plan": {
+                "Alias": "rt_1",
+                "Custom Plan Provider": "DecompressChunk",
+                "Node Type": "Custom Scan",
+                "Query": "curve",
+                "Relation Name": "_hyper_3_7_chunk",
+                "Schema": "_timescaledb_internal",
+                "Shared Hit Blocks": 10,
+                "Shared Read Blocks": 0
+              },
+              "Planning Time": 1.0
+            },
+            "planning_ms": 1.0,
+            "shared_hit_blocks": 10,
+            "shared_read_blocks": 0
+          },
+          "execution_bounds": {
+            "finished_at": "2026-07-15T12:10:04Z",
+            "lock_timeout_ms": 5000,
+            "phase_timeout_seconds": 900,
+            "started_at": "2026-07-15T12:10:00Z",
+            "statement_timeout_ms": 60000
+          },
+          "measurements": [
+            {
+              "execution_ms": 12,
+              "plan": {
+                "Execution Time": 12,
+                "Plan": {
+                  "Alias": "rt_1",
+                  "Custom Plan Provider": "DecompressChunk",
+                  "Node Type": "Custom Scan",
+                  "Query": "curve",
+                  "Relation Name": "_hyper_3_7_chunk",
+                  "Schema": "_timescaledb_internal",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 13,
+              "plan": {
+                "Execution Time": 13,
+                "Plan": {
+                  "Alias": "rt_1",
+                  "Custom Plan Provider": "DecompressChunk",
+                  "Node Type": "Custom Scan",
+                  "Query": "curve",
+                  "Relation Name": "_hyper_3_7_chunk",
+                  "Schema": "_timescaledb_internal",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 14,
+              "plan": {
+                "Execution Time": 14,
+                "Plan": {
+                  "Alias": "rt_1",
+                  "Custom Plan Provider": "DecompressChunk",
+                  "Node Type": "Custom Scan",
+                  "Query": "curve",
+                  "Relation Name": "_hyper_3_7_chunk",
+                  "Schema": "_timescaledb_internal",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 15,
+              "plan": {
+                "Execution Time": 15,
+                "Plan": {
+                  "Alias": "rt_1",
+                  "Custom Plan Provider": "DecompressChunk",
+                  "Node Type": "Custom Scan",
+                  "Query": "curve",
+                  "Relation Name": "_hyper_3_7_chunk",
+                  "Schema": "_timescaledb_internal",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 16,
+              "plan": {
+                "Execution Time": 16,
+                "Plan": {
+                  "Alias": "rt_1",
+                  "Custom Plan Provider": "DecompressChunk",
+                  "Node Type": "Custom Scan",
+                  "Query": "curve",
+                  "Relation Name": "_hyper_3_7_chunk",
+                  "Schema": "_timescaledb_internal",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 17,
+              "plan": {
+                "Execution Time": 17,
+                "Plan": {
+                  "Alias": "rt_1",
+                  "Custom Plan Provider": "DecompressChunk",
+                  "Node Type": "Custom Scan",
+                  "Query": "curve",
+                  "Relation Name": "_hyper_3_7_chunk",
+                  "Schema": "_timescaledb_internal",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 18,
+              "plan": {
+                "Execution Time": 18,
+                "Plan": {
+                  "Alias": "rt_1",
+                  "Custom Plan Provider": "DecompressChunk",
+                  "Node Type": "Custom Scan",
+                  "Query": "curve",
+                  "Relation Name": "_hyper_3_7_chunk",
+                  "Schema": "_timescaledb_internal",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            }
+          ],
+          "median_ms": 15.0,
+          "p95_ms": 18.0,
+          "result_payload": [
+            {
+              "valid_time": "2026-05-29T00:00:00Z",
+              "value": 1.25
+            }
+          ],
+          "result_sha256": "d537a2d2d9c23e39f0ad8fd01a31f28c83cc0a319f2dbc6adab5d2d4b909dc85",
+          "rows": 1,
+          "samples_ms": [
+            12.0,
+            13.0,
+            14.0,
+            15.0,
+            16.0,
+            17.0,
+            18.0
+          ],
+          "warmups": [
+            {
+              "execution_ms": 17,
+              "plan": {
+                "Execution Time": 17,
+                "Plan": {
+                  "Alias": "rt_1",
+                  "Custom Plan Provider": "DecompressChunk",
+                  "Node Type": "Custom Scan",
+                  "Query": "curve",
+                  "Relation Name": "_hyper_3_7_chunk",
+                  "Schema": "_timescaledb_internal",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 14,
+              "plan": {
+                "Execution Time": 14,
+                "Plan": {
+                  "Alias": "rt_1",
+                  "Custom Plan Provider": "DecompressChunk",
+                  "Node Type": "Custom Scan",
+                  "Query": "curve",
+                  "Relation Name": "_hyper_3_7_chunk",
+                  "Schema": "_timescaledb_internal",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            }
+          ]
+        },
+        "after_median_ms": 15.0,
+        "after_p95_ms": 18.0,
+        "before_capture": {
+          "activity_samples": [
+            {
+              "captured_at": "2026-07-15T12:00:12Z",
+              "material_load_stable": true,
+              "sessions": [],
+              "stage": "before_cold"
+            },
+            {
+              "captured_at": "2026-07-15T12:00:13Z",
+              "material_load_stable": true,
+              "sessions": [],
+              "stage": "after_cold"
+            },
+            {
+              "captured_at": "2026-07-15T12:00:14Z",
+              "material_load_stable": true,
+              "sessions": [],
+              "stage": "before_measurements"
+            },
+            {
+              "captured_at": "2026-07-15T12:00:15Z",
+              "material_load_stable": true,
+              "sessions": [],
+              "stage": "mid_measurements"
+            },
+            {
+              "captured_at": "2026-07-15T12:00:16Z",
+              "material_load_stable": true,
+              "sessions": [],
+              "stage": "after_result"
+            }
+          ],
+          "bytes": 53,
+          "cache_class": "warm-cache",
+          "cold": {
+            "execution_ms": 30,
+            "plan": {
+              "Execution Time": 30,
+              "Plan": {
+                "Alias": "river_timeseries",
+                "Node Type": "Index Scan",
+                "Relation Name": "river_timeseries",
+                "Schema": "hydro",
+                "Shared Hit Blocks": 10,
+                "Shared Read Blocks": 0
+              },
+              "Planning Time": 1.0
+            },
+            "planning_ms": 1.0,
+            "shared_hit_blocks": 10,
+            "shared_read_blocks": 0
+          },
+          "execution_bounds": {
+            "finished_at": "2026-07-15T12:00:16Z",
+            "lock_timeout_ms": 5000,
+            "phase_timeout_seconds": 900,
+            "started_at": "2026-07-15T12:00:12Z",
+            "statement_timeout_ms": 60000
+          },
+          "measurements": [
+            {
+              "execution_ms": 10,
+              "plan": {
+                "Execution Time": 10,
+                "Plan": {
+                  "Alias": "river_timeseries",
+                  "Node Type": "Index Scan",
+                  "Relation Name": "river_timeseries",
+                  "Schema": "hydro",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 11,
+              "plan": {
+                "Execution Time": 11,
+                "Plan": {
+                  "Alias": "river_timeseries",
+                  "Node Type": "Index Scan",
+                  "Relation Name": "river_timeseries",
+                  "Schema": "hydro",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 12,
+              "plan": {
+                "Execution Time": 12,
+                "Plan": {
+                  "Alias": "river_timeseries",
+                  "Node Type": "Index Scan",
+                  "Relation Name": "river_timeseries",
+                  "Schema": "hydro",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 13,
+              "plan": {
+                "Execution Time": 13,
+                "Plan": {
+                  "Alias": "river_timeseries",
+                  "Node Type": "Index Scan",
+                  "Relation Name": "river_timeseries",
+                  "Schema": "hydro",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 14,
+              "plan": {
+                "Execution Time": 14,
+                "Plan": {
+                  "Alias": "river_timeseries",
+                  "Node Type": "Index Scan",
+                  "Relation Name": "river_timeseries",
+                  "Schema": "hydro",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 15,
+              "plan": {
+                "Execution Time": 15,
+                "Plan": {
+                  "Alias": "river_timeseries",
+                  "Node Type": "Index Scan",
+                  "Relation Name": "river_timeseries",
+                  "Schema": "hydro",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 16,
+              "plan": {
+                "Execution Time": 16,
+                "Plan": {
+                  "Alias": "river_timeseries",
+                  "Node Type": "Index Scan",
+                  "Relation Name": "river_timeseries",
+                  "Schema": "hydro",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            }
+          ],
+          "median_ms": 13.0,
+          "p95_ms": 16.0,
+          "result_payload": [
+            {
+              "valid_time": "2026-05-29T00:00:00Z",
+              "value": 1.25
+            }
+          ],
+          "result_sha256": "d537a2d2d9c23e39f0ad8fd01a31f28c83cc0a319f2dbc6adab5d2d4b909dc85",
+          "rows": 1,
+          "samples_ms": [
+            10.0,
+            11.0,
+            12.0,
+            13.0,
+            14.0,
+            15.0,
+            16.0
+          ],
+          "warmups": [
+            {
+              "execution_ms": 15,
+              "plan": {
+                "Execution Time": 15,
+                "Plan": {
+                  "Alias": "river_timeseries",
+                  "Node Type": "Index Scan",
+                  "Relation Name": "river_timeseries",
+                  "Schema": "hydro",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 12,
+              "plan": {
+                "Execution Time": 12,
+                "Plan": {
+                  "Alias": "river_timeseries",
+                  "Node Type": "Index Scan",
+                  "Relation Name": "river_timeseries",
+                  "Schema": "hydro",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            }
+          ]
+        },
+        "before_median_ms": 13.0,
+        "before_p95_ms": 16.0,
+        "binding": {
+          "bound_parameters": [
+            "basin-v1",
+            "model_shud_riv_000001",
+            "network-v1",
+            "2026-05-28T00:00:00Z",
+            "2026-05-28T00:00:00Z",
+            "2026-06-04T00:00:00Z",
+            [
+              "gfs"
+            ],
+            [
+              "forecast_gfs_deterministic",
+              "gfs"
+            ]
+          ],
+          "parameter_names": [
+            "basin_version_id",
+            "river_segment_id",
+            "river_network_version_id",
+            "issue_time",
+            "start_time",
+            "end_time",
+            "source_or_scenario_tokens",
+            "scenario_tokens"
+          ]
+        },
+        "bytes": 53,
+        "cache_class": "warm-cache",
+        "decompress_chunk_plan_bound": true,
+        "median_threshold_ms": 113.0,
+        "name": "curve",
+        "p95_threshold_ms": 266.0,
+        "query_sha256": "b08e3ecce66c65fd75c8bb4b614de5d7b1823ae1636c97dee1a78b73ef3b8b22",
+        "request": {
+          "basin_version_id": "basin-v1",
+          "end_time": "2026-06-04T00:00:00Z",
+          "issue_time": "2026-05-28T00:00:00Z",
+          "river_network_version_id": "network-v1",
+          "river_segment_id": "model_reach_000001",
+          "scenario": "gfs"
+        },
+        "result_sha256": "d537a2d2d9c23e39f0ad8fd01a31f28c83cc0a319f2dbc6adab5d2d4b909dc85",
+        "rows": 1,
+        "source_refs": [
+          {
+            "bytes": 169946,
+            "path": "/home/nwm/NWM/packages/common/forecast_store.py",
+            "sha256": "a1163f84d32406836ce89481f9e69ed3d2083287a0b2c7a2e902b9af94353fed"
+          }
+        ]
+      },
+      {
+        "after_capture": {
+          "activity_samples": [
+            {
+              "captured_at": "2026-07-15T12:11:00Z",
+              "material_load_stable": true,
+              "sessions": [],
+              "stage": "before_cold"
+            },
+            {
+              "captured_at": "2026-07-15T12:11:01Z",
+              "material_load_stable": true,
+              "sessions": [],
+              "stage": "after_cold"
+            },
+            {
+              "captured_at": "2026-07-15T12:11:02Z",
+              "material_load_stable": true,
+              "sessions": [],
+              "stage": "before_measurements"
+            },
+            {
+              "captured_at": "2026-07-15T12:11:03Z",
+              "material_load_stable": true,
+              "sessions": [],
+              "stage": "mid_measurements"
+            },
+            {
+              "captured_at": "2026-07-15T12:11:04Z",
+              "material_load_stable": true,
+              "sessions": [],
+              "stage": "after_result"
+            }
+          ],
+          "bytes": 4,
+          "cache_class": "warm-cache",
+          "cold": {
+            "execution_ms": 32,
+            "plan": {
+              "Execution Time": 32,
+              "Plan": {
+                "Alias": "rt_1",
+                "Custom Plan Provider": "DecompressChunk",
+                "Node Type": "Custom Scan",
+                "Query": "mvt",
+                "Relation Name": "_hyper_3_7_chunk",
+                "Schema": "_timescaledb_internal",
+                "Shared Hit Blocks": 10,
+                "Shared Read Blocks": 0
+              },
+              "Planning Time": 1.0
+            },
+            "planning_ms": 1.0,
+            "shared_hit_blocks": 10,
+            "shared_read_blocks": 0
+          },
+          "execution_bounds": {
+            "finished_at": "2026-07-15T12:11:04Z",
+            "lock_timeout_ms": 5000,
+            "phase_timeout_seconds": 900,
+            "started_at": "2026-07-15T12:11:00Z",
+            "statement_timeout_ms": 60000
+          },
+          "measurements": [
+            {
+              "execution_ms": 12,
+              "plan": {
+                "Execution Time": 12,
+                "Plan": {
+                  "Alias": "rt_1",
+                  "Custom Plan Provider": "DecompressChunk",
+                  "Node Type": "Custom Scan",
+                  "Query": "mvt",
+                  "Relation Name": "_hyper_3_7_chunk",
+                  "Schema": "_timescaledb_internal",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 13,
+              "plan": {
+                "Execution Time": 13,
+                "Plan": {
+                  "Alias": "rt_1",
+                  "Custom Plan Provider": "DecompressChunk",
+                  "Node Type": "Custom Scan",
+                  "Query": "mvt",
+                  "Relation Name": "_hyper_3_7_chunk",
+                  "Schema": "_timescaledb_internal",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 14,
+              "plan": {
+                "Execution Time": 14,
+                "Plan": {
+                  "Alias": "rt_1",
+                  "Custom Plan Provider": "DecompressChunk",
+                  "Node Type": "Custom Scan",
+                  "Query": "mvt",
+                  "Relation Name": "_hyper_3_7_chunk",
+                  "Schema": "_timescaledb_internal",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 15,
+              "plan": {
+                "Execution Time": 15,
+                "Plan": {
+                  "Alias": "rt_1",
+                  "Custom Plan Provider": "DecompressChunk",
+                  "Node Type": "Custom Scan",
+                  "Query": "mvt",
+                  "Relation Name": "_hyper_3_7_chunk",
+                  "Schema": "_timescaledb_internal",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 16,
+              "plan": {
+                "Execution Time": 16,
+                "Plan": {
+                  "Alias": "rt_1",
+                  "Custom Plan Provider": "DecompressChunk",
+                  "Node Type": "Custom Scan",
+                  "Query": "mvt",
+                  "Relation Name": "_hyper_3_7_chunk",
+                  "Schema": "_timescaledb_internal",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 17,
+              "plan": {
+                "Execution Time": 17,
+                "Plan": {
+                  "Alias": "rt_1",
+                  "Custom Plan Provider": "DecompressChunk",
+                  "Node Type": "Custom Scan",
+                  "Query": "mvt",
+                  "Relation Name": "_hyper_3_7_chunk",
+                  "Schema": "_timescaledb_internal",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 18,
+              "plan": {
+                "Execution Time": 18,
+                "Plan": {
+                  "Alias": "rt_1",
+                  "Custom Plan Provider": "DecompressChunk",
+                  "Node Type": "Custom Scan",
+                  "Query": "mvt",
+                  "Relation Name": "_hyper_3_7_chunk",
+                  "Schema": "_timescaledb_internal",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            }
+          ],
+          "median_ms": 15.0,
+          "p95_ms": 18.0,
+          "result_payload": "deadbeef",
+          "result_sha256": "5f78c33274e43fa9de5659265c1d917e25c03722dcb0b8d27db8d5feaa813953",
+          "rows": 1,
+          "samples_ms": [
+            12.0,
+            13.0,
+            14.0,
+            15.0,
+            16.0,
+            17.0,
+            18.0
+          ],
+          "warmups": [
+            {
+              "execution_ms": 17,
+              "plan": {
+                "Execution Time": 17,
+                "Plan": {
+                  "Alias": "rt_1",
+                  "Custom Plan Provider": "DecompressChunk",
+                  "Node Type": "Custom Scan",
+                  "Query": "mvt",
+                  "Relation Name": "_hyper_3_7_chunk",
+                  "Schema": "_timescaledb_internal",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 14,
+              "plan": {
+                "Execution Time": 14,
+                "Plan": {
+                  "Alias": "rt_1",
+                  "Custom Plan Provider": "DecompressChunk",
+                  "Node Type": "Custom Scan",
+                  "Query": "mvt",
+                  "Relation Name": "_hyper_3_7_chunk",
+                  "Schema": "_timescaledb_internal",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            }
+          ]
+        },
+        "after_median_ms": 15.0,
+        "after_p95_ms": 18.0,
+        "before_capture": {
+          "activity_samples": [
+            {
+              "captured_at": "2026-07-15T12:00:17Z",
+              "material_load_stable": true,
+              "sessions": [],
+              "stage": "before_cold"
+            },
+            {
+              "captured_at": "2026-07-15T12:00:18Z",
+              "material_load_stable": true,
+              "sessions": [],
+              "stage": "after_cold"
+            },
+            {
+              "captured_at": "2026-07-15T12:00:19Z",
+              "material_load_stable": true,
+              "sessions": [],
+              "stage": "before_measurements"
+            },
+            {
+              "captured_at": "2026-07-15T12:00:20Z",
+              "material_load_stable": true,
+              "sessions": [],
+              "stage": "mid_measurements"
+            },
+            {
+              "captured_at": "2026-07-15T12:00:21Z",
+              "material_load_stable": true,
+              "sessions": [],
+              "stage": "after_result"
+            }
+          ],
+          "bytes": 4,
+          "cache_class": "warm-cache",
+          "cold": {
+            "execution_ms": 30,
+            "plan": {
+              "Execution Time": 30,
+              "Plan": {
+                "Alias": "river_timeseries",
+                "Node Type": "Index Scan",
+                "Relation Name": "river_timeseries",
+                "Schema": "hydro",
+                "Shared Hit Blocks": 10,
+                "Shared Read Blocks": 0
+              },
+              "Planning Time": 1.0
+            },
+            "planning_ms": 1.0,
+            "shared_hit_blocks": 10,
+            "shared_read_blocks": 0
+          },
+          "execution_bounds": {
+            "finished_at": "2026-07-15T12:00:21Z",
+            "lock_timeout_ms": 5000,
+            "phase_timeout_seconds": 900,
+            "started_at": "2026-07-15T12:00:17Z",
+            "statement_timeout_ms": 60000
+          },
+          "measurements": [
+            {
+              "execution_ms": 10,
+              "plan": {
+                "Execution Time": 10,
+                "Plan": {
+                  "Alias": "river_timeseries",
+                  "Node Type": "Index Scan",
+                  "Relation Name": "river_timeseries",
+                  "Schema": "hydro",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 11,
+              "plan": {
+                "Execution Time": 11,
+                "Plan": {
+                  "Alias": "river_timeseries",
+                  "Node Type": "Index Scan",
+                  "Relation Name": "river_timeseries",
+                  "Schema": "hydro",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 12,
+              "plan": {
+                "Execution Time": 12,
+                "Plan": {
+                  "Alias": "river_timeseries",
+                  "Node Type": "Index Scan",
+                  "Relation Name": "river_timeseries",
+                  "Schema": "hydro",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 13,
+              "plan": {
+                "Execution Time": 13,
+                "Plan": {
+                  "Alias": "river_timeseries",
+                  "Node Type": "Index Scan",
+                  "Relation Name": "river_timeseries",
+                  "Schema": "hydro",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 14,
+              "plan": {
+                "Execution Time": 14,
+                "Plan": {
+                  "Alias": "river_timeseries",
+                  "Node Type": "Index Scan",
+                  "Relation Name": "river_timeseries",
+                  "Schema": "hydro",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 15,
+              "plan": {
+                "Execution Time": 15,
+                "Plan": {
+                  "Alias": "river_timeseries",
+                  "Node Type": "Index Scan",
+                  "Relation Name": "river_timeseries",
+                  "Schema": "hydro",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 16,
+              "plan": {
+                "Execution Time": 16,
+                "Plan": {
+                  "Alias": "river_timeseries",
+                  "Node Type": "Index Scan",
+                  "Relation Name": "river_timeseries",
+                  "Schema": "hydro",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            }
+          ],
+          "median_ms": 13.0,
+          "p95_ms": 16.0,
+          "result_payload": "deadbeef",
+          "result_sha256": "5f78c33274e43fa9de5659265c1d917e25c03722dcb0b8d27db8d5feaa813953",
+          "rows": 1,
+          "samples_ms": [
+            10.0,
+            11.0,
+            12.0,
+            13.0,
+            14.0,
+            15.0,
+            16.0
+          ],
+          "warmups": [
+            {
+              "execution_ms": 15,
+              "plan": {
+                "Execution Time": 15,
+                "Plan": {
+                  "Alias": "river_timeseries",
+                  "Node Type": "Index Scan",
+                  "Relation Name": "river_timeseries",
+                  "Schema": "hydro",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            },
+            {
+              "execution_ms": 12,
+              "plan": {
+                "Execution Time": 12,
+                "Plan": {
+                  "Alias": "river_timeseries",
+                  "Node Type": "Index Scan",
+                  "Relation Name": "river_timeseries",
+                  "Schema": "hydro",
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0
+                },
+                "Planning Time": 1.0
+              },
+              "planning_ms": 1.0,
+              "shared_hit_blocks": 10,
+              "shared_read_blocks": 0
+            }
+          ]
+        },
+        "before_median_ms": 13.0,
+        "before_p95_ms": 16.0,
+        "binding": {
+          "basin_version_id": "basin-v1",
+          "buffer": 64,
+          "collection_coordinate_limit": 50000,
+          "extent": 4096,
+          "feature_coordinate_limit": 50000,
+          "feature_limit": 10000,
+          "max_coordinate_dimensions": 3,
+          "river_network_version_id": "network-v1",
+          "run_id": "run-1",
+          "simplification_tolerance_m": 9.554628535647032,
+          "valid_time": "2026-05-29T00:00:00Z",
+          "variable": "q_down",
+          "x": 420,
+          "y": 210,
+          "z": 9
+        },
+        "bytes": 4,
+        "cache_class": "warm-cache",
+        "decompress_chunk_plan_bound": true,
+        "median_threshold_ms": 113.0,
+        "name": "mvt",
+        "p95_threshold_ms": 266.0,
+        "query_sha256": "03a830d08d2bca1129e4636c78aba68f5f13a26be5295743f0692e49a1c5b32d",
+        "request": {
+          "basin_version_id": "basin-v1",
+          "river_network_version_id": "network-v1",
+          "run_id": "run-1",
+          "valid_time": "2026-05-29T00:00:00Z",
+          "x": 420,
+          "y": 210,
+          "z": 9
+        },
+        "result_sha256": "5f78c33274e43fa9de5659265c1d917e25c03722dcb0b8d27db8d5feaa813953",
+        "rows": 1,
+        "source_refs": [
+          {
+            "bytes": 59214,
+            "path": "/home/nwm/NWM/services/tiles/mvt.py",
+            "sha256": "8893e6d08a2dbc72cda460cf863ff89518b4b5771ace5170aefbd6044e76f331"
+          },
+          {
+            "bytes": 30349,
+            "path": "/home/nwm/NWM/apps/api/routes/hydro_display.py",
+            "sha256": "0ca6d3940fce358c883061d15b5877e954ebc2c055ed9db5977a33f343993147"
+          }
+        ]
+      }
+    ]
+  },
+  "catalog": {
+    "d3_exact": true,
+    "no_compression_policy": true,
+    "post": {
+      "bytes": 2277,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/catalog-post.json",
+      "sha256": "47243c33fa34a00e9b161a2f8d6b4a9a5433280c0f605055a9bfe4874d52e63c"
+    },
+    "selected_chunks_compressed": true
+  },
+  "chronology": {
+    "events": [
+      {
+        "at": "2026-07-15T11:19:00Z",
+        "name": "audit-window-start"
+      },
+      {
+        "at": "2026-07-15T11:20:00Z",
+        "name": "dump-list"
+      },
+      {
+        "at": "2026-07-15T11:25:00Z",
+        "name": "catalog-before"
+      },
+      {
+        "at": "2026-07-15T11:30:00Z",
+        "name": "migration-1-start"
+      },
+      {
+        "at": "2026-07-15T11:31:00Z",
+        "name": "migration-1-finish"
+      },
+      {
+        "at": "2026-07-15T11:31:00.500000Z",
+        "name": "catalog-1"
+      },
+      {
+        "at": "2026-07-15T11:31:01Z",
+        "name": "migration-2-start"
+      },
+      {
+        "at": "2026-07-15T11:32:00Z",
+        "name": "migration-2-finish"
+      },
+      {
+        "at": "2026-07-15T11:32:00.500000Z",
+        "name": "catalog-2"
+      },
+      {
+        "at": "2026-07-15T11:40:00Z",
+        "name": "recovery-preflight"
+      },
+      {
+        "at": "2026-07-15T11:41:00Z",
+        "name": "recovery-start"
+      },
+      {
+        "at": "2026-07-15T11:45:00Z",
+        "name": "recovery-finish"
+      },
+      {
+        "at": "2026-07-15T11:50:00Z",
+        "name": "compression-preflight"
+      },
+      {
+        "at": "2026-07-15T11:59:50Z",
+        "name": "dry-start"
+      },
+      {
+        "at": "2026-07-15T12:00:00Z",
+        "name": "dry-finish"
+      },
+      {
+        "at": "2026-07-15T12:00:10Z",
+        "name": "post-dry-selector"
+      },
+      {
+        "at": "2026-07-15T12:00:11Z",
+        "name": "benchmark-before-start"
+      },
+      {
+        "at": "2026-07-15T12:00:21Z",
+        "name": "benchmark-before-finish"
+      },
+      {
+        "at": "2026-07-15T12:00:22Z",
+        "name": "pre-enforce-selector"
+      },
+      {
+        "at": "2026-07-15T12:00:24Z",
+        "name": "sizes-pre"
+      },
+      {
+        "at": "2026-07-15T12:00:25Z",
+        "name": "enforce-start"
+      },
+      {
+        "at": "2026-07-15T12:05:01Z",
+        "name": "enforce-finish"
+      },
+      {
+        "at": "2026-07-15T12:05:02Z",
+        "name": "sizes-post"
+      },
+      {
+        "at": "2026-07-15T12:05:03Z",
+        "name": "catalog-post"
+      },
+      {
+        "at": "2026-07-15T12:10:00Z",
+        "name": "benchmark-after-start"
+      },
+      {
+        "at": "2026-07-15T12:11:04Z",
+        "name": "benchmark-after-finish"
+      },
+      {
+        "at": "2026-07-15T12:20:00Z",
+        "name": "cleanup-finish"
+      },
+      {
+        "at": "2026-07-15T12:20:01Z",
+        "name": "cleanup-captured"
+      },
+      {
+        "at": "2026-07-15T12:21:00Z",
+        "name": "audit-window-finish"
+      }
+    ],
+    "snapshot_ids": [
+      "schema-dump-list",
+      "catalog-before",
+      "catalog-first",
+      "catalog-second",
+      "sizes-pre",
+      "sizes-post",
+      "catalog-post"
+    ]
+  },
+  "cleanup": {
+    "autopipe_timer_restored": true,
+    "compression_service_activation_count": 0,
+    "compression_service_active": false,
+    "compression_timer_active": false,
+    "compression_timer_enabled": true,
+    "evidence": {
+      "bytes": 3289,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/cleanup.json",
+      "sha256": "b80254e7132084d399a16cce622db9b52ff44fc348987e2d3d96d1180ad6a76b"
+    },
+    "installed_service_matches_repo": true,
+    "installed_timer_matches_repo": true
+  },
+  "database_identity": {
+    "dbname": "nhms",
+    "instance": "node27-primary-pg15",
+    "postgres_version": "15.2",
+    "timescaledb_version": "2.10.2"
+  },
+  "execution": {
+    "checkpoint_artifacts": [
+      {
+        "bytes": 16,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/preflight-activity.json",
+        "sha256": "f8d76a4cc63ce0e3154262d8f555de7415e14ea6b7d03e9fec4fb5d8fbee2cef"
+      },
+      {
+        "bytes": 17,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/preflight-locks.json",
+        "sha256": "a65c805e8091e427ff7fbc133a9512e6184d6cfb82384fe55a6ed779218c0fdd"
+      },
+      {
+        "bytes": 1894,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/preflight-catalog.json",
+        "sha256": "138710bbe0420cc479441da68e293945005e72c35ef9a65f2ebeec25410c5ef3"
+      },
+      {
+        "bytes": 561,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/preflight-show.json",
+        "sha256": "eaf6cd0c8bf85e6b96616148698e0bcccd741f04a9d7ff065c04c420c27bb77a"
+      },
+      {
+        "bytes": 241,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/preflight-journal.log",
+        "sha256": "4dee1e030f2e13fb301fc2ff3881cedce8bda17cf166bef4958400c1c235c826"
+      },
+      {
+        "bytes": 16,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/before_mutation-migration-1-activity.json",
+        "sha256": "f8d76a4cc63ce0e3154262d8f555de7415e14ea6b7d03e9fec4fb5d8fbee2cef"
+      },
+      {
+        "bytes": 17,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/before_mutation-migration-1-locks.json",
+        "sha256": "a65c805e8091e427ff7fbc133a9512e6184d6cfb82384fe55a6ed779218c0fdd"
+      },
+      {
+        "bytes": 1894,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/before_mutation-migration-1-catalog.json",
+        "sha256": "138710bbe0420cc479441da68e293945005e72c35ef9a65f2ebeec25410c5ef3"
+      },
+      {
+        "bytes": 561,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/before_mutation-migration-1-show.json",
+        "sha256": "eaf6cd0c8bf85e6b96616148698e0bcccd741f04a9d7ff065c04c420c27bb77a"
+      },
+      {
+        "bytes": 241,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/before_mutation-migration-1-journal.log",
+        "sha256": "c8b1bf2e31632b56d23b2ef0ee6cba95b76d677c350b5e452825a0dfe17faf80"
+      },
+      {
+        "bytes": 16,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/after_mutation-migration-1-activity.json",
+        "sha256": "f8d76a4cc63ce0e3154262d8f555de7415e14ea6b7d03e9fec4fb5d8fbee2cef"
+      },
+      {
+        "bytes": 17,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/after_mutation-migration-1-locks.json",
+        "sha256": "a65c805e8091e427ff7fbc133a9512e6184d6cfb82384fe55a6ed779218c0fdd"
+      },
+      {
+        "bytes": 1894,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/after_mutation-migration-1-catalog.json",
+        "sha256": "138710bbe0420cc479441da68e293945005e72c35ef9a65f2ebeec25410c5ef3"
+      },
+      {
+        "bytes": 561,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/after_mutation-migration-1-show.json",
+        "sha256": "eaf6cd0c8bf85e6b96616148698e0bcccd741f04a9d7ff065c04c420c27bb77a"
+      },
+      {
+        "bytes": 241,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/after_mutation-migration-1-journal.log",
+        "sha256": "82b503414ba7de6e0a05fec66a8185acc1098b8db983a8f3a636c4e5e047fa73"
+      },
+      {
+        "bytes": 16,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/before_mutation-migration-2-activity.json",
+        "sha256": "f8d76a4cc63ce0e3154262d8f555de7415e14ea6b7d03e9fec4fb5d8fbee2cef"
+      },
+      {
+        "bytes": 17,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/before_mutation-migration-2-locks.json",
+        "sha256": "a65c805e8091e427ff7fbc133a9512e6184d6cfb82384fe55a6ed779218c0fdd"
+      },
+      {
+        "bytes": 1894,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/before_mutation-migration-2-catalog.json",
+        "sha256": "138710bbe0420cc479441da68e293945005e72c35ef9a65f2ebeec25410c5ef3"
+      },
+      {
+        "bytes": 561,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/before_mutation-migration-2-show.json",
+        "sha256": "eaf6cd0c8bf85e6b96616148698e0bcccd741f04a9d7ff065c04c420c27bb77a"
+      },
+      {
+        "bytes": 241,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/before_mutation-migration-2-journal.log",
+        "sha256": "c43a264974e11f3fb112459576e29f4bc7525f5cc148d8ea664e25fed6e93411"
+      },
+      {
+        "bytes": 16,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/after_mutation-migration-2-activity.json",
+        "sha256": "f8d76a4cc63ce0e3154262d8f555de7415e14ea6b7d03e9fec4fb5d8fbee2cef"
+      },
+      {
+        "bytes": 17,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/after_mutation-migration-2-locks.json",
+        "sha256": "a65c805e8091e427ff7fbc133a9512e6184d6cfb82384fe55a6ed779218c0fdd"
+      },
+      {
+        "bytes": 1894,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/after_mutation-migration-2-catalog.json",
+        "sha256": "138710bbe0420cc479441da68e293945005e72c35ef9a65f2ebeec25410c5ef3"
+      },
+      {
+        "bytes": 561,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/after_mutation-migration-2-show.json",
+        "sha256": "eaf6cd0c8bf85e6b96616148698e0bcccd741f04a9d7ff065c04c420c27bb77a"
+      },
+      {
+        "bytes": 241,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/after_mutation-migration-2-journal.log",
+        "sha256": "5cd0fba3b5d84d6cd1ef9f51f6f57aabbe411137b3e69c4c96579831d95b398b"
+      },
+      {
+        "bytes": 16,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/before_mutation-decompress-activity.json",
+        "sha256": "f8d76a4cc63ce0e3154262d8f555de7415e14ea6b7d03e9fec4fb5d8fbee2cef"
+      },
+      {
+        "bytes": 17,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/before_mutation-decompress-locks.json",
+        "sha256": "a65c805e8091e427ff7fbc133a9512e6184d6cfb82384fe55a6ed779218c0fdd"
+      },
+      {
+        "bytes": 1894,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/before_mutation-decompress-catalog.json",
+        "sha256": "138710bbe0420cc479441da68e293945005e72c35ef9a65f2ebeec25410c5ef3"
+      },
+      {
+        "bytes": 561,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/before_mutation-decompress-show.json",
+        "sha256": "eaf6cd0c8bf85e6b96616148698e0bcccd741f04a9d7ff065c04c420c27bb77a"
+      },
+      {
+        "bytes": 241,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/before_mutation-decompress-journal.log",
+        "sha256": "c430898fc225d3abe8f690e8dc9b39eb58411a94ef790ee34d221bff7b09e981"
+      },
+      {
+        "bytes": 16,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/after_mutation-decompress-activity.json",
+        "sha256": "f8d76a4cc63ce0e3154262d8f555de7415e14ea6b7d03e9fec4fb5d8fbee2cef"
+      },
+      {
+        "bytes": 17,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/after_mutation-decompress-locks.json",
+        "sha256": "a65c805e8091e427ff7fbc133a9512e6184d6cfb82384fe55a6ed779218c0fdd"
+      },
+      {
+        "bytes": 1894,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/after_mutation-decompress-catalog.json",
+        "sha256": "138710bbe0420cc479441da68e293945005e72c35ef9a65f2ebeec25410c5ef3"
+      },
+      {
+        "bytes": 561,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/after_mutation-decompress-show.json",
+        "sha256": "eaf6cd0c8bf85e6b96616148698e0bcccd741f04a9d7ff065c04c420c27bb77a"
+      },
+      {
+        "bytes": 241,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/after_mutation-decompress-journal.log",
+        "sha256": "118994be28c9ba46a2956eafcbb022f4ab4e89141cafa303d25e2b5059785379"
+      },
+      {
+        "bytes": 16,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/before_mutation-enforce-activity.json",
+        "sha256": "f8d76a4cc63ce0e3154262d8f555de7415e14ea6b7d03e9fec4fb5d8fbee2cef"
+      },
+      {
+        "bytes": 17,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/before_mutation-enforce-locks.json",
+        "sha256": "a65c805e8091e427ff7fbc133a9512e6184d6cfb82384fe55a6ed779218c0fdd"
+      },
+      {
+        "bytes": 1894,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/before_mutation-enforce-catalog.json",
+        "sha256": "138710bbe0420cc479441da68e293945005e72c35ef9a65f2ebeec25410c5ef3"
+      },
+      {
+        "bytes": 561,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/before_mutation-enforce-show.json",
+        "sha256": "eaf6cd0c8bf85e6b96616148698e0bcccd741f04a9d7ff065c04c420c27bb77a"
+      },
+      {
+        "bytes": 241,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/before_mutation-enforce-journal.log",
+        "sha256": "699c4b06a4d998757733fc329bec45f5b290f7cab125f16199bf91e86e365759"
+      },
+      {
+        "bytes": 16,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/after_mutation-enforce-activity.json",
+        "sha256": "f8d76a4cc63ce0e3154262d8f555de7415e14ea6b7d03e9fec4fb5d8fbee2cef"
+      },
+      {
+        "bytes": 17,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/after_mutation-enforce-locks.json",
+        "sha256": "a65c805e8091e427ff7fbc133a9512e6184d6cfb82384fe55a6ed779218c0fdd"
+      },
+      {
+        "bytes": 1894,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/after_mutation-enforce-catalog.json",
+        "sha256": "138710bbe0420cc479441da68e293945005e72c35ef9a65f2ebeec25410c5ef3"
+      },
+      {
+        "bytes": 561,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/after_mutation-enforce-show.json",
+        "sha256": "eaf6cd0c8bf85e6b96616148698e0bcccd741f04a9d7ff065c04c420c27bb77a"
+      },
+      {
+        "bytes": 241,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/after_mutation-enforce-journal.log",
+        "sha256": "3bbc8aaac5ae2bf09dbbfccec7ade9c3d243ef1c6e91d514748a01f1700446bf"
+      },
+      {
+        "bytes": 16,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/postflight-activity.json",
+        "sha256": "f8d76a4cc63ce0e3154262d8f555de7415e14ea6b7d03e9fec4fb5d8fbee2cef"
+      },
+      {
+        "bytes": 17,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/postflight-locks.json",
+        "sha256": "a65c805e8091e427ff7fbc133a9512e6184d6cfb82384fe55a6ed779218c0fdd"
+      },
+      {
+        "bytes": 1894,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/postflight-catalog.json",
+        "sha256": "138710bbe0420cc479441da68e293945005e72c35ef9a65f2ebeec25410c5ef3"
+      },
+      {
+        "bytes": 561,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/postflight-show.json",
+        "sha256": "eaf6cd0c8bf85e6b96616148698e0bcccd741f04a9d7ff065c04c420c27bb77a"
+      },
+      {
+        "bytes": 243,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/postflight-journal.log",
+        "sha256": "b7cb8cfd0297c84f16e45d0f621797c7c8f9a4b2e1dcc797449b083973c29228"
+      },
+      {
+        "bytes": 16,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/cleanup-activity.json",
+        "sha256": "f8d76a4cc63ce0e3154262d8f555de7415e14ea6b7d03e9fec4fb5d8fbee2cef"
+      },
+      {
+        "bytes": 17,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/cleanup-locks.json",
+        "sha256": "a65c805e8091e427ff7fbc133a9512e6184d6cfb82384fe55a6ed779218c0fdd"
+      },
+      {
+        "bytes": 1894,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/cleanup-catalog.json",
+        "sha256": "138710bbe0420cc479441da68e293945005e72c35ef9a65f2ebeec25410c5ef3"
+      },
+      {
+        "bytes": 561,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/cleanup-show.json",
+        "sha256": "eaf6cd0c8bf85e6b96616148698e0bcccd741f04a9d7ff065c04c420c27bb77a"
+      },
+      {
+        "bytes": 243,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/cleanup-journal.log",
+        "sha256": "8bbfbba40963621ebe317fc93197563163f6347e37a97cff055bfe4ac63e809e"
+      }
+    ],
+    "claim": "controlled lane executed exactly once with no observed conflict",
+    "database_audit_proof": false,
+    "ledger": {
+      "bytes": 59787,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/supervisor-ledger.jsonl",
+      "sha256": "3d0f672f0b7b3243987e7d5fa27d66f8165df05b798a978d40f16364b1bfe33c"
+    },
+    "namespace_counts": {
+      "benchmark_after": 1,
+      "benchmark_before": 1,
+      "compression_dry_run": 1,
+      "compression_enforce": 1,
+      "compression_service_activation": 0,
+      "decompress": 1,
+      "drill": 0,
+      "migration_apply": 2,
+      "node22": 0,
+      "pg_dump": 1,
+      "pg_restore_list": 1,
+      "pg_restore_version": 1,
+      "replay_supervisor_activation": 1,
+      "retention": 0,
+      "role": 0
+    },
+    "run_id": "run-1069",
+    "run_plan": {
+      "bytes": 9204,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/run-plan.json",
+      "sha256": "12ecac3a2d7d1724a00cc815eaf92f99693784e5aa7c8b37ea8b1c6bd370a0b4"
+    },
+    "sole_db_user_attested": true,
+    "trust_limit": "discrete observations; no absolute direct-SQL bypass proof"
+  },
+  "generated_at": "2026-07-15T12:20:00Z",
+  "issue": 1069,
+  "migration": {
+    "catalog_after_first": {
+      "bytes": 2071,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/catalog-first.json",
+      "sha256": "84b4e9e7e3264216b6916686d21792df08b4b07ba3c1032b8033176d10c37660"
+    },
+    "catalog_after_second": {
+      "bytes": 2073,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/catalog-second.json",
+      "sha256": "32470b329a2be4df01e2f5f2c64dfb6cf3ed98d77eac38067df1c0ba057a5334"
+    },
+    "catalogs_identical": true,
+    "first_exit_code": 0,
+    "first_invocation": {
+      "bytes": 59787,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/supervisor-ledger.jsonl",
+      "sha256": "3d0f672f0b7b3243987e7d5fa27d66f8165df05b798a978d40f16364b1bfe33c"
+    },
+    "migration_file": {
+      "bytes": 2369,
+      "path": "/home/nwm/NWM/db/migrations/000047_hypertable_compression_settings.sql",
+      "sha256": "9ee306ea4f01f517aab8653e002cfea1b2a98b0bbaf563bc955e9bbee6a61933"
+    },
+    "second_exit_code": 0,
+    "second_invocation": {
+      "bytes": 59787,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/supervisor-ledger.jsonl",
+      "sha256": "3d0f672f0b7b3243987e7d5fa27d66f8165df05b798a978d40f16364b1bfe33c"
+    }
+  },
+  "mutation_head_sha": "02b5909462fd6cce8b6c252a3044787742063f2d",
+  "node": "node-27",
+  "out_of_scope": {
+    "decompress_run": true,
+    "drill_run": false,
+    "node22_touched": false,
+    "retention_mutated": false,
+    "role_mutated": false
+  },
+  "preflight": {
+    "captured_at": "2026-07-15T11:50:00Z",
+    "catalog_before": {
+      "bytes": 2061,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/catalog-before.json",
+      "sha256": "8e881418188c5379958510b1bfae9e9d1ca8622a6784c163410466f6f5e5b0f8"
+    },
+    "container_state": {
+      "container_id": "container-123",
+      "image": "timescale/timescaledb:2.10.2-pg15",
+      "name": "nhms-db",
+      "running": true,
+      "status": "running"
+    },
+    "evidence": {
+      "bytes": 3326,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/preflight.json",
+      "sha256": "5f8adaf30c3c38eb2c0241aab5049a41735c8dec5bcd6fa934a3fdeed76c8419"
+    },
+    "mutation_head_sha": "02b5909462fd6cce8b6c252a3044787742063f2d",
+    "pg_restore_list_exit_code": 0,
+    "quiescent": true,
+    "role": {
+      "current_user": "nhms",
+      "execute_compress_chunk_regclass_boolean": true,
+      "grant_executed": false,
+      "owns_hydro_river_timeseries": true,
+      "owns_met_forcing_station_timeseries": true,
+      "rolcreatedb": true,
+      "rolcreaterole": true,
+      "role_created": false,
+      "role_mutated": false,
+      "rolsuper": true
+    },
+    "schema_dump": {
+      "bytes": 30,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/schema.dump",
+      "sha256": "b4926f2030521117fe27493d9d0d6ca1bd2572f67802b16426aa80d37d010268"
+    },
+    "schema_dump_list": {
+      "bytes": 1114,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/schema-dump-list.json",
+      "sha256": "642b85d02b2a755fa52fcf2cb763c66ef7c741862f5f5d5432942e396ccfa03c"
+    },
+    "units": {
+      "nhms-node27-autopipe.service": {
+        "active": "inactive",
+        "enabled": "static",
+        "journal": {
+          "bytes": 25,
+          "path": "/home/nwm/NWM/.nhms-issue1069-live/nhms-node27-autopipe.service.journal.log",
+          "sha256": "f80e97fc148d272b9ce7e73dd688a65a3ed0b46120975e80e86b8ffb2882b151"
+        },
+        "main_pid": 0,
+        "result": "success",
+        "sub": "dead"
+      },
+      "nhms-node27-autopipe.timer": {
+        "active": "inactive",
+        "enabled": "enabled",
+        "journal": {
+          "bytes": 25,
+          "path": "/home/nwm/NWM/.nhms-issue1069-live/nhms-node27-autopipe.timer.journal.log",
+          "sha256": "f80e97fc148d272b9ce7e73dd688a65a3ed0b46120975e80e86b8ffb2882b151"
+        },
+        "main_pid": 0,
+        "result": "success",
+        "sub": "dead"
+      },
+      "nhms-node27-timeseries-compression-replay.service": {
+        "active": "inactive",
+        "enabled": "static",
+        "journal": {
+          "bytes": 25,
+          "path": "/home/nwm/NWM/.nhms-issue1069-live/nhms-node27-timeseries-compression-replay.service.journal.log",
+          "sha256": "f80e97fc148d272b9ce7e73dd688a65a3ed0b46120975e80e86b8ffb2882b151"
+        },
+        "main_pid": 0,
+        "result": "success",
+        "sub": "dead"
+      },
+      "nhms-node27-timeseries-compression.service": {
+        "active": "inactive",
+        "enabled": "static",
+        "journal": {
+          "bytes": 25,
+          "path": "/home/nwm/NWM/.nhms-issue1069-live/nhms-node27-timeseries-compression.service.journal.log",
+          "sha256": "f80e97fc148d272b9ce7e73dd688a65a3ed0b46120975e80e86b8ffb2882b151"
+        },
+        "main_pid": 0,
+        "result": "success",
+        "sub": "dead"
+      },
+      "nhms-node27-timeseries-compression.timer": {
+        "active": "inactive",
+        "enabled": "enabled",
+        "journal": {
+          "bytes": 25,
+          "path": "/home/nwm/NWM/.nhms-issue1069-live/nhms-node27-timeseries-compression.timer.journal.log",
+          "sha256": "f80e97fc148d272b9ce7e73dd688a65a3ed0b46120975e80e86b8ffb2882b151"
+        },
+        "main_pid": 0,
+        "result": "success",
+        "sub": "dead"
+      }
+    }
+  },
+  "qualifies_task_4_5": true,
+  "receipts": {
+    "dry_run": {
+      "bytes": 1056,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/dry.json",
+      "sha256": "48311c5db354d078ad5b7421537832f1d66d75153d63bbba4b15e2035d6461c8"
+    },
+    "dry_run_invocation": {
+      "bytes": 59787,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/supervisor-ledger.jsonl",
+      "sha256": "3d0f672f0b7b3243987e7d5fa27d66f8165df05b798a978d40f16364b1bfe33c"
+    },
+    "dry_run_schema_valid": true,
+    "dry_run_semantic_valid": true,
+    "enforce": {
+      "bytes": 1061,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/enforce.json",
+      "sha256": "e05ea962db71247b847ac233a05d88fd5d937bca6d9efc6b76682abdade65800"
+    },
+    "enforce_invocation": {
+      "bytes": 59787,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/supervisor-ledger.jsonl",
+      "sha256": "3d0f672f0b7b3243987e7d5fa27d66f8165df05b798a978d40f16364b1bfe33c"
+    },
+    "enforce_schema_valid": true,
+    "enforce_semantic_valid": true
+  },
+  "recovery": {
+    "after_compressed": false,
+    "after_row_count": 12345678,
+    "authorized": true,
+    "before_compressed": true,
+    "before_row_count": 12345678,
+    "compression_preflight_captured_at": "2026-07-15T11:50:00Z",
+    "decompress_finished_at": "2026-07-15T11:45:00Z",
+    "decompress_return_relation": "_timescaledb_internal._hyper_3_7_chunk",
+    "decompress_started_at": "2026-07-15T11:41:00Z",
+    "exit_code": 0,
+    "free_bytes_before": 500000000000,
+    "invocation": {
+      "bytes": 59787,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/supervisor-ledger.jsonl",
+      "sha256": "3d0f672f0b7b3243987e7d5fa27d66f8165df05b798a978d40f16364b1bfe33c"
+    },
+    "mutation_head_sha": "02b5909462fd6cce8b6c252a3044787742063f2d",
+    "node": "node-27",
+    "preflight": {
+      "bytes": 3624,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/recovery-preflight.json",
+      "sha256": "0936ba793d04f7dbf9f53e03d89ea3dd8d485720180b19ba744867ba1507925b"
+    },
+    "preflight_captured_at": "2026-07-15T11:40:00Z",
+    "receipt": {
+      "bytes": 638,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/recovery-receipt.json",
+      "sha256": "e7c4090554fb298177c2a196f68fa39c08ce3f6c912f8bcc4b0e7709a9df31fb"
+    },
+    "row_parity": true,
+    "target": {
+      "chunk_name": "_hyper_3_7_chunk",
+      "chunk_schema": "_timescaledb_internal",
+      "hypertable_name": "river_timeseries",
+      "hypertable_schema": "hydro",
+      "range_end": "2026-06-04T00:00:00Z",
+      "range_start": "2026-05-28T00:00:00Z"
+    }
+  },
+  "schema_version": "3.0",
+  "selection": {
+    "bound": 1,
+    "post_dry_run": {
+      "artifact": {
+        "bytes": 908,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/selection-post-dry-run.json",
+        "sha256": "2db67cb6658930a73da41a9c4341e9532c1628bf00db3dac2f01d39d5db48712"
+      },
+      "candidates_sha256": "8e8a82dea425bc3f5fd2ebc1426eb32ea0da491f08a9876eca382c985d8c3f06",
+      "cutoff_margin_seconds": 2980810,
+      "free_bytes": 500000000000,
+      "observed_at": "2026-07-15T12:00:10Z",
+      "selector_sha256": "9302360c296b6b8ee308e72e9bb431cbe659f3daf6671173fb9b41bf91afbf01"
+    },
+    "pre_enforce": {
+      "artifact": {
+        "bytes": 908,
+        "path": "/home/nwm/NWM/.nhms-issue1069-live/selection-pre-enforce.json",
+        "sha256": "0a60ea9ac31757b46fe9007a48354e41e6a05c9a06533764b5a47af6fb086001"
+      },
+      "candidates_sha256": "8e8a82dea425bc3f5fd2ebc1426eb32ea0da491f08a9876eca382c985d8c3f06",
+      "cutoff_margin_seconds": 2980822,
+      "free_bytes": 500000000000,
+      "observed_at": "2026-07-15T12:00:22Z",
+      "seconds_before_enforce": 8.0,
+      "selector_sha256": "9302360c296b6b8ee308e72e9bb431cbe659f3daf6671173fb9b41bf91afbf01"
+    },
+    "selected": [
+      {
+        "chunk_name": "_hyper_3_7_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "range_end": "2026-06-04T00:00:00Z",
+        "range_start": "2026-05-28T00:00:00Z"
+      }
+    ],
+    "selected_before_bytes": 4115734528
+  },
+  "sizes": {
+    "compressed_chunk_count_delta": 1,
+    "post": {
+      "bytes": 700,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/sizes-post.json",
+      "sha256": "9db0ef1282994cd738deccdcf219a3992fe823e479e9b1af7fdd1788a4a85000"
+    },
+    "post_combined_hypertable_size": 138000000000,
+    "pre": {
+      "bytes": 525,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/sizes-pre.json",
+      "sha256": "f7ff5afd9d79166b79b568af7d59cc1737f079f3dd479c23d8e7639ba9e03595"
+    },
+    "pre_combined_hypertable_size": 142000000000,
+    "selected_after_bytes": 134119424,
+    "selected_before_bytes": 4115734528
+  },
+  "source_manifest": [
+    {
+      "bytes": 3289,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/cleanup.json",
+      "sha256": "b80254e7132084d399a16cce622db9b52ff44fc348987e2d3d96d1180ad6a76b"
+    },
+    {
+      "bytes": 202,
+      "path": "/home/nwm/NWM/infra/systemd/nhms-node27-timeseries-compression.timer",
+      "sha256": "a767fbfd711328f577be0a615aae2e0106b9b17b76aca015f59cc1d1fbdd1e5f"
+    },
+    {
+      "bytes": 443,
+      "path": "/home/nwm/NWM/infra/systemd/nhms-node27-timeseries-compression.service",
+      "sha256": "4653c390e40b1923f9493ebf4acad5e62e114ed6353839016580a3cb003a53d5"
+    },
+    {
+      "bytes": 202,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/installed-compression.timer",
+      "sha256": "a767fbfd711328f577be0a615aae2e0106b9b17b76aca015f59cc1d1fbdd1e5f"
+    },
+    {
+      "bytes": 443,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/installed-compression.service",
+      "sha256": "4653c390e40b1923f9493ebf4acad5e62e114ed6353839016580a3cb003a53d5"
+    },
+    {
+      "bytes": 31,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/final-nhms-node27-timeseries-compression.timer.journal.log",
+      "sha256": "59d5c84ea29afceb2f7077fabcc6a2bd627dac674a41cd8b1721dce92f73c6d6"
+    },
+    {
+      "bytes": 31,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/final-nhms-node27-timeseries-compression.service.journal.log",
+      "sha256": "59d5c84ea29afceb2f7077fabcc6a2bd627dac674a41cd8b1721dce92f73c6d6"
+    },
+    {
+      "bytes": 31,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/final-nhms-node27-timeseries-compression-replay.service.journal.log",
+      "sha256": "59d5c84ea29afceb2f7077fabcc6a2bd627dac674a41cd8b1721dce92f73c6d6"
+    },
+    {
+      "bytes": 31,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/final-nhms-node27-autopipe.timer.journal.log",
+      "sha256": "59d5c84ea29afceb2f7077fabcc6a2bd627dac674a41cd8b1721dce92f73c6d6"
+    },
+    {
+      "bytes": 31,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/final-nhms-node27-autopipe.service.journal.log",
+      "sha256": "59d5c84ea29afceb2f7077fabcc6a2bd627dac674a41cd8b1721dce92f73c6d6"
+    },
+    {
+      "bytes": 28514,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/benchmarks.json",
+      "sha256": "174d2015a89ce35d7770a36ddf68a05c84cb2e5abacc4d0bd2d11fe290d45793"
+    },
+    {
+      "bytes": 30349,
+      "path": "/home/nwm/NWM/apps/api/routes/hydro_display.py",
+      "sha256": "0ca6d3940fce358c883061d15b5877e954ebc2c055ed9db5977a33f343993147"
+    },
+    {
+      "bytes": 59214,
+      "path": "/home/nwm/NWM/services/tiles/mvt.py",
+      "sha256": "8893e6d08a2dbc72cda460cf863ff89518b4b5771ace5170aefbd6044e76f331"
+    },
+    {
+      "bytes": 169946,
+      "path": "/home/nwm/NWM/packages/common/forecast_store.py",
+      "sha256": "a1163f84d32406836ce89481f9e69ed3d2083287a0b2c7a2e902b9af94353fed"
+    },
+    {
+      "bytes": 2277,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/catalog-post.json",
+      "sha256": "47243c33fa34a00e9b161a2f8d6b4a9a5433280c0f605055a9bfe4874d52e63c"
+    },
+    {
+      "bytes": 700,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/sizes-post.json",
+      "sha256": "9db0ef1282994cd738deccdcf219a3992fe823e479e9b1af7fdd1788a4a85000"
+    },
+    {
+      "bytes": 525,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/sizes-pre.json",
+      "sha256": "f7ff5afd9d79166b79b568af7d59cc1737f079f3dd479c23d8e7639ba9e03595"
+    },
+    {
+      "bytes": 956,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/enforce-invocation.json",
+      "sha256": "0544de343356661974f82da373c0c958360858244e65fe385715676aa70d6e56"
+    },
+    {
+      "bytes": 1061,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/enforce.json",
+      "sha256": "e05ea962db71247b847ac233a05d88fd5d937bca6d9efc6b76682abdade65800"
+    },
+    {
+      "bytes": 932,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/dry-invocation.json",
+      "sha256": "faff8d3c9de6578e5a48a6a7a903fd69e7aa6c1ced9aa8578cd02346ef40e806"
+    },
+    {
+      "bytes": 1056,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/dry.json",
+      "sha256": "48311c5db354d078ad5b7421537832f1d66d75153d63bbba4b15e2035d6461c8"
+    },
+    {
+      "bytes": 908,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/selection-pre-enforce.json",
+      "sha256": "0a60ea9ac31757b46fe9007a48354e41e6a05c9a06533764b5a47af6fb086001"
+    },
+    {
+      "bytes": 908,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/selection-post-dry-run.json",
+      "sha256": "2db67cb6658930a73da41a9c4341e9532c1628bf00db3dac2f01d39d5db48712"
+    },
+    {
+      "bytes": 2073,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/catalog-second.json",
+      "sha256": "32470b329a2be4df01e2f5f2c64dfb6cf3ed98d77eac38067df1c0ba057a5334"
+    },
+    {
+      "bytes": 952,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/migration-second-invocation.json",
+      "sha256": "c238a76a461772a4f21f663c5b23cc4be2185b69999c427a639fcd0b75923d34"
+    },
+    {
+      "bytes": 2071,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/catalog-first.json",
+      "sha256": "84b4e9e7e3264216b6916686d21792df08b4b07ba3c1032b8033176d10c37660"
+    },
+    {
+      "bytes": 952,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/migration-first-invocation.json",
+      "sha256": "00af79cc2cc8a8f900f1b3198c843714f33252363a5f98794f46c72cc39e57de"
+    },
+    {
+      "bytes": 2369,
+      "path": "/home/nwm/NWM/db/migrations/000047_hypertable_compression_settings.sql",
+      "sha256": "9ee306ea4f01f517aab8653e002cfea1b2a98b0bbaf563bc955e9bbee6a61933"
+    },
+    {
+      "bytes": 2061,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/catalog-before.json",
+      "sha256": "8e881418188c5379958510b1bfae9e9d1ca8622a6784c163410466f6f5e5b0f8"
+    },
+    {
+      "bytes": 1114,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/schema-dump-list.json",
+      "sha256": "642b85d02b2a755fa52fcf2cb763c66ef7c741862f5f5d5432942e396ccfa03c"
+    },
+    {
+      "bytes": 30,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/schema.dump",
+      "sha256": "b4926f2030521117fe27493d9d0d6ca1bd2572f67802b16426aa80d37d010268"
+    },
+    {
+      "bytes": 3326,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/preflight.json",
+      "sha256": "5f8adaf30c3c38eb2c0241aab5049a41735c8dec5bcd6fa934a3fdeed76c8419"
+    },
+    {
+      "bytes": 25,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/nhms-node27-timeseries-compression.timer.journal.log",
+      "sha256": "f80e97fc148d272b9ce7e73dd688a65a3ed0b46120975e80e86b8ffb2882b151"
+    },
+    {
+      "bytes": 25,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/nhms-node27-timeseries-compression.service.journal.log",
+      "sha256": "f80e97fc148d272b9ce7e73dd688a65a3ed0b46120975e80e86b8ffb2882b151"
+    },
+    {
+      "bytes": 25,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/nhms-node27-timeseries-compression-replay.service.journal.log",
+      "sha256": "f80e97fc148d272b9ce7e73dd688a65a3ed0b46120975e80e86b8ffb2882b151"
+    },
+    {
+      "bytes": 25,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/nhms-node27-autopipe.timer.journal.log",
+      "sha256": "f80e97fc148d272b9ce7e73dd688a65a3ed0b46120975e80e86b8ffb2882b151"
+    },
+    {
+      "bytes": 25,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/nhms-node27-autopipe.service.journal.log",
+      "sha256": "f80e97fc148d272b9ce7e73dd688a65a3ed0b46120975e80e86b8ffb2882b151"
+    },
+    {
+      "bytes": 991,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/recovery-invocation.json",
+      "sha256": "76bf39092f70e02823a001225628822fcb6b1b7b48e1e633992151b33540e612"
+    },
+    {
+      "bytes": 638,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/recovery-receipt.json",
+      "sha256": "e7c4090554fb298177c2a196f68fa39c08ce3f6c912f8bcc4b0e7709a9df31fb"
+    },
+    {
+      "bytes": 3624,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/recovery-preflight.json",
+      "sha256": "0936ba793d04f7dbf9f53e03d89ea3dd8d485720180b19ba744867ba1507925b"
+    },
+    {
+      "bytes": 59787,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/supervisor-ledger.jsonl",
+      "sha256": "3d0f672f0b7b3243987e7d5fa27d66f8165df05b798a978d40f16364b1bfe33c"
+    },
+    {
+      "bytes": 9204,
+      "path": "/home/nwm/NWM/.nhms-issue1069-live/run-plan.json",
+      "sha256": "12ecac3a2d7d1724a00cc815eaf92f99693784e5aa7c8b37ea8b1c6bd370a0b4"
+    }
+  ],
+  "verdict": "PASS_TASK_4_5",
+  "verifier_head_sha": "89abcdef0123456789abcdef0123456789abcdef"
+}

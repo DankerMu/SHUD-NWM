@@ -38,6 +38,11 @@ minio-data/
 .nhms-runs/
 .nhms-workspace/
 .nhms-object-store/
+# Node-27 per-issue live-evidence directories (mode-0600 receipts; never synced).
+# The replay supervisor's checkout-lineage gate runs
+# `git status --porcelain=v1 --untracked-files=normal` and fails closed on ANY
+# untracked entry, so these MUST be ignored for the replay to be executable.
+.nhms-issue*-live/
 
 # Subagent-workflow session-local review artifacts (persistent record lives in docs/review-loop-log.jsonl)
 .workplans/

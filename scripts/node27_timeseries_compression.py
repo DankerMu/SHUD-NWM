@@ -21,23 +21,35 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import stat
+import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
+from packages.common.evidence_io import (
+    BoundedEvidenceError,
+    acquire_exclusive_flock_until,
+    assert_paths_disjoint,
+    inspect_bounded_file_no_follow,
+    normalized_absolute_path,
+)
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
     ensure_directory_no_follow,
     open_directory_no_follow,
+    verify_directory_no_follow,
 )
 
-SCHEMA_VERSION = "1.0"
-TOOL_VERSION = "node27-timeseries-compression/1"
+SCHEMA_VERSION = "2.0"
+TOOL_VERSION = "node27-timeseries-compression/2"
+PUBLISH_LOCK_TIMEOUT_SECONDS = 5.0
 
 # The two detail hypertables gated by D3. Ordering here is the tie-break in
 # chunk selection and per-table totals — do not reorder without matching the
@@ -55,10 +67,46 @@ HYPERTABLES: tuple[tuple[str, str], ...] = (
 # overall run.
 _QUERY_TIMEOUT_MS = 60_000
 _COMPRESS_TIMEOUT_MS = 300_000
+_CONNECT_TIMEOUT_SECONDS = 10
+_MAX_CATALOG_ROWS = 50_000
+_MAX_CATALOG_BYTES = 16 * 1024**2
+_MAX_CANDIDATES = 10_000
 
 
 class CompressionConfigError(RuntimeError):
     """Fail-closed configuration parse error before any DB call."""
+
+
+def _current_head_sha(*, require_clean: bool = False) -> str:
+    """Freeze the exact repository HEAD before selection or mutation begins."""
+    repo_root = Path(__file__).resolve().parents[1]
+    try:
+        if require_clean:
+            cleanliness = subprocess.run(
+                ["git", "diff", "--quiet", "HEAD", "--"],
+                cwd=repo_root,
+                check=False,
+                timeout=10,
+            )
+        else:
+            cleanliness = None
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise CompressionConfigError("cannot bind receipt to repository HEAD") from error
+    if cleanliness is not None:
+        if cleanliness.returncode != 0:
+            raise CompressionConfigError("runner worktree differs from repository HEAD")
+    head_sha = result.stdout.strip()
+    if result.returncode != 0 or re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
+        raise CompressionConfigError("cannot bind receipt to repository HEAD")
+    return head_sha
 
 
 @dataclass(frozen=True)
@@ -119,14 +167,20 @@ def _parse_positive_int(raw: str | None, *, name: str, minimum: int) -> int:
     return value
 
 
-def config_from_args(
-    args: argparse.Namespace, env: Mapping[str, str] | None = None
-) -> CompressionConfig:
+def config_from_args(args: argparse.Namespace, env: Mapping[str, str] | None = None) -> CompressionConfig:
     """Strict env + CLI parse. No truthiness fallback. Fails closed on bad shape."""
     env = os.environ if env is None else env
-    database_url = env.get("DATABASE_URL")
-    if not database_url or not database_url.strip():
-        raise CompressionConfigError("DATABASE_URL must be set")
+    receipt_raw = (
+        args.receipt_path if args.receipt_path is not None else env.get("NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH")
+    )
+    lock_raw = args.lock_path if args.lock_path is not None else env.get("NODE27_TIMESERIES_COMPRESSION_LOCK_PATH")
+    if not receipt_raw:
+        raise CompressionConfigError(
+            "receipt path must be set via --receipt-path or NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH"
+        )
+    receipt_path = Path(str(receipt_raw))
+    if not receipt_path.is_absolute():
+        raise CompressionConfigError("receipt path must be absolute")
     lag_seconds = _parse_positive_int(
         env.get("NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS"),
         name="NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS",
@@ -137,28 +191,18 @@ def config_from_args(
         name="NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND",
         minimum=1,
     )
-    receipt_raw = (
-        args.receipt_path if args.receipt_path is not None else env.get("NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH")
-    )
-    lock_raw = (
-        args.lock_path if args.lock_path is not None else env.get("NODE27_TIMESERIES_COMPRESSION_LOCK_PATH")
-    )
-    if not receipt_raw:
-        raise CompressionConfigError(
-            "receipt path must be set via --receipt-path or "
-            "NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH"
-        )
     if not lock_raw:
-        raise CompressionConfigError(
-            "lock path must be set via --lock-path or "
-            "NODE27_TIMESERIES_COMPRESSION_LOCK_PATH"
-        )
-    receipt_path = Path(str(receipt_raw))
+        raise CompressionConfigError("lock path must be set via --lock-path or NODE27_TIMESERIES_COMPRESSION_LOCK_PATH")
     lock_path = Path(str(lock_raw))
-    if not receipt_path.is_absolute():
-        raise CompressionConfigError("receipt path must be absolute")
     if not lock_path.is_absolute():
         raise CompressionConfigError("lock path must be absolute")
+    try:
+        assert_paths_disjoint(receipt_path, [lock_path], label="compression receipt")
+    except BoundedEvidenceError as error:
+        raise CompressionConfigError(str(error)) from error
+    database_url = env.get("DATABASE_URL")
+    if not database_url or not database_url.strip():
+        raise CompressionConfigError("DATABASE_URL must be set")
     return CompressionConfig(
         database_url=database_url,
         lag_seconds=lag_seconds,
@@ -235,6 +279,24 @@ ORDER BY hypertable_schema, hypertable_name, range_end ASC
 """
 
 
+# TimescaleDB 2.10 exposes compression state in
+# ``timescaledb_information.chunks`` but does not expose the compressed
+# sibling relation name there.  Resolve the origin -> sibling mapping from
+# the extension's chunk catalog instead.  The node-27 live oracle runs 2.10.2;
+# querying non-existent ``compressed_chunk_schema/name`` information-view
+# columns would fail only after ``compress_chunk`` had already mutated data.
+_COMPRESSED_SIBLING_QUERY = """
+SELECT sibling.schema_name, sibling.table_name
+FROM _timescaledb_catalog.chunk AS origin
+JOIN _timescaledb_catalog.chunk AS sibling
+  ON sibling.id = origin.compressed_chunk_id
+WHERE origin.schema_name = %s
+  AND origin.table_name = %s
+  AND NOT origin.dropped
+  AND NOT sibling.dropped
+"""
+
+
 def _row_to_chunk(row: Mapping[str, Any]) -> ChunkRow:
     range_start = row["range_start"]
     range_end = row["range_end"]
@@ -272,29 +334,58 @@ def _iso(value: datetime) -> str:
 FetchChunks = Callable[[str], list[ChunkRow]]
 MeasureChunkBytes = Callable[..., int]
 CompressChunk = Callable[[str, ChunkRow], None]
+ReconcileChunkState = Callable[[str, ChunkRow], bool]
 
 
 def _default_fetch_chunks(database_url: str) -> list[ChunkRow]:
     import psycopg2  # type: ignore[import-untyped]
     import psycopg2.extras  # type: ignore[import-untyped]
 
-    connection = psycopg2.connect(database_url, cursor_factory=psycopg2.extras.RealDictCursor)
+    connection = psycopg2.connect(
+        database_url,
+        connect_timeout=_CONNECT_TIMEOUT_SECONDS,
+        cursor_factory=psycopg2.extras.RealDictCursor,
+    )
     try:
         with connection:
-            with connection.cursor() as cursor:
-                cursor.execute(f"SET statement_timeout = {_QUERY_TIMEOUT_MS}")
-                cursor.execute(_CHUNK_QUERY)
-                return [_row_to_chunk(row) for row in cursor.fetchall()]
+            with connection.cursor() as setup_cursor:
+                setup_cursor.execute(f"SET statement_timeout = {_QUERY_TIMEOUT_MS}")
+            cursor_name = f"nhms_compression_catalog_{os.getpid()}"
+            with connection.cursor(name=cursor_name, cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                cursor.itersize = 1000
+                cursor.execute(
+                    f"SELECT * FROM ({_CHUNK_QUERY.rstrip().rstrip(';')}) bounded_catalog LIMIT %s",
+                    (min(_MAX_CATALOG_ROWS, _MAX_CANDIDATES) + 1,),
+                )
+                chunks: list[ChunkRow] = []
+                captured_bytes = 2
+                while True:
+                    rows = cursor.fetchmany(1000)
+                    if not rows:
+                        break
+                    for row in rows:
+                        captured_bytes += len(
+                            json.dumps(
+                                dict(row),
+                                sort_keys=True,
+                                default=str,
+                                separators=(",", ":"),
+                            ).encode()
+                        )
+                        if captured_bytes > _MAX_CATALOG_BYTES:
+                            raise CompressionConfigError("catalog discovery exceeds the byte ceiling")
+                        chunks.append(_row_to_chunk(row))
+                        if len(chunks) > min(_MAX_CATALOG_ROWS, _MAX_CANDIDATES):
+                            raise CompressionConfigError("catalog discovery exceeds the row/candidate ceiling")
+                return chunks
     finally:
         connection.close()
 
 
-def _default_measure_chunk_bytes(
-    database_url: str, chunk: ChunkRow, *, after: bool = False
-) -> int:
+def _default_measure_chunk_bytes(database_url: str, chunk: ChunkRow, *, after: bool = False) -> int:
     import psycopg2  # type: ignore[import-untyped]
 
-    connection = psycopg2.connect(database_url)
+    connection = psycopg2.connect(database_url, connect_timeout=_CONNECT_TIMEOUT_SECONDS)
     try:
         with connection:
             with connection.cursor() as cursor:
@@ -310,11 +401,7 @@ def _default_measure_chunk_bytes(
                     # the outer per-chunk try/except records ``after_bytes =
                     # null`` in the descriptor and marks outcome=partial.
                     cursor.execute(
-                        """
-                        SELECT compressed_chunk_schema, compressed_chunk_name
-                        FROM timescaledb_information.chunks
-                        WHERE chunk_schema = %s AND chunk_name = %s
-                        """,
+                        _COMPRESSED_SIBLING_QUERY,
                         (chunk.chunk_schema, chunk.chunk_name),
                     )
                     row = cursor.fetchone()
@@ -342,7 +429,7 @@ def _default_measure_chunk_bytes(
 def _default_compress_chunk(database_url: str, chunk: ChunkRow) -> None:
     import psycopg2  # type: ignore[import-untyped]
 
-    connection = psycopg2.connect(database_url)
+    connection = psycopg2.connect(database_url, connect_timeout=_CONNECT_TIMEOUT_SECONDS)
     try:
         with connection:
             with connection.cursor() as cursor:
@@ -352,6 +439,40 @@ def _default_compress_chunk(database_url: str, chunk: ChunkRow) -> None:
                     (f"{chunk.chunk_schema}.{chunk.chunk_name}",),
                 )
                 cursor.fetchone()
+    finally:
+        connection.close()
+
+
+def _default_reconcile_chunk_state(database_url: str, chunk: ChunkRow) -> bool:
+    """Read the exact target through a fresh catalog connection after uncertainty."""
+
+    import psycopg2  # type: ignore[import-untyped]
+
+    connection = psycopg2.connect(database_url, connect_timeout=_CONNECT_TIMEOUT_SECONDS)
+    try:
+        connection.set_session(readonly=True, autocommit=True)
+        with connection.cursor() as cursor:
+            cursor.execute(f"SET statement_timeout = {_QUERY_TIMEOUT_MS}")
+            cursor.execute(
+                """
+                SELECT is_compressed
+                FROM timescaledb_information.chunks
+                WHERE hypertable_schema = %s
+                  AND hypertable_name = %s
+                  AND chunk_schema = %s
+                  AND chunk_name = %s
+                """,
+                (
+                    chunk.hypertable_schema,
+                    chunk.hypertable_name,
+                    chunk.chunk_schema,
+                    chunk.chunk_name,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None or not isinstance(row[0], bool):
+                raise RuntimeError("exact target catalog state unavailable")
+            return row[0]
     finally:
         connection.close()
 
@@ -403,7 +524,14 @@ def _descriptor(chunk: ChunkRow, *, before: int, after: int | None) -> dict[str,
         "range_end": _iso(chunk.range_end),
         "before_bytes": before,
         "after_bytes": after,
+        "mutation_state": "not_applicable",
     }
+
+
+def _safe_failure(operation: str, error: Exception) -> str:
+    """Describe failure class without copying credential-bearing exception text."""
+
+    return f"{operation} failed ({type(error).__name__})"
 
 
 def build_receipt(
@@ -413,8 +541,13 @@ def build_receipt(
     fetch_chunks: FetchChunks,
     measure_chunk_bytes: MeasureChunkBytes,
     compress_chunk: CompressChunk,
+    reconcile_chunk_state: ReconcileChunkState = _default_reconcile_chunk_state,
+    head_sha: str | None = None,
 ) -> dict[str, Any]:
     """Perform the selection + (optionally) compression and return the receipt."""
+    frozen_head_sha = head_sha or _current_head_sha()
+    if re.fullmatch(r"[0-9a-f]{40}", frozen_head_sha) is None:
+        raise CompressionConfigError("receipt head_sha must be a lowercase 40-hex Git SHA")
     chunks = fetch_chunks(config.database_url)
     selected_rows, deferred_rows, skipped_rows = _classify(
         chunks,
@@ -452,7 +585,9 @@ def build_receipt(
             before = int(measure_chunk_bytes(config.database_url, chunk))
         except Exception as error:
             descriptor = _descriptor(chunk, before=0, after=None)
-            descriptor["error"] = f"measure_chunk_bytes(before) failed: {error}"
+            if config.enforce:
+                descriptor["mutation_state"] = "failed_before_mutation"
+            descriptor["error"] = _safe_failure("measure_chunk_bytes(before)", error)
             any_errors = True
             # Chunk never reached compressed state — do NOT contribute to any
             # totals — but poison after_bytes so successful siblings in the
@@ -467,23 +602,53 @@ def build_receipt(
             try:
                 compress_chunk(config.database_url, chunk)
             except Exception as error:  # per-chunk isolation per issue spec
-                descriptor = _descriptor(chunk, before=before, after=None)
-                descriptor["error"] = f"compress_chunk failed: {error}"
+                try:
+                    reconciled_compressed = reconcile_chunk_state(config.database_url, chunk)
+                except Exception:
+                    descriptor = _descriptor(chunk, before=before, after=None)
+                    descriptor["mutation_state"] = "indeterminate"
+                    descriptor["error"] = "compress_chunk result indeterminate; exact-target reconciliation unavailable"
+                    any_errors = True
+                    after_poisoned[chunk.hypertable_key] = True
+                    selected_descriptors.append(descriptor)
+                    continue
+                if not reconciled_compressed:
+                    descriptor = _descriptor(chunk, before=before, after=None)
+                    descriptor["mutation_state"] = "failed_before_mutation"
+                    descriptor["error"] = _safe_failure("compress_chunk before mutation", error)
+                    any_errors = True
+                    after_poisoned[chunk.hypertable_key] = True
+                    selected_descriptors.append(descriptor)
+                    continue
+                # The commit happened even though its acknowledgement was
+                # lost. Preserve committed truth and continue to a fresh size
+                # measurement; the top-level result remains partial because
+                # the invocation itself did not complete normally.
                 any_errors = True
-                # Chunk never reached compressed state — do NOT contribute to
-                # chunks_compressed OR before_bytes (round-3 closure R3-01:
-                # including a failed chunk's before while excluding it from
-                # chunks_compressed would inflate the (before-after)/before
-                # savings ratio computed by any downstream consumer). Poison
-                # after_bytes so successful siblings cannot masquerade either.
-                after_poisoned[chunk.hypertable_key] = True
+                totals[chunk.hypertable_key]["before_bytes"] += before
+                totals[chunk.hypertable_key]["chunks_compressed"] += 1
+                try:
+                    after = int(measure_chunk_bytes(config.database_url, chunk, after=True))
+                except Exception:
+                    descriptor = _descriptor(chunk, before=before, after=None)
+                    descriptor["mutation_state"] = "committed"
+                    descriptor["error"] = "compression committed; post-measurement unavailable"
+                    after_poisoned[chunk.hypertable_key] = True
+                    selected_descriptors.append(descriptor)
+                    continue
+                descriptor = _descriptor(chunk, before=before, after=after)
+                descriptor["mutation_state"] = "committed"
+                descriptor["error"] = "compression committed after lost acknowledgement"
+                totals[chunk.hypertable_key]["after_bytes"] += after
+                saw_after[chunk.hypertable_key] = True
                 selected_descriptors.append(descriptor)
                 continue
             try:
                 after = int(measure_chunk_bytes(config.database_url, chunk, after=True))
             except Exception as error:
                 descriptor = _descriptor(chunk, before=before, after=None)
-                descriptor["error"] = f"measure_chunk_bytes(after) failed: {error}"
+                descriptor["mutation_state"] = "committed"
+                descriptor["error"] = _safe_failure("measure_chunk_bytes(after)", error)
                 any_errors = True
                 # The compression itself did succeed, so the chunk reached the
                 # compressed state — record chunks_compressed + before_bytes.
@@ -495,6 +660,7 @@ def build_receipt(
                 selected_descriptors.append(descriptor)
                 continue
             descriptor = _descriptor(chunk, before=before, after=after)
+            descriptor["mutation_state"] = "committed"
             key = chunk.hypertable_key
             totals[key]["chunks_compressed"] += 1
             totals[key]["before_bytes"] += before
@@ -521,15 +687,26 @@ def build_receipt(
         outcome = "clean"
 
     deferred_descriptors = [
-        {**_descriptor(chunk, before=0, after=None), "defer_reason": "per-tick bound reached"}
+        {
+            **{
+                key: value for key, value in _descriptor(chunk, before=0, after=None).items() if key != "mutation_state"
+            },
+            "defer_reason": "per-tick bound reached",
+        }
         for chunk in deferred_rows
     ]
     skipped_descriptors = [
-        {**_descriptor(chunk, before=0, after=None), "skip_reason": "range_end inside lag window"}
+        {
+            **{
+                key: value for key, value in _descriptor(chunk, before=0, after=None).items() if key != "mutation_state"
+            },
+            "skip_reason": "range_end inside lag window",
+        }
         for chunk in skipped_rows
     ]
     return {
         "schema_version": SCHEMA_VERSION,
+        "head_sha": frozen_head_sha,
         "generated_at": _iso(datetime.now(UTC)),
         "now_utc": _iso(now_utc),
         "lag_seconds": config.lag_seconds,
@@ -545,9 +722,210 @@ def build_receipt(
 
 def publish_receipt(config: CompressionConfig, receipt: Mapping[str, Any]) -> None:
     payload = (json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-    atomic_write_bytes_no_follow(
-        config.receipt_path, payload, mode=0o600, require_durable_replace=True
+    atomic_write_bytes_no_follow(config.receipt_path, payload, mode=0o600, require_durable_replace=True)
+
+
+def build_refused_lock_receipt(
+    config: CompressionConfig, *, now_utc: datetime, head_sha: str | None = None
+) -> dict[str, Any]:
+    """Build the mutation-free terminal receipt for a contended runner lock.
+
+    This path deliberately does not discover chunks: lock ownership is the
+    boundary before every DB call.  Publishing the refusal replaces any stale
+    success receipt so governance sees the current invocation's terminal
+    state.
+    """
+    frozen_head_sha = head_sha or _current_head_sha()
+    if re.fullmatch(r"[0-9a-f]{40}", frozen_head_sha) is None:
+        raise CompressionConfigError("receipt head_sha must be a lowercase 40-hex Git SHA")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "head_sha": frozen_head_sha,
+        "generated_at": _iso(datetime.now(UTC)),
+        "now_utc": _iso(now_utc),
+        "lag_seconds": config.lag_seconds,
+        "per_tick_bound": config.per_tick_bound,
+        "mode": "enforce" if config.enforce else "dry-run",
+        "outcome": "refused_lock",
+        "selected": [],
+        "deferred": [],
+        "skipped": [],
+        "per_table_totals": {
+            key: {
+                "before_bytes": 0,
+                "after_bytes": None,
+                "chunks_compressed": 0,
+            }
+            for key in _blank_totals()
+        },
+    }
+
+
+def build_failed_receipt(
+    config: CompressionConfig,
+    *,
+    now_utc: datetime,
+    stage: str,
+    head_sha: str | None,
+    mutation_state: str = "failed_before_mutation",
+) -> dict[str, Any]:
+    """Build a non-secret terminal failure that replaces any stale success."""
+
+    receipt: dict[str, Any] = {
+        "schema_version": "2.0",
+        "provenance_state": "bound" if head_sha is not None else "unavailable",
+        "generated_at": _iso(datetime.now(UTC)),
+        "now_utc": _iso(now_utc),
+        "lag_seconds": config.lag_seconds,
+        "per_tick_bound": config.per_tick_bound,
+        "mode": "enforce" if config.enforce else "dry-run",
+        "outcome": "failed",
+        "selected": [],
+        "deferred": [],
+        "skipped": [],
+        "per_table_totals": {
+            key: {"before_bytes": 0, "after_bytes": None, "chunks_compressed": 0} for key in _blank_totals()
+        },
+        "failure": {"stage": stage, "mutation_state": mutation_state},
+    }
+    if head_sha is not None:
+        receipt["head_sha"] = head_sha
+        receipt["mutation_head_sha"] = head_sha
+    return receipt
+
+
+@dataclass(frozen=True)
+class _SafeReceiptTarget:
+    path: Path
+    device: int
+    inode: int
+    sha256: str
+
+
+def _known_safe_receipt_path(
+    args: argparse.Namespace, env: Mapping[str, str] | None = None
+) -> _SafeReceiptTarget | None:
+    """Return an early failure destination only when it is disjoint from the lock."""
+
+    env = os.environ if env is None else env
+    receipt_raw = (
+        args.receipt_path if args.receipt_path is not None else env.get("NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH")
     )
+    lock_raw = args.lock_path if args.lock_path is not None else env.get("NODE27_TIMESERIES_COMPRESSION_LOCK_PATH")
+    if not receipt_raw or not lock_raw:
+        return None
+    path = Path(str(receipt_raw))
+    lock_path = Path(str(lock_raw))
+    if not path.is_absolute() or not lock_path.is_absolute():
+        return None
+    if normalized_absolute_path(path) == normalized_absolute_path(lock_path):
+        return None
+    try:
+        receipt_info = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return None
+    try:
+        lock_info = os.lstat(lock_path)
+    except FileNotFoundError:
+        lock_info = None
+    except (OSError, ValueError):
+        return None
+    if not stat.S_ISREG(receipt_info.st_mode) or receipt_info.st_nlink != 1:
+        return None
+    if lock_info is not None and not stat.S_ISREG(lock_info.st_mode):
+        return None
+    if lock_info is not None and (
+        receipt_info.st_dev,
+        receipt_info.st_ino,
+    ) == (lock_info.st_dev, lock_info.st_ino):
+        return None
+    try:
+        verify_directory_no_follow(path.parent)
+        verify_directory_no_follow(lock_path.parent)
+    except (OSError, SafeFilesystemError, ValueError):
+        return None
+    try:
+        identity = inspect_bounded_file_no_follow(path, max_bytes=16 * 1024**2, label="early receipt")
+    except BoundedEvidenceError:
+        return None
+    if (identity.device, identity.inode) != (receipt_info.st_dev, receipt_info.st_ino):
+        return None
+    return _SafeReceiptTarget(path, identity.device, identity.inode, identity.sha256)
+
+
+def _replace_early_stale_with_failure(
+    target: _SafeReceiptTarget,
+    *,
+    enforce: bool,
+    now_utc: datetime,
+    stage: str,
+) -> None:
+    """Publish a schema-v2 provenance-unavailable tombstone without config lies."""
+
+    payload = {
+        "schema_version": "2.0",
+        "generated_at": _iso(datetime.now(UTC)),
+        "now_utc": _iso(now_utc),
+        "mode": "enforce" if enforce else "dry-run",
+        "outcome": "failed",
+        "provenance_state": "unavailable",
+        "failure": {
+            "stage": stage,
+            "mutation_state": "failed_before_mutation",
+        },
+    }
+    lock_path = target.path.with_name(f".{target.path.name}.publish.lock")
+    try:
+        lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        acquire_exclusive_flock_until(
+            lock_fd,
+            deadline_monotonic=time.monotonic() + PUBLISH_LOCK_TIMEOUT_SECONDS,
+            label="early failure receipt publication",
+        )
+        current = inspect_bounded_file_no_follow(target.path, max_bytes=16 * 1024**2, label="early receipt")
+        if (current.device, current.inode, current.sha256) != (target.device, target.inode, target.sha256):
+            return
+        atomic_write_bytes_no_follow(
+            target.path,
+            (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode(),
+            mode=0o600,
+            require_durable_replace=True,
+        )
+    except (BoundedEvidenceError, OSError, SafeFilesystemError):
+        return
+    finally:
+        if "lock_fd" in locals():
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_fd)
+
+
+def _replace_stale_with_failure(
+    config: CompressionConfig,
+    *,
+    now_utc: datetime,
+    stage: str,
+    head_sha: str | None,
+    mutation_state: str = "failed_before_mutation",
+) -> None:
+    try:
+        publish_receipt(
+            config,
+            build_failed_receipt(
+                config,
+                now_utc=now_utc,
+                stage=stage,
+                head_sha=head_sha,
+                mutation_state=mutation_state,
+            ),
+        )
+    except SafeFilesystemError:
+        # Publication failure is reported by the caller; no claim that the
+        # stale destination was replaced is made.
+        return
 
 
 def _emit_stderr_diagnostic(status: str, reason: str, dsn: str | None = None) -> None:
@@ -564,21 +942,67 @@ def main(
     fetch_chunks: FetchChunks | None = None,
     measure_chunk_bytes: MeasureChunkBytes | None = None,
     compress_chunk: CompressChunk | None = None,
+    reconcile_chunk_state: ReconcileChunkState | None = None,
 ) -> int:
+    now = now_utc or datetime.now(UTC)
     try:
         args = _parser().parse_args(argv)
-        config = config_from_args(args)
     except CompressionConfigError as error:
         _emit_stderr_diagnostic("failed", str(error))
         return 1
-    now = now_utc or datetime.now(UTC)
+    safe_receipt_path = _known_safe_receipt_path(args)
+    try:
+        config = config_from_args(args)
+    except CompressionConfigError as error:
+        if safe_receipt_path is not None:
+            _replace_early_stale_with_failure(
+                safe_receipt_path,
+                enforce=bool(args.enforce),
+                now_utc=now,
+                stage="config",
+            )
+        _emit_stderr_diagnostic("failed", str(error))
+        return 1
+    try:
+        frozen_head_sha = _current_head_sha(require_clean=True)
+    except CompressionConfigError as error:
+        _replace_stale_with_failure(
+            config,
+            now_utc=now,
+            stage="freeze_head",
+            head_sha=None,
+        )
+        _emit_stderr_diagnostic("failed", str(error), dsn=config.database_url)
+        return 1
     try:
         lock_fd = acquire_lock(config.lock_path)
     except CompressionConfigError as error:
+        _replace_stale_with_failure(
+            config,
+            now_utc=now,
+            stage="acquire_lock",
+            head_sha=frozen_head_sha,
+        )
         _emit_stderr_diagnostic("failed", str(error))
         return 1
     if lock_fd is None:
-        _emit_stderr_diagnostic("skipped", "lock-contended", dsn=config.database_url)
+        receipt = build_refused_lock_receipt(config, now_utc=now, head_sha=frozen_head_sha)
+        try:
+            publish_receipt(config, receipt)
+        except SafeFilesystemError as error:
+            _replace_stale_with_failure(
+                config,
+                now_utc=now,
+                stage="publish_refused_lock",
+                head_sha=frozen_head_sha,
+            )
+            _emit_stderr_diagnostic(
+                "failed",
+                f"receipt publication error: {error}",
+                dsn=config.database_url,
+            )
+            return 1
+        _emit_stderr_diagnostic("refused_lock", "lock-contended", dsn=config.database_url)
         return 0
     try:
         try:
@@ -588,19 +1012,51 @@ def main(
                 fetch_chunks=fetch_chunks or _default_fetch_chunks,
                 measure_chunk_bytes=measure_chunk_bytes or _default_measure_chunk_bytes,
                 compress_chunk=compress_chunk or _default_compress_chunk,
+                reconcile_chunk_state=reconcile_chunk_state or _default_reconcile_chunk_state,
+                head_sha=frozen_head_sha,
             )
         except CompressionConfigError as error:
+            _replace_stale_with_failure(
+                config,
+                now_utc=now,
+                stage="runner",
+                head_sha=frozen_head_sha,
+            )
             _emit_stderr_diagnostic("failed", str(error), dsn=config.database_url)
             return 1
         except SafeFilesystemError as error:
+            _replace_stale_with_failure(
+                config,
+                now_utc=now,
+                stage="runner",
+                head_sha=frozen_head_sha,
+            )
             _emit_stderr_diagnostic("failed", f"receipt publication error: {error}", dsn=config.database_url)
             return 1
         except Exception as error:
-            _emit_stderr_diagnostic("failed", f"compression runner error: {error}", dsn=config.database_url)
+            _replace_stale_with_failure(
+                config,
+                now_utc=now,
+                stage="runner",
+                head_sha=frozen_head_sha,
+                mutation_state="indeterminate" if config.enforce else "failed_before_mutation",
+            )
+            _emit_stderr_diagnostic(
+                "failed",
+                f"compression runner error ({type(error).__name__})",
+                dsn=config.database_url,
+            )
             return 1
         try:
             publish_receipt(config, receipt)
         except SafeFilesystemError as error:
+            _replace_stale_with_failure(
+                config,
+                now_utc=now,
+                stage="publish_receipt",
+                head_sha=frozen_head_sha,
+                mutation_state=("indeterminate" if config.enforce else "failed_before_mutation"),
+            )
             _emit_stderr_diagnostic("failed", f"receipt publication error: {error}", dsn=config.database_url)
             return 1
         return 0 if receipt["outcome"] == "clean" else 1

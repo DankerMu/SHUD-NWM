@@ -53,6 +53,11 @@ else
 fi
 export PYTHONPATH
 
+[ -x /usr/bin/timeout ] || {
+  echo '{"status":"failed","reason":"timeout launcher is unavailable"}' >&2
+  exit 1
+}
+
 if ! "$PYTHON_BIN" -c '
 import importlib.machinery
 import os
@@ -82,4 +87,4 @@ raise SystemExit(0 if valid else 1)
   exit 1
 fi
 
-exec "$PYTHON_BIN" "$SCRIPT" "$@"
+exec /usr/bin/timeout --signal=TERM --kill-after=30s 900s "$PYTHON_BIN" "$SCRIPT" "$@"

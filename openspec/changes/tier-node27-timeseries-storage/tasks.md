@@ -974,7 +974,7 @@ Order is load-bearing:
 
 ## 4. Hypertable compression (`hypertable-compression`)
 
-- [ ] 4.1 Migration `000047`: compression settings for both hypertables. (Issue #851 body still cites `000043` from the earlier planning window; slot 000043–000046 are now occupied, so this task uses the next free slot 000047. #851 fixture in `design.md` records the deviation.)
+- [x] 4.1 Migration `000047`: compression settings for both hypertables. (Issue #851 body still cites `000043` from the earlier planning window; slot 000043–000046 are now occupied, so this task uses the next free slot 000047. #851 fixture in `design.md` records the deviation.)
   Evidence floor: `ALTER TABLE ... SET (timescaledb.compress,
   compress_segmentby, compress_orderby)` per design D3; no policy job.
   Verification on the real-DB oracle:
@@ -986,7 +986,12 @@ Order is load-bearing:
   Test rows:
   - Input: migration applied on the node-27 real-DB oracle.
     Expected: both catalog assertions above pass for both hypertables.
-- [ ] 4.2 Build the compression runner
+  Closure evidence (#1069, 2026-07-15): both guarded applies exited zero;
+  their canonical catalog documents were byte-identical. Both hypertables
+  report compression enabled, the nine indexed D3 segment/order settings
+  match exactly, and no compression-policy job exists. This migration task is
+  complete independently of task 4.5's rejected terminal envelope.
+- [x] 4.2 Build the compression runner
   (`scripts/node27_timeseries_compression.py` + `_once.sh`).
   Evidence floor: compresses only chunks whose `range_end` is older than the
   configurable lag (default 7d), never the active chunk; dry-run default +
@@ -1000,6 +1005,16 @@ Order is load-bearing:
   - Input: run without the enforce flag, or with the flock already held.
     Expected: nothing compressed; dry-run candidate list or lock-skip
     receipt emitted.
+  Implementation evidence (#1069, 2026-07-15): lock contention atomically
+  replaces stale evidence with a schema-valid `refused_lock` receipt while
+  making zero DB calls; the committed service has the sole literal
+  `--enforce` wiring and the manual wrapper remains dry-run by default. The
+  runner plus independent live-evidence verifier focused suites, storage
+  schema suite, ruff, both schema examples/metaschemas, strict OpenSpec, and
+  `git diff --check` pass locally. Task 4.1 is closed by the live catalog
+  evidence. The recorded v2 replay later exposed expanded-fixture invariant
+  gaps; task 4.5 remains open pending fresh live evidence under the strengthened
+  contract below.
 - [x] 4.3 Add the fail-closed compressed-chunk write guard to all three
   hypertable write paths.
   Evidence floor: one shared pre-write helper detects compressed-chunk
@@ -1034,6 +1049,163 @@ Order is load-bearing:
   reduced; compressed-chunk count > 0) and representative curve/MVT query
   timings before/after (acceptance: no representative query regresses past
   the threshold documented in the receipt).
+  Issue #1069 closure note: the mandatory fixture in `design.md` additionally
+  requires exact D3 catalog proof, a schema forensic snapshot, successful-first
+  idempotency evidence, quiesced ingest, and one dry-run-bound exact selected
+  chunk (`bound=1`, at most 8 GiB, 300 GiB free-space headroom, 900-second
+  external timeout). Independent schema/semantic/sha256 validation and the
+  actual production curve/MVT SQL must pass the pinned warm-cache thresholds.
+  The committed read-only benchmark helper derives both SQL/bind sets from
+  production source, captures cold/warmup/activity plus seven complete plans,
+  and fail-closes before/after merge on any production identity drift.
+  The compression timer is installed and enabled but remains inactive. This
+  issue also closes the discovered task-4.2 lock-receipt gap and #853 wiring
+  gap: contention publishes `refused_lock`, while the committed timer service
+  invokes the wrapper with literal `--enforce`. Task 4.2 is closed by the
+  local implementation evidence above and task 4.1 by the catalog proof;
+  task 4.5 is not closed by the recorded replay below. The node-27 pre-mutation
+  probe also
+  proved that TimescaleDB 2.10 requires compressed-sibling resolution through
+  `_timescaledb_catalog.chunk.compressed_chunk_id`; the runner and regression
+  test pin that live-compatible lookup before any `compress_chunk` call. The
+  independent verifier also binds the exact sibling while allowing at most
+  1 MiB of post-measurement FSM/VM drift; larger drift or failure to reduce
+  below the origin remains terminal failure.
+  Historical v1 outcome and evidence gap (#1069, 2026-07-15): receipts are
+  `docs/runbooks/receipts/tier-node27-timeseries-storage/timeseries-compression/`.
+  The exact bound-1 enforce compressed one hydro terminal chunk from
+  4,115,734,528 to 134,119,424 bytes; combined two-table hypertable size fell
+  from 266,599,981,056 to 262,618,431,488 bytes and compressed count increased
+  by one. Cleanup restored autopipe and left the enabled compression timer
+  inactive with zero service activations. Final review rejected the terminal
+  envelope because it rewrote the mutation SHA in preflight, persisted only
+  one selector snapshot, and omitted complete benchmark bindings,
+  cold/warmup/activity records, and seven measured plans. That historical
+  terminal remains rejected and has not been relabeled. The user separately
+  authorized an evidence replay on 2026-07-15 for only
+  `_timescaledb_internal._hyper_3_7_chunk`
+  (`2026-05-28T00:00:00Z` through `2026-06-04T00:00:00Z`). The replay required
+  two distinct hashed recovery artifacts: a preflight proving this
+  exact target is compressed, row count is positive, and free space is at
+  least 300 GiB; and a receipt proving one successful decompression returned
+  the same relation, left it uncompressed, and preserved the row count. Both
+  bind node-27, the mutation SHA and database identity, with chronology ending
+  before the fresh compression preflight. Authorization and terminal truth
+  record decompression as performed; the two selector snapshots plus new v2
+  dry-run/enforce receipts reselected the same exact target before one bound-1
+  recompression.
+
+  Recorded v2 replay evidence (#1069, 2026-07-15; acceptance superseded): the
+  exact recovery target
+  retained 5,738,400 rows across its sole decompression, then one v2 enforce
+  recompressed it with `bound=1`, compression lag 604800 seconds (7 days), and
+  no second target. The selected chunk fell from 3,088,285,696 to 134,119,424
+  bytes. Direct hypertable-size evidence was:
+
+  | Hypertable | Before bytes | After bytes | Compressed chunks after |
+  | --- | ---: | ---: | ---: |
+  | `hydro.river_timeseries` | 180,168,245,248 | 177,214,144,512 | 1 |
+  | `met.forcing_station_timeseries` | 85,404,286,976 | 85,404,286,976 | 0 |
+  | **Combined** | **265,572,532,224** | **262,618,431,488** | **1** |
+
+  Combined size therefore strictly decreased by 2,954,100,736 bytes and total
+  compressed-chunk count is 1 (> 0). Curve results were identical with median
+  0.435 ms -> 0.432 ms and p95 0.499 ms -> 0.434 ms. MVT bytes/hash were
+  identical with median 4.583 ms -> 4.951 ms and p95 4.618 ms -> 4.972 ms;
+  both passed their pinned thresholds and all seven after plans for each query
+  bound `DecompressChunk`. Cleanup restored autopipe enabled/active, left the
+  compression timer enabled/inactive and service inactive, recorded zero
+  activations, and proved installed units byte-identical. Retention, node-22,
+  drill, and role mutation remained false; `decompress_run=true` truthfully
+  records the separately authorized recovery.
+
+  Committed immutable receipts and SHA256:
+
+  - `docs/runbooks/receipts/tier-node27-timeseries-storage/timeseries-compression/dry-run-replay-20260715T114310Z.json`
+    — `5804660072c640634de6200c42b9cecd46308ca66c9ae85c20adc7b73e64ed5b`.
+  - `docs/runbooks/receipts/tier-node27-timeseries-storage/timeseries-compression/enforce-replay-20260715T114420Z.json`
+    — `634205e8f367bae88bd72cd476046e1bef3aa86bf43afe6bbca055d60a5c573c`.
+  - `docs/runbooks/receipts/tier-node27-timeseries-storage/timeseries-compression/terminal-replay-20260715T114625Z.json`
+    — `f4b1cbf9a0a8f60a30ddb8b4787584542aabeec35799fa7a9dd1de7242deff65`.
+
+  The then-current verifier generated the terminal at
+  `2026-07-15T11:46:25.062814Z` with verdict `PASS_TASK_4_5`. Full cross-review
+  subsequently confirmed false-PASS gaps in path ingestion, execution and
+  unit provenance, production query/plan/load identity, selector/snapshot
+  transition proof, and mutation uncertainty. The immutable receipt remains
+  historical evidence, not current acceptance.
+
+  Invariant-closure evidence gap: read-only recapture can prove current source
+  and unit bytes, dump readability, current catalog, and current production
+  query construction. It cannot retroactively prove the two ordered migration
+  executions, the prior/final activation window, invocation cardinality and
+  timeout, the pre-compression plans/snapshots, or the possible-mutation
+  reconciliation state. Those require a newly authorized controlled live
+  replay. No node-27 mutation was performed by the closure fix; task 4.5 stays
+  unchecked until a terminal produced from the expanded contract passes.
+
+  Round-2 invariant closure (2026-07-15): current acceptance requires a
+  version-3 terminal with `qualifies_task_4_5=true`; a version-2 terminal is
+  readable only as superseded history. The version-3 fixture retains all five
+  invocation refs, a real descriptor-bound PG15 dump listing, authorization-
+  pinned origin lineage, one complete supervisor-owned execution ledger, one
+  global non-overlapping chronology, exact structural plans, overlap-bound
+  production requests, bijective chunk/sibling snapshots, and a complete
+  source manifest. Runner/benchmark/verifier output paths are input-disjoint
+  by normalized path and inode and replace only known-safe stale outputs with
+  versioned failure tombstones. Compression and benchmark DB connections,
+  statements, results and phases now carry hard producer-side bounds; the
+  committed wrapper actually runs the 900-second timeout and systemd has a
+  finite consistent `TimeoutStartSec`. No live mutation was performed while
+  adding these gates; the historical replay still cannot close task 4.5.
+
+  Round-3 retro decision (2026-07-15): node-27 lacks a complete database
+  statement-audit source, and the user selected the explicit supervisor-ledger
+  trust boundary because they are the only DB user. A qualifying terminal must
+  derive exact controlled invocations from supervisor-produced events, prove
+  pre/post quiescence with DB lock/activity and systemd observations, and bind
+  the operator's sole-DB-user attestation. It may claim only “controlled lane
+  executed exactly once with no observed conflict”; it MUST NOT claim
+  database-audit proof of absolute zero direct SQL bypass. This decision does
+  not waive any of the other 14 confirmed Round-3 blockers or the required new
+  controlled live replay. Required implementation evidence maps one-for-one to
+  the `Round-3 invariant matrix and regression contract` in `design.md`: exact
+  producer event cardinality and raw quiescence refs; canonical installed-unit
+  show/journals; pre-write bounded transitive graph and alias freeze; one
+  supervisor hard wall plus shared CAS finalizer/tombstones; streamed bounded
+  container `pg_restore`; exact VERBOSE plan identity and raw-plan-derived
+  summaries; bounded catalog discovery; full snapshot bijection; no-touch
+  config failure; strict positive-duration chronology; and nested v3 schema
+  requirements. Every row requires a focused positive and negative test before
+  another comprehensive review. The live floor additionally requires a fresh
+  v3 terminal from that reviewed producer; local fixtures cannot tick 4.5.
+  The recurring compression service/timer MUST remain the normal bounded
+  wrapper `--enforce` lane. The issue-specific supervisor runs only from a
+  separate no-timer replay service with explicit reviewed plan/env/state paths,
+  one expected activation and an `ExecStopPost` CAS-finalizer backstop.
+  Local evidence MUST include a harmless end-to-end supervisor-plan run that
+  creates every semantic output through its declared child/capture owner in
+  true state-machine order, with no out-of-band fixture writer. Canonical
+  replay-unit `systemctl show` proves the current InvocationID/MainPID/start;
+  journals prove absence of extra replay/recurring activations. Git probes and
+  publisher locks remain inside the same hard wall.
+  The exact decompression argv MUST invoke a committed JSON-receipt producer
+  covered by a real-Timescale integration test. Replay-unit checkpoints accept
+  only the canonical executing `Type=oneshot` state `activating/start` with the
+  bound MainPID/InvocationID. Main-wall operations reserve termination/drain/
+  CAS time, and a held-lock finalizer preserves its state for a later bounded
+  `ExecStopPost` retry.
+  User-service activation tests MUST exercise `_SYSTEMD_USER_UNIT` with the
+  enclosing `_SYSTEMD_UNIT=user@<uid>.service`. Terminal consumers and
+  publishers treat a pending verifier failure intent as authoritative invalid
+  state until the exact schema-valid intent is either published as failure or
+  reconciled by a later successful/newer terminal under the same lock; tampered
+  PASS/secret/symlink/hardlink/input-alias sidecars must fail closed.
+  Manager-shaped journal tests MUST cover `_SYSTEMD_USER_UNIT=init.scope` plus
+  governed `USER_UNIT`. Failure intent durability tests MUST inject parent-dir
+  fsync failure, reader/publisher concurrency and a two-process same-byte inode
+  swap; only the persisted identity record, never in-memory state, may authorize
+  later reconciliation.
 
 ## 5. Archive rebuild drill (`archive-rebuild-drill`)
 

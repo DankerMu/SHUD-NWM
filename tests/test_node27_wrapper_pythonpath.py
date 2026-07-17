@@ -28,10 +28,51 @@ exit "${WRAPPER_EXIT_CODE:-0}"
 """
 
 
+_PINNED_LAUNCHER = "/usr/bin/timeout"
+_PINNED_LAUNCHER_GUARD = f"[ -x {_PINNED_LAUNCHER} ] || {{"
+_PINNED_LAUNCHER_EXEC = (
+    f'exec {_PINNED_LAUNCHER} --signal=TERM --kill-after=30s 900s "$PYTHON_BIN" "$SCRIPT" "$@"'
+)
+
+
 def _write_executable(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     path.chmod(0o700)
+
+
+def _launcher_available() -> bool:
+    return os.access(_PINNED_LAUNCHER, os.X_OK)
+
+
+def _relaunched_wrapper(tmp_path: Path, wrapper_name: str, launcher: str) -> Path:
+    """Copy a wrapper with its pinned launcher re-pointed, anchored to the production text."""
+    source = (_ROOT / "scripts" / wrapper_name).read_text(encoding="utf-8")
+    assert source.count(_PINNED_LAUNCHER_GUARD) == 1
+    assert source.count(_PINNED_LAUNCHER_EXEC) == 1
+    harness = tmp_path / wrapper_name
+    _write_executable(harness, source.replace(_PINNED_LAUNCHER, launcher))
+    return harness
+
+
+def _wrapper_under_test(tmp_path: Path, wrapper_name: str) -> Path:
+    """Keep the production wrapper under test, substituting only a launcher this host lacks.
+
+    The compression wrapper pins an absolute `/usr/bin/timeout` deliberately: resolving the
+    launcher through PATH would let a caller supply their own.  A host without that exact
+    path therefore cannot reach anything the wrapper does after its launcher check --
+    including the import-origin guard -- so a copy re-points the pinned launcher at an
+    equivalent local one and everything downstream is exercised for real.  Hosts that do
+    have the launcher (Linux CI, node-27) run the production file verbatim, and the
+    substitution is anchored to the production launcher text so drift breaks these tests
+    rather than silently diverging from the wrapper they claim to cover.
+    """
+    source = (_ROOT / "scripts" / wrapper_name).read_text(encoding="utf-8")
+    if _PINNED_LAUNCHER_GUARD not in source or _launcher_available():
+        return _ROOT / "scripts" / wrapper_name
+    launcher = tmp_path / "pinned-launcher"
+    _write_executable(launcher, '#!/bin/sh\nshift 3\nexec "$@"\n')
+    return _relaunched_wrapper(tmp_path, wrapper_name, str(launcher))
 
 
 def _shell_tools(tmp_path: Path) -> Path:
@@ -287,7 +328,7 @@ def _default_root_wrapper_harness(
     assert f"${shell_root}/scripts/node27_{case}.py" in source
 
     if case not in {"timeseries_retention", "raw_retention"}:
-        return wrapper
+        return _wrapper_under_test(tmp_path, wrapper_name)
 
     probe_prefix = 'if ! (cd "$REPO" && "$PYTHON_BIN" -c \'\n'
     assert source.count(probe_prefix) == 1
@@ -518,7 +559,7 @@ def test_sibling_wrappers_share_pythonpath_and_preserve_launch_contract(
     }
     if root_source == "process":
         env[root_env] = str(repo_root)
-    wrapper = _ROOT / "scripts" / wrapper_name
+    wrapper = _wrapper_under_test(tmp_path, wrapper_name)
     result = subprocess.run(
         [str(wrapper), "--probe", "value with spaces"],
         env=env,
@@ -591,7 +632,7 @@ def test_wrapper_explicit_interpreter_and_entrypoint_overrides_remain_supported(
     }
 
     result = subprocess.run(
-        [str(_ROOT / "scripts" / wrapper_name), "--explicit-probe"],
+        [str(_wrapper_under_test(tmp_path, wrapper_name)), "--explicit-probe"],
         env=env,
         capture_output=True,
         text=True,
@@ -716,7 +757,7 @@ def test_all_wrappers_refuse_conflicting_regular_scripts_package_before_entrypoi
     }
 
     result = subprocess.run(
-        [str(_ROOT / "scripts" / wrapper_name)],
+        [str(_wrapper_under_test(tmp_path, wrapper_name))],
         env=env,
         capture_output=True,
         text=True,
@@ -797,7 +838,7 @@ def test_all_wrappers_safe_path_uses_interpreter_search_path_and_runs_entrypoint
     env.update({"PYTHONPATH": "", "PYTHONSAFEPATH": "1"})
 
     result = subprocess.run(
-        [str(_ROOT / "scripts" / wrapper_name), "--probe", "value with spaces"],
+        [str(_wrapper_under_test(tmp_path, wrapper_name)), "--probe", "value with spaces"],
         env=env,
         capture_output=True,
         text=True,
@@ -837,7 +878,7 @@ def test_all_wrappers_refuse_regular_scripts_package_in_entrypoint_directory(
     env.pop("PYTHONSAFEPATH", None)
 
     result = subprocess.run(
-        [str(_ROOT / "scripts" / wrapper_name)],
+        [str(_wrapper_under_test(tmp_path, wrapper_name))],
         env=env,
         capture_output=True,
         text=True,
@@ -908,7 +949,7 @@ def test_explicit_entrypoint_outside_root_refuses_its_scripts_shadow(
     env.pop("PYTHONSAFEPATH", None)
 
     result = subprocess.run(
-        [str(_ROOT / "scripts" / wrapper_name)],
+        [str(_wrapper_under_test(tmp_path, wrapper_name))],
         env=env,
         capture_output=True,
         text=True,
@@ -959,3 +1000,54 @@ def test_retention_wrappers_probe_empty_pythonpath_segment_from_final_cwd(
 
     assert result.returncode == 37, result.stderr
     assert marker.exists()
+
+
+def test_compression_wrapper_pins_an_absolute_launcher_instead_of_resolving_it_on_path() -> None:
+    """Resolving the launcher through PATH would let a caller substitute their own."""
+    source = (_ROOT / "scripts/node27_timeseries_compression_once.sh").read_text(encoding="utf-8")
+
+    assert _PINNED_LAUNCHER_GUARD in source
+    assert _PINNED_LAUNCHER_EXEC in source
+    assert "command -v timeout" not in source
+    assert "gtimeout" not in source
+    assert "$(which timeout)" not in source
+
+
+def test_compression_wrapper_refuses_an_unavailable_pinned_launcher(tmp_path: Path) -> None:
+    """The launcher check fails closed rather than launching the entrypoint unbounded."""
+    bin_dir = _shell_tools(tmp_path)
+    zstd = tmp_path / "zstd"
+    _write_executable(zstd, "#!/bin/sh\nexit 0\n")
+    python_bin = tmp_path / "python"
+    _write_executable(python_bin, _CAPTURE_SCRIPT)
+    entrypoint = tmp_path / "entrypoint.py"
+    entrypoint.write_text("raise SystemExit(99)\n", encoding="utf-8")
+    capture = tmp_path / "capture.txt"
+    wrapper = _relaunched_wrapper(
+        tmp_path,
+        "node27_timeseries_compression_once.sh",
+        str(tmp_path / "absent-launcher"),
+    )
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "PYTHONPATH": "",
+        "NODE27_TIMESERIES_COMPRESSION_REPO_ROOT": str(tmp_path),
+        "NODE27_TIMESERIES_COMPRESSION_ENV_FILE": str(
+            _env_file(tmp_path, _runtime_env("timeseries_compression", tmp_path, zstd) + "\n")
+        ),
+        "NODE27_TIMESERIES_COMPRESSION_PYTHON": str(python_bin),
+        "NODE27_TIMESERIES_COMPRESSION_SCRIPT": str(entrypoint),
+        "WRAPPER_CAPTURE": str(capture),
+    }
+
+    result = subprocess.run(
+        [str(wrapper)], env=env, capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 1
+    assert json.loads(result.stderr) == {
+        "status": "failed",
+        "reason": "timeout launcher is unavailable",
+    }
+    assert not capture.exists()

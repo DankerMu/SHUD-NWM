@@ -1,0 +1,510 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NHMS Node-27 Initial Timeseries Compression Live Evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "generated_at"],
+  "properties": {
+    "schema_version": {"enum": ["2.0", "3.0"]},
+    "qualifies_task_4_5": {"type": "boolean"},
+    "outcome": {"const": "failed"},
+    "provenance_state": {"enum": ["bound", "unavailable"]},
+    "failure": {
+      "type": "object", "additionalProperties": false,
+      "required": ["stage", "mutation_state"],
+      "properties": {
+        "stage": {"type": "string", "minLength": 1},
+        "mutation_state": {"enum": ["failed_before_mutation", "indeterminate"]}
+      }
+    },
+    "failure_context": {
+      "type": "object", "additionalProperties": false,
+      "required": ["reason_category", "expected_output", "verifier_head_sha"],
+      "properties": {
+        "reason_category": {"type": "string", "minLength": 1},
+        "expected_output": {
+          "anyOf": [
+            {"type": "null"},
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["device", "inode", "bytes", "sha256"],
+              "properties": {
+                "device": {"type": "integer", "minimum": 0},
+                "inode": {"type": "integer", "minimum": 0},
+                "bytes": {"type": "integer", "minimum": 0},
+                "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+              }
+            }
+          ]
+        },
+        "verifier_head_sha": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/git_sha"}]}
+      }
+    },
+    "issue": {"const": 1069},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "run_id": {"type": "string", "minLength": 1},
+    "node": {"const": "node-27"},
+    "mutation_head_sha": {"$ref": "#/$defs/git_sha"},
+    "verifier_head_sha": {"$ref": "#/$defs/git_sha"},
+    "database_identity": {"$ref": "#/$defs/database_identity"},
+    "authorization": {
+      "type": "object", "additionalProperties": false,
+      "required": ["lag_seconds", "bound", "max_selected_bytes", "min_free_bytes", "timeout_seconds", "enforce_invocations", "replay_decompression", "decompress_invocations"],
+      "properties": {
+        "lag_seconds": {"const": 604800}, "bound": {"const": 1},
+        "max_selected_bytes": {"const": 8589934592},
+        "min_free_bytes": {"const": 322122547200},
+        "timeout_seconds": {"const": 900}, "enforce_invocations": {"const": 1},
+        "replay_decompression": {"const": true}, "decompress_invocations": {"const": 1},
+        "migration_invocations": {"const": 2}, "dry_run_invocations": {"const": 1},
+        "sole_db_user_during_window": {"const": true},
+        "database_audit_proof": {"const": false},
+        "acceptance_claim": {"const": "controlled lane executed exactly once with no observed conflict"},
+        "repo_path": {"const": "/home/nwm/NWM"},
+        "remote_identity": {"const": "DankerMu/SHUD-NWM"},
+        "reviewed_mutation_sha": {"$ref": "#/$defs/git_sha"},
+        "reviewed_remote_ref": {"const": "refs/remotes/origin/feat/issue-1069-live-compression"}
+      }
+    },
+    "execution": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_plan", "ledger", "run_id", "namespace_counts", "checkpoint_artifacts", "claim", "sole_db_user_attested", "database_audit_proof", "trust_limit"],
+      "properties": {
+        "run_plan": {"$ref": "#/$defs/artifact_ref"},
+        "ledger": {"$ref": "#/$defs/artifact_ref"},
+        "run_id": {"type": "string", "minLength": 1},
+        "namespace_counts": {"$ref": "#/$defs/supervisor_counts"},
+        "checkpoint_artifacts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/artifact_ref"}},
+        "claim": {"const": "controlled lane executed exactly once with no observed conflict"},
+        "sole_db_user_attested": {"const": true},
+        "database_audit_proof": {"const": false},
+        "trust_limit": {"const": "discrete observations; no absolute direct-SQL bypass proof"}
+      }
+    },
+    "recovery": {
+      "type": "object", "additionalProperties": false,
+      "required": ["preflight", "receipt", "authorized", "node", "mutation_head_sha", "target", "preflight_captured_at", "decompress_started_at", "decompress_finished_at", "compression_preflight_captured_at", "free_bytes_before", "before_compressed", "after_compressed", "before_row_count", "after_row_count", "row_parity", "decompress_return_relation", "exit_code"],
+      "properties": {
+        "preflight": {"$ref": "#/$defs/artifact_ref"},
+        "receipt": {"$ref": "#/$defs/artifact_ref"},
+        "invocation": {"$ref": "#/$defs/artifact_ref"},
+        "authorized": {"const": true}, "node": {"const": "node-27"},
+        "mutation_head_sha": {"$ref": "#/$defs/git_sha"},
+        "target": {"$ref": "#/$defs/recovery_target"},
+        "preflight_captured_at": {"type": "string", "format": "date-time"},
+        "decompress_started_at": {"type": "string", "format": "date-time"},
+        "decompress_finished_at": {"type": "string", "format": "date-time"},
+        "compression_preflight_captured_at": {"type": "string", "format": "date-time"},
+        "free_bytes_before": {"type": "integer", "minimum": 322122547200},
+        "before_compressed": {"const": true}, "after_compressed": {"const": false},
+        "before_row_count": {"type": "integer", "minimum": 1},
+        "after_row_count": {"type": "integer", "minimum": 1},
+        "row_parity": {"const": true},
+        "decompress_return_relation": {"const": "_timescaledb_internal._hyper_3_7_chunk"},
+        "exit_code": {"const": 0}
+      }
+    },
+    "preflight": {
+      "type": "object", "additionalProperties": false,
+      "required": ["evidence", "schema_dump", "catalog_before", "pg_restore_list_exit_code", "role", "quiescent", "captured_at", "mutation_head_sha", "container_state", "units"],
+      "properties": {
+        "evidence": {"$ref": "#/$defs/artifact_ref"},
+        "schema_dump": {"$ref": "#/$defs/artifact_ref"},
+        "schema_dump_list": {"$ref": "#/$defs/artifact_ref"},
+        "catalog_before": {"$ref": "#/$defs/artifact_ref"},
+        "pg_restore_list_exit_code": {"const": 0},
+        "role": {"$ref": "#/$defs/role_facts"}, "quiescent": {"const": true},
+        "captured_at": {"type": "string", "format": "date-time"},
+        "mutation_head_sha": {"$ref": "#/$defs/git_sha"},
+        "container_state": {"$ref": "#/$defs/container_state"},
+        "units": {"$ref": "#/$defs/four_units"}
+      }
+    },
+    "migration": {
+      "type": "object", "additionalProperties": false,
+      "required": ["migration_file", "first_exit_code", "second_exit_code", "catalog_after_first", "catalog_after_second", "catalogs_identical"],
+      "properties": {
+        "migration_file": {"$ref": "#/$defs/artifact_ref"},
+        "first_invocation": {"$ref": "#/$defs/artifact_ref"},
+        "second_invocation": {"$ref": "#/$defs/artifact_ref"},
+        "first_exit_code": {"const": 0}, "second_exit_code": {"const": 0},
+        "catalog_after_first": {"$ref": "#/$defs/artifact_ref"},
+        "catalog_after_second": {"$ref": "#/$defs/artifact_ref"},
+        "catalogs_identical": {"const": true}
+      }
+    },
+    "selection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bound", "selected", "selected_before_bytes", "post_dry_run", "pre_enforce"],
+      "properties": {
+        "bound": {"const": 1},
+        "selected": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"$ref": "#/$defs/chunk_identity"}},
+        "selected_before_bytes": {"type": "integer", "minimum": 1, "maximum": 8589934592},
+        "post_dry_run": {"$ref": "#/$defs/selection_observation"},
+        "pre_enforce": {
+          "allOf": [
+            {"$ref": "#/$defs/selection_observation"},
+            {"type": "object", "required": ["seconds_before_enforce"], "properties": {"seconds_before_enforce": {"type": "number", "minimum": 0, "maximum": 60}}}
+          ]
+        }
+      }
+    },
+    "receipts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["dry_run", "enforce", "dry_run_schema_valid", "dry_run_semantic_valid", "enforce_schema_valid", "enforce_semantic_valid"],
+      "properties": {
+        "dry_run": {"$ref": "#/$defs/artifact_ref"}, "enforce": {"$ref": "#/$defs/artifact_ref"},
+        "dry_run_invocation": {"$ref": "#/$defs/artifact_ref"},
+        "enforce_invocation": {"$ref": "#/$defs/artifact_ref"},
+        "dry_run_schema_valid": {"const": true}, "dry_run_semantic_valid": {"const": true},
+        "enforce_schema_valid": {"const": true}, "enforce_semantic_valid": {"const": true}
+      }
+    },
+    "sizes": {
+      "type": "object", "additionalProperties": false,
+      "required": ["pre", "post", "pre_combined_hypertable_size", "post_combined_hypertable_size", "compressed_chunk_count_delta", "selected_before_bytes", "selected_after_bytes"],
+      "properties": {
+        "pre": {"$ref": "#/$defs/artifact_ref"}, "post": {"$ref": "#/$defs/artifact_ref"},
+        "pre_combined_hypertable_size": {"type": "integer", "minimum": 1},
+        "post_combined_hypertable_size": {"type": "integer", "minimum": 0},
+        "compressed_chunk_count_delta": {"const": 1},
+        "selected_before_bytes": {"type": "integer", "minimum": 1},
+        "selected_after_bytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "catalog": {
+      "type": "object", "additionalProperties": false,
+      "required": ["post", "d3_exact", "no_compression_policy", "selected_chunks_compressed"],
+      "properties": {
+        "post": {"$ref": "#/$defs/artifact_ref"}, "d3_exact": {"const": true},
+        "no_compression_policy": {"const": true}, "selected_chunks_compressed": {"const": true}
+      }
+    },
+    "benchmarks": {
+      "type": "object", "additionalProperties": false, "required": ["evidence", "queries"],
+      "properties": {
+        "evidence": {"$ref": "#/$defs/artifact_ref"},
+        "queries": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/query_evidence"}}
+      }
+    },
+    "cleanup": {
+      "type": "object", "additionalProperties": false,
+      "required": ["evidence", "autopipe_timer_restored", "compression_timer_enabled", "compression_timer_active", "compression_service_active", "compression_service_activation_count", "installed_service_matches_repo", "installed_timer_matches_repo"],
+      "properties": {
+        "evidence": {"$ref": "#/$defs/artifact_ref"}, "autopipe_timer_restored": {"const": true},
+        "compression_timer_enabled": {"const": true}, "compression_timer_active": {"const": false},
+        "compression_service_active": {"const": false}, "compression_service_activation_count": {"const": 0},
+        "installed_service_matches_repo": {"const": true}, "installed_timer_matches_repo": {"const": true}
+      }
+    },
+    "chronology": {
+      "type": "object", "additionalProperties": false,
+      "required": ["events", "snapshot_ids"],
+      "properties": {
+        "events": {"type": "array", "minItems": 25, "items": {"$ref": "#/$defs/chronology_event"}},
+        "snapshot_ids": {"type": "array", "minItems": 7, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "source_manifest": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": {"$ref": "#/$defs/artifact_ref"}
+    },
+    "out_of_scope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["retention_mutated", "drill_run", "node22_touched", "decompress_run", "role_mutated"],
+      "properties": {
+        "retention_mutated": {"const": false}, "drill_run": {"const": false},
+        "node22_touched": {"const": false}, "decompress_run": {"const": true},
+        "role_mutated": {"const": false}
+      }
+    },
+    "verdict": {"const": "PASS_TASK_4_5"}
+  },
+  "allOf": [
+    {
+      "if": {"required": ["outcome"]},
+      "then": {
+        "required": ["qualifies_task_4_5", "provenance_state", "failure"],
+        "properties": {"schema_version": {"const": "3.0"}, "qualifies_task_4_5": {"const": false}},
+        "not": {"required": ["verdict"]},
+        "allOf": [
+          {
+            "if": {"properties": {"provenance_state": {"const": "bound"}}, "required": ["provenance_state"]},
+            "then": {
+              "required": ["run_id", "mutation_head_sha"],
+              "not": {"required": ["failure_context"]}
+            },
+            "else": {
+              "required": ["failure_context"],
+              "allOf": [
+                {"not": {"required": ["run_id"]}},
+                {"not": {"required": ["mutation_head_sha"]}}
+              ]
+            }
+          }
+        ]
+      },
+      "else": {
+        "required": ["issue", "node", "mutation_head_sha", "verifier_head_sha", "database_identity", "authorization", "recovery", "preflight", "migration", "selection", "receipts", "sizes", "catalog", "benchmarks", "cleanup", "out_of_scope", "verdict"]
+      }
+    },
+    {
+      "if": {"properties": {"schema_version": {"const": "2.0"}}, "required": ["schema_version"]},
+      "then": {"not": {"properties": {"qualifies_task_4_5": {"const": true}}, "required": ["qualifies_task_4_5"]}},
+      "else": {
+        "if": {"not": {"required": ["outcome"]}},
+        "then": {
+          "required": ["qualifies_task_4_5", "execution", "chronology", "source_manifest"],
+          "properties": {"qualifies_task_4_5": {"const": true}},
+          "not": {
+            "anyOf": [
+              {"required": ["failure"]},
+              {"required": ["failure_context"]},
+              {"required": ["provenance_state"]},
+              {"required": ["outcome"]}
+            ]
+          },
+          "allOf": [
+            {"properties": {"authorization": {"required": ["migration_invocations", "dry_run_invocations", "sole_db_user_during_window", "database_audit_proof", "acceptance_claim", "repo_path", "remote_identity", "reviewed_mutation_sha", "reviewed_remote_ref"]}}},
+            {"properties": {"recovery": {"required": ["invocation"]}}},
+            {"properties": {"preflight": {"required": ["schema_dump_list"]}}},
+            {"properties": {"migration": {"required": ["first_invocation", "second_invocation"]}}},
+            {"properties": {"receipts": {"required": ["dry_run_invocation", "enforce_invocation"]}}},
+            {"properties": {"benchmarks": {"properties": {"queries": {"items": {
+              "required": ["request"],
+              "properties": {
+                "before_capture": {"required": ["execution_bounds"]},
+                "after_capture": {"required": ["execution_bounds"]}
+              }
+            }}}}}}
+          ]
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "git_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "chronology_event": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "at"],
+      "properties": {"name": {"type": "string", "minLength": 1}, "at": {"type": "string", "format": "date-time"}}
+    },
+    "artifact_ref": {
+      "type": "object", "additionalProperties": false, "required": ["path", "sha256", "bytes"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^/[^\\u0000-\\u001f]*$"},
+        "sha256": {"$ref": "#/$defs/sha256"}, "bytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "supervisor_counts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["migration_apply", "decompress", "compression_dry_run", "compression_enforce", "compression_service_activation", "retention", "drill", "role", "node22", "pg_dump", "pg_restore_version", "pg_restore_list", "benchmark_before", "benchmark_after", "replay_supervisor_activation"],
+      "properties": {
+        "migration_apply": {"const": 2}, "decompress": {"const": 1},
+        "compression_dry_run": {"const": 1}, "compression_enforce": {"const": 1},
+        "compression_service_activation": {"const": 0}, "retention": {"const": 0},
+        "drill": {"const": 0}, "role": {"const": 0}, "node22": {"const": 0},
+        "pg_dump": {"const": 1}, "pg_restore_version": {"const": 1},
+        "pg_restore_list": {"const": 1}, "benchmark_before": {"const": 1},
+        "benchmark_after": {"const": 1}, "replay_supervisor_activation": {"const": 1}
+      }
+    },
+    "database_identity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["dbname", "instance", "postgres_version", "timescaledb_version"],
+      "properties": {
+        "dbname": {"const": "nhms"}, "instance": {"const": "node27-primary-pg15"},
+        "postgres_version": {"type": "string", "minLength": 1},
+        "timescaledb_version": {"type": "string", "minLength": 1}
+      }
+    },
+    "container_state": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "container_id", "image", "status", "running"],
+      "properties": {
+        "name": {"const": "nhms-db"}, "container_id": {"type": "string", "minLength": 1},
+        "image": {"type": "string", "minLength": 1}, "status": {"type": "string", "minLength": 1},
+        "running": {"const": true}
+      }
+    },
+    "unit_state": {
+      "type": "object", "additionalProperties": false,
+      "required": ["enabled", "active", "sub", "result", "main_pid", "journal"],
+      "properties": {
+        "enabled": {"type": "string", "minLength": 1}, "active": {"type": "string", "minLength": 1},
+        "sub": {"type": "string", "minLength": 1}, "result": {"type": "string", "minLength": 1},
+        "main_pid": {"type": "integer", "minimum": 0}, "journal": {"$ref": "#/$defs/artifact_ref"}
+      }
+    },
+    "four_units": {
+      "type": "object", "additionalProperties": false,
+          "required": ["nhms-node27-autopipe.timer", "nhms-node27-autopipe.service", "nhms-node27-timeseries-compression.timer", "nhms-node27-timeseries-compression.service"],
+      "properties": {
+        "nhms-node27-autopipe.timer": {"$ref": "#/$defs/unit_state"},
+        "nhms-node27-autopipe.service": {"$ref": "#/$defs/unit_state"},
+        "nhms-node27-timeseries-compression.timer": {"$ref": "#/$defs/unit_state"},
+            "nhms-node27-timeseries-compression.service": {"$ref": "#/$defs/unit_state"},
+            "nhms-node27-timeseries-compression-replay.service": {"$ref": "#/$defs/unit_state"}
+      }
+    },
+    "role_facts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["current_user", "rolsuper", "rolcreaterole", "rolcreatedb", "owns_hydro_river_timeseries", "owns_met_forcing_station_timeseries", "execute_compress_chunk_regclass_boolean", "role_created", "grant_executed", "role_mutated"],
+      "properties": {
+        "current_user": {"const": "nhms"}, "rolsuper": {"const": true},
+        "rolcreaterole": {"const": true}, "rolcreatedb": {"const": true},
+        "owns_hydro_river_timeseries": {"const": true}, "owns_met_forcing_station_timeseries": {"const": true},
+        "execute_compress_chunk_regclass_boolean": {"const": true}, "role_created": {"const": false},
+        "grant_executed": {"const": false}, "role_mutated": {"const": false}
+      }
+    },
+    "chunk_identity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["hypertable_schema", "hypertable_name", "chunk_schema", "chunk_name", "range_start", "range_end"],
+      "properties": {
+        "hypertable_schema": {"const": "hydro"}, "hypertable_name": {"const": "river_timeseries"},
+        "chunk_schema": {"type": "string", "minLength": 1}, "chunk_name": {"type": "string", "minLength": 1},
+        "range_start": {"type": "string", "format": "date-time"}, "range_end": {"type": "string", "format": "date-time"}
+      }
+    },
+    "recovery_target": {
+      "type": "object", "additionalProperties": false,
+      "required": ["hypertable_schema", "hypertable_name", "chunk_schema", "chunk_name", "range_start", "range_end"],
+      "properties": {
+        "hypertable_schema": {"const": "hydro"},
+        "hypertable_name": {"const": "river_timeseries"},
+        "chunk_schema": {"const": "_timescaledb_internal"},
+        "chunk_name": {"const": "_hyper_3_7_chunk"},
+        "range_start": {"const": "2026-05-28T00:00:00Z"},
+        "range_end": {"const": "2026-06-04T00:00:00Z"}
+      }
+    },
+    "selection_observation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["artifact", "observed_at", "candidates_sha256", "selector_sha256", "free_bytes", "cutoff_margin_seconds"],
+      "properties": {
+        "artifact": {"$ref": "#/$defs/artifact_ref"}, "observed_at": {"type": "string", "format": "date-time"},
+        "candidates_sha256": {"$ref": "#/$defs/sha256"}, "selector_sha256": {"$ref": "#/$defs/sha256"},
+        "free_bytes": {"type": "integer", "minimum": 322122547200},
+        "cutoff_margin_seconds": {"type": "integer", "minimum": 600},
+        "seconds_before_enforce": {"type": "number", "minimum": 0, "maximum": 60}
+      }
+    },
+    "measurement": {
+      "type": "object", "additionalProperties": false,
+      "required": ["plan", "planning_ms", "execution_ms", "shared_hit_blocks", "shared_read_blocks"],
+      "properties": {
+        "plan": {}, "planning_ms": {"type": "number", "minimum": 0},
+        "execution_ms": {"type": "number", "minimum": 0},
+        "shared_hit_blocks": {"type": "integer", "minimum": 0},
+        "shared_read_blocks": {"type": "integer", "minimum": 0}
+      }
+    },
+    "activity_sample": {
+      "oneOf": [
+        {"$ref": "#/$defs/legacy_activity_sample"},
+        {"$ref": "#/$defs/bounded_activity_sample"}
+      ]
+    },
+    "legacy_activity_sample": {
+      "type": "object", "additionalProperties": false,
+      "required": ["captured_at", "active_sessions", "material_load_stable"],
+      "properties": {
+        "captured_at": {"type": "string", "format": "date-time"},
+        "active_sessions": {"type": "integer", "minimum": 0},
+        "material_load_stable": {"const": true}
+      }
+    },
+    "bounded_activity_sample": {
+      "type": "object", "additionalProperties": false,
+      "required": ["captured_at", "stage", "sessions", "material_load_stable"],
+      "properties": {
+        "captured_at": {"type": "string", "format": "date-time"},
+        "stage": {"enum": ["before_cold", "after_cold", "before_measurements", "mid_measurements", "after_result"]},
+        "sessions": {"type": "array", "maxItems": 1000, "items": {"$ref": "#/$defs/activity_session"}},
+        "material_load_stable": {"const": true}
+      }
+    },
+    "activity_session": {
+      "type": "object", "additionalProperties": false,
+      "required": ["pid", "backend_start", "xact_start", "query_start", "state", "wait_event_type", "backend_type", "usename", "has_write_privilege_on_target", "query_signature"],
+      "properties": {
+        "pid": {"type": "integer", "minimum": 1},
+        "backend_start": {"type": ["string", "null"]}, "xact_start": {"type": ["string", "null"]},
+        "query_start": {"type": ["string", "null"]}, "state": {"type": ["string", "null"]},
+        "wait_event_type": {"type": ["string", "null"]}, "backend_type": {"type": ["string", "null"]},
+        "usename": {"type": ["string", "null"]},
+        "has_write_privilege_on_target": {"type": "boolean"},
+        "query_signature": {"type": ["string", "null"]}
+      }
+    },
+    "execution_bounds": {
+      "type": "object", "additionalProperties": false,
+      "required": ["statement_timeout_ms", "lock_timeout_ms", "phase_timeout_seconds", "started_at", "finished_at"],
+      "properties": {
+        "statement_timeout_ms": {"const": 60000}, "lock_timeout_ms": {"const": 5000},
+        "phase_timeout_seconds": {"const": 900},
+        "started_at": {"type": "string", "format": "date-time"},
+        "finished_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "phase_capture": {
+      "type": "object", "additionalProperties": false,
+      "required": ["result_payload", "result_sha256", "rows", "bytes", "cache_class", "cold", "warmups", "measurements", "activity_samples", "samples_ms", "median_ms", "p95_ms"],
+      "properties": {
+        "result_payload": {}, "result_sha256": {"$ref": "#/$defs/sha256"},
+        "rows": {"type": "integer", "minimum": 1}, "bytes": {"type": "integer", "minimum": 1},
+        "cache_class": {"enum": ["warm-cache", "mixed-cache"]}, "cold": {"$ref": "#/$defs/measurement"},
+        "warmups": {"type": "array", "minItems": 2, "maxItems": 5, "items": {"$ref": "#/$defs/measurement"}},
+        "measurements": {"type": "array", "minItems": 7, "maxItems": 7, "items": {"$ref": "#/$defs/measurement"}},
+        "activity_samples": {"type": "array", "minItems": 1, "maxItems": 5, "items": {"$ref": "#/$defs/activity_sample"}},
+        "execution_bounds": {"$ref": "#/$defs/execution_bounds"},
+        "samples_ms": {"$ref": "#/$defs/seven_samples"}, "median_ms": {"type": "number", "minimum": 0},
+        "p95_ms": {"type": "number", "minimum": 0}
+      }
+    },
+    "curve_binding": {
+      "type": "object", "additionalProperties": false, "required": ["parameter_names", "bound_parameters"],
+      "properties": {
+        "parameter_names": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "bound_parameters": {"type": "array", "minItems": 1}
+      }
+    },
+    "mvt_binding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_id", "basin_version_id", "river_network_version_id", "variable", "valid_time", "z", "x", "y", "feature_limit", "feature_coordinate_limit", "collection_coordinate_limit", "max_coordinate_dimensions", "extent", "buffer", "simplification_tolerance_m"],
+      "properties": {
+        "run_id": {"type": "string", "minLength": 1}, "basin_version_id": {"type": "string", "minLength": 1},
+        "river_network_version_id": {"type": "string", "minLength": 1}, "variable": {"const": "q_down"},
+        "valid_time": {"type": "string", "format": "date-time"}, "z": {"const": 9},
+        "x": {"type": "integer", "minimum": 0, "maximum": 511}, "y": {"type": "integer", "minimum": 0, "maximum": 511},
+        "feature_limit": {"const": 10000}, "feature_coordinate_limit": {"const": 50000},
+        "collection_coordinate_limit": {"const": 50000}, "max_coordinate_dimensions": {"const": 3},
+        "extent": {"const": 4096}, "buffer": {"const": 64},
+        "simplification_tolerance_m": {"type": "number", "exclusiveMinimum": 0}
+      }
+    },
+    "query_evidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "source_refs", "query_sha256", "binding", "result_sha256", "rows", "bytes", "cache_class", "before_capture", "after_capture", "before_median_ms", "after_median_ms", "median_threshold_ms", "before_p95_ms", "after_p95_ms", "p95_threshold_ms", "decompress_chunk_plan_bound"],
+      "properties": {
+        "name": {"enum": ["curve", "mvt"]}, "request": {"type": "object", "minProperties": 1},
+        "source_refs": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/artifact_ref"}},
+        "query_sha256": {"$ref": "#/$defs/sha256"}, "binding": {}, "result_sha256": {"$ref": "#/$defs/sha256"},
+        "rows": {"type": "integer", "minimum": 1}, "bytes": {"type": "integer", "minimum": 1},
+        "cache_class": {"enum": ["warm-cache", "mixed-cache"]},
+        "before_capture": {"$ref": "#/$defs/phase_capture"}, "after_capture": {"$ref": "#/$defs/phase_capture"},
+        "before_median_ms": {"type": "number", "minimum": 0}, "after_median_ms": {"type": "number", "minimum": 0},
+        "median_threshold_ms": {"type": "number", "minimum": 0}, "before_p95_ms": {"type": "number", "minimum": 0},
+        "after_p95_ms": {"type": "number", "minimum": 0}, "p95_threshold_ms": {"type": "number", "minimum": 0},
+        "decompress_chunk_plan_bound": {"const": true}
+      },
+      "allOf": [
+        {"if": {"properties": {"name": {"const": "curve"}}}, "then": {"properties": {"binding": {"$ref": "#/$defs/curve_binding"}}}},
+        {"if": {"properties": {"name": {"const": "mvt"}}}, "then": {"properties": {"binding": {"$ref": "#/$defs/mvt_binding"}}}}
+      ]
+    },
+    "seven_samples": {"type": "array", "minItems": 7, "maxItems": 7, "items": {"type": "number", "minimum": 0}}
+  }
+}

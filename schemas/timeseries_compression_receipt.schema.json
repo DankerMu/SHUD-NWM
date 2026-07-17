@@ -1,29 +1,25 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "NHMS Node-27 Timeseries Compression Runner Receipt",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema_version",
     "generated_at",
-    "now_utc",
-    "lag_seconds",
-    "per_tick_bound",
     "mode",
-    "outcome",
-    "selected",
-    "deferred",
-    "skipped",
-    "per_table_totals"
+    "outcome"
   ],
   "properties": {
-    "schema_version": {"enum": ["1.0"]},
+    "schema_version": {"enum": ["1.0", "2.0"]},
+    "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "mutation_head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "provenance_state": {"enum": ["bound", "unavailable"]},
     "generated_at": {"type": "string", "format": "date-time"},
     "now_utc": {"type": "string", "format": "date-time"},
     "lag_seconds": {"type": "integer", "minimum": 1},
     "per_tick_bound": {"type": "integer", "minimum": 1},
     "mode": {"enum": ["dry-run", "enforce"]},
-    "outcome": {"enum": ["clean", "partial", "refused_lock", "refused_config"]},
+    "outcome": {"enum": ["clean", "partial", "refused_lock", "refused_config", "failed"]},
     "selected": {
       "type": "array",
       "maxItems": 100000,
@@ -47,8 +43,85 @@
         "hydro.river_timeseries": {"$ref": "#/$defs/table_total"},
         "met.forcing_station_timeseries": {"$ref": "#/$defs/table_total"}
       }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "mutation_state"],
+      "properties": {
+        "stage": {"type": "string", "minLength": 1},
+        "mutation_state": {"enum": ["failed_before_mutation", "indeterminate"]}
+      }
     }
   },
+  "allOf": [
+    {
+      "if": {"properties": {"outcome": {"const": "refused_lock"}}, "required": ["outcome"]},
+      "then": {
+        "properties": {
+          "selected": {"maxItems": 0},
+          "deferred": {"maxItems": 0},
+          "skipped": {"maxItems": 0},
+          "per_table_totals": {
+            "properties": {
+              "hydro.river_timeseries": {"$ref": "#/$defs/refused_table_total"},
+              "met.forcing_station_timeseries": {"$ref": "#/$defs/refused_table_total"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"schema_version": {"const": "1.0"}},
+        "required": ["schema_version"]
+      },
+      "then": {
+        "properties": {
+          "outcome": {"enum": ["clean", "partial", "refused_lock", "refused_config"]}
+        },
+        "allOf": [
+          {"not": {"required": ["head_sha"]}},
+          {"not": {"required": ["failure"]}},
+          {"not": {"required": ["provenance_state"]}}
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "schema_version": {"const": "2.0"},
+          "outcome": {"enum": ["clean", "partial", "refused_lock", "refused_config"]}
+        },
+        "required": ["schema_version", "outcome"]
+      },
+      "then": {"required": ["head_sha"]}
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "failed"}}, "required": ["outcome"]},
+      "then": {
+        "required": ["failure", "provenance_state"],
+        "properties": {"schema_version": {"const": "2.0"}},
+        "allOf": [
+          {
+            "if": {
+              "properties": {"provenance_state": {"const": "bound"}},
+              "required": ["provenance_state"]
+            },
+            "then": {"required": ["head_sha", "mutation_head_sha"]},
+            "else": {"not": {"anyOf": [{"required": ["head_sha"]}, {"required": ["mutation_head_sha"]}]}}
+          }
+        ]
+      },
+      "else": {
+        "not": {"anyOf": [{"required": ["failure"]}, {"required": ["provenance_state"]}]},
+        "required": [
+          "now_utc", "lag_seconds", "per_tick_bound", "selected", "deferred",
+          "skipped", "per_table_totals"
+        ]
+      }
+    }
+  ],
   "$defs": {
     "selected_descriptor": {
       "type": "object",
@@ -72,7 +145,10 @@
         "range_end": {"type": "string", "format": "date-time"},
         "before_bytes": {"type": "integer", "minimum": 0},
         "after_bytes": {"type": ["integer", "null"], "minimum": 0},
-        "error": {"type": "string", "minLength": 1}
+        "error": {"type": "string", "minLength": 1},
+        "mutation_state": {
+          "enum": ["not_applicable", "failed_before_mutation", "committed", "indeterminate"]
+        }
       }
     },
     "deferred_descriptor": {
@@ -135,6 +211,16 @@
         "before_bytes": {"type": "integer", "minimum": 0},
         "after_bytes": {"type": ["integer", "null"], "minimum": 0},
         "chunks_compressed": {"type": "integer", "minimum": 0}
+      }
+    },
+    "refused_table_total": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["before_bytes", "after_bytes", "chunks_compressed"],
+      "properties": {
+        "before_bytes": {"const": 0},
+        "after_bytes": {"type": "null"},
+        "chunks_compressed": {"const": 0}
       }
     }
   }

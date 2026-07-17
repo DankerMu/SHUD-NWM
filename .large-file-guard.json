@@ -16,6 +16,15 @@
     "scripts/node27_timeseries_retention.py",
     "tests/test_node27_archive_rebuild_drill.py",
     "tests/test_node27_timeseries_retention.py",
+    "docs/runbooks/tier-node27-timeseries-storage.md",
+    "packages/common/compression_terminal_state.py",
+    "scripts/node27_timeseries_compression.py",
+    "scripts/node27_timeseries_compression_live_evidence.py",
+    "scripts/node27_timeseries_compression_supervisor.py",
+    "tests/test_node27_timeseries_compression.py",
+    "tests/test_node27_timeseries_compression_live_evidence.py",
+    "tests/test_node27_timeseries_compression_supervisor.py",
+    "schemas/examples/timeseries_compression_live_evidence.example.json",
     "docs/runbooks/receipts/tier-node27-timeseries-storage/**/*.json"
   ]
 }

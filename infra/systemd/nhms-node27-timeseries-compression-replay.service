@@ -1,0 +1,18 @@
+[Unit]
+Description=NHMS node-27 one-off controlled timeseries compression replay
+ConditionPathExists=/home/nwm/node27-timeseries-compression-replay/run-plan.json
+ConditionPathExists=/home/nwm/NWM/infra/env/node27-timeseries-compression-replay.env
+ConditionPathIsDirectory=/home/nwm/node27-timeseries-compression-logs
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/nwm/NWM
+EnvironmentFile=/home/nwm/NWM/infra/env/node27-timeseries-compression-replay.env
+ExecStartPre=/usr/bin/mkdir -p /home/nwm/node27-timeseries-compression-logs
+ExecStart=/home/nwm/NWM/.venv/bin/python /home/nwm/NWM/scripts/node27_timeseries_compression_supervisor.py --enforce --run-plan-path /home/nwm/node27-timeseries-compression-replay/run-plan.json --ledger-path /home/nwm/node27-timeseries-compression-replay/supervisor-ledger.jsonl --receipt-path /home/nwm/node27-timeseries-compression-replay/terminal-evidence.json --finalizer-state-path /home/nwm/node27-timeseries-compression-replay/finalizer-state.json --wall-seconds 900
+ExecStopPost=/home/nwm/NWM/.venv/bin/python /home/nwm/NWM/scripts/node27_timeseries_compression_supervisor.py --finalize-only --finalizer-state-path /home/nwm/node27-timeseries-compression-replay/finalizer-state.json
+TimeoutStartSec=920
+TimeoutStopSec=20
+KillMode=control-group
+StandardOutput=append:/home/nwm/node27-timeseries-compression-logs/replay-systemd.log
+StandardError=append:/home/nwm/node27-timeseries-compression-logs/replay-systemd.err
