@@ -1,0 +1,14 @@
+{
+  "schema_version": "nhms.scheduler.registry_package_cutover.v1",
+  "generated_at": "2026-07-15T11:45:00Z",
+  "generation": "manifest-b44ab3b785f4",
+  "entries": [
+    {
+      "model_id": "basin-101",
+      "old_checksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "new_checksum": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "effective_cycle_utc": "2026-07-16T00:00:00Z",
+      "transition_mode": "replace"
+    }
+  ]
+}

@@ -564,6 +564,7 @@ def publish_scheduler_registry_manifest(
     generated_at: datetime | None = None,
     expected_preimage: ProviderPreimage | Mapping[str, object] | None = None,
     commit_observer: Callable[[ProviderPreimage], None] | None = None,
+    cutover_gate: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     roots = _ProviderRoots(
         object_store_root=object_store_root,
@@ -590,19 +591,27 @@ def publish_scheduler_registry_manifest(
     )
     if commit_observer is not None:
         commit_observer(committed)
-    return _evidence_safe(
-        {
-            "status": "published",
-            "schema_version": REGISTRY_MANIFEST_SCHEMA_VERSION,
-            "destination": _uri_evidence(destination_uri),
-            "checksum": checksum,
-            "content_sha256": sha256_bytes(content),
-            "generated_at": payload["generated_at"],
-            "model_count": len(models),
-            "manifest_last": True,
-            "atomic_write": True,
+    receipt: dict[str, Any] = {
+        "status": "published",
+        "schema_version": REGISTRY_MANIFEST_SCHEMA_VERSION,
+        "destination": _uri_evidence(destination_uri),
+        "checksum": checksum,
+        "content_sha256": sha256_bytes(content),
+        "generated_at": payload["generated_at"],
+        "model_count": len(models),
+        "manifest_last": True,
+        "atomic_write": True,
+    }
+    # R2-A1: mirror the caller's cutover_gate audit block on the receipt so
+    # downstream operators reading `manifest-last.json`'s companion receipt
+    # see the same audit fact the CLI summary/runner receipt records.
+    if cutover_gate is not None:
+        receipt["cutover_gate"] = {
+            "mode": str(cutover_gate.get("mode") or "not_wired"),
+            "declaration_env": cutover_gate.get("declaration_env"),
+            "declaration_present": bool(cutover_gate.get("declaration_present")),
         }
-    )
+    return _evidence_safe(receipt)
 
 
 def publish_canonical_readiness_index(

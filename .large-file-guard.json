@@ -25,6 +25,11 @@
     "tests/test_node27_timeseries_compression_live_evidence.py",
     "tests/test_node27_timeseries_compression_supervisor.py",
     "schemas/examples/timeseries_compression_live_evidence.example.json",
-    "docs/runbooks/receipts/tier-node27-timeseries-storage/**/*.json"
+    "docs/runbooks/receipts/tier-node27-timeseries-storage/**/*.json",
+    "scripts/scheduler_file_provider_refresh.py",
+    "scripts/publish_scheduler_file_registry.py",
+    "tests/test_scheduler_file_provider_refresh.py",
+    "tests/test_publish_scheduler_file_registry.py",
+    "docs/runbooks/current-production-ops.md"
   ]
 }

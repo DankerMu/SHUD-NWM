@@ -50,7 +50,10 @@
         "orphan_limit_exceeded",
         "primary_receipt_failed",
         "receipt_channels_failed",
-        "emergency_record_invalid"
+        "emergency_record_invalid",
+        "registry_cutover_undeclared",
+        "registry_cutover_removal_refused",
+        "registry_cutover_declaration_invalid"
       ],
       "maxLength": 64
     },
@@ -80,7 +83,10 @@
         "orphan_limit_exceeded",
         "primary_receipt_failed",
         "receipt_channels_failed",
-        "emergency_record_invalid"
+        "emergency_record_invalid",
+        "registry_cutover_undeclared",
+        "registry_cutover_removal_refused",
+        "registry_cutover_declaration_invalid"
       ],
       "maxLength": 64
     },
@@ -158,12 +164,169 @@
       "type": "array",
       "maxItems": 64,
       "items": {"type": "string", "maxLength": 512, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"}
+    },
+    "registry_classification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "previous_registry_sha256",
+        "new_registry_sha256",
+        "previous_model_count",
+        "prospective_model_count",
+        "added",
+        "unchanged",
+        "removed",
+        "package_changed",
+        "refused",
+        "declared_cutovers"
+      ],
+      "properties": {
+        "previous_registry_sha256": {
+          "oneOf": [
+            {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            {"type": "null"}
+          ]
+        },
+        "new_registry_sha256": {
+          "oneOf": [
+            {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            {"type": "null"}
+          ]
+        },
+        "previous_model_count": {
+          "oneOf": [
+            {"type": "integer", "minimum": 0, "maximum": 65536},
+            {"type": "null"}
+          ]
+        },
+        "prospective_model_count": {"type": "integer", "minimum": 0, "maximum": 65536},
+        "added": {"$ref": "#/$defs/model_id_group"},
+        "unchanged": {"$ref": "#/$defs/model_id_group"},
+        "removed": {"$ref": "#/$defs/model_id_group"},
+        "package_changed": {"$ref": "#/$defs/checksum_group"},
+        "refused": {"$ref": "#/$defs/refused_group"},
+        "declared_cutovers": {"$ref": "#/$defs/declared_cutover_group"}
+      }
+    }
+  },
+  "$defs": {
+    "model_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.:-]+$"},
+    "package_checksum": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "model_id_group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "total", "truncated"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {"$ref": "#/$defs/model_id"}
+        },
+        "total": {"type": "integer", "minimum": 0},
+        "truncated": {"type": "boolean"}
+      }
+    },
+    "checksum_group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "total", "truncated"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["model_id", "old_checksum", "new_checksum"],
+            "properties": {
+              "model_id": {"$ref": "#/$defs/model_id"},
+              "old_checksum": {"$ref": "#/$defs/package_checksum"},
+              "new_checksum": {"$ref": "#/$defs/package_checksum"}
+            }
+          }
+        },
+        "total": {"type": "integer", "minimum": 0},
+        "truncated": {"type": "boolean"}
+      }
+    },
+    "refused_group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "total", "truncated"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["model_id", "reason"],
+            "properties": {
+              "model_id": {"$ref": "#/$defs/model_id"},
+              "old_checksum": {
+                "oneOf": [
+                  {"$ref": "#/$defs/package_checksum"},
+                  {"type": "null"}
+                ]
+              },
+              "new_checksum": {
+                "oneOf": [
+                  {"$ref": "#/$defs/package_checksum"},
+                  {"type": "null"}
+                ]
+              },
+              "reason": {
+                "enum": [
+                  "registry_cutover_undeclared",
+                  "registry_cutover_removal_refused",
+                  "registry_cutover_declaration_invalid"
+                ],
+                "maxLength": 64
+              }
+            }
+          }
+        },
+        "total": {"type": "integer", "minimum": 0},
+        "truncated": {"type": "boolean"}
+      }
+    },
+    "declared_cutover_group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "total", "truncated"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "model_id",
+              "old_checksum",
+              "new_checksum",
+              "effective_cycle_utc",
+              "transition_mode"
+            ],
+            "properties": {
+              "model_id": {"$ref": "#/$defs/model_id"},
+              "old_checksum": {"$ref": "#/$defs/package_checksum"},
+              "new_checksum": {"$ref": "#/$defs/package_checksum"},
+              "effective_cycle_utc": {"type": "string", "format": "date-time", "maxLength": 64},
+              "transition_mode": {"enum": ["replace"]}
+            }
+          }
+        },
+        "total": {"type": "integer", "minimum": 0},
+        "truncated": {"type": "boolean"}
+      }
     }
   },
   "allOf": [
     {
       "if": {"properties": {"outcome": {"enum": ["published", "dry_run"]}}, "required": ["outcome"]},
       "then": {
+        "required": ["registry_classification"],
         "properties": {
           "providers": {
             "oneOf": [
@@ -190,6 +353,21 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "enum": [
+              "registry_cutover_undeclared",
+              "registry_cutover_removal_refused",
+              "registry_cutover_declaration_invalid"
+            ]
+          }
+        },
+        "required": ["reason"]
+      },
+      "then": {"required": ["registry_classification"]}
     }
   ]
 }

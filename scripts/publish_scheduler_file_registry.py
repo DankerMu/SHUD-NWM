@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -61,7 +62,22 @@ from workers.model_registry.basins_soil_alpha_repair import (
     repair_soil_alpha_calibration_for_basin as repair_shud_calibration_for_basin,
 )
 
-SCHEMA_VERSION = "nhms.scheduler.basins_file_registry_publish.v1"
+# v2 (#1080 round-2 R2-A1): summary now carries a required top-level
+# `cutover_gate` audit block so a `--allow-uncovered-cutover` bypass leaves a
+# persisted marker (versus the byte-identical v1 shape between gate-passing
+# and bypass runs).  See design.md D7 sub-decision on `cutover_gate`.
+SCHEMA_VERSION = "nhms.scheduler.basins_file_registry_publish.v2"
+# Env name owned by scheduler_file_provider_refresh._registry_precommit_gate;
+# hard-coded here so the CLI can audit it even when the refresh module is not
+# imported (bootstrap path).
+CUTOVER_DECLARATION_ENV_NAME = "NHMS_REGISTRY_CUTOVER_DECLARATION_PATH"
+CUTOVER_GATE_MODES = frozenset(
+    {
+        "enforced",
+        "bypassed_allow_uncovered_cutover",
+        "not_wired",
+    }
+)
 DEFAULT_PACKAGE_VERSION_TEMPLATE = "vbasins-{slug_id}-{content_hash}-{source_hash}"
 DEFAULT_SOURCE_POLICY = {
     "forcing_source": "node27_raw_handoff",
@@ -142,7 +158,9 @@ def publish_all_basin_scheduler_registry(
     resource_validator: Callable[[Path], None] | None = None,
     workspace_budget: WorkspaceBudget | None = None,
     max_contexts: int | None = None,
+    cutover_gate: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    audited_cutover_gate = _normalize_cutover_gate_audit(cutover_gate)
     root = resolve_basins_root(str(basins_root) if basins_root not in (None, "") else None)
     resolved_object_root = _required_path(
         object_store_root or os.getenv("OBJECT_STORE_ROOT"),
@@ -350,6 +368,11 @@ def publish_all_basin_scheduler_registry(
                 generated_at=registry_generated_at,
                 expected_preimage=expected_preimage,
                 commit_observer=registry_commit_observer,
+                # R2-A1: mirror the CLI summary audit into the manifest
+                # publication receipt so operators reading
+                # `manifest-last.json`'s companion receipt see the same
+                # cutover_gate mode and declaration presence.
+                cutover_gate=audited_cutover_gate,
             )
         except Exception as error:
             raise _publish_failure(
@@ -378,6 +401,10 @@ def publish_all_basin_scheduler_registry(
         "registry": registry_receipt,
         "package_status_counts": package_status_counts,
         "packages": package_results,
+        # R2-A1: persist the cutover_gate audit block on every summary
+        # (dry_run/published/bypassed).  Same shape in every path so a later
+        # auditor can grep for `cutover_gate.mode` and see how the gate ran.
+        "cutover_gate": audited_cutover_gate,
     }
     summary["repair_staging_cleanup"] = (
         {"status": "retained", "reason": "retain_repair_staging"}
@@ -387,6 +414,56 @@ def publish_all_basin_scheduler_registry(
     if output_path is not None:
         _write_json(output_path, summary)
     return summary
+
+
+def _normalize_cutover_gate_audit(
+    cutover_gate: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Return a bounded, well-typed `cutover_gate` audit block for the summary.
+
+    R2-A1 requires every summary path (bypass/normal/dry-run) and the manifest
+    publication receipt to persist the same three-field audit shape:
+
+    - ``mode``: one of ``CUTOVER_GATE_MODES``; missing input becomes
+      ``"not_wired"`` so callers that never opted in are recorded truthfully
+      instead of masquerading as ``"enforced"``.
+    - ``declaration_env``: the env name consulted (``str``) when the gate ran
+      enforced, else ``None`` — bypass and not_wired never consult an env.
+    - ``declaration_present``: ``bool``; whether the env resolved to a
+      readable declaration file.  Defaults to ``False`` when absent.
+    """
+    if cutover_gate is None:
+        return {
+            "mode": "not_wired",
+            "declaration_env": None,
+            "declaration_present": False,
+        }
+    if not isinstance(cutover_gate, Mapping):
+        raise SchedulerRegistryPublishError(
+            "SCHEDULER_REGISTRY_CUTOVER_AUDIT_INVALID",
+            "cutover_gate audit must be a mapping.",
+            details={"provided_type": type(cutover_gate).__name__},
+        )
+    mode = cutover_gate.get("mode")
+    if mode not in CUTOVER_GATE_MODES:
+        raise SchedulerRegistryPublishError(
+            "SCHEDULER_REGISTRY_CUTOVER_AUDIT_INVALID",
+            "cutover_gate.mode must be one of the audited modes.",
+            details={"mode": mode, "allowed": sorted(CUTOVER_GATE_MODES)},
+        )
+    env_name = cutover_gate.get("declaration_env")
+    if env_name is not None and not isinstance(env_name, str):
+        raise SchedulerRegistryPublishError(
+            "SCHEDULER_REGISTRY_CUTOVER_AUDIT_INVALID",
+            "cutover_gate.declaration_env must be a string or null.",
+            details={"provided_type": type(env_name).__name__},
+        )
+    declaration_present = bool(cutover_gate.get("declaration_present"))
+    return {
+        "mode": str(mode),
+        "declaration_env": env_name,
+        "declaration_present": declaration_present,
+    }
 
 
 def _guard_resources(validator: Callable[[Path], None] | None, workspace: Path) -> None:
@@ -424,6 +501,12 @@ def _publish_failure(
         "provider_replace_failed",
         "provider_replace_uncertain",
         "provider_postread_failed",
+        # #1080 registry-cutover refusal tokens flow through the same details
+        # channel as other precommit rejections; keep them out of the generic
+        # provider_invalid collapse so operators see the actual reason.
+        "registry_cutover_undeclared",
+        "registry_cutover_removal_refused",
+        "registry_cutover_declaration_invalid",
     }
     provider_reason = (
         str(source_reason)
@@ -1049,15 +1132,155 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help="Discover/select only; do not publish packages/registry.",
     )
     parser.add_argument("--output", default=None, help="Optional path for the aggregate publication receipt.")
+    parser.add_argument(
+        "--allow-uncovered-cutover",
+        action="store_true",
+        help=(
+            "Bypass the #1080 registry cutover gate.  Only intended for bootstrap "
+            "(no previous canonical manifest) or one-off operator recovery; regular "
+            "operators must file a cutover declaration and let the gate run."
+        ),
+    )
     return parser.parse_args(argv)
+
+
+def _cutover_declaration_present(env_value: str | None) -> bool:
+    """Return True when the cutover declaration env resolves to a readable file.
+
+    R2-A1: the CLI records this fact on the summary so a later auditor can tell
+    whether the operator staged a declaration at all before running the
+    publisher — a "gate enforced but no declaration" run is materially
+    different from a "gate enforced and declaration file was found" run.
+
+    Any error (missing env, not a regular file, permission denied) collapses
+    to ``False``.  The gate itself does the strict schema validation; this
+    helper only proves the operator staged a file we could read.
+    """
+    if not env_value:
+        return False
+    path = Path(env_value).expanduser()
+    try:
+        # Explicit no-follow: symlinks are already rejected by the gate; the
+        # audit fact should reflect the same rejection.
+        stat_result = path.lstat()
+    except OSError:
+        return False
+    if not stat.S_ISREG(stat_result.st_mode):
+        return False
+    return os.access(str(path), os.R_OK)
+
+
+def _build_manual_cutover_gate(
+    *,
+    registry_manifest: str | Path,
+    dry_run: bool,
+) -> Callable[
+    [Path, Sequence[Mapping[str, Any]], Sequence[Mapping[str, Any]]], None
+]:
+    """Wire the #1080 registry cutover gate for the manual CLI (finding C-D1).
+
+    Lazy import of the refresh module keeps this file free of a top-level
+    dependency cycle (`scheduler_file_provider_refresh` already imports from
+    this module).  The manual CLI runs outside the refresh runner's own lock
+    coordination, but the gate itself is stateless — it snapshots the
+    previous canonical bytes inside the gate call and returns the same
+    classification refusal that the runner path would produce.
+    """
+    from datetime import UTC, datetime  # local — CLI-only path.
+
+    from scripts import scheduler_file_provider_refresh as refresh
+
+    manifest_path = Path(registry_manifest).expanduser()
+
+    def gate(
+        workspace: Path,
+        packages: Sequence[Mapping[str, Any]],
+        registry_models: Sequence[Mapping[str, Any]],
+    ) -> None:
+        # Load the previous canonical bytes; missing file legitimately
+        # bootstraps and returns None.  We deliberately hand only the raw
+        # bytes forward so the gate's own parser stays the source of truth.
+        try:
+            previous = refresh._load_previous_canonical_registry(
+                str(manifest_path),
+                containment_root=manifest_path.parent,
+            )
+        except refresh.RefreshError as error:
+            raise SchedulerRegistryPublishError(
+                "SCHEDULER_REGISTRY_REFRESH_PRECOMMIT_FAILED",
+                "Previous canonical registry could not be read for the cutover gate.",
+                details={
+                    "provider_reason": error.reason,
+                    "provider_phase": "precommit",
+                },
+            ) from error
+        previous_sha: str | None
+        previous_bytes: bytes | None
+        if previous is None:
+            previous_sha = None
+            previous_bytes = None
+        else:
+            previous_sha, _previous_models, previous_bytes = previous
+        cutover_env = os.getenv(refresh.CUTOVER_DECLARATION_ENV, "").strip() or None
+        # Manual CLI does not need to bind classification to a receipt; the
+        # sink still needs to be a no-op callable.
+        def classification_sink(payload: dict[str, Any]) -> None:
+            del payload
+        refresh._registry_precommit_gate(
+            workspace,
+            packages,
+            registry_models,
+            previous_registry_bytes=previous_bytes,
+            previous_registry_sha256=previous_sha,
+            prospective_generated_at=datetime.now(UTC),
+            cutover_declaration_env=cutover_env,
+            dry_run=dry_run,
+            classification_sink=classification_sink,
+        )
+
+    return gate
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
+    resolved_registry_manifest = args.registry_manifest or _default_registry_manifest()
+    precommit_validator: Callable[
+        [Path, Sequence[Mapping[str, Any]], Sequence[Mapping[str, Any]]], None
+    ] | None = None
+    # R2-A1: compute the cutover_gate audit block BEFORE calling the publisher
+    # so the summary always records how the gate ran even when the publisher
+    # fails/short-circuits.  Only the CLI-controlled seam changes mode.
+    cutover_gate_audit: dict[str, Any]
+    if args.allow_uncovered_cutover:
+        # Loud stderr warning: operators must NOT default to bypass; the
+        # gate refusal is the point of #1080.
+        print(
+            "WARNING: --allow-uncovered-cutover disables the #1080 registry "
+            "cutover gate. Only use for bootstrap or explicit one-off recovery; "
+            "regular refreshes MUST file a valid cutover declaration.",
+            file=sys.stderr,
+        )
+        cutover_gate_audit = {
+            "mode": "bypassed_allow_uncovered_cutover",
+            "declaration_env": None,
+            "declaration_present": False,
+        }
+    else:
+        precommit_validator = _build_manual_cutover_gate(
+            registry_manifest=resolved_registry_manifest,
+            dry_run=args.dry_run,
+        )
+        cutover_gate_audit = {
+            "mode": "enforced",
+            "declaration_env": CUTOVER_DECLARATION_ENV_NAME,
+            "declaration_present": _cutover_declaration_present(
+                os.getenv(CUTOVER_DECLARATION_ENV_NAME, "").strip() or None
+            ),
+        }
     try:
         summary = publish_all_basin_scheduler_registry(
             basins_root=args.basins_root,
-            registry_manifest=args.registry_manifest or _default_registry_manifest(),
+            registry_manifest=resolved_registry_manifest,
             object_store_root=args.object_store_root,
             object_store_prefix=args.object_store_prefix,
             work_dir=args.work_dir or _default_work_dir(),
@@ -1073,12 +1296,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             retain_repair_staging=args.retain_repair_staging,
             dry_run=args.dry_run,
             output_path=args.output,
+            precommit_validator=precommit_validator,
+            cutover_gate=cutover_gate_audit,
         )
     except SchedulerRegistryPublishError as error:
-        print(json.dumps(error.to_payload(), ensure_ascii=False, sort_keys=True), file=sys.stderr)
+        # R2-A1: attach the cutover_gate audit to the stderr error payload so
+        # a refusal (or bootstrap/deploy failure) leaves the same audit fact
+        # a successful summary would.  Otherwise bypass runs would be
+        # byte-identical to gate-passing runs in every persisted artifact and
+        # a later auditor could not tell them apart.
+        payload = {**error.to_payload(), "cutover_gate": cutover_gate_audit}
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True), file=sys.stderr)
         return 1
     except (BasinsDiscoveryError, BasinsPackageError, BasinsRegistryImportError) as error:
-        print(json.dumps(error.to_payload(), ensure_ascii=False, sort_keys=True), file=sys.stderr)
+        payload = {**error.to_payload(), "cutover_gate": cutover_gate_audit}
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True), file=sys.stderr)
         return 1
     except SchedulerFileProviderError as error:
         print(
@@ -1089,6 +1321,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "reason": error.reason,
                     "field": error.field,
                     "evidence": error.evidence,
+                    "cutover_gate": cutover_gate_audit,
                 },
                 ensure_ascii=False,
                 sort_keys=True,

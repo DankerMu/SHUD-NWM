@@ -14,9 +14,12 @@ import sys
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from dataclasses import field as dataclass_field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
+
+import jsonschema
 
 from packages.common.libpq_env import LIBPQ_CONNECTION_ENV_KEYS
 from packages.common.provider_atomic import (
@@ -82,8 +85,63 @@ REASONS = frozenset(
         "primary_receipt_failed",
         "receipt_channels_failed",
         "emergency_record_invalid",
+        # #1080 registry cutover gate refusal tokens.  Emitted only before any
+        # canonical provider replacement; previous canonical bytes stay intact.
+        "registry_cutover_undeclared",
+        "registry_cutover_removal_refused",
+        "registry_cutover_declaration_invalid",
     }
 )
+REGISTRY_CUTOVER_REFUSAL_REASONS = frozenset(
+    {
+        "registry_cutover_undeclared",
+        "registry_cutover_removal_refused",
+        "registry_cutover_declaration_invalid",
+    }
+)
+CUTOVER_SCHEMA_VERSION = "nhms.scheduler.registry_package_cutover.v1"
+REGISTRY_MANIFEST_SCHEMA_VERSION = "nhms.scheduler.file_model_registry.v1"
+CUTOVER_TRANSITION_MODES = frozenset({"replace"})
+CUTOVER_DECLARATION_ENV = "NHMS_REGISTRY_CUTOVER_DECLARATION_PATH"
+MAX_CUTOVER_DECLARATION_BYTES = 256 * 1024
+CUTOVER_PAST_TOLERANCE = timedelta(hours=24)
+CUTOVER_FUTURE_TOLERANCE = timedelta(hours=168)
+# Aligned to the 00:00/12:00 UTC compute cycle cadence.
+CUTOVER_CYCLE_HOURS = frozenset({0, 12})
+# Registry rows compared byte-for-byte on these top-level fields to decide
+# "unchanged" vs "package_changed".  Deviations in ANY of these fields escalate.
+#
+# The whitelist is the deliberate union of the identity fields the spec names
+# (see openspec design D7): the three URI/checksum fields plus every documented
+# identity field emitted by scheduler_registry_row_from_sources.  It stays a
+# tuple so the classifier iterates in declaration order and the identical
+# tuple also drives the regression test that guards the whitelist itself.
+REGISTRY_MODEL_IDENTITY_FIELDS = (
+    "model_package_uri",
+    "manifest_uri",
+    "package_checksum",
+    "basin_version_id",
+    "river_network_version_id",
+    "shud_code_version",
+    "segment_count",
+    "output_segment_count",
+    "lifecycle_state",
+)
+# Nested identity fields; classified by (top_level_field, nested_path) pairs.
+# Every path is a tuple of successive Mapping keys.  A missing top-level or
+# intermediate mapping in either row counts as inequality (escalates to
+# package_changed) so drift in a rebuilt resource profile cannot ride through
+# silently.
+REGISTRY_MODEL_NESTED_IDENTITY_FIELDS = (
+    ("resource_profile", ("source_inventory_checksum",)),
+)
+# Runtime enforcement of the model_id regex must match the schema
+# (see schemas/scheduler_file_provider_refresh_receipt.schema.json:204 and
+# schemas/scheduler_registry_package_cutover.schema.json:16) so
+# `_validate_receipt` and `jsonschema.Draft202012Validator` reject the same
+# corpus.
+MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]+$")
+MAX_MODEL_ID_LENGTH = 128
 MAX_RECEIPT_BYTES = 1024 * 1024
 MAX_COLLECTION_ITEMS = 256
 MAX_STRING_LENGTH = 512
@@ -111,6 +169,9 @@ RECEIPT_KEYS = frozenset(
         "residues",
     }
 )
+# Optional top-level key emitted whenever the registry-cutover gate ran.  The
+# schema (allOf conditional) requires it on dry_run/published/refusal outcomes.
+RECEIPT_OPTIONAL_KEYS = frozenset({"registry_classification"})
 
 
 class RefreshError(RuntimeError):
@@ -519,6 +580,10 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
     orphan_total = 0
     orphan_discovered_total = 0
     orphan_attempted_total = 0
+    # Populated by the registry precommit gate; must be included on every
+    # dry_run/published/refusal receipt per #1080 spec.
+    registry_classification: dict[str, Any] | None = None
+    cutover_declaration_env = os.getenv(CUTOVER_DECLARATION_ENV, "").strip() or None
 
     def rollback_receipt_if_needed(*, preserve_failure: bool = False) -> dict[str, Any] | None:
         if not rollback_stack:
@@ -540,6 +605,7 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                 orphan_total=orphan_total,
                 orphan_discovered_total=orphan_discovered_total,
                 orphan_attempted_total=orphan_attempted_total,
+                registry_classification=registry_classification,
             )
         return _receipt(
             run_id=run_id,
@@ -552,6 +618,7 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
             orphan_total=orphan_total,
             orphan_discovered_total=orphan_discovered_total,
             orphan_attempted_total=orphan_attempted_total,
+            registry_classification=registry_classification,
         )
 
     try:
@@ -656,6 +723,34 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
             readiness_entries: list[dict[str, Any]] = []
             readiness_derivation: dict[str, Any] = {}
             registry_generated_at = datetime.now(UTC)
+            # Snapshot the previous canonical registry once, inside the
+            # destination lock, so classification sees the exact bytes the
+            # canonical writer is about to replace.  The loader now returns
+            # (sha256, models, raw_bytes) from the same read, so
+            # previous_registry_sha256_snapshot and
+            # previous_registry_bytes_snapshot are guaranteed to come from
+            # the same page cache read (finding C-F2).
+            try:
+                previous_canonical = _load_previous_canonical_registry(
+                    config.registry_uri,
+                    containment_root=config.provider_store_root,
+                )
+            except RefreshError:
+                raise
+            if previous_canonical is None:
+                previous_registry_sha256_snapshot: str | None = None
+                previous_registry_bytes_snapshot: bytes | None = None
+            else:
+                (
+                    previous_registry_sha256_snapshot,
+                    previous_models_snapshot,
+                    previous_registry_bytes_snapshot,
+                ) = previous_canonical
+                del previous_models_snapshot  # parsed again inside the gate
+
+            def _classification_sink(payload: dict[str, Any]) -> None:
+                nonlocal registry_classification
+                registry_classification = payload
 
             def precommit_provider_generation(
                 workspace: Path,
@@ -663,7 +758,17 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                 registry_models: Sequence[Mapping[str, Any]],
             ) -> None:
                 nonlocal readiness_entries, readiness_derivation
-                _registry_precommit_gate(workspace, packages, registry_models)
+                _registry_precommit_gate(
+                    workspace,
+                    packages,
+                    registry_models,
+                    previous_registry_bytes=previous_registry_bytes_snapshot,
+                    previous_registry_sha256=previous_registry_sha256_snapshot,
+                    prospective_generated_at=registry_generated_at,
+                    cutover_declaration_env=cutover_declaration_env,
+                    dry_run=dry_run,
+                    classification_sink=_classification_sink,
+                )
                 readiness_entries, readiness_derivation = derive_catalog_bound_readiness_entries(
                     registry_models,
                     object_store_root=config.object_store_root,
@@ -699,6 +804,18 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                     )
                     worker_registry_committed = rollback_stack[-1].committed
 
+            # R2-A1: the runner installs the cutover gate itself upstream via
+            # `precommit_provider_generation`; audit that fact on the publisher
+            # summary/manifest receipt so operators reading either side see
+            # the same gate mode and declaration-present bit.
+            runner_cutover_gate_audit = {
+                "mode": "enforced",
+                "declaration_env": CUTOVER_DECLARATION_ENV,
+                "declaration_present": _cutover_declaration_env_resolves_to_file(
+                    cutover_declaration_env
+                ),
+            }
+
             def publish_registry(
                 commit_observer: Callable[[ProviderPreimage], None] | None = None,
             ) -> dict[str, Any]:
@@ -716,6 +833,7 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                     resource_validator=_enforce_workspace_bounds,
                     workspace_budget=workspace_budget,
                     max_contexts=MAX_ORPHANS,
+                    cutover_gate=runner_cutover_gate_audit,
                 )
 
             if not dry_run and config.worker_registry_uri is not None:
@@ -859,6 +977,7 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                 orphan_total=orphan_total,
                 orphan_discovered_total=orphan_discovered_total,
                 orphan_attempted_total=orphan_attempted_total,
+                registry_classification=registry_classification,
             )
     except ProviderAtomicError as error:
         rollback_receipt = rollback_receipt_if_needed(
@@ -877,6 +996,7 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
             ),
             phase=error.phase,
             providers=committed,
+            registry_classification=registry_classification,
         )
     except (RefreshError, SchedulerRegistryPublishError, SchedulerFileProviderError, StateManagerError) as error:
         reason = getattr(error, "reason", None) or getattr(error, "error_code", None) or "provider_invalid"
@@ -933,6 +1053,7 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                 orphan_total=orphan_total,
                 orphan_discovered_total=orphan_discovered_total,
                 orphan_attempted_total=orphan_attempted_total,
+                registry_classification=registry_classification,
             )
     except Exception:
         rollback_receipt = rollback_receipt_if_needed()
@@ -943,6 +1064,7 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
             reason="provider_invalid",
             phase="precommit",
             providers=committed,
+            registry_classification=registry_classification,
         )
 
     try:
@@ -1310,6 +1432,29 @@ def _discard_emergency_slot(slot: EmergencySlot) -> None:
         os.close(slot.parent_fd)
 
 
+def _lenient_receipt_order(payload: Any) -> tuple[datetime, str] | None:
+    """Extract ``(started_at, run_id)`` from an untrusted receipt payload.
+
+    Used only when reading an existing ``latest.json`` for the monotonic-order
+    comparison and history rotation.  Legacy pre-#1080 receipts on disk lack
+    the ``registry_classification`` field required by ``_validate_receipt``;
+    running the strict validator on them would brick the first post-#1080
+    refresh (see finding C-A2).  This lenient reader accepts any payload
+    whose ``started_at`` and ``run_id`` parse cleanly; anything malformed
+    returns ``None`` and lets the caller default to "replace".
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    run_id = payload.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return None
+    try:
+        started = _parse_receipt_datetime(payload.get("started_at"))
+    except ValueError:
+        return None
+    return started, run_id
+
+
 def _publish_primary_receipt(root: Path, receipt: Mapping[str, Any]) -> None:
     canonical = _validate_receipt(receipt)
     content = _receipt_bytes(canonical)
@@ -1321,18 +1466,26 @@ def _publish_primary_receipt(root: Path, receipt: Mapping[str, Any]) -> None:
         latest_path = root / "latest.json"
         replace_latest = True
         try:
-            latest = _validate_receipt(
-                json.loads(
-                    read_bytes_limited_no_follow(
-                        latest_path,
-                        max_bytes=MAX_RECEIPT_BYTES,
-                        containment_root=root,
-                    )
-                )
+            existing_bytes = read_bytes_limited_no_follow(
+                latest_path,
+                max_bytes=MAX_RECEIPT_BYTES,
+                containment_root=root,
             )
-            replace_latest = _receipt_order(canonical) >= _receipt_order(latest)
         except FileNotFoundError:
-            pass
+            existing_bytes = None
+        if existing_bytes is not None:
+            # Read the existing latest.json leniently — legacy pre-#1080
+            # receipts lack `registry_classification` and would otherwise
+            # brick this write (finding C-A2).  Validation is a publish-time
+            # invariant we hold for receipts THIS process writes, not a
+            # gate on the previous generation's shape.
+            try:
+                existing_payload = json.loads(existing_bytes)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                existing_payload = None
+            existing_order = _lenient_receipt_order(existing_payload)
+            if existing_order is not None:
+                replace_latest = _receipt_order(canonical) >= existing_order
         if replace_latest:
             atomic_write_bytes_no_follow(latest_path, content, containment_root=root, mode=0o600)
         files: list[tuple[tuple[datetime, str], Path]] = []
@@ -1340,16 +1493,17 @@ def _publish_primary_receipt(root: Path, receipt: Mapping[str, Any]) -> None:
             if not item.is_file() or item.is_symlink():
                 continue
             try:
-                historical = _validate_receipt(
-                    json.loads(
-                        read_bytes_limited_no_follow(
-                            item,
-                            max_bytes=MAX_RECEIPT_BYTES,
-                            containment_root=root,
-                        )
-                    )
+                historical_bytes = read_bytes_limited_no_follow(
+                    item,
+                    max_bytes=MAX_RECEIPT_BYTES,
+                    containment_root=root,
                 )
-                order = _receipt_order(historical)
+                historical_payload = json.loads(historical_bytes)
+                lenient = _lenient_receipt_order(historical_payload)
+                if lenient is None:
+                    order = (datetime.min.replace(tzinfo=UTC), item.name)
+                else:
+                    order = lenient
             except (OSError, SafeFilesystemError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
                 order = (datetime.min.replace(tzinfo=UTC), item.name)
             files.append((order, item))
@@ -1377,12 +1531,13 @@ def _receipt(
     orphan_total: int | None = None,
     orphan_discovered_total: int | None = None,
     orphan_attempted_total: int | None = None,
+    registry_classification: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     evidence = list(orphan_paths[:MAX_ORPHAN_EVIDENCE])
     total = len(orphan_paths) if orphan_total is None else orphan_total
     discovered_total = total if orphan_discovered_total is None else orphan_discovered_total
     attempted_total = total if orphan_attempted_total is None else orphan_attempted_total
-    return {
+    receipt: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
         "started_at": started.isoformat().replace("+00:00", "Z"),
@@ -1404,6 +1559,10 @@ def _receipt(
         },
         "residues": [],
     }
+    if registry_classification is not None:
+        # deep-copy through json to freeze the payload against later mutation.
+        receipt["registry_classification"] = json.loads(json.dumps(registry_classification))
+    return receipt
 
 
 def _provider_evidence(name: str, before: Mapping[str, Any], result: Any) -> dict[str, Any]:
@@ -1447,7 +1606,10 @@ def _read_provider_header(path: Path, *, containment_root: Path, max_bytes: int)
 
 
 def _validate_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
-    if not isinstance(receipt, Mapping) or set(receipt) != RECEIPT_KEYS:
+    if not isinstance(receipt, Mapping):
+        raise ValueError("receipt_shape_invalid")
+    keys = set(receipt)
+    if not RECEIPT_KEYS <= keys or (keys - RECEIPT_KEYS) - RECEIPT_OPTIONAL_KEYS:
         raise ValueError("receipt_shape_invalid")
     if receipt.get("schema_version") != SCHEMA_VERSION:
         raise ValueError("receipt_schema_invalid")
@@ -1598,8 +1760,301 @@ def _validate_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
         or orphans.get("truncated") is not (orphan_total > len(orphan_items))
     ):
         raise ValueError("receipt_orphan_limit")
+    _validate_registry_classification_field(receipt)
     _validate_value_bounds(receipt)
     return json.loads(json.dumps(receipt, ensure_ascii=True))
+
+
+_CLASSIFICATION_GROUP_KEYS = frozenset({"items", "total", "truncated"})
+
+
+def _validate_registry_classification_field(receipt: Mapping[str, Any]) -> None:
+    classification = receipt.get("registry_classification")
+    outcome = receipt.get("outcome")
+    reason = receipt.get("reason")
+    requires_classification = (
+        outcome in {"dry_run", "published"}
+        or reason in REGISTRY_CUTOVER_REFUSAL_REASONS
+    )
+    if classification is None:
+        if requires_classification:
+            raise ValueError("receipt_classification_required")
+        return
+    if not isinstance(classification, Mapping):
+        raise ValueError("receipt_classification_invalid")
+    required = {
+        "previous_registry_sha256",
+        "new_registry_sha256",
+        # R2-N1: partition counts are required on every classified receipt so
+        # reconciliation is enforceable as equality, not just non-negative.
+        "previous_model_count",
+        "prospective_model_count",
+        "added",
+        "unchanged",
+        "removed",
+        "package_changed",
+        "refused",
+        "declared_cutovers",
+    }
+    if set(classification) != required:
+        raise ValueError("receipt_classification_invalid")
+    for hash_field in ("previous_registry_sha256", "new_registry_sha256"):
+        value = classification.get(hash_field)
+        if value is not None:
+            if not isinstance(value, str) or len(value) != 64 or any(
+                character not in "0123456789abcdef" for character in value
+            ):
+                raise ValueError("receipt_classification_invalid")
+    previous_count = classification.get("previous_model_count")
+    if previous_count is not None:
+        if (
+            not isinstance(previous_count, int)
+            or isinstance(previous_count, bool)
+            or previous_count < 0
+        ):
+            raise ValueError("receipt_classification_invalid")
+    prospective_count = classification.get("prospective_model_count")
+    if (
+        not isinstance(prospective_count, int)
+        or isinstance(prospective_count, bool)
+        or prospective_count < 0
+    ):
+        raise ValueError("receipt_classification_invalid")
+    for group_name in ("added", "unchanged", "removed"):
+        group = classification.get(group_name)
+        if not isinstance(group, Mapping) or set(group) != _CLASSIFICATION_GROUP_KEYS:
+            raise ValueError("receipt_classification_invalid")
+        items = group.get("items")
+        if not isinstance(items, list) or len(items) > MAX_COLLECTION_ITEMS:
+            raise ValueError("receipt_classification_invalid")
+        for item in items:
+            if (
+                not isinstance(item, str)
+                or not item
+                or len(item) > MAX_MODEL_ID_LENGTH
+                or MODEL_ID_PATTERN.fullmatch(item) is None
+            ):
+                # Same corpus as the schema (see MODEL_ID_PATTERN). Runtime
+                # and jsonschema.Draft202012Validator must accept/reject the
+                # same set of items or fixtures drift.
+                raise ValueError("receipt_classification_invalid")
+        _validate_group_totals(group, items)
+    package_changed = classification.get("package_changed")
+    _validate_object_group(
+        package_changed,
+        required_keys={"model_id", "old_checksum", "new_checksum"},
+        optional_keys=set(),
+    )
+    refused = classification.get("refused")
+    _validate_object_group(
+        refused,
+        required_keys={"model_id", "reason"},
+        optional_keys={"old_checksum", "new_checksum"},
+        reason_enum=REGISTRY_CUTOVER_REFUSAL_REASONS,
+    )
+    declared = classification.get("declared_cutovers")
+    _validate_object_group(
+        declared,
+        required_keys={
+            "model_id",
+            "old_checksum",
+            "new_checksum",
+            "effective_cycle_utc",
+            "transition_mode",
+        },
+        optional_keys=set(),
+    )
+    _enforce_registry_classification_reconciliation(
+        classification, outcome=outcome, reason=reason
+    )
+
+
+def _enforce_registry_classification_reconciliation(
+    classification: Mapping[str, Any],
+    *,
+    outcome: Any,
+    reason: Any,
+) -> None:
+    """Cross-check every classification total against the reconciliation formulas.
+
+    Governing invariants from spec.md:397-403:
+
+    * ``unchanged + package_changed + removed == previous_count`` when the
+      previous canonical registry existed.
+    * ``added + unchanged + package_changed == prospective_count``.
+    * ``declared_cutovers`` model_ids are a subset of ``package_changed``
+      model_ids.
+    * ``refused`` covers every ``removed`` entry, every ``package_changed``
+      entry not in ``declared_cutovers``, and every ``declaration_invalid``
+      entry (including synthetic ``__declaration__`` markers).
+    * ``dry_run``: reconciliation runs in id-only mode; ``package_changed``
+      may legitimately be zero because prospective rows carry only ids.
+    * ``published``: ``refused.total == 0`` (a non-zero refusal would have
+      raised before commit).
+    * refusal outcomes: ``refused.total >= 1``.
+    """
+    def _total(group_name: str) -> int:
+        group = classification.get(group_name)
+        if not isinstance(group, Mapping):
+            raise ValueError("receipt_classification_invalid")
+        total = group.get("total")
+        if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+            raise ValueError("receipt_classification_invalid")
+        return total
+
+    def _items(group_name: str) -> list[Any]:
+        group = classification.get(group_name)
+        if not isinstance(group, Mapping):
+            raise ValueError("receipt_classification_invalid")
+        items = group.get("items")
+        if not isinstance(items, list):
+            raise ValueError("receipt_classification_invalid")
+        return items
+
+    added_total = _total("added")
+    unchanged_total = _total("unchanged")
+    removed_total = _total("removed")
+    package_changed_total = _total("package_changed")
+    refused_total = _total("refused")
+    declared_total = _total("declared_cutovers")
+
+    package_changed_ids = {
+        item.get("model_id")
+        for item in _items("package_changed")
+        if isinstance(item, Mapping)
+    }
+    declared_ids = {
+        item.get("model_id")
+        for item in _items("declared_cutovers")
+        if isinstance(item, Mapping)
+    }
+    if not declared_ids <= package_changed_ids:
+        # `declared_cutovers ⊆ package_changed` per spec — any declared row
+        # must also be listed in `package_changed`.
+        raise ValueError("receipt_classification_invalid")
+
+    prospective_count = classification.get("prospective_model_count")
+    if (
+        not isinstance(prospective_count, int)
+        or isinstance(prospective_count, bool)
+        or prospective_count < 0
+    ):
+        raise ValueError("receipt_classification_invalid")
+
+    if outcome == "dry_run":
+        # dry_run classification is id-only; prospective rows have no
+        # checksum, so package_changed/refused stay empty by construction.
+        if package_changed_total != 0 or refused_total != 0 or declared_total != 0:
+            raise ValueError("receipt_classification_invalid")
+        # Even in dry_run the added+unchanged+package_changed equality must
+        # bind to the pinned prospective_model_count (package_changed is 0
+        # here so this reduces to added+unchanged == prospective_count).
+        if added_total + unchanged_total + package_changed_total != prospective_count:
+            raise ValueError("receipt_classification_invalid")
+        return
+
+    previous_count = classification.get("previous_model_count")
+    previous_sha = classification.get("previous_registry_sha256")
+    # R2-N1: enforce EQUALITY, not just non-negative bounds.  The pinned
+    # counts (`previous_model_count` / `prospective_model_count`) come from
+    # `_classify_registry`'s own len(previous_by_id)/len(prospective_by_id)
+    # so any drop or gain in the bucket totals fails validation on-disk.
+    if previous_sha is None:
+        # A missing previous canonical registry MUST also carry a null
+        # previous_model_count (bootstrap semantics).  A non-null count with
+        # no previous SHA is contradictory shape.
+        if previous_count is not None:
+            raise ValueError("receipt_classification_invalid")
+    else:
+        if (
+            not isinstance(previous_count, int)
+            or isinstance(previous_count, bool)
+            or previous_count < 0
+        ):
+            raise ValueError("receipt_classification_invalid")
+        if unchanged_total + package_changed_total + removed_total != previous_count:
+            raise ValueError("receipt_classification_invalid")
+
+    if added_total + unchanged_total + package_changed_total != prospective_count:
+        raise ValueError("receipt_classification_invalid")
+
+    # refused equals every removed entry + every package_changed entry not
+    # in declared_cutovers + every entry rejected by declaration_invalid.
+    # The declaration_invalid slice is unbounded (may include the synthetic
+    # `__declaration__` marker) so we assert only the lower bound.
+    expected_min_refused = removed_total + max(
+        package_changed_total - declared_total, 0
+    )
+    if refused_total < expected_min_refused:
+        raise ValueError("receipt_classification_invalid")
+
+    if outcome == "published":
+        # A publish that emits any refused entry contradicts the gate
+        # contract (the gate would have raised before commit).
+        if refused_total != 0:
+            raise ValueError("receipt_classification_invalid")
+
+    if reason in REGISTRY_CUTOVER_REFUSAL_REASONS:
+        if refused_total < 1:
+            raise ValueError("receipt_classification_invalid")
+
+
+def _validate_group_totals(group: Mapping[str, Any], items: Sequence[Any]) -> None:
+    total = group.get("total")
+    truncated = group.get("truncated")
+    if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+        raise ValueError("receipt_classification_invalid")
+    if total < len(items) or not isinstance(truncated, bool):
+        raise ValueError("receipt_classification_invalid")
+    if truncated is not (total > len(items)):
+        raise ValueError("receipt_classification_invalid")
+
+
+def _validate_object_group(
+    group: Any,
+    *,
+    required_keys: set[str],
+    optional_keys: set[str],
+    reason_enum: frozenset[str] | None = None,
+) -> None:
+    if not isinstance(group, Mapping) or set(group) != _CLASSIFICATION_GROUP_KEYS:
+        raise ValueError("receipt_classification_invalid")
+    items = group.get("items")
+    if not isinstance(items, list) or len(items) > MAX_COLLECTION_ITEMS:
+        raise ValueError("receipt_classification_invalid")
+    for item in items:
+        if not isinstance(item, Mapping):
+            raise ValueError("receipt_classification_invalid")
+        keys = set(item)
+        if not required_keys <= keys or (keys - required_keys) - optional_keys:
+            raise ValueError("receipt_classification_invalid")
+        for name, value in item.items():
+            if name == "model_id":
+                if (
+                    not isinstance(value, str)
+                    or not value
+                    or len(value) > MAX_MODEL_ID_LENGTH
+                    or MODEL_ID_PATTERN.fullmatch(value) is None
+                ):
+                    # Same corpus as the schema (see MODEL_ID_PATTERN).
+                    raise ValueError("receipt_classification_invalid")
+            elif name in {"old_checksum", "new_checksum"} and value is not None:
+                if (
+                    not isinstance(value, str)
+                    or len(value) != 64
+                    or any(character not in "0123456789abcdef" for character in value)
+                ):
+                    raise ValueError("receipt_classification_invalid")
+            elif name == "reason":
+                if reason_enum is not None and value not in reason_enum:
+                    raise ValueError("receipt_classification_invalid")
+            elif name == "transition_mode":
+                if value not in CUTOVER_TRANSITION_MODES:
+                    raise ValueError("receipt_classification_invalid")
+            elif isinstance(value, str):
+                if len(value) > MAX_STRING_LENGTH:
+                    raise ValueError("receipt_classification_invalid")
+    _validate_group_totals(group, items)
 
 
 def _parse_receipt_datetime(value: object) -> datetime:
@@ -1647,12 +2102,601 @@ def _enforce_workspace_bounds(root: Path) -> None:
     )
 
 
+def _iso_utc(value: datetime) -> str:
+    if value.tzinfo is None:
+        raise RefreshError("provider_invalid")
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _cutover_declaration_env_resolves_to_file(env_value: str | None) -> bool:
+    """Return True when the cutover declaration env points at a readable file.
+
+    R2-A1 audit helper: only records "did the operator stage a file the runner
+    could open" — schema validity is proven separately by
+    ``_load_cutover_declaration``.  Missing env, symlinks, non-regular files,
+    and permission errors collapse to ``False`` so the audit fact never
+    overclaims presence.
+    """
+    if not env_value:
+        return False
+    path = Path(env_value).expanduser()
+    try:
+        stat_result = path.lstat()
+    except OSError:
+        return False
+    if not stat.S_ISREG(stat_result.st_mode):
+        return False
+    return os.access(str(path), os.R_OK)
+
+
+def _load_previous_canonical_registry(
+    registry_uri: str, *, containment_root: Path
+) -> tuple[str, list[dict[str, Any]], bytes] | None:
+    """Return (sha256, models, raw_bytes) for the current canonical manifest.
+
+    Missing file is legitimate first publication and returns ``None``.  Any
+    other read/parse failure is a hard refusal condition and propagates.
+    Returned ``raw_bytes`` lets the caller hand the exact bytes that were
+    classified to downstream code without a second read (see finding C-F2).
+    """
+    path = Path(registry_uri)
+    try:
+        content = read_bytes_limited_no_follow(
+            path,
+            max_bytes=MAX_REGISTRY_MANIFEST_BYTES,
+            containment_root=containment_root,
+        )
+    except FileNotFoundError:
+        return None
+    except (OSError, SafeFilesystemError) as error:
+        raise RefreshError("provider_invalid") from error
+    # Sentinel-plus-one: read_bytes_limited_no_follow returns max_bytes+1
+    # bytes when the file is oversize; enforce the explicit cap here so the
+    # loader is symmetric with _read_provider_header/provider_atomic.
+    if len(content) > MAX_REGISTRY_MANIFEST_BYTES:
+        raise RefreshError("provider_invalid")
+    try:
+        payload = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RefreshError("provider_invalid") from error
+    if not isinstance(payload, Mapping):
+        raise RefreshError("provider_invalid")
+    models = payload.get("models")
+    if not isinstance(models, list):
+        raise RefreshError("provider_invalid")
+    normalized: list[dict[str, Any]] = []
+    for model in models:
+        if not isinstance(model, Mapping):
+            raise RefreshError("provider_invalid")
+        normalized.append(dict(model))
+    return hashlib.sha256(content).hexdigest(), normalized, content
+
+
+def _prospective_registry_content(
+    registry_models: Sequence[Mapping[str, Any]], *, generated_at: datetime
+) -> tuple[bytes, str]:
+    """Return the exact canonical bytes and SHA-256 that
+    ``publish_scheduler_registry_manifest`` will commit.
+
+    Mirrors the payload shape in
+    ``services/orchestrator/scheduler_file_providers.publish_scheduler_registry_manifest``
+    so the receipt's `new_registry_sha256` matches the actual on-disk hash.
+    """
+    payload: dict[str, Any] = {
+        "schema_version": REGISTRY_MANIFEST_SCHEMA_VERSION,
+        "generated_at": _iso_utc(generated_at),
+        "models": [dict(model) for model in registry_models],
+    }
+    canonical_without_checksum = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), default=str
+    ).encode("utf-8")
+    payload["checksum"] = f"sha256:{hashlib.sha256(canonical_without_checksum).hexdigest()}"
+    pretty = json.dumps(payload, sort_keys=True, indent=2, default=str).encode("utf-8") + b"\n"
+    return pretty, hashlib.sha256(pretty).hexdigest()
+
+
+def _prospective_registry_generation(
+    registry_models: Sequence[Mapping[str, Any]], *, generated_at: datetime
+) -> str:
+    """Stable identifier for one prospective registry publication.
+
+    Operators observe this value on a refused refresh receipt and file the
+    matching cutover declaration.  The generation is a pure content hash of
+    the sorted-by-model_id model list (``generated_at`` is intentionally
+    excluded from the preimage): the value is byte-for-byte deterministic
+    across any wall-clock interval, so the operator's refuse -> declare ->
+    retry loop always sees the same generation string as long as the model
+    set has not itself drifted.
+
+    ``generated_at`` is still accepted so callers stay symmetric with
+    ``_prospective_registry_content``, but the parameter is unused.  Keeping
+    the signature stable avoids touching every call site.
+    """
+    del generated_at  # unused — kept for signature stability
+    normalized = [
+        {key: value for key, value in dict(model).items()}
+        for model in registry_models
+    ]
+    normalized.sort(key=lambda model: str(model.get("model_id") or ""))
+    preimage = json.dumps(
+        {"models": normalized},
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    digest = hashlib.sha256(preimage).hexdigest()
+    return f"manifest-{digest[:12]}"
+
+
+def _load_cutover_declaration(
+    env_path: str | None, *, now: datetime
+) -> dict[str, Any] | None:
+    """Read/validate a cutover declaration file; return the parsed payload.
+
+    Absent env or empty value returns ``None`` (no declaration).  Any file
+    validation failure raises RefreshError(registry_cutover_declaration_invalid).
+    """
+    if not env_path:
+        return None
+    path = Path(env_path).expanduser()
+    if not path.is_absolute():
+        raise RefreshError("registry_cutover_declaration_invalid")
+    parent = path.parent
+    try:
+        content = read_bytes_limited_no_follow(
+            path,
+            max_bytes=MAX_CUTOVER_DECLARATION_BYTES,
+            containment_root=parent,
+        )
+    except (OSError, SafeFilesystemError) as error:
+        raise RefreshError("registry_cutover_declaration_invalid") from error
+    # Sentinel-plus-one: enforce the byte cap explicitly (finding C-F4).
+    if len(content) > MAX_CUTOVER_DECLARATION_BYTES:
+        raise RefreshError("registry_cutover_declaration_invalid")
+    try:
+        payload = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RefreshError("registry_cutover_declaration_invalid") from error
+    try:
+        # Module-level validator (finding C-F3) avoids the per-call
+        # metaschema resolution jsonschema.validate performs.
+        _CUTOVER_DECLARATION_VALIDATOR.validate(payload)
+    except jsonschema.ValidationError as error:
+        raise RefreshError("registry_cutover_declaration_invalid") from error
+    if not isinstance(payload, dict):
+        raise RefreshError("registry_cutover_declaration_invalid")
+    entries = payload.get("entries") or []
+    seen: set[str] = set()
+    for entry in entries:
+        model_id = str(entry.get("model_id") or "")
+        if model_id in seen:
+            raise RefreshError("registry_cutover_declaration_invalid")
+        seen.add(model_id)
+        try:
+            cycle = datetime.fromisoformat(str(entry["effective_cycle_utc"]).replace("Z", "+00:00"))
+        except (KeyError, ValueError) as error:
+            raise RefreshError("registry_cutover_declaration_invalid") from error
+        if cycle.tzinfo is None:
+            raise RefreshError("registry_cutover_declaration_invalid")
+        cycle = cycle.astimezone(UTC)
+        if (
+            cycle.minute != 0
+            or cycle.second != 0
+            or cycle.microsecond != 0
+            or cycle.hour not in CUTOVER_CYCLE_HOURS
+        ):
+            raise RefreshError("registry_cutover_declaration_invalid")
+        if cycle < now - CUTOVER_PAST_TOLERANCE or cycle > now + CUTOVER_FUTURE_TOLERANCE:
+            raise RefreshError("registry_cutover_declaration_invalid")
+        if str(entry.get("transition_mode")) not in CUTOVER_TRANSITION_MODES:
+            raise RefreshError("registry_cutover_declaration_invalid")
+    return payload
+
+
+# jsonschema is loaded from the vendored file at import time so the gate does
+# not touch the filesystem per call.
+_CUTOVER_DECLARATION_SCHEMA_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "schemas"
+    / "scheduler_registry_package_cutover.schema.json"
+)
+try:
+    _CUTOVER_DECLARATION_SCHEMA = json.loads(
+        _CUTOVER_DECLARATION_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
+except (OSError, json.JSONDecodeError) as _cutover_schema_load_error:  # pragma: no cover
+    raise RuntimeError(
+        f"cutover declaration schema unavailable: {_cutover_schema_load_error}"
+    ) from _cutover_schema_load_error
+# Module-level validator: jsonschema.validate() re-resolves the metaschema on
+# every call and builds a fresh validator instance.  We hold the validator
+# once (finding C-F3) so the gate pays the metaschema hop only at import.
+_CUTOVER_DECLARATION_VALIDATOR = jsonschema.Draft202012Validator(
+    _CUTOVER_DECLARATION_SCHEMA
+)
+
+
+@dataclass
+class _RegistryClassification:
+    """In-flight classification decision produced by ``_registry_precommit_gate``.
+
+    Populated before the gate raises so the exception handler can still emit
+    ``registry_classification`` on a refusal receipt.
+    """
+
+    previous_registry_sha256: str | None = None
+    new_registry_sha256: str | None = None
+    # R2-N1: carry the exact previous/prospective row counts on the
+    # classification so ``_enforce_registry_classification_reconciliation``
+    # can enforce EQUALITY (not just non-negative bounds) against the
+    # partition counts.  A validated on-disk receipt then catches a stale
+    # classification whose totals silently drop or gain a row.
+    previous_model_count: int | None = None
+    prospective_model_count: int = 0
+    added: list[str] = dataclass_field(default_factory=list)
+    unchanged: list[str] = dataclass_field(default_factory=list)
+    removed: list[str] = dataclass_field(default_factory=list)
+    package_changed: list[dict[str, str]] = dataclass_field(default_factory=list)
+    refused: list[dict[str, Any]] = dataclass_field(default_factory=list)
+    declared_cutovers: list[dict[str, Any]] = dataclass_field(default_factory=list)
+
+    def to_receipt(self) -> dict[str, Any]:
+        def id_group(values: Sequence[str]) -> dict[str, Any]:
+            total = len(values)
+            items = list(values)[:MAX_COLLECTION_ITEMS]
+            return {"items": items, "total": total, "truncated": total > len(items)}
+
+        def obj_group(values: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+            total = len(values)
+            items = [dict(item) for item in values[:MAX_COLLECTION_ITEMS]]
+            return {"items": items, "total": total, "truncated": total > len(items)}
+
+        return {
+            "previous_registry_sha256": self.previous_registry_sha256,
+            "new_registry_sha256": self.new_registry_sha256,
+            "previous_model_count": self.previous_model_count,
+            "prospective_model_count": int(self.prospective_model_count),
+            "added": id_group(sorted(self.added)),
+            "unchanged": id_group(sorted(self.unchanged)),
+            "removed": id_group(sorted(self.removed)),
+            "package_changed": obj_group(
+                sorted(self.package_changed, key=lambda item: item["model_id"])
+            ),
+            "refused": obj_group(sorted(self.refused, key=lambda item: item["model_id"])),
+            "declared_cutovers": obj_group(
+                sorted(self.declared_cutovers, key=lambda item: item["model_id"])
+            ),
+        }
+
+
+_MISSING_IDENTITY = object()
+
+
+def _extract_nested_identity(row: Mapping[str, Any], path: Sequence[str]) -> Any:
+    """Traverse ``row`` by ``path`` returning ``_MISSING_IDENTITY`` on any gap.
+
+    Missing top-level or intermediate mapping is materially different from a
+    JSON ``null`` value; conflating the two would let a rebuilt profile drop
+    its ``source_inventory_checksum`` silently and stay ``unchanged``.
+    """
+    current: Any = row
+    for key in path:
+        if not isinstance(current, Mapping) or key not in current:
+            return _MISSING_IDENTITY
+        current = current[key]
+    return current
+
+
+def _rows_have_identical_identity(
+    row: Mapping[str, Any], previous_row: Mapping[str, Any]
+) -> bool:
+    """Return True when ``row`` and ``previous_row`` match on every identity field.
+
+    Compares the flat ``REGISTRY_MODEL_IDENTITY_FIELDS`` plus every nested
+    ``(top_level, nested_path)`` pair in ``REGISTRY_MODEL_NESTED_IDENTITY_FIELDS``.
+    Any deviation escalates the caller to ``package_changed``.
+    """
+    for field_name in REGISTRY_MODEL_IDENTITY_FIELDS:
+        if row.get(field_name) != previous_row.get(field_name):
+            return False
+    for top_level, nested_path in REGISTRY_MODEL_NESTED_IDENTITY_FIELDS:
+        if _extract_nested_identity(row, (top_level, *nested_path)) != (
+            _extract_nested_identity(previous_row, (top_level, *nested_path))
+        ):
+            return False
+    return True
+
+
+def _classify_registry(
+    *,
+    previous: Sequence[Mapping[str, Any]] | None,
+    prospective: Sequence[Mapping[str, Any]],
+    previous_sha256: str | None,
+    new_sha256: str | None,
+    generation: str,
+    declaration: Mapping[str, Any] | None,
+    dry_run: bool,
+) -> tuple[_RegistryClassification, str | None]:
+    """Return (classification, refusal_reason).
+
+    Refusal semantics only apply to real publishes; ``dry_run`` reports the
+    id-only shape without failing so operators can preview additions.
+    """
+    result = _RegistryClassification(
+        previous_registry_sha256=previous_sha256,
+        new_registry_sha256=None if dry_run else new_sha256,
+    )
+    prospective_by_id: dict[str, Mapping[str, Any]] = {}
+    for row in prospective:
+        model_id = str(row.get("model_id") or "")
+        if not model_id:
+            raise RefreshError("provider_invalid")
+        if model_id in prospective_by_id:
+            # A duplicate model_id in the prospective set is a data-shape bug
+            # upstream; refuse before any canonical replacement.
+            raise RefreshError("provider_invalid")
+        prospective_by_id[model_id] = row
+    previous_by_id: dict[str, Mapping[str, Any]] = {}
+    if previous is not None:
+        for row in previous:
+            model_id = str(row.get("model_id") or "")
+            if not model_id:
+                raise RefreshError("provider_invalid")
+            if model_id in previous_by_id:
+                raise RefreshError("provider_invalid")
+            previous_by_id[model_id] = row
+    # R2-N1: pin the exact partition counts here (not derived from the sum of
+    # bucket totals) so the receipt validator can enforce EQUALITY against a
+    # tampered classification.
+    result.prospective_model_count = len(prospective_by_id)
+    result.previous_model_count = (
+        None if previous is None else len(previous_by_id)
+    )
+
+    # In dry-run mode prospective rows carry only id/basin_id (no checksum),
+    # so checksum-based drift cannot be observed and we do a lenient id-only
+    # classification.  Operators preview additions this way.
+    if dry_run:
+        for model_id in prospective_by_id:
+            if model_id in previous_by_id:
+                result.unchanged.append(model_id)
+            else:
+                result.added.append(model_id)
+        # dry_run does not evaluate removals or refuse; the strict gate only
+        # runs on real publish.
+        return result, None
+
+    for model_id, row in prospective_by_id.items():
+        if model_id not in previous_by_id:
+            result.added.append(model_id)
+            continue
+        previous_row = previous_by_id[model_id]
+        if _rows_have_identical_identity(row, previous_row):
+            result.unchanged.append(model_id)
+        else:
+            result.package_changed.append(
+                {
+                    "model_id": model_id,
+                    "old_checksum": str(previous_row.get("package_checksum") or ""),
+                    "new_checksum": str(row.get("package_checksum") or ""),
+                }
+            )
+    for model_id in previous_by_id:
+        if model_id not in prospective_by_id:
+            result.removed.append(model_id)
+
+    declaration_entries: dict[str, Mapping[str, Any]] = {}
+    declaration_generation: str | None = None
+    if declaration is not None:
+        declaration_generation = str(declaration.get("generation") or "")
+        for entry in declaration.get("entries") or []:
+            declaration_entries[str(entry.get("model_id") or "")] = entry
+
+    # Declaration must bind to this exact prospective generation.  A stale or
+    # rebuilt registry cannot accidentally activate a formerly-approved
+    # transition.
+    generation_matches = (
+        declaration is None or declaration_generation == generation
+    )
+
+    def refuse_declaration(model_id: str, entry: Mapping[str, Any] | None) -> None:
+        result.refused.append(
+            {
+                "model_id": model_id,
+                "old_checksum": str((entry or {}).get("old_checksum") or "") or None,
+                "new_checksum": str((entry or {}).get("new_checksum") or "") or None,
+                "reason": "registry_cutover_declaration_invalid",
+            }
+        )
+
+    # 1. Any declaration entry whose model_id is not part of the prospective
+    #    registry is invalid — an operator cannot cutover an unknown model.
+    unknown_declaration_ids = [
+        model_id
+        for model_id in declaration_entries
+        if model_id not in prospective_by_id
+    ]
+    declaration_invalid = bool(unknown_declaration_ids) or not generation_matches
+    for model_id in unknown_declaration_ids:
+        refuse_declaration(model_id, declaration_entries[model_id])
+    if not generation_matches:
+        # Attach a synthetic marker so operators see the generation mismatch
+        # without leaking either canonical string publicly.
+        result.refused.append(
+            {
+                "model_id": "__declaration__",
+                "old_checksum": None,
+                "new_checksum": None,
+                "reason": "registry_cutover_declaration_invalid",
+            }
+        )
+
+    # 2. For each package_changed row: look for a matching declaration entry
+    #    with correct old/new checksums.  Accept it when everything aligns,
+    #    otherwise record the specific invalidity mode.
+    undeclared: list[Mapping[str, Any]] = []
+    for changed in result.package_changed:
+        model_id = changed["model_id"]
+        entry = declaration_entries.get(model_id)
+        if entry is None:
+            undeclared.append(changed)
+            continue
+        old_matches = str(entry.get("old_checksum")) == changed["old_checksum"]
+        new_matches = str(entry.get("new_checksum")) == changed["new_checksum"]
+        if declaration_invalid or not old_matches or not new_matches:
+            declaration_invalid = True
+            refuse_declaration(model_id, entry)
+            continue
+        result.declared_cutovers.append(
+            {
+                "model_id": model_id,
+                "old_checksum": changed["old_checksum"],
+                "new_checksum": changed["new_checksum"],
+                "effective_cycle_utc": str(entry.get("effective_cycle_utc") or ""),
+                "transition_mode": str(entry.get("transition_mode") or ""),
+            }
+        )
+
+    # 3. Any package_changed row not covered by a valid declaration is
+    #    undeclared drift.
+    for changed in undeclared:
+        result.refused.append(
+            {
+                "model_id": changed["model_id"],
+                "old_checksum": changed["old_checksum"],
+                "new_checksum": changed["new_checksum"],
+                "reason": "registry_cutover_undeclared",
+            }
+        )
+
+    # 4. Removals are refused — deliberate decommission is out of scope for
+    #    #1080 and must go through a separate declared workflow.
+    for model_id in result.removed:
+        result.refused.append(
+            {
+                "model_id": model_id,
+                "old_checksum": str(previous_by_id[model_id].get("package_checksum") or "") or None,
+                "new_checksum": None,
+                "reason": "registry_cutover_removal_refused",
+            }
+        )
+
+    # Decide the single refusal reason to raise (declaration-invalid takes
+    # priority so operators see the schema problem first, then removal, then
+    # undeclared drift).
+    if declaration_invalid:
+        return result, "registry_cutover_declaration_invalid"
+    if result.removed:
+        return result, "registry_cutover_removal_refused"
+    if undeclared:
+        return result, "registry_cutover_undeclared"
+    return result, None
+
+
 def _registry_precommit_gate(
     workspace: Path,
     packages: Sequence[Mapping[str, Any]],
     registry_models: Sequence[Mapping[str, Any]],
+    *,
+    previous_registry_bytes: bytes | None,
+    previous_registry_sha256: str | None,
+    prospective_generated_at: datetime,
+    cutover_declaration_env: str | None,
+    dry_run: bool,
+    classification_sink: Callable[[dict[str, Any]], None],
+    now: datetime | None = None,
 ) -> None:
+    """Precommit gate.
+
+    Order: classification/declaration first (semantic refusals should fail
+    fast without paying for workspace enumeration), then workspace/orphan
+    bounds.  Classification is delivered to ``classification_sink`` even on
+    refusal so the receipt path can attach the payload.
+    """
     orphan_items = [item for item in packages if item.get("status") == "published"]
+
+    previous_models: list[dict[str, Any]] | None
+    if previous_registry_bytes is None:
+        previous_models = None
+    else:
+        try:
+            previous_payload = json.loads(previous_registry_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise SchedulerRegistryPublishError(
+                "SCHEDULER_REGISTRY_REFRESH_PRECOMMIT_FAILED",
+                "Previous canonical registry could not be parsed.",
+                details={"provider_reason": "provider_invalid", "provider_phase": "precommit"},
+            ) from error
+        raw_models = previous_payload.get("models") if isinstance(previous_payload, Mapping) else None
+        if not isinstance(raw_models, list):
+            raise SchedulerRegistryPublishError(
+                "SCHEDULER_REGISTRY_REFRESH_PRECOMMIT_FAILED",
+                "Previous canonical registry has no model list.",
+                details={"provider_reason": "provider_invalid", "provider_phase": "precommit"},
+            )
+        previous_models = [dict(row) for row in raw_models]
+
+    prospective_generation = _prospective_registry_generation(
+        registry_models, generated_at=prospective_generated_at
+    )
+    _, new_sha = _prospective_registry_content(
+        registry_models, generated_at=prospective_generated_at
+    )
+
+    declaration: dict[str, Any] | None = None
+    reference_now = now or datetime.now(UTC)
+    declaration_load_error: RefreshError | None = None
+    try:
+        declaration = _load_cutover_declaration(cutover_declaration_env, now=reference_now)
+    except RefreshError as error:
+        declaration_load_error = error
+
+    classification, refusal_reason = _classify_registry(
+        previous=previous_models,
+        prospective=registry_models,
+        previous_sha256=previous_registry_sha256,
+        new_sha256=new_sha,
+        generation=prospective_generation,
+        declaration=declaration,
+        dry_run=dry_run,
+    )
+    if declaration_load_error is not None:
+        # Surface the file-level load failure without needing the operator to
+        # inspect provider evidence; treat it as declaration-invalid.
+        classification.refused.append(
+            {
+                "model_id": "__declaration__",
+                "old_checksum": None,
+                "new_checksum": None,
+                "reason": "registry_cutover_declaration_invalid",
+            }
+        )
+        refusal_reason = "registry_cutover_declaration_invalid"
+
+    classification_sink(classification.to_receipt())
+
+    if refusal_reason is not None:
+        raise SchedulerRegistryPublishError(
+            "SCHEDULER_REGISTRY_REFRESH_PRECOMMIT_FAILED",
+            "Registry cutover gate refused canonical replacement before commit.",
+            details={
+                "provider_reason": refusal_reason,
+                "provider_phase": "precommit",
+                "discovered_total": len(packages),
+                "attempted_total": len(packages),
+                "created_total": len(orphan_items),
+                "packages": [
+                    {
+                        "status": item.get("status"),
+                        "orphan_id": hashlib.sha256(
+                            str(item.get("manifest_uri") or "").encode("utf-8")
+                        ).hexdigest()[:32],
+                    }
+                    for item in orphan_items[:MAX_ORPHAN_EVIDENCE]
+                ],
+            },
+        )
+
     try:
         _enforce_workspace_bounds(workspace)
         if len(orphan_items) > MAX_ORPHANS:

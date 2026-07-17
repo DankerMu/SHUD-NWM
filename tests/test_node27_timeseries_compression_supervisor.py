@@ -1322,7 +1322,7 @@ def test_finalizer_state_run_id_cannot_escape_its_marker_path(tmp_path: Path) ->
     # ExecStopPost, and writes no marker anywhere.
     assert supervisor.finalize_from_state(state, stage="systemd-stop-post") is False
     assert receipt.read_bytes() == stale
-    assert not list(tmp_path.parent.glob("*escape*"))
+    assert not (tmp_path.parent / "escape").exists()
     assert sorted(item.name for item in tmp_path.iterdir()) == ["receipt.json", "state.json"]
 
 

@@ -291,6 +291,110 @@ scripts/scheduler_file_provider_refresh_once.sh \
 恢复会先比对三个当前 canonical SHA-256 与 worker registry mirror。primary 与 emergency
 均失败就是 `replace_uncertain`，必须直接重验四个绑定；journal/stderr 只作诊断。
 
+**Registry cutover gate (#1080) refusal semantics**：refresh 在 canonical registry
+replace 前对 prospective vs 上一份 canonical `manifest-last.json` 做逐行分类，并把
+`registry_classification` 写进 v1 receipt（`dry_run` / `published` / cutover refusal
+outcome 都必须带）。分类桶：`added`（prospective 有、previous 无）、`unchanged`
+（同 `model_id` 且 `model_package_uri` / `manifest_uri` / `package_checksum` 逐字节
+相等）、`package_changed`（同 `model_id`，`package_checksum` 不同）、`removed`
+（previous 有、prospective 无）、`refused`、`declared_cutovers`。三个 refusal 原因均在
+canonical replace 前退出、非零：
+
+- `registry_cutover_undeclared`：某个已存在 `model_id` 的 `package_checksum` 变了但没有
+  匹配的 cutover declaration。先看 `registry_classification.refused` 找到具体 model 与
+  old/new checksum；确认漂移是有意后按下述格式提交 declaration，再重跑。
+- `registry_cutover_removal_refused`：previous canonical 里的某个 `model_id` 在
+  prospective 里消失。#1080 不允许 removal；需要下线一个流域走单独的 declared workflow，
+  否则不要动 `NHMS_BASINS_ROOT` 里的对应目录。
+- `registry_cutover_declaration_invalid`：declaration 文件本身或某条 entry 无效。常见
+  原因：schema 不匹配、`generation` 与 prospective 不一致、`old_checksum`/`new_checksum`
+  与实际不符、`effective_cycle_utc` 未对齐 00:00 或 12:00 UTC、超出 24h 过期 / 168h
+  未来窗口、entry 里有 duplicate `model_id`、declaration 文件是 symlink/非常规文件、
+  超过 256 KiB。
+
+Cutover declaration 是 `nhms.scheduler.registry_package_cutover.v1`（schema：
+`schemas/scheduler_registry_package_cutover.schema.json`；参考 example：
+`schemas/examples/scheduler_registry_package_cutover.example.json`）。文件路径通过
+新增的 optional env `NHMS_REGISTRY_CUTOVER_DECLARATION_PATH` 传入 refresh 进程；
+env 未设置或空值等同于"无 declaration"（只有当没有 `package_changed`/`removed`
+时才允许）。示例：
+
+```json
+{
+  "schema_version": "nhms.scheduler.registry_package_cutover.v1",
+  "generated_at": "2026-07-15T11:45:00Z",
+  "generation": "manifest-b44ab3b785f4",
+  "entries": [
+    {
+      "model_id": "basins_kashigeer_shud",
+      "old_checksum": "<previous canonical package_checksum>",
+      "new_checksum": "<prospective package_checksum>",
+      "effective_cycle_utc": "2026-07-16T00:00:00Z",
+      "transition_mode": "replace"
+    }
+  ]
+}
+```
+
+`generation` 必须等于本次 prospective 的 registry generation；这个值是
+`manifest-<12hex>`（12hex 是 sorted-by-model_id prospective model list 的 SHA-256
+前 12 位，**不含**任何 wall-clock 分量）。相同 model set 的重跑 refresh 得到 byte-
+identical 的 generation string，所以"先看被拒 receipt -> 拷 generation 到 declaration ->
+重跑 refresh"这个循环里，第二次 refresh 一定能匹配 declaration；只有 prospective
+model set 真正变了，generation 才会变（这时也必须重新出 declaration）。
+
+操作流程：先看被拒 receipt -> 拷 generation / old/new checksum 到 declaration -> 提交
+declaration 到 mode-0600 路径 -> `export NHMS_REGISTRY_CUTOVER_DECLARATION_PATH=<path>` ->
+重跑 refresh。`effective_cycle_utc` 必须精确对齐 00:00 或 12:00 UTC，且落在
+`[now-24h, now+168h]` 区间；`transition_mode` 目前仅支持 `replace`。
+
+**手动 publisher CLI**（`scripts/publish_scheduler_file_registry.py`）：为兼容 #1080 gate，
+manual publisher 默认也会跑 cutover gate，语义与 refresh runner 一致；未通过 gate 就
+不会替换 canonical。仅在 bootstrap（没有 previous canonical `manifest-last.json`）或
+显式一次性 recovery 时使用 `--allow-uncovered-cutover` 跳过（会在 stderr 打印 WARNING）。
+常规运维必须走 declaration + 重跑，绝不 default 到 bypass。
+
+**`cutover_gate` audit（R2-A1，v2 summary）**：CLI 每次退出（成功 summary 到 stdout、
+失败 error payload 到 stderr）都会写入一个 `cutover_gate` audit 块，schema 是
+`nhms.scheduler.basins_file_registry_publish.v2`。三个字段：`mode ∈ {enforced,
+bypassed_allow_uncovered_cutover, not_wired}`、`declaration_env`（enforced 时是
+`NHMS_REGISTRY_CUTOVER_DECLARATION_PATH`，否则 null）、`declaration_present`
+（bool，declaration file 是否可读的 regular file；符号链接和权限拒绝均计为 false）。
+同一个 audit 块也会 mirror 到 manifest publication receipt 上（`publish_scheduler_
+registry_manifest` 返回的 dict 里的 `cutover_gate` 字段），所以 downstream 直接读
+`manifest-last.json` 的 companion receipt 也能看到同一份 audit。
+
+任何一次 `--allow-uncovered-cutover` 之后，运维必须 `jq '.cutover_gate'` 核对：
+
+```bash
+# 手动 publisher summary（成功走 stdout；失败/refusal 走 stderr 最后一行）
+scripts/publish_scheduler_file_registry.py ... | jq '.cutover_gate'
+# 期望常规运维：{"mode": "enforced", "declaration_env": "NHMS_REGISTRY_CUTOVER_DECLARATION_PATH",
+#              "declaration_present": true}
+# 一次性 recovery：{"mode": "bypassed_allow_uncovered_cutover", "declaration_env": null,
+#              "declaration_present": false}
+```
+
+`mode == "bypassed_allow_uncovered_cutover"` 是 **审计红旗**：必须在 issue/worklog
+里留下 bypass 理由、bypass 时刻的 previous canonical SHA-256 以及本次 commit 的
+canonical SHA-256，并跟一次 declaration + 正常 refresh 复位。
+
+**升级 pre-#1080 receipt**：如果 `.../provider-refresh/receipts/latest.json` 是升级前
+（无 `registry_classification` 字段）的 published receipt，第一次 post-#1080 refresh
+仍然会正常 publish 并把新 receipt 写入 `latest.json`；不需要人工清 stale receipt。
+`_publish_primary_receipt` 用 lenient reader 只读 `(started_at, run_id)` 做 history/
+latest.json 的 monotonic-order 排序，legacy shape 不会触发 `receipt_classification_required`。
+写入的新 receipt 通过 `_validate_receipt` 严格校验，之后 `install_node22_scheduler_
+file_provider_refresh.sh --enable`（内部走 `validate_current_receipt`）会看到完整
+post-#1080 shape。
+
+启用 refresh timer 前必须 `jq '.registry_classification'
+/scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json`
+核对：`previous_registry_sha256` 等于 shared canonical 的实际 SHA-256、`new_registry_sha256`
+等于本次刚 commit 的 canonical SHA-256、`refused.total == 0`、`declared_cutovers`
+里的 entry 与 `entries` 数量与 declaration 完全一致。任何 `refused` 都禁止把 timer
+enable；那说明当前 declaration 与 prospective 不匹配、需要重新提交。
+
 成功 manual refresh 后才建立稳态：
 
 ```bash

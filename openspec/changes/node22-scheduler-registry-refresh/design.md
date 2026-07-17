@@ -135,6 +135,169 @@ The refresh unit runs only while the scheduler service is inactive and orders
 before a concurrently requested scheduler start, so a pre-existing stage job
 cannot observe the mirror transition.
 
+### D7. Registry refresh is classified against the previous canonical registry (#1080 follow-up)
+
+Adding a basin is not itself an input to another basin's `package_checksum`:
+per-model package versions are derived from the model's own validated content
+and source identity (`package_version_for_model`). The 2026-07-15 failure was
+not a checksum-derivation drift; it was that the refresh publishes a full new
+registry with no compatibility gate against the previous active rows, so a
+mixed refresh silently activated 13 new package checksums for pre-existing
+models and blocked scheduler continuity downstream.
+
+The registry publisher gains a precommit compatibility gate:
+
+1. **Load previous canonical** — before invoking
+   `publish_scheduler_registry_manifest`, the refresh runner reads the
+   currently canonical `manifest-last.json` under bounded no-follow limits
+   with an explicit `len > MAX_REGISTRY_MANIFEST_BYTES` sentinel (missing
+   file is legitimate first-time publication, tracked separately). The
+   loader returns `(sha256, models, raw_bytes)` from the same read so the
+   receipt's `previous_registry_sha256` is byte-bound to the classified
+   snapshot (no second read that could race the first).
+2. **Diff by `model_id`** — the union of previous and prospective
+   `model_id`s is classified into four disjoint primary buckets, then a
+   decision layer produces `refused` and `declared_cutovers`:
+   - `added` covers prospective `model_id`s absent from the previous
+     canonical registry.
+   - `unchanged` covers `model_id`s present in both with byte-for-byte
+     equality on **every** documented identity field, currently the union of
+     `REGISTRY_MODEL_IDENTITY_FIELDS` (`model_package_uri`, `manifest_uri`,
+     `package_checksum`, `basin_version_id`, `river_network_version_id`,
+     `shud_code_version`, `segment_count`, `output_segment_count`,
+     `lifecycle_state`) plus every nested pair in
+     `REGISTRY_MODEL_NESTED_IDENTITY_FIELDS`
+     (currently `resource_profile.source_inventory_checksum`). Any
+     deviation, including a missing top-level or nested mapping on either
+     side, escalates to `package_changed`.
+   - `package_changed` covers `model_id`s present in both whose identity
+     union differs.
+   - `removed` covers previously canonical `model_id`s absent from the
+     prospective registry (a previous-only row, not a prospective row).
+     Deliberate decommission is out of scope for #1080 and is refused; it
+     must go through a separate declared workflow.
+   `declared_cutovers` is a subset of `package_changed` whose cutover
+   declaration entry validates. `refused` records every `removed` entry,
+   every `package_changed` entry not covered by `declared_cutovers`, and
+   every entry rejected by declaration invalidity.
+3. **Cutover declaration contract** — a `package_changed` row is admitted only
+   when a `nhms.scheduler.registry_package_cutover.v1` declaration (path via
+   env `NHMS_REGISTRY_CUTOVER_DECLARATION_PATH`, absent = no declaration)
+   names the same `model_id` with matching `old_checksum` (= previous
+   canonical), matching `new_checksum` (= prospective), the same `generation`
+   as the prospective registry, an `effective_cycle_utc` aligned to 00:00 or
+   12:00 UTC and within the bounded window (not more than 24h in the past nor
+   more than 168h in the future), and a supported `transition_mode`
+   (`replace`). Duplicates, unmatched entries, and schema-invalid declarations
+   fail closed. The declaration loader also bounces oversize files with an
+   explicit `len > MAX_CUTOVER_DECLARATION_BYTES` sentinel and uses a
+   module-level `jsonschema.Draft202012Validator` (no per-call metaschema
+   resolution).
+4. **Generation formula** — `_prospective_registry_generation` returns
+   `manifest-<12hex>` where `<12hex>` is the SHA-256 prefix of the
+   sorted-by-`model_id` prospective model list. The wall clock is NOT part
+   of the preimage: identical prospective content produces byte-identical
+   generation strings across any interval, so the operator loop
+   "refuse -> read generation -> file declaration -> retry" is convergent
+   without a pin-generation knob. The generation only changes when the
+   prospective model set itself changes (which is when the declaration
+   must be re-issued anyway).
+5. **Refusal semantics** — undeclared `package_changed`, any `removed`, or an
+   invalid declaration exits non-zero with a closed reason token
+   (`registry_cutover_undeclared`, `registry_cutover_removal_refused`,
+   `registry_cutover_declaration_invalid`) before any canonical provider
+   replace. The existing rollback transaction (D3) is not entered because no
+   commit token exists; previous canonical bytes, inode, mtime, and identity
+   remain unchanged (asserted per-refusal by tests via `st_ino` +
+   `st_mtime_ns`, not just bytes-compare).
+6. **Receipt classification** — the v1 receipt gains a top-level
+   `registry_classification` object bound to the previous and new canonical
+   registry SHA-256, with bounded (256-cap + `total` + `truncated`) lists for
+   each class exposing only `model_id`, `old_checksum`, `new_checksum`, and
+   accepted declaration identity. No absolute paths, object URIs, or
+   credentials are emitted. `_validate_receipt` enforces the same
+   `^[A-Za-z0-9_.:-]+$` regex on every `model_id` as the JSON schema (schema
+   and runtime accept/reject the same corpus). `_validate_receipt` also
+   cross-checks the reconciliation formulas:
+   `unchanged + package_changed + removed == previous_count` when previous
+   existed, `added + unchanged + package_changed == prospective_count`,
+   `declared_cutovers` ⊆ `package_changed`, and
+   `refused >= removed + (package_changed - declared_cutovers)`. `published`
+   receipts require `refused.total == 0`; refusal receipts require
+   `refused.total >= 1`.
+7. **Concurrency invariant** — the gate runs inside
+   `refresh_scheduler_file_providers` while `provider_destination_lock(
+   config.refresh_lock, blocking=False)` is held; the canonical destination
+   lock itself is only entered briefly inside `atomic_replace_provider_bytes`
+   at commit time. A concurrent refresh attempts to acquire the same
+   `refresh_lock` and fails immediately (`already_running`), so no two gate
+   evaluations race. Concurrent NON-refresh writers (e.g. the manual
+   publisher) are excluded from the same `refresh_lock` but are stopped at
+   commit time by the `expected_preimage` CAS in
+   `atomic_replace_provider_bytes` — a concurrent write that lands between
+   snapshot and commit raises `provider_preimage_changed` and the refresh
+   restores its owned lanes without touching the concurrent authoritative
+   generation.
+8. **Manual publisher parity** — `scripts/publish_scheduler_file_registry.py`
+   now wires the same gate through `publish_all_basin_scheduler_registry`'s
+   `precommit_validator` so operators cannot bypass by running the manual
+   CLI directly. The gate is only skipped when the operator explicitly
+   passes `--allow-uncovered-cutover` (bootstrap / one-off recovery),
+   printing a loud stderr WARNING banner. This closes the C-D1 hole where
+   the manual path was gate-free.
+9. **Legacy receipt upgrade** — `_publish_primary_receipt` reads the
+   existing `latest.json` through a lenient parser
+   (`_lenient_receipt_order`) that only extracts `(started_at, run_id)`
+   for the monotonic-order comparison. Pre-#1080 receipts on disk (which
+   lack `registry_classification`) cannot brick the first post-#1080
+   refresh; `_validate_receipt` is reserved for receipts THIS process
+   writes. Once the first post-#1080 receipt is written, subsequent reads
+   and the installer's `validate_current_receipt` see the strict shape.
+10. **`cutover_gate` audit field (round-2 R2-A1)** — the manual publisher
+    CLI persisted no marker of a `--allow-uncovered-cutover` bypass in v1:
+    the summary/manifest bytes were byte-identical between a
+    gate-passing run and a bypassed run, defeating the entire governance
+    surface #1080 exists to close. Every summary construction path in
+    `publish_all_basin_scheduler_registry` (dry-run, published, refusal
+    error payload) and the manifest publication receipt returned by
+    `publish_scheduler_registry_manifest` now carries a required
+    `cutover_gate: {mode, declaration_env, declaration_present}` block
+    with a closed `mode` enum: `enforced` (gate installed and ran, either
+    from the manual CLI's default `_build_manual_cutover_gate` or from
+    the refresh runner's own gate), `bypassed_allow_uncovered_cutover`
+    (explicit CLI flag), or `not_wired` (programmatic caller that never
+    opted in). The CLI summary `schema_version` bumps to
+    `nhms.scheduler.basins_file_registry_publish.v2` to signal the new
+    required field. `declaration_env` records the env name consulted
+    (`NHMS_REGISTRY_CUTOVER_DECLARATION_PATH`) when enforced;
+    `declaration_present` records whether that env resolved to a
+    readable regular file (a stronger fact than "env was set"). The
+    audit is bounded (three keys, closed enum, no paths/URIs/credentials)
+    and mirrored on the manifest publication receipt so a downstream
+    operator reading `manifest-last.json`'s companion receipt sees the
+    same audit fact the CLI stdout summary would.
+11. **Partition-count reconciliation (round-2 R2-N1)** — the reconciliation
+    formulas in D7#6 previously only asserted non-negative bounds on the
+    derived sums because no on-receipt count was pinned. The classification
+    now carries `previous_model_count` (nullable int) and
+    `prospective_model_count` (int) pinned from
+    `_classify_registry`'s own `len(previous_by_id)` / `len(prospective_by_id)`
+    so `_enforce_registry_classification_reconciliation` enforces
+    EQUALITY: `unchanged + package_changed + removed == previous_model_count`
+    (when previous existed) and `added + unchanged + package_changed ==
+    prospective_model_count` on every classified receipt (dry-run
+    included). `validate_current_receipt` then catches a tampered on-disk
+    receipt whose bucket totals were rewritten while a count was left
+    stale.
+
+The gate lives inside the existing precommit hook
+(`_registry_precommit_gate`) so the classification, refusal decision, and
+receipt payload are produced under the same `refresh_lock` and preimage
+snapshot as the canonical registry write. Because refusal happens before
+replace, the phase-explicit outcome semantics (D3) are unchanged — refusals
+are pre-commit `failed` outcomes, never `replace_uncertain` or
+`restored_previous`.
+
 ## Risk Packs Considered
 
 - Public API / CLI / script entry: selected - refresh CLI/wrapper and compatible
@@ -232,6 +395,32 @@ Surfaces:
 
 Regression rows:
 
+- Prospective registry equals previous canonical registry plus new basins with
+  every previously canonical model byte-identical -> `added` count equals new
+  basins, `unchanged` count equals previous canonical model count,
+  `package_changed = removed = refused = declared_cutovers = 0`, and canonical
+  replacement proceeds under the shared lock and existing rollback transaction.
+- Any previously canonical `model_id` whose prospective row has a different
+  `package_checksum` with no matching cutover declaration -> non-zero
+  `registry_cutover_undeclared`, previous canonical bytes/inode/mtime/identity
+  unchanged, and receipt lists the refused model with previous and proposed
+  checksums only.
+- A previously canonical `model_id` missing from the prospective registry ->
+  non-zero `registry_cutover_removal_refused`, previous canonical bytes
+  unchanged, and receipt lists the removed model.
+- Valid `nhms.scheduler.registry_package_cutover.v1` declaration whose entry
+  matches the prospective `model_id + old_checksum + new_checksum + generation`
+  with UTC-cycle-aligned `effective_cycle_utc` and a supported
+  `transition_mode` -> classification records the row under
+  `declared_cutovers`, canonical replacement proceeds, and receipt binds the
+  declaration identity.
+- Declaration whose schema is invalid, whose `generation` differs, whose
+  old/new checksum mismatches the actual prospective/previous, whose
+  `effective_cycle_utc` is non-cycle-aligned or outside the bounded window,
+  which duplicates a `model_id`, which references a `model_id` absent from
+  the prospective registry, or which is symlinked/non-regular/over-size ->
+  non-zero `registry_cutover_declaration_invalid`, previous canonical bytes
+  unchanged, and receipt records the specific invalidity token.
 - Valid N-model inventory + newest valid GFS/IFS catalogs + valid-except-age
   state input -> 2N catalog-bound readiness entries (19 models/38 entries on
   2026-07-15 after removing duplicate `HHe-MAIN-02`), fully revalidated atomic
@@ -282,6 +471,14 @@ Regression rows:
 - Stale/idempotency: daily catalog-bound readiness derivation, state age-only
   renewal, concurrent authoritative update/preimage change, repeated success,
   failed retry and emergency-receipt reconstruction.
+- Registry-classification boundary (#1080): previous canonical
+  `manifest-last.json` no-follow read, cutover declaration schema
+  (`nhms.scheduler.registry_package_cutover.v1`) loaded from
+  `NHMS_REGISTRY_CUTOVER_DECLARATION_PATH`, refusal reason tokens
+  (`registry_cutover_undeclared`,
+  `registry_cutover_removal_refused`,
+  `registry_cutover_declaration_invalid`), bounded per-class evidence lists in
+  `registry_classification`.
 - Unchanged: manual publisher interface, consumer, node-27 ingest/display, #856.
 
 ## Risks / Trade-offs

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nhms.invalid/schemas/scheduler_registry_package_cutover.schema.json",
+  "title": "NHMS scheduler registry package cutover declaration v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "generated_at",
+    "generation",
+    "entries"
+  ],
+  "properties": {
+    "schema_version": {"const": "nhms.scheduler.registry_package_cutover.v1"},
+    "generated_at": {"type": "string", "format": "date-time", "maxLength": 64},
+    "generation": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.:-]+$"},
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "model_id",
+          "old_checksum",
+          "new_checksum",
+          "effective_cycle_utc",
+          "transition_mode"
+        ],
+        "properties": {
+          "model_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.:-]+$"},
+          "old_checksum": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "new_checksum": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "effective_cycle_utc": {"type": "string", "format": "date-time", "maxLength": 64},
+          "transition_mode": {"enum": ["replace"]}
+        }
+      }
+    }
+  }
+}

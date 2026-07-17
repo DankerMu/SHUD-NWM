@@ -375,6 +375,43 @@ def _preimage(value: str = "old") -> ProviderPreimage:
     )
 
 
+def _minimal_registry_manifest_bytes(name: str) -> bytes:
+    """Minimal but shape-valid manifest bytes for gate tests.
+
+    #1080 gate parses the previous canonical manifest; opaque byte fixtures
+    (b"registry\n") would fail as ``provider_invalid`` before the classifier
+    can run.  Empty ``models`` array covers the "first publication / fresh
+    inventory" case so the gate classifies everything as ``added``.
+    """
+    return json.dumps(
+        {
+            "schema_version": "nhms.scheduler.file_model_registry.v1",
+            "generated_at": "2026-07-14T00:00:00Z",
+            "models": [],
+            "checksum": f"sha256:{'0' * 64}",
+            "note": name,
+        },
+        sort_keys=True,
+    ).encode() + b"\n"
+
+
+def _classification_stub() -> dict[str, object]:
+    return {
+        "previous_registry_sha256": None,
+        "new_registry_sha256": None,
+        # R2-N1: partition counts are required; empty classification pins
+        # both to zero (matches the empty added/unchanged/etc buckets).
+        "previous_model_count": None,
+        "prospective_model_count": 0,
+        "added": {"items": [], "total": 0, "truncated": False},
+        "unchanged": {"items": [], "total": 0, "truncated": False},
+        "removed": {"items": [], "total": 0, "truncated": False},
+        "package_changed": {"items": [], "total": 0, "truncated": False},
+        "refused": {"items": [], "total": 0, "truncated": False},
+        "declared_cutovers": {"items": [], "total": 0, "truncated": False},
+    }
+
+
 def _write_current_published_receipt(config: refresh.RefreshConfig) -> tuple[Path, dict[str, object]]:
     providers = []
     provider_paths = [("registry", config.registry_uri)]
@@ -384,7 +421,12 @@ def _write_current_published_receipt(config: refresh.RefreshConfig) -> tuple[Pat
     for name, uri in provider_paths:
         path = Path(uri)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("registry\n" if name == "registry_worker_mirror" else name + "\n", encoding="utf-8")
+        if name in {"registry", "registry_worker_mirror"}:
+            # Use shape-valid manifest bytes so the #1080 gate can parse the
+            # previous canonical without treating it as provider_invalid.
+            path.write_bytes(_minimal_registry_manifest_bytes("registry"))
+        else:
+            path.write_text(name + "\n", encoding="utf-8")
         preimage = capture_scheduler_provider_preimage(path)
         providers.append(
             {
@@ -408,6 +450,7 @@ def _write_current_published_receipt(config: refresh.RefreshConfig) -> tuple[Pat
         reason="success",
         phase="complete",
         providers=providers,
+        registry_classification=_classification_stub(),
     )
     receipt_path = config.receipt_root / "latest.json"
     receipt_path.write_bytes(refresh._receipt_bytes(receipt))
@@ -941,9 +984,11 @@ def test_refresh_dry_run_rejects_existing_worker_registry_generation_mismatch(
     )
     shared = Path(config.registry_uri)
     worker = Path(config.worker_registry_uri)
-    shared.write_text('{"generation":"new-20-model"}\n')
+    # Both files must be shape-valid so the #1080 gate does not refuse
+    # earlier than the shared/mirror generation-mismatch check.
+    shared.write_bytes(_minimal_registry_manifest_bytes("shared"))
     worker.parent.mkdir(parents=True)
-    worker.write_text('{"generation":"old-13-model"}\n')
+    worker.write_bytes(_minimal_registry_manifest_bytes("worker-old"))
     _stub_provider_pipeline(monkeypatch)
     monkeypatch.setattr(refresh, "capture_scheduler_provider_preimage", capture_scheduler_provider_preimage)
 
@@ -1004,9 +1049,12 @@ def _tracked_transaction_fixture(
         "readiness": Path(config.readiness_uri),
         "state": Path(config.state_uri),
     }
+    # #1080 gate parses previous canonical registry bytes as JSON with a
+    # models list; use shape-valid manifest content for the registry lanes.
+    _valid_registry = _minimal_registry_manifest_bytes("previous")
     old = {
-        "registry": b"old-registry-generation",
-        "registry_worker_mirror": b"old-registry-generation",
+        "registry": _valid_registry,
+        "registry_worker_mirror": _valid_registry,
         "readiness": b"old-readiness-generation",
         "state": b"old-state-generation",
     }
@@ -1640,6 +1688,7 @@ def test_receipt_schema_and_runtime_reject_same_expressible_negative_corpus() ->
             {**provider, "name": "readiness"},
             {**provider, "name": "state"},
         ],
+        registry_classification=_classification_stub(),
     )
     schema = json.loads(
         (
@@ -2173,6 +2222,14 @@ def test_installer_enable_lifecycle_and_failure_restore_with_fake_systemctl(tmp_
     env_dir.mkdir(parents=True)
     scripts_dir.mkdir()
     shutil.copy2(root / "scripts/scheduler_file_provider_refresh.py", scripts_dir)
+    # The #1080 cutover-declaration schema is loaded at module import; the
+    # installer runs the script from repo/scripts/ so schemas/ must resolve
+    # relative to the copied tree too.
+    (repo / "schemas").mkdir()
+    shutil.copy2(
+        root / "schemas/scheduler_registry_package_cutover.schema.json",
+        repo / "schemas",
+    )
     for name in (
         "nhms-scheduler-file-provider-refresh.service",
         "nhms-scheduler-file-provider-refresh.timer",
@@ -2224,6 +2281,7 @@ def test_installer_enable_lifecycle_and_failure_restore_with_fake_systemctl(tmp_
                 reason="success",
                 phase="complete",
                 providers=providers,
+                registry_classification=_classification_stub(),
             )
         )
     )
@@ -2467,3 +2525,1615 @@ def test_wrapper_rejects_forbidden_selector_in_mode_0600_env_before_exec(tmp_pat
 
     assert result.returncode != 0
     assert not marker.exists()
+
+
+# ---------------------------------------------------------------------------
+# #1080 Registry Cutover Gate — direct classification and refusal coverage.
+# ---------------------------------------------------------------------------
+
+
+def _registry_row(
+    model_id: str,
+    package_checksum: str,
+    *,
+    basin_id: str | None = None,
+    basin_version_id: str = "v1",
+    river_network_version_id: str = "r1",
+    shud_code_version: str = "basins-shud",
+    segment_count: int = 100,
+    output_segment_count: int = 50,
+    lifecycle_state: str = "active",
+    source_inventory_checksum: str | None = None,
+    resource_profile_extra: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Shape-realistic registry row covering every identity field the classifier checks.
+
+    Defaults deliberately mirror what
+    ``scripts.publish_scheduler_file_registry.scheduler_registry_row_from_sources``
+    emits (see #1080 finding C-C1) so tests express drift on any of the
+    documented identity fields without having to reconstruct the whole row.
+    """
+    profile = {
+        "manifest_uri": f"s3://nhms/models/{model_id}/v1/manifest.json",
+        "package_checksum": package_checksum,
+        "model_package_uri": f"s3://nhms/models/{model_id}/v1/package.tgz",
+        "source_inventory_checksum": source_inventory_checksum
+        or f"sha256:{'0' * 62}{ord(model_id[-1]) & 0xFF:02x}",
+    }
+    if resource_profile_extra:
+        profile.update(resource_profile_extra)
+    return {
+        "model_id": model_id,
+        "basin_id": basin_id or f"basin-{model_id}",
+        "basin_version_id": basin_version_id,
+        "river_network_version_id": river_network_version_id,
+        "shud_code_version": shud_code_version,
+        "segment_count": segment_count,
+        "output_segment_count": output_segment_count,
+        "lifecycle_state": lifecycle_state,
+        "model_package_uri": f"s3://nhms/models/{model_id}/v1/package.tgz",
+        "manifest_uri": f"s3://nhms/models/{model_id}/v1/manifest.json",
+        "package_checksum": package_checksum,
+        "resource_profile": profile,
+    }
+
+
+def _assert_classification_reconciles(
+    classification: dict[str, object],
+    *,
+    previous_count: int | None,
+    prospective_count: int | None,
+) -> None:
+    """Assert every reconciliation formula from spec.md:397-403 (T3 / C-E4).
+
+    * ``unchanged + package_changed + removed == previous_count`` when a
+      previous canonical registry existed;
+    * ``added + unchanged + package_changed == prospective_count`` unless
+      the caller passes ``prospective_count=None`` (dry_run id-only mode);
+    * ``declared_cutovers`` model_ids ⊆ ``package_changed`` model_ids;
+    * ``refused`` ⊇ ``removed`` ∪ (``package_changed`` \\ ``declared_cutovers``).
+    """
+    def total(group: str) -> int:
+        return int(classification[group]["total"])  # type: ignore[index]
+
+    def ids(group: str) -> set[str]:
+        return {
+            str(item["model_id"])  # type: ignore[index]
+            for item in classification[group]["items"]  # type: ignore[index]
+            if isinstance(item, dict)
+        }
+
+    added = total("added")
+    unchanged = total("unchanged")
+    removed = total("removed")
+    package_changed = total("package_changed")
+    refused = total("refused")
+    declared = total("declared_cutovers")
+
+    if previous_count is not None:
+        assert unchanged + package_changed + removed == previous_count, (
+            f"previous reconciliation broken: unchanged={unchanged} "
+            f"package_changed={package_changed} removed={removed} "
+            f"previous_count={previous_count}"
+        )
+    if prospective_count is not None:
+        assert added + unchanged + package_changed == prospective_count, (
+            f"prospective reconciliation broken: added={added} "
+            f"unchanged={unchanged} package_changed={package_changed} "
+            f"prospective_count={prospective_count}"
+        )
+    assert ids("declared_cutovers") <= ids("package_changed")
+    # refused >= removed + (package_changed - declared_cutovers)
+    assert refused >= removed + max(package_changed - declared, 0)
+
+
+def _valid_previous_manifest(models: list[dict[str, object]]) -> bytes:
+    """Shape-valid canonical manifest bytes for gate tests."""
+    return json.dumps(
+        {
+            "schema_version": "nhms.scheduler.file_model_registry.v1",
+            "generated_at": "2026-07-14T00:00:00Z",
+            "models": models,
+            "checksum": f"sha256:{'0' * 64}",
+        },
+        sort_keys=True,
+    ).encode() + b"\n"
+
+
+def _write_previous_canonical(config: refresh.RefreshConfig, models: list[dict[str, object]]) -> Path:
+    path = Path(config.registry_uri)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_valid_previous_manifest(models))
+    return path
+
+
+def _write_declaration(
+    tmp_path: Path,
+    *,
+    generation: str,
+    entries: list[dict[str, object]],
+    generated_at: str = "2026-07-14T12:00:00Z",
+) -> Path:
+    declaration = tmp_path / "declaration.json"
+    declaration.write_text(
+        json.dumps(
+            {
+                "schema_version": "nhms.scheduler.registry_package_cutover.v1",
+                "generated_at": generated_at,
+                "generation": generation,
+                "entries": entries,
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    return declaration
+
+
+def _run_gate(
+    tmp_path: Path,
+    config: refresh.RefreshConfig,
+    *,
+    prospective_models: list[dict[str, object]],
+    previous_models: list[dict[str, object]] | None = None,
+    declaration_path: Path | None = None,
+    dry_run: bool = False,
+    generated_at: refresh.datetime | None = None,
+    now: refresh.datetime | None = None,
+) -> tuple[list[dict[str, object]], Exception | None]:
+    workspace = tmp_path / "gate-workspace"
+    workspace.mkdir(exist_ok=True)
+    generated_at = generated_at or refresh.datetime(2026, 7, 14, 12, tzinfo=refresh.UTC)
+    now = now or generated_at
+    registry_path = Path(config.registry_uri)
+    if previous_models is not None:
+        # Only overwrite if the caller has NOT already staged a specific
+        # bytes snapshot on disk.  Rewriting bumps mtime which round-2
+        # tests (T8 / C-E9) need to survive across the gate call.
+        if not registry_path.exists():
+            _write_previous_canonical(config, previous_models)
+        previous_bytes = registry_path.read_bytes()
+        previous_sha = refresh.hashlib.sha256(previous_bytes).hexdigest()
+    else:
+        previous_bytes = None
+        previous_sha = None
+    captured: list[dict[str, object]] = []
+
+    def sink(payload: dict[str, object]) -> None:
+        captured.append(payload)
+
+    caught: Exception | None = None
+    try:
+        refresh._registry_precommit_gate(
+            workspace,
+            [],
+            prospective_models,
+            previous_registry_bytes=previous_bytes,
+            previous_registry_sha256=previous_sha,
+            prospective_generated_at=generated_at,
+            cutover_declaration_env=str(declaration_path) if declaration_path else None,
+            dry_run=dry_run,
+            classification_sink=sink,
+            now=now,
+        )
+    except Exception as error:  # noqa: BLE001 -- intentional
+        caught = error
+    return captured, caught
+
+
+def test_cutover_gate_admits_prospective_superset_with_byte_identical_existing_rows(
+    tmp_path: Path,
+) -> None:
+    """(a) 13 previous + 6 new -> 6 added + 13 unchanged, refresh proceeds."""
+    config = _config(tmp_path)
+    previous = [
+        _registry_row(f"basin-1{index:02d}", "a" * 64)
+        for index in range(1, 14)
+    ]
+    prospective = previous + [
+        _registry_row(f"basin-2{index:02d}", "b" * 64)
+        for index in range(1, 7)
+    ]
+
+    captured, error = _run_gate(
+        tmp_path,
+        config,
+        prospective_models=prospective,
+        previous_models=previous,
+    )
+
+    assert error is None
+    payload = captured[0]
+    assert payload["added"]["total"] == 6
+    assert payload["unchanged"]["total"] == 13
+    assert payload["removed"]["total"] == 0
+    assert payload["package_changed"]["total"] == 0
+    assert payload["refused"]["total"] == 0
+    assert payload["declared_cutovers"]["total"] == 0
+    assert payload["previous_registry_sha256"] is not None
+    assert payload["new_registry_sha256"] is not None
+
+
+def test_cutover_gate_refuses_undeclared_package_checksum_drift(tmp_path: Path) -> None:
+    """(b) 1 existing package_changed without declaration -> refusal + previous intact.
+
+    Also asserts (T8 / C-E9) that inode and mtime of the previous canonical
+    file survive the refusal, not just the byte content.
+    """
+    config = _config(tmp_path)
+    previous = [_registry_row("basin-101", "a" * 64), _registry_row("basin-102", "b" * 64)]
+    prospective = [
+        _registry_row("basin-101", "c" * 64),  # checksum drift, undeclared
+        _registry_row("basin-102", "b" * 64),
+    ]
+    registry_path = _write_previous_canonical(config, previous)
+    before = registry_path.read_bytes()
+    before_stat = registry_path.stat()
+
+    captured, error = _run_gate(
+        tmp_path, config, prospective_models=prospective, previous_models=previous
+    )
+
+    assert isinstance(error, refresh.SchedulerRegistryPublishError)
+    assert error.details["provider_reason"] == "registry_cutover_undeclared"
+    assert error.details["provider_phase"] == "precommit"
+    payload = captured[0]
+    assert payload["package_changed"]["total"] == 1
+    assert payload["refused"]["items"][0]["reason"] == "registry_cutover_undeclared"
+    assert payload["refused"]["items"][0]["model_id"] == "basin-101"
+    assert payload["refused"]["items"][0]["old_checksum"] == "a" * 64
+    assert payload["refused"]["items"][0]["new_checksum"] == "c" * 64
+    # Previous canonical bytes, inode, and mtime untouched.
+    assert registry_path.read_bytes() == before
+    after_stat = registry_path.stat()
+    assert (after_stat.st_ino, after_stat.st_mtime_ns) == (
+        before_stat.st_ino,
+        before_stat.st_mtime_ns,
+    )
+    _assert_classification_reconciles(
+        payload, previous_count=2, prospective_count=2
+    )
+
+
+def test_cutover_gate_admits_valid_declaration_for_specific_checksum_transition(
+    tmp_path: Path,
+) -> None:
+    """(c) Valid declaration accepts the same transition."""
+    config = _config(tmp_path)
+    previous = [_registry_row("basin-101", "a" * 64), _registry_row("basin-102", "b" * 64)]
+    prospective = [
+        _registry_row("basin-101", "c" * 64),
+        _registry_row("basin-102", "b" * 64),
+    ]
+    generated_at = refresh.datetime(2026, 7, 14, 12, tzinfo=refresh.UTC)
+    generation = refresh._prospective_registry_generation(
+        prospective, generated_at=generated_at
+    )
+    declaration = _write_declaration(
+        tmp_path,
+        generation=generation,
+        entries=[
+            {
+                "model_id": "basin-101",
+                "old_checksum": "a" * 64,
+                "new_checksum": "c" * 64,
+                "effective_cycle_utc": "2026-07-15T00:00:00Z",
+                "transition_mode": "replace",
+            }
+        ],
+    )
+
+    captured, error = _run_gate(
+        tmp_path,
+        config,
+        prospective_models=prospective,
+        previous_models=previous,
+        declaration_path=declaration,
+        generated_at=generated_at,
+        now=generated_at,
+    )
+
+    assert error is None, error
+    payload = captured[0]
+    assert payload["package_changed"]["total"] == 1
+    assert payload["declared_cutovers"]["total"] == 1
+    assert payload["declared_cutovers"]["items"][0]["model_id"] == "basin-101"
+    assert payload["declared_cutovers"]["items"][0]["transition_mode"] == "replace"
+    assert payload["refused"]["total"] == 0
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "schema_invalid",
+        "wrong_generation",
+        "wrong_old_checksum",
+        "wrong_new_checksum",
+        "non_cycle_aligned",
+        "out_of_window_past",
+        "out_of_window_future",
+        "duplicate_model_id",
+        "unknown_model_id",
+        "symlinked_declaration",
+        "over_size_declaration",
+    ],
+)
+def test_cutover_gate_rejects_invalid_declaration_modes(
+    tmp_path: Path, corruption: str
+) -> None:
+    """(d) Every invalid declaration mode fails closed."""
+    config = _config(tmp_path)
+    previous = [_registry_row("basin-101", "a" * 64), _registry_row("basin-102", "b" * 64)]
+    prospective = [
+        _registry_row("basin-101", "c" * 64),
+        _registry_row("basin-102", "b" * 64),
+    ]
+    registry_path = _write_previous_canonical(config, previous)
+    before = registry_path.read_bytes()
+    before_stat = registry_path.stat()
+    generated_at = refresh.datetime(2026, 7, 14, 12, tzinfo=refresh.UTC)
+    generation = refresh._prospective_registry_generation(
+        prospective, generated_at=generated_at
+    )
+    valid_entry = {
+        "model_id": "basin-101",
+        "old_checksum": "a" * 64,
+        "new_checksum": "c" * 64,
+        "effective_cycle_utc": "2026-07-15T00:00:00Z",
+        "transition_mode": "replace",
+    }
+    declaration_path: Path
+    if corruption == "schema_invalid":
+        # Missing the schema_version key entirely.
+        declaration_path = tmp_path / "declaration.json"
+        declaration_path.write_text('{"entries": []}\n')
+    elif corruption == "symlinked_declaration":
+        target = tmp_path / "real-declaration.json"
+        target.write_text(
+            json.dumps(
+                {
+                    "schema_version": "nhms.scheduler.registry_package_cutover.v1",
+                    "generated_at": "2026-07-14T00:00:00Z",
+                    "generation": generation,
+                    "entries": [valid_entry],
+                },
+                sort_keys=True,
+            )
+        )
+        declaration_path = tmp_path / "declaration.json"
+        declaration_path.symlink_to(target)
+    elif corruption == "over_size_declaration":
+        declaration_path = tmp_path / "declaration.json"
+        oversized = {
+            "schema_version": "nhms.scheduler.registry_package_cutover.v1",
+            "generated_at": "2026-07-14T00:00:00Z",
+            "generation": generation,
+            "entries": [valid_entry],
+        }
+        # Inflate the payload well past MAX_CUTOVER_DECLARATION_BYTES via
+        # padding-embedded entries that still schema-validate.  The bounded
+        # no-follow read rejects the file before parsing.
+        entries = []
+        for index in range(300):  # >256-cap forces schema-invalidity too
+            entries.append(
+                {
+                    "model_id": f"basin-{index:03d}",
+                    "old_checksum": "a" * 64,
+                    "new_checksum": "c" * 64,
+                    "effective_cycle_utc": "2026-07-15T00:00:00Z",
+                    "transition_mode": "replace",
+                }
+            )
+        oversized["entries"] = entries
+        raw = (json.dumps(oversized, sort_keys=True) + "\n").encode()
+        # Pad to actually exceed the byte cap.
+        raw = raw + b" " * (refresh.MAX_CUTOVER_DECLARATION_BYTES + 1024)
+        declaration_path.write_bytes(raw)
+    else:
+        entry = dict(valid_entry)
+        gen_for_file = generation
+        if corruption == "wrong_generation":
+            gen_for_file = "manifest-99999999-deadbeefcafe"
+        elif corruption == "wrong_old_checksum":
+            entry["old_checksum"] = "9" * 64
+        elif corruption == "wrong_new_checksum":
+            entry["new_checksum"] = "9" * 64
+        elif corruption == "non_cycle_aligned":
+            entry["effective_cycle_utc"] = "2026-07-15T06:00:00Z"
+        elif corruption == "out_of_window_past":
+            entry["effective_cycle_utc"] = "2026-07-10T00:00:00Z"
+        elif corruption == "out_of_window_future":
+            entry["effective_cycle_utc"] = "2027-01-01T00:00:00Z"
+        elif corruption == "duplicate_model_id":
+            declaration_path = _write_declaration(
+                tmp_path,
+                generation=gen_for_file,
+                entries=[valid_entry, dict(valid_entry)],
+            )
+        elif corruption == "unknown_model_id":
+            entry["model_id"] = "basin-does-not-exist"
+        if corruption not in {"duplicate_model_id"}:
+            declaration_path = _write_declaration(
+                tmp_path, generation=gen_for_file, entries=[entry]
+            )
+
+    captured, error = _run_gate(
+        tmp_path,
+        config,
+        prospective_models=prospective,
+        previous_models=previous,
+        declaration_path=declaration_path,
+        generated_at=generated_at,
+        now=generated_at,
+    )
+
+    assert isinstance(error, refresh.SchedulerRegistryPublishError)
+    assert error.details["provider_reason"] == "registry_cutover_declaration_invalid"
+    assert error.details["provider_phase"] == "precommit"
+    # Previous canonical bytes, inode, and mtime untouched (T8 / C-E9).
+    assert registry_path.read_bytes() == before
+    after_stat = registry_path.stat()
+    assert (after_stat.st_ino, after_stat.st_mtime_ns) == (
+        before_stat.st_ino,
+        before_stat.st_mtime_ns,
+    )
+
+
+def test_cutover_gate_refuses_removed_previously_canonical_model(tmp_path: Path) -> None:
+    """(e) Previously canonical model removed -> refusal, previous intact.
+
+    Explicitly asserts (T7 / C-E8) that the removed row's refused entry
+    carries the previous checksum in ``old_checksum`` and ``null`` in
+    ``new_checksum``, and asserts (T8 / C-E9) that inode+mtime survive.
+    """
+    config = _config(tmp_path)
+    previous = [
+        _registry_row("basin-101", "a" * 64),
+        _registry_row("basin-102", "b" * 64),
+    ]
+    prospective = [_registry_row("basin-101", "a" * 64)]  # basin-102 dropped
+    registry_path = _write_previous_canonical(config, previous)
+    before = registry_path.read_bytes()
+    before_stat = registry_path.stat()
+
+    captured, error = _run_gate(
+        tmp_path, config, prospective_models=prospective, previous_models=previous
+    )
+
+    assert isinstance(error, refresh.SchedulerRegistryPublishError)
+    assert error.details["provider_reason"] == "registry_cutover_removal_refused"
+    payload = captured[0]
+    assert payload["removed"]["items"] == ["basin-102"]
+    refused_removed = next(
+        item
+        for item in payload["refused"]["items"]
+        if item["reason"] == "registry_cutover_removal_refused"
+    )
+    assert refused_removed["model_id"] == "basin-102"
+    # Symmetric to the drift branch: previous checksum is populated, no new
+    # checksum exists on the prospective side (T7 / C-E8).
+    assert refused_removed["old_checksum"] == "b" * 64
+    assert refused_removed["new_checksum"] is None
+    # bytes / inode / mtime survive (T8 / C-E9).
+    assert registry_path.read_bytes() == before
+    after_stat = registry_path.stat()
+    assert (after_stat.st_ino, after_stat.st_mtime_ns) == (
+        before_stat.st_ino,
+        before_stat.st_mtime_ns,
+    )
+    _assert_classification_reconciles(
+        payload, previous_count=2, prospective_count=1
+    )
+
+
+def test_cutover_gate_missing_previous_canonical_is_first_publication(tmp_path: Path) -> None:
+    """(f) Missing previous canonical registry -> every row is `added`."""
+    config = _config(tmp_path)
+    prospective = [
+        _registry_row("basin-a", "a" * 64),
+        _registry_row("basin-b", "b" * 64),
+    ]
+    # Do not write any previous manifest.
+    captured, error = _run_gate(
+        tmp_path, config, prospective_models=prospective, previous_models=None
+    )
+
+    assert error is None
+    payload = captured[0]
+    assert payload["previous_registry_sha256"] is None
+    assert payload["added"]["total"] == 2
+    assert set(payload["added"]["items"]) == {"basin-a", "basin-b"}
+    assert payload["unchanged"]["total"] == 0
+    assert payload["removed"]["total"] == 0
+
+
+def test_cutover_classification_bounded_evidence_truncates_over_cap(tmp_path: Path) -> None:
+    """Classification arrays cap at 256 with total + truncated fields."""
+    config = _config(tmp_path)
+    # 300 previous canonical models, all removed in the prospective set.
+    previous = [_registry_row(f"basin-{index:03d}", "a" * 64) for index in range(300)]
+    prospective: list[dict[str, object]] = []
+    _write_previous_canonical(config, previous)
+
+    captured, error = _run_gate(
+        tmp_path, config, prospective_models=prospective, previous_models=previous
+    )
+
+    # Empty prospective is technically valid classification (all removed).
+    assert isinstance(error, refresh.SchedulerRegistryPublishError)
+    assert error.details["provider_reason"] == "registry_cutover_removal_refused"
+    payload = captured[0]
+    assert payload["removed"]["total"] == 300
+    assert payload["removed"]["truncated"] is True
+    assert len(payload["removed"]["items"]) == refresh.MAX_COLLECTION_ITEMS
+    assert payload["refused"]["total"] == 300
+    assert payload["refused"]["truncated"] is True
+    assert len(payload["refused"]["items"]) == refresh.MAX_COLLECTION_ITEMS
+
+
+def test_cutover_gate_dry_run_reports_id_only_classification_without_refusal(
+    tmp_path: Path,
+) -> None:
+    """dry_run: id-only classification, no refusal even if drift-shaped."""
+    config = _config(tmp_path)
+    previous = [_registry_row("basin-101", "a" * 64)]
+    # In dry-run mode the prospective rows carry only id/basin_id.
+    prospective = [
+        {"model_id": "basin-101", "basin_id": "basin-basin-101"},
+        {"model_id": "basin-201", "basin_id": "basin-201"},
+    ]
+
+    captured, error = _run_gate(
+        tmp_path,
+        config,
+        prospective_models=prospective,
+        previous_models=previous,
+        dry_run=True,
+    )
+
+    assert error is None
+    payload = captured[0]
+    assert payload["added"]["items"] == ["basin-201"]
+    assert payload["unchanged"]["items"] == ["basin-101"]
+    assert payload["package_changed"]["total"] == 0
+    assert payload["new_registry_sha256"] is None  # dry_run does not publish
+
+
+def test_refresh_receipt_binds_registry_classification_on_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Successful published receipt carries a `registry_classification` payload."""
+    monkeypatch.delenv(refresh.CUTOVER_DECLARATION_ENV, raising=False)
+    config = _config(tmp_path)
+    # Seed one previous canonical model so classification has real content.
+    previous_models = [_registry_row("model-1", "a" * 64)]
+    _write_previous_canonical(config, previous_models)
+    _stub_provider_pipeline(monkeypatch)
+
+    receipt = refresh.refresh_scheduler_file_providers(config, dry_run=True)
+
+    assert receipt["outcome"] == "dry_run"
+    classification = receipt["registry_classification"]
+    assert classification["previous_registry_sha256"] is not None
+    # Stubbed pipeline emits 13 minimal id-only rows.
+    assert classification["added"]["total"] + classification["unchanged"]["total"] == 13
+
+
+def test_refresh_receipt_binds_registry_classification_on_undeclared_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused refresh emits registry_classification pinpointing the drift."""
+    monkeypatch.delenv(refresh.CUTOVER_DECLARATION_ENV, raising=False)
+    config = _config(tmp_path)
+    previous_models = [_registry_row("model-a", "a" * 64)]
+    _write_previous_canonical(config, previous_models)
+    _stub_provider_pipeline(monkeypatch)
+
+    def publish_registry_with_drift(**kwargs: object) -> dict[str, object]:
+        workspace = Path(str(kwargs["work_dir"]))
+        workspace.mkdir(parents=True, exist_ok=True)
+        kwargs["precommit_validator"](
+            workspace,
+            [],
+            [_registry_row("model-a", "c" * 64)],
+        )
+        return {"selected_model_count": 1, "registry": None, "packages": []}
+
+    monkeypatch.setattr(refresh, "publish_all_basin_scheduler_registry", publish_registry_with_drift)
+
+    receipt = refresh.refresh_scheduler_file_providers(config, dry_run=False)
+
+    assert receipt["outcome"] == "failed"
+    assert receipt["reason"] == "registry_cutover_undeclared"
+    classification = receipt["registry_classification"]
+    assert classification["refused"]["total"] == 1
+    assert classification["refused"]["items"][0]["reason"] == "registry_cutover_undeclared"
+    # Previous canonical registry SHA is captured on the receipt.
+    assert classification["previous_registry_sha256"] is not None
+    _assert_classification_reconciles(
+        classification, previous_count=1, prospective_count=1
+    )
+
+
+def test_prospective_registry_generation_is_deterministic(
+    tmp_path: Path,
+) -> None:
+    """Same models produce the same generation string; wall clock is excluded.
+
+    Operators observe this value on a refused refresh receipt and file the
+    matching cutover declaration; determinism (across wall-clock intervals,
+    finding C-B1) is the operational contract that makes the refuse ->
+    declare -> retry loop convergent.
+    """
+    models = [_registry_row("basin-101", "a" * 64), _registry_row("basin-102", "b" * 64)]
+    generated_at = refresh.datetime(2026, 7, 14, 12, tzinfo=refresh.UTC)
+    gen1 = refresh._prospective_registry_generation(models, generated_at=generated_at)
+    gen2 = refresh._prospective_registry_generation(
+        list(models), generated_at=generated_at
+    )
+    assert gen1 == gen2
+    assert gen1.startswith("manifest-")
+    # Generation is a pure content hash: shape is manifest-<12 hex chars>.
+    _, _, digest = gen1.partition("-")
+    assert len(digest) == 12
+    assert all(character in "0123456789abcdef" for character in digest)
+    # A different model set produces a different generation.
+    perturbed = models + [_registry_row("basin-103", "c" * 64)]
+    gen3 = refresh._prospective_registry_generation(perturbed, generated_at=generated_at)
+    assert gen3 != gen1
+    # Wall-clock changes MUST NOT change the generation for the same models
+    # (T10, finding C-B1).  A generation that varies with wall clock breaks
+    # the refuse-declaration-retry operator loop.
+    later = refresh.datetime(2026, 7, 15, 9, 42, 17, 500000, tzinfo=refresh.UTC)
+    much_later = refresh.datetime(2026, 7, 16, 3, 0, tzinfo=refresh.UTC)
+    gen_later = refresh._prospective_registry_generation(models, generated_at=later)
+    gen_much_later = refresh._prospective_registry_generation(
+        models, generated_at=much_later
+    )
+    assert gen1 == gen_later == gen_much_later
+
+
+# ---------------------------------------------------------------------------
+# Round-2 fix-pass tests (T1-T13; see #1080 review round-1-verdicts-summary.md)
+# ---------------------------------------------------------------------------
+
+
+def _write_previous_manifest_with_generated_at(
+    config: refresh.RefreshConfig,
+    models: list[dict[str, object]],
+    generated_at: str,
+) -> Path:
+    path = Path(config.registry_uri)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        json.dumps(
+            {
+                "schema_version": "nhms.scheduler.file_model_registry.v1",
+                "generated_at": generated_at,
+                "models": models,
+                "checksum": f"sha256:{'0' * 64}",
+            },
+            sort_keys=True,
+        ).encode()
+        + b"\n"
+    )
+    return path
+
+
+def _stub_provider_pipeline_with_models(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    prospective_models: list[dict[str, object]],
+) -> None:
+    """Version of `_stub_provider_pipeline` that emits caller-provided rows.
+
+    The default `_stub_provider_pipeline` bakes a 13-row prospective set; the
+    round-2 tests need to drive the runner with fully-shaped registry rows so
+    published receipts carry real classification content.
+    """
+    preimage = ProviderPreimage(exists=False)
+    monkeypatch.setattr(refresh, "capture_scheduler_provider_preimage", lambda *args, **kwargs: preimage)
+    monkeypatch.setattr(
+        refresh,
+        "_read_provider_header",
+        lambda *args, **kwargs: {
+            "schema_version": "nhms.scheduler.file_model_registry.v1",
+            "generated_at": "2026-07-01T00:00:00Z",
+            "checksum": "sha256:" + "1" * 64,
+        },
+    )
+    monkeypatch.setattr(
+        refresh,
+        "derive_catalog_bound_readiness_entries",
+        lambda *args, **kwargs: ([{"entry": "valid"}], {"status": "ready", "entry_count": 26}),
+    )
+    monkeypatch.setattr(refresh, "validate_catalog_bound_readiness_entries", lambda *args, **kwargs: {})
+
+    class _Repository:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def validated_entries_for_renewal(self):
+            return ([{"entry": "valid"}], {"checksum": "sha256:" + "c" * 64}, preimage)
+
+    monkeypatch.setattr(refresh, "FileStateSnapshotIndexRepository", _Repository)
+
+    committed_sha_holder: dict[str, str] = {}
+
+    def publish_registry(**kwargs: object) -> dict[str, object]:
+        workspace = Path(str(kwargs["work_dir"]))
+        workspace.mkdir(parents=True, exist_ok=True)
+        kwargs["precommit_validator"](workspace, [], prospective_models)
+        # Simulate a canonical commit by writing the manifest bytes so
+        # downstream provider evidence has a real SHA to bind to.
+        if not kwargs.get("dry_run"):
+            registry_uri = Path(str(kwargs["registry_manifest"]))
+            registry_uri.parent.mkdir(parents=True, exist_ok=True)
+            content, sha = refresh._prospective_registry_content(
+                prospective_models,
+                generated_at=kwargs.get("registry_generated_at")
+                or refresh.datetime.now(refresh.UTC),
+            )
+            registry_uri.write_bytes(content)
+            committed_sha_holder["sha"] = sha
+            observer = kwargs.get("registry_commit_observer")
+            if observer is not None:
+                observer(
+                    ProviderPreimage(
+                        exists=True,
+                        sha256=sha,
+                        inode=registry_uri.stat().st_ino,
+                        size=len(content),
+                    )
+                )
+            return {
+                "selected_model_count": len(prospective_models),
+                "registry": {
+                    "checksum": f"sha256:{sha}",
+                    "model_count": len(prospective_models),
+                    "content_sha256": sha,
+                    "entry_count": len(prospective_models),
+                },
+                "packages": [],
+            }
+        return {
+            "selected_model_count": len(prospective_models),
+            "registry": None,
+            "packages": [],
+        }
+
+    monkeypatch.setattr(refresh, "publish_all_basin_scheduler_registry", publish_registry)
+    monkeypatch.setattr(
+        refresh,
+        "publish_canonical_readiness_index",
+        lambda *args, **kwargs: {"checksum": "sha256:" + "e" * 64, "entry_count": 1},
+    )
+    monkeypatch.setattr(
+        refresh,
+        "publish_state_snapshot_index",
+        lambda *args, **kwargs: {"checksum": "sha256:" + "f" * 64, "entry_count": 1},
+    )
+
+
+def test_full_runner_published_receipt_binds_new_registry_sha_and_reconciles_totals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T1 / C-E2: full ``dry_run=False`` end-to-end publish carries a
+    reconciled classification and ``new_registry_sha256`` equals the
+    registry provider's ``after_sha256``."""
+    monkeypatch.delenv(refresh.CUTOVER_DECLARATION_ENV, raising=False)
+    config = _config(tmp_path)
+    previous_models = [
+        _registry_row("basin-101", "a" * 64),
+        _registry_row("basin-102", "b" * 64),
+    ]
+    _write_previous_canonical(config, previous_models)
+    # Prospective: keep both existing rows byte-identical + add one new row.
+    prospective_models = previous_models + [_registry_row("basin-201", "c" * 64)]
+    _stub_provider_pipeline_with_models(
+        monkeypatch, prospective_models=prospective_models
+    )
+
+    receipt = refresh.refresh_scheduler_file_providers(config, dry_run=False)
+
+    assert receipt["outcome"] == "published", receipt
+    classification = receipt["registry_classification"]
+    registry_provider = next(
+        provider for provider in receipt["providers"] if provider["name"] == "registry"
+    )
+    assert classification["new_registry_sha256"] == registry_provider["after_sha256"]
+    _assert_classification_reconciles(
+        classification, previous_count=2, prospective_count=3
+    )
+    assert classification["added"]["total"] == 1
+    assert classification["unchanged"]["total"] == 2
+    assert classification["package_changed"]["total"] == 0
+    assert classification["refused"]["total"] == 0
+
+
+def test_full_runner_published_receipt_admits_valid_cutover_and_still_publishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T2 / C-E3: 13 previous + 19 prospective where one existing model
+    changes checksum with a valid declaration.  End-to-end runner path must
+    reach ``outcome="published"`` with 6 added / 12 unchanged / 1
+    package_changed / 1 declared_cutovers / 0 refused, and the strict
+    receipt validator must accept the payload (round-1 finding C-A1)."""
+    previous_models = [_registry_row(f"basin-1{i:02d}", "a" * 64) for i in range(1, 14)]
+    # Prospective: 12 existing byte-identical + 1 existing with checksum
+    # drift (basin-101 changes checksum) + 6 new basins.
+    prospective_models = [
+        _registry_row("basin-101", "c" * 64),  # package_changed via declaration
+    ] + [
+        _registry_row(f"basin-1{i:02d}", "a" * 64) for i in range(2, 14)
+    ] + [
+        _registry_row(f"basin-2{i:02d}", "b" * 64) for i in range(1, 7)
+    ]
+    # File the matching cutover declaration.
+    generation = refresh._prospective_registry_generation(
+        prospective_models, generated_at=refresh.datetime.now(refresh.UTC)
+    )
+    declaration = tmp_path / "declaration.json"
+    declaration.write_text(
+        json.dumps(
+            {
+                "schema_version": "nhms.scheduler.registry_package_cutover.v1",
+                "generated_at": "2026-07-14T00:00:00Z",
+                "generation": generation,
+                "entries": [
+                    {
+                        "model_id": "basin-101",
+                        "old_checksum": "a" * 64,
+                        "new_checksum": "c" * 64,
+                        "effective_cycle_utc": "2026-07-15T00:00:00Z",
+                        "transition_mode": "replace",
+                    }
+                ],
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    declaration.chmod(0o600)
+    monkeypatch.setenv(refresh.CUTOVER_DECLARATION_ENV, str(declaration))
+    # Freeze wall clock via a subclass so refresh.datetime.now(UTC) returns
+    # a fixed value (datetime.datetime is immutable and cannot have its
+    # classmethod replaced directly — set the module-level attribute
+    # instead).
+    class _StubDateTime(refresh.datetime):  # type: ignore[misc]
+        @classmethod
+        def now(cls, tz=None):  # noqa: ANN001
+            del tz
+            return refresh.datetime(2026, 7, 14, 18, tzinfo=refresh.UTC)
+
+    monkeypatch.setattr(refresh, "datetime", _StubDateTime)
+
+    config = _config(tmp_path)
+    _write_previous_canonical(config, previous_models)
+    _stub_provider_pipeline_with_models(
+        monkeypatch, prospective_models=prospective_models
+    )
+
+    receipt = refresh.refresh_scheduler_file_providers(config, dry_run=False)
+
+    assert receipt["outcome"] == "published", receipt
+    classification = receipt["registry_classification"]
+    assert classification["added"]["total"] == 6
+    assert classification["unchanged"]["total"] == 12
+    assert classification["package_changed"]["total"] == 1
+    assert classification["declared_cutovers"]["total"] == 1
+    assert classification["refused"]["total"] == 0
+    _assert_classification_reconciles(
+        classification, previous_count=13, prospective_count=19
+    )
+    # T5 / C-E6: the fully-shaped published receipt also validates against
+    # the JSON schema (Draft 2020-12) — the schema/runtime pair are the
+    # same corpus.
+    schema = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "schemas/scheduler_file_provider_refresh_receipt.schema.json"
+        ).read_text()
+    )
+    jsonschema.Draft202012Validator(schema, format_checker=jsonschema.FormatChecker()).validate(
+        receipt
+    )
+
+
+def test_receipt_validator_rejects_unsafe_classification_item_model_id(
+    tmp_path: Path,
+) -> None:
+    """T4 / C-E5: injecting a model_id that violates the schema's
+    ``^[A-Za-z0-9_.:-]+$`` regex must be rejected by ``_validate_receipt``
+    with the schema-matching typed reason; the JSON schema also rejects
+    the same shape (schema/runtime corpus stays aligned)."""
+    receipt = refresh._receipt(
+        run_id="refresh_refused",
+        started=refresh.datetime(2026, 7, 14, tzinfo=refresh.UTC),
+        outcome="failed",
+        reason="registry_cutover_undeclared",
+        phase="precommit",
+        providers=[],
+        registry_classification={
+            "previous_registry_sha256": "1" * 64,
+            "new_registry_sha256": None,
+            "previous_model_count": 1,
+            "prospective_model_count": 1,
+            "added": {"items": [], "total": 0, "truncated": False},
+            "unchanged": {"items": [], "total": 0, "truncated": False},
+            "removed": {"items": [], "total": 0, "truncated": False},
+            "package_changed": {
+                "items": [
+                    {
+                        "model_id": "/etc/passwd",  # regex-invalid
+                        "old_checksum": "a" * 64,
+                        "new_checksum": "c" * 64,
+                    }
+                ],
+                "total": 1,
+                "truncated": False,
+            },
+            "refused": {
+                "items": [
+                    {
+                        "model_id": "/etc/passwd",
+                        "old_checksum": "a" * 64,
+                        "new_checksum": "c" * 64,
+                        "reason": "registry_cutover_undeclared",
+                    }
+                ],
+                "total": 1,
+                "truncated": False,
+            },
+            "declared_cutovers": {"items": [], "total": 0, "truncated": False},
+        },
+    )
+    with pytest.raises(ValueError) as info:
+        refresh._validate_receipt(receipt)
+    assert "receipt_classification_invalid" in str(info.value)
+    schema = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "schemas/scheduler_file_provider_refresh_receipt.schema.json"
+        ).read_text()
+    )
+    # R2-N4: exercise the JSON schema's ``allOf`` refusal conditional
+    # (schemas/scheduler_file_provider_refresh_receipt.schema.json:316-363)
+    # on a real refused shape with a strict Draft2020-12 validator +
+    # FormatChecker, matching the CI ``check-jsonschema`` invocation.
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.Draft202012Validator(
+            schema, format_checker=jsonschema.FormatChecker()
+        ).validate(receipt)
+
+
+def test_receipt_validator_rejects_bad_flat_classification_id(tmp_path: Path) -> None:
+    """T4 continued: an ``added`` group model_id that violates the regex must
+    also be rejected — this exercises ``_validate_registry_classification_field``
+    directly (schema also rejects)."""
+    receipt = refresh._receipt(
+        run_id="refresh_refused_added",
+        started=refresh.datetime(2026, 7, 14, tzinfo=refresh.UTC),
+        outcome="failed",
+        reason="registry_cutover_undeclared",
+        phase="precommit",
+        providers=[],
+        registry_classification={
+            "previous_registry_sha256": "1" * 64,
+            "new_registry_sha256": None,
+            "previous_model_count": 0,
+            "prospective_model_count": 1,
+            "added": {
+                "items": ["basin/with/slash"],  # regex-invalid model_id
+                "total": 1,
+                "truncated": False,
+            },
+            "unchanged": {"items": [], "total": 0, "truncated": False},
+            "removed": {"items": [], "total": 0, "truncated": False},
+            "package_changed": {"items": [], "total": 0, "truncated": False},
+            "refused": {
+                "items": [
+                    {
+                        "model_id": "sane-id",
+                        "old_checksum": None,
+                        "new_checksum": "c" * 64,
+                        "reason": "registry_cutover_undeclared",
+                    }
+                ],
+                "total": 1,
+                "truncated": False,
+            },
+            "declared_cutovers": {"items": [], "total": 0, "truncated": False},
+        },
+    )
+    # R2-N3: assert the runtime rejects with the same typed reason token that
+    # the sibling test T4a (:3487) already binds; mirroring both call sites
+    # keeps the runtime/schema failure surfaces in lockstep.
+    with pytest.raises(ValueError) as info:
+        refresh._validate_receipt(receipt)
+    assert "receipt_classification_invalid" in str(info.value)
+
+
+def test_reconciliation_formula_helper_catches_missing_refused_entries(
+    tmp_path: Path,
+) -> None:
+    """T3 / C-E4: the reconciliation helper itself catches a receipt whose
+    ``refused`` bucket is smaller than ``removed + (package_changed \\
+    declared_cutovers)`` — the property under test IS the formula, not any
+    per-scenario hardcoded total."""
+    bad_classification = {
+        "previous_registry_sha256": "1" * 64,
+        "new_registry_sha256": None,
+        "previous_model_count": 1,
+        "prospective_model_count": 0,
+        "added": {"items": [], "total": 0, "truncated": False},
+        "unchanged": {"items": [], "total": 0, "truncated": False},
+        "removed": {"items": ["basin-102"], "total": 1, "truncated": False},
+        "package_changed": {"items": [], "total": 0, "truncated": False},
+        "refused": {"items": [], "total": 0, "truncated": False},  # missing removal
+        "declared_cutovers": {"items": [], "total": 0, "truncated": False},
+    }
+    with pytest.raises(AssertionError):
+        _assert_classification_reconciles(
+            bad_classification, previous_count=1, prospective_count=0
+        )
+
+
+def test_receipt_validator_rejects_previous_count_mismatch(tmp_path: Path) -> None:
+    """R2-N1: a receipt whose bucket totals do not equal the pinned
+    ``previous_model_count`` must be rejected with the typed reason.  This
+    exercises the runtime reconciliation validator directly and demonstrates
+    that an on-disk tampered receipt (bucket rewritten, count left stale)
+    fails at ``_validate_receipt`` time — not just via the helper."""
+    receipt = refresh._receipt(
+        run_id="refresh_bad_previous_count",
+        started=refresh.datetime(2026, 7, 14, tzinfo=refresh.UTC),
+        outcome="failed",
+        reason="registry_cutover_removal_refused",
+        phase="precommit",
+        providers=[],
+        registry_classification={
+            "previous_registry_sha256": "1" * 64,
+            "new_registry_sha256": "2" * 64,
+            # Pin count claims 3 previous rows but buckets sum to 1
+            # (unchanged 0 + package_changed 0 + removed 1) — mismatch.
+            "previous_model_count": 3,
+            "prospective_model_count": 0,
+            "added": {"items": [], "total": 0, "truncated": False},
+            "unchanged": {"items": [], "total": 0, "truncated": False},
+            "removed": {"items": ["basin-102"], "total": 1, "truncated": False},
+            "package_changed": {"items": [], "total": 0, "truncated": False},
+            "refused": {
+                "items": [
+                    {
+                        "model_id": "basin-102",
+                        "old_checksum": "a" * 64,
+                        "new_checksum": None,
+                        "reason": "registry_cutover_removal_refused",
+                    }
+                ],
+                "total": 1,
+                "truncated": False,
+            },
+            "declared_cutovers": {"items": [], "total": 0, "truncated": False},
+        },
+    )
+    with pytest.raises(ValueError) as info:
+        refresh._validate_receipt(receipt)
+    assert "receipt_classification_invalid" in str(info.value)
+
+
+def test_reconciliation_formula_helper_catches_declared_not_in_package_changed(
+    tmp_path: Path,
+) -> None:
+    """R2-N5: `declared_cutovers ⊆ package_changed` is a spec invariant
+    (design.md D7#2, spec.md:397-403).  The helper must fail when a
+    declaration entry names a model_id that never appears in the
+    ``package_changed`` bucket — a tampered receipt that grants a cutover
+    for a row the classifier never flagged as changed."""
+    bad_classification = {
+        "previous_registry_sha256": "1" * 64,
+        "new_registry_sha256": "2" * 64,
+        "previous_model_count": 1,
+        "prospective_model_count": 1,
+        "added": {"items": [], "total": 0, "truncated": False},
+        # basin-a was the sole existing model; classifier saw it as
+        # `unchanged`.  A tampered receipt puts basin-a into
+        # declared_cutovers WITHOUT listing it in package_changed — that
+        # declaration cannot bind to any transition.
+        "unchanged": {"items": ["basin-a"], "total": 1, "truncated": False},
+        "removed": {"items": [], "total": 0, "truncated": False},
+        "package_changed": {"items": [], "total": 0, "truncated": False},
+        "refused": {"items": [], "total": 0, "truncated": False},
+        "declared_cutovers": {
+            "items": [
+                {
+                    "model_id": "basin-a",
+                    "old_checksum": "a" * 64,
+                    "new_checksum": "b" * 64,
+                    "effective_cycle_utc": "2026-07-14T12:00:00Z",
+                    "transition_mode": "replace",
+                }
+            ],
+            "total": 1,
+            "truncated": False,
+        },
+    }
+    with pytest.raises(AssertionError):
+        _assert_classification_reconciles(
+            bad_classification, previous_count=1, prospective_count=1
+        )
+
+
+def test_publish_primary_receipt_upgrades_over_pre_1080_latest(tmp_path: Path) -> None:
+    """T9 / C-A2: a pre-#1080 ``latest.json`` (lacking
+    ``registry_classification``) on disk must not brick the next refresh —
+    ``_publish_primary_receipt`` reads it leniently and writes the new
+    post-#1080 receipt over the top; ``validate_current_receipt`` (installer
+    ``--enable``) then accepts the new receipt."""
+    receipt_root = tmp_path / "receipts"
+    receipt_root.mkdir(mode=0o700)
+    # Legacy latest.json shape: pre-#1080 published receipt, no
+    # registry_classification, otherwise valid.
+    legacy_provider = {
+        "name": "registry",
+        "before_sha256": "1" * 64,
+        "before_inode": 100,
+        "before_schema_version": "nhms.scheduler.file_model_registry.v1",
+        "before_generated_at": "2026-07-01T00:00:00Z",
+        "before_payload_checksum": "sha256:" + "a" * 64,
+        "after_sha256": "2" * 64,
+        "after_schema_version": "nhms.scheduler.file_model_registry.v1",
+        "after_generated_at": "2026-07-01T01:00:00Z",
+        "after_payload_checksum": "sha256:" + "b" * 64,
+        "entry_count": 13,
+    }
+    legacy_payload = {
+        "schema_version": refresh.SCHEMA_VERSION,
+        "run_id": "refresh_pre_1080",
+        "started_at": "2026-07-01T00:00:00Z",
+        "finished_at": "2026-07-01T00:05:00Z",
+        "outcome": "published",
+        "reason": "success",
+        "operation_outcome": "published",
+        "operation_reason": "success",
+        "phase": "complete",
+        "database_free": True,
+        "providers": [
+            legacy_provider,
+            {**legacy_provider, "name": "readiness"},
+            {**legacy_provider, "name": "state"},
+        ],
+        "orphans": {
+            "items": [],
+            "total": 0,
+            "discovered_total": 0,
+            "attempted_total": 0,
+            "created_total": 0,
+            "truncated": False,
+        },
+        "residues": [],
+    }
+    (receipt_root / "latest.json").write_bytes(
+        json.dumps(legacy_payload, sort_keys=True, indent=2).encode() + b"\n"
+    )
+    # Now write a post-#1080 receipt via the real publisher.
+    new_receipt = refresh._receipt(
+        run_id="refresh_post_1080",
+        started=refresh.datetime(2026, 7, 14, tzinfo=refresh.UTC),
+        outcome="published",
+        reason="success",
+        phase="complete",
+        providers=[
+            {**legacy_provider, "name": "registry"},
+            {**legacy_provider, "name": "readiness"},
+            {**legacy_provider, "name": "state"},
+        ],
+        registry_classification=_classification_stub(),
+    )
+    # Would previously raise ValueError inside `_publish_primary_receipt`
+    # because the stale latest.json fails `_validate_receipt`; must succeed.
+    refresh._publish_primary_receipt(receipt_root, new_receipt)
+    # Latest.json now holds the post-#1080 shape and validates strictly.
+    persisted = json.loads((receipt_root / "latest.json").read_text())
+    assert persisted["run_id"] == "refresh_post_1080"
+    assert "registry_classification" in persisted
+    refresh._validate_receipt(persisted)
+
+
+def test_full_runner_over_pre_1080_latest_publishes_and_installer_accepts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T9 continued: the full runner completes ``outcome="published"`` when
+    a pre-#1080 stub ``latest.json`` is present, and the new receipt is
+    subsequently acceptable to ``validate_current_receipt``."""
+    monkeypatch.delenv(refresh.CUTOVER_DECLARATION_ENV, raising=False)
+    config = _config(tmp_path)
+    previous_models = [_registry_row("basin-101", "a" * 64)]
+    _write_previous_canonical(config, previous_models)
+    # Seed the pre-#1080 latest.json.
+    legacy_provider = {
+        "name": "registry",
+        "before_sha256": "1" * 64,
+        "before_inode": 100,
+        "before_schema_version": "nhms.scheduler.file_model_registry.v1",
+        "before_generated_at": "2026-07-01T00:00:00Z",
+        "before_payload_checksum": "sha256:" + "a" * 64,
+        "after_sha256": "2" * 64,
+        "after_schema_version": "nhms.scheduler.file_model_registry.v1",
+        "after_generated_at": "2026-07-01T01:00:00Z",
+        "after_payload_checksum": "sha256:" + "b" * 64,
+        "entry_count": 1,
+    }
+    (config.receipt_root / "latest.json").write_bytes(
+        json.dumps(
+            {
+                "schema_version": refresh.SCHEMA_VERSION,
+                "run_id": "refresh_pre_1080",
+                "started_at": "2026-07-01T00:00:00Z",
+                "finished_at": "2026-07-01T00:05:00Z",
+                "outcome": "published",
+                "reason": "success",
+                "operation_outcome": "published",
+                "operation_reason": "success",
+                "phase": "complete",
+                "database_free": True,
+                "providers": [
+                    legacy_provider,
+                    {**legacy_provider, "name": "readiness"},
+                    {**legacy_provider, "name": "state"},
+                ],
+                "orphans": {
+                    "items": [],
+                    "total": 0,
+                    "discovered_total": 0,
+                    "attempted_total": 0,
+                    "created_total": 0,
+                    "truncated": False,
+                },
+                "residues": [],
+            },
+            sort_keys=True,
+            indent=2,
+        ).encode()
+        + b"\n"
+    )
+    _stub_provider_pipeline_with_models(
+        monkeypatch, prospective_models=previous_models
+    )
+
+    receipt = refresh.refresh_scheduler_file_providers(config, dry_run=False)
+
+    assert receipt["outcome"] == "published", receipt
+    persisted = json.loads((config.receipt_root / "latest.json").read_text())
+    assert persisted["run_id"] == receipt["run_id"]
+    assert "registry_classification" in persisted
+
+
+def test_full_runner_wall_clock_stable_generation_admits_deferred_declaration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T10 / C-B1: monkeypatch ``datetime.now(UTC)`` across a wall-clock
+    boundary; a declaration filed at wall-clock T1 must still match the
+    prospective generation at wall-clock T2 (which is exactly what the
+    refuse -> declare -> retry operator loop requires)."""
+    config = _config(tmp_path)
+    previous_models = [_registry_row("basin-101", "a" * 64)]
+    _write_previous_canonical(config, previous_models)
+    prospective_models = [_registry_row("basin-101", "c" * 64)]
+
+    # T1: refuse at 12:03:17.  We swap in a ``datetime`` proxy exposed as
+    # ``refresh.datetime`` so ``refresh.datetime.now(UTC)`` returns whatever
+    # the test's clock currently reads without touching the C-level
+    # ``datetime.datetime`` type itself (which is not monkeypatchable).
+    class _Clock:
+        current = refresh.datetime(2026, 7, 14, 12, 3, 17, tzinfo=refresh.UTC)
+
+    class _StubDateTime(refresh.datetime):  # type: ignore[misc]
+        @classmethod
+        def now(cls, tz=None):  # noqa: ANN001
+            del tz
+            return _Clock.current
+
+    monkeypatch.setattr(refresh, "datetime", _StubDateTime)
+    monkeypatch.delenv(refresh.CUTOVER_DECLARATION_ENV, raising=False)
+    _stub_provider_pipeline_with_models(
+        monkeypatch, prospective_models=prospective_models
+    )
+
+    first_receipt = refresh.refresh_scheduler_file_providers(config, dry_run=False)
+    assert first_receipt["outcome"] == "failed"
+    assert first_receipt["reason"] == "registry_cutover_undeclared"
+    refused_generation = refresh._prospective_registry_generation(
+        prospective_models, generated_at=_Clock.current
+    )
+
+    # Operator files a declaration bound to that generation.
+    declaration = tmp_path / "declaration.json"
+    declaration.write_text(
+        json.dumps(
+            {
+                "schema_version": "nhms.scheduler.registry_package_cutover.v1",
+                "generated_at": _Clock.current.isoformat().replace("+00:00", "Z"),
+                "generation": refused_generation,
+                "entries": [
+                    {
+                        "model_id": "basin-101",
+                        "old_checksum": "a" * 64,
+                        "new_checksum": "c" * 64,
+                        "effective_cycle_utc": "2026-07-15T00:00:00Z",
+                        "transition_mode": "replace",
+                    }
+                ],
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    declaration.chmod(0o600)
+    monkeypatch.setenv(refresh.CUTOVER_DECLARATION_ENV, str(declaration))
+
+    # T2: retry 7 hours later; wall clock has advanced, but generation MUST
+    # stay identical (finding C-B1).  Reset the pipeline stub because the
+    # first refresh consumed it.
+    _Clock.current = refresh.datetime(2026, 7, 14, 19, 42, 0, tzinfo=refresh.UTC)
+    # Re-seed the previous canonical since the first refusal did not commit.
+    _write_previous_canonical(config, previous_models)
+    _stub_provider_pipeline_with_models(
+        monkeypatch, prospective_models=prospective_models
+    )
+
+    second_receipt = refresh.refresh_scheduler_file_providers(config, dry_run=False)
+
+    assert second_receipt["outcome"] == "published", second_receipt
+    classification = second_receipt["registry_classification"]
+    assert classification["package_changed"]["total"] == 1
+    assert classification["declared_cutovers"]["total"] == 1
+    assert classification["refused"]["total"] == 0
+    _assert_classification_reconciles(
+        classification, previous_count=1, prospective_count=1
+    )
+
+
+def test_cutover_gate_escalates_source_inventory_checksum_drift(tmp_path: Path) -> None:
+    """T11 / C-C1: two rows with identical URIs + package_checksum but a
+    different nested ``resource_profile.source_inventory_checksum`` MUST
+    classify as ``package_changed`` (spec.md:301-306).  Previously the
+    classifier's 3-field whitelist silently classified them as unchanged."""
+    config = _config(tmp_path)
+    previous = [
+        _registry_row(
+            "basin-101",
+            "a" * 64,
+            source_inventory_checksum="sha256:" + "1" * 63 + "0",
+        )
+    ]
+    prospective = [
+        _registry_row(
+            "basin-101",
+            "a" * 64,  # top-level package_checksum unchanged
+            source_inventory_checksum="sha256:" + "1" * 63 + "1",  # nested drift
+        )
+    ]
+
+    captured, error = _run_gate(
+        tmp_path, config, prospective_models=prospective, previous_models=previous
+    )
+
+    assert isinstance(error, refresh.SchedulerRegistryPublishError)
+    assert error.details["provider_reason"] == "registry_cutover_undeclared"
+    payload = captured[0]
+    assert payload["unchanged"]["total"] == 0
+    assert payload["package_changed"]["total"] == 1
+    assert payload["package_changed"]["items"][0]["model_id"] == "basin-101"
+
+
+def test_cutover_gate_escalates_basin_version_id_drift(tmp_path: Path) -> None:
+    """T11 continued: a change to any top-level identity field
+    (``basin_version_id`` here) escalates to ``package_changed``."""
+    config = _config(tmp_path)
+    previous = [_registry_row("basin-101", "a" * 64, basin_version_id="v1")]
+    prospective = [_registry_row("basin-101", "a" * 64, basin_version_id="v2")]
+
+    captured, error = _run_gate(
+        tmp_path, config, prospective_models=prospective, previous_models=previous
+    )
+
+    assert isinstance(error, refresh.SchedulerRegistryPublishError)
+    assert error.details["provider_reason"] == "registry_cutover_undeclared"
+    payload = captured[0]
+    assert payload["package_changed"]["total"] == 1
+    assert payload["unchanged"]["total"] == 0
+
+
+def test_cutover_gate_escalates_missing_nested_identity(tmp_path: Path) -> None:
+    """T11 continued: missing ``resource_profile`` on either side counts as
+    identity drift — a rebuilt row that dropped the profile field must not
+    ride through as ``unchanged``."""
+    config = _config(tmp_path)
+    previous = [_registry_row("basin-101", "a" * 64)]
+    prospective_row = _registry_row("basin-101", "a" * 64)
+    prospective_row.pop("resource_profile")
+
+    captured, error = _run_gate(
+        tmp_path,
+        config,
+        prospective_models=[prospective_row],
+        previous_models=previous,
+    )
+
+    assert isinstance(error, refresh.SchedulerRegistryPublishError)
+    payload = captured[0]
+    assert payload["package_changed"]["total"] == 1
+
+
+def test_load_previous_canonical_rejects_oversize_file(tmp_path: Path) -> None:
+    """T (C-F1): explicit ``len > MAX`` sentinel after
+    ``read_bytes_limited_no_follow`` in ``_load_previous_canonical_registry``."""
+    manifest_dir = tmp_path / "registry"
+    manifest_dir.mkdir()
+    manifest_path = manifest_dir / "manifest-last.json"
+    # Write MAX+1 bytes so read_bytes_limited_no_follow returns exactly
+    # MAX+1 bytes (its sentinel-plus-one contract) and the caller's
+    # explicit len > MAX check fires.
+    manifest_path.write_bytes(b"x" * (refresh.MAX_REGISTRY_MANIFEST_BYTES + 1))
+    assert manifest_path.stat().st_size > refresh.MAX_REGISTRY_MANIFEST_BYTES
+
+    with pytest.raises(refresh.RefreshError) as info:
+        refresh._load_previous_canonical_registry(
+            str(manifest_path), containment_root=manifest_dir
+        )
+    assert info.value.reason == "provider_invalid"
+
+
+def test_load_cutover_declaration_rejects_oversize_file(tmp_path: Path) -> None:
+    """T (C-F4): explicit ``len > MAX`` sentinel in
+    ``_load_cutover_declaration``."""
+    declaration = tmp_path / "declaration.json"
+    filler = b" " * (refresh.MAX_CUTOVER_DECLARATION_BYTES + 1)
+    declaration.write_bytes(b"{}" + filler)
+    with pytest.raises(refresh.RefreshError) as info:
+        refresh._load_cutover_declaration(
+            str(declaration), now=refresh.datetime.now(refresh.UTC)
+        )
+    assert info.value.reason == "registry_cutover_declaration_invalid"
+
+
+def test_load_previous_canonical_returns_bytes_bound_to_sha(tmp_path: Path) -> None:
+    """T (C-F2): the loader returns the exact bytes it hashed so callers
+    can hand the snapshot forward without a second read (bytes+SHA must
+    come from the same read)."""
+    manifest_dir = tmp_path / "registry"
+    manifest_dir.mkdir()
+    manifest_path = manifest_dir / "manifest-last.json"
+    manifest_path.write_bytes(
+        json.dumps(
+            {
+                "schema_version": "nhms.scheduler.file_model_registry.v1",
+                "generated_at": "2026-07-14T00:00:00Z",
+                "models": [_registry_row("basin-101", "a" * 64)],
+                "checksum": f"sha256:{'0' * 64}",
+            },
+            sort_keys=True,
+        ).encode()
+        + b"\n"
+    )
+    loaded = refresh._load_previous_canonical_registry(
+        str(manifest_path), containment_root=manifest_dir
+    )
+    assert loaded is not None
+    sha, models, raw_bytes = loaded
+    assert sha == refresh.hashlib.sha256(raw_bytes).hexdigest()
+    assert models[0]["model_id"] == "basin-101"
+
+
+def test_full_runner_refresh_lock_is_held_during_precommit_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T13 (part a) / C-E1: the precommit gate is invoked while
+    ``config.refresh_lock`` is held by the runner.  A second attempt to
+    acquire the same lock non-blocking must fail while the gate runs."""
+    monkeypatch.delenv(refresh.CUTOVER_DECLARATION_ENV, raising=False)
+    config = _config(tmp_path)
+    previous_models = [_registry_row("basin-101", "a" * 64)]
+    _write_previous_canonical(config, previous_models)
+    prospective_models = [_registry_row("basin-101", "a" * 64)]
+
+    lock_holder_state: dict[str, bool] = {"seen_locked": False}
+
+    # Monkeypatch the precommit gate implementation so we can observe that,
+    # at the moment the gate runs, a competing non-blocking acquisition of
+    # the same refresh_lock fails.  We do NOT replace the gate's semantics.
+    original_gate = refresh._registry_precommit_gate
+
+    def instrumented_gate(*args: object, **kwargs: object) -> None:
+        # A second non-blocking acquire of the same refresh_lock must fail
+        # with a typed ProviderAtomicError — proving the runner holds it.
+        try:
+            with provider_atomic_module.provider_destination_lock(
+                config.refresh_lock, blocking=False
+            ):
+                # Successfully acquired means the runner did NOT hold it.
+                lock_holder_state["seen_locked"] = False
+        except provider_atomic_module.ProviderAtomicError:
+            lock_holder_state["seen_locked"] = True
+        return original_gate(*args, **kwargs)
+
+    monkeypatch.setattr(refresh, "_registry_precommit_gate", instrumented_gate)
+    _stub_provider_pipeline_with_models(
+        monkeypatch, prospective_models=prospective_models
+    )
+
+    receipt = refresh.refresh_scheduler_file_providers(config, dry_run=False)
+    assert receipt["outcome"] == "published", receipt
+    assert lock_holder_state["seen_locked"] is True, (
+        "refresh_lock was NOT held while the precommit gate ran — the "
+        "concurrency invariant #1080 spec §D3/D7 relies on is broken."
+    )
+
+
+def test_full_runner_refusal_preserves_canonical_bytes_inode_and_mtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T13 (part c) / C-E1: a refused runner call leaves canonical bytes,
+    inode, and mtime byte-identical (the receipt refusal contract)."""
+    monkeypatch.delenv(refresh.CUTOVER_DECLARATION_ENV, raising=False)
+    config = _config(tmp_path)
+    previous_models = [_registry_row("basin-101", "a" * 64)]
+    canonical_path = _write_previous_canonical(config, previous_models)
+    before_bytes = canonical_path.read_bytes()
+    before_stat = canonical_path.stat()
+    prospective_models = [_registry_row("basin-101", "c" * 64)]
+
+    def publish_registry_with_drift(**kwargs: object) -> dict[str, object]:
+        workspace = Path(str(kwargs["work_dir"]))
+        workspace.mkdir(parents=True, exist_ok=True)
+        kwargs["precommit_validator"](workspace, [], prospective_models)
+        return {"selected_model_count": 1, "registry": None, "packages": []}
+
+    _stub_provider_pipeline_with_models(
+        monkeypatch, prospective_models=prospective_models
+    )
+    monkeypatch.setattr(
+        refresh, "publish_all_basin_scheduler_registry", publish_registry_with_drift
+    )
+
+    receipt = refresh.refresh_scheduler_file_providers(config, dry_run=False)
+
+    assert receipt["outcome"] == "failed"
+    assert receipt["reason"] == "registry_cutover_undeclared"
+    assert canonical_path.read_bytes() == before_bytes
+    after_stat = canonical_path.stat()
+    assert (after_stat.st_ino, after_stat.st_mtime_ns) == (
+        before_stat.st_ino,
+        before_stat.st_mtime_ns,
+    )
+
+
+def test_provider_atomic_cas_refuses_concurrent_authoritative_swap(
+    tmp_path: Path,
+) -> None:
+    """T13 (part b) / C-E1: ``expected_preimage`` CAS prevents a concurrent
+    canonical writer from committing after a snapshot.  This mirrors the
+    invariant D3 relies on for the registry lane.
+    """
+    canonical = tmp_path / "registry" / "manifest-last.json"
+    canonical.parent.mkdir()
+    canonical.write_bytes(b"old\n")
+    snapshot = capture_provider_preimage(canonical, max_bytes=1024)
+    # Concurrent authoritative writer swaps the bytes.
+    canonical.write_bytes(b"authoritative-new\n")
+
+    with pytest.raises(ProviderAtomicError) as info:
+        atomic_replace_provider_bytes(
+            canonical,
+            b"refresh-would-be\n",
+            max_bytes=1024,
+            expected_preimage=snapshot,
+        )
+
+    assert info.value.reason == "provider_preimage_changed"
+    # Concurrent bytes preserved unchanged.
+    assert canonical.read_bytes() == b"authoritative-new\n"
+
+
