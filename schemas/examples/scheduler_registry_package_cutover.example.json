@@ -1,7 +1,7 @@
 {
   "schema_version": "nhms.scheduler.registry_package_cutover.v1",
   "generated_at": "2026-07-15T11:45:00Z",
-  "generation": "manifest-2026071512-b44ab3b785f4",
+  "generation": "manifest-b44ab3b785f4",
   "entries": [
     {
       "model_id": "basin-101",

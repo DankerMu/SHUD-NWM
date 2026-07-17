@@ -150,18 +150,28 @@ The registry publisher gains a precommit compatibility gate:
 1. **Load previous canonical** — before invoking
    `publish_scheduler_registry_manifest`, the refresh runner reads the
    currently canonical `manifest-last.json` under bounded no-follow limits
-   (missing file is legitimate first-time publication, tracked separately).
+   with an explicit `len > MAX_REGISTRY_MANIFEST_BYTES` sentinel (missing
+   file is legitimate first-time publication, tracked separately). The
+   loader returns `(sha256, models, raw_bytes)` from the same read so the
+   receipt's `previous_registry_sha256` is byte-bound to the classified
+   snapshot (no second read that could race the first).
 2. **Diff by `model_id`** — the union of previous and prospective
    `model_id`s is classified into four disjoint primary buckets, then a
    decision layer produces `refused` and `declared_cutovers`:
    - `added` covers prospective `model_id`s absent from the previous
      canonical registry.
    - `unchanged` covers `model_id`s present in both with byte-for-byte
-     equality on `model_package_uri`, `manifest_uri`, `package_checksum`,
-     `source_inventory_checksum`, and the documented model identity fields;
-     any deviation escalates.
-   - `package_changed` covers `model_id`s present in both whose
-     `package_checksum` differs.
+     equality on **every** documented identity field, currently the union of
+     `REGISTRY_MODEL_IDENTITY_FIELDS` (`model_package_uri`, `manifest_uri`,
+     `package_checksum`, `basin_version_id`, `river_network_version_id`,
+     `shud_code_version`, `segment_count`, `output_segment_count`,
+     `lifecycle_state`) plus every nested pair in
+     `REGISTRY_MODEL_NESTED_IDENTITY_FIELDS`
+     (currently `resource_profile.source_inventory_checksum`). Any
+     deviation, including a missing top-level or nested mapping on either
+     side, escalates to `package_changed`.
+   - `package_changed` covers `model_id`s present in both whose identity
+     union differs.
    - `removed` covers previously canonical `model_id`s absent from the
      prospective registry (a previous-only row, not a prospective row).
      Deliberate decommission is out of scope for #1080 and is refused; it
@@ -179,24 +189,74 @@ The registry publisher gains a precommit compatibility gate:
    12:00 UTC and within the bounded window (not more than 24h in the past nor
    more than 168h in the future), and a supported `transition_mode`
    (`replace`). Duplicates, unmatched entries, and schema-invalid declarations
-   fail closed.
-4. **Refusal semantics** — undeclared `package_changed`, any `removed`, or an
+   fail closed. The declaration loader also bounces oversize files with an
+   explicit `len > MAX_CUTOVER_DECLARATION_BYTES` sentinel and uses a
+   module-level `jsonschema.Draft202012Validator` (no per-call metaschema
+   resolution).
+4. **Generation formula** — `_prospective_registry_generation` returns
+   `manifest-<12hex>` where `<12hex>` is the SHA-256 prefix of the
+   sorted-by-`model_id` prospective model list. The wall clock is NOT part
+   of the preimage: identical prospective content produces byte-identical
+   generation strings across any interval, so the operator loop
+   "refuse -> read generation -> file declaration -> retry" is convergent
+   without a pin-generation knob. The generation only changes when the
+   prospective model set itself changes (which is when the declaration
+   must be re-issued anyway).
+5. **Refusal semantics** — undeclared `package_changed`, any `removed`, or an
    invalid declaration exits non-zero with a closed reason token
    (`registry_cutover_undeclared`, `registry_cutover_removal_refused`,
    `registry_cutover_declaration_invalid`) before any canonical provider
    replace. The existing rollback transaction (D3) is not entered because no
    commit token exists; previous canonical bytes, inode, mtime, and identity
-   remain unchanged.
-5. **Receipt classification** — the v1 receipt gains a top-level
+   remain unchanged (asserted per-refusal by tests via `st_ino` +
+   `st_mtime_ns`, not just bytes-compare).
+6. **Receipt classification** — the v1 receipt gains a top-level
    `registry_classification` object bound to the previous and new canonical
    registry SHA-256, with bounded (256-cap + `total` + `truncated`) lists for
    each class exposing only `model_id`, `old_checksum`, `new_checksum`, and
    accepted declaration identity. No absolute paths, object URIs, or
-   credentials are emitted.
+   credentials are emitted. `_validate_receipt` enforces the same
+   `^[A-Za-z0-9_.:-]+$` regex on every `model_id` as the JSON schema (schema
+   and runtime accept/reject the same corpus). `_validate_receipt` also
+   cross-checks the reconciliation formulas:
+   `unchanged + package_changed + removed == previous_count` when previous
+   existed, `added + unchanged + package_changed == prospective_count`,
+   `declared_cutovers` ⊆ `package_changed`, and
+   `refused >= removed + (package_changed - declared_cutovers)`. `published`
+   receipts require `refused.total == 0`; refusal receipts require
+   `refused.total >= 1`.
+7. **Concurrency invariant** — the gate runs inside
+   `refresh_scheduler_file_providers` while `provider_destination_lock(
+   config.refresh_lock, blocking=False)` is held; the canonical destination
+   lock itself is only entered briefly inside `atomic_replace_provider_bytes`
+   at commit time. A concurrent refresh attempts to acquire the same
+   `refresh_lock` and fails immediately (`already_running`), so no two gate
+   evaluations race. Concurrent NON-refresh writers (e.g. the manual
+   publisher) are excluded from the same `refresh_lock` but are stopped at
+   commit time by the `expected_preimage` CAS in
+   `atomic_replace_provider_bytes` — a concurrent write that lands between
+   snapshot and commit raises `provider_preimage_changed` and the refresh
+   restores its owned lanes without touching the concurrent authoritative
+   generation.
+8. **Manual publisher parity** — `scripts/publish_scheduler_file_registry.py`
+   now wires the same gate through `publish_all_basin_scheduler_registry`'s
+   `precommit_validator` so operators cannot bypass by running the manual
+   CLI directly. The gate is only skipped when the operator explicitly
+   passes `--allow-uncovered-cutover` (bootstrap / one-off recovery),
+   printing a loud stderr WARNING banner. This closes the C-D1 hole where
+   the manual path was gate-free.
+9. **Legacy receipt upgrade** — `_publish_primary_receipt` reads the
+   existing `latest.json` through a lenient parser
+   (`_lenient_receipt_order`) that only extracts `(started_at, run_id)`
+   for the monotonic-order comparison. Pre-#1080 receipts on disk (which
+   lack `registry_classification`) cannot brick the first post-#1080
+   refresh; `_validate_receipt` is reserved for receipts THIS process
+   writes. Once the first post-#1080 receipt is written, subsequent reads
+   and the installer's `validate_current_receipt` see the strict shape.
 
 The gate lives inside the existing precommit hook
 (`_registry_precommit_gate`) so the classification, refusal decision, and
-receipt payload are produced under the same destination lock and preimage
+receipt payload are produced under the same `refresh_lock` and preimage
 snapshot as the canonical registry write. Because refusal happens before
 replace, the phase-explicit outcome semantics (D3) are unchanged — refusals
 are pre-commit `failed` outcomes, never `replace_uncertain` or

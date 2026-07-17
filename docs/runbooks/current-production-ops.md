@@ -323,7 +323,7 @@ env 未设置或空值等同于"无 declaration"（只有当没有 `package_chan
 {
   "schema_version": "nhms.scheduler.registry_package_cutover.v1",
   "generated_at": "2026-07-15T11:45:00Z",
-  "generation": "manifest-202607151200-b44ab3b785f4",
+  "generation": "manifest-b44ab3b785f4",
   "entries": [
     {
       "model_id": "basins_kashigeer_shud",
@@ -337,13 +337,31 @@ env 未设置或空值等同于"无 declaration"（只有当没有 `package_chan
 ```
 
 `generation` 必须等于本次 prospective 的 registry generation；这个值是
-`manifest-YYYYMMDDHHMM-<12hex>`（YYYYMMDDHHMM 来自 refresh 使用的 `generated_at`，
-12hex 来自 prospective payload 的 content SHA-256 前 12 位）。它出现在被拒 refresh 的
-`registry_classification.new_registry_sha256`（同源）以及日志里；操作流程：先看被拒
-receipt -> 拷 generation / old/new checksum 到 declaration -> 提交 declaration 到
-mode-0600 路径 -> `export NHMS_REGISTRY_CUTOVER_DECLARATION_PATH=<path>` -> 重跑
-refresh。`effective_cycle_utc` 必须精确对齐 00:00 或 12:00 UTC，且落在 `[now-24h,
-now+168h]` 区间；`transition_mode` 目前仅支持 `replace`。
+`manifest-<12hex>`（12hex 是 sorted-by-model_id prospective model list 的 SHA-256
+前 12 位，**不含**任何 wall-clock 分量）。相同 model set 的重跑 refresh 得到 byte-
+identical 的 generation string，所以"先看被拒 receipt -> 拷 generation 到 declaration ->
+重跑 refresh"这个循环里，第二次 refresh 一定能匹配 declaration；只有 prospective
+model set 真正变了，generation 才会变（这时也必须重新出 declaration）。
+
+操作流程：先看被拒 receipt -> 拷 generation / old/new checksum 到 declaration -> 提交
+declaration 到 mode-0600 路径 -> `export NHMS_REGISTRY_CUTOVER_DECLARATION_PATH=<path>` ->
+重跑 refresh。`effective_cycle_utc` 必须精确对齐 00:00 或 12:00 UTC，且落在
+`[now-24h, now+168h]` 区间；`transition_mode` 目前仅支持 `replace`。
+
+**手动 publisher CLI**（`scripts/publish_scheduler_file_registry.py`）：为兼容 #1080 gate，
+manual publisher 默认也会跑 cutover gate，语义与 refresh runner 一致；未通过 gate 就
+不会替换 canonical。仅在 bootstrap（没有 previous canonical `manifest-last.json`）或
+显式一次性 recovery 时使用 `--allow-uncovered-cutover` 跳过（会在 stderr 打印 WARNING）。
+常规运维必须走 declaration + 重跑，绝不 default 到 bypass。
+
+**升级 pre-#1080 receipt**：如果 `.../provider-refresh/receipts/latest.json` 是升级前
+（无 `registry_classification` 字段）的 published receipt，第一次 post-#1080 refresh
+仍然会正常 publish 并把新 receipt 写入 `latest.json`；不需要人工清 stale receipt。
+`_publish_primary_receipt` 用 lenient reader 只读 `(started_at, run_id)` 做 history/
+latest.json 的 monotonic-order 排序，legacy shape 不会触发 `receipt_classification_required`。
+写入的新 receipt 通过 `_validate_receipt` 严格校验，之后 `install_node22_scheduler_
+file_provider_refresh.sh --enable`（内部走 `validate_current_receipt`）会看到完整
+post-#1080 shape。
 
 启用 refresh timer 前必须 `jq '.registry_classification'
 /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json`

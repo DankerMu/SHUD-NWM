@@ -1295,3 +1295,162 @@ def test_registry_precommit_gate_refusal_preserves_canonical_bytes_under_same_lo
     releases = [event for event in lock_events if event[0] == "release"]
     assert acquires and releases
     assert len(acquires) == len(releases)
+
+
+# ---------------------------------------------------------------------------
+# Round-2 fix pass (#1080): manual publisher CLI now wires the cutover gate.
+# ---------------------------------------------------------------------------
+
+
+def test_manual_cli_refuses_undeclared_package_cutover_without_bypass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """T12 / C-D1: the manual CLI now refuses when the prospective set has
+    a ``package_changed`` row and no cutover declaration is filed.  Without
+    ``--allow-uncovered-cutover`` the wired gate must reject; the previous
+    canonical bytes remain intact."""
+    inventory = {
+        "schema_version": "basins.discovery.v1",
+        "root": str(tmp_path / "Basins"),
+        "resolved_root": str(tmp_path / "Basins"),
+        "model_count": 1,
+        "models": [_inventory_model("first")],
+        "warnings": [],
+    }
+    monkeypatch.setattr(registry_script, "discover_basins_inventory", lambda _root: inventory)
+    monkeypatch.setattr(registry_script, "publish_basins_package", _fake_publish_basins_package)
+    monkeypatch.setattr(
+        registry_script,
+        "prepare_basins_import_sources",
+        lambda inventory_path, package_manifest_path: _fake_sources(
+            inventory, Path(package_manifest_path)
+        ),
+    )
+    canonical = tmp_path / "shared/scheduler/registry/manifest-last.json"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_bytes(
+        json.dumps(
+            {
+                "schema_version": "nhms.scheduler.file_model_registry.v1",
+                "generated_at": "2026-07-13T00:00:00Z",
+                # Same model_id as the prospective row, but a different
+                # package_checksum -> package_changed.
+                "models": [
+                    {
+                        "model_id": "basins_first_shud",
+                        "basin_id": "basins_first",
+                        "model_package_uri": "s3://nhms/models/basins_first_shud/OLD/package/",
+                        "manifest_uri": "s3://nhms/models/basins_first_shud/OLD/manifest.json",
+                        "package_checksum": "package-sha-basins_first_shud-OLD",
+                    }
+                ],
+                "checksum": f"sha256:{'0' * 64}",
+            },
+            sort_keys=True,
+        ).encode()
+        + b"\n"
+    )
+    before = canonical.read_bytes()
+    monkeypatch.delenv("NHMS_REGISTRY_CUTOVER_DECLARATION_PATH", raising=False)
+
+    argv = [
+        "--basins-root",
+        str(tmp_path / "Basins"),
+        "--registry-manifest",
+        str(canonical),
+        "--object-store-root",
+        str(tmp_path / "private-objects"),
+        "--object-store-prefix",
+        "s3://nhms",
+        "--work-dir",
+        str(tmp_path / "work"),
+    ]
+
+    exit_code = registry_script.main(argv)
+    assert exit_code != 0
+    err = capsys.readouterr().err
+    # The refusal payload includes the wired-gate provider_reason.
+    assert "registry_cutover_undeclared" in err, err
+    # Canonical bytes untouched.
+    assert canonical.read_bytes() == before
+
+
+def test_manual_cli_allow_uncovered_bypasses_gate_with_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """T12 / C-D1: ``--allow-uncovered-cutover`` bypasses the gate and
+    prints a stderr WARNING banner.  This is the bootstrap/one-off recovery
+    seam, not a regular publish path."""
+    inventory = {
+        "schema_version": "basins.discovery.v1",
+        "root": str(tmp_path / "Basins"),
+        "resolved_root": str(tmp_path / "Basins"),
+        "model_count": 1,
+        "models": [_inventory_model("first")],
+        "warnings": [],
+    }
+    monkeypatch.setattr(registry_script, "discover_basins_inventory", lambda _root: inventory)
+    monkeypatch.setattr(registry_script, "publish_basins_package", _fake_publish_basins_package)
+    monkeypatch.setattr(
+        registry_script,
+        "prepare_basins_import_sources",
+        lambda inventory_path, package_manifest_path: _fake_sources(
+            inventory, Path(package_manifest_path)
+        ),
+    )
+    canonical = tmp_path / "shared/scheduler/registry/manifest-last.json"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_bytes(
+        json.dumps(
+            {
+                "schema_version": "nhms.scheduler.file_model_registry.v1",
+                "generated_at": "2026-07-13T00:00:00Z",
+                "models": [
+                    {
+                        "model_id": "basins_first_shud",
+                        "basin_id": "basins_first",
+                        "model_package_uri": "s3://nhms/models/basins_first_shud/OLD/package/",
+                        "manifest_uri": "s3://nhms/models/basins_first_shud/OLD/manifest.json",
+                        "package_checksum": "package-sha-basins_first_shud-OLD",
+                    }
+                ],
+                "checksum": f"sha256:{'0' * 64}",
+            },
+            sort_keys=True,
+        ).encode()
+        + b"\n"
+    )
+    monkeypatch.delenv("NHMS_REGISTRY_CUTOVER_DECLARATION_PATH", raising=False)
+
+    argv = [
+        "--basins-root",
+        str(tmp_path / "Basins"),
+        "--registry-manifest",
+        str(canonical),
+        "--object-store-root",
+        str(tmp_path / "private-objects"),
+        "--object-store-prefix",
+        "s3://nhms",
+        "--work-dir",
+        str(tmp_path / "work"),
+        "--allow-uncovered-cutover",
+    ]
+    exit_code = registry_script.main(argv)
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "allow-uncovered-cutover" in err
+    # With bypass, publish should proceed (canonical bytes replaced).
+    assert exit_code == 0
+    assert canonical.read_bytes() != json.dumps(
+        {
+            "schema_version": "nhms.scheduler.file_model_registry.v1",
+            "generated_at": "2026-07-13T00:00:00Z",
+        },
+        sort_keys=True,
+    ).encode()
+
+

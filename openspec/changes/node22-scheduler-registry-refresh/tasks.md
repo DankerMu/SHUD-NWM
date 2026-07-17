@@ -165,17 +165,43 @@
 - [x] 5.6 Extend `tests/test_publish_scheduler_file_registry.py` with a
   concurrency assertion that the precommit gate runs while the same
   destination lock is held that governs canonical replacement, and that a
-  refusal releases the lock without touching canonical bytes.
+  refusal releases the lock without touching canonical bytes.  Round-2
+  fix pass also proves in `tests/test_scheduler_file_provider_refresh.py`
+  that `config.refresh_lock` is held during the gate call (a second
+  non-blocking acquire during the gate raises `ProviderAtomicError`) and
+  that `expected_preimage` CAS refuses a concurrent authoritative swap
+  after snapshot.
 - [x] 5.7 Update `docs/runbooks/current-production-ops.md` operator section
   with: what a `registry_cutover_*` refusal means, how to file a valid
   declaration (schema, path env, cycle alignment, generation binding), and
   how the receipt's `registry_classification` should be inspected before
-  enabling the refresh timer after a cutover.
+  enabling the refresh timer after a cutover.  Round-2 fix pass updated
+  the recipe to reflect the deterministic `manifest-<12hex>` generation
+  and documented the manual CLI `--allow-uncovered-cutover` flag.
 - [x] 5.8 Run `uv run pytest -q tests/test_scheduler_file_provider_refresh.py
   tests/test_publish_scheduler_file_registry.py`, `uv run ruff check .`, and
   `openspec validate node22-scheduler-registry-refresh --strict
   --no-interactive`; capture the receipt example through the CI
   `check-jsonschema` metaschema/example loop.
+- [x] 5.9 Round-2 invariant closure: fix `_validate_registry_classification_field`
+  reconciliation semantics (published receipts MUST accept
+  `package_changed>0` when covered by `declared_cutovers`); pin
+  `_prospective_registry_generation` to a wall-clock-free content hash
+  (`manifest-<12hex>`); expand `REGISTRY_MODEL_IDENTITY_FIELDS` and
+  introduce nested `REGISTRY_MODEL_NESTED_IDENTITY_FIELDS` so drift in
+  `resource_profile.source_inventory_checksum`, `basin_version_id`, etc.
+  escalates to `package_changed`; add lenient receipt reader
+  (`_lenient_receipt_order`) so pre-#1080 `latest.json` on disk does not
+  brick the first post-#1080 publish; wire the same gate into
+  `scripts/publish_scheduler_file_registry.py::main` behind a bounded
+  `--allow-uncovered-cutover` flag; module-level jsonschema validator;
+  bounded-read sentinels in `_load_previous_canonical_registry` and
+  `_load_cutover_declaration`; bind classified snapshot bytes+SHA to a
+  single read; enforce `^[A-Za-z0-9_.:-]+$` on classification `model_id`
+  runtime.  Round-2 test coverage adds T1-T13 in
+  `tests/test_scheduler_file_provider_refresh.py` +
+  `tests/test_publish_scheduler_file_registry.py` (see round-1
+  verdict summary in `.workplans/1080/review/`).
 
 ## Evidence Floor
 
