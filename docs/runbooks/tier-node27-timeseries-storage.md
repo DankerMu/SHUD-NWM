@@ -445,8 +445,8 @@ terminals, zero discovery failures, zero residue, 28,738,825 archive bytes,
 and free-space band `clean`. Post-enforce verification confirmed all 17
 sources absent and all 17 archives verified. The completeness baseline remains
 `incomplete` with 228 selectors; #1070 still owns salvage and the complete
-audit. Node-22 and the out-of-scope DB mutation, salvage, compression, drill,
-retention, and timer-enablement surfaces were not touched.
+audit. The out-of-scope surfaces (DB mutation, salvage, compression, drill,
+retention, timer-enablement) were not touched. Node-22 was likewise untouched.
 
 Local evidence:
 
