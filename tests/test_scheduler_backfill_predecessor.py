@@ -509,3 +509,236 @@ def test_emit_predecessor_skips_active_pipeline(monkeypatch: Any) -> None:
     assert marker.get("predecessor_backfill_active_pipeline") is True
     reasons = [record.get("reason") for record in evidence]
     assert "predecessor_backfill_active_pipeline" in reasons
+
+
+def test_emit_predecessor_prepend_cap_counts_skipped_items(monkeypatch: Any) -> None:
+    """R3-C-1 / F1: the pre-admit cap projection must include ``len(skipped)``.
+
+    Fixture: pre-existing candidates=9700, blocked=299 (1 of which is the
+    predecessor-pending successor), skipped=1 (unrelated external skip).
+    max_candidates=10000.  At the FIRST admission attempt the projected
+    total is 9700 + 299 + 1 (skipped) + 0 (admitted) + 1 (this candidate)
+    == 10001 > 10000 → SchedulerResourceLimitError.
+
+    Without the fix the projection would be 9700 + 299 + 0 + 1 == 10000,
+    NOT greater-than the cap, and admission would silently breach the
+    10000-per-pass governance limit by 1 (in the worst case, up to
+    len(skipped) which the main loop tracks in the tens/hundreds).
+    """
+    _wire_manifest_ready(monkeypatch)
+    # 9700 pre-emission candidates (unrelated to the predecessor emission).
+    candidates: list[SchedulerCandidate] = [
+        _candidate(
+            candidate_id=f"cand_pre_{i}",
+            cycle_id=f"gfs_2026070500_{i}",
+            cycle_time=_dt("2026-07-05T00:00:00Z"),
+            model_id=f"model_pre_{i}",
+            status="pending",
+        )
+        for i in range(9700)
+    ]
+    # 299 blocked entries — 1 is the predecessor-pending successor, the
+    # remaining 298 are unrelated blocks (no predecessor evidence).
+    successor = _candidate(
+        candidate_id="cand_gfs_2026070612_model_a",
+        cycle_id="gfs_2026070612",
+        cycle_time=_dt("2026-07-06T12:00:00Z"),
+        state_evidence=_predecessor_pending_evidence(),
+    )
+    blocked: list[SchedulerCandidate] = [successor] + [
+        _candidate(
+            candidate_id=f"cand_blk_{i}",
+            cycle_id=f"gfs_2026070400_{i}",
+            cycle_time=_dt("2026-07-04T00:00:00Z"),
+            model_id=f"model_blk_{i}",
+            reason="unrelated_block",
+        )
+        for i in range(298)
+    ]
+    # 1 external skipped entry — shape mirrors what the main loop appends
+    # (dict with candidate fields + reason).  We only care about ``len``
+    # here; the projection doesn't inspect the contents.
+    skipped_external: list[dict[str, Any]] = [
+        {"candidate_id": "cand_skipped_0", "reason": "active_duplicate_pipeline"}
+    ]
+    # Without ``skipped_external`` the total would be exactly the cap
+    # (10000) — with it the FIRST admit attempt breaches by 1.
+    with pytest.raises(_bf.SchedulerResourceLimitError) as exc_info:
+        _bf.emit_predecessor_candidates(
+            models=[_FakeModel(model_id=f"model_pre_{i}") for i in range(9700)]
+            + [_FakeModel("model_a")],
+            cycles=[],
+            candidates=candidates,
+            blocked=blocked,
+            candidate_factory=_candidate_factory,
+            strict_warm_start_for_candidate=_gate_ready,
+            blocked_candidate_factory=_blocked_candidate_factory,
+            max_candidates=10000,
+            skipped=skipped_external,
+        )
+    # The error payload reports skipped explicitly so operators can trace
+    # why the cap tripped where the pre-fix projection missed it.
+    details = exc_info.value.details
+    assert details.get("current_skipped") == 1
+    assert details.get("max_candidates") == 10000
+    assert exc_info.value.reason == "predecessor_emission_max_candidates_exceeded"
+    # No admit occurred: candidates list unchanged.
+    assert len(candidates) == 9700
+
+
+def test_emission_summary_attached_to_blocked_successor(monkeypatch: Any) -> None:
+    """R3-T-3 / F4: attach_emission_summary_to_blocked writes a summary
+    payload to each successor's blocked entry with per-successor totals
+    plus the pass-level totals across ``emitted / blocked / skipped /
+    truncated``.  This is the operator-audit trail for §8.6 emissions."""
+    _wire_manifest_ready(monkeypatch)
+    successor = _candidate(
+        candidate_id="cand_gfs_2026070612_model_a",
+        cycle_id="gfs_2026070612",
+        cycle_time=_dt("2026-07-06T12:00:00Z"),
+        state_evidence=_predecessor_pending_evidence(),
+    )
+    candidates: list[SchedulerCandidate] = []
+    blocked: list[SchedulerCandidate] = [successor]
+    evidence = _bf.emit_predecessor_candidates(
+        models=[_FakeModel()],
+        cycles=[],
+        candidates=candidates,
+        blocked=blocked,
+        candidate_factory=_candidate_factory,
+        strict_warm_start_for_candidate=_gate_ready,
+        blocked_candidate_factory=_blocked_candidate_factory,
+    )
+    assert len(evidence) == 1
+    assert evidence[0]["status"] == "emitted"
+    # Attach the summary — mutates ``blocked`` in place.
+    _bf.attach_emission_summary_to_blocked(blocked, evidence)
+    successor_after = next(
+        entry
+        for entry in blocked
+        if entry.candidate_id == "cand_gfs_2026070612_model_a"
+    )
+    backfill = successor_after.state_evidence.get("predecessor_backfill")
+    assert backfill is not None
+    summary = backfill.get("summary")
+    assert summary is not None
+    # Per-successor totals: 1 emission targeted this successor.
+    per_successor_totals = summary["totals"]
+    assert per_successor_totals == {"emitted": 1}
+    # Pass-level totals: same 1 emission (single-successor fixture).
+    pass_totals = summary["pass_totals"]
+    assert pass_totals == {"emitted": 1}
+    # Records preserved so the operator can trace WHICH emissions fired.
+    records = summary["records"]
+    assert len(records) == 1
+    assert records[0]["status"] == "emitted"
+    assert records[0]["successor_candidate_id"] == "cand_gfs_2026070612_model_a"
+
+
+def test_env_unwired_warning_is_one_per_pass(
+    monkeypatch: Any, caplog: Any
+) -> None:
+    """R2-B4 / F6: env-unwired warning is deduped to one-per-pass.
+
+    Fixture: two distinct predecessor-pending successors, both requiring
+    predecessor emission.  Env is NOT wired (no ``_wire_manifest_ready``
+    monkeypatch), so both emissions hit the ``env_unwired`` branch.  The
+    log warning MUST fire exactly once across the two attempts — spamming
+    an identical operator warning per candidate would drown other signal.
+    """
+    import logging as _logging
+    successor_a = _candidate(
+        candidate_id="cand_gfs_2026070612_model_a",
+        cycle_id="gfs_2026070612",
+        cycle_time=_dt("2026-07-06T12:00:00Z"),
+        model_id="model_a",
+        state_evidence=_predecessor_pending_evidence(
+            predecessor_cycle_time=_dt("2026-07-06T00:00:00Z"),
+        ),
+    )
+    successor_b = _candidate(
+        candidate_id="cand_gfs_2026070700_model_b",
+        cycle_id="gfs_2026070700",
+        cycle_time=_dt("2026-07-07T00:00:00Z"),
+        model_id="model_b",
+        state_evidence=_predecessor_pending_evidence(
+            predecessor_cycle_time=_dt("2026-07-06T12:00:00Z"),
+        ),
+    )
+    candidates: list[SchedulerCandidate] = []
+    blocked: list[SchedulerCandidate] = [successor_a, successor_b]
+    with caplog.at_level(
+        _logging.WARNING,
+        logger="services.orchestrator.scheduler_backfill_predecessor",
+    ):
+        evidence = _bf.emit_predecessor_candidates(
+            models=[_FakeModel("model_a"), _FakeModel("model_b")],
+            cycles=[],
+            candidates=candidates,
+            blocked=blocked,
+            candidate_factory=_candidate_factory,
+            strict_warm_start_for_candidate=_gate_ready,
+            blocked_candidate_factory=_blocked_candidate_factory,
+        )
+    # Both attempts hit the env-unwired branch.
+    reasons = [record.get("reason") for record in evidence]
+    assert reasons.count("predecessor_raw_manifest_env_unwired") == 2
+    # Exactly ONE warning log emitted for the two attempts.
+    env_unwired_records = [
+        record
+        for record in caplog.records
+        if "not wired" in record.getMessage()
+        and record.name == "services.orchestrator.scheduler_backfill_predecessor"
+    ]
+    assert len(env_unwired_records) == 1
+
+
+def test_emit_predecessor_skips_when_present_in_existing_blocked_keys(
+    monkeypatch: Any,
+) -> None:
+    """R2-B / F6: the ``existing_blocked_keys`` dedup branch of
+    ``emit_predecessor_candidates`` short-circuits when the predecessor
+    already sits on the blocked list (e.g. a prior pass parked it there).
+    Mirrors the ``existing_candidate_keys`` coverage but on the blocked side.
+    """
+    _wire_manifest_ready(monkeypatch)
+    successor = _candidate(
+        candidate_id="cand_gfs_2026070612_model_a",
+        cycle_id="gfs_2026070612",
+        cycle_time=_dt("2026-07-06T12:00:00Z"),
+        state_evidence=_predecessor_pending_evidence(),
+    )
+    # A prior-blocked predecessor whose (source_id, cycle_time, model_id)
+    # matches the pending predecessor key — this should short-circuit
+    # emission with ``predecessor_already_present`` on the blocked side.
+    already_blocked_predecessor = _candidate(
+        candidate_id="cand_gfs_2026070600_model_a",
+        cycle_id="gfs_2026070600",
+        cycle_time=_dt("2026-07-06T00:00:00Z"),
+        model_id="model_a",
+        source_id="gfs",
+        reason="unrelated_prior_block",
+    )
+    candidates: list[SchedulerCandidate] = []
+    blocked: list[SchedulerCandidate] = [
+        successor,
+        already_blocked_predecessor,
+    ]
+    evidence = _bf.emit_predecessor_candidates(
+        models=[_FakeModel()],
+        cycles=[],
+        candidates=candidates,
+        blocked=blocked,
+        candidate_factory=_candidate_factory,
+        strict_warm_start_for_candidate=_gate_ready,
+        blocked_candidate_factory=_blocked_candidate_factory,
+    )
+    # No new prepend — predecessor already sits on blocked.
+    assert candidates == []
+    # No new blocked append — the prior-blocked predecessor is unchanged.
+    assert len(blocked) == 2
+    # Emission evidence carries the dedup reason.
+    reasons = [record.get("reason") for record in evidence]
+    assert "predecessor_already_present" in reasons
+    statuses = [record.get("status") for record in evidence]
+    assert statuses == ["skipped"]

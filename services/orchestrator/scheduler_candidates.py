@@ -887,6 +887,10 @@ def build_candidates(
         blocked_candidate_factory=_blocked_candidate,
         active_repository=context.active_repository,
         max_candidates=max_candidates,
+        # R3-C-1: hand the main-loop ``skipped`` list down so §8.6's pre-admit
+        # cap projection matches ``candidates + blocked + skipped`` at line
+        # 185; otherwise admitted predecessors can silently breach the cap.
+        skipped=skipped,
     )
     if predecessor_emission_evidence:
         _bf.attach_emission_summary_to_blocked(

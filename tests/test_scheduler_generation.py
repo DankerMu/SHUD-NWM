@@ -1079,11 +1079,26 @@ def test_transition_decision_survives_concurrent_evaluation(
     for thread in threads:
         thread.join()
 
-    # All 4 threads observed the same §8 decision (cache did not tear).
+    # Cross-thread invariant #1: all 4 threads observed the same §8 decision
+    # (cache did not tear; no thread saw a partial mutation).
     assert reasons == ["registry_cutover_declaration_missing"] * 4
-    # After 4 concurrent passes the per-lifetime cache still holds ONE
-    # loaded value (not 4 distinct entries or a partial state).
-    assert not isinstance(scheduler._cutover_declaration_cache, list)
+    # Cross-thread invariant #2: the per-lifetime declaration cache is a
+    # scalar sentinel-based slot (see scheduler_core.py:138 —
+    # ``_cutover_declaration_cache: Any = _CUTOVER_DECLARATION_UNLOADED``,
+    # then replaced by the loader with either ``None`` (env unset) or the
+    # parsed declaration dict).  After the fan-out the sentinel MUST have
+    # been replaced — proving the loader actually fired inside at least one
+    # thread — AND the final settled value MUST be ``None`` because this
+    # fixture leaves ``CUTOVER_DECLARATION`` env unset.  If two threads
+    # torn-wrote different terminal values, this assertion fails.
+    # R1-A4 invariant: single-value pin, no OR-set. See
+    # .workplans/1081/review/review-failure-retro-round3.md.
+    from services.orchestrator import scheduler_generation_gate as _generation_gate
+    assert (
+        scheduler._cutover_declaration_cache
+        is not _generation_gate.CUTOVER_DECLARATION_UNLOADED
+    )
+    assert scheduler._cutover_declaration_cache is None
 
 
 # ---------------------------------------------------------------------------
@@ -1100,7 +1115,19 @@ def test_env_override_does_not_admit_missing_predecessor(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    """§8.9 (b): env=false + valid declaration + missing predecessor -> block."""
+    """§8.9 (b): env=false + declaration configured → §8 blocks, does NOT admit.
+
+    Fixture: declaration whose ``effective_cycle_utc`` is 18h before ``now``
+    (2026-05-21T00Z vs 2026-05-21T18Z) — the schema validator classifies this
+    outside the cutover window and the §8 gate settles on
+    ``registry_cutover_declaration_stale``.  The specific block reason is
+    subordinate to the invariant "env=false did NOT bypass §8" (candidates
+    empty, len(blocked) == 1).  For the branch that surfaces
+    ``state_snapshot_index_prior_checkpoint_missing_after_history`` the
+    fixture would need a valid declaration (in-window) + generation-matched
+    state entry at cycle - 12h but NO successor checkpoint at cycle_time —
+    tracked separately if needed.
+    """
     from services.orchestrator import scheduler as scheduler_module
     from services.orchestrator.scheduler import ProductionSchedulerConfig
     from tests.test_production_scheduler import (
@@ -1207,31 +1234,40 @@ def test_env_override_does_not_admit_missing_predecessor(
     # The successor blocks; env=false did NOT bypass §8.
     assert candidates == []
     assert len(blocked) == 1
-    # Decision string: block_declaration_stale for a fabricated fixture is
-    # acceptable when the fixture's new_checksum cannot match the model
-    # resource_profile — but the KEY assertion is that env-override did
-    # NOT admit the candidate.  Any admit would surface a non-empty
-    # candidates list.
-    assert blocked[0].reason in {
-        "state_snapshot_index_prior_checkpoint_missing_after_history",
-        "registry_cutover_declaration_stale",
-    }
+    # R1-A4 invariant: single-value pin, no OR-set. See
+    # .workplans/1081/review/review-failure-retro-round3.md.
+    # This fixture's declaration is out-of-window (effective 18h before now)
+    # so the schema validator's stale classification fires the
+    # ``block_declaration_stale`` branch deterministically.
+    assert blocked[0].reason == "registry_cutover_declaration_stale"
     transition_decision = (
         blocked[0].state_evidence.get("registry_cutover_transition", {}).get(
             "decision"
         )
     )
-    assert transition_decision in {
-        generation.TransitionDecision.BLOCK_PREDECESSOR_PENDING,
-        generation.TransitionDecision.BLOCK_DECLARATION_STALE,
-    }
+    assert (
+        transition_decision
+        == generation.TransitionDecision.BLOCK_DECLARATION_STALE
+    )
 
 
 def test_env_override_does_not_admit_wrong_generation_checkpoint(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    """§8.9 (c): env=false + wrong-generation state entry at expected key -> block."""
+    """§8.9 (c): env=false + no declaration configured → §8 blocks with
+    ``registry_cutover_declaration_missing``, does NOT admit.
+
+    Fixture: no ``CUTOVER_DECLARATION`` env is set on-disk, so the §8 gate
+    fires ``block_declaration_missing`` deterministically.  With no
+    declaration the ``state_snapshot_index_generation_mismatch`` branch is
+    unreachable — a fixture aimed at that specific branch would need a
+    declaration whose new_generation differs from the state entry at the
+    expected key AND the env wired for the declaration path.  The invariant
+    tested here is "env=false does NOT admit"; the specific block reason
+    ``registry_cutover_declaration_missing`` is the concrete branch the
+    fixture drives.
+    """
     from services.orchestrator import scheduler as scheduler_module
     from services.orchestrator.scheduler import ProductionSchedulerConfig
     from tests.test_production_scheduler import (
@@ -1316,14 +1352,22 @@ def test_env_override_does_not_admit_wrong_generation_checkpoint(
     )
     assert candidates == []
     assert len(blocked) == 1
-    # The key claim: env=false did not admit the candidate.  §8 either
-    # blocks with declaration_missing (no declaration configured) or
-    # wrong_generation (declaration configured + wrong lineage) — both
-    # are valid §8 blocks; admit is the failure we're guarding against.
-    assert blocked[0].reason in {
-        "registry_cutover_declaration_missing",
-        "state_snapshot_index_generation_mismatch",
-    }
+    # R1-A4 invariant: single-value pin, no OR-set. See
+    # .workplans/1081/review/review-failure-retro-round3.md.
+    # The fixture writes no declaration on-disk (env unset), so the §8 gate
+    # deterministically fires ``block_declaration_missing`` — the
+    # ``state_snapshot_index_generation_mismatch`` branch would require a
+    # declaration to be configured and is unreachable here.
+    assert blocked[0].reason == "registry_cutover_declaration_missing"
+    transition_decision = (
+        blocked[0].state_evidence.get("registry_cutover_transition", {}).get(
+            "decision"
+        )
+    )
+    assert (
+        transition_decision
+        == generation.TransitionDecision.BLOCK_DECLARATION_MISSING
+    )
 
 
 def _looks_like_hex64(value: str) -> bool:
@@ -1619,3 +1663,13 @@ def test_d89_preflight_returns_none_preserves_pre_section8_evidence_shape(
     # Pre-§8 legacy shape: no ``registry_cutover_transition`` at the top
     # level — the caller downstream still sees the legacy evidence contract.
     assert "registry_cutover_transition" not in evidence
+    # R3-T-4 / F5 (tests-evidence): also assert the pre-§8 fields ARE
+    # present with expected values so this test proves BOTH the absence of
+    # §8-only fields AND the preservation of the legacy provider payload.
+    # ``legacy_strict_warm_start_evidence`` at scheduler_generation_gate.py
+    # returns the provider evidence verbatim when
+    # ``_db_free_strict_warm_start_required_for`` is True (line 223-224).
+    # The _NotReadyProvider above returns exactly three keys — assert them.
+    assert evidence["ready"] is False
+    assert evidence["status"] == "blocked"
+    assert evidence["reason"] == "state_snapshot_index_exact_checkpoint_missing"

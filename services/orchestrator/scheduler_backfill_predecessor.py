@@ -211,6 +211,7 @@ def emit_predecessor_candidates(
     blocked_candidate_factory: Any,
     active_repository: Any | None = None,
     max_candidates: int | None = None,
+    skipped: Sequence[Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Emit predecessor candidates for §8.6 predecessor-pending blocks.
 
@@ -238,7 +239,17 @@ def emit_predecessor_candidates(
         :func:`services.orchestrator.scheduler_candidates.build_candidates`
         so admitted predecessors can never bypass the 10000-per-pass limit
         by prepending after the loop finishes.
+
+    ``skipped``:
+        Optional external skipped list from the main construction loop
+        (R3-C-1).  Included in the cap projection so the fail-closed
+        governance total mirrors the main-loop check
+        ``len(candidates) + len(blocked) + len(skipped) >= max_candidates``
+        at :func:`services.orchestrator.scheduler_candidates.build_candidates`
+        line 185.  Omitting it silently let admitted predecessors breach the
+        cap by up to ``len(skipped)``.
     """
+    skipped_count = len(skipped) if skipped is not None else 0
     pending = _extract_pending_predecessors(blocked)
     if not pending:
         return []
@@ -553,9 +564,15 @@ def emit_predecessor_candidates(
         # not push the total past the cap or the 10000/pass guarantee is
         # silently broken.
         if max_candidates is not None:
+            # R3-C-1: mirror the main-loop cap semantic at
+            # ``scheduler_candidates.py:185`` — that check sums candidates +
+            # blocked + skipped.  Omitting ``skipped_count`` here let admitted
+            # predecessors silently breach the 10000/pass cap by up to
+            # len(skipped) (~20% worst case).
             projected_total = (
                 len(candidates)
                 + len(blocked)
+                + skipped_count
                 + len(admitted)
                 + 1  # this candidate is about to be admitted
             )
@@ -566,6 +583,7 @@ def emit_predecessor_candidates(
                         "max_candidates": int(max_candidates),
                         "current_candidates": len(candidates),
                         "current_blocked": len(blocked),
+                        "current_skipped": skipped_count,
                         "predecessor_admitted": len(admitted),
                     },
                 )
