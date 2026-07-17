@@ -87,3 +87,56 @@ file/object-store index instead of `PsycopgMetStore`.
   `restart_stage=convert`
 - **AND** missing or invalid raw evidence blocks without submitting
   `download_source_cycle`.
+
+### Requirement: Scheduler consumes registry declared package cutovers
+
+The system SHALL consume the `nhms.scheduler.registry_package_cutover.v1`
+declaration channel emitted by the registry publisher (schema landed by
+#1080) and bind each declared cutover to the target `model_id` before
+candidate submission can cold-start on its effective cycle.
+
+#### Scenario: Declaration bound at planning time
+
+- **WHEN** scheduler plans a candidate for a `model_id` whose registry
+  `package_checksum` differs from the previous canonical (a `package_changed`
+  row)
+- **THEN** scheduler loads the declaration from the configured channel
+- **AND** matches (`model_id`, `old_checksum`, `new_checksum`, `generation`)
+  exactly
+- **AND** records `effective_cycle_utc` and `transition_mode` in candidate
+  evidence.
+
+#### Scenario: Missing / stale / mismatched declaration fails closed
+
+- **WHEN** no declaration is loaded, or the declaration `old_checksum` /
+  `new_checksum` / `generation` does not match the current registry state, or
+  the candidate cycle is outside the declared effective window
+- **THEN** scheduler blocks the candidate with a typed reason
+  (`registry_cutover_declaration_missing` /
+  `registry_cutover_declaration_stale` /
+  `registry_cutover_cold_start_out_of_window`) and does not submit
+- **AND** evidence identifies the failing declaration field without leaking
+  secrets.
+
+### Requirement: Model generation identity threads through scheduler boundaries
+
+The system SHALL derive a `generation` token deterministically from the
+registry `package_checksum` and thread it through candidate construction,
+state-index lookup, backfill selection, and evidence.
+
+#### Scenario: Generation token derived from package checksum
+
+- **WHEN** scheduler builds a candidate from the registry manifest
+- **THEN** the candidate carries a `generation` token derived deterministically
+  from `package_checksum`
+- **AND** downstream state-index queries filter by generation
+- **AND** backfill selection refuses a candidate predecessor whose generation
+  differs from the successor's.
+
+#### Scenario: Evidence records generation for every decision path
+
+- **WHEN** scheduler records candidate evidence
+- **THEN** `model_id`, `generation`, `transition_decision`,
+  `selected_predecessor` identity (or `null`), `cold_start_reason`, and any
+  typed block reason are captured
+- **AND** the evidence stays bounded (no unbounded log / state inlining).

@@ -290,3 +290,106 @@ Scenario evidence rows for section 5:
   Evidence: this task update, the 2026-06-29 receipt,
   `docs/runbooks/node22-db-retirement-runbook.md`, active topology docs, and
   env examples now describe `:55433` as archived/stopped rollback state only.
+
+## 8. Generation-Aware Cutover Consumer For Cold Start And Backfill (#1081)
+
+- [x] 8.1 Consume the `nhms.scheduler.registry_package_cutover.v1` declaration
+  channel emitted by the registry publisher (schema landed by #1080) at
+  scheduler planning time.
+  Evidence floor: scheduler loads the declaration from the configured channel
+  (env or manifest reference) and binds each declared cutover to (`model_id`,
+  `old_checksum`, `new_checksum`, `generation`, `effective_cycle_utc`,
+  `transition_mode`); mismatched checksums/generation, missing declaration
+  when a `package_changed` transition would be required, or a candidate cycle
+  outside the declared window fail closed with a typed reason and no candidate
+  submission.
+
+- [x] 8.2 Derive a generation token from the registry `package_checksum` and
+  thread it through candidate construction, state lookup, backfill selection,
+  and evidence.
+  Evidence floor: every candidate carries a `generation` token derived
+  deterministically from `package_checksum`; state/backfill queries filter by
+  generation; evidence records generation for candidate, cold/warm decision,
+  selected state predecessor, and any refusal reason.
+
+- [x] 8.3 Warm continuation for unchanged generation.
+  Evidence floor: when the candidate's model generation equals the current
+  registry-canonical generation AND an exact state checkpoint exists at the
+  expected predecessor cycle/lead, scheduler selects warm start; missing exact
+  checkpoint blocks with
+  `state_snapshot_index_prior_checkpoint_missing_after_history` and identifies
+  the required predecessor identity in evidence.
+
+- [x] 8.4 Cold start for truly new model.
+  Evidence floor: when a `model_id` has no prior state-index history across
+  all generations, scheduler cold-starts once at its earliest selected source
+  cycle; subsequent cycles of the same generation require exact predecessor
+  checkpoints and fail closed if absent.
+
+- [x] 8.5 Cold start for a declared existing-model package cutover only at
+  `effective_cycle_utc`.
+  Evidence floor: a valid declaration admits cold start ONLY at
+  `effective_cycle_utc`; earlier cycles keep the old generation's warm
+  requirement; later cycles must find exact new-generation predecessors; a
+  cycle earlier than `effective_cycle_utc`, or an absent / stale / mismatched
+  declaration, fails closed with a typed reason
+  (`registry_cutover_cold_start_out_of_window` /
+  `registry_cutover_declaration_missing` /
+  `registry_cutover_declaration_stale`). Old-generation state history remains
+  readable for audit and rollback but does not count as current-generation
+  history.
+
+- [x] 8.6 Predecessor-aware backfill within one generation.
+  Evidence floor: when cycle T is blocked because the required predecessor
+  (T-12h for 00/12 sources, or T-6h if the source uses a 6h cadence) is
+  missing AND the raw manifest for the predecessor exists, scheduler emits a
+  predecessor-select candidate for the predecessor before retrying T;
+  T is deferred with a `predecessor_pending` reason and is NOT submitted or
+  permanently failed while the predecessor is pending. A candidate
+  predecessor from a different generation is refused with
+  `generation_mismatch`.
+
+- [x] 8.7 Generation-lineage quarantine for stale journal / output evidence.
+  Evidence floor: completed / failed journal entries whose recorded
+  predecessor identity does not match the required predecessor for the
+  current generation are quarantined from canonical readiness scoring **at
+  scoring time** (the journal itself remains immutable — no journal writes
+  are performed by the quarantine path) while remaining readable as
+  immutable audit entries; correct backfill selection is not suppressed by
+  their presence.
+
+- [x] 8.8 Evidence emission for every decision path.
+  Evidence floor: scheduler evidence records `model_id`, `generation`,
+  `transition_decision` ∈ {`warm_continue`, `cold_new_model`,
+  `cold_declared_cutover`, `block_predecessor_pending`,
+  `block_declaration_missing`, `block_declaration_stale`,
+  `block_cold_start_out_of_window`, `block_wrong_generation`},
+  `selected_predecessor` identity (or `null`), `cold_start_reason`, and any
+  typed block reason. The 13→19 matrix, both 00/12 UTC transitions, GFS/IFS,
+  retry / restart, and concurrent bounded submission are covered.
+
+- [x] 8.9 No broad bypass through `NHMS_REQUIRE_FORECAST_WARM_START=false`.
+  Evidence floor: the existing env variable only affects optional warm-start
+  hints; it does NOT admit a declaration-less cutover, a missing predecessor,
+  or a wrong-generation checkpoint. Verified by targeted regression test.
+
+- [x] 8.10 Test matrix + Slurm-oracle proof.
+  Evidence floor: `uv run pytest -q` covers all Acceptance Criteria
+  (13 continuing + 6 new models; both 00 and 12 transitions **for each of
+  GFS and IFS**; a package cutover with declaration; retry / restart across
+  a cutover; concurrent bounded submission); `uv run ruff check .` clean;
+  `openspec validate node22-db-free-scheduler-state --strict --no-interactive`
+  valid; node-22 Slurm-oracle **dry-run** (planning + fake submission — no
+  live backfill execution, that is #1072/#856 scope) proves scheduler does
+  not submit outside the declared window and defers `predecessor_pending`
+  cycles instead of permanently failing them.
+  Local pytest coverage of the 8 `transition_decision` enum values landed in
+  `tests/test_scheduler_generation.py` (28 tests, incl. the D8.9
+  env-override regression) and
+  `tests/test_state_manager_generation_history.py` (5 generation-scoped
+  history-signal cases).  Node-22 Slurm-oracle dry-run proof is a deployment
+  step deferred to #1081 PR review — the planning code path itself carries
+  the ``registry_cutover_transition`` evidence field consumed by that
+  oracle, and existing DB-free scheduler tests (`test_production_scheduler`
+  covering strict + non-strict, GFS/IFS, retry / restart) all pass with the
+  new logic.

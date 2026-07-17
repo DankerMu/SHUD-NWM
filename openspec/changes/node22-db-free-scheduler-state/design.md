@@ -1045,6 +1045,205 @@ Invariant Matrix:
   - Active docs/env examples mark `:55433` only as archived/stopped rollback
     context.
 
+## Issue #1081 Fixture
+
+Fixture level: expanded/high
+Repair intensity: high
+
+Mandatory expanded triggers:
+
+- The change ties the registry declared-cutover contract (landed by #1080) to
+  scheduler cold-start policy, state-index continuity, and backfill selection
+  in one transition. A partial implementation would either (a) admit a
+  declaration-less cutover, or (b) let old-generation history block a
+  legitimate declared cold start, or (c) submit a successor cycle whose own
+  readiness policy will inevitably block it — each of which is a governance
+  hole equivalent to the one #1080 just closed.
+- Scheduler decides which Slurm workloads run. Getting the cutover consumer
+  wrong causes wasted compute, silently-invalid state chains, or missed
+  raw-manifest predecessor cycles.
+- The old-generation state entries must remain audit-visible without being
+  treated as current-generation history — a boundary that only becomes
+  visible during the transition and must not be inferred from local reads.
+
+Must preserve:
+
+- Existing warm-start strictness within one generation: an unchanged model
+  generation still requires an exact predecessor checkpoint; no fallback to
+  latest-usable-state.
+- Old-generation state objects are immutable and remain readable for audit /
+  rollback.
+- Manifest-last write ordering and DB-free constraint from §§1-6.
+- `NHMS_REQUIRE_FORECAST_WARM_START=false` continues to affect only optional
+  warm-start hints and NEVER admits a declaration-less cutover, missing
+  predecessor, or wrong-generation checkpoint.
+
+Must add / change:
+
+- Scheduler planning consumes the `nhms.scheduler.registry_package_cutover.v1`
+  declaration channel emitted by the registry publisher (schema landed by
+  #1080). Each declared cutover is bound to a target `(model_id, old_checksum,
+  new_checksum, generation, effective_cycle_utc, transition_mode)` before
+  candidate submission.
+- A `generation` token derived deterministically from the registry
+  `package_checksum` threads through candidate, state lookup, backfill
+  selection, and evidence.
+- Cold-start is now decidable by a single `transition_decision` enum over the
+  full matrix: `warm_continue`, `cold_new_model`, `cold_declared_cutover`, and
+  five block reasons (`block_predecessor_pending`, `block_declaration_missing`,
+  `block_declaration_stale`, `block_cold_start_out_of_window`,
+  `block_wrong_generation`).
+- Backfill is predecessor-aware within one generation: a successor cycle is
+  never attempted while its raw-available predecessor is missing.
+- Stale journal / output entries whose lineage lacks a required intermediate
+  predecessor OR belongs to a different generation are quarantined from
+  canonical readiness scoring.
+- Evidence records every decision path with model_id, generation,
+  transition_decision, selected_predecessor identity, cold-start reason, and
+  any typed block reason. Bounded — no unbounded log/state inlining.
+
+Risk packs considered for #1081:
+
+- State machine / invariants: SELECTED — the transition is a state-space
+  extension (`warm_continue` -> `cold_declared_cutover` / `cold_new_model` /
+  block reasons), and the boundary between old-generation audit history and
+  current-generation warm-start history must be a strict invariant.
+- Registry-boundary contract: SELECTED — consumes the declaration schema
+  landed by #1080; a mismatch in old/new_checksum/generation semantics is a
+  cross-PR governance hole.
+- Concurrency / bounded submission: SELECTED — retries and concurrent bounded
+  submission across a cutover boundary must not corrupt generation lineage.
+- Predecessor / backfill selection: SELECTED — the 2026070600 <-> 2026070612
+  regression documented in the issue is a real cycle-selector defect that
+  scheduler must not repeat.
+- Legacy compatibility / rollback: SELECTED — old-generation state history
+  must remain audit-visible; nothing in this change deletes it.
+- Public API / CLI / script entry: NOT SELECTED — no CLI surface changes.
+- Config / project setup: NOT SELECTED — no new env variables introduced
+  beyond the declaration path already added by #1080.
+- File IO / path safety / overwrite: NOT SELECTED — no new file writes
+  outside the existing journal / state-index / candidate evidence sinks.
+- Auth / permissions / secrets: NOT SELECTED — DB-free; no credentials
+  crossed.
+- Resource limits / discovery: partially SELECTED — evidence must remain
+  bounded.
+
+Invariant Matrix:
+
+- Governing invariant: within one model generation, forecast state continuity
+  is strict (exact predecessor checkpoint required); across an explicit
+  declared package cutover, cold start is admitted ONLY at the declared
+  `effective_cycle_utc`, and old-generation history is audit-visible but does
+  NOT count as current-generation warm-start history.
+- Source-of-truth contract: the registry `manifest-last.json`
+  `package_checksum` plus the `nhms.scheduler.registry_package_cutover.v1`
+  declaration are jointly authoritative for the generation identity and the
+  effective cold-start cycle.
+- Producers: registry publisher writes declaration + manifest; scheduler
+  consumer derives generation token, matches declaration, and emits candidate
+  + evidence.
+- Validators / preflight: declaration `(model_id, old_checksum, new_checksum,
+  generation, effective_cycle_utc)` matches current registry state; candidate
+  cycle within the declared window; predecessor identity matches required
+  generation; journal lineage matches required predecessors.
+- Failure paths / rollback / stale state: any of
+  {declaration_missing, declaration_stale, cold_start_out_of_window,
+  wrong_generation, predecessor_pending} blocks submission with a typed
+  reason; a `predecessor_pending` is retryable, others require operator
+  action.
+- Evidence / audit / readiness: candidate evidence records generation,
+  transition_decision, selected_predecessor, cold-start reason, and typed
+  block reason (bounded); journal quarantine of stale-lineage entries is
+  itself an audit event; Slurm-oracle dry-run proves the cycle selector
+  respects the window.
+- Regression rows:
+  - 13 continuing generation-unchanged models select `warm_continue` with
+    exact predecessor checkpoint.
+  - 6 new models with no prior history cold-start once at earliest selected
+    cycle (`cold_new_model`).
+  - Existing model + declared cutover admits `cold_declared_cutover` ONLY
+    at `effective_cycle_utc`; earlier cycles keep old-generation warm
+    requirement; later cycles require new-generation exact predecessor.
+  - Old-generation state objects remain readable for audit but never satisfy
+    current-generation warm-start.
+  - With raw manifests for 2026070600 AND 2026070612 and no 2026070600
+    journal, scheduler selects 2026070600 first; 2026070612 is deferred with
+    `predecessor_pending`, not submitted or permanently failed.
+  - Completed / failed entries from an invalid later-cycle lineage do not
+    suppress correct backfill.
+  - `NHMS_REQUIRE_FORECAST_WARM_START=false` never admits declaration-less
+    cutover, missing predecessor, or wrong-generation checkpoint.
+  - Concurrent bounded submission across a cutover boundary preserves
+    generation lineage per candidate.
+
+Boundary-Surface Checklist:
+
+- Registry consumer: reads declaration channel; matches (model_id, old_checksum,
+  new_checksum, generation); rejects mismatch.
+- Candidate construction: derives generation token; carries transition_decision
+  and selected_predecessor forward.
+- State-index lookup: filters by generation; refuses wrong-generation
+  checkpoint as usable.
+- Backfill selector: predecessor-aware within one generation; refuses
+  cross-generation predecessor with `generation_mismatch`.
+- Journal quarantine: stale-lineage entries are audit-readable but excluded
+  from canonical readiness scoring.
+- Evidence sink: every decision path (8 in enum: 3 admit + 5 block) captured
+  with bounded identity fields.
+- Env override: `NHMS_REQUIRE_FORECAST_WARM_START=false` still gated at
+  hint-only granularity.
+- Slurm oracle: dry-run proves the cycle selector defers `predecessor_pending`
+  and refuses cold-start outside window.
+
+Decisions (D8):
+
+D8.1 Declaration loading is at scheduler-planning time (not runtime submit
+time), so a mid-plan declaration change cannot corrupt an in-flight candidate.
+
+D8.2 Generation token = deterministic function of `package_checksum` (short
+form recommended: first 12 hex chars, mirroring #1080's `manifest-<12hex>`
+convention). Scheduler evidence records the full checksum + short generation.
+Invariant: the declaration's top-level `generation` field (from
+`nhms.scheduler.registry_package_cutover.v1`) MUST equal
+`derived_generation(entry.new_checksum)` for the declaration to bind. A
+mismatch is a `block_declaration_stale` — the 12-hex short form derived from
+`new_checksum` is the authoritative match key.
+
+D8.3 A `cold_declared_cutover` candidate at `effective_cycle_utc` explicitly
+IGNORES old-generation state history for warm-start; old-generation entries
+remain readable but not usable-as-predecessor.
+
+D8.4 A cycle earlier than `effective_cycle_utc` uses the OLD generation's
+warm-start rules — it is not a cutover-cold-start, it is a legacy cycle. This
+preserves audit and rollback semantics.
+
+D8.5 Predecessor cadence: 12h for GFS/IFS 00/12; if a future source uses 6h,
+the same predecessor-aware rule applies with cadence = 6h. Cadence is derived
+from source metadata, not hardcoded.
+
+D8.6 A `predecessor_pending` block is transient (retryable next scheduler
+tick). All other block reasons are terminal until operator action (a new
+declaration, an operator ack, or a manual state repair).
+
+D8.7 Journal quarantine is applied at readiness-scoring time. The journal
+itself is immutable; quarantined entries stay readable via
+`scheduler_state_snapshot.jsonl` and are excluded ONLY from the readiness
+score that drives candidate selection.
+
+D8.8 The eight `transition_decision` enum values — three admit (`warm_continue`,
+`cold_new_model`, `cold_declared_cutover`) and five block (`block_predecessor_pending`,
+`block_declaration_missing`, `block_declaration_stale`,
+`block_cold_start_out_of_window`, `block_wrong_generation`) — are the closed
+contract. Adding a new enum value is an OpenSpec change, not a scheduler-local
+decision. Each `block_*` enum value maps 1:1 to a typed-reason string used in
+evidence: `block_declaration_missing` → `registry_cutover_declaration_missing`,
+`block_declaration_stale` → `registry_cutover_declaration_stale`,
+`block_cold_start_out_of_window` → `registry_cutover_cold_start_out_of_window`,
+`block_predecessor_pending` → `state_snapshot_index_prior_checkpoint_missing_after_history`,
+`block_wrong_generation` → `state_snapshot_index_generation_mismatch`. The
+`transition_decision` is the coarse gate; the typed reason surfaces the
+specific field that failed.
+
 ## Migration Plan
 
 1. Add DB-free runtime preflight and file-lock live proof while state remains
