@@ -171,6 +171,8 @@
       "required": [
         "previous_registry_sha256",
         "new_registry_sha256",
+        "previous_model_count",
+        "prospective_model_count",
         "added",
         "unchanged",
         "removed",
@@ -191,6 +193,13 @@
             {"type": "null"}
           ]
         },
+        "previous_model_count": {
+          "oneOf": [
+            {"type": "integer", "minimum": 0, "maximum": 65536},
+            {"type": "null"}
+          ]
+        },
+        "prospective_model_count": {"type": "integer", "minimum": 0, "maximum": 65536},
         "added": {"$ref": "#/$defs/model_id_group"},
         "unchanged": {"$ref": "#/$defs/model_id_group"},
         "removed": {"$ref": "#/$defs/model_id_group"},

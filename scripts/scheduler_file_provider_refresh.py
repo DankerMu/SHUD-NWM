@@ -804,6 +804,18 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                     )
                     worker_registry_committed = rollback_stack[-1].committed
 
+            # R2-A1: the runner installs the cutover gate itself upstream via
+            # `precommit_provider_generation`; audit that fact on the publisher
+            # summary/manifest receipt so operators reading either side see
+            # the same gate mode and declaration-present bit.
+            runner_cutover_gate_audit = {
+                "mode": "enforced",
+                "declaration_env": CUTOVER_DECLARATION_ENV,
+                "declaration_present": _cutover_declaration_env_resolves_to_file(
+                    cutover_declaration_env
+                ),
+            }
+
             def publish_registry(
                 commit_observer: Callable[[ProviderPreimage], None] | None = None,
             ) -> dict[str, Any]:
@@ -821,6 +833,7 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                     resource_validator=_enforce_workspace_bounds,
                     workspace_budget=workspace_budget,
                     max_contexts=MAX_ORPHANS,
+                    cutover_gate=runner_cutover_gate_audit,
                 )
 
             if not dry_run and config.worker_registry_uri is not None:
@@ -1772,6 +1785,10 @@ def _validate_registry_classification_field(receipt: Mapping[str, Any]) -> None:
     required = {
         "previous_registry_sha256",
         "new_registry_sha256",
+        # R2-N1: partition counts are required on every classified receipt so
+        # reconciliation is enforceable as equality, not just non-negative.
+        "previous_model_count",
+        "prospective_model_count",
         "added",
         "unchanged",
         "removed",
@@ -1788,6 +1805,21 @@ def _validate_registry_classification_field(receipt: Mapping[str, Any]) -> None:
                 character not in "0123456789abcdef" for character in value
             ):
                 raise ValueError("receipt_classification_invalid")
+    previous_count = classification.get("previous_model_count")
+    if previous_count is not None:
+        if (
+            not isinstance(previous_count, int)
+            or isinstance(previous_count, bool)
+            or previous_count < 0
+        ):
+            raise ValueError("receipt_classification_invalid")
+    prospective_count = classification.get("prospective_model_count")
+    if (
+        not isinstance(prospective_count, int)
+        or isinstance(prospective_count, bool)
+        or prospective_count < 0
+    ):
+        raise ValueError("receipt_classification_invalid")
     for group_name in ("added", "unchanged", "removed"):
         group = classification.get(group_name)
         if not isinstance(group, Mapping) or set(group) != _CLASSIFICATION_GROUP_KEYS:
@@ -1901,28 +1933,49 @@ def _enforce_registry_classification_reconciliation(
         # must also be listed in `package_changed`.
         raise ValueError("receipt_classification_invalid")
 
+    prospective_count = classification.get("prospective_model_count")
+    if (
+        not isinstance(prospective_count, int)
+        or isinstance(prospective_count, bool)
+        or prospective_count < 0
+    ):
+        raise ValueError("receipt_classification_invalid")
+
     if outcome == "dry_run":
         # dry_run classification is id-only; prospective rows have no
         # checksum, so package_changed/refused stay empty by construction.
         if package_changed_total != 0 or refused_total != 0 or declared_total != 0:
             raise ValueError("receipt_classification_invalid")
+        # Even in dry_run the added+unchanged+package_changed equality must
+        # bind to the pinned prospective_model_count (package_changed is 0
+        # here so this reduces to added+unchanged == prospective_count).
+        if added_total + unchanged_total + package_changed_total != prospective_count:
+            raise ValueError("receipt_classification_invalid")
         return
 
+    previous_count = classification.get("previous_model_count")
     previous_sha = classification.get("previous_registry_sha256")
-    if previous_sha is not None:
-        # unchanged + package_changed + removed == previous_count
-        previous_count = unchanged_total + package_changed_total + removed_total
-        # We do not carry `previous_count` on the receipt; the sum above IS
-        # the reconciled previous count.  Add cross-check that the numbers
-        # are internally non-negative and reasonable.
-        if previous_count < 0:
+    # R2-N1: enforce EQUALITY, not just non-negative bounds.  The pinned
+    # counts (`previous_model_count` / `prospective_model_count`) come from
+    # `_classify_registry`'s own len(previous_by_id)/len(prospective_by_id)
+    # so any drop or gain in the bucket totals fails validation on-disk.
+    if previous_sha is None:
+        # A missing previous canonical registry MUST also carry a null
+        # previous_model_count (bootstrap semantics).  A non-null count with
+        # no previous SHA is contradictory shape.
+        if previous_count is not None:
+            raise ValueError("receipt_classification_invalid")
+    else:
+        if (
+            not isinstance(previous_count, int)
+            or isinstance(previous_count, bool)
+            or previous_count < 0
+        ):
+            raise ValueError("receipt_classification_invalid")
+        if unchanged_total + package_changed_total + removed_total != previous_count:
             raise ValueError("receipt_classification_invalid")
 
-    # added + unchanged + package_changed == prospective_count (no direct
-    # prospective_count carried on the receipt; the sum IS the prospective
-    # count so we simply assert it's non-negative and consistent).
-    prospective_count = added_total + unchanged_total + package_changed_total
-    if prospective_count < 0:
+    if added_total + unchanged_total + package_changed_total != prospective_count:
         raise ValueError("receipt_classification_invalid")
 
     # refused equals every removed entry + every package_changed entry not
@@ -2053,6 +2106,27 @@ def _iso_utc(value: datetime) -> str:
     if value.tzinfo is None:
         raise RefreshError("provider_invalid")
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _cutover_declaration_env_resolves_to_file(env_value: str | None) -> bool:
+    """Return True when the cutover declaration env points at a readable file.
+
+    R2-A1 audit helper: only records "did the operator stage a file the runner
+    could open" — schema validity is proven separately by
+    ``_load_cutover_declaration``.  Missing env, symlinks, non-regular files,
+    and permission errors collapse to ``False`` so the audit fact never
+    overclaims presence.
+    """
+    if not env_value:
+        return False
+    path = Path(env_value).expanduser()
+    try:
+        stat_result = path.lstat()
+    except OSError:
+        return False
+    if not stat.S_ISREG(stat_result.st_mode):
+        return False
+    return os.access(str(path), os.R_OK)
 
 
 def _load_previous_canonical_registry(
@@ -2252,6 +2326,13 @@ class _RegistryClassification:
 
     previous_registry_sha256: str | None = None
     new_registry_sha256: str | None = None
+    # R2-N1: carry the exact previous/prospective row counts on the
+    # classification so ``_enforce_registry_classification_reconciliation``
+    # can enforce EQUALITY (not just non-negative bounds) against the
+    # partition counts.  A validated on-disk receipt then catches a stale
+    # classification whose totals silently drop or gain a row.
+    previous_model_count: int | None = None
+    prospective_model_count: int = 0
     added: list[str] = dataclass_field(default_factory=list)
     unchanged: list[str] = dataclass_field(default_factory=list)
     removed: list[str] = dataclass_field(default_factory=list)
@@ -2273,6 +2354,8 @@ class _RegistryClassification:
         return {
             "previous_registry_sha256": self.previous_registry_sha256,
             "new_registry_sha256": self.new_registry_sha256,
+            "previous_model_count": self.previous_model_count,
+            "prospective_model_count": int(self.prospective_model_count),
             "added": id_group(sorted(self.added)),
             "unchanged": id_group(sorted(self.unchanged)),
             "removed": id_group(sorted(self.removed)),
@@ -2362,6 +2445,13 @@ def _classify_registry(
             if model_id in previous_by_id:
                 raise RefreshError("provider_invalid")
             previous_by_id[model_id] = row
+    # R2-N1: pin the exact partition counts here (not derived from the sum of
+    # bucket totals) so the receipt validator can enforce EQUALITY against a
+    # tampered classification.
+    result.prospective_model_count = len(prospective_by_id)
+    result.previous_model_count = (
+        None if previous is None else len(previous_by_id)
+    )
 
     # In dry-run mode prospective rows carry only id/basin_id (no checksum),
     # so checksum-based drift cannot be observed and we do a lenient id-only

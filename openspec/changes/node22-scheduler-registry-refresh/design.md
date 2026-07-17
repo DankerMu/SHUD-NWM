@@ -253,6 +253,42 @@ The registry publisher gains a precommit compatibility gate:
    refresh; `_validate_receipt` is reserved for receipts THIS process
    writes. Once the first post-#1080 receipt is written, subsequent reads
    and the installer's `validate_current_receipt` see the strict shape.
+10. **`cutover_gate` audit field (round-2 R2-A1)** — the manual publisher
+    CLI persisted no marker of a `--allow-uncovered-cutover` bypass in v1:
+    the summary/manifest bytes were byte-identical between a
+    gate-passing run and a bypassed run, defeating the entire governance
+    surface #1080 exists to close. Every summary construction path in
+    `publish_all_basin_scheduler_registry` (dry-run, published, refusal
+    error payload) and the manifest publication receipt returned by
+    `publish_scheduler_registry_manifest` now carries a required
+    `cutover_gate: {mode, declaration_env, declaration_present}` block
+    with a closed `mode` enum: `enforced` (gate installed and ran, either
+    from the manual CLI's default `_build_manual_cutover_gate` or from
+    the refresh runner's own gate), `bypassed_allow_uncovered_cutover`
+    (explicit CLI flag), or `not_wired` (programmatic caller that never
+    opted in). The CLI summary `schema_version` bumps to
+    `nhms.scheduler.basins_file_registry_publish.v2` to signal the new
+    required field. `declaration_env` records the env name consulted
+    (`NHMS_REGISTRY_CUTOVER_DECLARATION_PATH`) when enforced;
+    `declaration_present` records whether that env resolved to a
+    readable regular file (a stronger fact than "env was set"). The
+    audit is bounded (three keys, closed enum, no paths/URIs/credentials)
+    and mirrored on the manifest publication receipt so a downstream
+    operator reading `manifest-last.json`'s companion receipt sees the
+    same audit fact the CLI stdout summary would.
+11. **Partition-count reconciliation (round-2 R2-N1)** — the reconciliation
+    formulas in D7#6 previously only asserted non-negative bounds on the
+    derived sums because no on-receipt count was pinned. The classification
+    now carries `previous_model_count` (nullable int) and
+    `prospective_model_count` (int) pinned from
+    `_classify_registry`'s own `len(previous_by_id)` / `len(prospective_by_id)`
+    so `_enforce_registry_classification_reconciliation` enforces
+    EQUALITY: `unchanged + package_changed + removed == previous_model_count`
+    (when previous existed) and `added + unchanged + package_changed ==
+    prospective_model_count` on every classified receipt (dry-run
+    included). `validate_current_receipt` then catches a tampered on-disk
+    receipt whose bucket totals were rewritten while a count was left
+    stale.
 
 The gate lives inside the existing precommit hook
 (`_registry_precommit_gate`) so the classification, refusal decision, and

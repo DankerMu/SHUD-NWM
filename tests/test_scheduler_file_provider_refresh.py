@@ -399,6 +399,10 @@ def _classification_stub() -> dict[str, object]:
     return {
         "previous_registry_sha256": None,
         "new_registry_sha256": None,
+        # R2-N1: partition counts are required; empty classification pins
+        # both to zero (matches the empty added/unchanged/etc buckets).
+        "previous_model_count": None,
+        "prospective_model_count": 0,
         "added": {"items": [], "total": 0, "truncated": False},
         "unchanged": {"items": [], "total": 0, "truncated": False},
         "removed": {"items": [], "total": 0, "truncated": False},
@@ -3453,6 +3457,8 @@ def test_receipt_validator_rejects_unsafe_classification_item_model_id(
         registry_classification={
             "previous_registry_sha256": "1" * 64,
             "new_registry_sha256": None,
+            "previous_model_count": 1,
+            "prospective_model_count": 1,
             "added": {"items": [], "total": 0, "truncated": False},
             "unchanged": {"items": [], "total": 0, "truncated": False},
             "removed": {"items": [], "total": 0, "truncated": False},
@@ -3491,8 +3497,14 @@ def test_receipt_validator_rejects_unsafe_classification_item_model_id(
             / "schemas/scheduler_file_provider_refresh_receipt.schema.json"
         ).read_text()
     )
+    # R2-N4: exercise the JSON schema's ``allOf`` refusal conditional
+    # (schemas/scheduler_file_provider_refresh_receipt.schema.json:316-363)
+    # on a real refused shape with a strict Draft2020-12 validator +
+    # FormatChecker, matching the CI ``check-jsonschema`` invocation.
     with pytest.raises(jsonschema.ValidationError):
-        jsonschema.Draft202012Validator(schema).validate(receipt)
+        jsonschema.Draft202012Validator(
+            schema, format_checker=jsonschema.FormatChecker()
+        ).validate(receipt)
 
 
 def test_receipt_validator_rejects_bad_flat_classification_id(tmp_path: Path) -> None:
@@ -3509,6 +3521,8 @@ def test_receipt_validator_rejects_bad_flat_classification_id(tmp_path: Path) ->
         registry_classification={
             "previous_registry_sha256": "1" * 64,
             "new_registry_sha256": None,
+            "previous_model_count": 0,
+            "prospective_model_count": 1,
             "added": {
                 "items": ["basin/with/slash"],  # regex-invalid model_id
                 "total": 1,
@@ -3532,8 +3546,12 @@ def test_receipt_validator_rejects_bad_flat_classification_id(tmp_path: Path) ->
             "declared_cutovers": {"items": [], "total": 0, "truncated": False},
         },
     )
-    with pytest.raises(ValueError):
+    # R2-N3: assert the runtime rejects with the same typed reason token that
+    # the sibling test T4a (:3487) already binds; mirroring both call sites
+    # keeps the runtime/schema failure surfaces in lockstep.
+    with pytest.raises(ValueError) as info:
         refresh._validate_receipt(receipt)
+    assert "receipt_classification_invalid" in str(info.value)
 
 
 def test_reconciliation_formula_helper_catches_missing_refused_entries(
@@ -3546,6 +3564,8 @@ def test_reconciliation_formula_helper_catches_missing_refused_entries(
     bad_classification = {
         "previous_registry_sha256": "1" * 64,
         "new_registry_sha256": None,
+        "previous_model_count": 1,
+        "prospective_model_count": 0,
         "added": {"items": [], "total": 0, "truncated": False},
         "unchanged": {"items": [], "total": 0, "truncated": False},
         "removed": {"items": ["basin-102"], "total": 1, "truncated": False},
@@ -3556,6 +3576,92 @@ def test_reconciliation_formula_helper_catches_missing_refused_entries(
     with pytest.raises(AssertionError):
         _assert_classification_reconciles(
             bad_classification, previous_count=1, prospective_count=0
+        )
+
+
+def test_receipt_validator_rejects_previous_count_mismatch(tmp_path: Path) -> None:
+    """R2-N1: a receipt whose bucket totals do not equal the pinned
+    ``previous_model_count`` must be rejected with the typed reason.  This
+    exercises the runtime reconciliation validator directly and demonstrates
+    that an on-disk tampered receipt (bucket rewritten, count left stale)
+    fails at ``_validate_receipt`` time — not just via the helper."""
+    receipt = refresh._receipt(
+        run_id="refresh_bad_previous_count",
+        started=refresh.datetime(2026, 7, 14, tzinfo=refresh.UTC),
+        outcome="failed",
+        reason="registry_cutover_removal_refused",
+        phase="precommit",
+        providers=[],
+        registry_classification={
+            "previous_registry_sha256": "1" * 64,
+            "new_registry_sha256": "2" * 64,
+            # Pin count claims 3 previous rows but buckets sum to 1
+            # (unchanged 0 + package_changed 0 + removed 1) — mismatch.
+            "previous_model_count": 3,
+            "prospective_model_count": 0,
+            "added": {"items": [], "total": 0, "truncated": False},
+            "unchanged": {"items": [], "total": 0, "truncated": False},
+            "removed": {"items": ["basin-102"], "total": 1, "truncated": False},
+            "package_changed": {"items": [], "total": 0, "truncated": False},
+            "refused": {
+                "items": [
+                    {
+                        "model_id": "basin-102",
+                        "old_checksum": "a" * 64,
+                        "new_checksum": None,
+                        "reason": "registry_cutover_removal_refused",
+                    }
+                ],
+                "total": 1,
+                "truncated": False,
+            },
+            "declared_cutovers": {"items": [], "total": 0, "truncated": False},
+        },
+    )
+    with pytest.raises(ValueError) as info:
+        refresh._validate_receipt(receipt)
+    assert "receipt_classification_invalid" in str(info.value)
+
+
+def test_reconciliation_formula_helper_catches_declared_not_in_package_changed(
+    tmp_path: Path,
+) -> None:
+    """R2-N5: `declared_cutovers ⊆ package_changed` is a spec invariant
+    (design.md D7#2, spec.md:397-403).  The helper must fail when a
+    declaration entry names a model_id that never appears in the
+    ``package_changed`` bucket — a tampered receipt that grants a cutover
+    for a row the classifier never flagged as changed."""
+    bad_classification = {
+        "previous_registry_sha256": "1" * 64,
+        "new_registry_sha256": "2" * 64,
+        "previous_model_count": 1,
+        "prospective_model_count": 1,
+        "added": {"items": [], "total": 0, "truncated": False},
+        # basin-a was the sole existing model; classifier saw it as
+        # `unchanged`.  A tampered receipt puts basin-a into
+        # declared_cutovers WITHOUT listing it in package_changed — that
+        # declaration cannot bind to any transition.
+        "unchanged": {"items": ["basin-a"], "total": 1, "truncated": False},
+        "removed": {"items": [], "total": 0, "truncated": False},
+        "package_changed": {"items": [], "total": 0, "truncated": False},
+        "refused": {"items": [], "total": 0, "truncated": False},
+        "declared_cutovers": {
+            "items": [
+                {
+                    "model_id": "basin-a",
+                    "old_checksum": "a" * 64,
+                    "new_checksum": "b" * 64,
+                    "effective_cycle_utc": "2026-07-14T12:00:00Z",
+                    "transition_mode": "replace",
+                }
+            ],
+            "total": 1,
+            "truncated": False,
+        },
+    }
+    with pytest.raises(AssertionError):
+        _assert_classification_reconciles(
+            bad_classification, previous_count=1, prospective_count=1
         )
 
 

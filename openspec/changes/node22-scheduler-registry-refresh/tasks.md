@@ -183,6 +183,25 @@
   `openspec validate node22-scheduler-registry-refresh --strict
   --no-interactive`; capture the receipt example through the CI
   `check-jsonschema` metaschema/example loop.
+- [x] 5.10 Round-2 fix pass (post-verifier, PR #1091): persist a `cutover_gate`
+  audit block on every manual publisher summary + manifest publication receipt
+  path so a `--allow-uncovered-cutover` bypass is byte-distinguishable from a
+  gate-passing run (R2-A1); bump the summary `schema_version` to v2 to signal
+  the required-field addition; wire the same audit fact through the refresh
+  runner's `publish_all_basin_scheduler_registry` call and record it on the
+  publisher error payloads so refusal + bypass runs both leave a persisted
+  marker.  Add `previous_model_count` + `prospective_model_count` fields to
+  `registry_classification` (schema + runtime + example fixture) so
+  `_enforce_registry_classification_reconciliation` enforces EQUALITY (not
+  bounds) against the pinned partition counts (R2-N1).  Add typed-reason
+  assertion to `test_receipt_validator_rejects_bad_flat_classification_id`
+  (R2-N3); attach `FormatChecker` to the inline schema validation on
+  `test_receipt_validator_rejects_unsafe_classification_item_model_id`
+  (R2-N4); add a `declared_cutovers ⊆ package_changed` helper-negative test
+  (R2-N5); delete the round-1 F1 scaffolding test in
+  `tests/test_publish_scheduler_file_registry.py` whose lock-ownership claim
+  lived entirely in test scaffolding (R2-N8) — truthful coverage lives in
+  T13 in `tests/test_scheduler_file_provider_refresh.py`.
 - [x] 5.9 Round-2 invariant closure: fix `_validate_registry_classification_field`
   reconciliation semantics (published receipts MUST accept
   `package_changed>0` when covered by `declared_cutovers`); pin

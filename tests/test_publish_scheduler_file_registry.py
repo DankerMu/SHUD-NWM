@@ -1171,134 +1171,17 @@ def _write_geol_dmac_model_files(root: Path, basin_slug: str, input_name: str) -
 
 
 # ---------------------------------------------------------------------------
-# #1080 Registry Cutover Gate — concurrency assertion.
-# ---------------------------------------------------------------------------
-
-
-def test_registry_precommit_gate_refusal_preserves_canonical_bytes_under_same_lock(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A refused gate call must:
-
-    * run while the destination lock is held that governs canonical
-      replacement (so no concurrent publisher can slip in between validation
-      and refusal);
-    * release the lock without touching the canonical bytes.
-    """
-    from packages.common import provider_atomic as provider_atomic_module
-
-    inventory = {
-        "schema_version": "basins.discovery.v1",
-        "root": str(tmp_path / "Basins"),
-        "resolved_root": str(tmp_path / "Basins"),
-        "model_count": 1,
-        # Two models so `basins_first_shud` matches the previous canonical
-        # id but with a drifted checksum, triggering `registry_cutover_undeclared`.
-        "models": [_inventory_model("first")],
-        "warnings": [],
-    }
-    monkeypatch.setattr(registry_script, "discover_basins_inventory", lambda _root: inventory)
-    monkeypatch.setattr(registry_script, "publish_basins_package", _fake_publish_basins_package)
-    monkeypatch.setattr(
-        registry_script,
-        "prepare_basins_import_sources",
-        lambda inventory_path, package_manifest_path: _fake_sources(
-            inventory, Path(package_manifest_path)
-        ),
-    )
-    canonical = tmp_path / "shared/scheduler/registry/manifest-last.json"
-    canonical.parent.mkdir(parents=True)
-    canonical.write_bytes(
-        json.dumps(
-            {
-                "schema_version": "nhms.scheduler.file_model_registry.v1",
-                "generated_at": "2026-07-13T00:00:00Z",
-                # Same id as the prospective model but a different checksum
-                # (fake publisher yields `package-sha-basins_first_shud`).
-                "models": [
-                    {
-                        "model_id": "basins_first_shud",
-                        "basin_id": "basins_first",
-                        "model_package_uri": "s3://nhms/models/basins_first_shud/OLD/package/",
-                        "manifest_uri": "s3://nhms/models/basins_first_shud/OLD/manifest.json",
-                        "package_checksum": "package-sha-basins_first_shud-OLD",
-                    }
-                ],
-                "checksum": f"sha256:{'0' * 64}",
-            },
-            sort_keys=True,
-        ).encode()
-        + b"\n"
-    )
-    before = canonical.read_bytes()
-
-    lock_events: list[tuple[str, int]] = []
-    real_flock = provider_atomic_module.fcntl.flock
-
-    def traced_flock(fd: int, flags: int) -> None:
-        if flags & provider_atomic_module.fcntl.LOCK_EX:
-            lock_events.append(("acquire_ex", fd))
-        if flags & provider_atomic_module.fcntl.LOCK_UN:
-            lock_events.append(("release", fd))
-        return real_flock(fd, flags)
-
-    monkeypatch.setattr(provider_atomic_module.fcntl, "flock", traced_flock)
-
-    generated_at = refresh.datetime(2026, 7, 14, 12, tzinfo=refresh.UTC)
-    captured: list[dict[str, object]] = []
-
-    def cutover_gate(
-        workspace: Path,
-        packages: list[dict[str, Any]],
-        registry_models: list[dict[str, Any]],
-    ) -> None:
-        # Read the shared canonical bytes to prove the gate sees exactly
-        # what the canonical writer is about to replace (same lock owner).
-        previous_bytes = canonical.read_bytes()
-        previous_sha = refresh.hashlib.sha256(previous_bytes).hexdigest()
-        refresh._registry_precommit_gate(
-            workspace,
-            packages,
-            registry_models,
-            previous_registry_bytes=previous_bytes,
-            previous_registry_sha256=previous_sha,
-            prospective_generated_at=generated_at,
-            cutover_declaration_env=None,
-            dry_run=False,
-            classification_sink=captured.append,
-            now=generated_at,
-        )
-
-    with pytest.raises(registry_script.SchedulerRegistryPublishError) as error_info:
-        # Wrap the publisher inside the destination lock so the refusal
-        # happens under the exact lock that would otherwise gate replacement.
-        with provider_atomic_module.provider_destination_lock(canonical, blocking=False):
-            registry_script.publish_all_basin_scheduler_registry(
-                basins_root=tmp_path / "Basins",
-                registry_manifest=canonical,
-                object_store_root=tmp_path / "private-objects",
-                object_store_prefix="s3://nhms",
-                work_dir=tmp_path / "work",
-                precommit_validator=cutover_gate,
-                registry_generated_at=generated_at,
-            )
-
-    assert error_info.value.details["provider_reason"] == "registry_cutover_undeclared"
-    # Canonical bytes must be byte-identical.
-    assert canonical.read_bytes() == before
-    # Classification was still emitted.
-    assert captured and captured[0]["refused"]["total"] == 1
-    # Lock lifecycle observed exactly one acquire/release pair for the
-    # canonical destination that wrapped the refused gate call.
-    acquires = [event for event in lock_events if event[0] == "acquire_ex"]
-    releases = [event for event in lock_events if event[0] == "release"]
-    assert acquires and releases
-    assert len(acquires) == len(releases)
-
-
-# ---------------------------------------------------------------------------
 # Round-2 fix pass (#1080): manual publisher CLI now wires the cutover gate.
+#
+# The former round-1 scaffolding "gate refusal preserves canonical bytes under
+# the same lock" test was removed per R2-N6 in the round-2 review: it wrapped
+# the publisher in a test-owned destination lock but did NOT prove the
+# publisher itself acquires that same canonical lock at replace time, so the
+# concurrency invariant it claimed to test lived entirely in test scaffolding.
+# The truthful coverage lives in
+# `tests/test_scheduler_file_provider_refresh.py::test_full_runner_refresh_lock_is_held_during_precommit_gate`
+# (T13, part a) which instruments the runner's real `refresh_lock` and proves
+# a competing non-blocking acquire fails while the gate runs.
 # ---------------------------------------------------------------------------
 
 
@@ -1370,11 +1253,22 @@ def test_manual_cli_refuses_undeclared_package_cutover_without_bypass(
 
     exit_code = registry_script.main(argv)
     assert exit_code != 0
-    err = capsys.readouterr().err
+    captured = capsys.readouterr()
+    err = captured.err
     # The refusal payload includes the wired-gate provider_reason.
     assert "registry_cutover_undeclared" in err, err
     # Canonical bytes untouched.
     assert canonical.read_bytes() == before
+    # R2-A1: the refusal error payload records the cutover_gate audit fact
+    # (enforced, declaration_present=False) so a later auditor reading stderr
+    # can distinguish "gate ran and refused" from "gate was skipped".
+    refusal_payload = json.loads(err.strip().splitlines()[-1])
+    audit = refusal_payload.get("cutover_gate")
+    assert audit == {
+        "mode": "enforced",
+        "declaration_env": "NHMS_REGISTRY_CUTOVER_DECLARATION_PATH",
+        "declaration_present": False,
+    }, refusal_payload
 
 
 def test_manual_cli_allow_uncovered_bypasses_gate_with_warning(
@@ -1440,7 +1334,9 @@ def test_manual_cli_allow_uncovered_bypasses_gate_with_warning(
         "--allow-uncovered-cutover",
     ]
     exit_code = registry_script.main(argv)
-    err = capsys.readouterr().err
+    captured = capsys.readouterr()
+    err = captured.err
+    out = captured.out
     assert "WARNING" in err
     assert "allow-uncovered-cutover" in err
     # With bypass, publish should proceed (canonical bytes replaced).
@@ -1452,5 +1348,109 @@ def test_manual_cli_allow_uncovered_bypasses_gate_with_warning(
         },
         sort_keys=True,
     ).encode()
+    # R2-A1: the summary emitted to stdout records the bypass on
+    # `cutover_gate.mode` alongside the stderr WARNING, so persisted CLI
+    # output distinguishes a bypass run from a gate-passing run without
+    # relying on the ephemeral WARNING line.
+    summary = json.loads(out)
+    assert (
+        summary["schema_version"]
+        == "nhms.scheduler.basins_file_registry_publish.v2"
+    )
+    assert summary["cutover_gate"] == {
+        "mode": "bypassed_allow_uncovered_cutover",
+        "declaration_env": None,
+        "declaration_present": False,
+    }
+    # The bypass audit fact also surfaces on the manifest publication
+    # receipt so downstream operators reading `manifest-last.json`'s
+    # companion receipt see the same fact.
+    assert summary["registry"]["cutover_gate"] == summary["cutover_gate"]
+
+
+def test_manual_cli_records_declaration_present_when_env_resolves_to_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """R2-A1: when the CLI runs with the gate enforced AND the operator has
+    staged a declaration file the runner can open, the persisted CLI output
+    (summary on happy path, error payload on refusal path) records
+    ``cutover_gate={mode:enforced, declaration_env:<env>,
+    declaration_present:true}``.  This closes the byte-identical hole where
+    an enforced-with-declaration run and an enforced-no-declaration run
+    would otherwise be indistinguishable in later audit.
+
+    Using bootstrap-shaped setup (no previous canonical) with a schema-valid
+    but generation-mismatched declaration: the gate correctly refuses on
+    declaration_invalid, and the assertion under test is that the audit
+    still reports ``declaration_present=True`` — the audit is about "did
+    the operator stage a file the runner could open", not "did the gate
+    ultimately accept it"."""
+    inventory = {
+        "schema_version": "basins.discovery.v1",
+        "root": str(tmp_path / "Basins"),
+        "resolved_root": str(tmp_path / "Basins"),
+        "model_count": 1,
+        "models": [_inventory_model("first")],
+        "warnings": [],
+    }
+    monkeypatch.setattr(registry_script, "discover_basins_inventory", lambda _root: inventory)
+    monkeypatch.setattr(registry_script, "publish_basins_package", _fake_publish_basins_package)
+    monkeypatch.setattr(
+        registry_script,
+        "prepare_basins_import_sources",
+        lambda inventory_path, package_manifest_path: _fake_sources(
+            inventory, Path(package_manifest_path)
+        ),
+    )
+    canonical = tmp_path / "shared/scheduler/registry/manifest-last.json"
+    canonical.parent.mkdir(parents=True)
+    # Schema-valid declaration file (readable, correct JSON shape) but
+    # deliberately-unmatched generation — the audit still records
+    # `declaration_present=True` because the operator DID stage a file the
+    # runner could open.  A separate audit fact would record the gate's
+    # decision on the declaration's semantic validity.
+    declaration_path = tmp_path / "declarations" / "cutover.json"
+    declaration_path.parent.mkdir(parents=True)
+    declaration_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "nhms.scheduler.registry_package_cutover.v1",
+                "generated_at": "2026-07-14T12:00:00Z",
+                "generation": "manifest-000000000000",
+                "entries": [],
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    monkeypatch.setenv(
+        "NHMS_REGISTRY_CUTOVER_DECLARATION_PATH", str(declaration_path)
+    )
+
+    argv = [
+        "--basins-root",
+        str(tmp_path / "Basins"),
+        "--registry-manifest",
+        str(canonical),
+        "--object-store-root",
+        str(tmp_path / "private-objects"),
+        "--object-store-prefix",
+        "s3://nhms",
+        "--work-dir",
+        str(tmp_path / "work"),
+    ]
+    exit_code = registry_script.main(argv)
+    captured = capsys.readouterr()
+    # Either exit code is acceptable here; the audit fact is what's under
+    # test.  Read from whichever channel carries the payload.
+    payload_json = captured.out if exit_code == 0 else captured.err.strip().splitlines()[-1]
+    payload = json.loads(payload_json)
+    assert payload["cutover_gate"] == {
+        "mode": "enforced",
+        "declaration_env": "NHMS_REGISTRY_CUTOVER_DECLARATION_PATH",
+        "declaration_present": True,
+    }, payload
 
 
