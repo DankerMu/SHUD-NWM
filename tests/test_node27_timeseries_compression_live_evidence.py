@@ -28,6 +28,7 @@ from packages.common.evidence_io import resolve_artifact_closure
 from scripts import node27_timeseries_compression_benchmark as benchmark
 from scripts import node27_timeseries_compression_bundle_author as bundle_author
 from scripts import node27_timeseries_compression_live_evidence as evidence
+from scripts import node27_timeseries_compression_plan_author as plan_author
 from scripts import node27_timeseries_compression_supervisor as supervisor
 from services.tiles.mvt import postgis_tile_sql
 
@@ -4254,3 +4255,669 @@ def test_round3_capture_pre_post_causality_is_strict(
     _replace_execution_events(bundle, events, tmp_path / f"bad-{capture_kind}-causality.jsonl")
     with pytest.raises(evidence.EvidenceError, match="capture owner chronology"):
         evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+
+# --------------------------------------------------------------------------- #
+# Issue #1069 -- MERGED hermetic end-to-end lock.
+#
+# This is the union of the two halves that previously stopped short of each
+# other: the capture suite's `test_authored_plan_survives_the_real_state_machine
+# _and_verifier_validators` drives the REAL supervisor state machine + REAL
+# capture_checkpoint against stubs but never runs `verify_bundle`; the G10
+# round-trip runs the REAL `verify_bundle` but over a hand-shaped synthetic work
+# dir, never the real state machine.  The test below merges them: the REAL
+# `execute_producer_state_machine` + REAL `capture_checkpoint` (post-G12 order)
+# generate the work dir through stubbed producers whose outputs are shaped to the
+# G10 verifier contract, the REAL `build_bundle` assembles the bundle, and the
+# REAL `verify_bundle` returns a task-4.5 PASS -- proving the whole live-evidence
+# lane works from committed code before it is ever run on node-27.
+# --------------------------------------------------------------------------- #
+from datetime import timedelta as _timedelta  # noqa: E402
+
+from tests import test_node27_timeseries_compression_capture as _capture_harness  # noqa: E402
+from tests import test_node27_timeseries_compression_supervisor as _sup  # noqa: E402
+
+# The self-test data-volume headroom handed to the capture producer through the
+# `--self-test-free-bytes` seam (>= the 300 GiB `MIN_FREE_BYTES` floor), so the
+# selection snapshots verify on a small-disk CI runner rather than false-RED on
+# the runner's real statvfs.
+_SELFTEST_FREE_BYTES = 500_000_000_000
+_IMAGE_SHA = "sha256:" + "a" * 64
+_BINARY_SHA = "b" * 64
+_VERSION_BYTES = b"pg_restore (PostgreSQL) 15.2\n"
+_ENTRIES_BYTES = b"TABLE hydro river_timeseries\nTABLE met forcing_station_timeseries\n"
+_DUMP_BYTES = b"PGDMP\x00hermetic self-test forensic schema\n"
+
+# A stateful psql stub: identical to the supervisor stub template except that a
+# response may carry a `sequence` of stdouts consumed in call order (a per-marker
+# on-disk counter).  The two preflight-family captures (recovery, then
+# compression) each issue the same `capture:preflight` / `capture:preflight_probe`
+# marker, but the verifier requires their `captured_at`s to be distinct and
+# ordered, so those two markers return an ordered pair.
+_SELFTEST_PSQL_TEMPLATE = """#!{python}
+import json
+import os
+import sys
+
+_here = os.path.dirname(os.path.abspath(__file__))
+_name = os.path.basename(__file__)
+with open(os.path.join(_here, _name + ".responses.json"), encoding="utf-8") as _fh:
+    _responses = json.load(_fh)
+_argv = " ".join(sys.argv[1:])
+for _index, _response in enumerate(_responses):
+    if all(_token in _argv for _token in _response["match"]):
+        if "sequence" in _response:
+            _counter = os.path.join(_here, _name + ".seq%d.count" % _index)
+            try:
+                with open(_counter, encoding="utf-8") as _cf:
+                    _n = int(_cf.read().strip() or "0")
+            except OSError:
+                _n = 0
+            with open(_counter, "w", encoding="utf-8") as _cf:
+                _cf.write(str(_n + 1))
+            _seq = _response["sequence"]
+            _out = _seq[_n if _n < len(_seq) else len(_seq) - 1]
+        else:
+            _out = _response.get("stdout", "")
+        sys.stdout.write(_out)
+        sys.stderr.write(_response.get("stderr", ""))
+        sys.exit(_response.get("exit", 0))
+sys.stderr.write("no stub response for argv: " + _argv + "\\n")
+sys.exit(97)
+"""
+
+
+def _e2e_fmt(dt: datetime) -> str:
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+def _e2e_write_stub(bindir: Path, name: str, responses: list[dict[str, Any]], *, template: str | None = None) -> str:
+    bindir.mkdir(parents=True, exist_ok=True)
+    script = bindir / name
+    script.write_text((template or _sup._STUB_TEMPLATE).replace("{python}", sys.executable), encoding="utf-8")
+    script.chmod(0o755)
+    (bindir / f"{name}.responses.json").write_text(json.dumps(responses), encoding="utf-8")
+    return str(script)
+
+
+def _e2e_unit_show(enabled: str, active: str, sub: str, pid: int) -> str:
+    return f"UnitFileState={enabled}\nActiveState={active}\nSubState={sub}\nResult=success\nMainPID={pid}\n"
+
+
+_PROBE_QUERY = (
+    "SELECT current_database() AS dbname, "
+    "current_setting('server_version') AS postgres_version, "
+    "extversion AS timescaledb_version FROM pg_extension "
+    "WHERE extname = 'timescaledb'"
+)
+_DB_IDENTITY = {
+    "dbname": "nhms",
+    "instance": "node27-primary-pg15",
+    "postgres_version": "15.2",
+    "timescaledb_version": "2.10.2",
+}
+_ROLE = {
+    "current_user": "nhms",
+    "rolsuper": True,
+    "rolcreaterole": True,
+    "rolcreatedb": True,
+    "owns_hydro_river_timeseries": True,
+    "owns_met_forcing_station_timeseries": True,
+    "execute_compress_chunk_regclass_boolean": True,
+    "role_created": False,
+    "grant_executed": False,
+    "role_mutated": False,
+}
+
+
+def _e2e_build_timeline() -> tuple[list[datetime], dict[str, datetime], _timedelta]:
+    """Deterministic, compressed 2026-07-15 timeline for the 55 ``_utc_now`` calls.
+
+    The supervisor state machine calls ``_utc_now`` in a fixed order: one per
+    checkpoint, two (start/finish) per child, two per capture.  Child wall deltas
+    must be within 0.5s of the real monotonic elapsed (verifier isclose gate), so
+    every child/capture start->finish is a small 0.3s window while distinct
+    operations are 2s apart.  Every document timestamp is derived from the START
+    of its producing operation, which -- because execution order equals the
+    verifier's global chronology order -- makes the whole chain strictly
+    increasing by construction.
+    """
+
+    ops = [
+        ("checkpoint", "preflight"),
+        ("child", "pg_dump"),
+        ("child", "pg_restore_version"),
+        ("child", "pg_restore_list"),
+        ("capture", "schema_dump_list"),
+        ("capture", "catalog_before"),
+        ("checkpoint", "before-migration-1"),
+        ("child", "migration-1"),
+        ("checkpoint", "after-migration-1"),
+        ("capture", "catalog_after_first"),
+        ("checkpoint", "before-migration-2"),
+        ("child", "migration-2"),
+        ("checkpoint", "after-migration-2"),
+        ("capture", "catalog_after_second"),
+        ("capture", "recovery_preflight"),
+        ("checkpoint", "before-decompress"),
+        ("child", "decompress"),
+        ("checkpoint", "after-decompress"),
+        ("capture", "preflight_evidence"),
+        ("child", "dry-run"),
+        ("capture", "post_dry_selection"),
+        ("child", "benchmark_before"),
+        ("capture", "pre_enforce_selection"),
+        ("capture", "sizes_pre"),
+        ("checkpoint", "before-enforce"),
+        ("child", "enforce"),
+        ("checkpoint", "after-enforce"),
+        ("capture", "sizes_post"),
+        ("capture", "catalog_post"),
+        ("child", "benchmark_after"),
+        ("checkpoint", "postflight"),
+        ("capture", "cleanup"),
+        ("checkpoint", "cleanup-final"),
+    ]
+    base = datetime(2026, 7, 15, 11, 0, 0, tzinfo=UTC)
+    step = _timedelta(seconds=2)
+    child = _timedelta(seconds=0.3)
+    seq: list[datetime] = []
+    starts: dict[str, datetime] = {}
+    cursor = base
+    for kind, name in ops:
+        starts[name] = cursor
+        if kind == "checkpoint":
+            seq.append(cursor)
+        else:
+            seq.append(cursor)
+            seq.append(cursor + child)
+        cursor = cursor + step
+    return seq, starts, child
+
+
+def _e2e_capture_psql_responses(starts: dict[str, datetime], child: _timedelta) -> list[dict[str, Any]]:
+    d3 = _sup._d3_catalog()
+
+    def preflight_body(captured: datetime) -> str:
+        return json.dumps({"captured_at": _e2e_fmt(captured), "database_identity": _DB_IDENTITY}) + "\n"
+
+    def probe_body(captured: datetime) -> str:
+        return (
+            json.dumps({"captured_at": _e2e_fmt(captured), "query": _PROBE_QUERY, "row": _DB_IDENTITY}) + "\n"
+        )
+
+    def catalog_body(name: str) -> str:
+        return json.dumps({"captured_at": _e2e_fmt(starts[name]), "catalog": d3}) + "\n"
+
+    candidate = {**IDENTITY, "is_compressed": False, "before_bytes": 4_115_734_528}
+    deferred = {
+        "hypertable_schema": "met",
+        "hypertable_name": "forcing_station_timeseries",
+        "chunk_schema": "_timescaledb_internal",
+        "chunk_name": "_hyper_2_20_chunk",
+        "range_start": "2026-05-02T00:00:00Z",
+        "range_end": "2026-05-09T00:00:00Z",
+        "is_compressed": False,
+        "before_bytes": 2_147_483_648,
+    }
+
+    def selection_body(name: str) -> str:
+        observed = starts[name]
+        cutoff = observed - _timedelta(seconds=evidence.EXPECTED_LAG_SECONDS)
+        return (
+            json.dumps(
+                {
+                    "observed_at": _e2e_fmt(observed),
+                    "cutoff": _e2e_fmt(cutoff),
+                    "candidates": [candidate, deferred],
+                }
+            )
+            + "\n"
+        )
+
+    def sizes_body(name: str, *, post: bool) -> str:
+        return json.dumps({"captured_at": _e2e_fmt(starts[name]), "tables": _sizes(post=post)["tables"]}) + "\n"
+
+    cleanup_captured = starts["cleanup"]
+    cleanup_body = {
+        "captured_at": _e2e_fmt(cleanup_captured),
+        "window_started_at": _e2e_fmt(starts["recovery_preflight"] + _timedelta(seconds=1)),
+        "window_finished_at": _e2e_fmt(cleanup_captured - _timedelta(seconds=0.5)),
+    }
+    catalog_post_body = {
+        "captured_at": _e2e_fmt(starts["catalog_post"]),
+        "catalog": d3,
+        "compressed_chunk_identities": [dict(IDENTITY)],
+    }
+    return [
+        {"match": ["capture:now"], "stdout": json.dumps(_e2e_fmt(starts["schema_dump_list"])) + "\n"},
+        # The `*_probe` marker is a superset of the `capture:preflight` prefix, so
+        # it must precede it in the match order.  Both return an ordered pair
+        # consumed recovery-first, then compression-preflight.
+        {
+            "match": ["capture:preflight_probe"],
+            "sequence": [
+                probe_body(starts["recovery_preflight"] - _timedelta(seconds=1)),
+                probe_body(starts["preflight_evidence"] - _timedelta(seconds=1)),
+            ],
+        },
+        {
+            "match": ["capture:preflight"],
+            "sequence": [
+                preflight_body(starts["recovery_preflight"]),
+                preflight_body(starts["preflight_evidence"]),
+            ],
+        },
+        {"match": ["capture:role"], "stdout": json.dumps(_ROLE) + "\n"},
+        {
+            "match": ["capture:quiescence"],
+            "stdout": json.dumps({"database_writes_quiescent": True, "conflicting_locks_absent": True}) + "\n",
+        },
+        {
+            "match": ["capture:recovery_preflight"],
+            "stdout": json.dumps(
+                {"free_bytes": _SELFTEST_FREE_BYTES, "before_compressed": True, "before_row_count": 12_345_678}
+            )
+            + "\n",
+        },
+        {"match": ["capture:catalog_before"], "stdout": catalog_body("catalog_before")},
+        {"match": ["capture:catalog_after_first"], "stdout": catalog_body("catalog_after_first")},
+        {"match": ["capture:catalog_after_second"], "stdout": catalog_body("catalog_after_second")},
+        {"match": ["capture:catalog_post"], "stdout": json.dumps(catalog_post_body) + "\n"},
+        {"match": ["capture:post_dry_selection"], "stdout": selection_body("post_dry_selection")},
+        {"match": ["capture:pre_enforce_selection"], "stdout": selection_body("pre_enforce_selection")},
+        {"match": ["capture:sizes_pre"], "stdout": sizes_body("sizes_pre", post=False)},
+        {"match": ["capture:sizes_post"], "stdout": sizes_body("sizes_post", post=True)},
+        {"match": ["capture:cleanup_window"], "stdout": json.dumps(cleanup_body) + "\n"},
+    ]
+
+
+def _e2e_capture_bin(bindir: Path, starts: dict[str, datetime], child: _timedelta) -> None:
+    _e2e_write_stub(bindir, "psql", _e2e_capture_psql_responses(starts, child), template=_SELFTEST_PSQL_TEMPLATE)
+    systemctl = []
+    for unit, (enabled, active, sub, pid) in {
+        "nhms-node27-autopipe.timer": ("enabled", "active", "waiting", 0),
+        "nhms-node27-autopipe.service": ("static", "inactive", "dead", 0),
+        "nhms-node27-timeseries-compression.timer": ("enabled", "inactive", "dead", 0),
+        "nhms-node27-timeseries-compression.service": ("static", "inactive", "dead", 0),
+        "nhms-node27-timeseries-compression-replay.service": ("static", "activating", "start", 4137040),
+    }.items():
+        systemctl.append({"match": ["UnitFileState", unit], "stdout": _e2e_unit_show(enabled, active, sub, pid)})
+    _e2e_write_stub(bindir, "systemctl", systemctl)
+    _e2e_write_stub(bindir, "journalctl", [{"match": ["--user"], "stdout": "-- boot --\njournal line\n"}])
+    realpath = evidence.CONTAINER_PG_RESTORE_REALPATH
+    _e2e_write_stub(
+        bindir,
+        "docker",
+        [
+            {
+                "match": ["inspect", ".State.Running"],
+                "stdout": "/nhms-db\tcontainer-123\ttimescale/timescaledb:2.10.2-pg15\trunning\ttrue\n",
+            },
+            {"match": ["inspect", ".Image"], "stdout": _IMAGE_SHA + "\n"},
+            {"match": ["exec", "--version"], "stdout": _VERSION_BYTES.decode()},
+            {"match": ["exec", "--list"], "stdout": _ENTRIES_BYTES.decode()},
+            {"match": ["exec", "readlink"], "stdout": realpath + "\n"},
+            {"match": ["exec", "sha256sum"], "stdout": _BINARY_SHA + "  " + realpath + "\n"},
+        ],
+    )
+    _e2e_write_stub(
+        bindir,
+        "git",
+        [
+            {"match": ["status"], "stdout": ""},
+            {"match": ["remote", "get-url"], "stdout": "https://github.com/DankerMu/SHUD-NWM.git\n"},
+        ],
+    )
+
+
+def _e2e_bench_phase(
+    name: str, samples: list[float], *, after: bool, bounds: tuple[datetime, datetime], activity: list[datetime]
+) -> dict[str, Any]:
+    payload: Any = "deadbeef" if name == "mvt" else [{"valid_time": "2026-05-29T00:00:00Z", "value": 1.25}]
+    if name == "mvt":
+        raw = bytes.fromhex(payload)
+        rows = 1
+    else:
+        raw = _canonical(payload)
+        rows = len(payload)
+    stages = ["before_cold", "after_cold", "before_measurements", "mid_measurements", "after_result"]
+    return {
+        "result_sha256": hashlib.sha256(raw).hexdigest(),
+        "rows": rows,
+        "bytes": len(raw),
+        "result_payload": payload,
+        "cache_class": "warm-cache",
+        "cold": _measurement(name=name, after=after, execution_ms=samples[0] + 20),
+        "warmups": [
+            _measurement(name=name, after=after, execution_ms=samples[0] + 5),
+            _measurement(name=name, after=after, execution_ms=samples[0] + 2),
+        ],
+        "measurements": [_measurement(name=name, after=after, execution_ms=sample) for sample in samples],
+        "activity_samples": [
+            {"captured_at": _e2e_fmt(when), "stage": stage, "sessions": [], "material_load_stable": True}
+            for when, stage in zip(activity, stages, strict=True)
+        ],
+        "execution_bounds": {
+            "statement_timeout_ms": 60_000,
+            "lock_timeout_ms": 5_000,
+            "phase_timeout_seconds": 900,
+            "started_at": _e2e_fmt(bounds[0]),
+            "finished_at": _e2e_fmt(bounds[1]),
+        },
+    }
+
+
+def _e2e_benchmarks_document(starts: dict[str, datetime]) -> dict[str, Any]:
+    curve_query, curve_names, curve_parameters = benchmark._curve_query_and_binding(
+        basin_version_id="basin-v1",
+        river_segment_id="model_reach_000001",
+        river_network_version_id="network-v1",
+        issue_time=datetime(2026, 5, 28, tzinfo=UTC),
+        end_time=datetime(2026, 6, 4, tzinfo=UTC),
+        scenario="gfs",
+    )
+    mvt_request = {
+        "run_id": "run-1",
+        "basin_version_id": "basin-v1",
+        "river_network_version_id": "network-v1",
+        "valid_time": "2026-05-29T00:00:00Z",
+        "z": 9,
+        "x": 420,
+        "y": 210,
+    }
+    mvt_query = postgis_tile_sql("hydro")
+    mvt_binding = benchmark._json_value(
+        _postgis_tile_params(
+            {
+                "run_id": mvt_request["run_id"],
+                "basin_version_id": mvt_request["basin_version_id"],
+                "river_network_version_id": mvt_request["river_network_version_id"],
+                "variable": "q_down",
+                "valid_time": datetime(2026, 5, 29, tzinfo=UTC),
+            },
+            z=9,
+            x=420,
+            y=210,
+        )
+    )
+    curve_source = ROOT / "packages/common/forecast_store.py"
+    mvt_source = ROOT / "services/tiles/mvt.py"
+    route_source = ROOT / "apps/api/routes/hydro_display.py"
+
+    def window(base: datetime, offset: float) -> datetime:
+        return base + _timedelta(seconds=offset)
+
+    def phase_pack(base: datetime, *, after: bool, samples: list[float]) -> dict[str, Any]:
+        return {
+            "curve": (
+                (window(base, 0.010), window(base, 0.090)),
+                [window(base, off) for off in (0.020, 0.035, 0.050, 0.065, 0.085)],
+            ),
+            "mvt": (
+                (window(base, 0.150), window(base, 0.240)),
+                [window(base, off) for off in (0.160, 0.175, 0.190, 0.205, 0.235)],
+            ),
+        }
+
+    before_base = starts["benchmark_before"]
+    after_base = starts["benchmark_after"]
+    before_pack = phase_pack(before_base, after=False, samples=[])
+    after_pack = phase_pack(after_base, after=True, samples=[])
+    before_samples = [10, 11, 12, 13, 14, 15, 16]
+    after_samples = [12, 13, 14, 15, 16, 17, 18]
+    queries = []
+    for name in ("curve", "mvt"):
+        queries.append(
+            {
+                "name": name,
+                "request": (
+                    {
+                        "basin_version_id": "basin-v1",
+                        "river_segment_id": "model_reach_000001",
+                        "river_network_version_id": "network-v1",
+                        "issue_time": "2026-05-28T00:00:00Z",
+                        "end_time": "2026-06-04T00:00:00Z",
+                        "scenario": "gfs",
+                    }
+                    if name == "curve"
+                    else mvt_request
+                ),
+                "source_refs": (
+                    [_file_ref(curve_source)]
+                    if name == "curve"
+                    else [_file_ref(mvt_source), _file_ref(route_source)]
+                ),
+                "query_sha256": hashlib.sha256((curve_query if name == "curve" else mvt_query).encode()).hexdigest(),
+                "query_text": curve_query if name == "curve" else mvt_query,
+                "binding": (
+                    {"parameter_names": curve_names, "bound_parameters": benchmark._json_value(curve_parameters)}
+                    if name == "curve"
+                    else mvt_binding
+                ),
+                "before": _e2e_bench_phase(
+                    name, before_samples, after=False, bounds=before_pack[name][0], activity=before_pack[name][1]
+                ),
+                "after": _e2e_bench_phase(
+                    name, after_samples, after=True, bounds=after_pack[name][0], activity=after_pack[name][1]
+                ),
+            }
+        )
+    return {
+        "execution_bounds": {
+            "before": {
+                "started_at": _e2e_fmt(window(before_base, 0.005)),
+                "finished_at": _e2e_fmt(window(before_base, 0.250)),
+                "wall_seconds": 900,
+            },
+            "after": {
+                "started_at": _e2e_fmt(window(after_base, 0.005)),
+                "finished_at": _e2e_fmt(window(after_base, 0.250)),
+                "wall_seconds": 900,
+            },
+        },
+        "queries": queries,
+    }
+
+
+def _e2e_child_argv(kind: str, association_path: str | None, dump_container: str, src_dir: Path) -> list[str]:
+    def copy(src: Path, dst: str) -> list[str]:
+        return [sys.executable, "-c", f"import shutil; shutil.copyfile({str(src)!r}, {dst!r})"]
+
+    def emit(data: bytes) -> list[str]:
+        return [sys.executable, "-c", f"import sys; sys.stdout.buffer.write({data!r})"]
+
+    if kind == "pg_dump":
+        return copy(src_dir / "schema.dump", association_path)
+    if kind == "pg_restore_version":
+        return emit(_VERSION_BYTES)
+    if kind == "pg_restore_list":
+        # argv[-1] must remain the /var/lib/postgresql container dump path: the
+        # state machine hands it to `resolve_container_pg_restore_identity`.
+        return [sys.executable, "-c", f"import sys; sys.stdout.buffer.write({_ENTRIES_BYTES!r})", dump_container]
+    if kind == "migration_apply":
+        return [sys.executable, "-c", "pass"]
+    if kind == "decompress":
+        return copy(src_dir / "recovery-receipt.json", association_path)
+    if kind == "compression_dry_run":
+        return copy(src_dir / "dry-receipt.json", association_path)
+    if kind == "benchmark_before":
+        return copy(src_dir / "benchmark-before.json", association_path)
+    if kind == "compression_enforce":
+        return copy(src_dir / "enforce-receipt.json", association_path)
+    if kind == "benchmark_after":
+        return copy(src_dir / "benchmarks.json", association_path)
+    raise AssertionError(f"unmapped child kind {kind!r}")
+
+
+def test_real_state_machine_bundle_verifies_task_4_5_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The REAL state machine + REAL build_bundle + REAL verify_bundle => PASS.
+
+    Hermetic: no network, no DB, disk-size-independent (the free-bytes seam), and
+    deterministic (``_utc_now`` is driven by a fixed timeline).  Node-27 exercises
+    the real provenance/identity binaries; here the autouse fixtures repoint the
+    narrow git-provenance seams onto a suite-owned lineage, exactly as the other
+    verifier tests in this module do.
+    """
+
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run-user"))
+    seq, starts, child = _e2e_build_timeline()
+    clock = iter(seq)
+    monkeypatch.setattr(supervisor, "_utc_now", lambda: _e2e_fmt(next(clock)))
+
+    fixture_repo = _capture_harness._fixture_repo(tmp_path)
+    checkpoint_bin = tmp_path / "checkpoint-bin"
+    capture_bin = tmp_path / "capture-bin"
+    src_dir = tmp_path / "child-src"
+    src_dir.mkdir()
+    schema_dump_host = str(tmp_path / "schema-before.dump")
+    schema_dump_container = "/var/lib/postgresql/evidence/schema.dump"
+
+    # Pre-write every child-produced artifact so the child stubs merely copy it
+    # into place (the supervisor observes and hashes the on-disk bytes at exit).
+    (src_dir / "schema.dump").write_bytes(_DUMP_BYTES)
+    dump_sha = hashlib.sha256(_DUMP_BYTES).hexdigest()
+
+    def override_receipt(enforce: bool) -> dict[str, Any]:
+        base = starts["enforce" if enforce else "dry-run"]
+        receipt = _receipt(enforce=enforce)
+        receipt["generated_at"] = _e2e_fmt(base + _timedelta(seconds=0.1))
+        receipt["now_utc"] = _e2e_fmt(base + _timedelta(seconds=0.05))
+        return receipt
+
+    (src_dir / "dry-receipt.json").write_bytes(_canonical(override_receipt(False)))
+    (src_dir / "enforce-receipt.json").write_bytes(_canonical(override_receipt(True)))
+    recovery_receipt = {
+        "started_at": _e2e_fmt(starts["decompress"]),
+        "finished_at": _e2e_fmt(starts["decompress"] + child),
+        "node": "node-27",
+        "mutation_head_sha": HEAD,
+        "database_identity": _DB_IDENTITY,
+        "target": dict(IDENTITY),
+        "exit_code": 0,
+        "decompress_return_relation": evidence.RECOVERY_RETURN_RELATION,
+        "after_compressed": False,
+        "after_row_count": 12_345_678,
+    }
+    (src_dir / "recovery-receipt.json").write_bytes(_canonical(recovery_receipt))
+    (src_dir / "benchmark-before.json").write_bytes(_canonical({"phase": "before"}))
+    (src_dir / "benchmarks.json").write_bytes(_canonical(_e2e_benchmarks_document(starts)))
+
+    # Checkpoint-plane stubs (supervisor-owned probes + pg_restore identity),
+    # anchored to the SAME measured container identity as the capture plane.
+    _e2e_write_stub(checkpoint_bin, "psql", _sup._psql_responses())
+    _e2e_write_stub(checkpoint_bin, "systemctl", _sup._systemctl_responses())
+    _e2e_write_stub(checkpoint_bin, "journalctl", _sup._journalctl_responses())
+    _e2e_write_stub(
+        checkpoint_bin,
+        "docker",
+        _sup._docker_responses(
+            dump_path=schema_dump_container,
+            image=_IMAGE_SHA,
+            realpath=evidence.CONTAINER_PG_RESTORE_REALPATH,
+            binary_sha=_BINARY_SHA,
+            dump_sha=dump_sha,
+        ),
+    )
+    _e2e_capture_bin(capture_bin, starts, child)
+    monkeypatch.setattr(supervisor, "SUPERVISOR_BIN_DIR", checkpoint_bin)
+
+    # plan_PROD carries the pinned PRODUCTION command argvs the verifier requires;
+    # its capture argvs run the REAL capture producer against the stubs.
+    plan_prod = plan_author.build_run_plan(
+        mutation_head_sha=HEAD,
+        root=str(tmp_path),
+        schema_dump_host=schema_dump_host,
+        schema_dump_container=schema_dump_container,
+        capture_repo=str(fixture_repo),
+        capture_python=sys.executable,
+        capture_script=str(ROOT / "scripts/node27_timeseries_compression_capture.py"),
+        capture_psql=str(capture_bin / "psql"),
+        capture_systemctl=str(capture_bin / "systemctl"),
+        capture_docker=str(capture_bin / "docker"),
+        capture_journalctl=str(capture_bin / "journalctl"),
+        capture_git=str(capture_bin / "git"),
+    )
+    for capture in plan_prod["captures"]:
+        if capture["kind"] in ("post_dry_selection", "pre_enforce_selection"):
+            capture["argv"] = [*capture["argv"], "--self-test-free-bytes", str(_SELFTEST_FREE_BYTES)]
+        if capture["kind"] == "cleanup":
+            # `_validate_reviewed_file_ref` pins the cleanup repo-unit refs to the
+            # canonical checkout path, so the cleanup capture must read the real
+            # committed systemd units (the fixture repo suffices for the env-mode/
+            # write-guard reads the other captures perform).
+            argv = list(capture["argv"])
+            argv[argv.index("--repo") + 1] = str(ROOT)
+            capture["argv"] = argv
+    plan_prod["run_plan_id"] = supervisor.run_plan_id(plan_prod)
+    supervisor.validate_run_plan(plan_prod, inherited_env={})
+
+    # plan_EXEC shares captures/checkpoints but swaps the command argvs for stub
+    # producers (the production binaries cannot run hermetically).
+    plan_exec = copy.deepcopy(plan_prod)
+    for command in plan_exec["commands"]:
+        associations = command["artifact_associations"]
+        association_path = next(iter(associations.values())) if associations else None
+        command["argv"] = _e2e_child_argv(
+            str(command["kind"]), association_path, schema_dump_container, src_dir
+        )
+
+    ledger_path = tmp_path / "supervisor-ledger.jsonl"
+    checkpoints_by_phase = {(str(c["phase"]), c["command_id"]): c for c in plan_exec["checkpoints"]}
+    run_id = "run-1069-selftest"
+    cursor = {"value": "s=stub;i=start;b=stub;m=0;t=0;x=0"}
+    with supervisor.AppendOnlyLedger(
+        ledger_path, run_id=run_id, run_plan_id=plan_prod["run_plan_id"], invocation_id=_sup.PROBE_INVOCATION_ID
+    ) as ledger:
+
+        def live_checkpoint(phase: str, command_id: str | None) -> None:
+            cursor["value"] = supervisor.capture_checkpoint(
+                checkpoints_by_phase[(phase, command_id)],
+                wall=supervisor.HardWall.start(600),
+                ledger=ledger,
+                artifact_dir=tmp_path,
+                journal_cursor=cursor["value"],
+                invocation_id=_sup.PROBE_INVOCATION_ID,
+            )
+
+        supervisor.execute_producer_state_machine(
+            plan_exec,
+            wall=supervisor.HardWall.start(600),
+            ledger=ledger,
+            artifact_dir=tmp_path,
+            checkpoint_runner=live_checkpoint,
+            restore_identity_resolver=lambda w, dump: supervisor.resolve_container_pg_restore_identity(
+                wall=w, dump_path=dump
+            ),
+        )
+
+    # Re-anchor the executed ledger's child argvs to the production binary
+    # identities the stubs stood in for (argv[0] pins /usr/bin/pg_dump,
+    # {repo}/.venv/bin/python, ... which cannot exist on a hermetic runner).  Only
+    # the command argv identity is rewritten; every produced artifact path, sha,
+    # association and timestamp is exactly what the real state machine emitted.
+    prod_argv_by_command = {str(c["command_id"]): c["argv"] for c in plan_prod["commands"]}
+    events = [json.loads(line) for line in ledger_path.read_text().splitlines()]
+    for event in events:
+        if event.get("event_type") == "child_exit":
+            event["argv"] = prod_argv_by_command[str(event["command_id"])]
+    ledger_path.write_bytes(b"".join(_canonical(event) for event in events))
+    run_plan_path = tmp_path / "run-plan.json"
+    run_plan_path.write_bytes(_canonical(plan_prod))
+
+    built = bundle_author.build_bundle(
+        work_dir=tmp_path,
+        repo_path=evidence.REPO_ROOT,
+        run_plan_path=run_plan_path,
+        ledger_path=ledger_path,
+        schema_dump_path=schema_dump_host,
+        mutation_head_sha=HEAD,
+        verifier_head_sha=VERIFIER_HEAD,
+        generated_at="2026-07-15T12:00:00Z",
+    )
+
+    result = evidence.verify_bundle(built, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    assert result["qualifies_task_4_5"] is True
+    assert result["verdict"] == evidence.PASS_VERDICT

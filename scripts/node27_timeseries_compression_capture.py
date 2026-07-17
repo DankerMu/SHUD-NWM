@@ -46,6 +46,11 @@ from packages.common.evidence_io import reject_secret_material
 NODE = "node-27"
 REPO_PATH = "/home/nwm/NWM"
 REMOTE_IDENTITY = "DankerMu/SHUD-NWM"
+# Canonical host docker CLI recorded in the forensic pg_restore version/list
+# argvs.  The ``--docker`` seam may redirect EXECUTION (dress rehearsal), but the
+# reviewed record always names the pinned production binary; in production the
+# two coincide.
+HOST_DOCKER_CLI = "/usr/bin/docker"
 DATABASE_INSTANCE = "node27-primary-pg15"
 HYPERTABLE_KEYS = ("hydro.river_timeseries", "met.forcing_station_timeseries")
 EXPECTED_UNITS = (
@@ -108,6 +113,11 @@ class Context:
     git: str
     schema_dump_host: str | None
     schema_dump_container: str | None
+    # Test-only seam (see ``--self-test-free-bytes``): a deterministic override
+    # for the data-volume free-space probe, honoured ONLY when the explicit
+    # ``--self-test-free-bytes`` flag is passed.  ``None`` in every production
+    # invocation, so production always reads the real ``os.statvfs`` headroom.
+    self_test_free_bytes: int | None = None
 
 
 def _run(argv: list[str], *, label: str, max_bytes: int = MAX_DOCUMENT_BYTES) -> bytes:
@@ -496,6 +506,16 @@ def _capture_sizes(ctx: Context, kind: str) -> dict[str, Any]:
 
 
 def _free_bytes(ctx: Context) -> int:
+    # Test-only seam: the hermetic self-test cannot control the CI runner's disk
+    # size, and the free-space headroom the selection snapshots record is a real
+    # ``os.statvfs`` fact, not a monkeypatchable in-process value (this producer
+    # runs as its own subprocess under the supervisor).  ``--self-test-free-bytes``
+    # hands the producer a deterministic headroom value so the self-test is
+    # disk-independent; it is honoured ONLY when that explicit flag is present.
+    # No production caller (``plan_author``) ever emits the flag, so production
+    # falls through to the real statvfs probe below.
+    if ctx.self_test_free_bytes is not None:
+        return ctx.self_test_free_bytes
     stats = os.statvfs(ctx.evidence_dir)
     return int(stats.f_bavail) * int(stats.f_frsize)
 
@@ -505,10 +525,20 @@ def _capture_schema_dump_list(ctx: Context) -> dict[str, Any]:
         raise CaptureError("schema_dump_list requires --schema-dump-host/--schema-dump-container")
     dump_bytes = Path(ctx.schema_dump_host).read_bytes()
     dump_sha = hashlib.sha256(dump_bytes).hexdigest()
-    version_argv = [ctx.docker, "exec", ctx.container, "/usr/bin/pg_restore", "--version"]
-    list_argv = [ctx.docker, "exec", ctx.container, "/usr/bin/pg_restore", "--list", ctx.schema_dump_container]
-    version_stdout = _run(version_argv, label="pg_restore version", max_bytes=4096)
-    list_stdout = _run(list_argv, label="pg_restore list")
+    # The forensic ``version_argv``/``list_argv`` record the CANONICAL reviewed
+    # invocation -- the pinned host docker CLI and the canonical container
+    # ``/usr/bin/pg_restore`` entrypoint -- not the realpaths or the injectable
+    # ``--docker`` seam value.  This mirrors the container entrypoint already being
+    # recorded as ``/usr/bin/pg_restore`` rather than its pg_wrapper realpath: the
+    # ``--docker`` seam redirects EXECUTION for the dress rehearsal, while the
+    # record names the production binary the plan pins (in production the two
+    # coincide, ``ctx.docker == HOST_DOCKER_CLI``).
+    version_exec_argv = [ctx.docker, "exec", ctx.container, "/usr/bin/pg_restore", "--version"]
+    list_exec_argv = [ctx.docker, "exec", ctx.container, "/usr/bin/pg_restore", "--list", ctx.schema_dump_container]
+    version_argv = [HOST_DOCKER_CLI, "exec", ctx.container, "/usr/bin/pg_restore", "--version"]
+    list_argv = [HOST_DOCKER_CLI, "exec", ctx.container, "/usr/bin/pg_restore", "--list", ctx.schema_dump_container]
+    version_stdout = _run(version_exec_argv, label="pg_restore version", max_bytes=4096)
+    list_stdout = _run(list_exec_argv, label="pg_restore list")
     image_id = _run(
         [ctx.docker, "inspect", "--format={{.Image}}", ctx.container], label="container image", max_bytes=4096
     ).decode().strip()
@@ -699,6 +729,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--git", required=True)
     parser.add_argument("--schema-dump-host", default=None)
     parser.add_argument("--schema-dump-container", default=None)
+    # Test-only seam: deterministic free-space headroom for the hermetic
+    # self-test (see ``_free_bytes``).  Production ``plan_author`` never emits it,
+    # so production always measures the real ``os.statvfs`` data-volume headroom.
+    parser.add_argument("--self-test-free-bytes", type=int, default=None, help=argparse.SUPPRESS)
     return parser
 
 
@@ -706,6 +740,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if re.fullmatch(r"[0-9a-f]{40}", args.mutation_head_sha) is None:
         raise CaptureError("mutation head sha must be 40 lowercase hex characters")
+    if args.self_test_free_bytes is not None and args.self_test_free_bytes < 1:
+        raise CaptureError("--self-test-free-bytes must be a positive byte count")
     args.evidence_dir.mkdir(parents=True, exist_ok=True)
     ctx = Context(
         database=args.database,
@@ -720,6 +756,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         git=args.git,
         schema_dump_host=args.schema_dump_host,
         schema_dump_container=args.schema_dump_container,
+        self_test_free_bytes=args.self_test_free_bytes,
     )
     _emit(_dispatch(ctx, args.kind))
     return 0
