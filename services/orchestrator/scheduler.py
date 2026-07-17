@@ -300,7 +300,7 @@ DEFAULT_LOCK_TTL_SECONDS = 3600
 # Used by the Slurm gateway self-reference check to reject a gateway URL that
 # points back at the scheduler/orchestrator itself instead of a real gateway.
 DEFAULT_SERVICE_PORT = 8000
-MAX_LOOKBACK_HOURS = 168
+MAX_LOOKBACK_HOURS = 336
 MAX_SOURCES = 4
 MAX_CYCLES_PER_SOURCE = 16
 MAX_DISCOVERED_MODELS = 1000
