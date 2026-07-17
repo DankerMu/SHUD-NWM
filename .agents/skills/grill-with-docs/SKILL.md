@@ -7,7 +7,7 @@ description: >
   或用户希望在压测计划的同时统一项目语言、沉淀长期决策。
   不用于不需要术语/决策沉淀的轻量压测（用 grill-me），也不用于纯需求澄清（用 clarify）。
 invocation_posture: hybrid
-version: 0.2.1
+version: 0.2.2
 ---
 
 # Grill With Docs
@@ -20,7 +20,7 @@ version: 0.2.1
 
 1. 一次只问一个问题。
 2. 每个问题附推荐答案 + 一句理由。
-3. 能从 codebase/文档查到的**事实**就去查；**决策**必须摆到用户面前等答复，绝不代答——即使本 skill 嵌在 `stage-change-pipeline` Stage 2 内自动运行。
+3. 能从环境（codebase/文档/数据）查到的**事实**就去查；**决策**必须摆到用户面前等答复，绝不代答——即使本 skill 嵌在 `stage-change-pipeline` Stage 2 内自动运行。
 4. 沿决策树逐分支推进。
 5. 目标是 shared understanding，不是攒答案。
 6. 用户未确认共同理解已达成之前，不得动手落实计划。

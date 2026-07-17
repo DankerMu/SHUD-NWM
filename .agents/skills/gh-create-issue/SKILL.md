@@ -2,7 +2,7 @@
 name: gh-create-issue
 description: Create GitHub issues from PRDs, requirements, or feature descriptions, choosing between a single issue and an epic plus sub-issues using gh CLI labels and dependencies.
 invocation_posture: hybrid
-version: 0.3.1
+version: 0.4.0
 ---
 
 # GitHub Issue Creation
@@ -139,11 +139,14 @@ Depends on #102
 
 Full Epic and Sub-issue body templates live in [references/issue-templates.md](references/issue-templates.md) — read it before composing issue bodies.
 
+**Agent-brief durability contract.** Issues feeding an automated workflow sit in a DAG while earlier issues reshape the codebase. Bodies must follow [references/agent-brief.md](references/agent-brief.md): durability over precision (interfaces, types, behavioral contracts — never file paths or line numbers), behavioral not procedural, independently verifiable acceptance criteria, explicit out-of-scope. Read it before composing agent-implemented issue bodies.
+
 **Required vs optional fields.** When issues feed an automated implementation workflow (`stage-change-pipeline` Stage 5 → `subagent-workflow`), the following are **required** — the issue must be implementation-ready with no product decisions or requirement clarification deferred to the implementer:
 
 - `Implementation Ready: yes`
 - `Module / Scope` (a single module or ownership boundary)
 - `In Scope` / `Out of Scope`
+- `Current behavior` / `Desired behavior` (the behavioral contract per [references/agent-brief.md](references/agent-brief.md))
 - `PR Boundary`
 - one `Depends on #NN` line per dependency
 - `OpenSpec change:` reference when the issue derives from an OpenSpec change

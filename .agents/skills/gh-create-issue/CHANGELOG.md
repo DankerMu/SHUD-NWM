@@ -5,6 +5,12 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-14
+
+### Added
+- New `references/agent-brief.md` (canonical home): the **agent-brief durability contract** for issue bodies consumed by AFK implementer agents — durability over precision (interfaces, types, behavioral contracts; never file paths or line numbers, which rot while the issue waits in the DAG queue), behavioral not procedural, independently verifiable acceptance criteria, explicit out-of-scope against gold-plating. Adapted from `mattpocock/skills` v1.1.0 `triage` AGENT-BRIEF.md.
+- Sub-issue template gains `## Current behavior` / `## Desired behavior` / `## Key interfaces` fields (replacing free-form `## Description` for agent-implemented issues); `Current/Desired behavior` join the required-fields contract for automated-workflow issues. Prototype-snippet exception carried over: decision-rich snippets (state machine, schema, type shape) may be inlined under `Key interfaces`.
+
 ## [0.3.1] - 2026-07-11
 
 - Move the Epic/Sub-issue body templates to `references/issue-templates.md` and the gh command recipes (including label bootstrap) to `references/command-reference.md` (slimming batch 5). The required-fields contract, dependency rules, and label table stay in the body.

@@ -5,6 +5,63 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-07-16
+
+### Changed
+
+- 描述减重（常驻上下文税）：frontmatter description 从 655 字符压至 ~450——删去为弱触发模型准备的触发词枚举（保留 "implement #XX"/"处理下一个issue" 两个最强触发与全部反触发语义），语义边界不变。未跑 skill-creator 触发评测（无 ANTHROPIC_API_KEY），实际触发率变化需在使用中观察。
+
+## [0.19.0] - 2026-07-16
+
+### Added
+
+- **轮间 lens 轮换（带测量的试运行）**：修复后复审轮的 reviewer 组合从"与 Phase 4 同配置重跑"改为**钉死核心 + 自由槽轮换**——fixture 风险包选中的 lens 每轮必在（承担修复回归召回），其余槽位轮换为本 PR 尚未用过的 reviewer 包（同 lens 轮次共享盲区，轮换以零边际成本买联合召回）。禁止轮换掉任何钉死的风险包 lens。落点：phase-flow Phase 4 review rounds / Phase 6.5、phase-4-cross-review follow-up 规则。
+- **日志归因字段**：`review-loop-log.jsonl` 行新增 `round_lenses`（逐轮实际 lens 组合）与 `catches`（每条 net-catch finding 的轮次/产出 lens/失效类/严重度），把"后续轮的捕获来自钉死核心还是轮换进来的 lens"变成可查询事实。
+- **轮换 keep/cut 裁决标准**（沿用既有 ADR 人工决策机制，样本 ≥8 个多轮 PR）：后续轮捕获集中于轮换 lens → 留任；几乎全部来自钉死核心对修复区新代码的回归召回 → 轮换无收益，记录 ADR 并回退为 round-1 同配置。试运行政策靠机制论证上线，靠净捕获归因数据留任。
+
+## [0.18.0] - 2026-07-16
+
+### Changed
+
+- **Phase 4.5 verifier 从 per-finding 改为 per-failure-class 批量**：去重后的 candidate 先按 failure class 分组，每个 class 批次一个 `verifier` 子代理，批内至多 5 条（超出拆批；单条 class 退化为单条批，行为同旧版）。成本随 class 聚类因子下降；同 class 兄弟 finding 共享证据基，同一验证者一起裁决还能提高 verdict 一致性、捞出 dedup 漏掉的近重复。
+- 逐条裁决语义不变且硬化：每条 candidate 一个独立 verdict（CONFIRMED/PLAUSIBLE/REFUTED）+ 逐条证据，"批级一口价"判定无效、整批重跑；批内发现同一缺陷的两条 candidate 须各自 verdict 并在 note 标注重复，不得静默合并。
+- 独立性规则随批量调整：verifier 不得是产出**该批内任一** candidate 的 reviewer；编排器不得代裁不变。verdict 持久化从 `verify-<CANDIDATE_ID>.md` 改为按批 `verify-<CLASS_ID>.md`（逐条 verdict 表）。
+- 同步三处：SKILL.md 核心规则、`phase-flow.md` Phase 4.5 步骤 3/4、`phase-4-cross-review.md` verifier 模板（新增 `<CLASS_ID>`/`<CANDIDATE_BLOCKS>` 变量与批量输出表）。
+
+## [0.17.0] - 2026-07-16
+
+### Added
+
+- **Review Failure Retro 新增第四个 failure shape `converging`**，修补 0.16.0 三轮 gate 在健康收敛轨迹上的误触发：运行数据表明多轮 review 每轮都有净捕获，"第 3 轮不 clean"是常态而非病态信号，但 0.16.0 的三个 shape（breadth/depth/noise）没有一个描述健康收敛，默认动作（拆 PR/重构/降级）对它全是错误处方。
+- `converging` 判据（须在 retro 中列出逐轮数字作证据）：各轮已验证 finding 无同类复发，数量与最高严重度逐轮不增、至少一项严格下降；第 3 轮出现任一 critical/major 或任何同类复发即丧失资格。
+- `converging` 默认动作：**有界延长**——ordinary loop 至多再跑 2 轮 comprehensive cross-review，retro 只写一段收敛趋势、跳过策略章节；每 PR 至多选择一次。第 5 轮仍不 clean 则重进 gate，`converging` 不再可选，必须从 breadth/depth/noise 三选一。实质效果：3→5 轮之间的梯子由收敛证据驱动重建，gate 对病态轨迹仍是硬转向，对健康收敛只收一段话的税。
+- Post-gate budget 拆分为两支：pivot 支（breadth/depth/noise，纠正动作后至多一轮、仍有 critical/major 则升级重进）与 converging 支（硬 2 轮上限、round 5 强制重进且排除 converging）。
+
+## [0.16.0] - 2026-07-16
+
+### Changed
+- **审查升级 gate 从 5 轮提前到 3 轮，四文档包降为单份 retro**：删除五轮硬 gate 全套（Deep Review Failure Retro + Gate-Level PR Strategy Review + Invariant Surface Inventory + Regression Matrix 四文档包及 post-five budget）——触发太晚、仪式过重。新的唯一硬 gate：第 3 轮 comprehensive cross-review 仍不 clean（不再限定同一 failure class）即停 ordinary loop，持久化一份升级版 Review Failure Retro 后按归因执行纠正动作。
+- **Review Failure Retro 升级**：模板新增 PR/SHA/轮次证据行与 `Failure shape` 归因（breadth 分散 / depth 同 invariant 反复 / noise 评审噪音），并绑定默认动作映射——breadth 默认**拆 PR**（子 PR 以新 PR 身份重进工作流、round counter 归零，父 PR 证据束记录拆分方案与 finding 归属）；depth 默认 refactor/redesign 或诊断任务（**禁止拆分反复失败的 invariant**：每个子 PR 都继承同一缺陷）；noise 默认 reviewer-pattern downgrade 并记录理由。偏离默认动作须在 retro 中记录原因。
+- Post-gate budget 随 gate 前移：纠正动作后至多一轮 comprehensive cross-review，仍有 critical/major 则带更新后的 retro 重进 gate 并选更强动作，不得回退到逐行修补。
+- SKILL.md 不可协商项同步：由"第 6 轮前必须持久化 Gate-Level 包"改为"第 4 轮前必须持久化 Review Failure Retro 并执行其纠正动作"；round counter 不重置规则补充唯一合法例外——gate 选定的 PR split 产生的子 PR。
+
+## [0.15.0] - 2026-07-14
+
+### Added
+- Fixture 契约新增 **Seams under test** 字段（compact 与 expanded 模板各一处，`references/issue-risk-contract.md`）：测试将行使的公共边界，由上游（`stage-change-pipeline` Stage 2 design.md 或 issue 作者）**预先声明并附理由**——最少、最高、理想一个，无需人工确认，由 fixture review 检查。Core Rule "OpenSpec is the fixture" 同步列入：实现期只消费、不再谈判，需要但缺失的 seam 是一条须上报的 deviation。Adapted from `mattpocock/skills` v1.1.0 `tdd` 与 `to-spec`（先画缝再写 spec）；上游的用户确认环节有意改为上游自动声明 + 审核监督。
+
+## [0.14.0] - 2026-07-14
+
+### Added
+- **诊断闸门（cause-unknown 专用）五个绑定点**，消费新落地的 `diagnosing-bugs` 0.1.0（canonical 诊断词汇；consume-don't-fork，对齐 `risk-adaptive-cross-review` 先例）：
+  - Core Rule "Self-repair by delegation" 加限定：失败原因无法从输出确定时，先派**诊断任务**（报告契约 = 红命令+输出、最小复现、确诊假设+证据，不含修复），其报告才使 fix task 成为 "precise"。
+  - Phase 2：原因不明显的验证失败先走诊断 brief，禁止凭猜写修复任务。
+  - Phase 5：诊断闸门规则——因未知的 finding/失败需先有"已跑过一次、能红"的命令才进 fix list；有精确 file/line 且原因显然的普通 finding 不付诊断税；上一轮修复未关闭的 finding 重新过闸。
+  - Phase 6：新增**诊断 brief 模板**（implementer 子代理执行、report-only、orchestrator 内联蒸馏纪律——叶子子代理不触发技能）；因未知类修复的 `Test:` 字段硬化为"先红后绿"的红命令；插桩必须带 `[DEBUG-<tag>]`，提交前 `grep -r "DEBUG-"` 清零；seam 缺失本身就是 finding，走 deferral 路由。
+  - 两个 Retro（Review Failure / Deep Review Failure）各加归因行 "Cause never diagnosed (no red repro before fixes)"。
+  - Phase 8：本地不复现的 CI 失败先诊断（CI 环境 vs 本地的差分回路）再分类 `ci-only`/`semantic`，不按日志表面形状分类。
+- Supporting Skills 新增 `diagnosing-bugs` 条目（Phase 0-8 之外的交互式调试直接用独立技能）。
+
 ## [0.13.0] - 2026-07-06
 - New core rule "Deviations are recorded, not silent" (adapted from Thariq's implementation-notes practice): Phase 1 implementer briefs and Phase 6 fix briefs must report every departure from the plan (unexpected upstream/API behavior, non-reusable component, switched implementation path, mid-work constraint) as one line each — what/why/impact — with "no deviations" stated explicitly.
 - The PR description carries a running `偏离记录` section (seeded at Phase 3, appended by Phase 6 fix passes); Phase 4 reviewer briefs include it so review attention goes first to where the implementer chose in territory the plan did not cover; the Phase 8 Chinese work summary consumes it as a new `计划偏离` section.

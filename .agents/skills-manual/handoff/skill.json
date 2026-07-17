@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "name": "handoff",
+  "displayName": "Handoff",
+  "description": "把当前会话压缩成一份交接文档，让新会话或另一个 agent 无缝接续：会话独有状态（决策、工作流计数器、已排除路径、下一步）写入文档，已沉淀的工件只引用不复制。手动调用（/handoff），适配 issue 工作流的跨会话续跑。",
+  "version": "0.1.0",
+  "maturity": "experimental",
+  "categories": [
+    "productivity",
+    "workflow"
+  ],
+  "tags": [
+    "handoff",
+    "cross-session",
+    "context-transfer",
+    "continuation",
+    "user-invoked"
+  ],
+  "authors": [
+    {
+      "name": "danker"
+    }
+  ],
+  "license": "MIT",
+  "entrypoints": {
+    "skillDoc": "SKILL.md"
+  },
+  "capabilities": {
+    "shell": true,
+    "filesystemRead": true,
+    "filesystemWrite": true
+  }
+}

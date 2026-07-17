@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "name": "project-instruction-bootstrap",
+  "displayName": "Project Instruction Bootstrap",
+  "description": "为目标项目安装 pack 之后，扫描项目并补全/对齐它自己的 CLAUDE.md 与 AGENTS.md。推荐生成模式：项目维护 instructions/agents/{shared,claude,codex}.md 源，本 skill 充当生成器拼接两文件（shared 段单一事实源、零漂移），不给项目装脚本或 hook；已有手写指令则走增量兼容模式。写入项目自身约定（技术栈/命令/目录）、已装 pack/skill/agent 的使用与触发约定，以及可移植的编排骨架（Observable Completion、反熵下沉、按模型纠偏、项目本地适配指引）。增量补全、绝不覆盖已有内容、写前出 diff。Use after installing a pack into a target project to bootstrap or align its CLAUDE.md / AGENTS.md.",
+  "version": "0.2.1",
+  "maturity": "experimental",
+  "categories": [
+    "workflow",
+    "documentation"
+  ],
+  "tags": [
+    "onboarding",
+    "post-install",
+    "instructions",
+    "claude-md",
+    "agents-md",
+    "bootstrap"
+  ],
+  "authors": [
+    {
+      "name": "danker"
+    }
+  ],
+  "license": "MIT",
+  "entrypoints": {
+    "skillDoc": "SKILL.md"
+  },
+  "capabilities": {
+    "shell": false,
+    "filesystemRead": true,
+    "filesystemWrite": true
+  }
+}

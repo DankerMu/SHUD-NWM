@@ -5,6 +5,24 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-16
+
+### Added
+
+- **`blind-spot-pass` 正式接进 Stage 1**（修复成员引用完整性缺口——它此前是 pack 成员却未被任何主干流程引用）：支撑 skill 清单登记 + Stage 1 新增"盲区侦察"步骤，位于文档读取之后、压测门禁之前。触发条件：目标阶段进入陌生模块/外部系统/设计文档覆盖不到的区域；产出的盲区清单决策点直接作为 `grill-me` 压测输入；熟悉领域可跳过、无需留痕（与压测门禁的强制留痕形成有意对比——侦察是条件动作，压测是必决策门）。
+
+### Changed
+
+- 描述减重：frontmatter description 从 457 字符压至 ~280——删触发词枚举（保留三个最强触发），补"单 issue 走 subagent-workflow"的反触发。未跑触发评测（无 ANTHROPIC_API_KEY），触发率变化留观察。
+
+## [0.12.0] - 2026-07-14
+
+- Stage 2 design.md 新增 **Sketch seams under test** 步骤（自动，不设交互停点——除 grill 门禁外流水线保持自动化）：写下测试将行使的公共边界（优先已有 seam、用最高的 seam、越少越好、理想一个），每个 seam 附一行选择理由记入 design.md；监督走既有回路（Stage 3 三路审核 + 下游 fixture review），随 fixture 流入 `subagent-workflow` 0.15.0 的 `Seams under test` 字段——测试预算据此落在关键路径。Adapted from `mattpocock/skills` v1.1.0 `to-spec`（seam 前置）与 `tdd`（seams 先定后测）；上游的"与用户确认"有意改为自动决策 + 审核留痕。
+
+## [0.11.2] - 2026-07-14
+
+- Stage 5 子 issue 契约新增一条：行为描述遵循 `gh-create-issue` 0.4.0 的 **agent-brief 耐久性契约**（指针引用其 `references/agent-brief.md`，单一事实源，不镜像）——写接口/类型/行为契约与 `Current/Desired behavior`，不写文件路径与行号，因为 issue 在 DAG 中等待期间代码结构会被前置 issue 改变。
+
 ## [0.11.1] - 2026-07-11
 
 - Push loop-accountability detail (logEntry schema, kill criteria, ratchet policy) to `references/loop-accountability.md` and the duration estimate + minimal command set to `references/quick-reference.md` (slimming batch 5). The four mandatory orchestrator log steps, dependency list, and skip strategy stay in the body.

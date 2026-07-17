@@ -27,7 +27,7 @@ Risk-adaptive selection:
 - `high` or `broad-expanded`: run the 4 standard reviewers by default (Correctness, Integration, Security/Performance, Test & Evidence Coverage). Use 6 reviewers when the PR touches DB-backed state, retry/cancellation, publish/delete/rollback, schema/evidence contracts, security boundaries, production config, or shared helper/state-machine roots. The extra reviewers are:
   - `review-spec-compliance`: checks the implementation against OpenSpec/design/issue acceptance criteria.
   - `review-invariant-state`: traces the governing invariant across state machines, stale-state boundaries, retry/cancel transitions, and backward compatibility.
-- Follow-up rounds after fixes: run the same risk-adaptive reviewer count and reviewer mix as a fresh Phase 4 review of the current head. Do not downgrade to targeted-only reviewers, because the prior round may have missed unrelated issues.
+- Follow-up rounds after fixes: run the same risk-adaptive reviewer count as a fresh Phase 4 review of the current head, with the pinned-core + rotating-free-slots mix (risk-pack lenses pinned every round, free slots rotated to not-yet-used packs — see `phase-flow.md` Phase 4 review rounds). Do not downgrade to targeted-only reviewers, because the prior round may have missed unrelated issues.
 - Initial round only: if a repository policy requires a fixed number of evidence comments, follow it only when it does not conflict with the 6-review high-risk escalation in `SKILL.md`; otherwise post a consolidated evidence bundle rather than reducing reviewer coverage.
 - High or broad-expanded PRs: the brief must include the OpenSpec `Invariant Matrix`. Each reviewer must evaluate the matrix rows, not just the touched lines. If a reviewer cannot map a row to evidence, it should report that as missing evidence or explain why the row is out of scope under the fixture.
 - Spawn the selected reviewer set as parallel subagents in one batch (Claude Code: multiple Task calls in one message; Codex: parallel subagents) unless a documented subagent/tooling failure requires a fallback. A failed no-report invocation is not a review round.
@@ -101,38 +101,42 @@ Non-blocking notes:
 
 ## Phase 4.5 Verifier Template
 
-Run this after dedup, on the deduped candidate set, by spawning one `verifier` subagent per candidate in parallel. Each candidate becomes one verifier task. A verifier must not be the reviewer that produced the candidate.
+Run this after dedup, on the deduped candidate set grouped by failure class: spawn one `verifier` subagent per failure-class batch in parallel, at most 5 candidates per batch (split larger classes; a singleton class is a batch of one). A verifier must not be a reviewer that produced any candidate in its batch.
 
 Additional variables:
 
-- `<CANDIDATE_ID>`: stable id for the deduped candidate (e.g. `cand-03`).
-- `<CANDIDATE_BLOCK>`: the full candidate finding text (severity, failure class, invariant, scenario, required test, sibling surfaces, originating reviewer).
+- `<CLASS_ID>`: stable id for the failure-class batch (e.g. `path-binding-1`).
+- `<CANDIDATE_ID>`: stable id for a deduped candidate (e.g. `cand-03`).
+- `<CANDIDATE_BLOCKS>`: the full candidate finding texts for the batch, one block per candidate (severity, failure class, invariant, scenario, required test, sibling surfaces, originating reviewer), each headed by its `<CANDIDATE_ID>`.
 
 Verifier contract:
 
-- Return exactly one verdict: `CONFIRMED`, `PLAUSIBLE`, or `REFUTED`.
+- Adjudicate every candidate in the batch independently; return exactly one verdict per candidate: `CONFIRMED`, `PLAUSIBLE`, or `REFUTED`. A batch-level verdict without per-candidate evidence is invalid.
+- If two candidates in the batch turn out to be the same defect, verdict both and flag the duplication in the note — do not silently collapse them.
 - `CONFIRMED`: the failing scenario is constructible from the diff, fixture, or existing contracts/tests. Cite the constructing evidence.
 - `PLAUSIBLE`: reachable but not fully constructible. Default here for realistic runtime states — rare error paths, falsy-zero treated as missing, off-by-one at a boundary the code does not exclude, concurrency races, retry storms, stale cache/DB rows, regex/allowlist that lost an anchor. Do not refute a candidate merely for being "speculative" or "depends on runtime state" when the state is realistic.
 - `REFUTED`: only when constructible from the code — factually wrong (quote the actual line), provably impossible (cite the type/constant/invariant), already handled in this diff (cite the guard), or pure style with no observable effect.
 - Use only evidence from the diff, OpenSpec fixture, existing code/contracts, or tests. Do not invent a scenario to confirm or a guard to refute.
 
-Spawn one `verifier` subagent per candidate (working directory `<absolute repo path>`), in parallel:
+Spawn one `verifier` subagent per failure-class batch (working directory `<absolute repo path>`), in parallel:
 
 ```text
-# Finding Verification: <CANDIDATE_ID>
+# Finding Verification Batch: <CLASS_ID>
 
-Verify one candidate review finding for PR #<N> on branch <branch>.
+Verify the candidate review findings below — all in the same failure class — for PR #<N> on branch <branch>.
 Head SHA: <FULL_SHA>
-Return the verdict as your final message. (The orchestrator persists it to <REVIEW_DIR>/verify-<CANDIDATE_ID>.md.)
+Return the verdict table as your final message. (The orchestrator persists it to <REVIEW_DIR>/verify-<CLASS_ID>.md.)
 
 Rules:
 - Do not edit files, commit, push, or change state.
 - You are a leaf verifier subagent. Do not invoke this workflow or the subagent-workflow skill, spawn further subagents, launch parallel agents, or ask another AI/code agent to verify, fix, implement, or plan.
-- Adjudicate only this candidate. Do not search for new findings.
-- Output only the structured verdict.
+- Adjudicate only these candidates. Do not search for new findings.
+- Adjudicate each candidate independently and give one verdict per candidate; a batch-level verdict without per-candidate evidence is invalid.
+- If two candidates describe the same defect, verdict both and flag the duplication in the note.
+- Output only the structured verdict table.
 
 Inputs:
-- Candidate finding: <CANDIDATE_BLOCK>
+- Candidate findings: <CANDIDATE_BLOCKS>
 - Changed files: <path list>
 - Fixture summary: <fixture summary>
 - Spec references: <proposal.md> <design.md> <tasks.md>
@@ -143,9 +147,11 @@ Adjudication:
 - REFUTED: factually wrong (quote line), provably impossible (cite type/constant/invariant), already handled (cite guard), or pure style. Only when constructible from the code.
 
 Output:
-Verifier verdict for: <CANDIDATE_ID>
+Verifier verdicts for batch: <CLASS_ID>
 Reviewed head SHA: <FULL_SHA>
-Verdict: CONFIRMED|PLAUSIBLE|REFUTED
-Evidence: <quoted line / cited guard / reachability path>
-Note: <one line, or "None.">
+Per-candidate verdicts:
+- <CANDIDATE_ID>: CONFIRMED|PLAUSIBLE|REFUTED
+  Evidence: <quoted line / cited guard / reachability path>
+  Note: <one line, or "None.">
+- ...one entry per candidate in the batch
 ```

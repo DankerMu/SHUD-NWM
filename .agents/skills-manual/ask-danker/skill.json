@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "name": "ask-danker",
+  "displayName": "Ask Danker",
+  "description": "本仓库 skills 的路由器——按你当前的处境指路：该用哪个 skill、走哪条流、下一步交给谁。手动调用（/ask-danker），模型不会自动触发。",
+  "version": "0.1.2",
+  "maturity": "experimental",
+  "categories": [
+    "productivity",
+    "workflow"
+  ],
+  "tags": [
+    "router",
+    "navigation",
+    "skill-map",
+    "flows",
+    "user-invoked"
+  ],
+  "authors": [
+    {
+      "name": "danker"
+    }
+  ],
+  "license": "MIT",
+  "entrypoints": {
+    "skillDoc": "SKILL.md",
+    "changelog": "CHANGELOG.md"
+  },
+  "capabilities": {
+    "shell": false,
+    "filesystemRead": true,
+    "filesystemWrite": false
+  }
+}

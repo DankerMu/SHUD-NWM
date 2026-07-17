@@ -7,7 +7,7 @@ description: >
   触发词："improve architecture"、"找重构机会"、"合并紧耦合模块"、"让代码更可测"、"架构评审"、"把重构拆成 issue"。
   不用于纯需求澄清（用 clarify）或纯方向选型（用 future-aware-architecture）。
 invocation_posture: hybrid
-version: 0.3.1
+version: 0.4.0
 ---
 
 # Improve Codebase Architecture
@@ -75,6 +75,8 @@ Explorer 的返回形状是一个清单，每项：`{ 区域/文件组, friction
    - **(b) 复杂性在 N 个 caller 里各自重现** —— module 是 deep 的，保留；
    - **(c) 复杂性迁移并集中到一个自然的邻居** —— shallow 簇，合并 / 深化到那里；
 4. 结局映射到报告徽章：(a) → `Strong`（collapse）；(c) → `Strong` 或 `Worth exploring`（deepen，取决于邻居 interface 是否已清晰）；判定含糊 / 证据不足 → `Speculative`。
+
+**编辑热度过滤（YAGNI scope）**：没人碰的代码里的 deepening opportunity 是永远不会兑现的 refactor——leverage 只在持续编辑的地方兑付。deletion test 之后、进报告之前，对每个 candidate 查编辑热度：`git log --oneline --since="12 months ago" -- <candidate 涉及路径>`。近 12 个月**零提交**的 candidate 不进报告（用户明确点名要审的区域除外）；仅 1-2 次提交的降级为 `Speculative`，card 上标注热度。报告不整理仓库的休眠角落。
 
 ### 2. Present candidates as an HTML report
 

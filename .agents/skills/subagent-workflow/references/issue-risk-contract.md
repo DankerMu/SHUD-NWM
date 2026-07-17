@@ -157,6 +157,8 @@ Must preserve:
 - <existing caller/output/test behavior>
 Must add/change:
 - <new behavior>
+Seams under test:
+- <public boundary each test targets; declared upstream with rationale, fewest and highest possible>
 Risk packs:
 - Public API / CLI / script entry: selected|not selected - <reason>
 - File IO / path safety / overwrite: selected|not selected - <reason>
@@ -186,6 +188,9 @@ Must preserve:
 Must add/change:
 - <new behavior>
 - <new config/schema/files>
+
+Seams under test:
+- <public boundary each test targets; declared upstream with rationale (stage-change-pipeline Stage 2 design.md or issue author), fewest and highest possible — implementer consumes, never renegotiates>
 
 Selected risk packs:
 - <pack>: <project-specific checks>

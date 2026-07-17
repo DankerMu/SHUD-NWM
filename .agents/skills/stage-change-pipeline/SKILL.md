@@ -1,17 +1,15 @@
 ---
 name: stage-change-pipeline
 description: >
-  设计文档 → openspec change → subagent 并行审核 → 修复 → GitHub issue 全流水线。
-  将 tasks 拆为细粒度、模块边界清晰、适合小 PR 审核的 GitHub issue。
-  触发词："开始下一个阶段"、"stage change pipeline"、"设计到issue"、"阶段实施"、
-  "openspec审核"、"创建 M* change"、"start the next stage"、"turn this design into
-  issues"、"create issues from the spec/design"、"run the stage pipeline"，
-  或用户指定一个开发阶段要求生成审核过的 issue（a design/stage doc that should become
-  a reviewed OpenSpec change plus implementation-ready GitHub issues）。
+  设计文档 → OpenSpec change → subagent 并行审核 → 修复 → 实现就绪 GitHub issue 全流水线，
+  tasks 拆为模块边界清晰、适合小 PR 审核的细粒度 issue。用于把设计/阶段文档变成审核过的
+  OpenSpec change 加 implementation-ready issues——"开始下一个阶段"、"设计到issue"、
+  "run the stage pipeline"。单个 issue 的实现/修复/合并走 subagent-workflow，不需要
+  OpenSpec change 与并行审核的普通 issue 不用本流水线。
 license: MIT
 metadata:
   author: danker
-  version: "0.11.1"
+  version: "0.13.0"
 ---
 
 # Stage Change Pipeline
@@ -25,6 +23,7 @@ metadata:
 **支撑 skill**：按需要复用本仓库已有 skill，不把它们的完整流程复制进来。
 
 - `clarify`：阶段目标、验收标准、范围边界或设计文档优先级不清时，在 Stage 1 前先澄清。
+- `blind-spot-pass`：目标阶段进入陌生模块、外部系统或设计文档覆盖不到的区域时，Stage 1 读完文档、压测门禁之前跑——从代码库考古（git 历史、相似实现、隐形约定、危险区、邻接面）挖出没想到要问的问题，盲区清单的决策点直接作为 `grill-me` 的压测输入。
 - `grill-me`：Stage 1 收尾、创建 OpenSpec change 之前，对阶段计划/设计文档做对抗式压测——沿决策树逐分支追问、一次一个问题，把未言明的假设和模糊边界逼清，降低 Stage 3 审核返工。
 - `grill-with-docs`：Stage 2 写 design/specs 时，对领域复杂、术语易漂的 change 做领域压测——对齐术语并 inline 沉淀到 `openspec/glossary.md`，够格的长期决策落 `docs/adr/`。
 - `future-aware-architecture`：Stage 2 的 `design.md` 涉及架构方向、技术选型、可逆性或长期演进风险时，用它形成决策输入。
@@ -78,6 +77,8 @@ Stage 5.5: Issue-Change 对齐审核 (≤2 轮)
 3. 并行读取目标阶段涉及的核心设计文档（通常 3-6 个文件），记录关键实体：表名、API 端点、ENUM 值、ID 规范等。
 4. 输出一份简要的阶段上下文摘要，确认后进入 Stage 2。
 
+**盲区侦察（陌生领域时，压测门禁之前）**：目标阶段涉及不熟悉的模块、外部系统或团队约定，且设计文档覆盖不足时，先跑 `blind-spot-pass` 产出带证据的盲区清单，其决策点作为下方 `grill-me` 压测的输入；熟悉领域可直接跳过，无需留痕。
+
 **压测门禁（EITHER/OR，必须留痕）**：进入 Stage 2 之前，对设计压测做出显式决策，二选一：
 
 - **跑**：用 `grill-me` 沿决策树逐分支压测（多轮、一次一问），把未言明假设、隐藏依赖和模糊边界逼清，再创建 OpenSpec change；启动 `full-pipeline.workflow.js` 时传 `grillGate: "passed"`。
@@ -119,6 +120,7 @@ Stage 5.5: Issue-Change 对齐审核 (≤2 轮)
    - 写技术决策（选型理由、备选方案）、风险和缓解
    - 如果技术决策还没有稳定依据，先用 `future-aware-architecture` 形成架构决策输入
    - 领域概念多、术语易漂时，用 `grill-with-docs` 对齐术语并 inline 沉淀到 `openspec/glossary.md`/`docs/adr/`，再定稿 design/specs
+   - **Sketch seams under test**（自动，不设交互停点）：写下测试将行使的公共边界——优先已有 seam、用最高的 seam、越少越好（理想一个），每个 seam 附一行选择理由，直接记入 design.md。监督走既有回路：Stage 3 三路审核与下游 fixture review 会检查该清单，无需专门向用户确认。清单随 fixture 流入 `subagent-workflow`（fixture 模板的 `Seams under test` 字段），实现期只消费、不再谈判——测试精力据此落在关键路径而非每个边角
 
    **specs/**（依赖 proposal，可与 design 并行）：
    - 获取指令：`openspec instructions specs --change "<name>" --json`
@@ -288,6 +290,7 @@ Stage 5.5: Issue-Change 对齐审核 (≤2 轮)
    - 任务清单（从 tasks.md 提取，保留 checkbox 格式）
    - 必读文档表（从 IMPLEMENTATION_PLAN.md 或 Stage 1 收集的文档清单中提取，标注优先级和重点章节）
    - 验收标准
+   - 行为描述遵循 `gh-create-issue` 的 agent-brief 耐久性契约（其 `references/agent-brief.md`，单一事实源）：写接口/类型/行为契约与 `Current/Desired behavior`，不写文件路径与行号——issue 在 DAG 中等待期间，代码结构会被前置 issue 改变
    - `**Implementation Ready:** yes`，仅当上述契约全部满足时允许创建
 
 5. 回填 Epic 的子任务列表和依赖关系图，按模块分组展示，避免子 issue 数量增加后失去总览。
