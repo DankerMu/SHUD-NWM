@@ -2207,20 +2207,39 @@ def test_checkpoint_rejects_recurring_activation_in_the_journal_window(
             )
 
 
-def _session(backend_type: str, *, pid: int = 42) -> dict[str, Any]:
+def _session(
+    backend_type: str,
+    *,
+    pid: int = 42,
+    usename: str | None = "nhms",
+    has_write_privilege_on_target: bool = False,
+) -> dict[str, Any]:
     """A full-shape pg_stat_activity session as the checkpoint SQL emits it."""
 
-    return {"pid": pid, "state": "active", "wait_event_type": None, "backend_type": backend_type}
+    return {
+        "pid": pid,
+        "state": "active",
+        "wait_event_type": None,
+        "backend_type": backend_type,
+        "usename": usename,
+        "has_write_privilege_on_target": has_write_privilege_on_target,
+    }
 
 
 def test_checkpoint_rejects_a_conflicting_client_backend_session_and_persists_the_evidence(
     probe_bin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # G9 + G9a: an external client backend is still a hard conflict, AND the
-    # observed sessions must already be on disk when the checkpoint raises --
-    # launch 7 destroyed the very evidence that triggered the abort.
+    # G9 + G9a: an external client backend that has write access to our target
+    # is still a hard conflict, AND the observed sessions must already be on
+    # disk when the checkpoint raises -- launch 7 destroyed the very evidence
+    # that triggered the abort.  G14: the write-privilege flag is the fact
+    # that distinguishes writers from readonly display connections.
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run-user"))
-    offending = _session(supervisor.CLIENT_BACKEND_TYPE)
+    offending = _session(
+        supervisor.CLIENT_BACKEND_TYPE,
+        usename="nhms",
+        has_write_privilege_on_target=True,
+    )
     probe_bin("psql", _psql_responses(activity={"sessions": [offending]}))
     probe_bin("systemctl", _systemctl_responses())
     probe_bin("journalctl", _journalctl_responses())
@@ -2291,6 +2310,77 @@ def test_checkpoint_rejects_a_session_without_backend_type(
     probe_bin("journalctl", _journalctl_responses())
     with _ledger(tmp_path / "ledger.jsonl") as ledger:
         with pytest.raises(supervisor.SupervisorError, match="activity session shape"):
+            supervisor.capture_checkpoint(
+                _checkpoint(),
+                wall=supervisor.HardWall.start(30),
+                ledger=ledger,
+                artifact_dir=tmp_path,
+                journal_cursor="s=stub;i=start;b=stub;m=0;t=0;x=0",
+                invocation_id=PROBE_INVOCATION_ID,
+            )
+
+
+def test_checkpoint_tolerates_readonly_display_client_backend_and_persists_it(
+    probe_bin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # G14 (launch 11): the display API's nhms_display_ro pool renders as
+    # backend_type='client backend', but the role has no INSERT/UPDATE/DELETE
+    # on the compression target, so it cannot be the trust-boundary writer the
+    # checkpoint guards against.  The judgment must ignore this session while
+    # the full row still persists at full fidelity in the artifact.
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run-user"))
+    display_pool = _session(
+        supervisor.CLIENT_BACKEND_TYPE,
+        pid=125,
+        usename="nhms_display_ro",
+        has_write_privilege_on_target=False,
+    )
+    probe_bin("psql", _psql_responses(activity={"sessions": [display_pool]}))
+    probe_bin("systemctl", _systemctl_responses())
+    probe_bin("journalctl", _journalctl_responses())
+    ledger_path = tmp_path / "ledger.jsonl"
+    with _ledger(ledger_path) as ledger:
+        end_cursor = supervisor.capture_checkpoint(
+            _checkpoint(),
+            wall=supervisor.HardWall.start(30),
+            ledger=ledger,
+            artifact_dir=tmp_path,
+            journal_cursor="s=stub;i=start;b=stub;m=0;t=0;x=0",
+            invocation_id=PROBE_INVOCATION_ID,
+        )
+    assert end_cursor == BOUNDARY_CURSOR
+    event = json.loads(ledger_path.read_text().strip())
+    persisted = json.loads(Path(event["database_activity"]["artifact"]["path"]).read_text(encoding="utf-8"))
+    assert persisted == {"sessions": [display_pool]}
+    # Producer/consumer seam: the verifier twin agrees.
+    result = evidence._validate_checkpoint_artifacts(
+        event,
+        "supervisor checkpoint[0]",
+        invocation_id=PROBE_INVOCATION_ID,
+        supervisor_pid=os.getpid(),
+    )
+    assert result["journal_end_cursor"] == BOUNDARY_CURSOR
+
+
+def test_checkpoint_rejects_a_write_capable_client_backend_session(
+    probe_bin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # G14 companion: the same 'client backend' backend_type IS a conflict when
+    # the session is running as a role that owns INSERT/UPDATE/DELETE on the
+    # compression target (e.g. 'nhms' during ingest).  Message wording is the
+    # G9 SupervisorError text, unchanged.
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run-user"))
+    writer = _session(
+        supervisor.CLIENT_BACKEND_TYPE,
+        pid=126,
+        usename="nhms",
+        has_write_privilege_on_target=True,
+    )
+    probe_bin("psql", _psql_responses(activity={"sessions": [writer]}))
+    probe_bin("systemctl", _systemctl_responses())
+    probe_bin("journalctl", _journalctl_responses())
+    with _ledger(tmp_path / "ledger.jsonl") as ledger:
+        with pytest.raises(supervisor.SupervisorError, match="conflicting database session"):
             supervisor.capture_checkpoint(
                 _checkpoint(),
                 wall=supervisor.HardWall.start(30),

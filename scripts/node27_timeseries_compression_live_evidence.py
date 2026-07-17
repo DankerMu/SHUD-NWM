@@ -917,18 +917,37 @@ def _validate_checkpoint_artifacts(
     activity = _require_mapping(activity_raw, f"{label}.database_activity document")
     locks = _require_mapping(locks_raw, f"{label}.relation_locks document")
     show = _require_mapping(show_raw, f"{label}.systemd_show document")
-    # Same measured contract as the supervisor twin (G9): every captured
+    # Same measured contract as the supervisor twin (G9 + G14): every captured
     # session is preserved at full fidelity, but only an external client
-    # backend is a conflict -- PostgreSQL's own workers (autovacuum,
-    # TimescaleDB background workers, ...) are the deterministic wake-up after
-    # a real mutation, not a trust-boundary breach.
+    # backend that ALSO holds INSERT/UPDATE/DELETE on the compression target
+    # is a conflict.  PostgreSQL's own workers (autovacuum, TimescaleDB
+    # background workers, ...) are the deterministic wake-up after a real
+    # mutation, not a trust-boundary breach.  The display API's readonly role
+    # (``nhms_display_ro``) renders as a client backend too, but it has no
+    # write grants on the target hypertable and therefore cannot mutate it --
+    # ``has_write_privilege_on_target`` is the fact that separates the trust-
+    # boundary writers we guard against from readonly display connections.
     _require_exact_keys(activity, {"sessions"}, f"{label}.database_activity document")
     sessions = _require_list(activity["sessions"], f"{label}.database_activity.sessions")
     for session_index, session_value in enumerate(sessions):
         session_label = f"{label}.database_activity.sessions[{session_index}]"
         session = _require_mapping(session_value, session_label)
-        _require_exact_keys(session, {"pid", "state", "wait_event_type", "backend_type"}, session_label)
-        if session["backend_type"] == CLIENT_BACKEND_TYPE:
+        _require_exact_keys(
+            session,
+            {
+                "pid",
+                "state",
+                "wait_event_type",
+                "backend_type",
+                "usename",
+                "has_write_privilege_on_target",
+            },
+            session_label,
+        )
+        if (
+            session["backend_type"] == CLIENT_BACKEND_TYPE
+            and session["has_write_privilege_on_target"] is True
+        ):
             raise EvidenceError(f"{label} observed a conflicting writer or relation lock")
     if locks != {"conflicts": []}:
         raise EvidenceError(f"{label} observed a conflicting writer or relation lock")
@@ -2292,9 +2311,22 @@ def _validate_measurement(value: Any, label: str) -> dict[str, Any]:
 
 
 def _client_backend_sessions(sessions: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
-    """Project an activity sample onto the sessions the trust boundary targets."""
+    """Project an activity sample onto the sessions the trust boundary targets.
 
-    return [session for session in sessions if session["backend_type"] == CLIENT_BACKEND_TYPE]
+    G14 twin of the producer/checkpoint projections: a session is a trust-
+    boundary threat only when it is both an external client backend AND holds
+    INSERT/UPDATE/DELETE on our compression target.  The display API's
+    readonly pool (``nhms_display_ro``) renders as a client backend but has
+    no write grants on the hypertable, so it is not the concurrent-writer
+    identity this drift check guards against.
+    """
+
+    return [
+        session
+        for session in sessions
+        if session["backend_type"] == CLIENT_BACKEND_TYPE
+        and session["has_write_privilege_on_target"] is True
+    ]
 
 
 def _validate_phase(
@@ -2397,6 +2429,8 @@ def _validate_phase(
                     "state",
                     "wait_event_type",
                     "backend_type",
+                    "usename",
+                    "has_write_privilege_on_target",
                     "query_signature",
                 },
                 f"benchmark activity[{index}].sessions[{session_index}]",

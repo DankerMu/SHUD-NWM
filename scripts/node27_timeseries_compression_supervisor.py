@@ -1112,23 +1112,44 @@ def _verify_checkout_lineage(plan: Mapping[str, Any], *, wall: HardWall) -> None
 
 
 def _assert_no_client_backend_session(activity: Any) -> None:
-    """Fail closed on external client sessions; tolerate PostgreSQL's own workers.
+    """Fail closed on external write-capable client sessions; tolerate every-
+    thing else.
 
     MEASURED (launch 7, G9): the recompress mutation wakes autovacuum on the
     chunk it just created within seconds, so "ANY non-idle session = conflict"
     can essentially never pass a post-mutation checkpoint.  Only sessions with
     ``backend_type == 'client backend'`` can be the external writers the trust
-    boundary targets; every captured session stays persisted in the artifact
-    either way.  The exact-key shape gate keeps the judgment fail-closed: a
-    session missing ``backend_type`` cannot be silently tolerated.
+    boundary targets.  MEASURED (launch 11, G14): the display API's read-only
+    ``nhms_display_ro`` pool also renders as ``backend_type == 'client
+    backend'``, so a client-backend-only judgment aborts every post-decompress
+    checkpoint on a live node with the display API up.  Node-27's readonly
+    role has no INSERT/UPDATE/DELETE grants on the compression targets, so it
+    cannot mutate our hypertable no matter how many pooled connections it
+    holds; the trust-boundary conflict must therefore additionally require
+    ``has_write_privilege_on_target``.  Every captured session stays persisted
+    in the artifact at full fidelity; only the judgment narrows.  The exact-
+    key shape gate keeps the judgment fail-closed: a session missing any of
+    ``backend_type``/``usename``/``has_write_privilege_on_target`` cannot be
+    silently tolerated.
     """
 
     if not isinstance(activity, Mapping) or set(activity) != {"sessions"} or not isinstance(activity["sessions"], list):
         raise SupervisorError("checkpoint activity document shape differs")
+    expected_session_keys = {
+        "pid",
+        "state",
+        "wait_event_type",
+        "backend_type",
+        "usename",
+        "has_write_privilege_on_target",
+    }
     for session in activity["sessions"]:
-        if not isinstance(session, Mapping) or set(session) != {"pid", "state", "wait_event_type", "backend_type"}:
+        if not isinstance(session, Mapping) or set(session) != expected_session_keys:
             raise SupervisorError("checkpoint activity session shape differs")
-        if session["backend_type"] == CLIENT_BACKEND_TYPE:
+        if (
+            session["backend_type"] == CLIENT_BACKEND_TYPE
+            and session["has_write_privilege_on_target"] is True
+        ):
             raise SupervisorError("checkpoint observed a conflicting database session")
 
 
@@ -1145,9 +1166,20 @@ def capture_checkpoint(
 
     checkpoint_id = str(checkpoint["checkpoint_id"])
     safe_id = checkpoint_id.replace("/", "-")
+    # G14: judge conflict on the intersection of (a) external client backend
+    # AND (b) has INSERT/UPDATE/DELETE on our target hypertable.  The readonly
+    # display pool renders as ``client backend`` too, so backend_type alone
+    # cannot separate the trust-boundary writers we guard against from the
+    # display API's readonly connections; ``has_write_privilege_on_target`` is
+    # the fact that does.  Every session is still captured for forensics --
+    # only the judgment narrows.  ``COALESCE(..., false)`` fails closed for
+    # background workers where ``usename`` is NULL.
     activity_sql = (
         "SELECT json_build_object('sessions',COALESCE(json_agg(s ORDER BY pid),'[]'::json)) "
-        "FROM (SELECT pid,state,wait_event_type,backend_type FROM pg_stat_activity "
+        "FROM (SELECT pid,state,wait_event_type,backend_type,usename,"
+        "COALESCE(has_table_privilege(usename,'hydro.river_timeseries',"
+        "'INSERT,UPDATE,DELETE'),false) AS has_write_privilege_on_target "
+        "FROM pg_stat_activity "
         "WHERE datname=current_database() AND pid<>pg_backend_pid() "
         "AND state<>'idle') s"
     )

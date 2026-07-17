@@ -136,13 +136,32 @@ def _observed(ref: dict[str, Any]) -> dict[str, Any]:
     return {"artifact": ref, "device": info.st_dev, "inode": info.st_ino}
 
 
-def _checkpoint_session(backend_type: str, *, pid: int = 999) -> dict[str, Any]:
+def _checkpoint_session(
+    backend_type: str,
+    *,
+    pid: int = 999,
+    usename: str | None = "nhms",
+    has_write_privilege_on_target: bool = False,
+) -> dict[str, Any]:
     """A checkpoint-shape pg_stat_activity session (verifier exact-key set)."""
 
-    return {"pid": pid, "state": "active", "wait_event_type": None, "backend_type": backend_type}
+    return {
+        "pid": pid,
+        "state": "active",
+        "wait_event_type": None,
+        "backend_type": backend_type,
+        "usename": usename,
+        "has_write_privilege_on_target": has_write_privilege_on_target,
+    }
 
 
-def _benchmark_session(backend_type: str, *, pid: int = 1135) -> dict[str, Any]:
+def _benchmark_session(
+    backend_type: str,
+    *,
+    pid: int = 1135,
+    usename: str | None = "nhms",
+    has_write_privilege_on_target: bool = False,
+) -> dict[str, Any]:
     """A benchmark-shape activity session (producer/verifier exact-key set)."""
 
     return {
@@ -153,6 +172,8 @@ def _benchmark_session(backend_type: str, *, pid: int = 1135) -> dict[str, Any]:
         "state": "active",
         "wait_event_type": None,
         "backend_type": backend_type,
+        "usename": usename,
+        "has_write_privilege_on_target": has_write_privilege_on_target,
         "query_signature": "a" * 32,
     }
 
@@ -3647,12 +3668,18 @@ def test_retained_reference_change_after_publish_replaces_pass(tmp_path: Path, m
 
 
 def test_evidence_schema_requires_backend_type_on_activity_sessions() -> None:
-    # Locks the schema contract (G9 item F): the activity_session $def must
-    # require backend_type, so a session missing it fails the canonical schema
-    # even though additionalProperties otherwise governs the shape. Dropping
-    # backend_type from the $def's required list makes this test RED.
+    # Locks the schema contract (G9 item F + G14): the activity_session $def
+    # must require backend_type, so a session missing it fails the canonical
+    # schema even though additionalProperties otherwise governs the shape.
+    # G14 additionally requires ``usename`` and ``has_write_privilege_on_target``
+    # so the two-factor client-writer judgment can never regress to a "backend
+    # type alone" fail-open.  Dropping any of the three from the required list
+    # (or the properties block) makes this test RED.
     session_def = EVIDENCE_SCHEMA["$defs"]["activity_session"]
     assert "backend_type" in session_def["required"]
+    assert "usename" in session_def["required"]
+    assert "has_write_privilege_on_target" in session_def["required"]
+    assert session_def["properties"]["has_write_privilege_on_target"]["type"] == "boolean"
     validator = jsonschema.Draft7Validator(session_def, format_checker=jsonschema.FormatChecker())
     complete = {
         "pid": 1135,
@@ -3662,11 +3689,13 @@ def test_evidence_schema_requires_backend_type_on_activity_sessions() -> None:
         "state": "active",
         "wait_event_type": None,
         "backend_type": "autovacuum worker",
+        "usename": None,
+        "has_write_privilege_on_target": False,
         "query_signature": "a" * 32,
     }
     validator.validate(complete)
-    without_backend_type = {key: value for key, value in complete.items() if key != "backend_type"}
-    assert not validator.is_valid(without_backend_type)
+    for missing in ("backend_type", "usename", "has_write_privilege_on_target"):
+        assert not validator.is_valid({key: value for key, value in complete.items() if key != missing})
 
 
 def test_round3_current_d3_passes_and_catalog_drift_fails(tmp_path: Path) -> None:
@@ -3697,7 +3726,13 @@ def test_round3_checkpoint_bijection_and_raw_refs_are_required(tmp_path: Path) -
     events = [json.loads(line) for line in Path(bundle["execution"]["ledger"]["path"]).read_text().splitlines()]
     checkpoint = next(item for item in events if item["event_type"] == "checkpoint")
     activity = _read_ref(checkpoint["database_activity"]["artifact"])
-    activity["sessions"] = [_checkpoint_session(evidence.CLIENT_BACKEND_TYPE)]
+    activity["sessions"] = [
+        _checkpoint_session(
+            evidence.CLIENT_BACKEND_TYPE,
+            usename="nhms",
+            has_write_privilege_on_target=True,
+        )
+    ]
     checkpoint["database_activity"] = _observed(_json_ref(tmp_path, "conflicting-session.json", activity))
     ledger = tmp_path / "conflicting-session-ledger.jsonl"
     ledger.write_bytes(b"".join(_canonical(item) for item in events))
@@ -3760,15 +3795,72 @@ def test_benchmark_verifier_tolerates_transient_background_worker(tmp_path: Path
 
 
 def test_benchmark_verifier_rejects_client_backend_drift(tmp_path: Path) -> None:
-    # A client backend appearing in only some stages IS session-identity drift.
+    # A client backend that has write access to the compression target
+    # appearing in only some stages IS session-identity drift (G9 + G14).
     def mutate(document: dict[str, Any]) -> None:
         samples = document["queries"][0]["before"]["activity_samples"]
         for index in (1, 3):
-            samples[index]["sessions"] = [_benchmark_session(evidence.CLIENT_BACKEND_TYPE)]
+            samples[index]["sessions"] = [
+                _benchmark_session(
+                    evidence.CLIENT_BACKEND_TYPE,
+                    usename="nhms",
+                    has_write_privilege_on_target=True,
+                )
+            ]
 
     bundle = _mutated_benchmark_bundle(tmp_path, mutate)
     with pytest.raises(evidence.EvidenceError, match="session-identity drift"):
         evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+
+def test_benchmark_verifier_tolerates_readonly_display_client_backend(tmp_path: Path) -> None:
+    # G14 (launch 11): the display API's nhms_display_ro pool renders as a
+    # 'client backend' too, but it holds no writes on the compression target,
+    # so its arrival/departure across stages is NOT session-identity drift.
+    bundle = _bundle(tmp_path)
+    document = _read_ref(bundle["benchmarks"]["evidence"])
+    samples = document["queries"][0]["before"]["activity_samples"]
+    for index in (1, 3):
+        samples[index]["sessions"] = [
+            _benchmark_session(
+                evidence.CLIENT_BACKEND_TYPE,
+                pid=125,
+                usename="nhms_display_ro",
+                has_write_privilege_on_target=False,
+            )
+        ]
+    ref = _json_ref(tmp_path, "benchmark-readonly-display.json", document)
+    bundle["benchmarks"]["evidence"] = ref
+    _replace_produced_artifact(bundle, "benchmark_after", "benchmarks", ref, tmp_path)
+    terminal = evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    assert [query["name"] for query in terminal["benchmarks"]["queries"]] == ["curve", "mvt"]
+
+
+def test_checkpoint_verifier_tolerates_a_readonly_display_client_backend(tmp_path: Path) -> None:
+    # G14 verifier twin: the checkpoint-side judgment must ignore the display
+    # API's readonly client-backend session for the same reason.
+    bundle = _bundle(tmp_path)
+    events = [json.loads(line) for line in Path(bundle["execution"]["ledger"]["path"]).read_text().splitlines()]
+    checkpoint = next(item for item in events if item["event_type"] == "checkpoint")
+    activity = _read_ref(checkpoint["database_activity"]["artifact"])
+    activity["sessions"] = [
+        _checkpoint_session(
+            evidence.CLIENT_BACKEND_TYPE,
+            pid=125,
+            usename="nhms_display_ro",
+            has_write_privilege_on_target=False,
+        )
+    ]
+    checkpoint["database_activity"] = _observed(_json_ref(tmp_path, "readonly-display-session.json", activity))
+    ledger = tmp_path / "readonly-display-ledger.jsonl"
+    ledger.write_bytes(b"".join(_canonical(item) for item in events))
+    bundle["execution"]["ledger"] = _file_ref(ledger)
+    assert (
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)["preflight"][
+            "quiescent"
+        ]
+        is True
+    )
 
 
 def test_round3_plan_hash_ledger_order_journal_and_observed_associations_are_derived(tmp_path: Path) -> None:

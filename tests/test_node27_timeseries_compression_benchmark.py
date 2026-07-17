@@ -306,7 +306,13 @@ def test_merge_rejects_production_identity_drift() -> None:
         benchmark.merge_benchmark_slices(before, after)
 
 
-def _fake_session(backend_type: str, *, pid: int = 42) -> dict[str, Any]:
+def _fake_session(
+    backend_type: str,
+    *,
+    pid: int = 42,
+    usename: str | None = "nhms",
+    has_write_privilege_on_target: bool = False,
+) -> dict[str, Any]:
     return {
         "pid": pid,
         "backend_start": datetime(2026, 7, 15, tzinfo=UTC),
@@ -315,15 +321,20 @@ def _fake_session(backend_type: str, *, pid: int = 42) -> dict[str, Any]:
         "state": "active",
         "wait_event_type": None,
         "backend_type": backend_type,
+        "usename": usename,
+        "has_write_privilege_on_target": has_write_privilege_on_target,
         "query_signature": "a" * 32,
     }
 
 
 def test_activity_drift_is_preserved_not_claimed_stable() -> None:
-    # G9: a client backend drifting across stages IS the concurrent-writer
-    # identity the stability flag guards, so it must still flip stable to False.
+    # G9 + G14: a client backend that holds writes on the compression target
+    # drifting across stages IS the concurrent-writer identity the stability
+    # flag guards, so it must still flip stable to False.
     cursor = _FakeCursor(result_rows=[{"value": 1}], plan_reads=[0] * 10)
-    session = _fake_session("client backend")
+    session = _fake_session(
+        "client backend", usename="nhms", has_write_privilege_on_target=True
+    )
     monitor_cursor = _FakeCursor(
         result_rows=[],
         plan_reads=[],
@@ -346,7 +357,7 @@ def test_transient_background_worker_is_tolerated_and_persisted() -> None:
     # G9: an autovacuum worker appearing in only some stages is NOT drift; the
     # phase stays material_load_stable while the full session lists persist.
     cursor = _FakeCursor(result_rows=[{"value": 1}], plan_reads=[0] * 10)
-    worker = _fake_session("autovacuum worker", pid=1135)
+    worker = _fake_session("autovacuum worker", pid=1135, usename=None)
     monitor_cursor = _FakeCursor(
         result_rows=[],
         plan_reads=[],
@@ -362,6 +373,40 @@ def test_transient_background_worker_is_tolerated_and_persisted() -> None:
         result_kind="curve",
     )
     assert [len(sample["sessions"]) for sample in phase["activity_samples"]] == [0, 1, 0, 1, 0]
+    assert all(sample["material_load_stable"] for sample in phase["activity_samples"])
+
+
+def test_readonly_display_client_backend_is_tolerated_not_claimed_drift() -> None:
+    # G14 (launch 11): the display API's nhms_display_ro pool renders as
+    # backend_type='client backend' but has no INSERT/UPDATE/DELETE grant on
+    # the compression target.  Its arrival/departure across stages must NOT
+    # flip material_load_stable, while the full session rows still persist.
+    cursor = _FakeCursor(result_rows=[{"value": 1}], plan_reads=[0] * 10)
+    display_pool = _fake_session(
+        "client backend",
+        pid=125,
+        usename="nhms_display_ro",
+        has_write_privilege_on_target=False,
+    )
+    monitor_cursor = _FakeCursor(
+        result_rows=[],
+        plan_reads=[],
+        activity_sessions=[[], [display_pool], [], [display_pool], []],
+    )
+    connection = _FakeConnection(cursor)
+    monitor = _FakeConnection(monitor_cursor)
+    phase = benchmark._capture_phase(
+        connection,
+        monitor_connection=monitor,
+        statement="SELECT 1 AS value",
+        parameters=(),
+        result_kind="curve",
+    )
+    assert [len(sample["sessions"]) for sample in phase["activity_samples"]] == [0, 1, 0, 1, 0]
+    # Full row is captured (usename + write-privilege flag preserved).
+    persisted = phase["activity_samples"][1]["sessions"][0]
+    assert persisted["usename"] == "nhms_display_ro"
+    assert persisted["has_write_privilege_on_target"] is False
     assert all(sample["material_load_stable"] for sample in phase["activity_samples"])
 
 

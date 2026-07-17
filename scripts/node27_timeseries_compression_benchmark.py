@@ -54,6 +54,12 @@ EXPLAIN_PREFIX = "EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON) "
 ACTIVITY_SQL = """
 SELECT pid, backend_start, xact_start, query_start, state, wait_event_type,
        backend_type,
+       usename,
+       COALESCE(
+         has_table_privilege(usename, 'hydro.river_timeseries',
+                             'INSERT,UPDATE,DELETE'),
+         false
+       ) AS has_write_privilege_on_target,
        md5(regexp_replace(query, '\\s+', ' ', 'g')) AS query_signature
 FROM pg_stat_activity
 WHERE datname = current_database()
@@ -309,6 +315,10 @@ def _activity_snapshot(cursor: Any, *, deadline: _Deadline) -> tuple[list[dict[s
                 "state": row.get("state"),
                 "wait_event_type": row.get("wait_event_type"),
                 "backend_type": row.get("backend_type"),
+                "usename": row.get("usename"),
+                "has_write_privilege_on_target": bool(
+                    row.get("has_write_privilege_on_target")
+                ),
                 "query_signature": row.get("query_signature"),
             }
         )
@@ -316,9 +326,22 @@ def _activity_snapshot(cursor: Any, *, deadline: _Deadline) -> tuple[list[dict[s
 
 
 def _client_backend_sessions(sessions: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
-    """Project an activity snapshot onto the sessions the trust boundary targets."""
+    """Project an activity snapshot onto the sessions the trust boundary targets.
 
-    return [session for session in sessions if session.get("backend_type") == CLIENT_BACKEND_TYPE]
+    G14: a session is a trust-boundary threat only when it is both an external
+    client backend AND holds INSERT/UPDATE/DELETE on our compression target.
+    The display API's readonly role (``nhms_display_ro``) renders as a client
+    backend too, but its ``has_write_privilege_on_target`` is false because
+    the role has no write grants on the hypertable, so it cannot cause the
+    session-identity drift this projection guards against.
+    """
+
+    return [
+        session
+        for session in sessions
+        if session.get("backend_type") == CLIENT_BACKEND_TYPE
+        and session.get("has_write_privilege_on_target") is True
+    ]
 
 
 def _set_statement_bounds(cursor: Any, *, deadline: _Deadline) -> None:
