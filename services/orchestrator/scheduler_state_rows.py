@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
@@ -213,6 +214,10 @@ def _shared_stage_cycle_run_matches_candidate(
         return False
     prefix = f"cycle_{source}_{compact_cycle}_"
     stage = str(run_id).removeprefix(prefix) if str(run_id).startswith(prefix) else ""
+    if "_cohort_" in stage:
+        stage, separator, member_digest = stage.partition("_cohort_")
+        if not separator or re.fullmatch(r"[0-9a-f]{12}", member_digest) is None:
+            return False
     return stage == "full" or stage in DOWNSTREAM_RESTART_STAGES
 
 def _state_row_has_m23_comparison_fields(values: Mapping[str, str]) -> bool:

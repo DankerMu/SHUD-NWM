@@ -4,6 +4,7 @@ import ast
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 from collections.abc import Mapping, Sequence
@@ -27,6 +28,7 @@ from services.orchestrator import scheduler_execution as scheduler_execution_mod
 from services.orchestrator import scheduler_file_providers as scheduler_file_providers_module
 from services.orchestrator import scheduler_lease as scheduler_lease_module
 from services.orchestrator import scheduler_state as scheduler_state_module
+from services.orchestrator import scheduler_state_rows as scheduler_state_rows_module
 from services.orchestrator.chain import (
     M3_STAGES,
     OrchestratorConfig,
@@ -806,12 +808,14 @@ def test_scheduler_execution_compat_wrappers_delegate_to_owner_module(monkeypatc
             source_id: str,
             cycle_time_arg: datetime,
             cohort_key: tuple[int, str],
+            candidates_arg: Sequence[Any],
             *,
             format_cycle_time: Any,
         ) -> str:
             assert source_id == "gfs"
             assert cycle_time_arg is cycle_time
             assert cohort_key == (1, "forecast")
+            assert candidates_arg is candidates
             assert format_cycle_time is patched_format_cycle_time
             return "cycle-gfs-forecast"
 
@@ -822,7 +826,9 @@ def test_scheduler_execution_compat_wrappers_delegate_to_owner_module(monkeypatc
             fake_candidate_execution_cohort_run_id,
         )
         assert (
-            scheduler_module._candidate_execution_cohort_run_id("gfs", cycle_time, (1, "forecast"))
+            scheduler_module._candidate_execution_cohort_run_id(
+                "gfs", cycle_time, (1, "forecast"), candidates
+            )
             == "cycle-gfs-forecast"
         )
 
@@ -832,8 +838,10 @@ def test_scheduler_execution_compat_wrappers_delegate_to_owner_module(monkeypatc
             source_id: str,
             cycle_time_arg: datetime,
             cohort_key: tuple[int, str],
+            candidates_arg: Sequence[Any],
         ) -> str:
             del source_id, cycle_time_arg, cohort_key
+            assert candidates_arg is candidates
             return "run-for-cohort"
 
         def patched_run_id_for_candidate(
@@ -2932,7 +2940,60 @@ def test_full_cohort_candidates_share_one_slurm_array_cohort() -> None:
         [candidate_a, candidate_b],
     )
 
-    assert cohorts == [([candidate_a, candidate_b], "cycle_gfs_2026052106_full")]
+    assert len(cohorts) == 1
+    assert cohorts[0][0] == [candidate_a, candidate_b]
+    cohort_run_id = cohorts[0][1]
+    assert cohort_run_id is not None
+    assert re.fullmatch(r"cycle_gfs_2026052106_full_cohort_[0-9a-f]{12}", cohort_run_id)
+
+    reordered = scheduler_module._candidate_execution_cohorts(
+        "gfs",
+        _dt("2026-05-21T06:00:00Z"),
+        (0, "full"),
+        [candidate_b, candidate_a],
+    )
+    assert reordered[0][1] == cohort_run_id
+
+    expanded = scheduler_module._candidate_execution_cohorts(
+        "gfs",
+        _dt("2026-05-21T06:00:00Z"),
+        (0, "full"),
+        [
+            candidate_a,
+            candidate_b,
+            replace(
+                candidate_a,
+                candidate_id="gfs_2026052106_model_c",
+                model_id="model_c",
+            ),
+        ],
+    )
+    assert expanded[0][1] != cohort_run_id
+
+
+def test_shared_cohort_run_state_requires_valid_digest_and_matching_model() -> None:
+    expected = {
+        "source": "gfs",
+        "cycle_time": "2026-05-21T06:00:00Z",
+        "model_id": "model_a",
+    }
+    row = {"model_id": "model_a"}
+
+    assert scheduler_state_rows_module._shared_stage_cycle_run_matches_candidate(
+        "cycle_gfs_2026052106_forcing_cohort_012345abcdef",
+        row,
+        expected,
+    )
+    assert not scheduler_state_rows_module._shared_stage_cycle_run_matches_candidate(
+        "cycle_gfs_2026052106_forcing_cohort_not-a-digest",
+        row,
+        expected,
+    )
+    assert not scheduler_state_rows_module._shared_stage_cycle_run_matches_candidate(
+        "cycle_gfs_2026052106_forcing_cohort_012345abcdef",
+        {"model_id": "model_b"},
+        expected,
+    )
 
 
 def test_raw_manifest_reuse_overrides_residual_restart_stage(tmp_path: Path) -> None:
@@ -3105,7 +3166,10 @@ def test_multi_basin_raw_manifest_reuse_submits_one_convert_array_cohort(tmp_pat
     assert {basin["model_id"] for basin in basins} == {"qhh", "heihe"}
     for basin in basins:
         assert basin["restart_stage"] == "convert"
-        assert basin["orchestration_run_id"] == "cycle_gfs_2026052106_convert"
+        assert re.fullmatch(
+            r"cycle_gfs_2026052106_convert_cohort_[0-9a-f]{12}",
+            basin["orchestration_run_id"],
+        )
         assert basin["state_evidence"]["fresh_ingestion"] == {
             "required": False,
             "mode": "reuse_raw_then_convert",
@@ -11052,7 +11116,11 @@ def test_multi_candidate_restart_cohorts_are_candidate_scoped_and_second_scan_se
     assert first.evidence["counts"]["submitted_count"] == 2
     assert len(orchestrator.calls) == 1
     first_run_ids = {basin["orchestration_run_id"] for basin in orchestrator.calls[0]["basins"]}
-    assert first_run_ids == {"cycle_gfs_2026052106_parse"}
+    assert len(first_run_ids) == 1
+    assert re.fullmatch(
+        r"cycle_gfs_2026052106_parse_cohort_[0-9a-f]{12}",
+        next(iter(first_run_ids)),
+    )
     assert all(basin["restart_stage"] == "parse" for basin in orchestrator.calls[0]["basins"])
     assert second.evidence["counts"]["submitted_count"] == 0
     assert [item["reason"] for item in second.evidence["skipped_candidates"]] == [

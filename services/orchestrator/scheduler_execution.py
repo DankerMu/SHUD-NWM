@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -811,11 +812,16 @@ def candidate_execution_cohort_run_id(
     source_id: str,
     cycle_time: datetime,
     cohort_key: tuple[int, str],
+    candidates: Sequence[SchedulerExecutionCandidate],
     *,
     format_cycle_time: Callable[[datetime], str],
 ) -> str:
     stage = re.sub(r"[^A-Za-z0-9_.-]+", "_", cohort_key[1]).strip("._-") or "full"
-    return f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}_{stage}"
+    member_identity = "\0".join(
+        sorted(f"{candidate.model_id}\0{candidate.candidate_id}" for candidate in candidates)
+    )
+    member_digest = hashlib.sha256(member_identity.encode("utf-8")).hexdigest()[:12]
+    return f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}_{stage}_cohort_{member_digest}"
 
 
 def candidate_execution_cohorts(
@@ -824,7 +830,10 @@ def candidate_execution_cohorts(
     cohort_key: tuple[int, str],
     candidates: Sequence[SchedulerExecutionCandidate],
     *,
-    run_id_for_cohort: Callable[[str, datetime, tuple[int, str]], str],
+    run_id_for_cohort: Callable[
+        [str, datetime, tuple[int, str], Sequence[SchedulerExecutionCandidate]],
+        str,
+    ],
     run_id_for_candidate: Callable[
         [str, datetime, tuple[int, str], SchedulerExecutionCandidate],
         str,
@@ -836,7 +845,12 @@ def candidate_execution_cohorts(
     if len(cohort_candidates) == 1:
         candidate = cohort_candidates[0]
         return [([candidate], run_id_for_candidate(source_id, cycle_time, cohort_key, candidate))]
-    return [(cohort_candidates, run_id_for_cohort(source_id, cycle_time, cohort_key))]
+    return [
+        (
+            cohort_candidates,
+            run_id_for_cohort(source_id, cycle_time, cohort_key, cohort_candidates),
+        )
+    ]
 
 
 def candidate_execution_cohort_run_id_for_candidate(
