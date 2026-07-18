@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Clone warm states for an explicit baseline -> direct-grid cutover.
+"""Clone node-22 warm states for an explicit baseline -> direct-grid cutover.
 
 The command is intentionally bounded to one cutover time and an explicit
 warm/cold basin partition.  Warm candidates pass the platform's hydrologic
