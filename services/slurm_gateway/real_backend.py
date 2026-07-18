@@ -1192,6 +1192,7 @@ class RealSlurmGateway(SlurmGateway):
                 member_rows,
                 job_id,
                 expected_task_count=expected_task_count,
+                parent_fields=matching_fields,
             )
         if matching_fields is not None:
             return self._record_from_sacct_fields(matching_fields, job_id)
@@ -1203,6 +1204,7 @@ class RealSlurmGateway(SlurmGateway):
         job_id: str,
         *,
         expected_task_count: int | None = None,
+        parent_fields: Sequence[str] | None = None,
     ) -> SlurmJobRecord:
         """Collapse Slurm array member rows into one parent-level status record.
 
@@ -1248,7 +1250,12 @@ class RealSlurmGateway(SlurmGateway):
                 exit_field = row[2]
                 break
 
-        aggregated = [job_id, aggregate_raw, exit_field, start_field, end_field, elapsed_field]
+        metric_fields = (
+            list(parent_fields[5:])
+            if parent_fields is not None and len(parent_fields) > 5
+            else [elapsed_field]
+        )
+        aggregated = [job_id, aggregate_raw, exit_field, start_field, end_field, *metric_fields]
         return self._record_from_sacct_fields(aggregated, job_id)
 
     def _parse_sacct_list(self, stdout: str) -> list[SlurmJobRecord]:

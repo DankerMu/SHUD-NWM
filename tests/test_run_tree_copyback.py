@@ -711,6 +711,112 @@ def test_state_index_copyback_serializes_against_refresh_publisher_without_deadl
     assert {entry["state_id"] for entry in payload["entries"]} == {"private-state", "shared-state"}
 
 
+def test_state_index_copyback_holds_source_lock_until_checkpoint_copy_finishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    run_id = "fcst_gfs_2026062700_basins_heihe_shud"
+    _write_run(object_root, run_id)
+    private_store = LocalObjectStore(object_root, "s3://nhms")
+    shared_store = LocalObjectStore(copyback_root, "s3://nhms")
+    first_content = _valid_state_bytes(b"first")
+    second_content = _valid_state_bytes(b"second")
+    shared_content = _valid_state_bytes(b"shared")
+    first_uri = private_store.write_bytes_atomic("states/gfs/model_a/first/state.cfg.ic", first_content)
+    second_uri = private_store.write_bytes_atomic("states/gfs/model_a/second/state.cfg.ic", second_content)
+    shared_uri = shared_store.write_bytes_atomic("states/gfs/model_a/shared/state.cfg.ic", shared_content)
+    private_store.write_bytes_atomic("states/gfs/model_a/shared/state.cfg.ic", shared_content)
+    source_index = object_root / "scheduler/state-index/index-last.json"
+    destination_index = copyback_root / "scheduler/state-index/index-last.json"
+    first_entry = {
+        **_state_entry("first-state", first_uri, first_content, "2026-06-27T01:00:00Z"),
+        "run_id": run_id,
+    }
+    second_entry = {
+        **_state_entry("second-state", second_uri, second_content, "2026-06-27T02:00:00Z"),
+        "run_id": run_id,
+    }
+    shared_entry = _state_entry("shared-state", shared_uri, shared_content, "2026-06-27T00:00:00Z")
+    publish_state_snapshot_index(
+        [first_entry],
+        source_index,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
+    )
+    publish_state_snapshot_index(
+        [shared_entry],
+        destination_index,
+        object_store_root=copyback_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
+    )
+
+    entered = threading.Event()
+    release = threading.Event()
+    real_copy_checkpoint = state_manager_module._copyback_state_checkpoint
+    copyback_errors: list[BaseException] = []
+    publisher_errors: list[BaseException] = []
+
+    def pause_checkpoint(*args: object, **kwargs: object) -> str:
+        result = real_copy_checkpoint(*args, **kwargs)
+        entered.set()
+        assert release.wait(timeout=10)
+        return result
+
+    def run_copyback() -> None:
+        try:
+            copyback_run_trees(
+                object_store_root=object_root,
+                copyback_root=copyback_root,
+                run_ids=[run_id],
+                extra_object_keys=["scheduler/state-index/index-last.json"],
+            )
+        except BaseException as error:  # pragma: no cover - asserted below
+            copyback_errors.append(error)
+
+    def publish_replacement() -> None:
+        try:
+            publish_state_snapshot_index(
+                [second_entry],
+                source_index,
+                object_store_root=object_root,
+                object_store_prefix="s3://nhms",
+                generated_at=datetime(2026, 6, 27, 3, tzinfo=UTC),
+            )
+        except BaseException as error:  # pragma: no cover - asserted below
+            publisher_errors.append(error)
+
+    monkeypatch.setattr(state_manager_module, "_copyback_state_checkpoint", pause_checkpoint)
+    copyback_thread = threading.Thread(target=run_copyback)
+    copyback_thread.start()
+    assert entered.wait(timeout=10), copyback_errors
+    publisher_thread = threading.Thread(target=publish_replacement)
+    publisher_thread.start()
+    publisher_thread.join(timeout=10)
+    assert not publisher_thread.is_alive()
+    assert len(publisher_errors) == 1
+    assert getattr(publisher_errors[0], "reason", None) == "provider_already_running"
+
+    release.set()
+    copyback_thread.join(timeout=10)
+
+    assert not copyback_thread.is_alive()
+    assert not copyback_errors
+    destination_payload = json.loads(destination_index.read_text())
+    assert {entry["state_id"] for entry in destination_payload["entries"]} == {
+        "first-state",
+        "shared-state",
+    }
+    publisher_errors.clear()
+    publish_replacement()
+    assert not publisher_errors
+    source_payload = json.loads(source_index.read_text())
+    assert {entry["state_id"] for entry in source_payload["entries"]} == {"second-state"}
+
+
 def _valid_state_bytes(seed: bytes) -> bytes:
     minute = 27_000_000.0 + (int.from_bytes(seed[:4].ljust(4, b"\x00"), "big") % 1000)
     return (

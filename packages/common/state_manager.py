@@ -1882,6 +1882,33 @@ def merge_state_snapshot_index_copyback(
     merged checkpoints are checksum-copied into the shared destination.
     """
 
+    with provider_destination_lock(
+        source_path,
+        containment_root=source_containment_root,
+    ):
+        return _merge_state_snapshot_index_copyback_locked(
+            source_path=source_path,
+            destination_path=destination_path,
+            reference_object_store_root=reference_object_store_root,
+            object_store_prefix=object_store_prefix,
+            source_containment_root=source_containment_root,
+            destination_containment_root=destination_containment_root,
+            authoritative_run_ids=authoritative_run_ids,
+        )
+
+
+def _merge_state_snapshot_index_copyback_locked(
+    *,
+    source_path: Path,
+    destination_path: Path,
+    reference_object_store_root: str | Path,
+    object_store_prefix: str,
+    source_containment_root: Path,
+    destination_containment_root: Path,
+    authoritative_run_ids: Collection[str] | None,
+) -> dict[str, Any]:
+    """Merge while the private source index and its checkpoint set are stable."""
+
     try:
         source_content, _source_preimage = read_provider_snapshot(
             source_path,

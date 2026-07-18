@@ -143,7 +143,7 @@ def test_real_slurm_gateway_fake_binaries_cover_command_boundary(
     assert array.manifest["max_concurrent"] == 2
 
     status = gateway.get_job_status("12345")
-    assert status.status == SlurmJobStatus.CANCELLED
+    assert status.status == SlurmJobStatus.FAILED
     assert status.elapsed == "00:05:00"
     assert status.max_rss == "1024K"
     assert status.resource_metrics == {
@@ -200,8 +200,9 @@ def test_real_slurm_gateway_fake_binaries_cover_command_boundary(
     jobs = gateway.list_jobs(limit=10, offset=0)
     assert [job.job_id for job in jobs] == ["12345", "12346"]
     assert gateway.health().status == "healthy"
-    cancelled = gateway.cancel_job("12345")
-    assert cancelled.status == SlurmJobStatus.CANCELLED
+    with pytest.raises(SlurmGatewayError) as cancellation:
+        gateway.cancel_job("12345")
+    assert cancellation.value.code == "SLURM_CANCELLATION_PENDING"
 
     log_dir = tmp_path / "workspace" / "run_001" / "logs"
     log_dir.mkdir(parents=True)
