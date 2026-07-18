@@ -21,10 +21,7 @@ from typing import Any
 from packages.common.object_store import LocalObjectStore
 from packages.common.source_identity import normalize_source_id
 from packages.common.state_clone import fingerprint_gated_state_clone
-from packages.common.state_manager import (
-    FileStateSnapshotIndexRepository,
-    PsycopgStateSnapshotRepository,
-)
+from packages.common.state_manager import FileStateSnapshotIndexRepository
 from scripts.provision_direct_grid_scheduler_registry import _category_files, _required_single
 from workers.data_adapters.base import parse_cycle_time
 from workers.mapping_builder.rewrite import verify_hydrologic_core_fingerprint_equal
@@ -131,7 +128,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         root=Path(args.object_store_root),
         object_store_prefix=args.object_store_prefix,
     )
-    db_repo = PsycopgStateSnapshotRepository(args.database_url)
     file_repo = FileStateSnapshotIndexRepository(
         index_uri=args.state_index,
         object_store_root=args.object_store_root,
@@ -147,18 +143,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         for source_id in ("gfs", "IFS"):
             variant = variants[(baseline_id, source_id)]
             target_id = str(variant["model_id"])
-            existing_db = db_repo.get_state_snapshot_by_model_time(
-                model_id=target_id,
-                source_id=source_id,
-                valid_time=cutover_time,
-            )
             existing_file = file_repo.get_state_snapshot_by_model_time(
                 model_id=target_id,
                 source_id=source_id,
                 valid_time=cutover_time,
             )
             if baseline_id in cold_basins:
-                if existing_db is not None or existing_file is not None:
+                if existing_file is not None:
                     raise CutoverCloneError(
                         f"cold basin already has target state: {baseline_id}/{source_id}/{target_id}"
                     )
@@ -173,7 +164,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 )
                 continue
 
-            source_state = db_repo.get_state_snapshot_by_model_time(
+            source_state = file_repo.get_state_snapshot_by_model_time(
                 model_id=baseline_id,
                 source_id=source_id,
                 valid_time=cutover_time,
@@ -223,7 +214,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     state_schema_bytes=state_schema_bytes,
                     solver_config_bytes=solver_config_bytes,
                     m1_forcing_mapping_manifest=dict(manifest.get("direct_grid_forcing") or {}),
-                    repository=db_repo,
+                    repository=file_repo,
                     audit_recorder=recorder,
                 )
                 if result.refused or result.cloned_row is None:
@@ -231,7 +222,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         f"state clone refused: {baseline_id}/{source_id}: "
                         f"{result.refusal_scope}; audit={recorder.records}"
                     )
-                file_repo.upsert_state_snapshot(result.cloned_row)
                 state_id = result.cloned_row.state_id
             decisions.append(
                 {
@@ -267,7 +257,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--database-url", default=os.getenv("DATABASE_URL"), required=False)
     parser.add_argument("--object-store-root", required=True)
     parser.add_argument("--object-store-prefix", default="s3://nhms")
     parser.add_argument("--state-index", required=True)
@@ -286,8 +275,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    if not args.database_url:
-        parser.error("--database-url or DATABASE_URL is required")
     args.dry_run = not args.apply
     print(json.dumps(run(args), ensure_ascii=False, sort_keys=True))
     return 0
