@@ -2031,6 +2031,12 @@ def test_terminal_stage_forecast_state_save_qc_skips_parse_and_publish(tmp_path:
         "state_save_qc",
     ]
     assert [stage.status for stage in result.stages] == ["succeeded", "succeeded", "succeeded", "succeeded"]
+    assert {run["status"] for run in repository.hydro_runs.values()} == {"succeeded"}
+    assert {run["slurm_job_id"] for run in repository.hydro_runs.values()} == {
+        "2003_0",
+        "2003_1",
+        "2003_2",
+    }
     assert "parse" not in {job["stage"] for job in repository.jobs.values()}
     assert "publish" not in {job["stage"] for job in repository.jobs.values()}
 
