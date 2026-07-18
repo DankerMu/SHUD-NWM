@@ -583,6 +583,52 @@ def test_regular_grid_fast_path_matches_geodesic(tmp_path: pathlib.Path) -> None
         assert own.geodesic_distance_m == pytest.approx(geo_dist, rel=1.0e-12, abs=1.0e-9)
 
 
+def test_regular_grid_uses_geodesic_winner_when_planar_rounding_differs(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Ellipsoidal distance, not independent axis rounding, owns boundaries."""
+
+    cells = make_regular_grid_cells(
+        lon0=109.0,
+        lat0=29.0,
+        lon_step=0.25,
+        lat_step=0.25,
+        lon_count=9,
+        lat_count=9,
+    )
+    loader = InMemoryGridSnapshotLoader(
+        source_id="ifs",
+        grid_id="regular_boundary_grid",
+        snapshot=make_snapshot(
+            source_id="ifs",
+            grid_id="regular_boundary_grid",
+            cells=cells,
+            bbox_pad=1.0,
+        ),
+        cells=cells,
+    )
+    baseline = _single_element_basin(
+        tmp_path,
+        v1=(109.94, 30.115),
+        v2=(109.97, 30.115),
+        v3=(109.94, 30.145),
+    )
+
+    ownership = nearest_cell_barycenter_geodesic_v1(
+        baseline_root=baseline,
+        source_id="ifs",
+        grid_id="regular_boundary_grid",
+        store=loader,
+    )[0]
+    structure = algorithm_module._detect_regular_grid(cells)
+    assert structure is not None
+    planar = algorithm_module._select_cell_by_lonlat_round(109.95, 30.125, structure)
+
+    assert planar.latitude == 30.0
+    assert ownership.grid_cell_id != planar.grid_cell_id
+    assert next(cell for cell in cells if cell.grid_cell_id == ownership.grid_cell_id).latitude == 30.25
+
+
 def test_regular_grid_fast_path_divergence_raises(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -614,15 +660,15 @@ def test_regular_grid_fast_path_divergence_raises(
         v3=(30.02 - 0.01, 40.03 + 0.02),
     )
 
-    # Return a cell that is definitely NOT the geodesic pick.
-    wrong_cell = next(c for c in cells if c.grid_cell_id == "8")
+    real_neighbors = algorithm_module._regular_grid_neighbor_cells
 
-    def _lying_fast_path(lon, lat, structure):  # noqa: ANN001 - test double
-        return wrong_cell
+    def _lying_neighbors(lon, lat, structure, *, radius=1):  # noqa: ANN001
+        candidates = real_neighbors(lon, lat, structure, radius=radius)
+        if radius == 1:
+            return (next(c for c in cells if c.grid_cell_id == "8"),)
+        return candidates
 
-    monkeypatch.setattr(
-        algorithm_module, "_select_cell_by_lonlat_round", _lying_fast_path
-    )
+    monkeypatch.setattr(algorithm_module, "_regular_grid_neighbor_cells", _lying_neighbors)
 
     with pytest.raises(RegularGridFastPathParityError) as exc_info:
         nearest_cell_barycenter_geodesic_v1(

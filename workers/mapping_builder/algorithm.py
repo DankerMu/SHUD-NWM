@@ -521,8 +521,10 @@ def _regular_grid_neighbor_cells(
     longitude: float,
     latitude: float,
     structure: _RegularGridStructure,
+    *,
+    radius: int = 1,
 ) -> tuple[CanonicalGridCell, ...]:
-    """Return the bounded 3×3 neighborhood containing the global nearest cell.
+    """Return a bounded neighborhood around the planar nearest grid center.
 
     On a complete rectilinear grid, distance to a cell center grows
     monotonically after crossing the adjacent longitude/latitude center in
@@ -538,11 +540,13 @@ def _regular_grid_neighbor_cells(
     lon_index = structure.unique_lons.index(nearest_lon)
     lat_index = structure.unique_lats.index(nearest_lat)
     candidates: list[CanonicalGridCell] = []
-    for lat_offset in (-1, 0, 1):
+    if radius < 0:
+        raise ValueError("regular-grid neighborhood radius must be non-negative")
+    for lat_offset in range(-radius, radius + 1):
         candidate_lat_index = lat_index + lat_offset
         if not 0 <= candidate_lat_index < len(structure.unique_lats):
             continue
-        for lon_offset in (-1, 0, 1):
+        for lon_offset in range(-radius, radius + 1):
             candidate_lon_index = lon_index + lon_offset
             if not 0 <= candidate_lon_index < len(structure.unique_lons):
                 continue
@@ -845,12 +849,12 @@ def nearest_cell_barycenter_geodesic_v1(
        regular grid and the full cell set otherwise, delegating tie-break to
        :func:`resolve_tie_by_canonical_ordinal` (spec §2.2 smallest-
        canonical-ordinal).
-    6. If the cells form a regular lat/lon grid, additionally compute each
-       element's cell via independent lon/lat rounding and raise
+    6. If the cells form a regular lat/lon grid, additionally recompute each
+       element over a wider 5×5 geodesic neighborhood and raise
        :class:`RegularGridFastPathParityError` if it disagrees with the
-       geodesic pick. The reported ``geodesic_distance_m`` is always the
-       geodesic value — the fast path is a defense-in-depth cross-check,
-       never a silent shortcut.
+       3×3 pick. Independent lon/lat rounding is only the neighborhood seed:
+       on an ellipsoid it can legitimately differ from the geodesic winner
+       near a cell boundary.
     7. Apply :func:`verify_half_cell_diagonal_sanity_bound` per element (spec
        §2.2): raise :class:`DistanceSanityBoundExceededError` if the picked
        geodesic distance exceeds ``local_half_cell_diagonal +
@@ -932,7 +936,7 @@ def nearest_cell_barycenter_geodesic_v1(
     ownerships: list[ElementOwnership] = []
     for element_id, lon, lat in barycenters_wgs84:
         geodesic_candidates = (
-            _regular_grid_neighbor_cells(lon, lat, structure)
+            _regular_grid_neighbor_cells(lon, lat, structure, radius=1)
             if structure is not None
             else cells
         )
@@ -944,12 +948,23 @@ def nearest_cell_barycenter_geodesic_v1(
         )
         candidate_count = len(cells)
         if structure is not None:
-            fast_pick = _select_cell_by_lonlat_round(lon, lat, structure)
-            if fast_pick.grid_cell_id != cell.grid_cell_id:
+            verification_candidates = _regular_grid_neighbor_cells(
+                lon,
+                lat,
+                structure,
+                radius=2,
+            )
+            verified_cell, _, _, _ = _select_nearest_cell_geodesic(
+                lon=lon,
+                lat=lat,
+                cells=verification_candidates,
+                geod=geod,
+            )
+            if verified_cell.grid_cell_id != cell.grid_cell_id:
                 raise RegularGridFastPathParityError(
                     element_id=element_id,
-                    geodesic_grid_cell_id=cell.grid_cell_id,
-                    fast_path_grid_cell_id=fast_pick.grid_cell_id,
+                    geodesic_grid_cell_id=verified_cell.grid_cell_id,
+                    fast_path_grid_cell_id=cell.grid_cell_id,
                 )
         ownership = ElementOwnership(
             element_id=element_id,
