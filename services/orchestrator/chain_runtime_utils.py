@@ -167,6 +167,29 @@ def _manual_retry_scoped_cycle_execution(basins: Sequence[Mapping[str, Any]]) ->
 def _replacement_retry_scoped_cycle_execution(basins: Sequence[Mapping[str, Any]]) -> bool:
     if _manual_retry_scoped_cycle_execution(basins):
         return True
+    force_replacement_decisions = {
+        "retry_missing_forecast_output",
+        "retry_strict_warm_start_terminal_init_state_mismatch",
+        "retry_strict_warm_start_terminal_run_manifest_missing",
+        "retry_strict_warm_start_retry_run_manifest_mismatch",
+        "retry_terminal_run_manifest_missing",
+    }
+    if basins and all(
+        isinstance(basin.get("state_evidence"), Mapping)
+        and basin["state_evidence"].get("decision") in force_replacement_decisions
+        and _canonical_restart_stage(
+            basin["state_evidence"].get("restart_stage")
+            or basin["state_evidence"].get("restart_from_stage")
+        )
+        is not None
+        for basin in basins
+    ):
+        # A strict-warm repair is intentionally a replacement submission.  A
+        # stopped pass may have left candidate hydro rows in ``created`` with
+        # no Slurm binding; those placeholders must not block a multi-basin
+        # replacement cohort.  The run-scoped active-job check above still
+        # rejects a real in-flight submission for this exact cohort.
+        return True
     if len(basins) != 1:
         return False
     state_evidence = basins[0].get("state_evidence")

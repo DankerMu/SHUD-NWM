@@ -3210,6 +3210,68 @@ def test_model_package_refresh_candidate_scoped_ignores_stale_active_pipeline_pl
     assert "forcing" not in submitted_stages
 
 
+def test_strict_warm_replacement_cohort_ignores_stale_created_hydro_placeholders(
+    tmp_path: Path,
+) -> None:
+    class StaleActiveStrictWarmRepository(FakeCycleRepository):
+        def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
+            raise AssertionError(
+                f"strict-warm cohort must not fall back to cycle active check: {source_id} {cycle_time}"
+            )
+
+        def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+            del source_id, cycle_time, model_id
+            return True
+
+    repository = StaleActiveStrictWarmRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basins = _basins(2)
+    cohort_run_id = "cycle_gfs_2026050100_forecast_cohort_deadbeef0001"
+    for basin in basins:
+        basin["orchestration_run_id"] = cohort_run_id
+        basin["restart_stage"] = "forecast"
+        basin["state_evidence"] = {
+            "decision": "retry_strict_warm_start_retry_run_manifest_mismatch",
+            "restart_stage": "forecast",
+            "native_shud_resubmitted": True,
+        }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    assert result.status == "complete"
+    submitted_stages = {submission["stage"] for submission in client.submissions}
+    assert "forecast" in submitted_stages
+    assert "state_save_qc" in submitted_stages
+    assert "forcing" not in submitted_stages
+    assert "convert" not in submitted_stages
+
+
+def test_mixed_strict_warm_cohort_keeps_active_pipeline_guard(tmp_path: Path) -> None:
+    repository = FakeCycleRepository(active=True)
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basins = _basins(2)
+    cohort_run_id = "cycle_gfs_2026050100_forecast_cohort_deadbeef0002"
+    for basin in basins:
+        basin["orchestration_run_id"] = cohort_run_id
+        basin["restart_stage"] = "forecast"
+        basin["state_evidence"] = {
+            "decision": "retry_strict_warm_start_retry_run_manifest_mismatch",
+            "restart_stage": "forecast",
+        }
+    basins[1]["state_evidence"] = {
+        "decision": "retry_after_completed_stage",
+        "restart_stage": "forecast",
+    }
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    assert exc_info.value.error_code == "PIPELINE_ALREADY_ACTIVE"
+    assert client.submissions == []
+
+
 def test_completed_stage_resume_ignores_stale_active_hydro_placeholder(tmp_path: Path) -> None:
     run_id = "cycle_gfs_2026050100_full_model_0"
 
