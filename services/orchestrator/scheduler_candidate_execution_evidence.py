@@ -491,6 +491,32 @@ def _resource_profile_evidence(resource_profile: Mapping[str, Any]) -> dict[str,
     if not isinstance(redacted, Mapping):
         return {}
     evidence = dict(redacted)
+    direct_grid = evidence.get("direct_grid_forcing")
+    if isinstance(direct_grid, Mapping):
+        stations = direct_grid.get("stations")
+        station_count = (
+            len(stations)
+            if isinstance(stations, Sequence) and not isinstance(stations, str | bytes | bytearray)
+            else None
+        )
+        retained_keys = (
+            "forcing_mapping_mode",
+            "mapping_asset_identity",
+            "model_input_package_id",
+            "binding_uri",
+            "binding_checksum",
+            "applicable_source_ids",
+            "grid_id",
+            "grid_signature",
+            "sp_att_manifest_path",
+            "sp_att_checksum",
+        )
+        compact_direct_grid = {
+            key: direct_grid[key] for key in retained_keys if key in direct_grid
+        }
+        if station_count is not None:
+            compact_direct_grid["station_count"] = station_count
+        evidence["direct_grid_forcing"] = compact_direct_grid
     invalid_fields = {
         str(blocker.get("field", "")).removeprefix("resource_profile.")
         for blocker in _slurm_resource_profile_blockers(resource_profile)

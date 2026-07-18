@@ -18990,6 +18990,32 @@ def test_file_registry_direct_grid_requirement_accepts_direct_variant(
     assert receipt["model_count"] == 1
 
 
+def test_direct_grid_resource_profile_evidence_compacts_station_bindings() -> None:
+    profile = {
+        "forcing_mapping_mode": "direct_grid",
+        "direct_grid_forcing": {
+            "forcing_mapping_mode": "direct_grid",
+            "mapping_asset_identity": "dg-gfs-example",
+            "model_input_package_id": "dg-input-example",
+            "grid_id": "gfs_0p25",
+            "grid_signature": "a" * 64,
+            "applicable_source_ids": ["gfs"],
+            "stations": [
+                {"station_id": f"station-{index}", "grid_cell_id": str(index)}
+                for index in range(500)
+            ],
+        },
+    }
+
+    evidence = scheduler_module._resource_profile_evidence(profile)
+
+    contract = evidence["direct_grid_forcing"]
+    assert contract["station_count"] == 500
+    assert contract["grid_id"] == "gfs_0p25"
+    assert contract["applicable_source_ids"] == ["gfs"]
+    assert "stations" not in contract
+
+
 def test_file_canonical_readiness_publisher_and_provider_use_existing_evaluator(
     monkeypatch: Any,
     tmp_path: Path,
