@@ -296,7 +296,10 @@ def _build_one(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     baseline_root = store.resolve_path(str(model["model_package_uri"]))
     identity = _package_identity(model, source_id, loaded.snapshot)
-    package_key = f"models/{model['model_id']}_direct_grid/dg-{source_id.lower()}-{identity}/package"
+    package_key = (
+        f"models/direct_grid_variants/{model['model_id']}/"
+        f"dg-{source_id.lower()}-{identity}/package"
+    )
     variant_root = store.resolve_path(package_key)
     variant_uri = store.uri_for_key(package_key) + "/"
     binding_uri = f"{variant_uri}direct_grid_binding.json"
