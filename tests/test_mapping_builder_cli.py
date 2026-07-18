@@ -39,6 +39,7 @@ import ast
 import dataclasses
 import hashlib
 import json
+import math
 import pathlib
 import re
 import shutil
@@ -68,6 +69,7 @@ from workers.mapping_builder.cli import (
     BuildResult,
     PackagePathAuthorityError,
     ResolvedPackagePath,
+    _parse_mesh_nodes,
     build_direct_grid_variant,
     resolve_package_path,
 )
@@ -929,6 +931,23 @@ def test_parse_mesh_nodes_permuted_column_order_correctly_reads_elevation(
             "the wrong column (hardcoded index rather than header-located "
             "Elevation)"
         )
+
+
+def test_parse_mesh_nodes_skips_missing_elevation_rows(tmp_path: pathlib.Path) -> None:
+    baseline_root = _prepared_baseline(tmp_path)
+    sp_mesh = baseline_root / "keliya.sp.mesh"
+    text_lines = sp_mesh.read_text().splitlines()
+    n_elements = int(text_lines[0].split()[0])
+    node_header_line = 1 + 1 + n_elements
+    node_data_start = node_header_line + 2
+    first_tokens = text_lines[node_data_start].split()
+    text_lines[node_data_start] = "\t".join([*first_tokens[:-1], "NA"])
+    sp_mesh.write_text("\n".join(text_lines) + "\n")
+
+    nodes = _parse_mesh_nodes(baseline_root)
+
+    assert len(nodes) == int(text_lines[node_header_line].split()[0]) - 1
+    assert all(math.isfinite(node.elevation) for node in nodes)
 
 
 # =========================================================================

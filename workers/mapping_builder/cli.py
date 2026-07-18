@@ -55,6 +55,7 @@ import argparse
 import dataclasses
 import hashlib
 import json
+import math
 import os
 import pathlib
 import shutil
@@ -446,14 +447,25 @@ def _parse_mesh_nodes(baseline_root: pathlib.Path) -> tuple[MeshNode, ...]:
         tokens = raw.split()
         node_id = int(tokens[0])
         x, y = node_xy[node_id]  # trust the checksum-bound parser's coords
+        raw_elevation = tokens[elevation_col_index]
+        try:
+            elevation = float(raw_elevation)
+        except ValueError:
+            if raw_elevation.strip().upper() in {"NA", "N/A", "NULL", "NAN"}:
+                continue
+            raise
+        if not math.isfinite(elevation):
+            continue
         nodes.append(
             MeshNode(
                 node_id=node_id,
                 x=float(x),
                 y=float(y),
-                elevation=float(tokens[elevation_col_index]),
+                elevation=elevation,
             )
         )
+    if not nodes:
+        raise ValueError(f"{mesh_path.name}: no finite Elevation values are available for z sampling")
     return tuple(nodes)
 
 
