@@ -732,6 +732,7 @@ def _discover_runs(object_store_root: Path, sources: tuple[str, ...]) -> list[di
                 "source": match.group("source"),
                 "cycle": match.group("cycle"),
                 "basin": basin,
+                "run_family": "legacy" if legacy_match is not None else "direct_grid",
             }
         )
     return out
@@ -1502,6 +1503,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--basins-root", default=os.environ.get("BASINS_ROOT"))
     parser.add_argument("--sources", default="gfs,ifs", help="Comma list of sources (default gfs,ifs).")
     parser.add_argument("--only-basin", default=None, help="Restrict to a single basin slug (e.g. heihe).")
+    parser.add_argument(
+        "--only-cycle",
+        default=None,
+        metavar="YYYYMMDDHH",
+        help="Restrict ingest to one exact UTC forecast cycle.",
+    )
+    parser.add_argument(
+        "--direct-grid-only",
+        action="store_true",
+        help="Restrict ingest to direct-grid runs; excludes legacy basin-named runs.",
+    )
     parser.add_argument("--limit", type=int, default=None, help="Process at most N runs (smoke).")
     parser.add_argument("--seed-only", action="store_true", help="Only seed basin registries; skip run ingest.")
     parser.add_argument("--force", action="store_true", help="Re-ingest even already-parsed runs.")
@@ -1549,6 +1561,12 @@ def main(argv: list[str] | None = None) -> int:
     object_store_prefix = env.get("OBJECT_STORE_PREFIX", "")
 
     runs = _discover_runs(object_store_root, sources)
+    if args.only_cycle:
+        if re.fullmatch(r"\d{10}", args.only_cycle) is None:
+            parser.error("--only-cycle must use the exact UTC format YYYYMMDDHH")
+        runs = [r for r in runs if r["cycle"] == args.only_cycle]
+    if args.direct_grid_only:
+        runs = [r for r in runs if r["run_family"] == "direct_grid"]
     if args.only_basin:
         only_basin_key = _slug_id(args.only_basin)
         runs = [r for r in runs if r["basin"] == only_basin_key]

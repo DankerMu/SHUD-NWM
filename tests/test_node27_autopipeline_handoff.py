@@ -12,6 +12,7 @@ import scripts.node27_autopipeline as autopipe
 RUN_A = "fcst_gfs_2026062012_basins_qhh_shud"
 RUN_B = "fcst_gfs_2026062112_basins_qhh_shud"
 DIRECT_GRID_RUN = "fcst_gfs_2026070600_dg_0123456789abcdef"
+LEGACY_SAME_CYCLE_RUN = "fcst_gfs_2026070600_basins_qhh_shud"
 NODE27_DATABASE_URL = "postgresql://node27_writer:secret@127.0.0.1:55432/nhms"
 
 
@@ -188,6 +189,51 @@ def test_direct_grid_run_discovery_uses_manifest_basin_identity(
     assert summary["runs"]["details"][0]["run_id"] == DIRECT_GRID_RUN
     assert _command_kinds(calls) == ["register", "parse", "coverage"]
     assert published_calls == [NODE27_DATABASE_URL]
+
+
+def test_exact_cycle_direct_grid_filter_excludes_legacy_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, calls, published_calls = _prepare_autopipe(
+        monkeypatch,
+        tmp_path,
+        runs={DIRECT_GRID_RUN: True, LEGACY_SAME_CYCLE_RUN: True, RUN_A: True},
+    )
+
+    rc, summary = _run_main(
+        capsys,
+        object_store_root,
+        "--only-cycle",
+        "2026070600",
+        "--direct-grid-only",
+    )
+
+    assert rc == 0
+    assert summary["discovered_runs"] == 1
+    assert summary["runs"]["processed"] == 1
+    assert summary["runs"]["details"][0]["run_id"] == DIRECT_GRID_RUN
+    assert _command_kinds(calls) == ["register", "parse", "coverage"]
+    assert published_calls == [NODE27_DATABASE_URL]
+
+
+def test_exact_cycle_filter_rejects_noncanonical_value(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, calls, published_calls = _prepare_autopipe(
+        monkeypatch,
+        tmp_path,
+        runs={DIRECT_GRID_RUN: True},
+    )
+
+    with pytest.raises(SystemExit, match="2"):
+        _run_main(capsys, object_store_root, "--only-cycle", "2026-07-06T00:00:00Z")
+
+    assert calls == []
+    assert published_calls == []
 
 
 def _command_kinds(calls: list[list[str]]) -> list[str]:
