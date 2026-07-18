@@ -142,6 +142,23 @@ def run_state_variable_qc(
     return StateQCResult(passed=True, checks=checks, reason=None)
 
 
+def state_ic_structure_complete(ic_path: Path | str) -> bool:
+    """Return whether an IC file contains every row declared by its header.
+
+    This deliberately checks structure only.  The full physical range checks
+    remain the responsibility of :func:`run_state_variable_qc` at state-save
+    time.  The SHUD runtime uses this narrower predicate while watching a
+    non-atomically rewritten ``cfg.ic.update`` file so it never preserves a
+    header-matching but only partially written checkpoint.
+    """
+
+    try:
+        _parse_ic_file(Path(ic_path))
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def _parse_ic_file(path: Path) -> tuple[list[list[float]], list[list[float]], list[list[float]]]:
     """Split a ``.cfg.ic`` file into mesh / river / lake numeric data rows.
 
@@ -173,6 +190,14 @@ def _parse_ic_file(path: Path) -> tuple[list[list[float]], list[list[float]], li
 
     sectioned_rows = _parse_sectioned_rows(lines[1:], counts)
     if sectioned_rows is not None:
+        mesh_rows, river_rows, lake_rows = sectioned_rows
+        actual_counts = (len(mesh_rows), len(river_rows), len(lake_rows))
+        if actual_counts != counts:
+            raise ValueError(
+                "truncated sectioned IC body: "
+                f"have mesh={actual_counts[0]}, river={actual_counts[1]}, lake={actual_counts[2]}; "
+                f"header declares mesh={mesh_count}, river={river_count}, lake={lake_count}"
+            )
         return sectioned_rows
 
     data_rows: list[list[float]] = []

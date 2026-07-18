@@ -99,6 +99,22 @@ def test_native_shud_update_header_and_negative_zero_pass(tmp_path: Path) -> Non
     assert result.reason is None
 
 
+def test_truncated_sectioned_native_update_fails_even_at_row_boundary(tmp_path: Path) -> None:
+    path = tmp_path / "native-partial.cfg.ic.update"
+    path.write_text(
+        "3\t1\t27000000.000000\n"
+        "Index\tCanopy\tSnow\tSurface\tUnsat\tGW\n"
+        "1\t0.0\t0.0\t0.0\t0.0\t0.0\n"
+        "2\t0.0\t0.0\t0.0\t0.0\t0.0\n",
+        encoding="utf-8",
+    )
+
+    result = run_state_variable_qc(path)
+
+    assert result.passed is False
+    assert "truncated sectioned IC body" in (result.reason or "")
+
+
 def test_negative_beyond_roundoff_tolerance_fails(tmp_path: Path) -> None:
     ic = _write_ic(
         tmp_path / "neg_tolerance.cfg.ic",
