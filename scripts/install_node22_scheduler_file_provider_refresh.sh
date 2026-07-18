@@ -122,6 +122,7 @@ if [[ "$action" == --install ]]; then
   if grep -Eq "^[[:space:]]*($(IFS='|'; printf '%s' "${db_selectors[*]}"))=" "$env_file"; then
     exit 2
   fi
+  [[ $(grep -Ec '^NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true$' "$env_file") -eq 1 ]]
   printf '%s%s' \
     "$(unit_state nhms-compute-scheduler.timer)" \
     "$(unit_state nhms-compute-scheduler.service)" > "$state_root/scheduler.before"

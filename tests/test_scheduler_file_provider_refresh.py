@@ -2254,6 +2254,9 @@ def test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent() -
         "nhms-compute-scheduler.service'" in service
     )
     assert "is-active --quiet nhms-compute-scheduler.service" in wrapper
+    assert "NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true" in environment
+    assert '[[ "$NHMS_SCHEDULER_REQUIRE_DIRECT_GRID" == true ]]' in wrapper
+    assert "grep -Ec '^NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true$'" in installer
     for selector in ("DATABASE_URL=", "PIPELINE_DATABASE_URL=", "PGHOST=", "PGPORT="):
         assert selector not in environment
     assert "stat -c '%a'" in wrapper
@@ -2387,6 +2390,7 @@ def test_installer_enable_lifecycle_and_failure_restore_with_fake_systemctl(tmp_
                 f"NHMS_SCHEDULER_PROVIDER_REFRESH_RECEIPT_ROOT={receipts}",
                 f"NHMS_SCHEDULER_PROVIDER_REFRESH_EMERGENCY_ROOT={emergency}",
                 f"NHMS_SCHEDULER_PROVIDER_REFRESH_LOCK={tmp_path / 'private/refresh'}",
+                "NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true",
             )
         )
         + "\n"
@@ -2523,6 +2527,7 @@ def _write_wrapper_execution_fixture(tmp_path: Path, *, include_forbidden: bool 
         "NHMS_SCHEDULER_PROVIDER_REFRESH_RECEIPT_ROOT": "/private/receipts",
         "NHMS_SCHEDULER_PROVIDER_REFRESH_EMERGENCY_ROOT": "/private/emergency",
         "NHMS_SCHEDULER_PROVIDER_REFRESH_LOCK": "/private/refresh",
+        "NHMS_SCHEDULER_REQUIRE_DIRECT_GRID": "true",
     }
     lines = [f"{key}={value}" for key, value in configured.items()]
     if include_forbidden:
@@ -2545,6 +2550,7 @@ def _write_wrapper_execution_fixture(tmp_path: Path, *, include_forbidden: bool 
         "printf 'RECEIPTS=%s\\n' \"$NHMS_SCHEDULER_PROVIDER_REFRESH_RECEIPT_ROOT\"\n"
         "printf 'EMERGENCY=%s\\n' \"$NHMS_SCHEDULER_PROVIDER_REFRESH_EMERGENCY_ROOT\"\n"
         "printf 'LOCK=%s\\n' \"$NHMS_SCHEDULER_PROVIDER_REFRESH_LOCK\"\n"
+        "printf 'REQUIRE_DIRECT_GRID=%s\\n' \"$NHMS_SCHEDULER_REQUIRE_DIRECT_GRID\"\n"
         "printf 'DATABASE_URL=%s\\n' \"${DATABASE_URL-<unset>}\"\n"
         "printf 'PGHOST=%s\\n' \"${PGHOST-<unset>}\"\n"
         "printf 'PWD=%s\\n' \"$PWD\"\n"
@@ -2592,6 +2598,7 @@ def test_wrapper_clean_environment_loads_fixed_config_and_strips_inherited_db_se
     assert "RECEIPTS=/private/receipts" in result.stdout
     assert "EMERGENCY=/private/emergency" in result.stdout
     assert "LOCK=/private/refresh" in result.stdout
+    assert "REQUIRE_DIRECT_GRID=true" in result.stdout
     assert "DATABASE_URL=<unset>" in result.stdout
     assert "PGHOST=<unset>" in result.stdout
     assert f"PWD={tmp_path / 'repo'}" in result.stdout
