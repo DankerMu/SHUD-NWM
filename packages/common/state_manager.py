@@ -669,6 +669,27 @@ class PsycopgStateSnapshotRepository:
         )
         return _snapshot_from_row(row) if row is not None else None
 
+    def get_latest_state_before(
+        self,
+        *,
+        model_id: str,
+        source_id: str,
+        before_time: datetime,
+    ) -> StateSnapshot | None:
+        row = self._fetch_optional(
+            """
+            SELECT *
+            FROM hydro.state_snapshot
+            WHERE model_id = %s
+              AND source_id = %s
+              AND valid_time < %s
+            ORDER BY valid_time DESC, created_at DESC
+            LIMIT 1
+            """,
+            (model_id, source_id, _ensure_utc(before_time)),
+        )
+        return _snapshot_from_row(row) if row is not None else None
+
     def upsert_state_snapshot(self, snapshot: StateSnapshot) -> StateSnapshot:
         row = self._fetch_one(
             """
@@ -974,25 +995,51 @@ class FileStateSnapshotIndexRepository:
             enforce_freshness=not self.create_missing,
         )
         entry: dict[str, Any] | None
-        if cycle_id not in (None, "") or lead_hours is not None:
-            key = self._snapshot_key(
-                model_id=model_id,
-                source_id=source_id,
-                valid_time=valid_time,
-                cycle_id=cycle_id,
-                lead_hours=lead_hours,
-            )
-            entry = index_snapshot.entries.get(key)
-        else:
-            entry = self._first_entry_for_base_key(
-                index_snapshot.entries,
-                model_id=model_id,
-                source_id=source_id,
-                valid_time=valid_time,
-            )
+        entries = self._entries_for_base_key(
+            index_snapshot.entries,
+            model_id=model_id,
+            source_id=source_id,
+            valid_time=valid_time,
+        )
+        if cycle_id not in (None, ""):
+            entries = [entry for entry in entries if str(entry.get("cycle_id") or "") == cycle_id]
+        if lead_hours is not None:
+            entries = [entry for entry in entries if entry.get("lead_hours") == lead_hours]
+        entry = min(entries, key=lambda item: str(item.get("state_id") or "")) if entries else None
         if entry is None:
             return None
         return self._snapshot_from_lookup_entry(entry)
+
+    def get_latest_state_before(
+        self,
+        *,
+        model_id: str,
+        source_id: str,
+        before_time: datetime,
+    ) -> StateSnapshot | None:
+        index_snapshot = self._load_index_snapshot(
+            allow_empty=self.create_missing,
+            verify_objects=False,
+            enforce_freshness=not self.create_missing,
+        )
+        before_time = _ensure_utc(before_time)
+        candidates = [
+            entry
+            for entry in index_snapshot.entries.values()
+            if str(entry.get("model_id") or "") == model_id
+            and str(entry.get("source_id") or "") == source_id
+            and _parse_state_index_time(entry.get("valid_time"), field="valid_time") < before_time
+        ]
+        if not candidates:
+            return None
+        selected = max(
+            candidates,
+            key=lambda item: (
+                _parse_state_index_time(item.get("valid_time"), field="valid_time"),
+                str(item.get("state_id") or ""),
+            ),
+        )
+        return self._snapshot_from_lookup_entry(selected)
 
     def find_state_snapshot_by_model_time_checksum(
         self,
