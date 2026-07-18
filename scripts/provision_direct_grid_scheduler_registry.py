@@ -396,6 +396,9 @@ def _build_one(
     manifest_checksum = sha256_bytes(manifest_path.read_bytes())
     profile = {
         **dict(model["resource_profile"]),
+        "lineage": "direct_grid_variant_registration",
+        "canonical_grid_key": registration.canonical_grid_key,
+        "grid_snapshot_id": registration.grid_snapshot_id,
         "forcing_mapping_mode": "direct_grid",
         "direct_grid_forcing": contract,
         "canonical_grid_snapshot": _snapshot_projection(loaded.snapshot),
