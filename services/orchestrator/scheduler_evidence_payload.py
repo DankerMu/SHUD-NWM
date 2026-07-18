@@ -318,6 +318,7 @@ def _compact_runtime_config(value: Any) -> Any:
                 "require_runtime_roots",
                 "dry_run",
                 "allowed_cycle_hours_utc",
+                "slurm_array_concurrency_bound",
             ),
         )
     compact = _compact_mapping(
@@ -335,6 +336,7 @@ def _compact_runtime_config(value: Any) -> Any:
             "scheduler_state_index_backend",
             "dry_run",
             "allowed_cycle_hours_utc",
+            "slurm_array_concurrency_bound",
         ),
     )
     if isinstance(db_free_runtime, Mapping):

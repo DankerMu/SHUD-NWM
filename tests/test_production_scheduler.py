@@ -8946,6 +8946,7 @@ def test_bounded_evidence_preserves_pre_execution_reservation_proof(
         assert evidence["slurm_status_sync_proof"]["protected_by_pre_execution_evidence"] is True
         assert evidence["resolved_runtime_roots"]["workspace_root"]["path"] == str(tmp_path.resolve())
         assert evidence["runtime_config"]["dry_run"] is False
+        assert evidence["runtime_config"]["slurm_array_concurrency_bound"] == 32
 
 
 def test_duplicate_active_model_identity_is_rejected_before_candidates(tmp_path: Path) -> None:
