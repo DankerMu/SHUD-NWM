@@ -10,6 +10,7 @@ from workers.grid_registry.registry import (
     LiveProducerSignatureMismatchError,
     RegistrationError,
     RegistrationInvariantError,
+    prepare_snapshot,
     register_snapshot,
 )
 
@@ -18,5 +19,6 @@ __all__ = (
     "LiveProducerSignatureMismatchError",
     "RegistrationError",
     "RegistrationInvariantError",
+    "prepare_snapshot",
     "register_snapshot",
 )
