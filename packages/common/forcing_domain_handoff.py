@@ -854,6 +854,26 @@ def _validate_model_package_uri(
     key = _normalize_compat_object_key(manifest.get(field), store, reasons, field=field)
     if key is None:
         return
+    direct_grid_parts = key.strip("/").split("/")
+    if len(direct_grid_parts) == 5 and direct_grid_parts[:2] == ["models", "direct_grid_variants"]:
+        baseline_model_id, variant_id, package_segment = direct_grid_parts[2:]
+        source_id = str(manifest.get("source_id") or "").strip().lower()
+        if (
+            not baseline_model_id
+            or package_segment != "package"
+            or not source_id
+            or not variant_id.startswith(f"dg-{source_id}-")
+            or variant_id == f"dg-{source_id}-"
+        ):
+            reasons.append(
+                _reason(
+                    REASON_COMPATIBILITY_URI_MISMATCH,
+                    field=field,
+                    expected=f"models/direct_grid_variants/<baseline_model_id>/dg-{source_id}-<identity>/package",
+                    actual=key,
+                )
+            )
+        return
     validation = validate_object_path(key)
     if not validation.valid or validation.category != "models":
         reasons.append(_reason(REASON_COMPATIBILITY_URI_UNSAFE, field=field, detail=validation.error))
