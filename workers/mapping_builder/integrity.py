@@ -779,21 +779,31 @@ def verify_g0_baseline(baseline_root: pathlib.Path) -> BaselineIntegrityReport:
     # FORC values are already coerced to positive int by _coerce_positive_int_forc.
     max_forc_value = max(att_forc_values)
 
-    # Optional .tsd.forc reference integrity.
+    # Optional .tsd.forc station-catalog integrity.  FORC values in ``sp.att``
+    # reference rows in this catalog; the catalog may legitimately contain
+    # unused trailing stations, so its row ids are bounded by the declared
+    # catalog size rather than by ``max(FORC)``.
     tsd_forc_path = _find_optional_tsd_forc(baseline_root)
     tsd_forc_present = tsd_forc_path is not None
     tsd_forc_reference_count = 0
     if tsd_forc_path is not None:
         references = _parse_tsd_forc_reference_ids(tsd_forc_path)
         tsd_forc_reference_count = len(references)
-        valid_range = (1, max_forc_value)
+        station_count = len(references)
+        valid_range = (1, station_count)
         for line_number, ref in references:
-            if ref < 1 or ref > max_forc_value:
+            if ref < 1 or ref > station_count:
                 raise IllegalTsdForcReferenceError(
                     line_number=line_number,
                     invalid_reference=ref,
                     valid_range=valid_range,
                 )
+        if max_forc_value > station_count:
+            raise IllegalTsdForcReferenceError(
+                line_number=1,
+                invalid_reference=max_forc_value,
+                valid_range=valid_range,
+            )
 
     # INV-1 post-check: no baseline file may have changed while we read it.
     post_checksums = _compute_per_file_checksums(baseline_root)

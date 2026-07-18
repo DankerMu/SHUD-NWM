@@ -146,6 +146,24 @@ def test_valid_baseline_passes() -> None:
         int(sha, 16)
 
 
+def test_unused_trailing_tsd_forc_station_is_valid(tmp_path: pathlib.Path) -> None:
+    """A station catalog may contain rows that no mesh element currently uses."""
+
+    baseline = _copy_fixture(tmp_path)
+    att_path = baseline / "keliya.sp.att"
+    att_path.write_text(
+        att_path.read_text().replace(
+            "4\t1\t1\t11\t4\t1\t0\t0\t0",
+            "4\t1\t1\t11\t3\t1\t0\t0\t0",
+        )
+    )
+
+    report = verify_g0_baseline(baseline)
+
+    assert report.max_forc_value == 3
+    assert report.tsd_forc_reference_count == 4
+
+
 def test_pre_post_checksums_equal(tmp_path: pathlib.Path) -> None:
     """INV-1: verifying the baseline must not mutate it."""
     baseline = _copy_fixture(tmp_path)
