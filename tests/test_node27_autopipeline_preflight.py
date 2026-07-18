@@ -828,6 +828,46 @@ def test_already_seeded_registry_is_reactivated_for_display(
     } == {("qhh", 1, 2), ("zhaochen_bst", 1, 2)}
 
 
+def test_activate_model_preserves_existing_active_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executed: list[tuple[str, tuple[str, ...]]] = []
+
+    class Cursor:
+        rowcount = 0
+
+        def __enter__(self) -> Cursor:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def execute(self, sql: str, parameters: tuple[str, ...]) -> None:
+            executed.append((sql, parameters))
+
+    class Connection:
+        def __enter__(self) -> Connection:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def cursor(self) -> Cursor:
+            return Cursor()
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(autopipe.psycopg2, "connect", lambda _url: Connection())
+
+    assert autopipe._activate_model(NODE27_DATABASE_URL, "dg_source_variant") == 0
+    assert len(executed) == 1
+    sql, parameters = executed[0]
+    assert "NOT EXISTS" in sql
+    assert "active_sibling.basin_version_id = core.model_instance.basin_version_id" in sql
+    assert parameters == ("dg_source_variant",)
+
+
 def test_seed_registry_import_uses_database_url_env_not_subprocess_argv(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

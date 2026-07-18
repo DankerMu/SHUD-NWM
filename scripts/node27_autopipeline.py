@@ -963,9 +963,15 @@ def _run_product_mtime(object_store_root: Path, run_id: str) -> float | None:
 
 
 def _activate_model(database_url: str, model_id: str) -> int:
-    """Mark the model_instance active so the display station-coverage CTE
-    (``met.interp_weight`` join requires ``model_instance.active_flag = true``)
-    can see it. Generic import leaves the instance inactive."""
+    """Activate a model only when its basin version has no active sibling.
+
+    Generic registry import leaves a newly seeded basin without an active
+    model, so the first model still needs activation.  Existing basins may
+    already have an active legacy model while direct-grid run manifests point
+    at immutable source-specific variants.  Re-activating every run variant
+    would violate the one-active-model-per-basin-version invariant and must not
+    prevent those runs from reaching the display ingest phase.
+    """
     conn = psycopg2.connect(database_url)
     try:
         with conn:
@@ -975,6 +981,15 @@ def _activate_model(database_url: str, model_id: str) -> int:
                     UPDATE core.model_instance
                     SET active_flag = true, lifecycle_state = 'active'
                     WHERE model_id = %s
+                      AND (
+                          active_flag = true
+                          OR NOT EXISTS (
+                              SELECT 1
+                              FROM core.model_instance active_sibling
+                              WHERE active_sibling.basin_version_id = core.model_instance.basin_version_id
+                                AND active_sibling.active_flag = true
+                          )
+                      )
                     """,
                     (model_id,),
                 )
