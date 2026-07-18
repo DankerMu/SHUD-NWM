@@ -233,8 +233,12 @@ def test_state_index_copyback_merges_split_root_checkpoint_only_in_private(tmp_p
     shared_uri = store.write_bytes_atomic("states/gfs/model_a/shared/state.cfg.ic", shared_content)
     source_index = object_root / "scheduler/state-index/index-last.json"
     destination_index = copyback_root / "scheduler/state-index/index-last.json"
+    private_entry = {
+        **_state_entry("private-state", private_uri, private_content, "2026-06-27T01:00:00Z"),
+        "run_id": "fcst_gfs_2026062700_basins_heihe_shud",
+    }
     publish_state_snapshot_index(
-        [_state_entry("private-state", private_uri, private_content, "2026-06-27T01:00:00Z")],
+        [private_entry],
         source_index,
         object_store_root=object_root,
         object_store_prefix="s3://nhms",
@@ -327,6 +331,76 @@ def test_state_index_copyback_ignores_derived_entry_evidence_for_same_identity(t
     assert payload["entries"] == [base_entry]
 
 
+def test_state_index_copyback_scopes_source_entries_and_materializes_clone(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    run_id = "fcst_gfs_2026062700_basins_heihe_shud"
+    _write_run(object_root, run_id)
+    store = LocalObjectStore(object_root, "s3://nhms")
+    materialized_content = _valid_state_bytes(b"materialized")
+    clone_content = _valid_state_bytes(b"clone")
+    unrelated_content = _valid_state_bytes(b"unrelated")
+    materialized_uri = store.write_bytes_atomic(
+        "states/gfs/model_a/materialized/state.cfg.ic", materialized_content
+    )
+    clone_uri = store.write_bytes_atomic("states/gfs/model_a/clone/state.cfg.ic", clone_content)
+    unrelated_uri = store.write_bytes_atomic(
+        "states/gfs/model_b/unrelated/state.cfg.ic", unrelated_content
+    )
+    source_entry = {
+        **_state_entry("materialized", materialized_uri, materialized_content, "2026-06-27T01:00:00Z"),
+        "run_id": run_id,
+        "cloned_from_state_id": None,
+    }
+    clone_entry = {
+        **_state_entry("clone", clone_uri, clone_content, "2026-06-27T01:00:00Z"),
+        "run_id": "fcst_gfs_2026062612_basins_heihe_shud",
+        "cloned_from_state_id": "predecessor-state",
+    }
+    unrelated_private = {
+        **_state_entry("unrelated-private", unrelated_uri, unrelated_content, "2026-06-27T01:00:00Z"),
+        "model_id": "model_b",
+        "run_id": "unrelated-private-run",
+    }
+    unrelated_shared = {
+        **unrelated_private,
+        "state_id": "unrelated-shared",
+        "run_id": "unrelated-shared-run",
+    }
+    source_index = object_root / "scheduler/state-index/index-last.json"
+    destination_index = copyback_root / "scheduler/state-index/index-last.json"
+    publish_state_snapshot_index(
+        [source_entry, unrelated_private],
+        source_index,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, 3, tzinfo=UTC),
+    )
+    publish_state_snapshot_index(
+        [clone_entry, unrelated_shared],
+        destination_index,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
+    )
+
+    summary = copyback_run_trees(
+        object_store_root=object_root,
+        copyback_root=copyback_root,
+        run_ids=[run_id],
+        extra_object_keys=["scheduler/state-index/index-last.json"],
+    )
+
+    assert summary is not None
+    merge = summary["extra_objects"][0]["merge"]
+    assert merge["source_entry_count"] == 1
+    assert merge["authoritative_run_count"] == 1
+    payload = json.loads(destination_index.read_text(encoding="utf-8"))
+    by_model = {entry["model_id"]: entry for entry in payload["entries"]}
+    assert by_model["model_a"]["state_id"] == "materialized"
+    assert by_model["model_b"]["state_id"] == "unrelated-shared"
+
+
 def test_state_index_copyback_same_timestamp_semantic_conflict_fails_closed(tmp_path: Path) -> None:
     object_root = tmp_path / "object-store"
     copyback_root = tmp_path / "shared-object-store"
@@ -334,7 +408,10 @@ def test_state_index_copyback_same_timestamp_semantic_conflict_fails_closed(tmp_
     store = LocalObjectStore(object_root, "s3://nhms")
     content = _valid_state_bytes(b"conflict")
     state_uri = store.write_bytes_atomic("states/gfs/model_a/conflict/state.cfg.ic", content)
-    source_entry = _state_entry("same-state", state_uri, content, "2026-06-27T01:00:00Z")
+    source_entry = {
+        **_state_entry("same-state", state_uri, content, "2026-06-27T01:00:00Z"),
+        "run_id": "fcst_gfs_2026062700_basins_heihe_shud",
+    }
     destination_entry = {**source_entry, "run_id": "different-real-run"}
     source_index = object_root / "scheduler/state-index/index-last.json"
     destination_index = copyback_root / "scheduler/state-index/index-last.json"
@@ -490,7 +567,10 @@ def test_state_index_copyback_serializes_against_refresh_publisher_without_deadl
     shared_uri = shared_store.write_bytes_atomic("states/gfs/model_a/shared/state.cfg.ic", shared_content)
     source_index = object_root / "scheduler/state-index/index-last.json"
     destination_index = copyback_root / "scheduler/state-index/index-last.json"
-    private_entry = _state_entry("private-state", private_uri, private_content, "2026-06-27T01:00:00Z")
+    private_entry = {
+        **_state_entry("private-state", private_uri, private_content, "2026-06-27T01:00:00Z"),
+        "run_id": "fcst_gfs_2026062700_basins_heihe_shud",
+    }
     shared_entry = _state_entry("shared-state", shared_uri, shared_content, "2026-06-27T00:00:00Z")
     publish_state_snapshot_index(
         [private_entry],

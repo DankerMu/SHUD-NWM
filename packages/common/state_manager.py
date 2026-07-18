@@ -6,7 +6,7 @@ import os
 import re
 import stat
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -1868,12 +1868,16 @@ def merge_state_snapshot_index_copyback(
     object_store_prefix: str,
     source_containment_root: Path,
     destination_containment_root: Path,
+    authoritative_run_ids: Collection[str] | None = None,
 ) -> dict[str, Any]:
     """Merge the private lifecycle index into the shared canonical index.
 
-    Identity collisions retain the entry with the later ``created_at``; an
-    exact tie with different bytes fails closed.  This prevents either an old
-    refresh snapshot or an old copyback from deleting a concurrent state.
+    When ``authoritative_run_ids`` is supplied, only source entries produced
+    by those copied runs are merged.  A replay of the same run or a real
+    checkpoint replacing a cutover clone is authoritative; other identity
+    collisions retain the entry with the later ``created_at`` and an exact
+    tie with different bytes fails closed.  This prevents an unrelated private
+    index entry from overwriting a concurrently published shared state.
     Both indexes are verified against the private reference root before their
     merged checkpoints are checksum-copied into the shared destination.
     """
@@ -1900,6 +1904,17 @@ def merge_state_snapshot_index_copyback(
         enforce_freshness=False,
     )
     source_entries = _copyback_raw_entries(source_payload, source_validated)
+    authoritative_runs = (
+        {str(run_id) for run_id in authoritative_run_ids}
+        if authoritative_run_ids is not None
+        else None
+    )
+    if authoritative_runs is not None:
+        source_entries = {
+            key: entry
+            for key, entry in source_entries.items()
+            if str(entry.get("run_id") or "") in authoritative_runs
+        }
     with provider_destination_lock(
         destination_path,
         containment_root=destination_containment_root,
@@ -1940,7 +1955,20 @@ def merge_state_snapshot_index_copyback(
                 continue
             source_created = _copyback_entry_created_at(source_entry)
             current_created = _copyback_entry_created_at(current)
-            if source_created > current_created:
+            if authoritative_runs is not None and (
+                source_entry.get("run_id") == current.get("run_id")
+                or (
+                    current.get("cloned_from_state_id") is not None
+                    and source_entry.get("cloned_from_state_id") is None
+                )
+            ):
+                # A scoped copyback is authoritative for the run being
+                # published.  This covers both an idempotent replay of the
+                # same run and replacement of a cutover clone by the first
+                # materialized checkpoint.  Other same-time collisions still
+                # fail closed below.
+                merged[key] = source_entry
+            elif source_created > current_created:
                 merged[key] = source_entry
             elif source_created == current_created:
                 raise _state_index_error("state_snapshot_index_copyback_conflict", field="entries[]")
@@ -1967,6 +1995,9 @@ def merge_state_snapshot_index_copyback(
         return {
             **result,
             "source_entry_count": len(source_entries),
+            "authoritative_run_count": (
+                len(authoritative_runs) if authoritative_runs is not None else None
+            ),
             "merged_entry_count": len(merged),
             "checkpoint_copied_count": sum(item == "copied" for item in checkpoint_results),
             "checkpoint_reused_count": sum(item == "reused" for item in checkpoint_results),

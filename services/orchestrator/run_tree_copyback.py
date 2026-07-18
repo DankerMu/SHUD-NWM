@@ -101,6 +101,7 @@ def copyback_run_trees(
                     object_store_prefix=object_store_prefix,
                     source_containment_root=object_root,
                     destination_containment_root=target_root,
+                    authoritative_run_ids=unique_run_ids,
                 )
             except (ProviderAtomicError, StateManagerError) as error:
                 raise RunTreeCopybackError(
