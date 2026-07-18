@@ -84,10 +84,12 @@ NHMS_SCHEDULER_MAX_PASSES=1
 NHMS_SCHEDULER_STDOUT_SUMMARY_ONLY=true
 # Use atomic O_EXCL lock files on NFS mounts where flock can block on RPC.
 NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE=atomic
-# Submit up to the current active Basins model count per scheduler pass. Slurm
-# remains the resource arbiter: extra jobs wait in the queue until whole-node
-# capacity is available. Lower only for an intentional cluster throttle.
-NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND=13
+# The current 18-model registry and two sources yield 18 x 2 = 36 candidate
+# execution units per scheduler pass. Run up to 32 basin/source execution
+# workers concurrently. This is a scheduler worker ceiling, not a total-submit
+# limit or a guarantee of 32 RUNNING Slurm jobs; Slurm remains the resource
+# arbiter. Lower only for an intentional cluster throttle.
+NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND=32
 # Discovery time is floored by this lag to the prior allowed-cycle boundary
 # (for example, with allowed hours 0,12, a lagged 18:01 UTC target floors to 12).
 # Adapter cycle-hour env only reduces provider probes; the scheduler hard gate

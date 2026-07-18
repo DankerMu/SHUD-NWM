@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -201,6 +202,96 @@ def test_stage_nfs_raw_manifest_to_compute_visible_object_store(tmp_path: Path) 
     assert json.loads((target_root / "raw/gfs/2026062612/manifest.json").read_text(encoding="utf-8"))[
         "source_id"
     ] == "gfs"
+
+
+def test_stage_nfs_raw_manifest_serializes_same_source_cycle_and_reuses_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_root = tmp_path / "nfs"
+    target_root = tmp_path / "scratch-object-store"
+    _write_manifest(source_root)
+    readiness = nfs_raw_manifest_readiness(
+        source_id="gfs",
+        cycle_time=datetime(2026, 6, 26, 12, tzinfo=UTC),
+        object_store_root=source_root,
+        object_store_prefix="s3://nhms",
+        required=True,
+    )
+    from services.orchestrator import source_cycle_raw_manifest as raw_manifest_module
+
+    original_copy = raw_manifest_module._copy_object_file
+    copied_keys: list[str] = []
+
+    def counted_copy(source: Path, target: Path, key: str) -> int:
+        copied_keys.append(key)
+        return original_copy(source, target, key)
+
+    monkeypatch.setattr(raw_manifest_module, "_copy_object_file", counted_copy)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(
+            pool.map(
+                lambda _index: stage_nfs_raw_manifest_to_object_store(
+                    readiness,
+                    target_object_store_root=target_root,
+                    target_object_store_prefix="s3://nhms",
+                ),
+                range(8),
+            )
+        )
+
+    assert [result["status"] for result in results].count("staged") == 1
+    assert [result["status"] for result in results].count("skipped") == 7
+    assert sorted(copied_keys) == [
+        "raw/gfs/2026062612/file-a.grib2",
+        "raw/gfs/2026062612/manifest.json",
+    ]
+
+    repeated = stage_nfs_raw_manifest_to_object_store(
+        readiness,
+        target_object_store_root=target_root,
+        target_object_store_prefix="s3://nhms",
+    )
+    assert repeated["status"] == "skipped"
+    assert repeated["reason"] == "already_staged"
+    assert len(copied_keys) == 2
+
+
+def test_stage_nfs_raw_manifest_replaces_changed_source_generation(tmp_path: Path) -> None:
+    source_root = tmp_path / "nfs"
+    target_root = tmp_path / "scratch-object-store"
+    _write_manifest(source_root, metadata={"generation": 1})
+    cycle_time = datetime(2026, 6, 26, 12, tzinfo=UTC)
+    readiness = nfs_raw_manifest_readiness(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        object_store_root=source_root,
+        required=True,
+    )
+    first = stage_nfs_raw_manifest_to_object_store(
+        readiness,
+        target_object_store_root=target_root,
+    )
+    assert first["status"] == "staged"
+
+    _write_manifest(source_root, metadata={"generation": 2})
+    (source_root / "raw/gfs/2026062612/file-a.grib2").write_bytes(b"new-grib-generation")
+    refreshed = nfs_raw_manifest_readiness(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        object_store_root=source_root,
+        required=True,
+    )
+    second = stage_nfs_raw_manifest_to_object_store(
+        refreshed,
+        target_object_store_root=target_root,
+    )
+
+    assert second["status"] == "staged"
+    assert (target_root / "raw/gfs/2026062612/file-a.grib2").read_bytes() == b"new-grib-generation"
+    assert json.loads((target_root / "raw/gfs/2026062612/manifest.json").read_text(encoding="utf-8"))[
+        "metadata"
+    ] == {"generation": 2}
 
 
 def test_stage_nfs_raw_manifest_does_not_publish_manifest_when_raw_copy_fails(

@@ -1,6 +1,6 @@
 # Current Production Operations Runbook
 
-最后更新：2026-07-15
+最后更新：2026-07-18
 
 适用范围：node-27 active DB + ingest + display，node-22 Slurm/SHUD compute，
 以及两者共享的 NFS object-store/published 数据面。
@@ -161,13 +161,43 @@ test -d "$NHMS_BASINS_ROOT"
 该脚本是后续新增流域的运维入口：先确认新流域已放入 `NHMS_BASINS_ROOT`，
 再运行脚本刷新 DB-free registry，最后让 `nhms-compute-scheduler.timer`
 后续 tick 自动提交 00/12 UTC 业务 cycle。期望 summary 中
-`selected_model_count` 等于当前 `Basins/` 下可发布 SHUD
-模型数。2026-06-30 现场拓扑中，`Basins/` 有 10 个顶层流域，其中
-`zhaochen/` 下还有 4 个可运行子模型，因此 scheduler registry 应发布 13 个
-模型。`NHMS_SCHEDULER_MODEL_IDS` 和 `NHMS_SCHEDULER_BASIN_IDS` 正常保持为空，
-由 file registry 决定全量自动计算；只在定向 rollback/drill 时临时收窄。
-`NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND` 应按当前 active 模型数设置，2026-07-01
-现场为 13；Slurm 仍负责资源仲裁，空闲整节点会并行运行，资源不足的任务排队。
+`selected_model_count` 等于当前 `Basins/` 下可发布 SHUD 模型数。
+
+**当前 authority（2026-07-18 node-22 现场）**：scheduler registry 恰为以下
+18 个 model，口径为 12 个保留旧模型加 6 个新增模型：
+
+```text
+basins_dth_ls_shud
+basins_dth_zj_shud
+basins_hhe_shud
+basins_huai_main_shud
+basins_lh_gl_shud
+basins_heihe_shud
+basins_hetianhe_shud
+basins_jialingjiang_shud
+basins_kashigeer_shud
+basins_keliya_shud
+basins_qhh_shud
+basins_qinyijiang_shud
+basins_weiganhe_shud
+basins_xinanjiang_upstream_shud
+basins_zhaochen_bst_shud
+basins_zhaochen_mc_shud
+basins_zhaochen_wem_shud
+basins_tailanhe_shud
+```
+
+因此 GFS/IFS 各有 18 个 source-model candidate，共 36 个候选执行单元。
+`NHMS_SCHEDULER_MODEL_IDS` 和 `NHMS_SCHEDULER_BASIN_IDS` 正常保持为空，由
+file registry 决定全量自动计算；只在定向 rollback/drill 时临时收窄。
+生产目标 `NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND=32` 是全局流域/数据源执行
+worker 上限。每个“流域 × 数据源 × 时次”独立推进，同一流域的 GFS/IFS forcing
+允许同时计算；scheduler 只在该 pass 收尾时等待全部 execution unit 并汇总证据。
+该值不是总提交数限制，也不保证同时出现 32 个 `RUNNING` job；Slurm 仍负责
+资源仲裁，资源不足的任务会排队。
+
+2026-06-30 的 13 模型、2026-07-01 的 submit bound 13 仅是当时的历史现场
+快照，不再代表当前 registry 或并发配置。
 若只读 Basins 源中某个模型仅缺 `*.tsd.rl`，脚本会在私有 scratch copy
 里复制同覆盖期 radiation 模板，原始 NFS Basins 源保持不变。
 
@@ -223,9 +253,11 @@ scripts/install_node22_scheduler_file_provider_refresh.sh --install
 `OBJECT_STORE_ROOT` 中最新的 GFS/IFS cycle catalog，执行 bounded/no-follow、schema、
 source/cycle、统一 lineage identity、forecast hours、catalog row、canonical object checksum
 全验证，并生成每个 source/model 一条只含 `catalog_uri + catalog_sha256 +
-catalog_row_count` 绑定的 entry（N 个当前模型应为 GFS N + IFS N；移除被
-`HHe` 完整覆盖的重复目录 `HHe-MAIN-02` 后，2026-07-15 现场为 19 个模型、
-每个 source 19 条、共 38 条）。最新 catalog
+catalog_row_count` 绑定的 entry（N 个当前模型应为 GFS N + IFS N）。
+2026-07-18 当前 authority 为 18 个模型，因此每个 source 必须恰有 18 条、
+总计 36 条。2026-07-15 在移除被 `HHe` 完整覆盖的重复目录
+`HHe-MAIN-02` 后得到的 19 模型、每源 19 条、共 38 条，只是当日历史证据。
+最新 catalog
 invalid 时禁止回退旧 cycle；consumer identity mismatch 必须重读同一绑定 catalog 后重算。
 State index 才允许仅绕过年龄并重验 checkpoint object。任何 missing/invalid 引用或
 registry/readiness model-set mismatch 都在 canonical replace 前失败，绝不续签 legacy
@@ -243,9 +275,10 @@ jq '{outcome,reason,database_free,providers,orphans}' \
 
 `published` receipt 必须绑定三个 shared canonical 文件以及
 `NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST` 指向的 private compute-visible registry mirror。
-shared registry 与 worker mirror 必须具有完全相同的物理 SHA-256 和 model count；registry 的现场模型数
-应为当前完整 inventory（2026-06-30 为 13，2026-07-14 为 20；移除重复的
-`HHe-MAIN-02` 后，2026-07-15 为 19），readiness 必须与同次
+shared registry 与 worker mirror 必须具有完全相同的物理 SHA-256 和 model count；
+registry 的现场模型数应为当前完整 inventory。历史演进为 2026-06-30 的 13、
+2026-07-14 的 20、移除重复 `HHe-MAIN-02` 后 2026-07-15 的 19；当前
+2026-07-18 authority 为 18。readiness 必须与同次
 registry model set 逐 source 完全一致并记录 catalog URI/SHA/row count；state entry 不能因
 刷新减少。
 Installer 在任何 systemd mutation 前都会用同一 strict v1 runtime validator 读取 bounded/no-follow
@@ -449,11 +482,14 @@ jq -r '.features[].properties.basin_id' apps/frontend/public/geo/national-basin-
   | sort | uniq -c
 ```
 
-2026-07-01 现场期望：domain 输出 13 个 basin；river 输出 20,100 条 feature，
+以下是 **2026-07-01 历史展示快照**，不是当前 registry 或 display inventory
+authority：当时 domain 输出 13 个 basin；river 输出 20,100 条 feature，
 覆盖 `basins_heihe`、`basins_hetianhe`、`basins_kashigeer`、`basins_keliya`、
 `basins_qhh`、`basins_qinyijiang`、`basins_tailanhe`、`basins_weiganhe`、
 `basins_xinanjiang_upstream`、`basins_zhaochen_bst`、`basins_zhaochen_hhy`、
-`basins_zhaochen_mc`、`basins_zhaochen_wem`。刷新后重新部署前端，公网
+`basins_zhaochen_mc`、`basins_zhaochen_wem`。目前没有对应 2026-07-18 inventory
+的 river feature 总数现场真值；不得把 20,100 外推或改写成新的 river 数量。
+刷新后重新部署前端，公网
 `https://test.nwm.ac.cn` 才会看到新增流域边界和一致的缩放河网底图。
 
 显式补跑某个 00/12 UTC 周期时，使用 node-22 的 DB-free 入口脚本，不要手工
@@ -594,7 +630,8 @@ node-27 download timer
   -> downloads GFS/IFS raw cycles to shared NFS object-store
 node-22 DB-free scheduler timer / Slurm
   -> consumes node-27 raw manifests from shared NFS
-  -> submits convert/forcing/forecast/parse work through Slurm Gateway/sbatch
+  -> submits per-basin GFS/IFS convert/forcing/forecast/state-save-QC work
+     concurrently through Slurm Gateway/sbatch
   -> Slurm runs compute jobs on allocated compute nodes
   -> produces forcing and SHUD run artifacts
   -> writes shared NFS object-store/published roots
@@ -1022,7 +1059,10 @@ Business-readiness receipt after fix:
 
 - `nhms-compute-scheduler.service` and timer run with
   `NHMS_SCHEDULER_DB_FREE_REQUIRED=true`, no `DATABASE_URL`, and
-  `NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND` greater than `1`.
+  `NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND=32`. The receipt treats 32 as the
+  global basin/source execution-worker ceiling; GFS and IFS forcing share this
+  pool and synchronize only at pass finalization. It does not require or imply
+  32 simultaneous `RUNNING` jobs because Slurm remains the resource arbiter.
 - The emergency one-at-a-time override is removed or disabled.
 - The receipt includes at least two eligible candidates or array tasks; a
   no-work pass proves safe daemon behavior but does not prove business

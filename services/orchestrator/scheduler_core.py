@@ -318,6 +318,17 @@ class ProductionScheduler:
     ) -> list[dict[str, _scheduler.Any]]:
         return _scheduler._scheduler_execution.execute_candidates(self._scheduler_execution_context(), candidates)
 
+    def _execute_candidates_async(
+        self, candidates: _scheduler.Sequence[_scheduler.SchedulerCandidate]
+    ) -> tuple[
+        list[dict[str, _scheduler.Any]],
+        list[_scheduler.SchedulerCandidate],
+        list[_scheduler.SchedulerCandidate],
+    ]:
+        return _scheduler._scheduler_execution.execute_candidates_async(
+            self._scheduler_execution_context(), candidates
+        )
+
     def _execute_candidate_cohort(
         self,
         source_id: str,

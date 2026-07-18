@@ -1100,23 +1100,6 @@ def run_once(self) -> SchedulerPassResult:
                                 execution_boundary = "db_free_journal_write_blocked"
                                 pass_status = "preflight_blocked"
                                 no_mutation_proof = _no_mutation_proof()
-                            else:
-                                if self.forcing_producer is not None:
-                                    (
-                                        candidates,
-                                        forcing_blocked_candidates,
-                                        forcing_evidence,
-                                    ) = self._produce_forcing_for_candidates(candidates)
-                                    blocked_candidates.extend(forcing_blocked_candidates)
-                                    execution_evidence.extend(forcing_evidence)
-                                    progress_guard.checkpoint(
-                                        "forcing",
-                                        bool(forcing_evidence or forcing_blocked_candidates),
-                                        {
-                                            "forcing_evidence_count": len(forcing_evidence),
-                                            "forcing_blocked_count": len(forcing_blocked_candidates),
-                                        },
-                                    )
                             if candidates and not _db_free_journal_mutation_blocked(
                                 self.config,
                                 mutation_requested=bool(candidates),
@@ -1153,7 +1136,24 @@ def run_once(self) -> SchedulerPassResult:
                                     pass_status = "preflight_blocked"
                                     no_mutation_proof = _no_mutation_proof()
                                 else:
-                                    execution_evidence.extend(self._execute_candidates(candidates))
+                                    (
+                                        async_evidence,
+                                        forcing_blocked_candidates,
+                                        candidates,
+                                    ) = self._execute_candidates_async(candidates)
+                                    execution_evidence.extend(async_evidence)
+                                    blocked_candidates.extend(forcing_blocked_candidates)
+                                    forcing_evidence_count = sum(
+                                        1 for item in async_evidence if item.get("stage") == "forcing"
+                                    )
+                                    progress_guard.checkpoint(
+                                        "forcing",
+                                        bool(forcing_evidence_count or forcing_blocked_candidates),
+                                        {
+                                            "forcing_evidence_count": forcing_evidence_count,
+                                            "forcing_blocked_count": len(forcing_blocked_candidates),
+                                        },
+                                    )
                                     progress_guard.checkpoint(
                                         "submission",
                                         bool(execution_evidence),

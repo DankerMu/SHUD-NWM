@@ -286,6 +286,42 @@ def execute_candidates(
     context: SchedulerExecutionContext,
     candidates: Sequence[SchedulerExecutionCandidate],
 ) -> list[dict[str, Any]]:
+    evidence, _blocked, _prepared = _execute_candidate_units(context, candidates, prepare_forcing=False)
+    return evidence
+
+
+def execute_candidates_async(
+    context: SchedulerExecutionContext,
+    candidates: Sequence[SchedulerExecutionCandidate],
+) -> tuple[
+    list[dict[str, Any]],
+    list[SchedulerExecutionCandidate],
+    list[SchedulerExecutionCandidate],
+]:
+    """Run basin/source pipelines independently and join only at pass finalization.
+
+    Pre-orchestration forcing is part of each singleton execution unit, so a
+    ready basin can advance to Slurm without waiting for sibling basins or the
+    other forecast source to finish forcing production.
+    """
+
+    return _execute_candidate_units(
+        context,
+        candidates,
+        prepare_forcing=context.forcing_producer is not None,
+    )
+
+
+def _execute_candidate_units(
+    context: SchedulerExecutionContext,
+    candidates: Sequence[SchedulerExecutionCandidate],
+    *,
+    prepare_forcing: bool,
+) -> tuple[
+    list[dict[str, Any]],
+    list[SchedulerExecutionCandidate],
+    list[SchedulerExecutionCandidate],
+]:
     grouped: dict[tuple[str, datetime], list[SchedulerExecutionCandidate]] = {}
     for candidate in candidates:
         grouped.setdefault((candidate.source_id, candidate.cycle_time_utc), []).append(candidate)
@@ -294,16 +330,41 @@ def execute_candidates(
     receipt = context.submit_overlap_receipt_factory()
     context.set_last_submit_overlap_receipt(receipt)
 
-    def _submitter(unit: _CohortUnit) -> list[dict[str, Any]]:
+    def _submitter(
+        unit: _CohortUnit,
+    ) -> tuple[
+        list[dict[str, Any]],
+        list[SchedulerExecutionCandidate],
+        list[SchedulerExecutionCandidate],
+    ]:
         key = f"{unit.source_id}:{unit.cycle_id}:{unit.cohort_run_id or 'full'}"
-        run = context.timed_submission(
-            lambda: context.execute_candidate_cohort(
+
+        def _prepare_and_execute() -> tuple[
+            list[dict[str, Any]],
+            list[SchedulerExecutionCandidate],
+            list[SchedulerExecutionCandidate],
+        ]:
+            execution_candidates = unit.execution_candidates
+            forcing_evidence: list[dict[str, Any]] = []
+            forcing_blocked: list[SchedulerExecutionCandidate] = []
+            if prepare_forcing:
+                execution_candidates, forcing_blocked, forcing_evidence = produce_forcing_for_candidates(
+                    context,
+                    execution_candidates,
+                )
+            if not execution_candidates:
+                return forcing_evidence, forcing_blocked, []
+            cohort_evidence = context.execute_candidate_cohort(
                 unit.source_id,
                 unit.cycle_time,
                 unit.cycle_id,
-                unit.execution_candidates,
+                execution_candidates,
                 orchestration_run_id=unit.cohort_run_id,
-            ),
+            )
+            return [*forcing_evidence, *cohort_evidence], forcing_blocked, execution_candidates
+
+        run = context.timed_submission(
+            _prepare_and_execute,
             receipt=receipt,
             idempotency_key=key,
             candidate_id=unit.cohort_run_id,
@@ -316,11 +377,16 @@ def execute_candidates(
     )
 
     evidence: list[dict[str, Any]] = []
+    blocked_candidates: list[SchedulerExecutionCandidate] = []
+    prepared_candidates: list[SchedulerExecutionCandidate] = []
     for result in results:
         if isinstance(result, Exception):
             raise result
-        evidence.extend(result)
-    return evidence
+        unit_evidence, unit_blocked, unit_prepared = result
+        evidence.extend(unit_evidence)
+        blocked_candidates.extend(unit_blocked)
+        prepared_candidates.extend(unit_prepared)
+    return evidence, blocked_candidates, prepared_candidates
 
 
 def _execution_units(

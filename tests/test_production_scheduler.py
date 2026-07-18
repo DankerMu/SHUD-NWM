@@ -23115,6 +23115,55 @@ def test_concurrent_candidates_same_source_cycle_submits_basins_overlap(tmp_path
     assert receipt.to_dict()["concurrent_submit_count"] == 2
 
 
+def test_basin_async_workers_overlap_cross_source_forcing_without_intermediate_barrier(
+    tmp_path: Path,
+) -> None:
+    import threading
+
+    gfs_advanced_to_orchestration = threading.Event()
+
+    class _CrossSourceForcingProducer(FakeForcingProducer):
+        def produce(self, **kwargs: Any) -> Any:
+            if kwargs.get("source_id") == "IFS":
+                assert gfs_advanced_to_orchestration.wait(timeout=5.0)
+            return super().produce(**kwargs)
+
+    class _AdvancingOrchestrator(FakeProductionOrchestrator):
+        def orchestrate_cycle(
+            self,
+            source: str,
+            cycle_time: datetime,
+            basins: list[dict[str, Any]],
+        ) -> PipelineResult:
+            if source == "gfs":
+                gfs_advanced_to_orchestration.set()
+            return super().orchestrate_cycle(source, cycle_time, basins)
+
+    forcing_producer = _CrossSourceForcingProducer()
+    orchestrator = _AdvancingOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, sources=("gfs", "IFS"), concurrent_submit_bound=2),
+        registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
+        adapters={"gfs": FakeAdapter("gfs", []), "IFS": FakeAdapter("IFS", [])},
+        forcing_producer=forcing_producer,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+    candidates = [
+        _concurrency_candidate("gfs", "model_a", "basin_a"),
+        _concurrency_candidate("IFS", "model_b", "basin_b"),
+    ]
+
+    evidence, blocked, prepared = scheduler._execute_candidates_async(candidates)
+
+    assert blocked == []
+    assert len(prepared) == 2
+    assert gfs_advanced_to_orchestration.is_set()
+    assert {call["source_id"] for call in forcing_producer.calls} == {"gfs", "IFS"}
+    assert {call["source"] for call in orchestrator.calls} == {"gfs", "IFS"}
+    assert sum(item.get("stage") == "forcing" for item in evidence) == 2
+    assert scheduler._last_submit_overlap_receipt.overlapping is True
+
+
 def test_concurrent_submit_bound_gt_one_dedupes_same_candidate_resubmit(tmp_path: Path) -> None:
     class _CountingOrchestrator:
         def __init__(self) -> None:
