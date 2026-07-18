@@ -241,7 +241,46 @@ class FileForcingRepository:
         basin_version_id: str,
         contract: DirectGridForcingContract,
     ) -> Mapping[str, Any]:
-        return {"model_input_package_id": contract.model_input_package_id}
+        model = self._model_entry(model_id)
+        if str(model.get("basin_version_id") or "") != basin_version_id:
+            raise MetStoreError(
+                f"Model instance {model_id!r} for basin_version_id {basin_version_id!r} was not found."
+            )
+        authoritative_contract = self.load_forcing_mapping_contract(
+            model_id=model_id,
+            basin_version_id=basin_version_id,
+        )
+        if authoritative_contract != contract:
+            raise DirectGridContractError(
+                "Direct-grid validation contract does not match file model registry resource_profile.",
+                field="direct_grid_forcing",
+                details={"model_id": model_id, "basin_version_id": basin_version_id},
+            )
+
+        package_uri = str(model.get("model_package_uri") or "").rstrip("/")
+        if not package_uri:
+            raise MetStoreError(f"Model {model_id!r} does not declare model_package_uri.")
+        sp_att_relative = _safe_direct_grid_package_member(contract.sp_att_path)
+        sp_att_uri = f"{package_uri}/{sp_att_relative}"
+        try:
+            binding_content = self.object_store.read_bytes(contract.binding_uri)
+            sp_att_content = self.object_store.read_bytes(sp_att_uri)
+        except (OSError, ObjectStoreError, ValueError) as error:
+            raise MetStoreError(
+                f"Failed to read authoritative direct-grid assets for model {model_id!r}: {error}"
+            ) from error
+        try:
+            decoded_sp_att = sp_att_content.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise MetStoreError(
+                f"Direct-grid .sp.att for model {model_id!r} is not UTF-8 text."
+            ) from error
+        return {
+            "binding_checksum": sha256_bytes(binding_content),
+            "model_input_package_id": authoritative_contract.model_input_package_id,
+            "sp_att_checksum": sha256_bytes(sp_att_content),
+            "sp_att_content": decoded_sp_att,
+        }
 
     def get_forcing_version(
         self,
@@ -346,17 +385,60 @@ class FileForcingRepository:
         grid_id: str,
         grid_signature: str,
     ) -> tuple[float, float, float, float, uuid.UUID, datetime | None] | None:
-        """File-store stub: file backend does not model ``canonical_grid_snapshot``.
+        """Resolve the checksum-bound snapshot projection embedded in file registry rows.
 
-        Direct-grid producer preflight expects a DB-owned registry row. The
-        file backend is used for DB-free tests / dev flows that predate the
-        SUB-6 preflight; returning ``None`` here surfaces as
-        :class:`MissingRegisteredGridSnapshotError` in the producer, i.e. the
-        file backend is fail-closed by construction for direct-grid runs
-        until an object-store canonical_grid_snapshot manifest is defined.
+        Node-22 is deliberately DB-free.  A direct-grid registry row therefore
+        carries the immutable DB snapshot projection under
+        ``resource_profile.canonical_grid_snapshot``.  Multiple source-scoped
+        model variants may reference the same projection; byte-equivalent
+        duplicates are accepted while any conflicting projection fails closed.
         """
-        del source_id, grid_id, grid_signature
-        return None
+        normalized_source = normalize_source_id(source_id)
+        matches: list[tuple[float, float, float, float, uuid.UUID, datetime | None]] = []
+        for model in self._registry_models():
+            profile = model.get("resource_profile")
+            if not isinstance(profile, Mapping):
+                continue
+            direct_grid = profile.get("direct_grid_forcing")
+            if not isinstance(direct_grid, Mapping):
+                continue
+            if str(direct_grid.get("grid_id") or "") != grid_id:
+                continue
+            if str(direct_grid.get("grid_signature") or "") != grid_signature:
+                continue
+            applicable = direct_grid.get("applicable_source_ids")
+            if not isinstance(applicable, Sequence) or isinstance(applicable, (str, bytes)):
+                continue
+            try:
+                normalized_applicable = {normalize_source_id(str(value)) for value in applicable}
+            except ValueError:
+                continue
+            if normalized_source not in normalized_applicable:
+                continue
+            snapshot = profile.get("canonical_grid_snapshot")
+            if not isinstance(snapshot, Mapping):
+                raise MetStoreError(
+                    f"Direct-grid model {model.get('model_id')!r} is missing "
+                    "resource_profile.canonical_grid_snapshot for DB-free preflight."
+                )
+            matches.append(
+                _direct_grid_snapshot_bbox(
+                    snapshot,
+                    source_id=normalized_source,
+                    grid_id=grid_id,
+                    grid_signature=grid_signature,
+                )
+            )
+        if not matches:
+            return None
+        first = matches[0]
+        if any(match != first for match in matches[1:]):
+            raise MetStoreError(
+                "Conflicting canonical_grid_snapshot projections exist in the file model registry "
+                f"for source_id={normalized_source!r}, grid_id={grid_id!r}, "
+                f"grid_signature={grid_signature!r}."
+            )
+        return first
 
     def _registry(self) -> Mapping[str, Any]:
         if self._registry_cache is None:
@@ -852,6 +934,70 @@ class FileForcingRepository:
             or (model.get("resource_profile") or {}).get("model_package_manifest_uri")
             or self.object_store.uri_for_key(f"models/{model_id}/package/")
         )
+
+
+def _safe_direct_grid_package_member(value: str) -> str:
+    normalized = value.replace("\\", "/").strip()
+    path = Path(normalized)
+    if (
+        not normalized
+        or path.is_absolute()
+        or normalized.startswith("/")
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise DirectGridContractError(
+            "Direct-grid sp_att_path must be a safe model-package-relative path.",
+            field="sp_att_path",
+            details={"actual": value},
+        )
+    return normalized
+
+
+def _direct_grid_snapshot_bbox(
+    payload: Mapping[str, Any],
+    *,
+    source_id: str,
+    grid_id: str,
+    grid_signature: str,
+) -> tuple[float, float, float, float, uuid.UUID, datetime | None]:
+    try:
+        snapshot_source = normalize_source_id(str(payload["source_id"]))
+        snapshot_grid_id = str(payload["grid_id"])
+        snapshot_signature = str(payload["grid_signature"])
+        snapshot_id = uuid.UUID(str(payload["grid_snapshot_id"]))
+        bbox_south = float(payload["bbox_south"])
+        bbox_north = float(payload["bbox_north"])
+        bbox_west = float(payload["bbox_west"])
+        bbox_east = float(payload["bbox_east"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise MetStoreError(f"Invalid canonical_grid_snapshot projection: {error}") from error
+    if (snapshot_source, snapshot_grid_id, snapshot_signature) != (
+        source_id,
+        grid_id,
+        grid_signature,
+    ):
+        raise MetStoreError(
+            "canonical_grid_snapshot projection identity does not match its direct-grid contract."
+        )
+    superseded_at_raw = payload.get("superseded_at")
+    superseded_at: datetime | None = None
+    if superseded_at_raw not in (None, ""):
+        try:
+            superseded_at = datetime.fromisoformat(str(superseded_at_raw).replace("Z", "+00:00"))
+        except ValueError as error:
+            raise MetStoreError(
+                "canonical_grid_snapshot.superseded_at must be an ISO-8601 timestamp."
+            ) from error
+        if superseded_at.tzinfo is None:
+            raise MetStoreError("canonical_grid_snapshot.superseded_at must include a timezone.")
+    return (
+        bbox_south,
+        bbox_north,
+        bbox_west,
+        bbox_east,
+        snapshot_id,
+        superseded_at,
+    )
 
 
 def db_free_repository_enabled() -> bool:

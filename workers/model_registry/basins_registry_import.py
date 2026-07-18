@@ -1318,12 +1318,14 @@ def _build_river_segment_crosswalk_rows(
             "Basins seg.shp references reach Index values not present in river.shp.",
             details={"missing_iRiv": missing_iriv, "model_id": model_id},
         )
-    return [
-        {
+    rows_by_external_id: dict[str, dict[str, Any]] = {}
+    for segment in segments:
+        external_id = f"{segment.iRiv}:{segment.iEle}"
+        candidate = {
             "river_network_version_id": river_network_version_id,
             "river_segment_id": f"{model_id}_reach_{segment.iRiv:06d}",
             "source": "basins_seg_shp",
-            "external_id": f"{segment.iRiv}:{segment.iEle}",
+            "external_id": external_id,
             "properties_json": {
                 "iRiv": int(segment.iRiv),
                 "iEle": int(segment.iEle),
@@ -1331,8 +1333,28 @@ def _build_river_segment_crosswalk_rows(
                 "length_m": (None if segment.length_m is None else float(segment.length_m)),
             },
         }
-        for segment in segments
-    ]
+        existing = rows_by_external_id.get(external_id)
+        if existing is None:
+            rows_by_external_id[external_id] = candidate
+            continue
+        existing_properties = existing["properties_json"]
+        candidate_properties = candidate["properties_json"]
+        if existing_properties["length_m"] != candidate_properties["length_m"]:
+            raise BasinsGeometryError(
+                "BASINS_REGISTRY_CROSSWALK_DUPLICATE_CONFLICT",
+                "Basins seg.shp repeats an (iRiv, iEle) identity with conflicting attributes.",
+                details={
+                    "model_id": model_id,
+                    "external_id": external_id,
+                    "existing_length_m": existing_properties["length_m"],
+                    "duplicate_length_m": candidate_properties["length_m"],
+                },
+            )
+        # The database key models one relation per (iRiv, iEle).  Source
+        # shapefiles may repeat that same relation on multiple geometry rows;
+        # preserve the first (lowest source segment_order) deterministically so
+        # one execute_values page never targets the same ON CONFLICT key twice.
+    return list(rows_by_external_id.values())
 
 
 _OUTPUT_BACKFILL_INJECTED_KEYS = frozenset(

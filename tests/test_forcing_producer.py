@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import math
@@ -589,6 +590,148 @@ def test_file_forcing_repository_reads_model_registry_stations_and_canonical_att
         "gfs_2026062118_air_temperature_2m_f003.nc"
     )
     assert product.lineage_json["policy_identity"] == {"source": "gfs"}
+
+
+def _file_direct_grid_repository(
+    tmp_path: Path,
+    *,
+    snapshot_overrides: Mapping[str, Any] | None = None,
+    duplicate_snapshot_overrides: Mapping[str, Any] | None = None,
+) -> tuple[FileForcingRepository, Any, bytes, bytes]:
+    store = LocalObjectStore(tmp_path, object_store_prefix="s3://nhms")
+    binding_content = b'{"schema_version":"nhms.direct_grid.binding.v1"}'
+    sp_att_content = _sp_att_content().encode("utf-8")
+    binding_uri = "s3://nhms/models/demo/direct-grid/binding.json"
+    package_uri = "s3://nhms/models/demo/direct-grid/package"
+    store.write_bytes_atomic(binding_uri, binding_content)
+    store.write_bytes_atomic(f"{package_uri}/input/demo.sp.att", sp_att_content)
+    direct_grid = _direct_grid_manifest_for_default_grid()
+    direct_grid.update(
+        {
+            "binding_uri": binding_uri,
+            "binding_checksum": sha256_bytes(binding_content),
+            "sp_att_path": "input/demo.sp.att",
+            "sp_att_checksum": sha256_bytes(sp_att_content),
+        }
+    )
+    snapshot = {
+        "source_id": "GFS",
+        "grid_id": direct_grid["grid_id"],
+        "grid_signature": direct_grid["grid_signature"],
+        "grid_snapshot_id": "9dcbb4cf-cdaf-4255-8500-364f75cf2e00",
+        "bbox_south": 8.0,
+        "bbox_north": 64.0,
+        "bbox_west": 63.0,
+        "bbox_east": 145.0,
+        "superseded_at": None,
+    }
+    snapshot.update(snapshot_overrides or {})
+
+    def model_entry(model_id: str, projection: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "model_id": model_id,
+            "basin_id": "basin_a",
+            "basin_version_id": "basin_v1",
+            "river_network_version_id": "rivnet_v1",
+            "model_package_uri": package_uri,
+            "resource_profile": {
+                "direct_grid_forcing": direct_grid,
+                "canonical_grid_snapshot": dict(projection),
+            },
+        }
+
+    models = [model_entry("demo_model", snapshot)]
+    if duplicate_snapshot_overrides is not None:
+        duplicate_snapshot = dict(snapshot)
+        duplicate_snapshot.update(duplicate_snapshot_overrides)
+        models.append(model_entry("demo_model_duplicate", duplicate_snapshot))
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps({"models": models}), encoding="utf-8")
+    repository = FileForcingRepository(object_store=store, registry_manifest=registry_path)
+    contract = parse_direct_grid_forcing_contract(direct_grid, source_id="GFS")
+    return repository, contract, binding_content, sp_att_content
+
+
+def test_file_forcing_repository_loads_direct_grid_assets_and_snapshot_projection(
+    tmp_path: Path,
+) -> None:
+    repository, contract, binding_content, sp_att_content = _file_direct_grid_repository(tmp_path)
+
+    assets = repository.load_direct_grid_validation_assets(
+        model_id="demo_model",
+        basin_version_id="basin_v1",
+        contract=contract,
+    )
+    snapshot = repository.find_registered_snapshot_bbox_by_identity(
+        source_id="gfs",
+        grid_id=contract.grid_id,
+        grid_signature=contract.grid_signature,
+    )
+
+    assert assets == {
+        "binding_checksum": sha256_bytes(binding_content),
+        "model_input_package_id": contract.model_input_package_id,
+        "sp_att_checksum": sha256_bytes(sp_att_content),
+        "sp_att_content": sp_att_content.decode("utf-8"),
+    }
+    assert snapshot is not None
+    assert snapshot[:4] == (8.0, 64.0, 63.0, 145.0)
+    assert str(snapshot[4]) == "9dcbb4cf-cdaf-4255-8500-364f75cf2e00"
+    assert snapshot[5] is None
+
+
+def test_file_forcing_repository_rejects_unsafe_direct_grid_sp_att_path(tmp_path: Path) -> None:
+    repository, contract, _, _ = _file_direct_grid_repository(tmp_path)
+    unsafe_contract = dataclasses.replace(contract, sp_att_path="../baseline/demo.sp.att")
+    repository._registry_cache = {
+        "models": [
+            {
+                **repository._registry_models()[0],
+                "resource_profile": {
+                    **repository._registry_models()[0]["resource_profile"],
+                    "direct_grid_forcing": {
+                        **repository._registry_models()[0]["resource_profile"]["direct_grid_forcing"],
+                        "sp_att_path": "../baseline/demo.sp.att",
+                    },
+                },
+            }
+        ]
+    }
+
+    with pytest.raises(DirectGridContractError, match="model-package-relative"):
+        repository.load_direct_grid_validation_assets(
+            model_id="demo_model",
+            basin_version_id="basin_v1",
+            contract=unsafe_contract,
+        )
+
+
+def test_file_forcing_repository_rejects_conflicting_snapshot_projections(tmp_path: Path) -> None:
+    repository, contract, _, _ = _file_direct_grid_repository(
+        tmp_path,
+        duplicate_snapshot_overrides={"grid_snapshot_id": "f4e66c7f-5f5b-4624-b394-7ac09aac4797"},
+    )
+
+    with pytest.raises(MetStoreError, match="Conflicting canonical_grid_snapshot projections"):
+        repository.find_registered_snapshot_bbox_by_identity(
+            source_id="gfs",
+            grid_id=contract.grid_id,
+            grid_signature=contract.grid_signature,
+        )
+
+
+def test_file_forcing_repository_requires_snapshot_projection_for_direct_grid(tmp_path: Path) -> None:
+    repository, contract, _, _ = _file_direct_grid_repository(tmp_path)
+    model = dict(repository._registry_models()[0])
+    model["resource_profile"] = {"direct_grid_forcing": contract.__dict__}
+    repository._registry_cache = {"models": [model]}
+
+    with pytest.raises(MetStoreError, match="missing resource_profile.canonical_grid_snapshot"):
+        repository.find_registered_snapshot_bbox_by_identity(
+            source_id="gfs",
+            grid_id=contract.grid_id,
+            grid_signature=contract.grid_signature,
+        )
 
 
 def test_file_forcing_repository_prefers_canonical_product_catalog(tmp_path: Path) -> None:
