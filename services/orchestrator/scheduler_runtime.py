@@ -25,6 +25,7 @@ SchedulerEvidenceWriteError = _scheduler_evidence_module.SchedulerEvidenceWriteE
 SchedulerPassResult = _scheduler.SchedulerPassResult
 SchedulerResourceLimitError = _scheduler_discovery.SchedulerResourceLimitError
 UNKNOWN_AFTER_ATTEMPT = _scheduler_evidence_module.UNKNOWN_AFTER_ATTEMPT
+_SELECTED_CANDIDATE_STATE_COMPACTION_THRESHOLD = 16
 
 
 class _SchedulerProgressGuard:
@@ -1260,7 +1261,14 @@ def run_once(self) -> SchedulerPassResult:
                     "lock": lock_evidence,
                     "model_discovery": model_evidence,
                     "source_cycles": source_cycle_evidence,
-                    "candidates": [candidate.to_dict() for candidate in candidates],
+                    "candidates": [
+                        candidate.to_dict(
+                            compact_selected_state=(
+                                len(candidates) >= _SELECTED_CANDIDATE_STATE_COMPACTION_THRESHOLD
+                            )
+                        )
+                        for candidate in candidates
+                    ],
                     "blocked_candidates": [candidate.to_dict() for candidate in blocked_candidates],
                     "skipped_candidates": skipped_candidates,
                     "duplicate_exclusions": duplicate_exclusions,

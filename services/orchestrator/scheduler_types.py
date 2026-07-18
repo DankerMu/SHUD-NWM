@@ -94,7 +94,7 @@ class SchedulerCandidate:
     state_evidence: Mapping[str, Any] = field(default_factory=dict)
     slurm_array_max_concurrent: int | None = None
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, *, compact_selected_state: bool = False) -> dict[str, Any]:
         contract_identity = _scheduler._candidate_production_identity(self)
         payload = {
             "production_identity_contract": production_identity_contract_evidence(contract_identity),
@@ -129,5 +129,44 @@ class SchedulerCandidate:
         if contract_identity.get("pipeline_job_id") not in (None, ""):
             payload["pipeline_job_id"] = contract_identity["pipeline_job_id"]
         if self.state_evidence:
-            payload["state_evidence"] = _scheduler._evidence_safe(self.state_evidence)
+            state_evidence = self.state_evidence
+            if compact_selected_state and self.status == "selected":
+                state_evidence = _compact_selected_state_evidence(state_evidence)
+            payload["state_evidence"] = _scheduler._evidence_safe(state_evidence)
         return payload
+
+
+def _compact_selected_state_evidence(state_evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Bound repeated source readiness detail after a candidate is selected.
+
+    A source/cycle readiness payload is shared by every basin candidate.  Its
+    source-object identity and per-lead diagnostics can be tens of kilobytes,
+    so copying both collections into every selected candidate makes a normal
+    18-basin x 2-source pass exceed the scheduler's durable evidence limit.
+    Blocked candidates keep the full diagnostic payload; selected candidates
+    retain the decision, identities, counters, and explicit omission counts.
+    """
+
+    compact = dict(state_evidence)
+    canonical = compact.get("canonical_readiness")
+    if not isinstance(canonical, Mapping):
+        return compact
+
+    canonical_compact = dict(canonical)
+    for field_name, count_field in (
+        ("missing_leads", "missing_lead_count"),
+        ("source_object_identity", "source_object_identity_entry_count"),
+    ):
+        value = canonical_compact.pop(field_name, None)
+        if isinstance(value, Mapping):
+            canonical_compact[count_field] = len(value)
+        elif isinstance(value, list | tuple):
+            canonical_compact[count_field] = len(value)
+        elif value is not None:
+            canonical_compact[count_field] = 1
+        else:
+            canonical_compact.setdefault(count_field, 0)
+    canonical_compact["details_compacted"] = True
+    canonical_compact["details_compaction_scope"] = "selected_candidate_shared_source_readiness"
+    compact["canonical_readiness"] = canonical_compact
+    return compact

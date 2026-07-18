@@ -1116,6 +1116,88 @@ def test_scheduler_evidence_compat_forwarders_delegate_to_owner_module(
     assert all(item.config is scheduler.config for item in contexts)
 
 
+def test_selected_candidate_evidence_compacts_shared_readiness_diagnostics() -> None:
+    candidate = scheduler_module.SchedulerCandidate(
+        candidate_id="candidate-1",
+        source_id="gfs",
+        cycle_id="gfs_2026070600",
+        cycle_time_utc=_dt("2026-07-06T00:00:00Z"),
+        model_id="model_a",
+        basin_id="basin_a",
+        basin_version_id="basin_a_v1",
+        river_network_version_id="basin_a_rivnet_v1",
+        segment_count=3,
+        output_segment_count=2,
+        model_package_uri="s3://nhms/models/model_a/package/",
+        resource_profile={},
+        display_capabilities={},
+        horizon={},
+        scenario_id="forecast_gfs_deterministic",
+        run_id="fcst_gfs_2026070600_model_a",
+        forcing_version_id="forc_gfs_2026070600_model_a",
+        status="selected",
+        state_evidence={
+            "candidate_state": {"initial_state_quality": "fresh"},
+            "canonical_readiness": {
+                "status": "canonical_incomplete",
+                "ready": False,
+                "reason": "canonical_identity_mismatch",
+                "missing_leads": [{"lead": lead} for lead in range(57)],
+                "source_object_identity": {f"field_{index}": index for index in range(20)},
+                "required_variables": ["prcp_rate_or_amount"],
+            },
+        },
+    )
+
+    full = candidate.to_dict()
+    compact = candidate.to_dict(compact_selected_state=True)
+
+    assert len(full["state_evidence"]["canonical_readiness"]["missing_leads"]) == 57
+    canonical = compact["state_evidence"]["canonical_readiness"]
+    assert "missing_leads" not in canonical
+    assert "source_object_identity" not in canonical
+    assert canonical["missing_lead_count"] == 57
+    assert canonical["source_object_identity_entry_count"] == 20
+    assert canonical["details_compacted"] is True
+    assert canonical["status"] == "canonical_incomplete"
+    assert compact["state_evidence"]["candidate_state"] == {"initial_state_quality": "fresh"}
+
+
+def test_blocked_candidate_evidence_keeps_full_readiness_diagnostics() -> None:
+    candidate = scheduler_module.SchedulerCandidate(
+        candidate_id="candidate-1",
+        source_id="gfs",
+        cycle_id="gfs_2026070600",
+        cycle_time_utc=_dt("2026-07-06T00:00:00Z"),
+        model_id="model_a",
+        basin_id="basin_a",
+        basin_version_id="basin_a_v1",
+        river_network_version_id="basin_a_rivnet_v1",
+        segment_count=3,
+        output_segment_count=2,
+        model_package_uri="s3://nhms/models/model_a/package/",
+        resource_profile={},
+        display_capabilities={},
+        horizon={},
+        scenario_id="forecast_gfs_deterministic",
+        run_id="fcst_gfs_2026070600_model_a",
+        forcing_version_id="forc_gfs_2026070600_model_a",
+        status="blocked",
+        state_evidence={
+            "canonical_readiness": {
+                "missing_leads": [{"lead": 0}],
+                "source_object_identity": {"manifest": "raw/gfs/manifest.json"},
+            }
+        },
+    )
+
+    canonical = candidate.to_dict(compact_selected_state=True)["state_evidence"]["canonical_readiness"]
+
+    assert canonical["missing_leads"] == [{"lead": 0}]
+    assert canonical["source_object_identity"] == {"manifest": "raw/gfs/manifest.json"}
+    assert "details_compacted" not in canonical
+
+
 def test_scheduler_evidence_compat_wrappers_delegate_to_owner_module(
     monkeypatch: Any,
     tmp_path: Path,
