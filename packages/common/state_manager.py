@@ -696,7 +696,7 @@ class PsycopgStateSnapshotRepository:
                 run_id = EXCLUDED.run_id,
                 state_uri = EXCLUDED.state_uri,
                 checksum = EXCLUDED.checksum,
-                usable_flag = false,
+                usable_flag = EXCLUDED.usable_flag,
                 source_id = EXCLUDED.source_id,
                 cycle_id = EXCLUDED.cycle_id,
                 lead_hours = EXCLUDED.lead_hours,
