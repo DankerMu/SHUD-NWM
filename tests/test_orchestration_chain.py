@@ -1420,6 +1420,101 @@ def test_cycle_stage_manifest_forwards_db_free_file_provider_paths(
     assert manifest["scheduler_state_index"] == str(state_index)
 
 
+def test_cycle_stage_manifest_propagates_one_array_concurrency_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from services.orchestrator import chain_manifests
+
+    monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_ROOTS", str(tmp_path))
+    basins = [
+        {"model_id": "model_a", "run_id": "run_a", "max_concurrent": 14},
+        {"model_id": "model_b", "run_id": "run_b", "max_concurrent": 14},
+    ]
+    orchestrator = types.SimpleNamespace(
+        config=OrchestratorConfig(
+            workspace_root=tmp_path / "workspace",
+            object_store_root=tmp_path / "object-store",
+            object_store_prefix="s3://nhms",
+        ),
+        _reindexed_manifest_entries=lambda values: list(values),
+        _forecast_scenario_id=lambda _source: "forecast_gfs_deterministic",
+    )
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-07-05T12:00:00Z"),
+        cycle_id="gfs_2026070512",
+        run_id="cycle_gfs_2026070512",
+        all_basins=basins,
+        active_basins=basins,
+    )
+    stage = StageDefinition(
+        "forcing",
+        "produce_forcing_array",
+        "produce_forcing_array.sbatch",
+        "forcing_ready",
+        "failed_forcing",
+        is_array=True,
+    )
+
+    manifest = chain_manifests.build_cycle_stage_manifest(
+        orchestrator,
+        stage,
+        context,
+        model_run_stage_evidence=lambda _stage, entry, **_kwargs: dict(entry),
+    )
+
+    assert manifest["max_concurrent"] == 14
+
+
+@pytest.mark.parametrize("bounds", [(14, 13), (14, 0), (14, "13")])
+def test_cycle_stage_manifest_rejects_inconsistent_or_invalid_array_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    bounds: tuple[object, object],
+) -> None:
+    from services.orchestrator import chain_manifests
+
+    monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_ROOTS", str(tmp_path))
+    basins = [
+        {"model_id": "model_a", "run_id": "run_a", "max_concurrent": bounds[0]},
+        {"model_id": "model_b", "run_id": "run_b", "max_concurrent": bounds[1]},
+    ]
+    orchestrator = types.SimpleNamespace(
+        config=OrchestratorConfig(
+            workspace_root=tmp_path / "workspace",
+            object_store_root=tmp_path / "object-store",
+            object_store_prefix="s3://nhms",
+        ),
+        _reindexed_manifest_entries=lambda values: list(values),
+        _forecast_scenario_id=lambda _source: "forecast_gfs_deterministic",
+    )
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-07-05T12:00:00Z"),
+        cycle_id="gfs_2026070512",
+        run_id="cycle_gfs_2026070512",
+        all_basins=basins,
+        active_basins=basins,
+    )
+    stage = StageDefinition(
+        "forcing",
+        "produce_forcing_array",
+        "produce_forcing_array.sbatch",
+        "forcing_ready",
+        "failed_forcing",
+        is_array=True,
+    )
+
+    with pytest.raises(OrchestratorError, match="concurrency budget"):
+        chain_manifests.build_cycle_stage_manifest(
+            orchestrator,
+            stage,
+            context,
+            model_run_stage_evidence=lambda _stage, entry, **_kwargs: dict(entry),
+        )
+
+
 def test_cycle_stage_manifest_prefers_slurm_runtime_db_free_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

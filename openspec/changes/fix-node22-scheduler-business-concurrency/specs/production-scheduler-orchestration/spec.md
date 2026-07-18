@@ -39,6 +39,16 @@ source/cycle/model/stage/task identity to avoid duplicate work
 AND the pass records concurrent bound evidence
 AND no stale lock or duplicate submission remains after the pass.
 
+#### Scenario: basin forcing concurrency is owned by Slurm arrays
+
+WHEN one pass has eligible GFS/IFS candidates across multiple basins or
+restart-compatible cohorts
+THEN the login-node scheduler MUST only construct, submit, and poll the cohorts
+AND direct-grid forcing MUST execute through Slurm array tasks
+AND simultaneously runnable cohort array throttles MUST sum to no more than the
+configured global Slurm array concurrency bound
+AND the pass synchronizes the cohorts only at final pass aggregation.
+
 #### Scenario: no-work pass is not business readiness
 
 WHEN node-22 runs the scheduler and no eligible candidate or array task exists

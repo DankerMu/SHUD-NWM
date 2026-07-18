@@ -4,7 +4,7 @@ import hashlib
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -62,11 +62,13 @@ class SchedulerExecutionCandidate(Protocol):
     river_network_version_id: str | None
     resource_profile: Mapping[str, Any]
     state_evidence: Mapping[str, Any]
+    slurm_array_max_concurrent: int | None
 
 
 class SchedulerExecutionConfig(Protocol):
     sources: tuple[str, ...]
     concurrent_submit_bound: int
+    slurm_array_concurrency_bound: int
     slurm_execution_enabled: bool
     slurm_env: Mapping[str, str]
 
@@ -281,6 +283,7 @@ class _CohortUnit:
     cycle_id: str
     execution_candidates: list[SchedulerExecutionCandidate]
     cohort_run_id: str | None
+    array_max_concurrent: int
 
 
 def execute_candidates(
@@ -359,7 +362,10 @@ def _execute_candidate_units(
 
     results = context.run_concurrent_submissions(
         [(lambda u=unit: _submitter(u)) for unit in units],
-        max_workers=context.config.concurrent_submit_bound,
+        max_workers=min(
+            context.config.concurrent_submit_bound,
+            context.config.slurm_array_concurrency_bound,
+        ),
     )
 
     evidence: list[dict[str, Any]] = []
@@ -407,9 +413,73 @@ def _execution_units(
                         cycle_id=cycle_id,
                         execution_candidates=list(execution_candidates),
                         cohort_run_id=cohort_run_id,
+                        array_max_concurrent=1,
                     )
                 )
-    return units
+    budgets = _array_concurrency_budgets(
+        units,
+        global_bound=context.config.slurm_array_concurrency_bound,
+        worker_bound=context.config.concurrent_submit_bound,
+    )
+    return [
+        replace(
+            unit,
+            execution_candidates=[
+                _candidate_with_array_concurrency_budget(candidate, budget)
+                for candidate in unit.execution_candidates
+            ],
+            array_max_concurrent=budget,
+        )
+        for unit, budget in zip(units, budgets, strict=True)
+    ]
+
+
+def _array_concurrency_budgets(
+    units: Sequence[_CohortUnit],
+    *,
+    global_bound: int,
+    worker_bound: int,
+) -> list[int]:
+    """Allocate a strict cross-cohort Slurm array budget.
+
+    When every unit can start immediately, round-robin water filling preserves
+    small cohorts and uses the entire global budget whenever enough tasks
+    exist.  If units must queue behind the control-thread bound, every active
+    slot receives the same conservative ceiling; any combination of running
+    slots therefore remains within ``global_bound`` as queued units advance.
+    """
+
+    if not units:
+        return []
+    global_bound = max(int(global_bound), 1)
+    active_slots = min(len(units), max(int(worker_bound), 1), global_bound)
+    task_counts = [max(len(unit.execution_candidates), 1) for unit in units]
+    if len(units) > active_slots:
+        per_slot_bound = max(global_bound // active_slots, 1)
+        return [min(task_count, per_slot_bound) for task_count in task_counts]
+
+    budgets = [0] * len(units)
+    remaining = global_bound
+    while remaining > 0:
+        advanced = False
+        for index, task_count in enumerate(task_counts):
+            if budgets[index] >= task_count:
+                continue
+            budgets[index] += 1
+            remaining -= 1
+            advanced = True
+            if remaining == 0:
+                break
+        if not advanced:
+            break
+    return [max(budget, 1) for budget in budgets]
+
+
+def _candidate_with_array_concurrency_budget(
+    candidate: SchedulerExecutionCandidate,
+    budget: int,
+) -> SchedulerExecutionCandidate:
+    return replace(candidate, slurm_array_max_concurrent=int(budget))
 
 
 def _unique_execution_candidates(

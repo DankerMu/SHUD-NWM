@@ -320,6 +320,60 @@ def _fake_array_task(run_id: str, model_id: str) -> dict[str, str]:
     }
 
 
+def test_submit_job_array_honors_scheduler_budget_below_resource_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 12345\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    gateway = _gateway(tmp_path)
+    tasks = [_fake_array_task(f"run_{index}", f"model_{index}") for index in range(4)]
+
+    record = gateway.submit_job_array(
+        job_type="run_shud_forecast_array",
+        cycle_id="cycle_001",
+        stage_name="forecast",
+        tasks=tasks,
+        manifest={"max_concurrent": 2},
+    )
+
+    assert record.manifest["max_concurrent"] == 2
+    assert any("--array=0-3%2" in command for command in commands)
+
+
+@pytest.mark.parametrize("value", [0, True, "2", "2 --array=0-999"])
+def test_submit_job_array_rejects_invalid_scheduler_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    value: object,
+) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 12345\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    gateway = _gateway(tmp_path)
+
+    with pytest.raises(SlurmValidationError, match="max_concurrent"):
+        gateway.submit_job_array(
+            job_type="run_shud_forecast_array",
+            cycle_id="cycle_001",
+            stage_name="forecast",
+            tasks=[_fake_array_task("run_001", "model_001")],
+            manifest={"max_concurrent": value},
+        )
+    assert commands == []
+
+
 def _production_gateway(tmp_path: Path) -> RealSlurmGateway:
     return RealSlurmGateway(
         SlurmGatewaySettings(

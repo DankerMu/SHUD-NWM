@@ -167,7 +167,7 @@ NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=false \
 `scripts/provision_direct_grid_scheduler_registry.py`，输入上述 baseline staging、输出
 direct-only candidate。候选必须满足：18 个现有流域加新增流域，每个流域恰有 GFS/IFS
 两行，`resource_profile.forcing_mapping_mode` 唯一值为 `direct_grid`。把新 variant package
-镜像到 node-22 私有 object store 后，先用 `FileSchedulerModelRegistry(...,
+复制到 node-22 私有 object store 后，先用 `FileSchedulerModelRegistry(...,
 require_direct_grid=True)` 校验，再依次原子发布 Slurm worker mirror 与 shared canonical，
 并重建 canonical readiness。任何一步失败都保留上一份 canonical，不允许退回 IDW。
 
@@ -202,10 +202,13 @@ basins_tailanhe_shud
 pass-blocking failure。合同缺失或损坏仍须 fail closed。
 `NHMS_SCHEDULER_MODEL_IDS` 和 `NHMS_SCHEDULER_BASIN_IDS` 正常保持为空，由
 file registry 决定全量自动计算；只在定向 rollback/drill 时临时收窄。
-生产并发由 Slurm resource profile 的 `max_concurrent=32` 承担。scheduler 登录节点
+生产并发由 scheduler 的全局 Slurm 数组预算
+`NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND=32` 和 resource profile 的
+`max_concurrent=32` 共同约束。scheduler 登录节点
 只按“数据源 × 时次 × restart-compatible stage”构造 cohort、提交和轮询，不执行
 direct-grid forcing。每个 cohort 的全部流域进入 `produce_forcing_array.sbatch`，Gateway
-生成 `--array=0-(N-1)%min(32,N)`；GFS 与 IFS cohort 可同时在 Slurm 中推进，scheduler
+生成 `--array=0-(N-1)%min(cohort预算,resource profile上限,N)`；同一 pass 同时运行的
+cohort 预算总和不超过 32。GFS 与 IFS cohort 可同时在 Slurm 中推进，scheduler
 只在 pass 收尾时汇总全部 cohort。`NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND` 仅限制少量
 cohort 提交/轮询控制线程，不能作为流域计算并发口径，也不能替代 Slurm `%N`。
 cohort run id 包含排序后 candidate membership 的稳定摘要；同一成员集合重启时复用，
@@ -1085,9 +1088,10 @@ Business-readiness receipt after fix:
 
 - `nhms-compute-scheduler.service` and timer run with
   `NHMS_SCHEDULER_DB_FREE_REQUIRED=true`, no `DATABASE_URL`, and
-  a Slurm resource profile whose `max_concurrent=32`. The receipt must show a
-  multi-task `produce_forcing_array` submission with an array throttle derived
-  from that profile. `NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND` only bounds
+  `NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND=32` plus a Slurm resource
+  profile whose `max_concurrent=32`. The receipt must show multi-task
+  `produce_forcing_array` submissions whose simultaneous array throttles sum
+  to at most 32. `NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND` only bounds
   source/cycle cohort control threads; it is not accepted as forcing-concurrency
   proof. GFS and IFS cohorts may overlap and synchronize at pass finalization.
 - The cohort run id carries a stable digest of its candidate membership. A

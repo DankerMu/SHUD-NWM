@@ -6744,6 +6744,20 @@ def test_explicit_paths_must_stay_under_workspace(tmp_path: Path) -> None:
         _config(tmp_path, evidence_dir=outside)
 
 
+def test_scheduler_slurm_array_concurrency_bound_reads_env_and_clamps_positive(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND", "32")
+    config = ProductionSchedulerConfig(workspace_root=tmp_path)
+    assert config.slurm_array_concurrency_bound == 32
+    evidence = scheduler_module._scheduler_runtime_config_evidence(config)
+    assert evidence["slurm_array_concurrency_bound"] == 32
+
+    monkeypatch.setenv("NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND", "0")
+    assert ProductionSchedulerConfig(workspace_root=tmp_path).slurm_array_concurrency_bound == 1
+
+
 def test_fresh_default_workspace_runtime_paths_are_created_safely(
     monkeypatch: Any,
     tmp_path: Path,
@@ -14771,6 +14785,7 @@ def test_slurm_scheduler_preserves_safe_manifest_fields_and_allowed_env(tmp_path
     assert submitted_basin["model_package_uri"] == safe_package_uri
     assert submitted_basin["model_package_manifest_uri"] == "s3://nhms-safe/models/model_a/manifest.json"
     assert submitted_basin["resource_profile"] == safe_resource_profile
+    assert submitted_basin["max_concurrent"] == 1
     assert submitted_basin["output_uri"] == "s3://nhms-safe/runs/model_a/output/"
     assert submitted_basin["slurm_env"] == {"NHMS_PROFILE": "prod/gfs_00"}
     assert "DATABASE_URL" not in submitted_basin
@@ -23924,6 +23939,7 @@ def test_bound_32_dispatches_36_candidates_as_two_cross_source_slurm_cohorts(tmp
     active = 0
     peak = 0
     cohort_sizes: list[int] = []
+    cohort_array_bounds: list[int] = []
     lock = threading.Lock()
 
     class _Bound32Orchestrator:
@@ -23940,6 +23956,7 @@ def test_bound_32_dispatches_36_candidates_as_two_cross_source_slurm_cohorts(tmp
                 active += 1
                 peak = max(peak, active)
                 cohort_sizes.append(len(basins))
+                cohort_array_bounds.append(int(basins[0]["max_concurrent"]))
             try:
                 _time.sleep(0.05)
             finally:
@@ -23980,7 +23997,57 @@ def test_bound_32_dispatches_36_candidates_as_two_cross_source_slurm_cohorts(tmp
     assert len(evidence) == 36
     assert peak == 2
     assert sorted(cohort_sizes) == [18, 18]
+    assert sorted(cohort_array_bounds) == [16, 16]
+    assert sum(cohort_array_bounds) == 32
     assert scheduler._last_submit_overlap_receipt.to_dict()["concurrent_submit_count"] == 2
+
+
+def test_slurm_array_budget_waterfills_current_14_18_4_cohorts_to_global_32() -> None:
+    from services.orchestrator import scheduler_execution
+
+    def unit(size: int) -> Any:
+        return scheduler_execution._CohortUnit(
+            source_id="gfs",
+            cycle_time=_dt("2026-07-05T12:00:00Z"),
+            cycle_id="gfs_2026070512",
+            execution_candidates=[object()] * size,
+            cohort_run_id=None,
+            array_max_concurrent=1,
+        )
+
+    budgets = scheduler_execution._array_concurrency_budgets(
+        [unit(14), unit(18), unit(4)],
+        global_bound=32,
+        worker_bound=32,
+    )
+
+    assert budgets == [14, 14, 4]
+    assert sum(budgets) == 32
+
+
+def test_slurm_array_budget_stays_global_when_more_cohorts_than_control_workers() -> None:
+    from services.orchestrator import scheduler_execution
+
+    units = [
+        scheduler_execution._CohortUnit(
+            source_id=f"source_{index}",
+            cycle_time=_dt("2026-07-05T12:00:00Z"),
+            cycle_id=f"source_{index}_2026070512",
+            execution_candidates=[object()] * 20,
+            cohort_run_id=None,
+            array_max_concurrent=1,
+        )
+        for index in range(5)
+    ]
+
+    budgets = scheduler_execution._array_concurrency_budgets(
+        units,
+        global_bound=32,
+        worker_bound=4,
+    )
+
+    assert budgets == [8, 8, 8, 8, 8]
+    assert sum(sorted(budgets, reverse=True)[:4]) == 32
 
 
 # ---------------------------------------------------------------------------

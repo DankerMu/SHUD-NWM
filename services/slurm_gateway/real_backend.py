@@ -265,6 +265,13 @@ class RealSlurmGateway(SlurmGateway):
         max_concurrent = int(profile["max_concurrent"])
         if max_concurrent < 1:
             raise SlurmValidationError("max_concurrent must be \u2265 1")
+        requested_max_concurrent = base_manifest.get("max_concurrent")
+        if requested_max_concurrent not in (None, ""):
+            if isinstance(requested_max_concurrent, bool) or not isinstance(requested_max_concurrent, int):
+                raise SlurmValidationError("manifest max_concurrent must be a positive integer")
+            if requested_max_concurrent < 1:
+                raise SlurmValidationError("manifest max_concurrent must be \u2265 1")
+            max_concurrent = min(max_concurrent, requested_max_concurrent)
         task_count = len(task_list)
         effective_max_concurrent = min(max_concurrent, task_count)
         profile["max_concurrent"] = effective_max_concurrent

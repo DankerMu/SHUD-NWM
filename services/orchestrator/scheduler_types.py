@@ -92,6 +92,7 @@ class SchedulerCandidate:
     status: str
     reason: str | None = None
     state_evidence: Mapping[str, Any] = field(default_factory=dict)
+    slurm_array_max_concurrent: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         contract_identity = _scheduler._candidate_production_identity(self)
