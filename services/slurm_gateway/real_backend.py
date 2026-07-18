@@ -1177,18 +1177,32 @@ class RealSlurmGateway(SlurmGateway):
                 )
             if fields[0] == job_id:
                 matching_fields = fields
-                break
+                continue
             if member_pattern.fullmatch(fields[0]):
                 member_rows.append(fields)
 
+        if member_rows:
+            existing = self._jobs.get(job_id)
+            expected_task_count = None
+            if existing is not None:
+                raw_task_count = existing.manifest.get("array_task_count")
+                if isinstance(raw_task_count, int) and not isinstance(raw_task_count, bool):
+                    expected_task_count = raw_task_count
+            return self._aggregate_array_member_status(
+                member_rows,
+                job_id,
+                expected_task_count=expected_task_count,
+            )
         if matching_fields is not None:
             return self._record_from_sacct_fields(matching_fields, job_id)
-        if member_rows:
-            return self._aggregate_array_member_status(member_rows, job_id)
         raise SlurmJobNotFoundError(job_id)
 
     def _aggregate_array_member_status(
-        self, member_rows: Sequence[Sequence[str]], job_id: str
+        self,
+        member_rows: Sequence[Sequence[str]],
+        job_id: str,
+        *,
+        expected_task_count: int | None = None,
     ) -> SlurmJobRecord:
         """Collapse Slurm array member rows into one parent-level status record.
 
@@ -1198,9 +1212,19 @@ class RealSlurmGateway(SlurmGateway):
         """
         states = [self._map_slurm_state(row[1]) for row in member_rows]
         non_terminal = [s for s in states if s not in TERMINAL_STATUSES]
-        if non_terminal:
+        numeric_task_ids = {
+            match.group(1)
+            for row in member_rows
+            if (match := re.fullmatch(rf"{re.escape(job_id)}_(\d+)", row[0])) is not None
+        }
+        accounting_incomplete = (
+            expected_task_count is not None
+            and len(numeric_task_ids) < expected_task_count
+            and not any("[" in row[0] for row in member_rows)
+        )
+        if non_terminal or accounting_incomplete:
             aggregate_raw = "RUNNING"
-            if all(s == SlurmJobStatus.SUBMITTED for s in states):
+            if not accounting_incomplete and all(s == SlurmJobStatus.SUBMITTED for s in states):
                 aggregate_raw = "PENDING"
         elif any(s == SlurmJobStatus.FAILED for s in states):
             aggregate_raw = next(
@@ -1211,7 +1235,7 @@ class RealSlurmGateway(SlurmGateway):
         else:
             aggregate_raw = "COMPLETED"
 
-        all_terminal = not non_terminal
+        all_terminal = not non_terminal and not accounting_incomplete
         starts = [s for s in (row[3] for row in member_rows) if s.strip()]
         ends = [e for e in (row[4] for row in member_rows) if e.strip()]
         start_field = min(starts) if starts else ""

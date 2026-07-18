@@ -767,6 +767,39 @@ def test_get_job_status_array_running_member_keeps_parent_running(monkeypatch, t
     assert gateway.get_job_status("6031").status == SlurmJobStatus.RUNNING
 
 
+def test_get_job_status_array_terminal_parent_does_not_hide_running_member(monkeypatch, tmp_path):
+    stdout = "\n".join(
+        [
+            "6031|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00|00:05:00",
+            "6031_0|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00|00:05:00",
+            "6031_1|RUNNING|0:0|2026-05-08T12:01:00||",
+        ]
+    )
+    gateway = _array_status_gateway(monkeypatch, tmp_path, stdout)
+    assert gateway.get_job_status("6031").status == SlurmJobStatus.RUNNING
+
+
+def test_get_job_status_array_waits_for_all_expected_member_rows(monkeypatch, tmp_path):
+    stdout = "\n".join(
+        [
+            "6031|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00|00:05:00",
+            "6031_0|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00|00:05:00",
+        ]
+    )
+    gateway = _array_status_gateway(monkeypatch, tmp_path, stdout)
+    now = datetime.now(UTC)
+    gateway._jobs["6031"] = SlurmJobRecord(
+        job_id="6031",
+        run_id="array-run",
+        model_id="shud",
+        status=SlurmJobStatus.RUNNING,
+        submitted_at=now,
+        updated_at=now,
+        manifest={"array_task_count": 2},
+    )
+    assert gateway.get_job_status("6031").status == SlurmJobStatus.RUNNING
+
+
 def test_get_job_status_array_pending_master_is_submitted(monkeypatch, tmp_path):
     stdout = "6031_[0-1]|PENDING|0:0|||\n"
     gateway = _array_status_gateway(monkeypatch, tmp_path, stdout)
