@@ -688,11 +688,27 @@ def _upsert_met_stations(cursor: Any, stations: Sequence[Mapping[str, Any]]) -> 
         ON CONFLICT (station_id) DO UPDATE SET
             station_id = met.met_station.station_id
         WHERE met.met_station.basin_version_id = EXCLUDED.basin_version_id
-          AND met.met_station.station_name IS NOT DISTINCT FROM EXCLUDED.station_name
           AND ABS(ST_X(met.met_station.geom) - ST_X(EXCLUDED.geom)) <= {tolerance_sql}
           AND ABS(ST_Y(met.met_station.geom) - ST_Y(EXCLUDED.geom)) <= {tolerance_sql}
           AND met.met_station.elevation_m IS NOT DISTINCT FROM EXCLUDED.elevation_m
-          AND met.met_station.station_role = EXCLUDED.station_role
+          AND (
+              (
+                  met.met_station.station_name IS NOT DISTINCT FROM EXCLUDED.station_name
+                  AND met.met_station.station_role = EXCLUDED.station_role
+              )
+              OR (
+                  met.met_station.station_role = 'direct_grid_cache'
+                  AND EXCLUDED.station_role = 'forcing_grid'
+                  AND met.met_station.station_id LIKE 'dg-%%::cell:%%'
+                  AND met.met_station.properties_json ->> 'direct_grid' = 'true'
+                  AND EXCLUDED.properties_json ? 'forcing_filename'
+                  AND EXCLUDED.properties_json ? 'shud_forcing_index'
+                  AND met.met_station.properties_json ->> 'forcing_filename'
+                      IS NOT DISTINCT FROM EXCLUDED.properties_json ->> 'forcing_filename'
+                  AND met.met_station.properties_json ->> 'shud_forcing_index'
+                      IS NOT DISTINCT FROM EXCLUDED.properties_json ->> 'shud_forcing_index'
+              )
+          )
         RETURNING station_id
         """,
         rows,
@@ -898,13 +914,44 @@ def _station_rows_compatible(existing: Mapping[str, Any], station: Mapping[str, 
     # `false` MUST NOT be rejected as an identity conflict against a legitimate `true`.
     # Every other identity term stays intact so legacy `forcing_proxy` handoffs continue
     # to fail closed on real drift (basin/name/coords/elevation/role).
-    return (
+    common_identity_matches = (
         existing.get("basin_version_id") == station.get("basin_version_id")
-        and existing.get("station_name") == station.get("station_name")
         and _numbers_close(existing.get("longitude"), station.get("longitude"))
         and _numbers_close(existing.get("latitude"), station.get("latitude"))
         and _numbers_close(existing.get("elevation_m"), station.get("elevation_m"))
+    )
+    if not common_identity_matches:
+        return False
+    if (
+        existing.get("station_name") == station.get("station_name")
         and existing.get("station_role") == station.get("station_role")
+    ):
+        return True
+    return _direct_grid_cache_station_compatible(existing, station)
+
+
+def _direct_grid_cache_station_compatible(
+    existing: Mapping[str, Any],
+    station: Mapping[str, Any],
+) -> bool:
+    station_id = str(station.get("station_id") or "")
+    existing_properties = existing.get("properties_json")
+    incoming_properties = station.get("properties_json")
+    if not isinstance(existing_properties, Mapping) or not isinstance(incoming_properties, Mapping):
+        return False
+    forcing_filename = incoming_properties.get("forcing_filename")
+    shud_forcing_index = incoming_properties.get("shud_forcing_index")
+    return (
+        existing.get("station_id") == station.get("station_id")
+        and station_id.startswith("dg-")
+        and "::cell:" in station_id
+        and existing.get("station_role") == "direct_grid_cache"
+        and station.get("station_role") == "forcing_grid"
+        and existing_properties.get("direct_grid") is True
+        and forcing_filename not in (None, "")
+        and shud_forcing_index not in (None, "")
+        and existing_properties.get("forcing_filename") == forcing_filename
+        and existing_properties.get("shud_forcing_index") == shud_forcing_index
     )
 
 

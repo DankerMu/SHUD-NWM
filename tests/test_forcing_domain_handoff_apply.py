@@ -357,6 +357,96 @@ def test_existing_station_with_richer_metadata_is_preserved() -> None:
     )
 
 
+def test_existing_direct_grid_cache_station_is_reused_by_forcing_handoff() -> None:
+    envelope = copy.deepcopy(_parse_complete())
+    incoming = envelope["parsed"]["met.met_station"][0]
+    old_station_id = incoming["station_id"]
+    incoming["station_id"] = "dg-gfs-variant::cell:34027"
+    incoming["station_name"] = "QHH forcing station 34027"
+    incoming["station_role"] = "forcing_grid"
+    incoming["properties_json"] = {
+        **incoming["properties_json"],
+        "forcing_filename": "station_00001.csv",
+        "shud_forcing_index": 1,
+    }
+    for table in ("met.forcing_station_timeseries", "met.interp_weight"):
+        for row in envelope["parsed"][table]:
+            if row["station_id"] == old_station_id:
+                row["station_id"] = incoming["station_id"]
+
+    existing = copy.deepcopy(incoming)
+    existing["station_name"] = "Direct-grid station 1"
+    existing["station_role"] = "direct_grid_cache"
+    existing["properties_json"] = {
+        **existing["properties_json"],
+        "direct_grid": True,
+        "grid_cell_id": "34027",
+    }
+    existing["geom"] = {
+        "type": "Point",
+        "srid": 4490,
+        "coordinates": [existing["longitude"], existing["latitude"]],
+    }
+    connection = _FakeConnection()
+    connection.tables["met.met_station"].append(existing)
+
+    report = apply_module.apply_forcing_domain_handoff(envelope, connection=connection)
+
+    assert report["status"] == "applied"
+    stored = _find_row(connection.tables["met.met_station"], "station_id", incoming["station_id"])
+    assert stored is not None
+    assert stored["station_name"] == "Direct-grid station 1"
+    assert stored["station_role"] == "direct_grid_cache"
+    station_sql = next(
+        statement
+        for kind, statement, _rows in connection.executions
+        if kind == "execute_values" and "INSERT INTO met.met_station" in statement
+    )
+    assert "direct_grid_cache" in station_sql
+    assert "forcing_filename" in station_sql
+    assert "shud_forcing_index" in station_sql
+
+
+def test_existing_direct_grid_cache_station_rejects_binding_index_drift() -> None:
+    envelope = copy.deepcopy(_parse_complete())
+    incoming = envelope["parsed"]["met.met_station"][0]
+    old_station_id = incoming["station_id"]
+    incoming["station_id"] = "dg-gfs-variant::cell:34027"
+    incoming["station_name"] = "QHH forcing station 34027"
+    incoming["station_role"] = "forcing_grid"
+    incoming["properties_json"] = {
+        **incoming["properties_json"],
+        "forcing_filename": "station_00001.csv",
+        "shud_forcing_index": 1,
+    }
+    for table in ("met.forcing_station_timeseries", "met.interp_weight"):
+        for row in envelope["parsed"][table]:
+            if row["station_id"] == old_station_id:
+                row["station_id"] = incoming["station_id"]
+    existing = copy.deepcopy(incoming)
+    existing["station_name"] = "Direct-grid station 1"
+    existing["station_role"] = "direct_grid_cache"
+    existing["properties_json"] = {
+        **existing["properties_json"],
+        "direct_grid": True,
+        "shud_forcing_index": 2,
+    }
+    existing["geom"] = {
+        "type": "Point",
+        "srid": 4490,
+        "coordinates": [existing["longitude"], existing["latitude"]],
+    }
+    connection = _FakeConnection()
+    connection.tables["met.met_station"].append(existing)
+
+    report = apply_module.apply_forcing_domain_handoff(envelope, connection=connection)
+
+    assert report["status"] == "failed"
+    assert {reason["code"] for reason in report["unavailable_reasons"]} == {
+        apply_module.REASON_APPLY_STATION_CONFLICT
+    }
+
+
 def test_apply_preserves_existing_active_flag_true_when_payload_carries_false() -> None:
     """§D2 flag ownership: ingest apply MUST preserve existing `active_flag` on upsert.
 
@@ -902,14 +992,7 @@ def _fake_station_compatible(existing: Mapping[str, Any], record: Mapping[str, A
     # §D2: `active_flag` is intentionally NOT part of the identity compatibility
     # predicate — flag ownership is registration/cutover, not identity drift.
     existing_select = _station_select_row(existing)
-    return (
-        existing_select["basin_version_id"] == record["basin_version_id"]
-        and existing_select["station_name"] == record["station_name"]
-        and existing_select["longitude"] == record["longitude"]
-        and existing_select["latitude"] == record["latitude"]
-        and existing_select["elevation_m"] == record["elevation_m"]
-        and existing_select["station_role"] == record["station_role"]
-    )
+    return apply_module._station_rows_compatible(existing_select, record)
 
 
 def _station_select_row(row: Mapping[str, Any]) -> dict[str, Any]:
