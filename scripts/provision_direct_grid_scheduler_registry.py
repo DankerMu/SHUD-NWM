@@ -377,7 +377,12 @@ def _build_one(
             encoding="utf-8",
         )
 
-    contract = _read_json(manifest_path)
+    manifest_document = _read_json(manifest_path)
+    contract = manifest_document.get("direct_grid_forcing")
+    if not isinstance(contract, Mapping):
+        raise DirectGridProvisionError(
+            f"Built manifest {manifest_path} is missing the direct_grid_forcing object."
+        )
     baseline_inputs = _baseline_db_inputs(cursor, str(model["model_id"]), variant_uri)
     registration = register_direct_grid_variant(
         cursor,
