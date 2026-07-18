@@ -1979,6 +1979,10 @@ def merge_state_snapshot_index_copyback(
                 reference_object_store_root=reference_object_store_root,
                 destination_object_store_root=destination_containment_root,
                 object_store_prefix=object_store_prefix,
+                allow_replace=(
+                    authoritative_runs is not None
+                    and str(entry.get("run_id") or "") in authoritative_runs
+                ),
             )
             for entry in merged.values()
         ]
@@ -2001,6 +2005,7 @@ def merge_state_snapshot_index_copyback(
             "merged_entry_count": len(merged),
             "checkpoint_copied_count": sum(item == "copied" for item in checkpoint_results),
             "checkpoint_reused_count": sum(item == "reused" for item in checkpoint_results),
+            "checkpoint_replaced_count": sum(item == "replaced" for item in checkpoint_results),
         }
 
 
@@ -2010,6 +2015,7 @@ def _copyback_state_checkpoint(
     reference_object_store_root: str | Path,
     destination_object_store_root: str | Path,
     object_store_prefix: str,
+    allow_replace: bool = False,
 ) -> str:
     uri = str(entry.get("state_uri") or "")
     expected_checksum = str(entry.get("checksum") or "")
@@ -2022,20 +2028,23 @@ def _copyback_state_checkpoint(
     if not key.startswith("states/"):
         raise _state_index_error("state_snapshot_index_object_unsafe_uri", field="entries[].state_uri")
     try:
-        if destination_store.exists(key):
-            existing = destination_store.read_bytes_limited(key, max_bytes=MAX_STATE_IC_BYTES)
-            if not _checksum_matches(expected_checksum, sha256_bytes(existing)):
-                raise _state_index_error(
-                    "state_snapshot_index_object_checksum_mismatch",
-                    field="entries[].state_uri",
-                )
-            return "reused"
         content = source_store.read_bytes_limited(key, max_bytes=MAX_STATE_IC_BYTES)
         if not _checksum_matches(expected_checksum, sha256_bytes(content)):
             raise _state_index_error(
                 "state_snapshot_index_object_checksum_mismatch",
                 field="entries[].state_uri",
             )
+        replacing = False
+        if destination_store.exists(key):
+            existing = destination_store.read_bytes_limited(key, max_bytes=MAX_STATE_IC_BYTES)
+            if _checksum_matches(expected_checksum, sha256_bytes(existing)):
+                return "reused"
+            if not allow_replace:
+                raise _state_index_error(
+                    "state_snapshot_index_object_checksum_mismatch",
+                    field="entries[].state_uri",
+                )
+            replacing = True
         destination_root = Path(destination_object_store_root).expanduser().absolute()
         destination = destination_store.resolve_path(key)
         _ensure_copyback_state_parent(destination.parent, destination_root)
@@ -2056,7 +2065,7 @@ def _copyback_state_checkpoint(
         raise
     except (OSError, ObjectStoreError, SafeFilesystemError, ValueError) as error:
         raise _state_index_error("state_snapshot_index_object_unreadable", field="entries[].state_uri") from error
-    return "copied"
+    return "replaced" if replacing else "copied"
 
 
 def _ensure_copyback_state_parent(parent: Path, containment_root: Path) -> None:

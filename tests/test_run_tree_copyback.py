@@ -337,6 +337,7 @@ def test_state_index_copyback_scopes_source_entries_and_materializes_clone(tmp_p
     run_id = "fcst_gfs_2026062700_basins_heihe_shud"
     _write_run(object_root, run_id)
     store = LocalObjectStore(object_root, "s3://nhms")
+    shared_store = LocalObjectStore(copyback_root, "s3://nhms")
     materialized_content = _valid_state_bytes(b"materialized")
     clone_content = _valid_state_bytes(b"clone")
     unrelated_content = _valid_state_bytes(b"unrelated")
@@ -346,6 +347,9 @@ def test_state_index_copyback_scopes_source_entries_and_materializes_clone(tmp_p
     clone_uri = store.write_bytes_atomic("states/gfs/model_a/clone/state.cfg.ic", clone_content)
     unrelated_uri = store.write_bytes_atomic(
         "states/gfs/model_b/unrelated/state.cfg.ic", unrelated_content
+    )
+    shared_store.write_bytes_atomic(
+        "states/gfs/model_a/materialized/state.cfg.ic", clone_content
     )
     source_entry = {
         **_state_entry("materialized", materialized_uri, materialized_content, "2026-06-27T01:00:00Z"),
@@ -395,10 +399,12 @@ def test_state_index_copyback_scopes_source_entries_and_materializes_clone(tmp_p
     merge = summary["extra_objects"][0]["merge"]
     assert merge["source_entry_count"] == 1
     assert merge["authoritative_run_count"] == 1
+    assert merge["checkpoint_replaced_count"] == 1
     payload = json.loads(destination_index.read_text(encoding="utf-8"))
     by_model = {entry["model_id"]: entry for entry in payload["entries"]}
     assert by_model["model_a"]["state_id"] == "materialized"
     assert by_model["model_b"]["state_id"] == "unrelated-shared"
+    assert shared_store.read_bytes("states/gfs/model_a/materialized/state.cfg.ic") == materialized_content
 
 
 def test_state_index_copyback_same_timestamp_semantic_conflict_fails_closed(tmp_path: Path) -> None:
