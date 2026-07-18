@@ -740,13 +740,13 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
             if previous_canonical is None:
                 previous_registry_sha256_snapshot: str | None = None
                 previous_registry_bytes_snapshot: bytes | None = None
+                previous_models_snapshot: list[dict[str, Any]] = []
             else:
                 (
                     previous_registry_sha256_snapshot,
                     previous_models_snapshot,
                     previous_registry_bytes_snapshot,
                 ) = previous_canonical
-                del previous_models_snapshot  # parsed again inside the gate
 
             def _classification_sink(payload: dict[str, Any]) -> None:
                 nonlocal registry_classification
@@ -819,6 +819,35 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
             def publish_registry(
                 commit_observer: Callable[[ProviderPreimage], None] | None = None,
             ) -> dict[str, Any]:
+                if _env_flag("NHMS_SCHEDULER_REQUIRE_DIRECT_GRID"):
+                    if not previous_models_snapshot:
+                        raise RefreshError("provider_invalid")
+                    workspace = run_workspace / "registry"
+                    workspace.mkdir(parents=True, exist_ok=True)
+                    precommit_provider_generation(workspace, [], previous_models_snapshot)
+                    if dry_run:
+                        return {
+                            "status": "dry_run",
+                            "selected_model_count": len(previous_models_snapshot),
+                            "packages": [],
+                            "registry": {"model_count": len(previous_models_snapshot)},
+                        }
+                    registry_receipt = publish_scheduler_registry_manifest(
+                        previous_models_snapshot,
+                        config.registry_uri,
+                        object_store_root=config.object_store_root,
+                        object_store_prefix=config.object_store_prefix,
+                        generated_at=registry_generated_at,
+                        expected_preimage=registry_preimage,
+                        commit_observer=commit_observer,
+                        require_direct_grid=True,
+                    )
+                    return {
+                        "status": "published",
+                        "selected_model_count": len(previous_models_snapshot),
+                        "packages": [],
+                        "registry": registry_receipt,
+                    }
                 return publish_all_basin_scheduler_registry(
                     basins_root=config.basins_root,
                     registry_manifest=config.registry_uri,
@@ -1336,6 +1365,10 @@ def _required_env(name: str) -> str:
     if not value:
         raise RefreshError("configuration_invalid")
     return value
+
+
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _reserve_emergency_slot(root: Path, run_id: str) -> EmergencySlot:

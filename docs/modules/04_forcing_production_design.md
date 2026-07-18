@@ -19,6 +19,9 @@
 
 - 读取模型气象代站定义。
 - 按模型/input 资产的 `forcing_mapping_mode` 选择空间映射：缺省或显式 `idw` 使用 legacy IDW；显式 `direct_grid` 使用模型资产预计算 binding。
+- 上一条描述的是 producer 的历史兼容能力；当前生产 scheduler 设置
+  `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true`，registry 发布与加载都拒绝缺省/`idw` 行。
+  新增流域必须先生成 GFS、IFS 两个 source-scoped direct-grid variant 才能进入业务运行。
 - 生成 PRCP、TEMP、RH、wind、Rn、Press。
 - 输出 SHUD forcing 文件包。
 - 写入 forcing_station_timeseries。

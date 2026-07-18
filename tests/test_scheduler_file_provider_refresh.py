@@ -893,6 +893,35 @@ def test_refresh_dry_run_validates_three_providers_without_replacement(
     assert not list(config.emergency_root.iterdir())
 
 
+def test_direct_grid_refresh_republishes_current_authority_instead_of_basins(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    _stub_provider_pipeline(monkeypatch)
+    monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_DIRECT_GRID", "true")
+    models = [
+        {"model_id": f"dg-{index}", "basin_id": f"basin-{index}"}
+        for index in range(36)
+    ]
+    previous = _minimal_registry_manifest_bytes("direct-grid-current")
+    monkeypatch.setattr(
+        refresh,
+        "_load_previous_canonical_registry",
+        lambda *args, **kwargs: (sha256_bytes(previous), models, previous),
+    )
+    monkeypatch.setattr(
+        refresh,
+        "publish_all_basin_scheduler_registry",
+        lambda **kwargs: pytest.fail("direct-grid steady refresh must not republish Basins IDW rows"),
+    )
+
+    receipt = refresh.refresh_scheduler_file_providers(config, dry_run=True)
+
+    assert receipt["outcome"] == "dry_run"
+    assert receipt["providers"][0]["entry_count"] == 36
+
+
 def test_provider_evidence_prefers_entry_count_over_model_count() -> None:
     evidence = refresh._provider_evidence(
         "readiness",
@@ -4135,5 +4164,4 @@ def test_provider_atomic_cas_refuses_concurrent_authoritative_swap(
     assert info.value.reason == "provider_preimage_changed"
     # Concurrent bytes preserved unchanged.
     assert canonical.read_bytes() == b"authoritative-new\n"
-
 
