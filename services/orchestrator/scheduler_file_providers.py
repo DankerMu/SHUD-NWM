@@ -45,6 +45,7 @@ MAX_READINESS_ENTRIES = 5000
 MAX_READINESS_PRODUCT_ROWS = 250000
 MAX_FILE_PROVIDER_OBJECT_STORE_CACHE_ENTRIES = 16
 DEFAULT_MAX_MANIFEST_AGE_HOURS = 168
+REQUIRE_DIRECT_GRID_ENV = "NHMS_SCHEDULER_REQUIRE_DIRECT_GRID"
 MAX_FILE_PROVIDER_JSON_DEPTH = 64
 MAX_FILE_PROVIDER_JSON_NODES = 300_000
 MAX_CANONICAL_CATALOG_CYCLE_DIRS = 4096
@@ -84,6 +85,7 @@ class _ProviderRoots:
     published_artifact_root: str | Path | None = None
     now: datetime | None = None
     max_age_hours: int = DEFAULT_MAX_MANIFEST_AGE_HOURS
+    require_direct_grid: bool = False
     object_store_cache: dict[tuple[str, str, str], LocalObjectStore] = dataclass_field(
         default_factory=dict,
         compare=False,
@@ -101,6 +103,7 @@ class FileSchedulerModelRegistry:
         published_artifact_root: str | Path | None = None,
         now: datetime | None = None,
         max_age_hours: int = DEFAULT_MAX_MANIFEST_AGE_HOURS,
+        require_direct_grid: bool | None = None,
     ) -> None:
         self.manifest_uri = str(manifest_uri)
         self._roots = _ProviderRoots(
@@ -109,6 +112,7 @@ class FileSchedulerModelRegistry:
             published_artifact_root=published_artifact_root,
             now=now,
             max_age_hours=max_age_hours,
+            require_direct_grid=_require_direct_grid(require_direct_grid),
         )
         self._loaded = False
         self._models: list[dict[str, Any]] = []
@@ -565,12 +569,14 @@ def publish_scheduler_registry_manifest(
     expected_preimage: ProviderPreimage | Mapping[str, object] | None = None,
     commit_observer: Callable[[ProviderPreimage], None] | None = None,
     cutover_gate: Mapping[str, Any] | None = None,
+    require_direct_grid: bool | None = None,
 ) -> dict[str, Any]:
     roots = _ProviderRoots(
         object_store_root=object_store_root,
         object_store_prefix=object_store_prefix,
         published_artifact_root=published_artifact_root,
         now=generated_at,
+        require_direct_grid=_require_direct_grid(require_direct_grid),
     )
     payload = {
         "schema_version": REGISTRY_MANIFEST_SCHEMA_VERSION,
@@ -870,6 +876,18 @@ def _validate_registry_manifest(
         if not isinstance(item, Mapping):
             raise SchedulerFileProviderError("registry_model_not_object", field=f"models[{index}]")
         row = _normalize_registry_model(item, index=index, roots=roots)
+        if roots.require_direct_grid:
+            profile = row["resource_profile"]
+            direct_contract = profile.get("direct_grid_forcing")
+            if (
+                profile.get("forcing_mapping_mode") != "direct_grid"
+                or not isinstance(direct_contract, Mapping)
+            ):
+                raise SchedulerFileProviderError(
+                    "registry_direct_grid_required",
+                    field=f"models[{index}].resource_profile.forcing_mapping_mode",
+                    evidence={"model_id": row.get("model_id")},
+                )
         model_id = str(row["model_id"])
         if model_id in seen_model_ids:
             raise SchedulerFileProviderError(
@@ -891,6 +909,17 @@ def _validate_registry_manifest(
         "manifest_bytes": len(content),
     }
     return rows, {str(row["model_id"]): dict(row) for row in rows}, _evidence_safe(evidence)
+
+
+def _require_direct_grid(explicit: bool | None) -> bool:
+    if explicit is not None:
+        return bool(explicit)
+    return os.getenv(REQUIRE_DIRECT_GRID_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _validate_readiness_index(

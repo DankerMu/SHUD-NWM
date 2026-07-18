@@ -18919,6 +18919,77 @@ def test_file_registry_publisher_failure_keeps_previous_manifest(
     assert paths["NHMS_SCHEDULER_REGISTRY_MANIFEST"].read_bytes() == previous
 
 
+def test_file_registry_direct_grid_requirement_blocks_legacy_publish_and_load(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    generated_at = _dt("2026-06-27T00:00:00Z")
+    legacy, _ = _db_free_model_manifest_fixture(roots, _model("model_a", "basin_a"))
+    destination = paths["NHMS_SCHEDULER_REGISTRY_MANIFEST"]
+    scheduler_module.publish_scheduler_registry_manifest(
+        [legacy],
+        destination,
+        object_store_root=roots["object_store_root"],
+        object_store_prefix="s3://nhms",
+        generated_at=generated_at,
+        require_direct_grid=False,
+    )
+    previous = destination.read_bytes()
+
+    registry = scheduler_module.FileSchedulerModelRegistry(
+        destination,
+        object_store_root=roots["object_store_root"],
+        object_store_prefix="s3://nhms",
+        now=generated_at,
+        require_direct_grid=True,
+    )
+    assert registry.list_models(basin_version_id=None, active=True, limit=10, offset=0)[
+        "items"
+    ] == []
+    assert registry.scheduler_registry_evidence()["blockers"][0]["code"] == (
+        "registry_direct_grid_required"
+    )
+
+    with pytest.raises(scheduler_module.SchedulerFileProviderError) as error_info:
+        scheduler_module.publish_scheduler_registry_manifest(
+            [legacy],
+            destination,
+            object_store_root=roots["object_store_root"],
+            object_store_prefix="s3://nhms",
+            generated_at=generated_at,
+            require_direct_grid=True,
+        )
+
+    assert error_info.value.reason == "registry_direct_grid_required"
+    assert destination.read_bytes() == previous
+
+
+def test_file_registry_direct_grid_requirement_accepts_direct_variant(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    generated_at = _dt("2026-06-27T00:00:00Z")
+    model, _ = _db_free_model_manifest_fixture(roots, _model("model_a", "basin_a"))
+    model["resource_profile"] = {
+        **model["resource_profile"],
+        "forcing_mapping_mode": "direct_grid",
+        "direct_grid_forcing": {"forcing_mapping_mode": "direct_grid"},
+    }
+
+    receipt = scheduler_module.publish_scheduler_registry_manifest(
+        [model],
+        paths["NHMS_SCHEDULER_REGISTRY_MANIFEST"],
+        object_store_root=roots["object_store_root"],
+        object_store_prefix="s3://nhms",
+        generated_at=generated_at,
+        require_direct_grid=True,
+    )
+
+    assert receipt["model_count"] == 1
+
+
 def test_file_canonical_readiness_publisher_and_provider_use_existing_evaluator(
     monkeypatch: Any,
     tmp_path: Path,
