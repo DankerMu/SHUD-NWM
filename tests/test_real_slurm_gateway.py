@@ -1835,6 +1835,7 @@ def test_submit_job_rejects_secret_manifest_fields_before_sbatch(
             "s3://bucket/path?token=supersecret",
         ),
         ({"metadata": {"database_dsn": "postgresql://nhms@db.prod.example/nhms"}}, "database_dsn"),
+        ({"metadata": {"request_signature": "signed"}}, "request_signature"),
     ],
 )
 def test_submit_job_rejects_secret_manifest_keys_without_raw_error_or_sbatch(
@@ -1925,7 +1926,11 @@ def test_submit_job_allows_safe_nested_metadata_keys_and_values(
             job_type="convert_canonical",
             manifest={
                 **_production_manifest(tmp_path, "convert_canonical"),
-                "metadata": {"callback_uri": "https://example.com/notify", "safe_key": "safe/value"},
+                "metadata": {
+                    "callback_uri": "https://example.com/notify",
+                    "safe_key": "safe/value",
+                    "grid_signature": "sha256:" + "a" * 64,
+                },
                 "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
             },
         )
@@ -1933,6 +1938,7 @@ def test_submit_job_allows_safe_nested_metadata_keys_and_values(
 
     assert record.job_id == "12345"
     assert record.manifest["metadata"]["callback_uri"] == "https://example.com/notify"
+    assert record.manifest["metadata"]["grid_signature"] == "sha256:" + "a" * 64
 
 
 @pytest.mark.parametrize(
