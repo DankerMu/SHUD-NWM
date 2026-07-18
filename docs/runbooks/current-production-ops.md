@@ -208,6 +208,8 @@ direct-grid forcing。每个 cohort 的全部流域进入 `produce_forcing_array
 生成 `--array=0-(N-1)%min(32,N)`；GFS 与 IFS cohort 可同时在 Slurm 中推进，scheduler
 只在 pass 收尾时汇总全部 cohort。`NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND` 仅限制少量
 cohort 提交/轮询控制线程，不能作为流域计算并发口径，也不能替代 Slurm `%N`。
+cohort run id 包含排序后 candidate membership 的稳定摘要；同一成员集合重启时复用，
+定向过滤或新增/移除流域时生成新 idempotency key，禁止把子集数组误认成全量数组。
 
 `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true` 是生产硬门禁：publisher 不能用 legacy/IDW
 行覆盖 canonical，consumer 读到任一非 direct-grid 行也会整体阻断。每日
@@ -1088,6 +1090,9 @@ Business-readiness receipt after fix:
   from that profile. `NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND` only bounds
   source/cycle cohort control threads; it is not accepted as forcing-concurrency
   proof. GFS and IFS cohorts may overlap and synchronize at pass finalization.
+- The cohort run id carries a stable digest of its candidate membership. A
+  filtered drill and the full registry pass must not share the same array
+  idempotency key; adding a basin must produce a new cohort identity.
 - The emergency one-at-a-time override is removed or disabled.
 - The receipt includes at least two eligible candidates or array tasks; a
   no-work pass proves safe daemon behavior but does not prove business
