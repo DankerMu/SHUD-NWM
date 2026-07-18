@@ -381,6 +381,10 @@ def build_candidates(
                         }
                     )
                     continue
+            state_decision = _upgrade_retry_for_strict_warm_start_manifest(
+                state_decision,
+                strict_warm_start,
+            )
             if strict_warm_start is not None:
                 candidate = _candidate_with_state_evidence(candidate, strict_warm_start)
             if (
@@ -1355,6 +1359,32 @@ def _terminal_decision_run_manifest_matches_strict_warm_start(
     return str(manifest_state_id or "") == str(selected_id)
 
 
+def _upgrade_retry_for_strict_warm_start_manifest(
+    state_decision: CandidateStateDecision | None,
+    strict_evidence: Mapping[str, Any] | None,
+) -> CandidateStateDecision | None:
+    if state_decision is None or state_decision.action != "retry" or strict_evidence is None:
+        return state_decision
+    if (
+        state_decision.evidence.get("native_shud_resubmitted") is True
+        and state_decision.evidence.get("restart_stage") == "forecast"
+    ):
+        return state_decision
+    if _terminal_decision_run_manifest_matches_strict_warm_start(
+        state_decision.evidence,
+        strict_evidence,
+    ):
+        return state_decision
+    return CandidateStateDecision(
+        "retry",
+        "strict_warm_start_retry_run_manifest_mismatch",
+        _strict_warm_start_retry_run_manifest_evidence(
+            state_decision.evidence,
+            strict_evidence,
+        ),
+    )
+
+
 def _terminal_run_manifest_retry_evidence(
     terminal_evidence: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -1407,6 +1437,27 @@ def _strict_warm_start_run_manifest_retry_evidence(
         "strict_warm_start": _evidence_safe(dict(strict_evidence)),
         "native_shud_resubmitted": True,
         "durable_output_reused": False,
+    }
+    selected = strict_evidence.get("candidate_state")
+    if isinstance(selected, Mapping):
+        payload["candidate_state"] = _evidence_safe(dict(selected))
+    return _evidence_safe(payload)
+
+
+def _strict_warm_start_retry_run_manifest_evidence(
+    retry_evidence: Mapping[str, Any],
+    strict_evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    payload = {
+        **dict(retry_evidence),
+        "decision": "retry_strict_warm_start_retry_run_manifest_mismatch",
+        "reason": "strict_warm_start_retry_run_manifest_mismatch",
+        "restart_stage": "forecast",
+        "restart_from_stage": "forecast",
+        "strict_warm_start": _evidence_safe(dict(strict_evidence)),
+        "native_shud_resubmitted": True,
+        "durable_output_reused": False,
+        "durable_shud_output_reused": False,
     }
     selected = strict_evidence.get("candidate_state")
     if isinstance(selected, Mapping):

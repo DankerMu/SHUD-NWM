@@ -10513,6 +10513,53 @@ def test_auto_manifest_repair_resubmits_terminal_restart_stages() -> None:
     )
 
 
+def test_auto_manifest_repair_resubmits_terminal_cohort_when_every_basin_requires_it() -> None:
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=datetime(2026, 5, 1, tzinfo=UTC),
+        cycle_id="gfs_2026050100",
+        run_id="cycle_gfs_2026050100_full_cohort",
+        all_basins=[],
+        active_basins=[
+            {
+                "state_evidence": {
+                    "decision": "retry_strict_warm_start_retry_run_manifest_mismatch",
+                    "restart_stage": "forecast",
+                }
+            },
+            {
+                "state_evidence": {
+                    "decision": "retry_strict_warm_start_retry_run_manifest_mismatch",
+                    "restart_stage": "forecast",
+                }
+            },
+        ],
+        restart_stage="forecast",
+    )
+
+    assert ForecastOrchestrator._terminal_stage_needs_manual_retry(
+        context,
+        {"stage": "forecast", "status": "succeeded"},
+    )
+    assert ForecastOrchestrator._terminal_stage_needs_manual_retry(
+        context,
+        {"stage": "state_save_qc", "status": "succeeded"},
+    )
+    assert not ForecastOrchestrator._terminal_stage_needs_manual_retry(
+        context,
+        {"stage": "forcing", "status": "succeeded"},
+    )
+
+    context.active_basins[1]["state_evidence"] = {
+        "decision": "retry_after_completed_stage",
+        "restart_stage": "forcing",
+    }
+    assert not ForecastOrchestrator._terminal_stage_needs_manual_retry(
+        context,
+        {"stage": "forecast", "status": "succeeded"},
+    )
+
+
 class _RaceSemanticsCycleRepository(StoreBackedCycleRepository):
     """Reserve with production INSERT...ON CONFLICT DO NOTHING RETURNING.
 

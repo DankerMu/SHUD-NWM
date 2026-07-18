@@ -68,6 +68,7 @@ from services.orchestrator.scheduler import (
 from services.orchestrator.scheduler import (
     ProductionScheduler as _RealProductionScheduler,
 )
+from services.orchestrator.scheduler_state_types import CandidateStateDecision
 from services.orchestrator.source_cycle_raw_manifest import nfs_raw_manifest_readiness
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
 from workers.canonical_converter.converter import GFS_REQUIRED_STANDARD_VARIABLES, evaluate_canonical_readiness
@@ -76,6 +77,43 @@ from workers.shud_runtime import runtime as shud_runtime_module
 
 _TEST_CANONICAL_READINESS_PROVIDER_UNSET = object()
 _TEST_OBJECT_STORE_ROOT = Path(os.environ.get("TMPDIR", "/tmp")).resolve() / "nhms-test-object-store"
+
+
+def test_retry_with_stale_cold_manifest_is_upgraded_to_warm_forecast_rerun() -> None:
+    decision = CandidateStateDecision(
+        action="retry",
+        reason="resume_after_completed_stage",
+        evidence={
+            "decision": "retry_after_completed_stage",
+            "restart_stage": "forcing",
+            "run_manifest_initial_state": {
+                "state_id": None,
+                "quality": "cold_start_no_state",
+            },
+        },
+    )
+    strict = {
+        "ready": True,
+        "candidate_state": {
+            "init_state_id": "state_gfs_model_a_2026052112",
+            "init_state_uri": "s3://nhms/states/gfs/model_a/2026052112/state.cfg.ic",
+            "init_state_quality": "fresh",
+            "init_state_valid_time": "2026-05-21T12:00:00Z",
+        },
+    }
+
+    upgraded = scheduler_candidates_module._upgrade_retry_for_strict_warm_start_manifest(
+        decision,
+        strict,
+    )
+
+    assert upgraded is not None
+    assert upgraded.reason == "strict_warm_start_retry_run_manifest_mismatch"
+    assert upgraded.evidence["decision"] == "retry_strict_warm_start_retry_run_manifest_mismatch"
+    assert upgraded.evidence["restart_stage"] == "forecast"
+    assert upgraded.evidence["native_shud_resubmitted"] is True
+    assert upgraded.evidence["durable_shud_output_reused"] is False
+    assert upgraded.evidence["candidate_state"]["init_state_id"] == "state_gfs_model_a_2026052112"
 
 
 class _NoopReconcileStore:
