@@ -23766,6 +23766,69 @@ def test_concurrency_stays_within_configured_bound(tmp_path: Path) -> None:
     assert peak >= 2
 
 
+def test_bound_32_runs_36_cross_source_basin_units_in_two_waves(tmp_path: Path) -> None:
+    import threading
+    import time as _time
+
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    class _Bound32Orchestrator:
+        object_store = None
+
+        def orchestrate_cycle(
+            self,
+            source: str,
+            cycle_time: datetime,
+            basins: list[dict[str, Any]],
+        ) -> PipelineResult:
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            try:
+                _time.sleep(0.05)
+            finally:
+                with lock:
+                    active -= 1
+            stages = tuple(
+                StageRunResult(
+                    stage=stage.stage,
+                    job_type=stage.job_type,
+                    pipeline_job_id=f"job_{stage.stage}",
+                    slurm_job_id=f"slurm_{stage.stage}",
+                    status="succeeded",
+                )
+                for stage in M3_STAGES
+            )
+            return PipelineResult(
+                run_id=f"cycle_{source.lower()}_{format_cycle_time(cycle_time)}",
+                cycle_id=cycle_id_for(source, cycle_time),
+                status="complete",
+                stages=stages,
+                candidate_outcomes=(),
+            )
+
+    scheduler = ProductionScheduler(
+        _config(tmp_path, sources=("gfs", "IFS"), concurrent_submit_bound=32),
+        registry=FakeRegistry([_model("model_00", "basin_00")]),
+        adapters={"gfs": FakeAdapter("gfs", []), "IFS": FakeAdapter("IFS", [])},
+        orchestrator_factory=lambda _source_id: _Bound32Orchestrator(),
+    )
+    candidates = [
+        _concurrency_candidate(source, f"model_{index:02d}", f"basin_{index:02d}")
+        for source in ("gfs", "IFS")
+        for index in range(18)
+    ]
+
+    evidence = scheduler._execute_candidates(candidates)
+
+    assert len(evidence) == 36
+    assert peak == 32
+    assert scheduler._last_submit_overlap_receipt.to_dict()["concurrent_submit_count"] == 36
+
+
 # ---------------------------------------------------------------------------
 # Issue #292 §4.2: lease heartbeat / renewal + CAS-on-reclaim + liveness reconcile
 # ---------------------------------------------------------------------------
