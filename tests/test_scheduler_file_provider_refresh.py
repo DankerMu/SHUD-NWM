@@ -151,6 +151,63 @@ def test_catalog_derivation_builds_two_sources_for_exact_registry_model_set(tmp_
     assert all(entry["catalog_row_count"] > 0 for entry in entries)
 
 
+def test_catalog_derivation_respects_direct_grid_source_scope(tmp_path: Path) -> None:
+    object_root = tmp_path / "private-objects"
+    _write_canonical_catalog(object_root, source_id="gfs", cycle="2026071400")
+    _write_canonical_catalog(object_root, source_id="IFS", cycle="2026071400")
+    contract_base = {
+        "forcing_mapping_mode": "direct_grid",
+        "binding_uri": "s3://nhms/models/direct/binding.json",
+        "binding_checksum": "sha256:binding",
+        "model_input_package_id": "direct-input-v1",
+        "sp_att_path": "input/basin.sp.att",
+        "sp_att_checksum": "sha256:sp-att",
+        "grid_id": "grid-demo",
+        "grid_signature": "grid-signature-demo",
+        "station_bindings": [
+            {
+                "station_id": "station-1",
+                "shud_forcing_index": 1,
+                "forcing_filename": "X100Y30.csv",
+                "longitude": 100.0,
+                "latitude": 30.0,
+                "x": 100.0,
+                "y": 30.0,
+                "z": 10.0,
+                "grid_id": "grid-demo",
+                "grid_cell_id": "cell-1",
+            }
+        ],
+    }
+    models = [
+        {
+            "model_id": f"model-{source.lower()}",
+            "basin_id": "basin-a",
+            "resource_profile": {
+                "direct_grid_forcing": {
+                    **contract_base,
+                    "applicable_source_ids": [source],
+                }
+            },
+        }
+        for source in ("GFS", "IFS")
+    ]
+
+    entries, evidence = derive_catalog_bound_readiness_entries(
+        models,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+    )
+
+    assert {(entry["model_id"], entry["source_id"]) for entry in entries} == {
+        ("model-gfs", "gfs"),
+        ("model-ifs", "IFS"),
+    }
+    assert evidence["entry_count"] == 2
+    assert evidence["model_count"] == 2
+    assert evidence["model_set"]["source_entry_counts"] == {"gfs": 1, "IFS": 1}
+
+
 def test_catalog_bound_consumer_recomputes_identity_and_detects_catalog_mutation(tmp_path: Path) -> None:
     object_root = tmp_path / "private-objects"
     catalog_uri, policy, source_object = _write_canonical_catalog(
@@ -4164,4 +4221,3 @@ def test_provider_atomic_cas_refuses_concurrent_authoritative_swap(
     assert info.value.reason == "provider_preimage_changed"
     # Concurrent bytes preserved unchanged.
     assert canonical.read_bytes() == b"authoritative-new\n"
-

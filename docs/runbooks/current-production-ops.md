@@ -197,6 +197,9 @@ basins_tailanhe_shud
 ```
 
 因此 GFS/IFS 各有 18 个 source-model candidate，共 36 个候选执行单元。
+调度器在 candidate 构造前按 direct-grid contract 的 `applicable_source_ids` 投影模型；
+不得把 36 个 variant 与两个 source 做 72 行笛卡尔积，也不得把预期的异源不适配记成
+pass-blocking failure。合同缺失或损坏仍须 fail closed。
 `NHMS_SCHEDULER_MODEL_IDS` 和 `NHMS_SCHEDULER_BASIN_IDS` 正常保持为空，由
 file registry 决定全量自动计算；只在定向 rollback/drill 时临时收窄。
 生产目标 `NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND=32` 是全局流域/数据源执行
@@ -268,8 +271,9 @@ scripts/install_node22_scheduler_file_provider_refresh.sh --install
 在任何 canonical replace 前，用同次 prospective registry model identities 分别扫描 private
 `OBJECT_STORE_ROOT` 中最新的 GFS/IFS cycle catalog，执行 bounded/no-follow、schema、
 source/cycle、统一 lineage identity、forecast hours、catalog row、canonical object checksum
-全验证，并生成每个 source/model 一条只含 `catalog_uri + catalog_sha256 +
-catalog_row_count` 绑定的 entry（N 个当前模型应为 GFS N + IFS N）。
+全验证，并按 direct-grid `applicable_source_ids` 为每个适用的 source/model 生成一条只含
+`catalog_uri + catalog_sha256 + catalog_row_count` 绑定的 entry；不得生成异源不适配的
+readiness 行。
 2026-07-18 当前 authority 为 18 个模型，因此每个 source 必须恰有 18 条、
 总计 36 条。2026-07-15 在移除被 `HHe` 完整覆盖的重复目录
 `HHe-MAIN-02` 后得到的 19 模型、每源 19 条、共 38 条，只是当日历史证据。

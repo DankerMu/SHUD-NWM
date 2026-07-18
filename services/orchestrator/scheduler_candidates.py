@@ -182,6 +182,8 @@ def build_candidates(
         discovery = cycle.discovery
         has_active_orchestration: bool | None = None
         for model in models:
+            if _direct_grid_model_source_is_out_of_scope(model, discovery):
+                continue
             if len(candidates) + len(blocked) + len(skipped) >= max_candidates:
                 raise SchedulerResourceLimitError(
                     "candidate_limit_exceeded",
@@ -940,6 +942,44 @@ def _source_blocked_evidence(candidate: SchedulerCandidateLike, discovery: Cycle
     if discovery.evidence:
         evidence["source_discovery"] = _source_discovery_evidence_safe(discovery.evidence)
     return _evidence_safe(evidence)
+
+
+def _direct_grid_model_source_is_out_of_scope(
+    model: SchedulerModelLike,
+    discovery: CycleDiscovery,
+) -> bool:
+    """Exclude an expected source-scoped variant mismatch before candidate creation.
+
+    A direct-grid registry contains one model variant per basin and forcing
+    source.  Pairing every variant with every discovered source would create a
+    Cartesian product in which half the rows are intentionally inapplicable.
+    Those rows are not failed work and therefore must not become candidates.
+
+    Only the parser's precise source-scope mismatch is excluded here.  Missing
+    or malformed contracts continue into ``_direct_grid_source_scope_block``
+    below so contract corruption still fails closed with evidence.
+    """
+
+    resource_profile = getattr(model, "resource_profile", None)
+    direct_grid_section = (
+        resource_profile.get("direct_grid_forcing")
+        if isinstance(resource_profile, Mapping)
+        else None
+    )
+    if direct_grid_section is None:
+        return False
+    manifest = {
+        "forcing_mapping_mode": "direct_grid",
+        "direct_grid_forcing": direct_grid_section,
+    }
+    try:
+        load_forcing_mapping_contract_from_manifest(
+            manifest,
+            source_id=discovery.source_id,
+        )
+    except DirectGridContractError as error:
+        return str(error) == _DIRECT_GRID_SOURCE_SCOPE_ERROR_MESSAGE
+    return False
 
 
 def _direct_grid_source_scope_block(
