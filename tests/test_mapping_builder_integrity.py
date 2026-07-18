@@ -505,6 +505,29 @@ def test_crs_qhh_transverse_mercator_parses_to_wgs84(tmp_path: pathlib.Path) -> 
     assert lat == lat  # not NaN
 
 
+def test_crs_accepts_multiple_byte_identical_gis_prj_copies(tmp_path: pathlib.Path) -> None:
+    baseline = _copy_fixture(tmp_path)
+    original = baseline / "gis" / "keliya.prj"
+    domain = baseline / "gis" / "domain.prj"
+    domain.write_bytes(original.read_bytes())
+    (baseline / "gis" / "river.prj").write_bytes(original.read_bytes())
+
+    report = verify_package_crs(baseline)
+
+    assert report.prj_path == domain
+
+
+def test_crs_rejects_divergent_gis_prj_copies(tmp_path: pathlib.Path) -> None:
+    baseline = _copy_fixture(tmp_path)
+    original = baseline / "gis" / "keliya.prj"
+    domain = baseline / "gis" / "domain.prj"
+    domain.write_bytes(original.read_bytes())
+    (baseline / "gis" / "river.prj").write_text(_QHH_TM_WKT + "\n", encoding="utf-8")
+
+    with pytest.raises(UnparseablePrjError, match="declarations disagree"):
+        verify_package_crs(baseline)
+
+
 def test_missing_prj_raises_MissingPrjError(tmp_path: pathlib.Path) -> None:
     """§1.2: no ``gis/*.prj`` -> :class:`MissingPrjError`, no output."""
     baseline = _copy_fixture(tmp_path)

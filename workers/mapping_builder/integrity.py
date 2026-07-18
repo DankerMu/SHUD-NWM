@@ -822,10 +822,12 @@ def verify_g0_baseline(baseline_root: pathlib.Path) -> BaselineIntegrityReport:
 
 
 def _find_single_prj(baseline_root: pathlib.Path) -> pathlib.Path:
-    """Return the sole ``gis/*.prj`` file, or raise :class:`MissingPrjError`.
+    """Return the authoritative ``gis/*.prj`` after proving CRS unanimity.
 
-    Multiple ``.prj`` files under ``gis/`` are treated as unparseable (§1.2
-    expects a single CRS declaration per package).
+    Production Basins packages carry ``domain.prj``, ``river.prj`` and
+    ``seg.prj``.  They are multiple copies of one package CRS, not multiple
+    authorities.  Byte-identical declarations are accepted and ``domain.prj``
+    is preferred; divergent declarations remain a fail-closed error.
     """
     gis_dir = baseline_root / "gis"
     if not gis_dir.is_dir():
@@ -833,15 +835,18 @@ def _find_single_prj(baseline_root: pathlib.Path) -> pathlib.Path:
     candidates = sorted(p for p in gis_dir.glob("*.prj") if p.is_file())
     if not candidates:
         raise MissingPrjError(baseline_root=baseline_root)
-    if len(candidates) > 1:
+    authority = next((path for path in candidates if path.name == "domain.prj"), candidates[0])
+    authority_bytes = authority.read_bytes()
+    divergent = [path.name for path in candidates if path.read_bytes() != authority_bytes]
+    if divergent:
         raise UnparseablePrjError(
-            prj_path=candidates[0],
+            prj_path=authority,
             parse_error=(
-                f"expected exactly one gis/*.prj, found {len(candidates)}: "
-                f"{[p.name for p in candidates]}"
+                "gis/*.prj declarations disagree with the package CRS authority: "
+                f"{divergent}"
             ),
         )
-    return candidates[0]
+    return authority
 
 
 def verify_package_crs(baseline_root: pathlib.Path) -> PackageCrsReport:
@@ -855,7 +860,8 @@ def verify_package_crs(baseline_root: pathlib.Path) -> PackageCrsReport:
     ----------
     baseline_root:
         Directory containing the baseline basin model package. The CRS lives
-        at ``<baseline_root>/gis/<basin>.prj`` (single file per package).
+        under ``<baseline_root>/gis/*.prj``; multiple byte-identical GIS
+        copies are one declaration and divergent copies fail closed.
 
     Returns
     -------
@@ -869,7 +875,7 @@ def verify_package_crs(baseline_root: pathlib.Path) -> PackageCrsReport:
     MissingPrjError
         No ``.prj`` file exists under ``gis/``.
     UnparseablePrjError
-        pyproj cannot parse the WKT (or multiple ``.prj`` files were found).
+        pyproj cannot parse the WKT or multiple ``.prj`` files disagree.
     NonWgs84ConvertiblePrjError
         pyproj cannot build a Transformer to EPSG:4326, or the transformer
         returns non-finite coordinates on the probe point.
