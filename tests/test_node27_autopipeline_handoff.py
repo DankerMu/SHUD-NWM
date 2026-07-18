@@ -11,6 +11,7 @@ import scripts.node27_autopipeline as autopipe
 
 RUN_A = "fcst_gfs_2026062012_basins_qhh_shud"
 RUN_B = "fcst_gfs_2026062112_basins_qhh_shud"
+DIRECT_GRID_RUN = "fcst_gfs_2026070600_dg_0123456789abcdef"
 NODE27_DATABASE_URL = "postgresql://node27_writer:secret@127.0.0.1:55432/nhms"
 
 
@@ -166,6 +167,27 @@ def _handoff_failed() -> dict[str, Any]:
         "row_counts": {},
         "unavailable_reasons": [{"code": "HANDOFF_APPLY_SQL_FAILURE", "detail": "redacted"}],
     }
+
+
+def test_direct_grid_run_discovery_uses_manifest_basin_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, calls, published_calls = _prepare_autopipe(
+        monkeypatch,
+        tmp_path,
+        runs={DIRECT_GRID_RUN: True},
+    )
+
+    rc, summary = _run_main(capsys, object_store_root, "--only-basin", "qhh")
+
+    assert rc == 0
+    assert summary["discovered_runs"] == 1
+    assert summary["runs"]["processed"] == 1
+    assert summary["runs"]["details"][0]["run_id"] == DIRECT_GRID_RUN
+    assert _command_kinds(calls) == ["register", "parse", "coverage"]
+    assert published_calls == [NODE27_DATABASE_URL]
 
 
 def _command_kinds(calls: list[list[str]]) -> list[str]:

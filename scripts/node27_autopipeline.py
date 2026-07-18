@@ -71,6 +71,7 @@ from workers.model_registry.basins_radiation_template import repair_missing_tsd_
 PY = sys.executable
 # fcst_<source>_<cycle10>_basins_<basin>_shud  (basin may contain underscores).
 RUN_RE = re.compile(r"^fcst_(?P<source>gfs|ifs)_(?P<cycle>\d{10})_basins_(?P<basin>.+)_shud$")
+DIRECT_GRID_RUN_RE = re.compile(r"^fcst_(?P<source>gfs|ifs)_(?P<cycle>\d{10})_dg_[0-9a-f]+$")
 
 # Auth for import-basins-registry (models.switch_version => model_admin|sys_admin).
 SEED_AUTH_ACTOR = os.environ.get("AUTOPIPE_AUTH_ACTOR", "node27-autopipe")
@@ -710,15 +711,27 @@ def _discover_runs(object_store_root: Path, sources: tuple[str, ...]) -> list[di
     for entry in sorted(runs_dir.iterdir()):
         if not entry.is_dir():
             continue
-        m = RUN_RE.match(entry.name)
-        if not m or m.group("source") not in sources:
+        legacy_match = RUN_RE.match(entry.name)
+        direct_grid_match = DIRECT_GRID_RUN_RE.match(entry.name)
+        match = legacy_match or direct_grid_match
+        if not match or match.group("source") not in sources:
             continue
+        if legacy_match is not None:
+            basin = _slug_id(legacy_match.group("basin"))
+        else:
+            try:
+                basin = _basin_identity(object_store_root, entry.name)["basin_key"]
+            except (OSError, ValueError, json.JSONDecodeError, TypeError, KeyError):
+                # A direct-grid run has no basin identity in its run_id.  It is
+                # unsafe to guess; leave malformed/incomplete copyback entries
+                # for a later idempotent scan after the manifest is complete.
+                continue
         out.append(
             {
                 "run_id": entry.name,
-                "source": m.group("source"),
-                "cycle": m.group("cycle"),
-                "basin": _slug_id(m.group("basin")),
+                "source": match.group("source"),
+                "cycle": match.group("cycle"),
+                "basin": basin,
             }
         )
     return out
