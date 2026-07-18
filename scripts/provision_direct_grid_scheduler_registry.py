@@ -264,6 +264,14 @@ def _snapshot_projection(snapshot: CanonicalGridSnapshot) -> dict[str, Any]:
     }
 
 
+def _make_package_readable(root: Path) -> None:
+    """Make non-secret model assets readable by the node-22 NFS consumer."""
+
+    for path in root.rglob("*"):
+        path.chmod(0o755 if path.is_dir() else 0o644)
+    root.chmod(0o755)
+
+
 def _baseline_db_inputs(cursor: Any, model_id: str, variant_uri: str) -> DirectGridBaselineModelInputs:
     cursor.execute(
         """
@@ -376,6 +384,8 @@ def _build_one(
             json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+
+    _make_package_readable(variant_root)
 
     manifest_document = _read_json(manifest_path)
     contract = manifest_document.get("direct_grid_forcing")
