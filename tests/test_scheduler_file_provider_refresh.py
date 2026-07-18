@@ -2244,6 +2244,8 @@ def test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent() -
 
     assert "ExecStart=/scratch/frd_muziyao/NWM/scripts/scheduler_file_provider_refresh_once.sh" in service
     assert "TimeoutStartSec=7200" in service
+    assert "PrivateTmp=true" not in service
+    assert "no-follow verifier must open" in service
     assert "OnCalendar=*-*-* 02:15:00 UTC" in timer
     assert "RandomizedDelaySec=30m" in timer
     assert "UnsetEnvironment=DATABASE_URL PIPELINE_DATABASE_URL" in service
