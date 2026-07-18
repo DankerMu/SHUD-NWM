@@ -828,6 +828,14 @@ def test_scheduler_execution_compat_wrappers_delegate_to_owner_module(monkeypatc
 
     with monkeypatch.context() as patch_context:
 
+        def patched_run_id_for_cohort(
+            source_id: str,
+            cycle_time_arg: datetime,
+            cohort_key: tuple[int, str],
+        ) -> str:
+            del source_id, cycle_time_arg, cohort_key
+            return "run-for-cohort"
+
         def patched_run_id_for_candidate(
             source_id: str,
             cycle_time_arg: datetime,
@@ -843,15 +851,22 @@ def test_scheduler_execution_compat_wrappers_delegate_to_owner_module(monkeypatc
             cohort_key: tuple[int, str],
             candidates_arg: Sequence[Any],
             *,
+            run_id_for_cohort: Any,
             run_id_for_candidate: Any,
         ) -> list[tuple[list[Any], str | None]]:
             assert source_id == "gfs"
             assert cycle_time_arg is cycle_time
             assert cohort_key == (1, "forecast")
             assert candidates_arg is candidates
+            assert run_id_for_cohort is patched_run_id_for_cohort
             assert run_id_for_candidate is patched_run_id_for_candidate
             return [(candidates, "run-for-candidate")]
 
+        patch_context.setattr(
+            scheduler_module,
+            "_candidate_execution_cohort_run_id",
+            patched_run_id_for_cohort,
+        )
         patch_context.setattr(
             scheduler_module,
             "_candidate_execution_cohort_run_id_for_candidate",
@@ -1824,7 +1839,7 @@ def test_checksum_missing_canonical_readiness_blocks_forcing_candidate_submissio
     assert adapter.download_calls == 0
 
 
-def test_scheduler_invokes_forcing_producer_before_orchestration_for_ready_canonical_candidate(
+def test_scheduler_routes_ready_canonical_candidate_to_slurm_forcing_without_local_producer(
     tmp_path: Path,
 ) -> None:
     forcing_producer = FakeForcingProducer()
@@ -1842,38 +1857,16 @@ def test_scheduler_invokes_forcing_producer_before_orchestration_for_ready_canon
     result = scheduler.run_once()
 
     assert result.status == "submitted"
-    assert len(forcing_producer.calls) == 1
-    producer_call = forcing_producer.calls[0]
-    assert producer_call["source_id"] == "gfs"
-    assert producer_call["cycle_time"] == _dt("2026-05-21T06:00:00Z")
-    assert producer_call["model_id"] == "model_a"
-    assert producer_call["max_lead_hours"] == 168
-    assert producer_call["basin_id"] == "basin_a"
-    assert producer_call["basin_version_id"] == "basin_a_v1"
-    assert producer_call["river_network_version_id"] == "basin_a_rivnet_v1"
-    assert producer_call["canonical_product_id"] == "canon_gfs_2026052106"
-    assert producer_call["canonical_identity"]["canonical_product_id"] == "canon_gfs_2026052106"
-    assert producer_call["canonical_identity"]["policy_identity"]["source"] == "gfs"
-    assert producer_call["canonical_identity"]["source_object_identity"]["source"] == "gfs"
+    assert forcing_producer.calls == []
     assert result.evidence["counts"]["submitted_count"] == 1
-    assert result.evidence["execution_write_proof"]["met_result_table_writes"] is True
-    assert result.evidence["candidates"][0]["state_evidence"]["forcing_production"]["status"] == "forcing_ready"
-    assert result.evidence["model_run_evidence"][0]["stage"] == "forcing"
-    assert result.evidence["model_run_evidence"][0]["forcing"]["station_count"] == 2
-    assert result.evidence["model_run_evidence"][0]["forcing"]["variable_count"] == 6
-    assert result.evidence["model_run_evidence"][0]["forcing"]["manifest_checksum"] == "forcing-manifest-sha"
     assert orchestrator.calls
     submitted_basin = orchestrator.calls[0]["basins"][0]
     assert submitted_basin["forcing_version_id"] == "forc_gfs_2026052106_model_a"
-    assert submitted_basin["forcing_package_uri"].endswith("/forcing/gfs/2026052106/basin_a_v1/model_a/")
-    assert submitted_basin["forcing_uri"].endswith("/forcing/gfs/2026052106/basin_a_v1/model_a/forcing.tsd.forc")
-    assert submitted_basin["forcing_package_manifest_uri"].endswith(
-        "/forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json"
-    )
-    assert submitted_basin["forcing_manifest_checksum"] == "forcing-manifest-sha"
+    assert submitted_basin["forcing_package_uri"] is None
+    assert any(stage["stage"] == "forcing" for stage in result.evidence["model_run_evidence"][0]["stage_statuses"])
 
 
-def test_scheduler_blocks_orchestration_when_forcing_producer_fails(tmp_path: Path) -> None:
+def test_scheduler_does_not_execute_injected_control_node_forcing_producer(tmp_path: Path) -> None:
     forcing_producer = FakeForcingProducer(error=RuntimeError("missing fixed stations"))
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
@@ -1888,18 +1881,14 @@ def test_scheduler_blocks_orchestration_when_forcing_producer_fails(tmp_path: Pa
 
     result = scheduler.run_once()
 
-    assert result.status == "preflight_blocked"
-    assert forcing_producer.calls
-    assert orchestrator.calls == []
-    assert result.evidence["counts"]["submitted_count"] == 0
-    assert result.evidence["blocked_candidates"][0]["reason"] == "forcing_production_blocked"
-    assert result.evidence["model_run_evidence"][0]["stage"] == "forcing"
-    assert result.evidence["model_run_evidence"][0]["status"] == "blocked"
-    assert result.evidence["model_run_evidence"][0]["slurm_submit_called"] is False
-    assert result.evidence["no_mutation_proof"]["shud_runtime_called"] is False
+    assert result.status == "submitted"
+    assert forcing_producer.calls == []
+    assert len(orchestrator.calls) == 1
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert result.evidence["model_run_evidence"][0]["slurm_submit_called"] is True
 
 
-def test_scheduler_propagates_produced_forcing_identity_to_orchestration(tmp_path: Path) -> None:
+def test_scheduler_does_not_replace_candidate_identity_from_local_forcing_result(tmp_path: Path) -> None:
     forcing_producer = FakeForcingProducer(forcing_version_id="forc_reused_existing_ready")
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
@@ -1915,10 +1904,11 @@ def test_scheduler_propagates_produced_forcing_identity_to_orchestration(tmp_pat
     result = scheduler.run_once()
 
     assert result.status == "submitted"
-    assert result.evidence["candidates"][0]["forcing_version_id"] == "forc_reused_existing_ready"
-    assert result.evidence["model_run_evidence"][0]["forcing_version_id"] == "forc_reused_existing_ready"
-    assert orchestrator.calls[0]["basins"][0]["forcing_version_id"] == "forc_reused_existing_ready"
-    assert orchestrator.calls[0]["basins"][0]["forcing_package_manifest_uri"].endswith("forcing_package.json")
+    assert forcing_producer.calls == []
+    assert result.evidence["candidates"][0]["forcing_version_id"] == "forc_gfs_2026052106_model_a"
+    assert result.evidence["model_run_evidence"][0]["forcing_version_id"] == "forc_gfs_2026052106_model_a"
+    assert orchestrator.calls[0]["basins"][0]["forcing_version_id"] == "forc_gfs_2026052106_model_a"
+    assert orchestrator.calls[0]["basins"][0]["forcing_package_manifest_uri"] is None
 
 
 def _fresh_zero_row_readiness_provider(
@@ -2922,7 +2912,7 @@ def test_fresh_full_chain_candidate_forces_full_cohort_despite_residual_restart_
     assert cohort_candidates == [candidate]
 
 
-def test_full_cohort_candidates_are_candidate_scoped_for_model_isolation() -> None:
+def test_full_cohort_candidates_share_one_slurm_array_cohort() -> None:
     candidate_a = _scheduler_candidate_fixture()
     candidate_b = replace(
         candidate_a,
@@ -2942,10 +2932,7 @@ def test_full_cohort_candidates_are_candidate_scoped_for_model_isolation() -> No
         [candidate_a, candidate_b],
     )
 
-    assert cohorts == [
-        ([candidate_a], "cycle_gfs_2026052106_full_model_a"),
-        ([candidate_b], "cycle_gfs_2026052106_full_model_b"),
-    ]
+    assert cohorts == [([candidate_a, candidate_b], "cycle_gfs_2026052106_full")]
 
 
 def test_raw_manifest_reuse_overrides_residual_restart_stage(tmp_path: Path) -> None:
@@ -3081,9 +3068,9 @@ def test_canonical_unavailable_cycle_stays_blocked_no_fresh_marker(tmp_path: Pat
     assert "fresh_ingestion" not in blocked["state_evidence"]
 
 
-def test_multi_basin_raw_manifest_reuse_submits_per_model_convert_restart(tmp_path: Path) -> None:
-    # Raw-ready zero-canonical candidates restart at convert. Non-full restart
-    # cohorts intentionally get one idempotent orchestration run per model.
+def test_multi_basin_raw_manifest_reuse_submits_one_convert_array_cohort(tmp_path: Path) -> None:
+    # Raw-ready zero-canonical candidates restart at convert in one multi-task
+    # Slurm cohort; the scheduler process does not produce forcing itself.
     cycle_time = _dt("2026-05-21T06:00:00Z")
     policy = {"source": "gfs", "forecast_hours": [0, 3]}
     source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
@@ -3113,12 +3100,12 @@ def test_multi_basin_raw_manifest_reuse_submits_per_model_convert_restart(tmp_pa
     assert result.status == "submitted"
     assert forcing_producer.calls == []
     assert result.evidence["counts"]["submitted_count"] == 2
-    assert len(orchestrator.calls) == 2
-    basins = [call["basins"][0] for call in orchestrator.calls]
+    assert len(orchestrator.calls) == 1
+    basins = orchestrator.calls[0]["basins"]
     assert {basin["model_id"] for basin in basins} == {"qhh", "heihe"}
     for basin in basins:
         assert basin["restart_stage"] == "convert"
-        assert basin["orchestration_run_id"].endswith(f"_convert_{basin['model_id']}")
+        assert basin["orchestration_run_id"] == "cycle_gfs_2026052106_convert"
         assert basin["state_evidence"]["fresh_ingestion"] == {
             "required": False,
             "mode": "reuse_raw_then_convert",
@@ -8026,11 +8013,10 @@ def test_normal_mutation_sees_pre_execution_reservation_before_forcing_and_submi
     persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
 
     assert result.status == "submitted"
-    assert [item["reservation_exists"] for item in producer_observations] == [True]
+    assert producer_observations == []
     assert [item["reservation_exists"] for item in submit_observations] == [True]
-    assert producer_observations[0]["reservation"]["pass_id"] == pass_id
     assert submit_observations[0]["reservation"]["status"] == "reserved"
-    assert len(forcing_producer.calls) == 1
+    assert forcing_producer.calls == []
     assert len(orchestrator.calls) == 1
     for evidence in (result.evidence, persisted):
         assert evidence["evidence_pre_execution"]["status"] == "reserved"
@@ -8039,7 +8025,6 @@ def test_normal_mutation_sees_pre_execution_reservation_before_forcing_and_submi
             "scheduler_evidence_directory_write_before_production_mutation"
         )
         assert evidence["execution_write_proof"]["protected_by_pre_execution_evidence"] is True
-        assert evidence["no_mutation_proof"]["met_result_table_writes"] is True
         assert evidence["no_mutation_proof"]["slurm_submit_called"] is True
 
 
@@ -8593,7 +8578,7 @@ def test_scheduler_caps_reject_oversized_config_and_bound_candidate_work(
     monkeypatch: Any,
 ) -> None:
     with pytest.raises(ValueError, match="lookback_hours exceeds limit"):
-        _config(tmp_path, lookback_hours=169)
+        _config(tmp_path, lookback_hours=scheduler_module.MAX_LOOKBACK_HOURS + 1)
     with pytest.raises(ValueError, match="source count exceeds limit"):
         _config(tmp_path, sources=("gfs", "IFS", "a", "b", "c"))
 
@@ -11065,19 +11050,16 @@ def test_multi_candidate_restart_cohorts_are_candidate_scoped_and_second_scan_se
     second = scheduler.run_once()
 
     assert first.evidence["counts"]["submitted_count"] == 2
-    assert len(orchestrator.calls) == 2
-    first_run_ids = [call["basins"][0]["orchestration_run_id"] for call in orchestrator.calls]
-    assert first_run_ids == [
-        "cycle_gfs_2026052106_parse_model_a",
-        "cycle_gfs_2026052106_parse_model_b",
-    ]
-    assert all(call["basins"][0]["restart_stage"] == "parse" for call in orchestrator.calls)
+    assert len(orchestrator.calls) == 1
+    first_run_ids = {basin["orchestration_run_id"] for basin in orchestrator.calls[0]["basins"]}
+    assert first_run_ids == {"cycle_gfs_2026052106_parse"}
+    assert all(basin["restart_stage"] == "parse" for basin in orchestrator.calls[0]["basins"])
     assert second.evidence["counts"]["submitted_count"] == 0
     assert [item["reason"] for item in second.evidence["skipped_candidates"]] == [
         "active_slurm_job",
         "active_slurm_job",
     ]
-    assert len(orchestrator.calls) == 2
+    assert len(orchestrator.calls) == 1
 
 
 def test_sibling_active_restart_does_not_block_downstream_retry_candidate(tmp_path: Path) -> None:
@@ -15132,17 +15114,17 @@ def test_issue_196_partial_and_blocked_model_run_evidence_redacts_secrets_and_re
     assert failed["candidate_outcome"]["log_uri"] == "s3://nhms/logs/forcing.out"
     assert failed["stage_statuses"][0]["log_uri"] == "s3://nhms/logs/forcing.out"
     assert failed["stage_statuses"][0]["task_results_summary"] == {
-        "total_count": 1,
+        "total_count": 2,
         "included_count": 1,
-        "omitted_count": 0,
+        "omitted_count": 1,
         "matched_count": 1,
         "matching": "candidate_identity",
         "limit": MAX_MODEL_RUN_STAGE_TASK_ROWS,
-        "status_counts": {"succeeded": 1},
+        "status_counts": {"succeeded": 1, "failed": 1},
     }
     assert failed["resource_summary"]["stage_accounting"][0]["accounting"]["max_rss"] == "3072K"
     assert len(failed["resource_summary"]["task_accounting"]) == 1
-    assert failed["resource_summary"]["task_accounting"][0]["slurm_job_id"] == "slurm_forcing_0"
+    assert failed["resource_summary"]["task_accounting"][0]["slurm_job_id"] == "slurm_forcing_1"
     assert any(blocker["code"] == "FORCING_TASK_FAILED" for blocker in failed["residual_blockers"])
     for raw_secret in ("supersecret", "rawsecret", "user:pass", "signature=abc", "X-Amz-Signature"):
         assert raw_secret not in evidence_text
@@ -15282,7 +15264,7 @@ def test_model_run_evidence_keeps_only_candidate_matched_large_array_task_rows(t
         assert (
             item["resource_summary"]["task_accounting"][0]["slurm_job_id"] == (stage["task_results"][0]["slurm_job_id"])
         )
-        assert summary["total_count"] == 1
+        assert summary["total_count"] == 3
         assert summary["matched_count"] == 1
         assert summary["matching"] == "candidate_identity"
 
@@ -17378,6 +17360,9 @@ class FakeProductionOrchestratorWithStageEvidence(FakeProductionOrchestrator):
         basins: list[dict[str, Any]],
     ) -> PipelineResult:
         self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
+        outcomes_by_model = {
+            str(outcome.get("model_id")): outcome for outcome in self.candidate_outcomes if outcome.get("model_id")
+        }
         stage = StageRunResult(
             stage="forcing",
             job_type="produce_forcing_array",
@@ -17389,17 +17374,28 @@ class FakeProductionOrchestratorWithStageEvidence(FakeProductionOrchestrator):
             error_message=self.stage_error_message,
             log_uri=self.stage_log_uri,
             accounting={"elapsed": "00:03:00", "max_rss": "3072K", "alloc_tres": "cpu=2,mem=4G"},
-            task_results=(
+            task_results=tuple(
                 {
-                    "task_id": 0,
-                    "array_task_id": 0,
-                    "model_id": basins[0]["model_id"] if basins else "model_a",
-                    "status": "succeeded",
-                    "slurm_job_id": "slurm_forcing_0",
-                    "exit_code": 0,
+                    "task_id": index,
+                    "array_task_id": index,
+                    "candidate_id": basin.get("candidate_id"),
+                    "run_id": basin.get("run_id"),
+                    "model_id": basin["model_id"],
+                    "status": (
+                        "failed"
+                        if str(outcomes_by_model.get(str(basin["model_id"]), {}).get("status") or "") == "failed"
+                        else "succeeded"
+                    ),
+                    "slurm_job_id": f"slurm_forcing_{index}",
+                    "exit_code": (
+                        1
+                        if str(outcomes_by_model.get(str(basin["model_id"]), {}).get("status") or "") == "failed"
+                        else 0
+                    ),
                     "log_uri": self.stage_log_uri,
                     "accounting": {"elapsed": "00:03:00", "max_rss": "3072K"},
-                },
+                }
+                for index, basin in enumerate(basins)
             ),
         )
         return PipelineResult(
@@ -23171,11 +23167,8 @@ def test_concurrent_candidates_submits_overlap(tmp_path: Path) -> None:
         assert entry["submit_finished_at"] >= entry["submit_started_at"]
 
 
-def test_concurrent_candidates_same_source_cycle_submits_basins_overlap(tmp_path: Path) -> None:
-    import threading
-
-    barrier = threading.Barrier(2)
-    orchestrator = _BarrierOrchestrator(barrier)
+def test_same_source_cycle_candidates_submit_as_one_multi_basin_cohort(tmp_path: Path) -> None:
+    orchestrator = FakeProductionOrchestrator()
     config = _config(tmp_path, sources=("gfs",), concurrent_submit_bound=2)
     scheduler = ProductionScheduler(
         config,
@@ -23206,24 +23199,20 @@ def test_concurrent_candidates_same_source_cycle_submits_basins_overlap(tmp_path
             "fcst_gfs_2026052106_model_b",
         ),
     ]
-    assert orchestrator.calls == ["gfs", "gfs"]
+    assert len(orchestrator.calls) == 1
+    assert orchestrator.calls[0]["source"] == "gfs"
+    assert [basin["model_id"] for basin in orchestrator.calls[0]["basins"]] == ["model_a", "model_b"]
     receipt = scheduler._last_submit_overlap_receipt
-    assert receipt.overlapping is True
-    assert receipt.to_dict()["concurrent_submit_count"] == 2
+    assert receipt.overlapping is False
+    assert receipt.to_dict()["concurrent_submit_count"] == 1
 
 
-def test_basin_async_workers_overlap_cross_source_forcing_without_intermediate_barrier(
+def test_cross_source_slurm_cohorts_overlap_without_local_forcing(
     tmp_path: Path,
 ) -> None:
     import threading
 
-    gfs_advanced_to_orchestration = threading.Event()
-
-    class _CrossSourceForcingProducer(FakeForcingProducer):
-        def produce(self, **kwargs: Any) -> Any:
-            if kwargs.get("source_id") == "IFS":
-                assert gfs_advanced_to_orchestration.wait(timeout=5.0)
-            return super().produce(**kwargs)
+    cohort_barrier = threading.Barrier(2)
 
     class _AdvancingOrchestrator(FakeProductionOrchestrator):
         def orchestrate_cycle(
@@ -23232,11 +23221,10 @@ def test_basin_async_workers_overlap_cross_source_forcing_without_intermediate_b
             cycle_time: datetime,
             basins: list[dict[str, Any]],
         ) -> PipelineResult:
-            if source == "gfs":
-                gfs_advanced_to_orchestration.set()
+            cohort_barrier.wait(timeout=5.0)
             return super().orchestrate_cycle(source, cycle_time, basins)
 
-    forcing_producer = _CrossSourceForcingProducer()
+    forcing_producer = FakeForcingProducer()
     orchestrator = _AdvancingOrchestrator()
     scheduler = ProductionScheduler(
         _config(tmp_path, sources=("gfs", "IFS"), concurrent_submit_bound=2),
@@ -23254,10 +23242,8 @@ def test_basin_async_workers_overlap_cross_source_forcing_without_intermediate_b
 
     assert blocked == []
     assert len(prepared) == 2
-    assert gfs_advanced_to_orchestration.is_set()
-    assert {call["source_id"] for call in forcing_producer.calls} == {"gfs", "IFS"}
+    assert forcing_producer.calls == []
     assert {call["source"] for call in orchestrator.calls} == {"gfs", "IFS"}
-    assert sum(item.get("stage") == "forcing" for item in evidence) == 2
     assert scheduler._last_submit_overlap_receipt.overlapping is True
 
 
@@ -23863,12 +23849,13 @@ def test_concurrency_stays_within_configured_bound(tmp_path: Path) -> None:
     assert peak >= 2
 
 
-def test_bound_32_runs_36_cross_source_basin_units_in_two_waves(tmp_path: Path) -> None:
+def test_bound_32_dispatches_36_candidates_as_two_cross_source_slurm_cohorts(tmp_path: Path) -> None:
     import threading
     import time as _time
 
     active = 0
     peak = 0
+    cohort_sizes: list[int] = []
     lock = threading.Lock()
 
     class _Bound32Orchestrator:
@@ -23884,6 +23871,7 @@ def test_bound_32_runs_36_cross_source_basin_units_in_two_waves(tmp_path: Path) 
             with lock:
                 active += 1
                 peak = max(peak, active)
+                cohort_sizes.append(len(basins))
             try:
                 _time.sleep(0.05)
             finally:
@@ -23922,8 +23910,9 @@ def test_bound_32_runs_36_cross_source_basin_units_in_two_waves(tmp_path: Path) 
     evidence = scheduler._execute_candidates(candidates)
 
     assert len(evidence) == 36
-    assert peak == 32
-    assert scheduler._last_submit_overlap_receipt.to_dict()["concurrent_submit_count"] == 36
+    assert peak == 2
+    assert sorted(cohort_sizes) == [18, 18]
+    assert scheduler._last_submit_overlap_receipt.to_dict()["concurrent_submit_count"] == 2
 
 
 # ---------------------------------------------------------------------------

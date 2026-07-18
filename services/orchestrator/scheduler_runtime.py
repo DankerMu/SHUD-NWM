@@ -1144,7 +1144,13 @@ def run_once(self) -> SchedulerPassResult:
                                     execution_evidence.extend(async_evidence)
                                     blocked_candidates.extend(forcing_blocked_candidates)
                                     forcing_evidence_count = sum(
-                                        1 for item in async_evidence if item.get("stage") == "forcing"
+                                        1
+                                        for item in async_evidence
+                                        if item.get("stage") == "forcing"
+                                        or any(
+                                            isinstance(stage, Mapping) and stage.get("stage") == "forcing"
+                                            for stage in item.get("stage_statuses", [])
+                                        )
                                     )
                                     progress_guard.checkpoint(
                                         "forcing",

@@ -670,6 +670,7 @@ def _candidate_execution_cohorts(
         cycle_time,
         cohort_key,
         candidates,
+        run_id_for_cohort=_candidate_execution_cohort_run_id,
         run_id_for_candidate=_candidate_execution_cohort_run_id_for_candidate,
     )
 

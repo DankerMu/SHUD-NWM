@@ -286,7 +286,7 @@ def execute_candidates(
     context: SchedulerExecutionContext,
     candidates: Sequence[SchedulerExecutionCandidate],
 ) -> list[dict[str, Any]]:
-    evidence, _blocked, _prepared = _execute_candidate_units(context, candidates, prepare_forcing=False)
+    evidence, _blocked, _prepared = _execute_candidate_units(context, candidates)
     return evidence
 
 
@@ -298,25 +298,20 @@ def execute_candidates_async(
     list[SchedulerExecutionCandidate],
     list[SchedulerExecutionCandidate],
 ]:
-    """Run basin/source pipelines independently and join only at pass finalization.
+    """Submit source/cycle cohorts and join them only at pass finalization.
 
-    Pre-orchestration forcing is part of each singleton execution unit, so a
-    ready basin can advance to Slurm without waiting for sibling basins or the
-    other forecast source to finish forcing production.
+    The scheduler process never produces forcing here.  Every candidate that
+    needs forcing reaches the chain's ``produce_forcing_array`` Slurm stage;
+    candidates in the same restart-compatible source/cycle cohort share one
+    genuine multi-task array instead of one Python worker per basin.
     """
 
-    return _execute_candidate_units(
-        context,
-        candidates,
-        prepare_forcing=context.forcing_producer is not None,
-    )
+    return _execute_candidate_units(context, candidates)
 
 
 def _execute_candidate_units(
     context: SchedulerExecutionContext,
     candidates: Sequence[SchedulerExecutionCandidate],
-    *,
-    prepare_forcing: bool,
 ) -> tuple[
     list[dict[str, Any]],
     list[SchedulerExecutionCandidate],
@@ -339,32 +334,22 @@ def _execute_candidate_units(
     ]:
         key = f"{unit.source_id}:{unit.cycle_id}:{unit.cohort_run_id or 'full'}"
 
-        def _prepare_and_execute() -> tuple[
+        def _submit_and_wait() -> tuple[
             list[dict[str, Any]],
             list[SchedulerExecutionCandidate],
             list[SchedulerExecutionCandidate],
         ]:
-            execution_candidates = unit.execution_candidates
-            forcing_evidence: list[dict[str, Any]] = []
-            forcing_blocked: list[SchedulerExecutionCandidate] = []
-            if prepare_forcing:
-                execution_candidates, forcing_blocked, forcing_evidence = produce_forcing_for_candidates(
-                    context,
-                    execution_candidates,
-                )
-            if not execution_candidates:
-                return forcing_evidence, forcing_blocked, []
             cohort_evidence = context.execute_candidate_cohort(
                 unit.source_id,
                 unit.cycle_time,
                 unit.cycle_id,
-                execution_candidates,
+                unit.execution_candidates,
                 orchestration_run_id=unit.cohort_run_id,
             )
-            return [*forcing_evidence, *cohort_evidence], forcing_blocked, execution_candidates
+            return cohort_evidence, [], unit.execution_candidates
 
         run = context.timed_submission(
-            _prepare_and_execute,
+            _submit_and_wait,
             receipt=receipt,
             idempotency_key=key,
             candidate_id=unit.cohort_run_id,
@@ -839,20 +824,19 @@ def candidate_execution_cohorts(
     cohort_key: tuple[int, str],
     candidates: Sequence[SchedulerExecutionCandidate],
     *,
+    run_id_for_cohort: Callable[[str, datetime, tuple[int, str]], str],
     run_id_for_candidate: Callable[
         [str, datetime, tuple[int, str], SchedulerExecutionCandidate],
         str,
     ],
 ) -> list[tuple[list[SchedulerExecutionCandidate], str | None]]:
-    if cohort_key[1] == "full":
-        return [
-            ([candidate], run_id_for_candidate(source_id, cycle_time, cohort_key, candidate))
-            for candidate in candidates
-        ]
-    return [
-        ([candidate], run_id_for_candidate(source_id, cycle_time, cohort_key, candidate))
-        for candidate in candidates
-    ]
+    cohort_candidates = list(candidates)
+    if not cohort_candidates:
+        return []
+    if len(cohort_candidates) == 1:
+        candidate = cohort_candidates[0]
+        return [([candidate], run_id_for_candidate(source_id, cycle_time, cohort_key, candidate))]
+    return [(cohort_candidates, run_id_for_cohort(source_id, cycle_time, cohort_key))]
 
 
 def candidate_execution_cohort_run_id_for_candidate(

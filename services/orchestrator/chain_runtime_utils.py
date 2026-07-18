@@ -127,6 +127,17 @@ def _in_memory_active_cycle_conflicts(
 
 
 def _candidate_scoped_cycle_execution(basins: Sequence[Mapping[str, Any]]) -> bool:
+    if not basins:
+        return False
+    orchestration_run_ids = {
+        str(basin.get("orchestration_run_id"))
+        for basin in basins
+        if basin.get("orchestration_run_id") not in (None, "")
+    }
+    if len(orchestration_run_ids) == 1 and all(
+        basin.get("orchestration_run_id") not in (None, "") for basin in basins
+    ):
+        return True
     if len(basins) != 1:
         return False
     basin = basins[0]

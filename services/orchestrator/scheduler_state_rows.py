@@ -23,10 +23,12 @@ from services.orchestrator.scheduler_state_types import (
     CANDIDATE_STATE_TASK_RESULT_LIMIT,
     DEFAULT_CANDIDATE_STATE_EVENT_LIMIT,
     DEFAULT_CANDIDATE_STATE_JOB_LIMIT,
+    DOWNSTREAM_RESTART_STAGES,
     FAILED_PIPELINE_STATUSES,
     STATE_CANDIDATE_SCOPED_PROOF_FIELDS,
     STATE_M23_COMPARISON_FIELDS,
 )
+from workers.data_adapters.base import format_cycle_time
 
 
 def _bounded_candidate_state(state: Mapping[str, Any]) -> dict[str, Any]:
@@ -126,6 +128,12 @@ def _state_values_are_scoped_to_other_candidate(
         expected = expected_values.get(identity_field)
         if identity_field == "run_id" and _stage_cycle_run_matches_candidate(value, expected_values):
             continue
+        if identity_field == "run_id" and _shared_stage_cycle_run_matches_candidate(
+            value,
+            row_values,
+            expected_values,
+        ):
+            continue
         if value not in (None, "") and expected not in (None, "") and value != expected:
             return True
     return False
@@ -166,6 +174,8 @@ def _legacy_values_prove_same_candidate(
     if run_id not in (None, ""):
         if run_id == expected_run_id:
             return True
+        if _shared_stage_cycle_run_matches_candidate(run_id, row_values, expected_values):
+            return True
         if not _stage_cycle_run_matches_candidate(run_id, expected_values):
             return False
         return True
@@ -177,6 +187,33 @@ def _legacy_values_prove_same_candidate(
     if source != expected_values.get("source") or cycle_time != expected_values.get("cycle_time"):
         return False
     return model_id in (None, "", expected_values.get("model_id"))
+
+
+def _shared_stage_cycle_run_matches_candidate(
+    run_id: str | None,
+    row_values: Mapping[str, str],
+    expected_values: Mapping[str, str],
+) -> bool:
+    """Accept a cohort run only when the row independently binds the model.
+
+    Multi-basin Slurm arrays intentionally share one source/cycle/stage run id.
+    A bare shared run id is not candidate proof; the row must also carry the
+    exact candidate model id so sibling-model state cannot bleed across rows.
+    """
+
+    if run_id in (None, "") or row_values.get("model_id") != expected_values.get("model_id"):
+        return False
+    source = str(expected_values.get("source") or "").lower()
+    cycle_time = str(expected_values.get("cycle_time") or "")
+    if not source or not cycle_time:
+        return False
+    try:
+        compact_cycle = format_cycle_time(cycle_time)
+    except (TypeError, ValueError):
+        return False
+    prefix = f"cycle_{source}_{compact_cycle}_"
+    stage = str(run_id).removeprefix(prefix) if str(run_id).startswith(prefix) else ""
+    return stage == "full" or stage in DOWNSTREAM_RESTART_STAGES
 
 def _state_row_has_m23_comparison_fields(values: Mapping[str, str]) -> bool:
     return any(
@@ -254,7 +291,13 @@ def _bounded_task_result_sample(
 def _legacy_compatible_state_row(expected: Mapping[str, Any], row: Mapping[str, Any]) -> Mapping[str, Any]:
     row_values = _legacy_identity_values(row)
     expected_values = _legacy_identity_values(expected)
-    if not _stage_cycle_run_matches_candidate(row_values.get("run_id"), expected_values):
+    if not _stage_cycle_run_matches_candidate(
+        row_values.get("run_id"), expected_values
+    ) and not _shared_stage_cycle_run_matches_candidate(
+        row_values.get("run_id"),
+        row_values,
+        expected_values,
+    ):
         return row
     payload = dict(row)
     payload.pop("run_id", None)

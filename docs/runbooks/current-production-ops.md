@@ -202,11 +202,12 @@ basins_tailanhe_shud
 pass-blocking failure。合同缺失或损坏仍须 fail closed。
 `NHMS_SCHEDULER_MODEL_IDS` 和 `NHMS_SCHEDULER_BASIN_IDS` 正常保持为空，由
 file registry 决定全量自动计算；只在定向 rollback/drill 时临时收窄。
-生产目标 `NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND=32` 是全局流域/数据源执行
-worker 上限。每个“流域 × 数据源 × 时次”独立推进，同一流域的 GFS/IFS forcing
-允许同时计算；scheduler 只在该 pass 收尾时等待全部 execution unit 并汇总证据。
-该值不是总提交数限制，也不保证同时出现 32 个 `RUNNING` job；Slurm 仍负责
-资源仲裁，资源不足的任务会排队。
+生产并发由 Slurm resource profile 的 `max_concurrent=32` 承担。scheduler 登录节点
+只按“数据源 × 时次 × restart-compatible stage”构造 cohort、提交和轮询，不执行
+direct-grid forcing。每个 cohort 的全部流域进入 `produce_forcing_array.sbatch`，Gateway
+生成 `--array=0-(N-1)%min(32,N)`；GFS 与 IFS cohort 可同时在 Slurm 中推进，scheduler
+只在 pass 收尾时汇总全部 cohort。`NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND` 仅限制少量
+cohort 提交/轮询控制线程，不能作为流域计算并发口径，也不能替代 Slurm `%N`。
 
 `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true` 是生产硬门禁：publisher 不能用 legacy/IDW
 行覆盖 canonical，consumer 读到任一非 direct-grid 行也会整体阻断。每日
@@ -1082,10 +1083,11 @@ Business-readiness receipt after fix:
 
 - `nhms-compute-scheduler.service` and timer run with
   `NHMS_SCHEDULER_DB_FREE_REQUIRED=true`, no `DATABASE_URL`, and
-  `NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND=32`. The receipt treats 32 as the
-  global basin/source execution-worker ceiling; GFS and IFS forcing share this
-  pool and synchronize only at pass finalization. It does not require or imply
-  32 simultaneous `RUNNING` jobs because Slurm remains the resource arbiter.
+  a Slurm resource profile whose `max_concurrent=32`. The receipt must show a
+  multi-task `produce_forcing_array` submission with an array throttle derived
+  from that profile. `NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND` only bounds
+  source/cycle cohort control threads; it is not accepted as forcing-concurrency
+  proof. GFS and IFS cohorts may overlap and synchronize at pass finalization.
 - The emergency one-at-a-time override is removed or disabled.
 - The receipt includes at least two eligible candidates or array tasks; a
   no-work pass proves safe daemon behavior but does not prove business
