@@ -48,6 +48,36 @@ def _write_run(root: Path, run_id: str, *, output_text: str = "q\n") -> None:
     (model / "manifest.json").write_text("{}\n", encoding="utf-8")
 
 
+def _write_direct_grid_run(root: Path, run_id: str) -> None:
+    run = root / "runs" / run_id
+    (run / "input").mkdir(parents=True)
+    (run / "input" / "manifest.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "model": {
+                    "model_package_uri": (
+                        "s3://nhms/models/direct_grid_variants/basins_qhh_shud/"
+                        "dg-gfs-variant/package/"
+                    )
+                },
+                "forcing_package_uri": (
+                    "s3://nhms/forcing/gfs/2026070600/basins_qhh_vbasins/dg-candidate/"
+                ),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    forcing = root / "forcing/gfs/2026070600/basins_qhh_vbasins/dg-candidate"
+    forcing.mkdir(parents=True)
+    (forcing / "forcing_package.json").write_text("{}\n", encoding="utf-8")
+    package = root / "models/direct_grid_variants/basins_qhh_shud/dg-gfs-variant/package"
+    package.mkdir(parents=True)
+    (package / "manifest.json").write_text('{"variant":"gfs"}\n', encoding="utf-8")
+    (package / "qhh.cfg.para").write_text("model\n", encoding="utf-8")
+
+
 def test_copyback_run_trees_replaces_stale_target_tree(tmp_path: Path) -> None:
     object_root = tmp_path / "object-store"
     copyback_root = tmp_path / "shared-object-store"
@@ -83,6 +113,78 @@ def test_copyback_run_trees_replaces_stale_target_tree(tmp_path: Path) -> None:
         "forcing/gfs/2026062700/basins_heihe_vbasins/basins_heihe_shud",
         "models/basins_heihe_shud/v1",
     }
+
+
+def test_copyback_direct_grid_run_scopes_model_tree_to_exact_variant(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    run_id = "fcst_gfs_2026070600_dg_candidate"
+    _write_direct_grid_run(object_root, run_id)
+
+    summary = copyback_run_trees(
+        object_store_root=object_root,
+        copyback_root=copyback_root,
+        run_ids=[run_id],
+    )
+
+    assert summary is not None
+    assert {tree["object_key"] for tree in summary["referenced_trees"]} == {
+        "forcing/gfs/2026070600/basins_qhh_vbasins/dg-candidate",
+        "models/direct_grid_variants/basins_qhh_shud/dg-gfs-variant",
+    }
+    assert (
+        copyback_root
+        / "models/direct_grid_variants/basins_qhh_shud/dg-gfs-variant/package/manifest.json"
+    ).is_file()
+
+
+def test_copyback_reuses_matching_immutable_direct_grid_model_tree(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    run_id = "fcst_gfs_2026070600_dg_candidate"
+    _write_direct_grid_run(object_root, run_id)
+    target_package = (
+        copyback_root / "models/direct_grid_variants/basins_qhh_shud/dg-gfs-variant/package"
+    )
+    target_package.mkdir(parents=True)
+    (target_package / "manifest.json").write_text('{"variant":"gfs"}\n', encoding="utf-8")
+    marker = target_package / "node27-owned-marker"
+    marker.write_text("preserve\n", encoding="utf-8")
+
+    summary = copyback_run_trees(
+        object_store_root=object_root,
+        copyback_root=copyback_root,
+        run_ids=[run_id],
+    )
+
+    assert summary is not None
+    model_summary = next(
+        tree for tree in summary["referenced_trees"] if tree["object_key"].startswith("models/")
+    )
+    assert model_summary["status"] == "reused"
+    assert model_summary["file_count"] == 0
+    assert marker.read_text(encoding="utf-8") == "preserve\n"
+
+
+def test_copyback_rejects_mismatched_immutable_direct_grid_model_tree(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    run_id = "fcst_gfs_2026070600_dg_candidate"
+    _write_direct_grid_run(object_root, run_id)
+    target_package = (
+        copyback_root / "models/direct_grid_variants/basins_qhh_shud/dg-gfs-variant/package"
+    )
+    target_package.mkdir(parents=True)
+    (target_package / "manifest.json").write_text('{"variant":"ifs"}\n', encoding="utf-8")
+
+    with pytest.raises(RunTreeCopybackError) as error_info:
+        copyback_run_trees(
+            object_store_root=object_root,
+            copyback_root=copyback_root,
+            run_ids=[run_id],
+        )
+
+    assert error_info.value.code == "OBJECT_STORE_COPYBACK_MODEL_IDENTITY_MISMATCH"
 
 
 def test_copyback_run_trees_copies_extra_state_index_object(tmp_path: Path) -> None:
