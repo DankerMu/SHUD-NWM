@@ -252,7 +252,12 @@ def _nonempty_evidence_value(value: Any) -> bool:
     return bool(value)
 
 
-def _candidate_identity_evidence(candidate: SchedulerCandidate, *, output_uri: str | None = None) -> dict[str, Any]:
+def _candidate_identity_evidence(
+    candidate: SchedulerCandidate,
+    *,
+    output_uri: str | None = None,
+    include_state_evidence: bool = True,
+) -> dict[str, Any]:
     contract_identity = _candidate_production_identity(candidate)
     evidence = {
         "production_identity_contract": production_identity_contract_evidence(contract_identity),
@@ -285,7 +290,7 @@ def _candidate_identity_evidence(candidate: SchedulerCandidate, *, output_uri: s
     resolved_output_uri = output_uri or _candidate_output_uri(candidate)
     if resolved_output_uri is not None:
         evidence["output_uri"] = _redact_secret_manifest_for_evidence(resolved_output_uri, "output_uri")
-    if candidate.state_evidence:
+    if include_state_evidence and candidate.state_evidence:
         evidence["state_evidence"] = _evidence_safe(candidate.state_evidence)
     return evidence
 
@@ -778,7 +783,17 @@ def _candidate_model_run_review_evidence(
             "openspec_change": SCHEDULER_EVIDENCE_OPEN_SPEC_CHANGE,
             "scope": "model_run_evidence",
         },
-        **_candidate_identity_evidence(candidate, output_uri=output_uri),
+        # The scheduler pass already preserves the complete candidate state in
+        # its top-level ``candidates`` collection.  Repeating that potentially
+        # large journal/readiness history once more for every model-run record
+        # made a normal 18-basin x 2-source pass exceed the durable 5 MB
+        # evidence limit.  Keep model-run evidence candidate-scoped, but do not
+        # duplicate the state history here.
+        **_candidate_identity_evidence(
+            candidate,
+            output_uri=output_uri,
+            include_state_evidence=False,
+        ),
         "stage_statuses": stage_status_payload,
         "stage_evidence": stage_status_payload,
         "artifact_refs": artifact_refs,

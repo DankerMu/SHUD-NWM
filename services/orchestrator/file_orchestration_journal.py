@@ -5334,11 +5334,15 @@ def _validate_pipeline_job_identity(
             )
         return
     run_id = _required_safe_identity(row, "run_id")
-    if run_id != cycle_run_id and not run_id.startswith(f"fcst_{source_id.lower()}_{format_cycle_time(cycle_time)}_"):
+    if (
+        run_id != cycle_run_id
+        and not run_id.startswith(f"{cycle_run_id}_")
+        and not run_id.startswith(f"fcst_{source_id.lower()}_{format_cycle_time(cycle_time)}_")
+    ):
         raise FileOrchestrationJournalError(
             "file_journal_run_mismatch",
             field="run_id",
-            evidence={"expected": cycle_run_id, "actual": run_id[:80]},
+            evidence={"expected": f"{cycle_run_id}|{cycle_run_id}_<cohort>", "actual": run_id[:80]},
         )
 
 

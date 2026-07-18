@@ -5226,9 +5226,9 @@ def test_scheduler_pass_candidate_evidence_carries_repaired_stage_metadata_for_o
 
     assert result.evidence["counts"]["submitted_count"] == 1
     candidate_state = result.evidence["candidates"][0]["state_evidence"]["candidate_state"]
-    model_run_state = result.evidence["model_run_evidence"][0]["state_evidence"]["candidate_state"]
     submitted_state = orchestrator.calls[0]["basins"][0]["state_evidence"]["candidate_state"]
-    for state in (candidate_state, model_run_state, submitted_state):
+    assert "state_evidence" not in result.evidence["model_run_evidence"][0]
+    for state in (candidate_state, submitted_state):
         assert "decision" not in state
         assert "failure" not in state
         assert state["repaired_stage_evidence"]["original_failed_job_id"] == "job_cycle_gfs_2026052106_download"
