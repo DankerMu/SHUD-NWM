@@ -725,6 +725,9 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
                     sort_keys=True,
                 )
             )
+            if not _state_save_result_qc_passed(result):
+                click.echo("STATE_SNAPSHOT_QC_FAILED: one or more saved checkpoints failed QC.", err=True)
+                raise SystemExit(1)
         except ManifestValidationError as error:
             click.echo(f"{error.error_code}: {error.message}", err=True)
             raise SystemExit(1) from error
@@ -754,6 +757,12 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
                 else save_state_for_run(resolved_run_id)
             )
             print(json.dumps(result, sort_keys=True))
+            if not _state_save_result_qc_passed(result):
+                print(
+                    "STATE_SNAPSHOT_QC_FAILED: one or more saved checkpoints failed QC.",
+                    file=sys.stderr,
+                )
+                return 1
         except ManifestValidationError as error:
             print(f"{error.error_code}: {error.message}", file=sys.stderr)
             return 1
@@ -763,6 +772,18 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
         return 0
     parser.error(f"Unsupported command: {args.command}")
     return 2
+
+
+def _state_save_result_qc_passed(result: Mapping[str, Any]) -> bool:
+    if result.get("qc_passed") is False:
+        return False
+    checkpoints = result.get("checkpoints")
+    if not isinstance(checkpoints, Sequence) or isinstance(checkpoints, (str, bytes)):
+        return True
+    return all(
+        not isinstance(checkpoint, Mapping) or checkpoint.get("qc_passed") is not False
+        for checkpoint in checkpoints
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:

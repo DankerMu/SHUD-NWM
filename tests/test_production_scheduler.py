@@ -9316,6 +9316,38 @@ def test_qhh_project_name_propagates_from_resource_profile_to_runtime_manifest(t
     assert shud_runtime_module._project_name(manifest) == "qhh"
 
 
+def test_solver_parameters_propagate_from_resource_profile_to_runtime_manifest(tmp_path: Path) -> None:
+    basin = {
+        "candidate_id": "IFS:2026-07-07T00:00:00Z:huai:forecast_ifs_deterministic",
+        "model_id": "huai",
+        "basin_id": "basins_huai_main",
+        "basin_version_id": "basins_huai_main_vbasins",
+        "river_network_version_id": "basins_huai_main_rivnet_vbasins",
+        "segment_count": 6,
+        "model_package_uri": "s3://nhms/models/huai/package/",
+        "run_id": "fcst_ifs_2026070700_huai",
+        "forcing_version_id": "forc_ifs_2026070700_huai",
+        "forcing_uri": "s3://nhms/forcing/IFS/2026070700/huai/",
+        "resource_profile": {
+            "project_name": "Huai-MAIN",
+            "solver_parameters": {"MAX_SOLVER_STEP": 2},
+        },
+    }
+
+    assembly = build_model_run_assembly(
+        basin,
+        source_id="IFS",
+        cycle_id="ifs_2026070700",
+        cycle_time=_dt("2026-07-07T00:00:00Z"),
+        scenario_id="forecast_ifs_deterministic",
+        workspace_root=tmp_path / "workspace",
+        object_store=LocalObjectStore(tmp_path / "object-store", "s3://nhms"),
+        default_forecast_horizon_hours=168,
+    )
+
+    assert assembly.runtime["solver_parameters"] == {"MAX_SOLVER_STEP": 2}
+
+
 def test_qhh_output_segment_count_propagates_separately_from_gis_segment_count(tmp_path: Path) -> None:
     model = {
         "model_id": "basins_qhh_shud",

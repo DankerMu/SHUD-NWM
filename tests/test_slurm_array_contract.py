@@ -704,6 +704,25 @@ def test_state_save_array_cli_accepts_manifest_index(monkeypatch, tmp_path):
     assert captured["run_id"] == "run_001"
 
 
+def test_state_save_array_cli_fails_when_saved_checkpoint_fails_qc(monkeypatch, tmp_path):
+    def fake_save_state_for_run(run_id: str) -> dict[str, object]:
+        return {
+            "run_id": run_id,
+            "status": "created",
+            "qc_passed": False,
+            "checkpoints": [{"state_id": "state_bad", "qc_passed": False}],
+        }
+
+    monkeypatch.setattr(state_cli, "save_state_for_run", fake_save_state_for_run)
+
+    exit_code = _main_exit_code(
+        state_cli.main,
+        ["save", "--manifest-index", str(_manifest_index(tmp_path)), "--task-id", "0"],
+    )
+
+    assert exit_code == 1
+
+
 def test_state_save_array_cli_accepts_legacy_run_id_only_manifest_index(monkeypatch, tmp_path):
     captured: dict[str, str] = {}
     path = tmp_path / "legacy_manifest_index.json"

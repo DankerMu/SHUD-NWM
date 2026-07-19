@@ -364,6 +364,51 @@ def test_forecast_checkpoint_cadence_does_not_shorten_shud_long_run(tmp_path: Pa
     assert "END_TIME\t2026-05-08T00:00:00Z" in cfg
 
 
+def test_shud_project_runtime_applies_validated_solver_parameter_overrides(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(object_root)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    manifest["runtime"]["solver_parameters"] = {"MAX_SOLVER_STEP": 2}
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    output_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "output"
+
+    runtime.prepare_workspace(manifest, input_dir)
+    cfg_path = runtime.generate_cfg_para(manifest, input_dir, output_dir)
+
+    assert "MAX_SOLVER_STEP\t2" in cfg_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("solver_parameters", "error_code"),
+    [
+        ({"SHELL_COMMAND": "unsafe"}, "SOLVER_PARAMETER_UNSUPPORTED"),
+        ({"MAX_SOLVER_STEP": 0}, "SOLVER_PARAMETER_INVALID"),
+        ({"MAX_SOLVER_STEP": True}, "SOLVER_PARAMETER_INVALID"),
+    ],
+)
+def test_shud_project_runtime_rejects_invalid_solver_parameter_overrides(
+    tmp_path: Path,
+    solver_parameters: dict[str, Any],
+    error_code: str,
+) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(object_root)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    manifest["runtime"]["solver_parameters"] = solver_parameters
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    output_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "output"
+    runtime.prepare_workspace(manifest, input_dir)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.generate_cfg_para(manifest, input_dir, output_dir)
+
+    assert exc_info.value.error_code == error_code
+
+
 def test_state_checkpoint_tracker_captures_t6_t12_from_long_run_update(tmp_path: Path) -> None:
     manifest = _manifest()
     manifest["end_time"] = "2026-05-08T00:00:00Z"

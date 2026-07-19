@@ -856,6 +856,13 @@ def build_model_run_assembly(
         "mode": "native_shud_project",
         "output_river": output_river,
     }
+    solver_parameters = _nested_mapping(basin.get("runtime")).get("solver_parameters")
+    if solver_parameters is None:
+        solver_parameters = _nested_mapping(basin.get("resource_profile")).get("solver_parameters")
+    if solver_parameters is not None:
+        runtime["solver_parameters"] = (
+            dict(solver_parameters) if isinstance(solver_parameters, Mapping) else solver_parameters
+        )
     identity = {
         "schema_version": PRODUCTION_CONTRACT_SCHEMA_VERSION,
         "contract_id": PRODUCTION_CONTRACT_ID,

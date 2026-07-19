@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import math
 import os
 import re
 import stat as stat_module
@@ -60,6 +61,13 @@ MAX_DIRECT_GRID_TSD_FORC_LINES = 250_000
 MAX_DIRECT_GRID_FORCING_CSV_LINES = 250_000
 MAX_DIRECT_GRID_SP_ATT_LINES = 2_000_000
 MAX_DIRECT_GRID_STAGING_LINE_BYTES = 64 * 1024
+
+_SHUD_SOLVER_PARAMETER_BOUNDS: dict[str, tuple[float, float]] = {
+    "ABSTOL": (1.0e-12, 1.0),
+    "RELTOL": (1.0e-12, 1.0),
+    "INIT_SOLVER_STEP": (1.0e-6, 1440.0),
+    "MAX_SOLVER_STEP": (1.0e-6, 1440.0),
+}
 
 
 def _env_flag(name: str) -> bool:
@@ -463,6 +471,7 @@ class SHUDRuntime:
                 replacements["Update_IC_STEP"] = str(update_ic_step)
         else:
             content = "\n".join(line for line in content.splitlines() if ".cfg.ic" not in line)
+        replacements.update(_solver_parameter_replacements(manifest))
         for key, value in replacements.items():
             content = _replace_or_append(
                 content,
@@ -1907,6 +1916,51 @@ def _runtime_command(
     if executable.endswith(".py"):
         return [sys.executable, executable, *args]
     return [executable, *args]
+
+
+def _solver_parameter_replacements(manifest: Mapping[str, Any]) -> dict[str, str]:
+    runtime = manifest.get("runtime") or {}
+    if not isinstance(runtime, Mapping):
+        raise SHUDRuntimeError("SOLVER_PARAMETERS_INVALID", "runtime must be an object.")
+    raw = runtime.get("solver_parameters")
+    if raw in (None, {}):
+        return {}
+    if not isinstance(raw, Mapping):
+        raise SHUDRuntimeError(
+            "SOLVER_PARAMETERS_INVALID",
+            "runtime.solver_parameters must be an object.",
+        )
+
+    unknown = sorted(str(key) for key in raw if str(key) not in _SHUD_SOLVER_PARAMETER_BOUNDS)
+    if unknown:
+        raise SHUDRuntimeError(
+            "SOLVER_PARAMETER_UNSUPPORTED",
+            f"Unsupported SHUD solver parameter(s): {', '.join(unknown)}",
+        )
+
+    replacements: dict[str, str] = {}
+    for key, raw_value in raw.items():
+        name = str(key)
+        if isinstance(raw_value, bool):
+            raise SHUDRuntimeError(
+                "SOLVER_PARAMETER_INVALID",
+                f"SHUD solver parameter {name} must be numeric.",
+            )
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError) as error:
+            raise SHUDRuntimeError(
+                "SOLVER_PARAMETER_INVALID",
+                f"SHUD solver parameter {name} must be numeric.",
+            ) from error
+        lower, upper = _SHUD_SOLVER_PARAMETER_BOUNDS[name]
+        if not math.isfinite(value) or not lower <= value <= upper:
+            raise SHUDRuntimeError(
+                "SOLVER_PARAMETER_INVALID",
+                f"SHUD solver parameter {name} must be within [{lower:g}, {upper:g}].",
+            )
+        replacements[name] = _format_float(value)
+    return replacements
 
 
 def _is_shud_project_mode(manifest: dict[str, Any], command_style: str) -> bool:
