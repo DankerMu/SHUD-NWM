@@ -49,6 +49,22 @@ export interface M11StationFeatureCollection {
   }>
 }
 
+export interface M11StationClusterPolicy {
+  enabled: boolean
+  radius: number
+  maxZoom: number
+}
+
+/**
+ * Direct-grid 代站按原始格点展开，密度远低于历史 IDW 代站。
+ * 小流域直接展示格点；中/大流域仅在全国/区域尺度聚合，进入流域尺度后全部展开。
+ */
+export function m11StationClusterPolicy(stationCount: number): M11StationClusterPolicy {
+  if (stationCount <= 24) return { enabled: false, radius: 0, maxZoom: 0 }
+  if (stationCount <= 500) return { enabled: true, radius: 28, maxZoom: 7 }
+  return { enabled: true, radius: 36, maxZoom: 8 }
+}
+
 export function m11RegisteredOverlayHitLayerId(overlay: M11RegisteredOverlay): string {
   return `${overlay.layer.id}-hit`
 }
@@ -380,14 +396,15 @@ export function M11StationClusterPrimitive({
   collection: M11StationFeatureCollection
   selectedStationId?: string | null
 }) {
+  const clusterPolicy = m11StationClusterPolicy(collection.features.length)
   return (
     <Source
       id={MET_STATION_SOURCE_ID}
       type="geojson"
       data={collection}
-      cluster
-      clusterRadius={50}
-      clusterMaxZoom={14}
+      cluster={clusterPolicy.enabled}
+      clusterRadius={clusterPolicy.radius}
+      clusterMaxZoom={clusterPolicy.maxZoom}
       promoteId="station_id"
     >
       <Layer

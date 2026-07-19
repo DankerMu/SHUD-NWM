@@ -216,6 +216,12 @@ describe('overview data store discharge loading', () => {
     const snapshot = await useOverviewDataStore.getState().loadOverview(query)
 
     expect(snapshot.summary.freshness.runId).toBe('run-001')
+    expect(calls.filter((call) => call.path === '/api/v1/basins')).toEqual([
+      {
+        path: '/api/v1/basins',
+        query: { limit: 200, offset: 0, has_display_product: true },
+      },
+    ])
     const runCalls = calls.filter((call) => call.path === '/api/v1/runs')
     const allowedRunQueryKeys = new Set(['basin_id', 'source', 'cycle_time', 'status', 'limit', 'offset'])
     expect(runCalls).not.toHaveLength(0)

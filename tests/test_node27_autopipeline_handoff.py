@@ -218,6 +218,52 @@ def test_exact_cycle_direct_grid_filter_excludes_legacy_run(
     assert published_calls == [NODE27_DATABASE_URL]
 
 
+def test_excluded_basin_is_not_seeded_or_ingested(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, calls, published_calls = _prepare_autopipe(
+        monkeypatch,
+        tmp_path,
+        runs={DIRECT_GRID_RUN: True},
+    )
+
+    rc, summary = _run_main(
+        capsys,
+        object_store_root,
+        "--exclude-basins",
+        "basins_qhh",
+    )
+
+    assert rc == 0
+    assert summary["excluded_basins"] == ["qhh"]
+    assert summary["discovered_runs"] == 0
+    assert summary["basins"] == []
+    assert summary["runs"]["processed"] == 0
+    assert calls == []
+    assert published_calls == []
+
+
+def test_parallel_workers_preserve_deterministic_result_order_and_final_publish(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, _calls, published_calls = _prepare_autopipe(
+        monkeypatch,
+        tmp_path,
+        runs={RUN_A: True, RUN_B: True},
+    )
+
+    rc, summary = _run_main(capsys, object_store_root, "--workers", "2")
+
+    assert rc == 0
+    assert summary["runs"]["workers"] == 2
+    assert [detail["run_id"] for detail in summary["runs"]["details"]] == [RUN_A, RUN_B]
+    assert published_calls == [NODE27_DATABASE_URL]
+
+
 def test_exact_cycle_filter_rejects_noncanonical_value(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

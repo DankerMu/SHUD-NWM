@@ -20,6 +20,10 @@ BASINS_ROOT=/home/ghdc/nwm/Basins
 # Local working/log roots owned by the nwm user on node-27.
 AUTOPIPE_WORK_ROOT=/home/nwm/autopipe-work
 AUTOPIPE_LOG_ROOT=/home/nwm/autopipe-logs
+AUTOPIPE_RUN_WORKERS=2
+AUTOPIPE_COVERAGE_WORKERS=2
+AUTOPIPE_EXCLUDE_BASINS=zhaochen_hhy
+OUTPUT_PARSER_BATCH_SIZE=10000
 AUTOPIPE_LOG_FILE=/home/nwm/autopipe-logs/autopipe.log
 AUTOPIPE_LOCK_PATH=/tmp/autopipe.cron.lock
 # Per-run display coverage materialization timeout. Direct-grid basins with

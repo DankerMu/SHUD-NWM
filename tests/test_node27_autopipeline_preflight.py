@@ -1044,6 +1044,9 @@ def test_wrapper_contract_has_ingest_env_without_writer_default_or_display_env_s
     assert '. "$REPO/infra/env/display.env"' not in script
     assert "INGEST_ENV_DISPLAY_RUNTIME_FORBIDDEN" in script
     assert "NODE22_DB_RUNTIME_ENV_FORBIDDEN" in script
+    assert "--direct-grid-only" in script
+    assert 'AUTOPIPE_RUN_WORKERS:-1' in script
+    assert 'AUTOPIPE_EXCLUDE_BASINS:-' in script
     for required_key in (
         "DATABASE_URL",
         "NHMS_NODE27_INGEST_ROLE",

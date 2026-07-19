@@ -50,6 +50,13 @@ def main(argv: list[str] | None = None) -> int:
         help="With --all, only refresh runs whose coverage is missing or stale (resumable).",
     )
     parser.add_argument("--progress", action="store_true", help="With --all, emit per-run progress to stderr.")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=int(os.environ.get("AUTOPIPE_COVERAGE_WORKERS", "1")),
+        choices=range(1, 9),
+        help="Independent per-run coverage workers (1-8).",
+    )
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL") or LOCAL_DEFAULT)
     args = parser.parse_args(argv)
 
@@ -69,9 +76,13 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"  {run_id}: {status}", file=sys.stderr, flush=True)
 
             counts = refresh_all_run_display_coverage(
-                connection, dsn=args.database_url, skip_fresh=args.skip_fresh, on_progress=progress
+                connection,
+                dsn=args.database_url,
+                skip_fresh=args.skip_fresh,
+                on_progress=progress,
+                workers=args.workers,
             )
-            report = {"mode": "all", "skip_fresh": args.skip_fresh, **counts}
+            report = {"mode": "all", "skip_fresh": args.skip_fresh, "workers": args.workers, **counts}
         else:
             present = refresh_run_display_coverage(connection, args.run_id)
             report = {"mode": "run", "run_id": args.run_id, "refreshed": present}
