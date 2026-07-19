@@ -881,6 +881,8 @@ describe('loadHydroMetRiverForecast', () => {
           },
           query: {
             river_network_version_id: product.river_network_version_id,
+            run_id: product.run_id,
+            model_id: product.model_id,
             issue_time: '2026-05-21T00:00:00.000Z',
             variables: HYDRO_MET_RIVER_FORECAST_VARIABLE,
             scenarios: 'forecast_gfs_deterministic',
@@ -1037,7 +1039,7 @@ describe('loadHydroMetRiverForecast', () => {
   it('builds request keys from product and segment identity', () => {
     const product = latestProduct()
     expect(riverForecastRequestKey(product, 'seg-001')).toBe(
-      'basins_qhh_vbasins|basins_qhh_rivnet_vbasins|GFS|2026-05-21T00:00:00.000Z|seg-001',
+      'basins_qhh_vbasins|basins_qhh_rivnet_vbasins|qhh_gfs_2026052100_smoke|basins_qhh_shud|GFS|2026-05-21T00:00:00.000Z|seg-001',
     )
   })
 })

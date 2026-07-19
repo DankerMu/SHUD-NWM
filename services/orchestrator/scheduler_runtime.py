@@ -25,6 +25,7 @@ SchedulerEvidenceWriteError = _scheduler_evidence_module.SchedulerEvidenceWriteE
 SchedulerPassResult = _scheduler.SchedulerPassResult
 SchedulerResourceLimitError = _scheduler_discovery.SchedulerResourceLimitError
 UNKNOWN_AFTER_ATTEMPT = _scheduler_evidence_module.UNKNOWN_AFTER_ATTEMPT
+_SELECTED_CANDIDATE_STATE_COMPACTION_THRESHOLD = 16
 
 
 class _SchedulerProgressGuard:
@@ -1100,23 +1101,6 @@ def run_once(self) -> SchedulerPassResult:
                                 execution_boundary = "db_free_journal_write_blocked"
                                 pass_status = "preflight_blocked"
                                 no_mutation_proof = _no_mutation_proof()
-                            else:
-                                if self.forcing_producer is not None:
-                                    (
-                                        candidates,
-                                        forcing_blocked_candidates,
-                                        forcing_evidence,
-                                    ) = self._produce_forcing_for_candidates(candidates)
-                                    blocked_candidates.extend(forcing_blocked_candidates)
-                                    execution_evidence.extend(forcing_evidence)
-                                    progress_guard.checkpoint(
-                                        "forcing",
-                                        bool(forcing_evidence or forcing_blocked_candidates),
-                                        {
-                                            "forcing_evidence_count": len(forcing_evidence),
-                                            "forcing_blocked_count": len(forcing_blocked_candidates),
-                                        },
-                                    )
                             if candidates and not _db_free_journal_mutation_blocked(
                                 self.config,
                                 mutation_requested=bool(candidates),
@@ -1153,7 +1137,30 @@ def run_once(self) -> SchedulerPassResult:
                                     pass_status = "preflight_blocked"
                                     no_mutation_proof = _no_mutation_proof()
                                 else:
-                                    execution_evidence.extend(self._execute_candidates(candidates))
+                                    (
+                                        async_evidence,
+                                        forcing_blocked_candidates,
+                                        candidates,
+                                    ) = self._execute_candidates_async(candidates)
+                                    execution_evidence.extend(async_evidence)
+                                    blocked_candidates.extend(forcing_blocked_candidates)
+                                    forcing_evidence_count = sum(
+                                        1
+                                        for item in async_evidence
+                                        if item.get("stage") == "forcing"
+                                        or any(
+                                            isinstance(stage, Mapping) and stage.get("stage") == "forcing"
+                                            for stage in item.get("stage_statuses", [])
+                                        )
+                                    )
+                                    progress_guard.checkpoint(
+                                        "forcing",
+                                        bool(forcing_evidence_count or forcing_blocked_candidates),
+                                        {
+                                            "forcing_evidence_count": forcing_evidence_count,
+                                            "forcing_blocked_count": len(forcing_blocked_candidates),
+                                        },
+                                    )
                                     progress_guard.checkpoint(
                                         "submission",
                                         bool(execution_evidence),
@@ -1254,7 +1261,14 @@ def run_once(self) -> SchedulerPassResult:
                     "lock": lock_evidence,
                     "model_discovery": model_evidence,
                     "source_cycles": source_cycle_evidence,
-                    "candidates": [candidate.to_dict() for candidate in candidates],
+                    "candidates": [
+                        candidate.to_dict(
+                            compact_selected_state=(
+                                len(candidates) >= _SELECTED_CANDIDATE_STATE_COMPACTION_THRESHOLD
+                            )
+                        )
+                        for candidate in candidates
+                    ],
                     "blocked_candidates": [candidate.to_dict() for candidate in blocked_candidates],
                     "skipped_candidates": skipped_candidates,
                     "duplicate_exclusions": duplicate_exclusions,

@@ -4116,6 +4116,30 @@ def test_file_orchestration_journal_candidate_state_includes_run_manifest_packag
     assert package["model_package_checksum"] == "old-package-sha"
 
 
+def test_file_orchestration_journal_accepts_model_less_cycle_cohort_run_id(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    run_id = "cycle_gfs_2026062800_forcing"
+
+    reserved = repository.reserve_pipeline_job(
+        {
+            "job_id": f"job_{run_id}_forcing",
+            "run_id": run_id,
+            "cycle_id": "gfs_2026062800",
+            "source_id": "gfs",
+            "cycle_time": cycle_time,
+            "job_type": "produce_forcing_array",
+            "stage": "forcing",
+            "idempotency_key": f"{run_id}:forcing",
+        }
+    )
+
+    assert reserved is not None
+    assert reserved["model_id"] is None
+    assert reserved["run_id"] == run_id
+    assert repository.query_pipeline_jobs_by_run(run_id)[0]["status"] == "reserved"
+
+
 @pytest.mark.parametrize(
     ("field_name", "envelope_value", "expected_reason"),
     [

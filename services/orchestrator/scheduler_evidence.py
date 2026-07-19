@@ -98,6 +98,8 @@ class SchedulerEvidenceConfig(Protocol):
     interval_seconds: float
     max_cycles_per_source: int
     retry_limit: int
+    concurrent_submit_bound: int
+    slurm_array_concurrency_bound: int
     database_url_configured: bool
     scheduler_db_free_required: bool
     scheduler_state_backend: str | None
@@ -813,6 +815,8 @@ def scheduler_runtime_config_evidence(config: SchedulerEvidenceConfig) -> dict[s
         "cycle_lag_hours": config.cycle_lag_hours,
         "max_cycles_per_source": config.max_cycles_per_source,
         "retry_limit": config.retry_limit,
+        "concurrent_submit_bound": config.concurrent_submit_bound,
+        "slurm_array_concurrency_bound": config.slurm_array_concurrency_bound,
     }
     db_free_evidence = getattr(config, "db_free_runtime_evidence", None)
     if callable(db_free_evidence):

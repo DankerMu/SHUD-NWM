@@ -2520,6 +2520,42 @@ def test_build_crosswalk_rows_reach_missing_reports_set() -> None:
     assert 1 not in payload["missing_iRiv"]
 
 
+def test_build_crosswalk_rows_collapses_duplicate_external_identity() -> None:
+    segments = [
+        CrosswalkRow(iRiv=7, iEle=42, segment_order=3, length_m=120.5),
+        CrosswalkRow(iRiv=7, iEle=42, segment_order=9, length_m=120.5),
+    ]
+
+    rows = _build_river_segment_crosswalk_rows(
+        model_id="basins_duplicate_shud",
+        river_network_version_id="rnv_duplicate",
+        segments=segments,
+        reach_indices={7},
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["external_id"] == "7:42"
+    assert rows[0]["properties_json"]["segment_order"] == 3
+
+
+def test_build_crosswalk_rows_rejects_conflicting_duplicate_external_identity() -> None:
+    segments = [
+        CrosswalkRow(iRiv=7, iEle=42, segment_order=3, length_m=120.5),
+        CrosswalkRow(iRiv=7, iEle=42, segment_order=9, length_m=121.0),
+    ]
+
+    with pytest.raises(BasinsGeometryError) as exc_info:
+        _build_river_segment_crosswalk_rows(
+            model_id="basins_duplicate_shud",
+            river_network_version_id="rnv_duplicate",
+            segments=segments,
+            reach_indices={7},
+        )
+
+    assert exc_info.value.error_code == "BASINS_REGISTRY_CROSSWALK_DUPLICATE_CONFLICT"
+    assert exc_info.value.details["external_id"] == "7:42"
+
+
 # ---------------------------------------------------------------------------
 # PR 2 (issue #561): DB-side atomic switch tests (Section 2 of tasks.md)
 # ---------------------------------------------------------------------------

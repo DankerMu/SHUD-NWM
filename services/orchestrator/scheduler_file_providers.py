@@ -31,6 +31,10 @@ from services.orchestrator import source_cycle_raw_manifest
 from services.orchestrator.scheduler_state import _ensure_utc, _evidence_safe, _format_utc
 from workers.canonical_converter.converter import evaluate_canonical_readiness
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
+from workers.forcing_producer.direct_grid_contract import (
+    DirectGridContractError,
+    load_forcing_mapping_contract_from_manifest,
+)
 
 REGISTRY_MANIFEST_SCHEMA_VERSION = "nhms.scheduler.file_model_registry.v1"
 CANONICAL_READINESS_INDEX_SCHEMA_VERSION = "nhms.scheduler.canonical_readiness_index.v1"
@@ -45,6 +49,7 @@ MAX_READINESS_ENTRIES = 5000
 MAX_READINESS_PRODUCT_ROWS = 250000
 MAX_FILE_PROVIDER_OBJECT_STORE_CACHE_ENTRIES = 16
 DEFAULT_MAX_MANIFEST_AGE_HOURS = 168
+REQUIRE_DIRECT_GRID_ENV = "NHMS_SCHEDULER_REQUIRE_DIRECT_GRID"
 MAX_FILE_PROVIDER_JSON_DEPTH = 64
 MAX_FILE_PROVIDER_JSON_NODES = 300_000
 MAX_CANONICAL_CATALOG_CYCLE_DIRS = 4096
@@ -84,6 +89,7 @@ class _ProviderRoots:
     published_artifact_root: str | Path | None = None
     now: datetime | None = None
     max_age_hours: int = DEFAULT_MAX_MANIFEST_AGE_HOURS
+    require_direct_grid: bool = False
     object_store_cache: dict[tuple[str, str, str], LocalObjectStore] = dataclass_field(
         default_factory=dict,
         compare=False,
@@ -101,6 +107,7 @@ class FileSchedulerModelRegistry:
         published_artifact_root: str | Path | None = None,
         now: datetime | None = None,
         max_age_hours: int = DEFAULT_MAX_MANIFEST_AGE_HOURS,
+        require_direct_grid: bool | None = None,
     ) -> None:
         self.manifest_uri = str(manifest_uri)
         self._roots = _ProviderRoots(
@@ -109,6 +116,7 @@ class FileSchedulerModelRegistry:
             published_artifact_root=published_artifact_root,
             now=now,
             max_age_hours=max_age_hours,
+            require_direct_grid=_require_direct_grid(require_direct_grid),
         )
         self._loaded = False
         self._models: list[dict[str, Any]] = []
@@ -565,12 +573,14 @@ def publish_scheduler_registry_manifest(
     expected_preimage: ProviderPreimage | Mapping[str, object] | None = None,
     commit_observer: Callable[[ProviderPreimage], None] | None = None,
     cutover_gate: Mapping[str, Any] | None = None,
+    require_direct_grid: bool | None = None,
 ) -> dict[str, Any]:
     roots = _ProviderRoots(
         object_store_root=object_store_root,
         object_store_prefix=object_store_prefix,
         published_artifact_root=published_artifact_root,
         now=generated_at,
+        require_direct_grid=_require_direct_grid(require_direct_grid),
     )
     payload = {
         "schema_version": REGISTRY_MANIFEST_SCHEMA_VERSION,
@@ -699,6 +709,10 @@ def derive_catalog_bound_readiness_entries(
     if not normalized_sources:
         raise SchedulerFileProviderError("readiness_derivation_sources_empty", field="sources")
     models = _registry_readiness_identities(registry_models)
+    models_by_source = _registry_readiness_identities_by_source(
+        registry_models,
+        sources=normalized_sources,
+    )
     roots = _ProviderRoots(object_store_root=root, object_store_prefix=prefix)
     entries: list[dict[str, Any]] = []
     catalogs: list[dict[str, Any]] = []
@@ -722,7 +736,7 @@ def derive_catalog_bound_readiness_entries(
                 "model_id": model_id,
                 "basin_id": basin_id,
             }
-            for model_id, basin_id in models
+            for model_id, basin_id in models_by_source[source_id]
         )
         catalogs.append(
             {
@@ -797,10 +811,17 @@ def validate_readiness_registry_model_set(
     *,
     sources: Sequence[str] = READINESS_DERIVATION_SOURCES,
 ) -> dict[str, Any]:
-    """Require one readiness identity per registry model and source."""
+    """Require exactly the registry identities applicable to each source."""
 
     models = set(_registry_readiness_identities(registry_models))
     normalized_sources = tuple(dict.fromkeys(normalize_source_id(str(source)) for source in sources))
+    expected_by_source = {
+        source: set(identities)
+        for source, identities in _registry_readiness_identities_by_source(
+            registry_models,
+            sources=normalized_sources,
+        ).items()
+    }
     actual_by_source: dict[str, list[tuple[str, str]]] = {source: [] for source in normalized_sources}
     for index, entry in enumerate(entries):
         try:
@@ -818,18 +839,19 @@ def validate_readiness_registry_model_set(
             )
         actual_by_source[source_id].append(identity)
     for source_id, identities in actual_by_source.items():
-        if len(identities) != len(set(identities)) or set(identities) != models:
+        expected = expected_by_source[source_id]
+        if len(identities) != len(set(identities)) or set(identities) != expected:
             raise SchedulerFileProviderError(
                 "readiness_registry_model_set_mismatch",
                 field="entries[].model_id",
                 evidence={
                     "source_id": source_id,
-                    "expected_model_count": len(models),
+                    "expected_model_count": len(expected),
                     "actual_model_count": len(identities),
                     "actual_unique_model_count": len(set(identities)),
                 },
             )
-    expected_count = len(models) * len(normalized_sources)
+    expected_count = sum(len(identities) for identities in expected_by_source.values())
     if len(entries) != expected_count:
         raise SchedulerFileProviderError(
             "readiness_registry_entry_count_mismatch",
@@ -870,6 +892,18 @@ def _validate_registry_manifest(
         if not isinstance(item, Mapping):
             raise SchedulerFileProviderError("registry_model_not_object", field=f"models[{index}]")
         row = _normalize_registry_model(item, index=index, roots=roots)
+        if roots.require_direct_grid:
+            profile = row["resource_profile"]
+            direct_contract = profile.get("direct_grid_forcing")
+            if (
+                profile.get("forcing_mapping_mode") != "direct_grid"
+                or not isinstance(direct_contract, Mapping)
+            ):
+                raise SchedulerFileProviderError(
+                    "registry_direct_grid_required",
+                    field=f"models[{index}].resource_profile.forcing_mapping_mode",
+                    evidence={"model_id": row.get("model_id")},
+                )
         model_id = str(row["model_id"])
         if model_id in seen_model_ids:
             raise SchedulerFileProviderError(
@@ -891,6 +925,17 @@ def _validate_registry_manifest(
         "manifest_bytes": len(content),
     }
     return rows, {str(row["model_id"]): dict(row) for row in rows}, _evidence_safe(evidence)
+
+
+def _require_direct_grid(explicit: bool | None) -> bool:
+    if explicit is not None:
+        return bool(explicit)
+    return os.getenv(REQUIRE_DIRECT_GRID_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _validate_readiness_index(
@@ -1085,6 +1130,59 @@ def _registry_readiness_identities(
         model_ids.add(model_id)
         identities.append((model_id, basin_id))
     return sorted(identities)
+
+
+def _registry_readiness_identities_by_source(
+    registry_models: Sequence[Mapping[str, Any]],
+    *,
+    sources: Sequence[str],
+) -> dict[str, list[tuple[str, str]]]:
+    """Project registry identities onto their direct-grid source scopes.
+
+    Legacy rows without a direct-grid contract remain applicable to every
+    configured source.  Direct-grid rows are parsed from the same authoritative
+    contract used by dispatch, so readiness and candidate construction cannot
+    drift back to a source/model Cartesian product.
+    """
+
+    normalized_sources = tuple(dict.fromkeys(normalize_source_id(str(source)) for source in sources))
+    identities = _registry_readiness_identities(registry_models)
+    model_by_id = {str(model.get("model_id") or ""): model for model in registry_models}
+    result: dict[str, list[tuple[str, str]]] = {source: [] for source in normalized_sources}
+    for model_id, basin_id in identities:
+        model = model_by_id[model_id]
+        profile = model.get("resource_profile")
+        direct_grid_section = (
+            profile.get("direct_grid_forcing")
+            if isinstance(profile, Mapping)
+            else None
+        )
+        if direct_grid_section is None:
+            applicable_sources = normalized_sources
+        else:
+            manifest = {
+                "forcing_mapping_mode": "direct_grid",
+                "direct_grid_forcing": direct_grid_section,
+            }
+            try:
+                contract = load_forcing_mapping_contract_from_manifest(manifest)
+            except DirectGridContractError as error:
+                raise SchedulerFileProviderError(
+                    "readiness_registry_direct_grid_contract_invalid",
+                    field=f"registry.models[{model_id}].resource_profile.direct_grid_forcing",
+                    evidence={"model_id": model_id, "contract_field": error.field},
+                ) from error
+            if contract is None:
+                raise SchedulerFileProviderError(
+                    "readiness_registry_direct_grid_contract_invalid",
+                    field=f"registry.models[{model_id}].resource_profile.direct_grid_forcing",
+                    evidence={"model_id": model_id},
+                )
+            applicable_sources = contract.applicable_source_ids
+        for source_id in normalized_sources:
+            if source_id in applicable_sources:
+                result[source_id].append((model_id, basin_id))
+    return {source: sorted(source_identities) for source, source_identities in result.items()}
 
 
 def _latest_canonical_catalog_snapshot(

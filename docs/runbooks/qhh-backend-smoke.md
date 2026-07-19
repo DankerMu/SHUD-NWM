@@ -2,6 +2,10 @@
 
 最后更新：2026-05-26
 
+> 历史证据说明：本文记录 2026-05-26 QHH smoke 的现场结果，其中“发现 13 个
+> 模型目录”只描述该次复测，不是当前生产 registry authority。当前模型清单与
+> 数量见 [`current-production-ops.md`](current-production-ops.md)。
+
 ## 目标
 
 以 `data/Basins/qhh` 的已校准 SHUD 模型为首个真实流域资产，复测不含前端的后端功能链路：

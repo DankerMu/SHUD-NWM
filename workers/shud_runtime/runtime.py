@@ -30,7 +30,11 @@ from packages.common.safe_fs import (
 )
 from packages.common.shud_preflight import check_shud_executable
 from packages.common.state_manager import PsycopgStateSnapshotRepository, StateManager, StateSnapshot, assess_freshness
-from packages.common.state_qc import cfg_ic_header_minute_index, cfg_ic_header_minute_time
+from packages.common.state_qc import (
+    cfg_ic_header_minute_index,
+    cfg_ic_header_minute_time,
+    state_ic_structure_complete,
+)
 from services.orchestrator.time_consistency import check_three_way_time_consistency as _check_three_way_time_consistency
 
 
@@ -2489,6 +2493,21 @@ class _StateCheckpointTracker:
         _ensure_directory(self.checkpoint_dir, containment_root=self.output_dir)
         target = self.checkpoint_dir / f"{self.project_name}.f{hour:03d}.cfg.ic.update"
         _copy_staged_file_no_follow(self.source_path, target, root=self.output_dir)
+        captured_header_minute = _read_cfg_ic_header_minute(target)
+        if (
+            captured_header_minute is None
+            or not _header_minute_matches_checkpoint(
+                captured_header_minute,
+                valid_time=valid_time,
+                relative_minute=float(hour * 60),
+            )
+            or not state_ic_structure_complete(target)
+        ):
+            # SHUD rewrites cfg.ic.update in place.  Seeing the target minute in
+            # the header does not mean the body has finished flushing; discard
+            # this private partial copy and retry on the next watcher poll.
+            unlink_no_follow(target, containment_root=self.output_dir, missing_ok=True)
+            return
         self.captured[hour] = {
             "lead_hours": hour,
             "valid_time": _format_time(valid_time),

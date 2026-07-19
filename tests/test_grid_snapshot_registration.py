@@ -82,7 +82,7 @@ from workers.grid_registry.input_record import (
     SidecarSchemaError,
     read_input_record,
 )
-from workers.grid_registry.registry import _live_producer_signature
+from workers.grid_registry.registry import _live_producer_signature, prepare_snapshot
 from workers.grid_registry.shared_binding_eligibility import (
     SharedBindingVerificationEvidence,
     evaluate_shared_binding_eligibility,
@@ -193,6 +193,39 @@ def _read_default_record(tmp_path: pathlib.Path) -> GridSnapshotInputRecord:
         grid_definition_uri=_DEFAULT_GRID_DEFINITION_URI,
         expected_converter_version=_stub_converter_resolver,
     )
+
+
+def test_prepare_snapshot_preserves_descending_product_order(tmp_path: pathlib.Path) -> None:
+    """The drift path must bind the exact producer cell order, not sort latitude."""
+
+    longitudes = [63.0, 63.25, 63.5]
+    latitudes = [64.0, 63.75, 63.5]
+    grid_json, sidecar = _write_fixture(
+        tmp_path,
+        grid_payload=_default_grid_payload(longitudes=longitudes, latitudes=latitudes),
+        sidecar_payload=_default_sidecar_payload(
+            longitudes=longitudes,
+            latitudes=latitudes,
+        ),
+    )
+    record = read_input_record(
+        "GFS",
+        grid_json,
+        sidecar,
+        grid_definition_uri="canonical/gfs/grid/gfs_0p25/grid.json",
+        expected_converter_version=_stub_converter_resolver,
+    )
+
+    snapshot, cells = prepare_snapshot(record, source_id="GFS")
+
+    assert snapshot.latitude_order == "descending"
+    assert snapshot.grid_signature == grid_signature_hash(record.cells)
+    assert [(cell.grid_cell_id, cell.latitude) for cell in cells[:3]] == [
+        ("0", 64.0),
+        ("1", 64.0),
+        ("2", 64.0),
+    ]
+    assert cells[-1].latitude == 63.5
 
 
 # -----------------------------------------------------------------------------

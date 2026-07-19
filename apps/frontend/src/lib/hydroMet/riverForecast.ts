@@ -24,6 +24,8 @@ export type HydroMetRiverForecastPayload =
   | components['schemas']['SplicedForecastResponse']
 
 export interface HydroMetRiverForecastProductIdentity {
+  run_id: string
+  model_id: string
   basin_version_id: string
   river_network_version_id: string
   source_id: HydroMetSource
@@ -104,6 +106,8 @@ export function riverForecastRequestKey(product: HydroMetRiverForecastProductIde
   return [
     product.basin_version_id,
     product.river_network_version_id,
+    product.run_id,
+    product.model_id,
     product.source_id,
     normalizeHydroMetCycle(product.cycle_time) ?? product.cycle_time,
     segmentId,
@@ -127,6 +131,8 @@ export async function loadHydroMetRiverForecast({
           },
           query: {
             river_network_version_id: product.river_network_version_id,
+            run_id: product.run_id,
+            model_id: product.model_id,
             issue_time: issueTime || 'latest',
             variables: HYDRO_MET_RIVER_FORECAST_VARIABLE,
             scenarios: hydroMetRiverScenarioForSource(product.source_id),

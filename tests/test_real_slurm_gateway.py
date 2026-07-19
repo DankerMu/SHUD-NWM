@@ -143,7 +143,7 @@ def test_real_slurm_gateway_fake_binaries_cover_command_boundary(
     assert array.manifest["max_concurrent"] == 2
 
     status = gateway.get_job_status("12345")
-    assert status.status == SlurmJobStatus.CANCELLED
+    assert status.status == SlurmJobStatus.FAILED
     assert status.elapsed == "00:05:00"
     assert status.max_rss == "1024K"
     assert status.resource_metrics == {
@@ -200,8 +200,9 @@ def test_real_slurm_gateway_fake_binaries_cover_command_boundary(
     jobs = gateway.list_jobs(limit=10, offset=0)
     assert [job.job_id for job in jobs] == ["12345", "12346"]
     assert gateway.health().status == "healthy"
-    cancelled = gateway.cancel_job("12345")
-    assert cancelled.status == SlurmJobStatus.CANCELLED
+    with pytest.raises(SlurmGatewayError) as cancellation:
+        gateway.cancel_job("12345")
+    assert cancellation.value.code == "SLURM_CANCELLATION_PENDING"
 
     log_dir = tmp_path / "workspace" / "run_001" / "logs"
     log_dir.mkdir(parents=True)
@@ -318,6 +319,60 @@ def _fake_array_task(run_id: str, model_id: str) -> dict[str, str]:
         "source_id": "GFS",
         "cycle_time": "2026-05-08T12:00:00Z",
     }
+
+
+def test_submit_job_array_honors_scheduler_budget_below_resource_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 12345\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    gateway = _gateway(tmp_path)
+    tasks = [_fake_array_task(f"run_{index}", f"model_{index}") for index in range(4)]
+
+    record = gateway.submit_job_array(
+        job_type="run_shud_forecast_array",
+        cycle_id="cycle_001",
+        stage_name="forecast",
+        tasks=tasks,
+        manifest={"max_concurrent": 2},
+    )
+
+    assert record.manifest["max_concurrent"] == 2
+    assert any("--array=0-3%2" in command for command in commands)
+
+
+@pytest.mark.parametrize("value", [0, True, "2", "2 --array=0-999"])
+def test_submit_job_array_rejects_invalid_scheduler_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    value: object,
+) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 12345\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    gateway = _gateway(tmp_path)
+
+    with pytest.raises(SlurmValidationError, match="max_concurrent"):
+        gateway.submit_job_array(
+            job_type="run_shud_forecast_array",
+            cycle_id="cycle_001",
+            stage_name="forecast",
+            tasks=[_fake_array_task("run_001", "model_001")],
+            manifest={"max_concurrent": value},
+        )
+    assert commands == []
 
 
 def _production_gateway(tmp_path: Path) -> RealSlurmGateway:
@@ -710,6 +765,39 @@ def test_get_job_status_array_running_member_keeps_parent_running(monkeypatch, t
         ]
     )
     gateway = _array_status_gateway(monkeypatch, tmp_path, stdout)
+    assert gateway.get_job_status("6031").status == SlurmJobStatus.RUNNING
+
+
+def test_get_job_status_array_terminal_parent_does_not_hide_running_member(monkeypatch, tmp_path):
+    stdout = "\n".join(
+        [
+            "6031|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00|00:05:00",
+            "6031_0|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00|00:05:00",
+            "6031_1|RUNNING|0:0|2026-05-08T12:01:00||",
+        ]
+    )
+    gateway = _array_status_gateway(monkeypatch, tmp_path, stdout)
+    assert gateway.get_job_status("6031").status == SlurmJobStatus.RUNNING
+
+
+def test_get_job_status_array_waits_for_all_expected_member_rows(monkeypatch, tmp_path):
+    stdout = "\n".join(
+        [
+            "6031|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00|00:05:00",
+            "6031_0|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00|00:05:00",
+        ]
+    )
+    gateway = _array_status_gateway(monkeypatch, tmp_path, stdout)
+    now = datetime.now(UTC)
+    gateway._jobs["6031"] = SlurmJobRecord(
+        job_id="6031",
+        run_id="array-run",
+        model_id="shud",
+        status=SlurmJobStatus.RUNNING,
+        submitted_at=now,
+        updated_at=now,
+        manifest={"array_task_count": 2},
+    )
     assert gateway.get_job_status("6031").status == SlurmJobStatus.RUNNING
 
 
@@ -1835,6 +1923,7 @@ def test_submit_job_rejects_secret_manifest_fields_before_sbatch(
             "s3://bucket/path?token=supersecret",
         ),
         ({"metadata": {"database_dsn": "postgresql://nhms@db.prod.example/nhms"}}, "database_dsn"),
+        ({"metadata": {"request_signature": "signed"}}, "request_signature"),
     ],
 )
 def test_submit_job_rejects_secret_manifest_keys_without_raw_error_or_sbatch(
@@ -1925,7 +2014,11 @@ def test_submit_job_allows_safe_nested_metadata_keys_and_values(
             job_type="convert_canonical",
             manifest={
                 **_production_manifest(tmp_path, "convert_canonical"),
-                "metadata": {"callback_uri": "https://example.com/notify", "safe_key": "safe/value"},
+                "metadata": {
+                    "callback_uri": "https://example.com/notify",
+                    "safe_key": "safe/value",
+                    "grid_signature": "sha256:" + "a" * 64,
+                },
                 "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
             },
         )
@@ -1933,6 +2026,7 @@ def test_submit_job_allows_safe_nested_metadata_keys_and_values(
 
     assert record.job_id == "12345"
     assert record.manifest["metadata"]["callback_uri"] == "https://example.com/notify"
+    assert record.manifest["metadata"]["grid_signature"] == "sha256:" + "a" * 64
 
 
 @pytest.mark.parametrize(

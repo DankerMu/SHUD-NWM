@@ -59,7 +59,7 @@ from services.tiles.mvt import (
 router = APIRouter(tags=["hydro-display"])
 
 HYDRO_NATIONAL_SOURCE_ID = "hydro-national"
-HYDRO_NATIONAL_SOURCE_VERSION = "hydro-national-latest-per-basin"
+HYDRO_NATIONAL_SOURCE_VERSION = "hydro-national-latest-per-basin-stream-type-v2"
 DISPLAY_PRODUCT_READY_STATUSES = {"succeeded", "parsed", "published"}
 PUBLIC_LAYER_DEFINITIONS: tuple[tuple[str, str, str, list[str]], ...] = (
     ("discharge", "Discharge", "hydrology", ["q_down"]),

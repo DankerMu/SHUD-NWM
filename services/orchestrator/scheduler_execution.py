@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -61,11 +62,13 @@ class SchedulerExecutionCandidate(Protocol):
     river_network_version_id: str | None
     resource_profile: Mapping[str, Any]
     state_evidence: Mapping[str, Any]
+    slurm_array_max_concurrent: int | None
 
 
 class SchedulerExecutionConfig(Protocol):
     sources: tuple[str, ...]
     concurrent_submit_bound: int
+    slurm_array_concurrency_bound: int
     slurm_execution_enabled: bool
     slurm_env: Mapping[str, str]
 
@@ -280,12 +283,44 @@ class _CohortUnit:
     cycle_id: str
     execution_candidates: list[SchedulerExecutionCandidate]
     cohort_run_id: str | None
+    array_max_concurrent: int
 
 
 def execute_candidates(
     context: SchedulerExecutionContext,
     candidates: Sequence[SchedulerExecutionCandidate],
 ) -> list[dict[str, Any]]:
+    evidence, _blocked, _prepared = _execute_candidate_units(context, candidates)
+    return evidence
+
+
+def execute_candidates_async(
+    context: SchedulerExecutionContext,
+    candidates: Sequence[SchedulerExecutionCandidate],
+) -> tuple[
+    list[dict[str, Any]],
+    list[SchedulerExecutionCandidate],
+    list[SchedulerExecutionCandidate],
+]:
+    """Submit source/cycle cohorts and join them only at pass finalization.
+
+    The scheduler process never produces forcing here.  Every candidate that
+    needs forcing reaches the chain's ``produce_forcing_array`` Slurm stage;
+    candidates in the same restart-compatible source/cycle cohort share one
+    genuine multi-task array instead of one Python worker per basin.
+    """
+
+    return _execute_candidate_units(context, candidates)
+
+
+def _execute_candidate_units(
+    context: SchedulerExecutionContext,
+    candidates: Sequence[SchedulerExecutionCandidate],
+) -> tuple[
+    list[dict[str, Any]],
+    list[SchedulerExecutionCandidate],
+    list[SchedulerExecutionCandidate],
+]:
     grouped: dict[tuple[str, datetime], list[SchedulerExecutionCandidate]] = {}
     for candidate in candidates:
         grouped.setdefault((candidate.source_id, candidate.cycle_time_utc), []).append(candidate)
@@ -294,16 +329,31 @@ def execute_candidates(
     receipt = context.submit_overlap_receipt_factory()
     context.set_last_submit_overlap_receipt(receipt)
 
-    def _submitter(unit: _CohortUnit) -> list[dict[str, Any]]:
+    def _submitter(
+        unit: _CohortUnit,
+    ) -> tuple[
+        list[dict[str, Any]],
+        list[SchedulerExecutionCandidate],
+        list[SchedulerExecutionCandidate],
+    ]:
         key = f"{unit.source_id}:{unit.cycle_id}:{unit.cohort_run_id or 'full'}"
-        run = context.timed_submission(
-            lambda: context.execute_candidate_cohort(
+
+        def _submit_and_wait() -> tuple[
+            list[dict[str, Any]],
+            list[SchedulerExecutionCandidate],
+            list[SchedulerExecutionCandidate],
+        ]:
+            cohort_evidence = context.execute_candidate_cohort(
                 unit.source_id,
                 unit.cycle_time,
                 unit.cycle_id,
                 unit.execution_candidates,
                 orchestration_run_id=unit.cohort_run_id,
-            ),
+            )
+            return cohort_evidence, [], unit.execution_candidates
+
+        run = context.timed_submission(
+            _submit_and_wait,
             receipt=receipt,
             idempotency_key=key,
             candidate_id=unit.cohort_run_id,
@@ -312,15 +362,23 @@ def execute_candidates(
 
     results = context.run_concurrent_submissions(
         [(lambda u=unit: _submitter(u)) for unit in units],
-        max_workers=context.config.concurrent_submit_bound,
+        max_workers=min(
+            context.config.concurrent_submit_bound,
+            context.config.slurm_array_concurrency_bound,
+        ),
     )
 
     evidence: list[dict[str, Any]] = []
+    blocked_candidates: list[SchedulerExecutionCandidate] = []
+    prepared_candidates: list[SchedulerExecutionCandidate] = []
     for result in results:
         if isinstance(result, Exception):
             raise result
-        evidence.extend(result)
-    return evidence
+        unit_evidence, unit_blocked, unit_prepared = result
+        evidence.extend(unit_evidence)
+        blocked_candidates.extend(unit_blocked)
+        prepared_candidates.extend(unit_prepared)
+    return evidence, blocked_candidates, prepared_candidates
 
 
 def _execution_units(
@@ -355,9 +413,73 @@ def _execution_units(
                         cycle_id=cycle_id,
                         execution_candidates=list(execution_candidates),
                         cohort_run_id=cohort_run_id,
+                        array_max_concurrent=1,
                     )
                 )
-    return units
+    budgets = _array_concurrency_budgets(
+        units,
+        global_bound=context.config.slurm_array_concurrency_bound,
+        worker_bound=context.config.concurrent_submit_bound,
+    )
+    return [
+        replace(
+            unit,
+            execution_candidates=[
+                _candidate_with_array_concurrency_budget(candidate, budget)
+                for candidate in unit.execution_candidates
+            ],
+            array_max_concurrent=budget,
+        )
+        for unit, budget in zip(units, budgets, strict=True)
+    ]
+
+
+def _array_concurrency_budgets(
+    units: Sequence[_CohortUnit],
+    *,
+    global_bound: int,
+    worker_bound: int,
+) -> list[int]:
+    """Allocate a strict cross-cohort Slurm array budget.
+
+    When every unit can start immediately, round-robin water filling preserves
+    small cohorts and uses the entire global budget whenever enough tasks
+    exist.  If units must queue behind the control-thread bound, every active
+    slot receives the same conservative ceiling; any combination of running
+    slots therefore remains within ``global_bound`` as queued units advance.
+    """
+
+    if not units:
+        return []
+    global_bound = max(int(global_bound), 1)
+    active_slots = min(len(units), max(int(worker_bound), 1), global_bound)
+    task_counts = [max(len(unit.execution_candidates), 1) for unit in units]
+    if len(units) > active_slots:
+        per_slot_bound = max(global_bound // active_slots, 1)
+        return [min(task_count, per_slot_bound) for task_count in task_counts]
+
+    budgets = [0] * len(units)
+    remaining = global_bound
+    while remaining > 0:
+        advanced = False
+        for index, task_count in enumerate(task_counts):
+            if budgets[index] >= task_count:
+                continue
+            budgets[index] += 1
+            remaining -= 1
+            advanced = True
+            if remaining == 0:
+                break
+        if not advanced:
+            break
+    return [max(budget, 1) for budget in budgets]
+
+
+def _candidate_with_array_concurrency_budget(
+    candidate: SchedulerExecutionCandidate,
+    budget: int,
+) -> SchedulerExecutionCandidate:
+    return replace(candidate, slurm_array_max_concurrent=int(budget))
 
 
 def _unique_execution_candidates(
@@ -760,11 +882,16 @@ def candidate_execution_cohort_run_id(
     source_id: str,
     cycle_time: datetime,
     cohort_key: tuple[int, str],
+    candidates: Sequence[SchedulerExecutionCandidate],
     *,
     format_cycle_time: Callable[[datetime], str],
 ) -> str:
     stage = re.sub(r"[^A-Za-z0-9_.-]+", "_", cohort_key[1]).strip("._-") or "full"
-    return f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}_{stage}"
+    member_identity = "\0".join(
+        sorted(f"{candidate.model_id}\0{candidate.candidate_id}" for candidate in candidates)
+    )
+    member_digest = hashlib.sha256(member_identity.encode("utf-8")).hexdigest()[:12]
+    return f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}_{stage}_cohort_{member_digest}"
 
 
 def candidate_execution_cohorts(
@@ -773,19 +900,26 @@ def candidate_execution_cohorts(
     cohort_key: tuple[int, str],
     candidates: Sequence[SchedulerExecutionCandidate],
     *,
+    run_id_for_cohort: Callable[
+        [str, datetime, tuple[int, str], Sequence[SchedulerExecutionCandidate]],
+        str,
+    ],
     run_id_for_candidate: Callable[
         [str, datetime, tuple[int, str], SchedulerExecutionCandidate],
         str,
     ],
 ) -> list[tuple[list[SchedulerExecutionCandidate], str | None]]:
-    if cohort_key[1] == "full":
-        return [
-            ([candidate], run_id_for_candidate(source_id, cycle_time, cohort_key, candidate))
-            for candidate in candidates
-        ]
+    cohort_candidates = list(candidates)
+    if not cohort_candidates:
+        return []
+    if len(cohort_candidates) == 1:
+        candidate = cohort_candidates[0]
+        return [([candidate], run_id_for_candidate(source_id, cycle_time, cohort_key, candidate))]
     return [
-        ([candidate], run_id_for_candidate(source_id, cycle_time, cohort_key, candidate))
-        for candidate in candidates
+        (
+            cohort_candidates,
+            run_id_for_cohort(source_id, cycle_time, cohort_key, cohort_candidates),
+        )
     ]
 
 

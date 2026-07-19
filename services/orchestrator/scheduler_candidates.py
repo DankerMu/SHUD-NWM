@@ -182,6 +182,8 @@ def build_candidates(
         discovery = cycle.discovery
         has_active_orchestration: bool | None = None
         for model in models:
+            if _direct_grid_model_source_is_out_of_scope(model, discovery):
+                continue
             if len(candidates) + len(blocked) + len(skipped) >= max_candidates:
                 raise SchedulerResourceLimitError(
                     "candidate_limit_exceeded",
@@ -379,6 +381,10 @@ def build_candidates(
                         }
                     )
                     continue
+            state_decision = _upgrade_retry_for_strict_warm_start_manifest(
+                state_decision,
+                strict_warm_start,
+            )
             if strict_warm_start is not None:
                 candidate = _candidate_with_state_evidence(candidate, strict_warm_start)
             if (
@@ -942,6 +948,44 @@ def _source_blocked_evidence(candidate: SchedulerCandidateLike, discovery: Cycle
     return _evidence_safe(evidence)
 
 
+def _direct_grid_model_source_is_out_of_scope(
+    model: SchedulerModelLike,
+    discovery: CycleDiscovery,
+) -> bool:
+    """Exclude an expected source-scoped variant mismatch before candidate creation.
+
+    A direct-grid registry contains one model variant per basin and forcing
+    source.  Pairing every variant with every discovered source would create a
+    Cartesian product in which half the rows are intentionally inapplicable.
+    Those rows are not failed work and therefore must not become candidates.
+
+    Only the parser's precise source-scope mismatch is excluded here.  Missing
+    or malformed contracts continue into ``_direct_grid_source_scope_block``
+    below so contract corruption still fails closed with evidence.
+    """
+
+    resource_profile = getattr(model, "resource_profile", None)
+    direct_grid_section = (
+        resource_profile.get("direct_grid_forcing")
+        if isinstance(resource_profile, Mapping)
+        else None
+    )
+    if direct_grid_section is None:
+        return False
+    manifest = {
+        "forcing_mapping_mode": "direct_grid",
+        "direct_grid_forcing": direct_grid_section,
+    }
+    try:
+        load_forcing_mapping_contract_from_manifest(
+            manifest,
+            source_id=discovery.source_id,
+        )
+    except DirectGridContractError as error:
+        return str(error) == _DIRECT_GRID_SOURCE_SCOPE_ERROR_MESSAGE
+    return False
+
+
 def _direct_grid_source_scope_block(
     candidate: SchedulerCandidateLike,
     discovery: CycleDiscovery,
@@ -1315,6 +1359,32 @@ def _terminal_decision_run_manifest_matches_strict_warm_start(
     return str(manifest_state_id or "") == str(selected_id)
 
 
+def _upgrade_retry_for_strict_warm_start_manifest(
+    state_decision: CandidateStateDecision | None,
+    strict_evidence: Mapping[str, Any] | None,
+) -> CandidateStateDecision | None:
+    if state_decision is None or state_decision.action != "retry" or strict_evidence is None:
+        return state_decision
+    if (
+        state_decision.evidence.get("native_shud_resubmitted") is True
+        and state_decision.evidence.get("restart_stage") == "forecast"
+    ):
+        return state_decision
+    if _terminal_decision_run_manifest_matches_strict_warm_start(
+        state_decision.evidence,
+        strict_evidence,
+    ):
+        return state_decision
+    return CandidateStateDecision(
+        "retry",
+        "strict_warm_start_retry_run_manifest_mismatch",
+        _strict_warm_start_retry_run_manifest_evidence(
+            state_decision.evidence,
+            strict_evidence,
+        ),
+    )
+
+
 def _terminal_run_manifest_retry_evidence(
     terminal_evidence: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -1367,6 +1437,27 @@ def _strict_warm_start_run_manifest_retry_evidence(
         "strict_warm_start": _evidence_safe(dict(strict_evidence)),
         "native_shud_resubmitted": True,
         "durable_output_reused": False,
+    }
+    selected = strict_evidence.get("candidate_state")
+    if isinstance(selected, Mapping):
+        payload["candidate_state"] = _evidence_safe(dict(selected))
+    return _evidence_safe(payload)
+
+
+def _strict_warm_start_retry_run_manifest_evidence(
+    retry_evidence: Mapping[str, Any],
+    strict_evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    payload = {
+        **dict(retry_evidence),
+        "decision": "retry_strict_warm_start_retry_run_manifest_mismatch",
+        "reason": "strict_warm_start_retry_run_manifest_mismatch",
+        "restart_stage": "forecast",
+        "restart_from_stage": "forecast",
+        "strict_warm_start": _evidence_safe(dict(strict_evidence)),
+        "native_shud_resubmitted": True,
+        "durable_output_reused": False,
+        "durable_shud_output_reused": False,
     }
     selected = strict_evidence.get("candidate_state")
     if isinstance(selected, Mapping):

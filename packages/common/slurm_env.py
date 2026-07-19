@@ -62,6 +62,7 @@ RESERVED_SLURM_ENV_KEYS = frozenset(
     }
 )
 RESERVED_SLURM_ENV_PREFIXES = ("SLURM_", "SBATCH_")
+NON_SECRET_MANIFEST_IDENTITY_KEYS = frozenset({"grid_signature"})
 
 
 def is_sensitive_slurm_env_key(key: str) -> bool:
@@ -104,6 +105,12 @@ def secret_manifest_key_reason(key: str) -> str | None:
     """Return why a manifest key is secret-bearing under the Slurm persistence contract."""
 
     key_text = str(key)
+    # ``grid_signature`` is a public content identity (a digest of ordered
+    # grid coordinates), not a credential or signed URL. Keep the exemption
+    # exact so X-Amz-Signature and every other signature-shaped key remain
+    # rejected.
+    if key_text.lower() in NON_SECRET_MANIFEST_IDENTITY_KEYS:
+        return None
     url_reason = secret_bearing_url_reason(key_text)
     if url_reason is not None:
         return url_reason

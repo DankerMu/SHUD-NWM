@@ -253,24 +253,9 @@ def register_snapshot(
     same ``(source_id, grid_id)`` but a different ``grid_signature`` exists,
     raises :class:`GridDriftDetectedError` — SUB-5 does not own supersession.
     """
-    _assert_normalized_longitudes(record)
-
-    normalized_source = normalize_source_id(source_id)
-    registry_computed = grid_signature_hash(record.cells)
-
-    live_producer_computed = _live_producer_signature(
-        record, registry_computed=registry_computed
-    )
-    if registry_computed != live_producer_computed:
-        raise LiveProducerSignatureMismatchError(
-            registry_computed=registry_computed,
-            live_producer_computed=live_producer_computed,
-            reason=(
-                "registry hash from record.cells disagrees with producer's "
-                "live _grid_points_from_definition recompute on the same "
-                "grid definition bytes."
-            ),
-        )
+    snapshot, cells = prepare_snapshot(record, source_id=source_id)
+    normalized_source = snapshot.source_id
+    registry_computed = snapshot.grid_signature
 
     existing_id = store.find_snapshot_by_identity(
         normalized_source, record.grid_id, registry_computed
@@ -282,16 +267,6 @@ def register_snapshot(
     if drift_error is not None:
         raise drift_error
 
-    canonical_grid_key = derive_canonical_grid_key(
-        registry_computed, dict(record.download_bbox), record.native_resolution
-    )
-
-    snapshot, cells = _build_snapshot(
-        record=record,
-        normalized_source=normalized_source,
-        grid_signature=registry_computed,
-        canonical_grid_key=canonical_grid_key,
-    )
     try:
         return store.insert_snapshot(snapshot, cells)
     except RegistryUniqueViolationError as unique_error:
@@ -314,6 +289,46 @@ def register_snapshot(
             "likely rolled back after the unique constraint fired."
         )
         raise
+
+
+def prepare_snapshot(
+    record: GridSnapshotInputRecord,
+    *,
+    source_id: str,
+) -> tuple[CanonicalGridSnapshot, list[CanonicalGridCell]]:
+    """Validate and materialize a snapshot without reading or writing the registry.
+
+    The drift lifecycle needs the exact same longitude, signature, producer-parity,
+    and canonical-key checks as first registration before it opens its atomic
+    supersession transaction.  Keeping those checks here prevents an operational
+    drift path from silently diverging from :func:`register_snapshot`.
+    """
+
+    _assert_normalized_longitudes(record)
+    normalized_source = normalize_source_id(source_id)
+    registry_computed = grid_signature_hash(record.cells)
+    live_producer_computed = _live_producer_signature(
+        record, registry_computed=registry_computed
+    )
+    if registry_computed != live_producer_computed:
+        raise LiveProducerSignatureMismatchError(
+            registry_computed=registry_computed,
+            live_producer_computed=live_producer_computed,
+            reason=(
+                "registry hash from record.cells disagrees with producer's "
+                "live _grid_points_from_definition recompute on the same "
+                "grid definition bytes."
+            ),
+        )
+    canonical_grid_key = derive_canonical_grid_key(
+        registry_computed, dict(record.download_bbox), record.native_resolution
+    )
+    return _build_snapshot(
+        record=record,
+        normalized_source=normalized_source,
+        grid_signature=registry_computed,
+        canonical_grid_key=canonical_grid_key,
+    )
 
 
 def _check_drift(
@@ -350,7 +365,7 @@ __all__: tuple[str, ...] = (
     "LiveProducerSignatureMismatchError",
     "RegistrationError",
     "RegistrationInvariantError",
+    "prepare_snapshot",
     "register_snapshot",
 )
-
 

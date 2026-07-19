@@ -48,6 +48,36 @@ def _write_run(root: Path, run_id: str, *, output_text: str = "q\n") -> None:
     (model / "manifest.json").write_text("{}\n", encoding="utf-8")
 
 
+def _write_direct_grid_run(root: Path, run_id: str) -> None:
+    run = root / "runs" / run_id
+    (run / "input").mkdir(parents=True)
+    (run / "input" / "manifest.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "model": {
+                    "model_package_uri": (
+                        "s3://nhms/models/direct_grid_variants/basins_qhh_shud/"
+                        "dg-gfs-variant/package/"
+                    )
+                },
+                "forcing_package_uri": (
+                    "s3://nhms/forcing/gfs/2026070600/basins_qhh_vbasins/dg-candidate/"
+                ),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    forcing = root / "forcing/gfs/2026070600/basins_qhh_vbasins/dg-candidate"
+    forcing.mkdir(parents=True)
+    (forcing / "forcing_package.json").write_text("{}\n", encoding="utf-8")
+    package = root / "models/direct_grid_variants/basins_qhh_shud/dg-gfs-variant/package"
+    package.mkdir(parents=True)
+    (package / "manifest.json").write_text('{"variant":"gfs"}\n', encoding="utf-8")
+    (package / "qhh.cfg.para").write_text("model\n", encoding="utf-8")
+
+
 def test_copyback_run_trees_replaces_stale_target_tree(tmp_path: Path) -> None:
     object_root = tmp_path / "object-store"
     copyback_root = tmp_path / "shared-object-store"
@@ -83,6 +113,78 @@ def test_copyback_run_trees_replaces_stale_target_tree(tmp_path: Path) -> None:
         "forcing/gfs/2026062700/basins_heihe_vbasins/basins_heihe_shud",
         "models/basins_heihe_shud/v1",
     }
+
+
+def test_copyback_direct_grid_run_scopes_model_tree_to_exact_variant(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    run_id = "fcst_gfs_2026070600_dg_candidate"
+    _write_direct_grid_run(object_root, run_id)
+
+    summary = copyback_run_trees(
+        object_store_root=object_root,
+        copyback_root=copyback_root,
+        run_ids=[run_id],
+    )
+
+    assert summary is not None
+    assert {tree["object_key"] for tree in summary["referenced_trees"]} == {
+        "forcing/gfs/2026070600/basins_qhh_vbasins/dg-candidate",
+        "models/direct_grid_variants/basins_qhh_shud/dg-gfs-variant",
+    }
+    assert (
+        copyback_root
+        / "models/direct_grid_variants/basins_qhh_shud/dg-gfs-variant/package/manifest.json"
+    ).is_file()
+
+
+def test_copyback_reuses_matching_immutable_direct_grid_model_tree(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    run_id = "fcst_gfs_2026070600_dg_candidate"
+    _write_direct_grid_run(object_root, run_id)
+    target_package = (
+        copyback_root / "models/direct_grid_variants/basins_qhh_shud/dg-gfs-variant/package"
+    )
+    target_package.mkdir(parents=True)
+    (target_package / "manifest.json").write_text('{"variant":"gfs"}\n', encoding="utf-8")
+    marker = target_package / "node27-owned-marker"
+    marker.write_text("preserve\n", encoding="utf-8")
+
+    summary = copyback_run_trees(
+        object_store_root=object_root,
+        copyback_root=copyback_root,
+        run_ids=[run_id],
+    )
+
+    assert summary is not None
+    model_summary = next(
+        tree for tree in summary["referenced_trees"] if tree["object_key"].startswith("models/")
+    )
+    assert model_summary["status"] == "reused"
+    assert model_summary["file_count"] == 0
+    assert marker.read_text(encoding="utf-8") == "preserve\n"
+
+
+def test_copyback_rejects_mismatched_immutable_direct_grid_model_tree(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    run_id = "fcst_gfs_2026070600_dg_candidate"
+    _write_direct_grid_run(object_root, run_id)
+    target_package = (
+        copyback_root / "models/direct_grid_variants/basins_qhh_shud/dg-gfs-variant/package"
+    )
+    target_package.mkdir(parents=True)
+    (target_package / "manifest.json").write_text('{"variant":"ifs"}\n', encoding="utf-8")
+
+    with pytest.raises(RunTreeCopybackError) as error_info:
+        copyback_run_trees(
+            object_store_root=object_root,
+            copyback_root=copyback_root,
+            run_ids=[run_id],
+        )
+
+    assert error_info.value.code == "OBJECT_STORE_COPYBACK_MODEL_IDENTITY_MISMATCH"
 
 
 def test_copyback_run_trees_copies_extra_state_index_object(tmp_path: Path) -> None:
@@ -129,10 +231,17 @@ def test_state_index_copyback_merges_split_root_checkpoint_only_in_private(tmp_p
     shared_content = _valid_state_bytes(b"shared")
     private_uri = store.write_bytes_atomic("states/gfs/model_a/private/state.cfg.ic", private_content)
     shared_uri = store.write_bytes_atomic("states/gfs/model_a/shared/state.cfg.ic", shared_content)
+    LocalObjectStore(copyback_root, "s3://nhms").write_bytes_atomic(
+        "states/gfs/model_a/shared/state.cfg.ic", shared_content
+    )
     source_index = object_root / "scheduler/state-index/index-last.json"
     destination_index = copyback_root / "scheduler/state-index/index-last.json"
+    private_entry = {
+        **_state_entry("private-state", private_uri, private_content, "2026-06-27T01:00:00Z"),
+        "run_id": "fcst_gfs_2026062700_basins_heihe_shud",
+    }
     publish_state_snapshot_index(
-        [_state_entry("private-state", private_uri, private_content, "2026-06-27T01:00:00Z")],
+        [private_entry],
         source_index,
         object_store_root=object_root,
         object_store_prefix="s3://nhms",
@@ -141,12 +250,10 @@ def test_state_index_copyback_merges_split_root_checkpoint_only_in_private(tmp_p
     publish_state_snapshot_index(
         [_state_entry("shared-state", shared_uri, shared_content, "2026-06-27T00:00:00Z")],
         destination_index,
-        object_store_root=object_root,
+        object_store_root=copyback_root,
         object_store_prefix="s3://nhms",
         generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
     )
-
-    assert not (copyback_root / "states/gfs/model_a/shared/state.cfg.ic").exists()
 
     summary = copyback_run_trees(
         object_store_root=object_root,
@@ -159,8 +266,8 @@ def test_state_index_copyback_merges_split_root_checkpoint_only_in_private(tmp_p
     payload = json.loads(destination_index.read_text())
     assert {entry["state_id"] for entry in payload["entries"]} == {"private-state", "shared-state"}
     assert summary["extra_objects"][0]["merge"]["merged_entry_count"] == 2
-    assert summary["extra_objects"][0]["merge"]["checkpoint_copied_count"] == 2
-    assert summary["extra_objects"][0]["merge"]["checkpoint_reused_count"] == 0
+    assert summary["extra_objects"][0]["merge"]["checkpoint_copied_count"] == 1
+    assert summary["extra_objects"][0]["merge"]["checkpoint_reused_count"] == 1
     copied_checkpoint = copyback_root / "states/gfs/model_a/private/state.cfg.ic"
     assert copied_checkpoint.read_bytes() == private_content
     assert (copyback_root / "states/gfs/model_a/shared/state.cfg.ic").read_bytes() == shared_content
@@ -193,6 +300,9 @@ def test_state_index_copyback_ignores_derived_entry_evidence_for_same_identity(t
         "index_generated_at": "2026-06-27T02:00:00Z",
         "object_evidence": {"checksum_verified": True, "provider": "stale"},
     }
+    LocalObjectStore(copyback_root, "s3://nhms").write_bytes_atomic(
+        "states/gfs/model_a/same/state.cfg.ic", content
+    )
     source_index = object_root / "scheduler/state-index/index-last.json"
     destination_index = copyback_root / "scheduler/state-index/index-last.json"
     publish_state_snapshot_index(
@@ -205,7 +315,7 @@ def test_state_index_copyback_ignores_derived_entry_evidence_for_same_identity(t
     publish_state_snapshot_index(
         [destination_entry],
         destination_index,
-        object_store_root=object_root,
+        object_store_root=copyback_root,
         object_store_prefix="s3://nhms",
         generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
     )
@@ -220,20 +330,113 @@ def test_state_index_copyback_ignores_derived_entry_evidence_for_same_identity(t
     assert summary is not None
     merge = summary["extra_objects"][0]["merge"]
     assert merge["merged_entry_count"] == 1
-    assert merge["checkpoint_copied_count"] == 1
+    assert merge["checkpoint_reused_count"] == 1
     payload = json.loads(destination_index.read_text(encoding="utf-8"))
     assert payload["entries"] == [base_entry]
 
 
-def test_state_index_copyback_same_timestamp_semantic_conflict_fails_closed(tmp_path: Path) -> None:
+def test_state_index_copyback_scopes_source_entries_and_materializes_clone(tmp_path: Path) -> None:
     object_root = tmp_path / "object-store"
     copyback_root = tmp_path / "shared-object-store"
-    _write_run(object_root, "fcst_gfs_2026062700_basins_heihe_shud")
+    run_id = "fcst_gfs_2026062700_basins_heihe_shud"
+    _write_run(object_root, run_id)
     store = LocalObjectStore(object_root, "s3://nhms")
-    content = _valid_state_bytes(b"conflict")
-    state_uri = store.write_bytes_atomic("states/gfs/model_a/conflict/state.cfg.ic", content)
-    source_entry = _state_entry("same-state", state_uri, content, "2026-06-27T01:00:00Z")
-    destination_entry = {**source_entry, "run_id": "different-real-run"}
+    shared_store = LocalObjectStore(copyback_root, "s3://nhms")
+    materialized_content = _valid_state_bytes(b"materialized")
+    clone_content = _valid_state_bytes(b"clone")
+    unrelated_content = _valid_state_bytes(b"unrelated")
+    materialized_uri = store.write_bytes_atomic(
+        "states/gfs/model_a/materialized/state.cfg.ic", materialized_content
+    )
+    clone_uri = store.write_bytes_atomic("states/gfs/model_a/clone/state.cfg.ic", clone_content)
+    unrelated_uri = store.write_bytes_atomic(
+        "states/gfs/model_b/unrelated/state.cfg.ic", unrelated_content
+    )
+    shared_store.write_bytes_atomic(
+        "states/gfs/model_a/materialized/state.cfg.ic", clone_content
+    )
+    shared_store.write_bytes_atomic("states/gfs/model_a/clone/state.cfg.ic", clone_content)
+    shared_store.write_bytes_atomic(
+        "states/gfs/model_b/unrelated/state.cfg.ic", unrelated_content
+    )
+    source_entry = {
+        **_state_entry("materialized", materialized_uri, materialized_content, "2026-06-27T01:00:00Z"),
+        "run_id": run_id,
+        "cloned_from_state_id": None,
+    }
+    clone_entry = {
+        **_state_entry("clone", clone_uri, clone_content, "2026-06-27T01:00:00Z"),
+        "run_id": "fcst_gfs_2026062612_basins_heihe_shud",
+        "cloned_from_state_id": "predecessor-state",
+    }
+    unrelated_private = {
+        **_state_entry("unrelated-private", unrelated_uri, unrelated_content, "2026-06-27T01:00:00Z"),
+        "model_id": "model_b",
+        "run_id": "unrelated-private-run",
+    }
+    unrelated_shared = {
+        **unrelated_private,
+        "state_id": "unrelated-shared",
+        "run_id": "unrelated-shared-run",
+    }
+    source_index = object_root / "scheduler/state-index/index-last.json"
+    destination_index = copyback_root / "scheduler/state-index/index-last.json"
+    publish_state_snapshot_index(
+        [source_entry, unrelated_private],
+        source_index,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, 3, tzinfo=UTC),
+    )
+    publish_state_snapshot_index(
+        [clone_entry, unrelated_shared],
+        destination_index,
+        object_store_root=copyback_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
+    )
+
+    summary = copyback_run_trees(
+        object_store_root=object_root,
+        copyback_root=copyback_root,
+        run_ids=[run_id],
+        extra_object_keys=["scheduler/state-index/index-last.json"],
+    )
+
+    assert summary is not None
+    merge = summary["extra_objects"][0]["merge"]
+    assert merge["source_entry_count"] == 1
+    assert merge["authoritative_run_count"] == 1
+    assert merge["checkpoint_replaced_count"] == 1
+    payload = json.loads(destination_index.read_text(encoding="utf-8"))
+    by_model = {entry["model_id"]: entry for entry in payload["entries"]}
+    assert by_model["model_a"]["state_id"] == "materialized"
+    assert by_model["model_b"]["state_id"] == "unrelated-shared"
+    assert shared_store.read_bytes("states/gfs/model_a/materialized/state.cfg.ic") == materialized_content
+
+
+def test_state_index_copyback_replay_validates_each_index_against_its_own_root(
+    tmp_path: Path,
+) -> None:
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    run_id = "fcst_gfs_2026062700_basins_heihe_shud"
+    _write_run(object_root, run_id)
+    private_store = LocalObjectStore(object_root, "s3://nhms")
+    shared_store = LocalObjectStore(copyback_root, "s3://nhms")
+    private_content = _valid_state_bytes(b"replayed-state")
+    shared_content = _valid_state_bytes(b"old-state")
+    state_key = "states/gfs/model_a/replayed/state.cfg.ic"
+    state_uri = private_store.write_bytes_atomic(state_key, private_content)
+    shared_store.write_bytes_atomic(state_key, shared_content)
+    source_entry = {
+        **_state_entry("replayed-state", state_uri, private_content, "2026-06-27T01:00:00Z"),
+        "run_id": run_id,
+    }
+    destination_entry = {
+        **_state_entry("old-state", state_uri, shared_content, "2026-06-27T01:00:00Z"),
+        "run_id": run_id,
+    }
     source_index = object_root / "scheduler/state-index/index-last.json"
     destination_index = copyback_root / "scheduler/state-index/index-last.json"
     publish_state_snapshot_index(
@@ -246,7 +449,55 @@ def test_state_index_copyback_same_timestamp_semantic_conflict_fails_closed(tmp_
     publish_state_snapshot_index(
         [destination_entry],
         destination_index,
+        object_store_root=copyback_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
+    )
+
+    summary = copyback_run_trees(
         object_store_root=object_root,
+        copyback_root=copyback_root,
+        run_ids=[run_id],
+        extra_object_keys=["scheduler/state-index/index-last.json"],
+    )
+
+    assert summary is not None
+    merge = summary["extra_objects"][0]["merge"]
+    assert merge["source_entry_count"] == 1
+    assert merge["checkpoint_replaced_count"] == 1
+    assert shared_store.read_bytes(state_key) == private_content
+    payload = json.loads(destination_index.read_text(encoding="utf-8"))
+    assert payload["entries"] == [source_entry]
+
+
+def test_state_index_copyback_same_timestamp_semantic_conflict_fails_closed(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    _write_run(object_root, "fcst_gfs_2026062700_basins_heihe_shud")
+    store = LocalObjectStore(object_root, "s3://nhms")
+    content = _valid_state_bytes(b"conflict")
+    state_uri = store.write_bytes_atomic("states/gfs/model_a/conflict/state.cfg.ic", content)
+    source_entry = {
+        **_state_entry("same-state", state_uri, content, "2026-06-27T01:00:00Z"),
+        "run_id": "fcst_gfs_2026062700_basins_heihe_shud",
+    }
+    destination_entry = {**source_entry, "run_id": "different-real-run"}
+    LocalObjectStore(copyback_root, "s3://nhms").write_bytes_atomic(
+        "states/gfs/model_a/conflict/state.cfg.ic", content
+    )
+    source_index = object_root / "scheduler/state-index/index-last.json"
+    destination_index = copyback_root / "scheduler/state-index/index-last.json"
+    publish_state_snapshot_index(
+        [source_entry],
+        source_index,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, 3, tzinfo=UTC),
+    )
+    publish_state_snapshot_index(
+        [destination_entry],
+        destination_index,
+        object_store_root=copyback_root,
         object_store_prefix="s3://nhms",
         generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
     )
@@ -263,7 +514,9 @@ def test_state_index_copyback_same_timestamp_semantic_conflict_fails_closed(tmp_
     assert error_info.value.code == "OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED"
     assert "state_snapshot_index_copyback_conflict" in error_info.value.details["error"]
     assert destination_index.read_bytes() == before
-    assert not (copyback_root / "states").exists()
+    assert (
+        copyback_root / "states/gfs/model_a/conflict/state.cfg.ic"
+    ).read_bytes() == content
 
 
 def test_state_index_copyback_checkpoint_failure_preserves_shared_index(
@@ -332,6 +585,9 @@ def test_state_index_copyback_split_root_checksum_failure_preserves_shared_index
         "states/gfs/model_a/shared/state.cfg.ic",
         stale_shared_content,
     )
+    LocalObjectStore(copyback_root, "s3://nhms").write_bytes_atomic(
+        "states/gfs/model_a/shared/state.cfg.ic", stale_shared_content
+    )
     source_index = object_root / "scheduler/state-index/index-last.json"
     destination_index = copyback_root / "scheduler/state-index/index-last.json"
     publish_state_snapshot_index(
@@ -351,7 +607,7 @@ def test_state_index_copyback_split_root_checksum_failure_preserves_shared_index
             )
         ],
         destination_index,
-        object_store_root=object_root,
+        object_store_root=copyback_root,
         object_store_prefix="s3://nhms",
         generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
         verify_objects=False,
@@ -369,7 +625,10 @@ def test_state_index_copyback_split_root_checksum_failure_preserves_shared_index
     assert error_info.value.code == "OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED"
     assert "state_snapshot_index_object_checksum_mismatch" in error_info.value.details["error"]
     assert destination_index.read_bytes() == before
-    assert not (copyback_root / "states").exists()
+    assert (
+        copyback_root / "states/gfs/model_a/shared/state.cfg.ic"
+    ).read_bytes() == stale_shared_content
+    assert not (copyback_root / "states/gfs/model_a/private/state.cfg.ic").exists()
 
 
 def test_state_index_copyback_serializes_against_refresh_publisher_without_deadlock(
@@ -388,7 +647,10 @@ def test_state_index_copyback_serializes_against_refresh_publisher_without_deadl
     shared_uri = shared_store.write_bytes_atomic("states/gfs/model_a/shared/state.cfg.ic", shared_content)
     source_index = object_root / "scheduler/state-index/index-last.json"
     destination_index = copyback_root / "scheduler/state-index/index-last.json"
-    private_entry = _state_entry("private-state", private_uri, private_content, "2026-06-27T01:00:00Z")
+    private_entry = {
+        **_state_entry("private-state", private_uri, private_content, "2026-06-27T01:00:00Z"),
+        "run_id": "fcst_gfs_2026062700_basins_heihe_shud",
+    }
     shared_entry = _state_entry("shared-state", shared_uri, shared_content, "2026-06-27T00:00:00Z")
     publish_state_snapshot_index(
         [private_entry],
@@ -447,6 +709,112 @@ def test_state_index_copyback_serializes_against_refresh_publisher_without_deadl
     assert not copyback_errors
     payload = json.loads(destination_index.read_text())
     assert {entry["state_id"] for entry in payload["entries"]} == {"private-state", "shared-state"}
+
+
+def test_state_index_copyback_holds_source_lock_until_checkpoint_copy_finishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    run_id = "fcst_gfs_2026062700_basins_heihe_shud"
+    _write_run(object_root, run_id)
+    private_store = LocalObjectStore(object_root, "s3://nhms")
+    shared_store = LocalObjectStore(copyback_root, "s3://nhms")
+    first_content = _valid_state_bytes(b"first")
+    second_content = _valid_state_bytes(b"second")
+    shared_content = _valid_state_bytes(b"shared")
+    first_uri = private_store.write_bytes_atomic("states/gfs/model_a/first/state.cfg.ic", first_content)
+    second_uri = private_store.write_bytes_atomic("states/gfs/model_a/second/state.cfg.ic", second_content)
+    shared_uri = shared_store.write_bytes_atomic("states/gfs/model_a/shared/state.cfg.ic", shared_content)
+    private_store.write_bytes_atomic("states/gfs/model_a/shared/state.cfg.ic", shared_content)
+    source_index = object_root / "scheduler/state-index/index-last.json"
+    destination_index = copyback_root / "scheduler/state-index/index-last.json"
+    first_entry = {
+        **_state_entry("first-state", first_uri, first_content, "2026-06-27T01:00:00Z"),
+        "run_id": run_id,
+    }
+    second_entry = {
+        **_state_entry("second-state", second_uri, second_content, "2026-06-27T02:00:00Z"),
+        "run_id": run_id,
+    }
+    shared_entry = _state_entry("shared-state", shared_uri, shared_content, "2026-06-27T00:00:00Z")
+    publish_state_snapshot_index(
+        [first_entry],
+        source_index,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
+    )
+    publish_state_snapshot_index(
+        [shared_entry],
+        destination_index,
+        object_store_root=copyback_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
+    )
+
+    entered = threading.Event()
+    release = threading.Event()
+    real_copy_checkpoint = state_manager_module._copyback_state_checkpoint
+    copyback_errors: list[BaseException] = []
+    publisher_errors: list[BaseException] = []
+
+    def pause_checkpoint(*args: object, **kwargs: object) -> str:
+        result = real_copy_checkpoint(*args, **kwargs)
+        entered.set()
+        assert release.wait(timeout=10)
+        return result
+
+    def run_copyback() -> None:
+        try:
+            copyback_run_trees(
+                object_store_root=object_root,
+                copyback_root=copyback_root,
+                run_ids=[run_id],
+                extra_object_keys=["scheduler/state-index/index-last.json"],
+            )
+        except BaseException as error:  # pragma: no cover - asserted below
+            copyback_errors.append(error)
+
+    def publish_replacement() -> None:
+        try:
+            publish_state_snapshot_index(
+                [second_entry],
+                source_index,
+                object_store_root=object_root,
+                object_store_prefix="s3://nhms",
+                generated_at=datetime(2026, 6, 27, 3, tzinfo=UTC),
+            )
+        except BaseException as error:  # pragma: no cover - asserted below
+            publisher_errors.append(error)
+
+    monkeypatch.setattr(state_manager_module, "_copyback_state_checkpoint", pause_checkpoint)
+    copyback_thread = threading.Thread(target=run_copyback)
+    copyback_thread.start()
+    assert entered.wait(timeout=10), copyback_errors
+    publisher_thread = threading.Thread(target=publish_replacement)
+    publisher_thread.start()
+    publisher_thread.join(timeout=10)
+    assert not publisher_thread.is_alive()
+    assert len(publisher_errors) == 1
+    assert getattr(publisher_errors[0], "reason", None) == "provider_already_running"
+
+    release.set()
+    copyback_thread.join(timeout=10)
+
+    assert not copyback_thread.is_alive()
+    assert not copyback_errors
+    destination_payload = json.loads(destination_index.read_text())
+    assert {entry["state_id"] for entry in destination_payload["entries"]} == {
+        "first-state",
+        "shared-state",
+    }
+    publisher_errors.clear()
+    publish_replacement()
+    assert not publisher_errors
+    source_payload = json.loads(source_index.read_text())
+    assert {entry["state_id"] for entry in source_payload["entries"]} == {"second-state"}
 
 
 def _valid_state_bytes(seed: bytes) -> bytes:

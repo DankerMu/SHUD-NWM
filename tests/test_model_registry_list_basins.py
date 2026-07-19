@@ -83,6 +83,7 @@ def test_has_display_product_true_returns_only_basins_with_ready_run(
     stmt = captured[0]
     assert "EXISTS" in stmt["sql"]
     assert "hr.status = ANY(%s::hydro.run_status[])" in stmt["sql"]
+    assert "bv.valid_to IS NULL OR bv.valid_to > now()" in stmt["sql"]
     assert "status::text" not in stmt["sql"]
     assert list(QHH_LATEST_READY_RUN_STATUSES) in stmt["params"]
 

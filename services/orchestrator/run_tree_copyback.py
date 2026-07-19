@@ -74,11 +74,19 @@ def copyback_run_trees(
             if object_key in referenced_trees:
                 continue
             ref_source = _validate_object_tree(object_root / object_key, object_key=object_key)
-            ref_summary = _replace_tree(
-                source=ref_source,
-                target=target_root / object_key,
-                containment_root=target_root,
-            )
+            ref_target = target_root / object_key
+            if object_key.startswith("models/") and ref_target.exists():
+                ref_summary = _reuse_immutable_model_tree(
+                    source=ref_source,
+                    target=ref_target,
+                    object_key=object_key,
+                )
+            else:
+                ref_summary = _replace_tree(
+                    source=ref_source,
+                    target=ref_target,
+                    containment_root=target_root,
+                )
             referenced_trees[object_key] = {"object_key": object_key, **ref_summary}
             total_files += int(ref_summary["file_count"])
             total_bytes += int(ref_summary["byte_count"])
@@ -93,6 +101,7 @@ def copyback_run_trees(
                     object_store_prefix=object_store_prefix,
                     source_containment_root=object_root,
                     destination_containment_root=target_root,
+                    authoritative_run_ids=unique_run_ids,
                 )
             except (ProviderAtomicError, StateManagerError) as error:
                 raise RunTreeCopybackError(
@@ -247,8 +256,54 @@ def _object_tree_key_from_uri(value: str) -> str | None:
     if len(parts) >= 5 and parts[0] == "forcing":
         return "/".join(parts[:5])
     if len(parts) >= 3 and parts[0] == "models":
+        if "package" in parts[1:]:
+            package_index = parts.index("package", 1)
+            if package_index >= 3:
+                return "/".join(parts[:package_index])
         return "/".join(parts[:3])
     return None
+
+
+def _reuse_immutable_model_tree(*, source: Path, target: Path, object_key: str) -> dict[str, Any]:
+    _validate_object_tree(target, object_key=object_key)
+    identity_relative_path = next(
+        (
+            relative
+            for relative in (Path("package/manifest.json"), Path("manifest.json"))
+            if (source / relative).is_file() and not (source / relative).is_symlink()
+        ),
+        None,
+    )
+    if identity_relative_path is None:
+        raise RunTreeCopybackError(
+            "OBJECT_STORE_COPYBACK_MODEL_IDENTITY_MISSING",
+            "An immutable model tree is missing its identity manifest.",
+            {"object_key": object_key, "source": str(source)},
+        )
+    source_identity = _validate_object_file(
+        source / identity_relative_path,
+        object_key=f"{object_key}/{identity_relative_path.as_posix()}",
+    )
+    target_identity = _validate_object_file(
+        target / identity_relative_path,
+        object_key=f"{object_key}/{identity_relative_path.as_posix()}",
+    )
+    if source_identity.read_bytes() != target_identity.read_bytes():
+        raise RunTreeCopybackError(
+            "OBJECT_STORE_COPYBACK_MODEL_IDENTITY_MISMATCH",
+            "An existing immutable model tree does not match the staged model identity.",
+            {
+                "object_key": object_key,
+                "source_identity": str(source_identity),
+                "target_identity": str(target_identity),
+            },
+        )
+    return {
+        "status": "reused",
+        "reason": "immutable_model_identity_matches",
+        "file_count": 0,
+        "byte_count": 0,
+    }
 
 
 def _replace_tree(*, source: Path, target: Path, containment_root: Path) -> dict[str, Any]:

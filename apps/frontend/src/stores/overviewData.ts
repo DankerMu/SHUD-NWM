@@ -529,11 +529,11 @@ function scenariosForQuery(source: M11QueryState['source']) {
 
 async function fetchBasins() {
   return cached(
-    cacheKey('/api/v1/basins', { limit: 200, offset: 0 }),
+    cacheKey('/api/v1/basins', { limit: 200, offset: 0, hasDisplayProduct: true }),
     () =>
       getApi<ApiBasin[]>(
         '/api/v1/basins',
-        { params: { query: { limit: 200, offset: 0 } } },
+        { params: { query: { limit: 200, offset: 0, has_display_product: true } } },
         '获取流域列表失败',
       ),
   )

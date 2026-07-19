@@ -146,6 +146,24 @@ def test_valid_baseline_passes() -> None:
         int(sha, 16)
 
 
+def test_unused_trailing_tsd_forc_station_is_valid(tmp_path: pathlib.Path) -> None:
+    """A station catalog may contain rows that no mesh element currently uses."""
+
+    baseline = _copy_fixture(tmp_path)
+    att_path = baseline / "keliya.sp.att"
+    att_path.write_text(
+        att_path.read_text().replace(
+            "4\t1\t1\t11\t4\t1\t0\t0\t0",
+            "4\t1\t1\t11\t3\t1\t0\t0\t0",
+        )
+    )
+
+    report = verify_g0_baseline(baseline)
+
+    assert report.max_forc_value == 3
+    assert report.tsd_forc_reference_count == 4
+
+
 def test_pre_post_checksums_equal(tmp_path: pathlib.Path) -> None:
     """INV-1: verifying the baseline must not mutate it."""
     baseline = _copy_fixture(tmp_path)
@@ -503,6 +521,29 @@ def test_crs_qhh_transverse_mercator_parses_to_wgs84(tmp_path: pathlib.Path) -> 
     # the transformer produced finite plausible lat/lon.
     assert lon == lon  # not NaN
     assert lat == lat  # not NaN
+
+
+def test_crs_accepts_multiple_byte_identical_gis_prj_copies(tmp_path: pathlib.Path) -> None:
+    baseline = _copy_fixture(tmp_path)
+    original = baseline / "gis" / "keliya.prj"
+    domain = baseline / "gis" / "domain.prj"
+    domain.write_bytes(original.read_bytes())
+    (baseline / "gis" / "river.prj").write_bytes(original.read_bytes())
+
+    report = verify_package_crs(baseline)
+
+    assert report.prj_path == domain
+
+
+def test_crs_rejects_divergent_gis_prj_copies(tmp_path: pathlib.Path) -> None:
+    baseline = _copy_fixture(tmp_path)
+    original = baseline / "gis" / "keliya.prj"
+    domain = baseline / "gis" / "domain.prj"
+    domain.write_bytes(original.read_bytes())
+    (baseline / "gis" / "river.prj").write_text(_QHH_TM_WKT + "\n", encoding="utf-8")
+
+    with pytest.raises(UnparseablePrjError, match="declarations disagree"):
+        verify_package_crs(baseline)
 
 
 def test_missing_prj_raises_MissingPrjError(tmp_path: pathlib.Path) -> None:

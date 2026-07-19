@@ -38,6 +38,7 @@ Object-store / DB env (same contract as the per-run scripts)::
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import re
@@ -71,6 +72,7 @@ from workers.model_registry.basins_radiation_template import repair_missing_tsd_
 PY = sys.executable
 # fcst_<source>_<cycle10>_basins_<basin>_shud  (basin may contain underscores).
 RUN_RE = re.compile(r"^fcst_(?P<source>gfs|ifs)_(?P<cycle>\d{10})_basins_(?P<basin>.+)_shud$")
+DIRECT_GRID_RUN_RE = re.compile(r"^fcst_(?P<source>gfs|ifs)_(?P<cycle>\d{10})_dg_[0-9a-f]+$")
 
 # Auth for import-basins-registry (models.switch_version => model_admin|sys_admin).
 SEED_AUTH_ACTOR = os.environ.get("AUTOPIPE_AUTH_ACTOR", "node27-autopipe")
@@ -83,6 +85,8 @@ SEED_AUTH_ROLE = os.environ.get("AUTOPIPE_AUTH_ROLE", "model_admin")
 WORK_ROOT = os.environ.get("AUTOPIPE_WORK_ROOT") or tempfile.gettempdir()
 DEFAULT_SEED_PACKAGE_VERSION_TEMPLATE = "vbasins-{slug_id}-production"
 SAFE_PACKAGE_VERSION_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+DEFAULT_RUN_WORKERS = 1
+MAX_RUN_WORKERS = 8
 
 INGEST_ROLE = "node27_data_plane_ingest"
 INGEST_SUMMARY_SCHEMA = "nhms.node27_ingest.autopipeline.v1"
@@ -710,15 +714,28 @@ def _discover_runs(object_store_root: Path, sources: tuple[str, ...]) -> list[di
     for entry in sorted(runs_dir.iterdir()):
         if not entry.is_dir():
             continue
-        m = RUN_RE.match(entry.name)
-        if not m or m.group("source") not in sources:
+        legacy_match = RUN_RE.match(entry.name)
+        direct_grid_match = DIRECT_GRID_RUN_RE.match(entry.name)
+        match = legacy_match or direct_grid_match
+        if not match or match.group("source") not in sources:
             continue
+        if legacy_match is not None:
+            basin = _slug_id(legacy_match.group("basin"))
+        else:
+            try:
+                basin = _basin_identity(object_store_root, entry.name)["basin_key"]
+            except (OSError, ValueError, json.JSONDecodeError, TypeError, KeyError):
+                # A direct-grid run has no basin identity in its run_id.  It is
+                # unsafe to guess; leave malformed/incomplete copyback entries
+                # for a later idempotent scan after the manifest is complete.
+                continue
         out.append(
             {
                 "run_id": entry.name,
-                "source": m.group("source"),
-                "cycle": m.group("cycle"),
-                "basin": _slug_id(m.group("basin")),
+                "source": match.group("source"),
+                "cycle": match.group("cycle"),
+                "basin": basin,
+                "run_family": "legacy" if legacy_match is not None else "direct_grid",
             }
         )
     return out
@@ -824,6 +841,14 @@ def _seed_package_version_for_model(model: Mapping[str, Any]) -> str:
 def _slug_id(value: str) -> str:
     normalized = re.sub(r"[^0-9a-zA-Z]+", "_", value).strip("_").lower()
     return normalized or "unknown"
+
+
+def _basin_key_set(value: str | None) -> set[str]:
+    return {
+        _slug_id(item).removeprefix("basins_")
+        for item in str(value or "").split(",")
+        if item.strip()
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -949,9 +974,15 @@ def _run_product_mtime(object_store_root: Path, run_id: str) -> float | None:
 
 
 def _activate_model(database_url: str, model_id: str) -> int:
-    """Mark the model_instance active so the display station-coverage CTE
-    (``met.interp_weight`` join requires ``model_instance.active_flag = true``)
-    can see it. Generic import leaves the instance inactive."""
+    """Activate a model only when its basin version has no active sibling.
+
+    Generic registry import leaves a newly seeded basin without an active
+    model, so the first model still needs activation.  Existing basins may
+    already have an active legacy model while direct-grid run manifests point
+    at immutable source-specific variants.  Re-activating every run variant
+    would violate the one-active-model-per-basin-version invariant and must not
+    prevent those runs from reaching the display ingest phase.
+    """
     conn = psycopg2.connect(database_url)
     try:
         with conn:
@@ -961,6 +992,15 @@ def _activate_model(database_url: str, model_id: str) -> int:
                     UPDATE core.model_instance
                     SET active_flag = true, lifecycle_state = 'active'
                     WHERE model_id = %s
+                      AND (
+                          active_flag = true
+                          OR NOT EXISTS (
+                              SELECT 1
+                              FROM core.model_instance active_sibling
+                              WHERE active_sibling.basin_version_id = core.model_instance.basin_version_id
+                                AND active_sibling.active_flag = true
+                          )
+                      )
                     """,
                     (model_id,),
                 )
@@ -1489,13 +1529,39 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--basins-root", default=os.environ.get("BASINS_ROOT"))
     parser.add_argument("--sources", default="gfs,ifs", help="Comma list of sources (default gfs,ifs).")
     parser.add_argument("--only-basin", default=None, help="Restrict to a single basin slug (e.g. heihe).")
+    parser.add_argument(
+        "--only-cycle",
+        default=None,
+        metavar="YYYYMMDDHH",
+        help="Restrict ingest to one exact UTC forecast cycle.",
+    )
+    parser.add_argument(
+        "--direct-grid-only",
+        action="store_true",
+        help="Restrict ingest to direct-grid runs; excludes legacy basin-named runs.",
+    )
     parser.add_argument("--limit", type=int, default=None, help="Process at most N runs (smoke).")
     parser.add_argument("--seed-only", action="store_true", help="Only seed basin registries; skip run ingest.")
     parser.add_argument("--force", action="store_true", help="Re-ingest even already-parsed runs.")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=int(os.environ.get("AUTOPIPE_RUN_WORKERS", str(DEFAULT_RUN_WORKERS))),
+        help=f"Independent per-run ingest workers (1-{MAX_RUN_WORKERS}; default env AUTOPIPE_RUN_WORKERS or 1).",
+    )
+    parser.add_argument(
+        "--exclude-basins",
+        default=os.environ.get("AUTOPIPE_EXCLUDE_BASINS", ""),
+        help="Comma-separated retired basin slugs/ids excluded from seeding and ingest.",
+    )
     parser.add_argument("--progress", action="store_true", help="Per-step progress to stderr.")
     args = parser.parse_args(raw_argv)
 
+    if not 1 <= args.workers <= MAX_RUN_WORKERS:
+        parser.error(f"--workers must be between 1 and {MAX_RUN_WORKERS}")
+
     sources = tuple(s.strip().lower() for s in args.sources.split(",") if s.strip())
+    excluded_basins = _basin_key_set(args.exclude_basins)
 
     database_config = _database_url_config(args.database_url_file, env)
     preflight = _preflight_ingest_config(
@@ -1536,9 +1602,16 @@ def main(argv: list[str] | None = None) -> int:
     object_store_prefix = env.get("OBJECT_STORE_PREFIX", "")
 
     runs = _discover_runs(object_store_root, sources)
+    if args.only_cycle:
+        if re.fullmatch(r"\d{10}", args.only_cycle) is None:
+            parser.error("--only-cycle must use the exact UTC format YYYYMMDDHH")
+        runs = [r for r in runs if r["cycle"] == args.only_cycle]
+    if args.direct_grid_only:
+        runs = [r for r in runs if r["run_family"] == "direct_grid"]
     if args.only_basin:
         only_basin_key = _slug_id(args.only_basin)
         runs = [r for r in runs if r["basin"] == only_basin_key]
+    runs = [r for r in runs if r["basin"] not in excluded_basins]
 
     # ---- phase 1: seed any unseeded basin -------------------------------
     # Seed candidates come from BASINS_ROOT first so node-27 display metadata is
@@ -1551,6 +1624,11 @@ def main(argv: list[str] | None = None) -> int:
         only_basin=args.only_basin,
         object_store_prefix=object_store_prefix,
     )
+    seed_identities = {
+        basin_key: identity
+        for basin_key, identity in seed_identities.items()
+        if basin_key not in excluded_basins
+    }
     for basin_key in sorted({r["basin"] for r in runs}):
         first_run = next(r["run_id"] for r in runs if r["basin"] == basin_key)
         try:
@@ -1652,19 +1730,58 @@ def main(argv: list[str] | None = None) -> int:
         pending = [r for r in runnable if r["run_id"] not in done]
         if args.limit is not None:
             pending = pending[: args.limit]
-        for idx, run in enumerate(pending, start=1):
-            result = _process_run(
-                run["run_id"],
-                env,
-                object_store_root=object_store_root,
-                database_url=database_url,
-                object_store_prefix=object_store_prefix,
-            )
-            run_results.append(result)
-            if args.progress:
+        def process_pending(run: dict[str, str]) -> dict[str, Any]:
+            try:
+                return _process_run(
+                    run["run_id"],
+                    env,
+                    object_store_root=object_store_root,
+                    database_url=database_url,
+                    object_store_prefix=object_store_prefix,
+                )
+            except Exception as exc:  # noqa: BLE001 - preserve batch failure isolation across workers
+                return {
+                    "run_id": run["run_id"],
+                    "outcome": "failed",
+                    "stage": "worker",
+                    "error": redact_text(str(exc)),
+                }
+
+        if args.workers == 1:
+            run_results = [process_pending(run) for run in pending]
+        else:
+            ordered_results: list[dict[str, Any] | None] = [None] * len(pending)
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=args.workers,
+                thread_name_prefix="node27-ingest",
+            ) as executor:
+                futures = {
+                    executor.submit(process_pending, run): (index, run)
+                    for index, run in enumerate(pending)
+                }
+                completed = 0
+                for future in concurrent.futures.as_completed(futures):
+                    index, run = futures[future]
+                    result = future.result()
+                    ordered_results[index] = result
+                    completed += 1
+                    if args.progress:
+                        tail = f" ({result.get('stage')})" if result["outcome"] != "ingested" else ""
+                        print(
+                            f"[{completed}/{len(pending)}] {run['run_id']}: {result['outcome']}{tail}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+            run_results = [result for result in ordered_results if result is not None]
+
+        if args.progress and args.workers == 1:
+            for idx, result in enumerate(run_results, start=1):
                 tail = f" ({result.get('stage')})" if result["outcome"] != "ingested" else ""
-                print(f"[{idx}/{len(pending)}] {run['run_id']}: {result['outcome']}{tail}",
-                      file=sys.stderr, flush=True)
+                print(
+                    f"[{idx}/{len(pending)}] {result['run_id']}: {result['outcome']}{tail}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
     # ---- phase 3: advance fully-ingested runs to 'published' so the layer ----
     # catalog (discharge / q_down overlay) actually surfaces them. Idempotent;
@@ -1688,6 +1805,7 @@ def main(argv: list[str] | None = None) -> int:
         "object_store_root": str(object_store_root),
         "basins_root": str(basins_root),
         "sources": list(sources),
+        "excluded_basins": sorted(excluded_basins),
         "discovered_runs": len(runs),
         "basins": basins,
         "basin_slugs": [seed_identities[basin].get("basin_slug") for basin in basins],
@@ -1701,6 +1819,7 @@ def main(argv: list[str] | None = None) -> int:
             "already_ingested": already_count,
             "published": published_count,
             "processed": len(run_results),
+            "workers": args.workers,
             "ingested": len(by("ingested")),
             "skipped": len(by("skipped")),
             "failed": len(by("failed")),

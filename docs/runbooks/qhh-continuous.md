@@ -1,4 +1,24 @@
-# QHH GFS/IFS 持续多周期自动运行
+---
+status: superseded
+current_authority:
+  - path: docs/runbooks/current-production-ops.md
+    section: 业务流程
+    reason: node-22 DB-free scheduler 与 node-27 parse/display 的当前生产边界
+superseded_by:
+  - path: docs/runbooks/current-production-ops.md
+    section: 业务流程
+    reason: 当前多流域生产调度入口和节点职责
+status_since: 2026-07-18
+archive_scope: whole-document
+retained_for: qhh 专用诊断与历史回归命令证据
+---
+
+# QHH GFS/IFS 持续多周期自动运行（已被生产 runbook 取代）
+
+> 本文所有命令仅用于 qhh 诊断、历史回归与证据复现，不得作为当前生产部署
+> 指令。当前 node-22 不连接活数据库，并在 `state_save_qc` 结束；node-27 负责
+> parse/QC/ingest/display。请先遵循
+> [`current-production-ops.md`](current-production-ops.md)。
 
 最后更新：2026-05-26
 

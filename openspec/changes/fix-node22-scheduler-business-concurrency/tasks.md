@@ -38,6 +38,11 @@
 - [x] 3.2 Verify concurrent submit behavior locally.
   Evidence floor: scheduler tests cover `NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND`
   greater than `1` without duplicate retry/resubmit for the same candidate.
+- [x] 3.3 Move basin forcing concurrency to globally bounded Slurm arrays.
+  Evidence floor: scheduler tests allocate the current 14/18/4 cohort sizes to
+  14/14/4 under a global bound of 32; chain tests preserve the shared cohort
+  budget; Gateway tests render `%N`, clamp against the resource profile/task
+  count, and reject malformed budgets before `sbatch`.
 
 ## 4. Documentation, Validation, And Node-22 Deployment
 

@@ -226,6 +226,7 @@ def test_met_station_variable_coverage_filter_lands_with_model_id(monkeypatch: p
     count_statement = cursor.statements[0]
     count_params = cursor.parameters[0]
     assert "met.interp_weight" in count_statement
+    assert "ms.active_flag = true" not in count_statement
     assert "variable = ANY(%s)" in count_statement
     assert "HAVING COUNT(DISTINCT variable) = %s" in count_statement
     assert ["PRCP", "TEMP"] in count_params

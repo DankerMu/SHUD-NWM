@@ -151,6 +151,63 @@ def test_catalog_derivation_builds_two_sources_for_exact_registry_model_set(tmp_
     assert all(entry["catalog_row_count"] > 0 for entry in entries)
 
 
+def test_catalog_derivation_respects_direct_grid_source_scope(tmp_path: Path) -> None:
+    object_root = tmp_path / "private-objects"
+    _write_canonical_catalog(object_root, source_id="gfs", cycle="2026071400")
+    _write_canonical_catalog(object_root, source_id="IFS", cycle="2026071400")
+    contract_base = {
+        "forcing_mapping_mode": "direct_grid",
+        "binding_uri": "s3://nhms/models/direct/binding.json",
+        "binding_checksum": "sha256:binding",
+        "model_input_package_id": "direct-input-v1",
+        "sp_att_path": "input/basin.sp.att",
+        "sp_att_checksum": "sha256:sp-att",
+        "grid_id": "grid-demo",
+        "grid_signature": "grid-signature-demo",
+        "station_bindings": [
+            {
+                "station_id": "station-1",
+                "shud_forcing_index": 1,
+                "forcing_filename": "X100Y30.csv",
+                "longitude": 100.0,
+                "latitude": 30.0,
+                "x": 100.0,
+                "y": 30.0,
+                "z": 10.0,
+                "grid_id": "grid-demo",
+                "grid_cell_id": "cell-1",
+            }
+        ],
+    }
+    models = [
+        {
+            "model_id": f"model-{source.lower()}",
+            "basin_id": "basin-a",
+            "resource_profile": {
+                "direct_grid_forcing": {
+                    **contract_base,
+                    "applicable_source_ids": [source],
+                }
+            },
+        }
+        for source in ("GFS", "IFS")
+    ]
+
+    entries, evidence = derive_catalog_bound_readiness_entries(
+        models,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+    )
+
+    assert {(entry["model_id"], entry["source_id"]) for entry in entries} == {
+        ("model-gfs", "gfs"),
+        ("model-ifs", "IFS"),
+    }
+    assert evidence["entry_count"] == 2
+    assert evidence["model_count"] == 2
+    assert evidence["model_set"]["source_entry_counts"] == {"gfs": 1, "IFS": 1}
+
+
 def test_catalog_bound_consumer_recomputes_identity_and_detects_catalog_mutation(tmp_path: Path) -> None:
     object_root = tmp_path / "private-objects"
     catalog_uri, policy, source_object = _write_canonical_catalog(
@@ -891,6 +948,35 @@ def test_refresh_dry_run_validates_three_providers_without_replacement(
     assert all(provider["after_sha256"] == provider["before_sha256"] for provider in receipt["providers"])
     assert json.loads((config.receipt_root / "latest.json").read_text()) == receipt
     assert not list(config.emergency_root.iterdir())
+
+
+def test_direct_grid_refresh_republishes_current_authority_instead_of_basins(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    _stub_provider_pipeline(monkeypatch)
+    monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_DIRECT_GRID", "true")
+    models = [
+        {"model_id": f"dg-{index}", "basin_id": f"basin-{index}"}
+        for index in range(36)
+    ]
+    previous = _minimal_registry_manifest_bytes("direct-grid-current")
+    monkeypatch.setattr(
+        refresh,
+        "_load_previous_canonical_registry",
+        lambda *args, **kwargs: (sha256_bytes(previous), models, previous),
+    )
+    monkeypatch.setattr(
+        refresh,
+        "publish_all_basin_scheduler_registry",
+        lambda **kwargs: pytest.fail("direct-grid steady refresh must not republish Basins IDW rows"),
+    )
+
+    receipt = refresh.refresh_scheduler_file_providers(config, dry_run=True)
+
+    assert receipt["outcome"] == "dry_run"
+    assert receipt["providers"][0]["entry_count"] == 36
 
 
 def test_provider_evidence_prefers_entry_count_over_model_count() -> None:
@@ -2158,6 +2244,8 @@ def test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent() -
 
     assert "ExecStart=/scratch/frd_muziyao/NWM/scripts/scheduler_file_provider_refresh_once.sh" in service
     assert "TimeoutStartSec=7200" in service
+    assert "PrivateTmp=true" not in service
+    assert "no-follow verifier must open" in service
     assert "OnCalendar=*-*-* 02:15:00 UTC" in timer
     assert "RandomizedDelaySec=30m" in timer
     assert "UnsetEnvironment=DATABASE_URL PIPELINE_DATABASE_URL" in service
@@ -2168,6 +2256,9 @@ def test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent() -
         "nhms-compute-scheduler.service'" in service
     )
     assert "is-active --quiet nhms-compute-scheduler.service" in wrapper
+    assert "NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true" in environment
+    assert '[[ "$NHMS_SCHEDULER_REQUIRE_DIRECT_GRID" == true ]]' in wrapper
+    assert "grep -Ec '^NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true$'" in installer
     for selector in ("DATABASE_URL=", "PIPELINE_DATABASE_URL=", "PGHOST=", "PGPORT="):
         assert selector not in environment
     assert "stat -c '%a'" in wrapper
@@ -2301,6 +2392,7 @@ def test_installer_enable_lifecycle_and_failure_restore_with_fake_systemctl(tmp_
                 f"NHMS_SCHEDULER_PROVIDER_REFRESH_RECEIPT_ROOT={receipts}",
                 f"NHMS_SCHEDULER_PROVIDER_REFRESH_EMERGENCY_ROOT={emergency}",
                 f"NHMS_SCHEDULER_PROVIDER_REFRESH_LOCK={tmp_path / 'private/refresh'}",
+                "NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true",
             )
         )
         + "\n"
@@ -2437,6 +2529,7 @@ def _write_wrapper_execution_fixture(tmp_path: Path, *, include_forbidden: bool 
         "NHMS_SCHEDULER_PROVIDER_REFRESH_RECEIPT_ROOT": "/private/receipts",
         "NHMS_SCHEDULER_PROVIDER_REFRESH_EMERGENCY_ROOT": "/private/emergency",
         "NHMS_SCHEDULER_PROVIDER_REFRESH_LOCK": "/private/refresh",
+        "NHMS_SCHEDULER_REQUIRE_DIRECT_GRID": "true",
     }
     lines = [f"{key}={value}" for key, value in configured.items()]
     if include_forbidden:
@@ -2459,6 +2552,7 @@ def _write_wrapper_execution_fixture(tmp_path: Path, *, include_forbidden: bool 
         "printf 'RECEIPTS=%s\\n' \"$NHMS_SCHEDULER_PROVIDER_REFRESH_RECEIPT_ROOT\"\n"
         "printf 'EMERGENCY=%s\\n' \"$NHMS_SCHEDULER_PROVIDER_REFRESH_EMERGENCY_ROOT\"\n"
         "printf 'LOCK=%s\\n' \"$NHMS_SCHEDULER_PROVIDER_REFRESH_LOCK\"\n"
+        "printf 'REQUIRE_DIRECT_GRID=%s\\n' \"$NHMS_SCHEDULER_REQUIRE_DIRECT_GRID\"\n"
         "printf 'DATABASE_URL=%s\\n' \"${DATABASE_URL-<unset>}\"\n"
         "printf 'PGHOST=%s\\n' \"${PGHOST-<unset>}\"\n"
         "printf 'PWD=%s\\n' \"$PWD\"\n"
@@ -2506,6 +2600,7 @@ def test_wrapper_clean_environment_loads_fixed_config_and_strips_inherited_db_se
     assert "RECEIPTS=/private/receipts" in result.stdout
     assert "EMERGENCY=/private/emergency" in result.stdout
     assert "LOCK=/private/refresh" in result.stdout
+    assert "REQUIRE_DIRECT_GRID=true" in result.stdout
     assert "DATABASE_URL=<unset>" in result.stdout
     assert "PGHOST=<unset>" in result.stdout
     assert f"PWD={tmp_path / 'repo'}" in result.stdout
@@ -4135,5 +4230,3 @@ def test_provider_atomic_cas_refuses_concurrent_authoritative_swap(
     assert info.value.reason == "provider_preimage_changed"
     # Concurrent bytes preserved unchanged.
     assert canonical.read_bytes() == b"authoritative-new\n"
-
-

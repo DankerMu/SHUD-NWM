@@ -6,8 +6,8 @@ Covers the three production write paths — asserting for each that:
    the DELETE. (Ordering: guard must not lose to TimescaleDB's raw error.)
 2. When the guard raises, no DELETE (or INSERT) fires. (Fail-closed: no
    partial write.)
-3. When the guard passes, the DELETE + INSERT run byte-identically to the
-   pre-guard code path.
+3. When the guard passes, DELETE is time-bounded for chunk pruning and INSERT
+   preserves the production row shape.
 
 Every fake connection here records execute-call ordering so ``BEFORE`` claims
 can be asserted, not just claimed.
@@ -72,6 +72,9 @@ class _RecordingCursor:
         if _CHUNKS_QUERY_MARKER in normalized:
             self._last_fetchone = self.connection.compressed_chunk_row
             return
+        if "select min(valid_time) as valid_time_min" in " ".join(normalized.split()):
+            self._last_fetchone = self.connection.existing_river_window
+            return
         self._last_fetchone = None
 
     def fetchone(self) -> Any:
@@ -102,10 +105,16 @@ class _RecordingConnection:
 
     encoding: str = "UTF8"
 
-    def __init__(self, *, compressed_chunk_row: tuple[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        compressed_chunk_row: tuple[str, str] | None = None,
+        existing_river_window: tuple[datetime, datetime] | None = None,
+    ) -> None:
         self.executions: list[tuple[str, tuple[Any, ...]]] = []
         self.execute_values_calls: list[tuple[str, list[tuple[Any, ...]]]] = []
         self.compressed_chunk_row = compressed_chunk_row
+        self.existing_river_window = existing_river_window
         self.commits = 0
         self.rollbacks = 0
         self.closed = False
@@ -212,10 +221,10 @@ def test_output_parser_guard_blocks_before_any_delete_on_compressed_chunk() -> N
     assert delete_idx == -1, "DELETE MUST NOT fire when guard raises"
 
 
-def test_output_parser_guard_passes_batch_unchanged_when_uncompressed(
+def test_output_parser_uncompressed_delete_is_time_bounded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Byte-identity check: same DELETE key set, same INSERT statement text."""
+    """The replacement DELETE prunes historical compressed chunks by time."""
     execute_values_calls = _patch_parser_execute_values(monkeypatch)
     connection = _RecordingConnection()
     repository = _output_parser_repository(connection)
@@ -231,10 +240,37 @@ def test_output_parser_guard_passes_batch_unchanged_when_uncompressed(
     # one such key in the fixture.
     assert len(delete_calls) == 1
     _, params = delete_calls[0]
-    assert params == ("run_a", "rivnet_v1", "q_down")
+    assert params == ("run_a", "rivnet_v1", "q_down", _t(0), _t(2))
+    assert "valid_time >= %s" in delete_calls[0][0]
+    assert "valid_time <= %s" in delete_calls[0][0]
     assert len(execute_values_calls) == 1
     assert "INSERT INTO hydro.river_timeseries" in execute_values_calls[0][0]
     assert len(execute_values_calls[0][1]) == len(rows)
+
+
+def test_output_parser_replacement_window_includes_existing_rows_before_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_parser_execute_values(monkeypatch)
+    existing_min = datetime(2026, 5, 31, 21, tzinfo=UTC)
+    existing_max = datetime(2026, 6, 1, 5, tzinfo=UTC)
+    connection = _RecordingConnection(existing_river_window=(existing_min, existing_max))
+    repository = _output_parser_repository(connection)
+
+    repository.upsert_river_timeseries(_river_rows(), batch_size=2)
+
+    guard_call = next(
+        (statement, params)
+        for statement, params in connection.executions
+        if _CHUNKS_QUERY_MARKER in statement
+    )
+    assert guard_call[1][-2:] == (existing_max, existing_min)
+    delete_call = next(
+        (statement, params)
+        for statement, params in connection.executions
+        if "DELETE FROM hydro.river_timeseries" in statement
+    )
+    assert delete_call[1] == ("run_a", "rivnet_v1", "q_down", existing_min, existing_max)
 
 
 # ---------------------------------------------------------------------------

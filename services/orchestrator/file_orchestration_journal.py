@@ -642,7 +642,8 @@ class FileOrchestrationJournalRepository:
         jobs = [
             _file_reconcile_namespace(job)
             for job in self._iter_reconcile_pipeline_job_records()
-            if str(job.get("status") or "") in {"pending", "queued", "submitted", "running"}
+            if str(job.get("status") or "")
+            in {"pending", "queued", "submitted", "running", "reconcile_unverified"}
             and _file_journal_real_slurm_job_id(job.get("slurm_job_id"))
         ]
         jobs.sort(
@@ -3880,9 +3881,13 @@ def _job_needs_restart_reconcile(job: Mapping[str, Any]) -> bool:
         and job.get("idempotency_key") not in (None, "")
     ):
         return True
-    return status in {"pending", "queued", "submitted", "running"} and _file_journal_real_slurm_job_id(
-        job.get("slurm_job_id")
-    )
+    return status in {
+        "pending",
+        "queued",
+        "submitted",
+        "running",
+        "reconcile_unverified",
+    } and _file_journal_real_slurm_job_id(job.get("slurm_job_id"))
 
 
 def _file_retry_job_int(job: Any, field: str) -> int:
@@ -5329,11 +5334,15 @@ def _validate_pipeline_job_identity(
             )
         return
     run_id = _required_safe_identity(row, "run_id")
-    if run_id != cycle_run_id and not run_id.startswith(f"fcst_{source_id.lower()}_{format_cycle_time(cycle_time)}_"):
+    if (
+        run_id != cycle_run_id
+        and not run_id.startswith(f"{cycle_run_id}_")
+        and not run_id.startswith(f"fcst_{source_id.lower()}_{format_cycle_time(cycle_time)}_")
+    ):
         raise FileOrchestrationJournalError(
             "file_journal_run_mismatch",
             field="run_id",
-            evidence={"expected": cycle_run_id, "actual": run_id[:80]},
+            evidence={"expected": f"{cycle_run_id}|{cycle_run_id}_<cohort>", "actual": run_id[:80]},
         )
 
 

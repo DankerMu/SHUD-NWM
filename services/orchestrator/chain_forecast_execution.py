@@ -515,6 +515,8 @@ def _after_cycle_stage_terminal(
     terminal: dict[str, Any],
     aggregation: ArrayAggregation | None,
 ) -> None:
+    if stage.stage == "forecast" and aggregation is not None:
+        _update_array_forecast_hydro_statuses(self, context, aggregation)
     if result_status == "succeeded":
         if _stage_should_copyback_run_trees(self, stage):
             _copyback_stage_run_trees(self, context, stage=stage.stage)
@@ -554,6 +556,39 @@ def _after_cycle_stage_terminal(
         error_code=error_code,
         error_message=error_message,
     )
+
+
+def _update_array_forecast_hydro_statuses(
+    self,
+    context: CycleOrchestrationContext,
+    aggregation: ArrayAggregation,
+) -> None:
+    basins_by_task = {
+        int(basin.get("task_id", index)): basin
+        for index, basin in enumerate(context.active_basins)
+    }
+    for task in aggregation.task_results:
+        basin = basins_by_task.get(task.task_id)
+        if basin is None:
+            continue
+        run_id = str(basin.get("run_id") or "").strip()
+        if not run_id:
+            continue
+        if task.status == "succeeded":
+            self.repository.update_hydro_run_status(
+                run_id,
+                "succeeded",
+                slurm_job_id=task.slurm_job_id,
+            )
+            continue
+        if task.status in {"failed", "cancelled"}:
+            self.repository.update_hydro_run_status(
+                run_id,
+                "failed",
+                slurm_job_id=task.slurm_job_id,
+                error_code=task.error_code or f"FORECAST_TASK_{task.status.upper()}",
+                error_message=task.error_message or f"Forecast array task {task.task_id} {task.status}.",
+            )
 
 
 def _stage_should_copyback_run_trees(self, stage: StageDefinition) -> bool:

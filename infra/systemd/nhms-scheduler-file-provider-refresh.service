@@ -12,6 +12,8 @@ UnsetEnvironment=DATABASE_URL PIPELINE_DATABASE_URL PGAPPNAME PGCHANNELBINDING P
 ExecStart=/scratch/frd_muziyao/NWM/scripts/scheduler_file_provider_refresh_once.sh
 StandardOutput=journal
 StandardError=journal
-PrivateTmp=true
+# node-22 user-systemd makes the filesystem root inaccessible inside a
+# PrivateTmp mount namespace. The provider's no-follow verifier must open the
+# root and walk each absolute path component, so this unit cannot use PrivateTmp.
 UMask=0077
 TimeoutStartSec=7200

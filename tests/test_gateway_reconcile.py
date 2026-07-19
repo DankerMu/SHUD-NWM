@@ -7,6 +7,7 @@ still-running or already-terminal candidate.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -1712,6 +1713,128 @@ def test_parse_master_sacct_row_returns_exact_array_task_row() -> None:
     assert record.task_id == "3"
     assert record.array_task_id == "3"
     assert record.raw_state == "COMPLETED"
+
+
+@pytest.mark.parametrize(
+    ("member_rows", "expected_state", "expected_exit_code"),
+    [
+        (
+            "15144_0|nhms_forecast|PENDING|0:0|\n"
+            "15144_1|nhms_forecast|PENDING|0:0|\n",
+            "PENDING",
+            None,
+        ),
+        (
+            "15144_0|nhms_forecast|COMPLETED|0:0|\n"
+            "15144_1|nhms_forecast|RUNNING|0:0|\n",
+            "RUNNING",
+            None,
+        ),
+        (
+            "15144_0|nhms_forecast|FAILED|1:0|\n"
+            "15144_1|nhms_forecast|RUNNING|0:0|\n",
+            "RUNNING",
+            None,
+        ),
+        (
+            "15144_0|nhms_forecast|COMPLETED|0:0|\n"
+            "15144_1|nhms_forecast|TIMEOUT|1:0|\n",
+            "TIMEOUT",
+            "1:0",
+        ),
+        (
+            "15144_0|nhms_forecast|COMPLETED|0:0|\n"
+            "15144_1|nhms_forecast|CANCELLED|0:15|\n",
+            "CANCELLED",
+            "0:15",
+        ),
+    ],
+)
+def test_parse_master_sacct_row_aggregates_array_member_statuses(
+    member_rows: str,
+    expected_state: str,
+    expected_exit_code: str | None,
+) -> None:
+    from services.orchestrator.reconcile import _parse_master_sacct_row
+
+    record = _parse_master_sacct_row(member_rows, "15144")
+
+    assert record is not None
+    assert record.slurm_job_id == "15144"
+    assert record.job_name == "nhms_forecast"
+    assert record.raw_state == expected_state
+    assert record.exit_code == expected_exit_code
+    assert record.array_member_job_ids == ("15144_0", "15144_1")
+
+
+def test_file_restart_reconcile_retries_unverified_array_master_without_resubmit(
+    tmp_path: Any,
+) -> None:
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.reconcile import _parse_master_sacct_row
+
+    cycle_time = datetime(2026, 7, 18, 1, tzinfo=UTC)
+    cycle_id = "gfs_2026071801"
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    repository.upsert_pipeline_job(
+        {
+            "job_id": "job_gfs_2026071801_model_a_forecast",
+            "run_id": "fcst_gfs_2026071801_model_a",
+            "cycle_id": cycle_id,
+            "job_type": "run_shud_forecast_array",
+            "slurm_job_id": "15144",
+            "array_task_id": None,
+            "model_id": "model_a",
+            "status": "submitted",
+            "stage": "forecast",
+            "idempotency_key": "gfs:gfs_2026071801:model_a:forecast",
+            "candidate_id": (
+                "gfs:2026-07-18T01:00:00Z:model_a:forecast_gfs_deterministic"
+            ),
+        }
+    )
+
+    query_count = 0
+
+    def _sacct_query(_slurm_job_id: str) -> SacctRecord | None:
+        nonlocal query_count
+        query_count += 1
+        if query_count == 1:
+            return None
+        return _parse_master_sacct_row(
+            "15144_0|nhms_forecast|COMPLETED|0:0|\n"
+            "15144_0.batch|batch|COMPLETED|0:0|\n",
+            "15144",
+        )
+
+    first = reconcile_inflight_jobs(repository, sacct_query=_sacct_query)
+    assert first[0].action == "unverified"
+    assert repository.get_pipeline_job(first[0].job_id)["status"] == (
+        RECONCILE_UNVERIFIED_STATUS
+    )
+    assert [job.job_id for job in repository.query_inflight_jobs()] == [first[0].job_id]
+
+    second = reconcile_inflight_jobs(repository, sacct_query=_sacct_query)
+
+    assert query_count == 2
+    assert second[0].action == "terminal"
+    assert second[0].status == "succeeded"
+    recovered = repository.get_pipeline_job(second[0].job_id)
+    assert recovered is not None
+    assert recovered["status"] == "succeeded"
+    assert recovered["error_code"] is None
+    assert repository.has_active_pipeline(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        model_id="model_a",
+    ) is False
+    # Restart reconcile only updates the existing durable row.  The inactive
+    # gate now permits the scheduler to advance to state_save_qc without a
+    # duplicate sbatch for the forecast stage.
+    jobs = repository.query_pipeline_jobs_by_cycle(cycle_id)
+    assert [job["job_id"] for job in jobs] == [second[0].job_id]
 
 
 # --- FINDING-1: cached reconcile session rollback on crash recovery ------------

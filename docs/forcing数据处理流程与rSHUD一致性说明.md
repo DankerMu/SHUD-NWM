@@ -2,6 +2,10 @@
 
 > **目的**：说明本项目（NHMS/NWM 业务化系统）如何生产 SHUD forcing，并逐项对照 rSHUD/AutoSHUD 的离线建模 forcing 流程，论证 legacy IDW 模式与 direct-grid 模式的正确性。
 > **可追溯性**：本文所有技术断言均给出仓库内 `文件:行号`，可逐条核对源码。
+> **当前生产口径（2026-07-18）**：node-22 的 18 个流域均已迁移为 source-scoped
+> direct-grid 资产，GFS/IFS 各 18 个 model variant，共 36 行；生产环境设置
+> `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true`，IDW 只保留给历史资产解释、离线回放和
+> 显式恢复，不能进入当前业务 registry。
 
 ---
 
@@ -136,7 +140,9 @@ SHUD 模型侧统一对 `Rn` 做 `rn<0→0` 再 `nearbyint` 取整 W/m²（`conv
 
 #### ④-b `direct_grid`：按 grid_cell_id 精确取 canonical 值
 
-`direct_grid` 是 opt-in 资产模式，只有模型/input manifest 显式声明 `forcing_mapping_mode="direct_grid"` 时启用。该模式要求上游模型资产已经完成：
+`direct_grid` 在资产契约上仍由模型/input manifest 显式声明；但当前生产 route 强制要求
+该声明，不再把它视为可选能力。只有历史/离线兼容路径允许缺省或显式 `idw`。该模式要求
+上游模型资产已经完成：
 
 - direct-grid binding JSON：每个 SHUD forcing station 绑定一个 canonical `grid_id` / `grid_cell_id`；
 - manifest 级 `applicable_source_ids`、`binding_checksum`、`grid_signature`、模型 input identity 与 `.sp.att` checksum；

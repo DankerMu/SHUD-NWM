@@ -4,6 +4,7 @@ import ast
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 from collections.abc import Mapping, Sequence
@@ -27,6 +28,7 @@ from services.orchestrator import scheduler_execution as scheduler_execution_mod
 from services.orchestrator import scheduler_file_providers as scheduler_file_providers_module
 from services.orchestrator import scheduler_lease as scheduler_lease_module
 from services.orchestrator import scheduler_state as scheduler_state_module
+from services.orchestrator import scheduler_state_rows as scheduler_state_rows_module
 from services.orchestrator.chain import (
     M3_STAGES,
     OrchestratorConfig,
@@ -66,6 +68,7 @@ from services.orchestrator.scheduler import (
 from services.orchestrator.scheduler import (
     ProductionScheduler as _RealProductionScheduler,
 )
+from services.orchestrator.scheduler_state_types import CandidateStateDecision
 from services.orchestrator.source_cycle_raw_manifest import nfs_raw_manifest_readiness
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
 from workers.canonical_converter.converter import GFS_REQUIRED_STANDARD_VARIABLES, evaluate_canonical_readiness
@@ -74,6 +77,43 @@ from workers.shud_runtime import runtime as shud_runtime_module
 
 _TEST_CANONICAL_READINESS_PROVIDER_UNSET = object()
 _TEST_OBJECT_STORE_ROOT = Path(os.environ.get("TMPDIR", "/tmp")).resolve() / "nhms-test-object-store"
+
+
+def test_retry_with_stale_cold_manifest_is_upgraded_to_warm_forecast_rerun() -> None:
+    decision = CandidateStateDecision(
+        action="retry",
+        reason="resume_after_completed_stage",
+        evidence={
+            "decision": "retry_after_completed_stage",
+            "restart_stage": "forcing",
+            "run_manifest_initial_state": {
+                "state_id": None,
+                "quality": "cold_start_no_state",
+            },
+        },
+    )
+    strict = {
+        "ready": True,
+        "candidate_state": {
+            "init_state_id": "state_gfs_model_a_2026052112",
+            "init_state_uri": "s3://nhms/states/gfs/model_a/2026052112/state.cfg.ic",
+            "init_state_quality": "fresh",
+            "init_state_valid_time": "2026-05-21T12:00:00Z",
+        },
+    }
+
+    upgraded = scheduler_candidates_module._upgrade_retry_for_strict_warm_start_manifest(
+        decision,
+        strict,
+    )
+
+    assert upgraded is not None
+    assert upgraded.reason == "strict_warm_start_retry_run_manifest_mismatch"
+    assert upgraded.evidence["decision"] == "retry_strict_warm_start_retry_run_manifest_mismatch"
+    assert upgraded.evidence["restart_stage"] == "forecast"
+    assert upgraded.evidence["native_shud_resubmitted"] is True
+    assert upgraded.evidence["durable_shud_output_reused"] is False
+    assert upgraded.evidence["candidate_state"]["init_state_id"] == "state_gfs_model_a_2026052112"
 
 
 class _NoopReconcileStore:
@@ -806,12 +846,14 @@ def test_scheduler_execution_compat_wrappers_delegate_to_owner_module(monkeypatc
             source_id: str,
             cycle_time_arg: datetime,
             cohort_key: tuple[int, str],
+            candidates_arg: Sequence[Any],
             *,
             format_cycle_time: Any,
         ) -> str:
             assert source_id == "gfs"
             assert cycle_time_arg is cycle_time
             assert cohort_key == (1, "forecast")
+            assert candidates_arg is candidates
             assert format_cycle_time is patched_format_cycle_time
             return "cycle-gfs-forecast"
 
@@ -822,11 +864,23 @@ def test_scheduler_execution_compat_wrappers_delegate_to_owner_module(monkeypatc
             fake_candidate_execution_cohort_run_id,
         )
         assert (
-            scheduler_module._candidate_execution_cohort_run_id("gfs", cycle_time, (1, "forecast"))
+            scheduler_module._candidate_execution_cohort_run_id(
+                "gfs", cycle_time, (1, "forecast"), candidates
+            )
             == "cycle-gfs-forecast"
         )
 
     with monkeypatch.context() as patch_context:
+
+        def patched_run_id_for_cohort(
+            source_id: str,
+            cycle_time_arg: datetime,
+            cohort_key: tuple[int, str],
+            candidates_arg: Sequence[Any],
+        ) -> str:
+            del source_id, cycle_time_arg, cohort_key
+            assert candidates_arg is candidates
+            return "run-for-cohort"
 
         def patched_run_id_for_candidate(
             source_id: str,
@@ -843,15 +897,22 @@ def test_scheduler_execution_compat_wrappers_delegate_to_owner_module(monkeypatc
             cohort_key: tuple[int, str],
             candidates_arg: Sequence[Any],
             *,
+            run_id_for_cohort: Any,
             run_id_for_candidate: Any,
         ) -> list[tuple[list[Any], str | None]]:
             assert source_id == "gfs"
             assert cycle_time_arg is cycle_time
             assert cohort_key == (1, "forecast")
             assert candidates_arg is candidates
+            assert run_id_for_cohort is patched_run_id_for_cohort
             assert run_id_for_candidate is patched_run_id_for_candidate
             return [(candidates, "run-for-candidate")]
 
+        patch_context.setattr(
+            scheduler_module,
+            "_candidate_execution_cohort_run_id",
+            patched_run_id_for_cohort,
+        )
         patch_context.setattr(
             scheduler_module,
             "_candidate_execution_cohort_run_id_for_candidate",
@@ -1091,6 +1152,88 @@ def test_scheduler_evidence_compat_forwarders_delegate_to_owner_module(
     assert context.evidence_write_error_payload is scheduler_module._evidence_write_error_payload
     assert contexts
     assert all(item.config is scheduler.config for item in contexts)
+
+
+def test_selected_candidate_evidence_compacts_shared_readiness_diagnostics() -> None:
+    candidate = scheduler_module.SchedulerCandidate(
+        candidate_id="candidate-1",
+        source_id="gfs",
+        cycle_id="gfs_2026070600",
+        cycle_time_utc=_dt("2026-07-06T00:00:00Z"),
+        model_id="model_a",
+        basin_id="basin_a",
+        basin_version_id="basin_a_v1",
+        river_network_version_id="basin_a_rivnet_v1",
+        segment_count=3,
+        output_segment_count=2,
+        model_package_uri="s3://nhms/models/model_a/package/",
+        resource_profile={},
+        display_capabilities={},
+        horizon={},
+        scenario_id="forecast_gfs_deterministic",
+        run_id="fcst_gfs_2026070600_model_a",
+        forcing_version_id="forc_gfs_2026070600_model_a",
+        status="selected",
+        state_evidence={
+            "candidate_state": {"initial_state_quality": "fresh"},
+            "canonical_readiness": {
+                "status": "canonical_incomplete",
+                "ready": False,
+                "reason": "canonical_identity_mismatch",
+                "missing_leads": [{"lead": lead} for lead in range(57)],
+                "source_object_identity": {f"field_{index}": index for index in range(20)},
+                "required_variables": ["prcp_rate_or_amount"],
+            },
+        },
+    )
+
+    full = candidate.to_dict()
+    compact = candidate.to_dict(compact_selected_state=True)
+
+    assert len(full["state_evidence"]["canonical_readiness"]["missing_leads"]) == 57
+    canonical = compact["state_evidence"]["canonical_readiness"]
+    assert "missing_leads" not in canonical
+    assert "source_object_identity" not in canonical
+    assert canonical["missing_lead_count"] == 57
+    assert canonical["source_object_identity_entry_count"] == 20
+    assert canonical["details_compacted"] is True
+    assert canonical["status"] == "canonical_incomplete"
+    assert compact["state_evidence"]["candidate_state"] == {"initial_state_quality": "fresh"}
+
+
+def test_blocked_candidate_evidence_keeps_full_readiness_diagnostics() -> None:
+    candidate = scheduler_module.SchedulerCandidate(
+        candidate_id="candidate-1",
+        source_id="gfs",
+        cycle_id="gfs_2026070600",
+        cycle_time_utc=_dt("2026-07-06T00:00:00Z"),
+        model_id="model_a",
+        basin_id="basin_a",
+        basin_version_id="basin_a_v1",
+        river_network_version_id="basin_a_rivnet_v1",
+        segment_count=3,
+        output_segment_count=2,
+        model_package_uri="s3://nhms/models/model_a/package/",
+        resource_profile={},
+        display_capabilities={},
+        horizon={},
+        scenario_id="forecast_gfs_deterministic",
+        run_id="fcst_gfs_2026070600_model_a",
+        forcing_version_id="forc_gfs_2026070600_model_a",
+        status="blocked",
+        state_evidence={
+            "canonical_readiness": {
+                "missing_leads": [{"lead": 0}],
+                "source_object_identity": {"manifest": "raw/gfs/manifest.json"},
+            }
+        },
+    )
+
+    canonical = candidate.to_dict(compact_selected_state=True)["state_evidence"]["canonical_readiness"]
+
+    assert canonical["missing_leads"] == [{"lead": 0}]
+    assert canonical["source_object_identity"] == {"manifest": "raw/gfs/manifest.json"}
+    assert "details_compacted" not in canonical
 
 
 def test_scheduler_evidence_compat_wrappers_delegate_to_owner_module(
@@ -1824,7 +1967,7 @@ def test_checksum_missing_canonical_readiness_blocks_forcing_candidate_submissio
     assert adapter.download_calls == 0
 
 
-def test_scheduler_invokes_forcing_producer_before_orchestration_for_ready_canonical_candidate(
+def test_scheduler_routes_ready_canonical_candidate_to_slurm_forcing_without_local_producer(
     tmp_path: Path,
 ) -> None:
     forcing_producer = FakeForcingProducer()
@@ -1842,38 +1985,16 @@ def test_scheduler_invokes_forcing_producer_before_orchestration_for_ready_canon
     result = scheduler.run_once()
 
     assert result.status == "submitted"
-    assert len(forcing_producer.calls) == 1
-    producer_call = forcing_producer.calls[0]
-    assert producer_call["source_id"] == "gfs"
-    assert producer_call["cycle_time"] == _dt("2026-05-21T06:00:00Z")
-    assert producer_call["model_id"] == "model_a"
-    assert producer_call["max_lead_hours"] == 168
-    assert producer_call["basin_id"] == "basin_a"
-    assert producer_call["basin_version_id"] == "basin_a_v1"
-    assert producer_call["river_network_version_id"] == "basin_a_rivnet_v1"
-    assert producer_call["canonical_product_id"] == "canon_gfs_2026052106"
-    assert producer_call["canonical_identity"]["canonical_product_id"] == "canon_gfs_2026052106"
-    assert producer_call["canonical_identity"]["policy_identity"]["source"] == "gfs"
-    assert producer_call["canonical_identity"]["source_object_identity"]["source"] == "gfs"
+    assert forcing_producer.calls == []
     assert result.evidence["counts"]["submitted_count"] == 1
-    assert result.evidence["execution_write_proof"]["met_result_table_writes"] is True
-    assert result.evidence["candidates"][0]["state_evidence"]["forcing_production"]["status"] == "forcing_ready"
-    assert result.evidence["model_run_evidence"][0]["stage"] == "forcing"
-    assert result.evidence["model_run_evidence"][0]["forcing"]["station_count"] == 2
-    assert result.evidence["model_run_evidence"][0]["forcing"]["variable_count"] == 6
-    assert result.evidence["model_run_evidence"][0]["forcing"]["manifest_checksum"] == "forcing-manifest-sha"
     assert orchestrator.calls
     submitted_basin = orchestrator.calls[0]["basins"][0]
     assert submitted_basin["forcing_version_id"] == "forc_gfs_2026052106_model_a"
-    assert submitted_basin["forcing_package_uri"].endswith("/forcing/gfs/2026052106/basin_a_v1/model_a/")
-    assert submitted_basin["forcing_uri"].endswith("/forcing/gfs/2026052106/basin_a_v1/model_a/forcing.tsd.forc")
-    assert submitted_basin["forcing_package_manifest_uri"].endswith(
-        "/forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json"
-    )
-    assert submitted_basin["forcing_manifest_checksum"] == "forcing-manifest-sha"
+    assert submitted_basin["forcing_package_uri"] is None
+    assert any(stage["stage"] == "forcing" for stage in result.evidence["model_run_evidence"][0]["stage_statuses"])
 
 
-def test_scheduler_blocks_orchestration_when_forcing_producer_fails(tmp_path: Path) -> None:
+def test_scheduler_does_not_execute_injected_control_node_forcing_producer(tmp_path: Path) -> None:
     forcing_producer = FakeForcingProducer(error=RuntimeError("missing fixed stations"))
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
@@ -1888,18 +2009,14 @@ def test_scheduler_blocks_orchestration_when_forcing_producer_fails(tmp_path: Pa
 
     result = scheduler.run_once()
 
-    assert result.status == "preflight_blocked"
-    assert forcing_producer.calls
-    assert orchestrator.calls == []
-    assert result.evidence["counts"]["submitted_count"] == 0
-    assert result.evidence["blocked_candidates"][0]["reason"] == "forcing_production_blocked"
-    assert result.evidence["model_run_evidence"][0]["stage"] == "forcing"
-    assert result.evidence["model_run_evidence"][0]["status"] == "blocked"
-    assert result.evidence["model_run_evidence"][0]["slurm_submit_called"] is False
-    assert result.evidence["no_mutation_proof"]["shud_runtime_called"] is False
+    assert result.status == "submitted"
+    assert forcing_producer.calls == []
+    assert len(orchestrator.calls) == 1
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert result.evidence["model_run_evidence"][0]["slurm_submit_called"] is True
 
 
-def test_scheduler_propagates_produced_forcing_identity_to_orchestration(tmp_path: Path) -> None:
+def test_scheduler_does_not_replace_candidate_identity_from_local_forcing_result(tmp_path: Path) -> None:
     forcing_producer = FakeForcingProducer(forcing_version_id="forc_reused_existing_ready")
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
@@ -1915,10 +2032,11 @@ def test_scheduler_propagates_produced_forcing_identity_to_orchestration(tmp_pat
     result = scheduler.run_once()
 
     assert result.status == "submitted"
-    assert result.evidence["candidates"][0]["forcing_version_id"] == "forc_reused_existing_ready"
-    assert result.evidence["model_run_evidence"][0]["forcing_version_id"] == "forc_reused_existing_ready"
-    assert orchestrator.calls[0]["basins"][0]["forcing_version_id"] == "forc_reused_existing_ready"
-    assert orchestrator.calls[0]["basins"][0]["forcing_package_manifest_uri"].endswith("forcing_package.json")
+    assert forcing_producer.calls == []
+    assert result.evidence["candidates"][0]["forcing_version_id"] == "forc_gfs_2026052106_model_a"
+    assert result.evidence["model_run_evidence"][0]["forcing_version_id"] == "forc_gfs_2026052106_model_a"
+    assert orchestrator.calls[0]["basins"][0]["forcing_version_id"] == "forc_gfs_2026052106_model_a"
+    assert orchestrator.calls[0]["basins"][0]["forcing_package_manifest_uri"] is None
 
 
 def _fresh_zero_row_readiness_provider(
@@ -2922,7 +3040,7 @@ def test_fresh_full_chain_candidate_forces_full_cohort_despite_residual_restart_
     assert cohort_candidates == [candidate]
 
 
-def test_full_cohort_candidates_are_candidate_scoped_for_model_isolation() -> None:
+def test_full_cohort_candidates_share_one_slurm_array_cohort() -> None:
     candidate_a = _scheduler_candidate_fixture()
     candidate_b = replace(
         candidate_a,
@@ -2942,10 +3060,60 @@ def test_full_cohort_candidates_are_candidate_scoped_for_model_isolation() -> No
         [candidate_a, candidate_b],
     )
 
-    assert cohorts == [
-        ([candidate_a], "cycle_gfs_2026052106_full_model_a"),
-        ([candidate_b], "cycle_gfs_2026052106_full_model_b"),
-    ]
+    assert len(cohorts) == 1
+    assert cohorts[0][0] == [candidate_a, candidate_b]
+    cohort_run_id = cohorts[0][1]
+    assert cohort_run_id is not None
+    assert re.fullmatch(r"cycle_gfs_2026052106_full_cohort_[0-9a-f]{12}", cohort_run_id)
+
+    reordered = scheduler_module._candidate_execution_cohorts(
+        "gfs",
+        _dt("2026-05-21T06:00:00Z"),
+        (0, "full"),
+        [candidate_b, candidate_a],
+    )
+    assert reordered[0][1] == cohort_run_id
+
+    expanded = scheduler_module._candidate_execution_cohorts(
+        "gfs",
+        _dt("2026-05-21T06:00:00Z"),
+        (0, "full"),
+        [
+            candidate_a,
+            candidate_b,
+            replace(
+                candidate_a,
+                candidate_id="gfs_2026052106_model_c",
+                model_id="model_c",
+            ),
+        ],
+    )
+    assert expanded[0][1] != cohort_run_id
+
+
+def test_shared_cohort_run_state_requires_valid_digest_and_matching_model() -> None:
+    expected = {
+        "source": "gfs",
+        "cycle_time": "2026-05-21T06:00:00Z",
+        "model_id": "model_a",
+    }
+    row = {"model_id": "model_a"}
+
+    assert scheduler_state_rows_module._shared_stage_cycle_run_matches_candidate(
+        "cycle_gfs_2026052106_forcing_cohort_012345abcdef",
+        row,
+        expected,
+    )
+    assert not scheduler_state_rows_module._shared_stage_cycle_run_matches_candidate(
+        "cycle_gfs_2026052106_forcing_cohort_not-a-digest",
+        row,
+        expected,
+    )
+    assert not scheduler_state_rows_module._shared_stage_cycle_run_matches_candidate(
+        "cycle_gfs_2026052106_forcing_cohort_012345abcdef",
+        {"model_id": "model_b"},
+        expected,
+    )
 
 
 def test_raw_manifest_reuse_overrides_residual_restart_stage(tmp_path: Path) -> None:
@@ -3081,9 +3249,9 @@ def test_canonical_unavailable_cycle_stays_blocked_no_fresh_marker(tmp_path: Pat
     assert "fresh_ingestion" not in blocked["state_evidence"]
 
 
-def test_multi_basin_raw_manifest_reuse_submits_per_model_convert_restart(tmp_path: Path) -> None:
-    # Raw-ready zero-canonical candidates restart at convert. Non-full restart
-    # cohorts intentionally get one idempotent orchestration run per model.
+def test_multi_basin_raw_manifest_reuse_submits_one_convert_array_cohort(tmp_path: Path) -> None:
+    # Raw-ready zero-canonical candidates restart at convert in one multi-task
+    # Slurm cohort; the scheduler process does not produce forcing itself.
     cycle_time = _dt("2026-05-21T06:00:00Z")
     policy = {"source": "gfs", "forecast_hours": [0, 3]}
     source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
@@ -3113,12 +3281,15 @@ def test_multi_basin_raw_manifest_reuse_submits_per_model_convert_restart(tmp_pa
     assert result.status == "submitted"
     assert forcing_producer.calls == []
     assert result.evidence["counts"]["submitted_count"] == 2
-    assert len(orchestrator.calls) == 2
-    basins = [call["basins"][0] for call in orchestrator.calls]
+    assert len(orchestrator.calls) == 1
+    basins = orchestrator.calls[0]["basins"]
     assert {basin["model_id"] for basin in basins} == {"qhh", "heihe"}
     for basin in basins:
         assert basin["restart_stage"] == "convert"
-        assert basin["orchestration_run_id"].endswith(f"_convert_{basin['model_id']}")
+        assert re.fullmatch(
+            r"cycle_gfs_2026052106_convert_cohort_[0-9a-f]{12}",
+            basin["orchestration_run_id"],
+        )
         assert basin["state_evidence"]["fresh_ingestion"] == {
             "required": False,
             "mode": "reuse_raw_then_convert",
@@ -5239,9 +5410,9 @@ def test_scheduler_pass_candidate_evidence_carries_repaired_stage_metadata_for_o
 
     assert result.evidence["counts"]["submitted_count"] == 1
     candidate_state = result.evidence["candidates"][0]["state_evidence"]["candidate_state"]
-    model_run_state = result.evidence["model_run_evidence"][0]["state_evidence"]["candidate_state"]
     submitted_state = orchestrator.calls[0]["basins"][0]["state_evidence"]["candidate_state"]
-    for state in (candidate_state, model_run_state, submitted_state):
+    assert "state_evidence" not in result.evidence["model_run_evidence"][0]
+    for state in (candidate_state, submitted_state):
         assert "decision" not in state
         assert "failure" not in state
         assert state["repaired_stage_evidence"]["original_failed_job_id"] == "job_cycle_gfs_2026052106_download"
@@ -6693,6 +6864,20 @@ def test_explicit_paths_must_stay_under_workspace(tmp_path: Path) -> None:
         _config(tmp_path, evidence_dir=outside)
 
 
+def test_scheduler_slurm_array_concurrency_bound_reads_env_and_clamps_positive(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND", "32")
+    config = ProductionSchedulerConfig(workspace_root=tmp_path)
+    assert config.slurm_array_concurrency_bound == 32
+    evidence = scheduler_module._scheduler_runtime_config_evidence(config)
+    assert evidence["slurm_array_concurrency_bound"] == 32
+
+    monkeypatch.setenv("NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND", "0")
+    assert ProductionSchedulerConfig(workspace_root=tmp_path).slurm_array_concurrency_bound == 1
+
+
 def test_fresh_default_workspace_runtime_paths_are_created_safely(
     monkeypatch: Any,
     tmp_path: Path,
@@ -8026,11 +8211,10 @@ def test_normal_mutation_sees_pre_execution_reservation_before_forcing_and_submi
     persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
 
     assert result.status == "submitted"
-    assert [item["reservation_exists"] for item in producer_observations] == [True]
+    assert producer_observations == []
     assert [item["reservation_exists"] for item in submit_observations] == [True]
-    assert producer_observations[0]["reservation"]["pass_id"] == pass_id
     assert submit_observations[0]["reservation"]["status"] == "reserved"
-    assert len(forcing_producer.calls) == 1
+    assert forcing_producer.calls == []
     assert len(orchestrator.calls) == 1
     for evidence in (result.evidence, persisted):
         assert evidence["evidence_pre_execution"]["status"] == "reserved"
@@ -8039,7 +8223,6 @@ def test_normal_mutation_sees_pre_execution_reservation_before_forcing_and_submi
             "scheduler_evidence_directory_write_before_production_mutation"
         )
         assert evidence["execution_write_proof"]["protected_by_pre_execution_evidence"] is True
-        assert evidence["no_mutation_proof"]["met_result_table_writes"] is True
         assert evidence["no_mutation_proof"]["slurm_submit_called"] is True
 
 
@@ -8593,7 +8776,7 @@ def test_scheduler_caps_reject_oversized_config_and_bound_candidate_work(
     monkeypatch: Any,
 ) -> None:
     with pytest.raises(ValueError, match="lookback_hours exceeds limit"):
-        _config(tmp_path, lookback_hours=169)
+        _config(tmp_path, lookback_hours=scheduler_module.MAX_LOOKBACK_HOURS + 1)
     with pytest.raises(ValueError, match="source count exceeds limit"):
         _config(tmp_path, sources=("gfs", "IFS", "a", "b", "c"))
 
@@ -8883,6 +9066,7 @@ def test_bounded_evidence_preserves_pre_execution_reservation_proof(
         assert evidence["slurm_status_sync_proof"]["protected_by_pre_execution_evidence"] is True
         assert evidence["resolved_runtime_roots"]["workspace_root"]["path"] == str(tmp_path.resolve())
         assert evidence["runtime_config"]["dry_run"] is False
+        assert evidence["runtime_config"]["slurm_array_concurrency_bound"] == 32
 
 
 def test_duplicate_active_model_identity_is_rejected_before_candidates(tmp_path: Path) -> None:
@@ -11065,19 +11249,20 @@ def test_multi_candidate_restart_cohorts_are_candidate_scoped_and_second_scan_se
     second = scheduler.run_once()
 
     assert first.evidence["counts"]["submitted_count"] == 2
-    assert len(orchestrator.calls) == 2
-    first_run_ids = [call["basins"][0]["orchestration_run_id"] for call in orchestrator.calls]
-    assert first_run_ids == [
-        "cycle_gfs_2026052106_parse_model_a",
-        "cycle_gfs_2026052106_parse_model_b",
-    ]
-    assert all(call["basins"][0]["restart_stage"] == "parse" for call in orchestrator.calls)
+    assert len(orchestrator.calls) == 1
+    first_run_ids = {basin["orchestration_run_id"] for basin in orchestrator.calls[0]["basins"]}
+    assert len(first_run_ids) == 1
+    assert re.fullmatch(
+        r"cycle_gfs_2026052106_parse_cohort_[0-9a-f]{12}",
+        next(iter(first_run_ids)),
+    )
+    assert all(basin["restart_stage"] == "parse" for basin in orchestrator.calls[0]["basins"])
     assert second.evidence["counts"]["submitted_count"] == 0
     assert [item["reason"] for item in second.evidence["skipped_candidates"]] == [
         "active_slurm_job",
         "active_slurm_job",
     ]
-    assert len(orchestrator.calls) == 2
+    assert len(orchestrator.calls) == 1
 
 
 def test_sibling_active_restart_does_not_block_downstream_retry_candidate(tmp_path: Path) -> None:
@@ -14721,6 +14906,7 @@ def test_slurm_scheduler_preserves_safe_manifest_fields_and_allowed_env(tmp_path
     assert submitted_basin["model_package_uri"] == safe_package_uri
     assert submitted_basin["model_package_manifest_uri"] == "s3://nhms-safe/models/model_a/manifest.json"
     assert submitted_basin["resource_profile"] == safe_resource_profile
+    assert submitted_basin["max_concurrent"] == 1
     assert submitted_basin["output_uri"] == "s3://nhms-safe/runs/model_a/output/"
     assert submitted_basin["slurm_env"] == {"NHMS_PROFILE": "prod/gfs_00"}
     assert "DATABASE_URL" not in submitted_basin
@@ -15132,17 +15318,17 @@ def test_issue_196_partial_and_blocked_model_run_evidence_redacts_secrets_and_re
     assert failed["candidate_outcome"]["log_uri"] == "s3://nhms/logs/forcing.out"
     assert failed["stage_statuses"][0]["log_uri"] == "s3://nhms/logs/forcing.out"
     assert failed["stage_statuses"][0]["task_results_summary"] == {
-        "total_count": 1,
+        "total_count": 2,
         "included_count": 1,
-        "omitted_count": 0,
+        "omitted_count": 1,
         "matched_count": 1,
         "matching": "candidate_identity",
         "limit": MAX_MODEL_RUN_STAGE_TASK_ROWS,
-        "status_counts": {"succeeded": 1},
+        "status_counts": {"succeeded": 1, "failed": 1},
     }
     assert failed["resource_summary"]["stage_accounting"][0]["accounting"]["max_rss"] == "3072K"
     assert len(failed["resource_summary"]["task_accounting"]) == 1
-    assert failed["resource_summary"]["task_accounting"][0]["slurm_job_id"] == "slurm_forcing_0"
+    assert failed["resource_summary"]["task_accounting"][0]["slurm_job_id"] == "slurm_forcing_1"
     assert any(blocker["code"] == "FORCING_TASK_FAILED" for blocker in failed["residual_blockers"])
     for raw_secret in ("supersecret", "rawsecret", "user:pass", "signature=abc", "X-Amz-Signature"):
         assert raw_secret not in evidence_text
@@ -15282,7 +15468,7 @@ def test_model_run_evidence_keeps_only_candidate_matched_large_array_task_rows(t
         assert (
             item["resource_summary"]["task_accounting"][0]["slurm_job_id"] == (stage["task_results"][0]["slurm_job_id"])
         )
-        assert summary["total_count"] == 1
+        assert summary["total_count"] == 3
         assert summary["matched_count"] == 1
         assert summary["matching"] == "candidate_identity"
 
@@ -17378,6 +17564,9 @@ class FakeProductionOrchestratorWithStageEvidence(FakeProductionOrchestrator):
         basins: list[dict[str, Any]],
     ) -> PipelineResult:
         self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
+        outcomes_by_model = {
+            str(outcome.get("model_id")): outcome for outcome in self.candidate_outcomes if outcome.get("model_id")
+        }
         stage = StageRunResult(
             stage="forcing",
             job_type="produce_forcing_array",
@@ -17389,17 +17578,28 @@ class FakeProductionOrchestratorWithStageEvidence(FakeProductionOrchestrator):
             error_message=self.stage_error_message,
             log_uri=self.stage_log_uri,
             accounting={"elapsed": "00:03:00", "max_rss": "3072K", "alloc_tres": "cpu=2,mem=4G"},
-            task_results=(
+            task_results=tuple(
                 {
-                    "task_id": 0,
-                    "array_task_id": 0,
-                    "model_id": basins[0]["model_id"] if basins else "model_a",
-                    "status": "succeeded",
-                    "slurm_job_id": "slurm_forcing_0",
-                    "exit_code": 0,
+                    "task_id": index,
+                    "array_task_id": index,
+                    "candidate_id": basin.get("candidate_id"),
+                    "run_id": basin.get("run_id"),
+                    "model_id": basin["model_id"],
+                    "status": (
+                        "failed"
+                        if str(outcomes_by_model.get(str(basin["model_id"]), {}).get("status") or "") == "failed"
+                        else "succeeded"
+                    ),
+                    "slurm_job_id": f"slurm_forcing_{index}",
+                    "exit_code": (
+                        1
+                        if str(outcomes_by_model.get(str(basin["model_id"]), {}).get("status") or "") == "failed"
+                        else 0
+                    ),
                     "log_uri": self.stage_log_uri,
                     "accounting": {"elapsed": "00:03:00", "max_rss": "3072K"},
-                },
+                }
+                for index, basin in enumerate(basins)
             ),
         )
         return PipelineResult(
@@ -18917,6 +19117,103 @@ def test_file_registry_publisher_failure_keeps_previous_manifest(
 
     assert error_info.value.reason == "registry_model_package_manifest_missing"
     assert paths["NHMS_SCHEDULER_REGISTRY_MANIFEST"].read_bytes() == previous
+
+
+def test_file_registry_direct_grid_requirement_blocks_legacy_publish_and_load(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    generated_at = _dt("2026-06-27T00:00:00Z")
+    legacy, _ = _db_free_model_manifest_fixture(roots, _model("model_a", "basin_a"))
+    destination = paths["NHMS_SCHEDULER_REGISTRY_MANIFEST"]
+    scheduler_module.publish_scheduler_registry_manifest(
+        [legacy],
+        destination,
+        object_store_root=roots["object_store_root"],
+        object_store_prefix="s3://nhms",
+        generated_at=generated_at,
+        require_direct_grid=False,
+    )
+    previous = destination.read_bytes()
+
+    registry = scheduler_module.FileSchedulerModelRegistry(
+        destination,
+        object_store_root=roots["object_store_root"],
+        object_store_prefix="s3://nhms",
+        now=generated_at,
+        require_direct_grid=True,
+    )
+    assert registry.list_models(basin_version_id=None, active=True, limit=10, offset=0)[
+        "items"
+    ] == []
+    assert registry.scheduler_registry_evidence()["blockers"][0]["code"] == (
+        "registry_direct_grid_required"
+    )
+
+    with pytest.raises(scheduler_module.SchedulerFileProviderError) as error_info:
+        scheduler_module.publish_scheduler_registry_manifest(
+            [legacy],
+            destination,
+            object_store_root=roots["object_store_root"],
+            object_store_prefix="s3://nhms",
+            generated_at=generated_at,
+            require_direct_grid=True,
+        )
+
+    assert error_info.value.reason == "registry_direct_grid_required"
+    assert destination.read_bytes() == previous
+
+
+def test_file_registry_direct_grid_requirement_accepts_direct_variant(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    generated_at = _dt("2026-06-27T00:00:00Z")
+    model, _ = _db_free_model_manifest_fixture(roots, _model("model_a", "basin_a"))
+    model["resource_profile"] = {
+        **model["resource_profile"],
+        "forcing_mapping_mode": "direct_grid",
+        "direct_grid_forcing": {"forcing_mapping_mode": "direct_grid"},
+    }
+
+    receipt = scheduler_module.publish_scheduler_registry_manifest(
+        [model],
+        paths["NHMS_SCHEDULER_REGISTRY_MANIFEST"],
+        object_store_root=roots["object_store_root"],
+        object_store_prefix="s3://nhms",
+        generated_at=generated_at,
+        require_direct_grid=True,
+    )
+
+    assert receipt["model_count"] == 1
+
+
+def test_direct_grid_resource_profile_evidence_compacts_station_bindings() -> None:
+    profile = {
+        "forcing_mapping_mode": "direct_grid",
+        "direct_grid_forcing": {
+            "forcing_mapping_mode": "direct_grid",
+            "mapping_asset_identity": "dg-gfs-example",
+            "model_input_package_id": "dg-input-example",
+            "grid_id": "gfs_0p25",
+            "grid_signature": "a" * 64,
+            "applicable_source_ids": ["gfs"],
+            "stations": [
+                {"station_id": f"station-{index}", "grid_cell_id": str(index)}
+                for index in range(500)
+            ],
+        },
+    }
+
+    evidence = scheduler_module._resource_profile_evidence(profile)
+
+    contract = evidence["direct_grid_forcing"]
+    assert contract["station_count"] == 500
+    assert contract["grid_id"] == "gfs_0p25"
+    assert contract["applicable_source_ids"] == ["gfs"]
+    assert "stations" not in contract
 
 
 def test_file_canonical_readiness_publisher_and_provider_use_existing_evaluator(
@@ -23074,11 +23371,8 @@ def test_concurrent_candidates_submits_overlap(tmp_path: Path) -> None:
         assert entry["submit_finished_at"] >= entry["submit_started_at"]
 
 
-def test_concurrent_candidates_same_source_cycle_submits_basins_overlap(tmp_path: Path) -> None:
-    import threading
-
-    barrier = threading.Barrier(2)
-    orchestrator = _BarrierOrchestrator(barrier)
+def test_same_source_cycle_candidates_submit_as_one_multi_basin_cohort(tmp_path: Path) -> None:
+    orchestrator = FakeProductionOrchestrator()
     config = _config(tmp_path, sources=("gfs",), concurrent_submit_bound=2)
     scheduler = ProductionScheduler(
         config,
@@ -23109,10 +23403,52 @@ def test_concurrent_candidates_same_source_cycle_submits_basins_overlap(tmp_path
             "fcst_gfs_2026052106_model_b",
         ),
     ]
-    assert orchestrator.calls == ["gfs", "gfs"]
+    assert len(orchestrator.calls) == 1
+    assert orchestrator.calls[0]["source"] == "gfs"
+    assert [basin["model_id"] for basin in orchestrator.calls[0]["basins"]] == ["model_a", "model_b"]
     receipt = scheduler._last_submit_overlap_receipt
-    assert receipt.overlapping is True
-    assert receipt.to_dict()["concurrent_submit_count"] == 2
+    assert receipt.overlapping is False
+    assert receipt.to_dict()["concurrent_submit_count"] == 1
+
+
+def test_cross_source_slurm_cohorts_overlap_without_local_forcing(
+    tmp_path: Path,
+) -> None:
+    import threading
+
+    cohort_barrier = threading.Barrier(2)
+
+    class _AdvancingOrchestrator(FakeProductionOrchestrator):
+        def orchestrate_cycle(
+            self,
+            source: str,
+            cycle_time: datetime,
+            basins: list[dict[str, Any]],
+        ) -> PipelineResult:
+            cohort_barrier.wait(timeout=5.0)
+            return super().orchestrate_cycle(source, cycle_time, basins)
+
+    forcing_producer = FakeForcingProducer()
+    orchestrator = _AdvancingOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, sources=("gfs", "IFS"), concurrent_submit_bound=2),
+        registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
+        adapters={"gfs": FakeAdapter("gfs", []), "IFS": FakeAdapter("IFS", [])},
+        forcing_producer=forcing_producer,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+    candidates = [
+        _concurrency_candidate("gfs", "model_a", "basin_a"),
+        _concurrency_candidate("IFS", "model_b", "basin_b"),
+    ]
+
+    evidence, blocked, prepared = scheduler._execute_candidates_async(candidates)
+
+    assert blocked == []
+    assert len(prepared) == 2
+    assert forcing_producer.calls == []
+    assert {call["source"] for call in orchestrator.calls} == {"gfs", "IFS"}
+    assert scheduler._last_submit_overlap_receipt.overlapping is True
 
 
 def test_concurrent_submit_bound_gt_one_dedupes_same_candidate_resubmit(tmp_path: Path) -> None:
@@ -23715,6 +24051,124 @@ def test_concurrency_stays_within_configured_bound(tmp_path: Path) -> None:
     # Never exceed the configured bound, but do run more than one at a time.
     assert peak <= 2
     assert peak >= 2
+
+
+def test_bound_32_dispatches_36_candidates_as_two_cross_source_slurm_cohorts(tmp_path: Path) -> None:
+    import threading
+    import time as _time
+
+    active = 0
+    peak = 0
+    cohort_sizes: list[int] = []
+    cohort_array_bounds: list[int] = []
+    lock = threading.Lock()
+
+    class _Bound32Orchestrator:
+        object_store = None
+
+        def orchestrate_cycle(
+            self,
+            source: str,
+            cycle_time: datetime,
+            basins: list[dict[str, Any]],
+        ) -> PipelineResult:
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+                cohort_sizes.append(len(basins))
+                cohort_array_bounds.append(int(basins[0]["max_concurrent"]))
+            try:
+                _time.sleep(0.05)
+            finally:
+                with lock:
+                    active -= 1
+            stages = tuple(
+                StageRunResult(
+                    stage=stage.stage,
+                    job_type=stage.job_type,
+                    pipeline_job_id=f"job_{stage.stage}",
+                    slurm_job_id=f"slurm_{stage.stage}",
+                    status="succeeded",
+                )
+                for stage in M3_STAGES
+            )
+            return PipelineResult(
+                run_id=f"cycle_{source.lower()}_{format_cycle_time(cycle_time)}",
+                cycle_id=cycle_id_for(source, cycle_time),
+                status="complete",
+                stages=stages,
+                candidate_outcomes=(),
+            )
+
+    scheduler = ProductionScheduler(
+        _config(tmp_path, sources=("gfs", "IFS"), concurrent_submit_bound=32),
+        registry=FakeRegistry([_model("model_00", "basin_00")]),
+        adapters={"gfs": FakeAdapter("gfs", []), "IFS": FakeAdapter("IFS", [])},
+        orchestrator_factory=lambda _source_id: _Bound32Orchestrator(),
+    )
+    candidates = [
+        _concurrency_candidate(source, f"model_{index:02d}", f"basin_{index:02d}")
+        for source in ("gfs", "IFS")
+        for index in range(18)
+    ]
+
+    evidence = scheduler._execute_candidates(candidates)
+
+    assert len(evidence) == 36
+    assert peak == 2
+    assert sorted(cohort_sizes) == [18, 18]
+    assert sorted(cohort_array_bounds) == [16, 16]
+    assert sum(cohort_array_bounds) == 32
+    assert scheduler._last_submit_overlap_receipt.to_dict()["concurrent_submit_count"] == 2
+
+
+def test_slurm_array_budget_waterfills_current_14_18_4_cohorts_to_global_32() -> None:
+    from services.orchestrator import scheduler_execution
+
+    def unit(size: int) -> Any:
+        return scheduler_execution._CohortUnit(
+            source_id="gfs",
+            cycle_time=_dt("2026-07-05T12:00:00Z"),
+            cycle_id="gfs_2026070512",
+            execution_candidates=[object()] * size,
+            cohort_run_id=None,
+            array_max_concurrent=1,
+        )
+
+    budgets = scheduler_execution._array_concurrency_budgets(
+        [unit(14), unit(18), unit(4)],
+        global_bound=32,
+        worker_bound=32,
+    )
+
+    assert budgets == [14, 14, 4]
+    assert sum(budgets) == 32
+
+
+def test_slurm_array_budget_stays_global_when_more_cohorts_than_control_workers() -> None:
+    from services.orchestrator import scheduler_execution
+
+    units = [
+        scheduler_execution._CohortUnit(
+            source_id=f"source_{index}",
+            cycle_time=_dt("2026-07-05T12:00:00Z"),
+            cycle_id=f"source_{index}_2026070512",
+            execution_candidates=[object()] * 20,
+            cohort_run_id=None,
+            array_max_concurrent=1,
+        )
+        for index in range(5)
+    ]
+
+    budgets = scheduler_execution._array_concurrency_budgets(
+        units,
+        global_bound=32,
+        worker_bound=4,
+    )
+
+    assert budgets == [8, 8, 8, 8, 8]
+    assert sum(sorted(budgets, reverse=True)[:4]) == 32
 
 
 # ---------------------------------------------------------------------------

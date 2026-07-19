@@ -144,6 +144,12 @@ class ProductionSchedulerConfig:
             _scheduler.DEFAULT_CONCURRENT_SUBMIT_BOUND,
         )
     )
+    slurm_array_concurrency_bound: int = field(
+        default_factory=lambda: _scheduler._env_int(
+            "NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND",
+            32,
+        )
+    )
     progress_guard_max_no_progress_steps: int = field(
         default_factory=lambda: _scheduler._env_int("NHMS_SCHEDULER_PROGRESS_GUARD_MAX_NO_PROGRESS_STEPS", 256)
     )
@@ -382,6 +388,11 @@ class ProductionSchedulerConfig:
         object.__setattr__(self, "interval_seconds", max(float(self.interval_seconds), 1.0))
         object.__setattr__(self, "retry_limit", max(int(self.retry_limit), 0))
         object.__setattr__(self, "concurrent_submit_bound", max(int(self.concurrent_submit_bound), 1))
+        object.__setattr__(
+            self,
+            "slurm_array_concurrency_bound",
+            max(int(self.slurm_array_concurrency_bound), 1),
+        )
         object.__setattr__(
             self,
             "progress_guard_max_no_progress_steps",

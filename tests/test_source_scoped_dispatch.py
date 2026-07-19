@@ -7,10 +7,9 @@ things pinned by the parent OpenSpec change:
 * ``in_scope_dispatches``: an in-scope source lands in the candidate list; a
   legacy IDW model (no direct-grid contract) is unaffected regardless of
   requested source.
-* ``out_of_scope_fails_closed``: an out-of-scope source is blocked at the
-  candidate-assembly boundary with the parser's fail-closed error surfaced
-  and no fallback candidate.
-* ``boundary_not_producer_only``: the block is decided at
+* ``out_of_scope_not_a_candidate``: an out-of-scope source/model pairing is
+  excluded before candidate construction and cannot block in-scope work.
+* ``boundary_not_producer_only``: the exclusion is decided at
   ``build_candidates`` -- ``forcing_producer.produce`` is never called for
   the out-of-scope pairing.
 
@@ -326,14 +325,14 @@ def test_in_scope_dispatches_legacy_idw_model_unaffected_by_source_scope_check(
     assert blocked == []
 
 
-# --- out_of_scope_fails_closed --------------------------------------------
+# --- out_of_scope_not_a_candidate -----------------------------------------
 
 
-def test_out_of_scope_fails_closed_no_fallback_candidate(tmp_path: Path) -> None:
-    """An out-of-scope source is blocked with the parser's source-scope
-    error surfaced; no fallback IDW/other-source candidate is produced.
+def test_out_of_scope_pairing_is_excluded_before_candidate_creation(tmp_path: Path) -> None:
+    """An out-of-scope source/model pairing is not scheduler work.
 
-    Locks §4.1 evidence key ``out_of_scope_fails_closed``.
+    It is excluded before candidate construction, without fabricating an IDW
+    fallback or a pass-blocking failure candidate.
     """
 
     scheduler = _TestProductionScheduler(_config(tmp_path))
@@ -351,50 +350,35 @@ def test_out_of_scope_fails_closed_no_fallback_candidate(tmp_path: Path) -> None
     assert skipped == []
     assert duplicate_exclusions == []
     assert slurm_sync == []
-    assert len(blocked) == 1
-
-    blocked_candidate = blocked[0]
-    assert blocked_candidate.status == "blocked"
-    assert blocked_candidate.reason == "direct_grid_source_out_of_scope"
-    assert blocked_candidate.model_id == "model_direct_ifs_only"
-    assert blocked_candidate.source_id == "gfs"
-
-    scope_evidence = blocked_candidate.state_evidence["direct_grid_source_scope"]
-    assert scope_evidence["code"] == "direct_grid_source_out_of_scope"
-    assert scope_evidence["requested_source_id"] == "gfs"
-    # Parser normalizes 'IFS' -> 'IFS' (uppercase); 'gfs' -> 'gfs' (lowercase).
-    assert scope_evidence["normalized_source_id"] == "gfs"
-    assert list(scope_evidence["applicable_source_ids"]) == ["IFS"]
-    assert scope_evidence["message"] == (
-        "Direct-grid contract does not apply to the current source."
-    )
+    assert blocked == []
 
 
-def test_out_of_scope_fails_closed_no_second_candidate_for_other_source(
+def test_source_scoped_variants_do_not_form_a_cartesian_product(
     tmp_path: Path,
 ) -> None:
-    """The scheduler never fabricates a fallback candidate for a different
-    source when the requested source is out of scope for this basin's
-    direct-grid variant. Locks §4.1 evidence key ``out_of_scope_fails_closed``.
-    """
+    """Two source-scoped variants and two cycles yield two, not four, tasks."""
 
     scheduler = _TestProductionScheduler(_config(tmp_path))
 
     candidates, blocked, _skipped, _duplicates, _slurm = scheduler._build_candidates(
         models=[
             _direct_grid_model(
+                model_id="model_direct_gfs_only",
+                applicable_source_ids=["GFS"],
+            ),
+            _direct_grid_model(
                 model_id="model_direct_ifs_only",
                 applicable_source_ids=["IFS"],
             )
         ],
-        cycles=[_cycle_for("gfs")],
+        cycles=[_cycle_for("gfs"), _cycle_for("IFS")],
     )
 
-    # No candidate for any source: the block is fail-closed, not "try IFS
-    # instead" or "try legacy IDW".
-    assert candidates == []
-    assert all(item.source_id == "gfs" for item in blocked)
-    assert all(item.reason == "direct_grid_source_out_of_scope" for item in blocked)
+    assert {(item.model_id, item.source_id) for item in candidates} == {
+        ("model_direct_gfs_only", "gfs"),
+        ("model_direct_ifs_only", "IFS"),
+    }
+    assert blocked == []
 
 
 # --- boundary_not_producer_only -------------------------------------------
@@ -429,8 +413,7 @@ def test_boundary_not_producer_only_producer_never_called_for_out_of_scope(
     # even after we pipe the (empty) ``candidates`` through the real
     # execution seam.
     assert candidates == []
-    assert len(blocked) == 1
-    assert blocked[0].reason == "direct_grid_source_out_of_scope"
+    assert blocked == []
 
     ready, forcing_blocked, evidence = scheduler._produce_forcing_for_candidates(candidates)
     assert ready == []
@@ -486,14 +469,10 @@ def test_malformed_direct_contract_still_blocked_under_distinct_reason(
     assert "direct_grid_source_scope" not in blocked_candidate.state_evidence
 
 
-def test_malformed_contract_block_distinguished_from_source_scope_block(
+def test_malformed_contract_remains_blocked_while_scope_mismatch_is_excluded(
     tmp_path: Path,
 ) -> None:
-    """The two direct-grid block reasons are structurally distinct: the
-    source-scope block uses ``direct_grid_source_scope`` state-evidence key
-    and reason ``direct_grid_source_out_of_scope``; the shape-defense block
-    uses ``direct_grid_contract`` and ``direct_grid_contract_invalid``.
-    """
+    """Expected non-applicability is excluded; contract corruption blocks."""
 
     scheduler = _TestProductionScheduler(_config(tmp_path))
 
@@ -517,9 +496,7 @@ def test_malformed_contract_block_distinguished_from_source_scope_block(
         cycles=[_cycle_for("gfs")],
     )
 
-    assert blocked_scope[0].reason == "direct_grid_source_out_of_scope"
-    assert "direct_grid_source_scope" in blocked_scope[0].state_evidence
-    assert "direct_grid_contract" not in blocked_scope[0].state_evidence
+    assert blocked_scope == []
 
     assert blocked_shape[0].reason == "direct_grid_contract_invalid"
     assert "direct_grid_contract" in blocked_shape[0].state_evidence

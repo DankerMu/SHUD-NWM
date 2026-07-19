@@ -196,6 +196,7 @@ def _candidate_basin_manifest(
         "model_package_uri": candidate.model_package_uri,
         "model_package_manifest_uri": _model_package_manifest_uri(candidate),
         "resource_profile": dict(candidate.resource_profile),
+        "max_concurrent": candidate.slurm_array_max_concurrent,
         "display_capabilities": dict(candidate.display_capabilities),
         "scenario_id": candidate.scenario_id,
         "run_id": candidate.run_id,

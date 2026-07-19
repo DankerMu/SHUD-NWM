@@ -5,7 +5,7 @@ import json
 import logging
 import math
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -31,6 +31,14 @@ DEFAULT_DB_CONNECT_TIMEOUT_SECONDS = 10
 DEFAULT_DB_STATEMENT_TIMEOUT_MS = 60_000
 PARSE_READY_RUN_STATUSES = ("succeeded", "parsed", "failed")
 FAILABLE_RUN_STATUSES = ("created", "staged", "submitted", "running", "succeeded", "parsed")
+
+
+def _result_value(row: Any, key: str, index: int) -> Any:
+    if row is None:
+        return None
+    if isinstance(row, Mapping):
+        return row.get(key)
+    return row[index]
 
 
 class OutputParsingError(RuntimeError):
@@ -666,8 +674,38 @@ class PsycopgOutputParserRepository:
             with self.transaction() as repository:
                 repository.upsert_river_timeseries(rows, batch_size=batch_size)
             return
-        valid_time_min = min(row.valid_time for row in rows)
-        valid_time_max = max(row.valid_time for row in rows)
+        incoming_windows: dict[tuple[str, str, str], tuple[datetime, datetime]] = {}
+        for replacement_key in replacement_keys:
+            key_times = [
+                row.valid_time
+                for row in rows
+                if (row.run_id, row.river_network_version_id, row.variable) == replacement_key
+            ]
+            incoming_windows[replacement_key] = (min(key_times), max(key_times))
+        replacement_windows: dict[tuple[str, str, str], tuple[datetime, datetime]] = {}
+        for replacement_key in replacement_keys:
+            with self._connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT MIN(valid_time) AS valid_time_min,
+                           MAX(valid_time) AS valid_time_max
+                    FROM hydro.river_timeseries
+                    WHERE run_id = %s
+                      AND river_network_version_id = %s
+                      AND variable = %s
+                    """,
+                    replacement_key,
+                )
+                existing_window = cursor.fetchone()
+            incoming_min, incoming_max = incoming_windows[replacement_key]
+            existing_min = _result_value(existing_window, "valid_time_min", 0)
+            existing_max = _result_value(existing_window, "valid_time_max", 1)
+            replacement_windows[replacement_key] = (
+                min(incoming_min, _ensure_utc(existing_min)) if existing_min is not None else incoming_min,
+                max(incoming_max, _ensure_utc(existing_max)) if existing_max is not None else incoming_max,
+            )
+        valid_time_min = min(window[0] for window in replacement_windows.values())
+        valid_time_max = max(window[1] for window in replacement_windows.values())
         with self._connection.cursor() as guard_cursor:
             check_batch_targets_uncompressed(
                 guard_cursor,
@@ -677,14 +715,19 @@ class PsycopgOutputParserRepository:
                 valid_time_max=valid_time_max,
             )
         for run_id, river_network_version_id, variable in replacement_keys:
+            replacement_min, replacement_max = replacement_windows[
+                (run_id, river_network_version_id, variable)
+            ]
             self._fetch_all(
                 """
                 DELETE FROM hydro.river_timeseries
                 WHERE run_id = %s
                   AND river_network_version_id = %s
                   AND variable = %s
+                  AND valid_time >= %s
+                  AND valid_time <= %s
                 """,
-                (run_id, river_network_version_id, variable),
+                (run_id, river_network_version_id, variable, replacement_min, replacement_max),
             )
         value_rows = [
             (

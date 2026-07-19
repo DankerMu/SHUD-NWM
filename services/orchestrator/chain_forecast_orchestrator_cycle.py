@@ -6,6 +6,7 @@ _FORCE_TERMINAL_RESUBMIT_DECISIONS = {
     "retry_missing_forecast_output",
     "retry_strict_warm_start_terminal_init_state_mismatch",
     "retry_strict_warm_start_terminal_run_manifest_missing",
+    "retry_strict_warm_start_retry_run_manifest_mismatch",
     "retry_terminal_run_manifest_missing",
 }
 _STAGE_ORDER = {
@@ -686,20 +687,25 @@ def _terminal_stage_needs_forced_resubmit(
     status = str(job.get("status") or "")
     if status not in _chain.TERMINAL_JOB_STATUSES:
         return False
-    if len(context.active_basins) != 1:
+    if not context.active_basins:
         return False
-    state_evidence = context.active_basins[0].get("state_evidence")
-    if not isinstance(state_evidence, _chain.Mapping):
-        return False
-    if state_evidence.get("decision") not in _FORCE_TERMINAL_RESUBMIT_DECISIONS:
-        return False
-    restart_stage = _canonical_stage(
-        state_evidence.get("restart_stage") or state_evidence.get("restart_from_stage") or context.restart_stage
-    )
     job_stage = _canonical_stage(job.get("stage") or job.get("job_type"))
-    if restart_stage is None or job_stage is None:
+    if job_stage is None:
         return False
-    return _STAGE_ORDER[job_stage] >= _STAGE_ORDER[restart_stage]
+    for basin in context.active_basins:
+        state_evidence = basin.get("state_evidence")
+        if not isinstance(state_evidence, _chain.Mapping):
+            return False
+        if state_evidence.get("decision") not in _FORCE_TERMINAL_RESUBMIT_DECISIONS:
+            return False
+        restart_stage = _canonical_stage(
+            state_evidence.get("restart_stage")
+            or state_evidence.get("restart_from_stage")
+            or context.restart_stage
+        )
+        if restart_stage is None or _STAGE_ORDER[job_stage] < _STAGE_ORDER[restart_stage]:
+            return False
+    return True
 
 
 def _canonical_stage(value: _chain.Any) -> str | None:

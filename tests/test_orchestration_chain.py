@@ -1420,6 +1420,101 @@ def test_cycle_stage_manifest_forwards_db_free_file_provider_paths(
     assert manifest["scheduler_state_index"] == str(state_index)
 
 
+def test_cycle_stage_manifest_propagates_one_array_concurrency_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from services.orchestrator import chain_manifests
+
+    monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_ROOTS", str(tmp_path))
+    basins = [
+        {"model_id": "model_a", "run_id": "run_a", "max_concurrent": 14},
+        {"model_id": "model_b", "run_id": "run_b", "max_concurrent": 14},
+    ]
+    orchestrator = types.SimpleNamespace(
+        config=OrchestratorConfig(
+            workspace_root=tmp_path / "workspace",
+            object_store_root=tmp_path / "object-store",
+            object_store_prefix="s3://nhms",
+        ),
+        _reindexed_manifest_entries=lambda values: list(values),
+        _forecast_scenario_id=lambda _source: "forecast_gfs_deterministic",
+    )
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-07-05T12:00:00Z"),
+        cycle_id="gfs_2026070512",
+        run_id="cycle_gfs_2026070512",
+        all_basins=basins,
+        active_basins=basins,
+    )
+    stage = StageDefinition(
+        "forcing",
+        "produce_forcing_array",
+        "produce_forcing_array.sbatch",
+        "forcing_ready",
+        "failed_forcing",
+        is_array=True,
+    )
+
+    manifest = chain_manifests.build_cycle_stage_manifest(
+        orchestrator,
+        stage,
+        context,
+        model_run_stage_evidence=lambda _stage, entry, **_kwargs: dict(entry),
+    )
+
+    assert manifest["max_concurrent"] == 14
+
+
+@pytest.mark.parametrize("bounds", [(14, 13), (14, 0), (14, "13")])
+def test_cycle_stage_manifest_rejects_inconsistent_or_invalid_array_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    bounds: tuple[object, object],
+) -> None:
+    from services.orchestrator import chain_manifests
+
+    monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_ROOTS", str(tmp_path))
+    basins = [
+        {"model_id": "model_a", "run_id": "run_a", "max_concurrent": bounds[0]},
+        {"model_id": "model_b", "run_id": "run_b", "max_concurrent": bounds[1]},
+    ]
+    orchestrator = types.SimpleNamespace(
+        config=OrchestratorConfig(
+            workspace_root=tmp_path / "workspace",
+            object_store_root=tmp_path / "object-store",
+            object_store_prefix="s3://nhms",
+        ),
+        _reindexed_manifest_entries=lambda values: list(values),
+        _forecast_scenario_id=lambda _source: "forecast_gfs_deterministic",
+    )
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-07-05T12:00:00Z"),
+        cycle_id="gfs_2026070512",
+        run_id="cycle_gfs_2026070512",
+        all_basins=basins,
+        active_basins=basins,
+    )
+    stage = StageDefinition(
+        "forcing",
+        "produce_forcing_array",
+        "produce_forcing_array.sbatch",
+        "forcing_ready",
+        "failed_forcing",
+        is_array=True,
+    )
+
+    with pytest.raises(OrchestratorError, match="concurrency budget"):
+        chain_manifests.build_cycle_stage_manifest(
+            orchestrator,
+            stage,
+            context,
+            model_run_stage_evidence=lambda _stage, entry, **_kwargs: dict(entry),
+        )
+
+
 def test_cycle_stage_manifest_prefers_slurm_runtime_db_free_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1936,6 +2031,12 @@ def test_terminal_stage_forecast_state_save_qc_skips_parse_and_publish(tmp_path:
         "state_save_qc",
     ]
     assert [stage.status for stage in result.stages] == ["succeeded", "succeeded", "succeeded", "succeeded"]
+    assert {run["status"] for run in repository.hydro_runs.values()} == {"succeeded"}
+    assert {run["slurm_job_id"] for run in repository.hydro_runs.values()} == {
+        "2003_0",
+        "2003_1",
+        "2003_2",
+    }
     assert "parse" not in {job["stage"] for job in repository.jobs.values()}
     assert "publish" not in {job["stage"] for job in repository.jobs.values()}
 
@@ -3107,6 +3208,68 @@ def test_model_package_refresh_candidate_scoped_ignores_stale_active_pipeline_pl
     assert "forecast" in submitted_stages
     assert "convert" not in submitted_stages
     assert "forcing" not in submitted_stages
+
+
+def test_strict_warm_replacement_cohort_ignores_stale_created_hydro_placeholders(
+    tmp_path: Path,
+) -> None:
+    class StaleActiveStrictWarmRepository(FakeCycleRepository):
+        def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
+            raise AssertionError(
+                f"strict-warm cohort must not fall back to cycle active check: {source_id} {cycle_time}"
+            )
+
+        def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+            del source_id, cycle_time, model_id
+            return True
+
+    repository = StaleActiveStrictWarmRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basins = _basins(2)
+    cohort_run_id = "cycle_gfs_2026050100_forecast_cohort_deadbeef0001"
+    for basin in basins:
+        basin["orchestration_run_id"] = cohort_run_id
+        basin["restart_stage"] = "forecast"
+        basin["state_evidence"] = {
+            "decision": "retry_strict_warm_start_retry_run_manifest_mismatch",
+            "restart_stage": "forecast",
+            "native_shud_resubmitted": True,
+        }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    assert result.status == "complete"
+    submitted_stages = {submission["stage"] for submission in client.submissions}
+    assert "forecast" in submitted_stages
+    assert "state_save_qc" in submitted_stages
+    assert "forcing" not in submitted_stages
+    assert "convert" not in submitted_stages
+
+
+def test_mixed_strict_warm_cohort_keeps_active_pipeline_guard(tmp_path: Path) -> None:
+    repository = FakeCycleRepository(active=True)
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basins = _basins(2)
+    cohort_run_id = "cycle_gfs_2026050100_forecast_cohort_deadbeef0002"
+    for basin in basins:
+        basin["orchestration_run_id"] = cohort_run_id
+        basin["restart_stage"] = "forecast"
+        basin["state_evidence"] = {
+            "decision": "retry_strict_warm_start_retry_run_manifest_mismatch",
+            "restart_stage": "forecast",
+        }
+    basins[1]["state_evidence"] = {
+        "decision": "retry_after_completed_stage",
+        "restart_stage": "forecast",
+    }
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    assert exc_info.value.error_code == "PIPELINE_ALREADY_ACTIVE"
+    assert client.submissions == []
 
 
 def test_completed_stage_resume_ignores_stale_active_hydro_placeholder(tmp_path: Path) -> None:
@@ -10409,6 +10572,53 @@ def test_auto_manifest_repair_resubmits_terminal_restart_stages() -> None:
     assert ForecastOrchestrator._terminal_stage_needs_manual_retry(
         context,
         {"stage": "forecast", "status": "reservation_lost"},
+    )
+
+
+def test_auto_manifest_repair_resubmits_terminal_cohort_when_every_basin_requires_it() -> None:
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=datetime(2026, 5, 1, tzinfo=UTC),
+        cycle_id="gfs_2026050100",
+        run_id="cycle_gfs_2026050100_full_cohort",
+        all_basins=[],
+        active_basins=[
+            {
+                "state_evidence": {
+                    "decision": "retry_strict_warm_start_retry_run_manifest_mismatch",
+                    "restart_stage": "forecast",
+                }
+            },
+            {
+                "state_evidence": {
+                    "decision": "retry_strict_warm_start_retry_run_manifest_mismatch",
+                    "restart_stage": "forecast",
+                }
+            },
+        ],
+        restart_stage="forecast",
+    )
+
+    assert ForecastOrchestrator._terminal_stage_needs_manual_retry(
+        context,
+        {"stage": "forecast", "status": "succeeded"},
+    )
+    assert ForecastOrchestrator._terminal_stage_needs_manual_retry(
+        context,
+        {"stage": "state_save_qc", "status": "succeeded"},
+    )
+    assert not ForecastOrchestrator._terminal_stage_needs_manual_retry(
+        context,
+        {"stage": "forcing", "status": "succeeded"},
+    )
+
+    context.active_basins[1]["state_evidence"] = {
+        "decision": "retry_after_completed_stage",
+        "restart_stage": "forcing",
+    }
+    assert not ForecastOrchestrator._terminal_stage_needs_manual_retry(
+        context,
+        {"stage": "forecast", "status": "succeeded"},
     )
 
 

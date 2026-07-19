@@ -252,7 +252,12 @@ def _nonempty_evidence_value(value: Any) -> bool:
     return bool(value)
 
 
-def _candidate_identity_evidence(candidate: SchedulerCandidate, *, output_uri: str | None = None) -> dict[str, Any]:
+def _candidate_identity_evidence(
+    candidate: SchedulerCandidate,
+    *,
+    output_uri: str | None = None,
+    include_state_evidence: bool = True,
+) -> dict[str, Any]:
     contract_identity = _candidate_production_identity(candidate)
     evidence = {
         "production_identity_contract": production_identity_contract_evidence(contract_identity),
@@ -285,7 +290,7 @@ def _candidate_identity_evidence(candidate: SchedulerCandidate, *, output_uri: s
     resolved_output_uri = output_uri or _candidate_output_uri(candidate)
     if resolved_output_uri is not None:
         evidence["output_uri"] = _redact_secret_manifest_for_evidence(resolved_output_uri, "output_uri")
-    if candidate.state_evidence:
+    if include_state_evidence and candidate.state_evidence:
         evidence["state_evidence"] = _evidence_safe(candidate.state_evidence)
     return evidence
 
@@ -491,6 +496,32 @@ def _resource_profile_evidence(resource_profile: Mapping[str, Any]) -> dict[str,
     if not isinstance(redacted, Mapping):
         return {}
     evidence = dict(redacted)
+    direct_grid = evidence.get("direct_grid_forcing")
+    if isinstance(direct_grid, Mapping):
+        stations = direct_grid.get("stations")
+        station_count = (
+            len(stations)
+            if isinstance(stations, Sequence) and not isinstance(stations, str | bytes | bytearray)
+            else None
+        )
+        retained_keys = (
+            "forcing_mapping_mode",
+            "mapping_asset_identity",
+            "model_input_package_id",
+            "binding_uri",
+            "binding_checksum",
+            "applicable_source_ids",
+            "grid_id",
+            "grid_signature",
+            "sp_att_manifest_path",
+            "sp_att_checksum",
+        )
+        compact_direct_grid = {
+            key: direct_grid[key] for key in retained_keys if key in direct_grid
+        }
+        if station_count is not None:
+            compact_direct_grid["station_count"] = station_count
+        evidence["direct_grid_forcing"] = compact_direct_grid
     invalid_fields = {
         str(blocker.get("field", "")).removeprefix("resource_profile.")
         for blocker in _slurm_resource_profile_blockers(resource_profile)
@@ -752,7 +783,17 @@ def _candidate_model_run_review_evidence(
             "openspec_change": SCHEDULER_EVIDENCE_OPEN_SPEC_CHANGE,
             "scope": "model_run_evidence",
         },
-        **_candidate_identity_evidence(candidate, output_uri=output_uri),
+        # The scheduler pass already preserves the complete candidate state in
+        # its top-level ``candidates`` collection.  Repeating that potentially
+        # large journal/readiness history once more for every model-run record
+        # made a normal 18-basin x 2-source pass exceed the durable 5 MB
+        # evidence limit.  Keep model-run evidence candidate-scoped, but do not
+        # duplicate the state history here.
+        **_candidate_identity_evidence(
+            candidate,
+            output_uri=output_uri,
+            include_state_evidence=False,
+        ),
         "stage_statuses": stage_status_payload,
         "stage_evidence": stage_status_payload,
         "artifact_refs": artifact_refs,

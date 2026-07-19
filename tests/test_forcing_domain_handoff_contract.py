@@ -1873,6 +1873,46 @@ def test_compatibility_provenance_uris_are_object_store_normalized_and_identity_
     assert evidence["payloads"] == {}
 
 
+def test_direct_grid_model_package_uri_is_source_bound_without_legacy_model_id_equality(
+    tmp_path: Path,
+) -> None:
+    case_root = _copy_complete_case(tmp_path)
+    handoff = _read_json(_handoff_manifest_path(case_root))
+    handoff["model_package_uri"] = (
+        "s3://nhms/models/direct_grid_variants/basins_qhh_shud/"
+        "dg-gfs-00c7b9ac62e74c7e7565/package/"
+    )
+    _write_json(_handoff_manifest_path(case_root), handoff)
+
+    result = _validate_case_root(case_root)
+
+    assert result["available"] is True
+    assert REASON_COMPATIBILITY_URI_MISMATCH not in _reason_codes(result)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "s3://nhms/models/direct_grid_variants/basins_qhh_shud/dg-ifs-identity/package/",
+        "s3://nhms/models/direct_grid_variants/basins_qhh_shud/dg-gfs-/package/",
+        "s3://nhms/models/direct_grid_variants/basins_qhh_shud/dg-gfs-identity/not-package/",
+    ],
+)
+def test_direct_grid_model_package_uri_rejects_wrong_source_or_shape(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    case_root = _copy_complete_case(tmp_path)
+    handoff = _read_json(_handoff_manifest_path(case_root))
+    handoff["model_package_uri"] = value
+    _write_json(_handoff_manifest_path(case_root), handoff)
+
+    result = _validate_case_root(case_root)
+
+    assert result["available"] is False
+    assert REASON_COMPATIBILITY_URI_MISMATCH in _reason_codes(result)
+
+
 @pytest.mark.parametrize(
     ("value", "expected_reason"),
     [

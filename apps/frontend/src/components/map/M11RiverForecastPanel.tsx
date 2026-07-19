@@ -52,6 +52,8 @@ interface DualForecast {
 
 function productIdentity(product: QhhLatestProduct): HydroMetRiverForecastProductIdentity {
   return {
+    run_id: product.run_id,
+    model_id: product.model_id,
     basin_version_id: product.basin_version_id,
     river_network_version_id: product.river_network_version_id,
     source_id: product.source_id as HydroMetSource,

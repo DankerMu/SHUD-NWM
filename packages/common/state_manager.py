@@ -6,7 +6,7 @@ import os
 import re
 import stat
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -669,6 +669,27 @@ class PsycopgStateSnapshotRepository:
         )
         return _snapshot_from_row(row) if row is not None else None
 
+    def get_latest_state_before(
+        self,
+        *,
+        model_id: str,
+        source_id: str,
+        before_time: datetime,
+    ) -> StateSnapshot | None:
+        row = self._fetch_optional(
+            """
+            SELECT *
+            FROM hydro.state_snapshot
+            WHERE model_id = %s
+              AND source_id = %s
+              AND valid_time < %s
+            ORDER BY valid_time DESC, created_at DESC
+            LIMIT 1
+            """,
+            (model_id, source_id, _ensure_utc(before_time)),
+        )
+        return _snapshot_from_row(row) if row is not None else None
+
     def upsert_state_snapshot(self, snapshot: StateSnapshot) -> StateSnapshot:
         row = self._fetch_one(
             """
@@ -696,7 +717,7 @@ class PsycopgStateSnapshotRepository:
                 run_id = EXCLUDED.run_id,
                 state_uri = EXCLUDED.state_uri,
                 checksum = EXCLUDED.checksum,
-                usable_flag = false,
+                usable_flag = EXCLUDED.usable_flag,
                 source_id = EXCLUDED.source_id,
                 cycle_id = EXCLUDED.cycle_id,
                 lead_hours = EXCLUDED.lead_hours,
@@ -974,25 +995,51 @@ class FileStateSnapshotIndexRepository:
             enforce_freshness=not self.create_missing,
         )
         entry: dict[str, Any] | None
-        if cycle_id not in (None, "") or lead_hours is not None:
-            key = self._snapshot_key(
-                model_id=model_id,
-                source_id=source_id,
-                valid_time=valid_time,
-                cycle_id=cycle_id,
-                lead_hours=lead_hours,
-            )
-            entry = index_snapshot.entries.get(key)
-        else:
-            entry = self._first_entry_for_base_key(
-                index_snapshot.entries,
-                model_id=model_id,
-                source_id=source_id,
-                valid_time=valid_time,
-            )
+        entries = self._entries_for_base_key(
+            index_snapshot.entries,
+            model_id=model_id,
+            source_id=source_id,
+            valid_time=valid_time,
+        )
+        if cycle_id not in (None, ""):
+            entries = [entry for entry in entries if str(entry.get("cycle_id") or "") == cycle_id]
+        if lead_hours is not None:
+            entries = [entry for entry in entries if entry.get("lead_hours") == lead_hours]
+        entry = min(entries, key=lambda item: str(item.get("state_id") or "")) if entries else None
         if entry is None:
             return None
         return self._snapshot_from_lookup_entry(entry)
+
+    def get_latest_state_before(
+        self,
+        *,
+        model_id: str,
+        source_id: str,
+        before_time: datetime,
+    ) -> StateSnapshot | None:
+        index_snapshot = self._load_index_snapshot(
+            allow_empty=self.create_missing,
+            verify_objects=False,
+            enforce_freshness=not self.create_missing,
+        )
+        before_time = _ensure_utc(before_time)
+        candidates = [
+            entry
+            for entry in index_snapshot.entries.values()
+            if str(entry.get("model_id") or "") == model_id
+            and str(entry.get("source_id") or "") == source_id
+            and _parse_state_index_time(entry.get("valid_time"), field="valid_time") < before_time
+        ]
+        if not candidates:
+            return None
+        selected = max(
+            candidates,
+            key=lambda item: (
+                _parse_state_index_time(item.get("valid_time"), field="valid_time"),
+                str(item.get("state_id") or ""),
+            ),
+        )
+        return self._snapshot_from_lookup_entry(selected)
 
     def find_state_snapshot_by_model_time_checksum(
         self,
@@ -1821,15 +1868,46 @@ def merge_state_snapshot_index_copyback(
     object_store_prefix: str,
     source_containment_root: Path,
     destination_containment_root: Path,
+    authoritative_run_ids: Collection[str] | None = None,
 ) -> dict[str, Any]:
     """Merge the private lifecycle index into the shared canonical index.
 
-    Identity collisions retain the entry with the later ``created_at``; an
-    exact tie with different bytes fails closed.  This prevents either an old
-    refresh snapshot or an old copyback from deleting a concurrent state.
+    When ``authoritative_run_ids`` is supplied, only source entries produced
+    by those copied runs are merged.  A replay of the same run or a real
+    checkpoint replacing a cutover clone is authoritative; other identity
+    collisions retain the entry with the later ``created_at`` and an exact
+    tie with different bytes fails closed.  This prevents an unrelated private
+    index entry from overwriting a concurrently published shared state.
     Both indexes are verified against the private reference root before their
     merged checkpoints are checksum-copied into the shared destination.
     """
+
+    with provider_destination_lock(
+        source_path,
+        containment_root=source_containment_root,
+    ):
+        return _merge_state_snapshot_index_copyback_locked(
+            source_path=source_path,
+            destination_path=destination_path,
+            reference_object_store_root=reference_object_store_root,
+            object_store_prefix=object_store_prefix,
+            source_containment_root=source_containment_root,
+            destination_containment_root=destination_containment_root,
+            authoritative_run_ids=authoritative_run_ids,
+        )
+
+
+def _merge_state_snapshot_index_copyback_locked(
+    *,
+    source_path: Path,
+    destination_path: Path,
+    reference_object_store_root: str | Path,
+    object_store_prefix: str,
+    source_containment_root: Path,
+    destination_containment_root: Path,
+    authoritative_run_ids: Collection[str] | None,
+) -> dict[str, Any]:
+    """Merge while the private source index and its checkpoint set are stable."""
 
     try:
         source_content, _source_preimage = read_provider_snapshot(
@@ -1853,6 +1931,17 @@ def merge_state_snapshot_index_copyback(
         enforce_freshness=False,
     )
     source_entries = _copyback_raw_entries(source_payload, source_validated)
+    authoritative_runs = (
+        {str(run_id) for run_id in authoritative_run_ids}
+        if authoritative_run_ids is not None
+        else None
+    )
+    if authoritative_runs is not None:
+        source_entries = {
+            key: entry
+            for key, entry in source_entries.items()
+            if str(entry.get("run_id") or "") in authoritative_runs
+        }
     with provider_destination_lock(
         destination_path,
         containment_root=destination_containment_root,
@@ -1868,7 +1957,7 @@ def merge_state_snapshot_index_copyback(
                 raise ValueError("destination index is not an object")
             destination_validated = _validate_state_snapshot_index(
                 destination_payload,
-                object_store_root=reference_object_store_root,
+                object_store_root=destination_containment_root,
                 object_store_prefix=object_store_prefix,
                 published_artifact_root=None,
                 now=None,
@@ -1893,7 +1982,20 @@ def merge_state_snapshot_index_copyback(
                 continue
             source_created = _copyback_entry_created_at(source_entry)
             current_created = _copyback_entry_created_at(current)
-            if source_created > current_created:
+            if authoritative_runs is not None and (
+                source_entry.get("run_id") == current.get("run_id")
+                or (
+                    current.get("cloned_from_state_id") is not None
+                    and source_entry.get("cloned_from_state_id") is None
+                )
+            ):
+                # A scoped copyback is authoritative for the run being
+                # published.  This covers both an idempotent replay of the
+                # same run and replacement of a cutover clone by the first
+                # materialized checkpoint.  Other same-time collisions still
+                # fail closed below.
+                merged[key] = source_entry
+            elif source_created > current_created:
                 merged[key] = source_entry
             elif source_created == current_created:
                 raise _state_index_error("state_snapshot_index_copyback_conflict", field="entries[]")
@@ -1904,6 +2006,10 @@ def merge_state_snapshot_index_copyback(
                 reference_object_store_root=reference_object_store_root,
                 destination_object_store_root=destination_containment_root,
                 object_store_prefix=object_store_prefix,
+                allow_replace=(
+                    authoritative_runs is not None
+                    and str(entry.get("run_id") or "") in authoritative_runs
+                ),
             )
             for entry in merged.values()
         ]
@@ -1920,9 +2026,13 @@ def merge_state_snapshot_index_copyback(
         return {
             **result,
             "source_entry_count": len(source_entries),
+            "authoritative_run_count": (
+                len(authoritative_runs) if authoritative_runs is not None else None
+            ),
             "merged_entry_count": len(merged),
             "checkpoint_copied_count": sum(item == "copied" for item in checkpoint_results),
             "checkpoint_reused_count": sum(item == "reused" for item in checkpoint_results),
+            "checkpoint_replaced_count": sum(item == "replaced" for item in checkpoint_results),
         }
 
 
@@ -1932,6 +2042,7 @@ def _copyback_state_checkpoint(
     reference_object_store_root: str | Path,
     destination_object_store_root: str | Path,
     object_store_prefix: str,
+    allow_replace: bool = False,
 ) -> str:
     uri = str(entry.get("state_uri") or "")
     expected_checksum = str(entry.get("checksum") or "")
@@ -1944,20 +2055,23 @@ def _copyback_state_checkpoint(
     if not key.startswith("states/"):
         raise _state_index_error("state_snapshot_index_object_unsafe_uri", field="entries[].state_uri")
     try:
-        if destination_store.exists(key):
-            existing = destination_store.read_bytes_limited(key, max_bytes=MAX_STATE_IC_BYTES)
-            if not _checksum_matches(expected_checksum, sha256_bytes(existing)):
-                raise _state_index_error(
-                    "state_snapshot_index_object_checksum_mismatch",
-                    field="entries[].state_uri",
-                )
-            return "reused"
         content = source_store.read_bytes_limited(key, max_bytes=MAX_STATE_IC_BYTES)
         if not _checksum_matches(expected_checksum, sha256_bytes(content)):
             raise _state_index_error(
                 "state_snapshot_index_object_checksum_mismatch",
                 field="entries[].state_uri",
             )
+        replacing = False
+        if destination_store.exists(key):
+            existing = destination_store.read_bytes_limited(key, max_bytes=MAX_STATE_IC_BYTES)
+            if _checksum_matches(expected_checksum, sha256_bytes(existing)):
+                return "reused"
+            if not allow_replace:
+                raise _state_index_error(
+                    "state_snapshot_index_object_checksum_mismatch",
+                    field="entries[].state_uri",
+                )
+            replacing = True
         destination_root = Path(destination_object_store_root).expanduser().absolute()
         destination = destination_store.resolve_path(key)
         _ensure_copyback_state_parent(destination.parent, destination_root)
@@ -1978,7 +2092,7 @@ def _copyback_state_checkpoint(
         raise
     except (OSError, ObjectStoreError, SafeFilesystemError, ValueError) as error:
         raise _state_index_error("state_snapshot_index_object_unreadable", field="entries[].state_uri") from error
-    return "copied"
+    return "replaced" if replacing else "copied"
 
 
 def _ensure_copyback_state_parent(parent: Path, containment_root: Path) -> None:

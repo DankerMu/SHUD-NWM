@@ -650,11 +650,17 @@ def _candidate_restart_cohort_key(restart_stage: str | None) -> tuple[int, str]:
     )
 
 
-def _candidate_execution_cohort_run_id(source_id: str, cycle_time: datetime, cohort_key: tuple[int, str]) -> str:
+def _candidate_execution_cohort_run_id(
+    source_id: str,
+    cycle_time: datetime,
+    cohort_key: tuple[int, str],
+    candidates: Sequence[SchedulerCandidate],
+) -> str:
     return _scheduler_execution.candidate_execution_cohort_run_id(
         source_id,
         cycle_time,
         cohort_key,
+        candidates,
         format_cycle_time=format_cycle_time,
     )
 
@@ -670,6 +676,7 @@ def _candidate_execution_cohorts(
         cycle_time,
         cohort_key,
         candidates,
+        run_id_for_cohort=_candidate_execution_cohort_run_id,
         run_id_for_candidate=_candidate_execution_cohort_run_id_for_candidate,
     )
 

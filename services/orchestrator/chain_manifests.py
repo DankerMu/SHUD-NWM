@@ -241,6 +241,28 @@ def build_cycle_stage_manifest(
             "model_ids": [str(entry["model_id"]) for entry in manifest_index_entries],
         },
     }
+    if stage.is_array:
+        array_bounds: set[int] = set()
+        for basin in context.active_basins:
+            bound = basin.get("max_concurrent")
+            if bound in (None, ""):
+                continue
+            if isinstance(bound, bool) or not isinstance(bound, int) or bound < 1:
+                raise OrchestratorError(
+                    "ARRAY_CONCURRENCY_BUDGET_INVALID",
+                    "Slurm array concurrency budget must be a positive integer.",
+                    {"stage": stage.stage},
+                )
+            array_bounds.add(bound)
+        if len(array_bounds) > 1:
+            raise OrchestratorError(
+                "ARRAY_CONCURRENCY_BUDGET_MISMATCH",
+                "All basins in one Slurm array must share one concurrency budget.",
+                {"stage": stage.stage, "max_concurrent_values": sorted(array_bounds)},
+            )
+        if array_bounds:
+            array_bound = next(iter(array_bounds))
+            manifest["max_concurrent"] = array_bound
     if stage.stage == "publish":
         active_keys = {_basin_key(basin) for basin in context.active_basins}
         excluded = [basin for basin in context.all_basins if _basin_key(basin) not in active_keys]

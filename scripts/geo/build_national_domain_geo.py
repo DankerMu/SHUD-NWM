@@ -21,6 +21,7 @@ with a warning rather than guessed.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from collections import defaultdict
@@ -58,6 +59,33 @@ def _discover_basin_gis_dirs(basins_root: Path) -> list[tuple[str, Path]]:
     return discovered
 
 
+def _shape_source_digest(gis_dir: Path) -> str:
+    digest = hashlib.sha256()
+    for suffix in (".shp", ".shx", ".dbf", ".prj"):
+        path = gis_dir / f"domain{suffix}"
+        digest.update(suffix.encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _select_model_package_gis_dir(name: str, candidates: list[Path]) -> Path:
+    digests = {_shape_source_digest(path) for path in candidates}
+    if len(digests) > 1:
+        raise ValueError(f"ambiguous model packages for {name}: {len(candidates)} distinct domain sources")
+    return sorted(candidates)[0]
+
+
+def _discover_model_package_gis_dirs(model_packages_root: Path) -> list[tuple[str, Path]]:
+    grouped: dict[str, list[Path]] = {}
+    for shp in sorted(model_packages_root.glob("basins_*_shud/*/package/gis/domain.shp")):
+        model_name = shp.parents[3].name
+        if not model_name.startswith("basins_") or not model_name.endswith("_shud"):
+            continue
+        name = model_name.removeprefix("basins_").removesuffix("_shud")
+        grouped.setdefault(name, []).append(shp.parent)
+    return [(name, _select_model_package_gis_dir(name, candidates)) for name, candidates in sorted(grouped.items())]
+
+
 def _named_basin_gis_dir(basins_root: Path, name: str) -> Path:
     candidates = sorted((basins_root / name).glob("input/*/gis/domain.shp"))
     if candidates:
@@ -68,6 +96,14 @@ def _named_basin_gis_dir(basins_root: Path, name: str) -> Path:
         if candidates:
             return candidates[0].parent
     return basins_root / name / "input" / name / "gis"
+
+
+def _named_model_package_gis_dir(model_packages_root: Path, name: str) -> Path | None:
+    candidates = [
+        path.parent
+        for path in sorted(model_packages_root.glob(f"basins_{name.lower()}_shud/*/package/gis/domain.shp"))
+    ]
+    return _select_model_package_gis_dir(name, candidates) if candidates else None
 
 
 def _load_transformer(prj_path: Path) -> tuple[Transformer, float]:
@@ -234,6 +270,16 @@ def main() -> int:
         "If unset, legacy <repo-root>/SHUD/input/<name>/gis.",
     )
     parser.add_argument(
+        "--model-packages-root",
+        default=None,
+        help="optional object-store models root; used when a basin is absent from --basins-root",
+    )
+    parser.add_argument(
+        "--exclude-basins",
+        default="",
+        help="comma-separated basin names excluded from the generated display layer",
+    )
+    parser.add_argument(
         "--out",
         default=None,
         help="output geojson (default apps/frontend/public/geo/national-basin-domain.geojson)",
@@ -245,18 +291,31 @@ def main() -> int:
 
     repo_root = Path(args.repo_root).resolve()
     basins_root = Path(args.basins_root).resolve() if args.basins_root else None
+    model_packages_root = Path(args.model_packages_root).resolve() if args.model_packages_root else None
     out_path = Path(args.out) if args.out else repo_root / "apps/frontend/public/geo/national-basin-domain.geojson"
 
     def legacy_gis_dir(name: str) -> Path:
         if basins_root is not None:
-            return _named_basin_gis_dir(basins_root, name)
+            candidate = _named_basin_gis_dir(basins_root, name)
+            if (candidate / "domain.shp").is_file():
+                return candidate
+        if model_packages_root is not None:
+            candidate = _named_model_package_gis_dir(model_packages_root, name)
+            if candidate is not None:
+                return candidate
         return repo_root / "SHUD" / "input" / name / "gis"
 
+    excluded = {item.strip().lower() for item in args.exclude_basins.split(",") if item.strip()}
     requested_names = [b.strip() for b in args.basins.split(",") if b.strip()]
     if requested_names:
-        basin_inputs = [(name, legacy_gis_dir(name)) for name in requested_names]
-    elif basins_root is not None:
-        basin_inputs = _discover_basin_gis_dirs(basins_root)
+        basin_inputs = [(name, legacy_gis_dir(name)) for name in requested_names if name.lower() not in excluded]
+    elif basins_root is not None or model_packages_root is not None:
+        discovered = {}
+        if model_packages_root is not None:
+            discovered.update(_discover_model_package_gis_dirs(model_packages_root))
+        if basins_root is not None:
+            discovered.update(_discover_basin_gis_dirs(basins_root))
+        basin_inputs = [(name, gis) for name, gis in sorted(discovered.items()) if name.lower() not in excluded]
     else:
         basin_inputs = [(name, legacy_gis_dir(name)) for name in ("qhh", "heihe")]
     features = [

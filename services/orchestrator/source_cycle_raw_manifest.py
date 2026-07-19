@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
+from packages.common.provider_atomic import ProviderAtomicError, provider_destination_lock
 from packages.common.safe_fs import (
     SafeFilesystemError,
     ensure_directory_no_follow,
@@ -361,40 +362,129 @@ def stage_nfs_raw_manifest_to_object_store(
         pass
 
     manifest_path = _absolute_path(str(manifest_path_value))
-    payload, payload_error = _read_manifest_payload(
-        manifest_path,
-        root=source_root,
-        max_manifest_bytes=NFS_RAW_MANIFEST_MAX_BYTES,
-    )
-    if payload_error is not None:
-        raise NfsRawManifestStagingError(str(payload_error.get("reason") or "manifest_unreadable"))
-    source_id = str(readiness.get("source_id") or "")
-    cycle_time = parse_cycle_time(str(readiness.get("cycle_time") or ""))
-    validation_error = _validate_manifest_identity(payload, source_id=source_id, cycle_time=cycle_time)
-    if validation_error is not None:
-        raise NfsRawManifestStagingError(str(validation_error.get("reason") or "manifest_identity_invalid"))
-    entries = payload.get("entries")
-    if not isinstance(entries, Sequence) or isinstance(entries, str | bytes | bytearray) or not entries:
-        raise NfsRawManifestStagingError("manifest_entries_missing")
-    local_keys, entry_error = _entry_local_keys(entries)
-    if entry_error is not None:
-        raise NfsRawManifestStagingError(str(entry_error.get("reason") or "manifest_entry_invalid"))
-    _file_evidence, file_error = _verify_entry_files(source_root, local_keys)
-    if file_error is not None:
-        raise NfsRawManifestStagingError(str(file_error.get("reason") or "raw_files_invalid"))
+    target_manifest_path = target_root / manifest_key
+    ensure_directory_no_follow(target_manifest_path.parent, containment_root=target_root)
+    try:
+        with provider_destination_lock(target_manifest_path, containment_root=target_root):
+            payload, payload_error = _read_manifest_payload(
+                manifest_path,
+                root=source_root,
+                max_manifest_bytes=NFS_RAW_MANIFEST_MAX_BYTES,
+            )
+            if payload_error is not None:
+                raise NfsRawManifestStagingError(str(payload_error.get("reason") or "manifest_unreadable"))
+            source_id = str(readiness.get("source_id") or "")
+            cycle_time = parse_cycle_time(str(readiness.get("cycle_time") or ""))
+            validation_error = _validate_manifest_identity(payload, source_id=source_id, cycle_time=cycle_time)
+            if validation_error is not None:
+                raise NfsRawManifestStagingError(
+                    str(validation_error.get("reason") or "manifest_identity_invalid")
+                )
+            entries = payload.get("entries")
+            if not isinstance(entries, Sequence) or isinstance(entries, str | bytes | bytearray) or not entries:
+                raise NfsRawManifestStagingError("manifest_entries_missing")
+            local_keys, entry_error = _entry_local_keys(entries)
+            if entry_error is not None:
+                raise NfsRawManifestStagingError(str(entry_error.get("reason") or "manifest_entry_invalid"))
+            _file_evidence, file_error = _verify_entry_files(source_root, local_keys)
+            if file_error is not None:
+                raise NfsRawManifestStagingError(str(file_error.get("reason") or "raw_files_invalid"))
 
-    copied_files = 0
-    copied_bytes = 0
-    for local_key in sorted(set(local_keys)):
-        copied_bytes += _copy_object_file(source_root, target_root, local_key)
-        copied_files += 1
-    manifest_bytes = _copy_object_file(source_root, target_root, manifest_key)
+            source_manifest_bytes = read_bytes_limited_no_follow(
+                manifest_path,
+                max_bytes=NFS_RAW_MANIFEST_MAX_BYTES,
+                containment_root=source_root,
+            )
+            if _staged_target_matches_source(
+                target_root=target_root,
+                target_manifest_path=target_manifest_path,
+                source_manifest_bytes=source_manifest_bytes,
+                local_keys=local_keys,
+            ):
+                return _nfs_stage_result(
+                    readiness=readiness,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    manifest_key=manifest_key,
+                    target_object_store_prefix=target_object_store_prefix,
+                    status="skipped",
+                    reason="already_staged",
+                )
+
+            # The manifest is the completion marker. Remove a stale generation
+            # before replacing raw files so readers cannot observe it as ready
+            # while this generation is only partially staged.
+            unlink_no_follow(target_manifest_path, containment_root=target_root, missing_ok=True)
+            copied_files = 0
+            copied_bytes = 0
+            for local_key in sorted(set(local_keys)):
+                copied_bytes += _copy_object_file(source_root, target_root, local_key)
+                copied_files += 1
+            current_source_manifest = read_bytes_limited_no_follow(
+                manifest_path,
+                max_bytes=NFS_RAW_MANIFEST_MAX_BYTES,
+                containment_root=source_root,
+            )
+            if current_source_manifest != source_manifest_bytes:
+                raise NfsRawManifestStagingError("source_manifest_changed_during_staging")
+            manifest_bytes = _copy_object_file(source_root, target_root, manifest_key)
+            return _nfs_stage_result(
+                readiness=readiness,
+                source_id=source_id,
+                cycle_time=cycle_time,
+                manifest_key=manifest_key,
+                target_object_store_prefix=target_object_store_prefix,
+                status="staged",
+                staged_file_count=copied_files,
+                staged_manifest_bytes=manifest_bytes,
+                staged_raw_bytes=copied_bytes,
+            )
+    except ProviderAtomicError as error:
+        raise NfsRawManifestStagingError(f"raw_stage_lock_failed:{error.reason}") from error
+
+
+def _staged_target_matches_source(
+    *,
+    target_root: Path,
+    target_manifest_path: Path,
+    source_manifest_bytes: bytes,
+    local_keys: Sequence[str],
+) -> bool:
+    try:
+        target_manifest_bytes = read_bytes_limited_no_follow(
+            target_manifest_path,
+            max_bytes=NFS_RAW_MANIFEST_MAX_BYTES,
+            containment_root=target_root,
+        )
+    except FileNotFoundError:
+        return False
+    except (OSError, SafeFilesystemError):
+        return False
+    if target_manifest_bytes != source_manifest_bytes:
+        return False
+    _evidence, error = _verify_entry_files(target_root, local_keys)
+    return error is None
+
+
+def _nfs_stage_result(
+    *,
+    readiness: Mapping[str, Any],
+    source_id: str,
+    cycle_time: datetime,
+    manifest_key: str,
+    target_object_store_prefix: str,
+    status: str,
+    reason: str | None = None,
+    staged_file_count: int = 0,
+    staged_manifest_bytes: int = 0,
+    staged_raw_bytes: int = 0,
+) -> dict[str, Any]:
     manifest_uri = str(readiness.get("manifest_uri") or "").strip() or _manifest_uri_for_key(
         manifest_key,
         target_object_store_prefix,
     )
-    return {
-        "status": "staged",
+    result = {
+        "status": status,
         "source": NFS_RAW_MANIFEST_READY_SOURCE,
         "source_id": normalize_source_id(source_id),
         "cycle_id": str(readiness.get("cycle_id") or cycle_id_for(source_id, cycle_time)),
@@ -403,10 +493,13 @@ def stage_nfs_raw_manifest_to_object_store(
         "manifest_key": manifest_key,
         "source_object_store_root": "[local-path]",
         "target_object_store_root": "[local-path]",
-        "staged_file_count": copied_files,
-        "staged_manifest_bytes": manifest_bytes,
-        "staged_raw_bytes": copied_bytes,
+        "staged_file_count": staged_file_count,
+        "staged_manifest_bytes": staged_manifest_bytes,
+        "staged_raw_bytes": staged_raw_bytes,
     }
+    if reason is not None:
+        result["reason"] = reason
+    return result
 
 
 def _read_manifest_payload(

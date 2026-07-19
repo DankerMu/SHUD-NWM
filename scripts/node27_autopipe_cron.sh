@@ -194,7 +194,10 @@ START=$(date +%s)
 cd "$REPO" || { echo "[$(ts)] autopipe: cannot cd $REPO" >> "$LOG"; exit 1; }
 "$REPO/.venv/bin/python" "$REPO/scripts/node27_autopipeline.py" \
   --object-store-root "${OBJECT_STORE_ROOT:-}" \
-  --basins-root "${BASINS_ROOT:-}" >> "$LOG" 2>&1
+  --basins-root "${BASINS_ROOT:-}" \
+  --direct-grid-only \
+  --workers "${AUTOPIPE_RUN_WORKERS:-1}" \
+  --exclude-basins "${AUTOPIPE_EXCLUDE_BASINS:-}" >> "$LOG" 2>&1
 RC=$?
 
 if [ "$RC" -eq 2 ]; then
@@ -210,7 +213,8 @@ fi
 # makes this cheap + resumable. Non-fatal: never masks the ingest exit code.
 if [ -f "$REPO/scripts/node27_refresh_coverage.py" ]; then
   echo "[$(ts)] autopipe: coverage backstop (--all --skip-fresh)" >> "$LOG"
-  "$REPO/.venv/bin/python" "$REPO/scripts/node27_refresh_coverage.py" --all --skip-fresh >> "$LOG" 2>&1 \
+  "$REPO/.venv/bin/python" "$REPO/scripts/node27_refresh_coverage.py" --all --skip-fresh \
+    --workers "${AUTOPIPE_COVERAGE_WORKERS:-1}" >> "$LOG" 2>&1 \
     || echo "[$(ts)] autopipe: coverage backstop rc=$? (non-fatal)" >> "$LOG"
 fi
 

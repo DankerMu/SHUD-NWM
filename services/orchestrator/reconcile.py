@@ -94,6 +94,7 @@ class SacctRecord:
     submitted_manifest: Mapping[str, Any] | None = None
     stdout_identity: Mapping[str, Any] | None = None
     file_journal_identity: Mapping[str, Any] | None = None
+    array_member_job_ids: tuple[str, ...] = ()
 
 
 # A sacct querier maps a slurm_job_id to its accounting record (or None when the
@@ -106,9 +107,9 @@ def default_sacct_querier(slurm_bin_path: str = "") -> SacctQuerier:
     """Build a sacct querier that shells out to the real ``sacct`` binary.
 
     Uses ``--parsable2 --noheader`` with the same field shape the gateway uses
-    elsewhere (``JobID|JobName|State|ExitCode``), and returns the exact target
-    row. For master jobs this is the master row; for array tasks this is the
-    ``<master>_<task>`` row.
+    elsewhere (``JobID|JobName|State|ExitCode``). It returns the exact target
+    row when present; a bare array master with no parent row is reconstructed
+    from its exact ``<master>_<task>`` rows.
     """
 
     sacct = f"{slurm_bin_path.rstrip('/')}/sacct" if slurm_bin_path else "sacct"
@@ -243,10 +244,19 @@ def _parse_comment_sacct_rows(stdout: str, target_comment: str) -> SacctRecord |
 
 
 def _parse_master_sacct_row(stdout: str, slurm_job_id: str) -> SacctRecord | None:
-    """Parse the exact master or array-task job row from sacct."""
+    """Parse one job row, or aggregate array members for a bare master id.
+
+    Some Slurm accounting configurations omit the bare array-master row and
+    return only ``<master>_<task>`` rows.  A durable pipeline row is bound to
+    that bare master id, so restart reconcile must fold its exact members using
+    the same parent-status semantics as the gateway rather than treating the
+    job as absent.
+    """
 
     target_job_id = str(slurm_job_id)
     target_is_array_task = "_" in target_job_id
+    exact_fields: list[str] | None = None
+    member_fields: list[list[str]] = []
     for line in stdout.splitlines():
         line = line.strip()
         if not line:
@@ -258,23 +268,86 @@ def _parse_master_sacct_row(stdout: str, slurm_job_id: str) -> SacctRecord | Non
         # Skip job step rows (12345.batch / 12345_3.batch).
         if "." in job_id:
             continue
-        # Master queries keep the historical master-row behavior. Array-task
-        # queries must return the exact task row instead of being skipped.
-        if not target_is_array_task and "_" in job_id:
-            continue
         if job_id != target_job_id:
+            if (
+                not target_is_array_task
+                and job_id.startswith(f"{target_job_id}_")
+                and SLURM_JOB_ID_RE.fullmatch(job_id)
+            ):
+                member_fields.append(fields)
             continue
-        task_id = job_id.split("_", 1)[1] if "_" in job_id else None
-        return SacctRecord(
-            slurm_job_id=job_id,
-            job_name=fields[1],
-            raw_state=fields[2],
-            exit_code=fields[3] if len(fields) > 3 else None,
-            comment=fields[4].strip() if len(fields) > 4 else None,
-            task_id=task_id,
-            array_task_id=task_id,
-        )
+        exact_fields = fields
+
+    if exact_fields is not None:
+        return _sacct_record_from_fields(exact_fields)
+    if not target_is_array_task and member_fields:
+        return _aggregate_array_member_rows(member_fields, target_job_id)
     return None
+
+
+def _sacct_record_from_fields(fields: list[str]) -> SacctRecord:
+    job_id = fields[0]
+    task_id = job_id.split("_", 1)[1] if "_" in job_id else None
+    return SacctRecord(
+        slurm_job_id=job_id,
+        job_name=fields[1],
+        raw_state=fields[2],
+        exit_code=fields[3] if len(fields) > 3 else None,
+        comment=fields[4].strip() if len(fields) > 4 else None,
+        task_id=task_id,
+        array_task_id=task_id,
+    )
+
+
+def _aggregate_array_member_rows(
+    member_fields: list[list[str]],
+    master_job_id: str,
+) -> SacctRecord:
+    """Fold exact array members into one durable master accounting record."""
+
+    member_statuses: list[SlurmJobStatus] = []
+    for fields in member_fields:
+        normalized = _normalize_slurm_state(fields[2])
+        member_statuses.append(SLURM_STATE_MAP.get(normalized, SlurmJobStatus.FAILED))
+
+    non_terminal = [status for status in member_statuses if status not in TERMINAL_STATUSES]
+    selected_fields: list[str] | None = None
+    if non_terminal:
+        raw_state = (
+            "PENDING"
+            if all(status == SlurmJobStatus.SUBMITTED for status in member_statuses)
+            else "RUNNING"
+        )
+    elif SlurmJobStatus.FAILED in member_statuses:
+        failed_index = member_statuses.index(SlurmJobStatus.FAILED)
+        selected_fields = member_fields[failed_index]
+        raw_state = selected_fields[2]
+    elif SlurmJobStatus.CANCELLED in member_statuses:
+        cancelled_index = member_statuses.index(SlurmJobStatus.CANCELLED)
+        selected_fields = member_fields[cancelled_index]
+        raw_state = "CANCELLED"
+    else:
+        selected_fields = member_fields[0]
+        raw_state = "COMPLETED"
+
+    job_names = {fields[1].strip() for fields in member_fields}
+    comments = {
+        fields[4].strip()
+        for fields in member_fields
+        if len(fields) > 4 and fields[4].strip()
+    }
+    return SacctRecord(
+        slurm_job_id=master_job_id,
+        job_name=job_names.pop() if len(job_names) == 1 else "",
+        raw_state=raw_state,
+        exit_code=(
+            selected_fields[3]
+            if selected_fields is not None and len(selected_fields) > 3
+            else None
+        ),
+        comment=comments.pop() if len(comments) == 1 else None,
+        array_member_job_ids=tuple(fields[0] for fields in member_fields),
+    )
 
 
 @dataclass(frozen=True)
@@ -331,10 +404,32 @@ def _identity_matches(
 
 
 def _record_has_durable_identity_proof(record: SacctRecord, job: Any) -> bool:
+    if _array_master_record_matches_job(record, job):
+        return True
     for identity in _record_identity_mappings(record):
         if _identity_mapping_matches_job(identity, job):
             return True
     return False
+
+
+def _array_master_record_matches_job(record: SacctRecord, job: Any) -> bool:
+    """Prove a synthesized array master against its durable master binding."""
+
+    if not record.array_member_job_ids:
+        return False
+    expected_master = str(getattr(job, "slurm_job_id", "") or "")
+    if (
+        not expected_master
+        or "_" in expected_master
+        or record.slurm_job_id != expected_master
+        or getattr(job, "array_task_id", None) not in (None, "")
+    ):
+        return False
+    member_prefix = f"{expected_master}_"
+    return all(
+        member_id.startswith(member_prefix) and SLURM_JOB_ID_RE.fullmatch(member_id)
+        for member_id in record.array_member_job_ids
+    )
 
 
 def _record_identity_mappings(record: SacctRecord) -> list[Mapping[str, Any]]:
