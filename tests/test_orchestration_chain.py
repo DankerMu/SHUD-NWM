@@ -2373,7 +2373,7 @@ def test_forecast_stage_writes_runtime_manifests_and_manifest_index_paths(tmp_pa
         assert manifest["model"]["river_network_version_id"] == task["river_network_version_id"]
         assert manifest["forcing"]["forcing_uri"]
         assert manifest["outputs"]["run_manifest_uri"].endswith(f"runs/{task['run_id']}/input/manifest.json")
-        assert repository.hydro_runs[task["run_id"]]["status"] == "created"
+        assert repository.hydro_runs[task["run_id"]]["status"] == "succeeded"
 
     index_path = Path(forecast_submission["manifest"]["manifest_index_path"])
     index_entries = json.loads(index_path.read_text(encoding="utf-8"))
@@ -3942,18 +3942,25 @@ def test_crash_recovery_resumes_after_last_completed_stage(tmp_path: Path) -> No
         "payload": {"tasks": [{}, {}]},
     }
     orchestrator = _orchestrator(tmp_path, repository, client)
+    basins = _basins(2)
+    for basin in basins:
+        repository.hydro_runs[str(basin["run_id"])] = {
+            "run_id": str(basin["run_id"]),
+            "status": "submitted",
+        }
     orchestrator.object_store.write_bytes_atomic(
         "raw/gfs/2026050100/manifest.json",
         b'{"source_id":"GFS"}',
     )
 
-    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
 
     assert result.status == "complete"
     assert [submission["stage"] for submission in client.submissions] == [
         "state_save_qc",
         "publish",
     ]
+    assert {run["status"] for run in repository.hydro_runs.values()} == {"succeeded"}
 
 
 def test_resume_array_status_override_publishes_log_before_advertising_uri(

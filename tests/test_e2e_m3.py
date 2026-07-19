@@ -441,6 +441,41 @@ class _SqliteCycleRepository:
         ).mappings().one()
         return dict(row)
 
+    def update_hydro_run_status(
+        self,
+        run_id: str,
+        status: str,
+        *,
+        slurm_job_id: str | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> dict[str, Any]:
+        self.store.session.execute(
+            text(
+                """
+                UPDATE hydro.hydro_run
+                SET status = :status,
+                    slurm_job_id = COALESCE(:slurm_job_id, slurm_job_id),
+                    error_code = COALESCE(:error_code, error_code),
+                    error_message = COALESCE(:error_message, error_message)
+                WHERE run_id = :run_id
+                """
+            ),
+            {
+                "run_id": run_id,
+                "status": status,
+                "slurm_job_id": slurm_job_id,
+                "error_code": error_code,
+                "error_message": error_message,
+            },
+        )
+        self.store.session.commit()
+        row = self.store.session.execute(
+            text("SELECT * FROM hydro.hydro_run WHERE run_id = :run_id"),
+            {"run_id": run_id},
+        ).mappings().one()
+        return dict(row)
+
     def _ensure_hydro_run(self, *, source_id: str, cycle_time: datetime) -> None:
         run_id = f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}"
         self.store.session.execute(
@@ -526,6 +561,8 @@ def _store() -> Iterator["_ClosingStore"]:
                     end_time DATETIME NOT NULL,
                     status TEXT NOT NULL,
                     slurm_job_id TEXT,
+                    error_code TEXT,
+                    error_message TEXT,
                     run_manifest_uri TEXT NOT NULL
                 )
                 """
