@@ -1657,9 +1657,10 @@ cat "$NODE27_TIMESERIES_RETENTION_RECEIPT_PATH" | jq .
 # Enforce PRECONDITIONS:
 #  - Completeness receipt fresh AND covers the drop window with verdict=complete
 #    for every subject overlapping the drop window.
-#  - Drill receipt fresh AND verdict=PASS AND forcing+runs coverage tuples
-#    span the drop window (+ db-export tuple if completeness reports a
-#    db-export overlap).
+#  - Drill receipt fresh AND verdict=PASS AND forcing-recovery+runs coverage
+#    tuples span the drop window. The forcing-recovery union accepts verified
+#    forcing product tuples plus verified db-export tuples; db-export remains
+#    an independent required check when completeness reports an overlap.
 # Either export NODE27_TIMESERIES_RETENTION_ENFORCE=1 in the env file or
 # pass --enforce on the CLI.
 uv run python scripts/node27_timeseries_retention.py --enforce
@@ -1677,7 +1678,11 @@ Receipts match `schemas/timeseries_retention_receipt.schema.json`
 
 - `outcome=dry-run`: `mode=dry-run`; `candidate_chunks[]` lists chunks
   that WOULD be dropped up to the per-tick bound; `deferred_remainder[]`
-  lists chunks beyond the bound. Gates ARE evaluated in dry-run mode —
+  lists chunks beyond the bound plus any boundary-partial chunk whose
+  physical range begins before the completeness receipt's coverage start.
+  A boundary-partial chunk remains intact; later fully evidenced chunks use
+  a lower-bounded + upper-bounded `drop_chunks` call so retirement cannot
+  cascade through it. Gates ARE evaluated in dry-run mode —
   a dry-run invocation that would refuse still emits a `refused` receipt
   (`mode=enforce` per the schema `oneOf`) so operators see the exact
   refusal reason before ever running enforce. If gates pass, dry-run
@@ -1693,7 +1698,9 @@ Receipts match `schemas/timeseries_retention_receipt.schema.json`
   dropped chunk with its pre-drop `freed_bytes` (H4 — measured BEFORE
   `drop_chunks`); `deferred_remainder[]` records the beyond-bound
   chunks; `salvage_backed_windows[]` records the completeness-derived
-  db-export windows that fell inside the drop window (H9).
+  db-export windows that fell inside the drop window (H9). A verified
+  db-export tuple also participates in the forcing recovery union for the
+  same historical interval; it never fabricates a missing product archive.
 
 ### 8.6 Recovery (post-fault operator playbook)
 

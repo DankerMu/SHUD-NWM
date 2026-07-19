@@ -17,6 +17,9 @@ a `complete` verdict (checksum-verified product archive or verified
 `db-export` salvage object — salvage completion is thereby folded into
 completeness); the drill receipt covers the drop window when its declared
 (source, window) tuples satisfy the coverage rule in `archive-rebuild-drill`.
+Verified `db-export` tuples SHALL participate in the forcing recovery union
+because they are the durable recovery object for historical forcing rows;
+they SHALL also retain the independent db-export coverage check.
 
 #### Scenario: Missing or stale gate receipts
 
@@ -30,11 +33,25 @@ completeness); the drill receipt covers the drop window when its declared
 - **WHEN** both gate receipts are fresh and cover the drop window
 - **THEN** the runner MAY execute `drop_chunks` for that window
 
+#### Scenario: First physical chunk begins before evidence coverage
+
+- **WHEN** Timescale's first physical chunk starts before the completeness
+  receipt's truthful coverage start, but a later eligible chunk is fully
+  contained by the receipt bounds
+- **THEN** the boundary-partial chunk MUST remain intact and appear in
+  `deferred_remainder`
+- **AND** the later fully evidenced chunk MAY progress through the remaining
+  gates
+- **AND** its `drop_chunks` call MUST include both lower and upper time bounds
+  so it cannot cascade through the protected older chunk
+
 #### Scenario: Salvage-covered window is droppable with a manual recovery path
 
 - **WHEN** the drop window includes a window whose only durable copy is
   verified `db-export` salvage objects (verdict `complete` via salvage)
 - **THEN** enforce MAY drop that window's chunks
+- **AND** verified `db-export` coverage SHALL satisfy the forcing recovery
+  union for that historical interval without inventing a product archive
 - **AND** the receipt MUST record the salvage-backed windows included, whose
   post-drop recovery path is the documented manual `COPY FROM` procedure
   (see `db-export-salvage`)

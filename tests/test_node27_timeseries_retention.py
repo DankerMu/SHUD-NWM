@@ -654,6 +654,44 @@ def test_completeness_bounds_insufficient_refuses(tmp_path: Path) -> None:
     jsonschema.validate(receipt, _load_schema())
 
 
+def test_boundary_partial_chunk_is_deferred_while_fully_covered_chunk_progresses(
+    tmp_path: Path,
+) -> None:
+    """A physical chunk may start before the first evidenced row window.
+
+    That boundary-partial chunk remains intact, but it must not globally
+    block the next chunk whose complete range is inside the receipt bounds.
+    """
+    completeness = _completeness_receipt(
+        bounds_start=_NOW - timedelta(days=65),
+        bounds_end=_NOW,
+    )
+    _write_json(tmp_path / "completeness.json", completeness)
+    _write_json(tmp_path / "drill.json", _drill_receipt())
+    config = _build_config(tmp_path, per_tick_bound=5, enforce=False)
+    partial = _chunk(
+        "hydro", "river_timeseries", "chk-partial", delta_days=60, duration_days=7
+    )
+    covered = _chunk(
+        "hydro", "river_timeseries", "chk-covered", delta_days=53, duration_days=7
+    )
+    stub = _StubRunner([partial, covered])
+
+    receipt = retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+    )
+
+    assert receipt["outcome"] == "dry-run"
+    assert receipt["candidate_chunks"] == [covered.qualified_name]
+    assert receipt["deferred_remainder"] == [partial.qualified_name]
+    assert not any(call[0] == "drop" for call in stub.calls)
+    jsonschema.validate(receipt, _load_schema())
+
+
 def test_completeness_gap_in_drop_window_refuses(tmp_path: Path) -> None:
     completeness = _completeness_receipt(
         subjects=[
@@ -722,6 +760,49 @@ def test_drill_receipt_missing_refuses(tmp_path: Path) -> None:
         config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
     )
     assert receipt["refusal_reason"] == retention.CODE_DRILL_RECEIPT_MISSING
+
+
+def test_db_export_recovery_participates_in_forcing_coverage_union(tmp_path: Path) -> None:
+    """Verified DB-export objects recover forcing rows when no product
+    forcing package exists for the historical interval.
+    """
+    start = _NOW - timedelta(days=67)
+    end = _NOW - timedelta(days=60)
+    completeness = _completeness_receipt(
+        subjects=[
+            {
+                "lane": "forcing",
+                "subject": {"forcing_version_id": "forc-salvaged"},
+                "window": {"start": _iso(start), "end": _iso(end)},
+                "coverage": "db-export",
+                "verdict": "complete",
+            }
+        ]
+    )
+    drill = _drill_receipt(
+        forcing_tuples=[],
+        runs_window=(start, end),
+        db_export_window=(start, end),
+    )
+    _write_json(tmp_path / "completeness.json", completeness)
+    _write_json(tmp_path / "drill.json", drill)
+    config = _build_config(tmp_path, enforce=False)
+    chunk = _chunk(
+        "met", "forcing_station_timeseries", "chk-salvaged", delta_days=60, duration_days=7
+    )
+    stub = _StubRunner([chunk])
+
+    receipt = retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+    )
+
+    assert receipt["outcome"] == "dry-run"
+    assert receipt["candidate_chunks"] == [chunk.qualified_name]
+    jsonschema.validate(receipt, _load_schema())
 
 
 def test_drill_receipt_stale_refuses(tmp_path: Path) -> None:
@@ -1497,6 +1578,63 @@ def test_main_emits_config_invalid_wire_code_on_non_absolute_receipt_path(
 # ---------------------------------------------------------------------------
 # B1 — measure isolation: one chunk's abort MUST NOT poison neighbours
 # ---------------------------------------------------------------------------
+
+
+def test_default_drop_chunk_bounds_exact_physical_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The SQL lower bound prevents a later selected chunk from cascading
+    through an older boundary-partial chunk that was deliberately deferred.
+    """
+    executed: list[tuple[str, tuple | None]] = []
+
+    class _FakeCursor:
+        def __enter__(self) -> "_FakeCursor":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+        def execute(self, sql: str, params: tuple | None = None) -> None:
+            executed.append((sql, params))
+
+        def fetchall(self) -> list[tuple[str]]:
+            return [("_timescaledb_internal.chk-covered",)]
+
+    class _FakeConn:
+        def __enter__(self) -> "_FakeConn":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+        def cursor(self) -> _FakeCursor:
+            return _FakeCursor()
+
+        def close(self) -> None:
+            return None
+
+    import types
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "psycopg2",
+        types.SimpleNamespace(connect=lambda _url: _FakeConn()),
+    )
+    config = _build_config(tmp_path, enforce=True)
+    chunk = _chunk(
+        "hydro", "river_timeseries", "chk-covered", delta_days=53, duration_days=7
+    )
+
+    retention._default_drop_chunk(config, chunk)
+
+    drop_sql, params = next((sql, params) for sql, params in executed if "drop_chunks" in sql)
+    assert "newer_than" in drop_sql
+    assert params == (
+        chunk.range_end,
+        chunk.range_start,
+        "hydro.river_timeseries",
+    )
 
 
 def test_default_measure_chunk_bytes_isolates_per_chunk_failure(

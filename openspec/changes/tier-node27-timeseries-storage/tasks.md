@@ -1264,6 +1264,15 @@ Order is load-bearing:
   - Input: both gate receipts fresh and covering the drop window.
     Expected: eligible chunks dropped up to the per-tick bound; deferred
     remainder and salvage-backed windows recorded in the receipt.
+  - Input: the oldest physical chunk begins before the completeness receipt's
+    truthful coverage start, followed by a fully evidenced eligible chunk.
+    Expected: the boundary-partial chunk is retained in deferred remainder;
+    the covered chunk may progress, and exact lower/upper `drop_chunks` bounds
+    prevent cascading into the protected older chunk.
+  - Input: historical forcing is recoverable only from verified `db-export`
+    tuples for part or all of the candidate window.
+    Expected: those tuples participate in the forcing recovery union and keep
+    their independent db-export coverage requirement.
   - Input: metadata/coverage table row counts before vs after enforce.
     Expected: unchanged.
 - [x] 6.2 Add retention systemd units + env + governance registration.
