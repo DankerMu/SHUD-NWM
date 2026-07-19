@@ -501,6 +501,9 @@ class ProductionScheduler:
             candidate_factory=_scheduler._candidate_for,
             candidate_state_provider_caller=_scheduler._call_candidate_state_provider,
             candidate_state_decider=_scheduler._candidate_state_decision,
+            model_source_is_out_of_scope=(
+                _scheduler._scheduler_candidates._direct_grid_model_source_is_out_of_scope
+            ),
             strict_warm_start_for_candidate=self._strict_warm_start_for_candidate,
             successor_state_for_candidate=self._successor_warm_start_state_for_candidate,
             discover_source_window_provider=self._discover_source_window,

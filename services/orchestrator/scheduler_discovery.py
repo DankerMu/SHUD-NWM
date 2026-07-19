@@ -103,6 +103,7 @@ class SchedulerDiscoveryContext:
         [SchedulerCandidateLike, Mapping[str, Any] | None],
         CandidateStateDecisionLike | None,
     ]
+    model_source_is_out_of_scope: Callable[[SchedulerModelLike, CycleDiscovery], bool] | None = None
     strict_warm_start_for_candidate: Callable[
         [SchedulerCandidateLike, SchedulerSourceCycle],
         Mapping[str, Any] | None,
@@ -123,6 +124,10 @@ def cycle_completion_status(
     horizon: Mapping[str, Any] | None = None,
 ) -> str:
     """Return 'complete' if every model's full pipeline is done for this cycle, else 'gap'."""
+
+    source_scope_filter = context.model_source_is_out_of_scope
+    if callable(source_scope_filter):
+        models = tuple(model for model in models if not source_scope_filter(model, discovery))
 
     state_provider = (
         getattr(context.active_repository, "candidate_state", None)

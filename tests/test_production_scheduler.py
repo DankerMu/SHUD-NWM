@@ -13149,6 +13149,85 @@ def test_backfill_selects_oldest_incomplete_cycle_and_defers_later_gaps_for_warm
     assert audit["deferred_count"] == 2
 
 
+def test_backfill_completion_ignores_direct_grid_variants_scoped_to_another_source(
+    tmp_path: Path,
+) -> None:
+    def direct_grid_profile(source_id: str) -> dict[str, Any]:
+        grid_id = f"{source_id}_0p25"
+        return {
+            "runnable": True,
+            "memory_gb": 8,
+            "display_capabilities": {"tiles": True},
+            "forcing_mapping_mode": "direct_grid",
+            "direct_grid_forcing": {
+                "forcing_mapping_mode": "direct_grid",
+                "binding_uri": f"s3://nhms/mappings/{source_id}/binding.json",
+                "binding_checksum": "sha256:" + "a" * 64,
+                "model_input_package_id": f"input-{source_id}",
+                "sp_att_path": "input/mesh/SpatialData/sp.att",
+                "sp_att_checksum": "sha256:" + "b" * 64,
+                "applicable_source_ids": [source_id],
+                "grid_id": grid_id,
+                "grid_signature": "c" * 64,
+                "stations": [
+                    {
+                        "station_id": f"{source_id}-station-1",
+                        "shud_forcing_index": 1,
+                        "forcing_filename": "X100Y30.csv",
+                        "longitude": 100.0,
+                        "latitude": 30.0,
+                        "x": 100.0,
+                        "y": 30.0,
+                        "z": 0.0,
+                        "grid_id": grid_id,
+                        "grid_cell_id": "100:30",
+                    }
+                ],
+            },
+        }
+
+    class SourceScopedCompletionRepository(FakeActiveRepository):
+        def has_completed_pipeline(
+            self,
+            *,
+            source_id: str,
+            cycle_time: datetime,
+            model_id: str,
+        ) -> bool:
+            del source_id, cycle_time
+            return model_id == "model_gfs"
+
+    scheduler = ProductionScheduler(
+        _config(
+            tmp_path,
+            now=_dt("2026-05-21T18:00:00Z"),
+            dry_run=False,
+            backfill_enabled=True,
+        ),
+        registry=FakeRegistry([]),
+        adapters={"gfs": FakeAdapter("gfs", [])},
+        active_repository=SourceScopedCompletionRepository(active=False),
+    )
+    models = [
+        scheduler_module._coerce_registered_model(
+            _model("model_gfs", "basin_a", resource_profile=direct_grid_profile("gfs"))
+        ),
+        scheduler_module._coerce_registered_model(
+            _model("model_ifs", "basin_a", resource_profile=direct_grid_profile("IFS"))
+        ),
+    ]
+    discovery = CycleDiscovery(
+        cycle_id="gfs_2026052100",
+        source_id="gfs",
+        cycle_time=_dt("2026-05-21T00:00:00Z"),
+        cycle_hour=0,
+        available=True,
+        status="discovered",
+    )
+
+    assert scheduler._cycle_completion_status(discovery, models, horizon={}) == "complete"
+
+
 def test_backfill_floor_lookback_window_to_cycle_boundary_for_warm_start_order(
     tmp_path: Path,
 ) -> None:
