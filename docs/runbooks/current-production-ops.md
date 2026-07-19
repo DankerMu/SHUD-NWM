@@ -526,6 +526,8 @@ jq -r '.features[].properties.basin_id' apps/frontend/public/geo/national-basin-
 
 2026-07-19 当前 domain authority 是 18 个业务流域，包含 6 个新增流域
 `dth_ls`、`dth_zj`、`hhe`、`huai_main`、`jialingjiang`、`lh_gl`，不包含 HHY。
+当前静态 river authority 是 59,702 条 feature、13 个具备全国静态河网的流域；
+其中 HHE 使用 model package 中的真实 `river.shp`，包含 43,799 条河段，HHY 为 0。
 全国总览的 basin API 请求固定带 `has_display_product=true`；因此把 HHY 的
 `core.basin_version.valid_to` 置为退役时间后，历史 run 仍保留但不再进入展示列表。
 不要用 `active_flag` 做这项退役：当前 Basins importer 创建的版本默认都是 false，
