@@ -8,19 +8,20 @@ BOTH gate receipts are fresh AND cover the drop window:
 
 1. **Archive-completeness receipt** (emitted by ``node27_storage_inventory_audit``,
    schema ``schemas/archive_completeness_receipt.schema.json``). Runner reads
-   only from the receipt — no shadow DB oracle. Refuses if
-   ``coverage_bounds`` does not fully contain the drop window OR any subject
-   whose window overlaps the drop window carries ``verdict != complete``.
+   only from the receipt — no shadow DB oracle. Physical chunks wholly outside
+   ``coverage_bounds`` are deferred; the runner refuses when no eligible chunk
+   is fully evidenced or when any subject overlapping the covered candidate
+   window carries ``verdict != complete``.
 2. **Archive-rebuild-drill receipt** (emitted by
    ``node27_archive_rebuild_drill``, schema
    ``schemas/archive_rebuild_drill_receipt.schema.json``). Refuses if the
    drill is FAIL, stale, or its declared ``coverage[]`` tuples fail the per-
    source rule in ``docs/runbooks/tier-node27-timeseries-storage.md §7.5``:
-   for BOTH ``source=forcing`` AND ``source=runs`` the UNION of tuple
-   windows MUST span the drop window (the drill emits per-cycle 24 h
-   tuples — no single tuple is expected to cover a 30 d drop window on
-   its own); ``source=db-export`` is required iff the completeness receipt
-   reports any ``coverage=db-export`` subject overlapping the drop window.
+   the forcing-recovery UNION (``forcing`` plus verified ``db-export``) and
+   the ``runs`` UNION MUST span the drop window (the drill emits per-cycle
+   24 h tuples — no single tuple is expected to cover a 30 d drop window on
+   its own); ``source=db-export`` remains independently required iff the
+   completeness receipt reports any overlapping db-export subject.
 
 Design references (design.md #855 fixture pins H1-H17):
 
@@ -29,8 +30,7 @@ Design references (design.md #855 fixture pins H1-H17):
   bound cardinality server-side; runner enumerates
   ``timescaledb_information.chunks`` for the two D3 hypertables, orders by
   ``range_end ASC``, takes ``per_tick_bound``, then invokes ``drop_chunks``
-  per selected chunk with ``older_than := chunk.range_end + INTERVAL '1
-  microsecond'``).
+  per selected chunk with exact ``newer_than`` and ``older_than`` bounds).
 - H4 ``freed_bytes`` measured BEFORE drop (post-drop the chunk relation is
   gone; ``pg_total_relation_size`` would fail).
 - H5 fail-closed on per-chunk drop failure — whole tick refuses.
@@ -727,8 +727,21 @@ def _tuples_cover_window(
 def _drill_covers(
     coverage: Sequence[Mapping[str, Any]], source: str, drop: DropWindow
 ) -> bool:
-    """H2 per-source coverage: UNION of ``source=X`` tuples spans drop window."""
-    filtered = [entry for entry in coverage if isinstance(entry, Mapping) and entry.get("source") == source]
+    """H2 recovery coverage: the source tuple union spans the drop window.
+
+    A verified ``db-export`` selector is a forcing-timeseries recovery object,
+    so it participates in the forcing union while retaining its independent
+    db-export gate. This lets historical DB-only forcing remain recoverable
+    without inventing a missing product-archive forcing package.
+    """
+    accepted_sources = {source}
+    if source == "forcing":
+        accepted_sources.add("db-export")
+    filtered = [
+        entry
+        for entry in coverage
+        if isinstance(entry, Mapping) and entry.get("source") in accepted_sources
+    ]
     return _tuples_cover_window(filtered, drop)
 
 
@@ -885,12 +898,13 @@ def _default_measure_chunk_bytes(
 
 
 def _default_drop_chunk(config: RetentionConfig, chunk: ChunkRow) -> None:
-    """H3: invoke ``drop_chunks`` per selected chunk (H12: 300 s timeout).
+    """H3: invoke ``drop_chunks`` for exactly one selected chunk.
 
-    ``older_than`` is ``chunk.range_end + INTERVAL '1 microsecond'`` — the
-    smallest strict-greater step. Server-side ``drop_chunks`` returns an
-    array of dropped fully-qualified names; we raise if the count differs
-    from 1 so an ambiguous outcome cannot masquerade as success.
+    Both time bounds isolate the selected physical interval. The lower bound
+    is essential when an older boundary-partial chunk was deferred for
+    incomplete evidence: an upper-bound-only call would cascade through that
+    protected chunk. Server-side ``drop_chunks`` returns one row per dropped
+    chunk; any count other than one fails closed.
     """
     import psycopg2  # type: ignore[import-untyped]
 
@@ -902,16 +916,24 @@ def _default_drop_chunk(config: RetentionConfig, chunk: ChunkRow) -> None:
                 cursor.execute(
                     "SELECT drop_chunks("
                     "older_than := (%s::timestamptz + INTERVAL '1 microsecond'), "
+                    "newer_than := (%s::timestamptz - INTERVAL '1 microsecond'), "
                     "relation := %s::regclass"
                     ")",
-                    (chunk.range_end, f"{chunk.hypertable_schema}.{chunk.hypertable_name}"),
+                    (
+                        chunk.range_end,
+                        chunk.range_start,
+                        f"{chunk.hypertable_schema}.{chunk.hypertable_name}",
+                    ),
                 )
                 rows = cursor.fetchall()
-                # ``drop_chunks`` returns one row per dropped chunk.
-                if not rows or len(rows) != 1:
+                # ``drop_chunks`` returns one row per dropped chunk. Bind the
+                # returned identity as well as cardinality so a surprising
+                # server-side range decision cannot masquerade as success.
+                dropped_names = [str(row[0]) for row in rows if row]
+                if dropped_names != [chunk.qualified_name]:
                     raise RuntimeError(
-                        f"drop_chunks returned {len(rows)} rows for {chunk.qualified_name}; "
-                        f"expected exactly 1"
+                        f"drop_chunks returned {dropped_names!r} for "
+                        f"{chunk.qualified_name}; expected exact selected chunk"
                     )
     finally:
         connection.close()
@@ -1023,6 +1045,36 @@ def _drop_window_from_eligible(
     return DropWindow(start=min(starts), end=max(ends))
 
 
+def _partition_by_completeness_bounds(
+    eligible: Sequence[ChunkRow], receipt: Mapping[str, Any]
+) -> tuple[list[ChunkRow], list[ChunkRow]]:
+    """Keep boundary-partial chunks deferred instead of blocking later work.
+
+    Timescale aligns chunk boundaries to the partition interval, not to the
+    first observed row. The first physical chunk can therefore begin before
+    the inventory receipt's truthful coverage start. Such a chunk must stay
+    intact, while later chunks whose entire physical range is evidenced may
+    still progress.
+
+    Invalid bounds deliberately produce no covered chunks so the caller
+    retains the existing fail-closed bounds refusal.
+    """
+    bounds = receipt.get("coverage_bounds") or {}
+    try:
+        start = _parse_iso(bounds["start"])
+        end = _parse_iso(bounds["end"])
+    except (KeyError, TypeError, ValueError):
+        return [], list(eligible)
+    if end < start:
+        return [], list(eligible)
+    covered: list[ChunkRow] = []
+    deferred: list[ChunkRow] = []
+    for chunk in eligible:
+        target = covered if start <= chunk.range_start and chunk.range_end <= end else deferred
+        target.append(chunk)
+    return covered, deferred
+
+
 def publish_receipt(config: RetentionConfig, receipt: Mapping[str, Any]) -> None:
     """Atomically publish the receipt (mode 0600, no-follow, durable replace)."""
     payload = (json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
@@ -1092,7 +1144,16 @@ def run_retention(
     # Phase 2a: enumerate chunks + compute drop window.
     cutoff = now - timedelta(days=config.window_days)
     eligible = fetch_chunks(config, cutoff)
-    drop_window = _drop_window_from_eligible(eligible, cutoff)
+    covered_eligible, _boundary_deferred = _partition_by_completeness_bounds(
+        eligible, completeness
+    )
+    if eligible and not covered_eligible:
+        return build_receipt(
+            "refused",
+            now,
+            refusal_reason=CODE_COMPLETENESS_RECEIPT_BOUNDS_INSUFFICIENT,
+        )
+    drop_window = _drop_window_from_eligible(covered_eligible, cutoff)
 
     # Phase 2b: rerun completeness gate against the concrete drop window
     # (bounds / gap / pending — H1a + H1b).
@@ -1123,8 +1184,11 @@ def run_retention(
         return build_receipt("refused", now, refusal_reason=drill_reasons[0])
 
     # Phase 3: apply H3 per-tick bound.
-    selected = list(eligible[: config.per_tick_bound])
-    deferred_remainder = [chunk.qualified_name for chunk in eligible[config.per_tick_bound :]]
+    selected = list(covered_eligible[: config.per_tick_bound])
+    selected_names = {chunk.qualified_name for chunk in selected}
+    deferred_remainder = [
+        chunk.qualified_name for chunk in eligible if chunk.qualified_name not in selected_names
+    ]
 
     # Phase 4a: dry-run branch.
     if not config.enforce:
