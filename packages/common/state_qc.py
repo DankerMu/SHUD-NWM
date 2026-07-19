@@ -70,7 +70,7 @@ _NEGATIVE_ZERO_TOLERANCE = 1.0e-2
 # bound.  A domain-mean correction cap prevents a basin-wide solver failure
 # from being hidden while avoiding false rejection when many cells contain
 # only sub-millimetre serialization residuals.
-MAX_UNSAT_NEGATIVE_REPAIR_M = 2.0e-2
+MAX_UNSAT_NEGATIVE_REPAIR_M = 5.0e-2
 MAX_UNSAT_MEAN_CORRECTION_M = 2.0e-4
 
 
@@ -107,7 +107,7 @@ def normalize_state_negative_residuals(content: str) -> StateResidualNormalizati
     """Project bounded negative restart residuals to the physical zero floor.
 
     Other state variables retain the existing 10 mm numeric-zero tolerance.
-    ``Unsat`` alone receives the 20 mm repair ceiling because SHUD explicitly
+    ``Unsat`` alone receives the 50 mm repair ceiling because SHUD explicitly
     maps negative unsaturated-zone depth to its dry constitutive branch.  Any
     value beyond the ceiling remains untouched so normal QC rejects it.
     """

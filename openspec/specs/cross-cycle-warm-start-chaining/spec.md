@@ -83,7 +83,7 @@ lineage (beyond `valid_time` alone) and validate SHUD state-variable integrity b
 - **AND** a failing check marks the snapshot unusable with a recorded reason.
 
 #### Scenario: Bounded negative Unsat residual is projected to the physical floor
-- **WHEN** SHUD serializes negative `Unsat` ODE residuals no deeper than 0.02 m per mesh row and
+- **WHEN** SHUD serializes negative `Unsat` ODE residuals no deeper than 0.05 m per mesh row and
   their domain-row mean correction does not exceed 0.0002 m
 - **THEN** state-save and warm-state consumption project the accepted values to exact zero
 - **AND** evidence records the corrected value count, affected row count/fraction, maximum

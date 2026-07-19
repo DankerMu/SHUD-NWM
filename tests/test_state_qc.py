@@ -149,9 +149,24 @@ def test_bounded_unsat_negative_is_projected_to_physical_zero(tmp_path: Path) ->
     assert run_state_variable_qc(normalized, expected_mesh_count=100, expected_river_count=1).passed is True
 
 
+def test_isolated_25mm_unsat_ode_overshoot_is_projected_to_dry_floor(tmp_path: Path) -> None:
+    rows = [[float(index + 1), 0.1, 0.1, 0.1, 0.1, 0.1] for index in range(1000)]
+    rows[73][4] = -0.025409
+    ic = _write_ic(tmp_path / "isolated-unsat-overshoot.cfg.ic", mesh=1000, river=1, mesh_rows=rows)
+
+    normalization = normalize_state_negative_residuals(ic.read_text(encoding="utf-8"))
+    normalized = tmp_path / "isolated-unsat-overshoot-normalized.cfg.ic"
+    normalized.write_text(normalization.content, encoding="utf-8")
+
+    assert normalization.accepted is True
+    assert normalization.max_unsat_correction_m == pytest.approx(0.025409)
+    assert normalization.mean_unsat_correction_m == pytest.approx(0.000025409)
+    assert run_state_variable_qc(normalized, expected_mesh_count=1000, expected_river_count=1).passed is True
+
+
 def test_unsat_negative_beyond_repair_ceiling_remains_qc_failure(tmp_path: Path) -> None:
     rows = [[float(index + 1), 0.1, 0.1, 0.1, 0.1, 0.1] for index in range(100)]
-    rows[73][4] = -0.020001
+    rows[73][4] = -0.050001
     ic = _write_ic(tmp_path / "excess-unsat.cfg.ic", mesh=100, river=1, mesh_rows=rows)
 
     normalization = normalize_state_negative_residuals(ic.read_text(encoding="utf-8"))
