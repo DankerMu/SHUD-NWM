@@ -21,6 +21,7 @@ at (node-27 local).
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import psycopg2
@@ -469,10 +470,27 @@ def run_display_coverage_available(cursor: Any) -> bool:
     return value is not None
 
 
-# Per-run refresh statement timeout (ms). One run's coverage CTE is ~3.5s; a
-# value well above that bounds a pathological run (e.g. lock/IO starvation under
-# concurrent ingest) instead of letting it hold the table lock indefinitely.
-_REFRESH_STATEMENT_TIMEOUT_MS = 90_000
+# Per-run refresh statement timeout (ms). Small legacy/QHH runs finish in a few
+# seconds, but production direct-grid basins can contain millions of river rows
+# and legitimately exceed the former 90-second bound. Keep the query bounded,
+# while allowing operators to tune it without code edits for larger basins.
+_REFRESH_STATEMENT_TIMEOUT_ENV = "NHMS_DISPLAY_COVERAGE_REFRESH_STATEMENT_TIMEOUT_MS"
+_DEFAULT_REFRESH_STATEMENT_TIMEOUT_MS = 900_000
+_MIN_REFRESH_STATEMENT_TIMEOUT_MS = 90_000
+_MAX_REFRESH_STATEMENT_TIMEOUT_MS = 3_600_000
+
+
+def _refresh_statement_timeout_ms() -> int:
+    raw = os.getenv(_REFRESH_STATEMENT_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_REFRESH_STATEMENT_TIMEOUT_MS
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_REFRESH_STATEMENT_TIMEOUT_MS
+    if not _MIN_REFRESH_STATEMENT_TIMEOUT_MS <= value <= _MAX_REFRESH_STATEMENT_TIMEOUT_MS:
+        return _DEFAULT_REFRESH_STATEMENT_TIMEOUT_MS
+    return value
 
 
 def _refresh(connection: Any, run_id: str | None) -> list[str]:
@@ -486,7 +504,7 @@ def _refresh(connection: Any, run_id: str | None) -> list[str]:
         "variable_count": len(MVP_STATION_VARIABLES),
     }
     with connection.cursor(cursor_factory=RealDictCursor) as cursor:
-        cursor.execute("SET LOCAL statement_timeout = %s", (_REFRESH_STATEMENT_TIMEOUT_MS,))
+        cursor.execute("SET LOCAL statement_timeout = %s", (_refresh_statement_timeout_ms(),))
         cursor.execute(_REFRESH_SQL, params)
         rows = cursor.fetchall()
     return [r["run_id"] for r in rows]

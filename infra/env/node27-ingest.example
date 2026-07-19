@@ -22,3 +22,6 @@ AUTOPIPE_WORK_ROOT=/home/nwm/autopipe-work
 AUTOPIPE_LOG_ROOT=/home/nwm/autopipe-logs
 AUTOPIPE_LOG_FILE=/home/nwm/autopipe-logs/autopipe.log
 AUTOPIPE_LOCK_PATH=/tmp/autopipe.cron.lock
+# Per-run display coverage materialization timeout. Direct-grid basins with
+# millions of river rows legitimately exceed the historical 90-second bound.
+NHMS_DISPLAY_COVERAGE_REFRESH_STATEMENT_TIMEOUT_MS=900000

@@ -13,6 +13,7 @@ from httpx import ASGITransport, AsyncClient
 from apps.api.main import app
 from apps.api.routes.data_sources import get_data_source_store, get_station_lookup
 from apps.api.routes.forecast import get_forecast_store
+from packages.common.display_coverage import _refresh_statement_timeout_ms
 from packages.common.forecast_store import (
     QHH_LATEST_CONTEXT_LIMIT,
     QHH_LATEST_EXPECTED_HORIZON_HOURS,
@@ -28,6 +29,28 @@ from packages.common.forecast_store import (
 )
 
 QHH_LATEST_REFLECTED_PREFIX_LIMIT = QHH_LATEST_REFLECTED_VALUE_LIMIT - 3
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        (None, 900_000),
+        ("600000", 600_000),
+        ("89999", 900_000),
+        ("3600001", 900_000),
+        ("invalid", 900_000),
+    ],
+)
+def test_display_coverage_refresh_timeout_is_bounded_and_configurable(
+    monkeypatch: pytest.MonkeyPatch,
+    configured: str | None,
+    expected: int,
+) -> None:
+    if configured is None:
+        monkeypatch.delenv("NHMS_DISPLAY_COVERAGE_REFRESH_STATEMENT_TIMEOUT_MS", raising=False)
+    else:
+        monkeypatch.setenv("NHMS_DISPLAY_COVERAGE_REFRESH_STATEMENT_TIMEOUT_MS", configured)
+    assert _refresh_statement_timeout_ms() == expected
 
 
 class FakeForecastStore:
