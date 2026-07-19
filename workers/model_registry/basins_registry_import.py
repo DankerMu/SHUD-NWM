@@ -1129,19 +1129,22 @@ def _backfill_output_segment_geometry(
 
     PR 2 reach-level source: ``core.river_segment`` holds one row per ``.sp.riv``
     reach (from ``gis/river.shp``) with the reach's single-part LineString in
-    ``geom`` and ``iRiv`` recorded in properties. The output reach row keyed
+    ``geom`` and ``iRiv``/``Type`` recorded in properties. The output reach row keyed
     ``{model_id}_shud_riv_{N:06d}`` carries ``shud_riv_index=N`` and lines up
     1:1 with the parser-loaded reach row keyed ``{model_id}_reach_{N:06d}``
-    whose properties carry ``iRiv=N``. We copy ``geom`` + ``length_m`` from
-    the parent reach onto the output row in a single SQL UPDATE.
+    whose properties carry ``iRiv=N``. We copy ``geom`` + ``length_m`` + the
+    source stream ``Type`` from the parent reach onto the output row in one SQL
+    UPDATE. The stream class lets low-zoom MVT use real network topology instead
+    of dropping a tile when every local q_down value is tied at zero.
 
     ``length_m`` reflects the reach's true channel length (the reach row's
     ``length_m`` from river.shp's ``Length``). Provenance is stamped into
     ``properties_json`` under the historical ``gis_rivseg_iRiv`` label so the
     qhh bootstrap idempotency comparison in
     ``_output_segment_idempotency_properties`` keeps matching. With
-    ``only_missing`` only NULL-geom reaches are updated, so re-importing an
-    already-correct basin updates zero rows.
+    ``only_missing`` updates NULL-geom reaches and existing output reaches that
+    still lack a source ``Type``. A source without ``Type`` does not cause a
+    geometry-complete target to be rewritten on every pass.
     """
     from psycopg2.extras import execute_values
 
@@ -1154,19 +1157,21 @@ def _backfill_output_segment_geometry(
     # a malformed sibling row can never abort the batch on an integer cast.
     cursor.execute(
         """
-        SELECT river_segment_id, properties_json->>'shud_riv_index' AS shud_riv_index
+        SELECT river_segment_id,
+               properties_json->>'shud_riv_index' AS shud_riv_index,
+               geom IS NULL AS geom_missing
         FROM core.river_segment
         WHERE river_network_version_id = %s
           AND COALESCE(properties_json->>'shud_output_river', 'false') = 'true'
           AND (properties_json->>'shud_riv_index') ~ '^[0-9]+$'
-          AND (NOT %s OR geom IS NULL)
+          AND (NOT %s OR geom IS NULL OR NOT properties_json ? 'Type')
         """,
         (river_network_version_id, only_missing),
     )
-    reaches_by_index: dict[str, list[str]] = {}
+    reaches_by_index: dict[str, list[tuple[str, bool]]] = {}
     for row in cursor.fetchall():
         reaches_by_index.setdefault(_cell(row, "shud_riv_index", 1), []).append(
-            _cell(row, "river_segment_id", 0)
+            (_cell(row, "river_segment_id", 0), bool(_cell(row, "geom_missing", 2)))
         )
     if not reaches_by_index:
         return 0
@@ -1183,7 +1188,8 @@ def _backfill_output_segment_geometry(
         SELECT
             properties_json->>'iRiv' AS shud_riv_index,
             ST_AsText(geom) AS geom_wkt,
-            length_m
+            length_m,
+            properties_json->'Type' AS stream_type
         FROM core.river_segment
         WHERE river_network_version_id = %s
           AND geom IS NOT NULL
@@ -1193,32 +1199,37 @@ def _backfill_output_segment_geometry(
         """,
         (river_network_version_id,),
     )
-    reach_geom_by_index: dict[str, tuple[str, float | None]] = {}
+    reach_geom_by_index: dict[str, tuple[str, float | None, Any]] = {}
     for row in cursor.fetchall():
         index = _cell(row, "shud_riv_index", 0)
         geom_wkt = _cell(row, "geom_wkt", 1)
         length_m = _cell(row, "length_m", 2)
+        stream_type = _cell(row, "stream_type", 3)
         if not geom_wkt:
             continue
         reach_geom_by_index[index] = (
             str(geom_wkt),
             float(length_m) if length_m is not None else None,
+            stream_type,
         )
 
     updates: list[tuple[str, str, float | None, str]] = []
-    for index, reach_ids in reaches_by_index.items():
+    for index, reach_rows in reaches_by_index.items():
         reach_geom = reach_geom_by_index.get(index)
         if reach_geom is None:
             continue
-        geom_wkt, total_length = reach_geom
-        provenance = json.dumps(
-            {
-                "geometry_source": "gis_rivseg_iRiv",
-                "geometry_source_segment_count": 1,
-                "geometry_source_length_m": total_length,
-            }
-        )
-        for reach_id in reach_ids:
+        geom_wkt, total_length, stream_type = reach_geom
+        provenance_payload = {
+            "geometry_source": "gis_rivseg_iRiv",
+            "geometry_source_segment_count": 1,
+            "geometry_source_length_m": total_length,
+        }
+        if stream_type is not None:
+            provenance_payload["Type"] = stream_type
+        provenance = json.dumps(provenance_payload)
+        for reach_id, geom_missing in reach_rows:
+            if only_missing and not geom_missing and stream_type is None:
+                continue
             updates.append((reach_id, geom_wkt, total_length, provenance))
 
     if not updates:
@@ -1358,7 +1369,7 @@ def _build_river_segment_crosswalk_rows(
 
 
 _OUTPUT_BACKFILL_INJECTED_KEYS = frozenset(
-    {"geometry_source", "geometry_source_segment_count", "geometry_source_length_m"}
+    {"geometry_source", "geometry_source_segment_count", "geometry_source_length_m", "Type"}
 )
 
 

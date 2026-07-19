@@ -389,9 +389,10 @@ def postgis_tile_sql(layer: str) -> str:
             "variable": "variable IS NULL OR variable::text = ''",
             "valid_time": "valid_time IS NULL",
         }
-        # Trunk generalization by zoom. The DB has no stream_order (core.river_segment
-        # only carries an unreliable segment_order index), so q_down (`value` joined by
-        # :valid_time) is the only trunk-importance proxy: high flow == main channel.
+        # Trunk generalization by zoom. Output reaches inherit river.shp ``Type``
+        # during geometry backfill, so topology-backed source stream class is the
+        # primary low-zoom selector. q_down rank remains the compatibility fallback
+        # for older/imported rows without ``Type``.
         # We rank segments WITHIN each river network (PERCENT_RANK partitioned by
         # river_network_version_id, so a small basin's trunk is kept even though its
         # absolute q is lower than a big river's tributary) and keep only the top
@@ -477,7 +478,12 @@ def postgis_tile_sql(layer: str) -> str:
                                PARTITION BY ts.river_network_version_id
                                ORDER BY ts.value
                            )
-                       END AS value_percent_rank
+                       END AS value_percent_rank,
+                       CASE
+                           WHEN (rs.properties_json->>'Type') ~ '^[0-9]+([.][0-9]+)?$'
+                           THEN LEAST(5.0, GREATEST(1.0, (rs.properties_json->>'Type')::double precision))
+                           ELSE NULL
+                       END AS stream_type
                 FROM hydro.river_timeseries ts
                 JOIN (
                     SELECT DISTINCT ON (mi.river_network_version_id)
@@ -501,14 +507,27 @@ def postgis_tile_sql(layer: str) -> str:
             ) ranked
             WHERE :z >= 9
                OR (
-                   value_percent_rank IS NOT NULL
-                   AND value_percent_rank >= CASE
-                       WHEN :z <= 4 THEN 0.90
-                       WHEN :z = 5 THEN 0.70
-                       WHEN :z = 6 THEN 0.40
-                       WHEN :z = 7 THEN 0.15
-                       ELSE 0.04
-                   END
+                   (
+                       stream_type IS NOT NULL
+                       AND stream_type >= CASE
+                           WHEN :z <= 4 THEN 5.0
+                           WHEN :z = 5 THEN 4.0
+                           WHEN :z = 6 THEN 3.0
+                           WHEN :z = 7 THEN 2.0
+                           ELSE 1.0
+                       END
+                   )
+                   OR (
+                       stream_type IS NULL
+                       AND value_percent_rank IS NOT NULL
+                       AND value_percent_rank >= CASE
+                           WHEN :z <= 4 THEN 0.90
+                           WHEN :z = 5 THEN 0.70
+                           WHEN :z = 6 THEN 0.40
+                           WHEN :z = 7 THEN 0.15
+                           ELSE 0.04
+                       END
+                   )
                )
         """
     elif layer == "met-stations":
