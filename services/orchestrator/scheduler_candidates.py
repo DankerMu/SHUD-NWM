@@ -1473,16 +1473,23 @@ def _strict_warm_start_successor_retry_evidence(
     terminal_evidence: Mapping[str, Any],
     successor_state: Mapping[str, Any],
 ) -> dict[str, Any]:
+    # A terminal forecast with the exact warm-start manifest already produced the
+    # deterministic SHUD output needed by state-save/QC.  Re-running forecast
+    # cannot repair a missing or rejected successor checkpoint; resume at the
+    # checkpoint boundary and let the downstream artifact guards reject the
+    # retry if that durable output is no longer available.
     return _evidence_safe(
         {
             **dict(terminal_evidence),
             "decision": "retry_strict_warm_start_successor_checkpoint_missing",
             "reason": "strict_warm_start_successor_checkpoint_missing",
-            "restart_stage": "forecast",
-            "restart_from_stage": "forecast",
+            "restart_stage": "state_save_qc",
+            "restart_from_stage": "state_save_qc",
             "successor_state": _evidence_safe(dict(successor_state)),
-            "native_shud_resubmitted": True,
-            "durable_output_reused": False,
+            "native_shud_resubmitted": False,
+            "durable_shud_output_reused": True,
+            "durable_output_reused": True,
+            "force_native_shud_rerun": False,
         }
     )
 

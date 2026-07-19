@@ -83,12 +83,13 @@ lineage (beyond `valid_time` alone) and validate SHUD state-variable integrity b
 - **AND** a failing check marks the snapshot unusable with a recorded reason.
 
 #### Scenario: Bounded negative Unsat residual is projected to the physical floor
-- **WHEN** SHUD serializes a negative `Unsat` ODE residual no deeper than 0.02 m and affected mesh
-  rows do not exceed 2% of the basin
+- **WHEN** SHUD serializes negative `Unsat` ODE residuals no deeper than 0.02 m per mesh row and
+  their domain-row mean correction does not exceed 0.0002 m
 - **THEN** state-save and warm-state consumption project the accepted values to exact zero
 - **AND** evidence records the corrected value count, affected row count/fraction, maximum
   correction, and domain-row mean correction
-- **AND** a deeper or more widespread correction is rejected rather than hidden by normalization.
+- **AND** a deeper per-row correction or excessive domain-mean correction is rejected rather than
+  hidden by normalization.
 
 ### Requirement: Warm-start quality uses the canonical enum
 Recorded warm-start quality SHALL use the existing canonical values, not a new third set.

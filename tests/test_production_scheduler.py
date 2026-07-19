@@ -20768,7 +20768,11 @@ def test_db_free_terminal_success_reopens_when_successor_checkpoint_missing(
     assert slurm_sync == []
     evidence = candidates[0].state_evidence
     assert evidence["reason"] == "strict_warm_start_successor_checkpoint_missing"
-    assert evidence["restart_stage"] == "forecast"
+    assert evidence["restart_stage"] == "state_save_qc"
+    assert evidence["restart_from_stage"] == "state_save_qc"
+    assert evidence["native_shud_resubmitted"] is False
+    assert evidence["durable_shud_output_reused"] is True
+    assert evidence["force_native_shud_rerun"] is False
     assert evidence["candidate_state"]["init_state_id"] == state_fixture["entries"][0]["state_id"]
     assert evidence["successor_state"]["successor_cycle_time"] == _format_iso_z(successor_time)
     assert evidence["successor_state"]["reason"] == "state_snapshot_index_exact_checkpoint_missing"

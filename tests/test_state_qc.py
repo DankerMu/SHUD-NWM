@@ -165,16 +165,29 @@ def test_unsat_negative_beyond_repair_ceiling_remains_qc_failure(tmp_path: Path)
     assert "negative" in (result.reason or "")
 
 
-def test_widespread_unsat_negative_projection_is_rejected(tmp_path: Path) -> None:
+def test_many_submillimetre_unsat_residuals_use_mean_severity_not_row_fraction(tmp_path: Path) -> None:
     rows = [[float(index + 1), 0.1, 0.1, 0.1, 0.1, 0.1] for index in range(100)]
-    for index in (3, 20, 73):
+    for index in range(7):
+        rows[index][4] = -0.000379
+    ic = _write_ic(tmp_path / "many-tiny-unsat.cfg.ic", mesh=100, river=1, mesh_rows=rows)
+
+    normalization = normalize_state_negative_residuals(ic.read_text(encoding="utf-8"))
+
+    assert normalization.accepted is True
+    assert normalization.normalized_unsat_row_count == 7
+    assert normalization.mean_unsat_correction_m == pytest.approx(0.00002653)
+
+
+def test_large_domain_mean_unsat_projection_is_rejected(tmp_path: Path) -> None:
+    rows = [[float(index + 1), 0.1, 0.1, 0.1, 0.1, 0.1] for index in range(100)]
+    for index in range(100):
         rows[index][4] = -0.001
     ic = _write_ic(tmp_path / "widespread-unsat.cfg.ic", mesh=100, river=1, mesh_rows=rows)
 
     normalization = normalize_state_negative_residuals(ic.read_text(encoding="utf-8"))
 
     assert normalization.accepted is False
-    assert normalization.normalized_unsat_row_count == 3
+    assert normalization.normalized_unsat_row_count == 100
     assert "above" in (normalization.reason or "")
 
 

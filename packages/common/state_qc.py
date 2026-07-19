@@ -67,10 +67,11 @@ _NEGATIVE_ZERO_TOLERANCE = 1.0e-2
 # SHUD's constitutive update treats a negative unsaturated-zone depth as the
 # dry lower bound, but the restart writer can still serialize a small negative
 # ODE residual.  Permit a narrowly bounded projection to that physical lower
-# bound.  The row-fraction cap prevents a basin-wide solver failure from being
-# hidden by normalization.
+# bound.  A domain-mean correction cap prevents a basin-wide solver failure
+# from being hidden while avoiding false rejection when many cells contain
+# only sub-millimetre serialization residuals.
 MAX_UNSAT_NEGATIVE_REPAIR_M = 2.0e-2
-MAX_UNSAT_REPAIRED_ROW_FRACTION = 2.0e-2
+MAX_UNSAT_MEAN_CORRECTION_M = 2.0e-4
 
 
 @dataclass(frozen=True)
@@ -86,7 +87,7 @@ class StateResidualNormalization:
 
     def evidence(self) -> dict[str, Any]:
         return {
-            "policy": "bounded_physical_zero_projection_v1",
+            "policy": "bounded_physical_zero_projection_v2",
             "accepted": self.accepted,
             "reason": self.reason,
             "normalized_value_count": self.normalized_value_count,
@@ -98,7 +99,7 @@ class StateResidualNormalization:
             "max_unsat_correction_m": self.max_unsat_correction_m,
             "mean_unsat_correction_m": self.mean_unsat_correction_m,
             "max_unsat_negative_repair_m": MAX_UNSAT_NEGATIVE_REPAIR_M,
-            "max_unsat_repaired_row_fraction": MAX_UNSAT_REPAIRED_ROW_FRACTION,
+            "max_unsat_mean_correction_m": MAX_UNSAT_MEAN_CORRECTION_M,
         }
 
 
@@ -173,12 +174,12 @@ def normalize_state_negative_residuals(content: str) -> StateResidualNormalizati
         if changed:
             lines[line_index] = "\t".join(tokens)
 
-    repaired_fraction = len(normalized_unsat_rows) / mesh_count if mesh_count else 0.0
-    if repaired_fraction > MAX_UNSAT_REPAIRED_ROW_FRACTION:
+    mean_correction = unsat_correction_sum / mesh_count if mesh_count else 0.0
+    if mean_correction > MAX_UNSAT_MEAN_CORRECTION_M:
         reason = (
-            "unsat negative-residual repair affects "
-            f"{repaired_fraction:.6f} of mesh rows, above "
-            f"{MAX_UNSAT_REPAIRED_ROW_FRACTION:.6f}"
+            "unsat negative-residual domain-mean correction is "
+            f"{mean_correction:.9f} m, above "
+            f"{MAX_UNSAT_MEAN_CORRECTION_M:.9f} m"
         )
         return StateResidualNormalization(
             content,
@@ -188,7 +189,7 @@ def normalize_state_negative_residuals(content: str) -> StateResidualNormalizati
             len(normalized_unsat_rows),
             mesh_count,
             max_unsat_correction,
-            unsat_correction_sum / mesh_count if mesh_count else 0.0,
+            mean_correction,
         )
     trailing_newline = "\n" if content.endswith(("\n", "\r")) else ""
     normalized_content = "\n".join(lines) + trailing_newline if normalized_value_count else content
@@ -200,7 +201,7 @@ def normalize_state_negative_residuals(content: str) -> StateResidualNormalizati
         len(normalized_unsat_rows),
         mesh_count,
         max_unsat_correction,
-        unsat_correction_sum / mesh_count if mesh_count else 0.0,
+        mean_correction,
     )
 
 
