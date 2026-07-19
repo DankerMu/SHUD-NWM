@@ -119,6 +119,8 @@ class PsycopgForecastStore:
         scenarios: Sequence[str],
         include_analysis: bool = False,
         run_types: Sequence[str] | None = None,
+        run_id: str | None = None,
+        model_id: str | None = None,
     ) -> dict[str, Any]:
         requested_variables = _normalized_tokens(variables)
         if "q_down" not in requested_variables:
@@ -132,6 +134,7 @@ class PsycopgForecastStore:
 
         run_type_tokens = _run_type_tokens(run_types)
         scenario_filter = _scenario_filter(scenarios)
+        identity_filter = _run_identity_filter(run_id=run_id, model_id=model_id)
         # PR-2 reach rows live under <model>_reach_<iRiv>; hydro.river_timeseries
         # are keyed by the matching <model>_shud_riv_<iRiv> output id. Validate
         # against the reach row, but query the timeseries side with the
@@ -179,6 +182,7 @@ class PsycopgForecastStore:
                     segment_id=ts_segment_id,
                     river_network_version_id=river_network_version_id,
                     scenario_filter=scenario_filter,
+                    identity_filter=identity_filter,
                 )
             selected_issue_time = parsed_issue_time or _latest_cycle_time(latest_cycles_by_scenario)
             if include_analysis and selected_issue_time is None:
@@ -215,6 +219,7 @@ class PsycopgForecastStore:
                     river_network_version_id=river_network_version_id,
                     issue_time=selected_issue_time,
                     scenario_filter=scenario_filter,
+                    identity_filter=identity_filter,
                     cycle_times_by_scenario=None if parsed_issue_time is not None else latest_cycles_by_scenario,
                     end_time=forecast_end,
                 )
@@ -233,6 +238,7 @@ class PsycopgForecastStore:
                 river_network_version_id=river_network_version_id,
                 issue_time=selected_issue_time,
                 scenario_filter=scenario_filter,
+                identity_filter=identity_filter,
                 cycle_times_by_scenario=None if parsed_issue_time is not None else latest_cycles_by_scenario,
                 end_time=selected_issue_time + timedelta(days=7),
             )
@@ -342,6 +348,7 @@ class PsycopgForecastStore:
         segment_id: str,
         river_network_version_id: str,
         scenario_filter: "_ScenarioFilter",
+        identity_filter: "_ScenarioFilter",
     ) -> dict[str, datetime]:
         rows = self._fetch_all(
             cursor,
@@ -358,10 +365,17 @@ class PsycopgForecastStore:
               AND h.run_type = 'forecast'
               AND h.cycle_time IS NOT NULL
               {scenario_filter.sql}
+              {identity_filter.sql}
             GROUP BY h.scenario_id
             ORDER BY h.scenario_id
             """,
-            (basin_version_id, segment_id, river_network_version_id, *scenario_filter.params),
+            (
+                basin_version_id,
+                segment_id,
+                river_network_version_id,
+                *scenario_filter.params,
+                *identity_filter.params,
+            ),
         )
         return {
             str(row["scenario_id"]): _ensure_utc(row["cycle_time"])
@@ -442,6 +456,7 @@ class PsycopgForecastStore:
         river_network_version_id: str,
         issue_time: datetime,
         scenario_filter: "_ScenarioFilter",
+        identity_filter: "_ScenarioFilter",
         cycle_times_by_scenario: Mapping[str, datetime] | None = None,
         end_time: datetime | None = None,
     ) -> list[dict[str, Any]]:
@@ -484,6 +499,7 @@ class PsycopgForecastStore:
                   AND rt.valid_time >= h.cycle_time
                   AND rt.valid_time <= h.cycle_time + INTERVAL '7 days'
                   {scenario_filter.sql}
+                  {identity_filter.sql}
                 ORDER BY h.scenario_id, rt.valid_time
                 """,
                     (
@@ -492,6 +508,7 @@ class PsycopgForecastStore:
                         segment_id,
                         river_network_version_id,
                         *scenario_filter.params,
+                        *identity_filter.params,
                     ),
                 ),
             )
@@ -524,6 +541,7 @@ class PsycopgForecastStore:
               AND rt.valid_time >= %s
               AND rt.valid_time <= %s
               {scenario_filter.sql}
+              {identity_filter.sql}
             ORDER BY h.scenario_id, rt.valid_time
             """,
                 (
@@ -534,6 +552,7 @@ class PsycopgForecastStore:
                     issue_time,
                     forecast_end,
                     *scenario_filter.params,
+                    *identity_filter.params,
                 ),
             ),
         )
@@ -2383,6 +2402,22 @@ def _scenario_filter(scenarios: Sequence[str]) -> _ScenarioFilter:
         "AND (LOWER(h.source_id) = ANY(%s) OR LOWER(h.scenario_id) = ANY(%s))",
         (list(source_ids), sorted(scenario_ids)),
     )
+
+
+def _run_identity_filter(*, run_id: str | None, model_id: str | None) -> _ScenarioFilter:
+    clauses: list[str] = []
+    params: list[str] = []
+    normalized_run_id = str(run_id or "").strip()
+    normalized_model_id = str(model_id or "").strip()
+    if normalized_run_id:
+        clauses.append("h.run_id = %s")
+        params.append(normalized_run_id)
+    if normalized_model_id:
+        clauses.append("h.model_id = %s")
+        params.append(normalized_model_id)
+    if not clauses:
+        return _ScenarioFilter("", ())
+    return _ScenarioFilter("AND " + " AND ".join(clauses), tuple(params))
 
 
 def _run_type_tokens(run_types: Sequence[str] | None) -> list[str]:

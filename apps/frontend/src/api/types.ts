@@ -2117,6 +2117,10 @@ export interface operations {
                 scenarios?: string;
                 include_analysis?: boolean;
                 run_types?: string | null;
+                /** @description Exact hydro run identity used to prevent sibling model results from being merged. */
+                run_id?: string | null;
+                /** @description Exact model identity paired with run_id for strict display-product selection. */
+                model_id?: string | null;
             };
             header?: never;
             path: {

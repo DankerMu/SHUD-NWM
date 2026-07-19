@@ -515,10 +515,11 @@ class InMemoryForecastSeriesStore(PsycopgForecastStore):
         river_network_version_id: str,
         issue_time: datetime,
         scenario_filter: Any,
+        identity_filter: Any,
         cycle_times_by_scenario: dict[str, datetime] | None = None,
         end_time: datetime | None = None,
     ) -> list[dict[str, Any]]:
-        del cursor, basin_version_id, segment_id, river_network_version_id, scenario_filter, end_time
+        del cursor, basin_version_id, segment_id, river_network_version_id, scenario_filter, identity_filter, end_time
         self.forecast_fetches.append(
             {
                 "issue_time": issue_time,
@@ -702,6 +703,19 @@ async def test_forecast_series_returns_timestamp_value_tuples_and_q_down_filter(
     assert fake_store.forecast_calls[-1]["scenarios"] == ["GFS"]
     assert fake_store.forecast_calls[-1]["river_network_version_id"] == "rnv_v1"
     assert fake_store.forecast_calls[-1]["include_analysis"] is False
+
+
+@pytest.mark.asyncio
+async def test_forecast_series_forwards_strict_run_and_model_identity(fake_store: FakeForecastStore) -> None:
+    response = await _get(
+        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series"
+        "?river_network_version_id=rnv_v1&issue_time=2026-05-07T00:00:00Z"
+        "&variables=q_down&scenarios=GFS&run_id=run-direct-grid&model_id=model-direct-grid"
+    )
+
+    assert response.status_code == 200
+    assert fake_store.forecast_calls[-1]["run_id"] == "run-direct-grid"
+    assert fake_store.forecast_calls[-1]["model_id"] == "model-direct-grid"
 
 
 @pytest.mark.asyncio
@@ -3533,3 +3547,52 @@ def test_forecast_series_validates_reach_id_but_queries_timeseries_with_shud_riv
     for statement, params in ts_executions:
         assert shud_riv_id in params, statement
         assert reach_id not in params, statement
+
+
+def test_forecast_series_strict_identity_excludes_sibling_run_for_same_cycle() -> None:
+    issue_time = _dt("2026-07-05T00:00:00Z")
+    selected_run_id = "fcst_gfs_2026070500_dg_model"
+    selected_model_id = "dg_model"
+    store = SqlCaptureForecastStore(
+        [
+            [{"basin_version_id": "basins_qhh_vbasins"}],
+            [
+                {
+                    "river_segment_id": "basins_qhh_shud_shud_riv_000773",
+                    "river_network_version_id": "basins_qhh_rivnet_vbasins",
+                    "properties_json": {},
+                }
+            ],
+            [
+                {
+                    "scenario_id": "forecast_gfs_deterministic",
+                    "model_id": selected_model_id,
+                    "source_id": "GFS",
+                    "cycle_time": issue_time,
+                    "run_end_time": issue_time + timedelta(days=7),
+                    "forcing_version_id": None,
+                    "river_network_version_id": "basins_qhh_rivnet_vbasins",
+                    "valid_time": issue_time,
+                    "value": 164.045,
+                    "unit": "m3/s",
+                }
+            ],
+        ]
+    )
+
+    response = store.forecast_series(
+        basin_version_id="basins_qhh_vbasins",
+        segment_id="basins_qhh_shud_shud_riv_000773",
+        river_network_version_id="basins_qhh_rivnet_vbasins",
+        issue_time="2026-07-05T00:00:00Z",
+        variables=["q_down"],
+        scenarios=["GFS"],
+        run_id=selected_run_id,
+        model_id=selected_model_id,
+    )
+
+    statement, params = store.cursor.executions[2]
+    assert "h.run_id = %s" in statement
+    assert "h.model_id = %s" in statement
+    assert params[-2:] == (selected_run_id, selected_model_id)
+    assert response["series"][0]["points"] == [[_timestamp_ms(issue_time), 164.045]]

@@ -47,6 +47,16 @@ def get_forecast_series(
     scenarios: str = Query(default="GFS"),
     include_analysis: bool = Query(default=False),
     run_types: str | None = Query(default=None),
+    run_id: str | None = Query(
+        default=None,
+        min_length=1,
+        description="Exact hydro run identity used to prevent sibling model results from being merged.",
+    ),
+    model_id: str | None = Query(
+        default=None,
+        min_length=1,
+        description="Exact model identity paired with run_id for strict display-product selection.",
+    ),
     store: PsycopgForecastStore = Depends(get_forecast_store),
 ) -> dict[str, Any]:
     run_type_tokens = _split_query_list(run_types) if run_types is not None else None
@@ -62,6 +72,8 @@ def get_forecast_series(
             scenarios=_split_query_list(scenarios),
             include_analysis=include_analysis,
             run_types=run_type_tokens,
+            run_id=run_id,
+            model_id=model_id,
         )
     except ForecastStoreError as error:
         raise _api_error(error) from error

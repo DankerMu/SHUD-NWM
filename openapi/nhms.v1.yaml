@@ -658,6 +658,32 @@ paths:
           - type: string
           - type: 'null'
           title: Run Types
+      - name: run_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            minLength: 1
+          - type: 'null'
+          description: Exact hydro run identity used to prevent sibling model results
+            from being merged.
+          title: Run Id
+        description: Exact hydro run identity used to prevent sibling model results
+          from being merged.
+      - name: model_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            minLength: 1
+          - type: 'null'
+          description: Exact model identity paired with run_id for strict display-product
+            selection.
+          title: Model Id
+        description: Exact model identity paired with run_id for strict display-product
+          selection.
       responses:
         '200':
           description: Successful Response
