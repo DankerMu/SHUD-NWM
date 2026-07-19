@@ -10,11 +10,13 @@ import {
 } from '@/stores/stationLayerData'
 
 const fetchHydroMetStationsByIdentityMock = vi.fn()
+const fetchHydroMetLatestProductMock = vi.fn()
 
 vi.mock('@/pages/hydroMet/bootstrap', async () => {
   const actual = await vi.importActual<typeof import('@/pages/hydroMet/bootstrap')>('@/pages/hydroMet/bootstrap')
   return {
     ...actual,
+    fetchHydroMetLatestProduct: (...args: unknown[]) => fetchHydroMetLatestProductMock(...args),
     fetchHydroMetStationsByIdentity: (...args: unknown[]) => fetchHydroMetStationsByIdentityMock(...args),
   }
 })
@@ -47,7 +49,30 @@ function stationPage(items: HydroMetStation[], totalCount?: number) {
 describe('stationLayerData store (M26-3)', () => {
   beforeEach(() => {
     fetchHydroMetStationsByIdentityMock.mockReset()
+    fetchHydroMetLatestProductMock.mockReset()
     useStationLayerDataStore.getState().clear()
+  })
+
+  it('uses the selected direct-grid run model for station membership', async () => {
+    fetchHydroMetLatestProductMock.mockResolvedValue({
+      basin_version_id: 'bv-qhh',
+      model_id: 'dg-qhh-gfs',
+    })
+    fetchHydroMetStationsByIdentityMock.mockResolvedValueOnce(stationPage(stations('dg', 2), 2))
+
+    await useStationLayerDataStore.getState().loadStationLayer({
+      basinContexts: [{ basinId: 'basins_qhh', basinVersionId: 'bv-qhh', source: 'GFS', cycle: '2026-07-06T00:00:00Z' }],
+    })
+
+    expect(fetchHydroMetLatestProductMock).toHaveBeenCalledWith({
+      basinId: 'basins_qhh',
+      source: 'GFS',
+      cycle: '2026-07-06T00:00:00Z',
+    })
+    expect(fetchHydroMetStationsByIdentityMock).toHaveBeenCalledWith(
+      { basinVersionId: 'bv-qhh', modelId: 'dg-qhh-gfs' },
+      { limit: STATION_PAGE_LIMIT, offset: 0 },
+    )
   })
 
   it('builds structural request keys for delimiter-shaped basin identities', () => {

@@ -201,8 +201,8 @@ export function useBasinDetailMode({
         : null
     )
   const stationLayerBasinContexts = useMemo(
-    () => [{ basinId, basinVersionId: stationLayerBasinVersionId }],
-    [basinId, stationLayerBasinVersionId],
+    () => [{ basinId, basinVersionId: stationLayerBasinVersionId, source: resolvedSource, cycle: state.cycle }],
+    [basinId, resolvedSource, state.cycle, stationLayerBasinVersionId],
   )
   const stationLayer = useMetStationLayer({
     active: state.metStations,

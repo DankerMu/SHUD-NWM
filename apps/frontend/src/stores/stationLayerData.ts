@@ -3,6 +3,7 @@ import { create } from 'zustand'
 import { getApiErrorMessage } from '@/api/response'
 import {
   HYDRO_MET_STATION_LIMIT,
+  fetchHydroMetLatestProduct,
   fetchHydroMetStationsByIdentity,
   type HydroMetStation,
 } from '@/pages/hydroMet/bootstrap'
@@ -29,6 +30,8 @@ export interface StationLayerData {
 export interface StationLayerBasinContext {
   basinId: string
   basinVersionId: string | null
+  source?: 'GFS' | 'IFS' | null
+  cycle?: string | null
 }
 
 export interface StationLayerRequest {
@@ -51,18 +54,25 @@ function normalizeBasinContexts(contexts: StationLayerBasinContext[]): Array<Sta
   for (const context of contexts) {
     const basinId = context.basinId.trim()
     const basinVersionId = context.basinVersionId?.trim() || null
+    const source = context.source === 'GFS' || context.source === 'IFS' ? context.source : null
+    const cycle = context.cycle?.trim() || null
     if (!basinId || !basinVersionId) continue
-    const key = JSON.stringify([basinId, basinVersionId])
+    const key = JSON.stringify([basinId, basinVersionId, source, cycle])
     if (seen.has(key)) continue
     seen.add(key)
-    normalized.push({ basinId, basinVersionId })
+    normalized.push({ basinId, basinVersionId, source, cycle })
   }
   return normalized
 }
 
 export function stationLayerRequestKey(request: StationLayerRequest) {
   return JSON.stringify(
-    normalizeBasinContexts(request.basinContexts).map(({ basinId, basinVersionId }) => [basinId, basinVersionId]),
+    normalizeBasinContexts(request.basinContexts).map(({ basinId, basinVersionId, source, cycle }) => [
+      basinId,
+      basinVersionId,
+      source,
+      cycle,
+    ]),
   )
 }
 
@@ -92,8 +102,14 @@ async function fetchAllStations(request: StationLayerRequest): Promise<StationLa
       break
     }
 
+    const product = context.source
+      ? await fetchHydroMetLatestProduct({ basinId: context.basinId, source: context.source, cycle: context.cycle })
+      : null
+    const stationIdentity = product
+      ? { basinVersionId: product.basin_version_id, modelId: product.model_id }
+      : { basinVersionId: context.basinVersionId }
     const firstPage = await fetchHydroMetStationsByIdentity(
-      { basinVersionId: context.basinVersionId as string },
+      stationIdentity,
       { limit: Math.min(STATION_PAGE_LIMIT, STATION_CLIENT_CAP - stations.length), offset: 0 },
     )
     const basinTotal = Number.isFinite(firstPage.total_count) ? firstPage.total_count : firstPage.items.length
@@ -106,7 +122,7 @@ async function fetchAllStations(request: StationLayerRequest): Promise<StationLa
       const remainingCap = STATION_CLIENT_CAP - stations.length
       const pageLimit = Math.min(STATION_PAGE_LIMIT, remainingCap)
       const page = await fetchHydroMetStationsByIdentity(
-        { basinVersionId: context.basinVersionId as string },
+        stationIdentity,
         { limit: pageLimit, offset },
       )
       if (page.items.length === 0) break

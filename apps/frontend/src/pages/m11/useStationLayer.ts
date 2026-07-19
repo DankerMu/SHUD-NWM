@@ -75,6 +75,8 @@ export function useMetStationLayer({
         .map((context) => ({
           basinId: context.basinId.trim(),
           basinVersionId: context.basinVersionId?.trim() || null,
+          source: context.source === 'GFS' || context.source === 'IFS' ? context.source : null,
+          cycle: context.cycle?.trim() || null,
         }))
         .filter((context) => context.basinId.length > 0),
     [basinContexts],

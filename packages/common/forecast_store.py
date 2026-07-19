@@ -806,7 +806,12 @@ class PsycopgForecastStore:
                 FROM met.met_station ms
                 JOIN met.interp_weight iw ON iw.station_id = ms.station_id
             """
-            clauses = ["iw.model_id = %s", "ms.active_flag = true"]
+            # An explicit run/model identity is authoritative for immutable
+            # direct-grid station membership.  Direct-grid variants remain
+            # inactive while the basin's legacy model stays active, so the
+            # basin-wide active flag must not hide stations selected through
+            # this exact interp_weight scope.
+            clauses = ["iw.model_id = %s"]
             params: list[Any] = [model_id]
             if basin_version_id is not None:
                 clauses.append("ms.basin_version_id = %s")
