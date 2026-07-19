@@ -528,6 +528,11 @@ jq -r '.features[].properties.basin_id' apps/frontend/public/geo/national-basin-
 `dth_ls`、`dth_zj`、`hhe`、`huai_main`、`jialingjiang`、`lh_gl`，不包含 HHY。
 当前静态 river authority 是 59,702 条 feature、13 个具备全国静态河网的流域；
 其中 HHE 使用 model package 中的真实 `river.shp`，包含 43,799 条河段，HHY 为 0。
+静态 river 只负责全国底图常显，不参与点击。HHE 与其他业务流域的点击、流量上色
+统一来自 `hydro-national/q_down` live MVT；HHE model package 的 `river.shp.Type`
+必须回填到对应 output segment，低 zoom 优先按该真实河级筛选，历史缺失 `Type` 的
+segment 才回退到流量分位筛选。MVT feature 必须同时携带 `river_segment_id`、
+`basin_version_id` 和 `river_network_version_id`，否则前端不得打开河段时序弹窗。
 全国总览的 basin API 请求固定带 `has_display_product=true`；因此把 HHY 的
 `core.basin_version.valid_to` 置为退役时间后，历史 run 仍保留但不再进入展示列表。
 不要用 `active_flag` 做这项退役：当前 Basins importer 创建的版本默认都是 false，
