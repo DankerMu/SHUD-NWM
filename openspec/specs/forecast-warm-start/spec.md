@@ -43,6 +43,7 @@ TBD - created by archiving change m2-analysis-warm-start. Update Purpose after a
 #### Scenario: Init state file corrupted
 - **WHEN** `.cfg.ic` 文件 checksum 不匹配或文件不存在
 - **THEN** 系统标记该 state_snapshot.usable_flag=false，记录 error_code='INIT_STATE_CORRUPTED'，重新查询下一个最近可用状态；如果无可用状态则 fallback cold-start
+- **AND** 上述 fallback 仅适用于非严格兼容模式；严格业务模式必须保留原 exact-state 身份并失败闭锁，等待修复或重试，不得改用旧状态或 cold-start
 
 ### Requirement: Run Manifest Init State Fields
 系统 SHALL 在 run_manifest 中使用嵌套结构包含 init_state 相关字段，遵循 Appendix B manifest schema。
@@ -54,4 +55,3 @@ TBD - created by archiving change m2-analysis-warm-start. Update Purpose after a
 #### Scenario: Manifest with cold-start
 - **WHEN** forecast run 使用 cold-start
 - **THEN** run_manifest JSON 包含 `initial_state: { state_id: null, ic_file_uri: null, quality: "<reason>" }` 和 `runtime: { init_mode: 1 }`
-

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from packages.common.state_qc import (
     MAX_STATE_IC_BYTES,
     cfg_ic_header_minute_index,
     cfg_ic_header_minute_time,
+    normalize_state_negative_residuals,
     run_state_variable_qc,
 )
 
@@ -127,6 +130,52 @@ def test_negative_beyond_roundoff_tolerance_fails(tmp_path: Path) -> None:
 
     assert result.passed is False
     assert "negative" in (result.reason or "")
+
+
+def test_bounded_unsat_negative_is_projected_to_physical_zero(tmp_path: Path) -> None:
+    rows = [[float(index + 1), 0.1, 0.1, 0.1, 0.1, 0.1] for index in range(100)]
+    rows[73][4] = -0.014834
+    ic = _write_ic(tmp_path / "bounded-unsat.cfg.ic", mesh=100, river=1, mesh_rows=rows)
+
+    raw_result = run_state_variable_qc(ic, expected_mesh_count=100, expected_river_count=1)
+    normalization = normalize_state_negative_residuals(ic.read_text(encoding="utf-8"))
+    normalized = tmp_path / "normalized.cfg.ic"
+    normalized.write_text(normalization.content, encoding="utf-8")
+
+    assert raw_result.passed is False
+    assert normalization.accepted is True
+    assert normalization.normalized_unsat_row_count == 1
+    assert normalization.max_unsat_correction_m == pytest.approx(0.014834)
+    assert run_state_variable_qc(normalized, expected_mesh_count=100, expected_river_count=1).passed is True
+
+
+def test_unsat_negative_beyond_repair_ceiling_remains_qc_failure(tmp_path: Path) -> None:
+    rows = [[float(index + 1), 0.1, 0.1, 0.1, 0.1, 0.1] for index in range(100)]
+    rows[73][4] = -0.020001
+    ic = _write_ic(tmp_path / "excess-unsat.cfg.ic", mesh=100, river=1, mesh_rows=rows)
+
+    normalization = normalize_state_negative_residuals(ic.read_text(encoding="utf-8"))
+    normalized = tmp_path / "excess-normalized.cfg.ic"
+    normalized.write_text(normalization.content, encoding="utf-8")
+
+    assert normalization.accepted is True
+    assert normalization.normalized_unsat_row_count == 0
+    result = run_state_variable_qc(normalized, expected_mesh_count=100, expected_river_count=1)
+    assert result.passed is False
+    assert "negative" in (result.reason or "")
+
+
+def test_widespread_unsat_negative_projection_is_rejected(tmp_path: Path) -> None:
+    rows = [[float(index + 1), 0.1, 0.1, 0.1, 0.1, 0.1] for index in range(100)]
+    for index in (3, 20, 73):
+        rows[index][4] = -0.001
+    ic = _write_ic(tmp_path / "widespread-unsat.cfg.ic", mesh=100, river=1, mesh_rows=rows)
+
+    normalization = normalize_state_negative_residuals(ic.read_text(encoding="utf-8"))
+
+    assert normalization.accepted is False
+    assert normalization.normalized_unsat_row_count == 3
+    assert "above" in (normalization.reason or "")
 
 
 def test_out_of_range_value_fails(tmp_path: Path) -> None:

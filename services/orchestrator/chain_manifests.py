@@ -457,6 +457,10 @@ def build_forecast_runtime_manifest(
         "residual_blockers": [dict(item) for item in assembly.residual_blockers],
     }
     manifest["runtime"]["init_mode"] = 3 if basin.get("init_state_id") or basin.get("init_state_uri") else 1
+    if orchestrator.config.strict_forecast_warm_start_required_for(context.cycle_time) and (
+        basin.get("init_state_id") or basin.get("init_state_uri")
+    ):
+        manifest["runtime"]["warm_start_policy"] = "exact_required"
     checkpoint_hours = forecast_state_checkpoint_hours(manifest["forecast_horizon_hours"])
     if checkpoint_hours:
         manifest["runtime"]["state_checkpoint_hours"] = checkpoint_hours

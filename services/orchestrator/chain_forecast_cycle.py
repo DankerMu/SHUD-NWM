@@ -9,6 +9,7 @@ from packages.common.state_lineage import WARM_START_SUCCESSOR_CHECKPOINT_MISSIN
 from services.orchestrator import chain as _chain
 from services.orchestrator.chain_types import (
     CycleOrchestrationContext,
+    InitialStateSelection,
     ModelContext,
     OrchestratorError,
     StageDefinition,
@@ -206,6 +207,13 @@ def apply_cohort_warm_start(
         model_id = str(basin.get("model_id") or "")
         if not model_id:
             continue
+        if strict_required and _cold_seed_admitted(basin):
+            _apply_initial_state_selection_to_basin(
+                basin,
+                InitialStateSelection(None, None, None, None, "cold_start_no_state"),
+            )
+            basin["cold_start_reason"] = _cold_seed_reason(basin)
+            continue
         selection = self._select_forecast_initial_state(
             model_id=model_id,
             cycle_time=cycle_time,
@@ -217,6 +225,34 @@ def apply_cohort_warm_start(
         _apply_initial_state_selection_to_basin(basin, selection)
         if selection.rejection_code is not None:
             basin["init_state_rejection_code"] = selection.rejection_code
+
+
+def _cold_seed_admitted(basin: Mapping[str, Any]) -> bool:
+    return any(
+        evidence.get("mode") in {"db_free_cold_new_model", "db_free_cold_declared_cutover"}
+        for evidence in _state_evidence_layers(basin)
+    )
+
+
+def _cold_seed_reason(basin: Mapping[str, Any]) -> str | None:
+    for evidence in _state_evidence_layers(basin):
+        if evidence.get("mode") not in {"db_free_cold_new_model", "db_free_cold_declared_cutover"}:
+            continue
+        reason = evidence.get("cold_start_reason")
+        if reason not in (None, ""):
+            return str(reason)
+    return None
+
+
+def _state_evidence_layers(basin: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    evidence = basin.get("state_evidence")
+    if not isinstance(evidence, Mapping):
+        return []
+    layers: list[Mapping[str, Any]] = [evidence]
+    strict = evidence.get("strict_warm_start")
+    if isinstance(strict, Mapping):
+        layers.append(strict)
+    return layers
 
 
 def validate_cycle_basin_identities(

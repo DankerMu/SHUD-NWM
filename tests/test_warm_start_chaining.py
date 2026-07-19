@@ -613,6 +613,54 @@ def test_consume_materializes_canonical_ic_to_project_name(tmp_path: Path) -> No
     assert round(_read_cfg_ic_header_minute(project_ic)) == round(_minute_time(t_next))
 
 
+def test_consume_projects_bounded_unsat_residual_and_records_evidence(tmp_path: Path) -> None:
+    t_next = "2026-05-02T00:00:00Z"
+    rows = [f"{index + 1}\t0\t0\t0\t{(-0.014834 if index == 73 else 0.1):.6f}\t0" for index in range(100)]
+    ic_content = (
+        f"100\t1\t{_minute_time(t_next):.6f}\n"
+        "Index\tCanopy\tSnow\tSurface\tUnsat\tGW\n"
+        + "\n".join(rows)
+        + "\nIndex\tStage\n1\t0\n"
+    ).encode()
+    state = _ic_state(t_next, ic_content)
+    state_manager = FakeStateManager([state])
+    runtime, object_root, workspace = _runtime(tmp_path, state_manager)
+    (object_root / state.state_uri).parent.mkdir(parents=True, exist_ok=True)
+    (object_root / state.state_uri).write_bytes(ic_content)
+    manifest = _consume_manifest(state, start_time=t_next, valid_time=t_next, quality="fresh")
+    manifest["runtime"]["warm_start_policy"] = "exact_required"
+    input_dir = workspace / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime._stage_initial_state(manifest, input_dir)
+
+    project_ic = input_dir / "demo.cfg.ic"
+    assert project_ic.read_text(encoding="utf-8").splitlines()[75].split()[4] == "0"
+    evidence = manifest["runtime"]["initial_state_normalization"]
+    assert evidence["normalized_unsat_row_count"] == 1
+    assert evidence["max_unsat_correction_m"] == pytest.approx(0.014834)
+
+
+def test_exact_warm_state_unavailable_never_falls_back_to_cold_or_older_state(tmp_path: Path) -> None:
+    t_next = "2026-05-02T00:00:00Z"
+    ic_content = f"2 1 {_minute_time(t_next):.6f}\n1 0.1\n2 0.2\n1 0.0\n".encode()
+    state = _ic_state(t_next, ic_content)
+    state_manager = FakeStateManager([state])
+    runtime, _object_root, workspace = _runtime(tmp_path, state_manager)
+    manifest = _consume_manifest(state, start_time=t_next, valid_time=t_next, quality="fresh")
+    manifest["runtime"]["warm_start_policy"] = "exact_required"
+    input_dir = workspace / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(Exception) as excinfo:
+        runtime._stage_initial_state(manifest, input_dir)
+
+    assert getattr(excinfo.value, "error_code", None) == "WARM_START_UNAVAILABLE"
+    assert manifest["initial_state"]["state_id"] == state.state_id
+    assert manifest["initial_state"]["quality"] == "fresh"
+    assert manifest["runtime"]["init_mode"] == 3
+
+
 def test_consume_warm_continuity_blocks_on_three_way_run_start_mismatch(tmp_path: Path) -> None:
     # PRODUCTION-PATH three-way enforcement: the snapshot is consumed as the exact
     # successor (valid_time == run start_time == T_{N+1}, quality=fresh), but the
@@ -832,6 +880,54 @@ def test_cycle_cohort_forecast_manifest_uses_prior_cycle_saved_state(tmp_path: P
         == runtime_manifest["initial_state"]["checksum"]
         == entry["init_state_checksum"]
     )
+
+
+def test_strict_new_model_first_cycle_is_cold_seed_but_not_marked_exact_warm(tmp_path: Path) -> None:
+    from services.orchestrator.chain import CycleOrchestrationContext
+
+    cycle_time = _dt("2026-05-02T00:00:00Z")
+    orchestrator = _cohort_orchestrator(
+        tmp_path,
+        FakeStateManager([]),
+        require_forecast_warm_start=True,
+    )
+    basin = {
+        "model_id": "new_model",
+        "basin_id": "new_model",
+        "basin_version_id": "basin_v01",
+        "river_network_version_id": "river_v01",
+        "segment_count": 2,
+        "model_package_uri": "models/new_model/package/",
+        "source_id": "gfs",
+        "state_evidence": {
+            "decision": "retry_strict_warm_start_terminal_init_state_mismatch",
+            "strict_warm_start": {
+                "mode": "db_free_cold_new_model",
+                "ready": True,
+                "cold_start_reason": "no_prior_history",
+            },
+        },
+    }
+    basins = orchestrator._normalize_cycle_basins([basin], "gfs", cycle_time)
+
+    orchestrator._apply_cohort_warm_start(basins, "gfs", cycle_time)
+
+    record = basins[0]
+    assert record["init_state_id"] is None
+    assert record["init_state_quality"] == "cold_start_no_state"
+    assert record["cold_start_reason"] == "no_prior_history"
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_id="gfs_2026050200",
+        run_id="cycle_run",
+        all_basins=basins,
+        active_basins=list(basins),
+        restart_stage=None,
+    )
+    runtime_manifest = orchestrator._build_forecast_runtime_manifest(context, record)
+    assert runtime_manifest["runtime"]["init_mode"] == 1
+    assert "warm_start_policy" not in runtime_manifest["runtime"]
 
 
 def test_strict_cycle_prefilled_exact_successor_is_validated_and_preserved(tmp_path: Path) -> None:

@@ -71,8 +71,8 @@ lineage (beyond `valid_time` alone) and validate SHUD state-variable integrity b
 - **WHEN** the candidate state was produced by a different model package version, a different
   source, or a lead beyond the configured `max_lead` policy
 - **THEN** it is rejected with a stable rejection code recorded in evidence
-- **AND** the cycle falls back to the next usable state or a recorded cold start, never failing the
-  cycle solely for a missing successor state.
+- **AND** strict business-production mode keeps the candidate blocked for retry and does not select
+  an older state or cold start; non-strict compatibility paths may retain their documented fallback.
 
 #### Scenario: State-variable QC
 - **WHEN** a snapshot is QC'd before becoming usable
@@ -82,6 +82,14 @@ lineage (beyond `valid_time` alone) and validate SHUD state-variable integrity b
   storage
 - **AND** a failing check marks the snapshot unusable with a recorded reason.
 
+#### Scenario: Bounded negative Unsat residual is projected to the physical floor
+- **WHEN** SHUD serializes a negative `Unsat` ODE residual no deeper than 0.02 m and affected mesh
+  rows do not exceed 2% of the basin
+- **THEN** state-save and warm-state consumption project the accepted values to exact zero
+- **AND** evidence records the corrected value count, affected row count/fraction, maximum
+  correction, and domain-row mean correction
+- **AND** a deeper or more widespread correction is rejected rather than hidden by normalization.
+
 ### Requirement: Warm-start quality uses the canonical enum
 Recorded warm-start quality SHALL use the existing canonical values, not a new third set.
 
@@ -90,4 +98,3 @@ Recorded warm-start quality SHALL use the existing canonical values, not a new t
 - **THEN** it is one of `fresh`, `degraded_stale_init_state`, `cold_start_no_state`, or
   `cold_start_stale_state` (an aggregate `cold_start` display value MAY be derived, but the receipt
   retains the specific underlying value).
-

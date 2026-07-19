@@ -64,6 +64,145 @@ _MAX_STATE_VALUE_M = 1.0e6
 # negatives remain fatal because they are no longer harmless roundoff.
 _NEGATIVE_ZERO_TOLERANCE = 1.0e-2
 
+# SHUD's constitutive update treats a negative unsaturated-zone depth as the
+# dry lower bound, but the restart writer can still serialize a small negative
+# ODE residual.  Permit a narrowly bounded projection to that physical lower
+# bound.  The row-fraction cap prevents a basin-wide solver failure from being
+# hidden by normalization.
+MAX_UNSAT_NEGATIVE_REPAIR_M = 2.0e-2
+MAX_UNSAT_REPAIRED_ROW_FRACTION = 2.0e-2
+
+
+@dataclass(frozen=True)
+class StateResidualNormalization:
+    content: str
+    accepted: bool
+    reason: str | None
+    normalized_value_count: int
+    normalized_unsat_row_count: int
+    mesh_row_count: int
+    max_unsat_correction_m: float
+    mean_unsat_correction_m: float
+
+    def evidence(self) -> dict[str, Any]:
+        return {
+            "policy": "bounded_physical_zero_projection_v1",
+            "accepted": self.accepted,
+            "reason": self.reason,
+            "normalized_value_count": self.normalized_value_count,
+            "normalized_unsat_row_count": self.normalized_unsat_row_count,
+            "mesh_row_count": self.mesh_row_count,
+            "normalized_unsat_row_fraction": (
+                self.normalized_unsat_row_count / self.mesh_row_count if self.mesh_row_count else 0.0
+            ),
+            "max_unsat_correction_m": self.max_unsat_correction_m,
+            "mean_unsat_correction_m": self.mean_unsat_correction_m,
+            "max_unsat_negative_repair_m": MAX_UNSAT_NEGATIVE_REPAIR_M,
+            "max_unsat_repaired_row_fraction": MAX_UNSAT_REPAIRED_ROW_FRACTION,
+        }
+
+
+def normalize_state_negative_residuals(content: str) -> StateResidualNormalization:
+    """Project bounded negative restart residuals to the physical zero floor.
+
+    Other state variables retain the existing 10 mm numeric-zero tolerance.
+    ``Unsat`` alone receives the 20 mm repair ceiling because SHUD explicitly
+    maps negative unsaturated-zone depth to its dry constitutive branch.  Any
+    value beyond the ceiling remains untouched so normal QC rejects it.
+    """
+
+    lines = content.splitlines()
+    if len(lines) < 2:
+        return StateResidualNormalization(content, True, None, 0, 0, 0, 0.0, 0.0)
+    counts = _header_counts(lines[0].split())
+    if counts is None:
+        return StateResidualNormalization(content, True, None, 0, 0, 0, 0.0, 0.0)
+    mesh_count = counts[0]
+    sectioned = any(_looks_like_column_header(line) for line in lines[1:])
+    normalized_value_count = 0
+    normalized_unsat_rows: set[int] = set()
+    unsat_correction_sum = 0.0
+    max_unsat_correction = 0.0
+    mesh_row_index = 0
+    current_columns: list[str] | None = None
+
+    for line_index in range(1, len(lines)):
+        line = lines[line_index]
+        if _looks_like_column_header(line):
+            current_columns = [token.strip().lower() for token in line.split()]
+            continue
+        row = _numeric_row(line)
+        if row is None:
+            continue
+
+        is_mesh_row = False
+        unsat_index: int | None = None
+        if sectioned:
+            if current_columns is not None and "unsat" in current_columns and mesh_row_index < mesh_count:
+                is_mesh_row = True
+                unsat_index = current_columns.index("unsat")
+        elif mesh_row_index < mesh_count:
+            is_mesh_row = True
+            unsat_index = 4
+
+        if is_mesh_row:
+            mesh_row_index += 1
+        tokens = line.split()
+        if len(tokens) != len(row):
+            continue
+        changed = False
+        for value_index in range(1, len(row)):
+            value = row[value_index]
+            if value >= 0.0:
+                continue
+            tolerance = (
+                MAX_UNSAT_NEGATIVE_REPAIR_M
+                if is_mesh_row and unsat_index == value_index
+                else _NEGATIVE_ZERO_TOLERANCE
+            )
+            if value < -tolerance:
+                continue
+            tokens[value_index] = "0"
+            changed = True
+            normalized_value_count += 1
+            if is_mesh_row and unsat_index == value_index:
+                normalized_unsat_rows.add(mesh_row_index - 1)
+                correction = -value
+                unsat_correction_sum += correction
+                max_unsat_correction = max(max_unsat_correction, correction)
+        if changed:
+            lines[line_index] = "\t".join(tokens)
+
+    repaired_fraction = len(normalized_unsat_rows) / mesh_count if mesh_count else 0.0
+    if repaired_fraction > MAX_UNSAT_REPAIRED_ROW_FRACTION:
+        reason = (
+            "unsat negative-residual repair affects "
+            f"{repaired_fraction:.6f} of mesh rows, above "
+            f"{MAX_UNSAT_REPAIRED_ROW_FRACTION:.6f}"
+        )
+        return StateResidualNormalization(
+            content,
+            False,
+            reason,
+            normalized_value_count,
+            len(normalized_unsat_rows),
+            mesh_count,
+            max_unsat_correction,
+            unsat_correction_sum / mesh_count if mesh_count else 0.0,
+        )
+    trailing_newline = "\n" if content.endswith(("\n", "\r")) else ""
+    normalized_content = "\n".join(lines) + trailing_newline if normalized_value_count else content
+    return StateResidualNormalization(
+        normalized_content,
+        True,
+        None,
+        normalized_value_count,
+        len(normalized_unsat_rows),
+        mesh_count,
+        max_unsat_correction,
+        unsat_correction_sum / mesh_count if mesh_count else 0.0,
+    )
+
 
 @dataclass(frozen=True)
 class StateQCResult:

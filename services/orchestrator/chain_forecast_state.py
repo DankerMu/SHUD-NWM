@@ -133,10 +133,16 @@ def _forecast_scenario_id(self, source_id: str) -> str:
 
 
 def _build_run_manifest(self, context: ForecastRunContext) -> dict[str, Any]:
-    return chain_manifests.build_forecast_run_manifest(
+    manifest = chain_manifests.build_forecast_run_manifest(
         context,
         forecast_state_checkpoint_hours=_chain._forecast_state_checkpoint_hours,
     )
+    config = getattr(self, "config", None)
+    if config is not None and config.strict_forecast_warm_start_required_for(context.cycle_time) and (
+        context.init_state_id or context.init_state_uri
+    ):
+        manifest["runtime"]["warm_start_policy"] = "exact_required"
+    return manifest
 
 
 def _state_passes_qc(self, state: StateSnapshot) -> bool:

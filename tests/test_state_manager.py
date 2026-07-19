@@ -2120,6 +2120,34 @@ def test_state_save_checkpoint_ic_read_is_bounded_before_normalization(
     assert repository.snapshots == {}
 
 
+def test_state_save_checkpoint_normalizes_bounded_unsat_residual_before_upload(tmp_path: Path) -> None:
+    from packages.common.state_qc import run_state_variable_qc
+
+    valid_time = _dt("2026-07-08T00:00:00Z")
+    rows = [f"{index + 1}\t0\t0\t0\t{(-0.014834 if index == 73 else 0.1):.6f}\t0" for index in range(100)]
+    checkpoint_path = tmp_path / "huai.cfg.ic.update"
+    checkpoint_path.write_text(
+        f"100\t1\t{valid_time.timestamp() / 60.0:.6f}\n"
+        "Index\tCanopy\tSnow\tSurface\tUnsat\tGW\n"
+        + "\n".join(rows)
+        + "\nIndex\tStage\n1\t0\n",
+        encoding="utf-8",
+    )
+    checkpoint = state_cli.StateCheckpoint(
+        valid_time=valid_time,
+        ic_file=checkpoint_path,
+        original_shud_filename=checkpoint_path.name,
+        lead_hours=12,
+    )
+
+    normalized_path, evidence = state_cli._normalized_checkpoint_ic_file(checkpoint)
+
+    assert normalized_path != checkpoint_path
+    assert evidence["normalized_unsat_row_count"] == 1
+    assert evidence["max_unsat_correction_m"] == pytest.approx(0.014834)
+    assert run_state_variable_qc(normalized_path).passed is True
+
+
 def test_state_checkpoint_manifest_rejects_symlink_checkpoint_ic(
     tmp_path: Path,
     manager: StateManager,

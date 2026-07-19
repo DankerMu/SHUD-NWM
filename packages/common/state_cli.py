@@ -34,7 +34,11 @@ from packages.common.state_manager import (
     StateManager,
     StateManagerError,
 )
-from packages.common.state_qc import MAX_STATE_IC_BYTES, cfg_ic_header_minute_index
+from packages.common.state_qc import (
+    MAX_STATE_IC_BYTES,
+    cfg_ic_header_minute_index,
+    normalize_state_negative_residuals,
+)
 from workers.data_adapters.base import cycle_id_for, parse_cycle_time
 
 
@@ -162,7 +166,7 @@ def save_state_for_run(
     # interim state is valid at the next cycle's init time (M24 §2 Lane 2).
     saved = []
     for checkpoint in checkpoints:
-        ic_file_path = _normalized_checkpoint_ic_file(checkpoint)
+        ic_file_path, normalization_evidence = _normalized_checkpoint_ic_file(checkpoint)
         result = state_manager.save_state_snapshot(
             model_id=run.model_id,
             run_id=run.run_id,
@@ -190,6 +194,7 @@ def save_state_for_run(
                 "model_package_version": result.snapshot.model_package_version,
                 "model_package_checksum": result.snapshot.model_package_checksum,
                 "original_shud_filename": result.snapshot.original_shud_filename,
+                "state_normalization": normalization_evidence,
             }
         )
     first = saved[0]
@@ -205,33 +210,42 @@ def save_state_for_run(
     }
 
 
-def _normalized_checkpoint_ic_file(checkpoint: StateCheckpoint) -> Path:
-    """Return an IC file whose header minute-time is absolute at valid_time."""
+def _normalized_checkpoint_ic_file(checkpoint: StateCheckpoint) -> tuple[Path, dict[str, Any]]:
+    """Return a canonical IC with exact time and bounded physical floors."""
 
     content = _read_limited_text_no_follow(
         checkpoint.ic_file,
         max_bytes=MAX_STATE_IC_BYTES,
         label="state checkpoint IC file",
     )
-    lines = content.splitlines()
+    normalization = normalize_state_negative_residuals(content)
+    if not normalization.accepted:
+        raise StateManagerError(f"State checkpoint residual normalization rejected: {normalization.reason}")
+    lines = normalization.content.splitlines()
     if not lines:
-        return checkpoint.ic_file
+        return checkpoint.ic_file, normalization.evidence()
     header = lines[0].split()
     minute_index = cfg_ic_header_minute_index(header)
     if minute_index is None:
-        return checkpoint.ic_file
+        if normalization.normalized_value_count == 0:
+            return checkpoint.ic_file, normalization.evidence()
+        normalized = checkpoint.ic_file.with_name(f".{checkpoint.ic_file.name}.normalized")
+        atomic_write_bytes_no_follow(normalized, ("\n".join(lines) + "\n").encode("utf-8"))
+        return normalized, normalization.evidence()
     expected_minute = _ensure_utc(checkpoint.valid_time).timestamp() / 60.0
     try:
         observed_minute = float(header[minute_index])
     except ValueError:
-        return checkpoint.ic_file
-    if round(observed_minute) == round(expected_minute):
-        return checkpoint.ic_file
+        observed_minute = expected_minute
+    header_changed = round(observed_minute) != round(expected_minute)
+    if not header_changed and normalization.normalized_value_count == 0:
+        return checkpoint.ic_file, normalization.evidence()
     normalized = checkpoint.ic_file.with_name(f".{checkpoint.ic_file.name}.normalized")
-    header[minute_index] = f"{expected_minute:.6f}"
-    lines[0] = "\t".join(header)
+    if header_changed:
+        header[minute_index] = f"{expected_minute:.6f}"
+        lines[0] = "\t".join(header)
     atomic_write_bytes_no_follow(normalized, ("\n".join(lines) + "\n").encode("utf-8"))
-    return normalized
+    return normalized, normalization.evidence()
 
 
 def _checkpoint_with_header_time(checkpoint: StateCheckpoint, run: StateRunContext) -> StateCheckpoint:

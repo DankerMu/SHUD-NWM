@@ -34,6 +34,7 @@ from packages.common.state_manager import PsycopgStateSnapshotRepository, StateM
 from packages.common.state_qc import (
     cfg_ic_header_minute_index,
     cfg_ic_header_minute_time,
+    normalize_state_negative_residuals,
     state_ic_structure_complete,
 )
 from services.orchestrator.time_consistency import check_three_way_time_consistency as _check_three_way_time_consistency
@@ -842,6 +843,11 @@ class SHUDRuntime:
                     _set_runtime_init_mode(manifest, 3)
                     self._sync_init_state_id(manifest)
                     return
+            if _exact_warm_start_required(manifest):
+                raise SHUDRuntimeError(
+                    "WARM_START_REQUIRED",
+                    "Exact warm-start policy rejects a forecast without its selected initial state.",
+                )
             _set_cold_start_initial_state(manifest, quality=_initial_state_quality(manifest) or "cold_start_no_state")
             self._sync_init_state_id(manifest)
             return
@@ -876,6 +882,11 @@ class SHUDRuntime:
                 )
 
             if not state_uri:
+                if _exact_warm_start_required(manifest):
+                    raise SHUDRuntimeError(
+                        "WARM_START_UNAVAILABLE",
+                        "Exact warm-start policy rejects a selected state without a readable URI.",
+                    )
                 _set_cold_start_initial_state(manifest, quality="cold_start_no_state")
                 self._sync_init_state_id(manifest)
                 return
@@ -898,6 +909,13 @@ class SHUDRuntime:
                     message=message,
                     actual_checksum=actual_checksum,
                     expected_checksum=expected_checksum,
+                )
+
+            if _exact_warm_start_required(manifest):
+                self._clear_staged_initial_states(input_dir)
+                raise SHUDRuntimeError(
+                    "WARM_START_UNAVAILABLE",
+                    f"Exact warm-start state {state_id or state_uri} is unavailable: {message}",
                 )
 
             next_state = self._next_usable_state(manifest, before_time, rejected_state_ids)
@@ -984,6 +1002,21 @@ class SHUDRuntime:
         start_time = _parse_time(manifest["start_time"])
         native_header_minute = _read_cfg_ic_header_minute(target)
         self._verify_ic_time_consistency(manifest, native_header_minute)
+        content = _read_staged_bytes(target, root=input_dir).decode("utf-8")
+        normalization = normalize_state_negative_residuals(content)
+        if not normalization.accepted:
+            raise SHUDRuntimeError(
+                "WARM_START_STATE_RESIDUALS_EXCEED_POLICY",
+                f"Warm-start state residual normalization rejected: {normalization.reason}",
+            )
+        if normalization.normalized_value_count:
+            atomic_write_bytes_no_follow(
+                target,
+                normalization.content.encode("utf-8"),
+                containment_root=input_dir,
+                temp_suffix="part",
+            )
+            manifest.setdefault("runtime", {})["initial_state_normalization"] = normalization.evidence()
         _shift_cfg_ic_time(target, start_time)
 
     def _verify_ic_time_consistency(
@@ -2993,6 +3026,11 @@ def _init_mode(manifest: dict[str, Any]) -> str:
     if _initial_state_id(manifest) or _initial_state_uri(manifest):
         return "3"
     return "1"
+
+
+def _exact_warm_start_required(manifest: Mapping[str, Any]) -> bool:
+    runtime = manifest.get("runtime") or {}
+    return isinstance(runtime, Mapping) and runtime.get("warm_start_policy") == "exact_required"
 
 
 def _object_key(uri_or_key: str, object_store_prefix: str) -> str:

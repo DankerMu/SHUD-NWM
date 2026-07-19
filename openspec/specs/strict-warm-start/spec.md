@@ -60,6 +60,15 @@ whose `valid_time` equals the target `cycle_time`.
 - **AND** it does not write a run manifest, create or update a hydro_run, or
   submit Slurm work
 
+#### Scenario: Newly registered model may seed its first cycle cold
+
+- **GIVEN** generation-scoped state history proves the model has no prior state in any generation
+- **AND** the scheduler records `cold_new_model` with `cold_start_reason=no_prior_history`
+- **WHEN** the model's first forecast cycle is staged
+- **THEN** that first cycle may use cold start with `init_mode=1`
+- **AND** after it produces a successor checkpoint, the next cycle is governed by exact-successor
+  strict warm-start rules and may not cold-start again
+
 ### Requirement: Strict Mode Rejects Invalid Successor States
 
 In strict mode, an exact successor state SHALL be rejected when it is unusable,
@@ -75,6 +84,14 @@ checkpoint.
 - **THEN** the orchestrator returns a stable unusable/QC error
 - **AND** the error code is `warm_start_successor_checkpoint_unusable`
 - **AND** no run manifest, hydro_run, or Slurm side effect is produced
+
+#### Scenario: Selected exact state becomes unavailable during runtime staging
+
+- **GIVEN** strict mode selected an exact successor and the runtime manifest records
+  `warm_start_policy=exact_required`
+- **WHEN** the state object is missing, unreadable, or has a checksum mismatch during staging
+- **THEN** runtime fails with a stable warm-state-unavailable error
+- **AND** it does not query an older state and does not change the manifest to cold start
 
 #### Scenario: Exact state lineage does not match target
 
@@ -121,4 +138,3 @@ validation.
 - **THEN** the state remains selected
 - **AND** the same state identity, checksum, valid time, and lineage flow into
   the scheduler basin record, cycle-stage entries, and runtime manifest
-
