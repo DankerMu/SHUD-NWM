@@ -99,7 +99,7 @@ object-store forcing-domain handoff 进入 node-27 DB。
 cd /home/nwm/NWM
 sed -n '1,180p' scripts/node27_autopipe_cron.sh \
   | sed -E 's#^(export DATABASE_URL=).*#\1<redacted>#'
-tail -n 160 /home/nwm/autopipe.log
+tail -n 160 /home/nwm/autopipe-logs/autopipe.log
 ```
 
 正常现象：
@@ -643,7 +643,7 @@ node-27 ingest 侧优先看 autopipe 日志和 DB/run coverage：
 
 ```bash
 ssh -p 32099 nwm@210.77.77.27
-tail -n 200 /home/nwm/autopipe.log
+tail -n 200 /home/nwm/autopipe-logs/autopipe.log
 
 cd /home/nwm/NWM
 set -a
@@ -750,7 +750,7 @@ node-27 ingest wrapper/log:
 ```text
 /home/nwm/NWM/scripts/node27_autopipe_cron.sh
 /home/nwm/NWM/scripts/node27_autopipeline.py
-/home/nwm/autopipe.log
+/home/nwm/autopipe-logs/autopipe.log
 /home/nwm/autopipe-work/
 ```
 
@@ -941,7 +941,7 @@ ssh -p 32099 nwm@210.77.77.27 \
 先分清三种状态：
 
 - 正常运行：node-22 Slurm 有 active job，或 node-27 autopipe 正在本轮 ingest；
-  `/home/nwm/autopipe.log` 周期性刷新。
+  `/home/nwm/autopipe-logs/autopipe.log` 周期性刷新。
 - 等下一 cron tick：Slurm queue 空，autopipe 最近一轮 `rc=0`，DB 中没有新的
   un-ingested runs。
 - 真实卡住：autopipe 多轮非 0、同一 run 反复 failed，public `/health` 失败，
@@ -954,7 +954,7 @@ date '+%F %T %Z'
 
 # node-27 ingest/display
 ssh -p 32099 nwm@210.77.77.27 \
-  'tail -n 120 /home/nwm/autopipe.log &&
+  'tail -n 120 /home/nwm/autopipe-logs/autopipe.log &&
    curl -fsS --max-time 5 http://127.0.0.1:8080/health &&
    curl -fksS --max-time 5 https://test.nwm.ac.cn/health'
 
@@ -976,7 +976,7 @@ This section is a live snapshot, not a permanent fact. Refresh it during handoff
 2026-06-22 verification found:
 
 - node-27 `node27_autopipe` cron active every 10 minutes.
-- Recent `/home/nwm/autopipe.log` runs discovered 300 runs, ingested 4 new runs,
+- Recent `/home/nwm/autopipe-logs/autopipe.log` runs discovered 300 runs, ingested 4 new runs,
   published 4, and refreshed 4 display coverage rows.
 - node-27 display API listens on `127.0.0.1:8080`; local and public `/health`
   both returned `ok` after port alignment.
@@ -1017,7 +1017,7 @@ port, restart through the wrapper, and verify both local and public `/health`.
 
 Symptoms:
 
-- `/home/nwm/autopipe.log` shows repeated non-zero rc.
+- `/home/nwm/autopipe-logs/autopipe.log` shows repeated non-zero rc.
 - JSON summary has non-empty `failed_runs`.
 - New `object-store/runs/fcst_*` directories exist but DB `hydro.hydro_run`
   does not advance.
@@ -1026,7 +1026,7 @@ Checks:
 
 ```bash
 ssh -p 32099 nwm@210.77.77.27
-tail -n 240 /home/nwm/autopipe.log
+tail -n 240 /home/nwm/autopipe-logs/autopipe.log
 cd /home/nwm/NWM
 bash scripts/node27_autopipe_cron.sh
 ```
