@@ -74,6 +74,10 @@ def test_national_valid_times_use_active_basin_identity_not_transient_model_id()
     assert "mi.basin_version_id = h.basin_version_id" in session.sql
     assert "hydro.run_display_coverage" in session.sql
     assert "mi.model_id = h.model_id" not in session.sql
+    assert "representative_segment AS" in session.sql
+    assert "ORDER BY rt0.valid_time DESC, rt0.river_segment_id" in session.sql
+    assert "LIMIT 1" in session.sql
+    assert "HAVING COUNT(DISTINCT ts.river_network_version_id) = (SELECT COUNT(*) FROM latest_run)" in session.sql
 
 
 def test_display_db_pool_bounds_invalid_environment(monkeypatch: Any) -> None:

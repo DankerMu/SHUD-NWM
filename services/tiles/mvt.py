@@ -1240,13 +1240,14 @@ def national_discharge_valid_times(
     variable: str = "q_down",
     limit: int = MVT_VALID_TIME_SAMPLE_LIMIT,
 ) -> ValidTimeDiscovery:
-    """Union of distinct discharge valid-times across every basin's latest display-ready run.
+    """Common discharge valid-times across every active basin's latest river-bearing run.
 
     Mirrors the national tile SQL stable identity selection (latest river-bearing
-    run for each active basin/network) but only enumerates DISTINCT valid_time. Written
-    with a ROW_NUMBER() window instead of Postgres-only DISTINCT ON so the catalog /
-    valid-times contract stays testable on sqlite while remaining equivalent on
-    Postgres. No data is fabricated: empty when no ready run/series exists.
+    run for each active basin/network). One real data-bearing representative segment
+    per run supplies its stored valid-times, then the query keeps only times present in
+    every selected network. This avoids scanning millions of duplicate segment/time
+    rows and prevents the national single-time control from selecting a horizon that
+    leaves some basins unclickable. No time is generated or fabricated.
     """
     sample_limit = max(0, limit)
     rows = (
@@ -1254,9 +1255,10 @@ def national_discharge_valid_times(
             text(
                 """
                 WITH latest_run AS (
-                    SELECT run_id, river_network_version_id
+                    SELECT run_id, basin_version_id, river_network_version_id
                     FROM (
                         SELECT h.run_id,
+                               h.basin_version_id,
                                mi.river_network_version_id,
                                ROW_NUMBER() OVER (
                                    PARTITION BY mi.river_network_version_id
@@ -1272,13 +1274,33 @@ def national_discharge_valid_times(
                           AND mi.active_flag
                     ) ranked
                     WHERE rn = 1
+                ),
+                representative_segment AS (
+                    SELECT lr.run_id,
+                           lr.basin_version_id,
+                           lr.river_network_version_id,
+                           (
+                               SELECT rt0.river_segment_id
+                               FROM hydro.river_timeseries rt0
+                               WHERE rt0.run_id = lr.run_id
+                                 AND rt0.basin_version_id = lr.basin_version_id
+                                 AND rt0.river_network_version_id = lr.river_network_version_id
+                                 AND rt0.variable = :variable
+                               ORDER BY rt0.valid_time DESC, rt0.river_segment_id
+                               LIMIT 1
+                           ) AS river_segment_id
+                    FROM latest_run lr
                 )
-                SELECT DISTINCT ts.valid_time
+                SELECT ts.valid_time
                 FROM hydro.river_timeseries ts
-                JOIN latest_run lr
-                  ON lr.run_id = ts.run_id
-                 AND lr.river_network_version_id = ts.river_network_version_id
+                JOIN representative_segment rs
+                  ON rs.run_id = ts.run_id
+                 AND rs.basin_version_id = ts.basin_version_id
+                 AND rs.river_network_version_id = ts.river_network_version_id
+                 AND rs.river_segment_id = ts.river_segment_id
                 WHERE ts.variable = :variable
+                GROUP BY ts.valid_time
+                HAVING COUNT(DISTINCT ts.river_network_version_id) = (SELECT COUNT(*) FROM latest_run)
                 ORDER BY ts.valid_time DESC
                 LIMIT :limit
                 """
