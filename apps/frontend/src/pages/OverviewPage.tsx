@@ -20,7 +20,7 @@ import { bboxToMapFit, mapFeatureStringProperty, popupAnchorFromInteraction, use
 import { M11RiverForecastPanel, type M11RiverPopupSegment } from '@/components/map/M11RiverForecastPanel'
 import { M11StationForcingPopup, type M11StationPopupStation } from '@/components/map/M11StationForcingPopup'
 import type { HydroMetSource } from '@/lib/hydroMet/queryState'
-import type { LayerState, OverviewBasin } from '@/lib/m11/overviewDataContracts'
+import { mergeLayerStates, type LayerState, type OverviewBasin } from '@/lib/m11/overviewDataContracts'
 import {
   defaultM11QueryState,
   type M11QueryPatch,
@@ -278,7 +278,11 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   const metadataOverview = overviewMetadataMatchesQuery ? overview : null
   const mapOverview = currentOverview ?? metadataOverview
   const metadataLayers = overviewMetadataMatchesQuery ? (overview?.layers ?? []) : []
-  const layers = currentOverview?.layers ?? metadataLayers
+  const snapshotLayers = currentOverview?.layers ?? metadataLayers
+  const layers = useMemo(
+    () => mergeLayerStates(mapOverview?.bootstrap?.layerStates ?? [], snapshotLayers),
+    [mapOverview?.bootstrap?.layerStates, snapshotLayers],
+  )
 
   useEffect(() => {
     void loadOverview(dataLoadState).catch(() => undefined)

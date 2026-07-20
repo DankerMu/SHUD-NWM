@@ -560,6 +560,13 @@ export function mergeLayerCatalogs(runlessLayers: ApiLayer[], scopedLayers: ApiL
   return [...merged.values()]
 }
 
+/** 在展示边界再次保留 bootstrap 的 time-less 基础图层，防止异步快照切换造成图层闪退。 */
+export function mergeLayerStates(bootstrapLayers: LayerState[], snapshotLayers: LayerState[]): LayerState[] {
+  const merged = new Map(bootstrapLayers.map((layer) => [layer.layerId, layer]))
+  for (const layer of snapshotLayers) merged.set(layer.layerId, layer)
+  return [...merged.values()]
+}
+
 export function getM11LayerLegend(layerId: string): LayerLegendEntry[] {
   return layerLegend(layerId)
 }

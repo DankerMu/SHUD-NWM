@@ -5,6 +5,7 @@ import {
   filterBasinSegmentRows,
   getM11LayerLegend,
   mergeLayerCatalogs,
+  mergeLayerStates,
   normalizeBasinSegmentRows,
   normalizeLayerStates,
   normalizeSelectedSegmentDetail,
@@ -74,6 +75,44 @@ describe('M11 overview data contracts', () => {
     expect(merged.map((layer) => layer.layer_id)).toEqual(['discharge', 'river-network'])
     expect(merged[0].metadata?.source_generation).toBe('run-123')
     expect(merged[1].metadata?.source_generation).toBe('river-v1')
+  })
+
+  it('retains bootstrap base layer state when a later snapshot only carries discharge', () => {
+    const bootstrapStates = normalizeLayerStates({
+      query,
+      layers: [
+        {
+          layer_id: 'river-network',
+          layer_name: 'River network',
+          layer_type: 'base',
+          variables: ['geometry'],
+          metadata: {
+            tile_format: 'mvt',
+            url_template: '/api/v1/tiles/river-network-national/{z}/{x}/{y}.pbf',
+            maplibre_source_layer: 'river_network',
+            valid_times: [],
+            source_generation: 'river-v1',
+          } as never,
+        },
+      ],
+    })
+    const dischargeStates = normalizeLayerStates({
+      query,
+      layers: [
+        {
+          layer_id: 'discharge',
+          layer_name: 'Discharge',
+          layer_type: 'hydrology',
+          variables: ['q_down'],
+          metadata: { valid_times: ['2026-05-18T06:00:00Z'] } as never,
+        },
+      ],
+    })
+
+    expect(mergeLayerStates(bootstrapStates, dischargeStates).map((layer) => layer.layerId)).toEqual([
+      'discharge',
+      'river-network',
+    ])
   })
 
   it('normalizes only the discharge renderable layer by default', () => {
