@@ -14,7 +14,6 @@ import {
   buildBasinFeatureCollection,
   buildBasinRiverFeatureCollection,
   buildM11RegisteredOverlay,
-  buildM11RenderedNationalRiverCollection,
   buildSelectedSegmentFeatureCollection,
   countSkippedBasinGeometries,
   m11SelectedLayerUnavailableReason,
@@ -59,6 +58,7 @@ import {
   type OverviewBasin,
 } from '@/lib/m11/overviewDataContracts'
 import type { M11QueryState } from '@/lib/m11/queryState'
+import { buildMvtTileUrlTemplate, isMvtLayerMetadata } from '@/lib/mvtLayerMetadata'
 
 export {
   buildBasinFeatureCollection,
@@ -119,7 +119,6 @@ export function M11MapLibreSurface({
   visibleBasinIds,
   basinSegments = [],
   nationalRiverGeo = null,
-  meshRiverBasinIds = [],
   selectedSegmentId = null,
   selectedSegmentGeometry = null,
   selectedStationId = null,
@@ -153,14 +152,21 @@ export function M11MapLibreSurface({
     [basins, visibleBasinIds],
   )
   const renderableOverlay = overlay && (overlay.source.type === 'vector' || overlayData) ? overlay : null
-  // 动态 mesh 河网层（详情 GeoJSON 河段 / 流量 MVT 线层）激活的流域，其静态河流要从 national 底图剔除，
-  // 避免「平滑静态线 + 阶梯 mesh 线」双线叠画；非线叠加层不触发剔除，保留诚实降级。
-  const overlayIsRiverLine = renderableOverlay?.layer.type === 'line'
-  const dynamicRiverActive = basinRiverFeatureCollection.features.length > 0 || overlayIsRiverLine
-  const renderedNationalRiver = useMemo<FeatureCollection | null>(
-    () => buildM11RenderedNationalRiverCollection(nationalRiverGeo, meshRiverBasinIds, dynamicRiverActive),
-    [dynamicRiverActive, meshRiverBasinIds, nationalRiverGeo],
-  )
+  const nationalRiverVectorSource = useMemo(() => {
+    const metadata = layers.find((layer) => layer.layerId === 'river-network')?.metadata
+    if (
+      !isMvtLayerMetadata(metadata) ||
+      !metadata.url_template.includes('/river-network-national/') ||
+      metadata.release_blocking
+    ) {
+      return null
+    }
+    return {
+      tiles: [buildMvtTileUrlTemplate(metadata, {})],
+      minzoom: metadata.min_zoom ?? 0,
+      maxzoom: metadata.max_zoom ?? 14,
+    }
+  }, [layers])
   const selectedSegmentFeatureCollection = useMemo(
     () => buildSelectedSegmentFeatureCollection(selectedSegmentId, selectedSegmentGeometry),
     [selectedSegmentGeometry, selectedSegmentId],
@@ -249,7 +255,11 @@ export function M11MapLibreSurface({
       data-overlay-source-type={renderableOverlay?.source.type ?? ''}
       data-overlay-source-layer={renderableOverlay?.source.type === 'vector' ? renderableOverlay.source.sourceLayer : ''}
       data-met-station-feature-count={showStationLayer ? stationFeatureCollection?.features.length ?? 0 : 0}
-      data-national-river-feature-count={renderedNationalRiver?.features.length ?? 0}
+      data-national-river-feature-count="0"
+      data-national-river-source-type={nationalRiverVectorSource ? 'vector' : nationalRiverGeo ? 'legacy-geojson' : ''}
+      data-national-river-generation={
+        layers.find((layer) => layer.layerId === 'river-network')?.metadata?.source_generation ?? ''
+      }
     >
       <Map
         ref={mapRef}
@@ -264,9 +274,11 @@ export function M11MapLibreSurface({
       >
         <NavigationControl position="top-right" visualizePitch />
         <ScaleControl position="bottom-left" unit="metric" />
-        {renderedNationalRiver ? (
+        {nationalRiverVectorSource ? (
           <M11NationalRiverPrimitive
-            collection={renderedNationalRiver}
+            tiles={nationalRiverVectorSource.tiles}
+            minzoom={nationalRiverVectorSource.minzoom}
+            maxzoom={nationalRiverVectorSource.maxzoom}
             dimmed={Boolean(renderableOverlay) || basinRiverFeatureCollection.features.length > 0}
             satellite={state.basemap === 'satellite'}
           />

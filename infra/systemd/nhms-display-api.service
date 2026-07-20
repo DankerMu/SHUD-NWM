@@ -1,0 +1,19 @@
+[Unit]
+Description=NHMS node-27 display API (FastAPI uvicorn)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/nwm/NWM
+ExecStart=/bin/bash -lc 'set -a; . /home/nwm/NWM/infra/env/display.env; set +a; exec /home/nwm/NWM/.venv/bin/python -m uvicorn apps.api.main:app --host "${NHMS_DISPLAY_HOST:-127.0.0.1}" --port "${NHMS_DISPLAY_API_PORT:-8080}" --workers "${NHMS_DISPLAY_WORKERS:-2}"'
+Restart=always
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=30
+StandardOutput=append:/tmp/display-api.log
+StandardError=append:/tmp/display-api.log
+LimitNOFILE=65536
+
+[Install]
+WantedBy=default.target

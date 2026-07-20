@@ -1,6 +1,4 @@
-"""SPA fallback must serve real built static files (e.g. /geo/*.geojson) instead of
-returning index.html for them. The national river basemap fetches /geo/*.geojson at
-runtime; if the fallback returned HTML the frontend would silently lose the layer.
+"""Static mounts must serve real built assets and honor HTTP revalidation.
 
 Skipped when no frontend build is present (CI backend gate does not build the SPA).
 """
@@ -18,13 +16,23 @@ client = TestClient(app)
 
 
 def test_geojson_static_file_is_served_as_json_not_index_html() -> None:
-    response = client.get("/geo/national-basin-river.geojson")
+    response = client.get("/geo/national-basin-domain.geojson")
     assert response.status_code == 200
     body = response.text.lstrip()
     assert body.startswith("{"), "expected GeoJSON, got non-JSON (likely index.html fallback)"
     assert '"FeatureCollection"' in body
     assert "<!doctype html" not in body.lower()
-    assert response.headers["Cache-Control"] == "no-cache"
+    assert response.headers["Cache-Control"] == "public, max-age=300, must-revalidate"
+
+
+def test_geojson_static_file_honors_etag_revalidation() -> None:
+    first = client.get("/geo/national-basin-domain.geojson")
+    etag = first.headers.get("etag")
+
+    assert etag
+    second = client.get("/geo/national-basin-domain.geojson", headers={"If-None-Match": etag})
+    assert second.status_code == 304
+    assert second.content == b""
 
 
 def test_spa_client_route_falls_back_to_index_html() -> None:

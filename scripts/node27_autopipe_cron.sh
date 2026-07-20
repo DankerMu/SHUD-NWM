@@ -218,6 +218,17 @@ if [ -f "$REPO/scripts/node27_refresh_coverage.py" ]; then
     || echo "[$(ts)] autopipe: coverage backstop rc=$? (non-fatal)" >> "$LOG"
 fi
 
+# Warm the exact national overview working set after publish/coverage. This is
+# readonly and non-fatal: an unavailable display API must not rewrite the
+# ingest result, but the failure remains visible in the autopipe log.
+if [ "${AUTOPIPE_MVT_PREWARM_ENABLED:-1}" = "1" ] && [ -f "$REPO/scripts/node27_mvt_prewarm.py" ]; then
+  echo "[$(ts)] autopipe: national MVT prewarm (z=${AUTOPIPE_MVT_PREWARM_ZOOMS:-3,4})" >> "$LOG"
+  "$REPO/.venv/bin/python" "$REPO/scripts/node27_mvt_prewarm.py" \
+    --zooms "${AUTOPIPE_MVT_PREWARM_ZOOMS:-3,4}" \
+    --workers "${AUTOPIPE_MVT_PREWARM_WORKERS:-8}" >> "$LOG" 2>&1 \
+    || echo "[$(ts)] autopipe: MVT prewarm rc=$? (non-fatal)" >> "$LOG"
+fi
+
 END=$(date +%s)
 echo "[$(ts)] autopipe: done rc=$RC elapsed_sec=$((END - START))" >> "$LOG"
 exit "$RC"

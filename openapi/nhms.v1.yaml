@@ -2002,7 +2002,8 @@ paths:
         required: true
         schema:
           type: string
-          title: Variable
+          enum:
+          - q_down
       - name: valid_time
         in: path
         required: true
@@ -2016,18 +2017,29 @@ paths:
         schema:
           type: integer
           title: Z
+          minimum: 0
+          maximum: 14
+        description: Web Mercator XYZ zoom level.
       - name: x
         in: path
         required: true
         schema:
           type: integer
           title: X
+          minimum: 0
+          maximum: 16383
+        description: Web Mercator XYZ tile column. Global schema bounds are 0..16383
+          for max zoom 14; each request also enforces 0 <= x < 2^z.
       - name: y
         in: path
         required: true
         schema:
           type: integer
           title: Y
+          minimum: 0
+          maximum: 16383
+        description: Web Mercator XYZ tile row. Global schema bounds are 0..16383
+          for max zoom 14; each request also enforces 0 <= y < 2^z.
       responses:
         '200':
           description: Raw Mapbox vector tile
@@ -2063,15 +2075,87 @@ paths:
                 type: string
                 format: binary
         '424':
-          description: Live PostGIS MVT is unavailable for this canonical tile route.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+          $ref: '#/components/responses/MvtLivePostgisUnavailable'
         4XX:
-          description: MVT request validation error.
+          $ref: '#/components/responses/Error'
         5XX:
-          description: MVT server error.
+          $ref: '#/components/responses/Error'
+  /api/v1/tiles/river-network-national/{z}/{x}/{y}.pbf:
+    get:
+      tags:
+      - hydro-display
+      summary: River Network National Mvt Tile
+      operationId: river_network_national_mvt_tile_api_v1_tiles_river_network_national__z___x___y__pbf_get
+      parameters:
+      - name: z
+        in: path
+        required: true
+        schema:
+          type: integer
+          title: Z
+          minimum: 0
+          maximum: 14
+        description: Web Mercator XYZ zoom level.
+      - name: x
+        in: path
+        required: true
+        schema:
+          type: integer
+          title: X
+          minimum: 0
+          maximum: 16383
+        description: Web Mercator XYZ tile column. Global schema bounds are 0..16383
+          for max zoom 14; each request also enforces 0 <= x < 2^z.
+      - name: y
+        in: path
+        required: true
+        schema:
+          type: integer
+          title: Y
+          minimum: 0
+          maximum: 16383
+        description: Web Mercator XYZ tile row. Global schema bounds are 0..16383
+          for max zoom 14; each request also enforces 0 <= y < 2^z.
+      responses:
+        '200':
+          description: Raw Mapbox vector tile
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+            ETag:
+              schema:
+                type: string
+            X-Tile-Layer-ID:
+              schema:
+                type: string
+            X-Tile-Checksum:
+              schema:
+                type: string
+            X-Tile-Cache:
+              schema:
+                type: string
+                enum:
+                - hit
+                - miss
+                - bypass
+            X-Tile-Cache-Key:
+              schema:
+                type: string
+            X-MVT-Schema-Version:
+              schema:
+                type: string
+          content:
+            application/x-protobuf:
+              schema:
+                type: string
+                format: binary
+        '424':
+          $ref: '#/components/responses/MvtLivePostgisUnavailable'
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
   /api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf:
     get:
       tags:
@@ -3624,6 +3708,9 @@ components:
             including run_id, basin_version_id, river_network_version_id, and bounded
             source_version/run revision when advertised by required_placeholders.
           additionalProperties: true
+          nullable: true
+        source_generation:
+          type: string
           nullable: true
         cache_layer_id:
           type: string

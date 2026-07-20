@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 
 import type { FeatureCollection } from 'geojson'
 
-/** 全国静态底图几何（来自各流域 SHUD shp：domain 溶解轮廓 + river 河道），来源 public/geo。 */
+/** 全国静态边界几何。河道已迁移到按瓦片加载的 national river-network MVT。 */
 export interface NationalBasinGeo {
   domain: FeatureCollection | null
   river: FeatureCollection | null
@@ -15,7 +15,7 @@ export interface NationalBasinGeoState extends NationalBasinGeo {
 
 const EMPTY: NationalBasinGeo = { domain: null, river: null }
 
-// 模块级缓存：两份静态 GeoJSON 整个会话只取一次。
+// 模块级缓存：轻量 domain GeoJSON 整个会话只取一次。
 let cached: NationalBasinGeo | null = null
 let inflight: Promise<NationalBasinGeo> | null = null
 
@@ -33,11 +33,10 @@ async function fetchOne(url: string): Promise<FeatureCollection | null> {
 async function loadNationalBasinGeo(): Promise<NationalBasinGeo> {
   if (cached) return cached
   if (!inflight) {
-    inflight = Promise.all([
-      fetchOne('/geo/national-basin-domain.geojson'),
-      fetchOne('/geo/national-basin-river.geojson'),
-    ]).then(([domain, river]) => {
-      cached = { domain, river }
+    inflight = fetchOne('/geo/national-basin-domain.geojson').then((domain) => {
+      // national-basin-river.geojson is intentionally not fetched: it is ~45 MB
+      // decoded and used to block first paint. Base rivers now stream as MVT/PBF.
+      cached = { domain, river: null }
       return cached
     })
   }

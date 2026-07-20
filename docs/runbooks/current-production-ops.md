@@ -26,8 +26,9 @@
   `scripts/node27_autopipeline.py` 扫描 NFS object-store、注册/解析 run、
   入库并刷新 display coverage。生产配置用两个独立 run worker 并行处理，
   每个 worker 使用独立数据库事务；所有 run 收敛后只执行一次最终 display publish。
-- node-27 display API 由 `scripts/ops/start-display-api.sh` 管理，
-  当前监听 `127.0.0.1:8080`；公网入口是 `https://test.nwm.ac.cn`。
+- node-27 display API 由 user systemd `nhms-display-api.service` 托管，
+  `scripts/ops/start-display-api.sh` 负责安装权威 unit、平滑接管和 smoke check；
+  当前监听 `127.0.0.1:8080`，默认 2 workers；公网入口是 `https://test.nwm.ac.cn`。
 - node-22 是计算与 Slurm host：运行 Slurm Gateway、诊断 API、DB-free
   production scheduler timer、Slurm/SHUD wrapper，并向 NFS 写
   object-store/published 产物；node-22 不作为当前 NHMS 业务数据库 writer。
@@ -44,7 +45,7 @@
 | node-27 DB | node-27 `127.0.0.1:55432/nhms` | active PostgreSQL/PostGIS/TimescaleDB | writer `DATABASE_URL` from node-27 ingest env; display uses readonly `display.env` only |
 | node-27 download | node-27 `/home/nwm/NWM` | 自动下载 GFS/IFS 00/12 UTC raw source cycles 到共享 object-store | `infra/env/node27-download.env` -> `nhms-node27-download.timer` -> `scripts/node27_download_once.sh` |
 | node-27 ingest | node-27 `/home/nwm/NWM` | 扫描 object-store runs、seed registry、register、parse、publish、refresh coverage | `infra/env/node27-ingest.env` -> `nhms-node27-autopipe.timer` -> `scripts/node27_autopipe_cron.sh` -> `scripts/node27_autopipeline.py` |
-| node-27 display API | node-27 `127.0.0.1:8080` | display_readonly FastAPI, `/health`, `/api/v1/*`, frontend backend | `scripts/ops/start-display-api.sh` |
+| node-27 display API | node-27 `127.0.0.1:8080` | display_readonly FastAPI, `/health`, `/api/v1/*`, frontend backend | `infra/systemd/nhms-display-api.service` -> `scripts/ops/start-display-api.sh` |
 | node-27 public entry | `https://test.nwm.ac.cn` | nginx reverse proxy to local display API | `/etc/nginx/conf.d/test.nwm.ac.cn.conf` |
 | node-22 compute | node-22 `/scratch/frd_muziyao/NWM` | Slurm Gateway、diagnostic API、DB-free scheduler、Slurm/SHUD compute wrapper | `nhms-compute-scheduler.timer`, `python -m services.slurm_gateway`, Slurm jobs |
 | Shared NFS data | 22 `/ghdc/data/nwm`, 27 `/home/ghdc/nwm` | object-store mirror, published artifacts, Basins source data | NFS mount, no rsync step |
@@ -500,12 +501,11 @@ node-27 同一 NFS 视图核对 owner/group/mode/default ACL 与 `nwm` 访问。
 synthetic ACL probe、未绑定/非 terminal job 都不算通过。只有这一链通过后保留 refresh
 timer enabled/active；所有退出路径恢复 scheduler 初始状态并确认无 issue-owned job。
 
-前端全国总览的静态边界/河网也必须从同一个 Basins 真相源刷新；这是新增流域后
-让公网地图立刻显示边界和基础河网的运维入口。脚本先从 `--basins-root` 自动发现
-`**/input/*/gis/domain.shp` / `river.shp`；若业务流域只存在于 direct-grid model
-package，则再从 `--model-packages-root` 发现 `basins_*_shud/*/package/gis`。
-`Basins` 源优先于同名 model package。`zhaochen_hhy` 已由 `hhe` 覆盖，当前展示必须
-显式排除 HHY：
+前端全国总览的静态边界仍从 Basins 真相源刷新；基础河网不再生成全国 GeoJSON，
+而是由 active `core.model_instance` 对应的 `core.river_segment` 通过 national
+river-network MVT 自动纳入。新增流域只需完成 registry seed/active model 和
+`stream_type` 派生，不会扩大首屏静态包。`zhaochen_hhy` 已由 `hhe` 覆盖，domain
+生成仍显式排除 HHY：
 
 ```bash
 ssh -p 32099 nwm@210.77.77.27
@@ -514,21 +514,15 @@ cd /home/nwm/NWM
   --basins-root /home/ghdc/nwm/Basins \
   --model-packages-root /home/ghdc/nwm/object-store/models/direct_grid_variants \
   --exclude-basins zhaochen_hhy
-/home/nwm/.local/bin/uv run python scripts/geo/build_national_river_geo.py \
-  --basins-root /home/ghdc/nwm/Basins \
-  --model-packages-root /home/ghdc/nwm/object-store/models/direct_grid_variants \
-  --exclude-basins zhaochen_hhy
-
 jq -r '.features | length' apps/frontend/public/geo/national-basin-domain.geojson
-jq -r '.features[].properties.basin_id' apps/frontend/public/geo/national-basin-river.geojson \
-  | sort | uniq -c
+curl -fsS http://127.0.0.1:8080/api/v1/layers \
+  | jq '.data[] | select(.layer_id == "river-network") | .metadata.source_generation'
 ```
 
 2026-07-19 当前 domain authority 是 18 个业务流域，包含 6 个新增流域
 `dth_ls`、`dth_zj`、`hhe`、`huai_main`、`jialingjiang`、`lh_gl`，不包含 HHY。
-当前静态 river authority 是 59,702 条 feature、13 个具备全国静态河网的流域；
-其中 HHE 使用 model package 中的真实 `river.shp`，包含 43,799 条河段，HHY 为 0。
-静态 river 只负责全国底图常显，不参与点击。HHE 与其他业务流域的点击、流量上色
+历史静态 river GeoJSON（59,702 features，约 45 MB 解码）已退出运行关键路径；
+基础 river-network MVT 只负责全国底图常显，不参与点击。HHE 与其他业务流域的点击、流量上色
 统一来自 `hydro-national/q_down` live MVT；HHE model package 的 `river.shp.Type`
 必须回填到对应 output segment，低 zoom 优先按该真实河级筛选，历史缺失 `Type` 的
 segment 才回退到流量分位筛选。MVT feature 必须同时携带 `river_segment_id`、
@@ -613,14 +607,17 @@ wrapper 会：
 - source `infra/env/display.env`；
 - 校验 `DATABASE_URL`、`NHMS_ENABLE_LIVE_POSTGIS_MVT`、`OBJECT_STORE_ROOT`；
 - 创建并校验 `NHMS_MVT_FILE_CACHE_DIR`，未设置时默认 `$HOME/.cache/nhms/mvt`；
-- 停掉旧的 `apps.api.main:app` uvicorn；
-- 在 `127.0.0.1:${NHMS_DISPLAY_API_PORT:-8080}` 重新启动；
+- 安装仓库内 `infra/systemd/nhms-display-api.service`，停掉旧的手工 uvicorn；
+- 由 user systemd 在 `127.0.0.1:${NHMS_DISPLAY_API_PORT:-8080}` 启动
+  `${NHMS_DISPLAY_WORKERS:-2}` 个 worker，失败自动恢复；
 - 跑 `/health` 与 `/api/v1/models?limit=1` basin_id smoke check。
 
 确认当前 live 状态：
 
 ```bash
 cd /home/nwm/NWM
+systemctl --user is-enabled nhms-display-api.service
+systemctl --user is-active nhms-display-api.service
 grep -E '^NHMS_DISPLAY_API_PORT=|^NHMS_SERVICE_ROLE=|^OBJECT_STORE_ROOT=' \
   infra/env/display.env
 

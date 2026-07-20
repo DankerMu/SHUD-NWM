@@ -292,7 +292,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
     onQueryChange({ validTime: correctedValidTime })
   }, [onQueryChange, mapBootstrapLoading, metadataLayers, overviewMetadataMatchesQuery, state])
 
-  // 常态河网底图（basin shp 静态化）：全国总览常激活，秒显河流、不等慢的总览接口。
+  // 静态文件只保留轻量 basin domain；常态河网由 layer catalog 注册的 national MVT 分片加载。
   const nationalGeo = useNationalBasinGeo(true)
 
   // DB 内 basin geom 是 mesh 碎片、被客户端预算拒绝时，用静态 domain 轮廓回填边界/bbox，

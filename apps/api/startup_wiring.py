@@ -68,12 +68,24 @@ def register_static_and_health_routes(
         ),
         name="frontend-assets",
     )
+    api.mount(
+        "/geo",
+        # Non-hashed boundary assets are small and may change on deployment.
+        # StaticFiles supplies ETag/Last-Modified and honors conditional 304;
+        # the SPA catch-all FileResponse previously returned 200 every time.
+        static_files_cls(
+            directory=frontend_dist_dir / "geo",
+            check_dir=False,
+            cache_control="public, max-age=300, must-revalidate",
+        ),
+        name="frontend-geo",
+    )
 
     @api.get("/{full_path:path}")
     async def spa_fallback(full_path: str) -> FileResponse:
         if full_path.startswith("api/") or full_path == "api":
             raise HTTPException(status_code=404, detail="Not found")
-        # Serve real built static files outside /assets (e.g. /geo/*.geojson, favicon)
+        # Serve real built static files outside /assets and /geo (e.g. favicon)
         # before falling back to index.html for SPA client routes. Reject path
         # traversal by confirming the resolved path stays inside the dist root.
         if full_path:

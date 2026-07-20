@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import math
 import os
 import re
+import threading
+import weakref
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -35,6 +39,9 @@ POSTGIS_NON_FINITE_DOUBLE_SQL = (
 )
 WEB_MERCATOR_BOUNDS = [-20037508.342789244, -20037508.342789244, 20037508.342789244, 20037508.342789244]
 CHINA_WGS84_BOUNDS = [73.5, 18.1, 134.8, 53.6]
+
+_LOCAL_TILE_LOCKS_GUARD = threading.Lock()
+_LOCAL_TILE_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
 
 
 @dataclass(frozen=True)
@@ -138,6 +145,30 @@ def cache_key(tile: TileInput) -> str:
         "z": tile.z,
     }
     return hashlib.sha256(json.dumps(basis, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+@contextmanager
+def tile_generation_lock(tile: TileInput) -> Iterable[None]:
+    """Single-flight a cache miss in this process and across uvicorn workers."""
+    key = cache_key(tile)
+    with _LOCAL_TILE_LOCKS_GUARD:
+        local_lock = _LOCAL_TILE_LOCKS.get(key)
+        if local_lock is None:
+            local_lock = threading.Lock()
+            _LOCAL_TILE_LOCKS[key] = local_lock
+
+    with local_lock:
+        lock_path = _file_cache_lock_path(key)
+        if lock_path is None:
+            yield
+            return
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+b") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def stable_etag(data: bytes) -> str:
@@ -313,7 +344,7 @@ def postgis_tile_sql(layer: str) -> str:
     source_identity_stats_sql = (
         "SELECT CASE WHEN EXISTS (SELECT 1 FROM source_rows) THEN 1 ELSE 0 END AS source_identity_count"
     )
-    if layer == "river-network":
+    if layer in {"river-network", "river-network-national"}:
         required_property_checks = {
             "feature_id": "feature_id IS NULL OR feature_id::text = ''",
             "segment_id": "segment_id IS NULL OR segment_id::text = ''",
@@ -321,20 +352,52 @@ def postgis_tile_sql(layer: str) -> str:
             "river_network_version_id": "river_network_version_id IS NULL OR river_network_version_id::text = ''",
             "basin_version_id": "basin_version_id IS NULL OR basin_version_id::text = ''",
         }
-        source_cte = """
+        network_filter = (
+            "rnv.basin_version_id = :basin_version_id"
+            if layer == "river-network"
+            else "EXISTS (SELECT 1 FROM core.model_instance mi "
+            "WHERE mi.river_network_version_id = rnv.river_network_version_id AND mi.active_flag = true)"
+        )
+        source_cte = f"""
             SELECT (rs.river_network_version_id || '::' || rs.river_segment_id) AS feature_id,
                    rs.river_segment_id AS segment_id,
                    rs.river_segment_id,
                    rs.river_network_version_id,
-                   CAST(:basin_version_id AS text) AS basin_version_id,
-                   rs.geom, rs.properties_json
+                   rnv.basin_version_id,
+                   rs.stream_type AS "Type",
+                   CASE
+                       WHEN :z >= 9 THEN rs.geom
+                       ELSE ST_Transform(
+                           ST_SimplifyPreserveTopology(
+                               ST_Transform(rs.geom, 3857),
+                               CASE
+                                   WHEN :z <= 4 THEN 2000.0
+                                   WHEN :z = 5 THEN 1000.0
+                                   WHEN :z = 6 THEN 500.0
+                                   WHEN :z = 7 THEN 200.0
+                                   ELSE 80.0
+                               END
+                           ),
+                           4490
+                       )
+                   END AS geom
             FROM core.river_segment rs
-            WHERE EXISTS (
-                SELECT 1
-                FROM core.river_network_version rnv
-                WHERE rnv.river_network_version_id = rs.river_network_version_id
-                  AND rnv.basin_version_id = :basin_version_id
-            )
+            JOIN core.river_network_version rnv
+              ON rnv.river_network_version_id = rs.river_network_version_id
+            CROSS JOIN bounds
+            WHERE {network_filter}
+              AND rs.geom IS NOT NULL
+              AND rs.geom && ST_Transform(bounds.geom_3857, 4490)
+              AND (
+                  :z >= 9
+                  OR rs.stream_type >= CASE
+                      WHEN :z <= 4 THEN 5.0
+                      WHEN :z = 5 THEN 4.0
+                      WHEN :z = 6 THEN 3.0
+                      WHEN :z = 7 THEN 2.0
+                      ELSE 1.0
+                  END
+              )
         """
     elif layer == "hydro":
         required_property_checks = {
@@ -441,14 +504,119 @@ def postgis_tile_sql(layer: str) -> str:
             ) THEN 1 ELSE 0 END AS source_identity_count
         """
         source_cte = """
-            SELECT feature_id, segment_id, river_segment_id, river_network_version_id,
-                   basin_version_id, basin_id, value, unit, quality_flag, run_id, variable,
-                   valid_time,
+            WITH latest_runs AS MATERIALIZED (
+                SELECT DISTINCT ON (mi.river_network_version_id)
+                       h.run_id, mi.river_network_version_id
+                FROM hydro.hydro_run h
+                JOIN core.model_instance mi ON mi.model_id = h.model_id
+                WHERE h.status IN ('succeeded', 'parsed', 'published')
+                  AND mi.river_network_version_id IS NOT NULL
+                ORDER BY mi.river_network_version_id, h.cycle_time DESC, h.run_id DESC
+            ),
+            tile_segments AS MATERIALIZED (
+                SELECT rs.river_segment_id,
+                       rs.river_network_version_id,
+                       rs.stream_type
+                FROM core.river_segment rs
+                CROSS JOIN bounds
+                WHERE rs.geom IS NOT NULL
+                  AND rs.geom && ST_Transform(bounds.geom_3857, 4490)
+                  AND (
+                      :z >= 9
+                      OR rs.stream_type IS NULL
+                      OR rs.stream_type >= CASE
+                          WHEN :z <= 4 THEN 5.0
+                          WHEN :z = 5 THEN 4.0
+                          WHEN :z = 6 THEN 3.0
+                          WHEN :z = 7 THEN 2.0
+                          ELSE 1.0
+                      END
+                  )
+            ),
+            typed_values AS (
+                SELECT ts.river_segment_id,
+                       ts.river_network_version_id,
+                       ts.basin_version_id,
+                       ts.value,
+                       ts.unit,
+                       ts.quality_flag,
+                       ts.run_id,
+                       ts.variable,
+                       ts.valid_time
+                FROM latest_runs lr
+                JOIN hydro.river_timeseries ts
+                  ON ts.run_id = lr.run_id
+                 AND ts.river_network_version_id = lr.river_network_version_id
+                JOIN tile_segments seg
+                  ON seg.river_segment_id = ts.river_segment_id
+                 AND seg.river_network_version_id = ts.river_network_version_id
+                WHERE ts.variable = :variable
+                  AND ts.valid_time = :valid_time
+                  AND (:z >= 9 OR seg.stream_type IS NOT NULL)
+            ),
+            untyped_ranked AS (
+                SELECT ts.river_segment_id,
+                       ts.river_network_version_id,
+                       ts.basin_version_id,
+                       ts.value,
+                       ts.unit,
+                       ts.quality_flag,
+                       ts.run_id,
+                       ts.variable,
+                       ts.valid_time,
+                       CASE
+                           WHEN ts.value IS NULL THEN NULL
+                           ELSE PERCENT_RANK() OVER (
+                               PARTITION BY ts.river_network_version_id
+                               ORDER BY ts.value
+                           )
+                       END AS value_percent_rank
+                FROM latest_runs lr
+                JOIN hydro.river_timeseries ts
+                  ON ts.run_id = lr.run_id
+                 AND ts.river_network_version_id = lr.river_network_version_id
+                JOIN tile_segments seg
+                  ON seg.river_segment_id = ts.river_segment_id
+                 AND seg.river_network_version_id = ts.river_network_version_id
+                WHERE :z < 9
+                  AND seg.stream_type IS NULL
+                  AND ts.variable = :variable
+                  AND ts.valid_time = :valid_time
+            ),
+            selected_values AS (
+                SELECT river_segment_id, river_network_version_id, basin_version_id,
+                       value, unit, quality_flag, run_id, variable, valid_time
+                FROM typed_values
+                UNION ALL
+                SELECT river_segment_id, river_network_version_id, basin_version_id,
+                       value, unit, quality_flag, run_id, variable, valid_time
+                FROM untyped_ranked
+                WHERE value_percent_rank IS NOT NULL
+                  AND value_percent_rank >= CASE
+                      WHEN :z <= 4 THEN 0.90
+                      WHEN :z = 5 THEN 0.70
+                      WHEN :z = 6 THEN 0.40
+                      WHEN :z = 7 THEN 0.15
+                      ELSE 0.04
+                  END
+            )
+            SELECT (sv.river_network_version_id || '::' || sv.river_segment_id) AS feature_id,
+                   sv.river_segment_id AS segment_id,
+                   sv.river_segment_id,
+                   sv.river_network_version_id,
+                   sv.basin_version_id,
+                   bv.basin_id,
+                   sv.value,
+                   sv.unit,
+                   sv.quality_flag,
+                   sv.run_id,
+                   sv.variable,
+                   to_char(sv.valid_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS valid_time,
                    CASE
-                       WHEN :z >= 9 THEN geom
+                       WHEN :z >= 9 THEN rs.geom
                        ELSE ST_Transform(
                            ST_SimplifyPreserveTopology(
-                               ST_Transform(geom, 3857),
+                               ST_Transform(rs.geom, 3857),
                                CASE
                                    WHEN :z <= 4 THEN 2000.0
                                    WHEN :z = 5 THEN 1000.0
@@ -460,75 +628,12 @@ def postgis_tile_sql(layer: str) -> str:
                            4490
                        )
                    END AS geom
-            FROM (
-                SELECT (ts.river_network_version_id || '::' || ts.river_segment_id) AS feature_id,
-                       ts.river_segment_id AS segment_id,
-                       ts.river_segment_id,
-                       ts.river_network_version_id,
-                       ts.basin_version_id,
-                       bv.basin_id,
-                       ts.value, ts.unit,
-                       ts.quality_flag,
-                       ts.run_id, ts.variable,
-                       to_char(ts.valid_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS valid_time,
-                       rs.geom,
-                       CASE
-                           WHEN ts.value IS NULL THEN NULL
-                           ELSE PERCENT_RANK() OVER (
-                               PARTITION BY ts.river_network_version_id
-                               ORDER BY ts.value
-                           )
-                       END AS value_percent_rank,
-                       CASE
-                           WHEN (rs.properties_json->>'Type') ~ '^[0-9]+([.][0-9]+)?$'
-                           THEN LEAST(5.0, GREATEST(1.0, (rs.properties_json->>'Type')::double precision))
-                           ELSE NULL
-                       END AS stream_type
-                FROM hydro.river_timeseries ts
-                JOIN (
-                    SELECT DISTINCT ON (mi.river_network_version_id)
-                           h.run_id, mi.river_network_version_id
-                    FROM hydro.hydro_run h
-                    JOIN core.model_instance mi ON mi.model_id = h.model_id
-                    WHERE h.status IN ('succeeded', 'parsed', 'published')
-                      AND mi.river_network_version_id IS NOT NULL
-                    ORDER BY mi.river_network_version_id, h.cycle_time DESC, h.run_id DESC
-                ) lr ON lr.run_id = ts.run_id AND lr.river_network_version_id = ts.river_network_version_id
-                JOIN core.river_segment rs
-                  ON rs.river_segment_id = ts.river_segment_id
-                 AND rs.river_network_version_id = ts.river_network_version_id
-                CROSS JOIN bounds
-                LEFT JOIN core.basin_version bv
-                  ON bv.basin_version_id = ts.basin_version_id
-                WHERE ts.variable = :variable
-                  AND ts.valid_time = :valid_time
-                  AND rs.geom IS NOT NULL
-                  AND rs.geom && ST_Transform(bounds.geom_3857, 4490)
-            ) ranked
-            WHERE :z >= 9
-               OR (
-                   (
-                       stream_type IS NOT NULL
-                       AND stream_type >= CASE
-                           WHEN :z <= 4 THEN 5.0
-                           WHEN :z = 5 THEN 4.0
-                           WHEN :z = 6 THEN 3.0
-                           WHEN :z = 7 THEN 2.0
-                           ELSE 1.0
-                       END
-                   )
-                   OR (
-                       stream_type IS NULL
-                       AND value_percent_rank IS NOT NULL
-                       AND value_percent_rank >= CASE
-                           WHEN :z <= 4 THEN 0.90
-                           WHEN :z = 5 THEN 0.70
-                           WHEN :z = 6 THEN 0.40
-                           WHEN :z = 7 THEN 0.15
-                           ELSE 0.04
-                       END
-                   )
-               )
+            FROM selected_values sv
+            JOIN core.river_segment rs
+              ON rs.river_segment_id = sv.river_segment_id
+             AND rs.river_network_version_id = sv.river_network_version_id
+            LEFT JOIN core.basin_version bv
+              ON bv.basin_version_id = sv.basin_version_id
         """
     elif layer == "met-stations":
         required_property_checks = {
@@ -667,12 +772,13 @@ def postgis_tile_sql(layer: str) -> str:
 
 
 def _mvt_public_tile_columns(layer: str) -> tuple[str, ...]:
-    if layer == "river-network":
+    if layer in {"river-network", "river-network-national"}:
         return (
             "segment_id",
             "river_segment_id",
             "river_network_version_id",
             "basin_version_id",
+            '"Type"',
             "mvt_geom",
         )
     if layer == "hydro-national":
@@ -753,6 +859,12 @@ _NATIONAL_DISCHARGE_METADATA = {
     ],
 }
 
+_NATIONAL_RIVER_NETWORK_METADATA = {
+    "tile_url_template": "/api/v1/tiles/river-network-national/{z}/{x}/{y}.pbf",
+    "required_placeholders": ["z", "x", "y"],
+    "min_zoom": 0,
+}
+
 
 def layer_metadata(
     layer_id: str,
@@ -802,15 +914,18 @@ def layer_metadata(
             "fallback_available": True,
             "release_blocking": release_blocking,
         }
-    # National discharge overview: each basin's latest run is selected server-side, so
-    # the public tile route carries no run_id/basin/network placeholders.
+    # National overview sources resolve their identities server-side, so their public
+    # routes carry no run_id/basin/network placeholders.
     national_discharge = national and layer_id == "discharge"
+    national_river_network = national and layer_id == "river-network"
     if national_discharge:
         base = {**base, **_NATIONAL_DISCHARGE_METADATA}
+    elif national_river_network:
+        base = {**base, **_NATIONAL_RIVER_NETWORK_METADATA}
     cache_layer_id = layer_id
     source_refs = (
         {}
-        if national_discharge
+        if national_discharge or national_river_network
         else _layer_source_refs(
             layer_id,
             run_id=run_id,
@@ -820,7 +935,7 @@ def layer_metadata(
         )
     )
     source_ref_constants = {"z", "x", "y", "valid_time"}
-    if not national_discharge and any(
+    if not (national_discharge or national_river_network) and any(
         placeholder not in source_ref_constants and not source_refs.get(placeholder)
         for placeholder in base["required_placeholders"]
     ):
@@ -851,6 +966,7 @@ def layer_metadata(
             "route_variable": route_variable,
             "schema_version": MVT_SCHEMA_VERSION,
             "source_refs": source_refs,
+            "source_generation": source_version if national else None,
             "tile_url_template": base["tile_url_template"],
             "valid_time_limit": valid_time_limit,
             "valid_time_observed_count": valid_time_observed_count,
@@ -878,6 +994,7 @@ def layer_metadata(
         "valid_time_observed_count": valid_time_observed_count,
         "valid_times_truncated": valid_times_truncated,
         "source_refs": source_refs,
+        "source_generation": source_version if national else None,
         "cache_layer_id": cache_layer_id,
         "route_variable": route_variable,
         "alias_of": alias_of,
@@ -937,6 +1054,72 @@ def display_ready_run(session: Session) -> Mapping[str, Any] | None:
         )
     ).mappings().first()
     return dict(row) if row is not None else None
+
+
+def national_discharge_source_version(session: Session) -> str:
+    """Digest the exact latest display-ready run selected for every network."""
+    rows = (
+        session.execute(
+            text(
+                """
+                SELECT run_id, river_network_version_id, cycle_time, updated_at
+                FROM (
+                    SELECT h.run_id,
+                           mi.river_network_version_id,
+                           h.cycle_time,
+                           h.updated_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY mi.river_network_version_id
+                               ORDER BY h.cycle_time DESC, h.run_id DESC
+                           ) AS rn
+                    FROM hydro.hydro_run h
+                    JOIN core.model_instance mi ON mi.model_id = h.model_id
+                    WHERE h.status IN ('succeeded', 'parsed', 'published')
+                      AND mi.river_network_version_id IS NOT NULL
+                ) ranked
+                WHERE rn = 1
+                ORDER BY river_network_version_id, run_id
+                """
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return _national_source_digest("hydro-national", rows)
+
+
+def national_river_network_source_version(session: Session) -> str:
+    """Digest active river-network identities and their immutable inventory metadata."""
+    active_predicate = "mi.active_flag = 1" if session.get_bind().dialect.name == "sqlite" else "mi.active_flag = true"
+    rows = (
+        session.execute(
+            text(
+                f"""
+                SELECT DISTINCT rnv.river_network_version_id,
+                       rnv.basin_version_id,
+                       rnv.segment_count,
+                       rnv.checksum,
+                       rnv.created_at
+                FROM core.river_network_version rnv
+                JOIN core.model_instance mi
+                  ON mi.river_network_version_id = rnv.river_network_version_id
+                WHERE {active_predicate}
+                ORDER BY rnv.river_network_version_id
+                """
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return _national_source_digest("river-network-national", rows)
+
+
+def _national_source_digest(prefix: str, rows: Iterable[Mapping[str, Any]]) -> str:
+    basis = [dict(row) for row in rows]
+    digest = hashlib.sha256(
+        json.dumps(basis, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()[:20]
+    return f"{prefix}:{digest}:{len(basis)}"
 
 
 def valid_times_for_layer(
@@ -1060,6 +1243,7 @@ def _source_layer_id(layer: str) -> str:
     # source-layer name stays identical between single-run and national tiles.
     return {
         "river-network": "river_network",
+        "river-network-national": "river_network",
         "hydro": "hydro",
         "hydro-national": "hydro",
         "met-stations": "met_stations",
@@ -1167,6 +1351,13 @@ def _file_cache_path(key: str) -> Path | None:
     if not re.fullmatch(r"[0-9a-f]{64}", key):
         return None
     return Path(root).expanduser() / key[:2] / f"{key}.pbf"
+
+
+def _file_cache_lock_path(key: str) -> Path | None:
+    root = os.getenv(MVT_FILE_CACHE_DIR_ENV, "").strip()
+    if not root or not re.fullmatch(r"[0-9a-f]{64}", key):
+        return None
+    return Path(root).expanduser() / ".locks" / key[:2] / f"{key}.lock"
 
 
 def _read_file_cache(key: str) -> tuple[bytes, str, str] | None:

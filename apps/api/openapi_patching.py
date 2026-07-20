@@ -53,8 +53,10 @@ def patch_openapi_schema(schema: dict) -> None:
 
 def _patch_mvt_tile_openapi(schema: dict) -> None:
     mvt_paths = (
+        "/api/v1/tiles/river-network-national/{z}/{x}/{y}.pbf",
         "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
         "/api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf",
+        "/api/v1/tiles/hydro-national/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
         "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
     )
     _ensure_mvt_live_postgis_unavailable_response(schema)
@@ -67,7 +69,7 @@ def _patch_mvt_tile_openapi(schema: dict) -> None:
         operation["responses"]["5XX"] = {"$ref": "#/components/responses/Error"}
         for parameter in operation.get("parameters", []):
             name = parameter.get("name")
-            if path == "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf" and name == "variable":
+            if "/tiles/hydro" in path and name == "variable":
                 parameter["schema"] = {"type": "string", "enum": list(SUPPORTED_HYDRO_MVT_VARIABLES)}
             if name == "z":
                 parameter["description"] = "Web Mercator XYZ zoom level."
@@ -1474,6 +1476,7 @@ def _layer_metadata_schema() -> dict:
                     "additionalProperties": True,
                 }
             ),
+            "source_generation": _nullable({"type": "string"}),
             "cache_layer_id": _nullable({"type": "string"}),
             "route_variable": _nullable({"type": "string"}),
             "legacy_layer_ids": string_array,

@@ -1551,7 +1551,36 @@ def test_start_display_api_defaults_display_api_port_when_unset(tmp_path: Path) 
     launch_args = launch_text.splitlines()
     assert "--port" in launch_args
     assert launch_args[launch_args.index("--port") + 1] == "8080"
+    assert launch_args[launch_args.index("--workers") + 1] == "2"
     assert "target=127.0.0.1:8080" in completed.stdout
+
+
+@pytest.mark.parametrize("invalid_workers", ["0", "5", "many"])
+def test_start_display_api_invalid_worker_count_exits_before_stop_or_relaunch(
+    tmp_path: Path,
+    invalid_workers: str,
+) -> None:
+    temp_repo = tmp_path / "repo"
+    object_store_root = temp_repo / "object-store"
+    display_env = [
+        "DATABASE_URL=postgresql://nhms_display_ro:secret@db.internal.example:5432/nhms",
+        "NHMS_ENABLE_LIVE_POSTGIS_MVT=true",
+        f"OBJECT_STORE_ROOT={object_store_root}",
+        f"NHMS_DISPLAY_WORKERS={invalid_workers}",
+    ]
+    fake_bin, record_dir = _prepare_start_display_api_harness(
+        temp_repo,
+        display_env=display_env,
+        object_store_root=object_store_root,
+    )
+
+    completed = _run_start_display_api_harness(temp_repo, fake_bin, record_dir)
+
+    assert completed.returncode != 0
+    assert "NHMS_DISPLAY_WORKERS" in completed.stderr
+    assert (invalid_workers or "<empty>") in completed.stderr
+    assert not (record_dir / "pgrep.argv").exists()
+    assert not (record_dir / "setsid.argv").exists()
 
 
 @pytest.mark.parametrize("invalid_port", ["notaport", "70000", ""])

@@ -1383,6 +1383,8 @@ def test_run_scoped_layer_catalog_keeps_discharge_national_source_refs() -> None
             basin_version_id="basin_v1",
             river_network_version_id="river_v1",
             river_network_source_version="river-source-v1",
+            national_hydro_source_version="national-hydro-v1",
+            national_river_source_version="national-river-v1",
             national=False,
         )
     finally:

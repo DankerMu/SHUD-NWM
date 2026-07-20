@@ -77,9 +77,11 @@ def test_existing_geometry_without_source_stream_type_is_not_rewritten(monkeypat
 def test_national_hydro_mvt_prefers_source_stream_type_with_rank_fallback() -> None:
     sql = postgis_tile_sql("hydro-national")
 
-    assert "AS stream_type" in sql
-    assert "stream_type IS NOT NULL" in sql
+    assert "rs.stream_type" in sql
+    assert "seg.stream_type IS NOT NULL" in sql
     assert "WHEN :z = 5 THEN 4.0" in sql
-    assert "stream_type IS NULL" in sql
+    assert "seg.stream_type IS NULL" in sql
     assert "value_percent_rank >= CASE" in sql
-    assert HYDRO_NATIONAL_SOURCE_VERSION.endswith("stream-type-v2")
+    assert "JOIN core.river_segment rs" in sql
+    assert sql.index("selected_values AS") < sql.rindex("JOIN core.river_segment rs")
+    assert HYDRO_NATIONAL_SOURCE_VERSION.endswith("stream-type-v3")

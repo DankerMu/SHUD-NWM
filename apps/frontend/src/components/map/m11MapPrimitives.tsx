@@ -206,20 +206,32 @@ export function m11NationalRiverPaint({ dimmed, satellite }: { dimmed: boolean; 
 }
 
 export function M11NationalRiverPrimitive({
-  collection,
+  tiles,
+  minzoom,
+  maxzoom,
   dimmed,
   satellite,
 }: {
-  collection: FeatureCollection
+  tiles: string[]
+  minzoom: number
+  maxzoom: number
   dimmed: boolean
   satellite: boolean
 }) {
   return (
-    <Source id={M11_NATIONAL_RIVER_SOURCE_ID} type="geojson" data={collection}>
+    <Source
+      id={M11_NATIONAL_RIVER_SOURCE_ID}
+      type="vector"
+      tiles={tiles}
+      minzoom={minzoom}
+      maxzoom={maxzoom}
+      promoteId="segment_id"
+    >
       <Layer
         id={M11_NATIONAL_RIVER_LINE_LAYER_ID}
         type="line"
         source={M11_NATIONAL_RIVER_SOURCE_ID}
+        source-layer="river_network"
         layout={M11_ROUND_LINE_LAYOUT}
         paint={m11NationalRiverPaint({ dimmed, satellite })}
       />

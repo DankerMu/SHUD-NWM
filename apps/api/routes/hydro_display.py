@@ -6,7 +6,7 @@ import os
 from collections.abc import Generator
 from datetime import datetime
 from functools import lru_cache
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import Response
@@ -37,10 +37,13 @@ from services.tiles.mvt import (
     canonical_mvt_time,
     display_ready_run,
     layer_metadata,
+    national_discharge_source_version,
     national_discharge_valid_times,
+    national_river_network_source_version,
     postgis_tile_sql,
     public_hydro_layer_id,
     simplification_tolerance_m,
+    tile_generation_lock,
     valid_times_for_layer,
 )
 from services.tiles.mvt import (
@@ -59,7 +62,8 @@ from services.tiles.mvt import (
 router = APIRouter(tags=["hydro-display"])
 
 HYDRO_NATIONAL_SOURCE_ID = "hydro-national"
-HYDRO_NATIONAL_SOURCE_VERSION = "hydro-national-latest-per-basin-stream-type-v2"
+HYDRO_NATIONAL_SOURCE_VERSION = "hydro-national-latest-per-basin-stream-type-v3"
+RIVER_NETWORK_NATIONAL_SOURCE_ID = "river-network-national"
 DISPLAY_PRODUCT_READY_STATUSES = {"succeeded", "parsed", "published"}
 PUBLIC_LAYER_DEFINITIONS: tuple[tuple[str, str, str, list[str]], ...] = (
     ("discharge", "Discharge", "hydrology", ["q_down"]),
@@ -130,7 +134,24 @@ class LayerValidTimesResponse(ApiSuccessEnvelope):
 
 @lru_cache
 def _engine(database_url: str) -> Engine:
-    return create_engine(database_url, future=True)
+    return create_engine(
+        database_url,
+        future=True,
+        pool_pre_ping=True,
+        pool_size=_bounded_env_int("NHMS_DISPLAY_DB_POOL_SIZE", default=4, minimum=1, maximum=16),
+        max_overflow=_bounded_env_int("NHMS_DISPLAY_DB_MAX_OVERFLOW", default=2, minimum=0, maximum=16),
+        pool_timeout=10,
+        pool_recycle=1800,
+    )
+
+
+def _bounded_env_int(name: str, *, default: int, minimum: int, maximum: int) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if minimum <= value <= maximum else default
 
 
 def get_hydro_display_session() -> Generator[Session, None, None]:
@@ -196,11 +217,15 @@ def list_layers(
         basin_version_id, river_network_version_id = _require_run_source_identity(run, layer_id="layers")
         source_version = _run_source_version(run)
         river_network_source_version = _river_network_source_version(session, basin_version_id)
+        national_hydro_source_version = national_discharge_source_version(session)
+        national_river_source_version = national_river_network_source_version(session)
         layers = _default_layer_catalog(
             session,
             run_id=resolved_run_id,
             source_version=source_version,
             river_network_source_version=river_network_source_version,
+            national_hydro_source_version=national_hydro_source_version,
+            national_river_source_version=national_river_source_version,
             basin_version_id=basin_version_id,
             river_network_version_id=river_network_version_id,
             national=run_id is None,
@@ -295,21 +320,21 @@ def hydro_mvt_tile(
         y=y,
         variant_id=f"variable:{variable}",
     )
-    cached = read_cached_tile_response(session, tile_input)
-    if cached is not None:
-        return _mvt_response(cached)
-    data = _fetch_hydro_mvt_tile_bytes(
+    return _cached_or_generated_mvt_response(
         session,
-        run_id=run_id,
-        variable=variable,
-        valid_time=valid_time,
-        basin_version_id=basin_version_id,
-        river_network_version_id=river_network_version_id,
-        z=z,
-        x=x,
-        y=y,
+        tile_input,
+        lambda: _fetch_hydro_mvt_tile_bytes(
+            session,
+            run_id=run_id,
+            variable=variable,
+            valid_time=valid_time,
+            basin_version_id=basin_version_id,
+            river_network_version_id=river_network_version_id,
+            z=z,
+            x=x,
+            y=y,
+        ),
     )
-    return _mvt_response(build_raw_tile_response(session, tile_input, data))
 
 
 @router.get(
@@ -331,18 +356,49 @@ def hydro_national_mvt_tile(
     tile_input = TileInput(
         layer_id=public_hydro_layer_id(variable),
         source_id=HYDRO_NATIONAL_SOURCE_ID,
-        source_version=HYDRO_NATIONAL_SOURCE_VERSION,
+        source_version=f"{HYDRO_NATIONAL_SOURCE_VERSION}:{national_discharge_source_version(session)}",
         valid_time=_format_time(valid_time),
         z=z,
         x=x,
         y=y,
         variant_id=f"variable:{variable}",
     )
-    cached = read_cached_tile_response(session, tile_input)
-    if cached is not None:
-        return _mvt_response(cached)
-    data = _fetch_hydro_national_mvt_tile_bytes(session, variable=variable, valid_time=valid_time, z=z, x=x, y=y)
-    return _mvt_response(build_raw_tile_response(session, tile_input, data))
+    return _cached_or_generated_mvt_response(
+        session,
+        tile_input,
+        lambda: _fetch_hydro_national_mvt_tile_bytes(
+            session, variable=variable, valid_time=valid_time, z=z, x=x, y=y
+        ),
+    )
+
+
+@router.get(
+    "/api/v1/tiles/river-network-national/{z}/{x}/{y}.pbf",
+    responses=MVT_ROUTE_RESPONSES,
+    response_class=Response,
+)
+def river_network_national_mvt_tile(
+    z: int,
+    x: int,
+    y: int,
+    session: Session = Depends(get_hydro_display_session),
+) -> Response:
+    validate_xyz(z, x, y)
+    tile_input = TileInput(
+        layer_id="river-network",
+        source_id=RIVER_NETWORK_NATIONAL_SOURCE_ID,
+        source_version=national_river_network_source_version(session),
+        valid_time=None,
+        z=z,
+        x=x,
+        y=y,
+        variant_id="national",
+    )
+    return _cached_or_generated_mvt_response(
+        session,
+        tile_input,
+        lambda: _fetch_postgis_tile_bytes(session, "river-network-national", {}, z=z, x=x, y=y),
+    )
 
 
 @router.get(
@@ -368,11 +424,13 @@ def river_network_mvt_tile(
         x=x,
         y=y,
     )
-    cached = read_cached_tile_response(session, tile_input)
-    if cached is not None:
-        return _mvt_response(cached)
-    data = _fetch_river_network_mvt_tile_bytes(session, basin_version_id=basin_version_id, z=z, x=x, y=y)
-    return _mvt_response(build_raw_tile_response(session, tile_input, data))
+    return _cached_or_generated_mvt_response(
+        session,
+        tile_input,
+        lambda: _fetch_river_network_mvt_tile_bytes(
+            session, basin_version_id=basin_version_id, z=z, x=x, y=y
+        ),
+    )
 
 
 @router.get(
@@ -399,11 +457,26 @@ def met_station_mvt_tile(
         x=x,
         y=y,
     )
+    return _cached_or_generated_mvt_response(
+        session,
+        tile_input,
+        lambda: _fetch_station_mvt_tile_bytes(session, basin_version_id=basin_version_id, z=z, x=x, y=y),
+    )
+
+
+def _cached_or_generated_mvt_response(
+    session: Session,
+    tile_input: TileInput,
+    producer: Callable[[], bytes],
+) -> Response:
     cached = read_cached_tile_response(session, tile_input)
     if cached is not None:
         return _mvt_response(cached)
-    data = _fetch_station_mvt_tile_bytes(session, basin_version_id=basin_version_id, z=z, x=x, y=y)
-    return _mvt_response(build_raw_tile_response(session, tile_input, data))
+    with tile_generation_lock(tile_input):
+        cached = read_cached_tile_response(session, tile_input)
+        if cached is not None:
+            return _mvt_response(cached)
+        return _mvt_response(build_raw_tile_response(session, tile_input, producer()))
 
 
 def _mvt_live_postgis_enabled(session: Session) -> bool:
@@ -810,6 +883,8 @@ def _default_layer_catalog(
     basin_version_id: str,
     river_network_version_id: str,
     river_network_source_version: str,
+    national_hydro_source_version: str,
+    national_river_source_version: str,
     national: bool = False,
 ) -> list[Layer]:
     layers = []
@@ -832,14 +907,18 @@ def _default_layer_catalog(
                     valid_time_observed_count=valid_time_sample.observed_count,
                     valid_times_truncated=valid_time_sample.truncated,
                     source_version=(
-                        river_network_source_version
+                        national_river_source_version
+                        if national and layer_id == "river-network"
+                        else national_hydro_source_version
+                        if layer_id == "discharge"
+                        else river_network_source_version
                         if layer_id in {"river-network", "met-stations"}
                         else source_version
                     ),
                     basin_version_id=basin_version_id,
                     river_network_version_id=river_network_version_id,
                     release_blocking=not _mvt_live_postgis_enabled(session),
-                    national=layer_id == "discharge",
+                    national=layer_id == "discharge" or (national and layer_id == "river-network"),
                 ),
             )
         )

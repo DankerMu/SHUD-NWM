@@ -238,6 +238,17 @@ def test_latest_ready_run_discovery_migration_matches_query_predicate_and_order(
     assert "LIMIT 1" in function_source
 
 
+def test_river_segment_stream_type_is_generated_and_indexed() -> None:
+    migration = dict(_migration_sql())["000048_river_segment_stream_type.sql"]
+
+    assert "ADD COLUMN IF NOT EXISTS stream_type DOUBLE PRECISION" in migration
+    assert "GENERATED ALWAYS AS" in migration
+    assert "properties_json ->> 'Type'" in migration
+    assert "river_segment_network_stream_type_idx" in migration
+    assert "river_network_version_id" in migration
+    assert "stream_type DESC" in migration
+
+
 
 def test_selected_run_valid_time_discovery_migration_matches_strict_identity_predicates() -> None:
     migration = dict(_migration_sql())["000021_latest_ready_run_discovery_idx.sql"]

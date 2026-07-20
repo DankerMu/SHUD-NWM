@@ -619,6 +619,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tiles/river-network-national/{z}/{x}/{y}.pbf": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** River Network National Mvt Tile */
+        get: operations["river_network_national_mvt_tile_api_v1_tiles_river_network_national__z___x___y__pbf_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf": {
         parameters: {
             query?: never;
@@ -1307,6 +1324,7 @@ export interface components {
             source_refs?: {
                 [key: string]: unknown;
             } | null;
+            source_generation?: string | null;
             cache_layer_id?: string | null;
             route_variable?: string | null;
             legacy_layer_ids?: string[];
@@ -2936,10 +2954,13 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                variable: string;
+                variable: "q_down";
                 valid_time: string;
+                /** @description Web Mercator XYZ zoom level. */
                 z: number;
+                /** @description Web Mercator XYZ tile column. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= x < 2^z. */
                 x: number;
+                /** @description Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z. */
                 y: number;
             };
             cookie?: never;
@@ -2962,29 +2983,46 @@ export interface operations {
                     "application/x-protobuf": string;
                 };
             };
-            /** @description Live PostGIS MVT is unavailable for this canonical tile route. */
-            424: {
+            424: components["responses"]["MvtLivePostgisUnavailable"];
+            "4XX": components["responses"]["Error"];
+            "5XX": components["responses"]["Error"];
+        };
+    };
+    river_network_national_mvt_tile_api_v1_tiles_river_network_national__z___x___y__pbf_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Web Mercator XYZ zoom level. */
+                z: number;
+                /** @description Web Mercator XYZ tile column. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= x < 2^z. */
+                x: number;
+                /** @description Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z. */
+                y: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Raw Mapbox vector tile */
+            200: {
                 headers: {
+                    "Cache-Control"?: string;
+                    ETag?: string;
+                    "X-Tile-Layer-ID"?: string;
+                    "X-Tile-Checksum"?: string;
+                    "X-Tile-Cache"?: "hit" | "miss" | "bypass";
+                    "X-Tile-Cache-Key"?: string;
+                    "X-MVT-Schema-Version"?: string;
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/x-protobuf": string;
                 };
             };
-            /** @description MVT request validation error. */
-            "4XX": {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description MVT server error. */
-            "5XX": {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
+            424: components["responses"]["MvtLivePostgisUnavailable"];
+            "4XX": components["responses"]["Error"];
+            "5XX": components["responses"]["Error"];
         };
     };
     river_network_mvt_tile_api_v1_tiles_river_network__basin_version_id___z___x___y__pbf_get: {

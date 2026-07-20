@@ -67,6 +67,13 @@ if [[ ! "$UVICORN_PORT" =~ ^[0-9]+$ ]] || (( 10#$UVICORN_PORT < 1 || 10#$UVICORN
     echo "       fix display.env before restarting; existing uvicorn was not stopped." >&2
     exit 3
 fi
+DISPLAY_WORKERS="${NHMS_DISPLAY_WORKERS:-2}"
+if [[ ! "$DISPLAY_WORKERS" =~ ^[0-9]+$ ]] || (( 10#$DISPLAY_WORKERS < 1 || 10#$DISPLAY_WORKERS > 4 )); then
+    echo "ERROR: NHMS_DISPLAY_WORKERS must be a decimal integer from 1 through 4; got: ${DISPLAY_WORKERS:-<empty>}" >&2
+    echo "       fix display.env before restarting; existing uvicorn was not stopped." >&2
+    exit 3
+fi
+export NHMS_DISPLAY_WORKERS="$DISPLAY_WORKERS"
 
 if [[ ! -d "$OBJECT_STORE_ROOT" || ! -r "$OBJECT_STORE_ROOT" || ! -x "$OBJECT_STORE_ROOT" ]]; then
     echo "ERROR: OBJECT_STORE_ROOT must be an existing readable and traversable directory: $OBJECT_STORE_ROOT" >&2
@@ -96,7 +103,22 @@ echo "[start-display-api] DATABASE_URL=$db_redact"
 echo "[start-display-api] NHMS_ENABLE_LIVE_POSTGIS_MVT=${NHMS_ENABLE_LIVE_POSTGIS_MVT}"
 echo "[start-display-api] OBJECT_STORE_ROOT=$OBJECT_STORE_ROOT"
 echo "[start-display-api] NHMS_MVT_FILE_CACHE_DIR=$NHMS_MVT_FILE_CACHE_DIR"
-echo "[start-display-api] target=$UVICORN_HOST:$UVICORN_PORT  log=$LOG_PATH"
+echo "[start-display-api] target=$UVICORN_HOST:$UVICORN_PORT  log=$LOG_PATH workers=$DISPLAY_WORKERS"
+
+# Prefer the repository-owned user systemd unit on node-27. Developer/test
+# environments without a usable user manager retain the legacy detached path.
+SYSTEMD_UNIT_SOURCE="${REPO_ROOT}/infra/systemd/nhms-display-api.service"
+SYSTEMD_UNIT_DIR="${XDG_CONFIG_HOME:-${HOME:-/tmp}/.config}/systemd/user"
+USE_SYSTEMD=0
+if command -v systemctl >/dev/null 2>&1 \
+    && systemctl --user show-environment >/dev/null 2>&1 \
+    && [[ -f "$SYSTEMD_UNIT_SOURCE" ]]; then
+    mkdir -p "$SYSTEMD_UNIT_DIR"
+    install -m 0644 "$SYSTEMD_UNIT_SOURCE" "$SYSTEMD_UNIT_DIR/nhms-display-api.service"
+    systemctl --user daemon-reload
+    systemctl --user stop nhms-display-api.service 2>/dev/null || true
+    USE_SYSTEMD=1
+fi
 
 # -- gracefully replace prior uvicorn -------------------------------------------
 prior_pids=$(pgrep -f "$UVICORN_PATTERN" || true)
@@ -121,14 +143,20 @@ else
     echo "[start-display-api] no prior uvicorn process found"
 fi
 
-# -- relaunch detached ----------------------------------------------------------
+# -- relaunch under systemd (node-27) or detached fallback ---------------------
 cd "$REPO_ROOT"
-setsid nohup "$VENV_PYTHON" -m uvicorn apps.api.main:app \
-    --host "$UVICORN_HOST" --port "$UVICORN_PORT" \
-    >>"$LOG_PATH" 2>&1 < /dev/null &
-new_pid=$!
-disown "$new_pid" 2>/dev/null || true
-echo "[start-display-api] relaunched pid=$new_pid (log: $LOG_PATH)"
+if (( USE_SYSTEMD == 1 )); then
+    systemctl --user enable --now nhms-display-api.service
+    new_pid=$(systemctl --user show nhms-display-api.service --property MainPID --value)
+    echo "[start-display-api] systemd relaunched main_pid=$new_pid (log: $LOG_PATH)"
+else
+    setsid nohup "$VENV_PYTHON" -m uvicorn apps.api.main:app \
+        --host "$UVICORN_HOST" --port "$UVICORN_PORT" --workers "$DISPLAY_WORKERS" \
+        >>"$LOG_PATH" 2>&1 < /dev/null &
+    new_pid=$!
+    disown "$new_pid" 2>/dev/null || true
+    echo "[start-display-api] detached fallback relaunched pid=$new_pid (log: $LOG_PATH)"
+fi
 
 # -- wait for port bind ---------------------------------------------------------
 # Probe the root /health endpoint (apps/api/main.py:1947 _register_static_and_health_routes),
@@ -174,4 +202,9 @@ if [[ "$basin_id" == "null" || -z "$basin_id" ]]; then
     printf '%s\n' "$sample" >&2
     exit 7
 fi
-echo "[start-display-api] OK pid=$new_pid basin_id=$basin_id (smoke check passed)"
+if (( USE_SYSTEMD == 1 )); then
+    systemctl --user is-active --quiet nhms-display-api.service
+    echo "[start-display-api] OK systemd_main_pid=$new_pid workers=$DISPLAY_WORKERS basin_id=$basin_id (smoke check passed)"
+else
+    echo "[start-display-api] OK pid=$new_pid workers=$DISPLAY_WORKERS basin_id=$basin_id (smoke check passed)"
+fi
