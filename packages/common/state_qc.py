@@ -407,8 +407,9 @@ def _parse_sectioned_rows(
     lake_rows: list[list[float]] = []
     section: str | None = None
     stage_section_count = 0
+    declared_lake_count: int | None = None
 
-    for line in data_lines:
+    for index, line in enumerate(data_lines):
         if _looks_like_column_header(line):
             section = _section_from_column_header(line, stage_section_count=stage_section_count)
             if section in {"river", "lake"}:
@@ -426,12 +427,30 @@ def _parse_sectioned_rows(
                 mesh_rows.append(row)
             continue
         if section == "river":
+            # Native SHUD inserts ``<lake-count> <lake-state-columns>`` between
+            # the final river row and the lake column header.  It is section
+            # metadata, not an additional river state.  QHH is the first
+            # production basin with this layout (``1 2`` + ``Index LakeStage``).
+            next_line = data_lines[index + 1] if index + 1 < len(data_lines) else None
+            preamble = _native_lake_section_preamble(
+                line,
+                next_line=next_line,
+                stage_section_count=stage_section_count,
+            )
+            if preamble is not None:
+                declared_lake_count = preamble
+                continue
             river_rows.append(row)
             continue
         if section == "lake":
             lake_rows.append(row)
             continue
 
+    if declared_lake_count is not None and len(lake_rows) != declared_lake_count:
+        raise ValueError(
+            "truncated sectioned IC lake body: "
+            f"have lake={len(lake_rows)}; section declares lake={declared_lake_count}"
+        )
     return mesh_rows, river_rows, lake_rows
 
 
@@ -544,6 +563,35 @@ def _section_from_column_header(line: str, *, stage_section_count: int) -> str:
     if "stage" in tokens or "river_stage" in tokens:
         return "river" if stage_section_count == 0 else "lake"
     return "mesh"
+
+
+def _native_lake_section_preamble(
+    line: str,
+    *,
+    next_line: str | None,
+    stage_section_count: int,
+) -> int | None:
+    """Return the declared lake count for a native SHUD lake preamble.
+
+    The two metadata tokens are emitted as plain integers.  Requiring both the
+    integer lexical form and an immediately following lake column header avoids
+    confusing the last ``<river-id> <stage>`` row with section metadata.
+    """
+
+    if next_line is None or not _looks_like_column_header(next_line):
+        return None
+    if _section_from_column_header(next_line, stage_section_count=stage_section_count) != "lake":
+        return None
+    tokens = line.split()
+    if len(tokens) != 2:
+        return None
+    try:
+        lake_count, state_column_count = (int(token) for token in tokens)
+    except ValueError:
+        return None
+    if lake_count < 0 or state_column_count <= 0:
+        return None
+    return lake_count
 
 
 def _check_row_counts(row_counts: Mapping[str, Any]) -> str | None:

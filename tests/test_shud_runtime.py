@@ -503,6 +503,38 @@ def test_state_checkpoint_tracker_retries_header_matching_partial_native_write(t
     assert tracker.missing_hours() == []
 
 
+def test_state_checkpoint_tracker_captures_native_lake_checkpoint(tmp_path: Path) -> None:
+    manifest = _manifest()
+    manifest["end_time"] = "2026-05-08T00:00:00Z"
+    manifest["forecast_horizon_hours"] = 168
+    manifest["runtime"]["state_checkpoint_hours"] = [12]
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    update_file = output_dir / "demo.cfg.ic.update"
+    tracker = _StateCheckpointTracker(manifest, output_dir)
+
+    update_file.write_text(
+        "2\t6\t720.000000\n"
+        "Index\tCanopy\tSnow\tSurface\tUnsat\tGW\n"
+        "1\t0.0\t0.0\t0.0\t0.0\t0.0\n"
+        "2\t0.0\t0.0\t0.0\t0.0\t0.0\n"
+        "Index\tRiver_Stage\n"
+        "1\t0.1\n"
+        "2\t0.2\n"
+        "1\t2\n"
+        "Index\tLakeStage\n"
+        "1\t0.3\n",
+        encoding="utf-8",
+    )
+
+    tracker.capture_available()
+    tracker.write_manifest()
+
+    checkpoint = output_dir / "state_checkpoints" / "demo.f012.cfg.ic.update"
+    assert checkpoint.is_file()
+    assert tracker.missing_hours() == []
+
+
 def test_runtime_manifest_path_missing_raises_stable_manifest_error(tmp_path: Path) -> None:
     repository = FakeHydroRunRepository()
     runtime = _runtime(tmp_path, repository)

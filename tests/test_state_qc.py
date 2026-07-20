@@ -141,6 +141,59 @@ def test_native_shud_update_requires_all_expected_river_rows(tmp_path: Path) -> 
     assert state_ic_structure_complete(path, expected_mesh_count=2, expected_river_count=3) is True
 
 
+def test_native_shud_lake_preamble_is_not_counted_as_a_river_row(tmp_path: Path) -> None:
+    """QHH emits ``<lake-count> <columns>`` before the lake section header."""
+
+    path = tmp_path / "native-lake.cfg.ic.update"
+    path.write_text(
+        "2\t6\t720.000000\n"
+        "Index\tCanopy\tSnow\tSurface\tUnsat\tGW\n"
+        "1\t0.0\t0.0\t0.0\t0.0\t0.0\n"
+        "2\t0.0\t0.0\t0.0\t0.0\t0.0\n"
+        "Index\tRiver_Stage\n"
+        "1\t0.1\n"
+        "2\t0.2\n"
+        "1\t2\n"
+        "Index\tLakeStage\n"
+        "1\t0.3\n",
+        encoding="utf-8",
+    )
+
+    result = run_state_variable_qc(
+        path,
+        expected_mesh_count=2,
+        expected_river_count=2,
+        expected_lake_count=1,
+    )
+
+    assert result.passed is True
+    assert result.checks["row_counts"]["river"] == 2
+    assert result.checks["row_counts"]["lake"] == 1
+    assert state_ic_structure_complete(
+        path,
+        expected_mesh_count=2,
+        expected_river_count=2,
+        expected_lake_count=1,
+    ) is True
+
+
+def test_native_shud_lake_preamble_rejects_truncated_lake_body(tmp_path: Path) -> None:
+    path = tmp_path / "native-lake-partial.cfg.ic.update"
+    path.write_text(
+        "1\t6\t720.000000\n"
+        "Index\tCanopy\tSnow\tSurface\tUnsat\tGW\n"
+        "1\t0.0\t0.0\t0.0\t0.0\t0.0\n"
+        "Index\tRiver_Stage\n"
+        "1\t0.1\n"
+        "2\t2\n"
+        "Index\tLakeStage\n"
+        "1\t0.3\n",
+        encoding="utf-8",
+    )
+
+    assert state_ic_structure_complete(path, expected_river_count=1) is False
+
+
 def test_negative_beyond_roundoff_tolerance_fails(tmp_path: Path) -> None:
     ic = _write_ic(
         tmp_path / "neg_tolerance.cfg.ic",
