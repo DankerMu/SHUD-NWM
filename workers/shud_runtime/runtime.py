@@ -2535,6 +2535,7 @@ class _StateCheckpointTracker:
         self.project_name = _project_name(manifest)
         self.source_path = output_dir / f"{self.project_name}.cfg.ic.update"
         self.checkpoint_dir = output_dir / "state_checkpoints"
+        self.expected_river_count = _segment_count(manifest)
         self.targets = {
             int(hour): {
                 "valid_time": self.start_time + timedelta(hours=int(hour)),
@@ -2588,7 +2589,10 @@ class _StateCheckpointTracker:
                 valid_time=valid_time,
                 relative_minute=float(hour * 60),
             )
-            or not state_ic_structure_complete(target)
+            or not state_ic_structure_complete(
+                target,
+                expected_river_count=self.expected_river_count,
+            )
         ):
             # SHUD rewrites cfg.ic.update in place.  Seeing the target minute in
             # the header does not mean the body has finished flushing; discard

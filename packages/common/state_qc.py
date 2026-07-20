@@ -11,18 +11,18 @@ integrity before a snapshot is allowed to become a usable warm-start source:
 
 The SHUD ``.cfg.ic`` text layout (SHUD ``Model_Data::read_ic`` convention) is::
 
-    <header line>           # whitespace tokens; tokens[0..] = counts, last numeric = minute-time
+    <header line>           # native: mesh count, mesh-state column count, minute-time
     <mesh block>            # one row per mesh cell, columns = mesh state variables
     <river block>          # one row per river segment, columns = river state variables
     [<lake block>]          # optional, one row per lake, columns = lake state variables
 
-Different SHUD builds emit a slightly different number of leading count tokens and
-a header minute-time. Rather than hard-code a brittle column map, the parser is
-tolerant: it splits the file into numeric blocks and validates the *first*
-``mesh_count`` data rows as mesh state, the next ``river_count`` rows as river
-state, and (if present) ``lake_count`` rows as lake state. Column semantics are
-applied by position with documented indices, and unknown extra columns are
-range-checked generically (finite + non-negative for storage columns).
+Native sectioned SHUD files do not declare the river-element count in that header:
+the second token is the mesh-state column count (currently ``6``). The parser
+therefore uses section boundaries and requires callers to supply the expected river
+count from model metadata when completeness matters. Legacy unsectioned test and
+import files retain the historical ``mesh, river[, lake], minute-time`` layout.
+Column semantics are applied by position with documented indices, and unknown extra
+columns are range-checked generically (finite + non-negative for storage columns).
 
 Parsing failure is itself a QC failure (never a crash): a malformed or truncated
 IC file returns ``passed=False`` with a reason rather than raising.
@@ -282,21 +282,37 @@ def run_state_variable_qc(
     return StateQCResult(passed=True, checks=checks, reason=None)
 
 
-def state_ic_structure_complete(ic_path: Path | str) -> bool:
-    """Return whether an IC file contains every row declared by its header.
+def state_ic_structure_complete(
+    ic_path: Path | str,
+    *,
+    expected_mesh_count: int | None = None,
+    expected_river_count: int | None = None,
+    expected_lake_count: int | None = None,
+) -> bool:
+    """Return whether an IC file contains every required state row.
 
     This deliberately checks structure only.  The full physical range checks
     remain the responsibility of :func:`run_state_variable_qc` at state-save
     time.  The SHUD runtime uses this narrower predicate while watching a
     non-atomically rewritten ``cfg.ic.update`` file so it never preserves a
-    header-matching but only partially written checkpoint.
+    header-matching but only partially written checkpoint. Native SHUD headers do
+    not contain the river count, so runtime callers must pass the model's expected
+    count for a strict completeness decision.
     """
 
     try:
-        _parse_ic_file(Path(ic_path))
+        mesh_rows, river_rows, lake_rows = _parse_ic_file(Path(ic_path))
     except (OSError, ValueError):
         return False
-    return True
+    row_counts = {
+        "mesh": len(mesh_rows),
+        "river": len(river_rows),
+        "lake": len(lake_rows),
+        "expected_mesh": expected_mesh_count,
+        "expected_river": expected_river_count,
+        "expected_lake": expected_lake_count,
+    }
+    return _check_row_counts(row_counts) is None
 
 
 def _parse_ic_file(path: Path) -> tuple[list[list[float]], list[list[float]], list[list[float]]]:
@@ -328,15 +344,13 @@ def _parse_ic_file(path: Path) -> tuple[list[list[float]], list[list[float]], li
         raise ValueError(f"unreadable IC header: {lines[0]!r}")
     mesh_count, river_count, lake_count = counts
 
-    sectioned_rows = _parse_sectioned_rows(lines[1:], counts)
+    sectioned_rows = _parse_sectioned_rows(lines[1:], mesh_count=mesh_count)
     if sectioned_rows is not None:
         mesh_rows, river_rows, lake_rows = sectioned_rows
-        actual_counts = (len(mesh_rows), len(river_rows), len(lake_rows))
-        if actual_counts != counts:
+        if len(mesh_rows) != mesh_count:
             raise ValueError(
                 "truncated sectioned IC body: "
-                f"have mesh={actual_counts[0]}, river={actual_counts[1]}, lake={actual_counts[2]}; "
-                f"header declares mesh={mesh_count}, river={river_count}, lake={lake_count}"
+                f"have mesh={len(mesh_rows)}; header declares mesh={mesh_count}"
             )
         return sectioned_rows
 
@@ -375,42 +389,47 @@ def _parse_ic_file(path: Path) -> tuple[list[list[float]], list[list[float]], li
 
 def _parse_sectioned_rows(
     data_lines: Sequence[str],
-    counts: tuple[int, int, int],
+    *,
+    mesh_count: int,
 ) -> tuple[list[list[float]], list[list[float]], list[list[float]]] | None:
-    """Parse native SHUD ``*.cfg.ic.update`` files with per-section column headers."""
+    """Parse native SHUD ``*.cfg.ic.update`` files by section boundaries.
+
+    The native header's second token is a mesh-state column count, not a river
+    element count. River/lake rows are collected to the next section boundary and
+    validated against model metadata by the caller.
+    """
 
     if not any(_looks_like_column_header(line) for line in data_lines):
         return None
 
-    mesh_count, river_count, lake_count = counts
     mesh_rows: list[list[float]] = []
     river_rows: list[list[float]] = []
     lake_rows: list[list[float]] = []
     section: str | None = None
+    stage_section_count = 0
 
     for line in data_lines:
         if _looks_like_column_header(line):
-            section = _section_from_column_header(line, river_rows=river_rows, river_count=river_count)
+            section = _section_from_column_header(line, stage_section_count=stage_section_count)
+            if section in {"river", "lake"}:
+                stage_section_count += 1
             continue
 
         row = _numeric_row(line)
         if row is None:
             raise ValueError(f"non-numeric IC data row: {line!r}")
 
-        # Native SHUD restart files can include numeric section metadata between
-        # state blocks. Only rows inside a recognised section and before that
-        # section's declared count are state rows.
+        # Mesh is the only state-row count declared by the native IC header.
+        # River/lake counts are checked later against authoritative model metadata.
         if section == "mesh":
             if len(mesh_rows) < mesh_count:
                 mesh_rows.append(row)
             continue
         if section == "river":
-            if len(river_rows) < river_count:
-                river_rows.append(row)
+            river_rows.append(row)
             continue
         if section == "lake":
-            if len(lake_rows) < lake_count:
-                lake_rows.append(row)
+            lake_rows.append(row)
             continue
 
     return mesh_rows, river_rows, lake_rows
@@ -428,13 +447,15 @@ def _read_bytes_limited(path: Path, *, max_bytes: int) -> bytes:
 
 
 def _header_counts(header: Sequence[str]) -> tuple[int, int, int] | None:
-    """Extract (mesh, river, lake) counts from the header tokens.
+    """Extract compatibility (mesh, river, lake) counts from header tokens.
 
-    SHUD IC headers lead with integer element counts and end with a minute-time token.
+    Compatibility IC headers lead with integer element counts and end with a minute-time token.
     The minute-time may itself be integer-valued (e.g. ``27000000.000000``), so it
     cannot be distinguished from a count by integer-ness alone. We therefore take the
     LAST numeric token as the minute-time and the integer-valued tokens BEFORE it as
-    the (mesh, river, lake) counts. lake defaults to 0 when absent.
+    the (mesh, river, lake) counts. lake defaults to 0 when absent. For native
+    sectioned files, only the first returned value is an element count; the
+    section-aware parser deliberately ignores the remaining compatibility values.
     """
 
     numeric = [value for value in (_as_float(token) for token in header) if value is not None]
@@ -465,10 +486,10 @@ def cfg_ic_header_minute_index(header_tokens: Sequence[str]) -> int | None:
 
     Shares the "LAST numeric token is the minute-time" rule with ``_header_counts``
     so every consumer (state QC, runtime header read, runtime time shift) interprets
-    3-token ``<mesh> <river> <minute-time>`` and 4-token
-    ``<mesh> <river> <lake> <minute-time>`` headers identically. Returns the index
-    into ``header_tokens`` of that trailing numeric token. None when there are fewer
-    than two numeric tokens (no count + minute-time pair) or none at all.
+    native 3-token ``<mesh> <mesh-state-columns> <minute-time>`` and compatibility
+    4-token ``<mesh> <river> <lake> <minute-time>`` headers consistently. Returns
+    the index into ``header_tokens`` of that trailing numeric token. None when there
+    are fewer than two numeric tokens (no count + minute-time pair) or none at all.
     """
 
     numeric_indices = [
@@ -514,12 +535,14 @@ def _looks_like_column_header(line: str) -> bool:
     )
 
 
-def _section_from_column_header(line: str, *, river_rows: list[list[float]], river_count: int) -> str:
+def _section_from_column_header(line: str, *, stage_section_count: int) -> str:
     tokens = {token.strip().lower() for token in line.split()}
     if {"canopy", "snow", "surface", "unsat", "gw"} & tokens:
         return "mesh"
-    if "stage" in tokens or "river_stage" in tokens or "lake_stage" in tokens or "lakestage" in tokens:
-        return "river" if len(river_rows) < river_count else "lake"
+    if "lake_stage" in tokens or "lakestage" in tokens:
+        return "lake"
+    if "stage" in tokens or "river_stage" in tokens:
+        return "river" if stage_section_count == 0 else "lake"
     return "mesh"
 
 

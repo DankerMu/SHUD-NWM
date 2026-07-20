@@ -10,6 +10,7 @@ from packages.common.state_qc import (
     cfg_ic_header_minute_time,
     normalize_state_negative_residuals,
     run_state_variable_qc,
+    state_ic_structure_complete,
 )
 
 
@@ -87,7 +88,7 @@ def test_negative_state_value_fails(tmp_path: Path) -> None:
 def test_native_shud_update_header_and_negative_zero_pass(tmp_path: Path) -> None:
     path = tmp_path / "native.cfg.ic.update"
     path.write_text(
-        "2\t1\t27000000.000000\n"
+        "2\t6\t27000000.000000\n"
         "Index\tCanopy\tSnow\tSurface\tUnsat\tGW\n"
         "1\t0.000000\t0.000000\t-0.000001\t0.000000\t0.000000\n"
         "2\t0.000000\t0.000000\t0.000000\t0.000000\t-0.000001\n"
@@ -105,7 +106,7 @@ def test_native_shud_update_header_and_negative_zero_pass(tmp_path: Path) -> Non
 def test_truncated_sectioned_native_update_fails_even_at_row_boundary(tmp_path: Path) -> None:
     path = tmp_path / "native-partial.cfg.ic.update"
     path.write_text(
-        "3\t1\t27000000.000000\n"
+        "3\t6\t27000000.000000\n"
         "Index\tCanopy\tSnow\tSurface\tUnsat\tGW\n"
         "1\t0.0\t0.0\t0.0\t0.0\t0.0\n"
         "2\t0.0\t0.0\t0.0\t0.0\t0.0\n",
@@ -116,6 +117,28 @@ def test_truncated_sectioned_native_update_fails_even_at_row_boundary(tmp_path: 
 
     assert result.passed is False
     assert "truncated sectioned IC body" in (result.reason or "")
+
+
+def test_native_shud_update_requires_all_expected_river_rows(tmp_path: Path) -> None:
+    path = tmp_path / "native-river-partial.cfg.ic.update"
+    path.write_text(
+        "2\t6\t720.000000\n"
+        "Index\tCanopy\tSnow\tSurface\tUnsat\tGW\n"
+        "1\t0.0\t0.0\t0.0\t0.0\t0.0\n"
+        "2\t0.0\t0.0\t0.0\t0.0\t0.0\n"
+        "Index\tStage\n"
+        "1\t0.1\n",
+        encoding="utf-8",
+    )
+
+    assert state_ic_structure_complete(path, expected_mesh_count=2, expected_river_count=3) is False
+
+    path.write_text(path.read_text(encoding="utf-8") + "2\t0.2\n3\t0.3\n", encoding="utf-8")
+
+    result = run_state_variable_qc(path, expected_mesh_count=2, expected_river_count=3)
+    assert result.passed is True
+    assert result.checks["row_counts"]["river"] == 3
+    assert state_ic_structure_complete(path, expected_mesh_count=2, expected_river_count=3) is True
 
 
 def test_negative_beyond_roundoff_tolerance_fails(tmp_path: Path) -> None:
@@ -368,7 +391,7 @@ def test_header_declares_lake_but_body_missing_lake_fails(tmp_path: Path) -> Non
 
 
 def test_cfg_ic_header_minute_index_3_token_no_lake() -> None:
-    # <mesh> <river> <minute-time>: minute-time is the trailing (index 2) token.
+    # Native <mesh> <mesh-state-columns> <minute-time>: time is the trailing token.
     header = ["100", "50", "27000000.000000"]
     assert cfg_ic_header_minute_index(header) == 2
     assert cfg_ic_header_minute_time(header) == 27000000.0

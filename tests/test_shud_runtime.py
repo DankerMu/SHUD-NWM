@@ -419,9 +419,9 @@ def test_state_checkpoint_tracker_captures_t6_t12_from_long_run_update(tmp_path:
     update_file = output_dir / "demo.cfg.ic.update"
     tracker = _StateCheckpointTracker(manifest, output_dir)
 
-    update_file.write_text("2 1 29626920.000000\n1 0.1\n2 0.2\n1 0\n", encoding="utf-8")
+    update_file.write_text("2 2 29626920.000000\n1 0.1\n2 0.2\n1 0\n2 0\n", encoding="utf-8")
     tracker.capture_available()
-    update_file.write_text("2 1 29627280.000000\n1 0.3\n2 0.4\n1 0\n", encoding="utf-8")
+    update_file.write_text("2 2 29627280.000000\n1 0.3\n2 0.4\n1 0\n2 0\n", encoding="utf-8")
     tracker.capture_available()
     tracker.write_manifest()
 
@@ -430,8 +430,8 @@ def test_state_checkpoint_tracker_captures_t6_t12_from_long_run_update(tmp_path:
     f012 = checkpoint_dir / "demo.f012.cfg.ic.update"
     payload = json.loads((checkpoint_dir / "state_checkpoints.json").read_text(encoding="utf-8"))
 
-    assert f006.read_text(encoding="utf-8").startswith("2 1 29626920.000000")
-    assert f012.read_text(encoding="utf-8").startswith("2 1 29627280.000000")
+    assert f006.read_text(encoding="utf-8").startswith("2 2 29626920.000000")
+    assert f012.read_text(encoding="utf-8").startswith("2 2 29627280.000000")
     assert [item["lead_hours"] for item in payload["checkpoints"]] == [6, 12]
     assert [item["valid_time"] for item in payload["checkpoints"]] == [
         "2026-05-01T06:00:00Z",
@@ -449,15 +449,15 @@ def test_state_checkpoint_tracker_accepts_shud_relative_minutes(tmp_path: Path) 
     update_file = output_dir / "demo.cfg.ic.update"
     tracker = _StateCheckpointTracker(manifest, output_dir)
 
-    update_file.write_text("2 1 360.000000\n1 0.1\n2 0.2\n1 0\n", encoding="utf-8")
+    update_file.write_text("2 2 360.000000\n1 0.1\n2 0.2\n1 0\n2 0\n", encoding="utf-8")
     tracker.capture_available()
-    update_file.write_text("2 1 720.000000\n1 0.3\n2 0.4\n1 0\n", encoding="utf-8")
+    update_file.write_text("2 2 720.000000\n1 0.3\n2 0.4\n1 0\n2 0\n", encoding="utf-8")
     tracker.capture_available()
     tracker.write_manifest()
 
     checkpoint_dir = output_dir / "state_checkpoints"
-    assert (checkpoint_dir / "demo.f006.cfg.ic.update").read_text(encoding="utf-8").startswith("2 1 360.000000")
-    assert (checkpoint_dir / "demo.f012.cfg.ic.update").read_text(encoding="utf-8").startswith("2 1 720.000000")
+    assert (checkpoint_dir / "demo.f006.cfg.ic.update").read_text(encoding="utf-8").startswith("2 2 360.000000")
+    assert (checkpoint_dir / "demo.f012.cfg.ic.update").read_text(encoding="utf-8").startswith("2 2 720.000000")
 
 
 def test_state_checkpoint_tracker_retries_header_matching_partial_native_write(tmp_path: Path) -> None:
@@ -471,7 +471,7 @@ def test_state_checkpoint_tracker_retries_header_matching_partial_native_write(t
     tracker = _StateCheckpointTracker(manifest, output_dir)
 
     update_file.write_text(
-        "2\t1\t720.000000\n"
+        "2\t6\t720.000000\n"
         "Index\tCanopy\tSnow\tSurface\tUnsat\tGW\n"
         "1\t0.0\t0.0\t0.0\t0.0\t0.0\n",
         encoding="utf-8",
@@ -483,7 +483,7 @@ def test_state_checkpoint_tracker_retries_header_matching_partial_native_write(t
     assert tracker.missing_hours() == [12]
 
     update_file.write_text(
-        "2\t1\t720.000000\n"
+        "2\t6\t720.000000\n"
         "Index\tCanopy\tSnow\tSurface\tUnsat\tGW\n"
         "1\t0.0\t0.0\t0.0\t0.0\t0.0\n"
         "2\t0.0\t0.0\t0.0\t0.0\t0.0\n"
@@ -491,6 +491,12 @@ def test_state_checkpoint_tracker_retries_header_matching_partial_native_write(t
         "1\t0.0\n",
         encoding="utf-8",
     )
+    tracker.capture_available()
+
+    assert checkpoint.is_file() is False
+    assert tracker.missing_hours() == [12]
+
+    update_file.write_text(update_file.read_text(encoding="utf-8") + "2\t0.0\n", encoding="utf-8")
     tracker.capture_available()
 
     assert checkpoint.is_file()
