@@ -399,6 +399,42 @@ def postgis_tile_sql(layer: str) -> str:
                   END
               )
         """
+        if layer == "river-network-national":
+            # The nationwide base layer is deliberately non-interactive. At z3/z4,
+            # merge the many split output segments into one geometry per
+            # network/stream class; keeping their segment identities would exceed
+            # the feature budget even after Type=5 filtering (HHE alone has 5,920
+            # Type-5 output pieces). z>=5 retains segment granularity.
+            source_cte = f"""
+                WITH filtered_segments AS MATERIALIZED (
+                    {source_cte}
+                )
+                SELECT feature_id, segment_id, river_segment_id,
+                       river_network_version_id, basin_version_id, "Type", geom
+                FROM filtered_segments
+                WHERE :z >= 5
+                UNION ALL
+                SELECT (river_network_version_id || '::type:' || "Type"::text) AS feature_id,
+                       (river_network_version_id || '::type:' || "Type"::text) AS segment_id,
+                       (river_network_version_id || '::type:' || "Type"::text) AS river_segment_id,
+                       river_network_version_id,
+                       basin_version_id,
+                       "Type",
+                       ST_LineMerge(ST_Collect(geom)) AS geom
+                FROM filtered_segments
+                WHERE :z <= 4
+                GROUP BY river_network_version_id, basin_version_id, "Type"
+            """
+            source_identity_stats_sql = """
+                SELECT CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM core.model_instance mi
+                    JOIN core.river_segment rs
+                      ON rs.river_network_version_id = mi.river_network_version_id
+                    WHERE mi.active_flag = true
+                    LIMIT 1
+                ) THEN 1 ELSE 0 END AS source_identity_count
+            """
     elif layer == "hydro":
         required_property_checks = {
             "feature_id": "feature_id IS NULL OR feature_id::text = ''",

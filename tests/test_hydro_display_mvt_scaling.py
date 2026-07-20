@@ -105,6 +105,8 @@ def test_national_queries_filter_stream_type_before_geometry_materialization() -
     assert "mi.active_flag = true" in river_sql
     assert 'rs.stream_type AS "Type"' in river_sql
     assert "OR rs.stream_type >= CASE" in river_sql
+    assert "ST_LineMerge(ST_Collect(geom))" in river_sql
+    assert "WHERE :z <= 4" in river_sql
     assert "tile_segments AS MATERIALIZED" in hydro_sql
     assert hydro_sql.count("AND mi.active_flag") >= 2
     assert hydro_sql.index("selected_values AS") < hydro_sql.rindex("JOIN core.river_segment rs")
