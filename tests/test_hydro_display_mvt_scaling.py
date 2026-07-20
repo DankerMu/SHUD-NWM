@@ -57,6 +57,7 @@ def test_national_source_generations_change_with_data_identity() -> None:
     assert national_discharge_source_version(first) != national_discharge_source_version(second)
     assert "ROW_NUMBER() OVER" in first.sql
     assert "ORDER BY h.cycle_time DESC, h.run_id DESC" in first.sql
+    assert "AND mi.active_flag" in first.sql
 
 
 def test_display_db_pool_bounds_invalid_environment(monkeypatch: Any) -> None:
@@ -105,6 +106,7 @@ def test_national_queries_filter_stream_type_before_geometry_materialization() -
     assert 'rs.stream_type AS "Type"' in river_sql
     assert "OR rs.stream_type >= CASE" in river_sql
     assert "tile_segments AS MATERIALIZED" in hydro_sql
+    assert hydro_sql.count("AND mi.active_flag") >= 2
     assert hydro_sql.index("selected_values AS") < hydro_sql.rindex("JOIN core.river_segment rs")
     assert "seg.stream_type IS NULL" in hydro_sql
 

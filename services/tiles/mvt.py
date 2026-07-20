@@ -496,6 +496,7 @@ def postgis_tile_sql(layer: str) -> str:
                     JOIN core.model_instance mi ON mi.model_id = h.model_id
                     WHERE h.status IN ('succeeded', 'parsed', 'published')
                       AND mi.river_network_version_id IS NOT NULL
+                      AND mi.active_flag
                     ORDER BY mi.river_network_version_id, h.cycle_time DESC, h.run_id DESC
                 ) lr ON lr.run_id = ts.run_id AND lr.river_network_version_id = ts.river_network_version_id
                 WHERE ts.variable = :variable
@@ -511,6 +512,7 @@ def postgis_tile_sql(layer: str) -> str:
                 JOIN core.model_instance mi ON mi.model_id = h.model_id
                 WHERE h.status IN ('succeeded', 'parsed', 'published')
                   AND mi.river_network_version_id IS NOT NULL
+                  AND mi.active_flag
                 ORDER BY mi.river_network_version_id, h.cycle_time DESC, h.run_id DESC
             ),
             tile_segments AS MATERIALIZED (
@@ -1076,6 +1078,7 @@ def national_discharge_source_version(session: Session) -> str:
                     JOIN core.model_instance mi ON mi.model_id = h.model_id
                     WHERE h.status IN ('succeeded', 'parsed', 'published')
                       AND mi.river_network_version_id IS NOT NULL
+                      AND mi.active_flag
                 ) ranked
                 WHERE rn = 1
                 ORDER BY river_network_version_id, run_id
@@ -1205,6 +1208,7 @@ def national_discharge_valid_times(
                         JOIN core.model_instance mi ON mi.model_id = h.model_id
                         WHERE h.status IN ('succeeded', 'parsed', 'published')
                           AND mi.river_network_version_id IS NOT NULL
+                          AND mi.active_flag
                     ) ranked
                     WHERE rn = 1
                 )
