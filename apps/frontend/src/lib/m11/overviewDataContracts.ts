@@ -551,20 +551,32 @@ export function normalizeLayerStates(input: {
 /**
  * 合并无 run 的全局图层目录与按 run 收窄的目录。
  *
- * run-scoped `/layers` 只返回属于该 run 的时变图层，不能据此删除全国河网等无时次基础图层；
- * 同名图层则以 scoped 元数据为准，使 discharge 保留当前 run 的 source_refs/valid_times。
+ * run-scoped `/layers` 可能把同名基础图层收窄为单流域模板，不能据此覆盖全国河网等无时次基础图层；
+ * 时变同名图层则以 scoped 元数据为准，使 discharge 保留当前 run 的 source_refs/valid_times。
  */
 export function mergeLayerCatalogs(runlessLayers: ApiLayer[], scopedLayers: ApiLayer[]): ApiLayer[] {
   const merged = new Map(runlessLayers.map((layer) => [layer.layer_id, layer]))
-  for (const layer of scopedLayers) merged.set(layer.layer_id, layer)
+  for (const layer of scopedLayers) {
+    const runless = merged.get(layer.layer_id)
+    if (runless && isTimeLessLayerMetadata(runless.metadata)) continue
+    merged.set(layer.layer_id, layer)
+  }
   return [...merged.values()]
 }
 
 /** 在展示边界再次保留 bootstrap 的 time-less 基础图层，防止异步快照切换造成图层闪退。 */
 export function mergeLayerStates(bootstrapLayers: LayerState[], snapshotLayers: LayerState[]): LayerState[] {
   const merged = new Map(bootstrapLayers.map((layer) => [layer.layerId, layer]))
-  for (const layer of snapshotLayers) merged.set(layer.layerId, layer)
+  for (const layer of snapshotLayers) {
+    const bootstrap = merged.get(layer.layerId)
+    if (bootstrap && isTimeLessLayerMetadata(bootstrap.metadata)) continue
+    merged.set(layer.layerId, layer)
+  }
   return [...merged.values()]
+}
+
+function isTimeLessLayerMetadata(metadata: ApiLayer['metadata'] | null | undefined) {
+  return Array.isArray(metadata?.valid_times) && metadata.valid_times.length === 0
 }
 
 export function getM11LayerLegend(layerId: string): LayerLegendEntry[] {

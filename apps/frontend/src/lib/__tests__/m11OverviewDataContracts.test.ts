@@ -60,13 +60,25 @@ describe('M11 overview data contracts', () => {
         layer_name: 'River network',
         layer_type: 'base',
         variables: ['geometry'],
-        metadata: { source_generation: 'river-v1' } as never,
+        metadata: {
+          valid_times: [],
+          source_generation: 'river-v1',
+          url_template: '/api/v1/tiles/river-network-national/{z}/{x}/{y}.pbf',
+        } as never,
       },
     ] satisfies components['schemas']['Layer'][]
     const scoped = [
       {
         ...runless[0],
         metadata: { source_generation: 'run-123' } as never,
+      },
+      {
+        ...runless[1],
+        metadata: {
+          valid_times: [],
+          source_generation: null,
+          url_template: '/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf',
+        } as never,
       },
     ] satisfies components['schemas']['Layer'][]
 
@@ -75,6 +87,7 @@ describe('M11 overview data contracts', () => {
     expect(merged.map((layer) => layer.layer_id)).toEqual(['discharge', 'river-network'])
     expect(merged[0].metadata?.source_generation).toBe('run-123')
     expect(merged[1].metadata?.source_generation).toBe('river-v1')
+    expect(merged[1].metadata?.url_template).toContain('/river-network-national/')
   })
 
   it('retains bootstrap base layer state when a later snapshot only carries discharge', () => {
