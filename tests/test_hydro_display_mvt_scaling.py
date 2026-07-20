@@ -83,7 +83,7 @@ def test_national_river_generation_uses_only_active_network_inventory() -> None:
 
     version = national_river_network_source_version(session)
 
-    assert version.startswith("river-network-national:")
+    assert version.startswith("river-network-national:stream-type-aggregate-v1:")
     assert "mi.active_flag = true" in session.sql
     assert "ORDER BY rnv.river_network_version_id" in session.sql
 

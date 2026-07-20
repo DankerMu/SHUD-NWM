@@ -33,6 +33,7 @@ MVT_VALID_TIME_SAMPLE_LIMIT = 100
 MVT_MIN_SIMPLIFICATION_TOLERANCE_M = 0.5
 MVT_MAX_SIMPLIFICATION_TOLERANCE_M = 256.0
 MVT_FILE_CACHE_DIR_ENV = "NHMS_MVT_FILE_CACHE_DIR"
+NATIONAL_RIVER_NETWORK_QUERY_VERSION = "stream-type-aggregate-v1"
 SUPPORTED_HYDRO_MVT_VARIABLES = ("q_down",)
 POSTGIS_NON_FINITE_DOUBLE_SQL = (
     "'NaN'::double precision, 'Infinity'::double precision, '-Infinity'::double precision"
@@ -1150,7 +1151,10 @@ def national_river_network_source_version(session: Session) -> str:
         .mappings()
         .all()
     )
-    return _national_source_digest("river-network-national", rows)
+    return _national_source_digest(
+        f"river-network-national:{NATIONAL_RIVER_NETWORK_QUERY_VERSION}",
+        rows,
+    )
 
 
 def _national_source_digest(prefix: str, rows: Iterable[Mapping[str, Any]]) -> str:
