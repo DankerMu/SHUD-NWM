@@ -1280,14 +1280,11 @@ def national_discharge_valid_times(
                            lr.basin_version_id,
                            lr.river_network_version_id,
                            (
-                               SELECT rt0.river_segment_id
-                               FROM hydro.river_timeseries rt0
-                               WHERE rt0.run_id = lr.run_id
-                                 AND rt0.basin_version_id = lr.basin_version_id
-                                 AND rt0.river_network_version_id = lr.river_network_version_id
-                                 AND rt0.variable = :variable
-                               ORDER BY rt0.valid_time DESC, rt0.river_segment_id
-                               LIMIT 1
+                               SELECT MIN(rs0.river_segment_id)
+                               FROM core.river_segment rs0
+                               WHERE rs0.river_network_version_id = lr.river_network_version_id
+                                 AND lower(COALESCE(rs0.properties_json->>'shud_output_river', 'false'))
+                                     IN ('true', '1', 'yes')
                            ) AS river_segment_id
                     FROM latest_run lr
                 )
