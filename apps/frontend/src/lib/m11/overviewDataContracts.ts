@@ -548,6 +548,18 @@ export function normalizeLayerStates(input: {
   })
 }
 
+/**
+ * 合并无 run 的全局图层目录与按 run 收窄的目录。
+ *
+ * run-scoped `/layers` 只返回属于该 run 的时变图层，不能据此删除全国河网等无时次基础图层；
+ * 同名图层则以 scoped 元数据为准，使 discharge 保留当前 run 的 source_refs/valid_times。
+ */
+export function mergeLayerCatalogs(runlessLayers: ApiLayer[], scopedLayers: ApiLayer[]): ApiLayer[] {
+  const merged = new Map(runlessLayers.map((layer) => [layer.layer_id, layer]))
+  for (const layer of scopedLayers) merged.set(layer.layer_id, layer)
+  return [...merged.values()]
+}
+
 export function getM11LayerLegend(layerId: string): LayerLegendEntry[] {
   return layerLegend(layerId)
 }

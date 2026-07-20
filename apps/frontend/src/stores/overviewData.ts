@@ -9,6 +9,7 @@ import {
   createEmptyOverviewSummary,
   decideAggregationEndpoint,
   filterBasinSegmentRows,
+  mergeLayerCatalogs,
   normalizeBasinDetail,
   normalizeBasinSegmentRows,
   normalizeLayerStates,
@@ -1143,7 +1144,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
       const latestRun = latestPublishedRun(runs, query)
       const useSingleRunSurfaces = shouldUseSingleRunSurfaces(query)
       const [layersResult] = await Promise.allSettled([fetchLayers(useSingleRunSurfaces ? latestRun?.run_id : null)])
-      const layers = settledValue(layersResult, partialErrors, 'layers') ?? []
+      const scopedLayers = settledValue(layersResult, partialErrors, 'layers') ?? []
       const queue = settledValue(queueResult, partialErrors, 'queue')
       const requestPlan = buildOverviewRequestPlan(
         query,
@@ -1184,13 +1185,6 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
         runs: runsForSourceSelection(query, runs?.items ?? [], latestRun),
         partialErrors,
       })
-      const layerStates = normalizeLayerStates({
-        query: concreteSurfaceQuery,
-        layers,
-        // 默认 path 不传 validTimesByLayerId：normalizeLayerStates 三态优先消费 metadata.valid_times；
-        // metadata 缺失（schema gap）的 fallback 留给独立 PR / 后续按需触发。
-        resolvedRun: useSingleRunSurfaces ? latestRun : null,
-      })
       const aggregationDecision = decideAggregationEndpoint(requestPlan)
       const basinVersionToBasinId: Record<string, string> = {}
       for (const model of models as ApiModelInstance[]) {
@@ -1199,6 +1193,14 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
       // 等阶段 1 settle 后再合成最终快照（bootstrap 字段需存在）；bootstrap reject 时仍生成快照
       // 但 bootstrap=null（OverviewPage 将识别为 mapBootstrap 失败态而非 ready）。
       const bootstrapForSnapshot = await bootstrapPromise.catch(() => null)
+      const layers = mergeLayerCatalogs(bootstrapForSnapshot?.layers ?? [], scopedLayers)
+      const layerStates = normalizeLayerStates({
+        query: concreteSurfaceQuery,
+        layers,
+        // 默认 path 不传 validTimesByLayerId：normalizeLayerStates 三态优先消费 metadata.valid_times；
+        // metadata 缺失（schema gap）的 fallback 留给独立 PR / 后续按需触发。
+        resolvedRun: useSingleRunSurfaces ? latestRun : null,
+      })
       const finalSnapshot: OverviewDataSnapshot = {
         requestScope: overviewRequestScope(query),
         bootstrap: bootstrapForSnapshot,

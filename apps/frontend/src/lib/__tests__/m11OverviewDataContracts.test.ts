@@ -4,6 +4,7 @@ import type { components } from '@/api/types'
 import {
   filterBasinSegmentRows,
   getM11LayerLegend,
+  mergeLayerCatalogs,
   normalizeBasinSegmentRows,
   normalizeLayerStates,
   normalizeSelectedSegmentDetail,
@@ -44,6 +45,37 @@ function riverFeature(overrides: Partial<components['schemas']['RiverSegmentFeat
 }
 
 describe('M11 overview data contracts', () => {
+  it('retains runless base layers while scoped metadata overrides the matching dynamic layer', () => {
+    const runless = [
+      {
+        layer_id: 'discharge',
+        layer_name: 'Discharge',
+        layer_type: 'hydrology',
+        variables: ['q_down'],
+        metadata: { source_generation: 'global' } as never,
+      },
+      {
+        layer_id: 'river-network',
+        layer_name: 'River network',
+        layer_type: 'base',
+        variables: ['geometry'],
+        metadata: { source_generation: 'river-v1' } as never,
+      },
+    ] satisfies components['schemas']['Layer'][]
+    const scoped = [
+      {
+        ...runless[0],
+        metadata: { source_generation: 'run-123' } as never,
+      },
+    ] satisfies components['schemas']['Layer'][]
+
+    const merged = mergeLayerCatalogs(runless, scoped)
+
+    expect(merged.map((layer) => layer.layer_id)).toEqual(['discharge', 'river-network'])
+    expect(merged[0].metadata?.source_generation).toBe('run-123')
+    expect(merged[1].metadata?.source_generation).toBe('river-v1')
+  })
+
   it('normalizes only the discharge renderable layer by default', () => {
     const layers = normalizeLayerStates({
       query,
