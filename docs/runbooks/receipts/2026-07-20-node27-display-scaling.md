@@ -173,21 +173,23 @@ coverage 求所有 active network 的共同时间窗；不完整覆盖直接 fai
 node-27 当前运行证据：
 
 ```text
-deployed HEAD                    fc1a8c1f
-nhms-display-api.service         active, MainPID=1519573, NRestarts=0, workers=2
+deployed runtime commit          41d15731
+nhms-display-api.service         active, MainPID=1526329, NRestarts=0, workers=2
 nhms-node27-autopipe.timer       active
-hydro source generation         hydro-national:active-basin-coverage-v1:0c9d3ad63c8ffc64ae36:18
+hydro source generation         hydro-national:active-basin-coverage-v2:76348bed5e9a00d27727:18
 common valid-time latest         2026-07-16T09:00:00Z
-/api/v1/layers                   node-27 0.073 s；公网 0.378 s
-z3/z4/z5 prewarm                86 requests, 0 failures, 4,287,960 bytes
+/api/v1/layers                   公网 0.331 s
+z3/z4/z5 prewarm                86 requests, 0 failures, 4,361,637 bytes
 ```
 
 对公网 z3/z4/z5 的 43 个 hydro MVT 逐个解码，共得到 24,925 个可交互 feature；HHE 与
 Huai Main 均包含完整的 `basin_id`、`basin_version_id`、`river_network_version_id`、
 `river_segment_id` 和 `run_id`。代表 feature 的河段详情与 GFS+IFS forecast-series 均返回
-HTTP 200。z6 全国 99 个瓦片解码得到全部 18 个业务流域、24,916 个 feature、0 个失败；
-z3-z5 因既定低缩放干流筛选显示其中 15 个流域，另外 Keliya、Tailanhe、Zhaochen/Wem 在
-z6 起进入流量交互层。
+HTTP 200。随后发现绝对 Type 门槛会让本流域最高等级小于门槛的小流域整体消失；`41d15731`
+把门槛约束为 `min(缩放级别门槛, 本流域最高 Type)`，确保每个流域至少保留自己的主干，
+并将 query generation 升级到 v2 失效旧缓存。修复后 z3 解码得到 17 个流域（仅面积很小的
+Zhaochen/Wem 因像素级概化从 z4 开始出现），z4、z5、z6 均得到全部 18 个业务流域；各级
+分别为 0/0/0/0 个失败。原 413 URL 仍为 HTTP 200、65,023 bytes。
 
 本次相关后端集合为 84 passed，ruff 与 `git diff --check` 均通过。当前自动化浏览器运行时
 没有可用浏览器实例，因此没有伪造鼠标像素点击证据；MVT 身份、点击后的详情 API 和曲线 API
