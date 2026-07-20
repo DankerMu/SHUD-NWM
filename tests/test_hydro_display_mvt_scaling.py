@@ -93,7 +93,7 @@ def test_national_river_generation_uses_only_active_network_inventory() -> None:
 
     version = national_river_network_source_version(session)
 
-    assert version.startswith("river-network-national:stream-type-aggregate-v1:")
+    assert version.startswith("river-network-national:stream-type-aggregate-v2:")
     assert "mi.active_flag = true" in session.sql
     assert "ORDER BY rnv.river_network_version_id" in session.sql
 
@@ -116,7 +116,8 @@ def test_national_queries_filter_stream_type_before_geometry_materialization() -
     assert 'rs.stream_type AS "Type"' in river_sql
     assert "OR rs.stream_type >= CASE" in river_sql
     assert "ST_LineMerge(ST_Collect(geom))" in river_sql
-    assert "WHERE :z <= 4" in river_sql
+    assert "WHERE :z <= 8" in river_sql
+    assert "WHERE :z >= 9" in river_sql
     assert "tile_segments AS MATERIALIZED" in hydro_sql
     assert hydro_sql.count("AND mi.active_flag") >= 2
     assert hydro_sql.index("selected_values AS") < hydro_sql.rindex("JOIN core.river_segment rs")

@@ -4,12 +4,12 @@ from scripts import node27_mvt_prewarm as prewarm
 
 
 def test_china_default_working_set_is_small_and_unique() -> None:
-    tiles = prewarm.xyz_tiles(prewarm.CHINA_BOUNDS, [3, 4])
+    tiles = prewarm.xyz_tiles(prewarm.CHINA_BOUNDS, [3, 4, 5])
 
     assert tiles
     assert len(tiles) == len(set(tiles))
-    assert len(tiles) <= 32
-    assert all(z in {3, 4} and 0 <= x < 2**z and 0 <= y < 2**z for z, x, y in tiles)
+    assert len(tiles) == 43
+    assert all(z in {3, 4, 5} and 0 <= x < 2**z and 0 <= y < 2**z for z, x, y in tiles)
 
 
 def test_base_river_is_warmed_even_when_no_valid_time_exists() -> None:

@@ -80,7 +80,7 @@ SIGTERM 既有 uvicorn（10s timeout + SIGKILL 兜底）→
 且其 ad-hoc 流程不 source env file，已被本脚本取代。
 
 node-27 autopipeline 每次 publish/coverage 后调用
-`scripts/node27_mvt_prewarm.py`，有限并发预热中国默认视野 z3/z4 的基础河网与
+`scripts/node27_mvt_prewarm.py`，有限并发预热中国默认视野 z3/z4/z5 的基础河网与
 当前最新 valid time 流量瓦片。同一 cache key 由跨进程 `flock` single-flight
 保护，多 worker 和预热并发不会重复执行 PostGIS 生成。
 

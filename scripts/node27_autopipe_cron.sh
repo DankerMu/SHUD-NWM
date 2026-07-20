@@ -222,9 +222,9 @@ fi
 # readonly and non-fatal: an unavailable display API must not rewrite the
 # ingest result, but the failure remains visible in the autopipe log.
 if [ "${AUTOPIPE_MVT_PREWARM_ENABLED:-1}" = "1" ] && [ -f "$REPO/scripts/node27_mvt_prewarm.py" ]; then
-  echo "[$(ts)] autopipe: national MVT prewarm (z=${AUTOPIPE_MVT_PREWARM_ZOOMS:-3,4})" >> "$LOG"
+  echo "[$(ts)] autopipe: national MVT prewarm (z=${AUTOPIPE_MVT_PREWARM_ZOOMS:-3,4,5})" >> "$LOG"
   "$REPO/.venv/bin/python" "$REPO/scripts/node27_mvt_prewarm.py" \
-    --zooms "${AUTOPIPE_MVT_PREWARM_ZOOMS:-3,4}" \
+    --zooms "${AUTOPIPE_MVT_PREWARM_ZOOMS:-3,4,5}" \
     --workers "${AUTOPIPE_MVT_PREWARM_WORKERS:-8}" >> "$LOG" 2>&1 \
     || echo "[$(ts)] autopipe: MVT prewarm rc=$? (non-fatal)" >> "$LOG"
 fi

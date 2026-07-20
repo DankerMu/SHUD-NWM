@@ -33,7 +33,7 @@ MVT_VALID_TIME_SAMPLE_LIMIT = 100
 MVT_MIN_SIMPLIFICATION_TOLERANCE_M = 0.5
 MVT_MAX_SIMPLIFICATION_TOLERANCE_M = 256.0
 MVT_FILE_CACHE_DIR_ENV = "NHMS_MVT_FILE_CACHE_DIR"
-NATIONAL_RIVER_NETWORK_QUERY_VERSION = "stream-type-aggregate-v1"
+NATIONAL_RIVER_NETWORK_QUERY_VERSION = "stream-type-aggregate-v2"
 SUPPORTED_HYDRO_MVT_VARIABLES = ("q_down",)
 POSTGIS_NON_FINITE_DOUBLE_SQL = (
     "'NaN'::double precision, 'Infinity'::double precision, '-Infinity'::double precision"
@@ -401,11 +401,11 @@ def postgis_tile_sql(layer: str) -> str:
               )
         """
         if layer == "river-network-national":
-            # The nationwide base layer is deliberately non-interactive. At z3/z4,
-            # merge the many split output segments into one geometry per
-            # network/stream class; keeping their segment identities would exceed
-            # the feature budget even after Type=5 filtering (HHE alone has 5,920
-            # Type-5 output pieces). z>=5 retains segment granularity.
+            # The nationwide base layer is deliberately non-interactive. For every
+            # generalized zoom (z<=8), merge split output segments into one geometry
+            # per network/stream class. Keeping segment identities exceeded the z5
+            # feature budget (10,280 features for tile 5/25/12) and adds no click
+            # semantics to this visual-only layer. z>=9 keeps segment granularity.
             source_cte = f"""
                 WITH filtered_segments AS MATERIALIZED (
                     {source_cte}
@@ -413,7 +413,7 @@ def postgis_tile_sql(layer: str) -> str:
                 SELECT feature_id, segment_id, river_segment_id,
                        river_network_version_id, basin_version_id, "Type", geom
                 FROM filtered_segments
-                WHERE :z >= 5
+                WHERE :z >= 9
                 UNION ALL
                 SELECT (river_network_version_id || '::type:' || "Type"::text) AS feature_id,
                        (river_network_version_id || '::type:' || "Type"::text) AS segment_id,
@@ -423,7 +423,7 @@ def postgis_tile_sql(layer: str) -> str:
                        "Type",
                        ST_LineMerge(ST_Collect(geom)) AS geom
                 FROM filtered_segments
-                WHERE :z <= 4
+                WHERE :z <= 8
                 GROUP BY river_network_version_id, basin_version_id, "Type"
             """
             source_identity_stats_sql = """

@@ -1,6 +1,6 @@
 # node-27 全国展示扩展性能实施方案
 
-> 实施状态：**完成并部署**。2026-07-20 已在 node-27 应用 migration 000048、切换全国基础河网/流量 MVT、启用跨 worker 缓存互斥与 z3/z4 预热，并由 enabled+active 的 user systemd 双 worker 托管。实机结果见
+> 实施状态：**完成并部署**。2026-07-20 已在 node-27 应用 migration 000048、切换全国基础河网/流量 MVT、启用跨 worker 缓存互斥与 z3/z4/z5 预热，并由 enabled+active 的 user systemd 双 worker 托管。实机结果见
 > [`../runbooks/receipts/2026-07-20-node27-display-scaling.md`](../runbooks/receipts/2026-07-20-node27-display-scaling.md)。
 
 ## Goal
@@ -14,7 +14,7 @@
 - 为 `core.river_segment` 增加由 `properties_json.Type` 自动派生的持久化 `stream_type`，并补齐查询索引。
 - national river-network 和 national discharge 的缓存 key 使用真实数据代际摘要；新 run、新网络或重新入库后自动换代，不复用旧瓦片。
 - 同一瓦片跨线程/跨 uvicorn worker 只允许一个生成者，其余请求等待并复用结果。
-- node-27 autopipeline 在 publish/coverage 后预热当前默认时次的全国 z3/z4 基础河网与流量瓦片。
+- node-27 autopipeline 在 publish/coverage 后预热当前默认时次的全国 z3/z4/z5 基础河网与流量瓦片。
 - `/geo` 静态资源走支持 ETag/Last-Modified 条件请求的静态挂载；SPA catch-all 不再直接发送这些文件。
 - node-27 display API 纳入 user systemd 托管，以 2 个 worker 起步并保留有界连接池；部署后产出冷/热性能和点击功能实机证据。
 
@@ -50,7 +50,7 @@
 - 全国基础河网来自 `/api/v1/tiles/river-network-national/...pbf`；全国流量来自 `/api/v1/tiles/hydro-national/...pbf`，二者均按真实 generation 换代。
 - 18 个现有流域边界和河网可见；有该有效时次产品的河段可点击并打开原有流量弹窗；无产品流域只显示基础河网，不可伪点击。
 - node-27 代表性 z3 cold SQL `EXPLAIN ANALYZE` 执行时间不高于 800 ms；如果真实数据/硬件使该目标不可达，至少相对改造前 3.735 s 提升 3 倍且留下查询计划证据。
-- z3/z4 预热后，本机 MVT 命中不高于 50 ms，公网命中 p95 不高于 800 ms；代表性 z3 PBF 不高于 300 KB。
+- z3/z4/z5 预热后，本机 MVT 命中不高于 50 ms，公网命中 p95 不高于 800 ms；代表性 z3 PBF 不高于 300 KB。
 - 浏览器硬刷新到首个可点击河段 p95 不高于 2 s；失败时不得回退请求 45 MB GeoJSON。
 - 相同 tile 的并发 cold 请求只产生一次 PostGIS 生成；其他请求返回同 checksum/ETag。
 - node-27 API 由 enabled+active 的 user systemd unit 托管，2 worker 均通过 `/health`、只读边界和 display live receipt。
@@ -68,7 +68,7 @@
 - 已决：不新建离线瓦片框架，复用现有 PostGIS MVT、文件缓存和 MapLibre vector source。
 - 已决：基础河网与流量河网分层；基础层保证新流域可见，流量层保持点击与产品真实性。
 - 已决：低缩放优先使用持久化 stream type；只有历史缺失 type 的行才使用 q_down 分位回退。
-- 已决：预热只覆盖全国默认视野 z3/z4，其他缩放按需生成，避免无界预计算。
+- 已决：预热覆盖全国默认视野和首级放大 z3/z4/z5，其他缩放按需生成，避免无界预计算。
 
 ## Phases
 
@@ -105,7 +105,7 @@
 - Steps:
   1. 文件缓存 key 对应跨进程 `flock`；锁内二次读缓存后再生成。
   2. `/geo` 使用 `StaticFiles` 的条件响应与明确 cache-control。
-  3. 预热器从 API 获取当前默认 valid time，计算中国 bbox 的 z3/z4 XYZ，有限并发请求 base+discharge。
+  3. 预热器从 API 获取当前默认 valid time，计算中国 bbox 的 z3/z4/z5 XYZ，有限并发请求 base+discharge。
   4. autopipeline coverage backstop 后运行预热；预热失败记录且不篡改 ingest 结果。
 - Verify: 并发单生成测试；ETag 304 测试；预热空数据、部分失败、成功路径测试；node-27 新 generation 冷转热证据。
 - Depends on: Phase 1、2。

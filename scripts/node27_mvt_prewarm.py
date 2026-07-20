@@ -134,7 +134,7 @@ def _lat_to_y(lat: float, zoom: int) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
-    parser.add_argument("--zooms", default="3,4")
+    parser.add_argument("--zooms", default="3,4,5")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--valid-time")
