@@ -192,6 +192,10 @@ def test_national_queries_filter_stream_type_before_geometry_materialization() -
     assert "rdc.river_valid_time_start <= :valid_time" in hydro_sql
     assert "rdc.river_valid_time_end >= :valid_time" in hydro_sql
     assert hydro_sql.index("selected_values AS") < hydro_sql.rindex("JOIN core.river_segment rs")
+    assert "network_stream_max AS MATERIALIZED" in hydro_sql
+    assert "MAX(rs0.stream_type) AS max_stream_type" in hydro_sql
+    assert "LEAST(" in hydro_sql
+    assert "nsm.max_stream_type" in hydro_sql
     assert "seg.stream_type IS NULL" in hydro_sql
 
 

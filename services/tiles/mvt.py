@@ -34,7 +34,7 @@ MVT_MIN_SIMPLIFICATION_TOLERANCE_M = 0.5
 MVT_MAX_SIMPLIFICATION_TOLERANCE_M = 256.0
 MVT_FILE_CACHE_DIR_ENV = "NHMS_MVT_FILE_CACHE_DIR"
 NATIONAL_RIVER_NETWORK_QUERY_VERSION = "stream-type-aggregate-v2"
-NATIONAL_DISCHARGE_QUERY_VERSION = "active-basin-coverage-v1"
+NATIONAL_DISCHARGE_QUERY_VERSION = "active-basin-coverage-v2"
 SUPPORTED_HYDRO_MVT_VARIABLES = ("q_down",)
 POSTGIS_NON_FINITE_DOUBLE_SQL = (
     "'NaN'::double precision, 'Infinity'::double precision, '-Infinity'::double precision"
@@ -506,6 +506,10 @@ def postgis_tile_sql(layer: str) -> str:
         #   z=7  -> top 85% (cutoff 0.15)
         #   z=8  -> top 96% (cutoff 0.04)
         #   z>=9 -> no filter (full detail).
+        # Each absolute cutoff is clamped to that network's own maximum stream
+        # class. Small basins whose hierarchy never reaches Type 5 therefore keep
+        # at least their local trunk instead of disappearing from the interactive
+        # layer at the national default zoom.
         # Why z7/z8 still filter: a dense basin (e.g. Heihe) packs >10k segments / >50k
         # coordinates into a single z7 tile, blowing the per-tile budget (HTTP 413). The
         # progressive cutoff keeps the main channels and stays inside budget; by z9 a tile
@@ -563,24 +567,37 @@ def postgis_tile_sql(layer: str) -> str:
                   AND mi.active_flag
                 ORDER BY mi.river_network_version_id, h.cycle_time DESC, h.run_id DESC
             ),
+            network_stream_max AS MATERIALIZED (
+                SELECT lr.river_network_version_id,
+                       MAX(rs0.stream_type) AS max_stream_type
+                FROM latest_runs lr
+                JOIN core.river_segment rs0
+                  ON rs0.river_network_version_id = lr.river_network_version_id
+                GROUP BY lr.river_network_version_id
+            ),
             tile_segments AS MATERIALIZED (
                 SELECT rs.river_segment_id,
                        rs.river_network_version_id,
                        rs.stream_type
                 FROM core.river_segment rs
+                JOIN network_stream_max nsm
+                  ON nsm.river_network_version_id = rs.river_network_version_id
                 CROSS JOIN bounds
                 WHERE rs.geom IS NOT NULL
                   AND rs.geom && ST_Transform(bounds.geom_3857, 4490)
                   AND (
                       :z >= 9
                       OR rs.stream_type IS NULL
-                      OR rs.stream_type >= CASE
-                          WHEN :z <= 4 THEN 5.0
-                          WHEN :z = 5 THEN 4.0
-                          WHEN :z = 6 THEN 3.0
-                          WHEN :z = 7 THEN 2.0
-                          ELSE 1.0
-                      END
+                      OR rs.stream_type >= LEAST(
+                          CASE
+                              WHEN :z <= 4 THEN 5.0
+                              WHEN :z = 5 THEN 4.0
+                              WHEN :z = 6 THEN 3.0
+                              WHEN :z = 7 THEN 2.0
+                              ELSE 1.0
+                          END,
+                          nsm.max_stream_type
+                      )
                   )
             ),
             typed_values AS (
