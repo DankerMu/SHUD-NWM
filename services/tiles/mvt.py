@@ -10,7 +10,7 @@ import threading
 import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -1243,71 +1243,102 @@ def national_discharge_valid_times(
     """Common discharge valid-times across every active basin's latest river-bearing run.
 
     Mirrors the national tile SQL stable identity selection (latest river-bearing
-    run for each active basin/network). One real data-bearing representative segment
-    per run supplies its stored valid-times, then the query keeps only times present in
-    every selected network. This avoids scanning millions of duplicate segment/time
-    rows and prevents the national single-time control from selecting a horizon that
-    leaves some basins unclickable. No time is generated or fabricated.
+    run for each active basin/network). ``run_display_coverage`` may define the hourly
+    grid only when its sample count proves a complete segment × lead-time rectangle;
+    the returned range is then the intersection across every selected network. This
+    avoids scanning millions of duplicate segment/time rows and prevents the national
+    single-time control from selecting a horizon that leaves some basins unclickable.
+    Incomplete or inconsistent coverage fails closed with no advertised times.
     """
     sample_limit = max(0, limit)
     rows = (
         session.execute(
             text(
                 """
-                WITH latest_run AS (
-                    SELECT run_id, basin_version_id, river_network_version_id
-                    FROM (
-                        SELECT h.run_id,
-                               h.basin_version_id,
-                               mi.river_network_version_id,
-                               ROW_NUMBER() OVER (
-                                   PARTITION BY mi.river_network_version_id
-                                   ORDER BY h.cycle_time DESC, h.run_id DESC
-                               ) AS rn
-                        FROM hydro.hydro_run h
-                        JOIN core.model_instance mi ON mi.basin_version_id = h.basin_version_id
-                        JOIN hydro.run_display_coverage rdc
-                          ON rdc.run_id = h.run_id
-                         AND rdc.segment_count > 0
-                        WHERE h.status IN ('succeeded', 'parsed', 'published')
-                          AND mi.river_network_version_id IS NOT NULL
-                          AND mi.active_flag
-                    ) ranked
-                    WHERE rn = 1
-                ),
-                representative_segment AS (
-                    SELECT lr.run_id,
-                           lr.basin_version_id,
-                           lr.river_network_version_id,
-                           (
-                               SELECT MIN(rs0.river_segment_id)
-                               FROM core.river_segment rs0
-                               WHERE rs0.river_network_version_id = lr.river_network_version_id
-                                 AND lower(COALESCE(rs0.properties_json->>'shud_output_river', 'false'))
-                                     IN ('true', '1', 'yes')
-                           ) AS river_segment_id
-                    FROM latest_run lr
-                )
-                SELECT ts.valid_time
-                FROM hydro.river_timeseries ts
-                JOIN representative_segment rs
-                  ON rs.run_id = ts.run_id
-                 AND rs.basin_version_id = ts.basin_version_id
-                 AND rs.river_network_version_id = ts.river_network_version_id
-                 AND rs.river_segment_id = ts.river_segment_id
-                WHERE ts.variable = :variable
-                GROUP BY ts.valid_time
-                HAVING COUNT(DISTINCT ts.river_network_version_id) = (SELECT COUNT(*) FROM latest_run)
-                ORDER BY ts.valid_time DESC
-                LIMIT :limit
+                SELECT run_id, basin_version_id, river_network_version_id,
+                       segment_count, river_sample_count,
+                       river_valid_time_start, river_valid_time_end,
+                       min_lead_time_hours, max_lead_time_hours
+                FROM (
+                    SELECT h.run_id,
+                           h.basin_version_id,
+                           mi.river_network_version_id,
+                           rdc.segment_count,
+                           rdc.river_sample_count,
+                           rdc.river_valid_time_start,
+                           rdc.river_valid_time_end,
+                           rdc.min_lead_time_hours,
+                           rdc.max_lead_time_hours,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY mi.river_network_version_id
+                               ORDER BY h.cycle_time DESC, h.run_id DESC
+                           ) AS rn
+                    FROM hydro.hydro_run h
+                    JOIN core.model_instance mi ON mi.basin_version_id = h.basin_version_id
+                    JOIN hydro.run_display_coverage rdc
+                      ON rdc.run_id = h.run_id
+                     AND rdc.segment_count > 0
+                    WHERE h.status IN ('succeeded', 'parsed', 'published')
+                      AND mi.river_network_version_id IS NOT NULL
+                      AND mi.active_flag
+                ) ranked
+                WHERE rn = 1
+                ORDER BY river_network_version_id
                 """
             ),
-            {"variable": variable, "limit": sample_limit + 1},
         )
         .mappings()
         .all()
     )
-    return _valid_time_discovery(rows, sample_limit)
+    if not rows:
+        return ValidTimeDiscovery(valid_times=[], limit=sample_limit, observed_count=0, truncated=False)
+
+    coverage: list[tuple[datetime, datetime]] = []
+    for row in rows:
+        start = _coverage_datetime(row.get("river_valid_time_start"))
+        end = _coverage_datetime(row.get("river_valid_time_end"))
+        segment_count = int(row.get("segment_count") or 0)
+        sample_count = int(row.get("river_sample_count") or 0)
+        min_lead = row.get("min_lead_time_hours")
+        max_lead = row.get("max_lead_time_hours")
+        if start is None or end is None or segment_count <= 0 or min_lead is None or max_lead is None:
+            return ValidTimeDiscovery(valid_times=[], limit=sample_limit, observed_count=0, truncated=False)
+        lead_count = int(max_lead) - int(min_lead) + 1
+        if lead_count <= 0 or sample_count != segment_count * lead_count:
+            return ValidTimeDiscovery(valid_times=[], limit=sample_limit, observed_count=0, truncated=False)
+        if end < start or int((end - start).total_seconds()) != (lead_count - 1) * 3600:
+            return ValidTimeDiscovery(valid_times=[], limit=sample_limit, observed_count=0, truncated=False)
+        coverage.append((start, end))
+
+    common_start = max(start for start, _ in coverage)
+    common_end = min(end for _, end in coverage)
+    if common_end < common_start or any(int((common_end - start).total_seconds()) % 3600 for start, _ in coverage):
+        return ValidTimeDiscovery(valid_times=[], limit=sample_limit, observed_count=0, truncated=False)
+
+    observed_count = int((common_end - common_start).total_seconds()) // 3600 + 1
+    retained_count = min(sample_limit, observed_count)
+    retained_start = common_end - timedelta(hours=max(0, retained_count - 1))
+    valid_times = [
+        _format_time(retained_start + timedelta(hours=offset))
+        for offset in range(retained_count)
+    ]
+    return ValidTimeDiscovery(
+        valid_times=valid_times,
+        limit=sample_limit,
+        observed_count=observed_count,
+        truncated=observed_count > sample_limit,
+    )
+
+
+def _coverage_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if value is None:
+        return None
+    parsed = _parse_iso_datetime(str(value))
+    if parsed is None:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def _valid_time_discovery(rows: Iterable[Mapping[str, Any]], limit: int) -> ValidTimeDiscovery:

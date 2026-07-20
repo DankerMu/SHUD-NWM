@@ -66,18 +66,65 @@ def test_national_source_generations_change_with_data_identity() -> None:
 
 
 def test_national_valid_times_use_active_basin_identity_not_transient_model_id() -> None:
-    session = _Session([{"valid_time": "2026-07-11T11:00:00Z"}])
+    session = _Session(
+        [
+            {
+                "run_id": "run-a",
+                "basin_version_id": "bv-a",
+                "river_network_version_id": "rn-a",
+                "segment_count": 2,
+                "river_sample_count": 8,
+                "river_valid_time_start": "2026-07-11T08:00:00Z",
+                "river_valid_time_end": "2026-07-11T11:00:00Z",
+                "min_lead_time_hours": 0,
+                "max_lead_time_hours": 3,
+            },
+            {
+                "run_id": "run-b",
+                "basin_version_id": "bv-b",
+                "river_network_version_id": "rn-b",
+                "segment_count": 3,
+                "river_sample_count": 9,
+                "river_valid_time_start": "2026-07-11T09:00:00Z",
+                "river_valid_time_end": "2026-07-11T11:00:00Z",
+                "min_lead_time_hours": 0,
+                "max_lead_time_hours": 2,
+            },
+        ]
+    )
 
     discovery = national_discharge_valid_times(session)
 
-    assert discovery.valid_times == ["2026-07-11T11:00:00Z"]
+    assert discovery.valid_times == [
+        "2026-07-11T09:00:00Z",
+        "2026-07-11T10:00:00Z",
+        "2026-07-11T11:00:00Z",
+    ]
+    assert discovery.observed_count == 3
     assert "mi.basin_version_id = h.basin_version_id" in session.sql
     assert "hydro.run_display_coverage" in session.sql
     assert "mi.model_id = h.model_id" not in session.sql
-    assert "representative_segment AS" in session.sql
-    assert "MIN(rs0.river_segment_id)" in session.sql
-    assert "properties_json->>'shud_output_river'" in session.sql
-    assert "HAVING COUNT(DISTINCT ts.river_network_version_id) = (SELECT COUNT(*) FROM latest_run)" in session.sql
+    assert "hydro.river_timeseries" not in session.sql
+
+
+def test_national_valid_times_fail_closed_for_non_rectangular_coverage() -> None:
+    session = _Session(
+        [
+            {
+                "run_id": "run-a",
+                "basin_version_id": "bv-a",
+                "river_network_version_id": "rn-a",
+                "segment_count": 2,
+                "river_sample_count": 7,
+                "river_valid_time_start": "2026-07-11T08:00:00Z",
+                "river_valid_time_end": "2026-07-11T11:00:00Z",
+                "min_lead_time_hours": 0,
+                "max_lead_time_hours": 3,
+            }
+        ]
+    )
+
+    assert national_discharge_valid_times(session).valid_times == []
 
 
 def test_display_db_pool_bounds_invalid_environment(monkeypatch: Any) -> None:
