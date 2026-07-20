@@ -1312,20 +1312,19 @@ def _terminal_decision_matches_strict_warm_start(
     strict_evidence: Mapping[str, Any],
 ) -> bool:
     selected = strict_evidence.get("candidate_state")
-    selected_id = selected.get("init_state_id") if isinstance(selected, Mapping) else None
-    if selected_id in (None, ""):
+    if not isinstance(selected, Mapping) or _state_field(selected, "state_id") in (None, ""):
         return False
     terminal_candidate_state = terminal_evidence.get("candidate_state")
     if (
         terminal_evidence.get("terminal_source") == "pipeline_job"
         and isinstance(terminal_candidate_state, Mapping)
-        and str(terminal_candidate_state.get("init_state_id") or "") == str(selected_id)
+        and _warm_state_record_matches(selected, terminal_candidate_state)
     ):
         return True
     hydro_run = terminal_evidence.get("hydro_run")
     if not isinstance(hydro_run, Mapping):
         return False
-    terminal_init_state_id = hydro_run.get("init_state_id") or hydro_run.get("initial_state_id")
+    terminal_init_state_id = _state_field(hydro_run, "state_id")
     if (
         terminal_evidence.get("terminal_source") == "pipeline_job"
         and terminal_evidence.get("terminal_status") == "succeeded"
@@ -1334,7 +1333,7 @@ def _terminal_decision_matches_strict_warm_start(
         and hydro_run.get("error_code") == "COLD_START_QUARANTINED"
     ):
         return True
-    return str(terminal_init_state_id or "") == str(selected_id)
+    return _warm_state_record_matches(selected, hydro_run)
 
 
 def _terminal_decision_has_run_manifest(terminal_evidence: Mapping[str, Any]) -> bool:
@@ -1347,16 +1346,45 @@ def _terminal_decision_run_manifest_matches_strict_warm_start(
     strict_evidence: Mapping[str, Any],
 ) -> bool:
     selected = strict_evidence.get("candidate_state")
-    selected_id = selected.get("init_state_id") if isinstance(selected, Mapping) else None
-    if selected_id in (None, ""):
+    if not isinstance(selected, Mapping) or _state_field(selected, "state_id") in (None, ""):
         return False
     run_manifest_initial_state = terminal_evidence.get("run_manifest_initial_state")
     if not isinstance(run_manifest_initial_state, Mapping):
         return False
-    manifest_state_id = run_manifest_initial_state.get("state_id") or run_manifest_initial_state.get(
-        "init_state_id"
-    )
-    return str(manifest_state_id or "") == str(selected_id)
+    return _warm_state_record_matches(selected, run_manifest_initial_state)
+
+
+def _state_field(record: Mapping[str, Any], field: str) -> Any:
+    aliases = {
+        "state_id": ("init_state_id", "initial_state_id", "state_id"),
+        "checksum": ("init_state_checksum", "initial_state_checksum", "checksum"),
+        "uri": ("init_state_uri", "initial_state_uri", "ic_file_uri", "state_uri"),
+        "valid_time": ("init_state_valid_time", "initial_state_valid_time", "valid_time"),
+    }
+    for key in aliases[field]:
+        value = record.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _warm_state_record_matches(selected: Mapping[str, Any], observed: Mapping[str, Any]) -> bool:
+    """Require every selected warm-state identity field to match the observed run.
+
+    A repaired checkpoint intentionally retains its deterministic ``state_id`` while
+    its checksum changes. Comparing the ID alone would therefore let a terminal run
+    produced from the corrupt object masquerade as current and skip the required
+    forecast replay.
+    """
+
+    for field in ("state_id", "checksum", "uri", "valid_time"):
+        expected = _state_field(selected, field)
+        if expected in (None, ""):
+            continue
+        actual = _state_field(observed, field)
+        if str(actual or "") != str(expected):
+            return False
+    return True
 
 
 def _upgrade_retry_for_strict_warm_start_manifest(

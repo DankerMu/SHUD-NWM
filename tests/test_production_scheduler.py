@@ -116,6 +116,67 @@ def test_retry_with_stale_cold_manifest_is_upgraded_to_warm_forecast_rerun() -> 
     assert upgraded.evidence["candidate_state"]["init_state_id"] == "state_gfs_model_a_2026052112"
 
 
+def test_terminal_warm_state_same_id_with_repaired_checksum_requires_forecast_rerun() -> None:
+    decision = CandidateStateDecision(
+        action="retry",
+        reason="resume_after_completed_stage",
+        evidence={
+            "decision": "retry_after_completed_stage",
+            "restart_stage": "state_save_qc",
+            "run_manifest_initial_state": {
+                "state_id": "state_ifs_huai_2026070812",
+                "checksum": "partial-checksum",
+                "ic_file_uri": "s3://nhms/states/ifs/huai/2026070812/state.cfg.ic",
+                "valid_time": "2026-07-08T12:00:00Z",
+            },
+        },
+    )
+    strict = {
+        "ready": True,
+        "candidate_state": {
+            "init_state_id": "state_ifs_huai_2026070812",
+            "init_state_checksum": "repaired-complete-checksum",
+            "init_state_uri": "s3://nhms/states/ifs/huai/2026070812/state.cfg.ic",
+            "init_state_valid_time": "2026-07-08T12:00:00Z",
+        },
+    }
+
+    upgraded = scheduler_candidates_module._upgrade_retry_for_strict_warm_start_manifest(
+        decision,
+        strict,
+    )
+
+    assert upgraded is not None
+    assert upgraded.reason == "strict_warm_start_retry_run_manifest_mismatch"
+    assert upgraded.evidence["restart_stage"] == "forecast"
+    assert upgraded.evidence["native_shud_resubmitted"] is True
+
+
+def test_terminal_pipeline_state_same_id_with_repaired_checksum_is_not_current() -> None:
+    terminal = {
+        "terminal_source": "pipeline_job",
+        "candidate_state": {
+            "init_state_id": "state_ifs_huai_2026070812",
+            "init_state_checksum": "partial-checksum",
+            "init_state_uri": "s3://nhms/states/ifs/huai/2026070812/state.cfg.ic",
+            "init_state_valid_time": "2026-07-08T12:00:00Z",
+        },
+    }
+    strict = {
+        "candidate_state": {
+            "init_state_id": "state_ifs_huai_2026070812",
+            "init_state_checksum": "repaired-complete-checksum",
+            "init_state_uri": "s3://nhms/states/ifs/huai/2026070812/state.cfg.ic",
+            "init_state_valid_time": "2026-07-08T12:00:00Z",
+        }
+    }
+
+    assert (
+        scheduler_candidates_module._terminal_decision_matches_strict_warm_start(terminal, strict)
+        is False
+    )
+
+
 class _NoopReconcileStore:
     def query_reserved_unbound_jobs(self) -> list[Any]:
         return []
