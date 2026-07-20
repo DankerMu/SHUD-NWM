@@ -154,3 +154,41 @@ related pytest         82 passed
 
 扩大测试集合另有 13 项 macOS `/scratch`/Docker runtime 平台既有失败；相关 MVT、API、静态
 资源、migration、预热测试均通过，ruff、`bash -n` 和 `git diff --check` 通过。
+
+## direct-grid 流域不可点击修复补充
+
+z5 413 修复上线后，QHH、Heihe 可点击，但 HHE、Huai Main 等 direct-grid 流域没有进入
+`hydro-national` 交互层。根因不是前端事件绑定，而是 national discharge SQL 使用
+`core.model_instance.model_id = hydro.hydro_run.model_id` 选择运行：旧流域运行沿用稳定 model ID，
+而 direct-grid 业务运行使用 `dg_<hash>` 临时 model ID，因此无法匹配 active model，只有旧运行
+仍能进入瓦片。
+
+`00f9cce9` 将 national discharge 的运行选择、source generation 和有效时次发现统一改为稳定
+身份 `model_instance.basin_version_id = hydro_run.basin_version_id`，并要求对应
+`hydro.run_display_coverage` 在请求时次确有河段覆盖。`fc1a8c1f` 进一步取消对
+`hydro.river_timeseries` 大表的有效时次扫描：只有当 coverage 的
+`river_sample_count == segment_count × lead_count` 且首尾时次与逐小时 lead 完全一致时，才用
+coverage 求所有 active network 的共同时间窗；不完整覆盖直接 fail closed，不对外发布伪造时次。
+
+node-27 当前运行证据：
+
+```text
+deployed HEAD                    fc1a8c1f
+nhms-display-api.service         active, MainPID=1519573, NRestarts=0, workers=2
+nhms-node27-autopipe.timer       active
+hydro source generation         hydro-national:active-basin-coverage-v1:0c9d3ad63c8ffc64ae36:18
+common valid-time latest         2026-07-16T09:00:00Z
+/api/v1/layers                   node-27 0.073 s；公网 0.378 s
+z3/z4/z5 prewarm                86 requests, 0 failures, 4,287,960 bytes
+```
+
+对公网 z3/z4/z5 的 43 个 hydro MVT 逐个解码，共得到 24,925 个可交互 feature；HHE 与
+Huai Main 均包含完整的 `basin_id`、`basin_version_id`、`river_network_version_id`、
+`river_segment_id` 和 `run_id`。代表 feature 的河段详情与 GFS+IFS forecast-series 均返回
+HTTP 200。z6 全国 99 个瓦片解码得到全部 18 个业务流域、24,916 个 feature、0 个失败；
+z3-z5 因既定低缩放干流筛选显示其中 15 个流域，另外 Keliya、Tailanhe、Zhaochen/Wem 在
+z6 起进入流量交互层。
+
+本次相关后端集合为 84 passed，ruff 与 `git diff --check` 均通过。当前自动化浏览器运行时
+没有可用浏览器实例，因此没有伪造鼠标像素点击证据；MVT 身份、点击后的详情 API 和曲线 API
+均已用公网真实数据面完成端到端验证。
