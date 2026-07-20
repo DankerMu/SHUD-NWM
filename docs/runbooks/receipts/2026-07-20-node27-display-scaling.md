@@ -126,3 +126,31 @@ scheduler strict-warm 断言的环境/既有失败。完整套件因此不记作
 - 可设置 `AUTOPIPE_MVT_PREWARM_ENABLED=0` 停用预热，不影响 ingest 结果。
 - systemd 接管失败时可停止新 unit 并使用部署前 wrapper；当前 unit 已稳定 active，未触发回滚。
 - migration 新列/索引对旧代码向后兼容；应用回滚不要求立即删除列。
+
+## z5 放大 413 修复补充
+
+首次上线后，浏览器放大到 z5 暴露
+`river-network-national/5/25/12.pbf` 返回 413。服务端预算详情为 10,280 features，超过
+10,000 上限；coordinate count 为 21,486，未超过 50,000。根因是 v1 只在 z3/z4 聚合，
+从 z5 起过早恢复了逐河段 feature。
+
+`584b04b0` 将 national 基础河网升级为 `stream-type-aggregate-v2`：所有仍在进行几何概化的
+z≤8 均按 `river_network_version_id × Type` 聚合，z≥9 才恢复逐河段。基础河网是纯视觉层，
+不在 interactive layer 列表中，因此合并 synthetic feature identity 不改变 discharge 点击、
+河段身份或流量弹窗契约。预热范围同时从 z3/z4 扩到 z3/z4/z5。
+
+node-27 修复后证据：
+
+```text
+原报错 URL             200, 65023 bytes, X-Tile-Cache=hit, 0.326817 s
+source generation      river-network-national:stream-type-aggregate-v2:212301fa7e64a565e2f8:18
+z3/z4/z5 prewarm       86 requests, 86 cache hits, 0 failures
+z6 descendants         4 requests,  0 failures, max 50201 bytes
+z7 descendants         16 requests, 0 failures, max 47411 bytes
+z8 descendants         64 requests, 0 failures, max 52491 bytes
+browser hard refresh   sourceType=vector, AJAXError=false, request413=false
+related pytest         82 passed
+```
+
+扩大测试集合另有 13 项 macOS `/scratch`/Docker runtime 平台既有失败；相关 MVT、API、静态
+资源、migration、预热测试均通过，ruff、`bash -n` 和 `git diff --check` 通过。
