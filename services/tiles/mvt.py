@@ -34,6 +34,7 @@ MVT_MIN_SIMPLIFICATION_TOLERANCE_M = 0.5
 MVT_MAX_SIMPLIFICATION_TOLERANCE_M = 256.0
 MVT_FILE_CACHE_DIR_ENV = "NHMS_MVT_FILE_CACHE_DIR"
 NATIONAL_RIVER_NETWORK_QUERY_VERSION = "stream-type-aggregate-v2"
+NATIONAL_DISCHARGE_QUERY_VERSION = "active-basin-coverage-v1"
 SUPPORTED_HYDRO_MVT_VARIABLES = ("q_down",)
 POSTGIS_NON_FINITE_DOUBLE_SQL = (
     "'NaN'::double precision, 'Infinity'::double precision, '-Infinity'::double precision"
@@ -530,7 +531,12 @@ def postgis_tile_sql(layer: str) -> str:
                     SELECT DISTINCT ON (mi.river_network_version_id)
                            h.run_id, mi.river_network_version_id
                     FROM hydro.hydro_run h
-                    JOIN core.model_instance mi ON mi.model_id = h.model_id
+                    JOIN core.model_instance mi ON mi.basin_version_id = h.basin_version_id
+                    JOIN hydro.run_display_coverage rdc
+                      ON rdc.run_id = h.run_id
+                     AND rdc.segment_count > 0
+                     AND rdc.river_valid_time_start <= :valid_time
+                     AND rdc.river_valid_time_end >= :valid_time
                     WHERE h.status IN ('succeeded', 'parsed', 'published')
                       AND mi.river_network_version_id IS NOT NULL
                       AND mi.active_flag
@@ -546,7 +552,12 @@ def postgis_tile_sql(layer: str) -> str:
                 SELECT DISTINCT ON (mi.river_network_version_id)
                        h.run_id, mi.river_network_version_id
                 FROM hydro.hydro_run h
-                JOIN core.model_instance mi ON mi.model_id = h.model_id
+                JOIN core.model_instance mi ON mi.basin_version_id = h.basin_version_id
+                JOIN hydro.run_display_coverage rdc
+                  ON rdc.run_id = h.run_id
+                 AND rdc.segment_count > 0
+                 AND rdc.river_valid_time_start <= :valid_time
+                 AND rdc.river_valid_time_end >= :valid_time
                 WHERE h.status IN ('succeeded', 'parsed', 'published')
                   AND mi.river_network_version_id IS NOT NULL
                   AND mi.active_flag
@@ -1096,23 +1107,30 @@ def display_ready_run(session: Session) -> Mapping[str, Any] | None:
 
 
 def national_discharge_source_version(session: Session) -> str:
-    """Digest the exact latest display-ready run selected for every network."""
+    """Digest the latest display-ready, river-bearing run for every active basin/network."""
     rows = (
         session.execute(
             text(
                 """
-                SELECT run_id, river_network_version_id, cycle_time, updated_at
+                SELECT run_id, river_network_version_id, cycle_time, updated_at,
+                       river_valid_time_start, river_valid_time_end, river_sample_count
                 FROM (
                     SELECT h.run_id,
                            mi.river_network_version_id,
                            h.cycle_time,
                            h.updated_at,
+                           rdc.river_valid_time_start,
+                           rdc.river_valid_time_end,
+                           rdc.river_sample_count,
                            ROW_NUMBER() OVER (
                                PARTITION BY mi.river_network_version_id
                                ORDER BY h.cycle_time DESC, h.run_id DESC
                            ) AS rn
                     FROM hydro.hydro_run h
-                    JOIN core.model_instance mi ON mi.model_id = h.model_id
+                    JOIN core.model_instance mi ON mi.basin_version_id = h.basin_version_id
+                    JOIN hydro.run_display_coverage rdc
+                      ON rdc.run_id = h.run_id
+                     AND rdc.segment_count > 0
                     WHERE h.status IN ('succeeded', 'parsed', 'published')
                       AND mi.river_network_version_id IS NOT NULL
                       AND mi.active_flag
@@ -1125,7 +1143,7 @@ def national_discharge_source_version(session: Session) -> str:
         .mappings()
         .all()
     )
-    return _national_source_digest("hydro-national", rows)
+    return _national_source_digest(f"hydro-national:{NATIONAL_DISCHARGE_QUERY_VERSION}", rows)
 
 
 def national_river_network_source_version(session: Session) -> str:
@@ -1224,8 +1242,8 @@ def national_discharge_valid_times(
 ) -> ValidTimeDiscovery:
     """Union of distinct discharge valid-times across every basin's latest display-ready run.
 
-    Mirrors the national tile SQL identity selection (each river network's latest
-    display-ready run) but only enumerates DISTINCT valid_time. Written
+    Mirrors the national tile SQL stable identity selection (latest river-bearing
+    run for each active basin/network) but only enumerates DISTINCT valid_time. Written
     with a ROW_NUMBER() window instead of Postgres-only DISTINCT ON so the catalog /
     valid-times contract stays testable on sqlite while remaining equivalent on
     Postgres. No data is fabricated: empty when no ready run/series exists.
@@ -1245,7 +1263,10 @@ def national_discharge_valid_times(
                                    ORDER BY h.cycle_time DESC, h.run_id DESC
                                ) AS rn
                         FROM hydro.hydro_run h
-                        JOIN core.model_instance mi ON mi.model_id = h.model_id
+                        JOIN core.model_instance mi ON mi.basin_version_id = h.basin_version_id
+                        JOIN hydro.run_display_coverage rdc
+                          ON rdc.run_id = h.run_id
+                         AND rdc.segment_count > 0
                         WHERE h.status IN ('succeeded', 'parsed', 'published')
                           AND mi.river_network_version_id IS NOT NULL
                           AND mi.active_flag

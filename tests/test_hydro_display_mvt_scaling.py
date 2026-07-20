@@ -12,6 +12,7 @@ from services.tiles.mvt import (
     TileResponse,
     layer_metadata,
     national_discharge_source_version,
+    national_discharge_valid_times,
     national_river_network_source_version,
     postgis_tile_sql,
 )
@@ -34,7 +35,7 @@ class _Session:
         self.sql = ""
         self.bind = SimpleNamespace(dialect=SimpleNamespace(name=dialect))
 
-    def execute(self, statement: Any) -> _Rows:
+    def execute(self, statement: Any, _params: Any = None) -> _Rows:
         self.sql = str(statement)
         return _Rows(self.rows)
 
@@ -59,6 +60,20 @@ def test_national_source_generations_change_with_data_identity() -> None:
     assert "ROW_NUMBER() OVER" in first.sql
     assert "ORDER BY h.cycle_time DESC, h.run_id DESC" in first.sql
     assert "AND mi.active_flag" in first.sql
+    assert "mi.basin_version_id = h.basin_version_id" in first.sql
+    assert "hydro.run_display_coverage" in first.sql
+    assert "mi.model_id = h.model_id" not in first.sql
+
+
+def test_national_valid_times_use_active_basin_identity_not_transient_model_id() -> None:
+    session = _Session([{"valid_time": "2026-07-11T11:00:00Z"}])
+
+    discovery = national_discharge_valid_times(session)
+
+    assert discovery.valid_times == ["2026-07-11T11:00:00Z"]
+    assert "mi.basin_version_id = h.basin_version_id" in session.sql
+    assert "hydro.run_display_coverage" in session.sql
+    assert "mi.model_id = h.model_id" not in session.sql
 
 
 def test_display_db_pool_bounds_invalid_environment(monkeypatch: Any) -> None:
@@ -120,6 +135,11 @@ def test_national_queries_filter_stream_type_before_geometry_materialization() -
     assert "WHERE :z >= 9" in river_sql
     assert "tile_segments AS MATERIALIZED" in hydro_sql
     assert hydro_sql.count("AND mi.active_flag") >= 2
+    assert hydro_sql.count("mi.basin_version_id = h.basin_version_id") >= 2
+    assert hydro_sql.count("hydro.run_display_coverage") >= 2
+    assert "mi.model_id = h.model_id" not in hydro_sql
+    assert "rdc.river_valid_time_start <= :valid_time" in hydro_sql
+    assert "rdc.river_valid_time_end >= :valid_time" in hydro_sql
     assert hydro_sql.index("selected_values AS") < hydro_sql.rindex("JOIN core.river_segment rs")
     assert "seg.stream_type IS NULL" in hydro_sql
 
