@@ -1,5 +1,8 @@
 # node-27 全国展示扩展性能实施方案
 
+> 实施状态：**完成并部署**。2026-07-20 已在 node-27 应用 migration 000048、切换全国基础河网/流量 MVT、启用跨 worker 缓存互斥与 z3/z4 预热，并由 enabled+active 的 user systemd 双 worker 托管。实机结果见
+> [`../runbooks/receipts/2026-07-20-node27-display-scaling.md`](../runbooks/receipts/2026-07-20-node27-display-scaling.md)。
+
 ## Goal
 
 在不改变 node-22 计算链路、流量产品语义和河段点击契约的前提下，把 node-27 全国展示从“浏览器先下载并解析全国全量河网”改为“轻量边界先显示、版本化 MVT/PBF 分片加载、热点瓦片提前生成”。完成后，18 个流域的首页刷新不再请求 45 MB 的 `national-basin-river.geojson`，新增流域也不会线性放大全国首屏静态包；有预报的河段仍可点击，无预报或首次 cold 的新流域仍能显示基础河网。
