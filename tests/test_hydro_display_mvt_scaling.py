@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -66,6 +67,15 @@ def test_display_db_pool_bounds_invalid_environment(monkeypatch: Any) -> None:
 
     assert hydro_display._bounded_env_int("NHMS_DISPLAY_DB_POOL_SIZE", default=4, minimum=1, maximum=16) == 4
     assert hydro_display._bounded_env_int("NHMS_DISPLAY_DB_MAX_OVERFLOW", default=2, minimum=0, maximum=16) == 2
+
+
+def test_systemd_workers_receive_shared_file_cache_default() -> None:
+    unit = (Path(__file__).resolve().parents[1] / "infra/systemd/nhms-display-api.service").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'export NHMS_MVT_FILE_CACHE_DIR="${NHMS_MVT_FILE_CACHE_DIR:-/home/nwm/.cache/nhms/mvt}"' in unit
+    assert '--workers "${NHMS_DISPLAY_WORKERS:-2}"' in unit
 
 
 def test_national_river_generation_uses_only_active_network_inventory() -> None:
