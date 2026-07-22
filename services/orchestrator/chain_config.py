@@ -74,6 +74,8 @@ class OrchestratorConfig:
     terminal_stage: str | None = None
     slurm_job_type_templates: Mapping[str, str] = field(default_factory=dict)
     slurm_env: Mapping[str, str] = field(default_factory=dict)
+    reconcile_slurm_user: str | None = None
+    reconcile_slurm_account: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "workspace_root", Path(self.workspace_root).expanduser().resolve())
@@ -101,6 +103,12 @@ class OrchestratorConfig:
             {str(key): str(value) for key, value in dict(self.slurm_job_type_templates).items()},
         )
         object.__setattr__(self, "slurm_env", {str(key): str(value) for key, value in dict(self.slurm_env).items()})
+        object.__setattr__(self, "reconcile_slurm_user", _normalized_optional_identity(self.reconcile_slurm_user))
+        object.__setattr__(
+            self,
+            "reconcile_slurm_account",
+            _normalized_optional_identity(self.reconcile_slurm_account),
+        )
 
     @classmethod
     def from_env(cls) -> OrchestratorConfig:
@@ -140,6 +148,11 @@ def _env_flag(name: str, *, default: bool) -> bool:
     if normalized in {"0", "false", "f", "no", "n", "off"}:
         return False
     raise ValueError(f"{name} must be a boolean value.")
+
+
+def _normalized_optional_identity(value: object) -> str | None:
+    text = str(value or "").strip()
+    return text or None
 
 
 def _env_cycle_time(name: str) -> datetime | None:

@@ -8311,10 +8311,44 @@ def test_file_journal_post_window_concurrent_public_cycles_submit_one_retry(
         outcomes = list(pool.map(run_public_cycle, range(2)))
 
     assert client.forecast_attempts == 2
+    attempt_two_repo = FileOrchestrationJournalRepository(root)
+    attempt_two = attempt_two_repo.query_reserved_unbound_jobs()[0]
+    assert attempt_two.submission_attempt == 2, [
+        (
+            row["job_id"],
+            row["idempotency_key"],
+            row["status"],
+            row["submission_attempt"],
+            row.get("reconciliation_decision"),
+        )
+        for row in attempt_two_repo.query_pipeline_jobs_by_cycle(f"{source_segment}_{cycle}")
+    ]
+    assert {
+        (attempt_two_repo._hydro_run_for(str(basin["run_id"])) or {}).get("submission_attempt")
+        for basin in basins
+    } == {2}
+    assert reconcile_reserved_unbound_jobs(
+        attempt_two_repo,
+        comment_query=lambda _key: None,
+        grace=timedelta(0),
+    )[0].action == "absence_retry_permitted"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        second_outcomes = list(pool.map(run_public_cycle, range(2)))
+
+    attempt_three_repo = FileOrchestrationJournalRepository(root)
+    attempt_three = attempt_three_repo.query_reserved_unbound_jobs()[0]
+    assert attempt_three.submission_attempt == 3
+    assert {
+        (attempt_three_repo._hydro_run_for(str(basin["run_id"])) or {}).get("submission_attempt")
+        for basin in basins
+    } == {3}
+    assert client.forecast_attempts == 3
     assert sum(
         submission["stage"] == "forecast" for submission in client.submissions
-    ) == 1
+    ) == 2
     assert any(not isinstance(outcome, Exception) for outcome in outcomes)
+    assert any(not isinstance(outcome, Exception) for outcome in second_outcomes)
     assert client.cancelled_jobs == []
 
 

@@ -111,6 +111,7 @@ class ReservationResult:
     job_id: str
     status: str
     created: bool  # True => this pass wrote the reservation; False => reused.
+    submission_attempt: int = 1
 
     @property
     def already_inflight(self) -> bool:
@@ -243,6 +244,7 @@ def reserve_candidate(
             job_id=str(record["job_id"]),
             status=str(record["status"]),
             created=True,
+            submission_attempt=_submission_attempt(record),
         )
 
     # The INSERT lost. Before treating this as already-inflight, try to ATOMICALLY
@@ -277,6 +279,7 @@ def reserve_candidate(
                 job_id=str(reclaimed["job_id"]),
                 status=str(reclaimed["status"]),
                 created=True,
+                submission_attempt=_submission_attempt(reclaimed),
             )
 
     # Row is live (or a concurrent take-over beat us). We re-read ONLY to report
@@ -292,13 +295,22 @@ def reserve_candidate(
             job_id=job_id,
             status=RESERVED_STATUS,
             created=False,
+            submission_attempt=1,
         )
     return ReservationResult(
         idempotency_key=idempotency_key,
         job_id=str(existing["job_id"]),
         status=str(existing["status"]),
         created=False,
+        submission_attempt=_submission_attempt(existing),
     )
+
+
+def _submission_attempt(record: Mapping[str, Any]) -> int:
+    try:
+        return max(int(record.get("submission_attempt") or 1), 1)
+    except (TypeError, ValueError):
+        return 1
 
 
 def bind_reservation(

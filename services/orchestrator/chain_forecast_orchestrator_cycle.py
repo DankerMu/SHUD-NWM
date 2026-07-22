@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-import os
 from datetime import UTC, datetime
 
 from services.orchestrator import chain as _chain
-from services.orchestrator.accepted_submit_identity import forecast_cohort_digest
+from services.orchestrator.accepted_submit_identity import (
+    canonical_forecast_cohort_members,
+    forecast_cohort_digest,
+)
 
 _FORCE_TERMINAL_RESUBMIT_DECISIONS = {
     "retry_missing_forecast_output",
@@ -469,26 +471,32 @@ class ForecastOrchestratorCycleMixin:
             getattr(self.repository, "supports_accepted_submit_reconcile", False)
             and _chain.chain_stage_execution.is_forecast_cohort_stage(stage)
         ):
-            members = []
-            for index, basin in enumerate(context.active_basins):
-                members.append(
-                    {
-                        "array_task_id": int(basin.get("task_id", index)),
-                        "candidate_id": basin.get("candidate_id"),
-                        "run_id": basin.get("run_id"),
-                        "model_id": basin.get("model_id"),
-                        "basin_id": basin.get("basin_id"),
-                        "restart_stage": context.restart_stage or stage.stage,
-                    }
-                )
+            submission_attempt = max(int(context.retry_attempt or 1), 1)
+            retry_marker = "_retry_"
+            if retry_marker in pipeline_job_id:
+                try:
+                    submission_attempt = max(
+                        submission_attempt,
+                        int(pipeline_job_id.rsplit(retry_marker, maxsplit=1)[1]) + 1,
+                    )
+                except ValueError:
+                    pass
+            members = canonical_forecast_cohort_members(
+                source_id=context.source_id,
+                cycle_time=context.cycle_time,
+                basins=context.active_basins,
+            )
+            expected_user = self.config.reconcile_slurm_user
+            expected_account = self.config.reconcile_slurm_account
             reservation_evidence = {
                 "slurm_comment": _chain.slurm_comment_for(idempotency_key),
-                "cohort_members": members,
-                "restart_stage": context.restart_stage or stage.stage,
-                "submission_attempt": max(int(context.retry_attempt or 1), 1),
+                "cohort_members": list(members),
+                "restart_stage": "forecast",
+                "submission_attempt": submission_attempt,
                 "submission_attempt_started_at": datetime.now(UTC),
-                "expected_slurm_user": os.getenv("NHMS_SCHEDULER_RECONCILE_SLURM_USER"),
-                "expected_slurm_account": os.getenv("NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT"),
+                "slurm_ownership_required": bool(expected_user and expected_account),
+                "expected_slurm_user": expected_user,
+                "expected_slurm_account": expected_account,
                 "native_shud_resubmitted": _chain.chain_stage_execution.is_forecast_cohort_stage(stage),
             }
         reserve_kwargs = {

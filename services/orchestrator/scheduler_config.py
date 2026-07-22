@@ -118,6 +118,12 @@ class ProductionSchedulerConfig:
     )
     slurm_job_type_templates: Mapping[str, str] | None = None
     slurm_env: Mapping[str, str] = field(default_factory=dict)
+    reconcile_slurm_user: str | None = field(
+        default_factory=lambda: os.getenv("NHMS_SCHEDULER_RECONCILE_SLURM_USER")
+    )
+    reconcile_slurm_account: str | None = field(
+        default_factory=lambda: os.getenv("NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT")
+    )
     cancel_active_slurm: bool = False
     sources: tuple[str, ...] = _scheduler.DEFAULT_PRODUCTION_SOURCES
     allowed_cycle_hours_utc: tuple[int, ...] = field(
@@ -359,6 +365,12 @@ class ProductionSchedulerConfig:
         templates = dict(self.slurm_job_type_templates or DEFAULT_JOB_TYPE_TEMPLATES)
         object.__setattr__(self, "slurm_job_type_templates", templates)
         object.__setattr__(self, "slurm_env", _scheduler._production_slurm_env(dict(self.slurm_env)))
+        object.__setattr__(self, "reconcile_slurm_user", _normalized_optional_identity(self.reconcile_slurm_user))
+        object.__setattr__(
+            self,
+            "reconcile_slurm_account",
+            _normalized_optional_identity(self.reconcile_slurm_account),
+        )
         object.__setattr__(self, "slurm_gateway_url", str(self.slurm_gateway_url or "").strip())
         object.__setattr__(self, "service_port", int(self.service_port))
         if len(self.sources) > _scheduler.MAX_SOURCES:
@@ -577,6 +589,11 @@ class ProductionSchedulerConfig:
             "database_url_configured": bool(self.database_url_configured),
             "selectors": selectors,
             "paths": paths,
+            "accepted_submit_ownership": {
+                "required": bool(self.scheduler_db_free_required and self.slurm_execution_enabled),
+                "user_configured": self.reconcile_slurm_user is not None,
+                "account_configured": self.reconcile_slurm_account is not None,
+            },
             "canonical_selector_fields": [env for _attr, env, _default in _DB_FREE_SELECTOR_SPECS],
             "canonical_path_fields": [env for _attr, env, _kind in _DB_FREE_PATH_SPECS],
         }
@@ -605,6 +622,26 @@ class ProductionSchedulerConfig:
                     "message": "DB-free scheduler mode forbids scheduler DATABASE_URL before lock acquisition.",
                 }
             )
+        if self.slurm_execution_enabled:
+            for field_name, env_name in (
+                ("reconcile_slurm_user", "NHMS_SCHEDULER_RECONCILE_SLURM_USER"),
+                ("reconcile_slurm_account", "NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT"),
+            ):
+                value = getattr(self, field_name)
+                checks[env_name] = {
+                    "env": env_name,
+                    "configured": value is not None,
+                    "value_recorded": False,
+                }
+                if value is None:
+                    blockers.append(
+                        {
+                            "code": "accepted_submit_owner_missing",
+                            "field": env_name,
+                            "reason": "accepted_submit_owner_missing",
+                            "message": "DB-free Slurm execution requires exact accepted-submit ownership.",
+                        }
+                    )
         for attr, env, _legacy_default in _DB_FREE_SELECTOR_SPECS:
             value = getattr(self, attr)
             check, blocker = _db_free_selector_check(env, value)
@@ -625,6 +662,11 @@ class ProductionSchedulerConfig:
             "checks": checks,
             "evidence": self.db_free_runtime_evidence(),
         }
+
+
+def _normalized_optional_identity(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
 
 
 def _evidence_scalar(value: Any) -> Any:

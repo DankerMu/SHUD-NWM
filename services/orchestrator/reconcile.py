@@ -724,7 +724,7 @@ def reconcile_inflight_jobs(
             )
             continue
 
-        if file_cohort and not _terminal_file_cohort_identity_matches(record, job):
+        if file_cohort and not _terminal_file_cohort_identity_matches(store, record, job):
             write_count = int(
                 bool(
                     getattr(store, "record_pipeline_job_reconciliation")(
@@ -819,9 +819,14 @@ def _is_forecast_cohort_job(job: Any) -> bool:
     return str(getattr(job, "job_type", None) or "") in FORECAST_COHORT_STAGE_ALIASES
 
 
-def _terminal_file_cohort_identity_matches(record: SacctRecord, job: Any) -> bool:
+def _file_cohort_runtime_identity_matches(store: Any, identity: Mapping[str, Any]) -> bool:
+    validator = getattr(store, "forecast_cohort_runtime_identity_matches", None)
+    return callable(validator) and bool(validator(identity))
+
+
+def _terminal_file_cohort_identity_matches(store: Any, record: SacctRecord, job: Any) -> bool:
     identity = vars(job) if hasattr(job, "__dict__") else {}
-    if not forecast_cohort_identity_is_valid(identity):
+    if not forecast_cohort_identity_is_valid(identity) or not _file_cohort_runtime_identity_matches(store, identity):
         return False
     expected_master = str(getattr(job, "slurm_job_id", None) or "")
     if not expected_master or record.slurm_job_id != expected_master:
@@ -832,6 +837,10 @@ def _terminal_file_cohort_identity_matches(record: SacctRecord, job: Any) -> boo
         return False
     expected_user = str(getattr(job, "expected_slurm_user", None) or "")
     expected_account = str(getattr(job, "expected_slurm_account", None) or "")
+    if bool(getattr(job, "slurm_ownership_required", False)) and (
+        not expected_user or not expected_account or not record.user or not record.account
+    ):
+        return False
     if expected_user and record.user != expected_user:
         return False
     if expected_account and record.account != expected_account:
@@ -854,30 +863,30 @@ def _file_cohort_task_projections(job: Any, record: SacctRecord) -> tuple[list[d
         int(member["array_task_id"]): dict(member)
         for member in ordered_cohort_members(getattr(job, "cohort_members", ()))
     }
-    tasks: dict[int, SacctRecord] = {}
+    tasks: dict[int, list[SacctRecord]] = {}
     accounting_complete = True
-    invalid_task_identity = False
     for task in record.array_task_records:
         raw_task_id = task.array_task_id if task.array_task_id is not None else task.task_id
         try:
             task_id = int(raw_task_id)
         except (TypeError, ValueError):
             accounting_complete = False
-            invalid_task_identity = True
             continue
-        if task_id not in members or task_id in tasks:
+        if task_id not in members:
             accounting_complete = False
-            invalid_task_identity = True
             continue
-        tasks[task_id] = task
-    if len(tasks) != len(members) or len(record.array_task_records) != len(members):
+        tasks.setdefault(task_id, []).append(task)
+    if set(tasks) != set(members) or len(record.array_task_records) != len(members):
         accounting_complete = False
 
     projections: list[dict[str, Any]] = []
     for task_id, member in sorted(members.items()):
-        task = tasks.get(task_id)
+        task_records = tasks.get(task_id, [])
+        task = task_records[0] if len(task_records) == 1 else None
         outcome = "unverified"
-        if task is not None and not invalid_task_identity:
+        if len(task_records) > 1:
+            accounting_complete = False
+        elif task is not None:
             normalized = _normalize_slurm_state(task.raw_state)
             status = SLURM_STATE_MAP.get(normalized)
             if status == SlurmJobStatus.SUCCEEDED:
@@ -1032,7 +1041,7 @@ def reconcile_reserved_unbound_jobs(
         if (
             accepted_submit_reconcile
             and record is not None
-            and not _reserved_record_identity_matches(record, job, str(idempotency_key))
+            and not _reserved_record_identity_matches(store, record, job, str(idempotency_key))
         ):
             write_count = _record_file_reconciliation(store, job.job_id, "identity_mismatch_blocked")
             outcomes.append(
@@ -1189,9 +1198,9 @@ def _record_file_reconciliation(store: Any, job_id: str, decision: str) -> int:
     return 0
 
 
-def _reserved_record_identity_matches(record: SacctRecord, job: Any, idempotency_key: str) -> bool:
+def _reserved_record_identity_matches(store: Any, record: SacctRecord, job: Any, idempotency_key: str) -> bool:
     identity = vars(job) if hasattr(job, "__dict__") else {}
-    if not forecast_cohort_identity_is_valid(identity):
+    if not forecast_cohort_identity_is_valid(identity) or not _file_cohort_runtime_identity_matches(store, identity):
         return False
     if idempotency_key_from_comment(record.comment) != idempotency_key:
         return False
@@ -1210,6 +1219,10 @@ def _reserved_record_identity_matches(record: SacctRecord, job: Any, idempotency
             return False
     expected_user = str(getattr(job, "expected_slurm_user", None) or "")
     expected_account = str(getattr(job, "expected_slurm_account", None) or "")
+    if bool(getattr(job, "slurm_ownership_required", False)) and (
+        not expected_user or not expected_account or not record.user or not record.account
+    ):
+        return False
     if expected_user and record.user != expected_user:
         return False
     if expected_account and record.account != expected_account:

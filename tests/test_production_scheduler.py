@@ -18022,6 +18022,8 @@ def _set_db_free_scheduler_env(monkeypatch: Any, root: Path) -> tuple[dict[str, 
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
     monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_ROOTS", "true")
     monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_RECONCILE_SLURM_USER", "scheduler-user")
+    monkeypatch.setenv("NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT", "scheduler-account")
     monkeypatch.delenv("DATABASE_URL", raising=False)
     for key in _DB_FREE_SELECTOR_ENV_KEYS:
         monkeypatch.setenv(key, "file")
@@ -18042,6 +18044,69 @@ def _set_db_free_scheduler_env(monkeypatch: Any, root: Path) -> tuple[dict[str, 
             path.write_text("{}", encoding="utf-8")
         monkeypatch.setenv(key, str(path))
     return roots, paths
+
+
+@pytest.mark.parametrize("missing_field", ["user", "account", "blank_user", "blank_account"])
+def test_db_free_accepted_submit_owner_preflight_blocks_public_pass_before_lock(
+    monkeypatch: Any,
+    tmp_path: Path,
+    missing_field: str,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path / missing_field)
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ENABLED", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_RECONCILE_SLURM_USER", "scheduler-user")
+    monkeypatch.setenv("NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT", "scheduler-account")
+    field = missing_field.removeprefix("blank_")
+    env_name = {
+        "user": "NHMS_SCHEDULER_RECONCILE_SLURM_USER",
+        "account": "NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT",
+    }[field]
+    if missing_field.startswith("blank_"):
+        monkeypatch.setenv(env_name, "   ")
+    else:
+        monkeypatch.delenv(env_name)
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+
+    config = ProductionSchedulerConfig()
+    result = ProductionScheduler.from_env(config).run_once()
+
+    assert config.db_free_runtime_preflight()["status"] == "blocked"
+    assert result.status == "preflight_blocked"
+    assert result.evidence["lock"]["reason"] == "db_free_runtime_preflight_blocked"
+    blockers = result.evidence["db_free_runtime"]["blockers"]
+    assert any(item["code"] == "accepted_submit_owner_missing" and item["field"] == env_name for item in blockers)
+    assert result.evidence["counts"]["submitted_count"] == 0
+
+
+def test_db_free_accepted_submit_owner_exact_config_is_threaded_to_orchestrator(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "exact-owner")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ENABLED", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_RECONCILE_SLURM_USER", "scheduler-user")
+    monkeypatch.setenv("NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT", "scheduler-account")
+    repository = scheduler_module.FileOrchestrationJournalRepository(paths["NHMS_SCHEDULER_JOURNAL_ROOT"])
+    captured: dict[str, Any] = {}
+
+    class CapturingForecastOrchestrator:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["config"] = kwargs["config"]
+
+    monkeypatch.setattr(scheduler_module, "ForecastOrchestrator", CapturingForecastOrchestrator)
+    config = ProductionSchedulerConfig()
+    scheduler = ProductionScheduler(
+        config,
+        registry=object(),
+        adapters={},
+        active_repository=repository,
+    )
+
+    scheduler._default_orchestrator_for("gfs", state_manager=None)
+
+    assert config.db_free_runtime_preflight()["status"] == "ready"
+    assert captured["config"].reconcile_slurm_user == "scheduler-user"
+    assert captured["config"].reconcile_slurm_account == "scheduler-account"
 
 
 def _compact_json_bytes(payload: Mapping[str, Any]) -> bytes:
@@ -24110,6 +24175,289 @@ def test_scheduler_run_once_reconciles_real_file_journal_reservation(tmp_path: P
     assert job is not None
     assert job["slurm_job_id"] == "3001"
     assert job["status"] == "running"
+
+
+@pytest.mark.parametrize("source_id", ["gfs", "IFS"])
+def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_id: str,
+) -> None:
+    """Highest public seam: submit ambiguity -> bind/tasks -> state-save resume."""
+    from services.orchestrator.chain import OrchestratorError
+    from services.orchestrator.reconcile import SacctRecord
+    from tests.test_orchestration_chain import ImmediateTerminalSlurmClient
+
+    root = tmp_path / "journal"
+    models = [_model(f"model_{index}", f"basin_{index}") for index in range(18)]
+    for model in models:
+        model["model_package_checksum"] = f"sha256:model-{model['model_id']}"
+        model["resource_profile"] = {
+            **model["resource_profile"],
+            "output_uri": f"s3://nhms/runs/fcst_{source_id.lower()}_2026052106_{model['model_id']}/output/",
+        }
+    first_repository = scheduler_module.FileOrchestrationJournalRepository(root)
+    chain_workspace = tmp_path / "chain-workspace"
+    chain_object_root = tmp_path / "chain-object-store"
+
+    class AcceptedForecastTimeoutClient(ImmediateTerminalSlurmClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.accepted_forecast_job_id: str | None = None
+
+        def submit_job_array(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            accepted = super().submit_job_array(*args, **kwargs)
+            if kwargs.get("stage_name") == "forecast":
+                self.accepted_forecast_job_id = str(accepted["job_id"])
+                raise OrchestratorError("SLURM_GATEWAY_UNAVAILABLE", "response timed out after acceptance")
+            return accepted
+
+    def real_orchestrator(
+        repository: Any,
+        client: Any,
+        *,
+        terminal_stage: str,
+    ) -> Any:
+        return scheduler_module.ForecastOrchestrator(
+            config=OrchestratorConfig(
+                workspace_root=chain_workspace,
+                object_store_root=chain_object_root,
+                object_store_prefix="s3://nhms",
+                poll_interval_seconds=0,
+                job_timeout_seconds=5,
+                source_id=source_id,
+                terminal_stage=terminal_stage,
+                reconcile_slurm_user="scheduler-user",
+                reconcile_slurm_account="scheduler-account",
+            ),
+            repository=repository,
+            slurm_client=client,
+            object_store=LocalObjectStore(chain_object_root, "s3://nhms"),
+        )
+
+    initial_client = AcceptedForecastTimeoutClient()
+    initial_orchestrator = real_orchestrator(first_repository, initial_client, terminal_stage="forecast")
+    initial_scheduler = _RealProductionScheduler(
+        _config(
+            tmp_path / "initial",
+            sources=(source_id,),
+            dry_run=False,
+            now=_dt("2026-05-21T12:00:00Z"),
+            reconcile_slurm_user="scheduler-user",
+            reconcile_slurm_account="scheduler-account",
+        ),
+        registry=FakeRegistry(models),
+        adapters={source_id: FakeAdapter(source_id, [("2026-05-21T06:00:00Z", True)])},
+        active_repository=first_repository,
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source: initial_orchestrator,
+        reconcile_store=first_repository,
+    )
+
+    initial_result = initial_scheduler.run_once()
+
+    assert initial_result.status == "submitted", [
+        (
+            item.get("model_id"),
+            item.get("status"),
+            item.get("reason"),
+            item.get("error_code"),
+            item.get("error_message"),
+        )
+        for item in initial_result.evidence["candidates"]
+    ]
+    assert [submission["stage"] for submission in initial_client.submissions] == ["convert", "forcing", "forecast"]
+    assert initial_client.accepted_forecast_job_id is not None
+    reserved = first_repository.query_reserved_unbound_jobs()[0]
+    assert len(reserved.cohort_members) == 18
+    assert [member["array_task_id"] for member in reserved.cohort_members] == list(range(18))
+    assert all(
+        first_repository._hydro_run_for(member["run_id"])["candidate_id"] == member["candidate_id"]
+        for member in reserved.cohort_members
+    )
+
+    def accounting(*, user: str, account: str, state: str = "RUNNING") -> SacctRecord:
+        return SacctRecord(
+            str(initial_client.accepted_forecast_job_id),
+            state,
+            "nhms_forecast",
+            comment=reserved.slurm_comment,
+            run_id=reserved.run_id,
+            stage="forecast",
+            pipeline_job_id=reserved.job_id,
+            user=user,
+            account=account,
+        )
+
+    wrong_repository = scheduler_module.FileOrchestrationJournalRepository(root)
+    wrong_scheduler = _RealProductionScheduler(
+        _config(tmp_path / "wrong", sources=(source_id,), dry_run=False),
+        registry=FakeRegistry(models),
+        adapters={},
+        active_repository=wrong_repository,
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        reconcile_store=wrong_repository,
+        reconcile_comment_query=lambda _key: accounting(user="foreign-user", account="scheduler-account"),
+        reconcile_sacct_query=lambda _job: None,
+    )
+    wrong_result = wrong_scheduler.run_once()
+    assert wrong_result.evidence["restart_reconcile"]["reserved_unbound"]["outcomes"][0][
+        "reconciliation_decision"
+    ] == "identity_mismatch_blocked"
+    assert wrong_repository.get_pipeline_job(reserved.job_id)["slurm_job_id"] is None
+
+    exact = accounting(user="scheduler-user", account="scheduler-account")
+
+    def terminal(task_count: int) -> SacctRecord:
+        tasks = tuple(
+            SacctRecord(
+                f"{initial_client.accepted_forecast_job_id}_{index}",
+                "COMPLETED",
+                "nhms_forecast",
+                comment=reserved.slurm_comment,
+                array_task_id=index,
+            )
+            for index in range(task_count)
+        )
+        return SacctRecord(
+            str(initial_client.accepted_forecast_job_id),
+            "COMPLETED",
+            "nhms_forecast",
+            comment=reserved.slurm_comment,
+            user="scheduler-user",
+            account="scheduler-account",
+            array_member_job_ids=tuple(task.slurm_job_id for task in tasks),
+            array_task_records=tasks,
+        )
+
+    def execution_must_not_start(_source: str) -> Any:
+        pytest.fail("restart reconciliation must finish before candidate execution")
+
+    partial_repository = scheduler_module.FileOrchestrationJournalRepository(root)
+    partial_scheduler = _RealProductionScheduler(
+        _config(tmp_path / "partial", sources=(source_id,), dry_run=False),
+        registry=FakeRegistry(models),
+        adapters={},
+        active_repository=partial_repository,
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=execution_must_not_start,
+        reconcile_store=partial_repository,
+        reconcile_comment_query=lambda _key: exact,
+        reconcile_sacct_query=lambda _job: terminal(17),
+    )
+    partial_result = partial_scheduler.run_once()
+    partial_reconcile = partial_result.evidence["restart_reconcile"]
+    assert partial_reconcile["reserved_unbound"]["outcomes"][0]["action"] == "bound"
+    assert partial_reconcile["inflight"]["outcomes"][0]["action"] == "task_accounting_incomplete"
+    partial_parent = partial_repository.get_pipeline_job(reserved.job_id)
+    assert partial_parent["slurm_job_id"] == initial_client.accepted_forecast_job_id
+    assert partial_parent["status"] == "reconcile_unverified"
+    assert len(partial_parent["candidate_projections"]) == 17
+    assert partial_result.status == "restart_reconciled"
+    assert partial_result.evidence["execution_boundary"] == "restart_reconcile"
+    assert partial_result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+    assert partial_result.evidence["no_mutation_proof"]["slurm_cancellation_called"] is False
+    assert [submission["stage"] for submission in initial_client.submissions] == ["convert", "forcing", "forecast"]
+    assert initial_client.cancelled_jobs == []
+
+    verified_snapshots = {}
+    for member in reserved.cohort_members[:17]:
+        model_id = str(member["model_id"])
+        candidate_state = partial_repository.candidate_state(
+            source_id=source_id,
+            cycle_time=_dt("2026-05-21T06:00:00Z"),
+            model_id=model_id,
+            run_id=str(member["run_id"]),
+            forcing_version_id=f"forc_{source_id.lower()}_2026052106_{model_id}",
+            candidate_id=str(member["candidate_id"]),
+        )
+        assert candidate_state is not None
+        verified_snapshots[model_id] = {
+            "hydro_run": partial_repository._hydro_run_for(str(member["run_id"])),
+            "event_ids": tuple(
+                event["event_id"]
+                for event in candidate_state["pipeline_events"]
+                if event.get("event_type") == "array_task_reconciled"
+            ),
+        }
+
+    complete_repository = scheduler_module.FileOrchestrationJournalRepository(root)
+    complete_scheduler = _RealProductionScheduler(
+        _config(tmp_path / "complete", sources=(source_id,), dry_run=False),
+        registry=FakeRegistry(models),
+        adapters={},
+        active_repository=complete_repository,
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=execution_must_not_start,
+        reconcile_store=complete_repository,
+        reconcile_comment_query=lambda _key: None,
+        reconcile_sacct_query=lambda _job: terminal(18),
+    )
+    complete_result = complete_scheduler.run_once()
+    complete_reconcile = complete_result.evidence["restart_reconcile"]
+    assert complete_reconcile["reserved_unbound"]["count"] == 0
+    assert complete_reconcile["inflight"]["outcomes"][0]["action"] == "terminal"
+    complete_parent = complete_repository.get_pipeline_job(reserved.job_id)
+    assert complete_parent["status"] == "succeeded"
+    assert len(complete_parent["candidate_projections"]) == 18
+    assert complete_result.status == "restart_reconciled"
+    assert complete_result.evidence["execution_boundary"] == "restart_reconcile"
+    assert complete_result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+    assert complete_result.evidence["no_mutation_proof"]["slurm_cancellation_called"] is False
+    for member in reserved.cohort_members[:17]:
+        model_id = str(member["model_id"])
+        candidate_state = complete_repository.candidate_state(
+            source_id=source_id,
+            cycle_time=_dt("2026-05-21T06:00:00Z"),
+            model_id=model_id,
+            run_id=str(member["run_id"]),
+            forcing_version_id=f"forc_{source_id.lower()}_2026052106_{model_id}",
+            candidate_id=str(member["candidate_id"]),
+        )
+        assert candidate_state is not None
+        assert complete_repository._hydro_run_for(str(member["run_id"])) == verified_snapshots[model_id]["hydro_run"]
+        assert tuple(
+            event["event_id"]
+            for event in candidate_state["pipeline_events"]
+            if event.get("event_type") == "array_task_reconciled"
+        ) == verified_snapshots[model_id]["event_ids"]
+
+    monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast_state_save_qc")
+    resumed_repository = scheduler_module.FileOrchestrationJournalRepository(root)
+    state_save_client = ImmediateTerminalSlurmClient()
+    state_save_orchestrator = real_orchestrator(
+        resumed_repository,
+        state_save_client,
+        terminal_stage="forecast_state_save_qc",
+    )
+    resumed_scheduler = _RealProductionScheduler(
+        _config(
+            tmp_path / "resumed",
+            sources=(source_id,),
+            dry_run=False,
+            now=_dt("2026-05-21T12:00:00Z"),
+        ),
+        registry=FakeRegistry(models),
+        adapters={source_id: FakeAdapter(source_id, [("2026-05-21T06:00:00Z", True)])},
+        active_repository=resumed_repository,
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source: state_save_orchestrator,
+        reconcile_store=resumed_repository,
+        reconcile_comment_query=lambda _key: None,
+        reconcile_sacct_query=lambda _job: None,
+    )
+
+    resumed_result = resumed_scheduler.run_once()
+
+    assert resumed_result.status == "submitted", [
+        {
+            key: candidate.get(key)
+            for key in ("model_id", "status", "reason", "error_code", "error_message", "restart_stage")
+        }
+        for candidate in resumed_result.evidence["candidates"]
+    ]
+    assert [submission["stage"] for submission in state_save_client.submissions] == ["state_save_qc"]
+    assert len(resumed_repository.get_pipeline_job(reserved.job_id)["candidate_projections"]) == 18
 
 
 def test_restart_reconcile_error_marks_final_mutation_proof_unknown(tmp_path: Path) -> None:

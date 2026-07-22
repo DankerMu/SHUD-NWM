@@ -7,6 +7,8 @@ still-running or already-terminal candidate.
 
 from __future__ import annotations
 
+import copy
+import json
 from datetime import UTC, datetime
 from typing import Any
 
@@ -130,6 +132,7 @@ def _file_cohort_repository(
     expected_user: str | None = None,
     expected_account: str | None = None,
     corrupt_digest: bool = False,
+    with_runtime_rows: bool = True,
 ) -> Any:
     from services.orchestrator.accepted_submit_identity import forecast_cohort_digest
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
@@ -155,6 +158,7 @@ def _file_cohort_repository(
                     "run_id": f"fcst_gfs_2026071200_model_{index}",
                     "model_id": f"model_{index}",
                     "basin_id": f"basin_{index}",
+                    "scenario_id": "forecast_gfs_deterministic",
                     "restart_stage": "forecast",
                 }
                 for index in range(member_count)
@@ -163,6 +167,7 @@ def _file_cohort_repository(
             "submission_attempt_started_at": created_at or cycle_time,
             "expected_slurm_user": expected_user,
             "expected_slurm_account": expected_account,
+            "slurm_ownership_required": bool(expected_user and expected_account),
             "created_at": created_at or cycle_time,
             "updated_at": created_at or cycle_time,
         }
@@ -170,6 +175,8 @@ def _file_cohort_repository(
     if corrupt_digest:
         record["cohort_digest"] = "0" * 64
     repository.reserve_pipeline_job(record)
+    if with_runtime_rows:
+        _append_cohort_placeholders(repository, member_count)
     return repository
 
 
@@ -178,20 +185,26 @@ def _append_cohort_placeholders(repository: Any, count: int = 18) -> None:
         repository.append_historical_hydro_run(
             {
                 "run_id": f"fcst_gfs_2026071200_model_{index}",
+                "candidate_id": f"gfs:2026-07-12T00:00:00Z:model_{index}:forecast_gfs_deterministic",
                 "run_type": "forecast",
-                "scenario_id": "operational",
+                "scenario_id": "forecast_gfs_deterministic",
                 "model_id": f"model_{index}",
+                "basin_id": f"basin_{index}",
+                "array_task_id": index,
                 "basin_version_id": f"basin_v{index}",
                 "forcing_version_id": f"forc_gfs_2026071200_model_{index}",
+                "init_state_id": f"state_{index}",
                 "source_id": "gfs",
                 "cycle_time": "2026-07-12T00:00:00Z",
                 "start_time": "2026-07-12T00:00:00Z",
                 "end_time": "2026-07-12T18:00:00Z",
-                "status": "created",
+                "status": "failed",
                 "submission_attempt": 1,
                 "run_manifest_uri": f"s3://nhms/runs/model_{index}/run-manifest.json",
                 "output_uri": f"s3://nhms/runs/model_{index}/output",
                 "log_uri": f"s3://nhms/runs/model_{index}/logs",
+                "error_code": "SLURM_GATEWAY_UNAVAILABLE",
+                "error_message": "transport timeout",
             }
         )
 
@@ -497,6 +510,192 @@ def test_file_cohort_corrupt_digest_blocks_initial_bind(tmp_path: Any) -> None:
 
 
 @pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("array_task_id", 9),
+        ("candidate_id", "gfs:2026-07-13T00:00:00Z:model_0:forecast_gfs_deterministic"),
+        ("run_id", "fcst_gfs_2026071300_model_0"),
+        ("model_id", "wrong-model"),
+        ("scenario_id", "wrong-scenario"),
+        ("restart_stage", "parse"),
+    ],
+)
+def test_file_cohort_recomputed_digest_cannot_override_canonical_member_shape(
+    tmp_path: Any,
+    field: str,
+    value: Any,
+) -> None:
+    from services.orchestrator.accepted_submit_identity import (
+        forecast_cohort_digest,
+        forecast_cohort_identity_is_valid,
+    )
+
+    repository = _file_cohort_repository(tmp_path, member_count=2)
+    identity = copy.deepcopy(
+        repository.get_pipeline_job("job_cycle_gfs_2026071200_forecast_fixture_forecast")
+    )
+    identity["cohort_members"][0][field] = value
+    identity["cohort_digest"] = forecast_cohort_digest(identity)
+
+    assert forecast_cohort_identity_is_valid(identity) is False
+
+
+@pytest.mark.parametrize("phase", ["initial_bind", "terminal_projection"])
+@pytest.mark.parametrize("mutation", ["candidate_cycle", "scenario", "basin", "model", "order"])
+def test_file_cohort_runtime_manifest_identity_blocks_joint_member_and_digest_mutation(
+    tmp_path: Any,
+    phase: str,
+    mutation: str,
+) -> None:
+    from services.orchestrator.accepted_submit_identity import forecast_cohort_digest
+    from services.orchestrator.reconcile import (
+        SacctRecord,
+        reconcile_inflight_jobs,
+        reconcile_reserved_unbound_jobs,
+    )
+
+    repository = _file_cohort_repository(tmp_path, member_count=2)
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    exact = SacctRecord(
+        "17667",
+        "RUNNING",
+        "nhms_forecast",
+        comment=f"nhms_idem:{key}",
+        run_id="cycle_gfs_2026071200_forecast_fixture",
+        stage="forecast",
+        pipeline_job_id=job_id,
+    )
+    if phase == "terminal_projection":
+        assert reconcile_reserved_unbound_jobs(repository, comment_query=lambda _key: exact)[0].action == "bound"
+
+    identity = copy.deepcopy(repository.get_pipeline_job(job_id))
+    members = identity["cohort_members"]
+    if mutation == "candidate_cycle":
+        members[0]["candidate_id"] = members[0]["candidate_id"].replace("2026-07-12", "2026-07-13")
+    elif mutation == "scenario":
+        members[0]["scenario_id"] = "forecast_ifs_deterministic"
+        members[0]["candidate_id"] = members[0]["candidate_id"].replace(
+            "forecast_gfs_deterministic", "forecast_ifs_deterministic"
+        )
+    elif mutation == "basin":
+        members[0]["basin_id"] = "foreign_basin"
+    elif mutation == "model":
+        members[0]["model_id"] = "foreign_model"
+        members[0]["run_id"] = "fcst_gfs_2026071200_foreign_model"
+        members[0]["candidate_id"] = (
+            "gfs:2026-07-12T00:00:00Z:foreign_model:forecast_gfs_deterministic"
+        )
+    else:
+        members.reverse()
+        for index, member in enumerate(members):
+            member["array_task_id"] = index
+    identity["cohort_digest"] = forecast_cohort_digest(identity)
+    repository.upsert_pipeline_job(identity)
+
+    before_hydro = [repository._hydro_run_for(f"fcst_gfs_2026071200_model_{index}") for index in range(2)]
+    if phase == "initial_bind":
+        outcome = reconcile_reserved_unbound_jobs(repository, comment_query=lambda _key: exact)[0]
+        assert repository.get_pipeline_job(job_id)["slurm_job_id"] is None
+    else:
+        tasks = tuple(
+            SacctRecord(
+                f"17667_{index}",
+                "COMPLETED",
+                "nhms_forecast",
+                comment=f"nhms_idem:{key}",
+                array_task_id=index,
+            )
+            for index in range(2)
+        )
+        terminal = SacctRecord(
+            "17667",
+            "COMPLETED",
+            "nhms_forecast",
+            comment=f"nhms_idem:{key}",
+            array_member_job_ids=tuple(task.slurm_job_id for task in tasks),
+            array_task_records=tasks,
+        )
+        outcome = reconcile_inflight_jobs(repository, sacct_query=lambda _job: terminal)[0]
+        assert not repository.get_pipeline_job(job_id).get("candidate_projections")
+    assert outcome.action == "identity_mismatch_blocked"
+    assert [repository._hydro_run_for(f"fcst_gfs_2026071200_model_{index}") for index in range(2)] == before_hydro
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("source_id", "IFS"),
+        ("cycle_id", "gfs_2026071300"),
+        ("run_id", "cycle_gfs_2026071300_forecast_fixture"),
+        ("job_id", "job_cycle_gfs_2026071200_forecast_fixture_forecast_wrong"),
+        ("idempotency_key", "cycle_gfs_2026071200_forecast_fixture:forecast:wrong"),
+        ("slurm_comment", "nhms_idem:wrong"),
+    ],
+)
+def test_file_cohort_recomputed_digest_cannot_override_canonical_tuple(
+    tmp_path: Any,
+    field: str,
+    value: Any,
+) -> None:
+    from services.orchestrator.accepted_submit_identity import (
+        forecast_cohort_digest,
+        forecast_cohort_identity_is_valid,
+    )
+
+    repository = _file_cohort_repository(tmp_path, member_count=2)
+    identity = copy.deepcopy(
+        repository.get_pipeline_job("job_cycle_gfs_2026071200_forecast_fixture_forecast")
+    )
+    identity[field] = value
+    identity["cohort_digest"] = forecast_cohort_digest(identity)
+
+    assert forecast_cohort_identity_is_valid(identity) is False
+
+
+def test_file_cohort_task_identity_errors_isolate_verified_siblings(tmp_path: Any) -> None:
+    from services.orchestrator.reconcile import SacctRecord, reconcile_inflight_jobs
+
+    repository = _file_cohort_repository(tmp_path)
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    repository.bind_pipeline_job_reservation(key, slurm_job_id="17667", status="submitted")
+    tasks = [
+        SacctRecord(
+            f"17667_{index}",
+            "RUNNING" if index == 7 else ("FAILED" if index % 2 else "COMPLETED"),
+            "nhms_forecast",
+            comment=f"nhms_idem:{key}",
+            array_task_id=index,
+        )
+        for index in range(18)
+        if index != 5
+    ]
+    tasks.append(
+        SacctRecord("17667_6.batch", "COMPLETED", "nhms_forecast", array_task_id=6)
+    )
+    tasks.append(
+        SacctRecord("17667_99", "COMPLETED", "nhms_forecast", array_task_id=99)
+    )
+    master = SacctRecord(
+        "17667",
+        "COMPLETED",
+        "nhms_forecast",
+        comment=f"nhms_idem:{key}",
+        array_member_job_ids=tuple(task.slurm_job_id for task in tasks),
+        array_task_records=tuple(tasks),
+    )
+
+    outcome = reconcile_inflight_jobs(repository, sacct_query=lambda _job_id: master)[0]
+    projections = repository.get_pipeline_job(job_id)["candidate_projections"]
+    projected_ids = {int(item["array_task_id"]) for item in projections}
+
+    assert outcome.action == "task_accounting_incomplete"
+    assert projected_ids == set(range(18)) - {5, 6, 7}
+    assert {item["array_task_outcome"] for item in projections} == {"succeeded", "failed"}
+
+
+@pytest.mark.parametrize(
     "updates",
     [
         {"comment": "nhms_idem:wrong"},
@@ -549,13 +748,16 @@ def test_file_cohort_batch_projection_bounds_lock_append_and_materialization(
     monkeypatch: pytest.MonkeyPatch,
     member_count: int,
 ) -> None:
-    repository = _file_cohort_repository(tmp_path / str(member_count), member_count=member_count)
+    repository = _file_cohort_repository(
+        tmp_path / str(member_count), member_count=member_count, with_runtime_rows=False
+    )
     key = "cycle_gfs_2026071200_forecast_fixture:forecast"
     repository.bind_pipeline_job_reservation(key, slurm_job_id="17667", status="submitted")
-    calls = {"lock": 0, "append": 0, "materialize": 0}
+    calls = {"lock": 0, "append": 0, "materialize": 0, "event_scan": 0}
     original_lock = repository._locked_cycle_write
     original_append = repository._append_journal_records_unlocked
     original_materialize = repository._materialize_latest_unlocked
+    original_event_scan = repository._next_event_id_unlocked
 
     def counted_lock(**kwargs: Any) -> Any:
         calls["lock"] += 1
@@ -569,9 +771,14 @@ def test_file_cohort_batch_projection_bounds_lock_append_and_materialization(
         calls["materialize"] += 1
         return original_materialize(**kwargs)
 
+    def counted_event_scan(**kwargs: Any) -> Any:
+        calls["event_scan"] += 1
+        return original_event_scan(**kwargs)
+
     monkeypatch.setattr(repository, "_locked_cycle_write", counted_lock)
     monkeypatch.setattr(repository, "_append_journal_records_unlocked", counted_append)
     monkeypatch.setattr(repository, "_materialize_latest_unlocked", counted_materialize)
+    monkeypatch.setattr(repository, "_next_event_id_unlocked", counted_event_scan)
     projections = [
         {
             "candidate_id": f"gfs:2026-07-12T00:00:00Z:model_{index}:forecast_gfs_deterministic",
@@ -596,7 +803,57 @@ def test_file_cohort_batch_projection_bounds_lock_append_and_materialization(
     )
 
     assert result["total"] == (2 * member_count) + 1
-    assert calls == {"lock": 1, "append": 1, "materialize": member_count}
+    assert calls == {"lock": 1, "append": 1, "materialize": member_count, "event_scan": 1}
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    root = repository.root
+    journal_records = [
+        json.loads(line)
+        for path in sorted(root.rglob("*.jsonl"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    event_ids = [
+        int(record["payload"]["event_id"])
+        for record in journal_records
+        if record["record_type"] == "pipeline_event"
+    ]
+    assert len(event_ids) == member_count
+    assert len(event_ids) == len(set(event_ids))
+    assert event_ids == list(range(event_ids[0], event_ids[0] + member_count))
+
+    reopened = FileOrchestrationJournalRepository(root)
+    for index in (0, member_count - 1):
+        candidate_job_id = f"job_fcst_gfs_2026071200_model_{index}_forecast_reconciled_17667_{index}"
+        direct_path = root / "pipeline-jobs" / f"{candidate_job_id}.json"
+        direct_payload = json.loads(direct_path.read_text(encoding="utf-8"))["payload"]
+        replayed = reopened.get_pipeline_job(candidate_job_id)
+        latest_path = root / "latest" / "gfs" / "2026071200" / f"model_{index}.json"
+        latest = json.loads(latest_path.read_text(encoding="utf-8"))
+        latest_payload = next(job for job in latest["pipeline_jobs"] if job["job_id"] == candidate_job_id)
+        assert direct_payload == replayed == latest_payload
+
+    before_replay = {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file() and path.suffix in {".json", ".jsonl"}
+    }
+    second = reopened.project_forecast_cohort_tasks(
+        "job_cycle_gfs_2026071200_forecast_fixture_forecast",
+        master_slurm_job_id="17667",
+        projections=projections,
+        complete=True,
+        master_status="succeeded",
+        master_error_code=None,
+        reconciliation_decision="terminal_accounting_complete",
+    )
+    after_replay = {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file() and path.suffix in {".json", ".jsonl"}
+    }
+    assert second == {"total": 0, "pipeline_status": 0, "pipeline_event": 0}
+    assert after_replay == before_replay
 
 
 def test_non_forecast_file_cohort_terminal_reconcile_never_projects_forecast_success(

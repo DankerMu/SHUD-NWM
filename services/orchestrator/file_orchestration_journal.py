@@ -27,6 +27,7 @@ from packages.common.safe_fs import (
 from packages.common.slurm_env import secret_manifest_value_reason
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator import chain_repository_state
+from services.orchestrator.accepted_submit_identity import ordered_cohort_members
 from services.orchestrator.chain_repository import (
     ACTIVE_HYDRO_STATUSES,
     COMPLETED_HYDRO_STATUSES,
@@ -136,6 +137,7 @@ _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS = (
     "submission_attempt_started_at",
     "expected_slurm_user",
     "expected_slurm_account",
+    "slurm_ownership_required",
     "reconciliation_source",
     "reconciliation_decision",
     "matched_slurm_job_id",
@@ -765,11 +767,15 @@ class FileOrchestrationJournalRepository:
 
     def create_hydro_run(self, context: Any, manifest: dict[str, Any]) -> dict[str, Any]:
         init_state = manifest.get("initial_state") if isinstance(manifest.get("initial_state"), Mapping) else {}
+        model = manifest.get("model") if isinstance(manifest.get("model"), Mapping) else {}
         row = {
             "run_id": str(context.run_id),
+            "candidate_id": manifest.get("candidate_id"),
             "run_type": manifest.get("run_type", "forecast"),
             "scenario_id": manifest["scenario_id"],
             "model_id": str(context.model_id),
+            "basin_id": model.get("basin_id") or getattr(context, "basin_id", None),
+            "array_task_id": manifest.get("array_task_id", getattr(context, "array_task_id", None)),
             "basin_version_id": str(context.basin_version_id),
             "forcing_version_id": str(context.forcing_version_id),
             "init_state_id": getattr(context, "init_state_id", None) or init_state.get("state_id"),
@@ -795,9 +801,12 @@ class FileOrchestrationJournalRepository:
         cycle_time = parse_cycle_time(str(manifest["cycle_time"]))
         row = {
             "run_id": str(manifest["run_id"]),
+            "candidate_id": manifest.get("candidate_id"),
             "run_type": manifest.get("run_type", "forecast"),
             "scenario_id": manifest["scenario_id"],
             "model_id": str(model["model_id"]),
+            "basin_id": model.get("basin_id") or basin.get("basin_id"),
+            "array_task_id": basin.get("task_id"),
             "basin_version_id": str(model["basin_version_id"]),
             "forcing_version_id": forcing.get("forcing_version_id"),
             "init_state_id": initial_state.get("state_id") or basin.get("init_state_id"),
@@ -846,6 +855,47 @@ class FileOrchestrationJournalRepository:
                 materialize_model_id=model_id,
             )
         return _public_scheduler_row(record)
+
+    def forecast_cohort_runtime_identity_matches(self, identity: Mapping[str, Any]) -> bool:
+        """Validate accepted-submit members against independently written run manifests."""
+        members = ordered_cohort_members(identity.get("cohort_members"))
+        if not members:
+            return False
+        try:
+            source_id = _normalize_file_source_id(identity.get("source_id"), field="source_id")
+            cycle_id = _required_safe_identity(identity, "cycle_id")
+            cycle_time = parse_cycle_time(cycle_id.split("_", maxsplit=1)[1])
+            submission_attempt = max(int(identity.get("submission_attempt") or 1), 1)
+            expected_cycle_time = _format_utc(cycle_time)
+            for member in members:
+                hydro_run = self._hydro_run_for(str(member.get("run_id") or ""))
+                if hydro_run is None:
+                    return False
+                if {
+                    "candidate_id": str(hydro_run.get("candidate_id") or ""),
+                    "run_id": str(hydro_run.get("run_id") or ""),
+                    "model_id": str(hydro_run.get("model_id") or ""),
+                    "basin_id": str(hydro_run.get("basin_id") or ""),
+                    "scenario_id": str(hydro_run.get("scenario_id") or ""),
+                    "array_task_id": int(hydro_run.get("array_task_id")),
+                } != {
+                    "candidate_id": str(member.get("candidate_id") or ""),
+                    "run_id": str(member.get("run_id") or ""),
+                    "model_id": str(member.get("model_id") or ""),
+                    "basin_id": str(member.get("basin_id") or ""),
+                    "scenario_id": str(member.get("scenario_id") or ""),
+                    "array_task_id": int(member.get("array_task_id")),
+                }:
+                    return False
+                if (
+                    _normalize_file_source_id(hydro_run.get("source_id"), field="source_id") != source_id
+                    or _format_utc(_parse_cycle_time_field(hydro_run, "cycle_time")) != expected_cycle_time
+                    or max(int(hydro_run.get("submission_attempt") or 1), 1) != submission_attempt
+                ):
+                    return False
+        except (FileOrchestrationJournalError, IndexError, TypeError, ValueError):
+            return False
+        return True
 
     def update_hydro_run_status(
         self,
@@ -1003,6 +1053,7 @@ class FileOrchestrationJournalRepository:
                 "restart_stage",
                 "expected_slurm_user",
                 "expected_slurm_account",
+                "slurm_ownership_required",
                 "native_shud_resubmitted",
             ):
                 if key in request_row and request_row.get(key) not in (None, ""):
@@ -2569,6 +2620,7 @@ class FileOrchestrationJournalRepository:
             ),
             "expected_slurm_user": record.get("expected_slurm_user"),
             "expected_slurm_account": record.get("expected_slurm_account"),
+            "slurm_ownership_required": bool(record.get("slurm_ownership_required", False)),
             "reconciliation_source": record.get("reconciliation_source"),
             "reconciliation_decision": record.get("reconciliation_decision"),
             "matched_slurm_job_id": record.get("matched_slurm_job_id"),
@@ -4274,6 +4326,7 @@ def _bounded_cohort_members(value: Any) -> list[dict[str, Any]]:
         "run_id",
         "model_id",
         "basin_id",
+        "scenario_id",
         "restart_stage",
     )
     result: list[dict[str, Any]] = []

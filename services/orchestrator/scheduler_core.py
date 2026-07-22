@@ -437,6 +437,8 @@ class ProductionScheduler:
                 terminal_stage=config.terminal_stage,
                 slurm_job_type_templates=dict(self.config.slurm_job_type_templates or {}),
                 slurm_env=dict(self.config.slurm_env),
+                reconcile_slurm_user=self.config.reconcile_slurm_user,
+                reconcile_slurm_account=self.config.reconcile_slurm_account,
             )
         if config.source_id != source_id:
             config = _scheduler.OrchestratorConfig(
@@ -458,6 +460,8 @@ class ProductionScheduler:
                 terminal_stage=config.terminal_stage,
                 slurm_job_type_templates=config.slurm_job_type_templates,
                 slurm_env=config.slurm_env,
+                reconcile_slurm_user=config.reconcile_slurm_user,
+                reconcile_slurm_account=config.reconcile_slurm_account,
             )
         return _scheduler.ForecastOrchestrator(
             config=config,

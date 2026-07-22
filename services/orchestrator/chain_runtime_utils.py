@@ -190,12 +190,11 @@ def _replacement_retry_scoped_cycle_execution(basins: Sequence[Mapping[str, Any]
         # replacement cohort.  The run-scoped active-job check above still
         # rejects a real in-flight submission for this exact cohort.
         return True
-    if len(basins) != 1:
-        return False
-    state_evidence = basins[0].get("state_evidence")
-    if not isinstance(state_evidence, Mapping):
-        return False
-    if state_evidence.get("decision") == "retry_after_completed_stage":
+    completed_stage_restarts = []
+    for basin in basins:
+        state_evidence = basin.get("state_evidence")
+        if not isinstance(state_evidence, Mapping) or state_evidence.get("decision") != "retry_after_completed_stage":
+            break
         completed_stage = state_evidence.get("completed_stage_evidence")
         restart_stage = _canonical_restart_stage(
             state_evidence.get("restart_stage")
@@ -203,11 +202,18 @@ def _replacement_retry_scoped_cycle_execution(basins: Sequence[Mapping[str, Any]
             or (completed_stage.get("restart_stage") if isinstance(completed_stage, Mapping) else None)
             or (completed_stage.get("restart_from_stage") if isinstance(completed_stage, Mapping) else None)
         )
-        return (
+        completed_stage_restarts.append(
             isinstance(completed_stage, Mapping)
             and str(completed_stage.get("status") or "") in TERMINAL_PIPELINE_SUCCESS_STATUSES
             and restart_stage is not None
         )
+    if basins and len(completed_stage_restarts) == len(basins) and all(completed_stage_restarts):
+        return True
+    if len(basins) != 1:
+        return False
+    state_evidence = basins[0].get("state_evidence")
+    if not isinstance(state_evidence, Mapping):
+        return False
     if state_evidence.get("decision") == "retry_after_model_package_refresh":
         return True
     retry_policy = state_evidence.get("retry_policy")

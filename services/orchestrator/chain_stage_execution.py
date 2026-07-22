@@ -147,6 +147,11 @@ def submit_and_wait_cycle_stage(
     # a legacy repo without the reservation surface - proceeds to sbatch.
     if orchestrator._reservation_already_inflight(reservation):
         return orchestrator._skip_duplicate_submission(stage, context, pipeline_job_id, reservation), None
+    if reservation is not None and reservation.created:
+        # A reclaimed durable reservation increments the authoritative attempt.
+        # Runtime manifests/placeholders must carry that exact attempt so a
+        # later accepted-submit ambiguity releases the current, not stale, rows.
+        context.retry_attempt = reservation.submission_attempt
 
     submitted: dict[str, Any]
     manifest_index_path: Path | None = None
