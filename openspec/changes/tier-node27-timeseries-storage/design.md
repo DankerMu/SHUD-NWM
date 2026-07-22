@@ -321,7 +321,7 @@ Fixture level: expanded. Repair intensity: high. Project profile: NHMS.
 
 Change surface:
 
-- `infra/systemd/nhms-node27-product-archive.{service,timer}` (new): oneshot service + daily timer running `scripts/node27_product_archive_once.sh`.
+- `infra/systemd/nhms-node27-product-archive.{service,timer}` (new): oneshot service + hourly timer running `scripts/node27_product_archive_once.sh`, with the per-tick processing bound preserved.
 - `infra/systemd/nhms-node27-storage-inventory-audit.{service,timer}` (new): oneshot service + daily timer running the audit `_once.sh`; cadence must be strictly shorter than the retention gate's receipt validity window (design decision D6).
 - `infra/env/node27-product-archive.example` (new): `NHMS_ARCHIVE_ROOT`, `NHMS_ARCHIVE_MIN_AGE_DAYS`, per-tick bound, free-space warn/refuse watermarks, tool path.
 - `infra/env/node27-storage-inventory-audit.example` (new): DB URL, `NHMS_ARCHIVE_ROOT`, receipt path.

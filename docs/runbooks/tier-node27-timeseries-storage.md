@@ -98,7 +98,7 @@ next tick runs:
 
 | Order | Timer                                        | OnCalendar         | Rationale |
 |-------|----------------------------------------------|--------------------|-----------|
-| 1     | `nhms-node27-product-archive.timer`          | `03:20:00 UTC` daily | Bounded enforce archives/retirements (per-tick bound) before audit scans final leaves. |
+| 1     | `nhms-node27-product-archive.timer`          | hourly at `*:20:00 UTC` | Bounded enforce archives/retirements (per-tick bound); the `03:20` tick still precedes the daily audit. |
 | 2     | `nhms-node27-storage-inventory-audit.timer`  | `03:40:00 UTC` daily | Audit reads the mover's committed final leaves and emits the completeness receipt. |
 | 3     | `nhms-node27-resource-governance.timer`      | `04:10:00 UTC` daily | Governance audit reports the four new units + archive-root free-space band. |
 | 4     | `nhms-node27-timeseries-compression.timer`   | `04:25:00 UTC` daily | Terminal-chunk compression runs after governance so the previous-day receipt is already captured. Enablement is task §4.5 (requires migration `000047` applied first). |
@@ -117,7 +117,7 @@ extending the retention receipt validity window first.**
 
 ## Operation
 
-The installed product-archive service passes `--enforce`; each daily tick is
+The installed product-archive service passes `--enforce`; each hourly tick is
 still capped by `NODE27_PRODUCT_ARCHIVE_PER_TICK_BOUND` (currently 8) and every
 selected object must pass archive verification, source-retirement preflight,
 and the free-space gate. Operators use the same wrapper without `--enforce`
@@ -495,7 +495,7 @@ If either env var is set, both must be set; empty/negative/non-integer
 values fail closed at startup with no truthiness fallback.
 
 Tune by watching the governance receipt `archive_root.band` field after
-each daily tick:
+each hourly mover tick (the governance audit itself remains daily):
 
 - `clean` — `free_bytes >= warn_bytes` — steady state; no action.
 - `warn` — `refuse_bytes <= free_bytes < warn_bytes` — review retention or

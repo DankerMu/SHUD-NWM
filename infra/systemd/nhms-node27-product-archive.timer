@@ -1,8 +1,8 @@
 [Unit]
-Description=Run NHMS node-27 product archive mover daily
+Description=Run NHMS node-27 product archive mover hourly
 
 [Timer]
-OnCalendar=*-*-* 03:20:00 UTC
+OnCalendar=*-*-* *:20:00 UTC
 Persistent=true
 Unit=nhms-node27-product-archive.service
 

@@ -27,6 +27,7 @@ _LIVE_SHAPE = _ROOT / "tests/fixtures/node27_product_archive/live-shape/object-s
 _LIVE_SHAPE_PROVENANCE = _LIVE_SHAPE.parent / "provenance.json"
 _LIVE_SHAPE_NOW = datetime(2026, 9, 1, tzinfo=UTC)
 _SYSTEMD_SERVICE_PATH = _ROOT / "infra/systemd/nhms-node27-product-archive.service"
+_SYSTEMD_TIMER_PATH = _ROOT / "infra/systemd/nhms-node27-product-archive.timer"
 _SPEC = importlib.util.spec_from_file_location("node27_product_archive", _ROOT / "scripts/node27_product_archive.py")
 assert _SPEC and _SPEC.loader
 archive = importlib.util.module_from_spec(_SPEC)
@@ -34,6 +35,14 @@ sys.modules[_SPEC.name] = archive
 _SPEC.loader.exec_module(archive)
 
 _MISSING = object()
+
+
+def test_systemd_timer_runs_hourly_with_bounded_work_per_tick() -> None:
+    timer = _SYSTEMD_TIMER_PATH.read_text(encoding="utf-8")
+
+    assert "OnCalendar=*-*-* *:20:00 UTC" in timer
+    assert "Persistent=true" in timer
+    assert "Unit=nhms-node27-product-archive.service" in timer
 
 
 def _mount_id(fd: int) -> int:
