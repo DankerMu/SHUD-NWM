@@ -31,6 +31,7 @@ from packages.common.safe_fs import (
 )
 from packages.common.source_identity import normalize_source_id
 from packages.common.storage import (
+    DEFAULT_ARCHIVE_MIN_AGE_DAYS,
     DEFAULT_DB_RETENTION_DAYS,
     ArchiveConfigurationError,
     ArchiveIdentity,
@@ -1038,7 +1039,7 @@ def config_from_args(args: argparse.Namespace) -> AuditConfig:
         raw_age: int | str = (
             args.archive_min_age_days
             if args.archive_min_age_days is not None
-            else os.getenv("NHMS_ARCHIVE_MIN_AGE_DAYS", "45")
+            else os.getenv("NHMS_ARCHIVE_MIN_AGE_DAYS", str(DEFAULT_ARCHIVE_MIN_AGE_DAYS))
         )
         try:
             age = int(raw_age)

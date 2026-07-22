@@ -3778,12 +3778,25 @@ def test_main_lock_contender_emits_one_diagnostic_and_preserves_receipt(
     assert config.receipt_path.read_text() == "old\n"
 
 
-@pytest.mark.parametrize("age", [0, 20, 29])
+@pytest.mark.parametrize("age", [0, 13])
 def test_invalid_minimum_age_never_falls_back(tmp_path: Path, age: int) -> None:
     config = _config(tmp_path, enforce=False)
     config = archive.MoverConfig(**{**config.__dict__, "minimum_age_days": age})
-    with pytest.raises(archive.ArchiveMoverError, match="at least 30"):
+    with pytest.raises(archive.ArchiveMoverError, match="at least 14"):
         archive.run(config, mount_id_provider=_mount_id, rename_impl=_rename_noreplace)
+
+
+def test_minimum_age_equal_to_fourteen_day_policy_is_accepted(tmp_path: Path) -> None:
+    config = _config(tmp_path, enforce=False)
+    config = archive.MoverConfig(**{**config.__dict__, "minimum_age_days": 14})
+
+    receipt, exit_code = archive.run(
+        config, mount_id_provider=_mount_id, rename_impl=_rename_noreplace
+    )
+
+    assert exit_code == 0
+    assert receipt["minimum_age_days"] == 14
+    assert receipt["outcome"] == "success"
 
 
 def test_receipt_schema_positive_and_negative() -> None:
@@ -3794,6 +3807,10 @@ def test_receipt_schema_positive_and_negative() -> None:
     broken.pop("terminals")
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.Draft7Validator(schema).validate(broken)
+    below_policy = dict(example)
+    below_policy["minimum_age_days"] = 13
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.Draft7Validator(schema).validate(below_policy)
 
 
 @pytest.mark.parametrize(

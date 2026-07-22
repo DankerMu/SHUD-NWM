@@ -871,12 +871,12 @@ def test_archive_configuration_requires_explicit_cleanup_set(tmp_path: Path) -> 
 
 
 def test_resolve_archive_storage_config_rejects_minimum_age_below_retention(tmp_path: Path) -> None:
-    with pytest.raises(ArchiveConfigurationError, match="20 days is below DB retention 30 days"):
+    with pytest.raises(ArchiveConfigurationError, match="13 days is below DB retention 14 days"):
         resolve_archive_storage_config(
             cleanup_roots={"raw": tmp_path / "object-store"},
             env={
                 "NHMS_ARCHIVE_ROOT": str(tmp_path / "archive"),
-                "NHMS_ARCHIVE_MIN_AGE_DAYS": "20",
+                "NHMS_ARCHIVE_MIN_AGE_DAYS": "13",
             },
         )
 
@@ -887,8 +887,8 @@ def test_resolve_archive_storage_config_uses_default_age(tmp_path: Path) -> None
         env={"NHMS_ARCHIVE_ROOT": str(tmp_path / "archive")},
     )
 
-    assert config.archive_min_age_days == 45
-    assert config.retention_days == 30
+    assert config.archive_min_age_days == 14
+    assert config.retention_days == 14
 
 
 def test_raw_retention_object_store_override_precedence_is_unchanged(

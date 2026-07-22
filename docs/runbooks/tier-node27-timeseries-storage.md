@@ -4,6 +4,10 @@ Operation, rollback, and cadence rationale for the node-27 archive lane
 (product mover + storage inventory audit) delivered under
 `openspec/changes/tier-node27-timeseries-storage`.
 
+Current policy (effective 2026-07-21): product retirement and DB retention use
+a 14-day eligibility window. Compression remains earlier at 7 days. Historical
+30/45-day receipts below are audit evidence only, not commands for new runs.
+
 - Design record: `openspec/changes/tier-node27-timeseries-storage/design.md`
 - Architecture record: `docs/adr/0002-node27-timeseries-hot-cold-tiering.md`
 - Display carve-out: `docs/adr/0001-display-timeseries-carveout.md` (the
@@ -311,7 +315,7 @@ no residue; uncertain cleanup is `indeterminate` and names only its safe
 object-store-relative residue. Do not manually remove an indeterminate probe
 until its receipt and filesystem identity have been captured.
 
-Run the selected-source audit as `nwm` after an ordinary 30-day dry-run. This
+Run the selected-source audit as `nwm` after an ordinary 14-day dry-run. This
 loop is NUL-safe through base64 and therefore also covers legal spaces in run,
 model, or basin identifiers. It audits every selected lane rather than a
 hand-picked state sample:
@@ -321,7 +325,7 @@ hand-picked state sample:
 set -euo pipefail
 cd /home/nwm/NWM
 NODE27_PRODUCT_ARCHIVE_ENV_FILE=/home/nwm/NWM/infra/env/node27-product-archive.env \
-  ./scripts/node27_product_archive_once.sh --minimum-age-days 30
+  ./scripts/node27_product_archive_once.sh --minimum-age-days 14
 
 receipt=/home/nwm/node27-product-archive-logs/receipt.json
 object_root=/home/ghdc/nwm/object-store
@@ -396,7 +400,7 @@ randomized parent probes; do not substitute a shell `touch` test for them:
 cd /home/nwm/NWM
 NODE27_PRODUCT_ARCHIVE_ENV_FILE=/home/nwm/NWM/infra/env/node27-product-archive.env \
   ./scripts/node27_product_archive_once.sh \
-  --minimum-age-days 30 --enforce
+  --minimum-age-days 14 --enforce
 jq -e '
   .mode == "enforce" and .outcome == "success" and
   (.selected | length > 0) and
@@ -404,7 +408,9 @@ jq -e '
 ' /home/nwm/node27-product-archive-logs/receipt.json
 ```
 
-The first authorized 30-day enforce attempt on deployed head
+The following 30-day receipts are historical evidence from before the
+2026-07-21 policy change to 14 days. The first authorized 30-day enforce
+attempt on deployed head
 `cec39013167bc7ce6585ed34e3a9194832f99900` is failed evidence for this gate:
 the preceding dry-run discovered 320 candidates and selected eight, but
 enforce published eight verified archives before all eight source tombstone
@@ -1437,8 +1443,8 @@ tuples include, sampled within or older than that window:
 
 The drill EMIT contract is per-cycle: each verified product manifest
 contributes one 24 h coverage tuple sampled within or older than the
-drop window (see §7.4). The retention gate check is UNION-based: a 30 d
-drop window is normally covered by ~30 daily tuples whose union spans
+drop window (see §7.4). The retention gate check is UNION-based: a 14 d
+drop window is normally covered by ~14 daily tuples whose union spans
 it — no single tuple is expected to individually contain the drop
 window. These two shapes coexist deliberately (drill emits per-cycle
 tuples; retention union-checks them against the candidate drop window).
@@ -1480,7 +1486,7 @@ a clean environment (no-op if already recovered):
 
 ### 7.7 Live receipts (§5.2 boundary)
 
-Live PASS receipts on node-27 covering the planned 30-day drop window
+Live PASS receipts on node-27 covering the planned 14-day drop window
 are the domain of task §5.2 (follow-up commit under issue #854, not part
 of the §5.1 PR that introduced this section). Once §5.2 lands, the live
 receipts will be committed under
@@ -1491,13 +1497,13 @@ mover and audit receipt directories.
 
 The retention runner
 (`scripts/node27_timeseries_retention.py`, issue #855) drops chunks
-strictly older than the drop window (default 30 days) from the two D3
+strictly older than the drop window (default 14 days) from the two D3
 detail hypertables `hydro.river_timeseries` and
 `met.forcing_station_timeseries` via TimescaleDB `drop_chunks`. Enforce
 mode is hard-gated on TWO archive receipts and refuses fail-closed if
 either is missing, stale, or fails to cover the drop window (spec
 `timeseries-db-retention` and design D6 / D7). Compression state is
-never a gate — compressed chunks older than 30 days are exactly the
+never a gate — compressed chunks older than 14 days are exactly the
 retention target (H3 divergence from #851).
 
 Related documents:
@@ -1574,8 +1580,8 @@ surfaces in the same commit.
 - `DRILL_RECEIPT_FAIL` — drill receipt `verdict = FAIL`.
 - `DRILL_COVERAGE_FORCING_MISSING` — no set of `source=forcing` coverage
   tuples whose UNION covers the drop window (per-cycle 24 h tuples merge
-  into a single covering interval; a 30 d drop window is normally covered
-  by ~30 daily tuples).
+  into a single covering interval; a 14 d drop window is normally covered
+  by ~14 daily tuples).
 - `DRILL_COVERAGE_RUNS_MISSING` — no set of `source=runs` coverage tuples
   whose UNION covers the drop window.
 - `DRILL_COVERAGE_DB_EXPORT_MISSING` — completeness has `coverage=db-export`

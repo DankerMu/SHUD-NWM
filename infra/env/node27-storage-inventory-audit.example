@@ -33,8 +33,8 @@ OBJECT_STORE_PREFIX=s3://nhms
 # stable across restarts.
 NODE27_STORAGE_INVENTORY_RECEIPT_PATH=/home/nwm/node27-storage-inventory-audit-logs/completeness-receipt.json
 
-# Archive minimum age must match the shared retention invariant (>= 30 d).
-NHMS_ARCHIVE_MIN_AGE_DAYS=45
+# Archive minimum age must match the shared retention invariant (>= 14 d).
+NHMS_ARCHIVE_MIN_AGE_DAYS=14
 
 # DB URL for the audit. MUST be a read-only role (nhms_display_ro or the
 # equivalent read-only account); the audit itself is REPEATABLE READ READ

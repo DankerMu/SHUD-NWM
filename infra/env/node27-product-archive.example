@@ -23,8 +23,8 @@ OBJECT_STORE_PREFIX=s3://nhms
 NODE27_PRODUCT_ARCHIVE_RECEIPT=/home/nwm/node27-product-archive-logs/receipt.json
 NODE27_PRODUCT_ARCHIVE_LOCK_FILE=/home/nwm/node27-product-archive-logs/mover.lock
 
-# Archive minimum age (days). >= 30 required (foundation invariant #846).
-NHMS_ARCHIVE_MIN_AGE_DAYS=45
+# Archive minimum age (days). Must be >= the shared 14-day DB retention window.
+NHMS_ARCHIVE_MIN_AGE_DAYS=14
 
 # Per-tick candidate processing bound (bounded work per tick).
 NODE27_PRODUCT_ARCHIVE_PER_TICK_BOUND=8

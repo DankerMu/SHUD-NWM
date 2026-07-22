@@ -1,5 +1,8 @@
 # Tier Node-27 Timeseries Storage (Archive → Compress → Retain)
 
+> Policy revision (2026-07-21): archive retirement and DB retention use a
+> 14-day window; TimescaleDB compression remains at its independent 7-day lag.
+
 ## Why
 
 Live measurement on node-27 (2026-07-04 receipts + direct psql) shows the
@@ -24,7 +27,7 @@ destroy sole-copy data. Decision record: `docs/adr/0002-node27-timeseries-hot-co
 - **Enable TimescaleDB native compression** on both detail hypertables
   (terminal chunks only; hot chunks stay writable for reingest), with a
   documented decompress path for reingest conflicts.
-- Add **script-driven `drop_chunks` retention** (30-day window) with
+- Add **script-driven `drop_chunks` retention** (14-day window) with
   dry-run/enforce JSON receipts, flock, bounded deletion per tick, wired into
   the node-27 user-level systemd governance family; **hard-gated** on the
   recurring inventory audit's archive-completeness receipt (which folds in

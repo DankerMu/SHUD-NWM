@@ -2,6 +2,9 @@
 
 Date: 2026-07-03
 
+Policy amendment: 2026-07-21 (archive/DB retention window reduced from 30 to 14 days;
+the receipt gates and 7-day compression lead remain unchanged)
+
 ## Status
 
 Accepted
@@ -66,7 +69,7 @@ it omits TimescaleDB native compression entirely.
    Reingest into a compressed chunk requires an explicit, documented
    decompress step; tooling must fail closed with instructions rather than
    corrupt or silently skip.
-5. **Retention is script-driven `drop_chunks` with a 30-day window**, not
+5. **Retention is script-driven `drop_chunks` with a 14-day window**, not
    `add_retention_policy`: dry-run default, enforce mode, JSON receipts,
    flock, bounded deletions per tick, wired into the node-27 user-level
    systemd governance family. **Hard gate**: enforcement refuses to run
@@ -86,7 +89,7 @@ it omits TimescaleDB native compression entirely.
 
 ## Consequences
 
-- Steady-state DB size becomes bounded (30-day window, mostly compressed)
+- Steady-state DB size becomes bounded (14-day window, mostly compressed)
   instead of growing ~24 GB/week at 13 basins; the archive grows by
   compressed product tarballs (estimated single-digit GB/month at current
   scale) on a volume with 839 GB free.

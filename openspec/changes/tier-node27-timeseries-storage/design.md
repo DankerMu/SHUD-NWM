@@ -1,5 +1,10 @@
 # Design: Tier Node-27 Timeseries Storage
 
+> Policy revision (2026-07-21): the product-archive minimum age and DB
+> retention window are 14 days. References to 30/45-day live attempts in the
+> implementation-history fixtures remain historical evidence and do not define
+> the current policy. Compression remains a separate 7-day lead stage.
+
 ## Context
 
 Node-27 runs the active primary PostgreSQL (`nhms-db` container, TimescaleDB
@@ -32,7 +37,7 @@ hygiene checks, flock, receipts directory, systemd user timer).
 - Cut the two hypertables' footprint with native TimescaleDB compression on
   terminal chunks.
 - Bound DB size permanently with gated, receipted `drop_chunks` retention
-  (30-day window).
+  (14-day window).
 - Prove DB rebuildability from archive via the existing ingest path before
   retention can enforce.
 
@@ -69,7 +74,7 @@ products). Same-volume staging + atomic rename after verification keeps
 moves atomic; checksums are verified before any source deletion, and a
 final-path object that fails verification on a later run is quarantined and
 re-archived rather than trusted. Candidates are cycles older than
-`NHMS_ARCHIVE_MIN_AGE_DAYS` (default 45 d; config-validated ≥ the 30-day DB
+`NHMS_ARCHIVE_MIN_AGE_DAYS` (default 14 d; config-validated ≥ the 14-day DB
 retention window), so the hot object-store — and therefore the ADR 0001
 display disk window — is never shorter than the DB hot window.
 *Alternatives rejected:* bare directory move (no integrity story,
@@ -114,14 +119,14 @@ background job with no receipts, no bounds, invisible to the governance
 audit trail this node runs on.
 
 **D4 — Retention = script-driven `drop_chunks`, hard-gated.** A runner drops
-chunks fully older than 30 days on the two detail hypertables only, with
+chunks fully older than 14 days on the two detail hypertables only, with
 dry-run default, explicit enforce env, flock, per-tick chunk bound, and JSON
 receipts. Enforce refuses to run unless (a) the archive completeness receipt
 and (b) the rebuild-drill PASS receipt cover the window being dropped and are
 fresh. *Alternatives rejected:* `add_retention_policy` (cannot express the
 archive gate or receipts), row-level DELETE by cycle count (GPT proposal —
 abandons O(1) chunk drops, creates bloat, needs vacuum babysitting).
-Chunk-granular drops mean effective retention is 30–37 days; acceptable and
+Chunk-granular drops mean effective retention is 14–21 days; acceptable and
 documented.
 
 **D5 — Reingest vs compressed chunks fails closed.** TimescaleDB 2.10 cannot
@@ -268,7 +273,7 @@ Invariant Matrix:
 - Failure paths/rollback/stale state: overlap and too-small age fail before action; lookup of a cycle returns deterministic archive object/manifest paths.
 - Evidence/audit/readiness: focused pytest, schema examples plus negative documents, ruff, and strict OpenSpec validation.
 - Regression: shared root only and shared+override -> shared resolution then override precedence.
-- Regression: archive root contains/is contained by cleanup target, or age 20 with retention 30 -> named validation error before mutation.
+- Regression: archive root contains/is contained by cleanup target, or age 13 with retention 14 -> named validation error before mutation.
 - Regression: equal/aliased/symlink-resolved archive and cleanup roots -> normalized overlap rejection; caller supplies its complete cleanup-root set.
 - Regression: source-qualified, lane-typed forcing/runs/states identity with bound ISO `cycle_time` + compact `cycle_identity` -> deterministic sibling `archive.tar.zst` + `manifest.json`; shared source aliases normalize to canonical manifest IDs and lowercase object-store/archive path segments, different providers remain distinct, and unknown sources or unsafe/missing/cross-lane/time-mismatched identity or manifest/path mismatch fail before access.
 - Regression: every completeness verdict binds a lane-discriminated stable inventory subject (`forcing_version_id`, `run_id`, or `state_id`) independently of its coverage mechanism; equal-window sibling subjects remain distinguishable, while missing/cross-lane subjects fail schema validation and later inventory runtime must reject duplicate or omitted subjects.
@@ -285,7 +290,7 @@ Invariant Matrix:
 - Regression: every evidence read and receipt replace is root-dirfd anchored with no-follow component opens; missing leaves behind symlinks, inode swaps, unsafe siblings and parse/hash cross-inode races fail closed.
 - Regression: salvage traversal is bounded to 10,000 manifests/100,000 total entries/eight levels, and per-run output traversal is bounded to 10,000 entries/eight levels; both inspect every bounded sibling and publish a schema-valid `blocked` terminal receipt on overflow when the bootstrapped destination is safe, while run-output list/stat/child-open stays on one held directory-FD tree across pathname swaps.
 - Regression: salvage enumeration/stat/child-open/manifest-read/object-hash stays on one held `db-export` FD tree; real-directory swaps cannot mix evidence namespaces or bypass the global entry cap.
-- Regression: archive age shares the >=30-day foundation invariant without truthiness fallback, and all readable mismatch evidence survives coverage fallback precedence.
+- Regression: archive age shares the >=14-day foundation invariant without truthiness fallback, and all readable mismatch evidence survives coverage fallback precedence.
 - Regression: missing archive namespaces are ordinary absence; existing unsafe/unreadable/malformed/conflicting evidence terminates with a schema-valid `blocked` receipt, while a fully readable size/checksum mismatch is recorded and treated as absent coverage so the safe `incomplete` coverage receipt can still publish.
 - Regression: readable hot forcing manifest/member and state checksum mismatches are retained as absent-coverage evidence even when product/salvage wins; unsafe, malformed, permission and I/O failures remain blockers.
 - Regression: `schema_version=1.1` terminal receipts are deterministic, exact-`oneOf`, and atomically replaced; success branches cover every subject exactly once and enforce the complete/incomplete aggregate plus forcing/run gap-selector bijection, while pre-publication audit blockers publish `blocked`. Once the single publication attempt starts, pre-replace failure preserves prior bytes and post-replace failure leaves content unknown; both are stderr-only, never retried, and never reported as `published`.
@@ -1870,7 +1875,7 @@ Round 2 NEW-1: prior to this pin, `_default_lock_path(receipt_path)` co-located 
 
 ### Task §5.2 boundary
 
-Live PASS receipt on node-27 covering ≥1 forcing cycle + ≥1 runs cycle + ≥1 db-export selector for the planned 30-day drop window; committed as a follow-up commit under this same issue, not part of the §5.1 PR. §5.2 unlocks retention enforce in §6.3.
+Live PASS receipt on node-27 covering ≥1 forcing cycle + ≥1 runs cycle + ≥1 db-export selector for the planned 14-day drop window; committed as a follow-up commit under this same issue, not part of the §5.1 PR. §5.2 unlocks retention enforce in §6.3.
 
 ## Workflow Fixture: Issue #855 Gated Retention Runner + Systemd Wiring
 
@@ -1884,12 +1889,12 @@ Phase 0.5 fixture review surfaced **4 BLOCKING + 6 MODERATE + 3 MINOR CONFIRMED*
 Spec `timeseries-db-retention/spec.md:13-19` says every subject "with rows or products in the drop window" must carry `verdict = complete`, but `schemas/archive_completeness_receipt.schema.json` is subject-list keyed; the runner MUST NOT re-query the DB to enumerate in-window subjects (would introduce a shadow oracle bypassing D6). Pinned rule: the receipt is the sole authority. Runner refuses if (a) `coverage_bounds` does not fully contain the drop window (`bounds.start <= drop.start ∧ bounds.end >= drop.end`), or (b) any subject whose `window` overlaps the drop window has `verdict != complete`. Distinct wire codes per case (see §Wire-format codes).
 
 **H2 — Drill per-source coverage rule (BLOCKING).**
-Retention drops chunks from `hydro.river_timeseries` (source=`runs`) and `met.forcing_station_timeseries` (forcing recovery); the drill receipt PASS branch declares `coverage[]` tuples `(source ∈ {forcing, runs, db-export}, window)`. Runbook §7.5 already declares the rule the runner MUST byte-for-byte enforce: the `runs` UNION and the forcing-recovery UNION span the drop window, where forcing recovery is the UNION of verified `forcing` product tuples plus verified `db-export` tuples. `db-export` remains independently required iff the completeness receipt reports any `coverage=db-export` verdict overlapping the drop window. The drill emits per-cycle 24 h tuples, so a 30 d drop window is normally covered by ~30 daily tuples whose union spans it — no single tuple is expected to individually contain the drop window. A first physical Timescale chunk whose range begins before truthful completeness bounds is deferred rather than globally blocking later fully evidenced chunks; exact per-chunk `drop_chunks(older_than, newer_than)` bounds prevent retirement from cascading through that protected chunk. Refusal is per-shortfall — distinct wire codes so operators see which source blocked. §7.5 uses UNION wording aligned with §8.2 wire codes (`DRILL_COVERAGE_FORCING_MISSING`, `DRILL_COVERAGE_RUNS_MISSING`, `DRILL_COVERAGE_DB_EXPORT_MISSING`) so all three surfaces — H2 here, runbook §7.5, and runbook §8.2 — share the same byte-identical semantic.
+Retention drops chunks from `hydro.river_timeseries` (source=`runs`) and `met.forcing_station_timeseries` (forcing recovery); the drill receipt PASS branch declares `coverage[]` tuples `(source ∈ {forcing, runs, db-export}, window)`. Runbook §7.5 already declares the rule the runner MUST byte-for-byte enforce: the `runs` UNION and the forcing-recovery UNION span the drop window, where forcing recovery is the UNION of verified `forcing` product tuples plus verified `db-export` tuples. `db-export` remains independently required iff the completeness receipt reports any `coverage=db-export` verdict overlapping the drop window. The drill emits per-cycle 24 h tuples, so a 14 d drop window is normally covered by ~14 daily tuples whose union spans it — no single tuple is expected to individually contain the drop window. A first physical Timescale chunk whose range begins before truthful completeness bounds is deferred rather than globally blocking later fully evidenced chunks; exact per-chunk `drop_chunks(older_than, newer_than)` bounds prevent retirement from cascading through that protected chunk. Refusal is per-shortfall — distinct wire codes so operators see which source blocked. §7.5 uses UNION wording aligned with §8.2 wire codes (`DRILL_COVERAGE_FORCING_MISSING`, `DRILL_COVERAGE_RUNS_MISSING`, `DRILL_COVERAGE_DB_EXPORT_MISSING`) so all three surfaces — H2 here, runbook §7.5, and runbook §8.2 — share the same byte-identical semantic.
 
 **H3 — Chunk enumeration to honour per-tick bound (BLOCKING).**
 `SELECT drop_chunks(older_than := X, hypertable := 'schema.table'::regclass)` cannot bound cardinality (server picks all matching chunks). Runner MUST reuse the #851 pattern: catalog-enumerate via `timescaledb_information.chunks` for the two D3 hypertables, `ORDER BY hypertable_schema, hypertable_name, range_end ASC`, take `per_tick_bound`, then invoke `drop_chunks` per selected chunk (`older_than := chunk.range_end + INTERVAL '1 microsecond'` — the smallest strict-greater step). Remaining eligible chunks are recorded in `deferred_remainder[]`.
 
-Divergence from #851 sibling: retention MUST NOT filter `is_compressed = false`. Compressed chunks older than 30 d are exactly the retention target; the enumeration includes both `is_compressed IN (true, false)`. Code comment MUST cite this divergence.
+Divergence from #851 sibling: retention MUST NOT filter `is_compressed = false`. Compressed chunks older than 14 d are exactly the retention target; the enumeration includes both `is_compressed IN (true, false)`. Code comment MUST cite this divergence.
 
 **H4 — `freed_bytes` measured BEFORE drop (BLOCKING).**
 Receipt schema requires `dropped_chunks[]{name, freed_bytes: integer, minimum: 0}`. Measurement path: `pg_total_relation_size(<schema>.<chunk_name>::regclass)` per selected chunk BEFORE the corresponding `drop_chunks` call; recorded in a local dict keyed by fully-qualified chunk name; attached to `dropped_chunks[]` on success. Post-drop measurement is impossible (relation gone). Reuse compression `_default_measure_chunk_bytes` pattern minus the `after=True` branch.
@@ -1986,7 +1991,7 @@ Retention emits structured refusal codes; byte-identical across code (`scripts/n
 Byte-identical across code default lookup, `infra/env/node27-timeseries-retention.example`, runbook §8.1, this fixture.
 
 - `DATABASE_URL` — Postgres writer role DSN for the retention runner.
-- `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` — default `30`.
+- `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` — default `14`.
 - `NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND` — default `5` (matches compression sibling).
 - `NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH` — absolute.
 - `NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH` — absolute.
@@ -1998,7 +2003,7 @@ Byte-identical across code default lookup, `infra/env/node27-timeseries-retentio
 
 ### Explicit deviations from prior sub-issue patterns
 
-- **Retention includes compressed chunks** — divergence from #851 compression `_CHUNK_QUERY` which filters `is_compressed = false`. Runner filter is `is_compressed IN (true, false)`; code comment cites this pin. Compressed chunks older than 30 d are exactly the retention target.
+- **Retention includes compressed chunks** — divergence from #851 compression `_CHUNK_QUERY` which filters `is_compressed = false`. Runner filter is `is_compressed IN (true, false)`; code comment cites this pin. Compressed chunks older than 14 d are exactly the retention target.
 - **Predicate `range_end <= cutoff` (non-strict)** — divergence from #851 compression's strict `<`. Retention semantics: chunk with `range_end == cutoff` has all row times strictly < cutoff → satisfies "entire range older than window". Code comment cites spec sentence.
 - **Fail-closed whole-tick refusal on per-chunk drop failure** — no `partial` outcome. Alternative rejected due to schema `oneOf` strictness + operator-inspection principle (drops on healthy chunks should not proceed mid-failure).
 - **`drop_chunks` per selected chunk (not per hypertable bulk)** — required by per-tick bound (H3). Two per-chunk calls with `older_than := chunk.range_end + INTERVAL '1 microsecond'` per selected chunk.

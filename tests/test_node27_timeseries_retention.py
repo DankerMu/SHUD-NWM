@@ -48,7 +48,7 @@ _TIMER_PATH = _ROOT / "infra/systemd/nhms-node27-timeseries-retention.timer"
 _ENV_EXAMPLE_PATH = _ROOT / "infra/env/node27-timeseries-retention.example"
 
 _NOW = datetime(2026, 7, 11, 12, 0, tzinfo=UTC)
-_DROP_WINDOW_DAYS = 30
+_DROP_WINDOW_DAYS = 14
 
 
 def _cutoff(now: datetime = _NOW, days: int = _DROP_WINDOW_DAYS) -> datetime:
@@ -147,7 +147,7 @@ def _daily_coverage_tuples(
     window on its own.
 
     A2 fixture helper — pattern-level fix for #854 R1 fake-oracle-in-tests:
-    real drill receipts NEVER carry a single tuple spanning 30 d.
+    real drill receipts NEVER carry a single tuple spanning the full retention window.
     """
     tuples: list[dict[str, Any]] = []
     cursor = start
@@ -545,7 +545,7 @@ def _base_env(tmp_path: Path, **overrides: str | None) -> dict[str, str]:
 def test_config_parse_happy_path(tmp_path: Path) -> None:
     env = _base_env(tmp_path)
     config = retention.config_from_args(_args(), env)
-    assert config.window_days == 30
+    assert config.window_days == 14
     assert config.per_tick_bound == 5
     assert config.completeness_max_age_hours == 26
     assert config.drill_max_age_days == 30
@@ -926,42 +926,42 @@ def _drop_window(now: datetime, days: int) -> retention.DropWindow:
     return retention.DropWindow(start=now - timedelta(days=days), end=now)
 
 
-def test_a2a_thirty_daily_tuples_union_covers_drop_window() -> None:
-    """A2-a: 30 per-cycle tuples spanning drop window → drill coverage PASSES."""
+def test_a2a_fourteen_daily_tuples_union_covers_drop_window() -> None:
+    """A2-a: 14 per-cycle tuples spanning drop window → drill coverage PASSES."""
     now = _NOW
-    drop = _drop_window(now, 30)
+    drop = _drop_window(now, _DROP_WINDOW_DAYS)
     tuples = _daily_source_tuples(drop.start, drop.end, "forcing")
-    assert len(tuples) == 30
+    assert len(tuples) == _DROP_WINDOW_DAYS
     assert retention._drill_covers(tuples, "forcing", drop) is True
 
 
-def test_a2b_thirty_daily_tuples_with_gap_union_fails() -> None:
-    """A2-b: 30 per-cycle tuples with a 1-day gap in the middle → coverage FAILS."""
+def test_a2b_fourteen_daily_tuples_with_gap_union_fails() -> None:
+    """A2-b: 14 per-cycle tuples with a 1-day gap in the middle → coverage FAILS."""
     now = _NOW
-    drop = _drop_window(now, 30)
+    drop = _drop_window(now, _DROP_WINDOW_DAYS)
     all_tuples = _daily_source_tuples(drop.start, drop.end, "forcing")
-    # Remove the tuple covering day 15 → 16 to introduce a mid-window gap.
-    gapped = [t for i, t in enumerate(all_tuples) if i != 15]
-    assert len(gapped) == 29
+    # Remove the tuple covering day 7 → 8 to introduce a mid-window gap.
+    gapped = [t for i, t in enumerate(all_tuples) if i != 7]
+    assert len(gapped) == _DROP_WINDOW_DAYS - 1
     assert retention._drill_covers(gapped, "forcing", drop) is False
 
 
 def test_a2c_two_overlapping_tuples_union_covers() -> None:
     """A2-c: 2 overlapping tuples whose union covers the drop window → PASS."""
     now = _NOW
-    drop = _drop_window(now, 30)
+    drop = _drop_window(now, _DROP_WINDOW_DAYS)
     tuples = [
         {
             "source": "forcing",
             "window": {
                 "start": _iso(drop.start),
-                "end": _iso(drop.start + timedelta(days=20)),
+                "end": _iso(drop.start + timedelta(days=9)),
             },
         },
         {
             "source": "forcing",
             "window": {
-                "start": _iso(drop.start + timedelta(days=15)),
+                "start": _iso(drop.start + timedelta(days=7)),
                 "end": _iso(drop.end),
             },
         },
@@ -972,7 +972,7 @@ def test_a2c_two_overlapping_tuples_union_covers() -> None:
 def test_a2d_single_tuple_covering_last_day_fails() -> None:
     """A2-d: single per-cycle tuple covering only last day of drop window → FAIL."""
     now = _NOW
-    drop = _drop_window(now, 30)
+    drop = _drop_window(now, _DROP_WINDOW_DAYS)
     tuples = [
         {
             "source": "forcing",
@@ -995,11 +995,11 @@ def test_a2e_real_shape_uses_drill_identity_window(tmp_path: Path) -> None:
     """
     from scripts.node27_archive_rebuild_drill import _identity_window as drill_identity_window
 
-    # Build 30 synthetic per-cycle manifests, each with a 24 h producer
-    # window matching the drill's real shape. Union must cover the 30-day
+    # Build 14 synthetic per-cycle manifests, each with a 24 h producer
+    # window matching the drill's real shape. Union must cover the 14-day
     # drop window.
     now = _NOW
-    drop = _drop_window(now, 30)
+    drop = _drop_window(now, _DROP_WINDOW_DAYS)
     cycle_tuples: list[dict[str, Any]] = []
     cursor = drop.start
     while cursor < drop.end:
@@ -1013,11 +1013,11 @@ def test_a2e_real_shape_uses_drill_identity_window(tmp_path: Path) -> None:
         window = drill_identity_window(manifest)
         cycle_tuples.append({"source": "runs", "window": window})
         cursor = cycle_end
-    assert len(cycle_tuples) == 30
+    assert len(cycle_tuples) == _DROP_WINDOW_DAYS
     # Real drill emit shape → union covers → drill_covers PASSES.
     assert retention._drill_covers(cycle_tuples, "runs", drop) is True
     # Sanity: remove a middle cycle to introduce a gap → FAIL.
-    gapped = [t for i, t in enumerate(cycle_tuples) if i != 10]
+    gapped = [t for i, t in enumerate(cycle_tuples) if i != 7]
     assert retention._drill_covers(gapped, "runs", drop) is False
 
 
@@ -2129,7 +2129,7 @@ def test_chunk_straddling_cutoff_is_not_eligible() -> None:
 def test_mixed_compressed_and_uncompressed_chunks_both_drop(tmp_path: Path) -> None:
     """G F3: eligible chunks list may mix ``is_compressed=True`` and ``=False``;
     both flow through the drop path unchanged. Divergence from #851
-    compression sibling: compressed chunks older than 30 d ARE retention
+    compression sibling: compressed chunks older than 14 d ARE retention
     targets (see H3 comment in ``_CHUNK_QUERY``).
     """
     _write_json(tmp_path / "completeness.json", _completeness_receipt())

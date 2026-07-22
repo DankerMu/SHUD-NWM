@@ -107,8 +107,8 @@ class ArchiveConfigurationError(ValueError):
 
 ARCHIVE_LANES = frozenset({"forcing", "runs", "states"})
 LEGACY_UNQUALIFIED_ARCHIVE_SOURCE = "legacy-unqualified"
-DEFAULT_ARCHIVE_MIN_AGE_DAYS = 45
-DEFAULT_DB_RETENTION_DAYS = 30
+DEFAULT_ARCHIVE_MIN_AGE_DAYS = 14
+DEFAULT_DB_RETENTION_DAYS = 14
 
 
 VALID_PREFIX_PATTERNS: tuple[ObjectPrefixPattern, ...] = (

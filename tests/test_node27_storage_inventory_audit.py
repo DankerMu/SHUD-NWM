@@ -3112,7 +3112,7 @@ def test_archive_age_cli_overrides_env_and_env_below_retention_blocks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("NHMS_ARCHIVE_MIN_AGE_DAYS", "0")
-    assert audit.config_from_args(_args(tmp_path, age=30)).archive_min_age_days == 30
+    assert audit.config_from_args(_args(tmp_path, age=14)).archive_min_age_days == 14
     with pytest.raises(audit.AuditBlocked, match="at least DB retention"):
         audit.config_from_args(_args(tmp_path, age=None))
 

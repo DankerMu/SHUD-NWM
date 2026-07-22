@@ -257,8 +257,8 @@ configurable number of cycles per tick, default to dry-run, require an
 explicit enforce flag for mutation, and emit a JSON receipt (candidates,
 actions, bytes moved, skips, failures) per run. Archive candidates SHALL be
 limited to cycles older than a configurable minimum age
-(`NHMS_ARCHIVE_MIN_AGE_DAYS`, default 45 days); configuration validation
-SHALL reject a minimum age below the DB retention window (30 days), so the
+(`NHMS_ARCHIVE_MIN_AGE_DAYS`, default 14 days); configuration validation
+SHALL reject a minimum age below the DB retention window (14 days), so the
 hot object-store window — which is also the ADR 0001 display disk window for
 station forcing CSVs — is never shorter than the DB hot window. Cycles
 rotated after the minimum age are thereafter reachable only via the archive
@@ -536,8 +536,8 @@ post-replace durability/identity checks SHALL be explicitly enabled for this
 receipt and SHALL NOT silently change the shared helper's default contract for
 unmigrated non-receipt callers. Runtime schema validation SHALL
 use a direct production dependency.
-Archive minimum age SHALL reuse the shared 30-day retention safety invariant
-and SHALL reject explicit zero/below-30 inputs rather than falling back.
+Archive minimum age SHALL reuse the shared 14-day retention safety invariant
+and SHALL reject explicit zero/below-14 inputs rather than falling back.
 Evidence for every readable corrupt sibling SHALL be retained regardless of
 which valid coverage mechanism wins precedence. Readable hot forcing
 manifest/member and state-file checksum mismatches are absent coverage with

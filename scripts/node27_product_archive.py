@@ -46,6 +46,7 @@ from packages.common.safe_fs import (
 )
 from packages.common.source_identity import normalize_source_id
 from packages.common.storage import (
+    DEFAULT_ARCHIVE_MIN_AGE_DAYS,
     DEFAULT_DB_RETENTION_DAYS,
     ArchiveConfigurationError,
     ArchiveIdentity,
@@ -258,7 +259,7 @@ class MoverConfig:
     receipt_path: Path
     lock_path: Path
     zstd_path: Path
-    minimum_age_days: int = 45
+    minimum_age_days: int = DEFAULT_ARCHIVE_MIN_AGE_DAYS
     per_tick_bound: int = 10
     enforce: bool = False
     free_space_warn_bytes: int | None = None
@@ -4412,7 +4413,9 @@ def _verify_directory_namespace(fd: int, path: Path) -> None:
 def _config_from_args(args: argparse.Namespace) -> MoverConfig:
     env = os.environ
     raw_age = (
-        str(args.minimum_age_days) if args.minimum_age_days is not None else env.get("NHMS_ARCHIVE_MIN_AGE_DAYS", "45")
+        str(args.minimum_age_days)
+        if args.minimum_age_days is not None
+        else env.get("NHMS_ARCHIVE_MIN_AGE_DAYS", str(DEFAULT_ARCHIVE_MIN_AGE_DAYS))
     )
     raw_bound = (
         str(args.per_tick_bound)

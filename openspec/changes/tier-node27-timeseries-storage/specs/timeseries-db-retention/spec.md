@@ -58,7 +58,7 @@ they SHALL also retain the independent db-export coverage check.
 
 ### Requirement: Window and mechanism
 
-Retention SHALL use TimescaleDB `drop_chunks` with a 30-day default window,
+Retention SHALL use TimescaleDB `drop_chunks` with a 14-day default window,
 targeting exactly `hydro.river_timeseries` and
 `met.forcing_station_timeseries`; chunks are dropped only when their entire
 range is older than the window. Metadata and coverage tables (`hydro_run`,

@@ -9,7 +9,7 @@
     "generated_at": {"type": "string", "format": "date-time"},
     "mode": {"enum": ["dry-run", "enforce"]},
     "cutoff": {"type": "string", "format": "date-time"},
-    "minimum_age_days": {"type": "integer", "minimum": 30},
+    "minimum_age_days": {"type": "integer", "minimum": 14},
     "per_tick_bound": {"type": "integer", "minimum": 1, "maximum": 100000},
     "validation_attempts": {"type": "integer", "minimum": 0, "maximum": 100000},
     "outcome": {"enum": ["success", "failed", "indeterminate", "refused_free_space"]},

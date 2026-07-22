@@ -1,5 +1,9 @@
 # Tasks: Tier Node-27 Timeseries Storage
 
+> Policy revision (2026-07-21): current archive and DB retention eligibility is
+> 14 days. Completed rows that quote earlier 30/45-day live receipts are retained
+> as historical evidence; all open/live execution rows use the 14-day policy.
+
 Order is load-bearing:
 
 - Foundation (1) lands first — every later script consumes its env/helper,
@@ -28,7 +32,7 @@ Order is load-bearing:
   the non-display tooling (inventory audit, rebuild drill, salvage);
   configuration validation rejects (a) any overlap between the archive root
   and any retention/cleanup target roots and (b)
-  `NHMS_ARCHIVE_MIN_AGE_DAYS` below the DB retention window (30 days);
+  `NHMS_ARCHIVE_MIN_AGE_DAYS` below the DB retention window (14 days);
   display API code paths do not import the archive resolver (ADR 0001
   carve-out).
   Test rows:
@@ -50,7 +54,7 @@ Order is load-bearing:
     set explicitly so every later mutation-capable caller must supply all of
     its retention/cleanup targets rather than relying on a hidden partial
     env list.
-  - Input: `NHMS_ARCHIVE_MIN_AGE_DAYS=20` with the 30-day retention window.
+  - Input: `NHMS_ARCHIVE_MIN_AGE_DAYS=13` with the 14-day retention window.
     Expected: validation error before any mutation.
   - Input: canonical archive identity `(lane=forcing|runs|states, source,
     cycle_identity, cycle_time, lane-specific fields)`, where ISO-8601 UTC
@@ -309,8 +313,8 @@ Order is load-bearing:
   validation uses `jsonschema` as a direct production dependency, not a dev
   transitive dependency.
   Archive minimum age is parsed without truthiness fallback and validated
-  against the shared 30-day DB retention invariant; explicit or environment
-  values below 30 (including zero) fail before DB/filesystem audit work.
+  against the shared 14-day DB retention invariant; explicit or environment
+  values below 14 (including zero) fail before DB/filesystem audit work.
   Every readable size/checksum mismatch discovered for a subject is appended
   to its evidence before coverage precedence is selected, so a valid fallback
   copy never erases evidence of a corrupt sibling. This includes readable hot
@@ -459,9 +463,9 @@ Order is load-bearing:
   - Input: production dependency install without dev extras.
     Expected: importing the audit module and runtime `jsonschema` validation
     succeeds.
-  - Input: archive minimum age 20 or explicit CLI zero, with/without an env
-    fallback; and legal CLI 30 overriding an invalid env value.
-    Expected: 20/zero always fail without fallback, while explicit legal CLI
+  - Input: archive minimum age 13 or explicit CLI zero, with/without an env
+    fallback; and legal CLI 14 overriding an invalid env value.
+    Expected: 13/zero always fail without fallback, while explicit legal CLI
     wins and shares the foundation retention-age invariant.
   - Input: corrupt product archive with valid exact salvage, and corrupt
     exact salvage with valid product archive.
@@ -486,7 +490,7 @@ Order is load-bearing:
   counts), same-volume staging + atomic rename only after re-read checksum
   verification, verify-before-delete, quarantine of unverified final-path
   residue, candidate eligibility = cycle age older than
-  `NHMS_ARCHIVE_MIN_AGE_DAYS` (default 45), source lanes `forcing/`, `runs/`,
+  `NHMS_ARCHIVE_MIN_AGE_DAYS` (default 14), source lanes `forcing/`, `runs/`,
   and `states/`, flock, per-tick cycle bound, dry-run default, JSON receipts.
   This issue also pins `schemas/product_archive_receipt.schema.json` plus
   positive/negative examples because no #846 schema covers mover operations.
@@ -1240,14 +1244,14 @@ Order is load-bearing:
   Evidence floor: committed PASS receipt covering at least one `forcing/`
   cycle, one `runs/` cycle, and one `db-export` salvage object, with
   declared (source, window) tuples satisfying the coverage rule for the
-  planned 30-day drop window; zero count mismatches; production hypertable
+  planned 14-day drop window; zero count mismatches; production hypertable
   row counts unchanged by the drill. This unlocks 6.3.
 
 ## 6. Gated DB retention (`timeseries-db-retention`)
 
 - [x] 6.1 Build the retention runner
   (`scripts/node27_timeseries_retention.py` + `_once.sh`).
-  Evidence floor: `drop_chunks` older than 30d targeting exactly the two
+  Evidence floor: `drop_chunks` older than 14d targeting exactly the two
   detail hypertables; hard gate consumes exactly two receipts — a fresh
   archive-completeness receipt with every window in the drop window
   `complete`, and a drill PASS receipt whose declared coverage includes the

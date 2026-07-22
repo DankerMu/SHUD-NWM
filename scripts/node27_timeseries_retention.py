@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Gated TimescaleDB retention runner for node-27 (issue #855 §6.1 + §6.2).
 
-Drops chunks strictly older than a configurable window (default 30 d) from
+Drops chunks strictly older than a configurable window (default 14 d) from
 the two D3 detail hypertables ``hydro.river_timeseries`` and
 ``met.forcing_station_timeseries``. The runner refuses enforce mode unless
 BOTH gate receipts are fresh AND cover the drop window:
@@ -19,7 +19,7 @@ BOTH gate receipts are fresh AND cover the drop window:
    source rule in ``docs/runbooks/tier-node27-timeseries-storage.md §7.5``:
    the forcing-recovery UNION (``forcing`` plus verified ``db-export``) and
    the ``runs`` UNION MUST span the drop window (the drill emits per-cycle
-   24 h tuples — no single tuple is expected to cover a 30 d drop window on
+   24 h tuples — no single tuple is expected to cover a 14 d drop window on
    its own); ``source=db-export`` remains independently required iff the
    completeness receipt reports any overlapping db-export subject.
 
@@ -85,7 +85,7 @@ _DEFAULT_COMPLETENESS_MAX_AGE_HOURS = 26
 _DEFAULT_DRILL_MAX_AGE_DAYS = 30
 
 # H3 per-tick bound + window defaults (matches spec §Window and mechanism).
-_DEFAULT_WINDOW_DAYS = 30
+_DEFAULT_WINDOW_DAYS = 14
 _DEFAULT_PER_TICK_BOUND = 5
 
 # H12 statement timeouts.
@@ -688,8 +688,8 @@ def _tuples_cover_window(
     """Return True iff the UNION of tuple windows covers ``drop_window``.
 
     H2 semantics per runbook §7.5: the drill emits per-cycle 24 h coverage
-    tuples (one per verified product manifest); a 30 d drop window is
-    covered by ~30 daily tuples whose union spans it — no single tuple
+    tuples (one per verified product manifest); a 14 d drop window is
+    covered by ~14 daily tuples whose union spans it — no single tuple
     needs to individually contain the drop window.
 
     Standard interval-merge: sort by start, coalesce overlapping/adjacent
@@ -795,7 +795,7 @@ DropChunk = Callable[["RetentionConfig", ChunkRow], None]
 
 # SQL: catalog-only enumeration of the two D3 hypertables.
 # H3 divergence from #851 compression sibling: retention MUST NOT filter
-# `is_compressed = false` — compressed chunks older than 30 d are exactly
+# `is_compressed = false` — compressed chunks older than 14 d are exactly
 # the retention target, so both compressed and uncompressed chunks are
 # enumerated. Predicate is `range_end <= %s` (H7 non-strict), which differs
 # from compression's strict `<`: a chunk with `range_end == cutoff` has all
