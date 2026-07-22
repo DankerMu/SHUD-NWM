@@ -1077,6 +1077,14 @@ into sbatch runtime.
 
 ### 8.5 Node-22 scheduler stuck after missing forcing artifact
 
+Accepted-submit restart reconciliation is configured by
+`NHMS_SCHEDULER_RECONCILE_ABSENCE_SECONDS` (production example: 300 seconds).
+Values outside 30–3600 seconds fail closed at scheduler configuration time.
+`NHMS_SCHEDULER_RECONCILE_SLURM_USER` and
+`NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT` must match the `sacct` owner of jobs
+submitted by node-22; an owner, comment, master, task-prefix, stage, or cohort
+identity mismatch remains reconciling and cannot project candidate state.
+
 Symptoms:
 
 - `nhms-compute-scheduler.service` consumes CPU with no new Slurm job and no

@@ -439,6 +439,20 @@ def restart_reconcile_proof(restart_reconcile_evidence: Mapping[str, Any] | None
         list(reserved_unbound.get("outcomes") or []) if isinstance(reserved_unbound, Mapping) else []
     )
     inflight_outcomes = list(inflight.get("outcomes") or []) if isinstance(inflight, Mapping) else []
+    explicit_write_count = sum(
+        max(int(outcome.get("durable_write_count") or 0), 0)
+        for outcome in [*reserved_outcomes, *inflight_outcomes]
+        if isinstance(outcome, Mapping)
+    )
+    explicit_event_write_count = sum(
+        max(int(outcome.get("pipeline_event_write_count") or 0), 0)
+        for outcome in [*reserved_outcomes, *inflight_outcomes]
+        if isinstance(outcome, Mapping)
+    )
+    has_explicit_write_kinds = any(
+        isinstance(outcome, Mapping) and "durable_write_count" in outcome
+        for outcome in [*reserved_outcomes, *inflight_outcomes]
+    )
     bind_count = sum(
         1
         for outcome in reserved_outcomes
@@ -455,8 +469,13 @@ def restart_reconcile_proof(restart_reconcile_evidence: Mapping[str, Any] | None
         if isinstance(outcome, Mapping)
         and str(outcome.get("action") or "") in {"terminal", "still_running", "unverified"}
     )
-    pipeline_status_write_count = bind_count + reserved_status_update_count + inflight_status_update_count
-    mutation_occurred = pipeline_status_write_count > 0
+    pipeline_status_write_count = (
+        max(explicit_write_count - explicit_event_write_count, 0)
+        if has_explicit_write_kinds
+        else bind_count + reserved_status_update_count + inflight_status_update_count
+    )
+    pipeline_event_write_count = explicit_event_write_count if has_explicit_write_kinds else 0
+    mutation_occurred = pipeline_status_write_count > 0 or pipeline_event_write_count > 0
     error_fields = [
         field_name
         for field_name in ("reserved_unbound_error", "inflight_error")
@@ -475,7 +494,11 @@ def restart_reconcile_proof(restart_reconcile_evidence: Mapping[str, Any] | None
     pipeline_status_writes: bool | str = (
         _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT if unknown_after_attempt else mutation_occurred
     )
-    pipeline_event_writes: bool | str = _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT if unknown_after_attempt else False
+    pipeline_event_writes: bool | str = (
+        _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT
+        if unknown_after_attempt
+        else pipeline_event_write_count > 0
+    )
     proof: dict[str, Any] = {
         "status": (
             "mutated"
@@ -492,9 +515,9 @@ def restart_reconcile_proof(restart_reconcile_evidence: Mapping[str, Any] | None
         "pipeline_status_writes": pipeline_status_writes,
         "pipeline_event_writes": pipeline_event_writes,
         "pipeline_status_write_count": pipeline_status_write_count,
-        "pipeline_event_write_count": 0,
+        "pipeline_event_write_count": pipeline_event_write_count,
         "pipeline_status_writes_proven_absent": not mutation_occurred and not unknown_after_attempt,
-        "pipeline_event_writes_proven_absent": not unknown_after_attempt,
+        "pipeline_event_writes_proven_absent": pipeline_event_write_count == 0 and not unknown_after_attempt,
         "protected_by_pre_execution_evidence": False,
     }
     if unknown_after_attempt:

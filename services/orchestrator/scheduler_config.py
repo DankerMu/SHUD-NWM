@@ -159,6 +159,9 @@ class ProductionSchedulerConfig:
     restart_reconcile_enabled: bool = field(
         default_factory=lambda: _scheduler._env_flag("NHMS_SCHEDULER_RESTART_RECONCILE", default=True)
     )
+    restart_reconcile_absence_seconds: int = field(
+        default_factory=lambda: _scheduler._env_int("NHMS_SCHEDULER_RECONCILE_ABSENCE_SECONDS", 300)
+    )
     candidate_state_job_limit: int = field(
         default_factory=lambda: _scheduler._env_int(
             "NHMS_CANDIDATE_STATE_JOB_LIMIT",
@@ -404,6 +407,12 @@ class ProductionSchedulerConfig:
         timing_level_raw = self.timing_level if self.timing_level is not None else "stage"
         timing_level_normalised = str(timing_level_raw).strip().lower() or "stage"
         object.__setattr__(self, "timing_level", timing_level_normalised)
+        absence_seconds = int(self.restart_reconcile_absence_seconds)
+        if absence_seconds < 30 or absence_seconds > 3600:
+            raise ValueError(
+                "production scheduler restart_reconcile_absence_seconds must be between 30 and 3600"
+            )
+        object.__setattr__(self, "restart_reconcile_absence_seconds", absence_seconds)
         object.__setattr__(self, "candidate_state_job_limit", max(int(self.candidate_state_job_limit), 1))
         object.__setattr__(self, "candidate_state_event_limit", max(int(self.candidate_state_event_limit), 1))
         object.__setattr__(self, "lock_ttl_seconds", max(int(self.lock_ttl_seconds), 1))

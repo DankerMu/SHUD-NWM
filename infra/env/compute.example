@@ -91,6 +91,12 @@ NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE=atomic
 NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND=4
 # Strict aggregate ceiling across Slurm arrays submitted by one scheduler pass.
 NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND=32
+# Accepted-submit recovery waits this long for slurmdbd propagation before an
+# exact-comment absence can release one forecast cohort for retry. Both Slurm
+# ownership values must match sacct User/Account on node-22.
+NHMS_SCHEDULER_RECONCILE_ABSENCE_SECONDS=300
+NHMS_SCHEDULER_RECONCILE_SLURM_USER=frd_muziyao
+NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT=replace-with-node22-slurm-account
 NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true
 # Discovery time is floored by this lag to the prior allowed-cycle boundary
 # (for example, with allowed hours 0,12, a lagged 18:01 UTC target floors to 12).

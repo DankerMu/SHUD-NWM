@@ -8138,8 +8138,13 @@ def test_file_journal_forecast_timeout_stays_reconciling_with_durable_18_member_
     tmp_path: Path,
     source_id: str,
 ) -> None:
-    """ForecastOrchestrator public seam preserves an accepted/unknown array."""
+    """One real journal closes timeout -> restart -> exact task projection."""
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from services.orchestrator.reconcile import (
+        SacctRecord,
+        reconcile_inflight_jobs,
+        reconcile_reserved_unbound_jobs,
+    )
 
     class _AcceptedTimeoutClient(FakeCycleSlurmClient):
         def submit_job_array(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -8186,6 +8191,131 @@ def test_file_journal_forecast_timeout_stays_reconciling_with_durable_18_member_
         (repository._hydro_run_for(str(basin["run_id"])) or {}).get("status") != "failed"
         for basin in basins
     )
+    assert reserved.submission_attempt == 1
+    assert reserved.submission_attempt_started_at is not None
+    assert len(reserved.cohort_digest) == 64
+
+    rebuilt = FileOrchestrationJournalRepository(tmp_path / "journal")
+    exact = SacctRecord(
+        "2001",
+        "RUNNING",
+        "nhms_forecast",
+        comment=reserved.slurm_comment,
+        run_id=reserved.run_id,
+        stage="forecast",
+        pipeline_job_id=reserved.job_id,
+    )
+    assert reconcile_reserved_unbound_jobs(rebuilt, comment_query=lambda _key: exact)[0].action == "bound"
+
+    def terminal(task_count: int) -> SacctRecord:
+        tasks = tuple(
+            SacctRecord(
+                f"2001_{index}",
+                "COMPLETED",
+                "nhms_forecast",
+                comment=reserved.slurm_comment,
+                array_task_id=index,
+            )
+            for index in range(task_count)
+        )
+        return SacctRecord(
+            "2001",
+            "COMPLETED",
+            "nhms_forecast",
+            comment=reserved.slurm_comment,
+            array_member_job_ids=tuple(task.slurm_job_id for task in tasks),
+            array_task_records=tasks,
+        )
+
+    if source_segment == "ifs":
+        assert reconcile_inflight_jobs(rebuilt, sacct_query=lambda _job_id: terminal(17))[0].action == (
+            "task_accounting_incomplete"
+        )
+    assert reconcile_inflight_jobs(rebuilt, sacct_query=lambda _job_id: terminal(18))[0].action == "terminal"
+    durable = rebuilt.get_pipeline_job(reserved.job_id)
+    assert durable["status"] == "succeeded"
+    assert len(durable["candidate_projections"]) == 18
+    assert all(item["restart_stage"] == "state_save_qc" for item in durable["candidate_projections"])
+    assert reconcile_inflight_jobs(rebuilt, sacct_query=lambda _job_id: terminal(18)) == []
+    assert len(client.jobs) == 1
+    assert client.cancelled_jobs == []
+
+
+@pytest.mark.parametrize("source_id", ["gfs", "IFS"])
+def test_file_journal_post_window_concurrent_public_cycles_submit_one_retry(
+    tmp_path: Path,
+    source_id: str,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import timedelta
+    from threading import Lock
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from services.orchestrator.reconcile import reconcile_reserved_unbound_jobs
+
+    class _AbsentFirstForecastClient(FakeCycleSlurmClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.forecast_attempts = 0
+            self.submit_lock = Lock()
+
+        def submit_job_array(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            with self.submit_lock:
+                if kwargs["stage_name"] == "forecast":
+                    self.forecast_attempts += 1
+                    if self.forecast_attempts == 1:
+                        raise OrchestratorError("SLURM_GATEWAY_UNAVAILABLE", "response timed out")
+                    self.submissions.append({"stage": "forecast"})
+                    raise OrchestratorError("SLURM_GATEWAY_UNAVAILABLE", "retry response timed out")
+                return super().submit_job_array(*args, **kwargs)
+
+    cycle = "2026050100"
+    source_segment = source_id.lower()
+    basins = _basins(18)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_{source_segment}_{cycle}_model_{index}",
+                "candidate_id": (
+                    f"{source_id}:2026-05-01T00:00:00Z:model_{index}:forecast_{source_segment}_deterministic"
+                ),
+                "orchestration_run_id": f"cycle_{source_segment}_{cycle}_forecast_cohort_retry",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    root = tmp_path / "journal"
+    client = _AbsentFirstForecastClient()
+    initial = _orchestrator(tmp_path, FileOrchestrationJournalRepository(root), client)
+    assert initial.orchestrate_cycle(source_id, cycle, basins).status == "reconciling"
+    reconciliation_repo = FileOrchestrationJournalRepository(root)
+    assert reconcile_reserved_unbound_jobs(
+        reconciliation_repo,
+        comment_query=lambda _key: None,
+        grace=timedelta(0),
+    )[0].action == "absence_retry_permitted"
+
+    def run_public_cycle(_index: int) -> Any:
+        try:
+            return _orchestrator(
+                tmp_path,
+                FileOrchestrationJournalRepository(root),
+                client,
+            ).orchestrate_cycle(source_id, cycle, basins)
+        except OrchestratorError as error:
+            return error
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(run_public_cycle, range(2)))
+
+    assert client.forecast_attempts == 2
+    assert sum(
+        submission["stage"] == "forecast" for submission in client.submissions
+    ) == 1
+    assert any(not isinstance(outcome, Exception) for outcome in outcomes)
+    assert client.cancelled_jobs == []
 
 
 def test_file_journal_forcing_gateway_failure_keeps_legacy_failure_without_forecast_projection(

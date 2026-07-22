@@ -419,6 +419,7 @@ def build_forecast_runtime_manifest(
     manifest = {
         "run_id": run_id,
         "run_type": "forecast",
+        "submission_attempt": max(int(context.retry_attempt or 1), 1),
         "candidate_id": assembly.identity["candidate_id"],
         "scenario_id": assembly.identity["scenario_id"],
         "source_id": context.source_id,

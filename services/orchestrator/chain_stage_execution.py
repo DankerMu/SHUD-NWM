@@ -216,7 +216,7 @@ def submit_and_wait_cycle_stage(
                     "reconciliation_decision": "absence_deferred",
                     "matched_slurm_job_id": None,
                     "restart_stage": context.restart_stage or stage.stage,
-                    "native_shud_resubmitted": stage.stage == "forecast",
+                    "native_shud_resubmitted": is_forecast_cohort_stage(stage),
                 },
             )
             return (

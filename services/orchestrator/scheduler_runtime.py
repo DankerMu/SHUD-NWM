@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1448,9 +1448,14 @@ def _run_restart_reconcile(
     reserved_call_start_ns = time.monotonic_ns()
     try:
         comment_query = self._restart_reconcile_comment_query()
-        reserved = reconcile_reserved_unbound_jobs(store, comment_query=comment_query)
+        reserved = reconcile_reserved_unbound_jobs(
+            store,
+            comment_query=comment_query,
+            grace=timedelta(seconds=self.config.restart_reconcile_absence_seconds),
+        )
         evidence["reserved_unbound"] = {
             "count": len(reserved),
+            "absence_window_seconds": self.config.restart_reconcile_absence_seconds,
             "outcomes": [
                 {
                     "job_id": o.job_id,
@@ -1462,6 +1467,8 @@ def _run_restart_reconcile(
                     "reconciliation_decision": o.reconciliation_decision,
                     "matched_slurm_job_id": o.matched_slurm_job_id,
                     "match_count": o.match_count,
+                    "durable_write_kind": o.durable_write_kind,
+                    "durable_write_count": o.durable_write_count,
                 }
                 for o in reserved
             ],
@@ -1487,6 +1494,10 @@ def _run_restart_reconcile(
                     "slurm_job_id": o.slurm_job_id,
                     "action": o.action,
                     "status": o.status,
+                    "durable_write_kind": o.durable_write_kind,
+                    "durable_write_count": o.durable_write_count,
+                    "pipeline_status_write_count": o.pipeline_status_write_count,
+                    "pipeline_event_write_count": o.pipeline_event_write_count,
                 }
                 for o in inflight
             ],

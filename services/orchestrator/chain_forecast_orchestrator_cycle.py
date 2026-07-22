@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import os
+from datetime import UTC, datetime
+
 from services.orchestrator import chain as _chain
+from services.orchestrator.accepted_submit_identity import forecast_cohort_digest
 
 _FORCE_TERMINAL_RESUBMIT_DECISIONS = {
     "retry_missing_forecast_output",
@@ -142,6 +146,8 @@ class ForecastOrchestratorCycleMixin:
         context: _chain.CycleOrchestrationContext, job: _chain.Mapping[str, _chain.Any]
     ) -> bool:
         if _terminal_stage_needs_forced_resubmit(context, job):
+            return True
+        if str(job.get("status") or "") == "reservation_lost" and job.get("slurm_job_id") in (None, ""):
             return True
         if context.retry_attempt is None:
             return False
@@ -480,7 +486,10 @@ class ForecastOrchestratorCycleMixin:
                 "cohort_members": members,
                 "restart_stage": context.restart_stage or stage.stage,
                 "submission_attempt": max(int(context.retry_attempt or 1), 1),
-                "native_shud_resubmitted": stage.stage == "forecast",
+                "submission_attempt_started_at": datetime.now(UTC),
+                "expected_slurm_user": os.getenv("NHMS_SCHEDULER_RECONCILE_SLURM_USER"),
+                "expected_slurm_account": os.getenv("NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT"),
+                "native_shud_resubmitted": _chain.chain_stage_execution.is_forecast_cohort_stage(stage),
             }
         reserve_kwargs = {
             "idempotency_key": idempotency_key,
@@ -493,6 +502,9 @@ class ForecastOrchestratorCycleMixin:
             "candidate_id": context.run_id,
         }
         if reservation_evidence is not None:
+            reservation_evidence["cohort_digest"] = forecast_cohort_digest(
+                {"source_id": context.source_id, **reserve_kwargs, **reservation_evidence}
+            )
             reserve_kwargs["reservation_evidence"] = reservation_evidence
         return _chain.reserve_candidate(self.repository, **reserve_kwargs)
 

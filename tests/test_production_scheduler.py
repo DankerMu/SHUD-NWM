@@ -1766,6 +1766,44 @@ def test_restart_reconcile_proof_treats_errors_as_unknown_after_attempt() -> Non
     assert mutation["restart_reconcile_writes"] == "unknown_after_attempt"
 
 
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        {"action": "absence_unconfirmed", "durable_write_count": 1},
+        {"action": "absence_retry_permitted", "durable_write_count": 19},
+        {
+            "action": "task_accounting_incomplete",
+            "durable_write_count": 52,
+            "pipeline_event_write_count": 17,
+        },
+    ],
+)
+def test_restart_reconcile_proof_counts_every_explicit_durable_mutation(
+    outcome: dict[str, Any],
+) -> None:
+    proof = scheduler_module._restart_reconcile_proof(
+        {
+            "status": "completed",
+            "reserved_unbound": {"outcomes": [outcome]},
+            "inflight": {"outcomes": []},
+        }
+    )
+
+    assert proof["mutation_occurred"] is True
+    assert proof["pipeline_status_write_count"] == outcome["durable_write_count"] - outcome.get(
+        "pipeline_event_write_count", 0
+    )
+
+
+@pytest.mark.parametrize("absence_seconds", [29, 3601])
+def test_scheduler_reconcile_absence_window_invalid_values_fail_closed(
+    tmp_path: Path,
+    absence_seconds: int,
+) -> None:
+    with pytest.raises(ValueError, match="between 30 and 3600"):
+        _config(tmp_path, restart_reconcile_absence_seconds=absence_seconds)
+
+
 def test_registered_model_to_dict_preserves_shud_project_identity() -> None:
     model = scheduler_module.RegisteredSchedulerModel(
         model_id="basins_heihe_shud",
