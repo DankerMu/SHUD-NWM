@@ -1435,6 +1435,9 @@ Invariant Matrix:
   the new attempt has no `submit_outcome` and no reconciliation source,
   decision, or matched ID; evidence proved for the prior attempt cannot cross
   this boundary, including when the process stops immediately after reclaim.
+  Every versioned master carries one valid aware-UTC immutable
+  `submission_attempt_started_at`; reclaim creates the next anchor while
+  holding the lock and never trusts a lock-external request timestamp.
 - Attempt-CAS contract: timeout/accounting transitions compare the durable
   submission attempt and expected reserved-unbound state under the cycle lock.
   Normal Gateway success and accounting adoption atomically bind the accepted
@@ -1455,7 +1458,9 @@ Invariant Matrix:
   the frozen query window covers the current
   `submission_attempt_started_at` through the query end. An older attempt or a
   legacy/custom adapter that cannot prove that coverage remains
-  `accounting_unavailable` and cannot release retry permission.
+  `accounting_unavailable` and cannot release retry permission. The reconcile
+  consumer recalculates coverage from valid aware start/end bounds and the
+  durable anchor; an adapter's completeness boolean alone has no authority.
 - Accounting-authority contract: successful command execution is not by itself
   global visibility. Runtime preflight proves the scheduler principal's Slurm
   accounting visibility (including job privacy), otherwise zero-match evidence
@@ -1495,6 +1500,11 @@ Invariant Matrix:
   legacy read-only state and never acquire accepted-submit authority or become
   invalid merely because additive fields are absent. Global visibility proof
   is required only for versioned accepted-submit reconciliation.
+- Anchor-validation invariant: direct, journal, and latest replay reject a
+  versioned master whose attempt anchor is missing, malformed, or naive, while
+  marker-free historical rows retain their legacy read contract. Ordinary
+  same-attempt updates cannot change the anchor, and retry CAS compares both
+  attempt number and anchor.
 - Closed-enum invariant: task-accounting completeness is represented by
   pipeline status/error/projection fields and never adds values to the six-value
   `reconciliation_decision` contract. Reconciliation API inputs are normalized

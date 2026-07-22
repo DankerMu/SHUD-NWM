@@ -37,6 +37,7 @@ from services.orchestrator.accepted_submit_identity import (
     accepted_submit_contract_is_current,
     accepted_submit_row_kind,
     apply_accepted_submit_transition,
+    normalize_accepted_submit_attempt_anchor,
     normalize_accepted_submit_evidence,
     normalize_candidate_projections,
     ordered_cohort_members,
@@ -1049,6 +1050,25 @@ class FileOrchestrationJournalRepository:
             if existing is not None:
                 explicit_fields = set(record)
                 incoming = row
+                if (
+                    accepted_submit_contract_is_current(existing)
+                    and accepted_submit_row_kind(existing) == "master"
+                ):
+                    if "submission_attempt" in explicit_fields and max(
+                        int(incoming.get("submission_attempt") or 1), 1
+                    ) != max(int(existing.get("submission_attempt") or 1), 1):
+                        raise FileOrchestrationJournalError(
+                            "file_journal_evidence_invariant_invalid",
+                            field="submission_attempt",
+                        )
+                    if "submission_attempt_started_at" in explicit_fields and (
+                        _accepted_submit_attempt_anchor(record.get("submission_attempt_started_at"))
+                        != _accepted_submit_attempt_anchor(existing.get("submission_attempt_started_at"))
+                    ):
+                        raise FileOrchestrationJournalError(
+                            "file_journal_evidence_invariant_invalid",
+                            field="submission_attempt_started_at",
+                        )
                 row = dict(existing)
                 for key in _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS:
                     if key in explicit_fields:
@@ -1172,9 +1192,10 @@ class FileOrchestrationJournalRepository:
                 int(existing.get("submission_attempt") or 1) + 1,
                 int(request_row.get("submission_attempt") or 1),
             )
-            row["submission_attempt_started_at"] = request_row.get("submission_attempt_started_at") or _format_utc(
-                _utcnow()
-            )
+            # The successful lock holder owns a new attempt. Its immutable
+            # authority anchor is captured here, never copied from a stale
+            # lock-external reclaim request.
+            row["submission_attempt_started_at"] = _format_utc(_utcnow())
             for key in (
                 "run_id",
                 "cycle_id",
@@ -1616,6 +1637,7 @@ class FileOrchestrationJournalRepository:
         *,
         accepted_submit_contract_version: str | None = None,
         expected_submission_attempt: int | None = None,
+        expected_submission_attempt_started_at: datetime | None = None,
         expected_status: str = "reserved",
     ) -> int:
         """Move one still-reserved cohort to retryable exactly once under its cycle lock."""
@@ -1645,6 +1667,17 @@ class FileOrchestrationJournalRepository:
                 or accepted_submit_row_kind(existing) != "master"
             ):
                 return 0
+            if versioned:
+                if expected_submission_attempt_started_at is None:
+                    return 0
+                try:
+                    anchor_matches = _accepted_submit_attempt_anchor(
+                        existing.get("submission_attempt_started_at")
+                    ) == _accepted_submit_attempt_anchor(expected_submission_attempt_started_at)
+                except FileOrchestrationJournalError:
+                    return 0
+                if not anchor_matches:
+                    return 0
             if expected_submission_attempt is not None and max(
                 int(existing.get("submission_attempt") or 1), 1
             ) != max(int(expected_submission_attempt), 1):
@@ -5209,6 +5242,13 @@ def _validate_accepted_submit_evidence(row: Mapping[str, Any]) -> None:
 
     try:
         normalize_accepted_submit_evidence(row)
+    except AcceptedSubmitEvidenceError as error:
+        raise FileOrchestrationJournalError(error.reason, field=error.field) from error
+
+
+def _accepted_submit_attempt_anchor(value: Any) -> str:
+    try:
+        return normalize_accepted_submit_attempt_anchor(value)
     except AcceptedSubmitEvidenceError as error:
         raise FileOrchestrationJournalError(error.reason, field=error.field) from error
 

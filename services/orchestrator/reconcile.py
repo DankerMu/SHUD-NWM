@@ -81,12 +81,25 @@ COMMENT_SACCT_TIMEOUT_SECONDS = 30.0
 COMMENT_SACCT_VISIBILITY_TIMEOUT_SECONDS = 5.0
 
 
-def _as_utc_datetime(value: datetime | None) -> datetime | None:
-    if value is None:
+def _as_utc_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, datetime):
         return None
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _strict_utc_datetime(value: Any) -> datetime | None:
+    """Accept only aware datetimes at evidence-authority boundaries."""
+
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        return None
+    try:
+        if value.utcoffset() is None:
+            return None
+        return value.astimezone(UTC)
+    except (OverflowError, TypeError, ValueError):
+        return None
 
 
 class ReconcileQueryUnavailable(Exception):
@@ -1314,7 +1327,11 @@ def reconcile_reserved_unbound_jobs(
                 )
             )
             continue
-        if accepted_submit_reconcile and proof.kind == "global_absence" and not proof.coverage_complete:
+        if (
+            accepted_submit_reconcile
+            and proof.kind == "global_absence"
+            and not _effective_versioned_absence_coverage(proof, attempt_anchor=attempt_anchor)
+        ):
             write_count = _record_file_reconciliation(
                 store,
                 job,
@@ -1445,13 +1462,22 @@ def reconcile_reserved_unbound_jobs(
                     "expected_submission_attempt": _job_submission_attempt(job),
                     "expected_status": str(job.status),
                 }
+                retry_supports_anchor = _callable_accepts_keyword(
+                    permit_retry, "expected_submission_attempt_started_at"
+                )
+                if retry_supports_anchor:
+                    retry_kwargs["expected_submission_attempt_started_at"] = attempt_anchor
                 if _callable_accepts_keyword(permit_retry, "accepted_submit_contract_version"):
                     retry_kwargs["accepted_submit_contract_version"] = ACCEPTED_SUBMIT_CONTRACT_VERSION
-                retry_write_count = int(
-                    permit_retry(
-                        job.job_id,
-                        **retry_kwargs,
+                retry_write_count = (
+                    int(
+                        permit_retry(
+                            job.job_id,
+                            **retry_kwargs,
+                        )
                     )
+                    if retry_supports_anchor
+                    else 0
                 )
                 retry_permitted = retry_write_count > 0
             else:
@@ -1618,6 +1644,25 @@ def _classify_global_comment_records(
     if owned:
         return _CommentAccountingProof("owned_match", owned)
     return _CommentAccountingProof("global_absence")
+
+
+def _effective_versioned_absence_coverage(
+    proof: _CommentAccountingProof,
+    *,
+    attempt_anchor: datetime | None,
+) -> bool:
+    """Recompute absence authority from durable anchor and adapter bounds."""
+
+    anchor = _strict_utc_datetime(attempt_anchor)
+    coverage_start = _strict_utc_datetime(proof.coverage_start)
+    coverage_end = _strict_utc_datetime(proof.coverage_end)
+    return bool(
+        proof.coverage_complete is True
+        and anchor is not None
+        and coverage_start is not None
+        and coverage_end is not None
+        and coverage_start <= anchor <= coverage_end
+    )
 
 
 def _query_comment_accounting_proof(
@@ -1787,11 +1832,11 @@ def _job_submission_attempt(job: Any) -> int:
 
 
 def _job_attempt_anchor(job: Any, *, accepted_submit_reconcile: bool) -> datetime | None:
-    anchor = (
-        getattr(job, "submission_attempt_started_at", None)
-        if accepted_submit_reconcile
-        else getattr(job, "updated_at", None)
-    )
+    if accepted_submit_reconcile:
+        # A versioned absence is authoritative only for the durable current
+        # attempt. Never substitute created_at/updated_at for missing evidence.
+        return _strict_utc_datetime(getattr(job, "submission_attempt_started_at", None))
+    anchor = getattr(job, "updated_at", None)
     if anchor is None:
         anchor = getattr(job, "created_at", None)
     return _as_utc_datetime(anchor)

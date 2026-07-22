@@ -488,7 +488,11 @@ Scenario evidence rows for section 5:
   coverage-unproven attempts remain unavailable. Versioned master mutations use
   exact/cycle-scoped reads despite unrelated malformed or over-limit history,
   and raw page row/byte saturation emits bounded unavailable reason classes
-  rather than fabricating a multiple-match proof.
+  rather than fabricating a multiple-match proof. Versioned masters require an
+  immutable aware-UTC attempt anchor across reserve/direct/journal/latest;
+  reclaim creates a new lock-owned anchor, retry CAS compares it, and the
+  consumer rejects completeness declarations whose bounds do not actually
+  contain the durable anchor while still allowing a proven exact match to bind.
 
 - [ ] 9.6 Complete local, CI, and node-22 live verification.
   Evidence floor: the issue-targeted pytest command, `uv run ruff check .`, and

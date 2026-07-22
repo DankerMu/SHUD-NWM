@@ -4,7 +4,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import Any
 
 from packages.common.source_identity import normalize_source_id
@@ -262,6 +262,46 @@ def accepted_submit_contract_is_current(row: Mapping[str, Any]) -> bool:
     return True
 
 
+def normalize_accepted_submit_attempt_anchor(value: Any) -> str:
+    """Return one canonical aware-UTC anchor for the current submission attempt."""
+
+    parsed: datetime
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError as error:
+            raise AcceptedSubmitEvidenceError(
+                "file_journal_evidence_invariant_invalid",
+                field="submission_attempt_started_at",
+            ) from error
+    else:
+        raise AcceptedSubmitEvidenceError(
+            "file_journal_evidence_invariant_invalid",
+            field="submission_attempt_started_at",
+        )
+    try:
+        offset = parsed.utcoffset() if parsed.tzinfo is not None else None
+    except (OverflowError, TypeError, ValueError) as error:
+        raise AcceptedSubmitEvidenceError(
+            "file_journal_evidence_invariant_invalid",
+            field="submission_attempt_started_at",
+        ) from error
+    if offset is None:
+        raise AcceptedSubmitEvidenceError(
+            "file_journal_evidence_invariant_invalid",
+            field="submission_attempt_started_at",
+        )
+    try:
+        return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    except (OverflowError, TypeError, ValueError) as error:
+        raise AcceptedSubmitEvidenceError(
+            "file_journal_evidence_invariant_invalid",
+            field="submission_attempt_started_at",
+        ) from error
+
+
 def normalize_accepted_submit_evidence(row: Mapping[str, Any]) -> dict[str, Any]:
     """Normalize and validate the one durable accepted-submit master contract.
 
@@ -295,6 +335,9 @@ def normalize_accepted_submit_evidence(row: Mapping[str, Any]) -> dict[str, Any]
         raise AcceptedSubmitEvidenceError(
             "file_journal_evidence_type_invalid", field="native_shud_resubmitted"
         )
+    normalized["submission_attempt_started_at"] = normalize_accepted_submit_attempt_anchor(
+        normalized.get("submission_attempt_started_at")
+    )
 
     normalized["candidate_projections"] = normalize_candidate_projections(
         normalized.get("candidate_projections"),
@@ -598,6 +641,7 @@ __all__ = (
     "forecast_cohort_digest",
     "forecast_cohort_identity_is_valid",
     "is_forecast_cohort_stage_name",
+    "normalize_accepted_submit_attempt_anchor",
     "normalize_accepted_submit_evidence",
     "normalize_candidate_projections",
     "ordered_cohort_members",

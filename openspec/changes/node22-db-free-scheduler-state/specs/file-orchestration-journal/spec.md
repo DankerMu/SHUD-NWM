@@ -217,7 +217,10 @@ attempt and expected state under the same cycle lock. Gateway success MUST
 atomically bind its Slurm ID and `accepted` outcome; accounting adoption MUST
 atomically bind the ID and `matched_bound` tuple. Repeating the same ID is
 idempotent, while a stale transition or different-ID collision MUST NOT mutate
-the winning row.
+the winning row. Every versioned master MUST carry a valid aware-UTC immutable
+`submission_attempt_started_at`; a retry reclaim MUST create its next anchor
+under the cycle lock, and retry permission MUST compare the expected attempt
+number and anchor.
 
 A Gateway timeout MUST persist only the ambiguous submit outcome and MUST leave
 `reconciliation_source`, `reconciliation_decision`, and
@@ -294,6 +297,12 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
   an adapter cannot prove full attempt coverage
 - **THEN** zero matches remain `accounting_unavailable` with bounded
   `coverage_incomplete` evidence and MUST NOT permit retry.
+- **AND** reconcile MUST recompute coverage from valid aware
+  `coverage_start`/`coverage_end` bounds and the durable current-attempt anchor;
+  a completeness flag with missing, reversed, malformed, naive, or non-covering
+  bounds MUST NOT authorize absence.
+- **AND** an independently proven exact identity match MAY bind even when
+  absence coverage is incomplete.
 
 #### Scenario: Ownership mismatch is not authoritative absence
 

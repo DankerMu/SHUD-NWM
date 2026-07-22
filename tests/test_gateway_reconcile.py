@@ -627,11 +627,16 @@ def test_file_cohort_authoritative_absence_allows_one_atomic_retry(tmp_path: Any
     )
 
 
-def test_file_cohort_reclaim_begins_attempt_with_pre_outcome_state_after_reopen(
+@pytest.mark.parametrize("source_id", ["gfs", "ifs"])
+def test_file_cohort_reclaim_begins_attempt_with_fresh_locked_anchor_and_cas(
     tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    source_id: str,
 ) -> None:
     from datetime import timedelta
 
+    from services.orchestrator import file_orchestration_journal as journal_module
+    from services.orchestrator.accepted_submit_identity import AcceptedSubmitTransition
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
     from services.orchestrator.reconcile import reconcile_reserved_unbound_jobs
 
@@ -640,6 +645,7 @@ def test_file_cohort_reclaim_begins_attempt_with_pre_outcome_state_after_reopen(
         tmp_path,
         created_at=attempt_one_started_at,
         member_count=1,
+        source_id=source_id,
     )
     outcome = reconcile_reserved_unbound_jobs(
         repository,
@@ -648,23 +654,25 @@ def test_file_cohort_reclaim_begins_attempt_with_pre_outcome_state_after_reopen(
         now=lambda: attempt_one_started_at + timedelta(seconds=121),
     )[0]
     assert outcome.action == "absence_retry_permitted"
-    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    job_id = f"job_cycle_{source_id}_2026071200_forecast_fixture_forecast"
     attempt_one = repository.get_pipeline_job(job_id)
     assert attempt_one["submission_attempt"] == 1
     assert attempt_one["submit_outcome"] == "submit_result_ambiguous"
     assert attempt_one["reconciliation_decision"] == "absence_retry_permitted"
 
-    attempt_two_started_at = attempt_one_started_at + timedelta(seconds=122)
+    request_anchor = attempt_one_started_at + timedelta(seconds=122)
+    locked_anchor = attempt_one_started_at + timedelta(seconds=123)
     request = {
         **attempt_one,
         "status": "reserved",
         "submission_attempt": 2,
-        "submission_attempt_started_at": attempt_two_started_at,
+        "submission_attempt_started_at": request_anchor,
         "submit_outcome": None,
         "reconciliation_source": None,
         "reconciliation_decision": None,
         "matched_slurm_job_id": None,
     }
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: locked_anchor)
     reclaimed = repository.reclaim_pipeline_job_reservation(request)
 
     assert reclaimed is not None
@@ -678,9 +686,39 @@ def test_file_cohort_reclaim_begins_attempt_with_pre_outcome_state_after_reopen(
     )
     expected = (2, "reserved", None, None, None, None)
     assert tuple(reclaimed[field] for field in fields) == expected
+    assert reclaimed["submission_attempt_started_at"] == locked_anchor.isoformat().replace("+00:00", "Z")
+    assert reclaimed["submission_attempt_started_at"] != request_anchor.isoformat().replace("+00:00", "Z")
     assert tuple(repository.get_pipeline_job(job_id)[field] for field in fields) == expected
     reopened = FileOrchestrationJournalRepository(repository.root)
     assert tuple(reopened.get_pipeline_job(job_id)[field] for field in fields) == expected
+
+    with pytest.raises(journal_module.FileOrchestrationJournalError) as immutable:
+        repository.upsert_pipeline_job(
+            {
+                **reclaimed,
+                "submission_attempt_started_at": locked_anchor + timedelta(seconds=1),
+            }
+        )
+    assert immutable.value.field == "submission_attempt_started_at"
+
+    key = str(reclaimed["idempotency_key"])
+    stale = repository.commit_pipeline_job_submit_attempt(
+        key,
+        pipeline_job_id=job_id,
+        expected_submission_attempt=1,
+        slurm_job_id="17667",
+        transition=AcceptedSubmitTransition.accepted(status="submitted"),
+    )
+    assert stale.outcome == "stale"
+    assert repository.get_pipeline_job(job_id)["slurm_job_id"] is None
+    committed = repository.commit_pipeline_job_submit_attempt(
+        key,
+        pipeline_job_id=job_id,
+        expected_submission_attempt=2,
+        slurm_job_id="17667",
+        transition=AcceptedSubmitTransition.accepted(status="submitted"),
+    )
+    assert committed.outcome == "applied"
 
 
 @pytest.mark.parametrize(
@@ -1136,6 +1174,7 @@ def test_accepted_submit_evidence_validator_fails_closed(mutator: Any, field: st
         "stage": "forecast",
         "submit_outcome": "accepted",
         "restart_stage": "forecast",
+        "submission_attempt_started_at": datetime(2026, 7, 12, tzinfo=UTC),
         "slurm_ownership_required": False,
         "cohort_members": [{"array_task_id": 0}],
     }
@@ -1211,6 +1250,51 @@ def test_accepted_submit_evidence_validator_guards_all_file_surfaces(
             cycle_time=cycle_time,
             expected_model_id="model_0",
         )
+
+
+@pytest.mark.parametrize("source_id", ["gfs", "ifs"])
+@pytest.mark.parametrize("anchor_case", ["missing", "naive"])
+def test_versioned_master_reserve_and_replay_require_valid_attempt_anchor(
+    tmp_path: Any,
+    source_id: str,
+    anchor_case: str,
+) -> None:
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+        _CycleRows,
+    )
+
+    template = _file_cohort_repository(
+        tmp_path / "template",
+        member_count=1,
+        source_id=source_id,
+    )
+    job_id = f"job_cycle_{source_id}_2026071200_forecast_fixture_forecast"
+    row = template.get_accepted_submit_pipeline_job(job_id)
+    if anchor_case == "missing":
+        row.pop("submission_attempt_started_at")
+    else:
+        row["submission_attempt_started_at"] = datetime(2026, 7, 12)
+    target = FileOrchestrationJournalRepository(tmp_path / "target")
+    with pytest.raises(FileOrchestrationJournalError) as reserve_error:
+        target.reserve_pipeline_job(row)
+    assert reserve_error.value.field == "submission_attempt_started_at"
+
+    direct_path = template.root / "pipeline-jobs" / f"{job_id}.json"
+    record = json.loads(direct_path.read_text(encoding="utf-8"))
+    if anchor_case == "missing":
+        record["payload"].pop("submission_attempt_started_at")
+    else:
+        record["payload"]["submission_attempt_started_at"] = "2026-07-12T00:00:00"
+    with pytest.raises(FileOrchestrationJournalError) as replay_error:
+        template._apply_journal_record(
+            _CycleRows(),
+            record,
+            source_id=source_id,
+            cycle_time=datetime(2026, 7, 12, tzinfo=UTC),
+        )
+    assert replay_error.value.field == "submission_attempt_started_at"
 
 
 def test_candidate_submit_outcome_enum_fails_closed_on_every_file_surface(tmp_path: Any) -> None:
@@ -3540,6 +3624,199 @@ def test_default_comment_accounting_requires_full_attempt_coverage_but_still_bin
     )[0]
     assert bound.action == "bound"
     assert matched_repository.get_accepted_submit_pipeline_job(pipeline_job_id)["slurm_job_id"] == "72001"
+
+
+@pytest.mark.parametrize("source_id", ["gfs", "ifs"])
+@pytest.mark.parametrize(
+    "coverage_case",
+    [
+        "declared_false",
+        "missing_bounds",
+        "reversed_bounds",
+        "outside_anchor",
+        "malformed_bounds",
+        "naive_bounds",
+    ],
+)
+def test_versioned_zero_recomputes_adapter_coverage_at_consumer_boundary(
+    tmp_path: Any,
+    source_id: str,
+    coverage_case: str,
+) -> None:
+    from services.orchestrator.reconcile import CommentAccountingResult, reconcile_reserved_unbound_jobs
+
+    anchor = datetime(2026, 7, 12, tzinfo=UTC)
+    repository = _file_cohort_repository(
+        tmp_path,
+        created_at=anchor,
+        member_count=1,
+        source_id=source_id,
+    )
+    hydro_before = copy.deepcopy(repository._hydro_run_for(f"fcst_{source_id}_2026071200_model_0"))
+
+    def declared_zero(_key: str, **_kwargs: Any) -> CommentAccountingResult:
+        complete = coverage_case != "declared_false"
+        start: Any = anchor - timedelta(seconds=1)
+        end: Any = anchor + timedelta(seconds=1)
+        if coverage_case == "missing_bounds":
+            start = end = None
+        elif coverage_case == "reversed_bounds":
+            start, end = end, start
+        elif coverage_case == "outside_anchor":
+            start, end = anchor + timedelta(seconds=1), anchor + timedelta(seconds=2)
+        elif coverage_case == "malformed_bounds":
+            start, end = "2026-07-12T00:00:00Z", {"not": "a datetime"}
+        elif coverage_case == "naive_bounds":
+            start, end = datetime(2026, 7, 11, 23, 59), datetime(2026, 7, 12, 0, 1)
+        return CommentAccountingResult(
+            (),
+            scope="global",
+            coverage_start=start,
+            coverage_end=end,
+            coverage_complete=complete,
+        )
+
+    outcome = reconcile_reserved_unbound_jobs(
+        repository,
+        comment_query=declared_zero,
+        grace=timedelta(0),
+        now=lambda: anchor + timedelta(minutes=1),
+    )[0]
+    pipeline_job_id = f"job_cycle_{source_id}_2026071200_forecast_fixture_forecast"
+    persisted = repository.get_accepted_submit_pipeline_job(pipeline_job_id)
+    hydro = repository._hydro_run_for(f"fcst_{source_id}_2026071200_model_0")
+    assert outcome.action == "query_unavailable"
+    assert outcome.reconciliation_reason_class == "coverage_incomplete"
+    assert persisted["status"] == "reserved"
+    assert persisted["slurm_job_id"] is None
+    assert persisted["reconciliation_reason_class"] == "coverage_incomplete"
+    assert hydro == hydro_before
+
+
+@pytest.mark.parametrize("source_id", ["gfs", "ifs"])
+def test_missing_durable_attempt_anchor_blocks_zero_but_not_exact_match(
+    tmp_path: Any,
+    source_id: str,
+) -> None:
+    from services.orchestrator.reconcile import SacctRecord, reconcile_reserved_unbound_jobs
+
+    anchor = datetime(2026, 7, 12, tzinfo=UTC)
+
+    def hide_durable_anchor(repository: Any) -> None:
+        original = repository.query_reserved_unbound_jobs
+
+        def missing_anchor_rows() -> list[Any]:
+            rows = original()
+            for row in rows:
+                row.submission_attempt_started_at = None
+            return rows
+
+        repository.query_reserved_unbound_jobs = missing_anchor_rows
+
+    absent = _file_cohort_repository(
+        tmp_path / "absent",
+        created_at=anchor,
+        member_count=1,
+        source_id=source_id,
+    )
+    hide_durable_anchor(absent)
+    unavailable = reconcile_reserved_unbound_jobs(
+        absent,
+        comment_query=_authoritative_absence_query,
+        grace=timedelta(0),
+        now=lambda: anchor + timedelta(minutes=1),
+    )[0]
+    pipeline_job_id = f"job_cycle_{source_id}_2026071200_forecast_fixture_forecast"
+    persisted = absent.get_accepted_submit_pipeline_job(pipeline_job_id)
+    assert unavailable.action == "query_unavailable"
+    assert unavailable.reconciliation_reason_class == "coverage_incomplete"
+    assert persisted["status"] == "reserved"
+    assert persisted["slurm_job_id"] is None
+
+    matched = _file_cohort_repository(
+        tmp_path / "matched",
+        created_at=anchor,
+        member_count=1,
+        source_id=source_id,
+    )
+    identity = matched.get_accepted_submit_pipeline_job(pipeline_job_id)
+    hide_durable_anchor(matched)
+    exact = SacctRecord(
+        "72501",
+        "RUNNING",
+        "nhms_forecast",
+        comment=str(identity["slurm_comment"]),
+    )
+    bound = reconcile_reserved_unbound_jobs(matched, comment_query=lambda _key: exact)[0]
+    assert bound.action == "bound"
+    assert matched.get_accepted_submit_pipeline_job(pipeline_job_id)["slurm_job_id"] == "72501"
+
+
+@pytest.mark.parametrize("source_id", ["gfs", "ifs"])
+def test_valid_custom_coverage_permits_exactly_one_retry_and_marker_free_is_unchanged(
+    tmp_path: Any,
+    source_id: str,
+) -> None:
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from services.orchestrator.reconcile import CommentAccountingResult, reconcile_reserved_unbound_jobs
+
+    anchor = datetime(2026, 7, 12, tzinfo=UTC)
+
+    def valid_zero(_key: str, **_kwargs: Any) -> CommentAccountingResult:
+        return CommentAccountingResult(
+            (),
+            scope="global",
+            coverage_start=anchor - timedelta(seconds=1),
+            coverage_end=anchor + timedelta(seconds=1),
+            coverage_complete=True,
+        )
+
+    repository = _file_cohort_repository(
+        tmp_path / "versioned",
+        created_at=anchor,
+        member_count=1,
+        source_id=source_id,
+    )
+    pipeline_job_id = f"job_cycle_{source_id}_2026071200_forecast_fixture_forecast"
+    assert (
+        repository.permit_pipeline_job_retry(
+            pipeline_job_id,
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=1,
+            expected_submission_attempt_started_at=anchor + timedelta(seconds=1),
+        )
+        == 0
+    )
+    assert repository.get_accepted_submit_pipeline_job(pipeline_job_id)["status"] == "reserved"
+    first = reconcile_reserved_unbound_jobs(
+        repository,
+        comment_query=valid_zero,
+        grace=timedelta(0),
+        now=lambda: anchor + timedelta(minutes=1),
+    )
+    second = reconcile_reserved_unbound_jobs(
+        repository,
+        comment_query=valid_zero,
+        grace=timedelta(0),
+        now=lambda: anchor + timedelta(minutes=1),
+    )
+    assert [outcome.action for outcome in first] == ["absence_retry_permitted"]
+    assert second == []
+
+    marker_template = _file_cohort_repository(
+        tmp_path / "marker-template",
+        created_at=anchor,
+        member_count=1,
+        source_id=source_id,
+        versioned=False,
+    )
+    marker_row = marker_template.get_pipeline_job(pipeline_job_id)
+    marker_row.pop("submission_attempt_started_at")
+    marker_free = FileOrchestrationJournalRepository(tmp_path / "marker-free")
+    assert marker_free.reserve_pipeline_job(marker_row) is not None
+    legacy = reconcile_reserved_unbound_jobs(marker_free, comment_query=lambda _key: None)
+    assert [outcome.action for outcome in legacy] == ["legacy_unversioned_read_only"]
 
 
 @pytest.mark.parametrize(
