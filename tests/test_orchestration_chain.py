@@ -3563,6 +3563,38 @@ def test_permanently_failed_stage_blocks_downstream_stages(tmp_path: Path) -> No
     assert repository.cycle_statuses[-1] == "failed_convert"
 
 
+def test_legacy_convert_reservation_lost_obeys_retry_limit_without_direct_submit(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    job_id = "job_cycle_gfs_2026050100_convert"
+    repository.jobs[job_id] = {
+        "job_id": job_id,
+        "run_id": "cycle_gfs_2026050100",
+        "cycle_id": "gfs_2026050100",
+        "job_type": "convert_canonical",
+        "slurm_job_id": None,
+        "model_id": None,
+        "status": "reservation_lost",
+        "stage": "convert",
+        "retry_count": 99,
+        "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
+        "started_at": None,
+        "finished_at": _fmt(_dt("2026-05-01T00:01:00Z")),
+        "exit_code": None,
+        "error_code": "SLURM_RESERVATION_LOST",
+        "error_message": "legacy reservation was not accepted",
+        "log_uri": None,
+    }
+    client = FakeCycleSlurmClient()
+    retry_service = FakeRetryService(max_retries=0)
+    orchestrator = _orchestrator(tmp_path, repository, client, retry_service=retry_service)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
+
+    assert result.status == "failed"
+    assert retry_service.handled_job_ids == [job_id]
+    assert client.submissions == []
+
+
 def test_failed_stage_auto_retries_before_downstream_stages(tmp_path: Path) -> None:
     repository = FakeCycleRepository()
     client = FakeCycleSlurmClient(
@@ -10768,7 +10800,8 @@ def test_missing_forecast_output_retry_resubmits_lost_forecast_identity(tmp_path
     store.session.commit()
 
     client = FakeCycleSlurmClient()
-    orchestrator = _orchestrator(tmp_path, repository, client)
+    retry_service = FakeRetryService(max_retries=1)
+    orchestrator = _orchestrator(tmp_path, repository, client, retry_service=retry_service)
     basins = _basins(1)
     basins[0]["orchestration_run_id"] = "cycle_gfs_2026050100_forecast_model_0"
     basins[0]["restart_stage"] = "forecast"
@@ -10795,6 +10828,7 @@ def test_missing_forecast_output_retry_resubmits_lost_forecast_identity(tmp_path
     assert retry_job["slurm_job_id"] == "2001"
     assert retry_job["idempotency_key"] == "cycle_gfs_2026050100_forecast_model_0:forecast:retry_1"
     assert client.submissions[0]["stage"] == "forecast"
+    assert retry_service.handled_job_ids == ["job_cycle_gfs_2026050100_forecast_model_0_forecast"]
     assert (
         client.submissions[0]["manifest"]["comment"]
         == "nhms_idem:cycle_gfs_2026050100_forecast_model_0:forecast:retry_1"
@@ -10802,6 +10836,8 @@ def test_missing_forecast_output_retry_resubmits_lost_forecast_identity(tmp_path
 
 
 def test_auto_manifest_repair_resubmits_terminal_restart_stages() -> None:
+    from services.orchestrator.accepted_submit_identity import forecast_cohort_digest
+
     context = CycleOrchestrationContext(
         source_id="gfs",
         cycle_time=datetime(2026, 5, 1, tzinfo=UTC),
@@ -10842,10 +10878,41 @@ def test_auto_manifest_repair_resubmits_terminal_restart_stages() -> None:
         "decision": "retry_missing_forecast_output",
         "restart_stage": "forecast",
     }
-    assert ForecastOrchestrator._terminal_stage_needs_manual_retry(
+    assert not ForecastOrchestrator._terminal_stage_needs_manual_retry(
         context,
         {"stage": "forecast", "status": "reservation_lost"},
     )
+    verified_cohort = {
+        "job_id": "job_cycle_gfs_2026050100_forecast_fixture_forecast",
+        "run_id": "cycle_gfs_2026050100_forecast_fixture",
+        "source_id": "gfs",
+        "cycle_id": "gfs_2026050100",
+        "job_type": "run_shud_forecast_array",
+        "stage": "forecast",
+        "status": "reservation_lost",
+        "slurm_job_id": None,
+        "idempotency_key": "cycle_gfs_2026050100_forecast_fixture:forecast",
+        "slurm_comment": "nhms_idem:cycle_gfs_2026050100_forecast_fixture:forecast",
+        "submit_outcome": "submit_result_ambiguous",
+        "restart_stage": "forecast",
+        "submission_attempt": 1,
+        "cohort_members": [
+            {
+                "array_task_id": 0,
+                "candidate_id": "gfs:2026-05-01T00:00:00Z:model_0:forecast_gfs_deterministic",
+                "run_id": "fcst_gfs_2026050100_model_0",
+                "model_id": "model_0",
+                "basin_id": "basin_0",
+                "scenario_id": "forecast_gfs_deterministic",
+                "restart_stage": "forecast",
+            }
+        ],
+        "reconciliation_source": "slurm_exact_comment",
+        "reconciliation_decision": "absence_retry_permitted",
+        "matched_slurm_job_id": None,
+    }
+    verified_cohort["cohort_digest"] = forecast_cohort_digest(verified_cohort)
+    assert ForecastOrchestrator._terminal_stage_needs_manual_retry(context, verified_cohort)
 
 
 def test_auto_manifest_repair_resubmits_terminal_cohort_when_every_basin_requires_it() -> None:

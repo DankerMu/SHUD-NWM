@@ -192,7 +192,7 @@ def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult
                     else:
                         stage_results.append(result)
 
-                    if result.status in {"failed", "submission_failed", "permanently_failed"}:
+                    if result.status in {"failed", "submission_failed", "reservation_lost", "permanently_failed"}:
                         retry_attempts += 1
                         retry_pipeline_job_id = self._schedule_cycle_stage_retry(result, retry_attempts)
                         if retry_pipeline_job_id is not None:

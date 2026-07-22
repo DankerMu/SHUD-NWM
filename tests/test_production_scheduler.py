@@ -8672,14 +8672,21 @@ def test_atomic_lock_guard_mode_does_not_open_guard_file(
     assert not lock_path.exists()
 
 
-def test_file_journal_atomic_lock_mode_does_not_call_flock(
+def test_file_journal_atomic_lock_mode_uses_cross_process_flock(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     import fcntl
 
     monkeypatch.setenv("NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE", "atomic")
-    monkeypatch.setattr(fcntl, "flock", lambda *_args: pytest.fail("atomic mode must not call flock"))
+    calls: list[int] = []
+    real_flock = fcntl.flock
+
+    def recording_flock(fd: int, operation: int) -> None:
+        calls.append(operation)
+        real_flock(fd, operation)
+
+    monkeypatch.setattr(fcntl, "flock", recording_flock)
     repository = scheduler_module.FileOrchestrationJournalRepository(tmp_path / "journal")
     repository._ensure_root_unlocked()
 
@@ -8688,6 +8695,63 @@ def test_file_journal_atomic_lock_mode_does_not_call_flock(
 
     lock_path = tmp_path / "journal" / ".locks" / "gfs" / "2026052112.lock"
     assert lock_path.is_file()
+    assert calls == [fcntl.LOCK_EX, fcntl.LOCK_UN]
+
+
+def test_file_journal_atomic_alias_excludes_another_process(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import subprocess
+    import sys
+    import time
+
+    monkeypatch.setenv("NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE", "atomic")
+    root = tmp_path / "journal"
+    ready = tmp_path / "child-ready"
+    child_code = """
+import os
+import sys
+import time
+from datetime import UTC, datetime
+from pathlib import Path
+from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+os.environ['NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE'] = 'atomic'
+repo = FileOrchestrationJournalRepository(Path(sys.argv[1]))
+repo._ensure_root_unlocked()
+with repo._cycle_file_lock_unlocked(source_id='gfs', cycle_time=datetime(2026, 5, 21, 12, tzinfo=UTC)):
+    Path(sys.argv[2]).touch()
+    time.sleep(0.4)
+"""
+    child = subprocess.Popen([sys.executable, "-c", child_code, str(root), str(ready)])
+    deadline = time.monotonic() + 5
+    while not ready.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ready.exists()
+
+    repository = scheduler_module.FileOrchestrationJournalRepository(root)
+    started = time.monotonic()
+    with repository._cycle_file_lock_unlocked(source_id="gfs", cycle_time=_dt("2026-05-21T12:00:00Z")):
+        pass
+    elapsed = time.monotonic() - started
+    assert child.wait(timeout=5) == 0
+    assert elapsed >= 0.2
+
+    ready.unlink()
+    crashing_child_code = child_code.replace("time.sleep(0.4)", "time.sleep(60)")
+    crashing_child = subprocess.Popen(
+        [sys.executable, "-c", crashing_child_code, str(root), str(ready)]
+    )
+    deadline = time.monotonic() + 5
+    while not ready.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ready.exists()
+    crashing_child.terminate()
+    crashing_child.wait(timeout=5)
+    started = time.monotonic()
+    with repository._cycle_file_lock_unlocked(source_id="gfs", cycle_time=_dt("2026-05-21T12:00:00Z")):
+        pass
+    assert time.monotonic() - started < 0.2
 
 
 def test_file_journal_cycle_rows_reuse_cycle_scan_across_models(
@@ -24275,6 +24339,13 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
         first_repository._hydro_run_for(member["run_id"])["candidate_id"] == member["candidate_id"]
         for member in reserved.cohort_members
     )
+    initial_forecast_submission = next(
+        submission for submission in initial_client.submissions if submission["stage"] == "forecast"
+    )
+    initial_runtime_manifests = {
+        str(task["model_id"]): json.loads(Path(task["manifest_path"]).read_text(encoding="utf-8"))
+        for task in initial_forecast_submission["tasks"]
+    }
 
     def accounting(*, user: str, account: str, state: str = "RUNNING") -> SacctRecord:
         return SacctRecord(
@@ -24303,16 +24374,16 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
     wrong_result = wrong_scheduler.run_once()
     assert wrong_result.evidence["restart_reconcile"]["reserved_unbound"]["outcomes"][0][
         "reconciliation_decision"
-    ] == "identity_mismatch_blocked"
+    ] == "absence_deferred"
     assert wrong_repository.get_pipeline_job(reserved.job_id)["slurm_job_id"] is None
 
     exact = accounting(user="scheduler-user", account="scheduler-account")
 
-    def terminal(task_count: int) -> SacctRecord:
+    def terminal(task_count: int, *, retryable_failure_index: int | None = None) -> SacctRecord:
         tasks = tuple(
             SacctRecord(
                 f"{initial_client.accepted_forecast_job_id}_{index}",
-                "COMPLETED",
+                "TIMEOUT" if index == retryable_failure_index else "COMPLETED",
                 "nhms_forecast",
                 comment=reserved.slurm_comment,
                 array_task_id=index,
@@ -24321,7 +24392,7 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
         )
         return SacctRecord(
             str(initial_client.accepted_forecast_job_id),
-            "COMPLETED",
+            "FAILED" if retryable_failure_index is not None else "COMPLETED",
             "nhms_forecast",
             comment=reserved.slurm_comment,
             user="scheduler-user",
@@ -24391,15 +24462,20 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
         orchestrator_factory=execution_must_not_start,
         reconcile_store=complete_repository,
         reconcile_comment_query=lambda _key: None,
-        reconcile_sacct_query=lambda _job: terminal(18),
+        reconcile_sacct_query=lambda _job: terminal(18, retryable_failure_index=17),
     )
     complete_result = complete_scheduler.run_once()
     complete_reconcile = complete_result.evidence["restart_reconcile"]
     assert complete_reconcile["reserved_unbound"]["count"] == 0
     assert complete_reconcile["inflight"]["outcomes"][0]["action"] == "terminal"
     complete_parent = complete_repository.get_pipeline_job(reserved.job_id)
-    assert complete_parent["status"] == "succeeded"
+    assert complete_parent["status"] == "failed"
     assert len(complete_parent["candidate_projections"]) == 18
+    assert [item["array_task_outcome"] for item in complete_parent["candidate_projections"]].count("failed") == 1
+    failed_member = reserved.cohort_members[17]
+    failed_hydro = complete_repository._hydro_run_for(str(failed_member["run_id"]))
+    assert failed_hydro["status"] == "failed"
+    assert failed_hydro["error_code"] == "SLURM_TIMEOUT"
     assert complete_result.status == "restart_reconciled"
     assert complete_result.evidence["execution_boundary"] == "restart_reconcile"
     assert complete_result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
@@ -24456,7 +24532,114 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
         }
         for candidate in resumed_result.evidence["candidates"]
     ]
-    assert [submission["stage"] for submission in state_save_client.submissions] == ["state_save_qc"]
+    submitted_stages = [submission["stage"] for submission in state_save_client.submissions]
+    assert submitted_stages.count("state_save_qc") == 2
+    assert submitted_stages.count("forecast") == 1
+    state_save_submission = next(
+        submission
+        for submission in state_save_client.submissions
+        if submission["stage"] == "state_save_qc" and len(submission["tasks"]) == 17
+    )
+    forecast_submission = next(
+        submission for submission in state_save_client.submissions if submission["stage"] == "forecast"
+    )
+    assert {task["model_id"] for task in state_save_submission["tasks"]} == {
+        str(member["model_id"]) for member in reserved.cohort_members[:17]
+    }
+    assert {task["model_id"] for task in forecast_submission["tasks"]} == {str(failed_member["model_id"])}
+    for lineage in state_save_submission["manifest"]["model_runs"]:
+        original = initial_runtime_manifests[str(lineage["model_id"])]
+        assert original["runtime"]["state_checkpoint_hours"]
+        assert lineage["run_id"] == original["run_id"]
+        assert lineage["candidate_id"] == original["candidate_id"]
+        assert lineage["source_id"] == original["source_id"]
+        assert lineage["cycle_time"] == original["cycle_time"]
+        assert lineage["model_package_uri"] == original["model"]["model_package_uri"]
+    for task in state_save_submission["tasks"]:
+        original = initial_runtime_manifests[str(task["model_id"])]
+        identity = task["model_run_assembly"]["identity"]
+        assert identity["model_package_checksum"] == original["model"]["model_package_checksum"]
+
+    from packages.common.state_cli import StateRunContext, save_state_for_run
+    from packages.common.state_manager import FileStateSnapshotIndexRepository, StateManager
+
+    success_member = reserved.cohort_members[0]
+    success_run_id = str(success_member["run_id"])
+    success_model_id = str(success_member["model_id"])
+    success_manifest = initial_runtime_manifests[success_model_id]
+    checkpoint_lead = int(success_manifest["runtime"]["state_checkpoint_hours"][0])
+    checkpoint_valid_time = _dt(success_manifest["cycle_time"]) + timedelta(hours=checkpoint_lead)
+    checkpoint_dir = chain_workspace / "runs" / success_run_id / "output" / "state_checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_name = f"{success_model_id}.f{checkpoint_lead:03d}.cfg.ic.update"
+    checkpoint_path = checkpoint_dir / checkpoint_name
+    checkpoint_path.write_text(
+        (
+            f"2\t1\t{checkpoint_valid_time.timestamp() / 60.0:.6f}\n"
+            "1\t0.1\t0.1\t0.1\t0.1\t0.1\n"
+            "2\t0.2\t0.2\t0.2\t0.2\t0.2\n"
+            "1\t0.5\n"
+        ),
+        encoding="utf-8",
+    )
+    checkpoint_manifest_path = checkpoint_dir / "state_checkpoints.json"
+    checkpoint_manifest_path.write_text(
+        json.dumps(
+            {
+                "checkpoints": [
+                    {
+                        "lead_hours": checkpoint_lead,
+                        "valid_time": checkpoint_valid_time.isoformat().replace("+00:00", "Z"),
+                        "relative_path": f"state_checkpoints/{checkpoint_name}",
+                        "checkpoint_filename": checkpoint_name,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    state_object_root = tmp_path / "state-object-store"
+    state_index_path = tmp_path / "state-index.json"
+    state_repository = FileStateSnapshotIndexRepository(
+        str(state_index_path),
+        object_store_root=state_object_root,
+        object_store_prefix="s3://nhms-state",
+        published_artifact_root=state_object_root,
+        create_missing=True,
+    )
+    state_manager = StateManager(
+        repository=state_repository,
+        object_store=LocalObjectStore(state_object_root, "s3://nhms-state"),
+    )
+    state_result = save_state_for_run(
+        success_run_id,
+        manager=state_manager,
+        run_context=StateRunContext(
+            run_id=success_run_id,
+            model_id=success_model_id,
+            end_time=_dt(success_manifest["end_time"]),
+            output_uri=None,
+            source_id=source_id,
+            cycle_time=_dt(success_manifest["cycle_time"]),
+            model_package_version=success_manifest["model"]["model_package_uri"],
+            model_package_checksum=success_manifest["model"]["model_package_checksum"],
+        ),
+        workspace_root=chain_workspace,
+    )
+    saved_snapshot = state_repository.get_state_snapshot(state_result["state_id"])
+    assert state_result["qc_passed"] is True
+    assert len(state_result["checkpoints"]) == 1
+    assert saved_snapshot is not None
+    assert saved_snapshot.usable_flag is True
+    assert saved_snapshot.run_id == success_run_id
+    assert saved_snapshot.source_id == source_id
+    assert saved_snapshot.cycle_id == success_manifest["identity"]["cycle_id"]
+    assert saved_snapshot.model_package_version == success_manifest["model"]["model_package_uri"]
+    assert saved_snapshot.model_package_checksum == success_manifest["model"]["model_package_checksum"]
+    reopened_hydro = resumed_repository._hydro_run_for(success_run_id)
+    assert reopened_hydro["run_id"] == success_manifest["run_id"]
+    assert reopened_hydro["candidate_id"] == success_manifest["candidate_id"]
+    assert success_model_id not in {task["model_id"] for task in forecast_submission["tasks"]}
     assert len(resumed_repository.get_pipeline_job(reserved.job_id)["candidate_projections"]) == 18
 
 

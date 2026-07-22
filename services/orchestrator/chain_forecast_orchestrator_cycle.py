@@ -6,6 +6,7 @@ from services.orchestrator import chain as _chain
 from services.orchestrator.accepted_submit_identity import (
     canonical_forecast_cohort_members,
     forecast_cohort_digest,
+    forecast_cohort_identity_is_valid,
 )
 
 _FORCE_TERMINAL_RESUBMIT_DECISIONS = {
@@ -147,9 +148,9 @@ class ForecastOrchestratorCycleMixin:
     def _terminal_stage_needs_manual_retry(
         context: _chain.CycleOrchestrationContext, job: _chain.Mapping[str, _chain.Any]
     ) -> bool:
-        if _terminal_stage_needs_forced_resubmit(context, job):
-            return True
         if str(job.get("status") or "") == "reservation_lost" and job.get("slurm_job_id") in (None, ""):
+            return _verified_accepted_submit_forecast_retry(job)
+        if _terminal_stage_needs_forced_resubmit(context, job):
             return True
         if context.retry_attempt is None:
             return False
@@ -752,6 +753,18 @@ def _terminal_stage_needs_forced_resubmit(
         if restart_stage is None or _STAGE_ORDER[job_stage] < _STAGE_ORDER[restart_stage]:
             return False
     return True
+
+
+def _verified_accepted_submit_forecast_retry(job: _chain.Mapping[str, _chain.Any]) -> bool:
+    """Allow the reclaim shortcut only for reconcile-verified forecast cohorts."""
+
+    return bool(
+        job.get("submit_outcome") in {"accepted", "submit_result_ambiguous"}
+        and job.get("reconciliation_source") == "slurm_exact_comment"
+        and job.get("reconciliation_decision") == "absence_retry_permitted"
+        and job.get("matched_slurm_job_id") is None
+        and forecast_cohort_identity_is_valid(job)
+    )
 
 
 def _canonical_stage(value: _chain.Any) -> str | None:

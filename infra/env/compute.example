@@ -82,7 +82,7 @@ NHMS_SCHEDULER_MAX_PASSES=1
 # Keep systemd stdout operationally small; full pass evidence is still written
 # under NHMS_SCHEDULER_EVIDENCE_ROOT for audits and debugging.
 NHMS_SCHEDULER_STDOUT_SUMMARY_ONLY=true
-# Use atomic O_EXCL lock files on NFS mounts where flock can block on RPC.
+# "atomic" is a compatibility alias for the same crash-safe cross-process flock guard.
 NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE=atomic
 # Bound source/cycle cohort submission and polling control threads only. Basin
 # compute concurrency is owned by the global Slurm array bound below plus

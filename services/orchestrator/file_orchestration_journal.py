@@ -867,8 +867,18 @@ class FileOrchestrationJournalRepository:
             cycle_time = parse_cycle_time(cycle_id.split("_", maxsplit=1)[1])
             submission_attempt = max(int(identity.get("submission_attempt") or 1), 1)
             expected_cycle_time = _format_utc(cycle_time)
+            model_ids = [str(member.get("model_id") or "") for member in members]
+            if any(not model_id for model_id in model_ids):
+                return False
+            with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+                rows_by_model = self._cycle_rows_by_model_unlocked(
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    model_ids=model_ids,
+                )
             for member in members:
-                hydro_run = self._hydro_run_for(str(member.get("run_id") or ""))
+                model_rows = rows_by_model.get(str(member.get("model_id") or ""))
+                hydro_run = model_rows.hydro_run if model_rows is not None else None
                 if hydro_run is None:
                     return False
                 if {
@@ -1334,6 +1344,22 @@ class FileOrchestrationJournalRepository:
                             "slurm_job_id": candidate_job["slurm_job_id"],
                             "error_code": None,
                             "error_message": None,
+                            "updated_at": _format_utc(_utcnow()),
+                        }
+                    )
+                    payloads.append(("hydro_run", hydro_row, model_id))
+                elif (
+                    task_status == "failed"
+                    and isinstance(hydro, Mapping)
+                    and hydro.get("error_code") in {None, "SLURM_GATEWAY_UNAVAILABLE", "SLURM_RESERVATION_LOST"}
+                ):
+                    hydro_row = dict(hydro)
+                    hydro_row.update(
+                        {
+                            "status": "failed",
+                            "slurm_job_id": candidate_job["slurm_job_id"],
+                            "error_code": projection.get("error_code") or "SLURM_JOB_FAILED",
+                            "error_message": "terminal Slurm array task failed",
                             "updated_at": _format_utc(_utcnow()),
                         }
                     )
@@ -2115,6 +2141,7 @@ class FileOrchestrationJournalRepository:
                 cycle_time=cycle_time,
                 model_id=expected_model_id,
             )
+            _validate_accepted_submit_evidence(job)
             job = _with_latest_replay_order(job, latest_replay_sequence)
             _upsert_by_key(rows.pipeline_jobs, job, key="job_id")
         for event in _record_list(payload, "pipeline_events", "events", single_key="pipeline_event"):
@@ -2162,6 +2189,7 @@ class FileOrchestrationJournalRepository:
                 cycle_time=cycle_time,
                 model_id=record_model_id if record_model_id is not None else expected_model_id,
             )
+            _validate_accepted_submit_evidence(payload)
             _upsert_by_key(rows.pipeline_jobs, payload, key="job_id")
         elif record_type == "pipeline_event":
             self._apply_event_record(rows, record, source_id=source_id, cycle_time=cycle_time)
@@ -2679,6 +2707,7 @@ class FileOrchestrationJournalRepository:
             model_id=model_id,
             expected_job_id=expected_job_id,
         )
+        _validate_accepted_submit_evidence(payload)
         return payload
 
     def _write_hydro_run(self, row: Mapping[str, Any], *, retriable_only: bool) -> dict[str, Any]:
@@ -2728,6 +2757,7 @@ class FileOrchestrationJournalRepository:
         return None
 
     def _pipeline_job_row(self, record: Mapping[str, Any]) -> dict[str, Any]:
+        _validate_accepted_submit_evidence(record)
         cycle_id = _required_safe_identity(record, "cycle_id")
         source_id, cycle_time = _source_cycle_from_cycle_id(cycle_id)
         now = _format_utc(_utcnow())
@@ -2781,6 +2811,7 @@ class FileOrchestrationJournalRepository:
             cycle_time=cycle_time,
             model_id=_optional_safe_identity(row, "model_id"),
         )
+        _validate_accepted_submit_evidence(row)
         return row
 
     def _write_pipeline_job(self, row: Mapping[str, Any], *, exclusive_direct: bool) -> dict[str, Any] | None:
@@ -3355,10 +3386,8 @@ class FileOrchestrationJournalRepository:
 
 def _file_lock_guard_mode() -> str:
     value = os.getenv(FILE_LOCK_GUARD_MODE_ENV, "flock").strip().lower()
-    if value in {"", "flock", "fcntl"}:
+    if value in {"", "flock", "fcntl", "atomic"}:
         return "flock"
-    if value in {"atomic", "none", "off", "disabled"}:
-        return "atomic"
     raise SafeFilesystemError(f"Unsupported {FILE_LOCK_GUARD_MODE_ENV}: {value}")
 
 
@@ -4497,6 +4526,108 @@ def _bounded_candidate_projections(value: Any) -> list[dict[str, Any]]:
         "native_shud_resubmitted",
     )
     return [{key: item.get(key) for key in allowed} for item in value[:256] if isinstance(item, Mapping)]
+
+
+_ACCEPTED_SUBMIT_OUTCOMES = frozenset({"accepted", "submit_result_ambiguous"})
+_ACCEPTED_RECONCILIATION_DECISIONS = frozenset(
+    {
+        "accounting_unavailable",
+        "absence_deferred",
+        "absence_retry_permitted",
+        "identity_mismatch_blocked",
+        "matched_bound",
+        "multiple_matches_blocked",
+        "task_accounting_incomplete",
+        "terminal_accounting_complete",
+    }
+)
+_MATCHED_RECONCILIATION_DECISIONS = frozenset(
+    {"matched_bound", "task_accounting_incomplete", "terminal_accounting_complete"}
+)
+_ACCEPTED_RESTART_STAGES = frozenset({"forecast", "state_save_qc"})
+_ACCEPTED_PROJECTION_OUTCOMES = frozenset({"succeeded", "failed", "unverified"})
+
+
+def _validate_accepted_submit_evidence(row: Mapping[str, Any]) -> None:
+    """Validate semantic evidence for a durable forecast cohort on every surface."""
+
+    members = row.get("cohort_members")
+    if not isinstance(members, Sequence) or isinstance(members, str | bytes | bytearray) or not members:
+        return
+    stage = str(row.get("stage") or row.get("job_type") or "")
+    if stage not in {"forecast", "run_shud_forecast_array", "forecast_array"}:
+        return
+    if (
+        row.get("submit_outcome") is None
+        and row.get("reconciliation_decision") is None
+        and not row.get("candidate_projections")
+    ):
+        return
+    if row.get("submit_outcome") not in _ACCEPTED_SUBMIT_OUTCOMES:
+        raise FileOrchestrationJournalError("file_journal_evidence_enum_invalid", field="submit_outcome")
+    if type(row.get("slurm_ownership_required")) is not bool:
+        raise FileOrchestrationJournalError("file_journal_evidence_type_invalid", field="slurm_ownership_required")
+    restart_stage = row.get("restart_stage")
+    if restart_stage not in _ACCEPTED_RESTART_STAGES:
+        raise FileOrchestrationJournalError("file_journal_evidence_enum_invalid", field="restart_stage")
+    native_resubmitted = row.get("native_shud_resubmitted")
+    if native_resubmitted is not None and type(native_resubmitted) is not bool:
+        raise FileOrchestrationJournalError("file_journal_evidence_type_invalid", field="native_shud_resubmitted")
+
+    projections = row.get("candidate_projections")
+    if projections is not None:
+        if not isinstance(projections, Sequence) or isinstance(projections, str | bytes | bytearray):
+            raise FileOrchestrationJournalError("file_journal_evidence_type_invalid", field="candidate_projections")
+        for projection in projections:
+            if not isinstance(projection, Mapping):
+                raise FileOrchestrationJournalError(
+                    "file_journal_evidence_type_invalid", field="candidate_projections"
+                )
+            for field_name in ("candidate_id", "run_id", "model_id"):
+                if not isinstance(projection.get(field_name), str) or not projection.get(field_name):
+                    raise FileOrchestrationJournalError(
+                        "file_journal_evidence_required", field=f"candidate_projections.{field_name}"
+                    )
+            if type(projection.get("array_task_id")) is not int:
+                raise FileOrchestrationJournalError(
+                    "file_journal_evidence_type_invalid", field="candidate_projections.array_task_id"
+                )
+            if projection.get("array_task_outcome") not in _ACCEPTED_PROJECTION_OUTCOMES:
+                raise FileOrchestrationJournalError(
+                    "file_journal_evidence_enum_invalid", field="candidate_projections.array_task_outcome"
+                )
+            if projection.get("restart_stage") not in _ACCEPTED_RESTART_STAGES:
+                raise FileOrchestrationJournalError(
+                    "file_journal_evidence_enum_invalid", field="candidate_projections.restart_stage"
+                )
+            if type(projection.get("native_shud_resubmitted")) is not bool:
+                raise FileOrchestrationJournalError(
+                    "file_journal_evidence_type_invalid",
+                    field="candidate_projections.native_shud_resubmitted",
+                )
+
+    decision = row.get("reconciliation_decision")
+    source = row.get("reconciliation_source")
+    matched_id = row.get("matched_slurm_job_id")
+    if decision is None:
+        if source is not None or matched_id is not None:
+            raise FileOrchestrationJournalError(
+                "file_journal_evidence_invariant_invalid", field="reconciliation_decision"
+            )
+        return
+    if decision not in _ACCEPTED_RECONCILIATION_DECISIONS:
+        raise FileOrchestrationJournalError("file_journal_evidence_enum_invalid", field="reconciliation_decision")
+    if source != "slurm_exact_comment":
+        raise FileOrchestrationJournalError("file_journal_evidence_enum_invalid", field="reconciliation_source")
+    if decision in _MATCHED_RECONCILIATION_DECISIONS:
+        if not isinstance(matched_id, str) or re.fullmatch(r"\d+", matched_id) is None:
+            raise FileOrchestrationJournalError(
+                "file_journal_evidence_invariant_invalid", field="matched_slurm_job_id"
+            )
+    elif matched_id is not None:
+        raise FileOrchestrationJournalError(
+            "file_journal_evidence_invariant_invalid", field="matched_slurm_job_id"
+        )
 
 
 def _file_journal_real_slurm_job_id(value: Any) -> bool:

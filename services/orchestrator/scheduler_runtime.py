@@ -1440,6 +1440,7 @@ def _run_restart_reconcile(
         return {"status": "skipped", "reason": "reconcile_store_unavailable"}
 
     from services.orchestrator.reconcile import (
+        RESERVATION_ABSENCE_GRACE,
         reconcile_inflight_jobs,
         reconcile_reserved_unbound_jobs,
     )
@@ -1451,11 +1452,13 @@ def _run_restart_reconcile(
         reserved = reconcile_reserved_unbound_jobs(
             store,
             comment_query=comment_query,
-            grace=timedelta(seconds=self.config.restart_reconcile_absence_seconds),
+            accepted_submit_grace=timedelta(seconds=self.config.restart_reconcile_absence_seconds),
         )
         evidence["reserved_unbound"] = {
             "count": len(reserved),
             "absence_window_seconds": self.config.restart_reconcile_absence_seconds,
+            "accepted_submit_absence_window_seconds": self.config.restart_reconcile_absence_seconds,
+            "legacy_absence_window_seconds": int(RESERVATION_ABSENCE_GRACE.total_seconds()),
             "outcomes": [
                 {
                     "job_id": o.job_id,

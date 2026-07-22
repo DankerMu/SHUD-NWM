@@ -18,6 +18,7 @@ mismatch. If accounting has no matching/verifiable row, the candidate is marked
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import selectors
@@ -171,11 +172,16 @@ def default_comment_sacct_querier(slurm_bin_path: str = "") -> CommentSacctQueri
 
     sacct = f"{slurm_bin_path.rstrip('/')}/sacct" if slurm_bin_path else "sacct"
 
-    indexed_matches: dict[str, tuple[SacctRecord, ...]] | None = None
+    indexed_matches_by_scope: dict[tuple[str, str], dict[str, tuple[SacctRecord, ...]]] = {}
 
-    def _query(idempotency_key: str) -> tuple[SacctRecord, ...]:
-        nonlocal indexed_matches
+    def _query(
+        idempotency_key: str,
+        *,
+        expected_user: str | None = None,
+        expected_account: str | None = None,
+    ) -> tuple[SacctRecord, ...]:
         target_comment = slurm_comment_for(idempotency_key)
+        owner_scope = (str(expected_user or ""), str(expected_account or ""))
         # --starttime: without it sacct only returns jobs inside its default
         # (often same-day) window, so an in-flight master submitted just before a
         # crash can be invisible and misjudged reservation_lost. Mirror
@@ -186,17 +192,23 @@ def default_comment_sacct_querier(slurm_bin_path: str = "") -> CommentSacctQueri
             "--parsable2",
             "--noheader",
             "--format=JobID,JobName,State,ExitCode,Comment,User,Account",
-            "--allusers",
             f"--starttime={start_time}",
         ]
-        if indexed_matches is None:
+        command.append(f"--user={owner_scope[0]}" if owner_scope[0] else "--allusers")
+        if owner_scope[1]:
+            command.append(f"--accounts={owner_scope[1]}")
+        if owner_scope not in indexed_matches_by_scope:
             stdout = _bounded_sacct_stdout(command)
-            indexed_matches = _index_comment_sacct_matches(stdout)
+            indexed_matches_by_scope[owner_scope] = _index_comment_sacct_matches(
+                stdout,
+                expected_user=owner_scope[0] or None,
+                expected_account=owner_scope[1] or None,
+            )
         # Below: the query succeeded. A None here is the authoritative
         # "accounting has no job for this comment" answer (confirmed-absent),
         # which is the ONLY case allowed to mark reservation_lost. A transient
         # failure never reaches here.
-        return indexed_matches.get(target_comment, ())
+        return indexed_matches_by_scope[owner_scope].get(target_comment, ())
 
     return _query
 
@@ -270,7 +282,12 @@ def _terminate_and_reap(process: subprocess.Popen[bytes]) -> None:
             pass
 
 
-def _index_comment_sacct_matches(stdout: str) -> dict[str, tuple[SacctRecord, ...]]:
+def _index_comment_sacct_matches(
+    stdout: str,
+    *,
+    expected_user: str | None = None,
+    expected_account: str | None = None,
+) -> dict[str, tuple[SacctRecord, ...]]:
     comments: dict[str, list[SacctRecord]] = {}
     seen: dict[str, set[str]] = {}
     for line in stdout.splitlines()[:MAX_COMMENT_SACCT_ROWS]:
@@ -279,6 +296,12 @@ def _index_comment_sacct_matches(stdout: str) -> dict[str, tuple[SacctRecord, ..
             continue
         comment = fields[4].strip()
         if not comment.startswith("nhms_idem:"):
+            continue
+        user = fields[5].strip() if len(fields) > 5 and fields[5].strip() else None
+        account = fields[6].strip() if len(fields) > 6 and fields[6].strip() else None
+        if expected_user and user != expected_user:
+            continue
+        if expected_account and account != expected_account:
             continue
         master_id = fields[0].split("_", 1)[0]
         if not SLURM_JOB_ID_RE.fullmatch(master_id):
@@ -297,8 +320,8 @@ def _index_comment_sacct_matches(stdout: str) -> dict[str, tuple[SacctRecord, ..
                 raw_state=fields[2].strip(),
                 exit_code=fields[3].strip() or None,
                 comment=comment,
-                user=fields[5].strip() if len(fields) > 5 and fields[5].strip() else None,
-                account=fields[6].strip() if len(fields) > 6 and fields[6].strip() else None,
+                user=user,
+                account=account,
             )
         )
     return {comment: tuple(records) for comment, records in comments.items()}
@@ -916,7 +939,7 @@ def _file_cohort_task_projections(job: Any, record: SacctRecord) -> tuple[list[d
 # A comment querier maps an idempotency_key to the accounting record of the job
 # sbatch accepted under that ``--comment`` (or None when accounting has no such
 # job). Injectable so tests need no real cluster.
-CommentSacctQuerier = Callable[[str], "SacctRecord | Sequence[SacctRecord] | None"]
+CommentSacctQuerier = Callable[..., "SacctRecord | Sequence[SacctRecord] | None"]
 
 
 @dataclass(frozen=True)
@@ -946,6 +969,7 @@ def reconcile_reserved_unbound_jobs(
     *,
     comment_query: CommentSacctQuerier,
     grace: timedelta = RESERVATION_ABSENCE_GRACE,
+    accepted_submit_grace: timedelta | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> list[ReservationReconcileOutcome]:
     """Reconcile the submit-crash window: reserved rows with no slurm_job_id.
@@ -989,9 +1013,38 @@ def reconcile_reserved_unbound_jobs(
         if not idempotency_key:
             continue
         accepted_submit_reconcile = _accepted_submit_reconcile_job(store, job)
+        file_forecast_cohort = bool(
+            getattr(store, "supports_accepted_submit_reconcile", False)
+            and _is_forecast_cohort_job(job)
+            and isinstance(getattr(job, "cohort_members", None), Sequence)
+            and not isinstance(getattr(job, "cohort_members", None), str | bytes)
+            and getattr(job, "cohort_members", None)
+        )
+        if file_forecast_cohort and not accepted_submit_reconcile:
+            write_count = _record_file_reconciliation(store, job.job_id, "identity_mismatch_blocked")
+            outcomes.append(
+                ReservationReconcileOutcome(
+                    job_id=job.job_id,
+                    idempotency_key=str(idempotency_key),
+                    action="identity_mismatch_blocked",
+                    status=str(job.status),
+                    reconciliation_source="slurm_exact_comment",
+                    reconciliation_decision="identity_mismatch_blocked",
+                    durable_write_kind="pipeline_job_reconciliation" if write_count else None,
+                    durable_write_count=write_count,
+                )
+            )
+            continue
 
         try:
-            record = comment_query(str(idempotency_key))
+            expected_user = str(getattr(job, "expected_slurm_user", None) or "")
+            expected_account = str(getattr(job, "expected_slurm_account", None) or "")
+            record = _query_comment_accounting(
+                comment_query,
+                str(idempotency_key),
+                expected_user=expected_user if accepted_submit_reconcile else "",
+                expected_account=expected_account if accepted_submit_reconcile else "",
+            )
         except ReconcileQueryUnavailable as error:
             # Transient failure: we did NOT confirm absence. Keep the row
             # reserved (do not touch status) and retry on a later pass. Never
@@ -1020,7 +1073,11 @@ def reconcile_reserved_unbound_jobs(
                 )
             )
             continue
-        records = _comment_query_records(record)
+        records = _comment_query_records(
+            record,
+            expected_user=expected_user if accepted_submit_reconcile else "",
+            expected_account=expected_account if accepted_submit_reconcile else "",
+        )
         if accepted_submit_reconcile and len(records) > 1:
             write_count = _record_file_reconciliation(store, job.job_id, "multiple_matches_blocked")
             outcomes.append(
@@ -1086,7 +1143,12 @@ def reconcile_reserved_unbound_jobs(
             if anchor is not None:
                 if anchor.tzinfo is None:
                     anchor = anchor.replace(tzinfo=UTC)
-                if now() - anchor < grace:
+                absence_grace = (
+                    accepted_submit_grace
+                    if accepted_submit_reconcile and accepted_submit_grace is not None
+                    else grace
+                )
+                if now() - anchor < absence_grace:
                     write_count = (
                         _record_file_reconciliation(store, job.job_id, "absence_deferred")
                         if accepted_submit_reconcile
@@ -1176,12 +1238,48 @@ def reconcile_reserved_unbound_jobs(
 
 def _comment_query_records(
     value: SacctRecord | Sequence[SacctRecord] | None,
+    *,
+    expected_user: str = "",
+    expected_account: str = "",
 ) -> tuple[SacctRecord, ...]:
     if value is None:
         return ()
-    if isinstance(value, SacctRecord):
-        return (value,)
-    return tuple(item for item in value[: MAX_EXACT_COMMENT_MATCHES + 1] if isinstance(item, SacctRecord))
+    values = (value,) if isinstance(value, SacctRecord) else value
+    owned = (
+        item
+        for item in values
+        if isinstance(item, SacctRecord)
+        and (not expected_user or item.user == expected_user)
+        and (not expected_account or item.account == expected_account)
+    )
+    return tuple(item for _, item in zip(range(MAX_EXACT_COMMENT_MATCHES + 1), owned, strict=False))
+
+
+def _query_comment_accounting(
+    comment_query: CommentSacctQuerier,
+    idempotency_key: str,
+    *,
+    expected_user: str,
+    expected_account: str,
+) -> SacctRecord | Sequence[SacctRecord] | None:
+    """Pass ownership scope when supported while retaining legacy adapters."""
+
+    try:
+        parameters = tuple(inspect.signature(comment_query).parameters.values())
+    except (TypeError, ValueError):
+        parameters = ()
+    parameter_names = {parameter.name for parameter in parameters}
+    accepts_scope = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters) or {
+        "expected_user",
+        "expected_account",
+    }.issubset(parameter_names)
+    if accepts_scope:
+        return comment_query(
+            idempotency_key,
+            expected_user=expected_user or None,
+            expected_account=expected_account or None,
+        )
+    return comment_query(idempotency_key)
 
 
 def _record_file_reconciliation(store: Any, job_id: str, decision: str) -> int:
@@ -1231,11 +1329,10 @@ def _reserved_record_identity_matches(store: Any, record: SacctRecord, job: Any,
 
 
 def _accepted_submit_reconcile_job(store: Any, job: Any) -> bool:
-    members = getattr(job, "cohort_members", None)
+    identity = vars(job) if hasattr(job, "__dict__") else {}
     return bool(
         getattr(store, "supports_accepted_submit_reconcile", False)
         and _is_forecast_cohort_job(job)
-        and isinstance(members, Sequence)
-        and not isinstance(members, str | bytes)
-        and members
+        and forecast_cohort_identity_is_valid(identity)
+        and _file_cohort_runtime_identity_matches(store, identity)
     )
