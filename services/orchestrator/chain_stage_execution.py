@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
+from services.orchestrator.accepted_submit_identity import accepted_submit_pipeline_job_model_id
 from services.orchestrator.chain_types import (
     ArrayAggregation,
     CycleOrchestrationContext,
@@ -295,11 +296,13 @@ def submit_and_wait_cycle_stage(
             "job_type": stage.job_type,
             "slurm_job_id": slurm_job_id,
             "array_task_id": submitted_array_task_id,
-            "model_id": (
-                None
-                if getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
-                and is_forecast_cohort_stage(stage)
-                else deps.cycle_pipeline_job_model_id(context)
+            "model_id": accepted_submit_pipeline_job_model_id(
+                supports_accepted_submit_reconcile=getattr(
+                    orchestrator.repository, "supports_accepted_submit_reconcile", False
+                ),
+                stage=stage.stage,
+                job_type=stage.job_type,
+                model_id=deps.cycle_pipeline_job_model_id(context),
             ),
             "status": submitted_status,
             "stage": stage.stage,

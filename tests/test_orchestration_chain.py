@@ -8313,6 +8313,63 @@ def test_file_journal_forecast_explicit_rejection_terminalizes_without_secondary
     )
 
 
+def test_file_journal_single_member_forecast_explicit_rejection_is_model_less_after_reopen(
+    tmp_path: Path,
+) -> None:
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    class _RejectedClient(FakeCycleSlurmClient):
+        def submit_job_array(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("gateway rejected single-member submission")
+
+    cycle = "2026050100"
+    basin = _basins(1)[0]
+    basin.update(
+        {
+            "run_id": f"fcst_gfs_{cycle}_model_0",
+            "candidate_id": "gfs:2026-05-01T00:00:00Z:model_0:forecast_gfs_deterministic",
+            "orchestration_run_id": f"cycle_gfs_{cycle}_forecast_cohort_fixture",
+            "restart_stage": "forecast",
+            "state_evidence": {"restart_stage": "forecast"},
+            "model_package_uri": "s3://nhms/models/model_0.tar",
+            "model_package_checksum": "sha256:model-0",
+        }
+    )
+    root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(root)
+    orchestrator = _orchestrator(tmp_path, repository, _RejectedClient())
+
+    result = orchestrator.orchestrate_cycle("gfs", cycle, [basin])
+
+    assert result.status == "failed"
+    assert result.stages[-1].status == "submission_failed"
+    cohort = next(
+        job
+        for job in repository.query_pipeline_jobs_by_cycle(f"gfs_{cycle}")
+        if job.get("submit_outcome") == "rejected"
+    )
+    assert cohort["status"] == "submission_failed"
+    assert cohort["model_id"] is None
+    assert cohort["submit_outcome"] == "rejected"
+    assert (repository._hydro_run_for(str(basin["run_id"])) or {})["status"] == "failed"
+
+    reopened = FileOrchestrationJournalRepository(root)
+    reopened_cohort = reopened.get_pipeline_job(str(cohort["job_id"]))
+    parity_fields = (
+        "job_id",
+        "status",
+        "model_id",
+        "submit_outcome",
+        "cohort_digest",
+        "cohort_members",
+        "error_code",
+    )
+    assert {field: reopened_cohort.get(field) for field in parity_fields} == {
+        field: cohort.get(field) for field in parity_fields
+    }
+    assert (reopened._hydro_run_for(str(basin["run_id"])) or {})["status"] == "failed"
+
+
 @pytest.mark.parametrize("source_id", ["gfs", "IFS"])
 def test_file_journal_post_window_concurrent_public_cycles_submit_one_retry(
     tmp_path: Path,

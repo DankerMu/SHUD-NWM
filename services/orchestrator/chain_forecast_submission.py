@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 from services.orchestrator import chain as _chain
+from services.orchestrator.accepted_submit_identity import accepted_submit_pipeline_job_model_id
 
 CycleOrchestrationContext = _chain.CycleOrchestrationContext
 OrchestratorError = _chain.OrchestratorError
@@ -52,7 +53,14 @@ def _record_submission_failure(
             "cycle_id": context.cycle_id,
             "job_type": stage.job_type,
             "slurm_job_id": None,
-            "model_id": _cycle_pipeline_job_model_id(context),
+            "model_id": accepted_submit_pipeline_job_model_id(
+                supports_accepted_submit_reconcile=getattr(
+                    self.repository, "supports_accepted_submit_reconcile", False
+                ),
+                stage=stage.stage,
+                job_type=stage.job_type,
+                model_id=_cycle_pipeline_job_model_id(context),
+            ),
             "status": "submission_failed",
             "stage": stage.stage,
             "submitted_at": now,

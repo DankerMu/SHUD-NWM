@@ -60,6 +60,20 @@ class AcceptedSubmitEvidenceError(ValueError):
         self.field = field
 
 
+def accepted_submit_pipeline_job_model_id(
+    *,
+    supports_accepted_submit_reconcile: bool,
+    stage: Any,
+    job_type: Any,
+    model_id: str | None,
+) -> str | None:
+    """Keep canonical forecast cohort masters model-less on every write path."""
+
+    if supports_accepted_submit_reconcile and is_forecast_cohort_stage_name(stage, job_type):
+        return None
+    return model_id
+
+
 def accepted_submit_row_kind(row: Mapping[str, Any]) -> str | None:
     """Classify forecast master evidence separately from candidate task rows."""
 
@@ -403,6 +417,7 @@ __all__ = (
     "AcceptedSubmitEvidenceError",
     "FORECAST_COHORT_STAGE_ALIASES",
     "MAX_FORECAST_COHORT_MEMBERS",
+    "accepted_submit_pipeline_job_model_id",
     "accepted_submit_row_kind",
     "canonical_forecast_cohort_members",
     "canonical_forecast_stage",
