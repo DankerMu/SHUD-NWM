@@ -506,7 +506,10 @@ class ForecastOrchestratorCycleMixin:
             "run_id": context.run_id,
             "cycle_id": context.cycle_id,
             "job_type": stage.job_type,
-            "model_id": _chain._cycle_pipeline_job_model_id(context),
+            # Accepted-submit cohort truth is always model-less, including the
+            # single-member case. Per-model identity lives only in members and
+            # task projection rows.
+            "model_id": None if reservation_evidence is not None else _chain._cycle_pipeline_job_model_id(context),
             "stage": stage.stage,
             "candidate_id": context.run_id,
         }

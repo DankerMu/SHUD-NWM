@@ -295,7 +295,12 @@ def submit_and_wait_cycle_stage(
             "job_type": stage.job_type,
             "slurm_job_id": slurm_job_id,
             "array_task_id": submitted_array_task_id,
-            "model_id": deps.cycle_pipeline_job_model_id(context),
+            "model_id": (
+                None
+                if getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
+                and is_forecast_cohort_stage(stage)
+                else deps.cycle_pipeline_job_model_id(context)
+            ),
             "status": submitted_status,
             "stage": stage.stage,
             "idempotency_key": idempotency_key,
