@@ -201,6 +201,12 @@ persists any reconciliation decision. Task-accounting completeness MUST use
 pipeline status/error/projection fields and MUST NOT add values to the closed
 `reconciliation_decision` enum above.
 
+Reclaiming a reservation for a new submission attempt MUST atomically increment
+the attempt and clear `submit_outcome`, `reconciliation_source`,
+`reconciliation_decision`, and `matched_slurm_job_id` before the next Gateway
+call. Reopening the journal in that pre-Gateway window MUST NOT expose evidence
+from the prior attempt.
+
 A Gateway timeout MUST persist only the ambiguous submit outcome and MUST leave
 `reconciliation_source`, `reconciliation_decision`, and
 `matched_slurm_job_id` null until accounting has actually been queried. The
@@ -228,6 +234,15 @@ rows.
 - **THEN** the journal accepts `submit_outcome=rejected`, terminalizes affected
   hydro rows, and returns the ordinary submission-failure result without a
   secondary evidence-validation failure.
+
+#### Scenario: Retry reclaim starts a clean attempt
+
+- **WHEN** authoritative accounting permits retry of an ambiguous attempt and
+  the scheduler reclaims its reservation
+- **THEN** the incremented attempt is durably `reserved` with no submit outcome
+  or accounting tuple before the next Gateway call
+- **AND** an immediate process restart reads the same clean pre-outcome state,
+  without inheriting the prior attempt's absence proof.
 
 #### Scenario: Unique exact-comment match binds the accepted array
 

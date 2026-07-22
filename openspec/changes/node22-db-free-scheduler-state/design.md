@@ -1422,6 +1422,11 @@ Invariant Matrix:
   accounting query. Common evidence fields such as `submit_outcome` are
   validated before master/candidate specialization so neither row kind can
   bypass the closed enum.
+- Attempt-boundary contract: reclaiming a retry initializes the new submission
+  attempt atomically while holding the cycle lock. Before its Gateway result,
+  the new attempt has no `submit_outcome` and no reconciliation source,
+  decision, or matched ID; evidence proved for the prior attempt cannot cross
+  this boundary, including when the process stops immediately after reclaim.
 - Accounting-proof contract: an owner-scoped match identifies the bind
   candidate but is not by itself proof of global uniqueness, and an owner-scoped
   zero result is not authoritative global absence. Any bounded exact-comment

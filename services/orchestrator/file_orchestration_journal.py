@@ -1040,7 +1040,14 @@ class FileOrchestrationJournalRepository:
                     or self._candidate_job_for_idempotency_unlocked(idempotency_key) is not None
                 ):
                     return None
-            row = dict(existing)
+            row = (
+                apply_accepted_submit_transition(
+                    existing,
+                    AcceptedSubmitTransition.begin_attempt(),
+                )
+                if accepted_submit_row_kind(existing) == "master"
+                else dict(existing)
+            )
             row.update(
                 {
                     "status": "reserved",

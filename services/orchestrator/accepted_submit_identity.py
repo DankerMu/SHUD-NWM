@@ -69,13 +69,22 @@ class AcceptedSubmitTransition:
     therefore means CLEAR, never "leave the previous attempt unchanged".
     """
 
-    submit_outcome: str
+    submit_outcome: str | None
     reconciliation_source: str | None = None
     reconciliation_decision: str | None = None
     matched_slurm_job_id: str | None = None
     status: str | None = None
 
     def __post_init__(self) -> None:
+        if self.submit_outcome is None:
+            if (
+                self.reconciliation_source is not None
+                or self.reconciliation_decision is not None
+                or self.matched_slurm_job_id is not None
+                or self.status != "reserved"
+            ):
+                raise ValueError("pre-outcome transition must begin one reserved attempt")
+            return
         if self.submit_outcome not in ACCEPTED_SUBMIT_OUTCOMES:
             raise ValueError("invalid accepted-submit outcome transition")
         decision = self.reconciliation_decision
@@ -92,6 +101,10 @@ class AcceptedSubmitTransition:
                 raise ValueError("matched accounting transition requires a Slurm job id")
         elif self.matched_slurm_job_id is not None:
             raise ValueError("blocked accounting transition cannot carry a matched Slurm job id")
+
+    @classmethod
+    def begin_attempt(cls) -> AcceptedSubmitTransition:
+        return cls(None, status="reserved")
 
     @classmethod
     def timeout(cls, *, status: str = "reserved") -> AcceptedSubmitTransition:

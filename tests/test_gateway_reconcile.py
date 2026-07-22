@@ -555,6 +555,62 @@ def test_file_cohort_authoritative_absence_allows_one_atomic_retry(tmp_path: Any
     )
 
 
+def test_file_cohort_reclaim_begins_attempt_with_pre_outcome_state_after_reopen(
+    tmp_path: Any,
+) -> None:
+    from datetime import timedelta
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from services.orchestrator.reconcile import reconcile_reserved_unbound_jobs
+
+    attempt_one_started_at = datetime(2026, 7, 12, tzinfo=UTC)
+    repository = _file_cohort_repository(
+        tmp_path,
+        created_at=attempt_one_started_at,
+        member_count=1,
+    )
+    outcome = reconcile_reserved_unbound_jobs(
+        repository,
+        comment_query=lambda _key: None,
+        grace=timedelta(seconds=120),
+        now=lambda: attempt_one_started_at + timedelta(seconds=121),
+    )[0]
+    assert outcome.action == "absence_retry_permitted"
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    attempt_one = repository.get_pipeline_job(job_id)
+    assert attempt_one["submission_attempt"] == 1
+    assert attempt_one["submit_outcome"] == "submit_result_ambiguous"
+    assert attempt_one["reconciliation_decision"] == "absence_retry_permitted"
+
+    attempt_two_started_at = attempt_one_started_at + timedelta(seconds=122)
+    request = {
+        **attempt_one,
+        "status": "reserved",
+        "submission_attempt": 2,
+        "submission_attempt_started_at": attempt_two_started_at,
+        "submit_outcome": None,
+        "reconciliation_source": None,
+        "reconciliation_decision": None,
+        "matched_slurm_job_id": None,
+    }
+    reclaimed = repository.reclaim_pipeline_job_reservation(request)
+
+    assert reclaimed is not None
+    fields = (
+        "submission_attempt",
+        "status",
+        "submit_outcome",
+        "reconciliation_source",
+        "reconciliation_decision",
+        "matched_slurm_job_id",
+    )
+    expected = (2, "reserved", None, None, None, None)
+    assert tuple(reclaimed[field] for field in fields) == expected
+    assert tuple(repository.get_pipeline_job(job_id)[field] for field in fields) == expected
+    reopened = FileOrchestrationJournalRepository(repository.root)
+    assert tuple(reopened.get_pipeline_job(job_id)[field] for field in fields) == expected
+
+
 @pytest.mark.parametrize(
     "decision",
     [

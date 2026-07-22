@@ -424,8 +424,10 @@ Scenario evidence rows for section 5:
   owner/account collision remains mismatch-blocked, and owner-scoped zero alone
   cannot prove authoritative absence. A Gateway timeout carries no accounting
   decision before the first query, and an exact match without independent
-  runtime rows remains blocked. Every branch is reopened from disk and proves
-  the persisted tuple equals the emitted tuple.
+  runtime rows remains blocked. Reclaiming a retry atomically starts a clean
+  pre-outcome attempt and cannot inherit the prior attempt's accounting tuple,
+  including across immediate reopen. Every branch is reopened from disk and
+  proves the persisted tuple equals the emitted tuple.
 
 - [x] 9.3 Project terminal array-task accounting to candidate-scoped
   pipeline/hydro state.
