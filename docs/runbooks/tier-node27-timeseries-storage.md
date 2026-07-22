@@ -1745,7 +1745,8 @@ Receipts match `schemas/timeseries_retention_receipt.schema.json`
    `timescaledb_information.chunks` state before re-running enforce.
    Inspect the offending chunk (the refusal_reason suffix names it
    `<hypertable_schema>.<chunk_name>`). Common causes: statement timeout
-   (5 min per chunk), active writer holding an incompatible lock, or a
+   (14 min per chunk inside the 900 s wrapper / 940 s systemd walls), active
+   writer holding an incompatible lock, or a
    TimescaleDB catalog inconsistency. Re-run enforce after the operator
    has confirmed the DB is healthy. There is no automated retry loop —
    drops on healthy chunks should NOT proceed mid-failure without

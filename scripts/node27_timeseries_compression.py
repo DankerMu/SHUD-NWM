@@ -63,11 +63,12 @@ HYPERTABLES: tuple[tuple[str, str], ...] = (
 # Statement timeouts. Chunk-catalog lookups against
 # ``timescaledb_information.chunks`` are catalog-only (no hypertable row
 # scan) so 60 s is generous; ``compress_chunk`` on a 7-day chunk of the
-# river/forcing hypertables takes minutes, so 5 min per call is the ceiling
-# we accept before erroring the individual chunk without corrupting the
-# overall run.
+# river/forcing hypertables takes minutes. The per-call ceiling is 14 minutes,
+# inside the wrapper's 900-second wall and systemd's 940-second wall, leaving
+# 60/100 seconds respectively for reconciliation, receipt publication, and
+# process cleanup.
 _QUERY_TIMEOUT_MS = 60_000
-_COMPRESS_TIMEOUT_MS = 300_000
+_COMPRESS_TIMEOUT_MS = 840_000
 _CONNECT_TIMEOUT_SECONDS = 10
 _MAX_CATALOG_ROWS = 50_000
 _MAX_CATALOG_BYTES = 16 * 1024**2

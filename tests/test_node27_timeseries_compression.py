@@ -120,6 +120,11 @@ def test_config_parse_happy_path(tmp_path: Path) -> None:
     assert config.database_url.startswith("postgresql://")
 
 
+def test_compress_timeout_preserves_outer_cleanup_budgets() -> None:
+    assert compression._COMPRESS_TIMEOUT_MS == 840_000
+    assert compression._COMPRESS_TIMEOUT_MS < 900_000 < 940_000
+
+
 def test_receipt_and_lock_alias_is_rejected(tmp_path: Path) -> None:
     shared = tmp_path / "shared"
     env = _base_env(
