@@ -753,12 +753,23 @@ def test_file_cohort_batch_projection_bounds_lock_append_and_materialization(
     )
     key = "cycle_gfs_2026071200_forecast_fixture:forecast"
     repository.bind_pipeline_job_reservation(key, slurm_job_id="17667", status="submitted")
-    calls = {"lock": 0, "append": 0, "materialize": 0, "event_scan": 0, "sequence_scan": 0}
+    calls = {
+        "lock": 0,
+        "append": 0,
+        "materialize": 0,
+        "event_scan": 0,
+        "sequence_scan": 0,
+        "read_jsonl": 0,
+        "latest_enumerations": 0,
+        "latest_paths_returned": 0,
+    }
     original_lock = repository._locked_cycle_write
     original_append = repository._append_journal_records_unlocked
     original_materialize = repository._materialize_latest_unlocked
     original_event_scan = repository._next_event_id_unlocked
     original_sequence_scan = repository._next_sequence_unlocked
+    original_read_jsonl = repository._read_jsonl
+    original_latest_paths = repository._latest_paths
 
     def counted_lock(**kwargs: Any) -> Any:
         calls["lock"] += 1
@@ -780,11 +791,23 @@ def test_file_cohort_batch_projection_bounds_lock_append_and_materialization(
         calls["sequence_scan"] += 1
         return original_sequence_scan(**kwargs)
 
+    def counted_read_jsonl(path: Any) -> Any:
+        calls["read_jsonl"] += 1
+        return original_read_jsonl(path)
+
+    def counted_latest_paths(*args: Any, **kwargs: Any) -> Any:
+        calls["latest_enumerations"] += 1
+        paths = original_latest_paths(*args, **kwargs)
+        calls["latest_paths_returned"] += len(paths)
+        return paths
+
     monkeypatch.setattr(repository, "_locked_cycle_write", counted_lock)
     monkeypatch.setattr(repository, "_append_journal_records_unlocked", counted_append)
     monkeypatch.setattr(repository, "_materialize_latest_unlocked", counted_materialize)
     monkeypatch.setattr(repository, "_next_event_id_unlocked", counted_event_scan)
     monkeypatch.setattr(repository, "_next_sequence_unlocked", counted_sequence_scan)
+    monkeypatch.setattr(repository, "_read_jsonl", counted_read_jsonl)
+    monkeypatch.setattr(repository, "_latest_paths", counted_latest_paths)
     projections = [
         {
             "candidate_id": f"gfs:2026-07-12T00:00:00Z:model_{index}:forecast_gfs_deterministic",
@@ -817,6 +840,9 @@ def test_file_cohort_batch_projection_bounds_lock_append_and_materialization(
         # One scan seeds event IDs and one assigns journal sequences; the
         # materialization sweep must add no per-member scans.
         "sequence_scan": 2,
+        "read_jsonl": 14,
+        "latest_enumerations": 4,
+        "latest_paths_returned": 0,
     }
 
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository

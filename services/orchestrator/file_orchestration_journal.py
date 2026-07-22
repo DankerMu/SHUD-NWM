@@ -1266,6 +1266,15 @@ class FileOrchestrationJournalRepository:
             direct_jobs: list[dict[str, Any]] = []
             touched_models: set[str] = set()
             event_id = self._next_event_id_unlocked(source_id=source_id, cycle_time=cycle_time, model_id=None)
+            model_rows = self._cycle_rows_by_model_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_ids=(
+                    str(projection["model_id"])
+                    for projection in verified
+                    if projection.get("model_id") not in (None, "")
+                ),
+            )
             for projection in verified:
                 run_id = str(projection.get("run_id") or "")
                 model_id = str(projection.get("model_id") or "")
@@ -1309,7 +1318,10 @@ class FileOrchestrationJournalRepository:
                 }
                 event_id += 1
                 payloads.append(("pipeline_event", event, model_id))
-                hydro = self._hydro_run_for(run_id)
+                model_snapshot = model_rows.get(model_id)
+                hydro = model_snapshot.hydro_run if model_snapshot is not None else None
+                if isinstance(hydro, Mapping) and str(hydro.get("run_id") or "") != run_id:
+                    hydro = None
                 if (
                     task_status == "succeeded"
                     and isinstance(hydro, Mapping)
@@ -1383,6 +1395,24 @@ class FileOrchestrationJournalRepository:
                 records=records,
             )
             materialization_next_sequence = next_sequence + len(records)
+            self._apply_records_to_model_rows(
+                model_rows,
+                records,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            source_segments = _cycle_read_source_segments(
+                source_id=source_id,
+                source_segment_override=None,
+            )
+            cycle_segment = format_cycle_time(cycle_time)
+            for model_id, rows in model_rows.items():
+                rows.pipeline_events = _dedupe_events(rows.pipeline_events)
+                self._cache_cycle_rows(
+                    (source_id, cycle_segment, model_id, source_segments),
+                    rows,
+                    fingerprint=None,
+                )
             pipeline_records = [record for record in records if str(record.get("record_type") or "") == "pipeline_job"]
             for record, direct_job in zip(pipeline_records[: len(direct_jobs)], direct_jobs, strict=True):
                 direct_path = self.root / "pipeline-jobs" / f"{_required_safe_identity(direct_job, 'job_id')}.json"
@@ -1805,6 +1835,120 @@ class FileOrchestrationJournalRepository:
         rows.pipeline_events = _dedupe_events(rows.pipeline_events)
         self._cache_cycle_rows(cache_key, rows, fingerprint=fingerprint)
         return _clone_cycle_rows(rows)
+
+    def _cycle_rows_by_model_unlocked(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_ids: Iterable[str],
+    ) -> dict[str, _CycleRows]:
+        """Build exact model rows with one cycle-wide source scan.
+
+        ``_CycleRows`` has single hydro/forcing/context slots, so this must
+        reduce records into separate model containers rather than filtering
+        the lossy ``model_id=None`` merge.  The caller holds the cycle write
+        lock; the populated model caches therefore remain authoritative until
+        an append invalidates them.
+        """
+        source_id = _normalize_file_source_id(source_id, field="source_id")
+        normalized_model_ids = sorted({_safe_segment(model_id) for model_id in model_ids})
+        rows_by_model = {model_id: _CycleRows() for model_id in normalized_model_ids}
+        if not rows_by_model:
+            return {}
+        source_segments = _cycle_read_source_segments(
+            source_id=source_id,
+            source_segment_override=None,
+        )
+        cycle_segment = format_cycle_time(cycle_time)
+        for source_segment in source_segments:
+            for path in self._latest_paths(source_segment, cycle_segment, model_id=None):
+                model_id = _safe_segment(path.stem)
+                rows = rows_by_model.get(model_id)
+                if rows is None:
+                    continue
+                payload = self._read_optional_json(path)
+                if payload is not None:
+                    self._apply_latest_view(
+                        rows,
+                        payload,
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                        expected_model_id=model_id,
+                    )
+            self._apply_records_to_model_rows(
+                rows_by_model,
+                self._read_jsonl(self.root / "journal" / source_segment / f"{cycle_segment}.jsonl"),
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            self._apply_records_to_model_rows(
+                rows_by_model,
+                self._read_jsonl(self.root / "pipeline-events" / source_segment / f"{cycle_segment}.jsonl"),
+                source_id=source_id,
+                cycle_time=cycle_time,
+                expected_record_type="pipeline_event",
+            )
+        direct_jobs = self._direct_pipeline_job_records_for_cycle_cached(
+            source_id=source_id,
+            cycle_time=cycle_time,
+        )
+        for model_id, rows in rows_by_model.items():
+            for job in direct_jobs:
+                _insert_missing_by_key(rows.pipeline_jobs, job, key="job_id")
+            _filter_cycle_rows_for_model(rows, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+            rows.pipeline_events = _dedupe_events(rows.pipeline_events)
+            self._cache_cycle_rows(
+                (source_id, cycle_segment, model_id, source_segments),
+                rows,
+                fingerprint=None,
+            )
+        return {model_id: _clone_cycle_rows(rows) for model_id, rows in rows_by_model.items()}
+
+    def _apply_records_to_model_rows(
+        self,
+        rows_by_model: Mapping[str, _CycleRows],
+        records: Sequence[Mapping[str, Any]],
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        expected_record_type: str | None = None,
+    ) -> None:
+        """Route one decoded record batch into exact per-model reducers."""
+        for record in records:
+            payload = _payload_or_record_payload(record)
+            record_type = _record_type(record, payload)
+            _require_schema(record, FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION)
+            _require_source_cycle(record, source_id=source_id, cycle_time=cycle_time)
+            _require_record_payload_identity_match(record_type, record, payload)
+            if expected_record_type is not None and record_type != expected_record_type:
+                raise FileOrchestrationJournalError(
+                    "file_journal_record_type_mismatch",
+                    field="record_type",
+                    evidence={"expected": expected_record_type, "actual": record_type[:80]},
+                )
+            record_model_id = _record_model_id(
+                record,
+                payload,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            targets = (
+                ((record_model_id, rows_by_model[record_model_id]),)
+                if record_model_id in rows_by_model
+                else tuple(rows_by_model.items())
+                if record_model_id is None
+                else ()
+            )
+            for model_id, rows in targets:
+                self._apply_journal_record(
+                    rows,
+                    record,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    expected_record_type=expected_record_type,
+                    expected_model_id=model_id,
+                )
 
     def _direct_pipeline_job_records_for_cycle_cached(
         self,
