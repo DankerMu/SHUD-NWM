@@ -1458,6 +1458,10 @@ def _run_restart_reconcile(
                     "action": o.action,
                     "status": o.status,
                     "slurm_job_id": o.slurm_job_id,
+                    "reconciliation_source": o.reconciliation_source,
+                    "reconciliation_decision": o.reconciliation_decision,
+                    "matched_slurm_job_id": o.matched_slurm_job_id,
+                    "match_count": o.match_count,
                 }
                 for o in reserved
             ],

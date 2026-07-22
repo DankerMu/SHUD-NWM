@@ -26,6 +26,17 @@ class StageExecutionOrchestrator(Protocol):
     object_store: Any
 
 
+_FORECAST_STAGE_ALIASES = frozenset({"forecast", "run_shud_forecast", "run_shud_forecast_array"})
+
+
+def is_forecast_cohort_stage(stage: StageDefinition) -> bool:
+    """Return whether a stage belongs to the canonical native forecast family."""
+    stage_name = str(stage.stage or "")
+    if stage_name:
+        return stage_name in _FORECAST_STAGE_ALIASES
+    return str(stage.job_type or "") in _FORECAST_STAGE_ALIASES
+
+
 @dataclass(frozen=True)
 class StageExecutionDependencies:
     terminal_job_statuses: frozenset[str]
@@ -176,7 +187,59 @@ def submit_and_wait_cycle_stage(
                 )
             )
     except Exception as error:
+        if (
+            getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
+            and is_forecast_cohort_stage(stage)
+            and getattr(error, "error_code", None) == "SLURM_GATEWAY_UNAVAILABLE"
+        ):
+            recorder = getattr(orchestrator.repository, "record_pipeline_job_reconciliation", None)
+            if callable(recorder):
+                recorder(
+                    pipeline_job_id,
+                    submit_outcome="submit_result_ambiguous",
+                    reconciliation_decision="absence_deferred",
+                    matched_slurm_job_id=None,
+                    status="reserved",
+                )
+            orchestrator.repository.insert_pipeline_event(
+                entity_type="pipeline_job",
+                entity_id=pipeline_job_id,
+                event_type="submission_ambiguous",
+                status_from="reserved",
+                status_to="reserved",
+                message=f"{stage.stage} submit result is ambiguous; exact-comment reconcile required.",
+                details={
+                    "stage": stage.stage,
+                    "job_type": stage.job_type,
+                    "submit_outcome": "submit_result_ambiguous",
+                    "reconciliation_source": "slurm_exact_comment",
+                    "reconciliation_decision": "absence_deferred",
+                    "matched_slurm_job_id": None,
+                    "restart_stage": context.restart_stage or stage.stage,
+                    "native_shud_resubmitted": stage.stage == "forecast",
+                },
+            )
+            return (
+                StageRunResult(
+                    stage=stage.stage,
+                    job_type=stage.job_type,
+                    pipeline_job_id=pipeline_job_id,
+                    slurm_job_id="",
+                    status="submit_result_ambiguous",
+                    error_code="SLURM_GATEWAY_UNAVAILABLE",
+                    error_message="Gateway submit response unavailable; exact-comment reconciliation pending.",
+                    task_results=(),
+                ),
+                None,
+            )
         result = orchestrator._record_submission_failure(stage, context, error, pipeline_job_id=pipeline_job_id)
+        if (
+            getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
+            and is_forecast_cohort_stage(stage)
+        ):
+            recorder = getattr(orchestrator.repository, "record_pipeline_job_reconciliation", None)
+            if callable(recorder):
+                recorder(pipeline_job_id, submit_outcome="rejected", status="submission_failed")
         if stage.stage == "forecast":
             orchestrator._mark_staged_hydro_runs_failed(
                 [str(basin["run_id"]) for basin in context.active_basins if basin.get("run_id")],

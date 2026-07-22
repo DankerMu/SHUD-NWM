@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Mapping
@@ -60,6 +60,10 @@ RESERVATION_ABSENCE_GRACE = timedelta(seconds=120)
 # Typed action for a reserved-unbound row that queried absent but is younger
 # than RESERVATION_ABSENCE_GRACE: deliberately NOT demoted this pass.
 ABSENCE_UNCONFIRMED_ACTION = "absence_unconfirmed"
+MAX_EXACT_COMMENT_MATCHES = 2
+_FORECAST_COHORT_STAGE_ALIASES = frozenset(
+    {"forecast", "run_shud_forecast", "run_shud_forecast_array"}
+)
 
 
 class ReconcileQueryUnavailable(Exception):
@@ -95,6 +99,7 @@ class SacctRecord:
     stdout_identity: Mapping[str, Any] | None = None
     file_journal_identity: Mapping[str, Any] | None = None
     array_member_job_ids: tuple[str, ...] = ()
+    array_task_records: tuple["SacctRecord", ...] = ()
 
 
 # A sacct querier maps a slurm_job_id to its accounting record (or None when the
@@ -200,7 +205,11 @@ def default_comment_sacct_querier(slurm_bin_path: str = "") -> CommentSacctQueri
         # "accounting has no job for this comment" answer (confirmed-absent),
         # which is the ONLY case allowed to mark reservation_lost. A transient
         # failure never reaches here.
-        return _parse_comment_sacct_rows(result.stdout, target_comment)
+        return _parse_comment_sacct_matches(
+            result.stdout,
+            target_comment,
+            limit=MAX_EXACT_COMMENT_MATCHES + 1,
+        )
 
     return _query
 
@@ -211,6 +220,18 @@ def _parse_comment_sacct_rows(stdout: str, target_comment: str) -> SacctRecord |
     "<master>_[<range>]") normalize down to the bare master id; step sub-rows
     ("<id>.batch"/"<id>.extern") are skipped. Returns None when no row matches
     (the authoritative confirmed-absent answer)."""
+    matches = _parse_comment_sacct_matches(stdout, target_comment, limit=1)
+    return matches[0] if matches else None
+
+
+def _parse_comment_sacct_matches(
+    stdout: str,
+    target_comment: str,
+    *,
+    limit: int,
+) -> tuple[SacctRecord, ...]:
+    matches: list[SacctRecord] = []
+    seen_master_ids: set[str] = set()
     for line in stdout.splitlines():
         line = line.strip()
         if not line:
@@ -233,14 +254,19 @@ def _parse_comment_sacct_rows(stdout: str, target_comment: str) -> SacctRecord |
         # into a bogus empty-id record / false confirmed-absent.
         if not SLURM_JOB_ID_RE.fullmatch(job_id):
             continue
-        return SacctRecord(
+        if job_id in seen_master_ids:
+            continue
+        seen_master_ids.add(job_id)
+        matches.append(SacctRecord(
             slurm_job_id=job_id,
             job_name=fields[1],
             raw_state=fields[2],
             exit_code=fields[3] or None,
             comment=fields[4].strip(),
-        )
-    return None
+        ))
+        if len(matches) >= max(int(limit), 1):
+            break
+    return tuple(matches)
 
 
 def _parse_master_sacct_row(stdout: str, slurm_job_id: str) -> SacctRecord | None:
@@ -279,7 +305,16 @@ def _parse_master_sacct_row(stdout: str, slurm_job_id: str) -> SacctRecord | Non
         exact_fields = fields
 
     if exact_fields is not None:
-        return _sacct_record_from_fields(exact_fields)
+        exact = _sacct_record_from_fields(exact_fields)
+        if member_fields:
+            return SacctRecord(
+                **{
+                    **exact.__dict__,
+                    "array_member_job_ids": tuple(fields[0] for fields in member_fields),
+                    "array_task_records": tuple(_sacct_record_from_fields(fields) for fields in member_fields),
+                }
+            )
+        return exact
     if not target_is_array_task and member_fields:
         return _aggregate_array_member_rows(member_fields, target_job_id)
     return None
@@ -347,6 +382,7 @@ def _aggregate_array_member_rows(
         ),
         comment=comments.pop() if len(comments) == 1 else None,
         array_member_job_ids=tuple(fields[0] for fields in member_fields),
+        array_task_records=tuple(_sacct_record_from_fields(fields) for fields in member_fields),
     )
 
 
@@ -561,7 +597,15 @@ def reconcile_inflight_jobs(
         expected_token = _expected_job_name_token(job.stage, job.job_type)
         normalized = _normalize_slurm_state(record.raw_state) if record is not None else None
         slurm_status = SLURM_STATE_MAP.get(normalized, SlurmJobStatus.FAILED) if normalized is not None else None
-        requires_durable_identity = slurm_status in TERMINAL_STATUSES
+        cohort_members = getattr(job, "cohort_members", None)
+        file_cohort = bool(
+            getattr(store, "supports_accepted_submit_reconcile", False)
+            and _is_forecast_cohort_job(job)
+            and isinstance(cohort_members, Sequence)
+            and not isinstance(cohort_members, str | bytes)
+            and cohort_members
+        )
+        requires_durable_identity = slurm_status in TERMINAL_STATUSES and not file_cohort
 
         if record is None or not _identity_matches(
             record,
@@ -592,6 +636,8 @@ def reconcile_inflight_jobs(
         slurm_status = slurm_status or SlurmJobStatus.FAILED
 
         if slurm_status in TERMINAL_STATUSES:
+            if file_cohort:
+                _project_file_cohort_tasks(store, job, record)
             error_code = (
                 map_slurm_error_code(record.raw_state)
                 if slurm_status == SlurmJobStatus.FAILED
@@ -626,10 +672,110 @@ def reconcile_inflight_jobs(
     return outcomes
 
 
+def _is_forecast_cohort_job(job: Any) -> bool:
+    stage = str(getattr(job, "stage", None) or "")
+    if stage:
+        return stage in _FORECAST_COHORT_STAGE_ALIASES
+    return str(getattr(job, "job_type", None) or "") in _FORECAST_COHORT_STAGE_ALIASES
+
+
+def _project_file_cohort_tasks(store: Any, job: Any, record: SacctRecord) -> None:
+    """Project authoritative array task rows only onto their reserved members."""
+    members = {
+        int(member.get("array_task_id")): dict(member)
+        for member in getattr(job, "cohort_members", ())[:256]
+        if isinstance(member, Mapping) and str(member.get("array_task_id", "")).isdigit()
+    }
+    tasks: dict[int, SacctRecord] = {}
+    for task in record.array_task_records[:256]:
+        raw_task_id = task.array_task_id if task.array_task_id is not None else task.task_id
+        try:
+            task_id = int(raw_task_id)
+        except (TypeError, ValueError):
+            continue
+        if task_id in members and task_id not in tasks:
+            tasks[task_id] = task
+
+    projections: list[dict[str, Any]] = []
+    for task_id, member in sorted(members.items()):
+        task = tasks.get(task_id)
+        outcome = "unverified"
+        if task is not None:
+            status = SLURM_STATE_MAP.get(_normalize_slurm_state(task.raw_state), SlurmJobStatus.FAILED)
+            if status == SlurmJobStatus.SUCCEEDED:
+                outcome = "succeeded"
+            elif status in TERMINAL_STATUSES:
+                outcome = "failed"
+        projection = {
+            "candidate_id": member.get("candidate_id"),
+            "run_id": member.get("run_id"),
+            "model_id": member.get("model_id"),
+            "array_task_id": task_id,
+            "array_task_outcome": outcome,
+            "restart_stage": "state_save_qc" if outcome == "succeeded" else member.get("restart_stage"),
+            "native_shud_resubmitted": False,
+        }
+        projections.append(projection)
+        if outcome == "unverified":
+            continue
+
+        run_id = str(member.get("run_id") or "")
+        model_id = str(member.get("model_id") or "")
+        candidate_id = str(member.get("candidate_id") or "")
+        if not run_id or not model_id or not candidate_id:
+            continue
+        task_slurm_id = str(task.slurm_job_id if task is not None else f"{record.slurm_job_id}_{task_id}")
+        candidate_job_id = f"job_{run_id}_forecast_reconciled_{record.slurm_job_id}_{task_id}"
+        task_status = "succeeded" if outcome == "succeeded" else "failed"
+        store.upsert_pipeline_job(
+            {
+                "job_id": candidate_job_id,
+                "run_id": run_id,
+                "cycle_id": getattr(job, "cycle_id"),
+                "job_type": "run_shud_forecast_array",
+                "slurm_job_id": task_slurm_id,
+                "array_task_id": task_id,
+                "model_id": model_id,
+                "status": task_status,
+                "stage": "forecast",
+                "candidate_id": candidate_id,
+                "error_code": None if outcome == "succeeded" else map_slurm_error_code(task.raw_state),
+                "submit_outcome": "accepted",
+                "restart_stage": projection["restart_stage"],
+                "native_shud_resubmitted": False,
+            }
+        )
+        store.insert_pipeline_event(
+            entity_type="pipeline_job",
+            entity_id=candidate_job_id,
+            event_type="array_task_reconciled",
+            status_from="reconciling",
+            status_to=task_status,
+            details=projection,
+        )
+        hydro_lookup = getattr(store, "_hydro_run_for", None)
+        if callable(hydro_lookup):
+            hydro = hydro_lookup(run_id)
+            if (
+                outcome == "succeeded"
+                and isinstance(hydro, Mapping)
+                and hydro.get("error_code") == "SLURM_GATEWAY_UNAVAILABLE"
+            ):
+                # Forecast task success is an upstream-stage completion, not a
+                # completed hydro pipeline.  Keep the existing hydro row as the
+                # non-terminal ``created`` placeholder; candidate-scoped
+                # completed-stage evidence below advances it to state_save_qc.
+                store.update_hydro_run_status(run_id, "created", slurm_job_id=task_slurm_id)
+
+    recorder = getattr(store, "record_pipeline_job_reconciliation", None)
+    if callable(recorder):
+        recorder(job.job_id, candidate_projections=projections)
+
+
 # A comment querier maps an idempotency_key to the accounting record of the job
 # sbatch accepted under that ``--comment`` (or None when accounting has no such
 # job). Injectable so tests need no real cluster.
-CommentSacctQuerier = Callable[[str], "SacctRecord | None"]
+CommentSacctQuerier = Callable[[str], "SacctRecord | Sequence[SacctRecord] | None"]
 
 
 @dataclass(frozen=True)
@@ -646,6 +792,10 @@ class ReservationReconcileOutcome:
     action: str
     status: str
     slurm_job_id: str | None = None
+    reconciliation_source: str | None = None
+    reconciliation_decision: str | None = None
+    matched_slurm_job_id: str | None = None
+    match_count: int | None = None
 
 
 def reconcile_reserved_unbound_jobs(
@@ -695,6 +845,7 @@ def reconcile_reserved_unbound_jobs(
         idempotency_key = job.idempotency_key
         if not idempotency_key:
             continue
+        accepted_submit_reconcile = bool(getattr(store, "supports_accepted_submit_reconcile", False))
 
         try:
             record = comment_query(str(idempotency_key))
@@ -714,6 +865,41 @@ def reconcile_reserved_unbound_jobs(
                     idempotency_key=str(idempotency_key),
                     action="query_unavailable",
                     status=str(job.status),
+                    reconciliation_source="slurm_exact_comment" if accepted_submit_reconcile else None,
+                    reconciliation_decision="accounting_unavailable" if accepted_submit_reconcile else None,
+                )
+            )
+            _record_file_reconciliation(store, job.job_id, "accounting_unavailable")
+            continue
+        records = _comment_query_records(record)
+        if accepted_submit_reconcile and len(records) > 1:
+            _record_file_reconciliation(store, job.job_id, "multiple_matches_blocked")
+            outcomes.append(
+                ReservationReconcileOutcome(
+                    job_id=job.job_id,
+                    idempotency_key=str(idempotency_key),
+                    action="multiple_matches_blocked",
+                    status=str(job.status),
+                    reconciliation_source="slurm_exact_comment",
+                    reconciliation_decision="multiple_matches_blocked",
+                    match_count=min(len(records), MAX_EXACT_COMMENT_MATCHES + 1),
+                )
+            )
+            continue
+        record = records[0] if records else None
+        if accepted_submit_reconcile and record is not None and not _reserved_record_identity_matches(
+            record, job, str(idempotency_key)
+        ):
+            _record_file_reconciliation(store, job.job_id, "identity_mismatch_blocked")
+            outcomes.append(
+                ReservationReconcileOutcome(
+                    job_id=job.job_id,
+                    idempotency_key=str(idempotency_key),
+                    action="identity_mismatch_blocked",
+                    status=str(job.status),
+                    reconciliation_source="slurm_exact_comment",
+                    reconciliation_decision="identity_mismatch_blocked",
+                    match_count=1,
                 )
             )
             continue
@@ -742,30 +928,41 @@ def reconcile_reserved_unbound_jobs(
                 if anchor.tzinfo is None:
                     anchor = anchor.replace(tzinfo=UTC)
                 if now() - anchor < grace:
+                    _record_file_reconciliation(store, job.job_id, "absence_deferred")
                     outcomes.append(
                         ReservationReconcileOutcome(
                             job_id=job.job_id,
                             idempotency_key=str(idempotency_key),
                             action=ABSENCE_UNCONFIRMED_ACTION,
                             status=str(job.status),
+                            reconciliation_source="slurm_exact_comment" if accepted_submit_reconcile else None,
+                            reconciliation_decision="absence_deferred" if accepted_submit_reconcile else None,
                         )
                     )
                     continue
-            store.update_job_status(
-                job.job_id,
-                RESERVATION_LOST_STATUS,
-                error_code="SLURM_RESERVATION_LOST",
-                error_message=(
-                    "sbatch acceptance for reservation "
-                    f"idempotency_key={idempotency_key} could not be confirmed in accounting."
-                ),
-            )
+            retry_permitted = False
+            permit_retry = getattr(store, "permit_pipeline_job_retry", None)
+            if accepted_submit_reconcile and callable(permit_retry):
+                retry_permitted = bool(permit_retry(job.job_id))
+            else:
+                store.update_job_status(
+                    job.job_id,
+                    RESERVATION_LOST_STATUS,
+                    error_code="SLURM_RESERVATION_LOST",
+                    error_message=(
+                        "sbatch acceptance for reservation "
+                        f"idempotency_key={idempotency_key} could not be confirmed in accounting."
+                    ),
+                )
+                retry_permitted = True
             outcomes.append(
                 ReservationReconcileOutcome(
                     job_id=job.job_id,
                     idempotency_key=str(idempotency_key),
-                    action="reservation_lost",
-                    status=RESERVATION_LOST_STATUS,
+                    action="absence_retry_permitted" if accepted_submit_reconcile else "reservation_lost",
+                    status=RESERVATION_LOST_STATUS if retry_permitted else str(job.status),
+                    reconciliation_source="slurm_exact_comment" if accepted_submit_reconcile else None,
+                    reconciliation_decision="absence_retry_permitted" if accepted_submit_reconcile else None,
                 )
             )
             continue
@@ -775,6 +972,15 @@ def reconcile_reserved_unbound_jobs(
             slurm_job_id=record.slurm_job_id,
             status="submitted",
         )
+        if accepted_submit_reconcile and bound is not None:
+            recorder = getattr(store, "record_pipeline_job_reconciliation", None)
+            if callable(recorder):
+                recorder(
+                    job.job_id,
+                    submit_outcome="accepted",
+                    reconciliation_decision="matched_bound",
+                    matched_slurm_job_id=record.slurm_job_id,
+                )
         bound_status = "submitted" if bound is not None else str(job.status)
         outcomes.append(
             ReservationReconcileOutcome(
@@ -783,7 +989,50 @@ def reconcile_reserved_unbound_jobs(
                 action="bound",
                 status=bound_status,
                 slurm_job_id=record.slurm_job_id,
+                reconciliation_source="slurm_exact_comment" if accepted_submit_reconcile else None,
+                reconciliation_decision="matched_bound" if accepted_submit_reconcile else None,
+                matched_slurm_job_id=record.slurm_job_id if accepted_submit_reconcile else None,
+                match_count=1 if accepted_submit_reconcile else None,
             )
         )
 
     return outcomes
+
+
+def _comment_query_records(
+    value: SacctRecord | Sequence[SacctRecord] | None,
+) -> tuple[SacctRecord, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, SacctRecord):
+        return (value,)
+    return tuple(item for item in value[: MAX_EXACT_COMMENT_MATCHES + 1] if isinstance(item, SacctRecord))
+
+
+def _record_file_reconciliation(store: Any, job_id: str, decision: str) -> None:
+    recorder = getattr(store, "record_pipeline_job_reconciliation", None)
+    if callable(recorder):
+        recorder(
+            job_id,
+            reconciliation_decision=decision,
+            matched_slurm_job_id=None,
+        )
+
+
+def _reserved_record_identity_matches(record: SacctRecord, job: Any, idempotency_key: str) -> bool:
+    if idempotency_key_from_comment(record.comment) != idempotency_key:
+        return False
+    if not SLURM_JOB_ID_RE.fullmatch(str(record.slurm_job_id)):
+        return False
+    expected_token = _expected_job_name_token(getattr(job, "stage", None), getattr(job, "job_type", None))
+    if expected_token and expected_token not in str(record.job_name or ""):
+        return False
+    for record_value, job_field in (
+        (record.run_id, "run_id"),
+        (record.stage, "stage"),
+        (record.pipeline_job_id, "job_id"),
+    ):
+        expected = getattr(job, job_field, None)
+        if record_value not in (None, "") and expected not in (None, "") and str(record_value) != str(expected):
+            return False
+    return True

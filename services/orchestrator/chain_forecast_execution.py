@@ -209,6 +209,16 @@ def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult
                         )
                         break
 
+                    if result.status == "submit_result_ambiguous":
+                        pipeline_result = PipelineResult(
+                            context.run_id,
+                            context.cycle_id,
+                            "reconciling",
+                            tuple(stage_results),
+                            _candidate_outcomes(context, final_status="reconciling"),
+                        )
+                        break
+
                     if result.status == "cancelled":
                         pipeline_result = PipelineResult(
                             context.run_id,

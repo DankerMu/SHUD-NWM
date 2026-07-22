@@ -127,6 +127,16 @@ _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS = (
     "error_code",
     "error_message",
     "log_uri",
+    "submit_outcome",
+    "slurm_comment",
+    "cohort_members",
+    "restart_stage",
+    "submission_attempt",
+    "reconciliation_source",
+    "reconciliation_decision",
+    "matched_slurm_job_id",
+    "candidate_projections",
+    "native_shud_resubmitted",
 )
 _RUNTIME_ROOT_EVENT_CANDIDATE_PATHS = (
     ("runtime_root_contract",),
@@ -339,6 +349,9 @@ class _RecordBudget:
 
 
 class FileOrchestrationJournalRepository:
+    # Capability marker used by the shared submit/reconcile paths.  Legacy and
+    # PostgreSQL repositories deliberately keep their historical behaviour.
+    supports_accepted_submit_reconcile = True
     """Read-side file implementation for scheduler orchestration state."""
 
     def __init__(
@@ -997,6 +1010,7 @@ class FileOrchestrationJournalRepository:
                 {
                     "slurm_job_id": str(slurm_job_id),
                     "status": status,
+                    "submit_outcome": "accepted",
                     "submitted_at": row.get("submitted_at") or _format_utc(_utcnow()),
                     "updated_at": _format_utc(_utcnow()),
                 }
@@ -1005,6 +1019,68 @@ class FileOrchestrationJournalRepository:
                 row["array_task_id"] = array_task_id
             model_id = _optional_safe_identity(row, "model_id")
             return self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
+
+    def record_pipeline_job_reconciliation(
+        self,
+        job_id: str,
+        *,
+        submit_outcome: str | None = None,
+        reconciliation_decision: str | None = None,
+        matched_slurm_job_id: str | None = None,
+        candidate_projections: Sequence[Mapping[str, Any]] | None = None,
+        status: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Atomically append bounded accepted-submit reconciliation evidence."""
+        initial = self._pipeline_job_for_id_unlocked(job_id)
+        if initial is None:
+            return None
+        source_id = _source_id_from_job(initial)
+        cycle_time = _cycle_time_from_job(initial)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._pipeline_job_for_id_unlocked(job_id)
+            if existing is None:
+                return None
+            row = dict(existing)
+            if submit_outcome is not None:
+                row["submit_outcome"] = submit_outcome
+            if reconciliation_decision is not None:
+                row["reconciliation_source"] = "slurm_exact_comment"
+                row["reconciliation_decision"] = reconciliation_decision
+                row["matched_slurm_job_id"] = matched_slurm_job_id
+            if candidate_projections is not None:
+                row["candidate_projections"] = [dict(item) for item in candidate_projections]
+            if status is not None:
+                row["status"] = status
+            row["updated_at"] = _format_utc(_utcnow())
+            model_id = _optional_safe_identity(row, "model_id")
+            return self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
+
+    def permit_pipeline_job_retry(self, job_id: str) -> bool:
+        """Move one still-reserved cohort to retryable exactly once under its cycle lock."""
+        initial = self._pipeline_job_for_id_unlocked(job_id)
+        if initial is None:
+            return False
+        source_id = _source_id_from_job(initial)
+        cycle_time = _cycle_time_from_job(initial)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._pipeline_job_for_id_unlocked(job_id)
+            if existing is None or str(existing.get("status") or "") != "reserved":
+                return False
+            if existing.get("slurm_job_id") not in (None, ""):
+                return False
+            row = dict(existing)
+            row.update(
+                {
+                    "status": "reservation_lost",
+                    "reconciliation_source": "slurm_exact_comment",
+                    "reconciliation_decision": "absence_retry_permitted",
+                    "matched_slurm_job_id": None,
+                    "updated_at": _format_utc(_utcnow()),
+                }
+            )
+            model_id = _optional_safe_identity(row, "model_id")
+            self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
+            return True
 
     def update_pipeline_job_status(
         self,
@@ -2212,6 +2288,16 @@ class FileOrchestrationJournalRepository:
             "error_code": record.get("error_code"),
             "error_message": _durable_error_message(record.get("error_message")),
             "log_uri": record.get("log_uri"),
+            "submit_outcome": record.get("submit_outcome"),
+            "slurm_comment": record.get("slurm_comment"),
+            "cohort_members": _bounded_cohort_members(record.get("cohort_members")),
+            "restart_stage": record.get("restart_stage"),
+            "submission_attempt": record.get("submission_attempt", 1),
+            "reconciliation_source": record.get("reconciliation_source"),
+            "reconciliation_decision": record.get("reconciliation_decision"),
+            "matched_slurm_job_id": record.get("matched_slurm_job_id"),
+            "candidate_projections": _bounded_candidate_projections(record.get("candidate_projections")),
+            "native_shud_resubmitted": record.get("native_shud_resubmitted"),
             "created_at": _optional_format_datetime(record.get("created_at"), field="created_at") or now,
             "updated_at": _optional_format_datetime(record.get("updated_at"), field="updated_at") or now,
         }
@@ -3866,6 +3952,46 @@ def _file_reconcile_namespace(row: Mapping[str, Any]) -> SimpleNamespace:
         except FileOrchestrationJournalError:
             pass
     return SimpleNamespace(**payload)
+
+
+def _bounded_cohort_members(value: Any) -> list[dict[str, Any]]:
+    """Return the durable, credential-safe ordered member identity map."""
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
+        return []
+    allowed = (
+        "array_task_id",
+        "candidate_id",
+        "run_id",
+        "model_id",
+        "basin_id",
+        "restart_stage",
+    )
+    result: list[dict[str, Any]] = []
+    for item in value[:256]:
+        if not isinstance(item, Mapping):
+            continue
+        member = {key: item.get(key) for key in allowed}
+        result.append(member)
+    return result
+
+
+def _bounded_candidate_projections(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
+        return []
+    allowed = (
+        "candidate_id",
+        "run_id",
+        "model_id",
+        "array_task_id",
+        "array_task_outcome",
+        "restart_stage",
+        "native_shud_resubmitted",
+    )
+    return [
+        {key: item.get(key) for key in allowed}
+        for item in value[:256]
+        if isinstance(item, Mapping)
+    ]
 
 
 def _file_journal_real_slurm_job_id(value: Any) -> bool:

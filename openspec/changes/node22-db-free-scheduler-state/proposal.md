@@ -30,6 +30,9 @@ archived/stopped rollback-only state; the authoritative stop receipt is
   file-backed production journal.
 - Replace strict forecast warm-start state lookup with a file-backed state
   snapshot index.
+- Make DB-free forecast-cohort submission recover an accepted Slurm array after a
+  Gateway response timeout without duplicate submission, and preserve each
+  candidate's downstream restart stage through regrouping and execution.
 - Add cutover, archive, rollback, and live verification receipts required
   before stopping node-22 `:55433`.
 
@@ -59,6 +62,8 @@ archived/stopped rollback-only state; the authoritative stop receipt is
   `packages/common/state_manager.py` or adapter-facing wrappers
 - `services/orchestrator/chain_repository.py`, retry/reconcile integration, and
   scheduler state decision tests
+- `services/orchestrator/reconcile.py`, forecast cohort submission, file-journal
+  array-task projection, and scheduler restart-compatible cohort dispatch
 - `infra/env/compute.example`, node-22 runtime env/runbooks, and topology
   guardrails
 - `docs/runbooks/node22-db-retirement-runbook.md` and live receipt material

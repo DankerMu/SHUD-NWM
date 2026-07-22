@@ -24016,6 +24016,64 @@ def test_db_free_restart_reconcile_uses_file_journal_repository(tmp_path: Path) 
     assert job["status"] == "running"
 
 
+def test_scheduler_run_once_reconciles_real_file_journal_reservation(tmp_path: Path) -> None:
+    """Public pass seam complements the strict DB-free direct-reconcile oracle."""
+    from services.orchestrator.reconcile import SacctRecord
+    from services.orchestrator.reservation import slurm_comment_for
+
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    key = "gfs:gfs_2026052106:basin_a:forecast"
+    repository = scheduler_module.FileOrchestrationJournalRepository(tmp_path / "journal")
+    repository.reserve_pipeline_job(
+        {
+            "job_id": "job_run_once_reserved",
+            "run_id": "fcst_gfs_2026052106_model_a",
+            "cycle_id": cycle_id_for("gfs", cycle_time),
+            "job_type": "run_shud_forecast_array",
+            "model_id": "model_a",
+            "status": "reserved",
+            "stage": "forecast",
+            "idempotency_key": key,
+            "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+        }
+    )
+
+    def accounting(_identity: str) -> SacctRecord:
+        return SacctRecord(
+            slurm_job_id="3001",
+            raw_state="RUNNING",
+            job_name="nhms_forecast",
+            comment=slurm_comment_for(key),
+        )
+
+    scheduler = _RealProductionScheduler(
+        _config(
+            tmp_path,
+            dry_run=False,
+            scheduler_journal_backend="file",
+            scheduler_journal_root=tmp_path / "journal",
+            database_url=None,
+            database_url_configured=False,
+        ),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [])},
+        active_repository=repository,
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        reconcile_store=repository,
+        reconcile_comment_query=accounting,
+        reconcile_sacct_query=accounting,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "restart_reconciled"
+    assert result.evidence["restart_reconcile"]["reserved_unbound"]["outcomes"][0]["action"] == "bound"
+    job = repository.get_pipeline_job("job_run_once_reserved")
+    assert job is not None
+    assert job["slurm_job_id"] == "3001"
+    assert job["status"] == "running"
+
+
 def test_restart_reconcile_error_marks_final_mutation_proof_unknown(tmp_path: Path) -> None:
     from services.orchestrator.reconcile import SacctRecord
     from services.orchestrator.reservation import slurm_comment_for

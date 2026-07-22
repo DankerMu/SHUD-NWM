@@ -122,6 +122,286 @@ def _store() -> PipelineStore:
     return PipelineStore(Session(engine))
 
 
+def _file_cohort_repository(tmp_path: Any, *, created_at: datetime | None = None) -> Any:
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    cycle_time = datetime(2026, 7, 12, tzinfo=UTC)
+    repository.reserve_pipeline_job(
+        {
+            "job_id": "job_cycle_gfs_2026071200_forecast_fixture_forecast",
+            "run_id": "cycle_gfs_2026071200_forecast_fixture",
+            "cycle_id": "gfs_2026071200",
+            "job_type": "run_shud_forecast_array",
+            "model_id": None,
+            "stage": "forecast",
+            "idempotency_key": "cycle_gfs_2026071200_forecast_fixture:forecast",
+            "slurm_comment": "nhms_idem:cycle_gfs_2026071200_forecast_fixture:forecast",
+            "submit_outcome": "submit_result_ambiguous",
+            "restart_stage": "forecast",
+            "cohort_members": [
+                {
+                    "array_task_id": index,
+                    "candidate_id": f"gfs:2026-07-12T00:00:00Z:model_{index}:forecast_gfs_deterministic",
+                    "run_id": f"fcst_gfs_2026071200_model_{index}",
+                    "model_id": f"model_{index}",
+                    "basin_id": f"basin_{index}",
+                    "restart_stage": "forecast",
+                }
+                for index in range(18)
+            ],
+            "created_at": created_at or cycle_time,
+            "updated_at": created_at or cycle_time,
+        }
+    )
+    return repository
+
+
+def test_file_cohort_exact_comment_reconcile_distinguishes_all_fail_closed_branches(
+    tmp_path: Any,
+) -> None:
+    from services.orchestrator.reconcile import (
+        ReconcileQueryUnavailable,
+        SacctRecord,
+        reconcile_reserved_unbound_jobs,
+    )
+
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    exact = SacctRecord(
+        slurm_job_id="17667",
+        raw_state="RUNNING",
+        job_name="nhms_forecast",
+        comment=f"nhms_idem:{key}",
+        run_id="cycle_gfs_2026071200_forecast_fixture",
+        stage="forecast",
+        pipeline_job_id="job_cycle_gfs_2026071200_forecast_fixture_forecast",
+    )
+
+    unique = _file_cohort_repository(tmp_path / "unique")
+    outcome = reconcile_reserved_unbound_jobs(unique, comment_query=lambda _key: exact)[0]
+    assert outcome.reconciliation_decision == "matched_bound"
+    assert outcome.matched_slurm_job_id == "17667"
+    assert unique.get_pipeline_job(outcome.job_id)["slurm_job_id"] == "17667"
+
+    multiple = _file_cohort_repository(tmp_path / "multiple")
+    outcome = reconcile_reserved_unbound_jobs(
+        multiple,
+        comment_query=lambda _key: tuple(
+            SacctRecord(**{**exact.__dict__, "slurm_job_id": str(17703 + index)})
+            for index in range(10)
+        ),
+    )[0]
+    assert outcome.reconciliation_decision == "multiple_matches_blocked"
+    assert outcome.match_count == 3
+    assert multiple.get_pipeline_job(outcome.job_id)["slurm_job_id"] is None
+
+    mismatch = _file_cohort_repository(tmp_path / "mismatch")
+    wrong = SacctRecord(**{**exact.__dict__, "stage": "forcing"})
+    outcome = reconcile_reserved_unbound_jobs(mismatch, comment_query=lambda _key: wrong)[0]
+    assert outcome.reconciliation_decision == "identity_mismatch_blocked"
+    assert mismatch.get_pipeline_job(outcome.job_id)["slurm_job_id"] is None
+
+    unavailable = _file_cohort_repository(tmp_path / "unavailable")
+
+    def unavailable_query(_key: str) -> None:
+        raise ReconcileQueryUnavailable("sacct unavailable at /private/runtime")
+
+    outcome = reconcile_reserved_unbound_jobs(unavailable, comment_query=unavailable_query)[0]
+    assert outcome.reconciliation_decision == "accounting_unavailable"
+    persisted = unavailable.get_pipeline_job(outcome.job_id)
+    assert persisted["reconciliation_decision"] == "accounting_unavailable"
+    assert persisted["matched_slurm_job_id"] is None
+    assert "/private/runtime" not in str(persisted)
+
+
+def test_file_cohort_authoritative_absence_allows_one_atomic_retry(tmp_path: Any) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import timedelta
+
+    from services.orchestrator.reconcile import reconcile_reserved_unbound_jobs
+
+    created_at = datetime(2026, 7, 12, tzinfo=UTC)
+    repository = _file_cohort_repository(tmp_path, created_at=created_at)
+
+    def reconcile() -> Any:
+        return reconcile_reserved_unbound_jobs(
+            repository,
+            comment_query=lambda _key: None,
+            grace=timedelta(seconds=120),
+            now=lambda: created_at + timedelta(seconds=121),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = [item for batch in pool.map(lambda _index: reconcile(), range(2)) for item in batch]
+
+    assert sum(item.status == "reservation_lost" for item in outcomes) == 1
+    row = repository.get_pipeline_job("job_cycle_gfs_2026071200_forecast_fixture_forecast")
+    assert row["reconciliation_decision"] == "absence_retry_permitted"
+    assert row["matched_slurm_job_id"] is None
+
+
+def test_file_cohort_terminal_tasks_project_exact_success_failure_and_restart(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.orchestrator import scheduler as scheduler_module
+    from services.orchestrator.reconcile import SacctRecord, reconcile_inflight_jobs
+
+    repository = _file_cohort_repository(tmp_path)
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    repository.bind_pipeline_job_reservation(key, slurm_job_id="17667", status="submitted")
+    for index in range(2):
+        repository.append_historical_hydro_run(
+            {
+                "run_id": f"fcst_gfs_2026071200_model_{index}",
+                "run_type": "forecast",
+                "scenario_id": "operational",
+                "model_id": f"model_{index}",
+                "basin_version_id": f"basin_v{index}",
+                "forcing_version_id": f"forc_gfs_2026071200_model_{index}",
+                "init_state_id": f"state_{index}",
+                "source_id": "gfs",
+                "cycle_time": "2026-07-12T00:00:00Z",
+                "start_time": "2026-07-12T00:00:00Z",
+                "end_time": "2026-07-12T18:00:00Z",
+                "status": "failed",
+                "run_manifest_uri": f"s3://nhms/runs/model_{index}/run-manifest.json",
+                "output_uri": f"s3://nhms/runs/model_{index}/output",
+                "log_uri": f"s3://nhms/runs/model_{index}/logs",
+                "error_code": "SLURM_GATEWAY_UNAVAILABLE",
+                "error_message": "transport timeout",
+                "created_at": "2026-07-12T00:00:00Z",
+                "updated_at": "2026-07-12T00:01:00Z",
+            }
+        )
+    task_records = (
+        SacctRecord("17667_0", "COMPLETED", "nhms_forecast", exit_code="0:0", array_task_id=0),
+        SacctRecord("17667_1", "FAILED", "nhms_forecast", exit_code="1:0", array_task_id=1),
+    )
+    master = SacctRecord(
+        slurm_job_id="17667",
+        raw_state="FAILED",
+        job_name="nhms_forecast",
+        comment=f"nhms_idem:{key}",
+        array_member_job_ids=("17667_0", "17667_1"),
+        array_task_records=task_records,
+    )
+    before_success = repository._hydro_run_for("fcst_gfs_2026071200_model_0")
+
+    outcomes = reconcile_inflight_jobs(repository, sacct_query=lambda _job_id: master)
+
+    assert outcomes[0].action == "terminal"
+    cohort = repository.get_pipeline_job("job_cycle_gfs_2026071200_forecast_fixture_forecast")
+    projections = cohort["candidate_projections"]
+    assert projections[0]["array_task_outcome"] == "succeeded"
+    assert projections[0]["restart_stage"] == "state_save_qc"
+    assert projections[0]["native_shud_resubmitted"] is False
+    assert projections[1]["array_task_outcome"] == "failed"
+    succeeded = repository._hydro_run_for("fcst_gfs_2026071200_model_0")
+    failed = repository._hydro_run_for("fcst_gfs_2026071200_model_1")
+    assert succeeded["status"] == "created"
+    assert succeeded["error_code"] is None
+    assert succeeded["init_state_id"] == "state_0"
+    assert succeeded["run_manifest_uri"] == before_success["run_manifest_uri"]
+    assert succeeded["output_uri"] == before_success["output_uri"]
+    assert failed["status"] == "failed"
+    assert failed["error_code"] == "SLURM_GATEWAY_UNAVAILABLE"
+
+    cycle_time = datetime(2026, 7, 12, tzinfo=UTC)
+    monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast_state_save_qc")
+    assert repository.has_completed_pipeline(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        model_id="model_0",
+    ) is False
+    state = repository.candidate_state(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        model_id="model_0",
+        run_id="fcst_gfs_2026071200_model_0",
+        forcing_version_id="forc_gfs_2026071200_model_0",
+        candidate_id="gfs:2026-07-12T00:00:00Z:model_0:forecast_gfs_deterministic",
+    )
+    candidate = scheduler_module.SchedulerCandidate(
+        candidate_id="gfs:2026-07-12T00:00:00Z:model_0:forecast_gfs_deterministic",
+        source_id="gfs",
+        cycle_id="gfs_2026071200",
+        cycle_time_utc=cycle_time,
+        model_id="model_0",
+        basin_id="basin_0",
+        basin_version_id="basin_v0",
+        river_network_version_id="river_v0",
+        segment_count=1,
+        output_segment_count=1,
+        model_package_uri="s3://nhms/models/model_0.tar",
+        resource_profile={},
+        display_capabilities={},
+        horizon={},
+        scenario_id="operational",
+        run_id="fcst_gfs_2026071200_model_0",
+        forcing_version_id="forc_gfs_2026071200_model_0",
+        status="ready",
+    )
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "resume_after_completed_stage"
+    assert decision.evidence["restart_stage"] == "state_save_qc"
+    assert decision.evidence["native_shud_resubmitted"] is False
+
+
+def test_non_forecast_file_cohort_terminal_reconcile_never_projects_forecast_success(
+    tmp_path: Any,
+) -> None:
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from services.orchestrator.reconcile import SacctRecord, reconcile_inflight_jobs
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    key = "cycle_gfs_2026071200_forcing_fixture:forcing"
+    repository.reserve_pipeline_job(
+        {
+            "job_id": "job_cycle_gfs_2026071200_forcing_fixture_forcing",
+            "run_id": "cycle_gfs_2026071200_forcing_fixture",
+            "cycle_id": "gfs_2026071200",
+            "job_type": "produce_forcing_array",
+            "stage": "forcing",
+            "idempotency_key": key,
+            # Simulate a stale/pre-fix row carrying fields that #1112 must
+            # ignore outside the canonical forecast family.
+            "cohort_members": [
+                {
+                    "array_task_id": 0,
+                    "candidate_id": "gfs:2026-07-12T00:00:00Z:model_0:forecast_gfs_deterministic",
+                    "run_id": "fcst_gfs_2026071200_model_0",
+                    "model_id": "model_0",
+                    "basin_id": "basin_0",
+                    "restart_stage": "forcing",
+                }
+            ],
+        }
+    )
+    repository.bind_pipeline_job_reservation(key, slurm_job_id="18001", status="submitted")
+    record = SacctRecord(
+        slurm_job_id="18001",
+        raw_state="COMPLETED",
+        job_name="nhms_forcing",
+        array_member_job_ids=("18001_0",),
+        array_task_records=(
+            SacctRecord("18001_0", "COMPLETED", "nhms_forcing", array_task_id=0),
+        ),
+    )
+
+    outcomes = reconcile_inflight_jobs(repository, sacct_query=lambda _job_id: record)
+
+    assert outcomes[0].status == "succeeded"
+    forcing = repository.get_pipeline_job("job_cycle_gfs_2026071200_forcing_fixture_forcing")
+    assert forcing["candidate_projections"] == []
+    assert forcing["restart_stage"] is None
+    jobs = repository.query_pipeline_jobs_by_cycle("gfs_2026071200")
+    assert all(job["job_type"] != "run_shud_forecast_array" for job in jobs)
+    assert all(job.get("restart_stage") != "state_save_qc" for job in jobs)
+
+
 def _make_inflight_job(
     store: PipelineStore,
     *,

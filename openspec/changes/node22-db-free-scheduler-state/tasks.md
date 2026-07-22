@@ -403,3 +403,55 @@ Scenario evidence rows for section 5:
   oracle, and existing DB-free scheduler tests (`test_production_scheduler`
   covering strict + non-strict, GFS/IFS, retry / restart) all pass with the
   new logic.
+
+## 9. Accepted Cohort Reconcile And Restart-Stage Preservation (#1112)
+
+- [x] 9.1 Persist deterministic forecast-cohort reservation, ordered member/task map,
+  idempotency key, exact Slurm comment, restart stage, and submission-attempt
+  evidence before the Gateway call.
+  Evidence floor: a real `FileOrchestrationJournalRepository` test observes the
+  reserved-unbound cohort before fake Gateway submission and a transport
+  timeout records `submit_result_ambiguous`, not permanent candidate/hydro
+  failure.
+
+- [x] 9.2 Reconcile reserved-unbound file-journal forecast cohorts by exact Slurm comment
+  and identity.
+  Evidence floor: unique match binds; zero match defers within the bounded
+  window and permits one idempotent attempt afterward; multiple, mismatch, and
+  accounting-unavailable outcomes do not bind/cancel/resubmit and emit distinct
+  bounded evidence using the fixture's fixed `reconciliation_decision` values.
+
+- [x] 9.3 Project terminal array-task accounting to candidate-scoped
+  pipeline/hydro state.
+  Evidence floor: exact successful tasks clear only their stale
+  `SLURM_GATEWAY_UNAVAILABLE` state and resume at `state_save_qc`; failed tasks
+  remain failed/retry-eligible; successful siblings are not recomputed.
+
+- [x] 9.4 Preserve canonical `restart_stage` through scheduler grouping,
+  deterministic cohort identity, basin manifest/run context, and stage
+  execution.
+  Evidence floor: a recovered `state_save_qc` candidate submits no native SHUD
+  forecast, and mixed `forecast`/`state_save_qc` candidates form distinct
+  cohorts with distinct durable identities.
+
+- [x] 9.5 Add highest-feasible-seam regressions for accepted-submit timeout and
+  restart recovery.
+  Evidence floor: `ProductionScheduler.run_once()` and
+  `ForecastOrchestrator.orchestrate_cycle()` use the real file journal with a
+  fake Gateway/Slurm boundary to prove one array for 18 members, exact-comment
+  bind after process restart, GFS/IFS parity, partial-task isolation, no cancel
+  before ownership proof, and required reconciliation/restart evidence.
+  The matrix also proves two concurrent post-window passes permit one retry,
+  over-limit accounting blocks with bounded evidence, runtime roots/credentials
+  are redacted, generic and non-DB-free reconcile callers remain compatible,
+  and recovered success preserves initial-state/run-manifest/checkpoint/QC
+  lineage. Non-forecast array failures and stale cohort-like rows are also
+  proven unable to create forecast or `state_save_qc` projections.
+
+- [ ] 9.6 Complete local, CI, and node-22 live verification.
+  Evidence floor: the issue-targeted pytest command, `uv run ruff check .`, and
+  strict OpenSpec validation pass; CI is green at the frozen PR SHA; node-22
+  injects a bounded accepted-submit response timeout and proves automatic exact
+  comment recovery, one 18-task array, shared-NFS downstream copyback, no native
+  SHUD resubmission for `state_save_qc`, and no scheduler `DATABASE_URL`, with
+  explicit rollback receipt.

@@ -458,17 +458,43 @@ class ForecastOrchestratorCycleMixin:
         """
         if not hasattr(self.repository, "reserve_pipeline_job"):
             return None
-        return _chain.reserve_candidate(
-            self.repository,
-            idempotency_key=idempotency_key,
-            job_id=pipeline_job_id,
-            run_id=context.run_id,
-            cycle_id=context.cycle_id,
-            job_type=stage.job_type,
-            model_id=_chain._cycle_pipeline_job_model_id(context),
-            stage=stage.stage,
-            candidate_id=context.run_id,
-        )
+        reservation_evidence = None
+        if (
+            getattr(self.repository, "supports_accepted_submit_reconcile", False)
+            and _chain.chain_stage_execution.is_forecast_cohort_stage(stage)
+        ):
+            members = []
+            for index, basin in enumerate(context.active_basins):
+                members.append(
+                    {
+                        "array_task_id": int(basin.get("task_id", index)),
+                        "candidate_id": basin.get("candidate_id"),
+                        "run_id": basin.get("run_id"),
+                        "model_id": basin.get("model_id"),
+                        "basin_id": basin.get("basin_id"),
+                        "restart_stage": context.restart_stage or stage.stage,
+                    }
+                )
+            reservation_evidence = {
+                "slurm_comment": _chain.slurm_comment_for(idempotency_key),
+                "cohort_members": members,
+                "restart_stage": context.restart_stage or stage.stage,
+                "submission_attempt": max(int(context.retry_attempt or 1), 1),
+                "native_shud_resubmitted": stage.stage == "forecast",
+            }
+        reserve_kwargs = {
+            "idempotency_key": idempotency_key,
+            "job_id": pipeline_job_id,
+            "run_id": context.run_id,
+            "cycle_id": context.cycle_id,
+            "job_type": stage.job_type,
+            "model_id": _chain._cycle_pipeline_job_model_id(context),
+            "stage": stage.stage,
+            "candidate_id": context.run_id,
+        }
+        if reservation_evidence is not None:
+            reserve_kwargs["reservation_evidence"] = reservation_evidence
+        return _chain.reserve_candidate(self.repository, **reserve_kwargs)
 
     def _reservation_already_inflight(self, reservation: _chain.ReservationResult | None) -> bool:
         """True when THIS pass lost the reservation and must NOT sbatch.

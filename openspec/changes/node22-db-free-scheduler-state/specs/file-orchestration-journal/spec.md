@@ -178,3 +178,117 @@ orchestration state behavior against existing scheduler semantics.
   decisions are visible to scheduler planning
 - **AND** DB-backed active/orchestrator repository factories are not called in
   DB-free read-side construction.
+
+### Requirement: Accepted forecast cohort submission is reconciled exactly once
+
+The system SHALL preserve and recover a DB-free forecast cohort across the window where
+Slurm accepted an array but the Gateway response did not durably return, without
+creating, adopting, or cancelling an array whose exact identity is unproven.
+
+Persisted and emitted reconciliation evidence MUST use `submit_outcome` in
+`accepted|submit_result_ambiguous|rejected`,
+`reconciliation_source=slurm_exact_comment`, and `reconciliation_decision` in
+`matched_bound|absence_deferred|absence_retry_permitted|multiple_matches_blocked|identity_mismatch_blocked|accounting_unavailable`.
+`matched_slurm_job_id` MUST remain null until an exact unique identity is
+proven. Candidate projection MUST use `array_task_id`, `array_task_outcome` in
+`succeeded|failed|unverified`, `restart_stage`, and
+`native_shud_resubmitted`.
+
+#### Scenario: Forecast cohort reservation precedes the Gateway call
+
+- **WHEN** scheduler submits a source/cycle/restart-stage forecast cohort
+- **THEN** the file journal durably records its deterministic cohort identity,
+  ordered candidate/task member map, idempotency key, and exact Slurm comment
+  before the Gateway call
+- **AND** a Gateway response timeout records an ambiguous non-terminal submit
+  result rather than a permanent hydro or candidate failure.
+
+#### Scenario: Unique exact-comment match binds the accepted array
+
+- **WHEN** a later pass or process restart reconciles a reserved-unbound cohort
+  and authoritative accounting returns exactly one array with the exact comment
+  and matching source/cycle/stage/cohort identity
+- **THEN** the file journal binds that array master job ID and continues task
+  status reconciliation
+- **AND** scheduler neither submits nor cancels another forecast array.
+
+#### Scenario: Confirmed absence permits one bounded idempotent retry
+
+- **WHEN** authoritative exact-comment accounting returns zero matches before
+  the configured reconciliation window expires
+- **THEN** the cohort remains in a bounded reconciling state and is not
+  resubmitted
+- **AND WHEN** authoritative zero-match evidence persists after the window
+- **THEN** the file journal permits exactly one idempotent submission attempt,
+  including under concurrent scheduler passes.
+
+#### Scenario: Ambiguous or unavailable accounting fails closed
+
+- **WHEN** exact-comment accounting returns multiple matches, a mismatched
+  comment/cohort/stage/member identity, or an unavailable/non-authoritative
+  result
+- **THEN** scheduler does not bind, cancel, or submit another array
+- **AND** bounded evidence distinguishes multiple, mismatch, and unavailable
+  decisions so a later pass or operator can reconcile safely.
+
+#### Scenario: Accounting discovery and evidence are bounded and redacted
+
+- **WHEN** exact-comment discovery exceeds its configured match/row limit or
+  returns fields containing runtime roots, credentials, or raw unbounded rows
+- **THEN** scheduler records `multiple_matches_blocked` with bounded count/class
+  evidence and no matched Slurm identity
+- **AND** public evidence omits raw comments, credentials, local/shared-NFS
+  roots, and unbounded accounting payloads.
+
+#### Scenario: Terminal array tasks project to exact candidates
+
+- **WHEN** an adopted array has authoritative terminal task results
+- **THEN** each result is projected only to its exact reserved candidate/task
+  identity
+- **AND** successful forecast tasks clear their own stale
+  `SLURM_GATEWAY_UNAVAILABLE` hydro failure and resume at `state_save_qc`
+- **AND** failed or unverified tasks remain failed or reconciling without
+  relabelling/recomputing successful siblings.
+
+#### Scenario: Recovered success preserves run and QC provenance
+
+- **WHEN** a terminal successful task clears a stale transport failure
+- **THEN** its source/cycle/model, initial-state, output/checkpoint,
+  run-manifest, and QC lineage remain attached to the same candidate/run
+- **AND** reconcile does not synthesize a replacement forecast run.
+
+#### Scenario: Existing reconcile callers remain compatible
+
+- **WHEN** generic repository or non-DB-free reconcile processes a legacy row
+  without the additive cohort/member fields
+- **THEN** its existing status and identity contract remains valid
+- **AND** DB-free-only cohort fields are not made mandatory for that caller.
+
+#### Scenario: Non-forecast array stages retain their prior contract
+
+- **WHEN** a non-forecast array stage receives a Gateway failure or a legacy
+  row contains cohort-like member fields
+- **THEN** #1112 does not project that stage as forecast success or attach
+  `restart_stage=state_save_qc`
+- **AND** the stage retains its pre-#1112 failure/retry behavior.
+
+### Requirement: Candidate restart stage survives cohort dispatch
+
+The system SHALL preserve each candidate's earliest incomplete canonical stage
+through restart-compatible grouping, durable cohort identity, run-context
+construction, and stage execution.
+
+#### Scenario: Downstream restart never repeats forecast
+
+- **WHEN** a recovered candidate has `restart_stage=state_save_qc`
+- **THEN** its execution cohort starts at `state_save_qc`
+- **AND** `run_shud_forecast_array` is not submitted
+- **AND** evidence records `native_shud_resubmitted=false`.
+
+#### Scenario: Mixed restart stages form distinct cohorts
+
+- **WHEN** selected candidates for one source/cycle include both `forecast` and
+  `state_save_qc` restart stages
+- **THEN** scheduler creates distinct deterministic cohort identities and
+  dispatches each from its own earliest incomplete stage
+- **AND** it does not lower the downstream cohort to `forecast`.

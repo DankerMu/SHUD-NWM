@@ -8133,6 +8133,108 @@ def _fmt(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
+@pytest.mark.parametrize("source_id", ["gfs", "IFS"])
+def test_file_journal_forecast_timeout_stays_reconciling_with_durable_18_member_cohort(
+    tmp_path: Path,
+    source_id: str,
+) -> None:
+    """ForecastOrchestrator public seam preserves an accepted/unknown array."""
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    class _AcceptedTimeoutClient(FakeCycleSlurmClient):
+        def submit_job_array(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            accepted = super().submit_job_array(*args, **kwargs)
+            assert accepted["job_id"] == "2001"
+            raise OrchestratorError("SLURM_GATEWAY_UNAVAILABLE", "response timed out")
+
+    cycle = "2026050100"
+    source_segment = source_id.lower()
+    basins = _basins(18)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_{source_segment}_{cycle}_model_{index}",
+                "candidate_id": (
+                    f"{source_id}:2026-05-01T00:00:00Z:model_{index}:forecast_{source_segment}_deterministic"
+                ),
+                "orchestration_run_id": f"cycle_{source_segment}_{cycle}_forecast_cohort_fixture",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = _AcceptedTimeoutClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle(source_id, cycle, basins)
+
+    assert result.status == "reconciling"
+    assert len(client.jobs) == 1
+    rows = repository.query_reserved_unbound_jobs()
+    assert len(rows) == 1
+    reserved = rows[0]
+    assert reserved.submit_outcome == "submit_result_ambiguous"
+    assert reserved.slurm_job_id is None
+    assert reserved.slurm_comment == f"nhms_idem:{reserved.idempotency_key}"
+    assert reserved.restart_stage == "forecast"
+    assert reserved.native_shud_resubmitted is True
+    assert [member["array_task_id"] for member in reserved.cohort_members] == list(range(18))
+    assert all(member["restart_stage"] == "forecast" for member in reserved.cohort_members)
+    assert all(
+        (repository._hydro_run_for(str(basin["run_id"])) or {}).get("status") != "failed"
+        for basin in basins
+    )
+
+
+def test_file_journal_forcing_gateway_failure_keeps_legacy_failure_without_forecast_projection(
+    tmp_path: Path,
+) -> None:
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from services.orchestrator.reconcile import reconcile_inflight_jobs
+
+    class _AcceptedForcingTimeoutClient(FakeCycleSlurmClient):
+        def submit_job_array(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            accepted = super().submit_job_array(*args, **kwargs)
+            assert accepted["job_id"] == "2001"
+            raise OrchestratorError("SLURM_GATEWAY_UNAVAILABLE", "forcing response timed out")
+
+    cycle = "2026050100"
+    basins = _basins(2)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_{cycle}_model_{index}",
+                "candidate_id": f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic",
+                "orchestration_run_id": f"cycle_gfs_{cycle}_forcing_cohort_fixture",
+                "restart_stage": "forcing",
+                "state_evidence": {"restart_stage": "forcing"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    orchestrator = _orchestrator(tmp_path, repository, _AcceptedForcingTimeoutClient())
+
+    result = orchestrator.orchestrate_cycle("gfs", cycle, basins)
+
+    assert result.status == "failed"
+    jobs = repository.query_pipeline_jobs_by_cycle("gfs_2026050100")
+    forcing = next(job for job in jobs if job["stage"] == "forcing")
+    assert forcing["status"] == "submission_failed"
+    assert forcing["submit_outcome"] is None
+    assert forcing["cohort_members"] == []
+    assert forcing["candidate_projections"] == []
+    assert all(job["job_type"] != "run_shud_forecast_array" for job in jobs)
+    assert repository.query_reserved_unbound_jobs() == []
+    assert reconcile_inflight_jobs(
+        repository,
+        sacct_query=lambda _job_id: pytest.fail("terminal forcing rejection is not reconcile-inflight"),
+    ) == []
+    assert all(job.get("restart_stage") != "state_save_qc" for job in jobs)
+
+
 class _CaptureCursor:
     """Minimal psycopg2-style cursor that records the executed SQL/params."""
 
