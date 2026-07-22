@@ -232,6 +232,11 @@ def default_comment_sacct_querier(
             end = start
         return tuple(pages)
 
+    # One querier instance is one scheduler/reconcile session. Freeze its full
+    # time window once so every key and owner/global scope shares identical page
+    # cache keys even while wall clock time advances during the scan.
+    pages = _pages()
+
     def _query(
         idempotency_key: str,
         *,
@@ -249,7 +254,7 @@ def default_comment_sacct_querier(
         budget = scan_budget
         matches: list[SacctRecord] = []
         seen_ids: set[str] = set()
-        for page_start, page_end in _pages():
+        for page_start, page_end in pages:
             start_time = page_start.strftime("%Y-%m-%dT%H:%M:%S")
             end_time = page_end.strftime("%Y-%m-%dT%H:%M:%S")
             page_key = (*owner_scope, start_time, end_time)

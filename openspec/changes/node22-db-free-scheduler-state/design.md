@@ -1447,8 +1447,9 @@ Invariant Matrix:
   global visibility. Runtime preflight proves the scheduler principal's Slurm
   accounting visibility (including job privacy), otherwise zero-match evidence
   remains unavailable. Discovery pages a bounded time range before byte/row
-  materialization and aggregates only the bounded exact-comment matches needed
-  to prove zero, one, or multiple results at the supported 256-member cadence.
+  materialization, freezes one page-window snapshot for the whole reconcile
+  session, and aggregates only the bounded exact-comment matches needed to
+  prove zero, one, or multiple results at the supported 256-member cadence.
 - Independent-runtime contract: because runtime member rows are durably prepared
   before the Gateway call, a pre-outcome reservation with no runtime rows cannot
   have produced an accepted array. A later exact-comment match without those

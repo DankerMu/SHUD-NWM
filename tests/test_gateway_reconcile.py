@@ -11,7 +11,7 @@ import copy
 import json
 import os
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -3591,6 +3591,66 @@ def test_comment_sacct_production_cadence_pages_are_independently_bounded_and_ca
     assert [record.slurm_job_id for record in cached_proof.records] == [expected_ids[cached_target]]
     assert len(commands) == page_count * 2
     assert all(any(item.startswith("--endtime=") for item in command) for command in commands)
+
+
+def test_comment_sacct_session_freezes_advancing_clock_window_for_all_keys_and_scopes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    page_count = (reconcile_module.COMMENT_SACCT_LOOKBACK_DAYS * 24) // reconcile_module.COMMENT_SACCT_PAGE_HOURS
+    base_now = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    now_calls: list[datetime] = []
+
+    def advancing_now() -> datetime:
+        value = base_now + timedelta(seconds=len(now_calls))
+        now_calls.append(value)
+        return value
+
+    commands: list[list[str]] = []
+    scope_pages = {"owner": 0, "global": 0}
+    late_key = "gfs:late:forecast"
+    early_key = "ifs:early:state_save_qc"
+
+    def bounded(command: Any) -> str:
+        commands.append(list(command))
+        scope = "global" if "--allusers" in command else "owner"
+        page_index = scope_pages[scope]
+        scope_pages[scope] += 1
+        if page_index == 0:
+            return f"17668_0.batch|batch|RUNNING|0:0|nhms_idem:{early_key}|scheduler|account\n"
+        if page_index == page_count - 1:
+            return f"17667_0|nhms_forecast|RUNNING|0:0|nhms_idem:{late_key}|scheduler|account\n"
+        return ""
+
+    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
+    query = reconcile_module.default_comment_sacct_querier(
+        global_visibility_probe=lambda: True,
+        now=advancing_now,
+    )
+
+    late_proof = reconcile_module._query_comment_accounting_proof(
+        query,
+        late_key,
+        expected_user="scheduler",
+        expected_account="account",
+    )
+    assert late_proof.kind == "owned_match"
+    assert [record.slurm_job_id for record in late_proof.records] == ["17667"]
+    assert len(commands) == page_count * 2
+    assert scope_pages == {"owner": page_count, "global": page_count}
+
+    early_proof = reconcile_module._query_comment_accounting_proof(
+        query,
+        early_key,
+        expected_user="scheduler",
+        expected_account="account",
+    )
+    assert early_proof.kind == "owned_match"
+    assert [record.slurm_job_id for record in early_proof.records] == ["17668"]
+    assert len(commands) == page_count * 2
+    assert now_calls == [base_now]
+    assert "--endtime=2026-07-22T12:00:00" in commands[0]
 
 
 def test_comment_sacct_global_collision_is_detected_across_separate_pages(

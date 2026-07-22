@@ -471,9 +471,10 @@ Scenario evidence rows for section 5:
   reader.
   Exact-comment discovery proves global visibility at preflight, uses bounded
   time pages at the 256-member production cadence, and counts a final
-  unterminated record. Scheduler restart evidence contains the bounded
-  submit/accounting tuple, restart/native-SHUD fields, and candidate/task
-  outcomes for reserved and inflight branches.
+  unterminated record. Page boundaries are frozen per reconcile session so
+  advancing wall time cannot rescan/starve later cohort keys. Scheduler restart
+  evidence contains the bounded submit/accounting tuple, restart/native-SHUD
+  fields, and candidate/task outcomes for reserved and inflight branches.
 
 - [ ] 9.6 Complete local, CI, and node-22 live verification.
   Evidence floor: the issue-targeted pytest command, `uv run ruff check .`, and

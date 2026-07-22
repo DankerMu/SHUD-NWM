@@ -295,7 +295,10 @@ rows.
 - **AND WHEN** exact-comment discovery runs at the supported 256-member cadence
 - **THEN** it queries bounded time pages, counts an unterminated final row, and
   aggregates at most the bounded zero/one/multiple proof without silently
-  discarding a row at the byte or row limit.
+  discarding a row at the byte or row limit
+- **AND** all cohort queries in that reconcile session use the same frozen page
+  boundaries, so wall-clock advance cannot invalidate the page cache or starve
+  later GFS/IFS cohorts under the shared deadline.
 
 #### Scenario: Ambiguous or unavailable accounting fails closed
 
