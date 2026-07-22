@@ -122,6 +122,7 @@ _FORECAST_RUN_ID_RE = re.compile(r"^fcst_([^_]+)_(\d{10})_(.+)$")
 _CYCLE_RUN_ID_RE = re.compile(r"^cycle_([^_]+)_(\d{10})$")
 _CYCLE_COHORT_RUN_ID_RE = re.compile(r"^cycle_([^_]+)_(\d{10})(?:_.+)?$")
 _CANDIDATE_JOB_ID_RE = re.compile(r"^job_fcst_([^_]+)_(\d{10})_.+$")
+_ACCEPTED_SUBMIT_MASTER_JOB_ID_RE = re.compile(r"^job_cycle_([^_]+)_(\d{10})_.+$")
 _REPLAY_SEQUENCE_FIELD = "_file_journal_replay_sequence"
 _REPLAY_ORDER_FIELD = "_file_journal_replay_order"
 _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS = (
@@ -155,6 +156,7 @@ _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS = (
     "slurm_ownership_required",
     "reconciliation_source",
     "reconciliation_decision",
+    "reconciliation_reason_class",
     "matched_slurm_job_id",
     "candidate_projections",
     "native_shud_resubmitted",
@@ -647,6 +649,54 @@ class FileOrchestrationJournalRepository:
                 return dict(job)
         return None
 
+    def get_accepted_submit_pipeline_job(self, pipeline_job_id: str) -> dict[str, Any] | None:
+        """Read one deterministic cohort master without global history discovery."""
+
+        source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(pipeline_job_id)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            row = self._accepted_submit_job_for_id_unlocked(
+                pipeline_job_id,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            return _public_scheduler_row(row) if row is not None else None
+
+    def _accepted_submit_job_for_id_unlocked(
+        self,
+        pipeline_job_id: str,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+    ) -> dict[str, Any] | None:
+        """Resolve exact direct plus the one cycle journal; never latest/global."""
+
+        expected_job_id = _safe_segment(pipeline_job_id)
+        canonical_source = _normalize_file_source_id(source_id, field="source_id")
+        direct = self._direct_pipeline_job_record(expected_job_id)
+        rows = _CycleRows()
+        for record in self._read_jsonl(
+            self._journal_path(source_id=canonical_source, cycle_time=cycle_time)
+        ):
+            self._apply_journal_record(
+                rows,
+                record,
+                source_id=canonical_source,
+                cycle_time=cycle_time,
+            )
+        replayed = rows.pipeline_jobs.get(expected_job_id)
+        row = dict(replayed or direct) if replayed is not None or direct is not None else None
+        if row is None:
+            return None
+        if (
+            _source_id_from_job(row) != canonical_source
+            or _cycle_time_from_job(row) != cycle_time.astimezone(UTC)
+        ):
+            raise FileOrchestrationJournalError(
+                "file_journal_identity_mismatch",
+                field="job_id",
+            )
+        return row
+
     def query_pipeline_jobs_by_cycle(self, cycle_id: str) -> list[dict[str, Any]]:
         try:
             jobs = [
@@ -911,6 +961,7 @@ class FileOrchestrationJournalRepository:
                     source_id=source_id,
                     cycle_time=cycle_time,
                     model_ids=model_ids,
+                    include_direct_jobs=False,
                 )
             for member in members:
                 model_rows = rows_by_model.get(str(member.get("model_id") or ""))
@@ -1045,12 +1096,36 @@ class FileOrchestrationJournalRepository:
         idempotency_key = str(request_row["idempotency_key"])
         source_id = _source_id_from_job(request_row)
         cycle_time = _cycle_time_from_job(request_row)
+        versioned_master = bool(
+            accepted_submit_contract_is_current(request_row)
+            and accepted_submit_row_kind(request_row) == "master"
+        )
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
-            existing = self._candidate_job_for_idempotency_unlocked(idempotency_key)
-            matched_by_key = existing is not None
+            existing = (
+                self._accepted_submit_job_for_id_unlocked(
+                    str(request_row["job_id"]),
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                )
+                if versioned_master
+                else self._candidate_job_for_idempotency_unlocked(idempotency_key)
+            )
+            matched_by_key = bool(
+                existing is not None and str(existing.get("idempotency_key") or "") == idempotency_key
+            )
             if existing is None and request_row.get("job_id") not in (None, ""):
-                existing = self._pipeline_job_for_id_unlocked(str(request_row["job_id"]))
+                existing = (
+                    None
+                    if versioned_master
+                    else self._pipeline_job_for_id_unlocked(str(request_row["job_id"]))
+                )
             if existing is None:
+                return None
+            if versioned_master and (
+                not accepted_submit_contract_is_current(existing)
+                or accepted_submit_row_kind(existing) != "master"
+                or not matched_by_key
+            ):
                 return None
             existing_status = str(existing.get("status") or "")
             if matched_by_key:
@@ -1064,7 +1139,10 @@ class FileOrchestrationJournalRepository:
                     existing.get("idempotency_key") not in (None, "")
                     or existing.get("slurm_job_id") not in (None, "")
                     or existing_status != "pending"
-                    or self._candidate_job_for_idempotency_unlocked(idempotency_key) is not None
+                    or (
+                        not versioned_master
+                        and self._candidate_job_for_idempotency_unlocked(idempotency_key) is not None
+                    )
                 ):
                     return None
             row = (
@@ -1158,6 +1236,7 @@ class FileOrchestrationJournalRepository:
         self,
         idempotency_key: str,
         *,
+        pipeline_job_id: str | None = None,
         expected_submission_attempt: int,
         slurm_job_id: str,
         transition: AcceptedSubmitTransition,
@@ -1189,15 +1268,32 @@ class FileOrchestrationJournalRepository:
             and transition.matched_slurm_job_id != requested_id
         ):
             raise ValueError("matched accounting id must equal the bound Slurm job id")
-        initial = self._candidate_job_for_idempotency_unlocked(idempotency_key)
-        if initial is None:
-            return AcceptedSubmitCommitResult("missing")
-        source_id = _source_id_from_job(initial)
-        cycle_time = _cycle_time_from_job(initial)
+        if pipeline_job_id is not None:
+            source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(pipeline_job_id)
+        else:
+            initial = self._candidate_job_for_idempotency_unlocked(idempotency_key)
+            if initial is None:
+                return AcceptedSubmitCommitResult("missing")
+            source_id = _source_id_from_job(initial)
+            cycle_time = _cycle_time_from_job(initial)
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
-            existing = self._candidate_job_for_idempotency_unlocked(idempotency_key)
+            existing = (
+                self._accepted_submit_job_for_id_unlocked(
+                    pipeline_job_id,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                )
+                if pipeline_job_id is not None
+                else self._candidate_job_for_idempotency_unlocked(idempotency_key)
+            )
             if existing is None:
                 return AcceptedSubmitCommitResult("missing")
+            if pipeline_job_id is not None and (
+                not accepted_submit_contract_is_current(existing)
+                or accepted_submit_row_kind(existing) != "master"
+                or str(existing.get("idempotency_key") or "") != idempotency_key
+            ):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
             current_id = str(existing.get("slurm_job_id") or "")
             current_attempt = max(int(existing.get("submission_attempt") or 1), 1)
             if current_attempt != max(int(expected_submission_attempt), 1):
@@ -1240,6 +1336,7 @@ class FileOrchestrationJournalRepository:
         job_id: str,
         transition: AcceptedSubmitTransition,
         *,
+        accepted_submit_contract_version: str | None = None,
         expected_submission_attempt: int | None = None,
         expected_statuses: Sequence[str] | None = None,
         require_unbound: bool = False,
@@ -1251,15 +1348,37 @@ class FileOrchestrationJournalRepository:
 
         if not isinstance(transition, AcceptedSubmitTransition):
             raise TypeError("transition must be AcceptedSubmitTransition")
-        initial = self._pipeline_job_for_id_unlocked(job_id)
-        if initial is None:
-            return AcceptedSubmitCommitResult("missing")
-        source_id = _source_id_from_job(initial)
-        cycle_time = _cycle_time_from_job(initial)
+        versioned = accepted_submit_contract_version == ACCEPTED_SUBMIT_CONTRACT_VERSION
+        if accepted_submit_contract_version not in (None, ACCEPTED_SUBMIT_CONTRACT_VERSION):
+            raise FileOrchestrationJournalError(
+                "file_journal_evidence_enum_invalid",
+                field=ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD,
+            )
+        if versioned:
+            source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
+        else:
+            initial = self._pipeline_job_for_id_unlocked(job_id)
+            if initial is None:
+                return AcceptedSubmitCommitResult("missing")
+            source_id = _source_id_from_job(initial)
+            cycle_time = _cycle_time_from_job(initial)
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
-            existing = self._pipeline_job_for_id_unlocked(job_id)
+            existing = (
+                self._accepted_submit_job_for_id_unlocked(
+                    job_id,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                )
+                if versioned
+                else self._pipeline_job_for_id_unlocked(job_id)
+            )
             if existing is None:
                 return AcceptedSubmitCommitResult("missing")
+            if versioned and (
+                not accepted_submit_contract_is_current(existing)
+                or accepted_submit_row_kind(existing) != "master"
+            ):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
             if expected_submission_attempt is not None and max(
                 int(existing.get("submission_attempt") or 1), 1
             ) != max(int(expected_submission_attempt), 1):
@@ -1284,6 +1403,7 @@ class FileOrchestrationJournalRepository:
         self,
         idempotency_key: str,
         *,
+        pipeline_job_id: str | None = None,
         expected_submission_attempt: int,
         finished_at: datetime,
         error_code: str,
@@ -1293,16 +1413,33 @@ class FileOrchestrationJournalRepository:
     ) -> AcceptedSubmitCommitResult:
         """Reject one current attempt and its staged hydro cohort atomically."""
 
-        initial = self._candidate_job_for_idempotency_unlocked(idempotency_key)
-        if initial is None:
-            return AcceptedSubmitCommitResult("missing")
-        source_id = _source_id_from_job(initial)
-        cycle_time = _cycle_time_from_job(initial)
+        if pipeline_job_id is not None:
+            source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(pipeline_job_id)
+        else:
+            initial = self._candidate_job_for_idempotency_unlocked(idempotency_key)
+            if initial is None:
+                return AcceptedSubmitCommitResult("missing")
+            source_id = _source_id_from_job(initial)
+            cycle_time = _cycle_time_from_job(initial)
         attempt = max(int(expected_submission_attempt), 1)
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
-            existing = self._candidate_job_for_idempotency_unlocked(idempotency_key)
+            existing = (
+                self._accepted_submit_job_for_id_unlocked(
+                    pipeline_job_id,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                )
+                if pipeline_job_id is not None
+                else self._candidate_job_for_idempotency_unlocked(idempotency_key)
+            )
             if existing is None:
                 return AcceptedSubmitCommitResult("missing")
+            if pipeline_job_id is not None and (
+                not accepted_submit_contract_is_current(existing)
+                or accepted_submit_row_kind(existing) != "master"
+                or str(existing.get("idempotency_key") or "") != idempotency_key
+            ):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
             if (
                 max(int(existing.get("submission_attempt") or 1), 1) != attempt
                 or str(existing.get("status") or "") != "reserved"
@@ -1328,12 +1465,22 @@ class FileOrchestrationJournalRepository:
             )
             payloads: list[tuple[str, dict[str, Any], str | None]] = []
             touched_models: set[str] = set()
-            for member in _bounded_cohort_members(existing.get("cohort_members")):
+            members = _bounded_cohort_members(existing.get("cohort_members"))
+            model_rows = self._cycle_rows_by_model_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_ids=(str(member.get("model_id") or "") for member in members),
+                include_direct_jobs=False,
+            )
+            for member in members:
                 run_id = str(member.get("run_id") or "")
                 model_id = str(member.get("model_id") or "")
                 if not run_id or not model_id:
                     continue
-                hydro = self._hydro_run_for(run_id)
+                snapshot = model_rows.get(model_id)
+                hydro = snapshot.hydro_run if snapshot is not None else None
+                if isinstance(hydro, Mapping) and str(hydro.get("run_id") or "") != run_id:
+                    hydro = None
                 if (
                     hydro is None
                     or max(int(hydro.get("submission_attempt") or 1), 1) != attempt
@@ -1353,8 +1500,9 @@ class FileOrchestrationJournalRepository:
                 touched_models.add(model_id)
             payloads.append(("pipeline_job", master, None))
             event = {
-                "event_id": self._next_event_id_unlocked(
-                    source_id=source_id, cycle_time=cycle_time, model_id=None
+                "event_id": self._next_accepted_submit_event_id_unlocked(
+                    source_id=source_id,
+                    cycle_time=cycle_time,
                 ),
                 "entity_type": "pipeline_job",
                 "entity_id": str(master["job_id"]),
@@ -1403,6 +1551,7 @@ class FileOrchestrationJournalRepository:
                     source_id=source_id,
                     cycle_time=cycle_time,
                     model_id=model_id,
+                    include_direct_jobs=False,
                 )
             return AcceptedSubmitCommitResult("applied", _public_scheduler_row(master))
 
@@ -1465,18 +1614,36 @@ class FileOrchestrationJournalRepository:
         self,
         job_id: str,
         *,
+        accepted_submit_contract_version: str | None = None,
         expected_submission_attempt: int | None = None,
         expected_status: str = "reserved",
     ) -> int:
         """Move one still-reserved cohort to retryable exactly once under its cycle lock."""
-        initial = self._pipeline_job_for_id_unlocked(job_id)
-        if initial is None:
-            return 0
-        source_id = _source_id_from_job(initial)
-        cycle_time = _cycle_time_from_job(initial)
+        versioned = accepted_submit_contract_version == ACCEPTED_SUBMIT_CONTRACT_VERSION
+        if versioned:
+            source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
+        else:
+            initial = self._pipeline_job_for_id_unlocked(job_id)
+            if initial is None:
+                return 0
+            source_id = _source_id_from_job(initial)
+            cycle_time = _cycle_time_from_job(initial)
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
-            existing = self._pipeline_job_for_id_unlocked(job_id)
+            existing = (
+                self._accepted_submit_job_for_id_unlocked(
+                    job_id,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                )
+                if versioned
+                else self._pipeline_job_for_id_unlocked(job_id)
+            )
             if existing is None or str(existing.get("status") or "") != expected_status:
+                return 0
+            if versioned and (
+                not accepted_submit_contract_is_current(existing)
+                or accepted_submit_row_kind(existing) != "master"
+            ):
                 return 0
             if expected_submission_attempt is not None and max(
                 int(existing.get("submission_attempt") or 1), 1
@@ -1502,12 +1669,22 @@ class FileOrchestrationJournalRepository:
             cycle_time = _cycle_time_from_job(existing)
             payloads: list[tuple[str, dict[str, Any], str | None]] = []
             touched_models: set[str] = set()
-            for member in _bounded_cohort_members(existing.get("cohort_members")):
+            members = _bounded_cohort_members(existing.get("cohort_members"))
+            model_rows = self._cycle_rows_by_model_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_ids=(str(member.get("model_id") or "") for member in members),
+                include_direct_jobs=False,
+            )
+            for member in members:
                 run_id = str(member.get("run_id") or "")
                 model_id = str(member.get("model_id") or "")
                 if not run_id or not model_id:
                     continue
-                hydro = self._hydro_run_for(run_id)
+                snapshot = model_rows.get(model_id)
+                hydro = snapshot.hydro_run if snapshot is not None else None
+                if isinstance(hydro, Mapping) and str(hydro.get("run_id") or "") != run_id:
+                    hydro = None
                 if (
                     hydro is None
                     or int(hydro.get("submission_attempt") or 1) != attempt
@@ -1556,6 +1733,7 @@ class FileOrchestrationJournalRepository:
                     source_id=source_id,
                     cycle_time=cycle_time,
                     model_id=model_id,
+                    include_direct_jobs=False,
                 )
             return len(records)
 
@@ -1571,14 +1749,19 @@ class FileOrchestrationJournalRepository:
         reconciliation_decision: str,
     ) -> dict[str, int]:
         """Project one accounting pass under one cycle lock and one materialization/model."""
-        initial = self._pipeline_job_for_id_unlocked(job_id)
-        if initial is None:
-            return {"total": 0, "pipeline_status": 0, "pipeline_event": 0}
-        source_id = _source_id_from_job(initial)
-        cycle_time = _cycle_time_from_job(initial)
+        source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
-            existing = self._pipeline_job_for_id_unlocked(job_id)
-            if existing is None or str(existing.get("slurm_job_id") or "") != master_slurm_job_id:
+            existing = self._accepted_submit_job_for_id_unlocked(
+                job_id,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            if (
+                existing is None
+                or not accepted_submit_contract_is_current(existing)
+                or accepted_submit_row_kind(existing) != "master"
+                or str(existing.get("slurm_job_id") or "") != master_slurm_job_id
+            ):
                 return {"total": 0, "pipeline_status": 0, "pipeline_event": 0}
             if reconciliation_decision != "matched_bound":
                 raise FileOrchestrationJournalError(
@@ -1621,7 +1804,10 @@ class FileOrchestrationJournalRepository:
             payloads: list[tuple[str, dict[str, Any], str | None]] = []
             direct_jobs: list[dict[str, Any]] = []
             touched_models: set[str] = set()
-            event_id = self._next_event_id_unlocked(source_id=source_id, cycle_time=cycle_time, model_id=None)
+            event_id = self._next_accepted_submit_event_id_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
             model_rows = self._cycle_rows_by_model_unlocked(
                 source_id=source_id,
                 cycle_time=cycle_time,
@@ -1630,6 +1816,7 @@ class FileOrchestrationJournalRepository:
                     for projection in verified
                     if projection.get("model_id") not in (None, "")
                 ),
+                include_direct_jobs=False,
             )
             for projection in verified:
                 run_id = str(projection.get("run_id") or "")
@@ -2217,6 +2404,7 @@ class FileOrchestrationJournalRepository:
         source_id: str,
         cycle_time: datetime,
         model_ids: Iterable[str],
+        include_direct_jobs: bool = True,
     ) -> dict[str, _CycleRows]:
         """Build exact model rows with one cycle-wide source scan.
 
@@ -2264,20 +2452,25 @@ class FileOrchestrationJournalRepository:
                 cycle_time=cycle_time,
                 expected_record_type="pipeline_event",
             )
-        direct_jobs = self._direct_pipeline_job_records_for_cycle_cached(
-            source_id=source_id,
-            cycle_time=cycle_time,
+        direct_jobs = (
+            self._direct_pipeline_job_records_for_cycle_cached(
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            if include_direct_jobs
+            else ()
         )
         for model_id, rows in rows_by_model.items():
             for job in direct_jobs:
                 _insert_missing_by_key(rows.pipeline_jobs, job, key="job_id")
             _filter_cycle_rows_for_model(rows, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
             rows.pipeline_events = _dedupe_events(rows.pipeline_events)
-            self._cache_cycle_rows(
-                (source_id, cycle_segment, model_id, source_segments),
-                rows,
-                fingerprint=None,
-            )
+            if include_direct_jobs:
+                self._cache_cycle_rows(
+                    (source_id, cycle_segment, model_id, source_segments),
+                    rows,
+                    fingerprint=None,
+                )
         return {model_id: _clone_cycle_rows(rows) for model_id, rows in rows_by_model.items()}
 
     def _apply_records_to_model_rows(
@@ -3194,6 +3387,7 @@ class FileOrchestrationJournalRepository:
             "slurm_ownership_required": bool(record.get("slurm_ownership_required", False)),
             "reconciliation_source": record.get("reconciliation_source"),
             "reconciliation_decision": record.get("reconciliation_decision"),
+            "reconciliation_reason_class": record.get("reconciliation_reason_class"),
             "matched_slurm_job_id": record.get("matched_slurm_job_id"),
             "candidate_projections": _bounded_candidate_projections(record.get("candidate_projections")),
             "native_shud_resubmitted": record.get("native_shud_resubmitted"),
@@ -3280,6 +3474,18 @@ class FileOrchestrationJournalRepository:
 
     def _pipeline_job_conflicts_unlocked(self, row: Mapping[str, Any]) -> bool:
         job_id = str(row.get("job_id") or "")
+        if accepted_submit_contract_is_current(row) and accepted_submit_row_kind(row) == "master":
+            source_id = _source_id_from_job(row)
+            cycle_time = _cycle_time_from_job(row)
+            return bool(
+                job_id
+                and self._accepted_submit_job_for_id_unlocked(
+                    job_id,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                )
+                is not None
+            )
         if job_id and self.get_pipeline_job(job_id) is not None:
             return True
         idempotency_key = row.get("idempotency_key")
@@ -3551,6 +3757,34 @@ class FileOrchestrationJournalRepository:
         event_ids = [_optional_positive_int(event.get("event_id")) or 0 for event in rows.pipeline_events]
         return max([sequence_floor, *event_ids], default=0) + 1
 
+    def _next_accepted_submit_event_id_unlocked(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+    ) -> int:
+        """Compute a cohort event id from exact cycle surfaces, excluding global direct files."""
+
+        sequence_floor = self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time) - 1
+        rows = _CycleRows()
+        cycle_segment = format_cycle_time(cycle_time)
+        for source_segment in _cycle_read_source_segments(
+            source_id=source_id,
+            source_segment_override=None,
+        ):
+            for surface in ("journal", "pipeline-events"):
+                for record in self._read_jsonl(
+                    self.root / surface / source_segment / f"{cycle_segment}.jsonl"
+                ):
+                    self._apply_journal_record(
+                        rows,
+                        record,
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                    )
+        event_ids = [_optional_positive_int(event.get("event_id")) or 0 for event in rows.pipeline_events]
+        return max([sequence_floor, *event_ids], default=0) + 1
+
     def _append_journal_record_unlocked(
         self,
         *,
@@ -3653,8 +3887,18 @@ class FileOrchestrationJournalRepository:
         cycle_time: datetime,
         model_id: str,
         next_sequence: int | None = None,
+        include_direct_jobs: bool = True,
     ) -> None:
-        rows = self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+        rows = (
+            self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+            if include_direct_jobs
+            else self._cycle_rows_by_model_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_ids=(model_id,),
+                include_direct_jobs=False,
+            )[model_id]
+        )
         if next_sequence is None:
             next_sequence = self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
         latest = {
@@ -5165,6 +5409,18 @@ def _source_cycle_from_cycle_id(cycle_id: str) -> tuple[str, datetime]:
             evidence={"expected": expected, "actual": cycle_id[:80]},
         )
     return source_id, cycle_time
+
+
+def _accepted_submit_source_cycle_from_job_id(pipeline_job_id: str) -> tuple[str, datetime]:
+    safe_job_id = _safe_identity_text(str(pipeline_job_id), field="job_id")
+    match = _ACCEPTED_SUBMIT_MASTER_JOB_ID_RE.fullmatch(safe_job_id)
+    if match is None:
+        raise FileOrchestrationJournalError("file_journal_invalid_identity", field="job_id")
+    source_id = _normalize_file_source_id(match.group(1), field="job_id")
+    try:
+        return source_id, parse_cycle_time(match.group(2))
+    except (TypeError, ValueError) as error:
+        raise FileOrchestrationJournalError("file_journal_invalid_cycle_time", field="job_id") from error
 
 
 def _source_id_from_job(job: Mapping[str, Any]) -> str:

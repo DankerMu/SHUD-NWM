@@ -27,6 +27,22 @@ from services.orchestrator.reconcile import (
 )
 
 
+def _authoritative_absence_query(
+    _key: str,
+    **kwargs: Any,
+) -> Any:
+    from services.orchestrator.reconcile import CommentAccountingResult
+
+    anchor = kwargs.get("submission_attempt_started_at") or datetime(2026, 7, 12, tzinfo=UTC)
+    return CommentAccountingResult(
+        (),
+        scope="global",
+        coverage_start=anchor,
+        coverage_end=anchor,
+        coverage_complete=True,
+    )
+
+
 class _StoreRepo:
     """Repository-shaped wrapper over PipelineStore for reservation tests.
 
@@ -137,36 +153,42 @@ def _file_cohort_repository(
     with_runtime_rows: bool = True,
     submit_outcome: str | None = "submit_result_ambiguous",
     versioned: bool = True,
+    source_id: str = "gfs",
 ) -> Any:
+    from packages.common.source_identity import normalize_source_id
     from services.orchestrator.accepted_submit_identity import (
         ACCEPTED_SUBMIT_CONTRACT_VERSION,
         forecast_cohort_digest,
     )
+    from services.orchestrator.chain_config import scenario_for_source
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 
     repository = FileOrchestrationJournalRepository(tmp_path / "journal")
     cycle_time = datetime(2026, 7, 12, tzinfo=UTC)
+    canonical_source_id = normalize_source_id(source_id)
+    source_id = canonical_source_id.lower()
+    scenario_id = scenario_for_source(canonical_source_id)
     record = {
             "accepted_submit_contract_version": ACCEPTED_SUBMIT_CONTRACT_VERSION,
-            "job_id": "job_cycle_gfs_2026071200_forecast_fixture_forecast",
-            "run_id": "cycle_gfs_2026071200_forecast_fixture",
-            "source_id": "gfs",
-            "cycle_id": "gfs_2026071200",
+            "job_id": f"job_cycle_{source_id}_2026071200_forecast_fixture_forecast",
+            "run_id": f"cycle_{source_id}_2026071200_forecast_fixture",
+            "source_id": canonical_source_id,
+            "cycle_id": f"{source_id}_2026071200",
             "job_type": "run_shud_forecast_array",
             "model_id": None,
             "stage": "forecast",
-            "idempotency_key": "cycle_gfs_2026071200_forecast_fixture:forecast",
-            "slurm_comment": "nhms_idem:cycle_gfs_2026071200_forecast_fixture:forecast",
+            "idempotency_key": f"cycle_{source_id}_2026071200_forecast_fixture:forecast",
+            "slurm_comment": f"nhms_idem:cycle_{source_id}_2026071200_forecast_fixture:forecast",
             "submit_outcome": submit_outcome,
             "restart_stage": "forecast",
             "cohort_members": [
                 {
                     "array_task_id": index,
-                    "candidate_id": f"gfs:2026-07-12T00:00:00Z:model_{index}:forecast_gfs_deterministic",
-                    "run_id": f"fcst_gfs_2026071200_model_{index}",
+                    "candidate_id": f"{canonical_source_id}:2026-07-12T00:00:00Z:model_{index}:{scenario_id}",
+                    "run_id": f"fcst_{source_id}_2026071200_model_{index}",
                     "model_id": f"model_{index}",
                     "basin_id": f"basin_{index}",
-                    "scenario_id": "forecast_gfs_deterministic",
+                    "scenario_id": scenario_id,
                     "restart_stage": "forecast",
                 }
                 for index in range(member_count)
@@ -186,25 +208,31 @@ def _file_cohort_repository(
         record["cohort_digest"] = "0" * 64
     repository.reserve_pipeline_job(record)
     if with_runtime_rows:
-        _append_cohort_placeholders(repository, member_count)
+        _append_cohort_placeholders(repository, member_count, source_id=source_id)
     return repository
 
 
-def _append_cohort_placeholders(repository: Any, count: int = 18) -> None:
+def _append_cohort_placeholders(repository: Any, count: int = 18, *, source_id: str = "gfs") -> None:
+    from packages.common.source_identity import normalize_source_id
+    from services.orchestrator.chain_config import scenario_for_source
+
+    canonical_source_id = normalize_source_id(source_id)
+    source_id = canonical_source_id.lower()
+    scenario_id = scenario_for_source(canonical_source_id)
     for index in range(count):
         repository.append_historical_hydro_run(
             {
-                "run_id": f"fcst_gfs_2026071200_model_{index}",
-                "candidate_id": f"gfs:2026-07-12T00:00:00Z:model_{index}:forecast_gfs_deterministic",
+                "run_id": f"fcst_{source_id}_2026071200_model_{index}",
+                "candidate_id": f"{canonical_source_id}:2026-07-12T00:00:00Z:model_{index}:{scenario_id}",
                 "run_type": "forecast",
-                "scenario_id": "forecast_gfs_deterministic",
+                "scenario_id": scenario_id,
                 "model_id": f"model_{index}",
                 "basin_id": f"basin_{index}",
                 "array_task_id": index,
                 "basin_version_id": f"basin_v{index}",
-                "forcing_version_id": f"forc_gfs_2026071200_model_{index}",
+                "forcing_version_id": f"forc_{source_id}_2026071200_model_{index}",
                 "init_state_id": f"state_{index}",
-                "source_id": "gfs",
+                "source_id": canonical_source_id,
                 "cycle_time": "2026-07-12T00:00:00Z",
                 "start_time": "2026-07-12T00:00:00Z",
                 "end_time": "2026-07-12T18:00:00Z",
@@ -217,6 +245,33 @@ def _append_cohort_placeholders(repository: Any, count: int = 18) -> None:
                 "error_message": "transport timeout",
             }
         )
+
+
+def _seed_unrelated_history(repository: Any, *, count: int = 10) -> None:
+    for index in range(count):
+        cycle_time = datetime(2026, 6, 1, tzinfo=UTC) + timedelta(hours=index * 6)
+        stamp = cycle_time.strftime("%Y%m%d%H")
+        repository.append_historical_pipeline_job(
+            {
+                "job_id": f"job_fcst_gfs_{stamp}_history_model_{index}",
+                "run_id": f"fcst_gfs_{stamp}_history_model_{index}",
+                "cycle_id": f"gfs_{stamp}",
+                "job_type": "run_shud_forecast_array",
+                "model_id": f"history_model_{index}",
+                "status": "succeeded",
+                "stage": "forecast",
+                "candidate_id": f"history_{index}",
+            }
+        )
+    malformed_direct = repository.root / "pipeline-jobs" / "job_unrelated_malformed.json"
+    malformed_direct.parent.mkdir(parents=True, exist_ok=True)
+    malformed_direct.write_text("{not-json", encoding="utf-8")
+    malformed_latest = repository.root / "latest" / "gfs" / "2025010100" / "bad.json"
+    malformed_latest.parent.mkdir(parents=True, exist_ok=True)
+    malformed_latest.write_text("[]", encoding="utf-8")
+    malformed_journal = repository.root / "journal" / "gfs" / "2025010100.jsonl"
+    malformed_journal.parent.mkdir(parents=True, exist_ok=True)
+    malformed_journal.write_text("{not-json\n", encoding="utf-8")
 
 
 def test_file_cohort_exact_comment_reconcile_distinguishes_all_fail_closed_branches(
@@ -309,6 +364,8 @@ def test_file_cohort_exact_comment_reconcile_distinguishes_all_fail_closed_branc
     )
     persisted = unavailable.get_pipeline_job(outcome.job_id)
     assert persisted["reconciliation_decision"] == "accounting_unavailable"
+    assert persisted["reconciliation_reason_class"] == "process_unavailable"
+    assert outcome.reconciliation_reason_class == "process_unavailable"
     assert persisted["matched_slurm_job_id"] is None
     assert "/private/runtime" not in str(persisted)
     assert_reopen_tuple(unavailable, outcome, submit_outcome="submit_result_ambiguous")
@@ -330,7 +387,7 @@ def test_file_cohort_exact_comment_reconcile_distinguishes_all_fail_closed_branc
     deferred = _file_cohort_repository(tmp_path / "deferred", created_at=started_at)
     outcome = reconcile_reserved_unbound_jobs(
         deferred,
-        comment_query=lambda _key: None,
+        comment_query=_authoritative_absence_query,
         now=lambda: started_at + timedelta(seconds=1),
     )[0]
     assert (outcome.reconciliation_source, outcome.reconciliation_decision, outcome.matched_slurm_job_id) == (
@@ -343,7 +400,7 @@ def test_file_cohort_exact_comment_reconcile_distinguishes_all_fail_closed_branc
     expired = _file_cohort_repository(tmp_path / "expired", created_at=started_at)
     outcome = reconcile_reserved_unbound_jobs(
         expired,
-        comment_query=lambda _key: None,
+        comment_query=_authoritative_absence_query,
         now=lambda: started_at + timedelta(seconds=121),
     )[0]
     assert (outcome.reconciliation_source, outcome.reconciliation_decision, outcome.matched_slurm_job_id) == (
@@ -376,7 +433,7 @@ def test_file_cohort_pre_outcome_restart_classifies_ambiguous_before_decision(
 
     outcome = reconcile_reserved_unbound_jobs(
         repository,
-        comment_query=lambda _key: None,
+        comment_query=_authoritative_absence_query,
         now=lambda: started_at + timedelta(seconds=1),
     )[0]
 
@@ -496,9 +553,17 @@ def test_file_cohort_accounting_proof_separates_owner_and_global_scope(tmp_path:
         *,
         expected_user: str | None = None,
         expected_account: str | None = None,
-    ) -> list[Any]:
+    ) -> Any:
+        from services.orchestrator.reconcile import CommentAccountingResult
+
         scopes.append((expected_user, expected_account))
-        return []
+        return CommentAccountingResult(
+            (),
+            scope="global" if expected_user is None and expected_account is None else "owner",
+            coverage_start=started_at,
+            coverage_end=started_at + timedelta(seconds=121),
+            coverage_complete=True,
+        )
 
     outcome = reconcile_reserved_unbound_jobs(
         repository,
@@ -544,7 +609,7 @@ def test_file_cohort_authoritative_absence_allows_one_atomic_retry(tmp_path: Any
     def reconcile() -> Any:
         return reconcile_reserved_unbound_jobs(
             repository,
-            comment_query=lambda _key: None,
+            comment_query=_authoritative_absence_query,
             grace=timedelta(seconds=120),
             now=lambda: created_at + timedelta(seconds=121),
         )
@@ -578,7 +643,7 @@ def test_file_cohort_reclaim_begins_attempt_with_pre_outcome_state_after_reopen(
     )
     outcome = reconcile_reserved_unbound_jobs(
         repository,
-        comment_query=lambda _key: None,
+        comment_query=_authoritative_absence_query,
         grace=timedelta(seconds=120),
         now=lambda: attempt_one_started_at + timedelta(seconds=121),
     )[0]
@@ -666,13 +731,13 @@ def test_file_cohort_absence_uses_immutable_attempt_anchor_and_configured_window
     job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
     at_121 = reconcile_reserved_unbound_jobs(
         repository,
-        comment_query=lambda _key: None,
+        comment_query=_authoritative_absence_query,
         grace=timedelta(seconds=300),
         now=lambda: started_at + timedelta(seconds=121),
     )[0]
     at_301 = reconcile_reserved_unbound_jobs(
         repository,
-        comment_query=lambda _key: None,
+        comment_query=_authoritative_absence_query,
         grace=timedelta(seconds=300),
         now=lambda: started_at + timedelta(seconds=301),
     )[0]
@@ -1518,12 +1583,14 @@ def test_file_cohort_batch_projection_bounds_lock_append_and_materialization(
         "lock": 1,
         "append": 1,
         "materialize": member_count,
-        "event_scan": 1,
-        # One scan seeds event IDs and one assigns journal sequences; the
-        # materialization sweep must add no per-member scans.
+        # Accepted-submit projection must not fall back to the generic event
+        # scan because it enumerates unrelated direct-job history.
+        "event_scan": 0,
+        # Exact cycle surfaces seed event IDs, while one scan assigns journal
+        # sequences; materialization adds no per-member scans.
         "sequence_scan": 2,
-        "read_jsonl": 14,
-        "latest_enumerations": 4,
+        "read_jsonl": 13,
+        "latest_enumerations": 2,
         "latest_paths_returned": 0,
     }
 
@@ -1650,10 +1717,17 @@ def test_terminal_runtime_identity_uses_one_cycle_snapshot_from_reconcile_entry(
         calls["latest_enumerations"] += 1
         return original_latest_paths(*args, **kwargs)
 
-    def batch_rows(*, source_id: str, cycle_time: datetime, model_ids: Any) -> dict[str, Any]:
+    def batch_rows(
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_ids: Any,
+        include_direct_jobs: bool = True,
+    ) -> dict[str, Any]:
         calls["batch_snapshots"] += 1
         assert source_id == "gfs"
         assert cycle_time == datetime(2026, 7, 12, tzinfo=UTC)
+        assert include_direct_jobs is False
         requested = list(model_ids)
         assert len(requested) == member_count
         members = {str(member["model_id"]): member for member in identity["cohort_members"]}
@@ -3275,6 +3349,285 @@ def test_malformed_record_young_defers() -> None:
 # --- FINDING-2: real comment-row parsing + array-master normalization ----------
 
 
+@pytest.mark.parametrize("source_id", ["gfs", "ifs"])
+@pytest.mark.parametrize("operation", ["reserve", "commit", "accounting_bind", "reject"])
+def test_versioned_accepted_submit_mutations_never_enumerate_unrelated_history(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    source_id: str,
+    operation: str,
+) -> None:
+    from services.orchestrator.accepted_submit_identity import AcceptedSubmitTransition
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from services.orchestrator.reconcile import SacctRecord, reconcile_reserved_unbound_jobs
+
+    if operation == "reserve":
+        template = _file_cohort_repository(
+            tmp_path / "template",
+            member_count=1,
+            with_runtime_rows=False,
+            source_id=source_id,
+        )
+        pipeline_job_id = f"job_cycle_{source_id}_2026071200_forecast_fixture_forecast"
+        template_row = template.get_accepted_submit_pipeline_job(pipeline_job_id)
+        repository = FileOrchestrationJournalRepository(tmp_path / "target")
+        _seed_unrelated_history(repository)
+    else:
+        repository = _file_cohort_repository(
+            tmp_path / "target",
+            member_count=1,
+            source_id=source_id,
+        )
+        pipeline_job_id = f"job_cycle_{source_id}_2026071200_forecast_fixture_forecast"
+        template_row = None
+        _seed_unrelated_history(repository)
+    repository.max_records = 8
+
+    def global_iteration_forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        pytest.fail("versioned accepted-submit mutation called the global history iterator")
+
+    monkeypatch.setattr(repository, "_iter_pipeline_job_records", global_iteration_forbidden)
+
+    if operation == "reserve":
+        assert template_row is not None
+        created = repository.reserve_pipeline_job(dict(template_row))
+        assert created is not None
+        assert repository.reserve_pipeline_job(dict(template_row)) is None
+        return
+
+    current = repository.get_accepted_submit_pipeline_job(pipeline_job_id)
+    assert current is not None
+    idempotency_key = str(current["idempotency_key"])
+    if operation == "commit":
+        before = dict(current)
+        stale = repository.commit_pipeline_job_submit_attempt(
+            idempotency_key,
+            pipeline_job_id=pipeline_job_id,
+            expected_submission_attempt=2,
+            slurm_job_id="71001",
+            transition=AcceptedSubmitTransition.accepted(status="submitted"),
+        )
+        assert stale.outcome == "stale"
+        assert repository.get_accepted_submit_pipeline_job(pipeline_job_id) == before
+        applied = repository.commit_pipeline_job_submit_attempt(
+            idempotency_key,
+            pipeline_job_id=pipeline_job_id,
+            expected_submission_attempt=1,
+            slurm_job_id="71001",
+            transition=AcceptedSubmitTransition.accepted(status="submitted"),
+        )
+        assert applied.outcome == "applied"
+        assert applied.row["slurm_job_id"] == "71001"
+        return
+
+    if operation == "accounting_bind":
+        exact = SacctRecord(
+            slurm_job_id="71002",
+            raw_state="RUNNING",
+            job_name="nhms_forecast",
+            comment=str(current["slurm_comment"]),
+        )
+        outcome = reconcile_reserved_unbound_jobs(repository, comment_query=lambda _key: exact)[0]
+        assert outcome.action == "bound"
+        assert repository.get_accepted_submit_pipeline_job(pipeline_job_id)["slurm_job_id"] == "71002"
+        return
+
+    rejected = repository.reject_pipeline_job_submit_attempt(
+        idempotency_key,
+        pipeline_job_id=pipeline_job_id,
+        expected_submission_attempt=1,
+        finished_at=datetime(2026, 7, 12, 0, 1, tzinfo=UTC),
+        error_code="VALIDATION_ERROR",
+        error_message="request rejected before acceptance",
+        stage="forecast",
+        job_type="run_shud_forecast_array",
+    )
+    assert rejected.outcome == "applied"
+    reopened = FileOrchestrationJournalRepository(repository.root, max_records=8)
+    row = reopened.get_accepted_submit_pipeline_job(pipeline_job_id)
+    assert row["submit_outcome"] == "rejected"
+    with reopened._locked_cycle_write(
+        source_id=source_id,
+        cycle_time=datetime(2026, 7, 12, tzinfo=UTC),
+    ):
+        rows = reopened._cycle_rows_by_model_unlocked(
+            source_id=source_id,
+            cycle_time=datetime(2026, 7, 12, tzinfo=UTC),
+            model_ids=("model_0",),
+            include_direct_jobs=False,
+        )
+    assert rows["model_0"].hydro_run["status"] == "failed"
+
+
+@pytest.mark.parametrize("source_id", ["gfs", "ifs"])
+def test_default_comment_accounting_requires_full_attempt_coverage_but_still_binds_match(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    source_id: str,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    query_end = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    old_anchor = query_end - timedelta(days=8)
+    repository = _file_cohort_repository(
+        tmp_path / "absent",
+        created_at=old_anchor,
+        member_count=1,
+        source_id=source_id,
+    )
+    commands: list[list[str]] = []
+
+    def empty_page(command: list[str]) -> str:
+        commands.append(command)
+        return ""
+
+    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", empty_page)
+    outcome = reconcile_module.reconcile_reserved_unbound_jobs(
+        repository,
+        comment_query=reconcile_module.default_comment_sacct_querier(
+            global_visibility_probe=lambda: True,
+            now=lambda: query_end,
+        ),
+        grace=timedelta(0),
+        now=lambda: query_end,
+    )[0]
+    pipeline_job_id = f"job_cycle_{source_id}_2026071200_forecast_fixture_forecast"
+    persisted = repository.get_accepted_submit_pipeline_job(pipeline_job_id)
+    assert outcome.action == "query_unavailable"
+    assert outcome.reconciliation_decision == "accounting_unavailable"
+    assert outcome.reconciliation_reason_class == "coverage_incomplete"
+    assert persisted["status"] == "reserved"
+    assert persisted["slurm_job_id"] is None
+    assert persisted["reconciliation_reason_class"] == "coverage_incomplete"
+    assert commands
+    assert all(any(arg.startswith("--starttime=") for arg in command) for command in commands)
+    assert all(any(arg.startswith("--endtime=") for arg in command) for command in commands)
+
+    covered_repository = _file_cohort_repository(
+        tmp_path / "covered",
+        created_at=query_end - timedelta(minutes=1),
+        member_count=1,
+        source_id=source_id,
+    )
+    covered = reconcile_module.reconcile_reserved_unbound_jobs(
+        covered_repository,
+        comment_query=reconcile_module.default_comment_sacct_querier(
+            global_visibility_probe=lambda: True,
+            now=lambda: query_end,
+        ),
+        grace=timedelta(0),
+        now=lambda: query_end,
+    )[0]
+    assert covered.action == "absence_retry_permitted"
+
+    matched_repository = _file_cohort_repository(
+        tmp_path / "matched",
+        created_at=old_anchor,
+        member_count=1,
+        source_id=source_id,
+    )
+    matched = matched_repository.get_accepted_submit_pipeline_job(pipeline_job_id)
+    comment = str(matched["slurm_comment"])
+    row = f"72001|nhms_forecast|RUNNING|0:0|{comment}|||\n"
+    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", lambda _command: row)
+    bound = reconcile_module.reconcile_reserved_unbound_jobs(
+        matched_repository,
+        comment_query=reconcile_module.default_comment_sacct_querier(
+            global_visibility_probe=lambda: True,
+            now=lambda: query_end,
+        ),
+        now=lambda: query_end,
+    )[0]
+    assert bound.action == "bound"
+    assert matched_repository.get_accepted_submit_pipeline_job(pipeline_job_id)["slurm_job_id"] == "72001"
+
+
+@pytest.mark.parametrize(
+    ("boundary", "reason_class", "payload", "max_rows", "max_bytes"),
+    [
+        ("rows", "bounded_output_rows_saturated", "\n\n", 1, 1024),
+        ("bytes", "bounded_output_bytes_saturated", "123456789", 100, 8),
+    ],
+)
+def test_versioned_accounting_saturation_is_public_bounded_unavailable_evidence(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+    reason_class: str,
+    payload: str,
+    max_rows: int,
+    max_bytes: int,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+    from services.orchestrator import scheduler_runtime
+
+    repository = _file_cohort_repository(tmp_path, member_count=1)
+    monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_ROWS", max_rows)
+    monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_BYTES", max_bytes)
+    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", lambda _command: payload)
+    query_end = datetime(2026, 7, 12, 0, 1, tzinfo=UTC)
+    outcome = reconcile_module.reconcile_reserved_unbound_jobs(
+        repository,
+        comment_query=reconcile_module.default_comment_sacct_querier(
+            global_visibility_probe=lambda: True,
+            now=lambda: query_end,
+        ),
+        now=lambda: query_end,
+    )[0]
+    pipeline_job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    persisted = repository.get_accepted_submit_pipeline_job(pipeline_job_id)
+    public = scheduler_runtime._restart_reconcile_attempt_evidence(repository, pipeline_job_id)
+    assert outcome.action == "query_unavailable"
+    assert outcome.match_count is None
+    assert outcome.reconciliation_decision == "accounting_unavailable"
+    assert outcome.reconciliation_reason_class == reason_class
+    assert persisted["status"] == "reserved"
+    assert persisted["slurm_job_id"] is None
+    assert persisted["reconciliation_reason_class"] == reason_class
+    assert public["reconciliation_reason_class"] == reason_class
+    assert boundary in reason_class
+    assert "nhms_idem:" not in str(public)
+    assert str(repository.root) not in str(public)
+
+    exact = reconcile_module.SacctRecord(
+        "73001",
+        "RUNNING",
+        "nhms_forecast",
+        comment=str(persisted["slurm_comment"]),
+    )
+    recovered = reconcile_module.reconcile_reserved_unbound_jobs(
+        repository,
+        comment_query=lambda _key: exact,
+    )[0]
+    rebound = repository.get_accepted_submit_pipeline_job(pipeline_job_id)
+    assert recovered.action == "bound"
+    assert rebound["slurm_job_id"] == "73001"
+    assert rebound["reconciliation_reason_class"] is None
+
+
+def test_legacy_custom_comment_adapter_remains_callable_but_cannot_prove_versioned_zero(
+    tmp_path: Any,
+) -> None:
+    from services.orchestrator.reconcile import reconcile_reserved_unbound_jobs
+
+    repository = _file_cohort_repository(tmp_path / "versioned", member_count=1)
+    outcome = reconcile_reserved_unbound_jobs(
+        repository,
+        comment_query=lambda _key: None,
+        grace=timedelta(0),
+    )[0]
+    assert outcome.action == "query_unavailable"
+    assert outcome.reconciliation_reason_class == "coverage_incomplete"
+
+    marker_free = _file_cohort_repository(
+        tmp_path / "legacy",
+        member_count=1,
+        versioned=False,
+    )
+    legacy = reconcile_reserved_unbound_jobs(marker_free, comment_query=lambda _key: None)[0]
+    assert legacy.action == "legacy_unversioned_read_only"
+
+
 def test_parse_comment_sacct_rows_resolves_array_master() -> None:
     """Real (non-mock) parse of multi-row sacct output: an array stage stamped
     with the idempotency --comment reconciles back to its BARE master id. Array
@@ -3904,8 +4257,11 @@ def test_comment_sacct_rejects_any_single_page_over_its_bound(
     payload = "\n\n\n" if boundary == "row" else "123456789"
     monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", lambda _command: payload)
 
-    with pytest.raises(reconcile_module.ReconcileQueryUnavailable, match="bounded output"):
+    with pytest.raises(reconcile_module.ReconcileQuerySaturated, match="bounded output") as error:
         reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: True)("key")
+    expected = "rows" if boundary == "row" else "bytes"
+    assert error.value.boundary == expected
+    assert error.value.reason_class == f"bounded_output_{expected}_saturated"
 
 
 def test_bounded_sacct_rejects_max_newlines_plus_unterminated_row(

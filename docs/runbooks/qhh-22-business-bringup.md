@@ -224,6 +224,17 @@ model-scoped materialized view；不得通过删除 journal 来控制 direct-fil
 `by-cycle/` 搬回 flat namespace。marker-free legacy flat rows 保持只读兼容，不自动升级为
 accepted-submit reconcile authority。
 
+版本化 accepted-submit master 的 reserve/commit/reject/accounting-bind 只按确定的
+`pipeline_job_id` 读取 flat direct 与对应 `journal/<source>/<cycle>.jsonl`，不会为了匹配
+idempotency key 枚举无关历史 `latest/`、journal 或 direct 文件。exact-comment `sacct`
+仍固定查询七天、按 12 小时分页；零结果只有在查询覆盖从当前
+`submission_attempt_started_at` 一直到冻结的 query end 时才是权威 absence。attempt 早于
+七天 floor 时记录 `accounting_unavailable` + `coverage_incomplete`，保留 reservation，禁止
+retry；窗口内找到精确记录仍可绑定。页输出超过 row/byte 上限分别记录
+`bounded_output_rows_saturated` / `bounded_output_bytes_saturated`，这代表 accounting
+不可用，不代表已经证明多个 exact matches，因此同样禁止 bind、cancel 和 retry。公开
+evidence 只输出上述受限类别，不输出 raw comment、accounting row 或运行路径。
+
 **实时生产监控快照**（`nhms-monitor`，通用编排器，49883ea）——一次性扫 DB + Slurm 生成结构化健康快照，适合 cron/守护轮询：
 
 ```bash

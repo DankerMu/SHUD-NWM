@@ -483,7 +483,12 @@ Scenario evidence rows for section 5:
   failed/unverified summaries retain `forecast`. Version-marked new rows and
   marker-free legacy rows replay compatibly, DB-free visibility proof does not
   affect generic reconciliation, and 256-member historical cycles do not grow
-  a globally scanned direct namespace toward its hard file limit.
+  a globally scanned direct namespace toward its hard file limit. A zero-match
+  proof covers the current attempt anchor before releasing retry; older or
+  coverage-unproven attempts remain unavailable. Versioned master mutations use
+  exact/cycle-scoped reads despite unrelated malformed or over-limit history,
+  and raw page row/byte saturation emits bounded unavailable reason classes
+  rather than fabricating a multiple-match proof.
 
 - [ ] 9.6 Complete local, CI, and node-22 live verification.
   Evidence floor: the issue-targeted pytest command, `uv run ruff check .`, and

@@ -29,6 +29,15 @@ ACCEPTED_RECONCILIATION_DECISIONS = frozenset(
         "multiple_matches_blocked",
     }
 )
+ACCEPTED_RECONCILIATION_REASON_CLASSES = frozenset(
+    {
+        "accounting_authority_unproven",
+        "bounded_output_bytes_saturated",
+        "bounded_output_rows_saturated",
+        "coverage_incomplete",
+        "process_unavailable",
+    }
+)
 ACCEPTED_RESTART_STAGES = frozenset({"forecast", "state_save_qc"})
 ACCEPTED_PROJECTION_OUTCOMES = frozenset({"succeeded", "failed", "unverified"})
 ACCEPTED_PROJECTION_FIELDS = frozenset(
@@ -91,6 +100,7 @@ class AcceptedSubmitTransition:
     reconciliation_source: str | None = None
     reconciliation_decision: str | None = None
     matched_slurm_job_id: str | None = None
+    reconciliation_reason_class: str | None = None
     status: str | None = None
 
     def __post_init__(self) -> None:
@@ -99,6 +109,7 @@ class AcceptedSubmitTransition:
                 self.reconciliation_source is not None
                 or self.reconciliation_decision is not None
                 or self.matched_slurm_job_id is not None
+                or self.reconciliation_reason_class is not None
                 or self.status != "reserved"
             ):
                 raise ValueError("pre-outcome transition must begin one reserved attempt")
@@ -107,7 +118,11 @@ class AcceptedSubmitTransition:
             raise ValueError("invalid accepted-submit outcome transition")
         decision = self.reconciliation_decision
         if decision is None:
-            if self.reconciliation_source is not None or self.matched_slurm_job_id is not None:
+            if (
+                self.reconciliation_source is not None
+                or self.matched_slurm_job_id is not None
+                or self.reconciliation_reason_class is not None
+            ):
                 raise ValueError("accounting tuple must be cleared together")
             return
         if decision not in ACCEPTED_RECONCILIATION_DECISIONS:
@@ -119,6 +134,12 @@ class AcceptedSubmitTransition:
                 raise ValueError("matched accounting transition requires a Slurm job id")
         elif self.matched_slurm_job_id is not None:
             raise ValueError("blocked accounting transition cannot carry a matched Slurm job id")
+        reason_class = self.reconciliation_reason_class
+        if reason_class is not None:
+            if decision != "accounting_unavailable":
+                raise ValueError("accounting reason class requires accounting_unavailable")
+            if reason_class not in ACCEPTED_RECONCILIATION_REASON_CLASSES:
+                raise ValueError("invalid accepted-submit accounting reason class")
 
     @classmethod
     def begin_attempt(cls) -> AcceptedSubmitTransition:
@@ -143,6 +164,7 @@ class AcceptedSubmitTransition:
         *,
         submit_outcome: str,
         matched_slurm_job_id: str | None = None,
+        reconciliation_reason_class: str | None = None,
         status: str | None = None,
     ) -> AcceptedSubmitTransition:
         return cls(
@@ -150,6 +172,7 @@ class AcceptedSubmitTransition:
             reconciliation_source="slurm_exact_comment",
             reconciliation_decision=decision,
             matched_slurm_job_id=matched_slurm_job_id,
+            reconciliation_reason_class=reconciliation_reason_class,
             status=status,
         )
 
@@ -166,6 +189,7 @@ def apply_accepted_submit_transition(
             "reconciliation_source": transition.reconciliation_source,
             "reconciliation_decision": transition.reconciliation_decision,
             "matched_slurm_job_id": transition.matched_slurm_job_id,
+            "reconciliation_reason_class": transition.reconciliation_reason_class,
         }
     )
     if transition.status is not None:
@@ -279,8 +303,9 @@ def normalize_accepted_submit_evidence(row: Mapping[str, Any]) -> dict[str, Any]
     decision = normalized.get("reconciliation_decision")
     source = normalized.get("reconciliation_source")
     matched_id = normalized.get("matched_slurm_job_id")
+    reason_class = normalized.get("reconciliation_reason_class")
     if decision is None:
-        if source is not None or matched_id is not None:
+        if source is not None or matched_id is not None or reason_class is not None:
             raise AcceptedSubmitEvidenceError(
                 "file_journal_evidence_invariant_invalid", field="reconciliation_decision"
             )
@@ -306,6 +331,17 @@ def normalize_accepted_submit_evidence(row: Mapping[str, Any]) -> dict[str, Any]
             raise AcceptedSubmitEvidenceError(
                 "file_journal_evidence_invariant_invalid", field="matched_slurm_job_id"
             )
+        if reason_class is not None:
+            if decision != "accounting_unavailable":
+                raise AcceptedSubmitEvidenceError(
+                    "file_journal_evidence_invariant_invalid",
+                    field="reconciliation_reason_class",
+                )
+            if reason_class not in ACCEPTED_RECONCILIATION_REASON_CLASSES:
+                raise AcceptedSubmitEvidenceError(
+                    "file_journal_evidence_enum_invalid",
+                    field="reconciliation_reason_class",
+                )
 
     # The pre-Gateway durable reservation is the sole state allowed to omit an
     # outcome. It cannot already contain a decision or task projections.

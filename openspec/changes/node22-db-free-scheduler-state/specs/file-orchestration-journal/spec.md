@@ -282,13 +282,18 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
 
 #### Scenario: Confirmed absence permits one bounded idempotent retry
 
-- **WHEN** authoritative exact-comment accounting returns zero matches before
-  the configured reconciliation window expires
+- **WHEN** authoritative exact-comment accounting returns zero matches from a
+  frozen query window that covers the current attempt anchor through query end,
+  before the configured reconciliation window expires
 - **THEN** the cohort remains in a bounded reconciling state and is not
   resubmitted
 - **AND WHEN** authoritative zero-match evidence persists after the window
 - **THEN** the file journal permits exactly one idempotent submission attempt,
   including under concurrent scheduler passes.
+- **AND WHEN** the current attempt predates the bounded accounting lookback, or
+  an adapter cannot prove full attempt coverage
+- **THEN** zero matches remain `accounting_unavailable` with bounded
+  `coverage_incomplete` evidence and MUST NOT permit retry.
 
 #### Scenario: Ownership mismatch is not authoritative absence
 
@@ -324,10 +329,12 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
 
 #### Scenario: Accounting discovery and evidence are bounded and redacted
 
-- **WHEN** exact-comment discovery exceeds its configured match/row limit or
-  returns fields containing runtime roots, credentials, or raw unbounded rows
-- **THEN** scheduler records `multiple_matches_blocked` with bounded count/class
+- **WHEN** indexed exact-comment discovery proves multiple matches
+- **THEN** scheduler records `multiple_matches_blocked` with bounded count
   evidence and no matched Slurm identity
+- **AND WHEN** a raw accounting page exceeds its configured byte/row limit
+- **THEN** scheduler records `accounting_unavailable` with a closed bounded
+  saturation reason class and MUST NOT bind, cancel, or permit retry
 - **AND** public evidence omits raw comments, credentials, local/shared-NFS
   roots, and unbounded accounting payloads.
 
@@ -367,6 +374,10 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
   member direct file or approach a global 100,000-file discovery limit
 - **AND** canonical journal evidence remains auditable under the documented
   partition/index and retention contract.
+- **AND** versioned master reserve, accepted bind, rejection, retry permission,
+  and accounting adoption resolve their deterministic job only from exact
+  direct plus the corresponding cycle journal, so unrelated malformed or
+  over-limit history cannot block the current mutation.
 
 #### Scenario: Recovered success preserves run and QC provenance
 

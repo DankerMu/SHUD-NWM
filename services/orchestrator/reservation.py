@@ -286,7 +286,11 @@ def reserve_candidate(
     # the existing row's status/job_id (logs/evidence). The loss is final for
     # this pass: ``created=False`` makes ``already_inflight`` True
     # unconditionally, so this pass never sbatches.
-    existing = repository.query_candidate_state(idempotency_key)
+    exact_getter = getattr(repository, "get_accepted_submit_pipeline_job", None)
+    if reservation_evidence and "accepted_submit_contract_version" in reservation_evidence and callable(exact_getter):
+        existing = exact_getter(job_id)
+    else:
+        existing = repository.query_candidate_state(idempotency_key)
     if existing is None:
         # Conflict reported but row vanished (e.g. concurrent cleanup): treat as
         # not-created with reserved status so the caller does not double-submit.

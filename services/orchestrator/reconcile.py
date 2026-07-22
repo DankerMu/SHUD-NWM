@@ -81,6 +81,14 @@ COMMENT_SACCT_TIMEOUT_SECONDS = 30.0
 COMMENT_SACCT_VISIBILITY_TIMEOUT_SECONDS = 5.0
 
 
+def _as_utc_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
 class ReconcileQueryUnavailable(Exception):
     """sacct could not be reached / did not answer authoritatively.
 
@@ -93,6 +101,26 @@ class ReconcileQueryUnavailable(Exception):
     a later reconcile pass retry, rather than acting on an absence we never
     actually confirmed.
     """
+
+    reason_class = "process_unavailable"
+
+    def __init__(self, message: str, *, reason_class: str | None = None) -> None:
+        super().__init__(message)
+        if reason_class is not None:
+            self.reason_class = reason_class
+
+
+class ReconcileQuerySaturated(ReconcileQueryUnavailable):
+    """A bounded accounting page exceeded a byte or logical-row ceiling."""
+
+    def __init__(self, boundary: str) -> None:
+        if boundary not in {"bytes", "rows"}:
+            raise ValueError("bounded accounting saturation boundary must be bytes or rows")
+        self.boundary = boundary
+        super().__init__(
+            f"sacct query exceeded bounded output ({boundary})",
+            reason_class=f"bounded_output_{boundary}_saturated",
+        )
 
 
 @dataclass(frozen=True)
@@ -245,6 +273,7 @@ def default_comment_sacct_querier(
         expected_user: str | None = None,
         expected_account: str | None = None,
         accepted_submit_contract_version: str | None = None,
+        submission_attempt_started_at: datetime | None = None,
     ) -> tuple[SacctRecord, ...]:
         target_comment = slurm_comment_for(idempotency_key)
         owner_scope = (str(expected_user or ""), str(expected_account or ""))
@@ -255,7 +284,10 @@ def default_comment_sacct_querier(
             if visibility_proven is None:
                 visibility_proven = bool(visibility_probe())
             if not visibility_proven:
-                raise ReconcileQueryUnavailable("global accounting visibility is unproven")
+                raise ReconcileQueryUnavailable(
+                    "global accounting visibility is unproven",
+                    reason_class="accounting_authority_unproven",
+                )
         budget = scan_budget
         matches: list[SacctRecord] = []
         seen_ids: set[str] = set()
@@ -294,9 +326,18 @@ def default_comment_sacct_querier(
         # "accounting has no job for this comment" answer (confirmed-absent),
         # which is the ONLY case allowed to mark reservation_lost. A transient
         # failure never reaches here.
+        coverage_start = pages[-1][0]
+        coverage_end = pages[0][1]
+        attempt_anchor = _as_utc_datetime(submission_attempt_started_at)
+        coverage_complete = bool(
+            attempt_anchor is not None and coverage_start <= attempt_anchor <= coverage_end
+        )
         return CommentAccountingResult(
             tuple(matches),
             scope="owner" if any(owner_scope) else "global",
+            coverage_start=coverage_start,
+            coverage_end=coverage_end,
+            coverage_complete=coverage_complete,
         )
 
     return _query
@@ -335,8 +376,10 @@ def _bounded_sacct_page(command: Sequence[str], budget: _SacctScanBudget) -> str
         raise ReconcileQueryUnavailable("sacct query timed out")
     encoded = stdout.encode("utf-8")
     rows = stdout.count("\n") + int(bool(stdout) and not stdout.endswith("\n"))
-    if len(encoded) > budget.page_max_bytes or rows > budget.page_max_rows:
-        raise ReconcileQueryUnavailable("sacct query exceeded bounded output")
+    if len(encoded) > budget.page_max_bytes:
+        raise ReconcileQuerySaturated("bytes")
+    if rows > budget.page_max_rows:
+        raise ReconcileQuerySaturated("rows")
     return stdout
 
 
@@ -379,8 +422,10 @@ def _bounded_sacct_stdout(command: Sequence[str], *, budget: _SacctScanBudget | 
             logical_row_count = row_count + int(bool(output) and not output.endswith(b"\n"))
             byte_limit = budget.page_max_bytes if budget is not None else MAX_COMMENT_SACCT_BYTES
             row_limit = budget.page_max_rows if budget is not None else MAX_COMMENT_SACCT_ROWS
-            if len(output) > byte_limit or logical_row_count > row_limit:
-                raise ReconcileQueryUnavailable("sacct query exceeded bounded output")
+            if len(output) > byte_limit:
+                raise ReconcileQuerySaturated("bytes")
+            if logical_row_count > row_limit:
+                raise ReconcileQuerySaturated("rows")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise ReconcileQueryUnavailable("sacct query timed out")
@@ -1074,6 +1119,9 @@ class CommentAccountingResult(Sequence[SacctRecord]):
 
     records: tuple[SacctRecord, ...]
     scope: str  # ``owner`` or authoritative ``global``.
+    coverage_start: datetime | None = None
+    coverage_end: datetime | None = None
+    coverage_complete: bool = False
 
     def __getitem__(self, index: int) -> SacctRecord:
         return self.records[index]
@@ -1089,6 +1137,9 @@ class CommentAccountingResult(Sequence[SacctRecord]):
 class _CommentAccountingProof:
     kind: str
     records: tuple[SacctRecord, ...] = ()
+    coverage_complete: bool = False
+    coverage_start: datetime | None = None
+    coverage_end: datetime | None = None
 
 
 CommentSacctQuerier = Callable[..., "CommentAccountingResult | SacctRecord | Sequence[SacctRecord] | None"]
@@ -1112,6 +1163,7 @@ class ReservationReconcileOutcome:
     reconciliation_decision: str | None = None
     matched_slurm_job_id: str | None = None
     match_count: int | None = None
+    reconciliation_reason_class: str | None = None
     durable_write_kind: str | None = None
     durable_write_count: int = 0
 
@@ -1214,6 +1266,7 @@ def reconcile_reserved_unbound_jobs(
                 AcceptedSubmitTransition.timeout(status=str(job.status)),
             )
 
+        attempt_anchor = _job_attempt_anchor(job, accepted_submit_reconcile=accepted_submit_reconcile)
         try:
             expected_user = str(getattr(job, "expected_slurm_user", None) or "")
             expected_account = str(getattr(job, "expected_slurm_account", None) or "")
@@ -1225,6 +1278,7 @@ def reconcile_reserved_unbound_jobs(
                 accepted_submit_contract_version=(
                     ACCEPTED_SUBMIT_CONTRACT_VERSION if accepted_submit_reconcile else None
                 ),
+                submission_attempt_started_at=(attempt_anchor if accepted_submit_reconcile else None),
             )
         except ReconcileQueryUnavailable as error:
             # Transient failure: we did NOT confirm absence. Keep the row
@@ -1237,7 +1291,12 @@ def reconcile_reserved_unbound_jobs(
                 error,
             )
             write_count = (
-                _record_file_reconciliation(store, job, "accounting_unavailable")
+                _record_file_reconciliation(
+                    store,
+                    job,
+                    "accounting_unavailable",
+                    reason_class=error.reason_class,
+                )
                 if accepted_submit_reconcile
                 else 0
             )
@@ -1249,6 +1308,28 @@ def reconcile_reserved_unbound_jobs(
                     status=str(job.status),
                     reconciliation_source="slurm_exact_comment" if accepted_submit_reconcile else None,
                     reconciliation_decision="accounting_unavailable" if accepted_submit_reconcile else None,
+                    reconciliation_reason_class=(error.reason_class if accepted_submit_reconcile else None),
+                    durable_write_kind="pipeline_job_reconciliation" if write_count else None,
+                    durable_write_count=write_count,
+                )
+            )
+            continue
+        if accepted_submit_reconcile and proof.kind == "global_absence" and not proof.coverage_complete:
+            write_count = _record_file_reconciliation(
+                store,
+                job,
+                "accounting_unavailable",
+                reason_class="coverage_incomplete",
+            )
+            outcomes.append(
+                ReservationReconcileOutcome(
+                    job_id=job.job_id,
+                    idempotency_key=str(idempotency_key),
+                    action="query_unavailable",
+                    status=str(job.status),
+                    reconciliation_source="slurm_exact_comment",
+                    reconciliation_decision="accounting_unavailable",
+                    reconciliation_reason_class="coverage_incomplete",
                     durable_write_kind="pipeline_job_reconciliation" if write_count else None,
                     durable_write_count=write_count,
                 )
@@ -1329,13 +1410,7 @@ def reconcile_reserved_unbound_jobs(
             # submission_attempt_started_at: reconciliation evidence may refresh
             # updated_at, but cannot extend this attempt's grace. Legacy rows keep
             # updated_at with created_at as their compatibility fallback.
-            anchor = (
-                getattr(job, "submission_attempt_started_at", None)
-                if accepted_submit_reconcile
-                else getattr(job, "updated_at", None)
-            )
-            if anchor is None:
-                anchor = getattr(job, "created_at", None)
+            anchor = attempt_anchor
             if anchor is not None:
                 if anchor.tzinfo is None:
                     anchor = anchor.replace(tzinfo=UTC)
@@ -1366,11 +1441,16 @@ def reconcile_reserved_unbound_jobs(
             retry_permitted = False
             permit_retry = getattr(store, "permit_pipeline_job_retry", None)
             if accepted_submit_reconcile and callable(permit_retry):
+                retry_kwargs: dict[str, Any] = {
+                    "expected_submission_attempt": _job_submission_attempt(job),
+                    "expected_status": str(job.status),
+                }
+                if _callable_accepts_keyword(permit_retry, "accepted_submit_contract_version"):
+                    retry_kwargs["accepted_submit_contract_version"] = ACCEPTED_SUBMIT_CONTRACT_VERSION
                 retry_write_count = int(
                     permit_retry(
                         job.job_id,
-                        expected_submission_attempt=_job_submission_attempt(job),
-                        expected_status=str(job.status),
+                        **retry_kwargs,
                     )
                 )
                 retry_permitted = retry_write_count > 0
@@ -1418,17 +1498,19 @@ def reconcile_reserved_unbound_jobs(
             committer = getattr(store, "commit_pipeline_job_submit_attempt", None)
             if not callable(committer):
                 raise ReconcileQueryUnavailable("accepted-submit commit API unavailable")
-            commit_result = committer(
-                str(idempotency_key),
-                expected_submission_attempt=_job_submission_attempt(job),
-                slurm_job_id=record.slurm_job_id,
-                transition=AcceptedSubmitTransition.accounting(
+            commit_kwargs: dict[str, Any] = {
+                "expected_submission_attempt": _job_submission_attempt(job),
+                "slurm_job_id": record.slurm_job_id,
+                "transition": AcceptedSubmitTransition.accounting(
                     "matched_bound",
                     submit_outcome="accepted",
                     matched_slurm_job_id=record.slurm_job_id,
                     status="submitted",
                 ),
-            )
+            }
+            if _callable_accepts_keyword(committer, "pipeline_job_id"):
+                commit_kwargs["pipeline_job_id"] = job.job_id
+            commit_result = committer(str(idempotency_key), **commit_kwargs)
             if not commit_result.committed:
                 outcomes.append(
                     ReservationReconcileOutcome(
@@ -1511,9 +1593,17 @@ def _classify_global_comment_records(
     *,
     expected_user: str,
     expected_account: str,
+    coverage_complete: bool = False,
+    coverage_start: datetime | None = None,
+    coverage_end: datetime | None = None,
 ) -> _CommentAccountingProof:
     if not records:
-        return _CommentAccountingProof("global_absence")
+        return _CommentAccountingProof(
+            "global_absence",
+            coverage_complete=coverage_complete,
+            coverage_start=coverage_start,
+            coverage_end=coverage_end,
+        )
     owned = tuple(
         record
         for record in records
@@ -1537,6 +1627,7 @@ def _query_comment_accounting_proof(
     expected_user: str,
     expected_account: str,
     accepted_submit_contract_version: str | None = None,
+    submission_attempt_started_at: datetime | None = None,
 ) -> _CommentAccountingProof:
     """Obtain an owner match or an authoritative global exact-comment proof."""
 
@@ -1549,6 +1640,7 @@ def _query_comment_accounting_proof(
             _bounded_comment_records(global_value),
             expected_user=expected_user,
             expected_account=expected_account,
+            coverage_complete=accepted_submit_contract_version is None,
         )
 
     scoped_kwargs: dict[str, Any] = {
@@ -1557,6 +1649,8 @@ def _query_comment_accounting_proof(
     }
     if accepted_submit_contract_version is not None and _comment_query_accepts_contract_version(comment_query):
         scoped_kwargs["accepted_submit_contract_version"] = accepted_submit_contract_version
+    if submission_attempt_started_at is not None and _comment_query_accepts_attempt_anchor(comment_query):
+        scoped_kwargs["submission_attempt_started_at"] = submission_attempt_started_at
     owner_value = comment_query(idempotency_key, **scoped_kwargs)
     owner_records = _bounded_comment_records(owner_value)
     if isinstance(owner_value, CommentAccountingResult) and owner_value.scope == "global":
@@ -1564,6 +1658,9 @@ def _query_comment_accounting_proof(
             owner_records,
             expected_user=expected_user,
             expected_account=expected_account,
+            coverage_complete=owner_value.coverage_complete,
+            coverage_start=owner_value.coverage_start,
+            coverage_end=owner_value.coverage_end,
         )
     owned = _comment_query_records(
         owner_records,
@@ -1591,6 +1688,17 @@ def _query_comment_accounting_proof(
         _bounded_comment_records(global_value),
         expected_user=expected_user,
         expected_account=expected_account,
+        coverage_complete=(
+            global_value.coverage_complete
+            if isinstance(global_value, CommentAccountingResult)
+            else accepted_submit_contract_version is None
+        ),
+        coverage_start=(
+            global_value.coverage_start if isinstance(global_value, CommentAccountingResult) else None
+        ),
+        coverage_end=(
+            global_value.coverage_end if isinstance(global_value, CommentAccountingResult) else None
+        ),
     )
     if owner_candidate is not None and global_proof.kind == "owned_match":
         global_candidate = global_proof.records[0]
@@ -1630,21 +1738,44 @@ def _comment_query_accepts_contract_version(comment_query: CommentSacctQuerier) 
     )
 
 
+def _comment_query_accepts_attempt_anchor(comment_query: CommentSacctQuerier) -> bool:
+    try:
+        parameters = tuple(inspect.signature(comment_query).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    return any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters) or any(
+        parameter.name == "submission_attempt_started_at" for parameter in parameters
+    )
+
+
+def _callable_accepts_keyword(callable_value: Callable[..., Any], name: str) -> bool:
+    try:
+        parameters = tuple(inspect.signature(callable_value).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    return any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters) or any(
+        parameter.name == name for parameter in parameters
+    )
+
+
 def _query_comment_accounting(
     comment_query: CommentSacctQuerier,
     idempotency_key: str,
     *,
     expected_user: str,
     expected_account: str,
+    submission_attempt_started_at: datetime | None = None,
 ) -> SacctRecord | Sequence[SacctRecord] | None:
     """Compatibility wrapper for direct adapter callers."""
 
     if _comment_query_accepts_scope(comment_query):
-        return comment_query(
-            idempotency_key,
-            expected_user=expected_user or None,
-            expected_account=expected_account or None,
-        )
+        kwargs: dict[str, Any] = {
+            "expected_user": expected_user or None,
+            "expected_account": expected_account or None,
+        }
+        if submission_attempt_started_at is not None and _comment_query_accepts_attempt_anchor(comment_query):
+            kwargs["submission_attempt_started_at"] = submission_attempt_started_at
+        return comment_query(idempotency_key, **kwargs)
     return comment_query(idempotency_key)
 
 
@@ -1655,13 +1786,31 @@ def _job_submission_attempt(job: Any) -> int:
         return 1
 
 
-def _record_file_reconciliation(store: Any, job: Any, decision: str) -> int:
+def _job_attempt_anchor(job: Any, *, accepted_submit_reconcile: bool) -> datetime | None:
+    anchor = (
+        getattr(job, "submission_attempt_started_at", None)
+        if accepted_submit_reconcile
+        else getattr(job, "updated_at", None)
+    )
+    if anchor is None:
+        anchor = getattr(job, "created_at", None)
+    return _as_utc_datetime(anchor)
+
+
+def _record_file_reconciliation(
+    store: Any,
+    job: Any,
+    decision: str,
+    *,
+    reason_class: str | None = None,
+) -> int:
     return _transition_file_reconciliation(
         store,
         job,
         AcceptedSubmitTransition.accounting(
             decision,
             submit_outcome="submit_result_ambiguous",
+            reconciliation_reason_class=reason_class,
         ),
     )
 
@@ -1673,12 +1822,17 @@ def _transition_file_reconciliation(
 ) -> int:
     transitioner = getattr(store, "transition_pipeline_job_submit_evidence", None)
     if callable(transitioner):
+        transition_kwargs: dict[str, Any] = {
+            "expected_submission_attempt": _job_submission_attempt(job),
+            "expected_statuses": (str(job.status),),
+            "require_unbound": getattr(job, "slurm_job_id", None) in (None, ""),
+        }
+        if _callable_accepts_keyword(transitioner, "accepted_submit_contract_version"):
+            transition_kwargs["accepted_submit_contract_version"] = ACCEPTED_SUBMIT_CONTRACT_VERSION
         result = transitioner(
             job.job_id,
             transition,
-            expected_submission_attempt=_job_submission_attempt(job),
-            expected_statuses=(str(job.status),),
-            require_unbound=(getattr(job, "slurm_job_id", None) in (None, "")),
+            **transition_kwargs,
         )
         return int(getattr(result, "wrote", False))
     return 0

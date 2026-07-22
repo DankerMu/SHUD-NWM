@@ -1451,6 +1451,11 @@ Invariant Matrix:
   binding requires one globally unique owned match, while retry eligibility
   requires a bounded, authoritative proof that no exact-comment job exists under
   any ownership.
+- Accounting-coverage contract: a zero-match result is authoritative only when
+  the frozen query window covers the current
+  `submission_attempt_started_at` through the query end. An older attempt or a
+  legacy/custom adapter that cannot prove that coverage remains
+  `accounting_unavailable` and cannot release retry permission.
 - Accounting-authority contract: successful command execution is not by itself
   global visibility. Runtime preflight proves the scheduler principal's Slurm
   accounting visibility (including job privacy), otherwise zero-match evidence
@@ -1458,6 +1463,10 @@ Invariant Matrix:
   materialization, freezes one page-window snapshot for the whole reconcile
   session, and aggregates only the bounded exact-comment matches needed to
   prove zero, one, or multiple results at the supported 256-member cadence.
+- Accounting-saturation contract: raw page byte/row saturation is not evidence
+  of multiple exact-comment matches. It remains fail-closed
+  `accounting_unavailable` with a closed, bounded reason class; only an indexed
+  proof of multiple exact matches becomes `multiple_matches_blocked`.
 - Independent-runtime contract: because runtime member rows are durably prepared
   before the Gateway call, a pre-outcome reservation with no runtime rows cannot
   have produced an accepted array. A later exact-comment match without those
@@ -1499,6 +1508,11 @@ Invariant Matrix:
   globally scanned direct-job namespace. Direct lookup/index/partition and
   audit retention keep per-cycle reads and restart discovery bounded at the
   supported 256-member cadence without deleting canonical journal truth.
+- Accepted-submit lookup invariant: versioned master reserve, transition,
+  accepted bind, rejection, retry permission, and accounting adoption resolve
+  the deterministic `pipeline_job_id` from exact direct plus its one cycle
+  journal. Unrelated historical latest/journal/direct records and their global
+  file/record limits cannot block the current attempt.
 - Compatibility invariant: generic repository and non-DB-free reconcile callers
   keep their existing inputs/status behavior, while the new cohort/member fields
   are additive for file-journal DB-free execution.

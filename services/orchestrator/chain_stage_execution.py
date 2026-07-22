@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import os
 import time
 from collections.abc import Callable
@@ -8,6 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from services.orchestrator.accepted_submit_identity import (
+    ACCEPTED_SUBMIT_CONTRACT_VERSION,
     AcceptedSubmitTransition,
     accepted_submit_pipeline_job_model_id,
 )
@@ -52,6 +54,16 @@ def _submit_error_is_ambiguous(error: Exception) -> bool:
     # Compatibility for legacy/in-process clients which predate the explicit
     # submit contract. The one old transport code remains ambiguity-safe.
     return getattr(error, "error_code", None) == "SLURM_GATEWAY_UNAVAILABLE"
+
+
+def _accepts_keyword(callable_value: Callable[..., Any], name: str) -> bool:
+    try:
+        parameters = tuple(inspect.signature(callable_value).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    return any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters) or any(
+        parameter.name == name for parameter in parameters
+    )
 
 
 @dataclass(frozen=True)
@@ -245,14 +257,19 @@ def submit_and_wait_cycle_stage(
                     {"stage": stage.stage},
                 )
             if callable(transition):
+                transition_kwargs: dict[str, Any] = {
+                    "expected_submission_attempt": (
+                        reservation.submission_attempt if reservation is not None else context.retry_attempt
+                    ),
+                    "expected_statuses": ("reserved",),
+                    "require_unbound": True,
+                }
+                if _accepts_keyword(transition, "accepted_submit_contract_version"):
+                    transition_kwargs["accepted_submit_contract_version"] = ACCEPTED_SUBMIT_CONTRACT_VERSION
                 transition_result = transition(
                     pipeline_job_id,
                     AcceptedSubmitTransition.timeout(),
-                    expected_submission_attempt=(
-                        reservation.submission_attempt if reservation is not None else context.retry_attempt
-                    ),
-                    expected_statuses=("reserved",),
-                    require_unbound=True,
+                    **transition_kwargs,
                 )
                 if not getattr(transition_result, "committed", False):
                     raise OrchestratorError(
@@ -303,14 +320,19 @@ def submit_and_wait_cycle_stage(
             expected_attempt = reservation.submission_attempt if reservation is not None else context.retry_attempt
             rejecter = getattr(orchestrator.repository, "reject_pipeline_job_submit_attempt", None)
             if callable(rejecter):
+                reject_kwargs: dict[str, Any] = {
+                    "expected_submission_attempt": expected_attempt,
+                    "finished_at": deps.utcnow(),
+                    "error_code": getattr(error, "error_code", None) or "SBATCH_SUBMISSION_FAILED",
+                    "error_message": str(deps.redact_payload(str(error))),
+                    "stage": stage.stage,
+                    "job_type": stage.job_type,
+                }
+                if _accepts_keyword(rejecter, "pipeline_job_id"):
+                    reject_kwargs["pipeline_job_id"] = pipeline_job_id
                 transition_result = rejecter(
                     idempotency_key,
-                    expected_submission_attempt=expected_attempt,
-                    finished_at=deps.utcnow(),
-                    error_code=getattr(error, "error_code", None) or "SBATCH_SUBMISSION_FAILED",
-                    error_message=str(deps.redact_payload(str(error))),
-                    stage=stage.stage,
-                    job_type=stage.job_type,
+                    **reject_kwargs,
                 )
                 rejection_batch_committed = getattr(transition_result, "committed", False)
             else:
@@ -325,17 +347,20 @@ def submit_and_wait_cycle_stage(
                         "submit rejection cannot be durably committed",
                         {"stage": stage.stage},
                     )
+                transition_kwargs = {
+                    "expected_submission_attempt": expected_attempt,
+                    "expected_statuses": ("reserved",),
+                    "require_unbound": True,
+                    "finished_at": deps.utcnow(),
+                    "error_code": getattr(error, "error_code", None) or "SBATCH_SUBMISSION_FAILED",
+                    "error_message": str(deps.redact_payload(str(error))),
+                }
+                if _accepts_keyword(transition, "accepted_submit_contract_version"):
+                    transition_kwargs["accepted_submit_contract_version"] = ACCEPTED_SUBMIT_CONTRACT_VERSION
                 transition_result = transition(
                     pipeline_job_id,
                     AcceptedSubmitTransition.rejected(),
-                    expected_submission_attempt=(
-                        expected_attempt
-                    ),
-                    expected_statuses=("reserved",),
-                    require_unbound=True,
-                    finished_at=deps.utcnow(),
-                    error_code=getattr(error, "error_code", None) or "SBATCH_SUBMISSION_FAILED",
-                    error_message=str(deps.redact_payload(str(error))),
+                    **transition_kwargs,
                 )
             if not getattr(transition_result, "committed", False):
                 raise OrchestratorError(
@@ -385,19 +410,24 @@ def submit_and_wait_cycle_stage(
                 "accepted submit cannot be durably committed to its reservation attempt",
                 {"stage": stage.stage},
             )
+        commit_kwargs: dict[str, Any] = {
+            "expected_submission_attempt": reservation.submission_attempt,
+            "slurm_job_id": slurm_job_id,
+            "transition": AcceptedSubmitTransition.accepted(status=submitted_status),
+            "array_task_id": submitted_array_task_id,
+            "submitted_at": deps.parse_gateway_time(submitted.get("submitted_at")) or deps.utcnow(),
+            "started_at": deps.parse_gateway_time(submitted.get("started_at")),
+            "finished_at": deps.parse_gateway_time(submitted.get("finished_at")),
+            "exit_code": submitted.get("exit_code"),
+            "error_code": submitted.get("error_code"),
+            "error_message": submitted.get("error_message"),
+            "log_uri": submitted_log_uri,
+        }
+        if _accepts_keyword(committer, "pipeline_job_id"):
+            commit_kwargs["pipeline_job_id"] = pipeline_job_id
         commit_result = committer(
             idempotency_key,
-            expected_submission_attempt=reservation.submission_attempt,
-            slurm_job_id=slurm_job_id,
-            transition=AcceptedSubmitTransition.accepted(status=submitted_status),
-            array_task_id=submitted_array_task_id,
-            submitted_at=deps.parse_gateway_time(submitted.get("submitted_at")) or deps.utcnow(),
-            started_at=deps.parse_gateway_time(submitted.get("started_at")),
-            finished_at=deps.parse_gateway_time(submitted.get("finished_at")),
-            exit_code=submitted.get("exit_code"),
-            error_code=submitted.get("error_code"),
-            error_message=submitted.get("error_message"),
-            log_uri=submitted_log_uri,
+            **commit_kwargs,
         )
         if not getattr(commit_result, "committed", False):
             raise OrchestratorError(

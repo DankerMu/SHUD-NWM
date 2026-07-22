@@ -8173,6 +8173,7 @@ def test_file_journal_forecast_timeout_stays_reconciling_with_durable_18_member_
     """One real journal closes timeout -> restart -> exact task projection."""
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
     from services.orchestrator.reconcile import (
+        CommentAccountingResult,
         SacctRecord,
         reconcile_inflight_jobs,
         reconcile_reserved_unbound_jobs,
@@ -8256,10 +8257,17 @@ def test_file_journal_forecast_timeout_stays_reconciling_with_durable_18_member_
     ) == (None, None, None)
     assert accounting_query_count == 0
 
-    def confirmed_zero(_key: str) -> None:
+    def confirmed_zero(_key: str, **kwargs: Any) -> CommentAccountingResult:
         nonlocal accounting_query_count
         accounting_query_count += 1
-        return None
+        anchor = kwargs["submission_attempt_started_at"]
+        return CommentAccountingResult(
+            (),
+            scope="global",
+            coverage_start=anchor,
+            coverage_end=anchor + timedelta(seconds=1),
+            coverage_complete=True,
+        )
 
     deferred = reconcile_reserved_unbound_jobs(
         rebuilt,
@@ -8565,7 +8573,17 @@ def test_file_journal_post_window_concurrent_public_cycles_submit_one_retry(
     from threading import Lock
 
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
-    from services.orchestrator.reconcile import reconcile_reserved_unbound_jobs
+    from services.orchestrator.reconcile import CommentAccountingResult, reconcile_reserved_unbound_jobs
+
+    def authoritative_absence(_key: str, **kwargs: Any) -> CommentAccountingResult:
+        anchor = kwargs["submission_attempt_started_at"]
+        return CommentAccountingResult(
+            (),
+            scope="global",
+            coverage_start=anchor,
+            coverage_end=anchor,
+            coverage_complete=True,
+        )
 
     class _AbsentFirstForecastClient(FakeCycleSlurmClient):
         def __init__(self) -> None:
@@ -8607,7 +8625,7 @@ def test_file_journal_post_window_concurrent_public_cycles_submit_one_retry(
     reconciliation_repo = FileOrchestrationJournalRepository(root)
     assert reconcile_reserved_unbound_jobs(
         reconciliation_repo,
-        comment_query=lambda _key: None,
+        comment_query=authoritative_absence,
         grace=timedelta(0),
     )[0].action == "absence_retry_permitted"
 
@@ -8649,7 +8667,7 @@ def test_file_journal_post_window_concurrent_public_cycles_submit_one_retry(
     } == {2}
     assert reconcile_reserved_unbound_jobs(
         attempt_two_repo,
-        comment_query=lambda _key: None,
+        comment_query=authoritative_absence,
         grace=timedelta(0),
     )[0].action == "absence_retry_permitted"
 
