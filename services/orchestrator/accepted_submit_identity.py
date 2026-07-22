@@ -62,6 +62,22 @@ class AcceptedSubmitEvidenceError(ValueError):
 
 
 @dataclass(frozen=True)
+class AcceptedSubmitCommitResult:
+    """Typed result for one attempt-scoped accepted-submit journal mutation."""
+
+    outcome: str
+    row: Mapping[str, Any] | None = None
+
+    @property
+    def committed(self) -> bool:
+        return self.outcome in {"applied", "idempotent"}
+
+    @property
+    def wrote(self) -> bool:
+        return self.outcome == "applied"
+
+
+@dataclass(frozen=True)
 class AcceptedSubmitTransition:
     """One complete accepted-submit evidence transition.
 
@@ -509,6 +525,7 @@ __all__ = (
     "ACCEPTED_RECONCILIATION_DECISIONS",
     "ACCEPTED_SUBMIT_OUTCOMES",
     "AcceptedSubmitTransition",
+    "AcceptedSubmitCommitResult",
     "AcceptedSubmitEvidenceError",
     "FORECAST_COHORT_STAGE_ALIASES",
     "MAX_FORECAST_COHORT_MEMBERS",

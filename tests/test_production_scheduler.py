@@ -24183,6 +24183,35 @@ def test_db_free_restart_reconcile_uses_file_journal_repository(tmp_path: Path) 
     assert job["status"] == "running"
 
 
+def test_restart_reconcile_adapters_use_configured_slurm_binary_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from services.orchestrator import reconcile as reconcile_module
+    from services.orchestrator import scheduler_runtime
+
+    paths: list[tuple[str, str]] = []
+    comment_query = lambda _key: ()  # noqa: E731 - identity sentinel for adapter wiring.
+    sacct_query = lambda _job_id: None  # noqa: E731 - identity sentinel for adapter wiring.
+    monkeypatch.setenv("SLURM_GATEWAY_SLURM_BIN_PATH", "/opt/slurm/bin")
+    monkeypatch.setattr(
+        reconcile_module,
+        "default_comment_sacct_querier",
+        lambda path="": paths.append(("comment", path)) or comment_query,
+    )
+    monkeypatch.setattr(
+        reconcile_module,
+        "default_sacct_querier",
+        lambda path="": paths.append(("job", path)) or sacct_query,
+    )
+    owner = SimpleNamespace(_reconcile_comment_query=None, _reconcile_sacct_query=None)
+
+    assert scheduler_runtime._restart_reconcile_comment_query(owner) is comment_query
+    assert scheduler_runtime._restart_reconcile_sacct_query(owner) is sacct_query
+    assert paths == [("comment", "/opt/slurm/bin"), ("job", "/opt/slurm/bin")]
+
+
 def test_scheduler_run_once_reconciles_real_file_journal_reservation(tmp_path: Path) -> None:
     """Public pass seam complements the strict DB-free direct-reconcile oracle."""
     from services.orchestrator.reconcile import SacctRecord
@@ -24268,8 +24297,18 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
         def __init__(self) -> None:
             super().__init__()
             self.accepted_forecast_job_id: str | None = None
+            self.pre_gateway_member_counts: list[int] = []
 
         def submit_job_array(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            if kwargs.get("stage_name") == "forecast":
+                pre_gateway = scheduler_module.FileOrchestrationJournalRepository(root)
+                reservations = pre_gateway.query_reserved_unbound_jobs()
+                assert len(reservations) == 1
+                assert reservations[0].submission_attempt == 1
+                assert reservations[0].status == "reserved"
+                assert reservations[0].slurm_job_id in (None, "")
+                assert [member["array_task_id"] for member in reservations[0].cohort_members] == list(range(18))
+                self.pre_gateway_member_counts.append(len(reservations[0].cohort_members))
             accepted = super().submit_job_array(*args, **kwargs)
             if kwargs.get("stage_name") == "forecast":
                 self.accepted_forecast_job_id = str(accepted["job_id"])
@@ -24332,6 +24371,7 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
     ]
     assert [submission["stage"] for submission in initial_client.submissions] == ["convert", "forcing", "forecast"]
     assert initial_client.accepted_forecast_job_id is not None
+    assert initial_client.pre_gateway_member_counts == [18]
     reserved = first_repository.query_reserved_unbound_jobs()[0]
     assert len(reserved.cohort_members) == 18
     assert [member["array_task_id"] for member in reserved.cohort_members] == list(range(18))
@@ -24420,6 +24460,42 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
     partial_reconcile = partial_result.evidence["restart_reconcile"]
     assert partial_reconcile["reserved_unbound"]["outcomes"][0]["action"] == "bound"
     assert partial_reconcile["inflight"]["outcomes"][0]["action"] == "task_accounting_incomplete"
+    reserved_evidence = partial_reconcile["reserved_unbound"]["outcomes"][0]
+    assert (
+        reserved_evidence["submission_attempt"],
+        reserved_evidence["submit_outcome"],
+        reserved_evidence["reconciliation_source"],
+        reserved_evidence["reconciliation_decision"],
+        reserved_evidence["matched_slurm_job_id"],
+        reserved_evidence["restart_stage"],
+        reserved_evidence["native_shud_resubmitted"],
+    ) == (
+        1,
+        "accepted",
+        "slurm_exact_comment",
+        "matched_bound",
+        initial_client.accepted_forecast_job_id,
+        "forecast",
+        True,
+    )
+    assert reserved_evidence["candidate_summary_count"] == 18
+    assert len(reserved_evidence["candidate_summary"]) <= 256
+    assert all(
+        set(item)
+        == {
+            "array_task_id",
+            "candidate_id",
+            "model_id",
+            "run_id",
+            "array_task_outcome",
+            "restart_stage",
+            "native_shud_resubmitted",
+        }
+        for item in reserved_evidence["candidate_summary"]
+    )
+    partial_summary = partial_reconcile["inflight"]["outcomes"][0]["candidate_summary"]
+    assert [item["array_task_outcome"] for item in partial_summary].count("succeeded") == 17
+    assert [item["array_task_outcome"] for item in partial_summary].count("unverified") == 1
     partial_parent = partial_repository.get_pipeline_job(reserved.job_id)
     assert partial_parent["slurm_job_id"] == initial_client.accepted_forecast_job_id
     assert partial_parent["status"] == "reconcile_unverified"
@@ -24468,6 +24544,9 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
     complete_reconcile = complete_result.evidence["restart_reconcile"]
     assert complete_reconcile["reserved_unbound"]["count"] == 0
     assert complete_reconcile["inflight"]["outcomes"][0]["action"] == "terminal"
+    complete_summary = complete_reconcile["inflight"]["outcomes"][0]["candidate_summary"]
+    assert [item["array_task_outcome"] for item in complete_summary].count("succeeded") == 17
+    assert [item["array_task_outcome"] for item in complete_summary].count("failed") == 1
     complete_parent = complete_repository.get_pipeline_job(reserved.job_id)
     assert complete_parent["status"] == "failed"
     assert len(complete_parent["candidate_projections"]) == 18

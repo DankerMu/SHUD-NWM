@@ -1410,6 +1410,10 @@ Invariant Matrix:
   ordered member candidate/task identities, idempotency key, exact Slurm
   comment, submission attempt, reconciliation decision, and bound master job
   ID.
+- Durability contract: a file-journal write may return success only after the
+  replaced file and its directory entry are durably committed and the parent
+  identity remains the one validated before replacement. Any indeterminate
+  durability result fails closed before an external Gateway call.
 - Submission-state contract: the durable reservation may temporarily have no
   `submit_outcome` only before the Gateway result is recorded. Restart recovery
   atomically classifies that state as `submit_result_ambiguous` before writing a
@@ -1427,6 +1431,11 @@ Invariant Matrix:
   the new attempt has no `submit_outcome` and no reconciliation source,
   decision, or matched ID; evidence proved for the prior attempt cannot cross
   this boundary, including when the process stops immediately after reclaim.
+- Attempt-CAS contract: timeout/accounting transitions compare the durable
+  submission attempt and expected reserved-unbound state under the cycle lock.
+  Normal Gateway success and accounting adoption atomically bind the accepted
+  Slurm ID with their complete evidence tuple; a same-ID repeat is idempotent,
+  while a different-ID collision never overwrites the winner.
 - Accounting-proof contract: an owner-scoped match identifies the bind
   candidate but is not by itself proof of global uniqueness, and an owner-scoped
   zero result is not authoritative global absence. Any bounded exact-comment
@@ -1434,6 +1443,12 @@ Invariant Matrix:
   binding requires one globally unique owned match, while retry eligibility
   requires a bounded, authoritative proof that no exact-comment job exists under
   any ownership.
+- Accounting-authority contract: successful command execution is not by itself
+  global visibility. Runtime preflight proves the scheduler principal's Slurm
+  accounting visibility (including job privacy), otherwise zero-match evidence
+  remains unavailable. Discovery pages a bounded time range before byte/row
+  materialization and aggregates only the bounded exact-comment matches needed
+  to prove zero, one, or multiple results at the supported 256-member cadence.
 - Independent-runtime contract: because runtime member rows are durably prepared
   before the Gateway call, a pre-outcome reservation with no runtime rows cannot
   have produced an accepted array. A later exact-comment match without those

@@ -274,7 +274,7 @@ def test_file_cohort_exact_comment_reconcile_distinguishes_all_fail_closed_branc
         "multiple_matches_blocked",
         None,
     )
-    assert outcome.match_count == 3
+    assert outcome.match_count == 2
     assert multiple.get_pipeline_job(outcome.job_id)["slurm_job_id"] is None
     assert_reopen_tuple(multiple, outcome, submit_outcome="submit_result_ambiguous")
 
@@ -3301,10 +3301,10 @@ def test_comment_sacct_querier_scans_once_and_reaps_oversized_stream(
         )
 
     monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
-    query = reconcile_module.default_comment_sacct_querier()
+    query = reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: True)
     assert query("key-a")[0].slurm_job_id == "17667"
     assert query("key-b")[0].slurm_job_id == "17668"
-    assert scans == 1
+    assert scans == (reconcile_module.COMMENT_SACCT_LOOKBACK_DAYS * 24) // reconcile_module.COMMENT_SACCT_PAGE_HOURS
 
     class FakeProcess:
         def __init__(self) -> None:
@@ -3347,9 +3347,316 @@ def test_comment_sacct_querier_scans_once_and_reaps_oversized_stream(
     monkeypatch.setattr(reconcile_module.subprocess, "Popen", popen)
     monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_BYTES", 128)
     with pytest.raises(reconcile_module.ReconcileQueryUnavailable):
-        reconcile_module.default_comment_sacct_querier()("secret-key")
+        reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: True)("secret-key")
     assert len(processes) == 1
     assert processes[0].reaped is True
+
+
+def test_file_submit_attempt_commit_is_cas_bound_idempotent_and_reopen_safe(tmp_path: Any) -> None:
+    from services.orchestrator.accepted_submit_identity import AcceptedSubmitTransition
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    repository = _file_cohort_repository(tmp_path, member_count=18)
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+
+    applied = repository.commit_pipeline_job_submit_attempt(
+        key,
+        expected_submission_attempt=1,
+        slurm_job_id="17667",
+        transition=AcceptedSubmitTransition.accepted(status="submitted"),
+    )
+    idempotent = repository.commit_pipeline_job_submit_attempt(
+        key,
+        expected_submission_attempt=1,
+        slurm_job_id="17667",
+        transition=AcceptedSubmitTransition.accepted(status="submitted"),
+    )
+    collision = repository.commit_pipeline_job_submit_attempt(
+        key,
+        expected_submission_attempt=1,
+        slurm_job_id="17668",
+        transition=AcceptedSubmitTransition.accepted(status="submitted"),
+    )
+    stale = repository.commit_pipeline_job_submit_attempt(
+        key,
+        expected_submission_attempt=2,
+        slurm_job_id="17667",
+        transition=AcceptedSubmitTransition.accepted(status="submitted"),
+    )
+
+    assert (applied.outcome, idempotent.outcome, collision.outcome, stale.outcome) == (
+        "applied",
+        "idempotent",
+        "collision",
+        "stale",
+    )
+    reopened = FileOrchestrationJournalRepository(tmp_path / "journal")
+    row = reopened.get_pipeline_job(job_id)
+    assert row is not None
+    assert row["slurm_job_id"] == "17667"
+    assert row["submit_outcome"] == "accepted"
+    assert [job.job_id for job in reopened.query_inflight_jobs()] == [job_id]
+    assert reopened.query_reserved_unbound_jobs() == []
+
+
+def test_file_submit_attempt_barrier_race_commits_only_one_slurm_id(tmp_path: Any) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from services.orchestrator.accepted_submit_identity import AcceptedSubmitTransition
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    repository = _file_cohort_repository(tmp_path, member_count=18)
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    barrier = Barrier(2)
+
+    def commit(slurm_job_id: str) -> str:
+        contender = FileOrchestrationJournalRepository(repository.root)
+        barrier.wait()
+        return contender.commit_pipeline_job_submit_attempt(
+            key,
+            expected_submission_attempt=1,
+            slurm_job_id=slurm_job_id,
+            transition=AcceptedSubmitTransition.accepted(status="submitted"),
+        ).outcome
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = tuple(pool.map(commit, ("17667", "17668")))
+
+    assert sorted(outcomes) == ["applied", "collision"]
+    reopened = FileOrchestrationJournalRepository(repository.root)
+    row = reopened.get_pipeline_job("job_cycle_gfs_2026071200_forecast_fixture_forecast")
+    assert row is not None
+    assert row["slurm_job_id"] in {"17667", "17668"}
+    assert len(reopened.query_inflight_jobs()) == 1
+    assert reopened.query_reserved_unbound_jobs() == []
+
+
+def test_comment_sacct_global_zero_is_unavailable_without_visibility_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        reconcile_module,
+        "_bounded_sacct_stdout",
+        lambda command: calls.append(list(command)) or "",
+    )
+    query = reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: False)
+
+    with pytest.raises(reconcile_module.ReconcileQueryUnavailable, match="visibility is unproven"):
+        query("key")
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("controller_private_data", "slurmdbd_private_data", "expected"),
+    [
+        ("none", "none", True),
+        ("accounts,events", "users", True),
+        ("jobs", "none", False),
+        ("none", "all", False),
+        (None, "none", False),
+        ("none", None, False),
+    ],
+)
+def test_global_accounting_visibility_probe_requires_controller_and_slurmdbd_private_data(
+    monkeypatch: pytest.MonkeyPatch,
+    controller_private_data: str | None,
+    slurmdbd_private_data: str | None,
+    expected: bool,
+) -> None:
+    from types import SimpleNamespace
+
+    from services.orchestrator import reconcile as reconcile_module
+
+    commands: list[list[str]] = []
+
+    def run(command: Any, **_kwargs: Any) -> Any:
+        commands.append(list(command))
+        value = controller_private_data if str(command[0]).endswith("scontrol") else slurmdbd_private_data
+        stdout = f"PrivateData = {value}\n" if value is not None else ""
+        return SimpleNamespace(returncode=0, stdout=stdout)
+
+    monkeypatch.setattr(reconcile_module.subprocess, "run", run)
+    assert reconcile_module.default_global_accounting_visibility_probe("/opt/slurm/bin")() is expected
+    assert commands == [
+        ["/opt/slurm/bin/scontrol", "show", "config"],
+        ["/opt/slurm/bin/sacctmgr", "show", "config"],
+    ]
+
+
+def test_global_accounting_visibility_probe_fails_closed_but_checks_both_when_one_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from services.orchestrator import reconcile as reconcile_module
+
+    commands: list[list[str]] = []
+
+    def run(command: Any, **_kwargs: Any) -> Any:
+        commands.append(list(command))
+        if str(command[0]).endswith("scontrol"):
+            raise OSError("controller config unavailable")
+        return SimpleNamespace(returncode=0, stdout="PrivateData = none\n")
+
+    monkeypatch.setattr(reconcile_module.subprocess, "run", run)
+    assert reconcile_module.default_global_accounting_visibility_probe()() is False
+    assert commands == [["scontrol", "show", "config"], ["sacctmgr", "show", "config"]]
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        ("PrivateData = none\nPrivateData = none\n", True),
+        ("PrivateData = none\nPrivateData = jobs\n", False),
+        ("PrivateData = all\nPrivateData = none\n", False),
+        ("unrelated = none\n", False),
+    ],
+)
+def test_private_data_visibility_requires_every_occurrence_to_allow_jobs(
+    stdout: str,
+    expected: bool,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    assert reconcile_module._private_data_allows_global_jobs(stdout) is expected
+
+
+def test_comment_sacct_production_cadence_pages_are_independently_bounded_and_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    page_count = (reconcile_module.COMMENT_SACCT_LOOKBACK_DAYS * 24) // reconcile_module.COMMENT_SACCT_PAGE_HOURS
+    stages = ("forcing", "forecast", "state_save_qc")
+    expected_ids: dict[str, str] = {}
+
+    def page_rows(page_index: int) -> str:
+        rows: list[str] = []
+        for source_index, source in enumerate(("gfs", "ifs")):
+            for stage_index, stage in enumerate(stages):
+                key = f"{source}:day{page_index:02d}:{stage}"
+                master_id = str(17000 + page_index * 10 + source_index * len(stages) + stage_index)
+                expected_ids[key] = master_id
+                for task_id in range(256):
+                    rows.append(
+                        f"{master_id}_{task_id}|nhms_{stage}|RUNNING|0:0|nhms_idem:{key}|scheduler|account\n"
+                    )
+                    rows.append(
+                        f"{master_id}_{task_id}.batch|batch|RUNNING|0:0|nhms_idem:{key}|scheduler|account\n"
+                    )
+        assert len(rows) == 2 * 3 * 256 * 2
+        return "".join(rows)
+
+    commands: list[list[str]] = []
+    scope_pages = {"owner": 0, "global": 0}
+
+    def bounded(command: Any) -> str:
+        commands.append(list(command))
+        scope = "global" if "--allusers" in command else "owner"
+        page_index = scope_pages[scope]
+        scope_pages[scope] += 1
+        return page_rows(page_index)
+
+    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
+    query = reconcile_module.default_comment_sacct_querier(
+        global_visibility_probe=lambda: True,
+        now=lambda: datetime(2026, 7, 22, 12, tzinfo=UTC),
+    )
+
+    target = f"ifs:day{page_count - 1:02d}:state_save_qc"
+    proof = reconcile_module._query_comment_accounting_proof(
+        query,
+        target,
+        expected_user="scheduler",
+        expected_account="account",
+    )
+    assert proof.kind == "owned_match"
+    assert [record.slurm_job_id for record in proof.records] == [expected_ids[target]]
+    assert scope_pages == {"owner": page_count, "global": page_count}
+    assert len(commands) == page_count * 2
+
+    cached_target = "gfs:day00:forcing"
+    cached_proof = reconcile_module._query_comment_accounting_proof(
+        query,
+        cached_target,
+        expected_user="scheduler",
+        expected_account="account",
+    )
+    assert cached_proof.kind == "owned_match"
+    assert [record.slurm_job_id for record in cached_proof.records] == [expected_ids[cached_target]]
+    assert len(commands) == page_count * 2
+    assert all(any(item.startswith("--endtime=") for item in command) for command in commands)
+
+
+def test_comment_sacct_global_collision_is_detected_across_separate_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    page_count = (reconcile_module.COMMENT_SACCT_LOOKBACK_DAYS * 24) // reconcile_module.COMMENT_SACCT_PAGE_HOURS
+    scope_pages = {"owner": 0, "global": 0}
+    target = "gfs:collision:forecast"
+
+    def bounded(command: Any) -> str:
+        scope = "global" if "--allusers" in command else "owner"
+        page_index = scope_pages[scope]
+        scope_pages[scope] += 1
+        if page_index == 0:
+            return f"17667_0.batch|batch|RUNNING|0:0|nhms_idem:{target}|scheduler|account\n"
+        if scope == "global" and page_index == page_count - 1:
+            return f"17668_0|nhms_forecast|RUNNING|0:0|nhms_idem:{target}|foreign|other\n"
+        return ""
+
+    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
+    proof = reconcile_module._query_comment_accounting_proof(
+        reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: True),
+        target,
+        expected_user="scheduler",
+        expected_account="account",
+    )
+
+    assert proof.kind == "foreign_collision"
+    assert [record.slurm_job_id for record in proof.records] == ["17667", "17668"]
+    assert scope_pages == {"owner": page_count, "global": page_count}
+
+
+@pytest.mark.parametrize("boundary", ["row", "byte"])
+def test_comment_sacct_rejects_any_single_page_over_its_bound(
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_ROWS", 2)
+    monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_BYTES", 8)
+    payload = "\n\n\n" if boundary == "row" else "123456789"
+    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", lambda _command: payload)
+
+    with pytest.raises(reconcile_module.ReconcileQueryUnavailable, match="bounded output"):
+        reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: True)("key")
+
+
+def test_bounded_sacct_rejects_max_newlines_plus_unterminated_row(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    executable = tmp_path / "sacct"
+    executable.write_text(
+        "#!/bin/sh\ni=0\nwhile [ $i -lt 20000 ]; do printf '\\n'; i=$((i+1)); done\nprintf 'unterminated'\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_ROWS", 20_000)
+
+    with pytest.raises(reconcile_module.ReconcileQueryUnavailable, match="bounded output"):
+        reconcile_module._bounded_sacct_stdout([str(executable)])
 
 
 def test_comment_sacct_querier_proves_owner_candidate_against_global_scope(
@@ -3370,18 +3677,19 @@ def test_comment_sacct_querier_proves_owner_candidate_against_global_scope(
 
     monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
     proof = reconcile_module._query_comment_accounting_proof(
-        reconcile_module.default_comment_sacct_querier(),
+        reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: True),
         "key",
         expected_user="scheduler",
         expected_account="account",
     )
 
     assert proof.kind == "foreign_collision"
-    assert len(commands) == 2
+    page_count = (reconcile_module.COMMENT_SACCT_LOOKBACK_DAYS * 24) // reconcile_module.COMMENT_SACCT_PAGE_HOURS
+    assert len(commands) == page_count + 1
     assert "--user=scheduler" in commands[0]
     assert "--accounts=account" in commands[0]
     assert "--allusers" not in commands[0]
-    assert "--allusers" in commands[1]
+    assert "--allusers" in commands[page_count]
 
 
 def test_comment_sacct_global_overlimit_after_owner_candidate_fails_closed(
@@ -3401,15 +3709,16 @@ def test_comment_sacct_global_overlimit_after_owner_candidate_fails_closed(
 
     with pytest.raises(reconcile_module.ReconcileQueryUnavailable, match="bounded output"):
         reconcile_module._query_comment_accounting_proof(
-            reconcile_module.default_comment_sacct_querier(),
+            reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: True),
             "key",
             expected_user="scheduler",
             expected_account="account",
         )
 
-    assert len(commands) == 2
+    page_count = (reconcile_module.COMMENT_SACCT_LOOKBACK_DAYS * 24) // reconcile_module.COMMENT_SACCT_PAGE_HOURS
+    assert len(commands) == page_count + 1
     assert "--user=scheduler" in commands[0]
-    assert "--allusers" in commands[1]
+    assert "--allusers" in commands[-1]
 
 
 def test_inflight_sacct_querier_uses_shared_bounded_stream_reader(

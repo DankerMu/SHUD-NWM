@@ -94,6 +94,12 @@ NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND=32
 # Accepted-submit recovery waits this long for slurmdbd propagation before an
 # exact-comment absence can release one forecast cohort for retry. Both Slurm
 # ownership values must match sacct User/Account on node-22.
+# Exact-comment absence/collision proof also requires the scheduler account to
+# observe all jobs. Startup reconciliation verifies both controller config
+# (`scontrol show config`) and SlurmDBD config (`sacctmgr show config`): both
+# `PrivateData` values must omit `jobs` and `all`. If either proof is missing,
+# unavailable, or restrictive, global zero-match is accounting-unavailable and
+# no retry is released; there is intentionally no acknowledgement override.
 NHMS_SCHEDULER_RECONCILE_ABSENCE_SECONDS=300
 NHMS_SCHEDULER_RECONCILE_SLURM_USER=frd_muziyao
 NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT=replace-with-node22-slurm-account
@@ -146,6 +152,9 @@ SHUD_EXECUTABLE=/opt/shud/bin/shud
 # sbatch on the login node — that is the diagnostic lane, not production.)
 SLURM_GATEWAY_URL=http://127.0.0.1:8081
 SLURM_GATEWAY_BACKEND=slurm
+# Optional common directory for sacct/scontrol/sacctmgr and other Slurm tools;
+# accepted-submit reconcile uses this same configured path for all three.
+SLURM_GATEWAY_SLURM_BIN_PATH=
 SLURM_GATEWAY_TEMPLATE_DIR=infra/sbatch
 SLURM_GATEWAY_WORKSPACE_DIR=/scratch/frd_muziyao/nhms-production/workspace
 # Optional comma-separated unhealthy compute nodes to avoid at submit time.

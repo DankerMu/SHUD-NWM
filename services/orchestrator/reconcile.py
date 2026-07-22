@@ -52,6 +52,7 @@ LOGGER = logging.getLogger(__name__)
 # accounting horizon; a fixed 7-day floor keeps a just-submitted master job
 # visible to reconcile-by-comment instead of being misjudged reservation_lost.
 COMMENT_SACCT_LOOKBACK_DAYS = 7
+COMMENT_SACCT_PAGE_HOURS = 12
 
 RECONCILE_UNVERIFIED_STATUS = "reconcile_unverified"
 # A reservation whose sbatch was never confirmed by accounting: sbatch did not
@@ -75,6 +76,7 @@ MAX_EXACT_COMMENT_MATCHES = 2
 MAX_COMMENT_SACCT_BYTES = 2 * 1024 * 1024
 MAX_COMMENT_SACCT_ROWS = 20_000
 COMMENT_SACCT_TIMEOUT_SECONDS = 30.0
+COMMENT_SACCT_VISIBILITY_TIMEOUT_SECONDS = 5.0
 
 
 class ReconcileQueryUnavailable(Exception):
@@ -152,7 +154,55 @@ def default_sacct_querier(slurm_bin_path: str = "") -> SacctQuerier:
     return _query
 
 
-def default_comment_sacct_querier(slurm_bin_path: str = "") -> CommentSacctQuerier:
+def default_global_accounting_visibility_probe(slurm_bin_path: str = "") -> Callable[[], bool]:
+    """Prove controller and SlurmDBD both expose jobs to ``--allusers``."""
+
+    scontrol = f"{slurm_bin_path.rstrip('/')}/scontrol" if slurm_bin_path else "scontrol"
+    sacctmgr = f"{slurm_bin_path.rstrip('/')}/sacctmgr" if slurm_bin_path else "sacctmgr"
+
+    def _probe() -> bool:
+        proven = True
+        for command in ([scontrol, "show", "config"], [sacctmgr, "show", "config"]):
+            try:
+                completed = subprocess.run(  # noqa: S603 - fixed argv, no shell.
+                    command,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=COMMENT_SACCT_VISIBILITY_TIMEOUT_SECONDS,
+                )
+            except (OSError, subprocess.SubprocessError):
+                proven = False
+                continue
+            if completed.returncode != 0 or not _private_data_allows_global_jobs(completed.stdout):
+                proven = False
+        return proven
+
+    return _probe
+
+
+def _private_data_allows_global_jobs(stdout: str) -> bool:
+    found = False
+    for line in stdout.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key.strip().lower() == "privatedata":
+            found = True
+            private_data = {
+                token.strip().lower()
+                for token in value.replace(",", " ").split()
+                if token.strip()
+            }
+            if "jobs" in private_data or "all" in private_data:
+                return False
+    return found
+
+
+def default_comment_sacct_querier(
+    slurm_bin_path: str = "",
+    *,
+    global_visibility_probe: Callable[[], bool] | None = None,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> CommentSacctQuerier:
     """Build a comment querier: idempotency_key -> the job sbatch recorded.
 
     Queries ``sacct`` for the master row whose ``Comment`` is
@@ -164,7 +214,23 @@ def default_comment_sacct_querier(slurm_bin_path: str = "") -> CommentSacctQueri
 
     sacct = f"{slurm_bin_path.rstrip('/')}/sacct" if slurm_bin_path else "sacct"
 
-    indexed_matches_by_scope: dict[tuple[str, str], dict[str, tuple[SacctRecord, ...]]] = {}
+    indexed_matches_by_page: dict[
+        tuple[str, str, str, str], dict[str, tuple[SacctRecord, ...]]
+    ] = {}
+    scan_budget = _SacctScanBudget()
+    visibility_probe = global_visibility_probe or default_global_accounting_visibility_probe(slurm_bin_path)
+    visibility_proven: bool | None = None
+
+    def _pages() -> tuple[tuple[datetime, datetime], ...]:
+        end = now().astimezone(UTC).replace(microsecond=0)
+        floor = end - timedelta(days=COMMENT_SACCT_LOOKBACK_DAYS)
+        width = timedelta(hours=COMMENT_SACCT_PAGE_HOURS)
+        pages: list[tuple[datetime, datetime]] = []
+        while end > floor:
+            start = max(end - width, floor)
+            pages.append((start, end))
+            end = start
+        return tuple(pages)
 
     def _query(
         idempotency_key: str,
@@ -174,41 +240,97 @@ def default_comment_sacct_querier(slurm_bin_path: str = "") -> CommentSacctQueri
     ) -> tuple[SacctRecord, ...]:
         target_comment = slurm_comment_for(idempotency_key)
         owner_scope = (str(expected_user or ""), str(expected_account or ""))
-        # --starttime: without it sacct only returns jobs inside its default
-        # (often same-day) window, so an in-flight master submitted just before a
-        # crash can be invisible and misjudged reservation_lost. Mirror
-        # real_backend.list_jobs by passing an explicit conservative floor.
-        start_time = (datetime.now(UTC) - timedelta(days=COMMENT_SACCT_LOOKBACK_DAYS)).strftime("%Y-%m-%dT%H:%M:%S")
-        command = [
-            sacct,
-            "--parsable2",
-            "--noheader",
-            "--format=JobID,JobName,State,ExitCode,Comment,User,Account",
-            f"--starttime={start_time}",
-        ]
-        command.append(f"--user={owner_scope[0]}" if owner_scope[0] else "--allusers")
-        if owner_scope[1]:
-            command.append(f"--accounts={owner_scope[1]}")
-        if owner_scope not in indexed_matches_by_scope:
-            stdout = _bounded_sacct_stdout(command)
-            indexed_matches_by_scope[owner_scope] = _index_comment_sacct_matches(
-                stdout,
-                expected_user=owner_scope[0] or None,
-                expected_account=owner_scope[1] or None,
-            )
+        nonlocal visibility_proven
+        if not any(owner_scope):
+            if visibility_proven is None:
+                visibility_proven = bool(visibility_probe())
+            if not visibility_proven:
+                raise ReconcileQueryUnavailable("global accounting visibility is unproven")
+        budget = scan_budget
+        matches: list[SacctRecord] = []
+        seen_ids: set[str] = set()
+        for page_start, page_end in _pages():
+            start_time = page_start.strftime("%Y-%m-%dT%H:%M:%S")
+            end_time = page_end.strftime("%Y-%m-%dT%H:%M:%S")
+            page_key = (*owner_scope, start_time, end_time)
+            if page_key not in indexed_matches_by_page:
+                command = [
+                    sacct,
+                    "--parsable2",
+                    "--noheader",
+                    "--format=JobID,JobName,State,ExitCode,Comment,User,Account",
+                    f"--starttime={start_time}",
+                    f"--endtime={end_time}",
+                ]
+                command.append(f"--user={owner_scope[0]}" if owner_scope[0] else "--allusers")
+                if owner_scope[1]:
+                    command.append(f"--accounts={owner_scope[1]}")
+                stdout = _bounded_sacct_page(command, budget)
+                indexed_matches_by_page[page_key] = _index_comment_sacct_matches(
+                    stdout,
+                    expected_user=owner_scope[0] or None,
+                    expected_account=owner_scope[1] or None,
+                )
+            for record in indexed_matches_by_page[page_key].get(target_comment, ()):
+                if record.slurm_job_id in seen_ids:
+                    continue
+                seen_ids.add(record.slurm_job_id)
+                matches.append(record)
+                if len(matches) >= MAX_EXACT_COMMENT_MATCHES:
+                    break
+            if len(matches) >= MAX_EXACT_COMMENT_MATCHES:
+                break
         # Below: the query succeeded. A None here is the authoritative
         # "accounting has no job for this comment" answer (confirmed-absent),
         # which is the ONLY case allowed to mark reservation_lost. A transient
         # failure never reaches here.
         return CommentAccountingResult(
-            indexed_matches_by_scope[owner_scope].get(target_comment, ()),
+            tuple(matches),
             scope="owner" if any(owner_scope) else "global",
         )
 
     return _query
 
 
-def _bounded_sacct_stdout(command: Sequence[str]) -> str:
+@dataclass
+class _SacctScanBudget:
+    """One scan deadline plus independent limits applied to every time page."""
+
+    page_max_bytes: int = 0
+    page_max_rows: int = 0
+    deadline: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not self.page_max_bytes:
+            self.page_max_bytes = MAX_COMMENT_SACCT_BYTES
+        if not self.page_max_rows:
+            self.page_max_rows = MAX_COMMENT_SACCT_ROWS
+        if not self.deadline:
+            self.deadline = time.monotonic() + COMMENT_SACCT_TIMEOUT_SECONDS
+
+
+def _bounded_sacct_page(command: Sequence[str], budget: _SacctScanBudget) -> str:
+    """Call the bounded reader while retaining compatibility with injected fakes."""
+
+    try:
+        supports_budget = "budget" in inspect.signature(_bounded_sacct_stdout).parameters
+    except (TypeError, ValueError):
+        supports_budget = False
+    if supports_budget:
+        return _bounded_sacct_stdout(command, budget=budget)
+    if time.monotonic() >= budget.deadline:
+        raise ReconcileQueryUnavailable("sacct query timed out")
+    stdout = _bounded_sacct_stdout(command)
+    if time.monotonic() >= budget.deadline:
+        raise ReconcileQueryUnavailable("sacct query timed out")
+    encoded = stdout.encode("utf-8")
+    rows = stdout.count("\n") + int(bool(stdout) and not stdout.endswith("\n"))
+    if len(encoded) > budget.page_max_bytes or rows > budget.page_max_rows:
+        raise ReconcileQueryUnavailable("sacct query exceeded bounded output")
+    return stdout
+
+
+def _bounded_sacct_stdout(command: Sequence[str], *, budget: _SacctScanBudget | None = None) -> str:
     """Read sacct output with byte/row/time bounds and always reap the child."""
 
     try:
@@ -226,11 +348,12 @@ def _bounded_sacct_stdout(command: Sequence[str]) -> str:
     output = bytearray()
     row_count = 0
     started = time.monotonic()
+    deadline = budget.deadline if budget is not None else started + COMMENT_SACCT_TIMEOUT_SECONDS
     selector = selectors.DefaultSelector()
     try:
         selector.register(stdout, selectors.EVENT_READ)
         while True:
-            remaining = COMMENT_SACCT_TIMEOUT_SECONDS - (time.monotonic() - started)
+            remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ReconcileQueryUnavailable("sacct query timed out")
             events = selector.select(timeout=min(remaining, 0.25))
@@ -243,9 +366,12 @@ def _bounded_sacct_stdout(command: Sequence[str]) -> str:
                 break
             output.extend(chunk)
             row_count += chunk.count(b"\n")
-            if len(output) > MAX_COMMENT_SACCT_BYTES or row_count > MAX_COMMENT_SACCT_ROWS:
+            logical_row_count = row_count + int(bool(output) and not output.endswith(b"\n"))
+            byte_limit = budget.page_max_bytes if budget is not None else MAX_COMMENT_SACCT_BYTES
+            row_limit = budget.page_max_rows if budget is not None else MAX_COMMENT_SACCT_ROWS
+            if len(output) > byte_limit or logical_row_count > row_limit:
                 raise ReconcileQueryUnavailable("sacct query exceeded bounded output")
-        remaining = COMMENT_SACCT_TIMEOUT_SECONDS - (time.monotonic() - started)
+        remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise ReconcileQueryUnavailable("sacct query timed out")
         return_code = process.wait(timeout=remaining)
@@ -287,7 +413,7 @@ def _index_comment_sacct_matches(
     seen: dict[str, set[str]] = {}
     for line in stdout.splitlines()[:MAX_COMMENT_SACCT_ROWS]:
         fields = line.strip().split("|")
-        if len(fields) < 5 or "." in fields[0]:
+        if len(fields) < 5:
             continue
         comment = fields[4].strip()
         if not comment.startswith("nhms_idem:"):
@@ -298,7 +424,7 @@ def _index_comment_sacct_matches(
             continue
         if expected_account and account != expected_account:
             continue
-        master_id = fields[0].split("_", 1)[0]
+        master_id = fields[0].split(".", 1)[0].split("_", 1)[0]
         if not SLURM_JOB_ID_RE.fullmatch(master_id):
             continue
         comment_seen = seen.setdefault(comment, set())
@@ -306,7 +432,7 @@ def _index_comment_sacct_matches(
             continue
         comment_seen.add(master_id)
         matches = comments.setdefault(comment, [])
-        if len(matches) >= MAX_EXACT_COMMENT_MATCHES + 1:
+        if len(matches) >= MAX_EXACT_COMMENT_MATCHES:
             continue
         matches.append(
             SacctRecord(
@@ -745,7 +871,7 @@ def reconcile_inflight_jobs(
         if file_cohort and not _terminal_file_cohort_identity_matches(store, record, job):
             write_count = _transition_file_reconciliation(
                 store,
-                job.job_id,
+                job,
                 AcceptedSubmitTransition.accounting(
                     "identity_mismatch_blocked",
                     submit_outcome=str(getattr(job, "submit_outcome", None) or "accepted"),
@@ -1036,7 +1162,7 @@ def reconcile_reserved_unbound_jobs(
             and getattr(job, "cohort_members", None)
         )
         if file_forecast_cohort and not accepted_submit_reconcile:
-            write_count = _record_file_reconciliation(store, job.job_id, "identity_mismatch_blocked")
+            write_count = _record_file_reconciliation(store, job, "identity_mismatch_blocked")
             outcomes.append(
                 ReservationReconcileOutcome(
                     job_id=job.job_id,
@@ -1054,7 +1180,7 @@ def reconcile_reserved_unbound_jobs(
         if accepted_submit_reconcile and getattr(job, "submit_outcome", None) is None:
             _transition_file_reconciliation(
                 store,
-                job.job_id,
+                job,
                 AcceptedSubmitTransition.timeout(status=str(job.status)),
             )
 
@@ -1078,7 +1204,7 @@ def reconcile_reserved_unbound_jobs(
                 error,
             )
             write_count = (
-                _record_file_reconciliation(store, job.job_id, "accounting_unavailable")
+                _record_file_reconciliation(store, job, "accounting_unavailable")
                 if accepted_submit_reconcile
                 else 0
             )
@@ -1096,7 +1222,7 @@ def reconcile_reserved_unbound_jobs(
             )
             continue
         if accepted_submit_reconcile and proof.kind == "ambiguous":
-            write_count = _record_file_reconciliation(store, job.job_id, "multiple_matches_blocked")
+            write_count = _record_file_reconciliation(store, job, "multiple_matches_blocked")
             outcomes.append(
                 ReservationReconcileOutcome(
                     job_id=job.job_id,
@@ -1112,7 +1238,7 @@ def reconcile_reserved_unbound_jobs(
             )
             continue
         if accepted_submit_reconcile and proof.kind == "foreign_collision":
-            write_count = _record_file_reconciliation(store, job.job_id, "identity_mismatch_blocked")
+            write_count = _record_file_reconciliation(store, job, "identity_mismatch_blocked")
             outcomes.append(
                 ReservationReconcileOutcome(
                     job_id=job.job_id,
@@ -1137,7 +1263,7 @@ def reconcile_reserved_unbound_jobs(
             and record is not None
             and not _reserved_record_identity_matches(store, record, job, str(idempotency_key))
         ):
-            write_count = _record_file_reconciliation(store, job.job_id, "identity_mismatch_blocked")
+            write_count = _record_file_reconciliation(store, job, "identity_mismatch_blocked")
             outcomes.append(
                 ReservationReconcileOutcome(
                     job_id=job.job_id,
@@ -1187,7 +1313,7 @@ def reconcile_reserved_unbound_jobs(
                 )
                 if now() - anchor < absence_grace:
                     write_count = (
-                        _record_file_reconciliation(store, job.job_id, "absence_deferred")
+                        _record_file_reconciliation(store, job, "absence_deferred")
                         if accepted_submit_reconcile
                         else 0
                     )
@@ -1207,7 +1333,13 @@ def reconcile_reserved_unbound_jobs(
             retry_permitted = False
             permit_retry = getattr(store, "permit_pipeline_job_retry", None)
             if accepted_submit_reconcile and callable(permit_retry):
-                retry_write_count = int(permit_retry(job.job_id))
+                retry_write_count = int(
+                    permit_retry(
+                        job.job_id,
+                        expected_submission_attempt=_job_submission_attempt(job),
+                        expected_status=str(job.status),
+                    )
+                )
                 retry_permitted = retry_write_count > 0
             else:
                 store.update_job_status(
@@ -1225,34 +1357,67 @@ def reconcile_reserved_unbound_jobs(
                 ReservationReconcileOutcome(
                     job_id=job.job_id,
                     idempotency_key=str(idempotency_key),
-                    action="absence_retry_permitted" if accepted_submit_reconcile else "reservation_lost",
+                    action=(
+                        "absence_retry_permitted"
+                        if accepted_submit_reconcile and retry_permitted
+                        else "stale_attempt_blocked"
+                        if accepted_submit_reconcile
+                        else "reservation_lost"
+                    ),
                     status=RESERVATION_LOST_STATUS if retry_permitted else str(job.status),
                     reconciliation_source="slurm_exact_comment" if accepted_submit_reconcile else None,
-                    reconciliation_decision="absence_retry_permitted" if accepted_submit_reconcile else None,
+                    reconciliation_decision=(
+                        "absence_retry_permitted" if accepted_submit_reconcile and retry_permitted else None
+                    ),
                     durable_write_kind=(
-                        "forecast_retry_permission" if accepted_submit_reconcile else "pipeline_job_status"
+                        "forecast_retry_permission"
+                        if accepted_submit_reconcile and retry_write_count
+                        else "pipeline_job_status"
+                        if not accepted_submit_reconcile
+                        else None
                     ),
                     durable_write_count=retry_write_count,
                 )
             )
             continue
 
-        bound = store.bind_reservation(
-            str(idempotency_key),
-            slurm_job_id=record.slurm_job_id,
-            status="submitted",
-        )
-        write_count = 1 if bound is not None else 0
-        if accepted_submit_reconcile and bound is not None:
-            write_count += _transition_file_reconciliation(
-                store,
-                job.job_id,
-                AcceptedSubmitTransition.accounting(
+        if accepted_submit_reconcile:
+            committer = getattr(store, "commit_pipeline_job_submit_attempt", None)
+            if not callable(committer):
+                raise ReconcileQueryUnavailable("accepted-submit commit API unavailable")
+            commit_result = committer(
+                str(idempotency_key),
+                expected_submission_attempt=_job_submission_attempt(job),
+                slurm_job_id=record.slurm_job_id,
+                transition=AcceptedSubmitTransition.accounting(
                     "matched_bound",
                     submit_outcome="accepted",
                     matched_slurm_job_id=record.slurm_job_id,
+                    status="submitted",
                 ),
             )
+            if not commit_result.committed:
+                outcomes.append(
+                    ReservationReconcileOutcome(
+                        job_id=job.job_id,
+                        idempotency_key=str(idempotency_key),
+                        action="stale_attempt_blocked",
+                        status=str(job.status),
+                        reconciliation_source="slurm_exact_comment",
+                        reconciliation_decision=None,
+                        match_count=1,
+                    )
+                )
+                continue
+            bound = commit_result.row
+            write_count = int(commit_result.wrote)
+        else:
+            bound = store.bind_reservation(
+                str(idempotency_key),
+                slurm_job_id=record.slurm_job_id,
+                status="submitted",
+            )
+            write_count = 1 if bound is not None else 0
         bound_status = "submitted" if bound is not None else str(job.status)
         outcomes.append(
             ReservationReconcileOutcome(
@@ -1289,7 +1454,7 @@ def _comment_query_records(
         and (not expected_user or item.user == expected_user)
         and (not expected_account or item.account == expected_account)
     )
-    return tuple(item for _, item in zip(range(MAX_EXACT_COMMENT_MATCHES + 1), owned, strict=False))
+    return tuple(item for _, item in zip(range(MAX_EXACT_COMMENT_MATCHES), owned, strict=False))
 
 
 def _bounded_comment_records(
@@ -1301,7 +1466,7 @@ def _bounded_comment_records(
     return tuple(
         item
         for _, item in zip(
-            range(MAX_EXACT_COMMENT_MATCHES + 1),
+            range(MAX_EXACT_COMMENT_MATCHES),
             (entry for entry in values if isinstance(entry, SacctRecord)),
             strict=False,
         )
@@ -1439,10 +1604,17 @@ def _query_comment_accounting(
     return comment_query(idempotency_key)
 
 
-def _record_file_reconciliation(store: Any, job_id: str, decision: str) -> int:
+def _job_submission_attempt(job: Any) -> int:
+    try:
+        return max(int(getattr(job, "submission_attempt", 1) or 1), 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _record_file_reconciliation(store: Any, job: Any, decision: str) -> int:
     return _transition_file_reconciliation(
         store,
-        job_id,
+        job,
         AcceptedSubmitTransition.accounting(
             decision,
             submit_outcome="submit_result_ambiguous",
@@ -1452,12 +1624,19 @@ def _record_file_reconciliation(store: Any, job_id: str, decision: str) -> int:
 
 def _transition_file_reconciliation(
     store: Any,
-    job_id: str,
+    job: Any,
     transition: AcceptedSubmitTransition,
 ) -> int:
     transitioner = getattr(store, "transition_pipeline_job_submit_evidence", None)
     if callable(transitioner):
-        return int(transitioner(job_id, transition) is not None)
+        result = transitioner(
+            job.job_id,
+            transition,
+            expected_submission_attempt=_job_submission_attempt(job),
+            expected_statuses=(str(job.status),),
+            require_unbound=(getattr(job, "slurm_job_id", None) in (None, "")),
+        )
+        return int(getattr(result, "wrote", False))
     return 0
 
 

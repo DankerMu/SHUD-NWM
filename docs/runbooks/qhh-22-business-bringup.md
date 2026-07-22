@@ -301,6 +301,13 @@ systemctl --user enable --now nhms-scheduler-evidence-retention.timer
      归一化到裸 `<id>`)；grace-gate 锚 `updated_at`(reserve/reclaim/bind 三路径刷新)防 slurmdbd 滞后误把 in-flight 预留降级
      reservation_lost；reconcile 会话 commit 失败后 rollback 避免毒化后续 pass。**部署前置见 §2.3**（000029 必须先 apply）。
      **尚未 live**——overlapping-submit 实况 receipt 待 daemon live = #292，依赖 #287(验 m23 #255 鲜活摄取)。
+
+     Accepted-submit exact-comment reconcile 的全局 0/1/多重匹配证明会同时执行 `scontrol show config`
+     （controller）和 `sacctmgr show config`（SlurmDBD）；两侧 `PrivateData` 都不含 `jobs`/`all` 时才允许
+     `sacct --allusers`。任一命令不可用、字段缺失或配置受限时，本轮记为 accounting unavailable，不释放
+     retry，也没有可绕过的 env acknowledgement。`sacct` 按 12 小时时间页扫描 7 天窗口，并在一个
+     reconcile pass 内缓存页面、跨页按 master job id 去重；每页独立执行 20,000 行/2 MiB 限制，整轮只共享
+     wall-time deadline，避免将合法的 7 天 task/`.batch` 总量误判为超限。
      out-of-scope LOW 收尾 → #300。
 7b. ✅ **多源下载韧性**（PR #308，b4a2e85/eeb4d5c）：GFS 换 NODD 多镜像链（`GFS_SOURCE_BACKENDS=s3,gcs,azure,ftpprd,nomads`，共享 `.idx`+HTTP-Range+本地 cdo-clip，NOMADS grib-filter 末位回退）；
 IFS 云镜像优先（`IFS_OPEN_DATA_FALLBACK_SOURCES` 默认 `aws,azure,google,ecmwf`，ECMWF 直连 500 连接上限末位）。NOMADS 403=动态封禁 → 持久断路器（`OBJECT_STORE_ROOT/state/source_circuit/`，cooldown 内停重试）；

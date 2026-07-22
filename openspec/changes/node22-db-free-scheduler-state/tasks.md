@@ -412,7 +412,9 @@ Scenario evidence rows for section 5:
   Evidence floor: a real `FileOrchestrationJournalRepository` test observes the
   reserved-unbound cohort before fake Gateway submission and a transport
   timeout records `submit_result_ambiguous`, not permanent candidate/hydro
-  failure.
+  failure. The fake Gateway itself reopens the real file journal and observes
+  the reservation before performing or simulating the external side effect;
+  strict directory durability failures fail closed before that boundary.
 
 - [x] 9.2 Reconcile reserved-unbound file-journal forecast cohorts by exact Slurm comment
   and identity.
@@ -427,7 +429,10 @@ Scenario evidence rows for section 5:
   runtime rows remains blocked. Reclaiming a retry atomically starts a clean
   pre-outcome attempt and cannot inherit the prior attempt's accounting tuple,
   including across immediate reopen. Every branch is reopened from disk and
-  proves the persisted tuple equals the emitted tuple.
+  proves the persisted tuple equals the emitted tuple. Attempt-scoped CAS keeps
+  stale concurrent transitions from overwriting a bound row, and normal success
+  plus accounting adoption each atomically bind the complete evidence tuple;
+  same-ID replay is idempotent and different-ID collision is blocked.
 
 - [x] 9.3 Project terminal array-task accounting to candidate-scoped
   pipeline/hydro state.
@@ -464,6 +469,11 @@ Scenario evidence rows for section 5:
   members with warm-cache/reopen parity. Executable process-boundary tests cover
   byte, row, and timeout termination/reap paths rather than mocking the bounded
   reader.
+  Exact-comment discovery proves global visibility at preflight, uses bounded
+  time pages at the 256-member production cadence, and counts a final
+  unterminated record. Scheduler restart evidence contains the bounded
+  submit/accounting tuple, restart/native-SHUD fields, and candidate/task
+  outcomes for reserved and inflight branches.
 
 - [ ] 9.6 Complete local, CI, and node-22 live verification.
   Evidence floor: the issue-targeted pytest command, `uv run ruff check .`, and

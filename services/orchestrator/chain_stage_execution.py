@@ -206,11 +206,31 @@ def submit_and_wait_cycle_stage(
                 "transition_pipeline_job_submit_evidence",
                 None,
             )
+            if not callable(transition):
+                raise OrchestratorError(
+                    "ACCEPTED_SUBMIT_COMMIT_UNAVAILABLE",
+                    "submit timeout cannot be durably committed",
+                    {"stage": stage.stage},
+                )
             if callable(transition):
-                transition(
+                transition_result = transition(
                     pipeline_job_id,
                     AcceptedSubmitTransition.timeout(),
+                    expected_submission_attempt=(
+                        reservation.submission_attempt if reservation is not None else context.retry_attempt
+                    ),
+                    expected_statuses=("reserved",),
+                    require_unbound=True,
                 )
+                if not getattr(transition_result, "committed", False):
+                    raise OrchestratorError(
+                        "ACCEPTED_SUBMIT_TRANSITION_CONFLICT",
+                        "submit timeout did not match the current durable reservation attempt",
+                        {
+                            "stage": stage.stage,
+                            "transition_outcome": getattr(transition_result, "outcome", "unknown"),
+                        },
+                    )
             orchestrator.repository.insert_pipeline_event(
                 entity_type="pipeline_job",
                 entity_id=pipeline_job_id,
@@ -242,18 +262,51 @@ def submit_and_wait_cycle_stage(
                 ),
                 None,
             )
-        result = orchestrator._record_submission_failure(stage, context, error, pipeline_job_id=pipeline_job_id)
-        if (
+        accepted_submit_failure = bool(
             getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
             and is_forecast_cohort_stage(stage)
-        ):
+        )
+        if accepted_submit_failure:
             transition = getattr(
                 orchestrator.repository,
                 "transition_pipeline_job_submit_evidence",
                 None,
             )
+            if not callable(transition):
+                raise OrchestratorError(
+                    "ACCEPTED_SUBMIT_COMMIT_UNAVAILABLE",
+                    "submit rejection cannot be durably committed",
+                    {"stage": stage.stage},
+                )
             if callable(transition):
-                transition(pipeline_job_id, AcceptedSubmitTransition.rejected())
+                transition_result = transition(
+                    pipeline_job_id,
+                    AcceptedSubmitTransition.rejected(),
+                    expected_submission_attempt=(
+                        reservation.submission_attempt if reservation is not None else context.retry_attempt
+                    ),
+                    expected_statuses=("reserved",),
+                    require_unbound=True,
+                    finished_at=deps.utcnow(),
+                    error_code=getattr(error, "error_code", None) or "SBATCH_SUBMISSION_FAILED",
+                    error_message=str(deps.redact_payload(str(error))),
+                )
+                if not getattr(transition_result, "committed", False):
+                    raise OrchestratorError(
+                        "ACCEPTED_SUBMIT_TRANSITION_CONFLICT",
+                        "submit rejection did not match the current durable reservation attempt",
+                        {
+                            "stage": stage.stage,
+                            "transition_outcome": getattr(transition_result, "outcome", "unknown"),
+                        },
+                    )
+        result = orchestrator._record_submission_failure(
+            stage,
+            context,
+            error,
+            pipeline_job_id=pipeline_job_id,
+            persist_pipeline_job=not accepted_submit_failure,
+        )
         if stage.stage == "forecast":
             orchestrator._mark_staged_hydro_runs_failed(
                 [str(basin["run_id"]) for basin in context.active_basins if basin.get("run_id")],
@@ -263,14 +316,6 @@ def submit_and_wait_cycle_stage(
         return result, None
 
     slurm_job_id = str(submitted["job_id"])
-    # M24 §3A phase 2: atomically bind slurm_job_id onto the reservation
-    # (no-op if a concurrent pass already bound it). The full upsert below
-    # remains authoritative for status/metadata.
-    orchestrator._bind_cycle_stage_reservation(
-        idempotency_key,
-        slurm_job_id=slurm_job_id,
-        array_task_id=deps.coerce_array_task_id(submitted.get("array_task_id")),
-    )
     log_publication = orchestrator._display_log_publication_for_stage(
         source_id=context.source_id,
         cycle_time=context.cycle_time,
@@ -280,6 +325,45 @@ def submit_and_wait_cycle_stage(
     )
     submitted_status = deps.status_from_gateway_job(submitted)
     submitted_log_uri = log_publication.advertised_uri
+    submitted_array_task_id = deps.coerce_array_task_id(submitted.get("array_task_id"))
+    accepted_submit_reconcile = bool(
+        getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
+        and is_forecast_cohort_stage(stage)
+    )
+    if accepted_submit_reconcile:
+        committer = getattr(orchestrator.repository, "commit_pipeline_job_submit_attempt", None)
+        if not callable(committer) or reservation is None:
+            raise OrchestratorError(
+                "ACCEPTED_SUBMIT_COMMIT_UNAVAILABLE",
+                "accepted submit cannot be durably committed to its reservation attempt",
+                {"stage": stage.stage},
+            )
+        commit_result = committer(
+            idempotency_key,
+            expected_submission_attempt=reservation.submission_attempt,
+            slurm_job_id=slurm_job_id,
+            transition=AcceptedSubmitTransition.accepted(status=submitted_status),
+            array_task_id=submitted_array_task_id,
+            submitted_at=deps.parse_gateway_time(submitted.get("submitted_at")) or deps.utcnow(),
+            started_at=deps.parse_gateway_time(submitted.get("started_at")),
+            finished_at=deps.parse_gateway_time(submitted.get("finished_at")),
+            exit_code=submitted.get("exit_code"),
+            error_code=submitted.get("error_code"),
+            error_message=submitted.get("error_message"),
+            log_uri=submitted_log_uri,
+        )
+        if not getattr(commit_result, "committed", False):
+            raise OrchestratorError(
+                "ACCEPTED_SUBMIT_COMMIT_CONFLICT",
+                "accepted submit did not match the current durable reservation attempt",
+                {"stage": stage.stage, "commit_outcome": getattr(commit_result, "outcome", "unknown")},
+            )
+    else:
+        orchestrator._bind_cycle_stage_reservation(
+            idempotency_key,
+            slurm_job_id=slurm_job_id,
+            array_task_id=submitted_array_task_id,
+        )
     submitted_publish_attempt: DisplayLogPublicationAttempt | None = None
     if submitted_status in deps.terminal_job_statuses:
         submitted_publish_attempt = orchestrator._try_publish_log_for_advertise(slurm_job_id, log_publication)
@@ -295,9 +379,9 @@ def submit_and_wait_cycle_stage(
     actual_manifest_index_path = submitted_manifest_index_path or (
         str(manifest_index_path) if manifest_index_path else ""
     )
-    submitted_array_task_id = deps.coerce_array_task_id(submitted.get("array_task_id"))
-    orchestrator.repository.upsert_pipeline_job(
-        {
+    if not accepted_submit_reconcile:
+        orchestrator.repository.upsert_pipeline_job(
+            {
             "job_id": pipeline_job_id,
             "run_id": context.run_id,
             "cycle_id": context.cycle_id,
@@ -322,8 +406,8 @@ def submit_and_wait_cycle_stage(
             "error_code": submitted.get("error_code"),
             "error_message": submitted.get("error_message"),
             "log_uri": submitted_log_uri,
-        }
-    )
+            }
+        )
     orchestrator.repository.insert_pipeline_event(
         entity_type="pipeline_job",
         entity_id=pipeline_job_id,

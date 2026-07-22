@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1472,13 +1472,14 @@ def _run_restart_reconcile(
                     "match_count": o.match_count,
                     "durable_write_kind": o.durable_write_kind,
                     "durable_write_count": o.durable_write_count,
+                    **_restart_reconcile_attempt_evidence(store, o.job_id),
                 }
                 for o in reserved
             ],
         }
     except Exception as error:  # noqa: BLE001 - recovery must never abort the pass.
         evidence["status"] = "error"
-        evidence["reserved_unbound_error"] = str(error)
+        evidence["reserved_unbound_error"] = _restart_reconcile_error_message(error)
         self._reset_reconcile_store_after_error()
     finally:
         if sacct_wait_sink is not None:
@@ -1501,19 +1502,96 @@ def _run_restart_reconcile(
                     "durable_write_count": o.durable_write_count,
                     "pipeline_status_write_count": o.pipeline_status_write_count,
                     "pipeline_event_write_count": o.pipeline_event_write_count,
+                    **_restart_reconcile_attempt_evidence(store, o.job_id),
                 }
                 for o in inflight
             ],
         }
     except Exception as error:  # noqa: BLE001 - recovery must never abort the pass.
         evidence["status"] = "error"
-        evidence["inflight_error"] = str(error)
+        evidence["inflight_error"] = _restart_reconcile_error_message(error)
         self._reset_reconcile_store_after_error()
     finally:
         if sacct_wait_sink is not None:
             inflight_delta_ms = (time.monotonic_ns() - inflight_call_start_ns) / 1_000_000.0
             sacct_wait_sink(inflight_delta_ms)
     return evidence
+
+
+def _restart_reconcile_attempt_evidence(store: Any, job_id: str) -> dict[str, Any]:
+    """Return the bounded public accepted-submit identity/evidence projection."""
+
+    getter = getattr(store, "get_pipeline_job", None) or getattr(store, "get_job", None)
+    if not callable(getter):
+        return {}
+    try:
+        row = getter(job_id)
+    except Exception:  # noqa: BLE001 - evidence enrichment cannot break reconcile.
+        return {}
+    if row is None:
+        return {}
+    values = dict(row) if isinstance(row, Mapping) else dict(vars(row))
+    raw_members = values.get("cohort_members")
+    members = raw_members if isinstance(raw_members, Sequence) and not isinstance(raw_members, str | bytes) else ()
+    raw_projections = values.get("candidate_projections")
+    projections = (
+        raw_projections
+        if isinstance(raw_projections, Sequence) and not isinstance(raw_projections, str | bytes)
+        else ()
+    )
+    projections_by_task = {
+        projection.get("array_task_id"): projection
+        for projection in projections[:256]
+        if isinstance(projection, Mapping)
+    }
+    candidate_summary = [
+        {
+            "array_task_id": member.get("array_task_id"),
+            "candidate_id": member.get("candidate_id"),
+            "model_id": member.get("model_id"),
+            "run_id": member.get("run_id"),
+            "array_task_outcome": (
+                projections_by_task.get(member.get("array_task_id"), {}).get("array_task_outcome") or "unverified"
+            ),
+            "restart_stage": member.get("restart_stage"),
+            "native_shud_resubmitted": bool(
+                projections_by_task.get(member.get("array_task_id"), {}).get(
+                    "native_shud_resubmitted",
+                    values.get("native_shud_resubmitted", False),
+                )
+            ),
+        }
+        for member in members[:256]
+        if isinstance(member, Mapping)
+    ]
+    return {
+        "submission_attempt": max(int(values.get("submission_attempt") or 1), 1),
+        "submit_outcome": values.get("submit_outcome"),
+        "reconciliation_source": values.get("reconciliation_source"),
+        "reconciliation_decision": values.get("reconciliation_decision"),
+        "matched_slurm_job_id": values.get("matched_slurm_job_id"),
+        "restart_stage": values.get("restart_stage"),
+        "native_shud_resubmitted": bool(values.get("native_shud_resubmitted", False)),
+        "candidate_summary": candidate_summary,
+        "candidate_summary_count": len(candidate_summary),
+    }
+
+
+def _restart_reconcile_error_message(error: Exception) -> str:
+    """Redact credentials and replace absolute filesystem tokens in evidence."""
+
+    redacted = str(redact_payload(str(error)))
+    return " ".join(_restart_reconcile_error_token(token) for token in redacted.split())
+
+
+def _restart_reconcile_error_token(token: str) -> str:
+    if token.lstrip("'\"([{<").startswith("/"):
+        return "[local-path]"
+    for separator in ("=", ":"):
+        key, found, value = token.partition(separator)
+        if found and value.lstrip("'\"([{<").startswith("/"):
+            return f"{key}{found}[local-path]"
+    return token
 
 
 def _reset_reconcile_store_after_error(self) -> None:
@@ -1595,7 +1673,7 @@ def _restart_reconcile_comment_query(self) -> Callable[[str], Any]:
         return self._reconcile_comment_query
     from services.orchestrator.reconcile import default_comment_sacct_querier
 
-    return default_comment_sacct_querier()
+    return default_comment_sacct_querier(_configured_slurm_bin_path())
 
 
 def _restart_reconcile_sacct_query(self) -> Callable[[str], Any]:
@@ -1603,7 +1681,18 @@ def _restart_reconcile_sacct_query(self) -> Callable[[str], Any]:
         return self._reconcile_sacct_query
     from services.orchestrator.reconcile import default_sacct_querier
 
-    return default_sacct_querier()
+    return default_sacct_querier(_configured_slurm_bin_path())
+
+
+def _configured_slurm_bin_path() -> str:
+    """Use the same configured Slurm binary directory as the real gateway."""
+
+    from services.slurm_gateway.config import SlurmGatewaySettings
+
+    try:
+        return str(SlurmGatewaySettings().slurm_bin_path or "").strip()
+    except Exception:  # noqa: BLE001 - reconcile construction remains fail-safe.
+        return ""
 
 
 def _run_retention(

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
+import stat
 from datetime import UTC, datetime
 from multiprocessing import get_context
 from pathlib import Path
@@ -32,6 +34,51 @@ from tests.test_production_scheduler import (
     _write_db_free_raw_manifest_fixture,
 )
 from workers.data_adapters.base import cycle_id_for, format_cycle_time
+
+
+@pytest.mark.parametrize("fault", ["directory_fsync", "parent_identity"])
+def test_file_reservation_durability_uncertainty_blocks_gateway_before_side_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    repository._ensure_root_unlocked()
+    gateway_calls = 0
+
+    if fault == "directory_fsync":
+        real_fsync = safe_fs.os.fsync
+
+        def fail_directory_fsync(fd: int) -> None:
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError(errno.EIO, "injected directory fsync failure")
+            real_fsync(fd)
+
+        monkeypatch.setattr(safe_fs.os, "fsync", fail_directory_fsync)
+    else:
+        real_verify = safe_fs._verify_fd_matches_path
+        real_fsync = safe_fs.os.fsync
+        directory_synced = False
+
+        def record_directory_fsync(fd: int) -> None:
+            nonlocal directory_synced
+            real_fsync(fd)
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                directory_synced = True
+
+        def fail_post_replace_parent_identity(fd: int, path: Path) -> None:
+            if directory_synced:
+                raise safe_fs.SafeFilesystemError("injected parent identity change")
+            real_verify(fd, path)
+
+        monkeypatch.setattr(safe_fs.os, "fsync", record_directory_fsync)
+        monkeypatch.setattr(safe_fs, "_verify_fd_matches_path", fail_post_replace_parent_identity)
+
+    with pytest.raises(OrchestratorError) as caught:
+        repository.reserve_pipeline_job(_pipeline_reservation_record(_dt("2026-06-28T00:00:00Z")))
+        gateway_calls += 1
+    assert caught.value.error_code == "FILE_JOURNAL_WRITE_FAILED"
+    assert gateway_calls == 0
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:

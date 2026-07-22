@@ -29,6 +29,7 @@ from packages.common.source_identity import normalize_source_id
 from services.orchestrator import chain_repository_state
 from services.orchestrator.accepted_submit_identity import (
     MAX_FORECAST_COHORT_MEMBERS,
+    AcceptedSubmitCommitResult,
     AcceptedSubmitEvidenceError,
     AcceptedSubmitTransition,
     accepted_submit_row_kind,
@@ -1127,28 +1128,131 @@ class FileOrchestrationJournalRepository:
             model_id = _optional_safe_identity(row, "model_id")
             return self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
 
+    def commit_pipeline_job_submit_attempt(
+        self,
+        idempotency_key: str,
+        *,
+        expected_submission_attempt: int,
+        slurm_job_id: str,
+        transition: AcceptedSubmitTransition,
+        array_task_id: int | None = None,
+        submitted_at: datetime | None = None,
+        started_at: datetime | None = None,
+        finished_at: datetime | None = None,
+        exit_code: int | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        log_uri: str | None = None,
+    ) -> AcceptedSubmitCommitResult:
+        """Bind and transition exactly one still-current reservation attempt.
+
+        The attempt check, reserved-state check, unbound check, Slurm id bind,
+        and complete accepted-submit evidence transition all happen under the
+        same cycle lock and in one durable journal replacement.
+        """
+
+        if not isinstance(transition, AcceptedSubmitTransition):
+            raise TypeError("transition must be AcceptedSubmitTransition")
+        if transition.submit_outcome != "accepted":
+            raise ValueError("submit-attempt commit requires an accepted transition")
+        requested_id = str(slurm_job_id)
+        if not requested_id.isdigit():
+            raise ValueError("submit-attempt commit requires a numeric Slurm master job id")
+        if (
+            transition.reconciliation_decision == "matched_bound"
+            and transition.matched_slurm_job_id != requested_id
+        ):
+            raise ValueError("matched accounting id must equal the bound Slurm job id")
+        initial = self._candidate_job_for_idempotency_unlocked(idempotency_key)
+        if initial is None:
+            return AcceptedSubmitCommitResult("missing")
+        source_id = _source_id_from_job(initial)
+        cycle_time = _cycle_time_from_job(initial)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._candidate_job_for_idempotency_unlocked(idempotency_key)
+            if existing is None:
+                return AcceptedSubmitCommitResult("missing")
+            current_id = str(existing.get("slurm_job_id") or "")
+            current_attempt = max(int(existing.get("submission_attempt") or 1), 1)
+            if current_attempt != max(int(expected_submission_attempt), 1):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            if current_id:
+                if current_id != requested_id:
+                    return AcceptedSubmitCommitResult("collision", dict(existing))
+                if (
+                    existing.get("submit_outcome") == transition.submit_outcome
+                    and existing.get("reconciliation_source") == transition.reconciliation_source
+                    and existing.get("reconciliation_decision") == transition.reconciliation_decision
+                    and existing.get("matched_slurm_job_id") == transition.matched_slurm_job_id
+                ):
+                    return AcceptedSubmitCommitResult("idempotent", dict(existing))
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            if str(existing.get("status") or "") != "reserved":
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            row = apply_accepted_submit_transition(existing, transition)
+            row.update(
+                {
+                    "slurm_job_id": requested_id,
+                    "submitted_at": _format_utc(submitted_at or _utcnow()),
+                    "started_at": _format_utc(started_at) if started_at is not None else None,
+                    "finished_at": _format_utc(finished_at) if finished_at is not None else None,
+                    "exit_code": exit_code,
+                    "error_code": error_code,
+                    "error_message": error_message,
+                    "log_uri": log_uri,
+                    "updated_at": _format_utc(_utcnow()),
+                }
+            )
+            if array_task_id is not None:
+                row["array_task_id"] = array_task_id
+            model_id = _optional_safe_identity(row, "model_id")
+            written = self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
+            return AcceptedSubmitCommitResult("applied", written)
+
     def transition_pipeline_job_submit_evidence(
         self,
         job_id: str,
         transition: AcceptedSubmitTransition,
-    ) -> dict[str, Any] | None:
+        *,
+        expected_submission_attempt: int | None = None,
+        expected_statuses: Sequence[str] | None = None,
+        require_unbound: bool = False,
+        finished_at: datetime | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> AcceptedSubmitCommitResult:
         """Atomically replace submit outcome and the complete accounting tuple."""
 
         if not isinstance(transition, AcceptedSubmitTransition):
             raise TypeError("transition must be AcceptedSubmitTransition")
         initial = self._pipeline_job_for_id_unlocked(job_id)
         if initial is None:
-            return None
+            return AcceptedSubmitCommitResult("missing")
         source_id = _source_id_from_job(initial)
         cycle_time = _cycle_time_from_job(initial)
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
             existing = self._pipeline_job_for_id_unlocked(job_id)
             if existing is None:
-                return None
+                return AcceptedSubmitCommitResult("missing")
+            if expected_submission_attempt is not None and max(
+                int(existing.get("submission_attempt") or 1), 1
+            ) != max(int(expected_submission_attempt), 1):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            if expected_statuses is not None and str(existing.get("status") or "") not in set(expected_statuses):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            if require_unbound and existing.get("slurm_job_id") not in (None, ""):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
             row = apply_accepted_submit_transition(existing, transition)
+            if finished_at is not None:
+                row["finished_at"] = _format_utc(finished_at)
+            if error_code is not None:
+                row["error_code"] = error_code
+            if error_message is not None:
+                row["error_message"] = error_message
             row["updated_at"] = _format_utc(_utcnow())
             model_id = _optional_safe_identity(row, "model_id")
-            return self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
+            written = self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
+            return AcceptedSubmitCommitResult("applied", written)
 
     def record_pipeline_job_reconciliation(
         self,
@@ -1205,7 +1309,13 @@ class FileOrchestrationJournalRepository:
             model_id = _optional_safe_identity(row, "model_id")
             return self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
 
-    def permit_pipeline_job_retry(self, job_id: str) -> int:
+    def permit_pipeline_job_retry(
+        self,
+        job_id: str,
+        *,
+        expected_submission_attempt: int | None = None,
+        expected_status: str = "reserved",
+    ) -> int:
         """Move one still-reserved cohort to retryable exactly once under its cycle lock."""
         initial = self._pipeline_job_for_id_unlocked(job_id)
         if initial is None:
@@ -1214,7 +1324,11 @@ class FileOrchestrationJournalRepository:
         cycle_time = _cycle_time_from_job(initial)
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
             existing = self._pipeline_job_for_id_unlocked(job_id)
-            if existing is None or str(existing.get("status") or "") != "reserved":
+            if existing is None or str(existing.get("status") or "") != expected_status:
+                return 0
+            if expected_submission_attempt is not None and max(
+                int(existing.get("submission_attempt") or 1), 1
+            ) != max(int(expected_submission_attempt), 1):
                 return 0
             if existing.get("slurm_job_id") not in (None, ""):
                 return 0
@@ -3399,7 +3513,12 @@ class FileOrchestrationJournalRepository:
 
     def _atomic_write_bytes_unlocked(self, path: Path, content: bytes) -> None:
         try:
-            atomic_write_bytes_no_follow(path, content, containment_root=self.root)
+            atomic_write_bytes_no_follow(
+                path,
+                content,
+                containment_root=self.root,
+                require_durable_replace=True,
+            )
         except (OSError, SafeFilesystemError) as error:
             raise OrchestratorError(
                 "FILE_JOURNAL_WRITE_FAILED",

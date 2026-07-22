@@ -41,13 +41,15 @@ def _record_submission_failure(
     error: Exception,
     *,
     pipeline_job_id: str | None = None,
+    persist_pipeline_job: bool = True,
 ) -> StageRunResult:
     pipeline_job_id = pipeline_job_id or _pipeline_job_id(context.run_id, stage.stage)
     now = _utcnow()
     message = str(redact_payload(str(error)))
     error_code = getattr(error, "error_code", None) or "SBATCH_SUBMISSION_FAILED"
-    self.repository.upsert_pipeline_job(
-        {
+    if persist_pipeline_job:
+        self.repository.upsert_pipeline_job(
+            {
             "job_id": pipeline_job_id,
             "run_id": context.run_id,
             "cycle_id": context.cycle_id,
@@ -70,8 +72,8 @@ def _record_submission_failure(
             "error_code": error_code,
             "error_message": message,
             "log_uri": None,
-        }
-    )
+            }
+        )
     self.repository.insert_pipeline_event(
         entity_type="pipeline_job",
         entity_id=pipeline_job_id,

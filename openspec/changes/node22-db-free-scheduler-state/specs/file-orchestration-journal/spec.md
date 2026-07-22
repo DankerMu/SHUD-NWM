@@ -185,6 +185,11 @@ The system SHALL preserve and recover a DB-free forecast cohort across the windo
 Slurm accepted an array but the Gateway response did not durably return, without
 creating, adopting, or cancelling an array whose exact identity is unproven.
 
+Before invoking the Gateway, every reservation write MUST use strict durable
+replacement semantics: file and parent-directory durability plus parent
+identity verification are mandatory, and an indeterminate result MUST fail
+closed rather than report a usable reservation.
+
 Persisted and emitted reconciliation evidence MUST use `submit_outcome` in
 `accepted|submit_result_ambiguous|rejected`,
 `reconciliation_source=slurm_exact_comment`, and `reconciliation_decision` in
@@ -207,6 +212,13 @@ the attempt and clear `submit_outcome`, `reconciliation_source`,
 call. Reopening the journal in that pre-Gateway window MUST NOT expose evidence
 from the prior attempt.
 
+Every submit/reconciliation transition MUST compare the durable submission
+attempt and expected state under the same cycle lock. Gateway success MUST
+atomically bind its Slurm ID and `accepted` outcome; accounting adoption MUST
+atomically bind the ID and `matched_bound` tuple. Repeating the same ID is
+idempotent, while a stale transition or different-ID collision MUST NOT mutate
+the winning row.
+
 A Gateway timeout MUST persist only the ambiguous submit outcome and MUST leave
 `reconciliation_source`, `reconciliation_decision`, and
 `matched_slurm_job_id` null until accounting has actually been queried. The
@@ -219,6 +231,8 @@ rows.
 - **THEN** the file journal durably records its deterministic cohort identity,
   ordered candidate/task member map, idempotency key, and exact Slurm comment
   before the Gateway call
+- **AND** a real file-journal test reopens and observes that reservation inside
+  the fake Gateway boundary, before the external side effect
 - **AND** a Gateway response timeout records an ambiguous non-terminal submit
   result rather than a permanent hydro or candidate failure.
 
@@ -272,6 +286,17 @@ rows.
 - **AND** an owner-scoped zero result alone cannot become
   `absence_retry_permitted`; retry requires bounded global zero-match proof.
 
+#### Scenario: Global accounting authority is proven and scale-bounded
+
+- **WHEN** scheduler preflight cannot prove that its principal sees jobs across
+  all users/accounts
+- **THEN** a successful empty `sacct --allusers` result is non-authoritative and
+  cannot permit retry
+- **AND WHEN** exact-comment discovery runs at the supported 256-member cadence
+- **THEN** it queries bounded time pages, counts an unterminated final row, and
+  aggregates at most the bounded zero/one/multiple proof without silently
+  discarding a row at the byte or row limit.
+
 #### Scenario: Ambiguous or unavailable accounting fails closed
 
 - **WHEN** exact-comment accounting returns multiple matches, a mismatched
@@ -308,6 +333,15 @@ rows.
   `SLURM_GATEWAY_UNAVAILABLE` hydro failure and resume at `state_save_qc`
 - **AND** failed or unverified tasks remain failed or reconciling without
   relabelling/recomputing successful siblings.
+
+#### Scenario: Scheduler restart evidence proves the recovery result
+
+- **WHEN** reserved or inflight restart reconciliation changes a cohort
+- **THEN** public scheduler evidence includes the bounded submit/accounting
+  tuple, matched identity, cohort restart stage, native-SHUD resubmission flag,
+  and bounded candidate/task outcomes
+- **AND** it excludes raw comments, credentials, runtime roots, and raw
+  accounting rows.
 
 #### Scenario: Recovered success preserves run and QC provenance
 
