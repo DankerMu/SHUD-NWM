@@ -1410,6 +1410,19 @@ Invariant Matrix:
   ordered member candidate/task identities, idempotency key, exact Slurm
   comment, submission attempt, reconciliation decision, and bound master job
   ID.
+- Submission-state contract: the durable reservation may temporarily have no
+  `submit_outcome` only before the Gateway result is recorded. Restart recovery
+  atomically classifies that state as `submit_result_ambiguous` before writing a
+  reconciliation decision. An explicit Gateway rejection records the normative
+  `rejected` outcome and terminalizes the affected hydro rows; neither state may
+  make the journal validator fail while handling the original failure.
+- Accounting-proof contract: an owner-scoped match identifies the bind
+  candidate but is not by itself proof of global uniqueness, and an owner-scoped
+  zero result is not authoritative global absence. Any bounded exact-comment
+  collision with a different owner/account is `identity_mismatch_blocked`;
+  binding requires one globally unique owned match, while retry eligibility
+  requires a bounded, authoritative proof that no exact-comment job exists under
+  any ownership.
 - Restart invariant: the earliest incomplete canonical stage is candidate
   state. Grouping never lowers it, mixed stages never share a cohort, and a
   `state_save_qc` cohort cannot enter native forecast.
@@ -1417,10 +1430,25 @@ Invariant Matrix:
   exact member identity; successful members clear stale transport failure and
   advance, failed members remain failed, and absent/unverified members remain
   reconciling.
+- Projection-schema invariant: every persisted projection maps by
+  `array_task_id` to exactly one canonical durable member and repeats that
+  member's candidate/run/model identity. Cohort digest and projection mapping
+  are validated on outgoing write and journal/latest/direct replay; missing or
+  malformed accepted-submit members fail closed instead of falling back to the
+  legacy reservation path.
 - Evidence invariant: every branch records bounded reconciliation source,
   matched identity or safe absence/mismatch class, decision, restart stage,
   and whether native SHUD was resubmitted; raw comments, local/shared-NFS roots,
   credentials, and unbounded accounting rows never enter public evidence.
+- Closed-enum invariant: task-accounting completeness is represented by
+  pipeline status/error/projection fields and never adds values to the six-value
+  `reconciliation_decision` contract. Reconciliation API inputs are normalized
+  to the same bounded projection allowlist before persistence.
+- Resource invariant: both exact-comment discovery and ordinary inflight
+  master/task accounting apply byte, row, and time limits before full
+  materialization. Model-less cohort truth remains in journal/direct storage
+  and is not copied into every model latest view; aggregate model-latest bytes
+  grow approximately linearly with cohort size.
 - Compatibility invariant: generic repository and non-DB-free reconcile callers
   keep their existing inputs/status behavior, while the new cohort/member fields
   are additive for file-journal DB-free execution.

@@ -24,7 +24,7 @@ import os
 import selectors
 import subprocess
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Mapping
@@ -140,22 +140,13 @@ def default_sacct_querier(slurm_bin_path: str = "") -> SacctQuerier:
             f"--jobs={slurm_job_id}",
         ]
         try:
-            result = subprocess.run(  # noqa: S603 - fixed argv, no shell.
-                command,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError) as error:
+            stdout = _bounded_sacct_stdout(command)
+        except ReconcileQueryUnavailable as error:
             LOGGER.warning("sacct query failed for %s: %s", slurm_job_id, error)
-            raise ReconcileQueryUnavailable(f"sacct query failed for {slurm_job_id}: {error}") from error
-        if result.returncode != 0:
-            LOGGER.warning("sacct returned %s for %s", result.returncode, slurm_job_id)
-            raise ReconcileQueryUnavailable(f"sacct returned {result.returncode} for {slurm_job_id}")
+            raise
         # Query succeeded: a None here means accounting has no such row
         # (confirmed-absent), not that we failed to ask.
-        return _parse_master_sacct_row(result.stdout, slurm_job_id)
+        return _parse_master_sacct_row(stdout, slurm_job_id)
 
     return _query
 
@@ -208,7 +199,10 @@ def default_comment_sacct_querier(slurm_bin_path: str = "") -> CommentSacctQueri
         # "accounting has no job for this comment" answer (confirmed-absent),
         # which is the ONLY case allowed to mark reservation_lost. A transient
         # failure never reaches here.
-        return indexed_matches_by_scope[owner_scope].get(target_comment, ())
+        return CommentAccountingResult(
+            indexed_matches_by_scope[owner_scope].get(target_comment, ()),
+            scope="owner" if any(owner_scope) else "global",
+        )
 
     return _query
 
@@ -223,11 +217,11 @@ def _bounded_sacct_stdout(command: Sequence[str]) -> str:
             stderr=subprocess.DEVNULL,
         )
     except OSError as error:
-        raise ReconcileQueryUnavailable("sacct comment query could not start") from error
+        raise ReconcileQueryUnavailable("sacct query could not start") from error
     stdout = process.stdout
     if stdout is None:
         _terminate_and_reap(process)
-        raise ReconcileQueryUnavailable("sacct comment query has no stdout")
+        raise ReconcileQueryUnavailable("sacct query has no stdout")
     output = bytearray()
     row_count = 0
     started = time.monotonic()
@@ -237,7 +231,7 @@ def _bounded_sacct_stdout(command: Sequence[str]) -> str:
         while True:
             remaining = COMMENT_SACCT_TIMEOUT_SECONDS - (time.monotonic() - started)
             if remaining <= 0:
-                raise ReconcileQueryUnavailable("sacct comment query timed out")
+                raise ReconcileQueryUnavailable("sacct query timed out")
             events = selector.select(timeout=min(remaining, 0.25))
             if not events:
                 if process.poll() is not None:
@@ -249,16 +243,16 @@ def _bounded_sacct_stdout(command: Sequence[str]) -> str:
             output.extend(chunk)
             row_count += chunk.count(b"\n")
             if len(output) > MAX_COMMENT_SACCT_BYTES or row_count > MAX_COMMENT_SACCT_ROWS:
-                raise ReconcileQueryUnavailable("sacct comment query exceeded bounded output")
+                raise ReconcileQueryUnavailable("sacct query exceeded bounded output")
         remaining = COMMENT_SACCT_TIMEOUT_SECONDS - (time.monotonic() - started)
         if remaining <= 0:
-            raise ReconcileQueryUnavailable("sacct comment query timed out")
+            raise ReconcileQueryUnavailable("sacct query timed out")
         return_code = process.wait(timeout=remaining)
         if return_code != 0:
-            raise ReconcileQueryUnavailable(f"sacct comment query returned {return_code}")
+            raise ReconcileQueryUnavailable(f"sacct query returned {return_code}")
         return bytes(output).decode("utf-8", errors="replace")
     except (OSError, subprocess.SubprocessError) as error:
-        raise ReconcileQueryUnavailable("sacct comment query failed") from error
+        raise ReconcileQueryUnavailable("sacct query failed") from error
     finally:
         selector.close()
         if process.poll() is None:
@@ -783,9 +777,7 @@ def reconcile_inflight_jobs(
                     complete=accounting_complete,
                     master_status=slurm_status.value,
                     master_error_code=error_code,
-                    reconciliation_decision=(
-                        "terminal_accounting_complete" if accounting_complete else "task_accounting_incomplete"
-                    ),
+                    reconciliation_decision="matched_bound",
                 )
                 write_count = int(write_result.get("total") or 0)
                 outcomes.append(
@@ -939,7 +931,30 @@ def _file_cohort_task_projections(job: Any, record: SacctRecord) -> tuple[list[d
 # A comment querier maps an idempotency_key to the accounting record of the job
 # sbatch accepted under that ``--comment`` (or None when accounting has no such
 # job). Injectable so tests need no real cluster.
-CommentSacctQuerier = Callable[..., "SacctRecord | Sequence[SacctRecord] | None"]
+@dataclass(frozen=True)
+class CommentAccountingResult(Sequence[SacctRecord]):
+    """Explicit scope carried by the default exact-comment adapter."""
+
+    records: tuple[SacctRecord, ...]
+    scope: str  # ``owner`` or authoritative ``global``.
+
+    def __getitem__(self, index: int) -> SacctRecord:
+        return self.records[index]
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+    def __iter__(self) -> Iterator[SacctRecord]:
+        return iter(self.records)
+
+
+@dataclass(frozen=True)
+class _CommentAccountingProof:
+    kind: str
+    records: tuple[SacctRecord, ...] = ()
+
+
+CommentSacctQuerier = Callable[..., "CommentAccountingResult | SacctRecord | Sequence[SacctRecord] | None"]
 
 
 @dataclass(frozen=True)
@@ -1036,10 +1051,19 @@ def reconcile_reserved_unbound_jobs(
             )
             continue
 
+        if accepted_submit_reconcile and getattr(job, "submit_outcome", None) is None:
+            recorder = getattr(store, "record_pipeline_job_reconciliation", None)
+            if callable(recorder):
+                recorder(
+                    job.job_id,
+                    submit_outcome="submit_result_ambiguous",
+                    status=str(job.status),
+                )
+
         try:
             expected_user = str(getattr(job, "expected_slurm_user", None) or "")
             expected_account = str(getattr(job, "expected_slurm_account", None) or "")
-            record = _query_comment_accounting(
+            proof = _query_comment_accounting_proof(
                 comment_query,
                 str(idempotency_key),
                 expected_user=expected_user if accepted_submit_reconcile else "",
@@ -1073,12 +1097,7 @@ def reconcile_reserved_unbound_jobs(
                 )
             )
             continue
-        records = _comment_query_records(
-            record,
-            expected_user=expected_user if accepted_submit_reconcile else "",
-            expected_account=expected_account if accepted_submit_reconcile else "",
-        )
-        if accepted_submit_reconcile and len(records) > 1:
+        if accepted_submit_reconcile and proof.kind == "ambiguous":
             write_count = _record_file_reconciliation(store, job.job_id, "multiple_matches_blocked")
             outcomes.append(
                 ReservationReconcileOutcome(
@@ -1088,13 +1107,33 @@ def reconcile_reserved_unbound_jobs(
                     status=str(job.status),
                     reconciliation_source="slurm_exact_comment",
                     reconciliation_decision="multiple_matches_blocked",
-                    match_count=min(len(records), MAX_EXACT_COMMENT_MATCHES + 1),
+                    match_count=min(len(proof.records), MAX_EXACT_COMMENT_MATCHES + 1),
                     durable_write_kind="pipeline_job_reconciliation" if write_count else None,
                     durable_write_count=write_count,
                 )
             )
             continue
-        record = records[0] if records else None
+        if accepted_submit_reconcile and proof.kind == "foreign_collision":
+            write_count = _record_file_reconciliation(store, job.job_id, "identity_mismatch_blocked")
+            outcomes.append(
+                ReservationReconcileOutcome(
+                    job_id=job.job_id,
+                    idempotency_key=str(idempotency_key),
+                    action="identity_mismatch_blocked",
+                    status=str(job.status),
+                    reconciliation_source="slurm_exact_comment",
+                    reconciliation_decision="identity_mismatch_blocked",
+                    match_count=min(len(proof.records), MAX_EXACT_COMMENT_MATCHES + 1),
+                    durable_write_kind="pipeline_job_reconciliation" if write_count else None,
+                    durable_write_count=write_count,
+                )
+            )
+            continue
+        record = (
+            proof.records[0]
+            if proof.records and (proof.kind == "owned_match" or not accepted_submit_reconcile)
+            else None
+        )
         if (
             accepted_submit_reconcile
             and record is not None
@@ -1237,7 +1276,7 @@ def reconcile_reserved_unbound_jobs(
 
 
 def _comment_query_records(
-    value: SacctRecord | Sequence[SacctRecord] | None,
+    value: CommentAccountingResult | SacctRecord | Sequence[SacctRecord] | None,
     *,
     expected_user: str = "",
     expected_account: str = "",
@@ -1255,6 +1294,135 @@ def _comment_query_records(
     return tuple(item for _, item in zip(range(MAX_EXACT_COMMENT_MATCHES + 1), owned, strict=False))
 
 
+def _bounded_comment_records(
+    value: CommentAccountingResult | SacctRecord | Sequence[SacctRecord] | None,
+) -> tuple[SacctRecord, ...]:
+    if value is None:
+        return ()
+    values = (value,) if isinstance(value, SacctRecord) else value
+    return tuple(
+        item
+        for _, item in zip(
+            range(MAX_EXACT_COMMENT_MATCHES + 1),
+            (entry for entry in values if isinstance(entry, SacctRecord)),
+            strict=False,
+        )
+    )
+
+
+def _classify_global_comment_records(
+    records: tuple[SacctRecord, ...],
+    *,
+    expected_user: str,
+    expected_account: str,
+) -> _CommentAccountingProof:
+    if not records:
+        return _CommentAccountingProof("global_absence")
+    owned = tuple(
+        record
+        for record in records
+        if (not expected_user or record.user == expected_user)
+        and (not expected_account or record.account == expected_account)
+    )
+    foreign = tuple(record for record in records if record not in owned)
+    if foreign:
+        return _CommentAccountingProof("foreign_collision", records)
+    if len(owned) > 1:
+        return _CommentAccountingProof("ambiguous", owned)
+    if owned:
+        return _CommentAccountingProof("owned_match", owned)
+    return _CommentAccountingProof("global_absence")
+
+
+def _query_comment_accounting_proof(
+    comment_query: CommentSacctQuerier,
+    idempotency_key: str,
+    *,
+    expected_user: str,
+    expected_account: str,
+) -> _CommentAccountingProof:
+    """Obtain an owner match or an authoritative global exact-comment proof."""
+
+    supports_scope = _comment_query_accepts_scope(comment_query)
+    if not supports_scope:
+        # A legacy one-argument fake represents a global collection. Never
+        # owner-filter it into a false zero-match proof.
+        global_value = comment_query(idempotency_key)
+        return _classify_global_comment_records(
+            _bounded_comment_records(global_value),
+            expected_user=expected_user,
+            expected_account=expected_account,
+        )
+
+    owner_value = comment_query(
+        idempotency_key,
+        expected_user=expected_user or None,
+        expected_account=expected_account or None,
+    )
+    owner_records = _bounded_comment_records(owner_value)
+    if isinstance(owner_value, CommentAccountingResult) and owner_value.scope == "global":
+        return _classify_global_comment_records(
+            owner_records,
+            expected_user=expected_user,
+            expected_account=expected_account,
+        )
+    owned = _comment_query_records(
+        owner_records,
+        expected_user=expected_user,
+        expected_account=expected_account,
+    )
+    if len(owned) > 1:
+        return _CommentAccountingProof("ambiguous", owned)
+    if owner_records:
+        if not owned:
+            return _CommentAccountingProof("foreign_collision", owner_records)
+        owner_candidate = owned[0]
+    else:
+        owner_candidate = None
+
+    # Neither owner-scoped zero nor one owner candidate proves global identity.
+    # A bounded all-ownership view must prove either one identical owned master
+    # or zero exact-comment rows before bind/retry can proceed.
+    global_value = comment_query(
+        idempotency_key,
+        expected_user=None,
+        expected_account=None,
+    )
+    if isinstance(global_value, CommentAccountingResult) and global_value.scope != "global":
+        raise ReconcileQueryUnavailable("exact-comment adapter did not provide global proof")
+    global_proof = _classify_global_comment_records(
+        _bounded_comment_records(global_value),
+        expected_user=expected_user,
+        expected_account=expected_account,
+    )
+    if owner_candidate is not None and global_proof.kind == "owned_match":
+        global_candidate = global_proof.records[0]
+        if (
+            global_candidate.slurm_job_id != owner_candidate.slurm_job_id
+            or global_candidate.user != owner_candidate.user
+            or global_candidate.account != owner_candidate.account
+            or global_candidate.comment != owner_candidate.comment
+        ):
+            return _CommentAccountingProof(
+                "foreign_collision", (owner_candidate, global_candidate)
+            )
+    elif owner_candidate is not None and global_proof.kind == "global_absence":
+        return _CommentAccountingProof("foreign_collision", (owner_candidate,))
+    return global_proof
+
+
+def _comment_query_accepts_scope(comment_query: CommentSacctQuerier) -> bool:
+    try:
+        parameters = tuple(inspect.signature(comment_query).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    parameter_names = {parameter.name for parameter in parameters}
+    return any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters) or {
+        "expected_user",
+        "expected_account",
+    }.issubset(parameter_names)
+
+
 def _query_comment_accounting(
     comment_query: CommentSacctQuerier,
     idempotency_key: str,
@@ -1262,18 +1430,9 @@ def _query_comment_accounting(
     expected_user: str,
     expected_account: str,
 ) -> SacctRecord | Sequence[SacctRecord] | None:
-    """Pass ownership scope when supported while retaining legacy adapters."""
+    """Compatibility wrapper for direct adapter callers."""
 
-    try:
-        parameters = tuple(inspect.signature(comment_query).parameters.values())
-    except (TypeError, ValueError):
-        parameters = ()
-    parameter_names = {parameter.name for parameter in parameters}
-    accepts_scope = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters) or {
-        "expected_user",
-        "expected_account",
-    }.issubset(parameter_names)
-    if accepts_scope:
+    if _comment_query_accepts_scope(comment_query):
         return comment_query(
             idempotency_key,
             expected_user=expected_user or None,
@@ -1330,9 +1489,10 @@ def _reserved_record_identity_matches(store: Any, record: SacctRecord, job: Any,
 
 def _accepted_submit_reconcile_job(store: Any, job: Any) -> bool:
     identity = vars(job) if hasattr(job, "__dict__") else {}
+    pre_outcome_reservation = identity.get("submit_outcome") is None
     return bool(
         getattr(store, "supports_accepted_submit_reconcile", False)
         and _is_forecast_cohort_job(job)
         and forecast_cohort_identity_is_valid(identity)
-        and _file_cohort_runtime_identity_matches(store, identity)
+        and (pre_outcome_reservation or _file_cohort_runtime_identity_matches(store, identity))
     )

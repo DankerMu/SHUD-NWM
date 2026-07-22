@@ -8273,6 +8273,46 @@ def test_file_journal_forecast_timeout_stays_reconciling_with_durable_18_member_
     assert client.cancelled_jobs == []
 
 
+def test_file_journal_forecast_explicit_rejection_terminalizes_without_secondary_error(
+    tmp_path: Path,
+) -> None:
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    class _RejectedClient(FakeCycleSlurmClient):
+        def submit_job_array(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("gateway rejected submission")
+
+    cycle = "2026050100"
+    basins = _basins(2)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_{cycle}_model_{index}",
+                "candidate_id": (
+                    f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic"
+                ),
+                "orchestration_run_id": f"cycle_gfs_{cycle}_forecast_cohort_fixture",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    orchestrator = _orchestrator(tmp_path, repository, _RejectedClient())
+
+    result = orchestrator.orchestrate_cycle("gfs", cycle, basins)
+
+    assert result.status == "failed"
+    cohort = repository.query_pipeline_jobs_by_cycle(f"gfs_{cycle}")[0]
+    assert cohort["status"] == "submission_failed"
+    assert cohort["submit_outcome"] == "rejected"
+    assert all(
+        (repository._hydro_run_for(str(basin["run_id"])) or {}).get("status") == "failed"
+        for basin in basins
+    )
+
+
 @pytest.mark.parametrize("source_id", ["gfs", "IFS"])
 def test_file_journal_post_window_concurrent_public_cycles_submit_one_retry(
     tmp_path: Path,

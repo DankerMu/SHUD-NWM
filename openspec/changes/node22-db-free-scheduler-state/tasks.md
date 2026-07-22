@@ -420,12 +420,20 @@ Scenario evidence rows for section 5:
   window and permits one idempotent attempt afterward; multiple, mismatch, and
   accounting-unavailable outcomes do not bind/cancel/resubmit and emit distinct
   bounded evidence using the fixture's fixed `reconciliation_decision` values.
+  A pre-outcome reservation interruption is first classified ambiguous; an
+  owner/account collision remains mismatch-blocked, and owner-scoped zero alone
+  cannot prove authoritative absence. Every branch is reopened from disk and
+  proves the persisted tuple equals the emitted tuple.
 
 - [x] 9.3 Project terminal array-task accounting to candidate-scoped
   pipeline/hydro state.
   Evidence floor: exact successful tasks clear only their stale
   `SLURM_GATEWAY_UNAVAILABLE` state and resume at `state_save_qc`; failed tasks
-  remain failed/retry-eligible; successful siblings are not recomputed.
+  remain failed/retry-eligible; successful siblings are not recomputed. The
+  canonical digest and every projection-to-member identity are validated on all
+  write/replay surfaces; malformed members fail closed, projection inputs are
+  bounded before persistence, and task-accounting state does not extend the
+  closed reconciliation-decision enum.
 
 - [x] 9.4 Preserve canonical `restart_stage` through scheduler grouping,
   deterministic cohort identity, basin manifest/run context, and stage
@@ -446,7 +454,10 @@ Scenario evidence rows for section 5:
   are redacted, generic and non-DB-free reconcile callers remain compatible,
   and recovered success preserves initial-state/run-manifest/checkpoint/QC
   lineage. Non-forecast array failures and stale cohort-like rows are also
-  proven unable to create forecast or `state_save_qc` projections.
+  proven unable to create forecast or `state_save_qc` projections. Ordinary
+  inflight task accounting is byte/row/time bounded before materialization, and
+  aggregate per-model latest output grows approximately linearly for 18 and 256
+  members with warm-cache/reopen parity.
 
 - [ ] 9.6 Complete local, CI, and node-22 live verification.
   Evidence floor: the issue-targeted pytest command, `uv run ruff check .`, and

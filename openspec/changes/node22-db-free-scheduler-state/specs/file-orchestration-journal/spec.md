@@ -194,6 +194,13 @@ proven. Candidate projection MUST use `array_task_id`, `array_task_outcome` in
 `succeeded|failed|unverified`, `restart_stage`, and
 `native_shud_resubmitted`.
 
+A reservation MAY temporarily omit `submit_outcome` only between its durable
+pre-submit write and durable Gateway-result classification. Restart recovery
+MUST atomically classify that state as `submit_result_ambiguous` before it
+persists any reconciliation decision. Task-accounting completeness MUST use
+pipeline status/error/projection fields and MUST NOT add values to the closed
+`reconciliation_decision` enum above.
+
 #### Scenario: Forecast cohort reservation precedes the Gateway call
 
 - **WHEN** scheduler submits a source/cycle/restart-stage forecast cohort
@@ -202,6 +209,17 @@ proven. Candidate projection MUST use `array_task_id`, `array_task_outcome` in
   before the Gateway call
 - **AND** a Gateway response timeout records an ambiguous non-terminal submit
   result rather than a permanent hydro or candidate failure.
+
+#### Scenario: Pre-outcome interruption and explicit rejection remain recoverable
+
+- **WHEN** a process restarts after the reservation write but before the Gateway
+  result was durably classified
+- **THEN** reconciliation first records `submit_result_ambiguous` and continues
+  exact-comment recovery, whether runtime member rows already exist or not
+- **AND WHEN** the Gateway explicitly rejects a forecast submission
+- **THEN** the journal accepts `submit_outcome=rejected`, terminalizes affected
+  hydro rows, and returns the ordinary submission-failure result without a
+  secondary evidence-validation failure.
 
 #### Scenario: Unique exact-comment match binds the accepted array
 
@@ -222,6 +240,15 @@ proven. Candidate projection MUST use `array_task_id`, `array_task_outcome` in
 - **THEN** the file journal permits exactly one idempotent submission attempt,
   including under concurrent scheduler passes.
 
+#### Scenario: Ownership mismatch is not authoritative absence
+
+- **WHEN** bounded exact-comment discovery finds a job owned by a different
+  Slurm user or account
+- **THEN** reconciliation records `identity_mismatch_blocked` and does not bind,
+  cancel, or submit another array
+- **AND** an owner-scoped zero result alone cannot become
+  `absence_retry_permitted`; retry requires bounded global zero-match proof.
+
 #### Scenario: Ambiguous or unavailable accounting fails closed
 
 - **WHEN** exact-comment accounting returns multiple matches, a mismatched
@@ -239,6 +266,13 @@ proven. Candidate projection MUST use `array_task_id`, `array_task_outcome` in
   evidence and no matched Slurm identity
 - **AND** public evidence omits raw comments, credentials, local/shared-NFS
   roots, and unbounded accounting payloads.
+
+#### Scenario: Inflight task accounting is bounded before materialization
+
+- **WHEN** master/task accounting exceeds its byte, row, or time limit
+- **THEN** reconciliation treats accounting as unavailable/incomplete and keeps
+  the cohort fail closed
+- **AND** the control process does not capture or split an unbounded output.
 
 #### Scenario: Terminal array tasks project to exact candidates
 

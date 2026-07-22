@@ -134,6 +134,7 @@ def _file_cohort_repository(
     expected_account: str | None = None,
     corrupt_digest: bool = False,
     with_runtime_rows: bool = True,
+    submit_outcome: str | None = "submit_result_ambiguous",
 ) -> Any:
     from services.orchestrator.accepted_submit_identity import forecast_cohort_digest
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
@@ -150,7 +151,7 @@ def _file_cohort_repository(
             "stage": "forecast",
             "idempotency_key": "cycle_gfs_2026071200_forecast_fixture:forecast",
             "slurm_comment": "nhms_idem:cycle_gfs_2026071200_forecast_fixture:forecast",
-            "submit_outcome": "submit_result_ambiguous",
+            "submit_outcome": submit_outcome,
             "restart_stage": "forecast",
             "cohort_members": [
                 {
@@ -213,6 +214,7 @@ def _append_cohort_placeholders(repository: Any, count: int = 18) -> None:
 def test_file_cohort_exact_comment_reconcile_distinguishes_all_fail_closed_branches(
     tmp_path: Any,
 ) -> None:
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
     from services.orchestrator.reconcile import (
         ReconcileQueryUnavailable,
         SacctRecord,
@@ -230,6 +232,24 @@ def test_file_cohort_exact_comment_reconcile_distinguishes_all_fail_closed_branc
         pipeline_job_id="job_cycle_gfs_2026071200_forecast_fixture_forecast",
     )
 
+    def assert_reopen_tuple(repository: Any, outcome: Any, *, submit_outcome: str) -> None:
+        persisted = repository.get_pipeline_job(outcome.job_id)
+        reopened = FileOrchestrationJournalRepository(repository.root).get_pipeline_job(outcome.job_id)
+        expected = (
+            submit_outcome,
+            outcome.reconciliation_source,
+            outcome.reconciliation_decision,
+            outcome.matched_slurm_job_id,
+        )
+        fields = (
+            "submit_outcome",
+            "reconciliation_source",
+            "reconciliation_decision",
+            "matched_slurm_job_id",
+        )
+        assert tuple(persisted[field] for field in fields) == expected
+        assert tuple(reopened[field] for field in fields) == expected
+
     unique = _file_cohort_repository(tmp_path / "unique")
     outcome = reconcile_reserved_unbound_jobs(unique, comment_query=lambda _key: exact)[0]
     assert (outcome.reconciliation_source, outcome.reconciliation_decision, outcome.matched_slurm_job_id) == (
@@ -238,6 +258,7 @@ def test_file_cohort_exact_comment_reconcile_distinguishes_all_fail_closed_branc
         "17667",
     )
     assert unique.get_pipeline_job(outcome.job_id)["slurm_job_id"] == "17667"
+    assert_reopen_tuple(unique, outcome, submit_outcome="accepted")
 
     multiple = _file_cohort_repository(tmp_path / "multiple")
     outcome = reconcile_reserved_unbound_jobs(
@@ -254,6 +275,7 @@ def test_file_cohort_exact_comment_reconcile_distinguishes_all_fail_closed_branc
     )
     assert outcome.match_count == 3
     assert multiple.get_pipeline_job(outcome.job_id)["slurm_job_id"] is None
+    assert_reopen_tuple(multiple, outcome, submit_outcome="submit_result_ambiguous")
 
     mismatch = _file_cohort_repository(tmp_path / "mismatch")
     wrong = SacctRecord(**{**exact.__dict__, "stage": "forcing"})
@@ -264,6 +286,7 @@ def test_file_cohort_exact_comment_reconcile_distinguishes_all_fail_closed_branc
         None,
     )
     assert mismatch.get_pipeline_job(outcome.job_id)["slurm_job_id"] is None
+    assert_reopen_tuple(mismatch, outcome, submit_outcome="submit_result_ambiguous")
 
     unavailable = _file_cohort_repository(tmp_path / "unavailable")
 
@@ -280,6 +303,7 @@ def test_file_cohort_exact_comment_reconcile_distinguishes_all_fail_closed_branc
     assert persisted["reconciliation_decision"] == "accounting_unavailable"
     assert persisted["matched_slurm_job_id"] is None
     assert "/private/runtime" not in str(persisted)
+    assert_reopen_tuple(unavailable, outcome, submit_outcome="submit_result_ambiguous")
 
     wrong_comment = _file_cohort_repository(tmp_path / "wrong-comment")
     wrong = SacctRecord(**{**exact.__dict__, "comment": "nhms_idem:another-reservation"})
@@ -290,6 +314,7 @@ def test_file_cohort_exact_comment_reconcile_distinguishes_all_fail_closed_branc
         None,
     )
     assert wrong_comment.get_pipeline_job(outcome.job_id)["slurm_job_id"] is None
+    assert_reopen_tuple(wrong_comment, outcome, submit_outcome="submit_result_ambiguous")
 
     from datetime import timedelta
 
@@ -305,6 +330,7 @@ def test_file_cohort_exact_comment_reconcile_distinguishes_all_fail_closed_branc
         "absence_deferred",
         None,
     )
+    assert_reopen_tuple(deferred, outcome, submit_outcome="submit_result_ambiguous")
 
     expired = _file_cohort_repository(tmp_path / "expired", created_at=started_at)
     outcome = reconcile_reserved_unbound_jobs(
@@ -316,6 +342,184 @@ def test_file_cohort_exact_comment_reconcile_distinguishes_all_fail_closed_branc
         "slurm_exact_comment",
         "absence_retry_permitted",
         None,
+    )
+    assert_reopen_tuple(expired, outcome, submit_outcome="submit_result_ambiguous")
+
+
+@pytest.mark.parametrize("with_runtime_rows", [False, True])
+def test_file_cohort_pre_outcome_restart_classifies_ambiguous_before_decision(
+    tmp_path: Any,
+    with_runtime_rows: bool,
+) -> None:
+    from datetime import timedelta
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from services.orchestrator.reconcile import reconcile_reserved_unbound_jobs
+
+    started_at = datetime(2026, 7, 12, tzinfo=UTC)
+    repository = _file_cohort_repository(
+        tmp_path,
+        created_at=started_at,
+        member_count=2,
+        submit_outcome=None,
+        with_runtime_rows=with_runtime_rows,
+    )
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+
+    outcome = reconcile_reserved_unbound_jobs(
+        repository,
+        comment_query=lambda _key: None,
+        now=lambda: started_at + timedelta(seconds=1),
+    )[0]
+
+    assert outcome.reconciliation_decision == "absence_deferred"
+    persisted = repository.get_pipeline_job(job_id)
+    assert persisted["submit_outcome"] == "submit_result_ambiguous"
+    assert persisted["reconciliation_decision"] == "absence_deferred"
+    reopened = FileOrchestrationJournalRepository(repository.root).get_pipeline_job(job_id)
+    assert reopened == persisted
+
+
+def test_file_cohort_accounting_proof_separates_owner_and_global_scope(tmp_path: Any) -> None:
+    from datetime import timedelta
+
+    from services.orchestrator.reconcile import (
+        ReconcileQueryUnavailable,
+        SacctRecord,
+        reconcile_reserved_unbound_jobs,
+    )
+
+    started_at = datetime(2026, 7, 12, tzinfo=UTC)
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    owned = SacctRecord(
+        "17667",
+        "RUNNING",
+        "nhms_forecast",
+        comment=f"nhms_idem:{key}",
+        user="scheduler",
+        account="account",
+    )
+    foreign = SacctRecord(
+        "17668",
+        "RUNNING",
+        "nhms_forecast",
+        comment=f"nhms_idem:{key}",
+        user="foreign",
+        account="other",
+    )
+
+    repository = _file_cohort_repository(
+        tmp_path / "owner-match",
+        created_at=started_at,
+        expected_user="scheduler",
+        expected_account="account",
+    )
+    calls: list[tuple[str | None, str | None]] = []
+
+    def owner_match(
+        _key: str,
+        *,
+        expected_user: str | None = None,
+        expected_account: str | None = None,
+    ) -> list[Any]:
+        calls.append((expected_user, expected_account))
+        return [owned] if expected_user else [owned, foreign]
+
+    assert (
+        reconcile_reserved_unbound_jobs(repository, comment_query=owner_match)[0].action
+        == "identity_mismatch_blocked"
+    )
+    assert calls == [("scheduler", "account"), (None, None)]
+
+    repository = _file_cohort_repository(
+        tmp_path / "globally-unique-owner",
+        created_at=started_at,
+        expected_user="scheduler",
+        expected_account="account",
+    )
+    calls = []
+
+    def globally_unique_owner(
+        _key: str,
+        *,
+        expected_user: str | None = None,
+        expected_account: str | None = None,
+    ) -> list[Any]:
+        calls.append((expected_user, expected_account))
+        return [owned]
+
+    assert (
+        reconcile_reserved_unbound_jobs(repository, comment_query=globally_unique_owner)[0].action
+        == "bound"
+    )
+    assert calls == [("scheduler", "account"), (None, None)]
+
+    repository = _file_cohort_repository(
+        tmp_path / "foreign-only",
+        created_at=started_at,
+        expected_user="scheduler",
+        expected_account="account",
+    )
+    outcome = reconcile_reserved_unbound_jobs(repository, comment_query=lambda _key: [foreign])[0]
+    assert outcome.action == "identity_mismatch_blocked"
+
+    repository = _file_cohort_repository(
+        tmp_path / "two-owned",
+        created_at=started_at,
+        expected_user="scheduler",
+        expected_account="account",
+    )
+    second_owned = SacctRecord(**{**owned.__dict__, "slurm_job_id": "17669"})
+    assert (
+        reconcile_reserved_unbound_jobs(repository, comment_query=lambda _key: [owned, second_owned])[0].action
+        == "multiple_matches_blocked"
+    )
+
+    repository = _file_cohort_repository(
+        tmp_path / "global-zero",
+        created_at=started_at,
+        expected_user="scheduler",
+        expected_account="account",
+    )
+    scopes: list[tuple[str | None, str | None]] = []
+
+    def global_zero(
+        _key: str,
+        *,
+        expected_user: str | None = None,
+        expected_account: str | None = None,
+    ) -> list[Any]:
+        scopes.append((expected_user, expected_account))
+        return []
+
+    outcome = reconcile_reserved_unbound_jobs(
+        repository,
+        comment_query=global_zero,
+        now=lambda: started_at + timedelta(seconds=121),
+    )[0]
+    assert outcome.action == "absence_retry_permitted"
+    assert scopes == [("scheduler", "account"), (None, None)]
+
+    repository = _file_cohort_repository(
+        tmp_path / "global-unavailable",
+        created_at=started_at,
+        expected_user="scheduler",
+        expected_account="account",
+    )
+
+    def global_unavailable(
+        _key: str,
+        *,
+        expected_user: str | None = None,
+        expected_account: str | None = None,
+    ) -> list[Any]:
+        if expected_user:
+            return [owned]
+        raise ReconcileQueryUnavailable("global accounting unavailable")
+
+    assert (
+        reconcile_reserved_unbound_jobs(repository, comment_query=global_unavailable)[0].action
+        == "query_unavailable"
     )
 
 
@@ -348,6 +552,42 @@ def test_file_cohort_authoritative_absence_allows_one_atomic_retry(tmp_path: Any
         repository._hydro_run_for(f"fcst_gfs_2026071200_model_{index}")["status"] == "failed"
         for index in range(18)
     )
+
+
+@pytest.mark.parametrize(
+    "decision",
+    [
+        "matched_bound",
+        "absence_deferred",
+        "absence_retry_permitted",
+        "multiple_matches_blocked",
+        "identity_mismatch_blocked",
+        "accounting_unavailable",
+    ],
+)
+def test_file_cohort_reconciliation_recorder_contract(tmp_path: Any, decision: str) -> None:
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    repository = _file_cohort_repository(tmp_path / decision, member_count=2)
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    matched = "17667" if decision == "matched_bound" else None
+
+    emitted = repository.record_pipeline_job_reconciliation(
+        job_id,
+        submit_outcome="accepted" if decision == "matched_bound" else "submit_result_ambiguous",
+        reconciliation_decision=decision,
+        matched_slurm_job_id=matched,
+    )
+    reopened = FileOrchestrationJournalRepository(repository.root).get_pipeline_job(job_id)
+
+    assert emitted is not None
+    fields = (
+        "submit_outcome",
+        "reconciliation_source",
+        "reconciliation_decision",
+        "matched_slurm_job_id",
+    )
+    assert tuple(emitted[field] for field in fields) == tuple(reopened[field] for field in fields)
 
 
 def test_file_cohort_absence_uses_immutable_attempt_anchor_and_configured_window(
@@ -568,22 +808,10 @@ def test_file_cohort_18_member_partial_then_complete_is_monotonic_and_idempotent
 
 
 def test_file_cohort_corrupt_digest_blocks_initial_bind(tmp_path: Any) -> None:
-    from services.orchestrator.reconcile import SacctRecord, reconcile_reserved_unbound_jobs
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
 
-    repository = _file_cohort_repository(tmp_path, corrupt_digest=True)
-    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
-    outcome = reconcile_reserved_unbound_jobs(
-        repository,
-        comment_query=lambda _key: SacctRecord(
-            "17667",
-            "RUNNING",
-            "nhms_forecast",
-            comment=f"nhms_idem:{key}",
-        ),
-    )[0]
-
-    assert outcome.action == "identity_mismatch_blocked"
-    assert repository.get_pipeline_job(outcome.job_id)["slurm_job_id"] is None
+    with pytest.raises(FileOrchestrationJournalError, match="file_journal_evidence_invariant_invalid"):
+        _file_cohort_repository(tmp_path, corrupt_digest=True)
 
 
 @pytest.mark.parametrize(
@@ -668,6 +896,12 @@ def test_file_cohort_runtime_manifest_identity_blocks_joint_member_and_digest_mu
         for index, member in enumerate(members):
             member["array_task_id"] = index
     identity["cohort_digest"] = forecast_cohort_digest(identity)
+    if mutation in {"candidate_cycle", "scenario"}:
+        from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
+
+        with pytest.raises(FileOrchestrationJournalError, match="file_journal_evidence_invariant_invalid"):
+            repository.upsert_pipeline_job(identity)
+        return
     repository.upsert_pipeline_job(identity)
 
     before_hydro = [repository._hydro_run_for(f"fcst_gfs_2026071200_model_{index}") for index in range(2)]
@@ -782,7 +1016,11 @@ def test_accepted_submit_evidence_validator_fails_closed(mutator: Any, field: st
     assert error.value.field == field
 
 
-def test_accepted_submit_evidence_validator_guards_all_file_surfaces(tmp_path: Any) -> None:
+@pytest.mark.parametrize("corruption", ["outcome", "digest", "projection_member", "master_model_id"])
+def test_accepted_submit_evidence_validator_guards_all_file_surfaces(
+    tmp_path: Any,
+    corruption: str,
+) -> None:
     from services.orchestrator.file_orchestration_journal import (
         FileOrchestrationJournalError,
         _CycleRows,
@@ -792,7 +1030,25 @@ def test_accepted_submit_evidence_validator_guards_all_file_surfaces(tmp_path: A
     job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
     direct_path = repository.root / "pipeline-jobs" / f"{job_id}.json"
     bad_record = json.loads(direct_path.read_text(encoding="utf-8"))
-    bad_record["payload"]["submit_outcome"] = "invalid"
+    if corruption == "outcome":
+        bad_record["payload"]["submit_outcome"] = "invalid"
+    elif corruption == "digest":
+        bad_record["payload"]["cohort_digest"] = "0" * 64
+    elif corruption == "projection_member":
+        member = bad_record["payload"]["cohort_members"][0]
+        bad_record["payload"]["candidate_projections"] = [
+            {
+                "candidate_id": "foreign-candidate",
+                "run_id": member["run_id"],
+                "model_id": member["model_id"],
+                "array_task_id": 0,
+                "array_task_outcome": "succeeded",
+                "restart_stage": "state_save_qc",
+                "native_shud_resubmitted": False,
+            }
+        ]
+    else:
+        bad_record["payload"]["model_id"] = "model_0"
     cycle_time = datetime(2026, 7, 12, tzinfo=UTC)
 
     with pytest.raises(FileOrchestrationJournalError):
@@ -824,6 +1080,67 @@ def test_accepted_submit_evidence_validator_guards_all_file_surfaces(tmp_path: A
             cycle_time=cycle_time,
             expected_model_id="model_0",
         )
+
+
+def test_master_model_id_corruption_blocks_query_instead_of_becoming_candidate(tmp_path: Any) -> None:
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    repository = _file_cohort_repository(tmp_path, member_count=2)
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    journal_path = repository.root / "journal" / "gfs" / "2026071200.jsonl"
+    records = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
+    for record in records:
+        if record.get("record_type") == "pipeline_job" and record["payload"].get("job_id") == job_id:
+            record["payload"]["model_id"] = "model_0"
+    journal_path.write_text(
+        "".join(f"{json.dumps(record, sort_keys=True)}\n" for record in records),
+        encoding="utf-8",
+    )
+    direct_path = repository.root / "pipeline-jobs" / f"{job_id}.json"
+    direct = json.loads(direct_path.read_text(encoding="utf-8"))
+    direct["payload"]["model_id"] = "model_0"
+    direct_path.write_text(json.dumps(direct), encoding="utf-8")
+
+    blocked = FileOrchestrationJournalRepository(repository.root).get_pipeline_job(job_id)
+
+    assert blocked["file_journal"]["status"] == "blocked"
+    assert blocked["file_journal"]["field"] == "model_id"
+    assert blocked["error_code"] == "file_journal_evidence_invariant_invalid"
+
+
+@pytest.mark.parametrize("failure", ["too_many", "extra_field", "wrong_member", "duplicate_task"])
+def test_reconciliation_projection_api_fails_closed_before_persistence(
+    tmp_path: Any,
+    failure: str,
+) -> None:
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
+
+    repository = _file_cohort_repository(tmp_path, member_count=2)
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    member = repository.get_pipeline_job(job_id)["cohort_members"][0]
+    projection = {
+        "candidate_id": member["candidate_id"],
+        "run_id": member["run_id"],
+        "model_id": member["model_id"],
+        "array_task_id": member["array_task_id"],
+        "array_task_outcome": "succeeded",
+        "restart_stage": "state_save_qc",
+        "native_shud_resubmitted": False,
+    }
+    if failure == "too_many":
+        projections = [projection] * 257
+    elif failure == "extra_field":
+        projections = [{**projection, "credential": "must-not-persist"}]
+    elif failure == "wrong_member":
+        projections = [{**projection, "candidate_id": "foreign-candidate"}]
+    else:
+        projections = [projection, projection]
+    before = repository.get_pipeline_job(job_id)
+
+    with pytest.raises(FileOrchestrationJournalError):
+        repository.record_pipeline_job_reconciliation(job_id, candidate_projections=projections)
+
+    assert repository.get_pipeline_job(job_id) == before
 
 
 def test_file_cohort_task_identity_errors_isolate_verified_siblings(tmp_path: Any) -> None:
@@ -915,7 +1232,7 @@ def test_file_cohort_terminal_identity_mismatch_never_projects(
     assert len(repository.query_pipeline_jobs_by_cycle("gfs_2026071200")) == 1
 
 
-@pytest.mark.parametrize("member_count", [18, 256])
+@pytest.mark.parametrize("member_count", [18, 64, 128, 256])
 def test_file_cohort_batch_projection_bounds_lock_append_and_materialization(
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -1002,7 +1319,7 @@ def test_file_cohort_batch_projection_bounds_lock_append_and_materialization(
         complete=True,
         master_status="succeeded",
         master_error_code=None,
-        reconciliation_decision="terminal_accounting_complete",
+        reconciliation_decision="matched_bound",
     )
 
     assert result["total"] == (2 * member_count) + 1
@@ -1018,6 +1335,15 @@ def test_file_cohort_batch_projection_bounds_lock_append_and_materialization(
         "latest_enumerations": 4,
         "latest_paths_returned": 0,
     }
+
+    latest_files = sorted((repository.root / "latest" / "gfs" / "2026071200").glob("*.json"))
+    assert len(latest_files) == member_count
+    assert sum(path.stat().st_size for path in latest_files) < member_count * 8_000
+    master_job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    assert all(
+        master_job_id not in {job["job_id"] for job in json.loads(path.read_text())["pipeline_jobs"]}
+        for path in latest_files
+    )
 
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 
@@ -1059,7 +1385,7 @@ def test_file_cohort_batch_projection_bounds_lock_append_and_materialization(
         complete=True,
         master_status="succeeded",
         master_error_code=None,
-        reconciliation_decision="terminal_accounting_complete",
+        reconciliation_decision="matched_bound",
     )
     after_replay = {
         str(path.relative_to(root)): path.read_bytes()
@@ -2853,7 +3179,7 @@ def test_comment_sacct_querier_scans_once_and_reaps_oversized_stream(
     assert processes[0].reaped is True
 
 
-def test_comment_sacct_querier_scopes_owner_before_collision_limit(
+def test_comment_sacct_querier_proves_owner_candidate_against_global_scope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from services.orchestrator import reconcile as reconcile_module
@@ -2866,22 +3192,72 @@ def test_comment_sacct_querier_scopes_owner_before_collision_limit(
             f"{17000 + index}|nhms_forecast|RUNNING|0:0|nhms_idem:key|foreign|other\n"
             for index in range(100)
         )
-        return foreign + (
-            "17667|nhms_forecast|RUNNING|0:0|nhms_idem:key|scheduler|account\n"
-            "17668|nhms_forecast|PENDING|0:0|nhms_idem:key|scheduler|account\n"
-        )
+        owned = "17667|nhms_forecast|RUNNING|0:0|nhms_idem:key|scheduler|account\n"
+        return owned + foreign if "--allusers" in command else foreign + owned
 
     monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
-    matches = reconcile_module.default_comment_sacct_querier()(
+    proof = reconcile_module._query_comment_accounting_proof(
+        reconcile_module.default_comment_sacct_querier(),
         "key",
         expected_user="scheduler",
         expected_account="account",
     )
 
-    assert [record.slurm_job_id for record in matches] == ["17667", "17668"]
+    assert proof.kind == "foreign_collision"
+    assert len(commands) == 2
     assert "--user=scheduler" in commands[0]
     assert "--accounts=account" in commands[0]
     assert "--allusers" not in commands[0]
+    assert "--allusers" in commands[1]
+
+
+def test_comment_sacct_global_overlimit_after_owner_candidate_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    commands: list[list[str]] = []
+
+    def bounded(command: Any) -> str:
+        commands.append(list(command))
+        if "--allusers" in command:
+            raise reconcile_module.ReconcileQueryUnavailable("sacct query exceeded bounded output")
+        return "17667|nhms_forecast|RUNNING|0:0|nhms_idem:key|scheduler|account\n"
+
+    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
+
+    with pytest.raises(reconcile_module.ReconcileQueryUnavailable, match="bounded output"):
+        reconcile_module._query_comment_accounting_proof(
+            reconcile_module.default_comment_sacct_querier(),
+            "key",
+            expected_user="scheduler",
+            expected_account="account",
+        )
+
+    assert len(commands) == 2
+    assert "--user=scheduler" in commands[0]
+    assert "--allusers" in commands[1]
+
+
+def test_inflight_sacct_querier_uses_shared_bounded_stream_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    commands: list[list[str]] = []
+
+    def bounded(command: Any) -> str:
+        commands.append(list(command))
+        return "17667|nhms_forecast|RUNNING|0:0|nhms_idem:key|scheduler|account\n"
+
+    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
+
+    record = reconcile_module.default_sacct_querier()("17667")
+
+    assert record is not None
+    assert record.slurm_job_id == "17667"
+    assert len(commands) == 1
+    assert "--jobs=17667" in commands[0]
 
 
 def test_parse_master_sacct_row_returns_exact_array_task_row() -> None:

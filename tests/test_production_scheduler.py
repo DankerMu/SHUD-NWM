@@ -24374,7 +24374,7 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
     wrong_result = wrong_scheduler.run_once()
     assert wrong_result.evidence["restart_reconcile"]["reserved_unbound"]["outcomes"][0][
         "reconciliation_decision"
-    ] == "absence_deferred"
+    ] == "identity_mismatch_blocked"
     assert wrong_repository.get_pipeline_job(reserved.job_id)["slurm_job_id"] is None
 
     exact = accounting(user="scheduler-user", account="scheduler-account")

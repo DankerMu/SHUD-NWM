@@ -27,7 +27,14 @@ from packages.common.safe_fs import (
 from packages.common.slurm_env import secret_manifest_value_reason
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator import chain_repository_state
-from services.orchestrator.accepted_submit_identity import ordered_cohort_members
+from services.orchestrator.accepted_submit_identity import (
+    MAX_FORECAST_COHORT_MEMBERS,
+    AcceptedSubmitEvidenceError,
+    accepted_submit_row_kind,
+    normalize_accepted_submit_evidence,
+    normalize_candidate_projections,
+    ordered_cohort_members,
+)
 from services.orchestrator.chain_repository import (
     ACTIVE_HYDRO_STATUSES,
     COMPLETED_HYDRO_STATUSES,
@@ -950,7 +957,10 @@ class FileOrchestrationJournalRepository:
             return _public_scheduler_row(row)
 
     def upsert_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any]:
-        row = self._pipeline_job_row(record)
+        # Upserts may be partial status transitions for an existing cohort.
+        # Validate the accepted-submit contract only after merging with its
+        # canonical durable identity; fresh rows still validate in full.
+        row = self._pipeline_job_row(record, validate_accepted_submit=False)
         source_id = _source_id_from_job(row)
         cycle_time = _cycle_time_from_job(row)
         model_id = _optional_safe_identity(row, "model_id")
@@ -965,6 +975,7 @@ class FileOrchestrationJournalRepository:
                         row[key] = incoming[key]
                 row["updated_at"] = _format_utc(_utcnow())
                 model_id = _optional_safe_identity(row, "model_id")
+            _validate_accepted_submit_evidence(row)
             return self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
 
     def append_historical_pipeline_job(self, record: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -1134,7 +1145,13 @@ class FileOrchestrationJournalRepository:
                 row["reconciliation_decision"] = reconciliation_decision
                 row["matched_slurm_job_id"] = matched_slurm_job_id
             if candidate_projections is not None:
-                row["candidate_projections"] = [dict(item) for item in candidate_projections]
+                try:
+                    row["candidate_projections"] = normalize_candidate_projections(
+                        candidate_projections,
+                        cohort_members=existing.get("cohort_members"),
+                    )
+                except AcceptedSubmitEvidenceError as error:
+                    raise FileOrchestrationJournalError(error.reason, field=error.field) from error
             if status is not None:
                 row["status"] = status
             row["updated_at"] = _format_utc(_utcnow())
@@ -1248,17 +1265,31 @@ class FileOrchestrationJournalRepository:
             existing = self._pipeline_job_for_id_unlocked(job_id)
             if existing is None or str(existing.get("slurm_job_id") or "") != master_slurm_job_id:
                 return {"total": 0, "pipeline_status": 0, "pipeline_event": 0}
+            if reconciliation_decision != "matched_bound":
+                raise FileOrchestrationJournalError(
+                    "file_journal_evidence_enum_invalid", field="reconciliation_decision"
+                )
             existing_projections = {
                 int(item["array_task_id"]): dict(item)
                 for item in _bounded_candidate_projections(existing.get("candidate_projections"))
                 if str(item.get("array_task_id", "")).isdigit()
             }
+            if len(projections) > MAX_FORECAST_COHORT_MEMBERS:
+                raise FileOrchestrationJournalError(
+                    "file_journal_evidence_limit_exceeded", field="candidate_projections"
+                )
             verified: list[dict[str, Any]] = []
             for projection in sorted(projections, key=lambda item: int(item.get("array_task_id") or 0)):
                 bounded = _bounded_candidate_projections([projection])
                 if not bounded or bounded[0].get("array_task_outcome") not in {"succeeded", "failed"}:
                     continue
-                item = bounded[0]
+                try:
+                    item = normalize_candidate_projections(
+                        bounded,
+                        cohort_members=existing.get("cohort_members"),
+                    )[0]
+                except AcceptedSubmitEvidenceError as error:
+                    raise FileOrchestrationJournalError(error.reason, field=error.field) from error
                 task_id = int(item["array_task_id"])
                 previous = existing_projections.get(task_id)
                 if previous is not None and previous.get("array_task_outcome") in {"succeeded", "failed"}:
@@ -2756,10 +2787,16 @@ class FileOrchestrationJournalRepository:
             return _public_scheduler_row(rows.hydro_run)
         return None
 
-    def _pipeline_job_row(self, record: Mapping[str, Any]) -> dict[str, Any]:
-        _validate_accepted_submit_evidence(record)
+    def _pipeline_job_row(
+        self,
+        record: Mapping[str, Any],
+        *,
+        validate_accepted_submit: bool = True,
+    ) -> dict[str, Any]:
         cycle_id = _required_safe_identity(record, "cycle_id")
         source_id, cycle_time = _source_cycle_from_cycle_id(cycle_id)
+        if validate_accepted_submit:
+            _validate_accepted_submit_evidence({**record, "source_id": source_id})
         now = _format_utc(_utcnow())
         row = {
             "job_id": _required_safe_identity(record, "job_id"),
@@ -2811,7 +2848,8 @@ class FileOrchestrationJournalRepository:
             cycle_time=cycle_time,
             model_id=_optional_safe_identity(row, "model_id"),
         )
-        _validate_accepted_submit_evidence(row)
+        if validate_accepted_submit:
+            _validate_accepted_submit_evidence(row)
         return row
 
     def _write_pipeline_job(self, row: Mapping[str, Any], *, exclusive_direct: bool) -> dict[str, Any] | None:
@@ -3246,11 +3284,17 @@ class FileOrchestrationJournalRepository:
             "forecast_cycle": _strip_internal_fields(rows.forecast_cycle),
             "forcing_version": _strip_internal_fields(rows.forcing_version),
             "model_context": _strip_internal_fields(rows.model_context),
-            "pipeline_jobs": [_strip_internal_fields(job) for job in rows.pipeline_jobs.values()],
+            "pipeline_jobs": [
+                _strip_internal_fields(job)
+                for job in rows.pipeline_jobs.values()
+                if accepted_submit_row_kind(job) != "master"
+            ],
             "pipeline_events": [_strip_internal_fields(event) for event in rows.pipeline_events],
             "replay": {
                 "latest_sequence": next_sequence - 1,
-                "job_count": len(rows.pipeline_jobs),
+                "job_count": sum(
+                    accepted_submit_row_kind(job) != "master" for job in rows.pipeline_jobs.values()
+                ),
                 "event_count": len(rows.pipeline_events),
             },
         }
@@ -4528,106 +4572,13 @@ def _bounded_candidate_projections(value: Any) -> list[dict[str, Any]]:
     return [{key: item.get(key) for key in allowed} for item in value[:256] if isinstance(item, Mapping)]
 
 
-_ACCEPTED_SUBMIT_OUTCOMES = frozenset({"accepted", "submit_result_ambiguous"})
-_ACCEPTED_RECONCILIATION_DECISIONS = frozenset(
-    {
-        "accounting_unavailable",
-        "absence_deferred",
-        "absence_retry_permitted",
-        "identity_mismatch_blocked",
-        "matched_bound",
-        "multiple_matches_blocked",
-        "task_accounting_incomplete",
-        "terminal_accounting_complete",
-    }
-)
-_MATCHED_RECONCILIATION_DECISIONS = frozenset(
-    {"matched_bound", "task_accounting_incomplete", "terminal_accounting_complete"}
-)
-_ACCEPTED_RESTART_STAGES = frozenset({"forecast", "state_save_qc"})
-_ACCEPTED_PROJECTION_OUTCOMES = frozenset({"succeeded", "failed", "unverified"})
-
-
 def _validate_accepted_submit_evidence(row: Mapping[str, Any]) -> None:
-    """Validate semantic evidence for a durable forecast cohort on every surface."""
+    """Delegate every file surface to the canonical accepted-submit boundary."""
 
-    members = row.get("cohort_members")
-    if not isinstance(members, Sequence) or isinstance(members, str | bytes | bytearray) or not members:
-        return
-    stage = str(row.get("stage") or row.get("job_type") or "")
-    if stage not in {"forecast", "run_shud_forecast_array", "forecast_array"}:
-        return
-    if (
-        row.get("submit_outcome") is None
-        and row.get("reconciliation_decision") is None
-        and not row.get("candidate_projections")
-    ):
-        return
-    if row.get("submit_outcome") not in _ACCEPTED_SUBMIT_OUTCOMES:
-        raise FileOrchestrationJournalError("file_journal_evidence_enum_invalid", field="submit_outcome")
-    if type(row.get("slurm_ownership_required")) is not bool:
-        raise FileOrchestrationJournalError("file_journal_evidence_type_invalid", field="slurm_ownership_required")
-    restart_stage = row.get("restart_stage")
-    if restart_stage not in _ACCEPTED_RESTART_STAGES:
-        raise FileOrchestrationJournalError("file_journal_evidence_enum_invalid", field="restart_stage")
-    native_resubmitted = row.get("native_shud_resubmitted")
-    if native_resubmitted is not None and type(native_resubmitted) is not bool:
-        raise FileOrchestrationJournalError("file_journal_evidence_type_invalid", field="native_shud_resubmitted")
-
-    projections = row.get("candidate_projections")
-    if projections is not None:
-        if not isinstance(projections, Sequence) or isinstance(projections, str | bytes | bytearray):
-            raise FileOrchestrationJournalError("file_journal_evidence_type_invalid", field="candidate_projections")
-        for projection in projections:
-            if not isinstance(projection, Mapping):
-                raise FileOrchestrationJournalError(
-                    "file_journal_evidence_type_invalid", field="candidate_projections"
-                )
-            for field_name in ("candidate_id", "run_id", "model_id"):
-                if not isinstance(projection.get(field_name), str) or not projection.get(field_name):
-                    raise FileOrchestrationJournalError(
-                        "file_journal_evidence_required", field=f"candidate_projections.{field_name}"
-                    )
-            if type(projection.get("array_task_id")) is not int:
-                raise FileOrchestrationJournalError(
-                    "file_journal_evidence_type_invalid", field="candidate_projections.array_task_id"
-                )
-            if projection.get("array_task_outcome") not in _ACCEPTED_PROJECTION_OUTCOMES:
-                raise FileOrchestrationJournalError(
-                    "file_journal_evidence_enum_invalid", field="candidate_projections.array_task_outcome"
-                )
-            if projection.get("restart_stage") not in _ACCEPTED_RESTART_STAGES:
-                raise FileOrchestrationJournalError(
-                    "file_journal_evidence_enum_invalid", field="candidate_projections.restart_stage"
-                )
-            if type(projection.get("native_shud_resubmitted")) is not bool:
-                raise FileOrchestrationJournalError(
-                    "file_journal_evidence_type_invalid",
-                    field="candidate_projections.native_shud_resubmitted",
-                )
-
-    decision = row.get("reconciliation_decision")
-    source = row.get("reconciliation_source")
-    matched_id = row.get("matched_slurm_job_id")
-    if decision is None:
-        if source is not None or matched_id is not None:
-            raise FileOrchestrationJournalError(
-                "file_journal_evidence_invariant_invalid", field="reconciliation_decision"
-            )
-        return
-    if decision not in _ACCEPTED_RECONCILIATION_DECISIONS:
-        raise FileOrchestrationJournalError("file_journal_evidence_enum_invalid", field="reconciliation_decision")
-    if source != "slurm_exact_comment":
-        raise FileOrchestrationJournalError("file_journal_evidence_enum_invalid", field="reconciliation_source")
-    if decision in _MATCHED_RECONCILIATION_DECISIONS:
-        if not isinstance(matched_id, str) or re.fullmatch(r"\d+", matched_id) is None:
-            raise FileOrchestrationJournalError(
-                "file_journal_evidence_invariant_invalid", field="matched_slurm_job_id"
-            )
-    elif matched_id is not None:
-        raise FileOrchestrationJournalError(
-            "file_journal_evidence_invariant_invalid", field="matched_slurm_job_id"
-        )
+    try:
+        normalize_accepted_submit_evidence(row)
+    except AcceptedSubmitEvidenceError as error:
+        raise FileOrchestrationJournalError(error.reason, field=error.field) from error
 
 
 def _file_journal_real_slurm_job_id(value: Any) -> bool:
