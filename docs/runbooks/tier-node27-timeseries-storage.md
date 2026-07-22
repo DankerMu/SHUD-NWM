@@ -98,7 +98,7 @@ next tick runs:
 
 | Order | Timer                                        | OnCalendar         | Rationale |
 |-------|----------------------------------------------|--------------------|-----------|
-| 1     | `nhms-node27-product-archive.timer`          | `03:20:00 UTC` daily | Mover finalizes leaves before audit scans them. |
+| 1     | `nhms-node27-product-archive.timer`          | `03:20:00 UTC` daily | Bounded enforce archives/retirements (per-tick bound) before audit scans final leaves. |
 | 2     | `nhms-node27-storage-inventory-audit.timer`  | `03:40:00 UTC` daily | Audit reads the mover's committed final leaves and emits the completeness receipt. |
 | 3     | `nhms-node27-resource-governance.timer`      | `04:10:00 UTC` daily | Governance audit reports the four new units + archive-root free-space band. |
 | 4     | `nhms-node27-timeseries-compression.timer`   | `04:25:00 UTC` daily | Terminal-chunk compression runs after governance so the previous-day receipt is already captured. Enablement is task §4.5 (requires migration `000047` applied first). |
@@ -116,6 +116,12 @@ second write. **Do not lengthen the audit cadence beyond 24 h without
 extending the retention receipt validity window first.**
 
 ## Operation
+
+The installed product-archive service passes `--enforce`; each daily tick is
+still capped by `NODE27_PRODUCT_ARCHIVE_PER_TICK_BOUND` (currently 8) and every
+selected object must pass archive verification, source-retirement preflight,
+and the free-space gate. Operators use the same wrapper without `--enforce`
+for an additional manual preview.
 
 ### Reading receipts
 

@@ -26,6 +26,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 _LIVE_SHAPE = _ROOT / "tests/fixtures/node27_product_archive/live-shape/object-store"
 _LIVE_SHAPE_PROVENANCE = _LIVE_SHAPE.parent / "provenance.json"
 _LIVE_SHAPE_NOW = datetime(2026, 9, 1, tzinfo=UTC)
+_SYSTEMD_SERVICE_PATH = _ROOT / "infra/systemd/nhms-node27-product-archive.service"
 _SPEC = importlib.util.spec_from_file_location("node27_product_archive", _ROOT / "scripts/node27_product_archive.py")
 assert _SPEC and _SPEC.loader
 archive = importlib.util.module_from_spec(_SPEC)
@@ -343,6 +344,14 @@ def test_archive_age_uses_display_watermark_not_wall_clock(tmp_path: Path) -> No
     ]
     assert eligible.exists()
     assert protected.exists()
+
+
+def test_scheduled_product_archive_is_bounded_enforce() -> None:
+    service = _SYSTEMD_SERVICE_PATH.read_text(encoding="utf-8")
+    assert (
+        "ExecStart=/home/nwm/NWM/scripts/node27_product_archive_once.sh --enforce"
+        in service
+    )
 
 
 def _forcing_with_domain_bundle(config: archive.MoverConfig, *, top_level_basin: object = _MISSING) -> Path:

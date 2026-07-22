@@ -317,7 +317,9 @@ terminal outcome and zero or more ordered side events (including quarantine);
 locator-keyed discovery failures remain disjoint. Ordering is deterministic,
 bytes are non-negative and overall outcome matches terminal/discovery failures.
 Lock metadata plus the receipt are the only writes allowed during dry-run.
-Enforce requires an explicit flag. The selected batch retirement-capability
+Enforce requires an explicit flag; the installed node-27 scheduled service
+SHALL pass that flag after lifecycle activation, while remaining subject to
+the configured per-tick bound and every safety gate. The selected batch retirement-capability
 gate above is fail-closed before candidate one; after it passes, enforce may
 continue over bounded independent candidates and exits non-zero if any
 candidate failed or publication/retirement became indeterminate. Preflight
@@ -340,6 +342,12 @@ disjointness remain unchanged.
 - **THEN** it MUST emit the candidate list and planned actions in the receipt
   and perform no source/archive/staging/quarantine mutation; atomic receipt
   publication and safe lock metadata are the sole permitted writes
+
+#### Scenario: Activated scheduled retirement remains bounded
+
+- **WHEN** the node-27 product-archive timer starts its installed service
+- **THEN** the service MUST request enforce explicitly
+- **AND** it MUST process no more than the configured per-tick bound
 
 #### Scenario: Selected source cannot be safely retired
 
