@@ -1382,6 +1382,7 @@ class FileOrchestrationJournalRepository:
                 cycle_time=cycle_time,
                 records=records,
             )
+            materialization_next_sequence = next_sequence + len(records)
             pipeline_records = [record for record in records if str(record.get("record_type") or "") == "pipeline_job"]
             for record, direct_job in zip(pipeline_records[: len(direct_jobs)], direct_jobs, strict=True):
                 direct_path = self.root / "pipeline-jobs" / f"{_required_safe_identity(direct_job, 'job_id')}.json"
@@ -1394,6 +1395,7 @@ class FileOrchestrationJournalRepository:
                     source_id=source_id,
                     cycle_time=cycle_time,
                     model_id=model_id,
+                    next_sequence=materialization_next_sequence,
                 )
             event_writes = sum(record_type == "pipeline_event" for record_type, _payload, _model in payloads)
             return {
