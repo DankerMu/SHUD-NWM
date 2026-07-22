@@ -8213,6 +8213,11 @@ def test_file_journal_forecast_timeout_stays_reconciling_with_durable_18_member_
     assert len(rows) == 1
     reserved = rows[0]
     assert reserved.submit_outcome == "submit_result_ambiguous"
+    assert (
+        reserved.reconciliation_source,
+        reserved.reconciliation_decision,
+        reserved.matched_slurm_job_id,
+    ) == (None, None, None)
     assert reserved.slurm_job_id is None
     assert reserved.slurm_comment == f"nhms_idem:{reserved.idempotency_key}"
     assert reserved.restart_stage == "forecast"
@@ -8226,8 +8231,50 @@ def test_file_journal_forecast_timeout_stays_reconciling_with_durable_18_member_
     assert reserved.submission_attempt == 1
     assert reserved.submission_attempt_started_at is not None
     assert len(reserved.cohort_digest) == 64
+    ambiguous_event = next(
+        event
+        for event in repository._cycle_rows(
+            source_id=source_segment,
+            cycle_time=_dt("2026-05-01T00:00:00Z"),
+            model_id=None,
+        ).pipeline_events
+        if event.get("event_type") == "submission_ambiguous"
+    )
+    assert (
+        ambiguous_event["details"].get("reconciliation_source"),
+        ambiguous_event["details"].get("reconciliation_decision"),
+        ambiguous_event["details"].get("matched_slurm_job_id"),
+    ) == (None, None, None)
 
     rebuilt = FileOrchestrationJournalRepository(tmp_path / "journal")
+    reopened_reserved = rebuilt.query_reserved_unbound_jobs()[0]
+    accounting_query_count = 0
+    assert (
+        reopened_reserved.reconciliation_source,
+        reopened_reserved.reconciliation_decision,
+        reopened_reserved.matched_slurm_job_id,
+    ) == (None, None, None)
+    assert accounting_query_count == 0
+
+    def confirmed_zero(_key: str) -> None:
+        nonlocal accounting_query_count
+        accounting_query_count += 1
+        return None
+
+    deferred = reconcile_reserved_unbound_jobs(
+        rebuilt,
+        comment_query=confirmed_zero,
+        now=lambda: reopened_reserved.submission_attempt_started_at + timedelta(seconds=1),
+    )[0]
+    assert deferred.action == "absence_unconfirmed"
+    assert accounting_query_count == 1
+    after_first_query = rebuilt.query_reserved_unbound_jobs()[0]
+    assert (
+        after_first_query.reconciliation_source,
+        after_first_query.reconciliation_decision,
+        after_first_query.matched_slurm_job_id,
+    ) == ("slurm_exact_comment", "absence_deferred", None)
+
     exact = SacctRecord(
         "2001",
         "RUNNING",
@@ -8452,6 +8499,12 @@ def test_file_journal_post_window_concurrent_public_cycles_submit_one_retry(
         )
         for row in attempt_two_repo.query_pipeline_jobs_by_cycle(f"{source_segment}_{cycle}")
     ]
+    assert attempt_two.submit_outcome == "submit_result_ambiguous"
+    assert (
+        attempt_two.reconciliation_source,
+        attempt_two.reconciliation_decision,
+        attempt_two.matched_slurm_job_id,
+    ) == (None, None, None)
     assert {
         (attempt_two_repo._hydro_run_for(str(basin["run_id"])) or {}).get("submission_attempt")
         for basin in basins

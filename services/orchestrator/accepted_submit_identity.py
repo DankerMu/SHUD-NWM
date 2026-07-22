@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC
 from typing import Any
 
@@ -58,6 +59,87 @@ class AcceptedSubmitEvidenceError(ValueError):
         super().__init__(reason)
         self.reason = reason
         self.field = field
+
+
+@dataclass(frozen=True)
+class AcceptedSubmitTransition:
+    """One complete accepted-submit evidence transition.
+
+    Every transition replaces the accounting tuple as a unit. A ``None`` tuple
+    therefore means CLEAR, never "leave the previous attempt unchanged".
+    """
+
+    submit_outcome: str
+    reconciliation_source: str | None = None
+    reconciliation_decision: str | None = None
+    matched_slurm_job_id: str | None = None
+    status: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.submit_outcome not in ACCEPTED_SUBMIT_OUTCOMES:
+            raise ValueError("invalid accepted-submit outcome transition")
+        decision = self.reconciliation_decision
+        if decision is None:
+            if self.reconciliation_source is not None or self.matched_slurm_job_id is not None:
+                raise ValueError("accounting tuple must be cleared together")
+            return
+        if decision not in ACCEPTED_RECONCILIATION_DECISIONS:
+            raise ValueError("invalid accepted-submit accounting decision")
+        if self.reconciliation_source != "slurm_exact_comment":
+            raise ValueError("accounting transition requires exact-comment source")
+        if decision == "matched_bound":
+            if not isinstance(self.matched_slurm_job_id, str) or not self.matched_slurm_job_id.isdigit():
+                raise ValueError("matched accounting transition requires a Slurm job id")
+        elif self.matched_slurm_job_id is not None:
+            raise ValueError("blocked accounting transition cannot carry a matched Slurm job id")
+
+    @classmethod
+    def timeout(cls, *, status: str = "reserved") -> AcceptedSubmitTransition:
+        return cls("submit_result_ambiguous", status=status)
+
+    @classmethod
+    def accepted(cls, *, status: str | None = None) -> AcceptedSubmitTransition:
+        return cls("accepted", status=status)
+
+    @classmethod
+    def rejected(cls, *, status: str = "submission_failed") -> AcceptedSubmitTransition:
+        return cls("rejected", status=status)
+
+    @classmethod
+    def accounting(
+        cls,
+        decision: str,
+        *,
+        submit_outcome: str,
+        matched_slurm_job_id: str | None = None,
+        status: str | None = None,
+    ) -> AcceptedSubmitTransition:
+        return cls(
+            submit_outcome=submit_outcome,
+            reconciliation_source="slurm_exact_comment",
+            reconciliation_decision=decision,
+            matched_slurm_job_id=matched_slurm_job_id,
+            status=status,
+        )
+
+
+def apply_accepted_submit_transition(
+    row: Mapping[str, Any], transition: AcceptedSubmitTransition
+) -> dict[str, Any]:
+    """Apply a typed transition, replacing the accounting tuple atomically."""
+
+    transitioned = dict(row)
+    transitioned.update(
+        {
+            "submit_outcome": transition.submit_outcome,
+            "reconciliation_source": transition.reconciliation_source,
+            "reconciliation_decision": transition.reconciliation_decision,
+            "matched_slurm_job_id": transition.matched_slurm_job_id,
+        }
+    )
+    if transition.status is not None:
+        transitioned["status"] = transition.status
+    return transitioned
 
 
 def accepted_submit_pipeline_job_model_id(
@@ -116,16 +198,15 @@ def normalize_accepted_submit_evidence(row: Mapping[str, Any]) -> dict[str, Any]
     """
 
     normalized = dict(row)
+    outcome = normalized.get("submit_outcome")
+    if outcome is not None and outcome not in ACCEPTED_SUBMIT_OUTCOMES:
+        raise AcceptedSubmitEvidenceError("file_journal_evidence_enum_invalid", field="submit_outcome")
     if accepted_submit_row_kind(normalized) != "master":
         return normalized
     if normalized.get("model_id") not in (None, ""):
         raise AcceptedSubmitEvidenceError(
             "file_journal_evidence_invariant_invalid", field="model_id"
         )
-
-    outcome = normalized.get("submit_outcome")
-    if outcome is not None and outcome not in ACCEPTED_SUBMIT_OUTCOMES:
-        raise AcceptedSubmitEvidenceError("file_journal_evidence_enum_invalid", field="submit_outcome")
     ownership_required = normalized.get("slurm_ownership_required")
     if type(ownership_required) is not bool:
         raise AcceptedSubmitEvidenceError(
@@ -414,11 +495,13 @@ __all__ = (
     "ACCEPTED_PROJECTION_FIELDS",
     "ACCEPTED_RECONCILIATION_DECISIONS",
     "ACCEPTED_SUBMIT_OUTCOMES",
+    "AcceptedSubmitTransition",
     "AcceptedSubmitEvidenceError",
     "FORECAST_COHORT_STAGE_ALIASES",
     "MAX_FORECAST_COHORT_MEMBERS",
     "accepted_submit_pipeline_job_model_id",
     "accepted_submit_row_kind",
+    "apply_accepted_submit_transition",
     "canonical_forecast_cohort_members",
     "canonical_forecast_stage",
     "forecast_cohort_digest",

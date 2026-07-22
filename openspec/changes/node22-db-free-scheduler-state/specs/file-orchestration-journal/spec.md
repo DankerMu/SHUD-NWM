@@ -201,6 +201,12 @@ persists any reconciliation decision. Task-accounting completeness MUST use
 pipeline status/error/projection fields and MUST NOT add values to the closed
 `reconciliation_decision` enum above.
 
+A Gateway timeout MUST persist only the ambiguous submit outcome and MUST leave
+`reconciliation_source`, `reconciliation_decision`, and
+`matched_slurm_job_id` null until accounting has actually been queried. The
+closed `submit_outcome` enum applies to both cohort-master and candidate-task
+rows.
+
 #### Scenario: Forecast cohort reservation precedes the Gateway call
 
 - **WHEN** scheduler submits a source/cycle/restart-stage forecast cohort
@@ -216,6 +222,8 @@ pipeline status/error/projection fields and MUST NOT add values to the closed
   result was durably classified
 - **THEN** reconciliation first records `submit_result_ambiguous` and continues
   exact-comment recovery, whether runtime member rows already exist or not
+- **AND** an exact-comment match without independently persisted runtime member
+  rows remains `identity_mismatch_blocked` rather than being bound
 - **AND WHEN** the Gateway explicitly rejects a forecast submission
 - **THEN** the journal accepts `submit_outcome=rejected`, terminalizes affected
   hydro rows, and returns the ordinary submission-failure result without a
@@ -273,6 +281,8 @@ pipeline status/error/projection fields and MUST NOT add values to the closed
 - **THEN** reconciliation treats accounting as unavailable/incomplete and keeps
   the cohort fail closed
 - **AND** the control process does not capture or split an unbounded output.
+- **AND** executable process-boundary tests cover byte, row, and wall-time
+  limits, including termination and reap behavior.
 
 #### Scenario: Terminal array tasks project to exact candidates
 

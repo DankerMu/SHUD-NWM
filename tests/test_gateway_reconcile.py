@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
@@ -1082,6 +1083,99 @@ def test_accepted_submit_evidence_validator_guards_all_file_surfaces(
         )
 
 
+def test_candidate_submit_outcome_enum_fails_closed_on_every_file_surface(tmp_path: Any) -> None:
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+        _CycleRows,
+    )
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    cycle_time = datetime(2026, 7, 12, tzinfo=UTC)
+    candidate = {
+        "job_id": "job_fcst_gfs_2026071200_model_0_forecast_candidate_0",
+        "run_id": "fcst_gfs_2026071200_model_0",
+        "cycle_id": "gfs_2026071200",
+        "job_type": "run_shud_forecast_array",
+        "slurm_job_id": "17667_0",
+        "array_task_id": 0,
+        "model_id": "model_0",
+        "status": "succeeded",
+        "stage": "forecast",
+        "candidate_id": "gfs:2026-07-12T00:00:00Z:model_0:forecast_gfs_deterministic",
+        "submit_outcome": "accepted",
+        "restart_stage": "forecast",
+        "native_shud_resubmitted": False,
+    }
+    repository.upsert_pipeline_job(candidate)
+    invalid_candidate = {**candidate, "submit_outcome": "invalid"}
+    with pytest.raises(FileOrchestrationJournalError) as upsert_error:
+        repository.upsert_pipeline_job(invalid_candidate)
+    assert upsert_error.value.field == "submit_outcome"
+
+    direct_path = repository.root / "pipeline-jobs" / f"{candidate['job_id']}.json"
+    bad_record = json.loads(direct_path.read_text(encoding="utf-8"))
+    bad_record["payload"]["submit_outcome"] = "invalid"
+    with pytest.raises(FileOrchestrationJournalError):
+        repository._validate_outgoing_record(
+            bad_record,
+            source_id="gfs",
+            cycle_time=cycle_time,
+            record_type="pipeline_job",
+            model_id="model_0",
+        )
+    with pytest.raises(FileOrchestrationJournalError):
+        repository._apply_journal_record(
+            _CycleRows(),
+            bad_record,
+            source_id="gfs",
+            cycle_time=cycle_time,
+        )
+    with pytest.raises(FileOrchestrationJournalError):
+        repository._validated_direct_pipeline_job_record(
+            bad_record,
+            expected_job_id=str(candidate["job_id"]),
+        )
+
+    latest_path = repository.root / "latest" / "gfs" / "2026071200" / "model_0.json"
+    bad_latest = json.loads(latest_path.read_text(encoding="utf-8"))
+    latest_candidate = next(
+        job for job in bad_latest["pipeline_jobs"] if job.get("job_id") == candidate["job_id"]
+    )
+    latest_candidate["submit_outcome"] = "invalid"
+    with pytest.raises(FileOrchestrationJournalError):
+        repository._apply_latest_view(
+            _CycleRows(),
+            bad_latest,
+            source_id="gfs",
+            cycle_time=cycle_time,
+            expected_model_id="model_0",
+        )
+
+    journal_path = repository.root / "journal" / "gfs" / "2026071200.jsonl"
+    journal_records = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
+    for record in journal_records:
+        if record.get("record_type") == "pipeline_job" and record["payload"].get("job_id") == candidate["job_id"]:
+            record["payload"]["submit_outcome"] = "invalid"
+    journal_path.write_text(
+        "".join(f"{json.dumps(record, sort_keys=True)}\n" for record in journal_records),
+        encoding="utf-8",
+    )
+    direct_path.write_text(json.dumps(bad_record), encoding="utf-8")
+    latest_path.write_text(json.dumps(bad_latest), encoding="utf-8")
+
+    reopened = FileOrchestrationJournalRepository(repository.root)
+    blocked = reopened.get_pipeline_job(str(candidate["job_id"]))
+    assert blocked["file_journal"]["status"] == "blocked"
+    assert blocked["file_journal"]["field"] == "submit_outcome"
+    queried = reopened.query_pipeline_jobs_by_cycle("gfs_2026071200")
+    assert any(
+        job.get("error_code") == "file_journal_evidence_enum_invalid"
+        and job.get("file_journal", {}).get("field") == "submit_outcome"
+        for job in queried
+    )
+
+
 def test_master_model_id_corruption_blocks_query_instead_of_becoming_candidate(tmp_path: Any) -> None:
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 
@@ -1230,6 +1324,29 @@ def test_file_cohort_terminal_identity_mismatch_never_projects(
     assert outcome.action == "identity_mismatch_blocked"
     assert repository.get_pipeline_job(job_id)["candidate_projections"] == []
     assert len(repository.query_pipeline_jobs_by_cycle("gfs_2026071200")) == 1
+
+
+def test_file_cohort_exact_accounting_match_without_runtime_rows_stays_identity_blocked(
+    tmp_path: Any,
+) -> None:
+    repository = _file_cohort_repository(tmp_path, member_count=1, with_runtime_rows=False)
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    repository.bind_pipeline_job_reservation(key, slurm_job_id="17667", status="submitted")
+    exact = SacctRecord(
+        "17667",
+        "RUNNING",
+        "nhms_forecast",
+        comment=f"nhms_idem:{key}",
+    )
+
+    outcome = reconcile_inflight_jobs(repository, sacct_query=lambda _job_id: exact)[0]
+
+    assert outcome.action == "identity_mismatch_blocked"
+    durable = repository.get_pipeline_job(job_id)
+    assert durable["status"] == RECONCILE_UNVERIFIED_STATUS
+    assert durable["reconciliation_decision"] == "identity_mismatch_blocked"
+    assert durable["candidate_projections"] == []
 
 
 @pytest.mark.parametrize("member_count", [18, 64, 128, 256])
@@ -3258,6 +3375,77 @@ def test_inflight_sacct_querier_uses_shared_bounded_stream_reader(
     assert record.slurm_job_id == "17667"
     assert len(commands) == 1
     assert "--jobs=17667" in commands[0]
+
+
+@pytest.mark.parametrize("boundary", ["byte", "row", "wall_time"])
+def test_real_sacct_process_bounds_reap_and_leave_inflight_cohort_unchanged(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    executable_root = tmp_path / f"fake-sacct-{boundary}"
+    executable_root.mkdir()
+    executable = executable_root / "sacct"
+    pid_path = tmp_path / f"{boundary}.pid"
+    terminated_path = tmp_path / f"{boundary}.terminated"
+    executable.write_text(
+        """#!/bin/sh
+printf '%s' "$$" > "$FAKE_SACCT_PID_PATH"
+terminated() {
+    : > "$FAKE_SACCT_TERMINATED_PATH"
+    exit 0
+}
+trap terminated TERM INT
+case "$FAKE_SACCT_BOUNDARY" in
+    byte)
+        while :; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; done
+        ;;
+    row)
+        while :; do printf '17667|nhms_forecast|RUNNING|0:0||scheduler|account\\n'; done
+        ;;
+    wall_time)
+        exec sleep 60
+        ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("FAKE_SACCT_BOUNDARY", boundary)
+    monkeypatch.setenv("FAKE_SACCT_PID_PATH", str(pid_path))
+    monkeypatch.setenv("FAKE_SACCT_TERMINATED_PATH", str(terminated_path))
+    monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_BYTES", 128 if boundary == "byte" else 1_000_000)
+    monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_ROWS", 2 if boundary == "row" else 10_000)
+    monkeypatch.setattr(
+        reconcile_module,
+        "COMMENT_SACCT_TIMEOUT_SECONDS",
+        1.0 if boundary == "wall_time" else 2.0,
+    )
+
+    repository = _file_cohort_repository(tmp_path / "state", member_count=1)
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    repository.bind_pipeline_job_reservation(key, slurm_job_id="17667", status="submitted")
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    before = repository.get_pipeline_job(job_id)
+
+    outcomes = reconcile_inflight_jobs(
+        repository,
+        sacct_query=reconcile_module.default_sacct_querier(str(executable_root)),
+    )
+
+    assert len(outcomes) == 1
+    assert outcomes[0].action == "query_unavailable"
+    assert outcomes[0].durable_write_count == 0
+    assert len(repr(outcomes[0])) < 1_000
+    assert repository.get_pipeline_job(job_id) == before
+    assert not before.get("candidate_projections")
+    if boundary != "wall_time":
+        assert terminated_path.exists()
+    child_pid = int(pid_path.read_text(encoding="utf-8"))
+    with pytest.raises(ChildProcessError):
+        os.waitpid(child_pid, os.WNOHANG)
 
 
 def test_parse_master_sacct_row_returns_exact_array_task_row() -> None:

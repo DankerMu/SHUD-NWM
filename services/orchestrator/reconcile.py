@@ -31,6 +31,7 @@ from typing import Any, Mapping
 
 from services.orchestrator.accepted_submit_identity import (
     FORECAST_COHORT_STAGE_ALIASES,
+    AcceptedSubmitTransition,
     forecast_cohort_identity_is_valid,
     is_forecast_cohort_stage_name,
     ordered_cohort_members,
@@ -742,15 +743,14 @@ def reconcile_inflight_jobs(
             continue
 
         if file_cohort and not _terminal_file_cohort_identity_matches(store, record, job):
-            write_count = int(
-                bool(
-                    getattr(store, "record_pipeline_job_reconciliation")(
-                        job.job_id,
-                        reconciliation_decision="identity_mismatch_blocked",
-                        matched_slurm_job_id=None,
-                        status=RECONCILE_UNVERIFIED_STATUS,
-                    )
-                )
+            write_count = _transition_file_reconciliation(
+                store,
+                job.job_id,
+                AcceptedSubmitTransition.accounting(
+                    "identity_mismatch_blocked",
+                    submit_outcome=str(getattr(job, "submit_outcome", None) or "accepted"),
+                    status=RECONCILE_UNVERIFIED_STATUS,
+                ),
             )
             outcomes.append(
                 ReconcileOutcome(
@@ -1052,13 +1052,11 @@ def reconcile_reserved_unbound_jobs(
             continue
 
         if accepted_submit_reconcile and getattr(job, "submit_outcome", None) is None:
-            recorder = getattr(store, "record_pipeline_job_reconciliation", None)
-            if callable(recorder):
-                recorder(
-                    job.job_id,
-                    submit_outcome="submit_result_ambiguous",
-                    status=str(job.status),
-                )
+            _transition_file_reconciliation(
+                store,
+                job.job_id,
+                AcceptedSubmitTransition.timeout(status=str(job.status)),
+            )
 
         try:
             expected_user = str(getattr(job, "expected_slurm_user", None) or "")
@@ -1246,15 +1244,15 @@ def reconcile_reserved_unbound_jobs(
         )
         write_count = 1 if bound is not None else 0
         if accepted_submit_reconcile and bound is not None:
-            recorder = getattr(store, "record_pipeline_job_reconciliation", None)
-            if callable(recorder):
-                recorded = recorder(
-                    job.job_id,
+            write_count += _transition_file_reconciliation(
+                store,
+                job.job_id,
+                AcceptedSubmitTransition.accounting(
+                    "matched_bound",
                     submit_outcome="accepted",
-                    reconciliation_decision="matched_bound",
                     matched_slurm_job_id=record.slurm_job_id,
-                )
-                write_count += int(recorded is not None)
+                ),
+            )
         bound_status = "submitted" if bound is not None else str(job.status)
         outcomes.append(
             ReservationReconcileOutcome(
@@ -1442,16 +1440,24 @@ def _query_comment_accounting(
 
 
 def _record_file_reconciliation(store: Any, job_id: str, decision: str) -> int:
-    recorder = getattr(store, "record_pipeline_job_reconciliation", None)
-    if callable(recorder):
-        return int(
-            recorder(
-                job_id,
-                reconciliation_decision=decision,
-                matched_slurm_job_id=None,
-            )
-            is not None
-        )
+    return _transition_file_reconciliation(
+        store,
+        job_id,
+        AcceptedSubmitTransition.accounting(
+            decision,
+            submit_outcome="submit_result_ambiguous",
+        ),
+    )
+
+
+def _transition_file_reconciliation(
+    store: Any,
+    job_id: str,
+    transition: AcceptedSubmitTransition,
+) -> int:
+    transitioner = getattr(store, "transition_pipeline_job_submit_evidence", None)
+    if callable(transitioner):
+        return int(transitioner(job_id, transition) is not None)
     return 0
 
 

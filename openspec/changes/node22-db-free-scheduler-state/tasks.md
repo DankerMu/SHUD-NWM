@@ -422,8 +422,10 @@ Scenario evidence rows for section 5:
   bounded evidence using the fixture's fixed `reconciliation_decision` values.
   A pre-outcome reservation interruption is first classified ambiguous; an
   owner/account collision remains mismatch-blocked, and owner-scoped zero alone
-  cannot prove authoritative absence. Every branch is reopened from disk and
-  proves the persisted tuple equals the emitted tuple.
+  cannot prove authoritative absence. A Gateway timeout carries no accounting
+  decision before the first query, and an exact match without independent
+  runtime rows remains blocked. Every branch is reopened from disk and proves
+  the persisted tuple equals the emitted tuple.
 
 - [x] 9.3 Project terminal array-task accounting to candidate-scoped
   pipeline/hydro state.
@@ -457,7 +459,9 @@ Scenario evidence rows for section 5:
   proven unable to create forecast or `state_save_qc` projections. Ordinary
   inflight task accounting is byte/row/time bounded before materialization, and
   aggregate per-model latest output grows approximately linearly for 18 and 256
-  members with warm-cache/reopen parity.
+  members with warm-cache/reopen parity. Executable process-boundary tests cover
+  byte, row, and timeout termination/reap paths rather than mocking the bounded
+  reader.
 
 - [ ] 9.6 Complete local, CI, and node-22 live verification.
   Evidence floor: the issue-targeted pytest command, `uv run ruff check .`, and

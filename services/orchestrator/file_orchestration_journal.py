@@ -30,7 +30,9 @@ from services.orchestrator import chain_repository_state
 from services.orchestrator.accepted_submit_identity import (
     MAX_FORECAST_COHORT_MEMBERS,
     AcceptedSubmitEvidenceError,
+    AcceptedSubmitTransition,
     accepted_submit_row_kind,
+    apply_accepted_submit_transition,
     normalize_accepted_submit_evidence,
     normalize_candidate_projections,
     ordered_cohort_members,
@@ -1102,18 +1104,42 @@ class FileOrchestrationJournalRepository:
             existing = self._candidate_job_for_idempotency_unlocked(idempotency_key)
             if existing is None or existing.get("slurm_job_id") not in (None, ""):
                 return None
-            row = dict(existing)
+            row = apply_accepted_submit_transition(
+                existing,
+                AcceptedSubmitTransition.accepted(status=status),
+            )
             row.update(
                 {
                     "slurm_job_id": str(slurm_job_id),
-                    "status": status,
-                    "submit_outcome": "accepted",
                     "submitted_at": row.get("submitted_at") or _format_utc(_utcnow()),
                     "updated_at": _format_utc(_utcnow()),
                 }
             )
             if array_task_id is not None:
                 row["array_task_id"] = array_task_id
+            model_id = _optional_safe_identity(row, "model_id")
+            return self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
+
+    def transition_pipeline_job_submit_evidence(
+        self,
+        job_id: str,
+        transition: AcceptedSubmitTransition,
+    ) -> dict[str, Any] | None:
+        """Atomically replace submit outcome and the complete accounting tuple."""
+
+        if not isinstance(transition, AcceptedSubmitTransition):
+            raise TypeError("transition must be AcceptedSubmitTransition")
+        initial = self._pipeline_job_for_id_unlocked(job_id)
+        if initial is None:
+            return None
+        source_id = _source_id_from_job(initial)
+        cycle_time = _cycle_time_from_job(initial)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._pipeline_job_for_id_unlocked(job_id)
+            if existing is None:
+                return None
+            row = apply_accepted_submit_transition(existing, transition)
+            row["updated_at"] = _format_utc(_utcnow())
             model_id = _optional_safe_identity(row, "model_id")
             return self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
 
@@ -1127,7 +1153,7 @@ class FileOrchestrationJournalRepository:
         candidate_projections: Sequence[Mapping[str, Any]] | None = None,
         status: str | None = None,
     ) -> dict[str, Any] | None:
-        """Atomically append bounded accepted-submit reconciliation evidence."""
+        """Compatibility/projection API backed by complete typed transitions."""
         initial = self._pipeline_job_for_id_unlocked(job_id)
         if initial is None:
             return None
@@ -1138,12 +1164,26 @@ class FileOrchestrationJournalRepository:
             if existing is None:
                 return None
             row = dict(existing)
-            if submit_outcome is not None:
-                row["submit_outcome"] = submit_outcome
             if reconciliation_decision is not None:
-                row["reconciliation_source"] = "slurm_exact_comment"
-                row["reconciliation_decision"] = reconciliation_decision
-                row["matched_slurm_job_id"] = matched_slurm_job_id
+                outcome = submit_outcome or str(existing.get("submit_outcome") or "")
+                row = apply_accepted_submit_transition(
+                    row,
+                    AcceptedSubmitTransition.accounting(
+                        reconciliation_decision,
+                        submit_outcome=outcome,
+                        matched_slurm_job_id=matched_slurm_job_id,
+                        status=status,
+                    ),
+                )
+            elif submit_outcome is not None:
+                row = apply_accepted_submit_transition(
+                    row,
+                    AcceptedSubmitTransition(submit_outcome=submit_outcome, status=status),
+                )
+            elif matched_slurm_job_id is not None:
+                raise FileOrchestrationJournalError(
+                    "file_journal_evidence_invariant_invalid", field="matched_slurm_job_id"
+                )
             if candidate_projections is not None:
                 try:
                     row["candidate_projections"] = normalize_candidate_projections(
@@ -1152,7 +1192,7 @@ class FileOrchestrationJournalRepository:
                     )
                 except AcceptedSubmitEvidenceError as error:
                     raise FileOrchestrationJournalError(error.reason, field=error.field) from error
-            if status is not None:
+            if status is not None and submit_outcome is None and reconciliation_decision is None:
                 row["status"] = status
             row["updated_at"] = _format_utc(_utcnow())
             model_id = _optional_safe_identity(row, "model_id")
@@ -1171,13 +1211,16 @@ class FileOrchestrationJournalRepository:
                 return 0
             if existing.get("slurm_job_id") not in (None, ""):
                 return 0
-            cohort_row = dict(existing)
+            cohort_row = apply_accepted_submit_transition(
+                existing,
+                AcceptedSubmitTransition.accounting(
+                    "absence_retry_permitted",
+                    submit_outcome="submit_result_ambiguous",
+                    status="reservation_lost",
+                ),
+            )
             cohort_row.update(
                 {
-                    "status": "reservation_lost",
-                    "reconciliation_source": "slurm_exact_comment",
-                    "reconciliation_decision": "absence_retry_permitted",
-                    "matched_slurm_job_id": None,
                     "updated_at": _format_utc(_utcnow()),
                 }
             )
@@ -1397,17 +1440,21 @@ class FileOrchestrationJournalRepository:
                     payloads.append(("hydro_run", hydro_row, model_id))
                 touched_models.add(model_id)
 
-            cohort_row = dict(existing)
+            cohort_row = apply_accepted_submit_transition(
+                existing,
+                AcceptedSubmitTransition.accounting(
+                    reconciliation_decision,
+                    submit_outcome="accepted",
+                    matched_slurm_job_id=master_slurm_job_id,
+                    status=master_status if complete else "reconcile_unverified",
+                ),
+            )
             cohort_row.update(
                 {
                     "candidate_projections": [
                         existing_projections[task_id] for task_id in sorted(existing_projections)
                     ],
-                    "status": master_status if complete else "reconcile_unverified",
                     "error_code": master_error_code if complete else "SLURM_TASK_ACCOUNTING_INCOMPLETE",
-                    "reconciliation_source": "slurm_exact_comment",
-                    "reconciliation_decision": reconciliation_decision,
-                    "matched_slurm_job_id": master_slurm_job_id,
                     "updated_at": _format_utc(_utcnow()),
                 }
             )

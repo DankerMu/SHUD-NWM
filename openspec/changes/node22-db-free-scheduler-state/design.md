@@ -1416,6 +1416,12 @@ Invariant Matrix:
   reconciliation decision. An explicit Gateway rejection records the normative
   `rejected` outcome and terminalizes the affected hydro rows; neither state may
   make the journal validator fail while handling the original failure.
+- Transition-truth contract: a Gateway timeout proves only
+  `submit_result_ambiguous`; it clears/leaves absent the reconciliation source,
+  decision, and matched ID. Those fields are written only by a completed
+  accounting query. Common evidence fields such as `submit_outcome` are
+  validated before master/candidate specialization so neither row kind can
+  bypass the closed enum.
 - Accounting-proof contract: an owner-scoped match identifies the bind
   candidate but is not by itself proof of global uniqueness, and an owner-scoped
   zero result is not authoritative global absence. Any bounded exact-comment
@@ -1423,6 +1429,12 @@ Invariant Matrix:
   binding requires one globally unique owned match, while retry eligibility
   requires a bounded, authoritative proof that no exact-comment job exists under
   any ownership.
+- Independent-runtime contract: because runtime member rows are durably prepared
+  before the Gateway call, a pre-outcome reservation with no runtime rows cannot
+  have produced an accepted array. A later exact-comment match without those
+  rows is unverifiable and remains identity-mismatch blocked; the pre-outcome
+  recovery allowance applies to safe ambiguity/absence handling, not to
+  weakening bind identity.
 - Restart invariant: the earliest incomplete canonical stage is candidate
   state. Grouping never lowers it, mixed stages never share a cohort, and a
   `state_save_qc` cohort cannot enter native forecast.

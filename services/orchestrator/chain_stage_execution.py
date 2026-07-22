@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
-from services.orchestrator.accepted_submit_identity import accepted_submit_pipeline_job_model_id
+from services.orchestrator.accepted_submit_identity import (
+    AcceptedSubmitTransition,
+    accepted_submit_pipeline_job_model_id,
+)
 from services.orchestrator.chain_types import (
     ArrayAggregation,
     CycleOrchestrationContext,
@@ -198,14 +201,15 @@ def submit_and_wait_cycle_stage(
             and is_forecast_cohort_stage(stage)
             and getattr(error, "error_code", None) == "SLURM_GATEWAY_UNAVAILABLE"
         ):
-            recorder = getattr(orchestrator.repository, "record_pipeline_job_reconciliation", None)
-            if callable(recorder):
-                recorder(
+            transition = getattr(
+                orchestrator.repository,
+                "transition_pipeline_job_submit_evidence",
+                None,
+            )
+            if callable(transition):
+                transition(
                     pipeline_job_id,
-                    submit_outcome="submit_result_ambiguous",
-                    reconciliation_decision="absence_deferred",
-                    matched_slurm_job_id=None,
-                    status="reserved",
+                    AcceptedSubmitTransition.timeout(),
                 )
             orchestrator.repository.insert_pipeline_event(
                 entity_type="pipeline_job",
@@ -218,8 +222,8 @@ def submit_and_wait_cycle_stage(
                     "stage": stage.stage,
                     "job_type": stage.job_type,
                     "submit_outcome": "submit_result_ambiguous",
-                    "reconciliation_source": "slurm_exact_comment",
-                    "reconciliation_decision": "absence_deferred",
+                    "reconciliation_source": None,
+                    "reconciliation_decision": None,
                     "matched_slurm_job_id": None,
                     "restart_stage": context.restart_stage or stage.stage,
                     "native_shud_resubmitted": is_forecast_cohort_stage(stage),
@@ -243,9 +247,13 @@ def submit_and_wait_cycle_stage(
             getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
             and is_forecast_cohort_stage(stage)
         ):
-            recorder = getattr(orchestrator.repository, "record_pipeline_job_reconciliation", None)
-            if callable(recorder):
-                recorder(pipeline_job_id, submit_outcome="rejected", status="submission_failed")
+            transition = getattr(
+                orchestrator.repository,
+                "transition_pipeline_job_submit_evidence",
+                None,
+            )
+            if callable(transition):
+                transition(pipeline_job_id, AcceptedSubmitTransition.rejected())
         if stage.stage == "forecast":
             orchestrator._mark_staged_hydro_runs_failed(
                 [str(basin["run_id"]) for basin in context.active_basins if basin.get("run_id")],
