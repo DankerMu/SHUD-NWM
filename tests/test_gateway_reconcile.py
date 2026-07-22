@@ -136,13 +136,18 @@ def _file_cohort_repository(
     corrupt_digest: bool = False,
     with_runtime_rows: bool = True,
     submit_outcome: str | None = "submit_result_ambiguous",
+    versioned: bool = True,
 ) -> Any:
-    from services.orchestrator.accepted_submit_identity import forecast_cohort_digest
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        forecast_cohort_digest,
+    )
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 
     repository = FileOrchestrationJournalRepository(tmp_path / "journal")
     cycle_time = datetime(2026, 7, 12, tzinfo=UTC)
     record = {
+            "accepted_submit_contract_version": ACCEPTED_SUBMIT_CONTRACT_VERSION,
             "job_id": "job_cycle_gfs_2026071200_forecast_fixture_forecast",
             "run_id": "cycle_gfs_2026071200_forecast_fixture",
             "source_id": "gfs",
@@ -175,6 +180,8 @@ def _file_cohort_repository(
             "updated_at": created_at or cycle_time,
         }
     record["cohort_digest"] = forecast_cohort_digest(record)
+    if not versioned:
+        record.pop("accepted_submit_contract_version")
     if corrupt_digest:
         record["cohort_digest"] = "0" * 64
     repository.reserve_pipeline_job(record)
@@ -1053,12 +1060,14 @@ def test_file_cohort_recomputed_digest_cannot_override_canonical_tuple(
     ],
 )
 def test_accepted_submit_evidence_validator_fails_closed(mutator: Any, field: str) -> None:
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
     from services.orchestrator.file_orchestration_journal import (
         FileOrchestrationJournalError,
         _validate_accepted_submit_evidence,
     )
 
     row = {
+        "accepted_submit_contract_version": ACCEPTED_SUBMIT_CONTRACT_VERSION,
         "stage": "forecast",
         "submit_outcome": "accepted",
         "restart_stage": "forecast",
@@ -1140,6 +1149,7 @@ def test_accepted_submit_evidence_validator_guards_all_file_surfaces(
 
 
 def test_candidate_submit_outcome_enum_fails_closed_on_every_file_surface(tmp_path: Any) -> None:
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
     from services.orchestrator.file_orchestration_journal import (
         FileOrchestrationJournalError,
         FileOrchestrationJournalRepository,
@@ -1162,6 +1172,7 @@ def test_candidate_submit_outcome_enum_fails_closed_on_every_file_surface(tmp_pa
         "submit_outcome": "accepted",
         "restart_stage": "forecast",
         "native_shud_resubmitted": False,
+        "accepted_submit_contract_version": ACCEPTED_SUBMIT_CONTRACT_VERSION,
     }
     repository.upsert_pipeline_job(candidate)
     invalid_candidate = {**candidate, "submit_outcome": "invalid"}
@@ -1169,7 +1180,14 @@ def test_candidate_submit_outcome_enum_fails_closed_on_every_file_surface(tmp_pa
         repository.upsert_pipeline_job(invalid_candidate)
     assert upsert_error.value.field == "submit_outcome"
 
-    direct_path = repository.root / "pipeline-jobs" / f"{candidate['job_id']}.json"
+    direct_path = (
+        repository.root
+        / "pipeline-jobs"
+        / "by-cycle"
+        / "gfs"
+        / "2026071200"
+        / f"{candidate['job_id']}.json"
+    )
     bad_record = json.loads(direct_path.read_text(encoding="utf-8"))
     bad_record["payload"]["submit_outcome"] = "invalid"
     with pytest.raises(FileOrchestrationJournalError):
@@ -1538,13 +1556,49 @@ def test_file_cohort_batch_projection_bounds_lock_append_and_materialization(
     reopened = FileOrchestrationJournalRepository(root)
     for index in (0, member_count - 1):
         candidate_job_id = f"job_fcst_gfs_2026071200_model_{index}_forecast_reconciled_17667_{index}"
-        direct_path = root / "pipeline-jobs" / f"{candidate_job_id}.json"
+        direct_path = (
+            root
+            / "pipeline-jobs"
+            / "by-cycle"
+            / "gfs"
+            / "2026071200"
+            / f"{candidate_job_id}.json"
+        )
         direct_payload = json.loads(direct_path.read_text(encoding="utf-8"))["payload"]
         replayed = reopened.get_pipeline_job(candidate_job_id)
         latest_path = root / "latest" / "gfs" / "2026071200" / f"model_{index}.json"
         latest = json.loads(latest_path.read_text(encoding="utf-8"))
         latest_payload = next(job for job in latest["pipeline_jobs"] if job["job_id"] == candidate_job_id)
         assert direct_payload == replayed == latest_payload
+        assert direct_payload["accepted_submit_contract_version"] == "nhms.accepted_submit.v1"
+
+    if member_count == 256:
+        partition = root / "pipeline-jobs" / "by-cycle" / "gfs" / "2026071200"
+        assert len(tuple(partition.glob("*.json"))) == 256
+        assert len(tuple((root / "pipeline-jobs").glob("*.json"))) == 1
+        seed = next(partition.glob("*.json")).read_bytes()
+        for history_index in range(300):
+            history = root / "pipeline-jobs" / "by-cycle" / "gfs" / f"2025{history_index:06d}"
+            history.mkdir(parents=True)
+            (history / "historical.json").write_bytes(seed)
+        bounded = FileOrchestrationJournalRepository(root, max_files=512)
+        assert len(list(bounded._iter_direct_pipeline_job_records())) == 1
+        assert bounded.get_pipeline_job(
+            "job_fcst_gfs_2026071200_model_255_forecast_reconciled_17667_255"
+        )["status"] == "succeeded"
+        current = list(
+            bounded._iter_direct_pipeline_job_records_for_cycle(
+                source_id="gfs",
+                cycle_time=datetime(2026, 7, 12, tzinfo=UTC),
+                model_id=None,
+            )
+        )
+        assert len(current) == 256
+        assert all(job.get("model_id") not in (None, "") for job in current)
+        queried = bounded.query_pipeline_jobs_by_cycle("gfs_2026071200")
+        assert len(queried) == 257
+        assert all(job["job_id"] != "file_journal_read_blocked" for job in queried)
+        assert bounded.query_inflight_jobs() == []
 
     before_replay = {
         str(path.relative_to(root)): path.read_bytes()
@@ -3447,8 +3501,161 @@ def test_comment_sacct_global_zero_is_unavailable_without_visibility_proof(
     query = reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: False)
 
     with pytest.raises(reconcile_module.ReconcileQueryUnavailable, match="visibility is unproven"):
-        query("key")
+        query("key", accepted_submit_contract_version="nhms.accepted_submit.v1")
     assert calls == []
+
+
+def test_comment_sacct_legacy_global_query_does_not_require_visibility_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        reconcile_module,
+        "_bounded_sacct_stdout",
+        lambda command: calls.append(list(command)) or "",
+    )
+    query = reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: False)
+
+    assert tuple(query("legacy-key")) == ()
+    assert calls
+    assert all("--allusers" in command for command in calls)
+
+
+@pytest.mark.parametrize("member_count", [1, 18, 256])
+def test_rejected_submit_batch_write_failure_reopens_as_unbound_recoverable_reservation(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    member_count: int,
+) -> None:
+    from services.orchestrator.chain_types import OrchestratorError
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    repository = _file_cohort_repository(
+        tmp_path / str(member_count),
+        member_count=member_count,
+        submit_outcome=None,
+    )
+    for index in range(member_count):
+        repository.update_hydro_run_status(
+            f"fcst_gfs_2026071200_model_{index}",
+            "created",
+            error_code=None,
+            error_message=None,
+        )
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+
+    def fail_batch(**_kwargs: Any) -> None:
+        raise OrchestratorError("FILE_JOURNAL_WRITE_FAILED", "injected batch failure")
+
+    monkeypatch.setattr(repository, "_append_journal_records_unlocked", fail_batch)
+    with pytest.raises(OrchestratorError, match="injected batch failure"):
+        repository.reject_pipeline_job_submit_attempt(
+            "cycle_gfs_2026071200_forecast_fixture:forecast",
+            expected_submission_attempt=1,
+            finished_at=datetime(2026, 7, 12, 0, 1, tzinfo=UTC),
+            error_code="VALIDATION_ERROR",
+            error_message="pre-submit rejected",
+            stage="forecast",
+            job_type="run_shud_forecast_array",
+        )
+
+    reopened = FileOrchestrationJournalRepository(repository.root)
+    master = reopened.get_pipeline_job(job_id)
+    assert master["status"] == "reserved"
+    assert master["submit_outcome"] is None
+    assert master["slurm_job_id"] is None
+    assert len(reopened.query_reserved_unbound_jobs()) == 1
+    assert all(
+        (reopened._hydro_run_for(f"fcst_gfs_2026071200_model_{index}") or {})["status"] == "created"
+        for index in range(member_count)
+    )
+
+
+def test_marker_free_historical_candidate_remains_readable_but_unversioned(tmp_path: Any) -> None:
+    from services.orchestrator.accepted_submit_identity import accepted_submit_contract_is_current
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    legacy = {
+        "job_id": "job_fcst_gfs_2026071200_model_legacy_forecast_candidate_0",
+        "run_id": "fcst_gfs_2026071200_model_legacy",
+        "cycle_id": "gfs_2026071200",
+        "job_type": "run_shud_forecast_array",
+        "slurm_job_id": "17667_0",
+        "array_task_id": 0,
+        "model_id": "model_legacy",
+        "status": "succeeded",
+        "stage": "forecast",
+        "candidate_id": "gfs:2026-07-12T00:00:00Z:model_legacy:forecast_gfs_deterministic",
+        "submit_outcome": "historical_pre_1112_value",
+        "restart_stage": "forecast",
+    }
+    repository.append_historical_pipeline_job(legacy)
+
+    reopened = FileOrchestrationJournalRepository(repository.root)
+    direct = reopened.get_pipeline_job(legacy["job_id"])
+    queried = next(
+        job for job in reopened.query_pipeline_jobs_by_cycle("gfs_2026071200")
+        if job["job_id"] == legacy["job_id"]
+    )
+    latest = json.loads(
+        (repository.root / "latest" / "gfs" / "2026071200" / "model_legacy.json").read_text()
+    )
+    latest_row = next(job for job in latest["pipeline_jobs"] if job["job_id"] == legacy["job_id"])
+    assert direct == queried == latest_row
+    assert accepted_submit_contract_is_current(direct) is False
+
+
+def test_marker_free_historical_master_is_read_only_to_accepted_submit_reconcile(tmp_path: Any) -> None:
+    from services.orchestrator.reconcile import reconcile_reserved_unbound_jobs
+
+    repository = _file_cohort_repository(
+        tmp_path,
+        member_count=1,
+        with_runtime_rows=False,
+        submit_outcome=None,
+        versioned=False,
+    )
+    before = repository.get_pipeline_job("job_cycle_gfs_2026071200_forecast_fixture_forecast")
+
+    outcomes = reconcile_reserved_unbound_jobs(repository, comment_query=lambda _key: None)
+
+    assert outcomes[0].action == "legacy_unversioned_read_only"
+    assert repository.get_pipeline_job(before["job_id"]) == before
+
+
+@pytest.mark.parametrize("version", ["nhms.accepted_submit.v2", None, 1])
+def test_explicit_unknown_or_malformed_accepted_submit_version_fails_closed(
+    tmp_path: Any,
+    version: Any,
+) -> None:
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    row = {
+        "job_id": "job_fcst_gfs_2026071200_model_legacy_forecast_candidate_0",
+        "run_id": "fcst_gfs_2026071200_model_legacy",
+        "cycle_id": "gfs_2026071200",
+        "job_type": "run_shud_forecast_array",
+        "slurm_job_id": "17667_0",
+        "array_task_id": 0,
+        "model_id": "model_legacy",
+        "status": "succeeded",
+        "stage": "forecast",
+        "candidate_id": "gfs:2026-07-12T00:00:00Z:model_legacy:forecast_gfs_deterministic",
+        "submit_outcome": "accepted",
+        "restart_stage": "forecast",
+        "accepted_submit_contract_version": version,
+    }
+
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.upsert_pipeline_job(row)
+    assert error.value.field == "accepted_submit_contract_version"
 
 
 @pytest.mark.parametrize(

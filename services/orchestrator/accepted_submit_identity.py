@@ -15,6 +15,8 @@ from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cy
 FORECAST_COHORT_STAGE_ALIASES = frozenset({"forecast", "run_shud_forecast", "run_shud_forecast_array"})
 MAX_FORECAST_COHORT_MEMBERS = 256
 MAX_ACCEPTED_SUBMIT_TEXT_LENGTH = 256
+ACCEPTED_SUBMIT_CONTRACT_VERSION = "nhms.accepted_submit.v1"
+ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD = "accepted_submit_contract_version"
 
 ACCEPTED_SUBMIT_OUTCOMES = frozenset({"accepted", "submit_result_ambiguous", "rejected"})
 ACCEPTED_RECONCILIATION_DECISIONS = frozenset(
@@ -218,6 +220,24 @@ def accepted_submit_row_kind(row: Mapping[str, Any]) -> str | None:
     return None
 
 
+def accepted_submit_contract_is_current(row: Mapping[str, Any]) -> bool:
+    """Return whether a row explicitly opts into the current authority contract.
+
+    Marker-free rows are historical compatibility data. An explicit but
+    unknown/malformed marker is corruption and therefore fails closed.
+    """
+
+    if ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD not in row:
+        return False
+    value = row.get(ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD)
+    if value != ACCEPTED_SUBMIT_CONTRACT_VERSION:
+        raise AcceptedSubmitEvidenceError(
+            "file_journal_evidence_enum_invalid",
+            field=ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD,
+        )
+    return True
+
+
 def normalize_accepted_submit_evidence(row: Mapping[str, Any]) -> dict[str, Any]:
     """Normalize and validate the one durable accepted-submit master contract.
 
@@ -227,6 +247,8 @@ def normalize_accepted_submit_evidence(row: Mapping[str, Any]) -> dict[str, Any]
     """
 
     normalized = dict(row)
+    if not accepted_submit_contract_is_current(normalized):
+        return normalized
     outcome = normalized.get("submit_outcome")
     if outcome is not None and outcome not in ACCEPTED_SUBMIT_OUTCOMES:
         raise AcceptedSubmitEvidenceError("file_journal_evidence_enum_invalid", field="submit_outcome")
@@ -521,6 +543,8 @@ def forecast_cohort_identity_is_valid(identity: Mapping[str, Any]) -> bool:
 
 
 __all__ = (
+    "ACCEPTED_SUBMIT_CONTRACT_VERSION",
+    "ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD",
     "ACCEPTED_PROJECTION_FIELDS",
     "ACCEPTED_RECONCILIATION_DECISIONS",
     "ACCEPTED_SUBMIT_OUTCOMES",
@@ -530,6 +554,7 @@ __all__ = (
     "FORECAST_COHORT_STAGE_ALIASES",
     "MAX_FORECAST_COHORT_MEMBERS",
     "accepted_submit_pipeline_job_model_id",
+    "accepted_submit_contract_is_current",
     "accepted_submit_row_kind",
     "apply_accepted_submit_transition",
     "canonical_forecast_cohort_members",

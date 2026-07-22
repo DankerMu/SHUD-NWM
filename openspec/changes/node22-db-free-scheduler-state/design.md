@@ -1420,6 +1420,10 @@ Invariant Matrix:
   reconciliation decision. An explicit Gateway rejection records the normative
   `rejected` outcome and terminalizes the affected hydro rows; neither state may
   make the journal validator fail while handling the original failure.
+- Submit-disposition contract: only a response that proves the external submit
+  was rejected before acceptance may write `rejected`. Transport loss,
+  post-`sbatch` parse failure, malformed success bodies, and unknown Gateway
+  failures are acceptance-unknown and enter exact-comment reconciliation.
 - Transition-truth contract: a Gateway timeout proves only
   `submit_result_ambiguous`; it clears/leaves absent the reconciliation source,
   decision, and matched ID. Those fields are written only by a completed
@@ -1436,6 +1440,10 @@ Invariant Matrix:
   Normal Gateway success and accounting adoption atomically bind the accepted
   Slurm ID with their complete evidence tuple; a same-ID repeat is idempotent,
   while a different-ID collision never overwrites the winner.
+- Rejection-atomicity contract: a proven rejection commits the attempt master,
+  every matching member hydro failure, and required event evidence as one
+  cycle-lock journal batch. A failed batch leaves the reservation recoverable;
+  it cannot leave a terminal master with active member state.
 - Accounting-proof contract: an owner-scoped match identifies the bind
   candidate but is not by itself proof of global uniqueness, and an owner-scoped
   zero result is not authoritative global absence. Any bounded exact-comment
@@ -1473,6 +1481,11 @@ Invariant Matrix:
   matched identity or safe absence/mismatch class, decision, restart stage,
   and whether native SHUD was resubmitted; raw comments, local/shared-NFS roots,
   credentials, and unbounded accounting rows never enter public evidence.
+- Version/compatibility invariant: the accepted-submit contract has an explicit
+  persisted version marker. Marker-free historical cohort-shaped rows remain
+  legacy read-only state and never acquire accepted-submit authority or become
+  invalid merely because additive fields are absent. Global visibility proof
+  is required only for versioned accepted-submit reconciliation.
 - Closed-enum invariant: task-accounting completeness is represented by
   pipeline status/error/projection fields and never adds values to the six-value
   `reconciliation_decision` contract. Reconciliation API inputs are normalized
@@ -1482,6 +1495,10 @@ Invariant Matrix:
   materialization. Model-less cohort truth remains in journal/direct storage
   and is not copied into every model latest view; aggregate model-latest bytes
   grow approximately linearly with cohort size.
+- Direct-storage invariant: terminal member projection does not amplify a
+  globally scanned direct-job namespace. Direct lookup/index/partition and
+  audit retention keep per-cycle reads and restart discovery bounded at the
+  supported 256-member cadence without deleting canonical journal truth.
 - Compatibility invariant: generic repository and non-DB-free reconcile callers
   keep their existing inputs/status behavior, while the new cohort/member fields
   are additive for file-journal DB-free execution.

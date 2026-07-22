@@ -11,6 +11,7 @@ from services.orchestrator.accepted_submit_identity import (
     AcceptedSubmitTransition,
     accepted_submit_pipeline_job_model_id,
 )
+from services.orchestrator.chain_config import SubmitDisposition
 from services.orchestrator.chain_types import (
     ArrayAggregation,
     CycleOrchestrationContext,
@@ -39,6 +40,18 @@ def is_forecast_cohort_stage(stage: StageDefinition) -> bool:
     if stage_name:
         return stage_name in _FORECAST_STAGE_ALIASES
     return str(stage.job_type or "") in _FORECAST_STAGE_ALIASES
+
+
+def _submit_error_is_ambiguous(error: Exception) -> bool:
+    disposition = getattr(error, "submit_disposition", None)
+    if disposition is not None:
+        try:
+            return SubmitDisposition(disposition) is SubmitDisposition.AMBIGUOUS
+        except ValueError:
+            return True
+    # Compatibility for legacy/in-process clients which predate the explicit
+    # submit contract. The one old transport code remains ambiguity-safe.
+    return getattr(error, "error_code", None) == "SLURM_GATEWAY_UNAVAILABLE"
 
 
 @dataclass(frozen=True)
@@ -195,11 +208,30 @@ def submit_and_wait_cycle_stage(
                     }
                 )
             )
+        submitted_job_id = submitted.get("job_id")
+        accepted_submit_repository = bool(
+            getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
+            and is_forecast_cohort_stage(stage)
+        )
+        valid_legacy_mock_id = (
+            isinstance(submitted_job_id, str)
+            and submitted_job_id.startswith("mock_")
+            and submitted_job_id.removeprefix("mock_").isdigit()
+        )
+        if not isinstance(submitted_job_id, str) or not (
+            submitted_job_id.isdigit() or (valid_legacy_mock_id and not accepted_submit_repository)
+        ):
+            error = OrchestratorError(
+                "SLURM_GATEWAY_INVALID_RESPONSE",
+                "Slurm submit response did not contain a valid master job id.",
+            )
+            error.submit_disposition = SubmitDisposition.AMBIGUOUS
+            raise error
     except Exception as error:
         if (
             getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
             and is_forecast_cohort_stage(stage)
-            and getattr(error, "error_code", None) == "SLURM_GATEWAY_UNAVAILABLE"
+            and _submit_error_is_ambiguous(error)
         ):
             transition = getattr(
                 orchestrator.repository,
@@ -256,8 +288,8 @@ def submit_and_wait_cycle_stage(
                     pipeline_job_id=pipeline_job_id,
                     slurm_job_id="",
                     status="submit_result_ambiguous",
-                    error_code="SLURM_GATEWAY_UNAVAILABLE",
-                    error_message="Gateway submit response unavailable; exact-comment reconciliation pending.",
+                    error_code=getattr(error, "error_code", None) or "SBATCH_SUBMIT_RESULT_AMBIGUOUS",
+                    error_message="Submit result is ambiguous; exact-comment reconciliation pending.",
                     task_results=(),
                 ),
                 None,
@@ -266,24 +298,38 @@ def submit_and_wait_cycle_stage(
             getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
             and is_forecast_cohort_stage(stage)
         )
+        rejection_batch_committed = False
         if accepted_submit_failure:
-            transition = getattr(
-                orchestrator.repository,
-                "transition_pipeline_job_submit_evidence",
-                None,
-            )
-            if not callable(transition):
-                raise OrchestratorError(
-                    "ACCEPTED_SUBMIT_COMMIT_UNAVAILABLE",
-                    "submit rejection cannot be durably committed",
-                    {"stage": stage.stage},
+            expected_attempt = reservation.submission_attempt if reservation is not None else context.retry_attempt
+            rejecter = getattr(orchestrator.repository, "reject_pipeline_job_submit_attempt", None)
+            if callable(rejecter):
+                transition_result = rejecter(
+                    idempotency_key,
+                    expected_submission_attempt=expected_attempt,
+                    finished_at=deps.utcnow(),
+                    error_code=getattr(error, "error_code", None) or "SBATCH_SUBMISSION_FAILED",
+                    error_message=str(deps.redact_payload(str(error))),
+                    stage=stage.stage,
+                    job_type=stage.job_type,
                 )
-            if callable(transition):
+                rejection_batch_committed = getattr(transition_result, "committed", False)
+            else:
+                transition = getattr(
+                    orchestrator.repository,
+                    "transition_pipeline_job_submit_evidence",
+                    None,
+                )
+                if not callable(transition):
+                    raise OrchestratorError(
+                        "ACCEPTED_SUBMIT_COMMIT_UNAVAILABLE",
+                        "submit rejection cannot be durably committed",
+                        {"stage": stage.stage},
+                    )
                 transition_result = transition(
                     pipeline_job_id,
                     AcceptedSubmitTransition.rejected(),
                     expected_submission_attempt=(
-                        reservation.submission_attempt if reservation is not None else context.retry_attempt
+                        expected_attempt
                     ),
                     expected_statuses=("reserved",),
                     require_unbound=True,
@@ -291,23 +337,24 @@ def submit_and_wait_cycle_stage(
                     error_code=getattr(error, "error_code", None) or "SBATCH_SUBMISSION_FAILED",
                     error_message=str(deps.redact_payload(str(error))),
                 )
-                if not getattr(transition_result, "committed", False):
-                    raise OrchestratorError(
-                        "ACCEPTED_SUBMIT_TRANSITION_CONFLICT",
-                        "submit rejection did not match the current durable reservation attempt",
-                        {
-                            "stage": stage.stage,
-                            "transition_outcome": getattr(transition_result, "outcome", "unknown"),
-                        },
-                    )
+            if not getattr(transition_result, "committed", False):
+                raise OrchestratorError(
+                    "ACCEPTED_SUBMIT_TRANSITION_CONFLICT",
+                    "submit rejection did not match the current durable reservation attempt",
+                    {
+                        "stage": stage.stage,
+                        "transition_outcome": getattr(transition_result, "outcome", "unknown"),
+                    },
+                )
         result = orchestrator._record_submission_failure(
             stage,
             context,
             error,
             pipeline_job_id=pipeline_job_id,
             persist_pipeline_job=not accepted_submit_failure,
+            persist_pipeline_event=not rejection_batch_committed,
         )
-        if stage.stage == "forecast":
+        if stage.stage == "forecast" and not rejection_batch_committed:
             orchestrator._mark_staged_hydro_runs_failed(
                 [str(basin["run_id"]) for basin in context.active_basins if basin.get("run_id")],
                 error_code=result.error_code or "SBATCH_SUBMISSION_FAILED",

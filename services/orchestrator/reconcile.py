@@ -30,8 +30,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Mapping
 
 from services.orchestrator.accepted_submit_identity import (
+    ACCEPTED_SUBMIT_CONTRACT_VERSION,
     FORECAST_COHORT_STAGE_ALIASES,
     AcceptedSubmitTransition,
+    accepted_submit_contract_is_current,
     forecast_cohort_identity_is_valid,
     is_forecast_cohort_stage_name,
     ordered_cohort_members,
@@ -242,11 +244,14 @@ def default_comment_sacct_querier(
         *,
         expected_user: str | None = None,
         expected_account: str | None = None,
+        accepted_submit_contract_version: str | None = None,
     ) -> tuple[SacctRecord, ...]:
         target_comment = slurm_comment_for(idempotency_key)
         owner_scope = (str(expected_user or ""), str(expected_account or ""))
         nonlocal visibility_proven
-        if not any(owner_scope):
+        if accepted_submit_contract_version not in (None, ACCEPTED_SUBMIT_CONTRACT_VERSION):
+            raise ReconcileQueryUnavailable("accepted-submit contract version is unsupported")
+        if not any(owner_scope) and accepted_submit_contract_version == ACCEPTED_SUBMIT_CONTRACT_VERSION:
             if visibility_proven is None:
                 visibility_proven = bool(visibility_probe())
             if not visibility_proven:
@@ -841,6 +846,7 @@ def reconcile_inflight_jobs(
         cohort_members = getattr(job, "cohort_members", None)
         file_cohort = bool(
             getattr(store, "supports_accepted_submit_reconcile", False)
+            and _accepted_submit_versioned_job(job)
             and _is_forecast_cohort_job(job)
             and isinstance(cohort_members, Sequence)
             and not isinstance(cohort_members, str | bytes)
@@ -1161,11 +1167,30 @@ def reconcile_reserved_unbound_jobs(
         accepted_submit_reconcile = _accepted_submit_reconcile_job(store, job)
         file_forecast_cohort = bool(
             getattr(store, "supports_accepted_submit_reconcile", False)
+            and _accepted_submit_versioned_job(job)
             and _is_forecast_cohort_job(job)
             and isinstance(getattr(job, "cohort_members", None), Sequence)
             and not isinstance(getattr(job, "cohort_members", None), str | bytes)
             and getattr(job, "cohort_members", None)
         )
+        unversioned_file_forecast = bool(
+            getattr(store, "supports_accepted_submit_reconcile", False)
+            and not _accepted_submit_versioned_job(job)
+            and _is_forecast_cohort_job(job)
+            and isinstance(getattr(job, "cohort_members", None), Sequence)
+            and not isinstance(getattr(job, "cohort_members", None), str | bytes)
+            and getattr(job, "cohort_members", None)
+        )
+        if unversioned_file_forecast:
+            outcomes.append(
+                ReservationReconcileOutcome(
+                    job_id=job.job_id,
+                    idempotency_key=str(idempotency_key),
+                    action="legacy_unversioned_read_only",
+                    status=str(job.status),
+                )
+            )
+            continue
         if file_forecast_cohort and not accepted_submit_reconcile:
             write_count = _record_file_reconciliation(store, job, "identity_mismatch_blocked")
             outcomes.append(
@@ -1197,6 +1222,9 @@ def reconcile_reserved_unbound_jobs(
                 str(idempotency_key),
                 expected_user=expected_user if accepted_submit_reconcile else "",
                 expected_account=expected_account if accepted_submit_reconcile else "",
+                accepted_submit_contract_version=(
+                    ACCEPTED_SUBMIT_CONTRACT_VERSION if accepted_submit_reconcile else None
+                ),
             )
         except ReconcileQueryUnavailable as error:
             # Transient failure: we did NOT confirm absence. Keep the row
@@ -1508,6 +1536,7 @@ def _query_comment_accounting_proof(
     *,
     expected_user: str,
     expected_account: str,
+    accepted_submit_contract_version: str | None = None,
 ) -> _CommentAccountingProof:
     """Obtain an owner match or an authoritative global exact-comment proof."""
 
@@ -1522,11 +1551,13 @@ def _query_comment_accounting_proof(
             expected_account=expected_account,
         )
 
-    owner_value = comment_query(
-        idempotency_key,
-        expected_user=expected_user or None,
-        expected_account=expected_account or None,
-    )
+    scoped_kwargs: dict[str, Any] = {
+        "expected_user": expected_user or None,
+        "expected_account": expected_account or None,
+    }
+    if accepted_submit_contract_version is not None and _comment_query_accepts_contract_version(comment_query):
+        scoped_kwargs["accepted_submit_contract_version"] = accepted_submit_contract_version
+    owner_value = comment_query(idempotency_key, **scoped_kwargs)
     owner_records = _bounded_comment_records(owner_value)
     if isinstance(owner_value, CommentAccountingResult) and owner_value.scope == "global":
         return _classify_global_comment_records(
@@ -1551,11 +1582,9 @@ def _query_comment_accounting_proof(
     # Neither owner-scoped zero nor one owner candidate proves global identity.
     # A bounded all-ownership view must prove either one identical owned master
     # or zero exact-comment rows before bind/retry can proceed.
-    global_value = comment_query(
-        idempotency_key,
-        expected_user=None,
-        expected_account=None,
-    )
+    global_kwargs = dict(scoped_kwargs)
+    global_kwargs.update({"expected_user": None, "expected_account": None})
+    global_value = comment_query(idempotency_key, **global_kwargs)
     if isinstance(global_value, CommentAccountingResult) and global_value.scope != "global":
         raise ReconcileQueryUnavailable("exact-comment adapter did not provide global proof")
     global_proof = _classify_global_comment_records(
@@ -1589,6 +1618,16 @@ def _comment_query_accepts_scope(comment_query: CommentSacctQuerier) -> bool:
         "expected_user",
         "expected_account",
     }.issubset(parameter_names)
+
+
+def _comment_query_accepts_contract_version(comment_query: CommentSacctQuerier) -> bool:
+    try:
+        parameters = tuple(inspect.signature(comment_query).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    return any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters) or any(
+        parameter.name == "accepted_submit_contract_version" for parameter in parameters
+    )
 
 
 def _query_comment_accounting(
@@ -1682,7 +1721,13 @@ def _accepted_submit_reconcile_job(store: Any, job: Any) -> bool:
     pre_outcome_reservation = identity.get("submit_outcome") is None
     return bool(
         getattr(store, "supports_accepted_submit_reconcile", False)
+        and _accepted_submit_versioned_job(job)
         and _is_forecast_cohort_job(job)
         and forecast_cohort_identity_is_valid(identity)
         and (pre_outcome_reservation or _file_cohort_runtime_identity_matches(store, identity))
     )
+
+
+def _accepted_submit_versioned_job(job: Any) -> bool:
+    identity = vars(job) if hasattr(job, "__dict__") else job
+    return isinstance(identity, Mapping) and accepted_submit_contract_is_current(identity)

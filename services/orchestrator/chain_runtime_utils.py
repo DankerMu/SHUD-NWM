@@ -1044,7 +1044,13 @@ def _response_json_or_text(response: httpx.Response) -> dict[str, Any] | str:
 
 def _error_code_from_response(details: dict[str, Any] | str) -> str:
     if isinstance(details, dict):
-        error = details.get("error")
-        if isinstance(error, dict) and isinstance(error.get("code"), str):
-            return error["code"]
+        value = details.get("error_code") or details.get("code")
+        if value not in (None, ""):
+            return str(value)
+        for key in ("error", "detail"):
+            nested = details.get(key)
+            if isinstance(nested, dict):
+                code = _error_code_from_response(nested)
+                if code != "SLURM_GATEWAY_ERROR":
+                    return code
     return "SLURM_GATEWAY_ERROR"

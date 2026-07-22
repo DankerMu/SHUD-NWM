@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Callable, Mapping, Sequence
 
 import httpx
@@ -33,7 +34,24 @@ def _error_code_from_response(details: dict[str, Any] | str) -> str:
         value = details.get("error_code") or details.get("code")
         if value not in (None, ""):
             return str(value)
+        for key in ("error", "detail"):
+            nested = details.get(key)
+            if isinstance(nested, Mapping):
+                nested_code = _error_code_from_response(dict(nested))
+                if nested_code != "SLURM_GATEWAY_ERROR":
+                    return nested_code
     return "SLURM_GATEWAY_ERROR"
+
+
+_PROVEN_PRE_ACCEPTANCE_REJECTION_CODES = frozenset(
+    {
+        "MANIFEST_VALIDATION_ERROR",
+        "TEMPLATE_NOT_FOUND",
+        "TEMPLATE_SECURITY_ERROR",
+        "VALIDATION_ERROR",
+    }
+)
+_SUBMIT_JOB_ID_RE = re.compile(r"^(?:\d+|mock_\d+)$")
 
 
 class HttpSlurmGatewayClient:
@@ -55,7 +73,8 @@ class HttpSlurmGatewayClient:
         self._error_code_from_response = error_code_from_response
 
     def submit_job(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return self._request("POST", "/api/v1/slurm/jobs", json=payload, expected=(200, 201))
+        response = self._request("POST", "/api/v1/slurm/jobs", json=payload, expected=(200, 201))
+        return self._validated_submit_response(response)
 
     def submit_job_array(
         self,
@@ -77,7 +96,8 @@ class HttpSlurmGatewayClient:
             payload["tasks"] = [dict(task) for task in tasks]
         if manifest is not None:
             payload["manifest"] = dict(manifest)
-        return self._request("POST", "/api/v1/slurm/job-arrays", json=payload, expected=(200, 201))
+        response = self._request("POST", "/api/v1/slurm/job-arrays", json=payload, expected=(200, 201))
+        return self._validated_submit_response(response)
 
     def get_job_status(self, job_id: str) -> dict[str, Any]:
         return self._request("GET", f"/api/v1/slurm/jobs/{job_id}", expected=(200,))
@@ -113,12 +133,60 @@ class HttpSlurmGatewayClient:
             with httpx.Client(base_url=self.base_url, timeout=self.timeout) as client:
                 response = client.request(method, path, json=json)
         except httpx.HTTPError as error:
-            raise self._error("SLURM_GATEWAY_UNAVAILABLE", f"Slurm Gateway request failed: {error}") from error
+            raise self._error(
+                "SLURM_GATEWAY_UNAVAILABLE",
+                f"Slurm Gateway request failed: {error}",
+                submit_disposition="ambiguous" if method == "POST" else None,
+            ) from error
         if response.status_code not in expected:
             details = self._response_json_or_text(response)
             code = self._error_code_from_response(details)
-            raise self._error(code, f"Slurm Gateway returned HTTP {response.status_code}.", {"response": details})
-        return response.json()
+            disposition = None
+            if method == "POST":
+                disposition = "rejected" if code in _PROVEN_PRE_ACCEPTANCE_REJECTION_CODES else "ambiguous"
+            raise self._error(
+                code,
+                f"Slurm Gateway returned HTTP {response.status_code}.",
+                {"response": details},
+                submit_disposition=disposition,
+            )
+        try:
+            return response.json()
+        except ValueError as error:
+            raise self._error(
+                "SLURM_GATEWAY_INVALID_RESPONSE",
+                "Slurm Gateway returned a non-JSON success response.",
+                submit_disposition="ambiguous" if method == "POST" else None,
+            ) from error
 
-    def _error(self, code: str, message: str, details: dict[str, Any] | None = None) -> Exception:
-        return self._error_cls(code, message, details or {})
+    def _validated_submit_response(self, value: Any) -> dict[str, Any]:
+        try:
+            response = self._coerce_mapping(value)
+        except (TypeError, ValueError) as error:
+            raise self._error(
+                "SLURM_GATEWAY_INVALID_RESPONSE",
+                "Slurm Gateway returned an invalid submit response.",
+                submit_disposition="ambiguous",
+            ) from error
+        job_id = response.get("job_id")
+        if not isinstance(job_id, str) or _SUBMIT_JOB_ID_RE.fullmatch(job_id) is None:
+            raise self._error(
+                "SLURM_GATEWAY_INVALID_RESPONSE",
+                "Slurm Gateway submit response did not contain a valid master job id.",
+                {"response_fields": sorted(str(key) for key in response)},
+                submit_disposition="ambiguous",
+            )
+        return response
+
+    def _error(
+        self,
+        code: str,
+        message: str,
+        details: dict[str, Any] | None = None,
+        *,
+        submit_disposition: str | None = None,
+    ) -> Exception:
+        error = self._error_cls(code, message, details or {})
+        if submit_disposition is not None:
+            setattr(error, "submit_disposition", submit_disposition)
+        return error

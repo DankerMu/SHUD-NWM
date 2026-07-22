@@ -225,6 +225,19 @@ A Gateway timeout MUST persist only the ambiguous submit outcome and MUST leave
 closed `submit_outcome` enum applies to both cohort-master and candidate-task
 rows.
 
+Only a typed, proven pre-acceptance rejection MAY persist `rejected`. Once a
+submit request may have reached `sbatch`, any transport error, parse failure,
+malformed success response, or unclassified Gateway failure MUST persist
+`submit_result_ambiguous` and reconcile by exact comment. A proven rejection
+MUST atomically terminalize the master and all matching-attempt hydro members;
+partial member terminalization MUST NOT be observable after reopen.
+
+New accepted-submit master and candidate rows MUST carry an explicit contract
+version. Marker-free historical cohort-shaped rows MUST retain the legacy
+read/replay contract and MUST NOT be rejected for missing accepted-submit
+fields. Global accounting-visibility proof MUST be applied only to versioned
+accepted-submit cohorts, not to generic or non-DB-free reconciliation.
+
 #### Scenario: Forecast cohort reservation precedes the Gateway call
 
 - **WHEN** scheduler submits a source/cycle/restart-stage forecast cohort
@@ -345,6 +358,15 @@ rows.
   and bounded candidate/task outcomes
 - **AND** it excludes raw comments, credentials, runtime roots, and raw
   accounting rows.
+
+#### Scenario: Accepted-submit storage remains bounded over operational history
+
+- **WHEN** four daily GFS/IFS cohorts project up to 256 terminal members over
+  many historical cycles
+- **THEN** cycle reads and restart discovery do not enumerate every historical
+  member direct file or approach a global 100,000-file discovery limit
+- **AND** canonical journal evidence remains auditable under the documented
+  partition/index and retention contract.
 
 #### Scenario: Recovered success preserves run and QC provenance
 

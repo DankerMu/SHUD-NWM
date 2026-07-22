@@ -42,9 +42,23 @@ def test_file_reservation_durability_uncertainty_blocks_gateway_before_side_effe
     monkeypatch: pytest.MonkeyPatch,
     fault: str,
 ) -> None:
+    from services.orchestrator.chain import M3_STAGES, CycleOrchestrationContext
+    from tests.test_orchestration_chain import FakeCycleSlurmClient, _basins, _orchestrator
+
     repository = FileOrchestrationJournalRepository(tmp_path / "journal")
     repository._ensure_root_unlocked()
-    gateway_calls = 0
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    basins = orchestrator._normalize_cycle_basins(_basins(2), "gfs", cycle_time)
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_id="gfs_2026062800",
+        run_id="cycle_gfs_2026062800",
+        all_basins=basins,
+        active_basins=list(basins),
+    )
 
     if fault == "directory_fsync":
         real_fsync = safe_fs.os.fsync
@@ -75,10 +89,15 @@ def test_file_reservation_durability_uncertainty_blocks_gateway_before_side_effe
         monkeypatch.setattr(safe_fs, "_verify_fd_matches_path", fail_post_replace_parent_identity)
 
     with pytest.raises(OrchestratorError) as caught:
-        repository.reserve_pipeline_job(_pipeline_reservation_record(_dt("2026-06-28T00:00:00Z")))
-        gateway_calls += 1
+        orchestrator._submit_and_wait_cycle_stage(M3_STAGES[2], context)
     assert caught.value.error_code == "FILE_JOURNAL_WRITE_FAILED"
-    assert gateway_calls == 0
+    assert client.submissions == []
+
+    monkeypatch.undo()
+    reopened = FileOrchestrationJournalRepository(repository.root)
+    rows = reopened.query_pipeline_jobs_by_cycle("gfs_2026062800")
+    assert all(row.get("slurm_job_id") in (None, "") for row in rows)
+    assert all(row.get("status") not in {"submission_failed", "failed"} for row in rows)
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:

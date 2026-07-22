@@ -24496,6 +24496,16 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
     partial_summary = partial_reconcile["inflight"]["outcomes"][0]["candidate_summary"]
     assert [item["array_task_outcome"] for item in partial_summary].count("succeeded") == 17
     assert [item["array_task_outcome"] for item in partial_summary].count("unverified") == 1
+    assert all(
+        item["restart_stage"] == "state_save_qc"
+        for item in partial_summary
+        if item["array_task_outcome"] == "succeeded"
+    )
+    assert all(
+        item["restart_stage"] == "forecast"
+        for item in partial_summary
+        if item["array_task_outcome"] == "unverified"
+    )
     partial_parent = partial_repository.get_pipeline_job(reserved.job_id)
     assert partial_parent["slurm_job_id"] == initial_client.accepted_forecast_job_id
     assert partial_parent["status"] == "reconcile_unverified"
@@ -24547,6 +24557,16 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
     complete_summary = complete_reconcile["inflight"]["outcomes"][0]["candidate_summary"]
     assert [item["array_task_outcome"] for item in complete_summary].count("succeeded") == 17
     assert [item["array_task_outcome"] for item in complete_summary].count("failed") == 1
+    assert all(
+        item["restart_stage"] == "state_save_qc"
+        for item in complete_summary
+        if item["array_task_outcome"] == "succeeded"
+    )
+    assert all(
+        item["restart_stage"] == "forecast"
+        for item in complete_summary
+        if item["array_task_outcome"] == "failed"
+    )
     complete_parent = complete_repository.get_pipeline_job(reserved.job_id)
     assert complete_parent["status"] == "failed"
     assert len(complete_parent["candidate_projections"]) == 18

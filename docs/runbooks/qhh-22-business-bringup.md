@@ -214,6 +214,16 @@ psql "$DATABASE_URL" -c "select run_id,status from hydro.hydro_run order by 1 de
 
 作业里每个 stage 以结构化 JSON（含 `error_code`/`status`）落到 `.out`，便于定位失败 stage。
 
+DB-free scheduler journal 的 `pipeline-jobs/` 只保留 cohort master 与 pre-#1112 legacy
+flat rows，供 bounded restart discovery 使用。#1112 之后的 terminal candidate direct
+projection 写入
+`pipeline-jobs/by-cycle/<source>/<YYYYMMDDHH>/<job_id>.json`；按 job-id 直接读取和按
+source/cycle 读取会命中该分区，但全局 restart/hard-limit scan 不递归枚举历史 candidate
+分区。`journal/<source>/<cycle>.jsonl` 仍是 append-only audit truth，`latest/` 仍是
+model-scoped materialized view；不得通过删除 journal 来控制 direct-file 数量，也不得把
+`by-cycle/` 搬回 flat namespace。marker-free legacy flat rows 保持只读兼容，不自动升级为
+accepted-submit reconcile authority。
+
 **实时生产监控快照**（`nhms-monitor`，通用编排器，49883ea）——一次性扫 DB + Slurm 生成结构化健康快照，适合 cron/守护轮询：
 
 ```bash

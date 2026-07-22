@@ -4,6 +4,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 
 from packages.common.source_identity import normalize_source_id
@@ -44,8 +45,26 @@ class AnalysisPipelineAlreadyActiveError(OrchestratorError):
         )
 
 
+class SubmitDisposition(str, Enum):
+    """Whether a failed submit is known not to have reached Slurm."""
+
+    REJECTED = "rejected"
+    AMBIGUOUS = "ambiguous"
+
+
 class SlurmClientError(OrchestratorError):
-    pass
+    def __init__(
+        self,
+        error_code: str,
+        message: str,
+        details: dict[str, object] | None = None,
+        *,
+        submit_disposition: SubmitDisposition | str | None = None,
+    ) -> None:
+        super().__init__(error_code, message, details)
+        self.submit_disposition = (
+            SubmitDisposition(submit_disposition) if submit_disposition is not None else None
+        )
 
 
 class SlurmAccountingEvidenceGap(OrchestratorError):

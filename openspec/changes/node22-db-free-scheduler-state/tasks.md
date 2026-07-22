@@ -414,7 +414,8 @@ Scenario evidence rows for section 5:
   timeout records `submit_result_ambiguous`, not permanent candidate/hydro
   failure. The fake Gateway itself reopens the real file journal and observes
   the reservation before performing or simulating the external side effect;
-  strict directory durability failures fail closed before that boundary.
+  strict directory durability failures are injected through the real
+  orchestrator path and prove the Gateway spy is never invoked.
 
 - [x] 9.2 Reconcile reserved-unbound file-journal forecast cohorts by exact Slurm comment
   and identity.
@@ -432,7 +433,10 @@ Scenario evidence rows for section 5:
   proves the persisted tuple equals the emitted tuple. Attempt-scoped CAS keeps
   stale concurrent transitions from overwriting a bound row, and normal success
   plus accounting adoption each atomically bind the complete evidence tuple;
-  same-ID replay is idempotent and different-ID collision is blocked.
+  same-ID replay is idempotent and different-ID collision is blocked. Only a
+  typed proven pre-acceptance rejection becomes `rejected`; post-request
+  parse/malformed/unknown failures remain ambiguous. Proven rejection commits
+  the master and every member hydro failure atomically with reopen parity.
 
 - [x] 9.3 Project terminal array-task accounting to candidate-scoped
   pipeline/hydro state.
@@ -475,6 +479,11 @@ Scenario evidence rows for section 5:
   advancing wall time cannot rescan/starve later cohort keys. Scheduler restart
   evidence contains the bounded submit/accounting tuple, restart/native-SHUD
   fields, and candidate/task outcomes for reserved and inflight branches.
+  Successful candidate summaries report projected `state_save_qc`, while
+  failed/unverified summaries retain `forecast`. Version-marked new rows and
+  marker-free legacy rows replay compatibly, DB-free visibility proof does not
+  affect generic reconciliation, and 256-member historical cycles do not grow
+  a globally scanned direct namespace toward its hard file limit.
 
 - [ ] 9.6 Complete local, CI, and node-22 live verification.
   Evidence floor: the issue-targeted pytest command, `uv run ruff check .`, and

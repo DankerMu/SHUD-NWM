@@ -1553,7 +1553,10 @@ def _restart_reconcile_attempt_evidence(store: Any, job_id: str) -> dict[str, An
             "array_task_outcome": (
                 projections_by_task.get(member.get("array_task_id"), {}).get("array_task_outcome") or "unverified"
             ),
-            "restart_stage": member.get("restart_stage"),
+            "restart_stage": (
+                projections_by_task.get(member.get("array_task_id"), {}).get("restart_stage")
+                or member.get("restart_stage")
+            ),
             "native_shud_resubmitted": bool(
                 projections_by_task.get(member.get("array_task_id"), {}).get(
                     "native_shud_resubmitted",

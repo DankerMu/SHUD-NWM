@@ -42,6 +42,7 @@ def _record_submission_failure(
     *,
     pipeline_job_id: str | None = None,
     persist_pipeline_job: bool = True,
+    persist_pipeline_event: bool = True,
 ) -> StageRunResult:
     pipeline_job_id = pipeline_job_id or _pipeline_job_id(context.run_id, stage.stage)
     now = _utcnow()
@@ -74,33 +75,34 @@ def _record_submission_failure(
             "log_uri": None,
             }
         )
-    self.repository.insert_pipeline_event(
-        entity_type="pipeline_job",
-        entity_id=pipeline_job_id,
-        event_type="submission",
-        status_from=None,
-        status_to="submission_failed",
-        message=f"{stage.stage} submission failed: {message}",
-        details=_safe_pipeline_event_details(
-            {
-                "stage": stage.stage,
-                "job_type": stage.job_type,
-                "error": message,
-                "runtime_root_contract": _submission_runtime_root_contract(
-                    {
-                        "workspace_dir": str(Path(self.config.workspace_root)),
-                        "object_store_root": str(Path(self.config.object_store_root)),
-                        "object_store_prefix": self.config.object_store_prefix,
-                        "published_artifact_root": os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT", ""),
-                        "published_artifact_uri_prefix": os.getenv(
-                            "NHMS_PUBLISHED_ARTIFACT_URI_PREFIX",
-                            "published://",
-                        ),
-                    }
-                ),
-            }
-        ),
-    )
+    if persist_pipeline_event:
+        self.repository.insert_pipeline_event(
+            entity_type="pipeline_job",
+            entity_id=pipeline_job_id,
+            event_type="submission",
+            status_from=None,
+            status_to="submission_failed",
+            message=f"{stage.stage} submission failed: {message}",
+            details=_safe_pipeline_event_details(
+                {
+                    "stage": stage.stage,
+                    "job_type": stage.job_type,
+                    "error": message,
+                    "runtime_root_contract": _submission_runtime_root_contract(
+                        {
+                            "workspace_dir": str(Path(self.config.workspace_root)),
+                            "object_store_root": str(Path(self.config.object_store_root)),
+                            "object_store_prefix": self.config.object_store_prefix,
+                            "published_artifact_root": os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT", ""),
+                            "published_artifact_uri_prefix": os.getenv(
+                                "NHMS_PUBLISHED_ARTIFACT_URI_PREFIX",
+                                "published://",
+                            ),
+                        }
+                    ),
+                }
+            ),
+        )
     self.repository.update_forecast_cycle_status(
         source_id=context.source_id,
         cycle_time=context.cycle_time,

@@ -8360,6 +8360,144 @@ def test_file_journal_forecast_explicit_rejection_terminalizes_without_secondary
     )
 
 
+@pytest.mark.parametrize(
+    ("status_code", "payload", "expected_error_code"),
+    [
+        (502, {"detail": {"error": {"code": "SLURM_PARSE_ERROR"}}}, "SLURM_PARSE_ERROR"),
+        (200, {"status": "submitted"}, "SLURM_GATEWAY_INVALID_RESPONSE"),
+    ],
+)
+def test_real_http_submit_uncertainty_keeps_file_cohort_reserved_for_reconcile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    payload: dict[str, Any],
+    expected_error_code: str,
+) -> None:
+    import httpx
+
+    from services.orchestrator.chain import HttpSlurmGatewayClient
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    class _HttpClient:
+        def __enter__(self) -> _HttpClient:
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def request(self, method: str, path: str, *, json: Any = None) -> httpx.Response:
+            del method, path, json
+            return httpx.Response(status_code, json=payload)
+
+    monkeypatch.setattr(httpx, "Client", lambda **_kwargs: _HttpClient())
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    orchestrator = _orchestrator(tmp_path, repository, HttpSlurmGatewayClient("http://gateway.test"))
+    raw_basins = _basins(2)
+    for index, basin in enumerate(raw_basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_2026050100_model_{index}",
+                "candidate_id": (
+                    f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic"
+                ),
+                "orchestration_run_id": "cycle_gfs_2026050100",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    basins = orchestrator._normalize_cycle_basins(raw_basins, "gfs", cycle_time)
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_id="gfs_2026050100",
+        run_id="cycle_gfs_2026050100",
+        all_basins=basins,
+        active_basins=list(basins),
+    )
+
+    result, aggregation = orchestrator._submit_and_wait_cycle_stage(M3_STAGES[2], context)
+
+    assert aggregation is None
+    assert result.status == "submit_result_ambiguous"
+    assert result.error_code == expected_error_code
+    row = repository.query_reserved_unbound_jobs()[0]
+    assert row.submit_outcome == "submit_result_ambiguous"
+    assert row.slurm_job_id is None
+    assert repository.reclaim_pipeline_job_reservation(vars(row)) is None
+    assert all(
+        (repository._hydro_run_for(str(basin["run_id"])) or {}).get("status") != "failed"
+        for basin in basins
+    )
+
+
+def test_real_http_proven_pre_submit_rejection_commits_master_hydro_and_event_batch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    from services.orchestrator.chain import HttpSlurmGatewayClient
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    class _HttpClient:
+        def __enter__(self) -> _HttpClient:
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def request(self, method: str, path: str, *, json: Any = None) -> httpx.Response:
+            del method, path, json
+            return httpx.Response(422, json={"error": {"code": "VALIDATION_ERROR"}})
+
+    monkeypatch.setattr(httpx, "Client", lambda **_kwargs: _HttpClient())
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    orchestrator = _orchestrator(tmp_path, repository, HttpSlurmGatewayClient("http://gateway.test"))
+    raw_basins = _basins(2)
+    for index, basin in enumerate(raw_basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_2026050100_model_{index}",
+                "candidate_id": (
+                    f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic"
+                ),
+                "orchestration_run_id": "cycle_gfs_2026050100",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    basins = orchestrator._normalize_cycle_basins(raw_basins, "gfs", cycle_time)
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_id="gfs_2026050100",
+        run_id="cycle_gfs_2026050100",
+        all_basins=basins,
+        active_basins=list(basins),
+    )
+
+    result, aggregation = orchestrator._submit_and_wait_cycle_stage(M3_STAGES[2], context)
+
+    assert aggregation is None
+    assert result.status == "submission_failed"
+    cohort = repository.get_pipeline_job(result.pipeline_job_id)
+    assert cohort["submit_outcome"] == "rejected"
+    assert cohort["status"] == "submission_failed"
+    assert all(
+        (repository._hydro_run_for(str(basin["run_id"])) or {})["status"] == "failed"
+        for basin in basins
+    )
+    events = repository._cycle_rows(source_id="gfs", cycle_time=cycle_time, model_id=None).pipeline_events
+    assert sum(event.get("event_type") == "submission" for event in events) == 1
+
+
 def test_file_journal_single_member_forecast_explicit_rejection_is_model_less_after_reopen(
     tmp_path: Path,
 ) -> None:
@@ -8851,6 +8989,7 @@ def test_chain_http_slurm_gateway_client_legacy_subclass_uses_owner_module() -> 
     assert client._coerce_mapping is legacy_chain._coerce_mapping
     assert client._response_json_or_text is legacy_chain._response_json_or_text
     assert client._error_code_from_response is legacy_chain._error_code_from_response
+    assert client._validated_submit_response({"job_id": "mock_1"}) == {"job_id": "mock_1"}
 
     inventory_text = _chain_inventory_text()
     for token in ("HttpSlurmGatewayClient", "chain_slurm_client.HttpSlurmGatewayClient"):

@@ -28,10 +28,13 @@ from packages.common.slurm_env import secret_manifest_value_reason
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator import chain_repository_state
 from services.orchestrator.accepted_submit_identity import (
+    ACCEPTED_SUBMIT_CONTRACT_VERSION,
+    ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD,
     MAX_FORECAST_COHORT_MEMBERS,
     AcceptedSubmitCommitResult,
     AcceptedSubmitEvidenceError,
     AcceptedSubmitTransition,
+    accepted_submit_contract_is_current,
     accepted_submit_row_kind,
     apply_accepted_submit_transition,
     normalize_accepted_submit_evidence,
@@ -118,9 +121,11 @@ _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _FORECAST_RUN_ID_RE = re.compile(r"^fcst_([^_]+)_(\d{10})_(.+)$")
 _CYCLE_RUN_ID_RE = re.compile(r"^cycle_([^_]+)_(\d{10})$")
 _CYCLE_COHORT_RUN_ID_RE = re.compile(r"^cycle_([^_]+)_(\d{10})(?:_.+)?$")
+_CANDIDATE_JOB_ID_RE = re.compile(r"^job_fcst_([^_]+)_(\d{10})_.+$")
 _REPLAY_SEQUENCE_FIELD = "_file_journal_replay_sequence"
 _REPLAY_ORDER_FIELD = "_file_journal_replay_order"
 _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS = (
+    "accepted_submit_contract_version",
     "slurm_job_id",
     "array_task_id",
     "model_id",
@@ -395,7 +400,7 @@ class FileOrchestrationJournalRepository:
         ] = {}
         self._direct_jobs_cycle_cache: dict[
             tuple[str, str],
-            tuple[tuple[int, int, int] | None, list[dict[str, Any]]],
+            tuple[tuple[Any, ...], list[dict[str, Any]]],
         ] = {}
         self._read_bytes_cache: dict[str, tuple[tuple[int, int, int], bytes, bool]] = {}
         self._read_bytes_cache_total = 0
@@ -615,11 +620,32 @@ class FileOrchestrationJournalRepository:
 
     def _pipeline_job_for_id_unlocked(self, job_id: str) -> dict[str, Any] | None:
         expected_job_id = _safe_segment(job_id)
+        direct_job = self._direct_pipeline_job_record(expected_job_id)
+        if direct_job is not None:
+            source_id = _source_id_from_job(direct_job)
+            cycle_time = _cycle_time_from_job(direct_job)
+            model_id = _optional_safe_identity(direct_job, "model_id")
+            if model_id is not None:
+                rows = self._cycle_rows(
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    model_id=model_id,
+                )
+            else:
+                rows = _CycleRows()
+                for record in self._read_jsonl(self._journal_path(source_id=source_id, cycle_time=cycle_time)):
+                    self._apply_journal_record(
+                        rows,
+                        record,
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                    )
+            replayed = rows.pipeline_jobs.get(expected_job_id)
+            return dict(replayed or direct_job)
         for job in self._iter_pipeline_job_records(include_direct=False):
             if str(job.get("job_id") or "") == expected_job_id:
                 return dict(job)
-        direct_job = self._direct_pipeline_job_record(expected_job_id)
-        return dict(direct_job) if direct_job is not None else None
+        return None
 
     def query_pipeline_jobs_by_cycle(self, cycle_id: str) -> list[dict[str, Any]]:
         try:
@@ -1254,6 +1280,132 @@ class FileOrchestrationJournalRepository:
             written = self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
             return AcceptedSubmitCommitResult("applied", written)
 
+    def reject_pipeline_job_submit_attempt(
+        self,
+        idempotency_key: str,
+        *,
+        expected_submission_attempt: int,
+        finished_at: datetime,
+        error_code: str,
+        error_message: str,
+        stage: str,
+        job_type: str,
+    ) -> AcceptedSubmitCommitResult:
+        """Reject one current attempt and its staged hydro cohort atomically."""
+
+        initial = self._candidate_job_for_idempotency_unlocked(idempotency_key)
+        if initial is None:
+            return AcceptedSubmitCommitResult("missing")
+        source_id = _source_id_from_job(initial)
+        cycle_time = _cycle_time_from_job(initial)
+        attempt = max(int(expected_submission_attempt), 1)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._candidate_job_for_idempotency_unlocked(idempotency_key)
+            if existing is None:
+                return AcceptedSubmitCommitResult("missing")
+            if (
+                max(int(existing.get("submission_attempt") or 1), 1) != attempt
+                or str(existing.get("status") or "") != "reserved"
+                or existing.get("slurm_job_id") not in (None, "")
+            ):
+                if (
+                    max(int(existing.get("submission_attempt") or 1), 1) == attempt
+                    and existing.get("submit_outcome") == "rejected"
+                    and str(existing.get("status") or "") == "submission_failed"
+                ):
+                    return AcceptedSubmitCommitResult("idempotent", dict(existing))
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+
+            safe_message = _durable_error_message(error_message)
+            master = apply_accepted_submit_transition(existing, AcceptedSubmitTransition.rejected())
+            master.update(
+                {
+                    "finished_at": _format_utc(finished_at),
+                    "error_code": error_code,
+                    "error_message": safe_message,
+                    "updated_at": _format_utc(_utcnow()),
+                }
+            )
+            payloads: list[tuple[str, dict[str, Any], str | None]] = []
+            touched_models: set[str] = set()
+            for member in _bounded_cohort_members(existing.get("cohort_members")):
+                run_id = str(member.get("run_id") or "")
+                model_id = str(member.get("model_id") or "")
+                if not run_id or not model_id:
+                    continue
+                hydro = self._hydro_run_for(run_id)
+                if (
+                    hydro is None
+                    or max(int(hydro.get("submission_attempt") or 1), 1) != attempt
+                    or str(hydro.get("status") or "") not in ACTIVE_HYDRO_STATUSES
+                ):
+                    continue
+                hydro_row = dict(hydro)
+                hydro_row.update(
+                    {
+                        "status": "failed",
+                        "error_code": error_code,
+                        "error_message": safe_message,
+                        "updated_at": _format_utc(_utcnow()),
+                    }
+                )
+                payloads.append(("hydro_run", hydro_row, model_id))
+                touched_models.add(model_id)
+            payloads.append(("pipeline_job", master, None))
+            event = {
+                "event_id": self._next_event_id_unlocked(
+                    source_id=source_id, cycle_time=cycle_time, model_id=None
+                ),
+                "entity_type": "pipeline_job",
+                "entity_id": str(master["job_id"]),
+                "event_type": "submission",
+                "status_from": "reserved",
+                "status_to": "submission_failed",
+                "message": f"{stage} submission failed: {safe_message}",
+                "details": {
+                    "stage": stage,
+                    "job_type": job_type,
+                    "error": safe_message,
+                    "submit_outcome": "rejected",
+                    "submission_attempt": attempt,
+                },
+                "created_at": _format_utc(_utcnow()),
+            }
+            payloads.append(("pipeline_event", event, None))
+
+            next_sequence = self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
+            records: list[dict[str, Any]] = []
+            for offset, (record_type, payload, model_id) in enumerate(payloads):
+                record = _journal_record_for_write(
+                    record_type,
+                    payload,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    model_id=model_id,
+                    sequence=next_sequence + offset,
+                )
+                self._validate_outgoing_record(
+                    record,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    record_type=record_type,
+                    model_id=model_id,
+                )
+                records.append(record)
+            self._append_journal_records_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                records=records,
+            )
+            self._write_pipeline_job_direct_unlocked(master, records[-2])
+            for model_id in sorted(touched_models):
+                self._materialize_latest_unlocked(
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    model_id=model_id,
+                )
+            return AcceptedSubmitCommitResult("applied", _public_scheduler_row(master))
+
     def record_pipeline_job_reconciliation(
         self,
         job_id: str,
@@ -1398,8 +1550,7 @@ class FileOrchestrationJournalRepository:
                 cycle_time=cycle_time,
                 records=records,
             )
-            direct_path = self.root / "pipeline-jobs" / f"{_required_safe_identity(cohort_row, 'job_id')}.json"
-            self._atomic_write_json_unlocked(direct_path, records[-1])
+            self._write_pipeline_job_direct_unlocked(cohort_row, records[-1])
             for model_id in sorted(touched_models):
                 self._materialize_latest_unlocked(
                     source_id=source_id,
@@ -1504,6 +1655,7 @@ class FileOrchestrationJournalRepository:
                         "candidate_id": candidate_id,
                         "error_code": None if task_status == "succeeded" else projection.get("error_code"),
                         "submit_outcome": "accepted",
+                        "accepted_submit_contract_version": ACCEPTED_SUBMIT_CONTRACT_VERSION,
                         "restart_stage": projection.get("restart_stage"),
                         "native_shud_resubmitted": False,
                     }
@@ -1640,11 +1792,9 @@ class FileOrchestrationJournalRepository:
                 )
             pipeline_records = [record for record in records if str(record.get("record_type") or "") == "pipeline_job"]
             for record, direct_job in zip(pipeline_records[: len(direct_jobs)], direct_jobs, strict=True):
-                direct_path = self.root / "pipeline-jobs" / f"{_required_safe_identity(direct_job, 'job_id')}.json"
-                self._atomic_write_json_unlocked(direct_path, record)
+                self._write_pipeline_job_direct_unlocked(direct_job, record)
             if cohort_changed:
-                direct_path = self.root / "pipeline-jobs" / f"{_required_safe_identity(cohort_row, 'job_id')}.json"
-                self._atomic_write_json_unlocked(direct_path, pipeline_records[-1])
+                self._write_pipeline_job_direct_unlocked(cohort_row, pipeline_records[-1])
             for model_id in sorted(touched_models):
                 self._materialize_latest_unlocked(
                     source_id=source_id,
@@ -2190,7 +2340,16 @@ class FileOrchestrationJournalRepository:
         unfiltered scan feeds the model_id=None rows.
         """
         cache_key = (source_id, format_cycle_time(cycle_time))
-        signature = _stat_signature(self.root / "pipeline-jobs")
+        signature = (
+            _stat_signature(self.root / "pipeline-jobs"),
+            _stat_signature(
+                self.root
+                / "pipeline-jobs"
+                / "by-cycle"
+                / _safe_segment(source_id)
+                / format_cycle_time(cycle_time)
+            ),
+        )
         cached = self._direct_jobs_cycle_cache.get(cache_key)
         if cached is not None and cached[0] == signature:
             return [dict(job) for job in cached[1]]
@@ -2225,6 +2384,7 @@ class FileOrchestrationJournalRepository:
         latest_entries: list[tuple[str, str, tuple[int, int, int] | None]] = []
         journal_signatures: list[tuple[str, tuple[int, int, int] | None]] = []
         event_signatures: list[tuple[str, tuple[int, int, int] | None]] = []
+        direct_partition_signatures: list[tuple[str, tuple[int, int, int] | None]] = []
         for source_segment in source_segments:
             try:
                 with os.scandir(self.root / "latest" / source_segment / cycle_segment) as it:
@@ -2255,9 +2415,18 @@ class FileOrchestrationJournalRepository:
                     _stat_signature(self.root / "pipeline-events" / source_segment / f"{cycle_segment}.jsonl"),
                 )
             )
+            direct_partition_signatures.append(
+                (
+                    source_segment,
+                    _stat_signature(
+                        self.root / "pipeline-jobs" / "by-cycle" / source_segment / cycle_segment
+                    ),
+                )
+            )
         return (
             tuple(journal_signatures),
             tuple(event_signatures),
+            tuple(direct_partition_signatures),
             tuple(sorted(latest_entries)),
             _stat_signature(self.root / "pipeline-jobs"),
         )
@@ -2560,6 +2729,18 @@ class FileOrchestrationJournalRepository:
     def _direct_pipeline_job_record(self, expected_job_id: str) -> dict[str, Any] | None:
         payload = self._read_optional_json(self.root / "pipeline-jobs" / f"{expected_job_id}.json")
         if payload is None:
+            match = _CANDIDATE_JOB_ID_RE.fullmatch(expected_job_id)
+            if match is not None:
+                source_id = _normalize_file_source_id(match.group(1), field="job_id")
+                payload = self._read_optional_json(
+                    self.root
+                    / "pipeline-jobs"
+                    / "by-cycle"
+                    / _safe_segment(source_id)
+                    / _safe_segment(match.group(2))
+                    / f"{expected_job_id}.json"
+                )
+        if payload is None:
             return None
         return self._validated_direct_pipeline_job_record(payload, expected_job_id=expected_job_id)
 
@@ -2570,9 +2751,18 @@ class FileOrchestrationJournalRepository:
         cycle_time: datetime,
         model_id: str | None,
     ) -> Iterable[dict[str, Any]]:
-        directory = self.root / "pipeline-jobs"
+        directories = (
+            self.root / "pipeline-jobs",
+            self.root
+            / "pipeline-jobs"
+            / "by-cycle"
+            / _safe_segment(_normalize_file_source_id(source_id, field="source_id"))
+            / format_cycle_time(cycle_time),
+        )
         for path in sorted(
-            _iter_regular_json_files(
+            path
+            for directory in directories
+            for path in _iter_regular_json_files(
                 directory,
                 root=self.root,
                 max_files=self.max_files,
@@ -3010,6 +3200,10 @@ class FileOrchestrationJournalRepository:
             "created_at": _optional_format_datetime(record.get("created_at"), field="created_at") or now,
             "updated_at": _optional_format_datetime(record.get("updated_at"), field="updated_at") or now,
         }
+        if ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD in record:
+            row[ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD] = record.get(
+                ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD
+            )
         _validate_pipeline_job_identity(
             row,
             source_id=source_id,
@@ -3057,11 +3251,32 @@ class FileOrchestrationJournalRepository:
             model_id=model_id,
         )
         self._append_journal_record_unlocked(source_id=source_id, cycle_time=cycle_time, record=record)
-        direct_path = self.root / "pipeline-jobs" / f"{_required_safe_identity(row, 'job_id')}.json"
-        self._atomic_write_json_unlocked(direct_path, record)
+        self._write_pipeline_job_direct_unlocked(row, record)
         if model_id is not None:
             self._materialize_latest_unlocked(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
         return _public_scheduler_row(row)
+
+    def _write_pipeline_job_direct_unlocked(
+        self,
+        row: Mapping[str, Any],
+        record: Mapping[str, Any],
+    ) -> None:
+        source_id = _source_id_from_job(row)
+        cycle_time = _cycle_time_from_job(row)
+        job_id = _required_safe_identity(row, "job_id")
+        if accepted_submit_contract_is_current(row) and accepted_submit_row_kind(row) == "candidate":
+            direct_path = (
+                self.root
+                / "pipeline-jobs"
+                / "by-cycle"
+                / _safe_segment(source_id)
+                / format_cycle_time(cycle_time)
+                / f"{job_id}.json"
+            )
+        else:
+            direct_path = self.root / "pipeline-jobs" / f"{job_id}.json"
+        self._atomic_write_json_unlocked(direct_path, record)
+        self._direct_jobs_cycle_cache.pop((source_id, format_cycle_time(cycle_time)), None)
 
     def _pipeline_job_conflicts_unlocked(self, row: Mapping[str, Any]) -> bool:
         job_id = str(row.get("job_id") or "")
