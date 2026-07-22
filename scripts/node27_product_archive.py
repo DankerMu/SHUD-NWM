@@ -27,6 +27,7 @@ from urllib.parse import urlsplit
 
 import jsonschema
 
+from packages.common.display_watermark import fetch_display_watermark
 from packages.common.forcing_domain_handoff import (
     PACKAGE_CONTRACT_ID as FORCING_DOMAIN_PACKAGE_CONTRACT_ID,
 )
@@ -56,6 +57,7 @@ from packages.common.storage import (
 )
 
 SCHEMA_VERSION = "1.0"
+RECEIPT_SCHEMA_VERSION = "1.1"
 TOOL_VERSION = "node27-product-archive/1"
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_DISCOVERY = 100_000
@@ -3878,13 +3880,15 @@ def _publish_refusal_receipt(
     config: MoverConfig,
     *,
     now: datetime,
+    reference_time: datetime,
     free_space: dict[str, Any],
 ) -> dict[str, Any]:
     receipt = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": RECEIPT_SCHEMA_VERSION,
         "generated_at": _time(now),
+        "reference_time": _time(reference_time),
         "mode": "enforce" if config.enforce else "dry-run",
-        "cutoff": _time(now - timedelta(days=config.minimum_age_days)),
+        "cutoff": _time(reference_time - timedelta(days=config.minimum_age_days)),
         "minimum_age_days": config.minimum_age_days,
         "per_tick_bound": config.per_tick_bound,
         "outcome": "refused_free_space",
@@ -3910,17 +3914,23 @@ def run(
     config: MoverConfig,
     *,
     now: datetime | None = None,
+    reference_time: datetime | None = None,
     mount_id_provider: MountIdProvider = fd_mount_id,
     rename_impl: RenameNoReplace = rename_no_replace,
     access_check: DirectoryAccessCheck = _directory_effective_access,
 ) -> tuple[dict[str, Any], int]:
     now = (now or datetime.now(UTC)).astimezone(UTC)
+    reference_time = (reference_time or now).astimezone(UTC)
     _validate_config(config)
     free_space = _measure_archive_free_space(config)
     if free_space is not None and free_space["band"] == "refuse":
-        receipt = _publish_refusal_receipt(config, now=now, free_space=free_space)
+        receipt = _publish_refusal_receipt(
+            config, now=now, reference_time=reference_time, free_space=free_space
+        )
         return receipt, 1
-    locators, failures = discover_candidate_locators(config, now=now, mount_id_provider=mount_id_provider)
+    locators, failures = discover_candidate_locators(
+        config, now=reference_time, mount_id_provider=mount_id_provider
+    )
     states_access_denied = any(
         failure.lane_hint == "states"
         and failure.locator == "states"
@@ -4033,10 +4043,11 @@ def run(
     has_indeterminate = any(item["status"] == "indeterminate" for item in terminals)
     has_failure = bool(failures) or any(item["status"] == "failed" for item in terminals)
     receipt = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": RECEIPT_SCHEMA_VERSION,
         "generated_at": _time(now),
+        "reference_time": _time(reference_time),
         "mode": "enforce" if config.enforce else "dry-run",
-        "cutoff": _time(now - timedelta(days=config.minimum_age_days)),
+        "cutoff": _time(reference_time - timedelta(days=config.minimum_age_days)),
         "minimum_age_days": config.minimum_age_days,
         "per_tick_bound": config.per_tick_bound,
         "outcome": "indeterminate" if has_indeterminate else "failed" if has_failure else "success",
@@ -4088,10 +4099,10 @@ def _validate_refusal_receipt_semantics(receipt: Mapping[str, Any]) -> None:
         raise ArchiveMoverError(
             "refused_free_space receipt free_bytes must be < refuse_bytes"
         )
-    generated = _parse_hour_or_instant(receipt["generated_at"], label="receipt generated_at")
+    reference = _parse_hour_or_instant(receipt["reference_time"], label="receipt reference_time")
     cutoff = _parse_hour_or_instant(receipt["cutoff"], label="receipt cutoff")
-    if cutoff != generated - timedelta(days=receipt["minimum_age_days"]):
-        raise ArchiveMoverError("receipt cutoff does not match generated_at/minimum age")
+    if cutoff != reference - timedelta(days=receipt["minimum_age_days"]):
+        raise ArchiveMoverError("receipt cutoff does not match reference_time/minimum age")
 
 
 def validate_receipt_semantics(receipt: Mapping[str, Any]) -> None:
@@ -4264,10 +4275,10 @@ def validate_receipt_semantics(receipt: Mapping[str, Any]) -> None:
         "archived": sum(item["archive_bytes"] for item in receipt["terminals"]),
     }:
         raise ArchiveMoverError("receipt byte totals disagree with terminals")
-    generated = _parse_hour_or_instant(receipt["generated_at"], label="receipt generated_at")
+    reference = _parse_hour_or_instant(receipt["reference_time"], label="receipt reference_time")
     cutoff = _parse_hour_or_instant(receipt["cutoff"], label="receipt cutoff")
-    if cutoff != generated - timedelta(days=receipt["minimum_age_days"]):
-        raise ArchiveMoverError("receipt cutoff does not match generated_at/minimum age")
+    if cutoff != reference - timedelta(days=receipt["minimum_age_days"]):
+        raise ArchiveMoverError("receipt cutoff does not match reference_time/minimum age")
 
 
 def _parse_hour_or_instant(value: Any, *, label: str) -> datetime:
@@ -4484,19 +4495,29 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--zstd")
     parser.add_argument("--minimum-age-days", type=int)
     parser.add_argument("--per-tick-bound", type=int)
+    parser.add_argument("--reference-time")
     parser.add_argument("--enforce", action="store_true", help="perform archive and retirement mutations")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     try:
-        config = _config_from_args(_parser().parse_args(argv))
+        args = _parser().parse_args(argv)
+        config = _config_from_args(args)
+        wall_time = datetime.now(UTC)
         lock_fd = acquire_lock(config.lock_path)
         if lock_fd is None:
             print(json.dumps({"status": "skipped", "reason": "lock-contended"}, sort_keys=True), file=sys.stderr)
             return 0
         try:
-            receipt, code = run(config)
+            reference_time = (
+                _parse_hour_or_instant(args.reference_time, label="reference time")
+                if args.reference_time is not None
+                else fetch_display_watermark(
+                    os.getenv("NODE27_DISPLAY_WATERMARK_DATABASE_URL", "")
+                )
+            )
+            receipt, code = run(config, now=wall_time, reference_time=reference_time)
             states_access = _receipt_states_access_denied(receipt)
             if states_access is not None:
                 print(

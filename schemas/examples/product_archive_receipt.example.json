@@ -1,8 +1,9 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "generated_at": "2026-07-11T00:00:00Z",
+  "reference_time": "2026-07-11T12:00:00Z",
   "mode": "dry-run",
-  "cutoff": "2026-06-27T00:00:00Z",
+  "cutoff": "2026-06-27T12:00:00Z",
   "minimum_age_days": 14,
   "per_tick_bound": 2,
   "validation_attempts": 2,

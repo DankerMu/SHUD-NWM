@@ -5,6 +5,10 @@ Date: 2026-07-03
 Policy amendment: 2026-07-21 (archive/DB retention window reduced from 30 to 14 days;
 the receipt gates and 7-day compression lead remain unchanged)
 
+Policy clarification: 2026-07-21 (all 7/14-day lifecycle ages are anchored to
+the latest node-27 displayable forecast cycle, not host wall time; wall time is
+used only for receipt generation and gate freshness)
+
 ## Status
 
 Accepted
@@ -65,7 +69,8 @@ it omits TimescaleDB native compression entirely.
    `run_id, river_network_version_id, river_segment_id`, orderby
    `variable, valid_time`; forcing: segmentby
    `forcing_version_id, station_id`, orderby `variable, valid_time`).
-   Compress-after lag is configurable (default one chunk width, 7 days).
+   Compress-after lag is configurable (default one chunk width, 7 days) and
+   is evaluated against the node-27 display business-time watermark.
    Reingest into a compressed chunk requires an explicit, documented
    decompress step; tooling must fail closed with instructions rather than
    corrupt or silently skip.
@@ -77,6 +82,11 @@ it omits TimescaleDB native compression entirely.
    being dropped. Coverage/metadata tables (`hydro_run`,
    `run_display_coverage`, `forcing_version`, QC/lineage) are retained
    indefinitely.
+   The product mover, existing raw cleanup, compression runner, and retention
+   runner all resolve one shared watermark as the maximum forecast
+   `cycle_time` accepted by the display catalog (`succeeded`, `parsed`, or
+   `published`). Missing/unreadable watermark truth blocks mutation; pipeline
+   stalls therefore do not age data merely because the host clock advances.
 6. **Deferred: v2 star schema** (surrogate-key dimension tables + narrow hot
    fact tables). With indexes at ~70% of hypertable size, compression of
    terminal chunks removes most of what the star schema would save. It is

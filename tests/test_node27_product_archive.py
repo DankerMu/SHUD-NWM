@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tarfile
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -316,6 +317,32 @@ def _forcing(config: archive.MoverConfig, cycle: str = "2026010100") -> Path:
         encoding="utf-8",
     )
     return leaf
+
+
+def test_archive_age_uses_display_watermark_not_wall_clock(tmp_path: Path) -> None:
+    config = replace(_config(tmp_path, enforce=False), minimum_age_days=14)
+    eligible = _forcing(config, "2026062000")
+    protected = _forcing(config, "2026063000")
+    wall_time = datetime(2026, 7, 22, 0, tzinfo=UTC)
+    display_watermark = datetime(2026, 7, 11, 12, tzinfo=UTC)
+
+    receipt, code = archive.run(
+        config,
+        now=wall_time,
+        reference_time=display_watermark,
+        mount_id_provider=_mount_id,
+        rename_impl=_rename_noreplace,
+    )
+
+    assert code == 0
+    assert receipt["generated_at"] == "2026-07-22T00:00:00Z"
+    assert receipt["reference_time"] == "2026-07-11T12:00:00Z"
+    assert receipt["cutoff"] == "2026-06-27T12:00:00Z"
+    assert [item["source_path"] for item in receipt["selected"]] == [
+        "forcing/gfs/2026062000/basin-a/model-a"
+    ]
+    assert eligible.exists()
+    assert protected.exists()
 
 
 def _forcing_with_domain_bundle(config: archive.MoverConfig, *, top_level_basin: object = _MISSING) -> Path:
@@ -1148,7 +1175,7 @@ def test_main_publishes_exact_state_access_receipt_then_emits_one_compact_diagno
     )
     real_run = archive.run
 
-    def local_run(runtime_config: archive.MoverConfig):
+    def local_run(runtime_config: archive.MoverConfig, **_kwargs):
         return real_run(
             runtime_config,
             now=_LIVE_SHAPE_NOW,
@@ -1172,6 +1199,8 @@ def test_main_publishes_exact_state_access_receipt_then_emits_one_compact_diagno
             "--zstd",
             str(config.zstd_path),
             "--enforce",
+            "--reference-time",
+            _LIVE_SHAPE_NOW.isoformat(),
         ]
     )
 
@@ -1210,7 +1239,7 @@ def test_main_keeps_exit_one_for_other_receipt_failures(
     monkeypatch.setattr(
         archive,
         "run",
-        lambda _config: (
+        lambda _config, **_kwargs: (
             {
                 "discovery_failures": [
                     {
@@ -1237,6 +1266,8 @@ def test_main_keeps_exit_one_for_other_receipt_failures(
             str(config.lock_path),
             "--zstd",
             str(config.zstd_path),
+            "--reference-time",
+            _LIVE_SHAPE_NOW.isoformat(),
         ]
     )
     assert code == 1
@@ -3766,6 +3797,8 @@ def test_main_lock_contender_emits_one_diagnostic_and_preserves_receipt(
                 str(config.lock_path),
                 "--zstd",
                 str(config.zstd_path),
+                "--reference-time",
+                _LIVE_SHAPE_NOW.isoformat(),
             ]
         )
     finally:
@@ -4398,8 +4431,9 @@ def test_missing_watermark_env_is_backwards_compatible(monkeypatch: pytest.Monke
 
 def test_refusal_receipt_semantics_reject_extra_terminals() -> None:
     receipt = {
-        "schema_version": archive.SCHEMA_VERSION,
+        "schema_version": archive.RECEIPT_SCHEMA_VERSION,
         "generated_at": "2026-07-11T00:00:00Z",
+        "reference_time": "2026-07-11T00:00:00Z",
         "mode": "enforce",
         "cutoff": "2026-05-27T00:00:00Z",
         "minimum_age_days": 45,
@@ -4442,8 +4476,9 @@ def test_refusal_receipt_semantics_reject_extra_terminals() -> None:
 
 def test_refusal_receipt_requires_free_below_refuse() -> None:
     receipt = {
-        "schema_version": archive.SCHEMA_VERSION,
+        "schema_version": archive.RECEIPT_SCHEMA_VERSION,
         "generated_at": "2026-07-11T00:00:00Z",
+        "reference_time": "2026-07-11T00:00:00Z",
         "mode": "enforce",
         "cutoff": "2026-05-27T00:00:00Z",
         "minimum_age_days": 45,
@@ -4472,8 +4507,9 @@ def test_refusal_receipt_requires_free_below_refuse() -> None:
 def test_refused_free_space_receipt_schema_positive_example() -> None:
     schema = json.loads((_ROOT / "schemas/product_archive_receipt.schema.json").read_text())
     receipt = {
-        "schema_version": archive.SCHEMA_VERSION,
+        "schema_version": archive.RECEIPT_SCHEMA_VERSION,
         "generated_at": "2026-07-11T00:00:00Z",
+        "reference_time": "2026-07-11T00:00:00Z",
         "mode": "enforce",
         "cutoff": "2026-05-27T00:00:00Z",
         "minimum_age_days": 45,

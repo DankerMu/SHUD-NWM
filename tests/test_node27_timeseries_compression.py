@@ -304,6 +304,32 @@ def test_classify_respects_per_tick_bound() -> None:
     assert [c.chunk_name for c in selected + deferred] == [c.chunk_name for c in chunks]
 
 
+def test_main_uses_display_watermark_as_compression_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = _base_env(tmp_path)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    reference_time = datetime(2026, 7, 11, 12, tzinfo=UTC)
+    monkeypatch.setattr(compression, "fetch_display_watermark", lambda _dsn: reference_time)
+    monkeypatch.setattr(compression, "_current_head_sha", lambda **_kwargs: "a" * 40)
+    chunk = _chunk(
+        "hydro", "river_timeseries", "watermark-old", now=reference_time, delta_days=8
+    )
+
+    code = compression.main(
+        [],
+        fetch_chunks=lambda _dsn: [chunk],
+        measure_chunk_bytes=lambda _dsn, _chunk, **_kwargs: 100,
+        compress_chunk=lambda _dsn, _chunk: None,
+    )
+
+    assert code == 0
+    receipt = json.loads(Path(env["NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH"]).read_text())
+    assert receipt["now_utc"] == "2026-07-11T12:00:00Z"
+    assert [item["chunk_name"] for item in receipt["selected"]] == ["watermark-old"]
+
+
 # ---------------------------------------------------------------------------
 # Dry-run vs enforce
 # ---------------------------------------------------------------------------

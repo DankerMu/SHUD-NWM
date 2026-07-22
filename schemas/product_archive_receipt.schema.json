@@ -3,10 +3,11 @@
   "title": "NHMS Product Archive Mover Receipt",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "generated_at", "mode", "cutoff", "minimum_age_days", "per_tick_bound", "validation_attempts", "outcome", "candidates", "selected", "deferred", "terminals", "events", "discovery_failures", "bytes"],
+  "required": ["schema_version", "generated_at", "reference_time", "mode", "cutoff", "minimum_age_days", "per_tick_bound", "validation_attempts", "outcome", "candidates", "selected", "deferred", "terminals", "events", "discovery_failures", "bytes"],
   "properties": {
-    "schema_version": {"const": "1.0"},
+    "schema_version": {"const": "1.1"},
     "generated_at": {"type": "string", "format": "date-time"},
+    "reference_time": {"type": "string", "format": "date-time"},
     "mode": {"enum": ["dry-run", "enforce"]},
     "cutoff": {"type": "string", "format": "date-time"},
     "minimum_age_days": {"type": "integer", "minimum": 14},

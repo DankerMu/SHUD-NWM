@@ -21,7 +21,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
-SCHEMA_VERSION = "nhms.node27_raw_retention.production.v1"
+from packages.common.display_watermark import fetch_display_watermark
+
+SCHEMA_VERSION = "nhms.node27_raw_retention.production.v2"
 DEFAULT_RETENTION_DAYS = 14
 DEFAULT_SOURCES = ("gfs", "ifs")
 CYCLE_NAME_LENGTH = 10
@@ -204,10 +206,16 @@ def _target_payload(target: RetentionTarget) -> dict[str, Any]:
     }
 
 
-def run_retention(config: RawRetentionConfig, *, now: datetime) -> dict[str, Any]:
+def run_retention(
+    config: RawRetentionConfig,
+    *,
+    now: datetime,
+    reference_time: datetime | None = None,
+) -> dict[str, Any]:
     started_at = now.astimezone(UTC)
-    cutoff = started_at - timedelta(days=config.retention_days)
-    targets, skipped = collect_targets(config, now=started_at)
+    reference_time = (reference_time or started_at).astimezone(UTC)
+    cutoff = reference_time - timedelta(days=config.retention_days)
+    targets, skipped = collect_targets(config, now=reference_time)
     planned = [_target_payload(target) for target in targets]
     deleted: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
@@ -226,6 +234,7 @@ def run_retention(config: RawRetentionConfig, *, now: datetime) -> dict[str, Any
         "status": "completed",
         "started_at": started_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "finished_at": finished_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "reference_time": reference_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "object_store_root": str(config.object_store_root),
         "raw_root": str(config.object_store_root / "raw"),
         "sources": sorted(config.sources),
@@ -277,7 +286,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--retention-days", type=int)
     parser.add_argument("--sources")
     parser.add_argument("--summary-path")
+    parser.add_argument("--reference-time")
     return parser
+
+
+def _parse_reference_time(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError("reference time is invalid") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("reference time must be timezone-aware")
+    return parsed.astimezone(UTC)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -290,7 +310,23 @@ def main(argv: list[str] | None = None) -> int:
             _write_summary(Path(summary_value).expanduser(), payload)
         print(json.dumps(payload, sort_keys=True))
         return 2
-    payload = run_retention(config, now=datetime.now(UTC))
+    try:
+        reference_time = (
+            _parse_reference_time(args.reference_time)
+            if args.reference_time is not None
+            else fetch_display_watermark(os.getenv("NODE27_DISPLAY_WATERMARK_DATABASE_URL", ""))
+        )
+    except Exception as error:
+        payload = _blocked_payload(
+            [{"field": "display_watermark", "reason": type(error).__name__}]
+        )
+        if config.summary_path is not None:
+            _write_summary(config.summary_path, payload)
+        print(json.dumps(payload, sort_keys=True))
+        return 2
+    payload = run_retention(
+        config, now=datetime.now(UTC), reference_time=reference_time
+    )
     if config.summary_path is not None:
         _write_summary(config.summary_path, payload)
     print(json.dumps(payload, sort_keys=True))

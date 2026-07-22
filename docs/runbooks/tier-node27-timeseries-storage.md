@@ -5,8 +5,19 @@ Operation, rollback, and cadence rationale for the node-27 archive lane
 `openspec/changes/tier-node27-timeseries-storage`.
 
 Current policy (effective 2026-07-21): product retirement and DB retention use
-a 14-day eligibility window. Compression remains earlier at 7 days. Historical
-30/45-day receipts below are audit evidence only, not commands for new runs.
+a 14-day eligibility window. Compression remains earlier at 7 days. Both ages
+are measured from the latest forecast cycle accepted by the node-27 display
+catalog, not from the server wall clock. Historical 30/45-day receipts below
+are audit evidence only, not commands for new runs.
+
+The shared business-time watermark is the UTC result of `MAX(cycle_time)` over
+`hydro.hydro_run` forecast rows in `succeeded`, `parsed`, or `published` state.
+Every lifecycle runner opens a bounded read-only query before selection and
+fails closed when that watermark is absent or unreadable; it MUST NOT fall back
+to `datetime.now()`. Wall time remains the receipt generation/freshness clock.
+For example, with display watermark `2026-07-11T12:00:00Z`, compression cutoff
+is `2026-07-04T12:00:00Z` and archive/raw/DB-retention cutoff is
+`2026-06-27T12:00:00Z` even if the host date is later.
 
 - Design record: `openspec/changes/tier-node27-timeseries-storage/design.md`
 - Architecture record: `docs/adr/0002-node27-timeseries-hot-cold-tiering.md`
@@ -41,7 +52,9 @@ system-level (root) units for this lane.
               /home/nwm/NWM/infra/env/node27-storage-inventory-audit.env
    ```
 
-   Fill in `DATABASE_URL` for the audit env with a read-only role
+   Fill in `DATABASE_URL` for the audit env and
+   `NODE27_DISPLAY_WATERMARK_DATABASE_URL` for the product-archive/raw envs
+   with a read-only role
    (`nhms_display_ro` or equivalent). A superuser or write-capable role in
    this env is a documented rollback / lint finding — the audit does not
    need write access and the receipt runbook must reject the file if the
@@ -108,6 +121,8 @@ extending the retention receipt validity window first.**
 
 - Product archive mover receipt:
   `/home/nwm/node27-product-archive-logs/receipt.json` (mode 0600).
+  `generated_at` is wall time, while `reference_time` is the display business
+  watermark and `cutoff = reference_time - minimum_age_days`.
   The receipt binds one `outcome`:
   - `success` — every selected candidate archived + verified + retired
     (enforce) or planned (dry-run).

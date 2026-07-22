@@ -41,6 +41,23 @@ def test_node27_raw_retention_production_deletes_aged_targets(tmp_path: Path) ->
     assert not old_cycle.exists()
 
 
+def test_raw_retention_age_uses_display_watermark_not_wall_clock(tmp_path: Path) -> None:
+    eligible = _write_raw_cycle(tmp_path, "gfs", "2026062000")
+    protected = _write_raw_cycle(tmp_path, "gfs", "2026063000")
+
+    result = node27_raw_retention.run_retention(
+        _config(tmp_path),
+        now=datetime(2026, 7, 22, 0, tzinfo=UTC),
+        reference_time=datetime(2026, 7, 11, 12, tzinfo=UTC),
+    )
+
+    assert result["started_at"] == "2026-07-22T00:00:00Z"
+    assert result["reference_time"] == "2026-07-11T12:00:00Z"
+    assert result["cutoff"] == "2026-06-27T12:00:00Z"
+    assert not eligible.exists()
+    assert protected.exists()
+
+
 def test_node27_raw_retention_execute_deletes_only_aged_enabled_sources(tmp_path: Path) -> None:
     old_gfs = _write_raw_cycle(tmp_path, "gfs", "2026060100")
     fresh_ifs = _write_raw_cycle(tmp_path, "IFS", "2026062612")

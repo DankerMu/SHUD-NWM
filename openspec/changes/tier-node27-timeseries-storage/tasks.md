@@ -3,6 +3,9 @@
 > Policy revision (2026-07-21): current archive and DB retention eligibility is
 > 14 days. Completed rows that quote earlier 30/45-day live receipts are retained
 > as historical evidence; all open/live execution rows use the 14-day policy.
+> The 7/14-day clock is the latest node-27 displayable forecast cycle, not host
+> wall time. Tests keep receipt freshness on wall time while asserting cutoff
+> selection against the display watermark and fail-closed lookup.
 
 Order is load-bearing:
 

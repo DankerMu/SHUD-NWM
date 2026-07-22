@@ -7,9 +7,11 @@ NODE27_TIMESERIES_COMPRESSION_REPO_ROOT=/home/nwm/NWM
 
 # Node-27 primary Postgres (writer role — compression is DDL/DML)
 DATABASE_URL=postgresql://REPLACE_ME_WRITER:REPLACE_ME_PW@127.0.0.1:55432/nhms
+# The runner uses this connection read-only first to resolve the display
+# business-time watermark, then applies the 7-day lag to that watermark.
 
 # Chunk-selection lag in seconds. Default 604800 = 7 days (one chunk width).
-# Chunks whose range_end is younger than this are skipped.
+# Chunks whose range_end is younger than the display-watermark cutoff are skipped.
 NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=604800
 
 # Maximum number of chunks compressed per timer tick.

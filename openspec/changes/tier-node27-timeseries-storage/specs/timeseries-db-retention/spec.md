@@ -61,14 +61,15 @@ they SHALL also retain the independent db-export coverage check.
 Retention SHALL use TimescaleDB `drop_chunks` with a 14-day default window,
 targeting exactly `hydro.river_timeseries` and
 `met.forcing_station_timeseries`; chunks are dropped only when their entire
-range is older than the window. Metadata and coverage tables (`hydro_run`,
+range is older than the window relative to the latest forecast cycle accepted
+by the node-27 display catalog. Host wall time is used for receipt/gate
+freshness only and SHALL NOT advance the drop cutoff. Metadata and coverage tables (`hydro_run`,
 `run_display_coverage`, `forcing_version`, `state_snapshot`, QC/lineage)
 SHALL never be retention targets.
 
 #### Scenario: Chunk fully outside the window is dropped
 
-- **WHEN** a chunk's `range_end` is older than the retention window at
-  enforce time
+- **WHEN** a chunk's `range_end` is older than the watermark-relative retention window
 - **THEN** the chunk MUST be dropped and the receipt MUST record its name and
   freed bytes
 
@@ -77,6 +78,11 @@ SHALL never be retention targets.
 - **WHEN** retention enforce completes
 - **THEN** row counts of the metadata/coverage tables MUST be unchanged by
   the run
+
+#### Scenario: Display watermark is unavailable
+
+- **WHEN** the runner cannot resolve a latest displayable forecast cycle
+- **THEN** it MUST fail closed before chunk enumeration or deletion
 
 ### Requirement: Safety bounds
 

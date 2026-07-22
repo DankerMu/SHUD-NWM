@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
+from packages.common.display_watermark import DisplayWatermarkError, fetch_display_watermark
 from packages.common.evidence_io import (
     BoundedEvidenceError,
     acquire_exclusive_flock_until,
@@ -944,7 +945,8 @@ def main(
     compress_chunk: CompressChunk | None = None,
     reconcile_chunk_state: ReconcileChunkState | None = None,
 ) -> int:
-    now = now_utc or datetime.now(UTC)
+    wall_time = datetime.now(UTC)
+    now = now_utc or wall_time
     try:
         args = _parser().parse_args(argv)
     except CompressionConfigError as error:
@@ -962,6 +964,20 @@ def main(
                 stage="config",
             )
         _emit_stderr_diagnostic("failed", str(error))
+        return 1
+    try:
+        # ``now_utc`` is retained as the receipt's legacy field name, but the
+        # production value is the node-27 display business-time watermark.
+        # Tests and controlled replays may inject it explicitly.
+        now = now_utc or fetch_display_watermark(config.database_url)
+    except DisplayWatermarkError as error:
+        _replace_stale_with_failure(
+            config,
+            now_utc=wall_time,
+            stage="display_watermark",
+            head_sha=None,
+        )
+        _emit_stderr_diagnostic("failed", str(error), dsn=config.database_url)
         return 1
     try:
         frozen_head_sha = _current_head_sha(require_clean=True)

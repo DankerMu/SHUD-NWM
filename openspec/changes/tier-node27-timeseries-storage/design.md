@@ -4,6 +4,9 @@
 > retention window are 14 days. References to 30/45-day live attempts in the
 > implementation-history fixtures remain historical evidence and do not define
 > the current policy. Compression remains a separate 7-day lead stage.
+> The 7/14-day cutoffs use the latest forecast cycle accepted by the node-27
+> display catalog. Host wall time is only receipt/freshness time, and missing
+> watermark truth blocks lifecycle mutation.
 
 ## Context
 

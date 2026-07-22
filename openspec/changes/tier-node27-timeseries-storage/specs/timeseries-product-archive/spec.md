@@ -264,8 +264,12 @@ station forcing CSVs — is never shorter than the DB hot window. Cycles
 rotated after the minimum age are thereafter reachable only via the archive
 tier (display routes return their ADR 0001 not-found for them).
 The Python entrypoint SHALL acquire the non-blocking flock itself before
-discovery/mutation. One UTC now SHALL drive strict
-`eligibility_end < now - minimum_age`; equality remains hot. Forcing/run
+discovery/mutation. One UTC display business-time watermark SHALL drive strict
+`eligibility_end < reference_time - minimum_age`; equality remains hot. The
+watermark is the latest forecast cycle accepted by the node-27 display catalog;
+failure to resolve it blocks mutation and host wall time is never a fallback.
+Receipt `generated_at` remains wall time while `reference_time` and `cutoff`
+prove selection. Forcing/run
 eligibility end is authoritative non-inverted manifest `end_time`, matching
 the inventory/DB/display hot window, while state uses valid-time point.
 Canonical archive identity/order remains cycle-time based and receipts also
@@ -302,7 +306,8 @@ validate against `product_archive_receipt.schema.json`, use an absolute
 configured path and the #847 strict dirfd/no-follow mode-0600 publication
 protocol: exclusive temp, file fsync, atomic replace, directory fsync and
 post-replace parent check; pre-replace failure preserves the old receipt and
-post-replace uncertainty is indeterminate. It SHALL record the captured now/cutoff, mode/bound,
+post-replace uncertainty is indeterminate. It SHALL record the captured wall generation time,
+display reference time/cutoff, mode/bound,
 candidate/selected/deferred identities, one terminal outcome per selected
 identity, ordered side events, disjoint locator-keyed discovery failures,
 bytes and reasons. Legacy skipped/quarantined action arrays SHALL NOT be
@@ -363,6 +368,12 @@ disjointness remain unchanged.
   configured minimum archive age
 - **THEN** the mover MUST NOT select it as a candidate and it MUST remain in
   the hot object-store
+
+#### Scenario: Host clock advances while display is stalled
+
+- **WHEN** host wall time advances but the display business-time watermark does not
+- **THEN** the archive candidate cutoff MUST remain unchanged
+- **AND** a missing watermark MUST block archive mutation
 
 #### Scenario: Minimum age below the retention window is rejected
 

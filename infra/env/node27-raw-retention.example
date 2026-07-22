@@ -5,8 +5,10 @@
 # user units for nwm.
 
 NODE27_RAW_RETENTION_REPO=/home/nwm/NWM
+NODE27_DISPLAY_WATERMARK_DATABASE_URL=postgresql://nhms_display_ro:REPLACE_ME@127.0.0.1:55432/nhms
 NODE27_RAW_RETENTION_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
 NODE27_RAW_RETENTION_LOG_ROOT=/home/nwm/node27-raw-retention-logs
 NODE27_RAW_RETENTION_LOCK_PATH=/tmp/node27-raw-retention.lock
 NODE27_RAW_RETENTION_SOURCES=GFS,IFS
+# Relative to the latest displayable forecast cycle, not the host clock.
 NODE27_RAW_RETENTION_DAYS=14

@@ -11,9 +11,11 @@ NODE27_TIMESERIES_RETENTION_REPO=/home/nwm/NWM
 
 # Node-27 primary Postgres (writer role — retention performs drop_chunks DDL).
 DATABASE_URL=postgresql://REPLACE_ME_WRITER:REPLACE_ME_PW@127.0.0.1:55432/nhms
+# The same connection is queried read-only first for the latest displayable
+# forecast cycle; the 14-day window is relative to that business-time watermark.
 
 # Drop-window size in days. Default 14 = spec §Window and mechanism.
-# Chunks whose entire range is older than this window are eligible.
+# Chunks whose entire range is older than the watermark-relative window are eligible.
 NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=14
 
 # Maximum number of chunks dropped per timer tick. Default 5 (matches

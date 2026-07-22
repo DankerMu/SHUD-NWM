@@ -7,6 +7,9 @@
   "properties": {
     "schema_version": {"const": "1.0"},
     "generated_at": {"type": "string", "format": "date-time"},
+    "reference_time": {"type": "string", "format": "date-time"},
+    "cutoff": {"type": "string", "format": "date-time"},
+    "window_days": {"type": "integer", "minimum": 1},
     "mode": {"enum": ["dry-run", "enforce"]},
     "outcome": {"enum": ["dry-run", "refused", "enforced"]},
     "refusal_reason": {"type": "string", "minLength": 1},

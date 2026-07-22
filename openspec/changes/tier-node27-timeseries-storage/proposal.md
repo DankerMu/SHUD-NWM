@@ -2,6 +2,8 @@
 
 > Policy revision (2026-07-21): archive retirement and DB retention use a
 > 14-day window; TimescaleDB compression remains at its independent 7-day lag.
+> Both windows are relative to the latest forecast cycle accepted by the
+> node-27 display catalog, never the host wall clock.
 
 ## Why
 
@@ -26,7 +28,8 @@ destroy sole-copy data. Decision record: `docs/adr/0002-node27-timeseries-hot-co
   inventory audit finds any), provenance-marked `db-export`.
 - **Enable TimescaleDB native compression** on both detail hypertables
   (terminal chunks only; hot chunks stay writable for reingest), with a
-  documented decompress path for reingest conflicts.
+  documented decompress path for reingest conflicts. Selection uses the
+  display business-time watermark so a stalled pipeline does not age data out.
 - Add **script-driven `drop_chunks` retention** (14-day window) with
   dry-run/enforce JSON receipts, flock, bounded deletion per tick, wired into
   the node-27 user-level systemd governance family; **hard-gated** on the

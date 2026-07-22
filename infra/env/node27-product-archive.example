@@ -8,6 +8,9 @@
 
 NODE27_PRODUCT_ARCHIVE_REPO_ROOT=/home/nwm/NWM
 NODE27_PRODUCT_ARCHIVE_LOG_ROOT=/home/nwm/node27-product-archive-logs
+# Read-only local DB identity used only to resolve the latest displayable
+# forecast cycle. Lifecycle age never falls back to host wall time.
+NODE27_DISPLAY_WATERMARK_DATABASE_URL=postgresql://nhms_display_ro:REPLACE_ME@127.0.0.1:55432/nhms
 
 # Archive root shared with the inventory audit (and later the drill/salvage).
 # NODE27_PRODUCT_ARCHIVE_ARCHIVE_ROOT overrides NHMS_ARCHIVE_ROOT per the #846

@@ -67,6 +67,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import jsonschema
 
+from packages.common.display_watermark import fetch_display_watermark
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
@@ -981,6 +982,8 @@ def build_receipt(
     dropped_chunks: Sequence[Mapping[str, Any]] = (),
     deferred_remainder: Sequence[str] = (),
     salvage_backed_windows: Sequence[Mapping[str, str]] = (),
+    reference_time: datetime | None = None,
+    window_days: int | None = None,
 ) -> dict[str, Any]:
     """Assemble a schema-``oneOf``-conformant receipt.
 
@@ -1002,6 +1005,12 @@ def build_receipt(
             "candidate_chunks": list(candidate_chunks),
             "deferred_remainder": list(deferred_remainder),
         }
+        if reference_time is not None and window_days is not None:
+            receipt.update(
+                reference_time=_iso(reference_time),
+                window_days=window_days,
+                cutoff=_iso(reference_time - timedelta(days=window_days)),
+            )
         return _validate_receipt(receipt)
     if outcome == "refused":
         if not refusal_reason:
@@ -1013,6 +1022,12 @@ def build_receipt(
             "outcome": "refused",
             "refusal_reason": refusal_reason,
         }
+        if reference_time is not None and window_days is not None:
+            receipt.update(
+                reference_time=_iso(reference_time),
+                window_days=window_days,
+                cutoff=_iso(reference_time - timedelta(days=window_days)),
+            )
         return _validate_receipt(receipt)
     if outcome == "enforced":
         if refusal_reason is not None:
@@ -1029,6 +1044,12 @@ def build_receipt(
             "deferred_remainder": list(deferred_remainder),
             "salvage_backed_windows": [dict(w) for w in salvage_backed_windows],
         }
+        if reference_time is not None and window_days is not None:
+            receipt.update(
+                reference_time=_iso(reference_time),
+                window_days=window_days,
+                cutoff=_iso(reference_time - timedelta(days=window_days)),
+            )
         return _validate_receipt(receipt)
     raise ValueError(f"unknown outcome: {outcome!r}")
 
@@ -1113,6 +1134,7 @@ def run_retention(
     config: RetentionConfig,
     now: datetime,
     *,
+    reference_time: datetime | None = None,
     fetch_chunks: FetchChunks | None = None,
     measure_chunk_bytes: MeasureChunkBytes | None = None,
     drop_chunk: DropChunk | None = None,
@@ -1125,12 +1147,22 @@ def run_retention(
     fetch_chunks = fetch_chunks or _default_fetch_chunks
     measure_chunk_bytes = measure_chunk_bytes or _default_measure_chunk_bytes
     drop_chunk = drop_chunk or _default_drop_chunk
+    reference_time = (reference_time or now).astimezone(UTC)
+
+    def _build(outcome: str, **kwargs: Any) -> dict[str, Any]:
+        return build_receipt(
+            outcome,
+            now,
+            reference_time=reference_time,
+            window_days=config.window_days,
+            **kwargs,
+        )
 
     # Phase 1a: load completeness receipt (raises MISSING on IO/schema fail).
     try:
         completeness = load_completeness_receipt(config.completeness_receipt_path)
     except ReceiptGateError as error:
-        return build_receipt("refused", now, refusal_reason=error.code)
+        return _build("refused", refusal_reason=error.code)
 
     # Phase 1b: completeness freshness check runs BEFORE enumeration so a
     # stale receipt does not cause a needless DB round-trip. Bounds / gap /
@@ -1139,18 +1171,17 @@ def run_retention(
         completeness, drop_window=None, max_age_hours=config.completeness_max_age_hours, now=now
     )
     if stale_reasons:
-        return build_receipt("refused", now, refusal_reason=stale_reasons[0])
+        return _build("refused", refusal_reason=stale_reasons[0])
 
     # Phase 2a: enumerate chunks + compute drop window.
-    cutoff = now - timedelta(days=config.window_days)
+    cutoff = reference_time - timedelta(days=config.window_days)
     eligible = fetch_chunks(config, cutoff)
     covered_eligible, _boundary_deferred = _partition_by_completeness_bounds(
         eligible, completeness
     )
     if eligible and not covered_eligible:
-        return build_receipt(
+        return _build(
             "refused",
-            now,
             refusal_reason=CODE_COMPLETENESS_RECEIPT_BOUNDS_INSUFFICIENT,
         )
     drop_window = _drop_window_from_eligible(covered_eligible, cutoff)
@@ -1164,7 +1195,7 @@ def run_retention(
         now=now,
     )
     if reasons:
-        return build_receipt("refused", now, refusal_reason=reasons[0])
+        return _build("refused", refusal_reason=reasons[0])
 
     # Phase 1c/2c: drill receipt (MISSING / STALE / FAIL / coverage). Loaded
     # here so completeness bounds/gap/pending refusals fire first (matches
@@ -1172,7 +1203,7 @@ def run_retention(
     try:
         drill = load_drill_receipt(config.drill_receipt_path)
     except ReceiptGateError as error:
-        return build_receipt("refused", now, refusal_reason=error.code)
+        return _build("refused", refusal_reason=error.code)
     drill_reasons = check_drill_gate(
         drill,
         completeness_receipt=completeness,
@@ -1181,7 +1212,7 @@ def run_retention(
         now=now,
     )
     if drill_reasons:
-        return build_receipt("refused", now, refusal_reason=drill_reasons[0])
+        return _build("refused", refusal_reason=drill_reasons[0])
 
     # Phase 3: apply H3 per-tick bound.
     selected = list(covered_eligible[: config.per_tick_bound])
@@ -1192,9 +1223,8 @@ def run_retention(
 
     # Phase 4a: dry-run branch.
     if not config.enforce:
-        return build_receipt(
+        return _build(
             "dry-run",
-            now,
             candidate_chunks=[chunk.qualified_name for chunk in selected],
             deferred_remainder=deferred_remainder,
         )
@@ -1212,7 +1242,7 @@ def run_retention(
                 f"{CODE_RETENTION_DROP_FAILED}:"
                 f"{chunk.hypertable_schema}.{chunk.chunk_name}: {error}"
             )
-            return build_receipt("refused", now, refusal_reason=reason)
+            return _build("refused", refusal_reason=reason)
         dropped.append(
             {
                 "name": chunk.qualified_name,
@@ -1221,9 +1251,8 @@ def run_retention(
         )
 
     salvage_windows = derive_salvage_backed_windows(completeness, drop_window)
-    return build_receipt(
+    return _build(
         "enforced",
-        now,
         dropped_chunks=dropped,
         deferred_remainder=deferred_remainder,
         salvage_backed_windows=salvage_windows,
@@ -1295,9 +1324,15 @@ def main(
 
     try:
         try:
+            reference_time = (
+                now
+                if now is not None
+                else fetch_display_watermark(config.database_url)
+            )
             receipt = run_retention(
                 config,
                 stamp,
+                reference_time=reference_time,
                 fetch_chunks=fetch_chunks,
                 measure_chunk_bytes=measure_chunk_bytes,
                 drop_chunk=drop_chunk,

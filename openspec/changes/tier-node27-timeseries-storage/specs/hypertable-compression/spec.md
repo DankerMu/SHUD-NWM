@@ -25,13 +25,21 @@ column: `hydro.river_timeseries` segmentby
 ### Requirement: Terminal-chunk-only compression
 
 The compression runner SHALL compress only chunks whose `range_end` is older
-than a configurable lag (default 7 days) and SHALL never compress the active
-chunk.
+than a configurable lag (default 7 days) relative to the latest forecast cycle
+accepted by the node-27 display catalog, and SHALL never compress the active
+chunk. Failure to resolve that watermark SHALL block compression; host wall
+time SHALL NOT be a fallback.
 
 #### Scenario: Recent chunk is skipped
 
-- **WHEN** a chunk's `range_end` is within the configured lag of now
+- **WHEN** a chunk's `range_end` is within the configured lag of the display watermark
 - **THEN** the runner MUST NOT compress it
+
+#### Scenario: Forecast pipeline stalls while wall time advances
+
+- **WHEN** the display watermark is unchanged but host wall time advances
+- **THEN** the eligible chunk set MUST remain unchanged
+- **AND** an unavailable watermark MUST produce a failed receipt without compression
 
 #### Scenario: Terminal chunks are compressed with receipts
 

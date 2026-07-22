@@ -2126,6 +2126,42 @@ def test_chunk_straddling_cutoff_is_not_eligible() -> None:
     # therefore never sees straddling chunks in ``eligible[]``.
 
 
+def test_retention_cutoff_uses_display_watermark_but_gate_freshness_uses_wall_clock(
+    tmp_path: Path,
+) -> None:
+    wall_time = datetime(2026, 7, 22, 0, tzinfo=UTC)
+    reference_time = datetime(2026, 7, 11, 12, tzinfo=UTC)
+    _write_json(
+        tmp_path / "completeness.json",
+        _completeness_receipt(
+            generated_at=wall_time - timedelta(hours=1),
+            bounds_start=reference_time - timedelta(days=365),
+            bounds_end=reference_time,
+        ),
+    )
+    _write_json(
+        tmp_path / "drill.json",
+        _drill_receipt(generated_at=wall_time - timedelta(days=1)),
+    )
+    config = _build_config(tmp_path)
+    stub = _StubRunner([])
+
+    receipt = retention.run_retention(
+        config,
+        wall_time,
+        reference_time=reference_time,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+    )
+
+    assert receipt["outcome"] == "dry-run"
+    assert receipt["generated_at"] == "2026-07-22T00:00:00Z"
+    assert receipt["reference_time"] == "2026-07-11T12:00:00Z"
+    assert receipt["cutoff"] == "2026-06-27T12:00:00Z"
+    assert ("fetch", datetime(2026, 6, 27, 12, tzinfo=UTC)) in stub.calls
+
+
 def test_mixed_compressed_and_uncompressed_chunks_both_drop(tmp_path: Path) -> None:
     """G F3: eligible chunks list may mix ``is_compressed=True`` and ``=False``;
     both flow through the drop path unchanged. Divergence from #851
