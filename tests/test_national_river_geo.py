@@ -9,6 +9,7 @@ independent of any real shapefile.
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,14 @@ def test_single_chain_stays_order_one() -> None:
     # A->B->C with no confluence: every segment is a first-order stream.
     segments = [[(0.0, 0.0), (100.0, 0.0)], [(100.0, 0.0), (200.0, 0.0)]]
     assert MOD._strahler_orders(segments, MOD.NODE_SNAP_M) == [1, 1]
+
+
+def test_strahler_order_restores_process_recursion_limit() -> None:
+    previous = sys.getrecursionlimit()
+    segments = [[(0.0, 0.0), (100.0, 0.0)]]
+
+    assert MOD._strahler_orders(segments, MOD.NODE_SNAP_M) == [1]
+    assert sys.getrecursionlimit() == previous
 
 
 def test_two_first_order_streams_merge_to_second_order() -> None:

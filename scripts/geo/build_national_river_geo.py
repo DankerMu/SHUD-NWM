@@ -158,8 +158,17 @@ def _strahler_orders(segments: list[list[tuple[float, float]]], snap: float) -> 
         orders[i] = top + 1 if child.count(top) >= 2 else top
         return orders[i]  # type: ignore[return-value]
 
-    sys.setrecursionlimit(max(10000, len(segments) * 4))
-    return [resolve(i, frozenset()) for i in range(len(segments))]
+    previous_recursion_limit = sys.getrecursionlimit()
+    required_recursion_limit = max(previous_recursion_limit, 10000, len(segments) * 4)
+    try:
+        sys.setrecursionlimit(required_recursion_limit)
+        return [resolve(i, frozenset()) for i in range(len(segments))]
+    finally:
+        # ``setrecursionlimit`` is process-global.  The generator may be
+        # imported by a long-lived process (including pytest), so leaking the
+        # temporary high limit would silently change unrelated JSON parsing
+        # and recursion guards after this function returns.
+        sys.setrecursionlimit(previous_recursion_limit)
 
 
 def _round_coords(part: list[tuple[float, float]], transformer: Transformer, decimals: int) -> list[list[float]]:

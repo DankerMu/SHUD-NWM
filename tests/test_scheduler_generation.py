@@ -17,6 +17,7 @@ running the whole test file plus the existing DB-free tests together.
 from __future__ import annotations
 
 import json
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -705,7 +706,12 @@ def test_load_cutover_declaration_handles_recursion_error_on_deeply_nested_json(
     payload = "[" * depth + "]" * depth
     path = tmp_path / "cutover-deep.json"
     path.write_text(payload, encoding="utf-8")
-    result = generation.load_cutover_declaration(str(path), now=NOW)
+    previous_recursion_limit = sys.getrecursionlimit()
+    try:
+        sys.setrecursionlimit(1000)
+        result = generation.load_cutover_declaration(str(path), now=NOW)
+    finally:
+        sys.setrecursionlimit(previous_recursion_limit)
     assert isinstance(result, dict)
     assert result.get("_load_error") == "declaration_malformed_json"
 

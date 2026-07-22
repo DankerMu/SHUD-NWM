@@ -20754,6 +20754,7 @@ def test_db_free_terminal_success_reopens_when_successor_checkpoint_missing(
         package_checksum=fixture["package_checksum"],
         generated_at=generated_at,
     )
+    selected_state = state_fixture["entries"][0]
     model = {
         **fixture["model"],
         "resource_profile": {
@@ -20775,12 +20776,18 @@ def test_db_free_terminal_success_reopens_when_successor_checkpoint_missing(
             "hydro_run": {
                 **identity,
                 "status": "created",
-                "init_state_id": state_fixture["entries"][0]["state_id"],
+                "init_state_id": selected_state["state_id"],
+                "init_state_checksum": selected_state["checksum"],
+                "init_state_uri": selected_state["state_uri"],
+                "init_state_valid_time": selected_state["valid_time"],
                 "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
             },
             "run_manifest_initial_state": {
                 "quality": "fresh",
-                "state_id": state_fixture["entries"][0]["state_id"],
+                "state_id": selected_state["state_id"],
+                "checksum": selected_state["checksum"],
+                "ic_file_uri": selected_state["state_uri"],
+                "valid_time": selected_state["valid_time"],
             },
             "pipeline_status": "succeeded",
             "pipeline_jobs": [
@@ -20863,6 +20870,7 @@ def test_db_free_terminal_success_reopens_when_active_run_manifest_missing(
         package_checksum=fixture["package_checksum"],
         generated_at=generated_at,
     )
+    selected_state = current_state_fixture["entries"][0]
     store = LocalObjectStore(roots["object_store_root"], "s3://nhms")
     successor_content = b"db-free-strict-warm-start-successor-state\n"
     successor_uri = store.write_bytes_atomic(
@@ -20914,7 +20922,10 @@ def test_db_free_terminal_success_reopens_when_active_run_manifest_missing(
             "hydro_run": {
                 **identity,
                 "status": "created",
-                "init_state_id": current_state_fixture["entries"][0]["state_id"],
+                "init_state_id": selected_state["state_id"],
+                "init_state_checksum": selected_state["checksum"],
+                "init_state_uri": selected_state["state_uri"],
+                "init_state_valid_time": selected_state["valid_time"],
                 "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
             },
             "pipeline_status": "succeeded",
