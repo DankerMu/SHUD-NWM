@@ -437,6 +437,7 @@ class ProductionScheduler:
                 terminal_stage=config.terminal_stage,
                 slurm_job_type_templates=dict(self.config.slurm_job_type_templates or {}),
                 slurm_env=dict(self.config.slurm_env),
+                target_python_runtime=config.target_python_runtime,
                 reconcile_slurm_user=self.config.reconcile_slurm_user,
                 reconcile_slurm_account=self.config.reconcile_slurm_account,
             )
@@ -460,6 +461,7 @@ class ProductionScheduler:
                 terminal_stage=config.terminal_stage,
                 slurm_job_type_templates=config.slurm_job_type_templates,
                 slurm_env=config.slurm_env,
+                target_python_runtime=config.target_python_runtime,
                 reconcile_slurm_user=config.reconcile_slurm_user,
                 reconcile_slurm_account=config.reconcile_slurm_account,
             )

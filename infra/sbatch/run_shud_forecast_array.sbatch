@@ -71,4 +71,10 @@ with TemporaryDirectory() as tmpdir:
 raise SystemExit(1)
 PY
 fi
-nhms-shud-runtime execute --manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"
+{% if target_python_runtime | default('') %}
+"$NHMS_TARGET_PYTHON_RUNTIME" -m workers.shud_runtime.cli execute \
+  --manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"
+{% else %}
+nhms-shud-runtime execute \
+  --manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"
+{% endif %}

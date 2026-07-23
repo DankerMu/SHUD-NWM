@@ -5875,17 +5875,31 @@ def test_round12_concurrent_prepare_holds_the_real_scheduler_mutation_authority(
 
 
 def _round14_clean_writer_checkout(root: Any, *, content: str) -> tuple[Any, str]:
+    import shutil
     import subprocess
     import sys
     from pathlib import Path
 
     checkout = Path(root)
     checkout.mkdir(parents=True)
-    (checkout / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+    (checkout / ".gitignore").write_text(".venv/\n.target-python/\n", encoding="utf-8")
     (checkout / "writer.txt").write_text(content, encoding="utf-8")
+    private_runtime = checkout / ".target-python" / "bin" / "python"
+    private_runtime.parent.mkdir(parents=True)
+    shutil.copy2(sys._base_executable, private_runtime)
+    base_lib = Path(sys._base_executable).parent.parent / "lib"
+    if base_lib.is_dir():
+        (checkout / ".target-python" / "lib").symlink_to(base_lib)
     runtime = checkout / ".venv" / "bin" / "python"
     runtime.parent.mkdir(parents=True)
-    runtime.symlink_to(sys.executable)
+    runtime.symlink_to(private_runtime)
+    (checkout / ".venv" / "pyvenv.cfg").write_text(
+        f"home = {private_runtime.parent}\n"
+        "include-system-site-packages = false\n"
+        f"version = {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}\n"
+        f"executable = {private_runtime}\n",
+        encoding="utf-8",
+    )
     subprocess.run(("git", "init", "-q"), cwd=checkout, check=True)
     subprocess.run(("git", "add", ".gitignore", "writer.txt"), cwd=checkout, check=True)
     subprocess.run(
@@ -6083,12 +6097,186 @@ def test_round16_launcher_requires_target_checkout_executable_runtime(
         assert starts == []
 
 
+def test_round18_launcher_binds_receipt_roots_lock_and_sanitizes_ambient_environment(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.orchestrator import file_orchestration_migration as migration_module
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.file_orchestration_migration import (
+        launch_file_journal_rollback_writer,
+        prepare_file_journal_rollback,
+    )
+
+    root_a = tmp_path / "authority-a" / "journal"
+    workspace_a = tmp_path / "authority-a" / "workspace"
+    lock_a = workspace_a / "locks" / "rollback-production.lock"
+    workspace_a.mkdir(parents=True)
+    repository = FileOrchestrationJournalRepository(root_a)
+    assert repository.query_inflight_jobs() == []
+    checkout, generation = _round14_clean_writer_checkout(
+        tmp_path / "writer-a",
+        content="writer A\n",
+    )
+    receipt = prepare_file_journal_rollback(
+        journal_root=root_a,
+        workspace_root=workspace_a,
+        lock_path=lock_a,
+        scheduler_state="stopped",
+        active_scheduler_processes=0,
+        checked_at=datetime.now(UTC),
+        checked_by="round18-operator",
+        target_writer_generation=generation,
+    )
+    ambient_b = tmp_path / "ambient-b"
+    monkeypatch.setenv("WORKSPACE_ROOT", str(ambient_b / "workspace"))
+    monkeypatch.setenv("NHMS_SCHEDULER_JOURNAL_ROOT", str(ambient_b / "journal"))
+    monkeypatch.setenv("NHMS_SCHEDULER_LOCK_BACKEND", "postgres")
+    monkeypatch.setenv("NHMS_SCHEDULER_LOCK_ROOT", str(ambient_b / "locks"))
+    monkeypatch.setenv("VIRTUAL_ENV", str(ambient_b / ".venv"))
+    monkeypatch.setenv("PYTHONPATH", str(ambient_b / "pythonpath"))
+    starts: list[dict[str, Any]] = []
+
+    def runner(
+        command: tuple[str, ...],
+        *,
+        cwd: Any,
+        check: bool,
+        env: Any,
+        pass_fds: Any,
+    ) -> Any:
+        starts.append(
+            {
+                "command": command,
+                "cwd": cwd,
+                "check": check,
+                "env": dict(env),
+                "pass_fds": tuple(pass_fds),
+            }
+        )
+        return type("Completed", (), {"returncode": 0})()
+
+    monkeypatch.setattr(migration_module, "_run_rollback_writer", runner)
+    for override in (
+        ("--workspace-root", str(ambient_b / "workspace")),
+        (f"--workspace-root={ambient_b / 'workspace'}",),
+        ("--lock-path", str(ambient_b / "lock")),
+        (f"--lock-path={ambient_b / 'lock'}",),
+    ):
+        with pytest.raises(
+            FileOrchestrationJournalError,
+            match="file_journal_rollback_writer_command_invalid",
+        ):
+            launch_file_journal_rollback_writer(
+                journal_root=root_a,
+                workspace_root=workspace_a,
+                lock_path=lock_a,
+                receipt_id=receipt["receipt_id"],
+                writer_repository_root=checkout,
+                writer_args=("plan-production", "--submit", *override),
+            )
+        assert starts == []
+
+    launched = launch_file_journal_rollback_writer(
+        journal_root=root_a,
+        workspace_root=workspace_a,
+        lock_path=lock_a,
+        receipt_id=receipt["receipt_id"],
+        writer_repository_root=checkout,
+        writer_args=("plan-production", "--submit"),
+    )
+    assert launched["writer_exit_code"] == 0
+    assert len(starts) == 1
+    started = starts[0]
+    child_env = started["env"]
+    assert child_env["WORKSPACE_ROOT"] == str(workspace_a.resolve())
+    assert child_env["NHMS_SCHEDULER_JOURNAL_ROOT"] == str(root_a.resolve())
+    assert child_env["NHMS_SCHEDULER_LOCK_BACKEND"] == "file"
+    assert child_env["NHMS_SCHEDULER_LOCK_ROOT"] == str(lock_a.parent.resolve())
+    assert child_env["NHMS_SCHEDULER_DB_FREE_REQUIRED"] == "true"
+    assert "VIRTUAL_ENV" not in child_env
+    assert "PYTHONPATH" not in child_env
+    assert str(ambient_b) not in json.dumps(started, default=str)
+    assert started["command"][-4:] == (
+        "--workspace-root",
+        str(workspace_a.resolve()),
+        "--lock-path",
+        str(lock_a.resolve()),
+    )
+    assert len(started["pass_fds"]) == 1
+
+    with pytest.raises(FileOrchestrationJournalError, match="file_journal_rollback_not_prepared"):
+        launch_file_journal_rollback_writer(
+            journal_root=root_a,
+            workspace_root=ambient_b / "workspace",
+            lock_path=ambient_b / "lock",
+            receipt_id=receipt["receipt_id"],
+            writer_repository_root=checkout,
+            writer_args=("plan-production", "--submit"),
+        )
+    assert len(starts) == 1
+
+
+def test_round18_open_runtime_snapshot_is_cross_filesystem_safe_after_path_replacement(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hashlib
+    import subprocess
+
+    from services.orchestrator import file_orchestration_migration as migration_module
+
+    source_runtime = tmp_path / "source" / "python"
+    source_runtime.parent.mkdir()
+    source_runtime.write_text('#!/bin/sh\nprintf A > "$1"\n', encoding="utf-8")
+    source_runtime.chmod(0o700)
+    original_digest = hashlib.sha256(source_runtime.read_bytes()).hexdigest()
+    source_fd = os.open(
+        source_runtime,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+    )
+    source_stat = os.fstat(source_fd)
+    original_identity = source_stat.st_dev, source_stat.st_ino
+
+    replacement_runtime = tmp_path / "replacement-python"
+    replacement_runtime.write_text('#!/bin/sh\nprintf B > "$1"\n', encoding="utf-8")
+    replacement_runtime.chmod(0o700)
+    os.replace(replacement_runtime, source_runtime)
+    bound_runtime = tmp_path / "other-filesystem-capable-bundle" / "bin" / "python"
+    bound_runtime.parent.mkdir(parents=True)
+
+    def hardlink_is_not_a_runtime_snapshot(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("runtime snapshot must not depend on same-filesystem hardlinks")
+
+    monkeypatch.setattr(migration_module.os, "link", hardlink_is_not_a_runtime_snapshot)
+    try:
+        migration_module._copy_open_runtime_snapshot(
+            source_fd=source_fd,
+            bound_path=bound_runtime,
+            runtime_identity=original_identity,
+        )
+    finally:
+        os.close(source_fd)
+
+    assert hashlib.sha256(bound_runtime.read_bytes()).hexdigest() == original_digest
+    assert hashlib.sha256(source_runtime.read_bytes()).hexdigest() != original_digest
+    assert (bound_runtime.stat().st_dev, bound_runtime.stat().st_ino) != original_identity
+    execution_marker = tmp_path / "snapshot-executed"
+    subprocess.run((str(bound_runtime), str(execution_marker)), check=True)
+    assert execution_marker.read_text(encoding="utf-8") == "A"
+
+
 def test_round16_commit_snapshot_closes_post_check_worktree_switch(
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import hashlib
     import subprocess
     import threading
+    from pathlib import Path
 
     from services.orchestrator import file_orchestration_migration as migration_module
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
@@ -6187,13 +6375,31 @@ def test_round16_commit_snapshot_closes_post_check_worktree_switch(
     continue_child = threading.Event()
     snapshot_paths: list[Any] = []
 
-    def barrier_runner(command: tuple[str, ...], *, cwd: Any, check: bool) -> Any:
+    def barrier_runner(
+        command: tuple[str, ...],
+        *,
+        cwd: Any,
+        check: bool,
+        env: Any,
+        pass_fds: Any,
+    ) -> Any:
         snapshot_paths.append(cwd)
         at_child_boundary.set()
         assert continue_child.wait(timeout=5)
-        return real_runner(command, cwd=cwd, check=check)
+        return real_runner(
+            command,
+            cwd=cwd,
+            check=check,
+            env=env,
+            pass_fds=pass_fds,
+        )
 
     monkeypatch.setattr(migration_module, "_run_rollback_writer", barrier_runner)
+
+    def hardlink_is_not_a_runtime_snapshot(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("runtime snapshot must not depend on same-filesystem hardlinks")
+
+    monkeypatch.setattr(migration_module.os, "link", hardlink_is_not_a_runtime_snapshot)
     outcome: dict[str, Any] = {}
 
     def launch() -> None:
@@ -6213,8 +6419,20 @@ def test_round16_commit_snapshot_closes_post_check_worktree_switch(
         )
 
     thread = threading.Thread(target=launch)
+    target_runtime = checkout / ".venv" / "bin" / "python"
+    resolved_runtime = target_runtime.resolve(strict=True)
+    original_runtime_identity = resolved_runtime.stat().st_dev, resolved_runtime.stat().st_ino
+    original_runtime_digest = hashlib.sha256(resolved_runtime.read_bytes()).hexdigest()
     thread.start()
     assert at_child_boundary.wait(timeout=10)
+    replacement_runtime = tmp_path / "replacement-runtime-b"
+    replacement_marker = tmp_path / "replacement-runtime-was-executed"
+    replacement_runtime.write_text(
+        f"#!/bin/sh\necho B > {replacement_marker}\nexit 91\n",
+        encoding="utf-8",
+    )
+    replacement_runtime.chmod(0o700)
+    os.replace(replacement_runtime, resolved_runtime)
     subprocess.run(("git", "checkout", "--detach", "--quiet", generation_b), cwd=checkout, check=True)
     continue_child.set()
     thread.join(timeout=10)
@@ -6223,7 +6441,121 @@ def test_round16_commit_snapshot_closes_post_check_worktree_switch(
     assert outcome["actual_writer_generation"] == generation_a
     assert (evidence / "writer-generation.txt").read_text(encoding="utf-8") == "A\n"
     assert (checkout / "writer.txt").read_text(encoding="utf-8") == "B\n"
+    assert not replacement_marker.exists()
     assert snapshot_paths and all(not path.exists() for path in snapshot_paths)
+    retained_runtime = Path(outcome["target_python_runtime"])
+    assert retained_runtime.exists()
+    assert (retained_runtime.stat().st_dev, retained_runtime.stat().st_ino) != original_runtime_identity
+    assert hashlib.sha256(retained_runtime.read_bytes()).hexdigest() == original_runtime_digest
+    assert hashlib.sha256(resolved_runtime.read_bytes()).hexdigest() != original_runtime_digest
+    assert (resolved_runtime.stat().st_dev, resolved_runtime.stat().st_ino) != original_runtime_identity
+    assert outcome["target_python_runtime_retention"] == ("retained_fail_closed_until_operator_cleanup")
+
+
+def test_round18_rollforward_is_excluded_while_old_writer_execution_is_active(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import shutil
+    import threading
+
+    from services.orchestrator import file_orchestration_migration as migration_module
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.file_orchestration_migration import (
+        complete_file_journal_rollforward,
+        launch_file_journal_rollback_writer,
+        prepare_file_journal_rollback,
+    )
+
+    root = tmp_path / "journal"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = FileOrchestrationJournalRepository(root)
+    assert repository.query_inflight_jobs() == []
+    checkout, generation = _round14_clean_writer_checkout(
+        tmp_path / "writer",
+        content="writer A\n",
+    )
+    receipt = prepare_file_journal_rollback(
+        journal_root=root,
+        workspace_root=workspace,
+        scheduler_state="stopped",
+        active_scheduler_processes=0,
+        checked_at=datetime.now(UTC),
+        checked_by="round18-operator",
+        target_writer_generation=generation,
+    )
+    template = _file_cohort_repository(
+        tmp_path / "template",
+        member_count=1,
+        with_runtime_rows=False,
+    )
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    source_job = template.root / "pipeline-jobs" / f"{job_id}.json"
+    entered = threading.Event()
+    continue_writer = threading.Event()
+
+    def blocked_writer(
+        _command: tuple[str, ...],
+        *,
+        cwd: Any,
+        check: bool,
+        env: Any,
+        pass_fds: Any,
+    ) -> Any:
+        del cwd, check, env
+        assert len(pass_fds) == 1
+        entered.set()
+        assert continue_writer.wait(timeout=5)
+        destination = root / "pipeline-jobs" / source_job.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source_job, destination)
+        return type("Completed", (), {"returncode": 0})()
+
+    monkeypatch.setattr(migration_module, "_run_rollback_writer", blocked_writer)
+    outcome: dict[str, Any] = {}
+
+    def launch() -> None:
+        outcome.update(
+            launch_file_journal_rollback_writer(
+                journal_root=root,
+                workspace_root=workspace,
+                receipt_id=receipt["receipt_id"],
+                writer_repository_root=checkout,
+                writer_args=("plan-production", "--submit"),
+            )
+        )
+
+    thread = threading.Thread(target=launch)
+    thread.start()
+    assert entered.wait(timeout=10)
+    with pytest.raises(
+        FileOrchestrationJournalError,
+        match="file_journal_rollback_execution_active",
+    ):
+        complete_file_journal_rollforward(
+            journal_root=root,
+            workspace_root=workspace,
+            preparation_receipt_id=receipt["receipt_id"],
+        )
+    assert not (root / "reconcile-inventory" / f"{job_id}.json").exists()
+    continue_writer.set()
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+    assert outcome["writer_exit_code"] == 0
+
+    completed = complete_file_journal_rollforward(
+        journal_root=root,
+        workspace_root=workspace,
+        preparation_receipt_id=receipt["receipt_id"],
+    )
+    assert completed["preparation_receipt_id"] == receipt["receipt_id"]
+    assert (root / "reconcile-inventory" / f"{job_id}.json").is_file()
+    reopened = FileOrchestrationJournalRepository(root)
+    assert [job.job_id for job in reopened.query_reserved_unbound_jobs()] == [job_id]
 
 
 def test_round14_prepare_resumes_after_receipt_write_before_marker_unlink(
@@ -6336,6 +6668,9 @@ def test_round14_writer_launch_is_strictly_generation_bound_and_fail_closed(
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from pathlib import Path
+
+    from packages.common.python_runtime import validated_target_python_runtime
     from services.orchestrator import file_orchestration_migration as migration_module
     from services.orchestrator.file_orchestration_journal import (
         FileOrchestrationJournalError,
@@ -6368,11 +6703,12 @@ def test_round14_writer_launch_is_strictly_generation_bound_and_fail_closed(
         checked_by="round14-operator",
         target_writer_generation=generation_a,
     )
-    starts: list[tuple[tuple[str, ...], Any, str]] = []
+    starts: list[tuple[tuple[str, ...], Any, str, Any]] = []
 
-    def runner(argv: tuple[str, ...], *, cwd: Any, check: bool) -> Any:
+    def runner(argv: tuple[str, ...], *, cwd: Any, check: bool, env: Any, pass_fds: Any) -> Any:
         assert check is False
-        starts.append((argv, cwd, (cwd / "writer.txt").read_text(encoding="utf-8")))
+        assert len(pass_fds) == 1
+        starts.append((argv, cwd, (cwd / "writer.txt").read_text(encoding="utf-8"), env))
         return type("Completed", (), {"returncode": 0})()
 
     monkeypatch.setattr(migration_module, "_run_rollback_writer", runner)
@@ -6388,14 +6724,32 @@ def test_round14_writer_launch_is_strictly_generation_bound_and_fail_closed(
     assert launched["actual_writer_generation"] == generation_a
     assert launched["writer_repository_root"] == str(checkout_a.resolve())
     assert len(starts) == 1
-    command, cwd, snapshot_content = starts[0]
-    assert command == (
-        str((checkout_a / ".venv" / "bin" / "python").absolute()),
+    command, cwd, snapshot_content, child_env = starts[0]
+    assert Path(command[0]).name == "python"
+    assert Path(command[0]).parent.name == "bin"
+    assert Path(command[0]).parent.parent.parent == checkout_a / ".venv"
+    assert Path(command[0]).parent.parent.name.startswith(".nhms-rollback-runtime-")
+    assert command[1:] == (
         "-m",
         "services.orchestrator.cli",
         "plan-production",
         "--submit",
+        "--workspace-root",
+        str(workspace.resolve()),
+        "--lock-path",
+        str((workspace / "scheduler" / "production-scheduler.lock").resolve()),
     )
+    assert child_env["NHMS_TARGET_PYTHON_RUNTIME"] == command[0]
+    assert launched["target_python_runtime"] == command[0]
+    assert Path(launched["target_python_runtime"]).is_file()
+    assert launched["target_python_runtime_retention"] == ("retained_fail_closed_until_operator_cleanup")
+    assert validated_target_python_runtime(
+        launched["target_python_runtime"],
+        required=True,
+    ) == launched["target_python_runtime"]
+    source_runtime = (checkout_a / ".venv" / "bin" / "python").resolve(strict=True)
+    assert Path(command[0]).stat().st_ino != source_runtime.stat().st_ino
+    assert Path(command[0]).read_bytes() == source_runtime.read_bytes()
     assert cwd != checkout_a.resolve()
     assert snapshot_content == "writer A\n"
     assert not cwd.exists()
@@ -6527,6 +6881,7 @@ def test_round12_rollback_commands_emit_verifiable_receipts(
     entrypoint: str,
 ) -> None:
     import inspect
+    from pathlib import Path
 
     from services.orchestrator import cli as cli_module
     from services.orchestrator import file_orchestration_migration as migration_module
@@ -6591,8 +6946,17 @@ def test_round12_rollback_commands_emit_verifiable_receipts(
 
     started: list[tuple[tuple[str, ...], Any]] = []
 
-    def run_writer(argv: tuple[str, ...], *, cwd: Any, check: bool) -> Any:
+    def run_writer(
+        argv: tuple[str, ...],
+        *,
+        cwd: Any,
+        check: bool,
+        env: Any,
+        pass_fds: Any,
+    ) -> Any:
         assert check is False
+        assert env["NHMS_TARGET_PYTHON_RUNTIME"] == argv[0]
+        assert len(pass_fds) == 1
         started.append((argv, cwd))
         return type("Completed", (), {"returncode": 0})()
 
@@ -6613,6 +6977,11 @@ def test_round12_rollback_commands_emit_verifiable_receipts(
         ("plan-production",),
         ("plan-production", "--plan"),
         ("plan-production", "--dry-run"),
+        ("plan-production", "--submit", "--help"),
+        ("plan-production", "--submit", "-h"),
+        ("plan-production", "--submit", "--version"),
+        ("plan-production", "--submit", "--workspace-root", str(workspace)),
+        ("plan-production", "--submit", "--lock-path", str(workspace / "other.lock")),
         ("trigger-analysis", "--submit"),
     ):
         invalid_argv = [*launch_prefix, *invalid_writer_args]
@@ -6639,6 +7008,8 @@ def test_round12_rollback_commands_emit_verifiable_receipts(
     launch = json.loads(capsys.readouterr().out)
     assert launch["actual_writer_generation"] == generation_a
     assert launch["writer_repository_root"] == str(checkout_a.resolve())
+    assert Path(launch["target_python_runtime"]).is_file()
+    assert launch["target_python_runtime_retention"] == ("retained_fail_closed_until_operator_cleanup")
     assert launch["dry_run"] is False
     assert len(started) == 1
     assert started[0][1] != checkout_a.resolve()

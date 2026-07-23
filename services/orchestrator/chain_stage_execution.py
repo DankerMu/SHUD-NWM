@@ -1207,6 +1207,8 @@ def slurm_submission_manifest(
         submission["slurm_job_type_templates"] = dict(orchestrator.config.slurm_job_type_templates)
     if orchestrator.config.slurm_env:
         submission["slurm_env"] = dict(orchestrator.config.slurm_env)
+    if orchestrator.config.target_python_runtime:
+        submission["target_python_runtime"] = orchestrator.config.target_python_runtime
     return submission
 
 

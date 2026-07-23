@@ -803,6 +803,7 @@ def _submission_runtime_root_contract(manifest: Mapping[str, Any]) -> dict[str, 
         "object_store_prefix",
         "published_artifact_root",
         "published_artifact_uri_prefix",
+        "target_python_runtime",
     )
     return {field: manifest[field] for field in fields if manifest.get(field) not in (None, "")}
 

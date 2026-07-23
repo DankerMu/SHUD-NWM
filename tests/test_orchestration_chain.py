@@ -1998,6 +1998,34 @@ def test_m3_cycle_orchestration_submits_all_stages_lazily(tmp_path: Path) -> Non
     assert {job["status"] for job in repository.jobs.values()} == {"succeeded"}
 
 
+def test_round18_target_runtime_reaches_all_worker_array_submission_manifests(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "target" / ".venv" / "bin" / ".nhms-rollback-python-test"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    runtime.chmod(0o700)
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(
+        tmp_path,
+        repository,
+        client,
+        target_python_runtime=str(runtime),
+    )
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    assert result.status == "complete"
+    worker_stages = {"forcing", "forecast", "state_save_qc"}
+    observed = {
+        submission["stage"]: submission["manifest"]["target_python_runtime"]
+        for submission in client.submissions
+        if submission["stage"] in worker_stages
+    }
+    assert observed == {stage: str(runtime) for stage in worker_stages}
+
+
 def test_terminal_stage_forecast_stops_before_parse_state_and_publish(tmp_path: Path) -> None:
     repository = FakeCycleRepository()
     client = FakeCycleSlurmClient()
@@ -7949,6 +7977,7 @@ def _orchestrator(
     orchestrator_cls: type[ForecastOrchestrator] = ForecastOrchestrator,
     slurm_job_type_templates: dict[str, str] | None = None,
     slurm_env: dict[str, str] | None = None,
+    target_python_runtime: str | None = None,
     terminal_stage: str | None = None,
 ) -> ForecastOrchestrator:
     workspace = tmp_path / "workspace"
@@ -7961,6 +7990,7 @@ def _orchestrator(
         job_timeout_seconds=5,
         slurm_job_type_templates=slurm_job_type_templates or {},
         slurm_env=slurm_env or {},
+        target_python_runtime=target_python_runtime,
         terminal_stage=terminal_stage,
     )
     return orchestrator_cls(

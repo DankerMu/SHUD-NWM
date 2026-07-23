@@ -20,6 +20,7 @@ from jinja2.sandbox import SandboxedEnvironment
 
 from packages.common.manifest_index import ManifestValidationError as CommonManifestValidationError
 from packages.common.manifest_index import serialize_manifest_index
+from packages.common.python_runtime import validated_target_python_runtime
 from packages.common.redaction import redact_text
 from packages.common.safe_fs import (
     SafeFilesystemError,
@@ -648,6 +649,11 @@ class RealSlurmGateway(SlurmGateway):
         manifest_dict.setdefault("workspace_dir", str(Path(self.settings.workspace_dir)))
         manifest_dict.setdefault("manifest_index_path", manifest_index_path)
         self._validate_manifest(manifest_dict)
+        target_python_runtime = self._validated_target_python_runtime(
+            manifest_dict.get("target_python_runtime")
+        )
+        if target_python_runtime is not None:
+            manifest_dict["target_python_runtime"] = target_python_runtime
         slurm_env = self._validate_slurm_env(manifest_dict.get("slurm_env") or {})
         resource_profile = dict(profile or self.resolve_resource_profile(str(manifest_dict.get("model_id") or "")))
         try:
@@ -933,7 +939,7 @@ class RealSlurmGateway(SlurmGateway):
             )
         lines: list[str] = []
         lines.extend(f"export {key}={shlex.quote(str(value or ''))}" for key, value in export_fields.items())
-        lines.extend(_python_runtime_export_lines())
+        lines.extend(_python_runtime_export_lines(context.get("target_python_runtime")))
         lines.extend(_grib_runtime_export_lines())
         return lines
 
@@ -1503,10 +1509,23 @@ class RealSlurmGateway(SlurmGateway):
                 raise ManifestValidationError("Manifest contains an unsafe field name.", {"field": f"{path}.[unsafe]"})
 
             field_path = f"{path}.{key}"
-            if key in STRICT_IDENTIFIER_FIELDS:
+            if key == "target_python_runtime":
+                self._validated_target_python_runtime(nested, field=field_path)
+            elif key in STRICT_IDENTIFIER_FIELDS:
                 self._validate_identifier_field(nested, field_path)
             elif isinstance(nested, str) and key not in FREEFORM_STRING_FIELDS:
                 self._validate_rendered_string(nested, field_path)
+
+    def _validated_target_python_runtime(
+        self,
+        value: Any,
+        *,
+        field: str = "manifest.target_python_runtime",
+    ) -> str | None:
+        try:
+            return validated_target_python_runtime(value)
+        except ValueError as error:
+            raise ManifestValidationError(str(error), {"field": field}) from error
 
     def _validate_manifest_secret_scan(self, value: Any, path: str = "manifest") -> None:
         secret_findings = iter_secret_manifest_findings(value, path)
@@ -1668,7 +1687,21 @@ class RealSlurmGateway(SlurmGateway):
         return datetime.now(UTC)
 
 
-def _python_runtime_export_lines() -> list[str]:
+def _python_runtime_export_lines(target_python_runtime: Any = None) -> list[str]:
+    if target_python_runtime not in (None, ""):
+        try:
+            runtime = validated_target_python_runtime(target_python_runtime, required=True)
+        except ValueError as error:
+            raise ManifestValidationError(
+                str(error),
+                {"field": "manifest.target_python_runtime"},
+            ) from error
+        assert runtime is not None
+        runtime_path = Path(runtime)
+        return [
+            f"export NHMS_TARGET_PYTHON_RUNTIME={shlex.quote(runtime)}",
+            f"export PATH={shlex.quote(str(runtime_path.parent))}:$PATH",
+        ]
     explicit_bin = os.getenv("NHMS_PYTHON_VENV_BIN")
     candidates: list[Path] = []
     if explicit_bin:

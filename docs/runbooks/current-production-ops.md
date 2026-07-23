@@ -259,11 +259,16 @@ uv run nhms-pipeline prepare-file-journal-rollback \
   --target-writer-generation "$ROLLBACK_SHA"
 ```
 
+`ROLLBACK_CHECKOUT` 及其 `.venv` 必须位于 Slurm gateway 与计算节点都可访问的共享路径；
+从 controller 启动到所有由本次 rollback pass 提交的 Slurm task 结束前，不得执行
+`uv sync`、切换该 checkout 或删除其 `.venv`。
+
 保存 preparation `receipt_id`。旧 writer 只能由仍在当前版本的 controller 通过下面
 的 gate 启动；该命令不接受操作者自报的 actual generation，而是从即将运行的 checkout
 内部执行 `git rev-parse HEAD`、检查 tracked/untracked dirty 状态，并要求目标 checkout 的
 `.venv/bin/python` 存在且可执行。gate 只接受 `plan-production` 的一次真实 `--submit`；
-不带 `--submit`、`--plan` 或 `--dry-run` 都会在 writer 零启动时拒绝：
+不带 `--submit`、`--plan`、`--dry-run`、`--help`/`--version`，以及操作者传入的
+`--workspace-root`/`--lock-path` 覆盖，都会在 writer 零启动时拒绝：
 
 ```bash
 uv run nhms-pipeline launch-file-journal-rollback-writer \
@@ -275,9 +280,16 @@ uv run nhms-pipeline launch-file-journal-rollback-writer \
 ```
 
 通过 receipt 后，controller 会把目标完整 SHA 物化为私有、临时、detached 的 clean
-commit 快照，并用目标 checkout 的 `.venv/bin/python` 在该快照中启动 writer；因此原
-checkout 在最终复核后切换到其他 commit，也不能改变本次实际执行的源码。私有快照在
-writer 退出后自动清理。
+commit 快照，并从已经打开和复核过的目标解释器复制一个权限锁紧、内容固定的私有
+runtime bundle。child 的 journal/workspace/file-lock 配置由 controller 强制绑定到
+preparation receipt 对应的根，ambient environment 不能改写。该 runtime 的绝对路径通过
+submission manifest 传到 HTTP Slurm gateway；forcing、forecast、state-save 三阶段只在
+该显式字段存在时使用它，普通生产提交仍使用原 console entrypoint。
+
+源码快照在 writer 退出后自动清理；runtime bundle 会以
+`retained_fail_closed_until_operator_cleanup` 保留，launch JSON 的
+`target_python_runtime` 是其审计路径。不要单独删除 bundle；所有引用该路径的 Slurm
+task 终态后，随整个 rollback worktree 一起清理。
 
 `preparing` receipt 无论遗留在 marker 删除前还是删除后，都只能在重新取得同一 production
 file lease 后自动续成一个 `prepared` fence；不得人工删除 marker/receipt。fence 存在期间，
@@ -295,9 +307,16 @@ systemctl --user start nhms-compute-scheduler.timer
 git worktree remove "$ROLLBACK_CHECKOUT"
 ```
 
+launcher 持有独立的 rollback execution flock，并把 fd 传给 child；即使 controller
+崩溃，只要 old writer 仍存活，roll-forward 也会以
+`file_journal_rollback_execution_active` fail closed。执行前滚前还必须按 launch receipt
+和 journal 中的 exact Slurm job identity 确认本次 pass 的所有 task 已终态，并确认
+`target_python_runtime` 仍存在；否则不得运行前滚、恢复 timer 或删除 worktree。
+
 node-22 live drill 必须保存 preparation、old-writer launch、roll-forward 三段 receipt，
 并证明 A receipt 只能运行 clean A commit 快照；B/dirty/unresolved checkout、不可用目标
-runtime 和非 submit 命令均为零启动。
+runtime、root/lock override 和非 submit/eager-exit 命令均为零启动；还必须保存三个
+worker stage 的 sbatch，证明它们引用 launch receipt 中同一 `target_python_runtime`。
 
 #### 3.1.2 DB-free file-provider 稳态刷新
 

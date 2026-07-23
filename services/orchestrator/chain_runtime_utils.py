@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence
 
 import httpx
 
+from packages.common.python_runtime import validated_target_python_runtime
 from packages.common.redaction import redact_payload
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.chain_stages import STAGES
@@ -991,7 +992,7 @@ def _template_export_lines(context: Mapping[str, Any]) -> list[str]:
         "OMP_NUM_THREADS": context.get("shud_threads", ""),
     }
     lines = [f"export {key}={shlex.quote(str(value or ''))}" for key, value in export_fields.items()]
-    lines.extend(_python_runtime_export_lines())
+    lines.extend(_python_runtime_export_lines(context.get("target_python_runtime")))
     grib_env_root = os.getenv("NHMS_GRIB_ENV_ROOT")
     if grib_env_root:
         # Compute nodes (cn01-24) lack cdo/libeccodes; inject the shared conda
@@ -1011,7 +1012,22 @@ def _first_nonempty(*values: Any) -> Any:
     return ""
 
 
-def _python_runtime_export_lines() -> list[str]:
+def _python_runtime_export_lines(target_python_runtime: Any = None) -> list[str]:
+    if target_python_runtime not in (None, ""):
+        try:
+            runtime = validated_target_python_runtime(target_python_runtime, required=True)
+        except ValueError as error:
+            raise OrchestratorError(
+                "INVALID_TARGET_PYTHON_RUNTIME",
+                str(error),
+                {"field": "target_python_runtime"},
+            ) from error
+        assert runtime is not None
+        runtime_path = Path(runtime)
+        return [
+            f"export NHMS_TARGET_PYTHON_RUNTIME={shlex.quote(runtime)}",
+            f"export PATH={shlex.quote(str(runtime_path.parent))}:$PATH",
+        ]
     explicit_bin = os.getenv("NHMS_PYTHON_VENV_BIN")
     candidates: list[Path] = []
     if explicit_bin:

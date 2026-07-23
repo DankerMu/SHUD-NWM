@@ -1647,6 +1647,99 @@ def test_safe_slurm_env_reaches_rendered_array_template_and_secret_is_rejected(t
         )
 
 
+@pytest.mark.parametrize(
+    ("job_type", "worker_module", "console_entrypoint"),
+    [
+        ("produce_forcing_array", "workers.forcing_producer.cli", "nhms-forcing produce"),
+        ("run_shud_forecast_array", "workers.shud_runtime.cli", "nhms-shud-runtime execute"),
+        ("save_state_snapshot_array", "packages.common.state_cli", "nhms-state save"),
+    ],
+)
+def test_round18_http_gateway_renders_only_explicit_target_runtime_for_worker_stages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    job_type: str,
+    worker_module: str,
+    console_entrypoint: str,
+) -> None:
+    target_runtime = tmp_path / "target" / ".venv" / "bin" / ".nhms-rollback-python-test"
+    target_runtime.parent.mkdir(parents=True)
+    target_runtime.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    target_runtime.chmod(0o700)
+    ambient_venv = tmp_path / "ambient-controller" / ".venv"
+    ambient_bin = ambient_venv / "bin"
+    ambient_bin.mkdir(parents=True)
+    monkeypatch.setenv("VIRTUAL_ENV", str(ambient_venv))
+    monkeypatch.setenv("NHMS_PYTHON_VENV_BIN", str(ambient_bin))
+    gateway = _production_gateway(tmp_path)
+    manifest_index = tmp_path / "workspace" / "cycle_001" / "manifests" / "index.json"
+    manifest = {
+        **_production_manifest(tmp_path, job_type),
+        "target_python_runtime": str(target_runtime),
+        "manifest_index_path": str(manifest_index),
+    }
+
+    rendered = gateway.render_template(job_type, manifest, str(manifest_index))
+
+    assert f"export NHMS_TARGET_PYTHON_RUNTIME={shlex.quote(str(target_runtime))}" in rendered
+    assert f"export PATH={shlex.quote(str(target_runtime.parent))}:$PATH" in rendered
+    assert str(ambient_venv) not in rendered
+    assert str(ambient_bin) not in rendered
+    assert f'"$NHMS_TARGET_PYTHON_RUNTIME" -m {worker_module}' in rendered
+    assert console_entrypoint not in rendered
+
+
+@pytest.mark.parametrize(
+    ("job_type", "worker_module", "console_entrypoint"),
+    [
+        ("produce_forcing_array", "workers.forcing_producer.cli", "nhms-forcing produce"),
+        ("run_shud_forecast_array", "workers.shud_runtime.cli", "nhms-shud-runtime execute"),
+        ("save_state_snapshot_array", "packages.common.state_cli", "nhms-state save"),
+    ],
+)
+def test_round18_http_gateway_preserves_console_entrypoint_without_target_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    job_type: str,
+    worker_module: str,
+    console_entrypoint: str,
+) -> None:
+    ambient_venv = tmp_path / "ambient-controller" / ".venv"
+    ambient_bin = ambient_venv / "bin"
+    ambient_bin.mkdir(parents=True)
+    monkeypatch.setenv("VIRTUAL_ENV", str(ambient_venv))
+    monkeypatch.setenv("NHMS_PYTHON_VENV_BIN", str(ambient_bin))
+    gateway = _production_gateway(tmp_path)
+    manifest_index = tmp_path / "workspace" / "cycle_001" / "manifests" / "index.json"
+    manifest = {
+        **_production_manifest(tmp_path, job_type),
+        "manifest_index_path": str(manifest_index),
+    }
+
+    rendered = gateway.render_template(job_type, manifest, str(manifest_index))
+
+    assert "NHMS_TARGET_PYTHON_RUNTIME" not in rendered
+    assert f'"$NHMS_TARGET_PYTHON_RUNTIME" -m {worker_module}' not in rendered
+    assert console_entrypoint in rendered
+    assert f"export PATH={shlex.quote(str(ambient_bin))}:$PATH" in rendered
+
+
+def test_round18_http_gateway_rejects_mutable_target_runtime_symlink(tmp_path: Path) -> None:
+    runtime_target = tmp_path / "python-target"
+    runtime_target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    runtime_target.chmod(0o700)
+    runtime_symlink = tmp_path / "python"
+    runtime_symlink.symlink_to(runtime_target)
+    gateway = _production_gateway(tmp_path)
+    manifest = {
+        **_production_manifest(tmp_path, "run_shud_forecast_array"),
+        "target_python_runtime": str(runtime_symlink),
+    }
+
+    with pytest.raises(ManifestValidationError, match="target_python_runtime"):
+        gateway.render_template("run_shud_forecast_array", manifest)
+
+
 def test_render_template_preserves_safe_url_query_execution_input(tmp_path: Path) -> None:
     safe_url = "https://example.com/notify?run=run_001&source=GFS"
     template_dir = _write_template(

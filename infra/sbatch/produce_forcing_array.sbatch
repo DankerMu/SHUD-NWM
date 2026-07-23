@@ -21,4 +21,10 @@ set -euo pipefail
 {% endfor %}
 
 mkdir -p "$WORKSPACE_ROOT/$NHMS_RUN_ID/logs"
-nhms-forcing produce --manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"
+{% if target_python_runtime | default('') %}
+"$NHMS_TARGET_PYTHON_RUNTIME" -m workers.forcing_producer.cli produce \
+  --manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"
+{% else %}
+nhms-forcing produce \
+  --manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"
+{% endif %}

@@ -4,10 +4,13 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import stat
 import subprocess
 import tempfile
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterator
@@ -45,6 +48,8 @@ HISTORICAL_MIGRATION_ROW_LIMITS = {
 EXPORT_FETCHMANY_BATCH_SIZE = 1_000
 ROLLBACK_WRITER_GIT_TIMEOUT_SECONDS = 10
 ROLLBACK_WRITER_GIT_OUTPUT_LIMIT_BYTES = 16_384
+ROLLBACK_RUNTIME_COPY_CHUNK_BYTES = 1024 * 1024
+ROLLBACK_EXECUTION_LOCK_NAME = ".reconcile-inventory-rollback-execution.lock"
 
 _FAILED_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed", "cancelled"}
 
@@ -140,52 +145,83 @@ def launch_file_journal_rollback_writer(
     """Validate the bound receipt and only then cross the old-writer exec boundary."""
 
     arguments = _validated_production_writer_arguments(writer_args)
-    repository_root, actual_writer_generation = _resolve_clean_writer_generation(
-        writer_repository_root
-    )
-    writer_runtime, runtime_identity = _resolve_target_writer_runtime(repository_root)
-    receipt = require_file_journal_rollback_prepared(
+    config, _lease_identity = _rollback_file_lease_config(
         journal_root=journal_root,
         workspace_root=workspace_root,
-        receipt_id=receipt_id,
-        actual_writer_generation=actual_writer_generation,
         lock_path=lock_path,
         scheduler_lock_backend=scheduler_lock_backend,
         lock_ttl_seconds=lock_ttl_seconds,
     )
-    if receipt["preflight"]["dry_run"] is not False:
-        raise FileOrchestrationJournalError(
-            "file_journal_rollback_not_prepared",
-            field="reconcile_inventory_migration",
+    with _rollback_execution_lock(journal_root) as execution_lock_fd:
+        repository_root, actual_writer_generation = _resolve_clean_writer_generation(writer_repository_root)
+        writer_runtime, resolved_runtime, runtime_identity = _resolve_target_writer_runtime(repository_root)
+        receipt = require_file_journal_rollback_prepared(
+            journal_root=journal_root,
+            workspace_root=workspace_root,
+            receipt_id=receipt_id,
+            actual_writer_generation=actual_writer_generation,
+            lock_path=lock_path,
+            scheduler_lock_backend=scheduler_lock_backend,
+            lock_ttl_seconds=lock_ttl_seconds,
         )
-    with _materialize_commit_snapshot(repository_root, actual_writer_generation) as snapshot_root:
-        rechecked_root, rechecked_generation = _resolve_clean_writer_generation(
-            repository_root
-        )
-        rechecked_runtime, rechecked_runtime_identity = _resolve_target_writer_runtime(
-            repository_root
-        )
-        if (
-            rechecked_root != repository_root
-            or rechecked_generation != actual_writer_generation
-            or rechecked_runtime != writer_runtime
-            or rechecked_runtime_identity != runtime_identity
-        ):
+        if receipt["preflight"]["dry_run"] is not False:
             raise FileOrchestrationJournalError(
-                "file_journal_rollback_writer_generation_changed",
-                field="writer_repository_root",
+                "file_journal_rollback_not_prepared",
+                field="reconcile_inventory_migration",
             )
-        command = (
-            str(writer_runtime),
-            "-m",
-            "services.orchestrator.cli",
-            *arguments,
-        )
-        completed = _run_rollback_writer(command, cwd=snapshot_root, check=False)
+        with (
+            _materialize_commit_snapshot(repository_root, actual_writer_generation) as snapshot_root,
+            _materialize_bound_runtime(
+                writer_runtime,
+                resolved_runtime=resolved_runtime,
+                runtime_identity=runtime_identity,
+            ) as bound_runtime,
+        ):
+            rechecked_root, rechecked_generation = _resolve_clean_writer_generation(repository_root)
+            rechecked_runtime, rechecked_resolved_runtime, rechecked_runtime_identity = _resolve_target_writer_runtime(
+                repository_root
+            )
+            if (
+                rechecked_root != repository_root
+                or rechecked_generation != actual_writer_generation
+                or rechecked_runtime != writer_runtime
+                or rechecked_resolved_runtime != resolved_runtime
+                or rechecked_runtime_identity != runtime_identity
+            ):
+                raise FileOrchestrationJournalError(
+                    "file_journal_rollback_writer_generation_changed",
+                    field="writer_repository_root",
+                )
+            controlled_arguments = (
+                *arguments,
+                "--workspace-root",
+                str(config.workspace_root),
+                "--lock-path",
+                str(config.lock_path),
+            )
+            command = (
+                str(bound_runtime.path),
+                "-m",
+                "services.orchestrator.cli",
+                *controlled_arguments,
+            )
+            completed = _run_rollback_writer(
+                command,
+                cwd=snapshot_root,
+                check=False,
+                env=_rollback_writer_environment(
+                    config=config,
+                    journal_root=journal_root,
+                    target_python_runtime=bound_runtime.path,
+                ),
+                pass_fds=(execution_lock_fd,),
+            )
     return {
         "preparation_receipt_id": receipt["receipt_id"],
         "actual_writer_generation": actual_writer_generation,
         "writer_repository_root": str(repository_root),
+        "target_python_runtime": str(bound_runtime.path),
+        "target_python_runtime_retention": "retained_fail_closed_until_operator_cleanup",
         "dry_run": False,
         "writer_exit_code": int(completed.returncode),
     }
@@ -202,6 +238,12 @@ def _validated_production_writer_arguments(writer_args: Iterable[str]) -> tuple[
         argument in {"--plan", "--dry-run"}
         or argument.startswith("--plan=")
         or argument.startswith("--dry-run=")
+        or argument in {"-h", "--help", "--version"}
+        or (argument.startswith("--") and "--help".startswith(argument))
+        or (argument.startswith("--") and "--version".startswith(argument))
+        or argument in {"--workspace-root", "--lock-path"}
+        or argument.startswith("--workspace-root=")
+        or argument.startswith("--lock-path=")
         for argument in arguments
         if isinstance(argument, str)
     )
@@ -219,7 +261,9 @@ def _validated_production_writer_arguments(writer_args: Iterable[str]) -> tuple[
     return arguments
 
 
-def _resolve_target_writer_runtime(repository_root: Path) -> tuple[Path, tuple[int, int]]:
+def _resolve_target_writer_runtime(
+    repository_root: Path,
+) -> tuple[Path, Path, tuple[int, int]]:
     runtime = repository_root / ".venv" / "bin" / "python"
     try:
         resolved_runtime = runtime.resolve(strict=True)
@@ -234,7 +278,172 @@ def _resolve_target_writer_runtime(repository_root: Path) -> tuple[Path, tuple[i
             "file_journal_rollback_writer_runtime_unavailable",
             field="writer_repository_root",
         )
-    return runtime.absolute(), (runtime_stat.st_dev, runtime_stat.st_ino)
+    return runtime.absolute(), resolved_runtime, (runtime_stat.st_dev, runtime_stat.st_ino)
+
+
+@dataclass
+class _BoundRuntime:
+    path: Path
+
+
+@contextmanager
+def _materialize_bound_runtime(
+    writer_runtime: Path,
+    *,
+    resolved_runtime: Path,
+    runtime_identity: tuple[int, int],
+) -> Iterator[_BoundRuntime]:
+    venv_root = writer_runtime.parent.parent
+    bundle_root = venv_root / f".nhms-rollback-runtime-{uuid4().hex}"
+    bundle_bin = bundle_root / "bin"
+    bound_path = bundle_bin / "python"
+    source_fd: int | None = None
+    try:
+        source_fd = os.open(
+            resolved_runtime,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+        source_stat = os.fstat(source_fd)
+        if not stat.S_ISREG(source_stat.st_mode) or (source_stat.st_dev, source_stat.st_ino) != runtime_identity:
+            raise OSError("target runtime changed before binding")
+        bundle_root.mkdir(mode=0o700)
+        bundle_bin.mkdir(mode=0o700)
+        source_config = venv_root / "pyvenv.cfg"
+        source_config_stat = source_config.stat(follow_symlinks=False)
+        if not stat.S_ISREG(source_config_stat.st_mode):
+            raise OSError("target venv is missing pyvenv.cfg")
+        shutil.copyfile(source_config, bundle_root / "pyvenv.cfg", follow_symlinks=False)
+        _materialize_bound_runtime_libraries(
+            bundle_root=bundle_root,
+            venv_root=venv_root,
+            resolved_runtime=resolved_runtime,
+        )
+        _copy_open_runtime_snapshot(
+            source_fd=source_fd,
+            bound_path=bound_path,
+            runtime_identity=runtime_identity,
+        )
+        os.chmod(bundle_root / "pyvenv.cfg", 0o400)
+        os.chmod(bundle_bin, 0o500)
+        os.chmod(bundle_root, 0o500)
+    except OSError as error:
+        _cleanup_bound_runtime_bundle(bundle_root)
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_writer_runtime_unavailable",
+            field="writer_repository_root",
+        ) from error
+    finally:
+        if source_fd is not None:
+            os.close(source_fd)
+    bound_runtime = _BoundRuntime(path=bound_path)
+    yield bound_runtime
+
+
+def _copy_open_runtime_snapshot(
+    *,
+    source_fd: int,
+    bound_path: Path,
+    runtime_identity: tuple[int, int],
+) -> None:
+    bound_fd: int | None = None
+    try:
+        bound_fd = os.open(
+            bound_path,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            0o500,
+        )
+        while chunk := os.read(source_fd, ROLLBACK_RUNTIME_COPY_CHUNK_BYTES):
+            pending = memoryview(chunk)
+            while pending:
+                written = os.write(bound_fd, pending)
+                if written <= 0:
+                    raise OSError("target runtime snapshot write made no progress")
+                pending = pending[written:]
+        os.fchmod(bound_fd, 0o500)
+        os.fsync(bound_fd)
+
+        source_stat = os.fstat(source_fd)
+        bound_stat = os.fstat(bound_fd)
+        bound_path_stat = bound_path.stat(follow_symlinks=False)
+        if (
+            not stat.S_ISREG(source_stat.st_mode)
+            or (source_stat.st_dev, source_stat.st_ino) != runtime_identity
+            or not stat.S_ISREG(bound_stat.st_mode)
+            or not stat.S_ISREG(bound_path_stat.st_mode)
+            or (bound_stat.st_dev, bound_stat.st_ino)
+            != (bound_path_stat.st_dev, bound_path_stat.st_ino)
+            or stat.S_IMODE(bound_stat.st_mode) & 0o111 == 0
+        ):
+            raise OSError("target runtime snapshot verification failed")
+    finally:
+        if bound_fd is not None:
+            os.close(bound_fd)
+
+
+def _materialize_bound_runtime_libraries(
+    *,
+    bundle_root: Path,
+    venv_root: Path,
+    resolved_runtime: Path,
+) -> None:
+    bundle_lib = bundle_root / "lib"
+    bundle_lib.mkdir(mode=0o700)
+    source_roots = (venv_root / "lib", resolved_runtime.parent.parent / "lib")
+    for source_root in source_roots:
+        if not source_root.is_dir():
+            continue
+        for source_entry in source_root.iterdir():
+            destination = bundle_lib / source_entry.name
+            if destination.exists() or destination.is_symlink():
+                continue
+            destination.symlink_to(source_entry)
+    source_lib64 = venv_root / "lib64"
+    if source_lib64.is_dir():
+        (bundle_root / "lib64").symlink_to(source_lib64)
+    os.chmod(bundle_lib, 0o500)
+
+
+def _cleanup_bound_runtime_bundle(bundle_root: Path) -> None:
+    if not bundle_root.exists():
+        return
+    os.chmod(bundle_root, 0o700)
+    bundle_bin = bundle_root / "bin"
+    if bundle_bin.exists():
+        os.chmod(bundle_bin, 0o700)
+    bundle_lib = bundle_root / "lib"
+    if bundle_lib.exists():
+        os.chmod(bundle_lib, 0o700)
+    shutil.rmtree(bundle_root)
+
+
+def _rollback_writer_environment(
+    *,
+    config: Any,
+    journal_root: str | Path,
+    target_python_runtime: Path,
+) -> dict[str, str]:
+    environment = {str(key): str(value) for key, value in os.environ.items()}
+    for key in ("VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH"):
+        environment.pop(key, None)
+    runtime_bin = str(target_python_runtime.parent)
+    inherited_path = environment.get("PATH", "")
+    environment.update(
+        {
+            "WORKSPACE_ROOT": str(config.workspace_root),
+            "NHMS_SCHEDULER_JOURNAL_ROOT": str(Path(journal_root).expanduser().resolve()),
+            "NHMS_SCHEDULER_LOCK_BACKEND": "file",
+            "NHMS_SCHEDULER_LOCK_ROOT": str(Path(config.lock_path).parent),
+            "NHMS_SCHEDULER_DB_FREE_REQUIRED": "true",
+            "NHMS_TARGET_PYTHON_RUNTIME": str(target_python_runtime),
+            "NHMS_PYTHON_VENV_BIN": runtime_bin,
+            "PATH": f"{runtime_bin}{os.pathsep}{inherited_path}" if inherited_path else runtime_bin,
+        }
+    )
+    return environment
 
 
 @contextmanager
@@ -397,8 +606,62 @@ def _run_rollback_writer(
     *,
     cwd: Path,
     check: bool,
+    env: Mapping[str, str],
+    pass_fds: tuple[int, ...],
 ) -> subprocess.CompletedProcess[Any]:
-    return subprocess.run(command, cwd=cwd, check=check, shell=False)
+    return subprocess.run(
+        command,
+        cwd=cwd,
+        check=check,
+        shell=False,
+        env=dict(env),
+        pass_fds=pass_fds,
+    )
+
+
+@contextmanager
+def _rollback_execution_lock(journal_root: str | Path) -> Iterator[int]:
+    import fcntl
+
+    root = Path(journal_root).expanduser().resolve()
+    lock_path = root / ROLLBACK_EXECUTION_LOCK_NAME
+    lock_fd: int | None = None
+    try:
+        ensure_directory_no_follow(root)
+        lock_fd = os.open(
+            lock_path,
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        os.fchmod(lock_fd, 0o600)
+        opened = os.fstat(lock_fd)
+        current = os.stat(lock_path, follow_symlinks=False)
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+            raise OSError("rollback execution lock changed")
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_rollback_execution_active",
+                field="reconcile_inventory_rollback_execution",
+            ) from error
+        current = os.stat(lock_path, follow_symlinks=False)
+        if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+            raise OSError("rollback execution lock changed")
+        yield lock_fd
+    except FileOrchestrationJournalError:
+        raise
+    except (OSError, SafeFilesystemError) as error:
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_execution_lock_unavailable",
+            field="reconcile_inventory_rollback_execution",
+        ) from error
+    finally:
+        if lock_fd is not None:
+            # Do not explicitly LOCK_UN: the child inherits this open file
+            # description, so a launcher crash keeps rollforward excluded until
+            # the old writer itself exits.
+            os.close(lock_fd)
 
 
 def complete_file_journal_rollforward(
@@ -412,30 +675,31 @@ def complete_file_journal_rollforward(
 ) -> dict[str, Any]:
     """Rebuild inventory and consume the rollback fence under the scheduler lease."""
 
-    config, lease_identity = _rollback_file_lease_config(
-        journal_root=journal_root,
-        workspace_root=workspace_root,
-        lock_path=lock_path,
-        scheduler_lock_backend=scheduler_lock_backend,
-        lock_ttl_seconds=lock_ttl_seconds,
-    )
-    lease, heartbeat, pass_id = _acquire_rollback_file_lease(config, operation="rollforward")
-    repository = FileOrchestrationJournalRepository(journal_root)
-    try:
-        return repository._complete_reconcile_inventory_rollforward_under_scheduler_lease(
-            preparation_receipt_id=preparation_receipt_id,
-            scheduler_lease_identity=lease_identity,
-            scheduler_lease_guard=lambda: _rollback_lease_is_held(
-                lease,
-                heartbeat,
-                pass_id=pass_id,
-            ),
+    with _rollback_execution_lock(journal_root):
+        config, lease_identity = _rollback_file_lease_config(
+            journal_root=journal_root,
+            workspace_root=workspace_root,
+            lock_path=lock_path,
+            scheduler_lock_backend=scheduler_lock_backend,
+            lock_ttl_seconds=lock_ttl_seconds,
         )
-    finally:
+        lease, heartbeat, pass_id = _acquire_rollback_file_lease(config, operation="rollforward")
+        repository = FileOrchestrationJournalRepository(journal_root)
         try:
-            heartbeat.stop()
+            return repository._complete_reconcile_inventory_rollforward_under_scheduler_lease(
+                preparation_receipt_id=preparation_receipt_id,
+                scheduler_lease_identity=lease_identity,
+                scheduler_lease_guard=lambda: _rollback_lease_is_held(
+                    lease,
+                    heartbeat,
+                    pass_id=pass_id,
+                ),
+            )
         finally:
-            lease.release(pass_id=pass_id)
+            try:
+                heartbeat.stop()
+            finally:
+                lease.release(pass_id=pass_id)
 
 
 def _rollback_file_lease_config(

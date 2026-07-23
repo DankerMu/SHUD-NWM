@@ -7,6 +7,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
+from packages.common.python_runtime import validated_target_python_runtime
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.chain_runtime_utils import _format_time
 from services.orchestrator.chain_stages import STAGES, terminal_stage_names
@@ -93,6 +94,7 @@ class OrchestratorConfig:
     terminal_stage: str | None = None
     slurm_job_type_templates: Mapping[str, str] = field(default_factory=dict)
     slurm_env: Mapping[str, str] = field(default_factory=dict)
+    target_python_runtime: str | None = None
     reconcile_slurm_user: str | None = None
     reconcile_slurm_account: str | None = None
 
@@ -122,6 +124,11 @@ class OrchestratorConfig:
             {str(key): str(value) for key, value in dict(self.slurm_job_type_templates).items()},
         )
         object.__setattr__(self, "slurm_env", {str(key): str(value) for key, value in dict(self.slurm_env).items()})
+        object.__setattr__(
+            self,
+            "target_python_runtime",
+            validated_target_python_runtime(self.target_python_runtime),
+        )
         object.__setattr__(self, "reconcile_slurm_user", _normalized_optional_identity(self.reconcile_slurm_user))
         object.__setattr__(
             self,
@@ -147,6 +154,7 @@ class OrchestratorConfig:
             require_forecast_warm_start=_env_flag("NHMS_REQUIRE_FORECAST_WARM_START", default=False),
             forecast_warm_start_required_from=_env_cycle_time("NHMS_FORECAST_WARM_START_REQUIRED_FROM"),
             terminal_stage=os.getenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE") or None,
+            target_python_runtime=os.getenv("NHMS_TARGET_PYTHON_RUNTIME") or None,
         )
 
     def strict_forecast_warm_start_required_for(self, cycle_time: datetime) -> bool:

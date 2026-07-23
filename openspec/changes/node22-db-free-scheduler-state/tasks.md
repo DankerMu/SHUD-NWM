@@ -542,11 +542,14 @@ Scenario evidence rows for section 5:
   blocker. Every `preparing` crash cut point is re-entrant, same-instance atomic
   lease renewal is serialized, and the old-writer launcher validates a full Git
   generation before mutation, admits only a real `plan-production --submit`,
-  requires the target checkout runtime, and executes a private detached snapshot
-  of the receipt-bound commit instead of accepting a caller claim or mutable
-  checkout; live-lease, concurrent, dirty/mismatched checkout, unavailable
-  runtime/snapshot, tampered, stale, and wrong-root paths are
-  zero-launch/zero-mutation failures.
+  rejects root/lock overrides and eager exits, binds the child environment to the
+  receipt roots, and executes a private detached source snapshot with an
+  already-opened interpreter snapshot. The retained target runtime propagates
+  through the HTTP Slurm gateway to all three worker arrays without changing
+  ordinary console-entrypoint submissions, while a child-inherited execution
+  lock excludes premature roll-forward. Live-lease, concurrent,
+  dirty/mismatched checkout, unavailable runtime/snapshot, tampered, stale, and
+  wrong-root paths are zero-launch/zero-mutation failures.
   Complete task truth derives the durable cohort outcome, and accepted-submit
   typed projection is the sole hydro terminal mutator. The annual cost oracle uses
   the production cadence of two cycles per day and GFS+IFS per cycle (1,460

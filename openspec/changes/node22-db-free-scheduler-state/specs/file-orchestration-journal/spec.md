@@ -528,12 +528,27 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
   Git generation from the clean target checkout, and target-generation format
   validation precedes every lease, marker, fence, or receipt mutation
 - **AND** that launch entry accepts only a real `plan-production` submission
-  containing exactly one `--submit`, rejects plan/dry-run/other commands, and
-  requires the target checkout's executable `.venv/bin/python`
+  containing exactly one `--submit`, rejects plan/dry-run/eager-exit/other
+  commands and caller root/lock overrides, and requires the target checkout's
+  executable `.venv/bin/python`
 - **AND** after receipt validation it materializes the full target generation as
-  a private detached clean commit snapshot, rechecks the original checkout and
-  runtime identity before launch, and runs the snapshot with the target runtime,
-  so a post-check checkout switch cannot change the executed source
+  a private detached clean commit snapshot and copies the already-opened,
+  identity-checked interpreter into a protected persistent runtime bundle;
+  rechecking the original checkout and runtime before launch means a post-check
+  checkout or interpreter-path replacement cannot change the executed source or
+  interpreter
+- **AND** the launcher overrides ambient configuration with the receipt-bound
+  journal root, workspace, file-lock backend and lock path, and carries the
+  protected target runtime through the production scheduler, forecast
+  orchestrator, submission manifest and HTTP Slurm gateway into forcing,
+  forecast and state-save worker templates; submissions without an explicit
+  target runtime preserve their existing console entrypoints
+- **AND** a separate cross-process rollback execution lock is held across the
+  complete old-writer process and inherited across launcher failure, so
+  roll-forward cannot consume the fence before or while that writer runs
+- **AND** the protected runtime remains on shared storage after launch and is
+  removed only after every submitted worker that references it is terminal;
+  its path and fail-closed retention contract are launch evidence
 - **AND** dirty, untracked, unresolved, changed, mismatched, runtime-unavailable,
   or snapshot-unavailable targets are rejected before any writer is started;
   caller-supplied generation claims are not launch authority
