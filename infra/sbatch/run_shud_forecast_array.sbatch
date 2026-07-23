@@ -22,6 +22,9 @@ set -euo pipefail
 {{ export_line }}
 {% endfor %}
 
+{% if target_python_runtime | default('') %}
+cd "$NHMS_TARGET_PYTHON_SOURCE_ROOT"
+{% endif %}
 mkdir -p "$WORKSPACE_ROOT/$NHMS_RUN_ID/logs"
 VALIDATION_EXPECTED_OUTCOME="$(python - <<'PY'
 import os

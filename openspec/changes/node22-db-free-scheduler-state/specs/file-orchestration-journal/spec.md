@@ -532,30 +532,46 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
   commands and caller root/lock overrides, and requires the target checkout's
   executable `.venv/bin/python`
 - **AND** after receipt validation it materializes the full target generation as
-  a private detached clean commit snapshot and copies the already-opened,
+  a private detached clean persistent source bundle and copies the already-opened,
   identity-checked interpreter into a protected persistent runtime bundle;
   rechecking the original checkout and runtime before launch means a post-check
   checkout or interpreter-path replacement cannot change the executed source or
   interpreter
+- **AND** before the old writer starts, the current controller durably binds the
+  preparation receipt, journal/workspace/lease identity and target Git generation
+  as a `prepared` no-launch authority, then replaces it with the protected runtime
+  and protected source bundle as `active` before crossing the child-execution
+  boundary; the current HTTP Slurm gateway applies only that exact active
+  workspace binding even when the old writer does not understand the new manifest
+  fields, and conflicting explicit fields fail closed
 - **AND** the launcher overrides ambient configuration with the receipt-bound
   journal root, workspace, file-lock backend and lock path, and carries the
-  protected target runtime through the production scheduler, forecast
-  orchestrator, submission manifest and HTTP Slurm gateway into forcing,
-  forecast and state-save worker templates; submissions without an explicit
-  target runtime preserve their existing console entrypoints
+  protected target runtime and source through the HTTP Slurm gateway into forcing,
+  forecast and state-save worker templates; all three stages execute from the
+  bound source generation, while workspaces without an active binding preserve
+  their existing console entrypoints
 - **AND** a separate cross-process rollback execution lock is held across the
   complete old-writer process and inherited across launcher failure, so
   roll-forward cannot consume the fence before or while that writer runs
-- **AND** the protected runtime remains on shared storage after launch and is
-  removed only after every submitted worker that references it is terminal;
-  its path and fail-closed retention contract are launch evidence
+- **AND** the protected runtime and source remain on shared storage after launch
+  and are removed only after every submitted worker that references them is
+  terminal; both paths, the execution-binding identity and the fail-closed
+  retention contract are launch evidence
 - **AND** dirty, untracked, unresolved, changed, mismatched, runtime-unavailable,
   or snapshot-unavailable targets are rejected before any writer is started;
   caller-supplied generation claims are not launch authority
 - **AND** roll-forward requires the matching preparation receipt and the same
-  scheduler lease; it performs one strict, crash-resumable backfill, restores
-  the completion marker, publishes a bound roll-forward receipt, and consumes
-  the fence before normal scheduling can resume
+  scheduler lease; before its first mutation it must prove the durable journal
+  has no reserved, ambiguous, reconciling, queued, running, or otherwise
+  non-terminal rollback-era job, and unavailable quiescence evidence fails closed
+- **AND** roll-forward can cancel an unlaunched preparation only from the exact
+  durable `prepared` authority; missing or tampered authority fails closed, while
+  both `prepared` and `active` transition to `rolling_forward` before the strict
+  crash-resumable backfill, then to `completed` only after it restores the
+  completion marker, publishes the bound roll-forward receipt and consumes the
+  fence; replay resumes the persisted transition, and a later supported rollback
+  preserves prior completed binding evidence without mixing it into the new
+  preparation
 - **AND** a live scheduler lease, a tampered/stale/wrong-root receipt, or a lost
   lease fails closed without changing migration authority
 - **AND** steady-state restart discovery after migration reads only the marker

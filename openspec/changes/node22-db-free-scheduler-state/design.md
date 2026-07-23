@@ -1564,6 +1564,18 @@ Invariant Matrix:
   exact `sacct` comment recovery, one array for 18 members, downstream
   copyback/state-save progress, no scheduler `DATABASE_URL`, and a rollback
   receipt.
+- Rollback execution-generation invariant: the current controller persists one
+  workspace-scoped execution binding before the old writer starts. `prepared`
+  binds the receipt and exact Git generation as durable no-launch authority;
+  launcher replaces it with `active` containing protected persistent Python
+  runtime and source bundles before child execution. The current Gateway injects
+  only active bundles into old-writer manifests, so forcing, forecast and
+  state-save cannot import the Gateway checkout's newer source generation.
+  Roll-forward is admitted only after a bounded journal query proves every
+  rollback-era job settled, then persists `prepared|active` -> `rolling_forward`
+  -> `completed` around the crash-resumable inventory transition. Missing prepared
+  authority cannot authorize cancellation. Completed bindings remain auditable
+  and cannot wedge or authorize a later preparation.
 
 Regression rows:
 
@@ -1572,6 +1584,18 @@ Regression rows:
   candidate failure, and exactly one Slurm array.
 - Process restart; exact comment has one matching array -> bind master ID,
   reconcile tasks, and do not submit or cancel another forecast array.
+- Rollback writer generation A with Gateway checkout B -> the old manifest is
+  bound by the current Gateway to A's protected runtime and source for forcing,
+  forecast and state-save; a conflicting path fails closed and an unrelated
+  workspace keeps its ordinary console entrypoint.
+- Old writer exits while any reserved/ambiguous/running job remains ->
+  roll-forward performs zero authority mutation; after all jobs settle it
+  resumes `active -> rolling_forward -> completed`, and a subsequent preparation
+  can establish a distinct binding without losing prior completed audit evidence.
+- Preparation is cancelled before launcher runs -> only the exact durable
+  `prepared` authority plus an empty unsettled-job query permits
+  `prepared` -> `rolling_forward` -> `completed`; deleted or tampered authority
+  leaves the fence unchanged.
 - Exact comment has zero matches before absence window -> remain reconciling;
   zero matches after the window -> one idempotent retry attempt, with concurrent
   passes unable to produce a second attempt.

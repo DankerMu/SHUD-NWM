@@ -543,11 +543,18 @@ Scenario evidence rows for section 5:
   lease renewal is serialized, and the old-writer launcher validates a full Git
   generation before mutation, admits only a real `plan-production --submit`,
   rejects root/lock overrides and eager exits, binds the child environment to the
-  receipt roots, and executes a private detached source snapshot with an
-  already-opened interpreter snapshot. The retained target runtime propagates
-  through the HTTP Slurm gateway to all three worker arrays without changing
-  ordinary console-entrypoint submissions, while a child-inherited execution
-  lock excludes premature roll-forward. Live-lease, concurrent,
+  receipt roots, and executes protected persistent source and runtime bundles
+  behind a durable workspace-scoped execution binding. The current HTTP Slurm
+  gateway injects that binding for old manifests, so all three worker arrays use
+  the exact target runtime and source without changing ordinary unrelated
+  console-entrypoint submissions. A child-inherited execution lock excludes
+  roll-forward while the writer runs; a bounded global unsettled-job query and
+  crash-resumable `prepared|active` -> `rolling_forward` -> `completed` binding
+  transition exclude roll-forward while any accepted task can still reference
+  the bundles. The exact `prepared` authority permits a no-launch cancellation, while
+  missing/tampered authority is zero-mutation failure. Repeated rollback preserves
+  completed audit evidence without mixing generations.
+  Live-lease, concurrent,
   dirty/mismatched checkout, unavailable runtime/snapshot, tampered, stale, and
   wrong-root paths are zero-launch/zero-mutation failures.
   Complete task truth derives the durable cohort outcome, and accepted-submit

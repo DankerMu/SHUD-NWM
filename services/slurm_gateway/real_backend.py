@@ -20,8 +20,15 @@ from jinja2.sandbox import SandboxedEnvironment
 
 from packages.common.manifest_index import ManifestValidationError as CommonManifestValidationError
 from packages.common.manifest_index import serialize_manifest_index
-from packages.common.python_runtime import validated_target_python_runtime
+from packages.common.python_runtime import (
+    validated_target_python_runtime,
+    validated_target_python_source_root,
+)
 from packages.common.redaction import redact_text
+from packages.common.rollback_execution_binding import (
+    RollbackExecutionBindingError,
+    read_rollback_execution_binding,
+)
 from packages.common.safe_fs import (
     SafeFilesystemError,
     ensure_directory_no_follow,
@@ -188,6 +195,7 @@ class RealSlurmGateway(SlurmGateway):
     def submit_job(self, request: SubmitJobRequest) -> SlurmJobRecord:
         manifest = request.normalized_manifest()
         self._validate_manifest_secret_scan(manifest)
+        manifest = self._manifest_with_active_rollback_binding(manifest)
         run_id = request.resolved_run_id()
         model_id = request.resolved_model_id()
         job_type = request.resolved_job_type()
@@ -260,6 +268,14 @@ class RealSlurmGateway(SlurmGateway):
             workspace_root,
             require_match=bool(requested_workspace),
         )
+        base_manifest = self._manifest_with_active_rollback_binding(
+            base_manifest,
+            workspace_root=workspace_root,
+        )
+        task_list = [
+            self._manifest_with_active_rollback_binding(task, workspace_root=workspace_root)
+            for task in task_list
+        ]
         first_task = dict(task_list[0])
         model_id = str(first_task.get("model_id") or base_manifest.get("model_id") or "")
         profile = self.resolve_resource_profile(model_id)
@@ -648,12 +664,23 @@ class RealSlurmGateway(SlurmGateway):
         manifest_dict.setdefault("stage_name", manifest_dict.get("stage") or job_type)
         manifest_dict.setdefault("workspace_dir", str(Path(self.settings.workspace_dir)))
         manifest_dict.setdefault("manifest_index_path", manifest_index_path)
+        manifest_dict = self._manifest_with_active_rollback_binding(manifest_dict)
         self._validate_manifest(manifest_dict)
         target_python_runtime = self._validated_target_python_runtime(
             manifest_dict.get("target_python_runtime")
         )
         if target_python_runtime is not None:
             manifest_dict["target_python_runtime"] = target_python_runtime
+        target_python_source_root = self._validated_target_python_source_root(
+            manifest_dict.get("target_python_source_root")
+        )
+        if target_python_source_root is not None:
+            manifest_dict["target_python_source_root"] = target_python_source_root
+        if (target_python_runtime is None) != (target_python_source_root is None):
+            raise ManifestValidationError(
+                "Target Python runtime and source root must be supplied together.",
+                {"field": "manifest.target_python_runtime"},
+            )
         slurm_env = self._validate_slurm_env(manifest_dict.get("slurm_env") or {})
         resource_profile = dict(profile or self.resolve_resource_profile(str(manifest_dict.get("model_id") or "")))
         try:
@@ -940,6 +967,7 @@ class RealSlurmGateway(SlurmGateway):
         lines: list[str] = []
         lines.extend(f"export {key}={shlex.quote(str(value or ''))}" for key, value in export_fields.items())
         lines.extend(_python_runtime_export_lines(context.get("target_python_runtime")))
+        lines.extend(_python_source_export_lines(context.get("target_python_source_root")))
         lines.extend(_grib_runtime_export_lines())
         return lines
 
@@ -1511,6 +1539,8 @@ class RealSlurmGateway(SlurmGateway):
             field_path = f"{path}.{key}"
             if key == "target_python_runtime":
                 self._validated_target_python_runtime(nested, field=field_path)
+            elif key == "target_python_source_root":
+                self._validated_target_python_source_root(nested, field=field_path)
             elif key in STRICT_IDENTIFIER_FIELDS:
                 self._validate_identifier_field(nested, field_path)
             elif isinstance(nested, str) and key not in FREEFORM_STRING_FIELDS:
@@ -1526,6 +1556,55 @@ class RealSlurmGateway(SlurmGateway):
             return validated_target_python_runtime(value)
         except ValueError as error:
             raise ManifestValidationError(str(error), {"field": field}) from error
+
+    def _validated_target_python_source_root(
+        self,
+        value: Any,
+        *,
+        field: str = "manifest.target_python_source_root",
+    ) -> str | None:
+        try:
+            return validated_target_python_source_root(value)
+        except ValueError as error:
+            raise ManifestValidationError(str(error), {"field": field}) from error
+
+    def _manifest_with_active_rollback_binding(
+        self,
+        manifest: Mapping[str, Any],
+        *,
+        workspace_root: Path | None = None,
+    ) -> dict[str, Any]:
+        normalized = dict(manifest)
+        resolved_workspace = workspace_root or self._resolve_submission_workspace_dir(
+            normalized.get("workspace_dir")
+        )
+        try:
+            binding = read_rollback_execution_binding(
+                resolved_workspace,
+                require_artifacts=False,
+            )
+            if binding is not None and binding["status"] == "active":
+                binding = read_rollback_execution_binding(
+                    resolved_workspace,
+                    required=True,
+                    require_artifacts=True,
+                )
+        except RollbackExecutionBindingError as error:
+            raise ManifestValidationError(
+                "Active rollback execution binding is invalid.",
+                {"field": "rollback_execution_binding"},
+            ) from error
+        if binding is None or binding["status"] != "active":
+            return normalized
+        for field in ("target_python_runtime", "target_python_source_root"):
+            requested = normalized.get(field)
+            if requested not in (None, "") and requested != binding[field]:
+                raise ManifestValidationError(
+                    "Submission conflicts with the active rollback execution binding.",
+                    {"field": f"manifest.{field}"},
+                )
+            normalized[field] = binding[field]
+        return normalized
 
     def _validate_manifest_secret_scan(self, value: Any, path: str = "manifest") -> None:
         secret_findings = iter_secret_manifest_findings(value, path)
@@ -1723,6 +1802,24 @@ def _python_runtime_export_lines(target_python_runtime: Any = None) -> list[str]
         quoted = shlex.quote(str(resolved))
         return [f"export PATH={quoted}:$PATH"]
     return []
+
+
+def _python_source_export_lines(target_python_source_root: Any = None) -> list[str]:
+    if target_python_source_root in (None, ""):
+        return []
+    try:
+        source_root = validated_target_python_source_root(target_python_source_root, required=True)
+    except ValueError as error:
+        raise ManifestValidationError(
+            str(error),
+            {"field": "manifest.target_python_source_root"},
+        ) from error
+    assert source_root is not None
+    return [
+        f"export NHMS_TARGET_PYTHON_SOURCE_ROOT={shlex.quote(source_root)}",
+        f"export PYTHONPATH={shlex.quote(source_root)}",
+        "export PYTHONDONTWRITEBYTECODE=1",
+    ]
 
 
 def _grib_runtime_export_lines() -> list[str]:

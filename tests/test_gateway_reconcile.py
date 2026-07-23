@@ -5709,6 +5709,11 @@ def test_round12_rollforward_strictly_backfills_once_under_real_scheduler_lease(
         receipt_id=receipt["receipt_id"],
         actual_writer_generation="a" * 40,
     )["receipt_id"] == receipt["receipt_id"]
+    _round20_write_execution_binding(
+        workspace=workspace,
+        receipt=receipt,
+        generation="a" * 40,
+    )
 
     direct = template.root / "pipeline-jobs" / f"{job_id}.json"
     if surface == "direct":
@@ -5728,6 +5733,14 @@ def test_round12_rollforward_strictly_backfills_once_under_real_scheduler_lease(
     with pytest.raises(FileOrchestrationJournalError, match="file_journal_rollforward_required"):
         FileOrchestrationJournalRepository(root).query_inflight_jobs()
 
+    with pytest.raises(FileOrchestrationJournalError, match="file_journal_rollforward_jobs_unsettled"):
+        complete_file_journal_rollforward(
+            journal_root=root,
+            workspace_root=workspace,
+            preparation_receipt_id=receipt["receipt_id"],
+        )
+    assert not (root / "reconcile-inventory" / f"{job_id}.json").exists()
+    destination.unlink()
     rollforward = complete_file_journal_rollforward(
         journal_root=root,
         workspace_root=workspace,
@@ -5735,11 +5748,9 @@ def test_round12_rollforward_strictly_backfills_once_under_real_scheduler_lease(
     )
     assert rollforward["preparation_receipt_id"] == receipt["receipt_id"]
     reopened = FileOrchestrationJournalRepository(root)
-    if surface == "journal":
-        assert [job.job_id for job in reopened.query_inflight_jobs()] == [job_id]
-    else:
-        assert [job.job_id for job in reopened.query_reserved_unbound_jobs()] == [job_id]
-    assert (root / "reconcile-inventory" / f"{job_id}.json").is_file()
+    assert reopened.query_inflight_jobs() == []
+    assert reopened.query_reserved_unbound_jobs() == []
+    assert not (root / "reconcile-inventory" / f"{job_id}.json").exists()
     assert marker.is_file()
     with pytest.raises(FileOrchestrationJournalError, match="file_journal_rollback_not_prepared"):
         require_file_journal_rollback_prepared(
@@ -5755,10 +5766,8 @@ def test_round12_rollforward_strictly_backfills_once_under_real_scheduler_lease(
         raise AssertionError("migration marker must make steady-state history replay impossible")
 
     monkeypatch.setattr(steady, "_stable_backfill_reconcile_inventory_unlocked", backfill_forbidden)
-    if surface == "journal":
-        assert [job.job_id for job in steady.query_inflight_jobs()] == [job_id]
-    else:
-        assert [job.job_id for job in steady.query_reserved_unbound_jobs()] == [job_id]
+    assert steady.query_inflight_jobs() == []
+    assert steady.query_reserved_unbound_jobs() == []
 
 
 def test_round12_live_scheduler_lease_blocks_prepare_without_mutating_authority(
@@ -5927,6 +5936,51 @@ def _round14_clean_writer_checkout(root: Any, *, content: str) -> tuple[Any, str
     return checkout, generation
 
 
+def _round20_write_execution_binding(
+    *,
+    workspace: Any,
+    receipt: dict[str, Any],
+    generation: str,
+    lock_path: Any | None = None,
+) -> dict[str, Any]:
+    from pathlib import Path
+
+    from packages.common.rollback_execution_binding import (
+        ROLLBACK_EXECUTION_BINDING_SCHEMA_VERSION,
+        binding_id_for,
+        write_rollback_execution_binding,
+    )
+
+    workspace_root = Path(workspace).resolve()
+    assets = workspace_root / ".round20-rollback-assets" / receipt["receipt_id"]
+    source_root = assets / "source"
+    source_root.mkdir(parents=True)
+    source_root.chmod(0o500)
+    runtime = assets / "runtime" / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    runtime.chmod(0o500)
+    configured_lock = Path(lock_path or workspace_root / "scheduler" / "production-scheduler.lock").resolve()
+    binding: dict[str, Any] = {
+        "schema_version": ROLLBACK_EXECUTION_BINDING_SCHEMA_VERSION,
+        "binding_id": "",
+        "status": "active",
+        "preparation_receipt_id": receipt["receipt_id"],
+        "journal_root_identity": dict(receipt["journal_root_identity"]),
+        "scheduler_lease_identity": dict(receipt["scheduler_lease_identity"]),
+        "workspace_root": str(workspace_root),
+        "lock_path": str(configured_lock),
+        "target_writer_generation": generation,
+        "target_python_runtime": str(runtime),
+        "target_python_source_root": str(source_root),
+        "writer_repository_root": str(assets),
+        "created_at": receipt["prepared_at"],
+        "updated_at": receipt["prepared_at"],
+    }
+    binding["binding_id"] = binding_id_for(binding)
+    return write_rollback_execution_binding(workspace_root, binding)
+
+
 def test_round16_prepare_rejects_non_full_git_generations_before_any_mutation(
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -5993,6 +6047,798 @@ def test_round16_prepare_rejects_non_full_git_generations_before_any_mutation(
         assert not lock_path.exists()
         assert repository.current_generation_scheduler_rollback_blocker() is None
         assert starts == []
+
+
+@pytest.mark.parametrize("missing_field", ["target_python_runtime", "target_python_source_root"])
+def test_round20_rollforward_rejects_missing_bound_artifact_without_mutation(
+    tmp_path: Any,
+    missing_field: str,
+) -> None:
+    from pathlib import Path
+
+    from packages.common.rollback_execution_binding import read_rollback_execution_binding
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.file_orchestration_migration import (
+        complete_file_journal_rollforward,
+        prepare_file_journal_rollback,
+    )
+
+    root = tmp_path / missing_field / "journal"
+    workspace = tmp_path / missing_field / "workspace"
+    workspace.mkdir(parents=True)
+    repository = FileOrchestrationJournalRepository(root)
+    assert repository.query_inflight_jobs() == []
+    receipt = prepare_file_journal_rollback(
+        journal_root=root,
+        workspace_root=workspace,
+        scheduler_state="stopped",
+        active_scheduler_processes=0,
+        checked_at=datetime.now(UTC),
+        checked_by="round20-operator",
+        target_writer_generation="a" * 40,
+    )
+    binding = _round20_write_execution_binding(
+        workspace=workspace,
+        receipt=receipt,
+        generation="a" * 40,
+    )
+    artifact = Path(binding[missing_field])
+    artifact.parent.chmod(0o700)
+    artifact.chmod(0o700)
+    os.replace(artifact, artifact.with_name(f"{artifact.name}.missing"))
+    fence = root / "reconcile-inventory-rollback-preparation-v2.json"
+    fence_before = fence.read_bytes()
+
+    with pytest.raises(
+        FileOrchestrationJournalError,
+        match="file_journal_rollforward_execution_binding_invalid",
+    ):
+        complete_file_journal_rollforward(
+            journal_root=root,
+            workspace_root=workspace,
+            preparation_receipt_id=receipt["receipt_id"],
+        )
+
+    assert fence.read_bytes() == fence_before
+    persisted = read_rollback_execution_binding(workspace, require_artifacts=False)
+    assert persisted is not None and persisted["status"] == "active"
+
+
+def test_round20_rollforward_query_failure_leaves_fence_and_binding_active(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from packages.common.rollback_execution_binding import rollback_execution_binding_path
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.file_orchestration_migration import (
+        complete_file_journal_rollforward,
+        prepare_file_journal_rollback,
+    )
+
+    root = tmp_path / "journal"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = FileOrchestrationJournalRepository(root)
+    assert repository.query_inflight_jobs() == []
+    receipt = prepare_file_journal_rollback(
+        journal_root=root,
+        workspace_root=workspace,
+        scheduler_state="stopped",
+        active_scheduler_processes=0,
+        checked_at=datetime.now(UTC),
+        checked_by="round20-query-failure-operator",
+        target_writer_generation="a" * 40,
+    )
+    _round20_write_execution_binding(
+        workspace=workspace,
+        receipt=receipt,
+        generation="a" * 40,
+    )
+    fence = root / "reconcile-inventory-rollback-preparation-v2.json"
+    binding_path = rollback_execution_binding_path(workspace)
+    fence_before = fence.read_bytes()
+    binding_before = binding_path.read_bytes()
+
+    def unavailable(_self: Any) -> list[Any]:
+        raise OSError("injected global rollback-job query failure")
+
+    monkeypatch.setattr(
+        FileOrchestrationJournalRepository,
+        "query_rollback_unsettled_jobs",
+        unavailable,
+    )
+    with pytest.raises(
+        FileOrchestrationJournalError,
+        match="file_journal_rollforward_quiescence_unavailable",
+    ):
+        complete_file_journal_rollforward(
+            journal_root=root,
+            workspace_root=workspace,
+            preparation_receipt_id=receipt["receipt_id"],
+        )
+
+    assert fence.read_bytes() == fence_before
+    assert binding_path.read_bytes() == binding_before
+    assert not (root / "reconcile-inventory").exists()
+
+
+@pytest.mark.parametrize("damage", ["deleted", "tampered"])
+def test_round20_prepare_only_authority_damage_blocks_rollforward_without_fence_mutation(
+    tmp_path: Any,
+    damage: str,
+) -> None:
+    from packages.common.rollback_execution_binding import rollback_execution_binding_path
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.file_orchestration_migration import (
+        complete_file_journal_rollforward,
+        prepare_file_journal_rollback,
+    )
+
+    root = tmp_path / damage / "journal"
+    workspace = tmp_path / damage / "workspace"
+    workspace.mkdir(parents=True)
+    repository = FileOrchestrationJournalRepository(root)
+    assert repository.query_inflight_jobs() == []
+    receipt = prepare_file_journal_rollback(
+        journal_root=root,
+        workspace_root=workspace,
+        scheduler_state="stopped",
+        active_scheduler_processes=0,
+        checked_at=datetime.now(UTC),
+        checked_by="round20-prepared-authority-negative",
+        target_writer_generation="a" * 40,
+    )
+    authority_path = rollback_execution_binding_path(workspace)
+    authority = json.loads(authority_path.read_text(encoding="utf-8"))
+    assert authority["status"] == "prepared"
+    assert authority["preparation_receipt_id"] == receipt["receipt_id"]
+    fence = root / "reconcile-inventory-rollback-preparation-v2.json"
+    fence_before = fence.read_bytes()
+    if damage == "deleted":
+        authority_path.unlink()
+    else:
+        authority["preparation_receipt_id"] = "f" * 64
+        authority_path.write_text(json.dumps(authority), encoding="utf-8")
+        authority_path.chmod(0o600)
+
+    with pytest.raises(
+        FileOrchestrationJournalError,
+        match="file_journal_rollforward_execution_binding_invalid",
+    ):
+        complete_file_journal_rollforward(
+            journal_root=root,
+            workspace_root=workspace,
+            preparation_receipt_id=receipt["receipt_id"],
+        )
+
+    assert fence.read_bytes() == fence_before
+    assert not (root / "reconcile-inventory").exists()
+
+
+def test_round20_prepare_retries_same_receipt_after_authority_publication_crash(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from packages.common.rollback_execution_binding import (
+        RollbackExecutionBindingError,
+        read_rollback_execution_binding,
+        rollback_execution_binding_path,
+    )
+    from services.orchestrator import file_orchestration_migration as migration_module
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.file_orchestration_migration import prepare_file_journal_rollback
+
+    root = tmp_path / "journal"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = FileOrchestrationJournalRepository(root)
+    assert repository.query_inflight_jobs() == []
+    real_write_binding = migration_module.write_rollback_execution_binding
+
+    def crash_before_authority_publication(_workspace_root: Any, _binding: Any) -> dict[str, Any]:
+        raise RollbackExecutionBindingError("injected prepared authority publication crash")
+
+    monkeypatch.setattr(
+        migration_module,
+        "write_rollback_execution_binding",
+        crash_before_authority_publication,
+    )
+    with pytest.raises(
+        FileOrchestrationJournalError,
+        match="file_journal_rollback_preparation_authority_unavailable",
+    ):
+        prepare_file_journal_rollback(
+            journal_root=root,
+            workspace_root=workspace,
+            scheduler_state="stopped",
+            active_scheduler_processes=0,
+            checked_at=datetime.now(UTC),
+            checked_by="round20-prepared-authority-crash",
+            target_writer_generation="a" * 40,
+        )
+    fence = root / "reconcile-inventory-rollback-preparation-v2.json"
+    persisted_receipt = json.loads(fence.read_text(encoding="utf-8"))
+    assert persisted_receipt["status"] == "prepared"
+    assert not rollback_execution_binding_path(workspace).exists()
+
+    monkeypatch.setattr(
+        migration_module,
+        "write_rollback_execution_binding",
+        real_write_binding,
+    )
+    retried = prepare_file_journal_rollback(
+        journal_root=root,
+        workspace_root=workspace,
+        scheduler_state="stopped",
+        active_scheduler_processes=0,
+        checked_at=datetime.now(UTC),
+        checked_by="round20-prepared-authority-retry",
+        target_writer_generation="a" * 40,
+    )
+    assert retried["receipt_id"] == persisted_receipt["receipt_id"]
+    authority = read_rollback_execution_binding(workspace, required=True, require_artifacts=False)
+    assert authority is not None
+    assert authority["status"] == "prepared"
+    assert authority["preparation_receipt_id"] == retried["receipt_id"]
+
+
+def test_round20_rollforward_resumes_after_crash_past_binding_cut(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from packages.common.rollback_execution_binding import read_rollback_execution_binding
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from services.orchestrator.file_orchestration_migration import (
+        complete_file_journal_rollforward,
+        prepare_file_journal_rollback,
+    )
+
+    root = tmp_path / "journal"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = FileOrchestrationJournalRepository(root)
+    assert repository.query_inflight_jobs() == []
+    receipt = prepare_file_journal_rollback(
+        journal_root=root,
+        workspace_root=workspace,
+        scheduler_state="stopped",
+        active_scheduler_processes=0,
+        checked_at=datetime.now(UTC),
+        checked_by="round20-crash-resume-operator",
+        target_writer_generation="a" * 40,
+    )
+    _round20_write_execution_binding(
+        workspace=workspace,
+        receipt=receipt,
+        generation="a" * 40,
+    )
+    fence = root / "reconcile-inventory-rollback-preparation-v2.json"
+    fence_before = fence.read_bytes()
+    real_complete = (
+        FileOrchestrationJournalRepository._complete_reconcile_inventory_rollforward_under_scheduler_lease
+    )
+
+    def crash_after_binding_cut(_self: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("injected crash after rolling_forward binding cut")
+
+    monkeypatch.setattr(
+        FileOrchestrationJournalRepository,
+        "_complete_reconcile_inventory_rollforward_under_scheduler_lease",
+        crash_after_binding_cut,
+    )
+    with pytest.raises(RuntimeError, match="injected crash"):
+        complete_file_journal_rollforward(
+            journal_root=root,
+            workspace_root=workspace,
+            preparation_receipt_id=receipt["receipt_id"],
+        )
+    cut_binding = read_rollback_execution_binding(workspace, require_artifacts=False)
+    assert cut_binding is not None and cut_binding["status"] == "rolling_forward"
+    assert fence.read_bytes() == fence_before
+
+    monkeypatch.setattr(
+        FileOrchestrationJournalRepository,
+        "_complete_reconcile_inventory_rollforward_under_scheduler_lease",
+        real_complete,
+    )
+
+    def stale_query_must_not_reopen_cut(_self: Any) -> list[Any]:
+        raise AssertionError("rolling_forward resume must not repeat the active-state query")
+
+    monkeypatch.setattr(
+        FileOrchestrationJournalRepository,
+        "query_rollback_unsettled_jobs",
+        stale_query_must_not_reopen_cut,
+    )
+    completed = complete_file_journal_rollforward(
+        journal_root=root,
+        workspace_root=workspace,
+        preparation_receipt_id=receipt["receipt_id"],
+    )
+
+    assert completed["rollback_execution_binding_status"] == "completed"
+    final_binding = read_rollback_execution_binding(workspace, require_artifacts=False)
+    assert final_binding is not None and final_binding["status"] == "completed"
+    assert not fence.exists()
+
+
+def test_round20_rollforward_rejects_partial_terminal_cohort_without_mutation(
+    tmp_path: Any,
+) -> None:
+    import shutil
+
+    from packages.common.rollback_execution_binding import read_rollback_execution_binding
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.file_orchestration_migration import (
+        complete_file_journal_rollforward,
+        prepare_file_journal_rollback,
+    )
+    from services.orchestrator.reconcile import SacctRecord, reconcile_inflight_jobs
+
+    root = tmp_path / "journal"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = FileOrchestrationJournalRepository(root)
+    assert repository.query_inflight_jobs() == []
+    receipt = prepare_file_journal_rollback(
+        journal_root=root,
+        workspace_root=workspace,
+        scheduler_state="stopped",
+        active_scheduler_processes=0,
+        checked_at=datetime.now(UTC),
+        checked_by="round20-partial-terminal-operator",
+        target_writer_generation="a" * 40,
+    )
+    _round20_write_execution_binding(
+        workspace=workspace,
+        receipt=receipt,
+        generation="a" * 40,
+    )
+
+    template = _file_cohort_repository(tmp_path / "template")
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    _bind_current_file_cohort(template, key, slurm_job_id="17667")
+    tasks = tuple(
+        SacctRecord(
+            f"17667_{index}",
+            "COMPLETED",
+            "nhms_forecast",
+            comment=f"nhms_idem:{key}",
+            array_task_id=index,
+        )
+        for index in range(17)
+    )
+    partial = SacctRecord(
+        "17667",
+        "COMPLETED",
+        "nhms_forecast",
+        comment=f"nhms_idem:{key}",
+        array_member_job_ids=tuple(task.slurm_job_id for task in tasks),
+        array_task_records=tasks,
+    )
+    outcome = reconcile_inflight_jobs(template, sacct_query=lambda _job_id: partial)[0]
+    assert outcome.action == "task_accounting_incomplete"
+    source_job = template.root / "pipeline-jobs" / f"{job_id}.json"
+    destination = root / "pipeline-jobs" / source_job.name
+    destination.parent.mkdir(parents=True)
+    shutil.copyfile(source_job, destination)
+    assert [job.job_id for job in repository.query_rollback_unsettled_jobs()] == [job_id]
+    fence = root / "reconcile-inventory-rollback-preparation-v2.json"
+    fence_before = fence.read_bytes()
+
+    with pytest.raises(
+        FileOrchestrationJournalError,
+        match="file_journal_rollforward_jobs_unsettled",
+    ):
+        complete_file_journal_rollforward(
+            journal_root=root,
+            workspace_root=workspace,
+            preparation_receipt_id=receipt["receipt_id"],
+        )
+
+    assert fence.read_bytes() == fence_before
+    binding = read_rollback_execution_binding(workspace, require_artifacts=False)
+    assert binding is not None and binding["status"] == "active"
+    assert not (root / "reconcile-inventory").exists()
+
+
+def test_round20_persisted_source_tree_is_recursively_sealed_and_tamper_fails_closed(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import stat
+    import subprocess
+    from pathlib import Path
+
+    from packages.common.rollback_execution_binding import RollbackExecutionBindingError
+    from services.orchestrator import file_orchestration_migration as migration_module
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.file_orchestration_migration import (
+        launch_file_journal_rollback_writer,
+        prepare_file_journal_rollback,
+    )
+
+    root = tmp_path / "journal"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = FileOrchestrationJournalRepository(root)
+    assert repository.query_inflight_jobs() == []
+    checkout, _initial_generation = _round14_clean_writer_checkout(
+        tmp_path / "writer",
+        content="writer A\n",
+    )
+    module = checkout / "source_package" / "module.py"
+    module.parent.mkdir()
+    module.write_text("VALUE = 'A'\n", encoding="utf-8")
+    executable = checkout / "bin" / "worker-tool"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    subprocess.run(("git", "add", "source_package/module.py", "bin/worker-tool"), cwd=checkout, check=True)
+    subprocess.run(
+        (
+            "git",
+            "-c",
+            "user.name=Round20 Test",
+            "-c",
+            "user.email=round20@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "nested source fixture",
+        ),
+        cwd=checkout,
+        check=True,
+    )
+    generation = subprocess.run(
+        ("git", "rev-parse", "HEAD"),
+        cwd=checkout,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    receipt = prepare_file_journal_rollback(
+        journal_root=root,
+        workspace_root=workspace,
+        scheduler_state="stopped",
+        active_scheduler_processes=0,
+        checked_at=datetime.now(UTC),
+        checked_by="round20-source-seal-operator",
+        target_writer_generation=generation,
+    )
+    starts: list[Path] = []
+
+    def runner(
+        _command: tuple[str, ...],
+        *,
+        cwd: Any,
+        check: bool,
+        env: Any,
+        pass_fds: Any,
+    ) -> Any:
+        del check, env, pass_fds
+        starts.append(Path(cwd))
+        assert (Path(cwd) / "source_package" / "module.py").read_text(encoding="utf-8") == (
+            "VALUE = 'A'\n"
+        )
+        return type("Completed", (), {"returncode": 0})()
+
+    monkeypatch.setattr(migration_module, "_run_rollback_writer", runner)
+    real_write_binding = migration_module.write_rollback_execution_binding
+
+    def crash_before_canonical_write(_workspace_root: Any, _binding: Any) -> dict[str, Any]:
+        raise RollbackExecutionBindingError("injected crash before canonical binding write")
+
+    monkeypatch.setattr(
+        migration_module,
+        "write_rollback_execution_binding",
+        crash_before_canonical_write,
+    )
+    with pytest.raises(
+        FileOrchestrationJournalError,
+        match="file_journal_rollback_execution_binding_unavailable",
+    ):
+        launch_file_journal_rollback_writer(
+            journal_root=root,
+            workspace_root=workspace,
+            receipt_id=receipt["receipt_id"],
+            writer_repository_root=checkout,
+            writer_args=("plan-production", "--submit"),
+        )
+    assert starts == []
+    monkeypatch.setattr(
+        migration_module,
+        "write_rollback_execution_binding",
+        real_write_binding,
+    )
+    launched = launch_file_journal_rollback_writer(
+        journal_root=root,
+        workspace_root=workspace,
+        receipt_id=receipt["receipt_id"],
+        writer_repository_root=checkout,
+        writer_args=("plan-production", "--submit"),
+    )
+    source_root = Path(launched["target_python_source_root"])
+    for path in (source_root, *source_root.rglob("*")):
+        metadata = path.lstat()
+        if stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode):
+            assert stat.S_IMODE(metadata.st_mode) & 0o222 == 0, path
+    sealed_module = source_root / "source_package" / "module.py"
+    sealed_executable = source_root / "bin" / "worker-tool"
+    assert stat.S_IMODE(sealed_executable.stat().st_mode) & 0o111
+    with pytest.raises(PermissionError):
+        sealed_module.write_text("VALUE = 'B'\n", encoding="utf-8")
+
+    sealed_module.chmod(0o600)
+    with pytest.raises(
+        FileOrchestrationJournalError,
+        match="file_journal_rollback_execution_binding_invalid",
+    ):
+        launch_file_journal_rollback_writer(
+            journal_root=root,
+            workspace_root=workspace,
+            receipt_id=receipt["receipt_id"],
+            writer_repository_root=checkout,
+            writer_args=("plan-production", "--submit"),
+        )
+    assert len(starts) == 1
+
+
+def test_round20_two_sequential_rollback_lifecycles_archive_completed_binding(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+    import subprocess
+    from pathlib import Path
+
+    from packages.common.rollback_execution_binding import (
+        RollbackExecutionBindingError,
+        read_rollback_execution_binding,
+        rollback_execution_binding_archive_path,
+    )
+    from services.orchestrator import file_orchestration_migration as migration_module
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.file_orchestration_migration import (
+        complete_file_journal_rollforward,
+        launch_file_journal_rollback_writer,
+        prepare_file_journal_rollback,
+    )
+
+    root = tmp_path / "journal"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = FileOrchestrationJournalRepository(root)
+    assert repository.query_inflight_jobs() == []
+    checkout, generation_a = _round14_clean_writer_checkout(
+        tmp_path / "writer",
+        content="writer A\n",
+    )
+    starts: list[str] = []
+
+    def runner(
+        _command: tuple[str, ...],
+        *,
+        cwd: Any,
+        check: bool,
+        env: Any,
+        pass_fds: Any,
+    ) -> Any:
+        del check, env, pass_fds
+        starts.append((Path(cwd) / "writer.txt").read_text(encoding="utf-8"))
+        return type("Completed", (), {"returncode": 0})()
+
+    monkeypatch.setattr(migration_module, "_run_rollback_writer", runner)
+    receipt_a = prepare_file_journal_rollback(
+        journal_root=root,
+        workspace_root=workspace,
+        scheduler_state="stopped",
+        active_scheduler_processes=0,
+        checked_at=datetime.now(UTC),
+        checked_by="round20-lifecycle-a",
+        target_writer_generation=generation_a,
+    )
+    launched_a = launch_file_journal_rollback_writer(
+        journal_root=root,
+        workspace_root=workspace,
+        receipt_id=receipt_a["receipt_id"],
+        writer_repository_root=checkout,
+        writer_args=("plan-production", "--submit"),
+    )
+    completed_a = complete_file_journal_rollforward(
+        journal_root=root,
+        workspace_root=workspace,
+        preparation_receipt_id=receipt_a["receipt_id"],
+    )
+    assert completed_a["rollback_execution_binding_status"] == "completed"
+    assert complete_file_journal_rollforward(
+        journal_root=root,
+        workspace_root=workspace,
+        preparation_receipt_id=receipt_a["receipt_id"],
+    ) == completed_a
+
+    (checkout / "writer.txt").write_text("writer B\n", encoding="utf-8")
+    subprocess.run(("git", "add", "writer.txt"), cwd=checkout, check=True)
+    subprocess.run(
+        (
+            "git",
+            "-c",
+            "user.name=Round20 Test",
+            "-c",
+            "user.email=round20@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "writer B",
+        ),
+        cwd=checkout,
+        check=True,
+    )
+    generation_b = subprocess.run(
+        ("git", "rev-parse", "HEAD"),
+        cwd=checkout,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert generation_b != generation_a
+    real_archive = migration_module.archive_completed_rollback_execution_binding
+    archive_cut_injected = False
+
+    def archive_then_crash(workspace_root: Any, binding: Any) -> dict[str, Any]:
+        nonlocal archive_cut_injected
+        archived = real_archive(workspace_root, binding)
+        if not archive_cut_injected:
+            archive_cut_injected = True
+            raise RollbackExecutionBindingError("injected crash after archive durability cut")
+        return archived
+
+    monkeypatch.setattr(
+        migration_module,
+        "archive_completed_rollback_execution_binding",
+        archive_then_crash,
+    )
+    with pytest.raises(
+        FileOrchestrationJournalError,
+        match="file_journal_rollback_preparation_authority_unavailable",
+    ):
+        prepare_file_journal_rollback(
+            journal_root=root,
+            workspace_root=workspace,
+            scheduler_state="stopped",
+            active_scheduler_processes=0,
+            checked_at=datetime.now(UTC),
+            checked_by="round20-lifecycle-b-archive-cut",
+            target_writer_generation=generation_b,
+        )
+    fence = root / "reconcile-inventory-rollback-preparation-v2.json"
+    receipt_b_after_archive_cut = json.loads(fence.read_text(encoding="utf-8"))
+    canonical_after_archive_cut = read_rollback_execution_binding(
+        workspace,
+        required=True,
+        require_artifacts=False,
+    )
+    assert canonical_after_archive_cut is not None
+    assert canonical_after_archive_cut["binding_id"] == launched_a["rollback_execution_binding_id"]
+    assert canonical_after_archive_cut["status"] == "completed"
+    assert starts == ["writer A\n"]
+    monkeypatch.setattr(
+        migration_module,
+        "archive_completed_rollback_execution_binding",
+        real_archive,
+    )
+    receipt_b = prepare_file_journal_rollback(
+        journal_root=root,
+        workspace_root=workspace,
+        scheduler_state="stopped",
+        active_scheduler_processes=0,
+        checked_at=datetime.now(UTC),
+        checked_by="round20-lifecycle-b-retry",
+        target_writer_generation=generation_b,
+    )
+    assert receipt_b["receipt_id"] == receipt_b_after_archive_cut["receipt_id"]
+    prepared_b = read_rollback_execution_binding(
+        workspace,
+        required=True,
+        require_artifacts=False,
+    )
+    assert prepared_b is not None and prepared_b["status"] == "prepared"
+
+    real_write_binding = migration_module.write_rollback_execution_binding
+    canonical_cut_injected = False
+
+    def write_canonical_then_crash(workspace_root: Any, binding: Any) -> dict[str, Any]:
+        nonlocal canonical_cut_injected
+        written = real_write_binding(workspace_root, binding)
+        if (
+            not canonical_cut_injected
+            and binding.get("status") == "active"
+            and binding.get("preparation_receipt_id") == receipt_b["receipt_id"]
+        ):
+            canonical_cut_injected = True
+            raise RollbackExecutionBindingError("injected crash after canonical durability cut")
+        return written
+
+    monkeypatch.setattr(
+        migration_module,
+        "write_rollback_execution_binding",
+        write_canonical_then_crash,
+    )
+    with pytest.raises(
+        FileOrchestrationJournalError,
+        match="file_journal_rollback_execution_binding_unavailable",
+    ):
+        launch_file_journal_rollback_writer(
+            journal_root=root,
+            workspace_root=workspace,
+            receipt_id=receipt_b["receipt_id"],
+            writer_repository_root=checkout,
+            writer_args=("plan-production", "--submit"),
+        )
+    active_after_canonical_cut = read_rollback_execution_binding(workspace, required=True)
+    assert active_after_canonical_cut is not None
+    assert active_after_canonical_cut["preparation_receipt_id"] == receipt_b["receipt_id"]
+    assert active_after_canonical_cut["status"] == "active"
+    assert starts == ["writer A\n"]
+    monkeypatch.setattr(
+        migration_module,
+        "write_rollback_execution_binding",
+        real_write_binding,
+    )
+
+    launched_b = launch_file_journal_rollback_writer(
+        journal_root=root,
+        workspace_root=workspace,
+        receipt_id=receipt_b["receipt_id"],
+        writer_repository_root=checkout,
+        writer_args=("plan-production", "--submit"),
+    )
+    assert launched_b["rollback_execution_binding_id"] != launched_a["rollback_execution_binding_id"]
+    assert starts == ["writer A\n", "writer B\n"]
+    archived_a_path = rollback_execution_binding_archive_path(
+        workspace,
+        launched_a["rollback_execution_binding_id"],
+    )
+    archived_a = json.loads(archived_a_path.read_text(encoding="utf-8"))
+    assert archived_a["binding_id"] == launched_a["rollback_execution_binding_id"]
+    assert archived_a["status"] == "completed"
+    active_b = read_rollback_execution_binding(workspace, required=True)
+    assert active_b is not None
+    assert active_b["binding_id"] == launched_b["rollback_execution_binding_id"]
+    assert active_b["status"] == "active"
+
+    completed_b = complete_file_journal_rollforward(
+        journal_root=root,
+        workspace_root=workspace,
+        preparation_receipt_id=receipt_b["receipt_id"],
+    )
+    assert completed_b["rollback_execution_binding_status"] == "completed"
+    final_binding = read_rollback_execution_binding(workspace, required=True, require_artifacts=False)
+    assert final_binding is not None
+    assert final_binding["binding_id"] == launched_b["rollback_execution_binding_id"]
+    assert final_binding["status"] == "completed"
 
 
 @pytest.mark.parametrize("generation_length", [40, 64])
@@ -6442,7 +7288,8 @@ def test_round16_commit_snapshot_closes_post_check_worktree_switch(
     assert (evidence / "writer-generation.txt").read_text(encoding="utf-8") == "A\n"
     assert (checkout / "writer.txt").read_text(encoding="utf-8") == "B\n"
     assert not replacement_marker.exists()
-    assert snapshot_paths and all(not path.exists() for path in snapshot_paths)
+    assert snapshot_paths == [Path(outcome["target_python_source_root"])]
+    assert all(path.is_dir() for path in snapshot_paths)
     retained_runtime = Path(outcome["target_python_runtime"])
     assert retained_runtime.exists()
     assert (retained_runtime.stat().st_dev, retained_runtime.stat().st_ino) != original_runtime_identity
@@ -6459,6 +7306,7 @@ def test_round18_rollforward_is_excluded_while_old_writer_execution_is_active(
     import shutil
     import threading
 
+    from packages.common.rollback_execution_binding import read_rollback_execution_binding
     from services.orchestrator import file_orchestration_migration as migration_module
     from services.orchestrator.file_orchestration_journal import (
         FileOrchestrationJournalError,
@@ -6488,6 +7336,13 @@ def test_round18_rollforward_is_excluded_while_old_writer_execution_is_active(
         checked_by="round18-operator",
         target_writer_generation=generation,
     )
+    prepared_authority = read_rollback_execution_binding(
+        workspace,
+        required=True,
+        require_artifacts=False,
+    )
+    assert prepared_authority is not None
+    assert prepared_authority["status"] == "prepared"
     template = _file_cohort_repository(
         tmp_path / "template",
         member_count=1,
@@ -6532,6 +7387,10 @@ def test_round18_rollforward_is_excluded_while_old_writer_execution_is_active(
     thread = threading.Thread(target=launch)
     thread.start()
     assert entered.wait(timeout=10)
+    active_authority = read_rollback_execution_binding(workspace, required=True)
+    assert active_authority is not None
+    assert active_authority["status"] == "active"
+    assert active_authority["binding_id"] != prepared_authority["binding_id"]
     with pytest.raises(
         FileOrchestrationJournalError,
         match="file_journal_rollback_execution_active",
@@ -6547,15 +7406,28 @@ def test_round18_rollforward_is_excluded_while_old_writer_execution_is_active(
     assert not thread.is_alive()
     assert outcome["writer_exit_code"] == 0
 
+    with pytest.raises(
+        FileOrchestrationJournalError,
+        match="file_journal_rollforward_jobs_unsettled",
+    ):
+        complete_file_journal_rollforward(
+            journal_root=root,
+            workspace_root=workspace,
+            preparation_receipt_id=receipt["receipt_id"],
+        )
+    assert (root / "pipeline-jobs" / source_job.name).is_file()
+    (root / "pipeline-jobs" / source_job.name).unlink()
+
     completed = complete_file_journal_rollforward(
         journal_root=root,
         workspace_root=workspace,
         preparation_receipt_id=receipt["receipt_id"],
     )
     assert completed["preparation_receipt_id"] == receipt["receipt_id"]
-    assert (root / "reconcile-inventory" / f"{job_id}.json").is_file()
+    assert completed["rollback_execution_binding_status"] == "completed"
+    assert not (root / "reconcile-inventory" / f"{job_id}.json").exists()
     reopened = FileOrchestrationJournalRepository(root)
-    assert [job.job_id for job in reopened.query_reserved_unbound_jobs()] == [job_id]
+    assert reopened.query_reserved_unbound_jobs() == []
 
 
 def test_round14_prepare_resumes_after_receipt_write_before_marker_unlink(
@@ -6653,6 +7525,11 @@ def test_round14_prepare_resumes_after_receipt_write_before_marker_unlink(
         receipt_id=prepared["receipt_id"],
         actual_writer_generation="a" * 40,
     )["status"] == "prepared"
+    _round20_write_execution_binding(
+        workspace=workspace,
+        receipt=prepared,
+        generation="a" * 40,
+    )
 
     rollforward = complete_file_journal_rollforward(
         journal_root=root,
@@ -6671,6 +7548,10 @@ def test_round14_writer_launch_is_strictly_generation_bound_and_fail_closed(
     from pathlib import Path
 
     from packages.common.python_runtime import validated_target_python_runtime
+    from packages.common.rollback_execution_binding import (
+        read_rollback_execution_binding,
+        write_rollback_execution_binding,
+    )
     from services.orchestrator import file_orchestration_migration as migration_module
     from services.orchestrator.file_orchestration_journal import (
         FileOrchestrationJournalError,
@@ -6752,7 +7633,8 @@ def test_round14_writer_launch_is_strictly_generation_bound_and_fail_closed(
     assert Path(command[0]).read_bytes() == source_runtime.read_bytes()
     assert cwd != checkout_a.resolve()
     assert snapshot_content == "writer A\n"
-    assert not cwd.exists()
+    assert cwd == Path(launched["target_python_source_root"])
+    assert cwd.is_dir()
 
     real_resolver = migration_module._resolve_clean_writer_generation
     resolution_calls = 0
@@ -6770,18 +7652,16 @@ def test_round14_writer_launch_is_strictly_generation_bound_and_fail_closed(
         "_resolve_clean_writer_generation",
         generation_changes_after_gate,
     )
-    with pytest.raises(
-        FileOrchestrationJournalError,
-        match="file_journal_rollback_writer_generation_changed",
-    ):
-        launch_file_journal_rollback_writer(
-            journal_root=root,
-            workspace_root=workspace,
-            receipt_id=receipt["receipt_id"],
-            writer_repository_root=checkout_a,
-            writer_args=("plan-production", "--submit"),
-        )
-    assert len(starts) == 1
+    relaunched = launch_file_journal_rollback_writer(
+        journal_root=root,
+        workspace_root=workspace,
+        receipt_id=receipt["receipt_id"],
+        writer_repository_root=checkout_a,
+        writer_args=("plan-production", "--submit"),
+    )
+    assert relaunched["rollback_execution_binding_id"] == launched["rollback_execution_binding_id"]
+    assert relaunched["target_python_source_root"] == launched["target_python_source_root"]
+    assert len(starts) == 2
     monkeypatch.setattr(
         migration_module,
         "_resolve_clean_writer_generation",
@@ -6796,7 +7676,7 @@ def test_round14_writer_launch_is_strictly_generation_bound_and_fail_closed(
             writer_repository_root=checkout_b,
             writer_args=("plan-production", "--submit"),
         )
-    assert len(starts) == 1
+    assert len(starts) == 2
 
     (checkout_a / "writer.txt").write_text("writer A dirty\n", encoding="utf-8")
     with pytest.raises(
@@ -6834,7 +7714,27 @@ def test_round14_writer_launch_is_strictly_generation_bound_and_fail_closed(
                 writer_repository_root=repository_root,
                 writer_args=("plan-production", "--submit"),
             )
-    assert len(starts) == 1
+    assert len(starts) == 2
+    (checkout_a / "untracked.txt").unlink()
+
+    rolling_forward = read_rollback_execution_binding(workspace, required=True)
+    assert rolling_forward is not None
+    write_rollback_execution_binding(
+        workspace,
+        {**rolling_forward, "status": "rolling_forward"},
+    )
+    with pytest.raises(
+        FileOrchestrationJournalError,
+        match="file_journal_rollback_execution_binding_conflict",
+    ):
+        launch_file_journal_rollback_writer(
+            journal_root=root,
+            workspace_root=workspace,
+            receipt_id=receipt["receipt_id"],
+            writer_repository_root=checkout_a,
+            writer_args=("plan-production", "--submit"),
+        )
+    assert len(starts) == 2
 
 
 def test_round14_writer_generation_git_probe_timeout_fails_closed(
@@ -7013,7 +7913,8 @@ def test_round12_rollback_commands_emit_verifiable_receipts(
     assert launch["dry_run"] is False
     assert len(started) == 1
     assert started[0][1] != checkout_a.resolve()
-    assert not started[0][1].exists()
+    assert started[0][1] == Path(launch["target_python_source_root"])
+    assert started[0][1].is_dir()
 
     mismatch_argv = list(launch_argv)
     mismatch_argv[mismatch_argv.index(str(checkout_a))] = str(checkout_b)
@@ -7077,6 +7978,11 @@ def test_round12_tampered_and_wrong_root_receipts_fail_closed(tmp_path: Any) -> 
         checked_by="round12-test-operator",
         target_writer_generation="a" * 40,
     )
+    _round20_write_execution_binding(
+        workspace=workspace,
+        receipt=receipt,
+        generation="a" * 40,
+    )
     receipt_path = root / "reconcile-inventory-rollback-preparation-v2.json"
     original = receipt_path.read_bytes()
     malformed = json.loads(original)
@@ -7096,7 +8002,10 @@ def test_round12_tampered_and_wrong_root_receipts_fail_closed(tmp_path: Any) -> 
             preparation_receipt_id=receipt["receipt_id"],
         )
     receipt_path.write_bytes(original)
-    with pytest.raises(FileOrchestrationJournalError, match="file_journal_rollforward_not_prepared"):
+    with pytest.raises(
+        FileOrchestrationJournalError,
+        match="file_journal_rollforward_execution_binding_conflict",
+    ):
         complete_file_journal_rollforward(
             journal_root=root,
             workspace_root=workspace,
@@ -7116,7 +8025,10 @@ def test_round12_tampered_and_wrong_root_receipts_fail_closed(tmp_path: Any) -> 
             receipt_id=receipt["receipt_id"],
             actual_writer_generation="a" * 40,
         )
-    with pytest.raises(FileOrchestrationJournalError, match="file_journal_rollback_receipt_wrong_root"):
+    with pytest.raises(
+        FileOrchestrationJournalError,
+        match="file_journal_rollforward_execution_binding_conflict",
+    ):
         complete_file_journal_rollforward(
             journal_root=wrong_root,
             workspace_root=workspace,

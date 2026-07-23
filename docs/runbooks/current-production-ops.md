@@ -279,17 +279,21 @@ uv run nhms-pipeline launch-file-journal-rollback-writer \
   -- plan-production --submit --continuous --max-passes 1
 ```
 
-通过 receipt 后，controller 会把目标完整 SHA 物化为私有、临时、detached 的 clean
-commit 快照，并从已经打开和复核过的目标解释器复制一个权限锁紧、内容固定的私有
-runtime bundle。child 的 journal/workspace/file-lock 配置由 controller 强制绑定到
-preparation receipt 对应的根，ambient environment 不能改写。该 runtime 的绝对路径通过
-submission manifest 传到 HTTP Slurm gateway；forcing、forecast、state-save 三阶段只在
-该显式字段存在时使用它，普通生产提交仍使用原 console entrypoint。
+通过 receipt 后，controller 会把目标完整 SHA 物化为私有、detached、权限锁紧的持久
+clean source bundle，并从已经打开和复核过的目标解释器复制一个内容固定的私有 runtime
+bundle。prepare 成功前，controller 先写入 workspace-scoped `prepared` execution binding，
+把 preparation receipt、journal/workspace/file-lock 与目标 generation 绑定为 no-launch
+authority；launcher 在 child 启动前将其替换为包含 source/runtime 的 `active` binding。
+ambient environment 不能改写这些值；即使旧版本 writer 不认识新 manifest 字段，当前
+HTTP Slurm gateway 也只会按 exact workspace 注入 active binding。forcing、
+forecast、state-save 三阶段都会切换到该 source 并使用该 runtime；无 active binding 的
+普通生产提交仍使用原 console entrypoint。
 
-源码快照在 writer 退出后自动清理；runtime bundle 会以
-`retained_fail_closed_until_operator_cleanup` 保留，launch JSON 的
-`target_python_runtime` 是其审计路径。不要单独删除 bundle；所有引用该路径的 Slurm
-task 终态后，随整个 rollback worktree 一起清理。
+source 与 runtime bundle 都以
+`retained_fail_closed_until_operator_cleanup` 保留，launch JSON 中的
+`target_python_source_root`、`target_python_runtime` 和
+`rollback_execution_binding_id` 是审计路径/身份。不要单独删除任一 bundle；只有所有引用
+它们的 Slurm task 均已终态且前滚完成后，才能随整个 rollback worktree 一起清理。
 
 `preparing` receipt 无论遗留在 marker 删除前还是删除后，都只能在重新取得同一 production
 file lease 后自动续成一个 `prepared` fence；不得人工删除 marker/receipt。fence 存在期间，
@@ -309,14 +313,20 @@ git worktree remove "$ROLLBACK_CHECKOUT"
 
 launcher 持有独立的 rollback execution flock，并把 fd 传给 child；即使 controller
 崩溃，只要 old writer 仍存活，roll-forward 也会以
-`file_journal_rollback_execution_active` fail closed。执行前滚前还必须按 launch receipt
-和 journal 中的 exact Slurm job identity 确认本次 pass 的所有 task 已终态，并确认
-`target_python_runtime` 仍存在；否则不得运行前滚、恢复 timer 或删除 worktree。
+`file_journal_rollback_execution_active` fail closed。前滚命令还会在首次状态迁移前扫描
+durable journal：任一 reserved、ambiguous、reconciling、queued、running 或其他非终态 job，
+以及查询不可用，都会拒绝前滚且不改变 fence/binding。确认 source/runtime 仍存在且任务
+全部收敛后，binding 按 `active -> rolling_forward -> completed` 迁移；中途崩溃可从
+`rolling_forward` 续跑。若 prepare 后决定不启动 old writer，也只能由 exact `prepared`
+authority 在 unsettled job 为空时执行 `prepared -> rolling_forward -> completed`；binding
+缺失或被篡改时禁止手工删除 fence。只有 completed receipt 才允许恢复 timer 或删除
+worktree。
 
 node-22 live drill 必须保存 preparation、old-writer launch、roll-forward 三段 receipt，
 并证明 A receipt 只能运行 clean A commit 快照；B/dirty/unresolved checkout、不可用目标
 runtime、root/lock override 和非 submit/eager-exit 命令均为零启动；还必须保存三个
-worker stage 的 sbatch，证明它们引用 launch receipt 中同一 `target_python_runtime`。
+worker stage 的 sbatch，证明它们引用 launch receipt 中同一
+`target_python_runtime` 和 `target_python_source_root`。
 
 #### 3.1.2 DB-free file-provider 稳态刷新
 

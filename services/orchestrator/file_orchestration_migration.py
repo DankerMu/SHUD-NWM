@@ -9,7 +9,7 @@ import stat
 import subprocess
 import tempfile
 from collections.abc import Iterable, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +17,15 @@ from typing import Any, Iterator
 from urllib.parse import urlparse
 from uuid import uuid4
 
+from packages.common.rollback_execution_binding import (
+    ROLLBACK_EXECUTION_BINDING_SCHEMA_VERSION,
+    RollbackExecutionBindingError,
+    archive_completed_rollback_execution_binding,
+    binding_id_for,
+    read_rollback_execution_binding,
+    seal_rollback_python_source_tree,
+    write_rollback_execution_binding,
+)
 from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow, ensure_directory_no_follow
 from services.orchestrator.file_orchestration_journal import (
     FileOrchestrationJournalError,
@@ -74,34 +83,100 @@ def prepare_file_journal_rollback(
         field="target_writer_generation",
         invalid_reason="file_journal_rollback_target_writer_generation_invalid",
     )
-    config, lease_identity = _rollback_file_lease_config(
-        journal_root=journal_root,
-        workspace_root=workspace_root,
-        lock_path=lock_path,
-        scheduler_lock_backend=scheduler_lock_backend,
-        lock_ttl_seconds=lock_ttl_seconds,
-    )
-    lease, heartbeat, pass_id = _acquire_rollback_file_lease(config, operation="prepare")
-    repository = FileOrchestrationJournalRepository(journal_root)
-    try:
-        return repository._prepare_reconcile_inventory_rollback_under_scheduler_lease(
-            scheduler_lease_identity=lease_identity,
-            scheduler_lease_guard=lambda: _rollback_lease_is_held(
-                lease,
-                heartbeat,
-                pass_id=pass_id,
-            ),
-            scheduler_state=scheduler_state,
-            active_scheduler_processes=active_scheduler_processes,
-            checked_at=checked_at,
-            checked_by=checked_by,
-            target_writer_generation=target_writer_generation,
+    with _rollback_execution_lock(journal_root):
+        config, lease_identity = _rollback_file_lease_config(
+            journal_root=journal_root,
+            workspace_root=workspace_root,
+            lock_path=lock_path,
+            scheduler_lock_backend=scheduler_lock_backend,
+            lock_ttl_seconds=lock_ttl_seconds,
         )
-    finally:
+        lease, heartbeat, pass_id = _acquire_rollback_file_lease(config, operation="prepare")
+        repository = FileOrchestrationJournalRepository(journal_root)
         try:
-            heartbeat.stop()
+            receipt = repository._prepare_reconcile_inventory_rollback_under_scheduler_lease(
+                scheduler_lease_identity=lease_identity,
+                scheduler_lease_guard=lambda: _rollback_lease_is_held(
+                    lease,
+                    heartbeat,
+                    pass_id=pass_id,
+                ),
+                scheduler_state=scheduler_state,
+                active_scheduler_processes=active_scheduler_processes,
+                checked_at=checked_at,
+                checked_by=checked_by,
+                target_writer_generation=target_writer_generation,
+            )
+            _publish_prepared_rollback_execution_binding(
+                config=config,
+                receipt=receipt,
+            )
+            return receipt
         finally:
-            lease.release(pass_id=pass_id)
+            try:
+                heartbeat.stop()
+            finally:
+                lease.release(pass_id=pass_id)
+
+
+def _publish_prepared_rollback_execution_binding(
+    *,
+    config: Any,
+    receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    prepared: dict[str, Any] = {
+        "schema_version": ROLLBACK_EXECUTION_BINDING_SCHEMA_VERSION,
+        "binding_id": "",
+        "status": "prepared",
+        "preparation_receipt_id": receipt["receipt_id"],
+        "journal_root_identity": dict(receipt["journal_root_identity"]),
+        "scheduler_lease_identity": dict(receipt["scheduler_lease_identity"]),
+        "workspace_root": str(config.workspace_root),
+        "lock_path": str(config.lock_path),
+        "target_writer_generation": receipt["preflight"]["target_writer_generation"],
+        "target_python_runtime": None,
+        "target_python_source_root": None,
+        "writer_repository_root": None,
+        "created_at": receipt["prepared_at"],
+        "updated_at": receipt["prepared_at"],
+    }
+    prepared["binding_id"] = binding_id_for(prepared)
+    try:
+        existing = read_rollback_execution_binding(
+            config.workspace_root,
+            require_artifacts=False,
+        )
+        if existing is not None and existing["status"] == "completed":
+            archive_completed_rollback_execution_binding(config.workspace_root, existing)
+            existing = None
+        if existing is not None:
+            if existing == prepared or (
+                existing["status"] == "active"
+                and _rollback_binding_matches_preparation(existing, prepared)
+            ):
+                return existing
+            raise RollbackExecutionBindingError("rollback preparation binding conflicts")
+        return write_rollback_execution_binding(config.workspace_root, prepared)
+    except RollbackExecutionBindingError as error:
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_preparation_authority_unavailable",
+            field="rollback_execution_binding",
+        ) from error
+
+
+def _rollback_binding_matches_preparation(
+    binding: Mapping[str, Any],
+    prepared: Mapping[str, Any],
+) -> bool:
+    fields = (
+        "preparation_receipt_id",
+        "journal_root_identity",
+        "scheduler_lease_identity",
+        "workspace_root",
+        "lock_path",
+        "target_writer_generation",
+    )
+    return all(binding.get(field) == prepared.get(field) for field in fields)
 
 
 def require_file_journal_rollback_prepared(
@@ -169,29 +244,112 @@ def launch_file_journal_rollback_writer(
                 "file_journal_rollback_not_prepared",
                 field="reconcile_inventory_migration",
             )
-        with (
-            _materialize_commit_snapshot(repository_root, actual_writer_generation) as snapshot_root,
-            _materialize_bound_runtime(
-                writer_runtime,
-                resolved_runtime=resolved_runtime,
-                runtime_identity=runtime_identity,
-            ) as bound_runtime,
-        ):
-            rechecked_root, rechecked_generation = _resolve_clean_writer_generation(repository_root)
-            rechecked_runtime, rechecked_resolved_runtime, rechecked_runtime_identity = _resolve_target_writer_runtime(
-                repository_root
+        try:
+            existing_binding = read_rollback_execution_binding(
+                config.workspace_root,
+                require_artifacts=False,
             )
-            if (
-                rechecked_root != repository_root
-                or rechecked_generation != actual_writer_generation
-                or rechecked_runtime != writer_runtime
-                or rechecked_resolved_runtime != resolved_runtime
-                or rechecked_runtime_identity != runtime_identity
-            ):
-                raise FileOrchestrationJournalError(
-                    "file_journal_rollback_writer_generation_changed",
-                    field="writer_repository_root",
+            if existing_binding is not None and (
+                existing_binding["status"] == "active"
+                or (
+                    existing_binding["status"] == "rolling_forward"
+                    and existing_binding.get("target_python_runtime") is not None
                 )
+            ):
+                existing_binding = read_rollback_execution_binding(
+                    config.workspace_root,
+                    required=True,
+                    require_artifacts=True,
+                )
+        except RollbackExecutionBindingError as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_rollback_execution_binding_invalid",
+                field="rollback_execution_binding",
+            ) from error
+        with ExitStack() as retained:
+            if existing_binding is not None and existing_binding["status"] == "completed":
+                try:
+                    archive_completed_rollback_execution_binding(
+                        config.workspace_root,
+                        existing_binding,
+                    )
+                except RollbackExecutionBindingError as error:
+                    raise FileOrchestrationJournalError(
+                        "file_journal_rollback_execution_binding_archive_unavailable",
+                        field="rollback_execution_binding",
+                    ) from error
+                existing_binding = None
+            if existing_binding is not None and existing_binding["status"] == "prepared":
+                _require_matching_prepared_rollback_binding(
+                    existing_binding,
+                    receipt=receipt,
+                    config=config,
+                    actual_writer_generation=actual_writer_generation,
+                )
+            if existing_binding is None or existing_binding["status"] == "prepared":
+                snapshot_root = retained.enter_context(
+                    _materialize_commit_snapshot(
+                        repository_root,
+                        actual_writer_generation,
+                        retention_key=receipt["receipt_id"],
+                    )
+                )
+                bound_runtime = retained.enter_context(
+                    _materialize_bound_runtime(
+                        writer_runtime,
+                        resolved_runtime=resolved_runtime,
+                        runtime_identity=runtime_identity,
+                    )
+                )
+                rechecked_root, rechecked_generation = _resolve_clean_writer_generation(repository_root)
+                rechecked_runtime, rechecked_resolved_runtime, rechecked_runtime_identity = (
+                    _resolve_target_writer_runtime(repository_root)
+                )
+                if (
+                    rechecked_root != repository_root
+                    or rechecked_generation != actual_writer_generation
+                    or rechecked_runtime != writer_runtime
+                    or rechecked_resolved_runtime != resolved_runtime
+                    or rechecked_runtime_identity != runtime_identity
+                ):
+                    raise FileOrchestrationJournalError(
+                        "file_journal_rollback_writer_generation_changed",
+                        field="writer_repository_root",
+                    )
+                created_at = _format_utc(datetime.now(UTC))
+                binding: dict[str, Any] = {
+                    "schema_version": ROLLBACK_EXECUTION_BINDING_SCHEMA_VERSION,
+                    "binding_id": "",
+                    "status": "active",
+                    "preparation_receipt_id": receipt["receipt_id"],
+                    "journal_root_identity": dict(receipt["journal_root_identity"]),
+                    "scheduler_lease_identity": dict(receipt["scheduler_lease_identity"]),
+                    "workspace_root": str(config.workspace_root),
+                    "lock_path": str(config.lock_path),
+                    "target_writer_generation": actual_writer_generation,
+                    "target_python_runtime": str(bound_runtime.path),
+                    "target_python_source_root": str(snapshot_root),
+                    "writer_repository_root": str(repository_root),
+                    "created_at": created_at,
+                    "updated_at": created_at,
+                }
+                binding["binding_id"] = binding_id_for(binding)
+                try:
+                    binding = write_rollback_execution_binding(config.workspace_root, binding)
+                except RollbackExecutionBindingError as error:
+                    raise FileOrchestrationJournalError(
+                        "file_journal_rollback_execution_binding_unavailable",
+                        field="rollback_execution_binding",
+                    ) from error
+            else:
+                binding = _require_matching_active_rollback_binding(
+                    existing_binding,
+                    receipt=receipt,
+                    config=config,
+                    repository_root=repository_root,
+                    actual_writer_generation=actual_writer_generation,
+                )
+                snapshot_root = Path(binding["target_python_source_root"])
             controlled_arguments = (
                 *arguments,
                 "--workspace-root",
@@ -200,7 +358,7 @@ def launch_file_journal_rollback_writer(
                 str(config.lock_path),
             )
             command = (
-                str(bound_runtime.path),
+                binding["target_python_runtime"],
                 "-m",
                 "services.orchestrator.cli",
                 *controlled_arguments,
@@ -212,7 +370,8 @@ def launch_file_journal_rollback_writer(
                 env=_rollback_writer_environment(
                     config=config,
                     journal_root=journal_root,
-                    target_python_runtime=bound_runtime.path,
+                    target_python_runtime=Path(binding["target_python_runtime"]),
+                    target_python_source_root=Path(binding["target_python_source_root"]),
                 ),
                 pass_fds=(execution_lock_fd,),
             )
@@ -220,7 +379,10 @@ def launch_file_journal_rollback_writer(
         "preparation_receipt_id": receipt["receipt_id"],
         "actual_writer_generation": actual_writer_generation,
         "writer_repository_root": str(repository_root),
-        "target_python_runtime": str(bound_runtime.path),
+        "rollback_execution_binding_id": binding["binding_id"],
+        "rollback_execution_binding_status": binding["status"],
+        "target_python_runtime": binding["target_python_runtime"],
+        "target_python_source_root": binding["target_python_source_root"],
         "target_python_runtime_retention": "retained_fail_closed_until_operator_cleanup",
         "dry_run": False,
         "writer_exit_code": int(completed.returncode),
@@ -259,6 +421,58 @@ def _validated_production_writer_arguments(writer_args: Iterable[str]) -> tuple[
             field="writer_args",
         )
     return arguments
+
+
+def _require_matching_active_rollback_binding(
+    binding: Mapping[str, Any],
+    *,
+    receipt: Mapping[str, Any],
+    config: Any,
+    repository_root: Path,
+    actual_writer_generation: str,
+) -> dict[str, Any]:
+    expected = {
+        "preparation_receipt_id": receipt["receipt_id"],
+        "journal_root_identity": receipt["journal_root_identity"],
+        "scheduler_lease_identity": receipt["scheduler_lease_identity"],
+        "workspace_root": str(config.workspace_root),
+        "lock_path": str(config.lock_path),
+        "target_writer_generation": actual_writer_generation,
+        "writer_repository_root": str(repository_root),
+    }
+    if binding.get("status") != "active" or any(binding.get(key) != value for key, value in expected.items()):
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_execution_binding_conflict",
+            field="rollback_execution_binding",
+        )
+    return dict(binding)
+
+
+def _require_matching_prepared_rollback_binding(
+    binding: Mapping[str, Any],
+    *,
+    receipt: Mapping[str, Any],
+    config: Any,
+    actual_writer_generation: str,
+) -> None:
+    expected = {
+        "preparation_receipt_id": receipt["receipt_id"],
+        "journal_root_identity": receipt["journal_root_identity"],
+        "scheduler_lease_identity": receipt["scheduler_lease_identity"],
+        "workspace_root": str(config.workspace_root),
+        "lock_path": str(config.lock_path),
+        "target_writer_generation": actual_writer_generation,
+        "target_python_runtime": None,
+        "target_python_source_root": None,
+        "writer_repository_root": None,
+    }
+    if binding.get("status") != "prepared" or any(
+        binding.get(key) != value for key, value in expected.items()
+    ):
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_execution_binding_conflict",
+            field="rollback_execution_binding",
+        )
 
 
 def _resolve_target_writer_runtime(
@@ -425,6 +639,7 @@ def _rollback_writer_environment(
     config: Any,
     journal_root: str | Path,
     target_python_runtime: Path,
+    target_python_source_root: Path,
 ) -> dict[str, str]:
     environment = {str(key): str(value) for key, value in os.environ.items()}
     for key in ("VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH"):
@@ -439,7 +654,9 @@ def _rollback_writer_environment(
             "NHMS_SCHEDULER_LOCK_ROOT": str(Path(config.lock_path).parent),
             "NHMS_SCHEDULER_DB_FREE_REQUIRED": "true",
             "NHMS_TARGET_PYTHON_RUNTIME": str(target_python_runtime),
+            "NHMS_TARGET_PYTHON_SOURCE_ROOT": str(target_python_source_root),
             "NHMS_PYTHON_VENV_BIN": runtime_bin,
+            "PYTHONDONTWRITEBYTECODE": "1",
             "PATH": f"{runtime_bin}{os.pathsep}{inherited_path}" if inherited_path else runtime_bin,
         }
     )
@@ -450,56 +667,77 @@ def _rollback_writer_environment(
 def _materialize_commit_snapshot(
     repository_root: Path,
     generation: str,
+    *,
+    retention_key: str,
 ) -> Iterator[Path]:
-    try:
-        temporary_root = tempfile.TemporaryDirectory(prefix="nhms-rollback-writer-")
-    except OSError as error:
+    if re.fullmatch(r"[0-9a-f]{64}", retention_key) is None:
         raise FileOrchestrationJournalError(
             "file_journal_rollback_writer_snapshot_unavailable",
             field="writer_repository_root",
-        ) from error
-    with temporary_root:
-        snapshot_root = Path(temporary_root.name) / "repository"
+        )
+    venv_root = repository_root / ".venv"
+    snapshot_root = venv_root / f".nhms-rollback-source-{retention_key}"
+    if snapshot_root.exists():
         try:
-            _run_bounded_git(
-                Path(temporary_root.name),
-                "clone",
-                "--no-local",
-                "--no-checkout",
-                "--quiet",
-                str(repository_root),
-                str(snapshot_root),
-            )
-            _run_bounded_git(
-                snapshot_root,
-                "checkout",
-                "--detach",
-                "--quiet",
-                generation,
-            )
-            snapshot_generation = _run_bounded_git(
-                snapshot_root,
-                "rev-parse",
-                "--verify",
-                "HEAD^{commit}",
-            ).lower()
-            snapshot_dirty = _run_bounded_git(
-                snapshot_root,
-                "status",
-                "--porcelain=v1",
-                "--untracked-files=all",
-            )
+            existing_root, existing_generation = _resolve_clean_writer_generation(snapshot_root)
         except FileOrchestrationJournalError as error:
             raise FileOrchestrationJournalError(
                 "file_journal_rollback_writer_snapshot_unavailable",
                 field="writer_repository_root",
             ) from error
-        if snapshot_generation != generation or snapshot_dirty:
+        if existing_root != snapshot_root.resolve() or existing_generation != generation:
             raise FileOrchestrationJournalError(
                 "file_journal_rollback_writer_snapshot_unavailable",
                 field="writer_repository_root",
             )
         yield snapshot_root
+        return
+    try:
+        temporary_root = Path(tempfile.mkdtemp(prefix=".nhms-rollback-source-tmp-", dir=venv_root))
+    except OSError as error:
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_writer_snapshot_unavailable",
+            field="writer_repository_root",
+        ) from error
+    temporary_snapshot = temporary_root / "repository"
+    try:
+        _run_bounded_git(
+            temporary_root,
+            "clone",
+            "--no-local",
+            "--no-checkout",
+            "--quiet",
+            str(repository_root),
+            str(temporary_snapshot),
+        )
+        _run_bounded_git(temporary_snapshot, "checkout", "--detach", "--quiet", generation)
+        snapshot_generation = _run_bounded_git(
+            temporary_snapshot,
+            "rev-parse",
+            "--verify",
+            "HEAD^{commit}",
+        ).lower()
+        snapshot_dirty = _run_bounded_git(
+            temporary_snapshot,
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        )
+        if snapshot_generation != generation or snapshot_dirty:
+            raise FileOrchestrationJournalError(
+                "file_journal_rollback_writer_snapshot_unavailable",
+                field="writer_repository_root",
+            )
+        os.replace(temporary_snapshot, snapshot_root)
+        seal_rollback_python_source_tree(snapshot_root)
+    except (FileOrchestrationJournalError, OSError) as error:
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_writer_snapshot_unavailable",
+            field="writer_repository_root",
+        ) from error
+    finally:
+        shutil.rmtree(temporary_root, ignore_errors=True)
+    yield snapshot_root
 
 
 def _resolve_clean_writer_generation(
@@ -686,7 +924,56 @@ def complete_file_journal_rollforward(
         lease, heartbeat, pass_id = _acquire_rollback_file_lease(config, operation="rollforward")
         repository = FileOrchestrationJournalRepository(journal_root)
         try:
-            return repository._complete_reconcile_inventory_rollforward_under_scheduler_lease(
+            try:
+                binding = read_rollback_execution_binding(
+                    config.workspace_root,
+                    required=True,
+                    require_artifacts=False,
+                )
+                if binding is not None and (
+                    binding["status"] == "active"
+                    or (
+                        binding["status"] == "rolling_forward"
+                        and binding.get("target_python_runtime") is not None
+                    )
+                ):
+                    binding = read_rollback_execution_binding(
+                        config.workspace_root,
+                        required=True,
+                        require_artifacts=True,
+                    )
+            except RollbackExecutionBindingError as error:
+                raise FileOrchestrationJournalError(
+                    "file_journal_rollforward_execution_binding_invalid",
+                    field="rollback_execution_binding",
+                ) from error
+            assert binding is not None
+            _require_matching_rollforward_binding(
+                binding,
+                preparation_receipt_id=preparation_receipt_id,
+                lease_identity=lease_identity,
+                config=config,
+                journal_root=Path(journal_root).expanduser().resolve(),
+            )
+            if binding["status"] in {"prepared", "active"}:
+                try:
+                    unsettled = repository.query_rollback_unsettled_jobs()
+                except Exception as error:
+                    raise FileOrchestrationJournalError(
+                        "file_journal_rollforward_quiescence_unavailable",
+                        field="rollback_jobs",
+                    ) from error
+                if unsettled:
+                    raise FileOrchestrationJournalError(
+                        "file_journal_rollforward_jobs_unsettled",
+                        field="rollback_jobs",
+                    )
+                binding = _transition_rollback_execution_binding(
+                    config.workspace_root,
+                    binding,
+                    status="rolling_forward",
+                )
+            completed = repository._complete_reconcile_inventory_rollforward_under_scheduler_lease(
                 preparation_receipt_id=preparation_receipt_id,
                 scheduler_lease_identity=lease_identity,
                 scheduler_lease_guard=lambda: _rollback_lease_is_held(
@@ -695,11 +982,100 @@ def complete_file_journal_rollforward(
                     pass_id=pass_id,
                 ),
             )
+            completed_binding = _transition_rollback_execution_binding(
+                config.workspace_root,
+                binding,
+                status="completed",
+            )
+            try:
+                archive_completed_rollback_execution_binding(
+                    config.workspace_root,
+                    completed_binding,
+                )
+            except RollbackExecutionBindingError as error:
+                raise FileOrchestrationJournalError(
+                    "file_journal_rollforward_execution_binding_archive_unavailable",
+                    field="rollback_execution_binding",
+                ) from error
+            return {
+                **completed,
+                "rollback_execution_binding_id": completed_binding["binding_id"],
+                "rollback_execution_binding_status": completed_binding["status"],
+            }
         finally:
             try:
                 heartbeat.stop()
             finally:
                 lease.release(pass_id=pass_id)
+
+
+def _require_matching_rollforward_binding(
+    binding: Mapping[str, Any],
+    *,
+    preparation_receipt_id: str,
+    lease_identity: Mapping[str, Any],
+    config: Any,
+    journal_root: Path,
+) -> None:
+    try:
+        journal_metadata = journal_root.stat(follow_symlinks=False)
+    except OSError as error:
+        raise FileOrchestrationJournalError(
+            "file_journal_rollforward_execution_binding_invalid",
+            field="rollback_execution_binding",
+        ) from error
+    journal_identity = {
+        "path_digest": hashlib.sha256(str(journal_root).encode("utf-8")).hexdigest(),
+        "device": int(journal_metadata.st_dev),
+        "inode": int(journal_metadata.st_ino),
+    }
+    expected = {
+        "preparation_receipt_id": preparation_receipt_id,
+        "journal_root_identity": journal_identity,
+        "scheduler_lease_identity": dict(lease_identity),
+        "workspace_root": str(config.workspace_root),
+        "lock_path": str(config.lock_path),
+    }
+    if binding.get("status") not in {"prepared", "active", "rolling_forward", "completed"} or any(
+        binding.get(key) != value for key, value in expected.items()
+    ):
+        raise FileOrchestrationJournalError(
+            "file_journal_rollforward_execution_binding_conflict",
+            field="rollback_execution_binding",
+        )
+
+
+def _transition_rollback_execution_binding(
+    workspace_root: str | Path,
+    binding: Mapping[str, Any],
+    *,
+    status: str,
+) -> dict[str, Any]:
+    current_status = str(binding.get("status") or "")
+    if current_status == status:
+        return dict(binding)
+    allowed = {
+        "prepared": "rolling_forward",
+        "active": "rolling_forward",
+        "rolling_forward": "completed",
+    }
+    if allowed.get(current_status) != status:
+        raise FileOrchestrationJournalError(
+            "file_journal_rollforward_execution_binding_conflict",
+            field="rollback_execution_binding",
+        )
+    transitioned = {
+        **dict(binding),
+        "status": status,
+        "updated_at": _format_utc(datetime.now(UTC)),
+    }
+    try:
+        return write_rollback_execution_binding(workspace_root, transitioned)
+    except RollbackExecutionBindingError as error:
+        raise FileOrchestrationJournalError(
+            "file_journal_rollforward_execution_binding_unavailable",
+            field="rollback_execution_binding",
+        ) from error
 
 
 def _rollback_file_lease_config(

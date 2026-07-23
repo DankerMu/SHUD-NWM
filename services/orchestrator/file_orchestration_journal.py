@@ -807,6 +807,33 @@ class FileOrchestrationJournalRepository:
         )
         return jobs
 
+    def query_rollback_unsettled_jobs(self) -> list[SimpleNamespace]:
+        """Read every rollback-era nonterminal/ambiguous job without inventory mutation."""
+
+        records: dict[str, dict[str, Any]] = {}
+        for job in self._iter_pipeline_job_records():
+            _upsert_by_key(records, job, key="job_id")
+        for job in self._iter_legacy_active_reconcile_records():
+            _upsert_by_key(records, job, key="job_id")
+        jobs: list[SimpleNamespace] = []
+        for job in records.values():
+            status = str(job.get("status") or "")
+            submit_outcome = str(job.get("submit_outcome") or "")
+            if (
+                _job_needs_restart_reconcile(job)
+                or status in {"reserved", "reconciling"}
+                or submit_outcome == "submit_result_ambiguous"
+            ):
+                jobs.append(_file_reconcile_namespace(job))
+        jobs.sort(
+            key=lambda job: (
+                _datetime_sort_key(getattr(job, "submitted_at", None)),
+                _datetime_sort_key(getattr(job, "created_at", None)),
+                str(job.job_id),
+            )
+        )
+        return jobs
+
     def bind_reservation(
         self,
         idempotency_key: str,
