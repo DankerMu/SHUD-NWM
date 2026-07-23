@@ -44,16 +44,17 @@ def is_forecast_cohort_stage(stage: StageDefinition) -> bool:
     return str(stage.job_type or "") in _FORECAST_STAGE_ALIASES
 
 
-def _submit_error_is_ambiguous(error: Exception) -> bool:
+def _submit_error_is_ambiguous(error: Exception, *, gateway_boundary_entered: bool) -> bool:
+    if not gateway_boundary_entered:
+        return False
     disposition = getattr(error, "submit_disposition", None)
-    if disposition is not None:
-        try:
-            return SubmitDisposition(disposition) is SubmitDisposition.AMBIGUOUS
-        except ValueError:
-            return True
-    # Compatibility for legacy/in-process clients which predate the explicit
-    # submit contract. The one old transport code remains ambiguity-safe.
-    return getattr(error, "error_code", None) == "SLURM_GATEWAY_UNAVAILABLE"
+    try:
+        return SubmitDisposition(disposition) is not SubmitDisposition.REJECTED
+    except (TypeError, ValueError):
+        # Once the Gateway call boundary is entered, missing/unknown proof is
+        # ambiguity-safe. Only an explicit REJECTED disposition may reopen the
+        # attempt for a later submit.
+        return True
 
 
 def _accepts_keyword(callable_value: Callable[..., Any], name: str) -> bool:
@@ -63,6 +64,55 @@ def _accepts_keyword(callable_value: Callable[..., Any], name: str) -> bool:
         return False
     return any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters) or any(
         parameter.name == name for parameter in parameters
+    )
+
+
+def _update_runtime_pipeline_status(
+    orchestrator: StageExecutionOrchestrator,
+    stage: StageDefinition,
+    pipeline_job_id: str,
+    status: str,
+    *,
+    current_status: str,
+    started_at: Any = None,
+    finished_at: Any = None,
+    exit_code: Any = None,
+    error_code: Any = None,
+    error_message: Any = None,
+    log_uri: Any = None,
+) -> tuple[str | None, dict[str, Any]]:
+    if (
+        getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
+        and is_forecast_cohort_stage(stage)
+    ):
+        transitioner = getattr(orchestrator.repository, "transition_pipeline_job_runtime_status", None)
+        if not callable(transitioner):
+            raise OrchestratorError(
+                "ACCEPTED_SUBMIT_RUNTIME_TRANSITION_UNAVAILABLE",
+                "forecast cohort runtime transition API is unavailable",
+            )
+        result = transitioner(
+            pipeline_job_id,
+            status,
+            expected_statuses=(current_status,),
+            started_at=started_at,
+            exit_code=exit_code,
+        )
+        if not getattr(result, "committed", False):
+            raise OrchestratorError(
+                "ACCEPTED_SUBMIT_RUNTIME_TRANSITION_CONFLICT",
+                "forecast cohort runtime state no longer matches the observed status",
+            )
+        return current_status, dict(getattr(result, "row", None) or {})
+    return orchestrator.repository.update_pipeline_job_status(
+        pipeline_job_id,
+        status,
+        started_at=started_at,
+        finished_at=finished_at,
+        exit_code=exit_code,
+        error_code=error_code,
+        error_message=error_message,
+        log_uri=log_uri,
     )
 
 
@@ -185,6 +235,7 @@ def submit_and_wait_cycle_stage(
     submitted: dict[str, Any]
     manifest_index_path: Path | None = None
     stage_manifest = orchestrator._build_cycle_stage_manifest(stage, context)
+    gateway_boundary_entered = False
     try:
         orchestrator._prepare_forecast_runtime_manifests(stage, context)
         if stage.stage == "forecast":
@@ -196,6 +247,7 @@ def submit_and_wait_cycle_stage(
             # Array path must carry the same idempotency --comment as the
             # single-job path so crash-recovery can reconcile array masters.
             stage_manifest["comment"] = deps.slurm_comment_for(idempotency_key)
+            gateway_boundary_entered = True
             submitted = _call_orchestrator_helper(
                 orchestrator,
                 "_submit_array_stage",
@@ -205,20 +257,20 @@ def submit_and_wait_cycle_stage(
                 stage_manifest,
             )
         else:
+            submit_payload = {
+                "run_id": context.run_id,
+                "model_id": deps.cycle_payload_model_id(context),
+                "job_type": stage.job_type,
+                "manifest": _call_orchestrator_helper(
+                    orchestrator,
+                    "_slurm_submission_manifest",
+                    stage_manifest,
+                ),
+                "comment": deps.slurm_comment_for(idempotency_key),
+            }
+            gateway_boundary_entered = True
             submitted = deps.coerce_mapping(
-                orchestrator.slurm_client.submit_job(
-                    {
-                        "run_id": context.run_id,
-                        "model_id": deps.cycle_payload_model_id(context),
-                        "job_type": stage.job_type,
-                        "manifest": _call_orchestrator_helper(
-                            orchestrator,
-                            "_slurm_submission_manifest",
-                            stage_manifest,
-                        ),
-                        "comment": deps.slurm_comment_for(idempotency_key),
-                    }
-                )
+                orchestrator.slurm_client.submit_job(submit_payload)
             )
         submitted_job_id = submitted.get("job_id")
         accepted_submit_repository = bool(
@@ -243,7 +295,7 @@ def submit_and_wait_cycle_stage(
         if (
             getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
             and is_forecast_cohort_stage(stage)
-            and _submit_error_is_ambiguous(error)
+            and _submit_error_is_ambiguous(error, gateway_boundary_entered=gateway_boundary_entered)
         ):
             transition = getattr(
                 orchestrator.repository,
@@ -410,17 +462,26 @@ def submit_and_wait_cycle_stage(
                 "accepted submit cannot be durably committed to its reservation attempt",
                 {"stage": stage.stage},
             )
+        persisted_submitted_status = (
+            "submitted" if submitted_status in deps.terminal_job_statuses else submitted_status
+        )
         commit_kwargs: dict[str, Any] = {
             "expected_submission_attempt": reservation.submission_attempt,
             "slurm_job_id": slurm_job_id,
-            "transition": AcceptedSubmitTransition.accepted(status=submitted_status),
+            "transition": AcceptedSubmitTransition.accepted(status=persisted_submitted_status),
             "array_task_id": submitted_array_task_id,
             "submitted_at": deps.parse_gateway_time(submitted.get("submitted_at")) or deps.utcnow(),
             "started_at": deps.parse_gateway_time(submitted.get("started_at")),
-            "finished_at": deps.parse_gateway_time(submitted.get("finished_at")),
-            "exit_code": submitted.get("exit_code"),
-            "error_code": submitted.get("error_code"),
-            "error_message": submitted.get("error_message"),
+            "finished_at": (
+                None
+                if submitted_status in deps.terminal_job_statuses
+                else deps.parse_gateway_time(submitted.get("finished_at"))
+            ),
+            "exit_code": None if submitted_status in deps.terminal_job_statuses else submitted.get("exit_code"),
+            "error_code": None if submitted_status in deps.terminal_job_statuses else submitted.get("error_code"),
+            "error_message": (
+                None if submitted_status in deps.terminal_job_statuses else submitted.get("error_message")
+            ),
             "log_uri": submitted_log_uri,
         }
         if _accepts_keyword(committer, "pipeline_job_id"):
@@ -459,38 +520,43 @@ def submit_and_wait_cycle_stage(
     if not accepted_submit_reconcile:
         orchestrator.repository.upsert_pipeline_job(
             {
-            "job_id": pipeline_job_id,
-            "run_id": context.run_id,
-            "cycle_id": context.cycle_id,
-            "job_type": stage.job_type,
-            "slurm_job_id": slurm_job_id,
-            "array_task_id": submitted_array_task_id,
-            "model_id": accepted_submit_pipeline_job_model_id(
-                supports_accepted_submit_reconcile=getattr(
-                    orchestrator.repository, "supports_accepted_submit_reconcile", False
+                "job_id": pipeline_job_id,
+                "run_id": context.run_id,
+                "cycle_id": context.cycle_id,
+                "job_type": stage.job_type,
+                "slurm_job_id": slurm_job_id,
+                "array_task_id": submitted_array_task_id,
+                "model_id": accepted_submit_pipeline_job_model_id(
+                    supports_accepted_submit_reconcile=getattr(
+                        orchestrator.repository, "supports_accepted_submit_reconcile", False
+                    ),
+                    stage=stage.stage,
+                    job_type=stage.job_type,
+                    model_id=deps.cycle_pipeline_job_model_id(context),
                 ),
-                stage=stage.stage,
-                job_type=stage.job_type,
-                model_id=deps.cycle_pipeline_job_model_id(context),
-            ),
-            "status": submitted_status,
-            "stage": stage.stage,
-            "idempotency_key": idempotency_key,
-            "submitted_at": deps.parse_gateway_time(submitted.get("submitted_at")) or deps.utcnow(),
-            "started_at": deps.parse_gateway_time(submitted.get("started_at")),
-            "finished_at": deps.parse_gateway_time(submitted.get("finished_at")),
-            "exit_code": submitted.get("exit_code"),
-            "error_code": submitted.get("error_code"),
-            "error_message": submitted.get("error_message"),
-            "log_uri": submitted_log_uri,
+                "status": submitted_status,
+                "stage": stage.stage,
+                "idempotency_key": idempotency_key,
+                "submitted_at": deps.parse_gateway_time(submitted.get("submitted_at")) or deps.utcnow(),
+                "started_at": deps.parse_gateway_time(submitted.get("started_at")),
+                "finished_at": deps.parse_gateway_time(submitted.get("finished_at")),
+                "exit_code": submitted.get("exit_code"),
+                "error_code": submitted.get("error_code"),
+                "error_message": submitted.get("error_message"),
+                "log_uri": submitted_log_uri,
             }
         )
+    submission_event_status = (
+        "submitted"
+        if accepted_submit_reconcile and submitted_status in deps.terminal_job_statuses
+        else submitted_status
+    )
     orchestrator.repository.insert_pipeline_event(
         entity_type="pipeline_job",
         entity_id=pipeline_job_id,
         event_type="submission",
         status_from=None,
-        status_to=submitted_status,
+        status_to=submission_event_status,
         message=f"{stage.stage} submitted as Slurm job {slurm_job_id}",
         details=deps.safe_pipeline_event_details(
             {
@@ -759,7 +825,13 @@ def resume_cycle_stage(
     if (
         stage.is_array
         and job.get("slurm_job_id")
-        and status not in {"failed", "cancelled", "submission_failed", "permanently_failed"}
+        and (
+            status not in {"failed", "cancelled", "submission_failed", "permanently_failed"}
+            or (
+                getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
+                and is_forecast_cohort_stage(stage)
+            )
+        )
     ):
         aggregation = orchestrator._aggregate_array_stage(
             stage,
@@ -873,9 +945,12 @@ def poll_cycle_stage_until_terminal(
         if new_status in deps.terminal_job_statuses and log_publication is not None:
             publication_attempt = orchestrator._try_publish_log_for_advertise(str(job["job_id"]), log_publication)
             log_uri = publication_attempt.advertised_uri
-        previous_status, record = orchestrator.repository.update_pipeline_job_status(
+        previous_status, record = _update_runtime_pipeline_status(
+            orchestrator,
+            stage,
             pipeline_job_id,
             new_status,
+            current_status=current_status,
             started_at=deps.parse_gateway_time(job.get("started_at")),
             finished_at=deps.parse_gateway_time(job.get("finished_at")),
             exit_code=job.get("exit_code"),
@@ -951,15 +1026,52 @@ def record_cycle_stage_poll_timeout(
         else None
     )
     log_uri = publication_attempt.advertised_uri if publication_attempt is not None else None
-    previous_status, record = orchestrator.repository.update_pipeline_job_status(
-        pipeline_job_id,
-        "failed",
-        finished_at=deps.utcnow(),
-        exit_code=terminal.get("exit_code"),
-        error_code="SLURM_JOB_TIMEOUT",
-        error_message=message,
-        log_uri=log_uri,
-    )
+    if (
+        getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
+        and is_forecast_cohort_stage(stage)
+    ):
+        transition = getattr(
+            orchestrator.repository,
+            "transition_pipeline_job_submit_evidence",
+            None,
+        )
+        if not callable(transition):
+            raise OrchestratorError(
+                "ACCEPTED_SUBMIT_RUNTIME_TRANSITION_UNAVAILABLE",
+                "forecast cohort timeout transition API is unavailable",
+            )
+        transition_kwargs: dict[str, Any] = {
+            "expected_statuses": (current_status,),
+            "finished_at": deps.utcnow(),
+            "exit_code": terminal.get("exit_code"),
+            "error_code": "SLURM_JOB_TIMEOUT",
+            "error_message": message,
+            "log_uri": log_uri,
+        }
+        if _accepts_keyword(transition, "accepted_submit_contract_version"):
+            transition_kwargs["accepted_submit_contract_version"] = ACCEPTED_SUBMIT_CONTRACT_VERSION
+        transition_result = transition(
+            pipeline_job_id,
+            AcceptedSubmitTransition.accepted(status="reconcile_unverified"),
+            **transition_kwargs,
+        )
+        if not getattr(transition_result, "committed", False):
+            raise OrchestratorError(
+                "ACCEPTED_SUBMIT_RUNTIME_TRANSITION_CONFLICT",
+                "forecast cohort timeout state no longer matches the observed status",
+            )
+        previous_status = current_status
+        record = dict(getattr(transition_result, "row", None) or {})
+    else:
+        previous_status, record = orchestrator.repository.update_pipeline_job_status(
+            pipeline_job_id,
+            "failed",
+            finished_at=deps.utcnow(),
+            exit_code=terminal.get("exit_code"),
+            error_code="SLURM_JOB_TIMEOUT",
+            error_message=message,
+            log_uri=log_uri,
+        )
     terminal.update(record)
     orchestrator.repository.insert_pipeline_event(
         entity_type="pipeline_job",
@@ -1013,7 +1125,16 @@ def submit_array_stage(
         # so the array master sbatch is stamped; real_backend.submit_job_array
         # reads ``manifest["comment"]`` and threads it to sbatch --comment,
         # making array-stage crash recovery reconcile-by-comment work.
-        submission_manifest = _call_orchestrator_helper(orchestrator, "_slurm_submission_manifest", manifest)
+        try:
+            submission_manifest = _call_orchestrator_helper(
+                orchestrator,
+                "_slurm_submission_manifest",
+                manifest,
+            )
+        except Exception as error:
+            if getattr(error, "submit_disposition", None) is None:
+                error.submit_disposition = SubmitDisposition.REJECTED
+            raise
         if manifest.get("comment"):
             submission_manifest["comment"] = manifest["comment"]
         return deps.coerce_mapping(
@@ -1025,11 +1146,13 @@ def submit_array_stage(
                 manifest=submission_manifest,
             )
         )
-    raise deps.make_slurm_client_error(
+    error = deps.make_slurm_client_error(
         "SLURM_ARRAY_SUBMIT_UNSUPPORTED",
         f"Slurm client does not support array submission for {stage.stage}.",
         {"stage": stage.stage, "job_type": stage.job_type, "cycle_id": context.cycle_id},
     )
+    error.submit_disposition = SubmitDisposition.REJECTED
+    raise error
 
 
 def slurm_submission_manifest(

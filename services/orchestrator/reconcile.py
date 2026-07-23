@@ -32,6 +32,7 @@ from typing import Any, Mapping
 from services.orchestrator.accepted_submit_identity import (
     ACCEPTED_SUBMIT_CONTRACT_VERSION,
     FORECAST_COHORT_STAGE_ALIASES,
+    AcceptedSubmitEvidenceError,
     AcceptedSubmitTransition,
     accepted_submit_contract_is_current,
     forecast_cohort_identity_is_valid,
@@ -919,12 +920,20 @@ def reconcile_inflight_jobs(
             require_durable_identity=requires_durable_identity,
         ):
             # Cannot prove this is our candidate: mark typed, do NOT resubmit.
-            store.update_job_status(
-                job.job_id,
-                RECONCILE_UNVERIFIED_STATUS,
-                error_code="SLURM_RECONCILE_UNVERIFIED",
-                error_message=(f"sacct could not verify the candidate identity for slurm_job_id={slurm_job_id}."),
-            )
+            if file_cohort:
+                write_count = _transition_file_runtime_status(
+                    store,
+                    job,
+                    RECONCILE_UNVERIFIED_STATUS,
+                )
+            else:
+                store.update_job_status(
+                    job.job_id,
+                    RECONCILE_UNVERIFIED_STATUS,
+                    error_code="SLURM_RECONCILE_UNVERIFIED",
+                    error_message=(f"sacct could not verify the candidate identity for slurm_job_id={slurm_job_id}."),
+                )
+                write_count = 1
             outcomes.append(
                 ReconcileOutcome(
                     job_id=job.job_id,
@@ -932,29 +941,20 @@ def reconcile_inflight_jobs(
                     action="unverified",
                     status=RECONCILE_UNVERIFIED_STATUS,
                     durable_write_kind="pipeline_job_status",
-                    durable_write_count=1,
+                    durable_write_count=write_count,
                 )
             )
             continue
 
         if file_cohort and not _terminal_file_cohort_identity_matches(store, record, job):
-            write_count = _transition_file_reconciliation(
-                store,
-                job,
-                AcceptedSubmitTransition.accounting(
-                    "identity_mismatch_blocked",
-                    submit_outcome=str(getattr(job, "submit_outcome", None) or "accepted"),
-                    status=RECONCILE_UNVERIFIED_STATUS,
-                ),
-            )
             outcomes.append(
                 ReconcileOutcome(
                     job_id=job.job_id,
                     slurm_job_id=str(slurm_job_id),
                     action="identity_mismatch_blocked",
-                    status=RECONCILE_UNVERIFIED_STATUS,
-                    durable_write_kind="pipeline_job_reconciliation",
-                    durable_write_count=write_count,
+                    status=str(job.status),
+                    durable_write_kind=None,
+                    durable_write_count=0,
                 )
             )
             continue
@@ -1007,7 +1007,11 @@ def reconcile_inflight_jobs(
             continue
 
         # Still running/queued: keep current status, never resubmit.
-        store.update_job_status(job.job_id, slurm_status.value)
+        if file_cohort:
+            write_count = _transition_file_runtime_status(store, job, slurm_status.value)
+        else:
+            store.update_job_status(job.job_id, slurm_status.value)
+            write_count = 1
         outcomes.append(
             ReconcileOutcome(
                 job_id=job.job_id,
@@ -1015,7 +1019,7 @@ def reconcile_inflight_jobs(
                 action="still_running",
                 status=slurm_status.value,
                 durable_write_kind="pipeline_job_status",
-                durable_write_count=1,
+                durable_write_count=write_count,
             )
         )
 
@@ -1055,10 +1059,39 @@ def _terminal_file_cohort_identity_matches(store: Any, record: SacctRecord, job:
         return False
     if expected_account and record.account != expected_account:
         return False
-    prefix = f"{expected_master}_"
+    try:
+        member_ids = {
+            int(member["array_task_id"])
+            for member in ordered_cohort_members(getattr(job, "cohort_members", ()))
+        }
+    except (AcceptedSubmitEvidenceError, KeyError, TypeError, ValueError):
+        return False
+    observed_task_ids: set[int] = set()
+    observed_slurm_ids: set[str] = set()
     for task in record.array_task_records:
-        if not str(task.slurm_job_id or "").startswith(prefix):
+        raw_array_task_id = task.array_task_id
+        raw_task_id = task.task_id
+        if raw_array_task_id not in (None, "") and raw_task_id not in (None, ""):
+            try:
+                if int(raw_array_task_id) != int(raw_task_id):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        raw_id = raw_array_task_id if raw_array_task_id not in (None, "") else raw_task_id
+        try:
+            task_id = int(raw_id)
+        except (TypeError, ValueError):
             return False
+        task_slurm_job_id = str(task.slurm_job_id or "")
+        if (
+            task_id not in member_ids
+            or task_id in observed_task_ids
+            or task_slurm_job_id in observed_slurm_ids
+            or task_slurm_job_id != f"{expected_master}_{task_id}"
+        ):
+            return False
+        observed_task_ids.add(task_id)
+        observed_slurm_ids.add(task_slurm_job_id)
         if task.job_name.strip() not in _GENERIC_ARRAY_JOB_NAMES and not is_forecast_cohort_stage_name(
             task.job_name.removeprefix("nhms_")
         ):
@@ -1881,6 +1914,18 @@ def _transition_file_reconciliation(
         )
         return int(getattr(result, "wrote", False))
     return 0
+
+
+def _transition_file_runtime_status(store: Any, job: Any, status: str) -> int:
+    transitioner = getattr(store, "transition_pipeline_job_runtime_status", None)
+    if not callable(transitioner):
+        return 0
+    result = transitioner(
+        job.job_id,
+        status,
+        expected_statuses=(str(job.status),),
+    )
+    return int(getattr(result, "wrote", False))
 
 
 def _reserved_record_identity_matches(store: Any, record: SacctRecord, job: Any, idempotency_key: str) -> bool:

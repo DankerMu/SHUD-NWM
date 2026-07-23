@@ -1320,9 +1320,10 @@ Persisted reconciliation/evidence contract for #1112:
 - Candidate projections persist `array_task_id`, `array_task_outcome` in
   `succeeded|failed|unverified`, `restart_stage`, and
   `native_shud_resubmitted`.
-- Comment/accounting discovery is capped before materialization; an over-limit
-  result maps to `multiple_matches_blocked` with a count/category only, not an
-  unbounded row list.
+- Comment/accounting discovery is capped before materialization. An indexed
+  proof of multiple exact-comment matches maps to `multiple_matches_blocked`
+  with a bounded count/category only; raw page byte/row saturation cannot prove
+  multiplicity and remains fail-closed `accounting_unavailable`.
 
 Risk packs considered for #1112:
 

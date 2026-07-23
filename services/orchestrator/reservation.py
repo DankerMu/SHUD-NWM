@@ -270,6 +270,19 @@ def reserve_candidate(
             }
         if reservation_evidence:
             reclaim_record.update(dict(reservation_evidence))
+            exact_getter = getattr(repository, "get_accepted_submit_pipeline_job", None)
+            if (
+                "accepted_submit_contract_version" in reservation_evidence
+                and callable(exact_getter)
+            ):
+                current = exact_getter(job_id)
+                if current is not None:
+                    reclaim_record["expected_submission_attempt"] = current.get(
+                        "submission_attempt"
+                    )
+                    reclaim_record["expected_submission_attempt_started_at"] = current.get(
+                        "submission_attempt_started_at"
+                    )
         reclaimed = reclaim(reclaim_record)
         if reclaimed is not None:
             # We took the dead reservation back to 'reserved': THIS pass now owns

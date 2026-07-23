@@ -82,8 +82,10 @@ NHMS_SCHEDULER_MAX_PASSES=1
 # Keep systemd stdout operationally small; full pass evidence is still written
 # under NHMS_SCHEDULER_EVIDENCE_ROOT for audits and debugging.
 NHMS_SCHEDULER_STDOUT_SUMMARY_ONLY=true
-# "atomic" is a compatibility alias for the same crash-safe cross-process flock guard.
-NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE=atomic
+# Lease-file CAS can run without a flock guard; the orchestration journal cannot.
+# Keep these separate so one value never selects incompatible safety semantics.
+NHMS_SCHEDULER_LEASE_GUARD_MODE=atomic
+NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE=flock
 # Bound source/cycle cohort submission and polling control threads only. Basin
 # compute concurrency is owned by the global Slurm array bound below plus
 # config/resource_profiles.yaml max_concurrent=32; this value must never be

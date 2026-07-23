@@ -8658,7 +8658,7 @@ def test_atomic_lock_guard_mode_does_not_open_guard_file(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setenv("NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE", "atomic")
+    monkeypatch.setenv("NHMS_SCHEDULER_LEASE_GUARD_MODE", "atomic")
     lock_path = tmp_path / "scheduler.lock"
     lease = FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
 
@@ -8672,13 +8672,13 @@ def test_atomic_lock_guard_mode_does_not_open_guard_file(
     assert not lock_path.exists()
 
 
-def test_file_journal_atomic_lock_mode_uses_cross_process_flock(
+def test_file_journal_explicit_flock_mode_uses_cross_process_flock(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     import fcntl
 
-    monkeypatch.setenv("NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE", "atomic")
+    monkeypatch.setenv("NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE", "flock")
     calls: list[int] = []
     real_flock = fcntl.flock
 
@@ -8698,7 +8698,45 @@ def test_file_journal_atomic_lock_mode_uses_cross_process_flock(
     assert calls == [fcntl.LOCK_EX, fcntl.LOCK_UN]
 
 
-def test_file_journal_atomic_alias_excludes_another_process(
+def test_legacy_atomic_guard_is_not_reinterpreted_for_shared_journal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from services.orchestrator.chain_types import OrchestratorError
+
+    monkeypatch.delenv("NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE", raising=False)
+    monkeypatch.setenv("NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE", "atomic")
+    repository = scheduler_module.FileOrchestrationJournalRepository(tmp_path / "journal")
+    repository._ensure_root_unlocked()
+
+    with pytest.raises(OrchestratorError, match="cycle lock"):
+        with repository._cycle_file_lock_unlocked(
+            source_id="gfs",
+            cycle_time=_dt("2026-05-21T12:00:00Z"),
+        ):
+            raise AssertionError("unsupported legacy alias must fail before journal writes")
+
+
+def test_distinct_lease_and_journal_guard_envs_have_independent_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("NHMS_SCHEDULER_LEASE_GUARD_MODE", "atomic")
+    monkeypatch.setenv("NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE", "flock")
+    lease = FileSchedulerLease(tmp_path / "scheduler.lock", ttl_seconds=10, workspace_root=tmp_path)
+    repository = scheduler_module.FileOrchestrationJournalRepository(tmp_path / "journal")
+    repository._ensure_root_unlocked()
+
+    acquired = lease.acquire(pass_id="p1", started_at=_dt("2026-05-21T12:00:00Z"))
+    with repository._cycle_file_lock_unlocked(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-21T12:00:00Z"),
+    ):
+        assert acquired["acquired"] is True
+    lease.release(pass_id="p1")
+
+
+def test_file_journal_flock_excludes_another_process(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -8706,7 +8744,7 @@ def test_file_journal_atomic_alias_excludes_another_process(
     import sys
     import time
 
-    monkeypatch.setenv("NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE", "atomic")
+    monkeypatch.setenv("NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE", "flock")
     root = tmp_path / "journal"
     ready = tmp_path / "child-ready"
     child_code = """
@@ -8716,7 +8754,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
-os.environ['NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE'] = 'atomic'
+os.environ['NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE'] = 'flock'
 repo = FileOrchestrationJournalRepository(Path(sys.argv[1]))
 repo._ensure_root_unlocked()
 with repo._cycle_file_lock_unlocked(source_id='gfs', cycle_time=datetime(2026, 5, 21, 12, tzinfo=UTC)):

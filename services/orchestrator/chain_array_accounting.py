@@ -299,6 +299,67 @@ def record_cycle_stage_status_override(
     deps: ArrayAccountingDependencies | None = None,
 ) -> None:
     deps = deps or _default_dependencies()
+    if (
+        getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
+        and stage.stage in {"forecast", "run_shud_forecast", "run_shud_forecast_array"}
+    ):
+        projector = getattr(orchestrator.repository, "project_forecast_cohort_tasks", None)
+        if not callable(projector):
+            raise OrchestratorError(
+                "ACCEPTED_SUBMIT_PROJECTION_UNAVAILABLE",
+                "forecast cohort terminal projection API is unavailable",
+            )
+        tasks = {task.task_id: task for task in aggregation.task_results}
+        expected_task_ids = {
+            int(basin.get("task_id", index))
+            for index, basin in enumerate(context.active_basins)
+        }
+        complete = len(tasks) == len(aggregation.task_results) and set(tasks) == expected_task_ids
+        projections: list[dict[str, Any]] = []
+        for index, basin in enumerate(context.active_basins):
+            task_id = int(basin.get("task_id", index))
+            task = tasks.get(task_id)
+            outcome = "unverified"
+            if task is not None and task.status == "succeeded":
+                outcome = "succeeded"
+            elif task is not None and task.status in {"failed", "cancelled"}:
+                outcome = "failed"
+            else:
+                complete = False
+            projections.append(
+                {
+                    "candidate_id": basin.get("candidate_id"),
+                    "run_id": basin.get("run_id"),
+                    "model_id": basin.get("model_id"),
+                    "array_task_id": task_id,
+                    "array_task_outcome": outcome,
+                    "task_slurm_job_id": task.slurm_job_id if task is not None else None,
+                    "error_code": task.error_code if task is not None else None,
+                    "restart_stage": (
+                        "state_save_qc" if outcome == "succeeded" else basin.get("restart_stage") or "forecast"
+                    ),
+                    "native_shud_resubmitted": False,
+                }
+            )
+        master_slurm_job_id = str(terminal.get("job_id") or terminal.get("slurm_job_id") or "")
+        projector(
+            pipeline_job_id,
+            master_slurm_job_id=master_slurm_job_id,
+            projections=projections,
+            complete=complete,
+            master_status=aggregation.status,
+            master_error_code=(
+                deps.aggregation_error_code(aggregation) or terminal.get("error_code")
+            ),
+            reconciliation_decision="matched_bound",
+            finished_at=deps.parse_gateway_time(terminal.get("finished_at")) or deps.utcnow(),
+            exit_code=terminal.get("exit_code"),
+            master_error_message=(
+                deps.aggregation_error_message(aggregation) or terminal.get("error_message")
+            ),
+            log_uri=log_uri,
+        )
+        return
     previous_status, record = orchestrator.repository.update_pipeline_job_status(
         pipeline_job_id,
         aggregation.status,

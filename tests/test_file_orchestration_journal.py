@@ -1399,7 +1399,7 @@ def test_file_orchestration_journal_cycle_rows_missing_alias_reads_close_parent_
     assert after - before <= 4
 
 
-def test_file_orchestration_journal_reconcile_direct_scan_keeps_old_active_records(
+def test_file_orchestration_journal_legacy_fallback_does_not_scan_beyond_bound(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1430,11 +1430,11 @@ def test_file_orchestration_journal_reconcile_direct_scan_keeps_old_active_recor
     reserved = repository.query_reserved_unbound_jobs()
     inflight = repository.query_inflight_jobs()
 
-    assert [job.job_id for job in reserved] == ["job_reconcile_old_reserved"]
-    assert [job.job_id for job in inflight] == ["job_reconcile_old_inflight"]
+    assert reserved == []
+    assert inflight == []
 
 
-def test_file_orchestration_journal_reconcile_direct_scan_skips_bad_entry_and_keeps_old_active_record(
+def test_file_orchestration_journal_legacy_fallback_skips_bad_entry_within_bound(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1475,7 +1475,7 @@ def test_file_orchestration_journal_reconcile_direct_scan_skips_bad_entry_and_ke
 
     reserved = repository.query_reserved_unbound_jobs()
 
-    assert [job.job_id for job in reserved] == ["job_reconcile_old_reserved_after_bad_direct"]
+    assert reserved == []
 
 
 def test_pipeline_event_public_surfaces_redact_runtime_root_recovery_details(tmp_path: Path) -> None:

@@ -30,6 +30,11 @@ by `PsycopgOrchestratorRepository`.
 - **AND** read-modify-write appends, event-id allocation, reservation duplicate
   checks, direct snapshot materialization, and latest materialization are
   linearized by a durable per-cycle file lock
+- **AND** scheduler-pass lease configuration and journal-transaction guard
+  configuration have distinct, unambiguous semantics; a mode that omits
+  `flock` for the lease MUST NOT silently become `flock` for the journal
+- **AND** DB-free startup fails closed when the configured shared filesystem has
+  no supported cross-process journal transaction guard
 - **AND** direct pipeline-job snapshots are materialized only after the
   append-only journal truth is committed, so append failure cannot leave a
   direct-only reservation blocker
@@ -228,6 +233,11 @@ versioned master's Slurm binding, status, outcome, reconciliation tuple/reason,
 projection, runtime/retry/error/log state; an exact replay MUST perform no
 authority write. Each legal master transition MUST use its typed commit,
 reconciliation, rejection, retry-permission, reclaim, or projection boundary.
+Generic status and reconciliation compatibility APIs MUST fail before writing
+when they would change any current-version master authority field, including a
+retryable status or absence permission. Reclaim MUST independently require the
+complete current-attempt typed absence proof and immutable attempt anchor; a
+generic compatibility write cannot manufacture retry authority.
 
 A Gateway timeout MUST persist only the ambiguous submit outcome and MUST leave
 `reconciliation_source`, `reconciliation_decision`, and
@@ -241,6 +251,11 @@ malformed success response, or unclassified Gateway failure MUST persist
 `submit_result_ambiguous` and reconcile by exact comment. A proven rejection
 MUST atomically terminalize the master and all matching-attempt hydro members;
 partial member terminalization MUST NOT be observable after reopen.
+
+Every repeated typed transition with the same normalized current-attempt state
+and evidence MUST be a zero-write replay: it MUST NOT append the cycle journal,
+rewrite direct state, or advance `updated_at`. A real typed evidence change MUST
+still append exactly once under the cycle lock.
 
 New accepted-submit master and candidate rows MUST carry an explicit contract
 version. Marker-free historical cohort-shaped rows MUST retain the legacy
@@ -393,6 +408,16 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
 - **WHEN** an adopted array has authoritative terminal task results
 - **THEN** each result is projected only to its exact reserved candidate/task
   identity
+- **AND** the physical Slurm task ID suffix, reported task ID, canonical member
+  order, and reserved member identity all agree before any terminal projection
+- **AND** malformed, swapped, duplicate, or incomplete task identity remains
+  fail-closed without candidate or hydro mutation
+- **AND** foreground polling, immediate-terminal submit responses, and restart
+  reconciliation use the same typed cycle-lock transaction to persist terminal
+  master state, task projections, candidate/hydro rows, and events together
+- **AND** restart discovery includes terminal current-version masters only when
+  their terminal projection is incomplete, while replay of a complete
+  projection is zero-write and cannot move an already progressed hydro backward
 - **AND** successful forecast tasks clear their own stale
   `SLURM_GATEWAY_UNAVAILABLE` hydro failure and resume at `state_save_qc`
 - **AND** failed or unverified tasks remain failed or reconciling without
@@ -409,10 +434,17 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
 
 #### Scenario: Accepted-submit storage remains bounded over operational history
 
-- **WHEN** four daily GFS/IFS cohorts project up to 256 terminal members over
-  many historical cycles
+- **WHEN** two daily forecast cycles each project one GFS and one IFS cohort
+  (four cohort masters per day) with up to 256 terminal members over long-term
+  history
 - **THEN** cycle reads and restart discovery do not enumerate every historical
   member direct file or approach a global 100,000-file discovery limit
+- **AND** a durable active-reconcile index is atomically maintained by every
+  typed current-version master transition, so restart discovery cost and public
+  outcome materialization are bounded independently of terminal history size
+- **AND** the oldest active cohort remains discoverable after reopen while a
+  terminal cohort is removed from the active index only in the same durable
+  transition that makes it ineligible for reconciliation
 - **AND** canonical journal evidence remains auditable under the documented
   partition/index and retention contract.
 - **AND** versioned master reserve, accepted bind, rejection, retry permission,

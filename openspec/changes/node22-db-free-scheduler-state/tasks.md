@@ -437,6 +437,9 @@ Scenario evidence rows for section 5:
   typed proven pre-acceptance rejection becomes `rejected`; post-request
   parse/malformed/unknown failures remain ambiguous. Proven rejection commits
   the master and every member hydro failure atomically with reopen parity.
+  Generic status/reconciliation compatibility APIs cannot forge retry
+  authority, reclaim independently requires the complete current-attempt typed
+  absence proof, and repeated identical typed evidence is a zero-write replay.
 
 - [x] 9.3 Project terminal array-task accounting to candidate-scoped
   pipeline/hydro state.
@@ -446,7 +449,10 @@ Scenario evidence rows for section 5:
   canonical digest and every projection-to-member identity are validated on all
   write/replay surfaces; malformed members fail closed, projection inputs are
   bounded before persistence, and task-accounting state does not extend the
-  closed reconciliation-decision enum.
+  closed reconciliation-decision enum. Physical Slurm task suffixes agree with
+  canonical task IDs before projection; foreground, immediate-terminal, and
+  restart completion share one atomic typed projection transaction, and
+  terminal-incomplete recovery cannot regress an already completed projection.
 
 - [x] 9.4 Preserve canonical `restart_stage` through scheduler grouping,
   deterministic cohort identity, basin manifest/run context, and stage
@@ -500,7 +506,12 @@ Scenario evidence rows for section 5:
   also proves generic upsert cannot clear a bound Slurm ID, forge retry
   permission, rewrite reconciliation/projection/runtime evidence, or revive a
   rejected/terminal master; exact replay is zero-write and each valid transition
-  remains available only through its typed API.
+  remains available only through its typed API. A durable active-reconcile index
+  makes restart reads independent of one year of terminal master history while
+  retaining the oldest active cohort after reopen, and stable
+  unavailable/mismatch decisions do not grow the journal. Scheduler lease and
+  journal transaction lock settings have distinct tested semantics;
+  unsupported shared-filesystem journal locking fails closed.
 
 - [ ] 9.6 Complete local, CI, and node-22 live verification.
   Evidence floor: the issue-targeted pytest command, `uv run ruff check .`, and

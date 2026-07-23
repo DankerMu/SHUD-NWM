@@ -21,7 +21,8 @@ MAX_LOCK_PAYLOAD_BYTES = 16_384
 # Bound production scheduler DB lock connects so a misconfigured/unreachable
 # database_url fails fast instead of hanging the scheduler pass.
 RECONCILE_DB_CONNECT_TIMEOUT_SECONDS = 5
-FILE_LOCK_GUARD_MODE_ENV = "NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE"
+FILE_LEASE_GUARD_MODE_ENV = "NHMS_SCHEDULER_LEASE_GUARD_MODE"
+LEGACY_FILE_LOCK_GUARD_MODE_ENV = "NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE"
 
 
 class UnsafeSchedulerLockError(OSError):
@@ -539,7 +540,10 @@ def _postgres_advisory_lock_key(value: str) -> int:
 
 
 def _file_lock_guard_mode() -> str:
-    value = os.getenv(FILE_LOCK_GUARD_MODE_ENV, "flock").strip().lower()
+    configured = os.getenv(FILE_LEASE_GUARD_MODE_ENV)
+    if configured is None:
+        configured = os.getenv(LEGACY_FILE_LOCK_GUARD_MODE_ENV, "flock")
+    value = configured.strip().lower()
     if value in {"", "flock", "fcntl"}:
         return "flock"
     if value in {"atomic", "none", "off", "disabled"}:
