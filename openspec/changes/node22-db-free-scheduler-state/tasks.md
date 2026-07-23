@@ -523,8 +523,16 @@ Scenario evidence rows for section 5:
   accounting until typed completion or exact terminal truth. Proven rejection
   leaves no active marker. Inventory migration fails closed without publishing
   its completion marker for malformed, unreadable, byte-saturated, or
-  record-saturated authority input, and exact atomic-temp residue is safely
-  repaired while unknown entries remain invalid. The annual cost oracle uses
+  record-saturated authority input, unsafe/disappearing flat JSON, or an
+  incomplete/non-canonical completion marker; exact atomic-temp residue is
+  safely repaired while unknown entries remain invalid. Gateway and typed
+  HTTP/custom response adapters, typed commit, and durable replay boundaries
+  reject null/empty/unknown accepted statuses as ambiguous or malformed, and
+  retry permission requires the exact positive attempt plus attempt anchor.
+  Poll timeout returns `reconciling`, submits no downstream stage, remains
+  restart-discoverable, and can be cancelled after reopen without replaying a
+  completed cancellation receipt; fresh/reclaimed attempts clear the receipt
+  discriminator. The annual cost oracle uses
   the production cadence of two cycles per day and GFS+IFS per cycle (1,460
   masters and 373,760 conceptual 256-member candidates per year), virtualizes
   candidate-history traversal, and asserts directory/stat/read work is constant;

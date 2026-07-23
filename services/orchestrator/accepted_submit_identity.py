@@ -40,6 +40,24 @@ ACCEPTED_RECONCILIATION_REASON_CLASSES = frozenset(
 )
 ACCEPTED_RESTART_STAGES = frozenset({"forecast", "state_save_qc"})
 ACCEPTED_PROJECTION_OUTCOMES = frozenset({"succeeded", "failed", "unverified"})
+ACCEPTED_SUBMIT_MASTER_STATUSES = frozenset(
+    {
+        "reserved",
+        "pending",
+        "queued",
+        "submitted",
+        "running",
+        "cancellation_pending",
+        "reconcile_unverified",
+        "submission_failed",
+        "reservation_lost",
+        "succeeded",
+        "partially_failed",
+        "failed",
+        "cancelled",
+        "permanently_failed",
+    }
+)
 ACCEPTED_PROJECTION_FIELDS = frozenset(
     {
         "array_task_id",
@@ -97,6 +115,7 @@ ACCEPTED_SUBMIT_MASTER_ORDINARY_UPSERT_FIELDS = (
     "reconciliation_reason_class",
     "matched_slurm_job_id",
     "candidate_projections",
+    "cancellation_receipt_recorded",
 )
 
 _MEMBER_FIELDS = (
@@ -456,11 +475,22 @@ def normalize_accepted_submit_evidence(row: Mapping[str, Any]) -> dict[str, Any]
         raise AcceptedSubmitEvidenceError(
             "file_journal_evidence_invariant_invalid", field="array_task_id"
         )
+    status = normalized.get("status")
+    if type(status) is not str or status not in ACCEPTED_SUBMIT_MASTER_STATUSES:
+        raise AcceptedSubmitEvidenceError(
+            "file_journal_evidence_enum_invalid", field="status"
+        )
     ownership_required = normalized.get("slurm_ownership_required")
     if type(ownership_required) is not bool:
         raise AcceptedSubmitEvidenceError(
             "file_journal_evidence_type_invalid", field="slurm_ownership_required"
         )
+    cancellation_receipt_recorded = normalized.get("cancellation_receipt_recorded", False)
+    if type(cancellation_receipt_recorded) is not bool:
+        raise AcceptedSubmitEvidenceError(
+            "file_journal_evidence_type_invalid", field="cancellation_receipt_recorded"
+        )
+    normalized["cancellation_receipt_recorded"] = cancellation_receipt_recorded
     submission_attempt = normalized.get("submission_attempt")
     if type(submission_attempt) is not int or submission_attempt < 1:
         raise AcceptedSubmitEvidenceError(
@@ -757,6 +787,7 @@ __all__ = (
     "ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD",
     "ACCEPTED_SUBMIT_MASTER_IMMUTABLE_FIELDS",
     "ACCEPTED_SUBMIT_MASTER_ORDINARY_UPSERT_FIELDS",
+    "ACCEPTED_SUBMIT_MASTER_STATUSES",
     "ACCEPTED_PROJECTION_FIELDS",
     "ACCEPTED_RECONCILIATION_DECISIONS",
     "ACCEPTED_SUBMIT_OUTCOMES",

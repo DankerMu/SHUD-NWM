@@ -176,6 +176,7 @@ _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS = (
     "reconciliation_reason_class",
     "matched_slurm_job_id",
     "candidate_projections",
+    "cancellation_receipt_recorded",
     "native_shud_resubmitted",
 )
 _RUNTIME_ROOT_EVENT_CANDIDATE_PATHS = (
@@ -1193,6 +1194,8 @@ class FileOrchestrationJournalRepository:
                 dirty_fields.add("previous_job_id")
             if record.get("candidate_projections") not in (None, [], ()):
                 dirty_fields.add("candidate_projections")
+            if record.get("cancellation_receipt_recorded") not in (None, False):
+                dirty_fields.add("cancellation_receipt_recorded")
             if str(record.get("status") or "reserved") != "reserved" or dirty_fields:
                 raise FileOrchestrationJournalError(
                     "file_journal_clean_reservation_required",
@@ -1333,6 +1336,7 @@ class FileOrchestrationJournalRepository:
                     "exit_code": None,
                     "error_code": None,
                     "error_message": None,
+                    "cancellation_receipt_recorded": False,
                     "idempotency_key": idempotency_key,
                     "updated_at": _format_utc(_utcnow()),
                 }
@@ -1441,6 +1445,15 @@ class FileOrchestrationJournalRepository:
             raise TypeError("transition must be AcceptedSubmitTransition")
         if transition.submit_outcome != "accepted":
             raise ValueError("submit-attempt commit requires an accepted transition")
+        if type(transition.status) is not str or transition.status not in {
+            "submitted",
+            "pending",
+            "queued",
+            "running",
+        }:
+            raise FileOrchestrationJournalError(
+                "file_journal_evidence_enum_invalid", field="status"
+            )
         requested_id = str(slurm_job_id)
         if not requested_id.isdigit():
             raise ValueError("submit-attempt commit requires a numeric Slurm master job id")
@@ -1744,7 +1757,10 @@ class FileOrchestrationJournalRepository:
                 return AcceptedSubmitCommitResult("stale", dict(existing))
             if str(existing.get("status") or "") == "cancellation_pending":
                 return AcceptedSubmitCommitResult("idempotent", dict(existing))
-            if str(existing.get("status") or "") == "reconcile_unverified":
+            if (
+                str(existing.get("status") or "") == "reconcile_unverified"
+                and bool(existing.get("cancellation_receipt_recorded", False))
+            ):
                 return AcceptedSubmitCommitResult("stale", dict(existing))
             if str(existing.get("status") or "") not in set(expected_statuses):
                 return AcceptedSubmitCommitResult("stale", dict(existing))
@@ -1796,6 +1812,7 @@ class FileOrchestrationJournalRepository:
                     "error_code": desired_error_code,
                     "error_message": _durable_error_message(error_message),
                     "log_uri": log_uri,
+                    "cancellation_receipt_recorded": True,
                 }
                 if all(existing.get(field) == value for field, value in desired.items()):
                     return AcceptedSubmitCommitResult("idempotent", dict(existing))
@@ -1811,6 +1828,7 @@ class FileOrchestrationJournalRepository:
                     "error_code": desired_error_code,
                     "error_message": _durable_error_message(error_message),
                     "log_uri": log_uri,
+                    "cancellation_receipt_recorded": True,
                     "updated_at": _format_utc(_utcnow()),
                 }
             )
@@ -2049,6 +2067,12 @@ class FileOrchestrationJournalRepository:
     ) -> int:
         """Move one still-reserved cohort to retryable exactly once under its cycle lock."""
         versioned = accepted_submit_contract_version == ACCEPTED_SUBMIT_CONTRACT_VERSION
+        if versioned and (
+            type(expected_submission_attempt) is not int or expected_submission_attempt < 1
+        ):
+            raise FileOrchestrationJournalError(
+                "file_journal_evidence_type_invalid", field="expected_submission_attempt"
+            )
         if versioned:
             source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
         else:
@@ -2097,7 +2121,9 @@ class FileOrchestrationJournalRepository:
                     return 0
                 if not anchor_matches:
                     return 0
-            if expected_submission_attempt is not None and max(
+            if versioned and existing.get("submission_attempt") != expected_submission_attempt:
+                return 0
+            if not versioned and expected_submission_attempt is not None and max(
                 int(existing.get("submission_attempt") or 1), 1
             ) != max(int(expected_submission_attempt), 1):
                 return 0
@@ -2205,6 +2231,15 @@ class FileOrchestrationJournalRepository:
         log_uri: str | None = None,
     ) -> dict[str, int]:
         """Project one accounting pass under one cycle lock and one materialization/model."""
+        if type(master_status) is not str or master_status not in {
+            "succeeded",
+            "partially_failed",
+            "failed",
+            "cancelled",
+        }:
+            raise FileOrchestrationJournalError(
+                "file_journal_evidence_enum_invalid", field="master_status"
+            )
         source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
             existing = self._accepted_submit_job_for_id_unlocked(
@@ -3801,7 +3836,28 @@ class FileOrchestrationJournalRepository:
         return source_id, cycle_time
 
     def _validate_reconcile_inventory_migration_marker(self, marker: Mapping[str, Any]) -> None:
-        if marker.get("schema_version") != _RECONCILE_INVENTORY_MIGRATION_SCHEMA_VERSION:
+        if set(marker) != {"schema_version", "completed_at"} or marker.get(
+            "schema_version"
+        ) != _RECONCILE_INVENTORY_MIGRATION_SCHEMA_VERSION:
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_migration_invalid",
+                field="reconcile_inventory_migration",
+            )
+        completed_at = marker.get("completed_at")
+        if type(completed_at) is not str or not completed_at.endswith("Z"):
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_migration_invalid",
+                field="reconcile_inventory_migration",
+            )
+        try:
+            parsed = datetime.fromisoformat(completed_at.removesuffix("Z") + "+00:00")
+            canonical = _format_utc(_ensure_utc(parsed))
+        except (TypeError, ValueError, OverflowError) as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_migration_invalid",
+                field="reconcile_inventory_migration",
+            ) from error
+        if canonical != completed_at:
             raise FileOrchestrationJournalError(
                 "file_journal_reconcile_inventory_migration_invalid",
                 field="reconcile_inventory_migration",
@@ -3920,15 +3976,38 @@ class FileOrchestrationJournalRepository:
                 field="pipeline_jobs",
             )
         for entry_name in sorted(entry_names):
+            if entry_name == "by-cycle":
+                try:
+                    mode = stat_no_follow(directory / entry_name, containment_root=self.root).st_mode
+                except (FileNotFoundError, OSError, SafeFilesystemError) as error:
+                    raise FileOrchestrationJournalError(
+                        "file_journal_reconcile_inventory_migration_invalid",
+                        field="pipeline_jobs",
+                    ) from error
+                if not stat.S_ISDIR(mode):
+                    raise FileOrchestrationJournalError(
+                        "file_journal_reconcile_inventory_migration_invalid",
+                        field="pipeline_jobs",
+                    )
+                continue
             if not entry_name.endswith(".json"):
-                continue
+                raise FileOrchestrationJournalError(
+                    "file_journal_reconcile_inventory_migration_invalid",
+                    field="pipeline_jobs",
+                )
             if _SAFE_SEGMENT_RE.fullmatch(entry_name) is None:
-                continue
+                raise FileOrchestrationJournalError(
+                    "file_journal_reconcile_inventory_migration_invalid",
+                    field="pipeline_jobs",
+                )
             path = directory / entry_name
             try:
                 mode = stat_no_follow(path, containment_root=self.root).st_mode
             except FileNotFoundError:
-                continue
+                raise FileOrchestrationJournalError(
+                    "file_journal_reconcile_inventory_migration_invalid",
+                    field="pipeline_jobs",
+                )
             except (OSError, SafeFilesystemError) as error:
                 raise FileOrchestrationJournalError(
                     "file_journal_reconcile_inventory_migration_unavailable",
@@ -4173,6 +4252,7 @@ class FileOrchestrationJournalRepository:
             "reconciliation_reason_class": record.get("reconciliation_reason_class"),
             "matched_slurm_job_id": record.get("matched_slurm_job_id"),
             "candidate_projections": _bounded_candidate_projections(record.get("candidate_projections")),
+            "cancellation_receipt_recorded": record.get("cancellation_receipt_recorded", False),
             "native_shud_resubmitted": record.get("native_shud_resubmitted"),
             "created_at": _optional_format_datetime(record.get("created_at"), field="created_at") or now,
             "updated_at": _optional_format_datetime(record.get("updated_at"), field="updated_at") or now,

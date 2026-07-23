@@ -257,6 +257,12 @@ Unknown, backward, unbound, or pre-acceptance runtime updates MUST be
 zero-write. `cancellation_pending` is a sticky durable intent: ordinary
 queued/running accounting MUST NOT overwrite it, and only typed cancellation
 completion or exact terminal task accounting/projection MAY leave it.
+Poll-timeout unverified state and a completed cancellation receipt MUST remain
+durably distinguishable. A reopened poll-timeout job MAY accept a typed
+cancellation intent and invoke the Gateway, while replay of a completed
+cancellation receipt MUST be idempotent and MUST NOT cancel again.
+The receipt discriminator is current-attempt typed authority: a fresh
+reservation MUST start false and reclaiming a new attempt MUST clear it.
 
 A Gateway timeout MUST persist only the ambiguous submit outcome and MUST leave
 `reconciliation_source`, `reconciliation_decision`, and
@@ -270,6 +276,13 @@ malformed success response, or unclassified Gateway failure MUST persist
 `submit_result_ambiguous` and reconcile by exact comment. A proven rejection
 MUST atomically terminalize the master and all matching-attempt hydro members;
 partial member terminalization MUST NOT be observable after reopen.
+The Gateway response adapter and accepted-bind commit boundary MUST both
+validate a closed submit-status enum. Null, empty, unknown, or otherwise
+malformed success status MUST NOT bind the returned Slurm ID; it remains a
+reserved, unbound ambiguous attempt in restart inventory until exact-comment
+reconciliation proves ownership. The same master-status enum MUST be validated
+when existing current-version journal/direct evidence is replayed; malformed
+persisted state fails closed rather than removing its anchor.
 
 Every repeated typed transition with the same normalized current-attempt state
 and evidence MUST be a zero-write replay: it MUST NOT append the cycle journal,
@@ -479,6 +492,12 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
   journal, or legacy-active authority input prevents the migration completion
   marker; after repair, reopen resumes migration and publishes the marker only
   after every authority surface is proven complete
+- **AND** every unexpected flat `.json` entry, including an unsafe filename or
+  disappearance after enumeration, is an authority blocker rather than a
+  skipped file
+- **AND** the migration completion marker has exactly its schema version and a
+  canonical aware-UTC `completed_at`; a missing, malformed, naive, or extended
+  marker fails closed without setting process-local completion state
 - **AND** the oldest active cohort remains discoverable after reopen while a
   terminal cohort is removed from the active index only in the same durable
   transition that makes it ineligible for reconciliation
@@ -510,12 +529,20 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
 - **THEN** it does not create a marker-free retry clone or use a generic master
   status mutation
 - **AND** retry stays within the attempt-aware accepted-submit lifecycle
+- **AND** retry permission requires a positive integer expected attempt and the
+  exact immutable attempt anchor under the same cycle lock; missing or invalid
+  CAS inputs are zero-write typed errors
 - **AND** non-terminal synchronization uses the typed runtime transition while
   terminal truth is finalized only by exact task accounting/projection
 - **AND** cancellation intent is durable before the external cancel call, so a
   process or Gateway failure remains recoverable on reopen
 - **AND** queued or running status observed after reopen preserves the pending
   cancellation intent until typed cancel completion or exact terminal truth
+- **AND** a forecast poll timeout ends the current pass as `reconciling` and
+  cannot submit parse or state-save before exact terminal accounting
+- **AND** a poll-timeout unverified job can still persist a cancellation intent
+  and invoke the Gateway exactly once, while an existing cancellation receipt
+  remains idempotent
 - **AND** proven rejection without a real Slurm master ID is not retained as
   terminal task-projection work in the active-reconcile inventory.
 

@@ -34,6 +34,21 @@ class StageExecutionOrchestrator(Protocol):
 
 
 _FORECAST_STAGE_ALIASES = frozenset({"forecast", "run_shud_forecast", "run_shud_forecast_array"})
+_ACCEPTED_GATEWAY_SUBMIT_STATUSES = frozenset(
+    {
+        "submitted",
+        "pending",
+        "queued",
+        "running",
+        "succeeded",
+        "partially_failed",
+        "failed",
+        "cancelled",
+        "submission_failed",
+        "reservation_lost",
+        "permanently_failed",
+    }
+)
 
 
 def is_forecast_cohort_stage(stage: StageDefinition) -> bool:
@@ -81,10 +96,11 @@ def _update_runtime_pipeline_status(
     error_message: Any = None,
     log_uri: Any = None,
 ) -> tuple[str | None, dict[str, Any]]:
-    if (
+    accepted_submit_runtime = bool(
         getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
         and is_forecast_cohort_stage(stage)
-    ):
+    )
+    if accepted_submit_runtime:
         transitioner = getattr(orchestrator.repository, "transition_pipeline_job_runtime_status", None)
         if not callable(transitioner):
             raise OrchestratorError(
@@ -288,6 +304,22 @@ def submit_and_wait_cycle_stage(
             error = OrchestratorError(
                 "SLURM_GATEWAY_INVALID_RESPONSE",
                 "Slurm submit response did not contain a valid master job id.",
+            )
+            error.submit_disposition = SubmitDisposition.AMBIGUOUS
+            raise error
+        raw_submitted_status = submitted.get("status")
+        raw_status_value = getattr(raw_submitted_status, "value", raw_submitted_status)
+        if (
+            accepted_submit_repository
+            and (
+                type(raw_status_value) is not str
+                or not raw_status_value
+                or raw_status_value not in _ACCEPTED_GATEWAY_SUBMIT_STATUSES
+            )
+        ):
+            error = OrchestratorError(
+                "SLURM_GATEWAY_INVALID_RESPONSE",
+                "Slurm submit response did not contain a recognized status.",
             )
             error.submit_disposition = SubmitDisposition.AMBIGUOUS
             raise error
@@ -804,8 +836,15 @@ def resume_cycle_stage(
     if (
         stage.is_array
         and job.get("slurm_job_id")
+        and status != "reconcile_unverified"
         and (
-            status not in {"failed", "cancelled", "submission_failed", "permanently_failed"}
+            status
+            not in {
+                "failed",
+                "cancelled",
+                "submission_failed",
+                "permanently_failed",
+            }
             or (
                 getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
                 and is_forecast_cohort_stage(stage)
@@ -1005,10 +1044,11 @@ def record_cycle_stage_poll_timeout(
         else None
     )
     log_uri = publication_attempt.advertised_uri if publication_attempt is not None else None
-    if (
+    accepted_submit_timeout = bool(
         getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
         and is_forecast_cohort_stage(stage)
-    ):
+    )
+    if accepted_submit_timeout:
         transition = getattr(
             orchestrator.repository,
             "transition_pipeline_job_runtime_status",
@@ -1050,13 +1090,19 @@ def record_cycle_stage_poll_timeout(
             log_uri=log_uri,
         )
     terminal.update(record)
+    event_type = "reconcile_unverified" if accepted_submit_timeout else "timeout"
+    event_status = "reconcile_unverified" if accepted_submit_timeout else "failed"
     orchestrator.repository.insert_pipeline_event(
         entity_type="pipeline_job",
         entity_id=pipeline_job_id,
-        event_type="timeout",
+        event_type=event_type,
         status_from=previous_status or current_status,
-        status_to="failed",
-        message=message,
+        status_to=event_status,
+        message=(
+            "Slurm accounting is not terminal; exact accounting reconciliation is required."
+            if accepted_submit_timeout
+            else message
+        ),
         details=deps.safe_pipeline_event_details(
             {
                 "stage": stage.stage,
@@ -1076,13 +1122,14 @@ def record_cycle_stage_poll_timeout(
         message="Slurm accounting did not reach a terminal state before timeout.",
         details={"timeout_seconds": orchestrator.config.job_timeout_seconds},
     )
-    orchestrator.repository.update_forecast_cycle_status(
-        source_id=context.source_id,
-        cycle_time=context.cycle_time,
-        status=stage.failure_cycle_status,
-        error_code="SLURM_JOB_TIMEOUT",
-        error_message=message,
-    )
+    if not accepted_submit_timeout:
+        orchestrator.repository.update_forecast_cycle_status(
+            source_id=context.source_id,
+            cycle_time=context.cycle_time,
+            status=stage.failure_cycle_status,
+            error_code="SLURM_JOB_TIMEOUT",
+            error_message=message,
+        )
     return TerminalJobObservation(job=terminal, publication_attempt=publication_attempt)
 
 

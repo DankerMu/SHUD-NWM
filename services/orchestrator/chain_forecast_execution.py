@@ -209,7 +209,7 @@ def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult
                         )
                         break
 
-                    if result.status == "submit_result_ambiguous":
+                    if result.status in {"submit_result_ambiguous", "reconcile_unverified"}:
                         pipeline_result = PipelineResult(
                             context.run_id,
                             context.cycle_id,
@@ -525,6 +525,8 @@ def _after_cycle_stage_terminal(
     terminal: dict[str, Any],
     aggregation: ArrayAggregation | None,
 ) -> None:
+    if result_status == "reconcile_unverified":
+        return
     if stage.stage == "forecast" and aggregation is not None:
         _update_array_forecast_hydro_statuses(self, context, aggregation)
     if result_status == "succeeded":

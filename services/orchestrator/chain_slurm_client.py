@@ -6,6 +6,7 @@ from typing import Any, Callable, Mapping, Sequence
 import httpx
 
 from services.orchestrator.chain_types import OrchestratorError
+from services.slurm_gateway.models import SlurmJobStatus
 
 __all__ = ("HttpSlurmGatewayClient",)
 
@@ -52,6 +53,7 @@ _PROVEN_PRE_ACCEPTANCE_REJECTION_CODES = frozenset(
     }
 )
 _SUBMIT_JOB_ID_RE = re.compile(r"^(?:\d+|mock_\d+)$")
+_SUBMIT_RESPONSE_STATUSES = frozenset(status.value for status in SlurmJobStatus)
 
 
 class HttpSlurmGatewayClient:
@@ -173,6 +175,14 @@ class HttpSlurmGatewayClient:
             raise self._error(
                 "SLURM_GATEWAY_INVALID_RESPONSE",
                 "Slurm Gateway submit response did not contain a valid master job id.",
+                {"response_fields": sorted(str(key) for key in response)},
+                submit_disposition="ambiguous",
+            )
+        status = response.get("status")
+        if not isinstance(status, str) or status not in _SUBMIT_RESPONSE_STATUSES:
+            raise self._error(
+                "SLURM_GATEWAY_INVALID_RESPONSE",
+                "Slurm Gateway submit response did not contain a valid status.",
                 {"response_fields": sorted(str(key) for key in response)},
                 submit_disposition="ambiguous",
             )

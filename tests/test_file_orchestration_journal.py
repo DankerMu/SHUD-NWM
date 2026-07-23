@@ -1430,7 +1430,7 @@ def test_file_orchestration_journal_migration_backfill_is_not_limited_by_former_
     assert [job.job_id for job in inflight] == ["job_reconcile_old_inflight"]
 
 
-def test_file_orchestration_journal_migration_skips_bad_entry_and_keeps_old_active(
+def test_file_orchestration_journal_migration_fails_closed_on_bad_entry_then_keeps_old_active(
     tmp_path: Path,
 ) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
@@ -1467,7 +1467,12 @@ def test_file_orchestration_journal_migration_skips_bad_entry_and_keeps_old_acti
     bad_direct_path = journal_root / "pipeline-jobs/unrelated bad direct.json"
     bad_direct_path.write_text("{not-json", encoding="utf-8")
 
-    reserved = repository.query_reserved_unbound_jobs()
+    with pytest.raises(FileOrchestrationJournalError):
+        repository.query_reserved_unbound_jobs()
+    assert not (journal_root / "reconcile-inventory-migration-v1.json").exists()
+
+    bad_direct_path.rename(journal_root / "quarantine-unrelated-bad-direct.json")
+    reserved = type(repository)(journal_root).query_reserved_unbound_jobs()
 
     assert [job.job_id for job in reserved] == ["job_reconcile_old_reserved_after_bad_direct"]
 
