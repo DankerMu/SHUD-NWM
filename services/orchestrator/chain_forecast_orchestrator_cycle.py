@@ -416,8 +416,8 @@ class ForecastOrchestratorCycleMixin:
         terminal: dict[str, _chain.Any],
         aggregation: _chain.ArrayAggregation,
         log_uri: str | None,
-    ) -> None:
-        _chain.chain_array_accounting.record_cycle_stage_status_override(
+    ) -> dict[str, _chain.Any]:
+        return _chain.chain_array_accounting.record_cycle_stage_status_override(
             self,
             stage,
             context,

@@ -6,7 +6,7 @@ import os
 import re
 import stat
 import threading
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -125,13 +125,23 @@ _RECONCILE_INVENTORY_DIRECTORY = "reconcile-inventory"
 _RECONCILE_INVENTORY_SCHEMA_VERSION = "nhms.scheduler.reconcile_inventory.v1"
 _RECONCILE_INVENTORY_MIGRATION_SCHEMA_VERSION = "nhms.scheduler.reconcile_inventory_migration.v1"
 _RECONCILE_INVENTORY_MIGRATION_MARKER = "reconcile-inventory-migration-v1.json"
+_RECONCILE_INVENTORY_ROLLBACK_PREP_SCHEMA_VERSION = (
+    "nhms.scheduler.reconcile_inventory_rollback_preparation.v2"
+)
+_RECONCILE_INVENTORY_ROLLBACK_PREP_RECEIPT = "reconcile-inventory-rollback-preparation-v2.json"
+_RECONCILE_INVENTORY_ROLLFORWARD_SCHEMA_VERSION = (
+    "nhms.scheduler.reconcile_inventory_rollforward.v1"
+)
+_RECONCILE_INVENTORY_ROLLFORWARD_RECEIPT = "reconcile-inventory-rollforward-v1.json"
 _LEGACY_ACTIVE_RECONCILE_DIRECTORY = "active-reconcile"
 _ATOMIC_TEMP_NONCE_RE = r"[0-9a-f]{32}"
 _RECONCILE_INVENTORY_TEMP_RE = re.compile(
     rf"^\.(?P<target>[A-Za-z0-9_.-]+\.json)\.{_ATOMIC_TEMP_NONCE_RE}\.tmp$"
 )
 _RECONCILE_MIGRATION_TEMP_RE = re.compile(
-    rf"^\.{re.escape(_RECONCILE_INVENTORY_MIGRATION_MARKER)}\.{_ATOMIC_TEMP_NONCE_RE}\.tmp$"
+    rf"^\.(?:{re.escape(_RECONCILE_INVENTORY_MIGRATION_MARKER)}|"
+    rf"{re.escape(_RECONCILE_INVENTORY_ROLLBACK_PREP_RECEIPT)}|"
+    rf"{re.escape(_RECONCILE_INVENTORY_ROLLFORWARD_RECEIPT)})\.{_ATOMIC_TEMP_NONCE_RE}\.tmp$"
 )
 _LATEST_REPLAY_ORDER_SENTINEL = MAX_FILE_JOURNAL_RECORDS + 1
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -487,14 +497,17 @@ class FileOrchestrationJournalRepository:
         )
         if hydro_run is not None and not hydro_run_matches:
             return False
-        if hydro_run_matches and str(hydro_run.get("status") or "") in COMPLETED_HYDRO_STATUSES:
-            return True
-        return any(
+        has_terminal_completion = any(
             _job_is_terminal_success(job)
             and _job_is_current_terminal_completion(job)
             and _job_matches_candidate(job, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
             for job in _current_terminal_jobs(rows.pipeline_jobs.values())
         )
+        if chain_repository_state._compute_state_save_qc_terminal_enabled():
+            return has_terminal_completion
+        if hydro_run_matches and str(hydro_run.get("status") or "") in COMPLETED_HYDRO_STATUSES:
+            return True
+        return has_terminal_completion
 
     def active_slurm_jobs(
         self,
@@ -2251,9 +2264,24 @@ class FileOrchestrationJournalRepository:
                 existing is None
                 or not accepted_submit_contract_is_current(existing)
                 or accepted_submit_row_kind(existing) != "master"
-                or str(existing.get("slurm_job_id") or "") != master_slurm_job_id
             ):
                 return {"total": 0, "pipeline_status": 0, "pipeline_event": 0}
+            if str(existing.get("slurm_job_id") or "") != master_slurm_job_id:
+                result = self._defer_forecast_cohort_projection_unlocked(
+                    existing,
+                    reconciliation_decision="identity_mismatch_blocked",
+                    reconciliation_reason_class=None,
+                    error_code="SLURM_MASTER_IDENTITY_MISMATCH",
+                    error_message="terminal Slurm master id did not match the durable accepted submit",
+                    finished_at=finished_at,
+                    exit_code=exit_code,
+                    log_uri=log_uri,
+                )
+                return {
+                    "total": 1 if result.wrote else 0,
+                    "pipeline_status": 1 if result.wrote else 0,
+                    "pipeline_event": 0,
+                }
             if reconciliation_decision != "matched_bound":
                 raise FileOrchestrationJournalError(
                     "file_journal_evidence_enum_invalid", field="reconciliation_decision"
@@ -2323,6 +2351,22 @@ class FileOrchestrationJournalRepository:
                     "file_journal_task_identity_mismatch",
                     field="candidate_projections",
                 )
+            if not complete:
+                result = self._defer_forecast_cohort_projection_unlocked(
+                    existing,
+                    reconciliation_decision="accounting_unavailable",
+                    reconciliation_reason_class="coverage_incomplete",
+                    error_code="SLURM_TASK_ACCOUNTING_INCOMPLETE",
+                    error_message="terminal Slurm array task accounting was incomplete",
+                    finished_at=finished_at,
+                    exit_code=exit_code,
+                    log_uri=log_uri,
+                )
+                return {
+                    "total": 1 if result.wrote else 0,
+                    "pipeline_status": 1 if result.wrote else 0,
+                    "pipeline_event": 0,
+                }
             verified: list[dict[str, Any]] = []
             for projection in sorted(normalized_projections, key=lambda item: int(item["array_task_id"])):
                 if projection.get("array_task_outcome") not in {"succeeded", "failed"}:
@@ -2420,7 +2464,7 @@ class FileOrchestrationJournalRepository:
                     hydro_row = dict(hydro)
                     hydro_row.update(
                         {
-                            "status": "created",
+                            "status": "succeeded",
                             "slurm_job_id": candidate_job["slurm_job_id"],
                             "error_code": None,
                             "error_message": None,
@@ -2575,6 +2619,108 @@ class FileOrchestrationJournalRepository:
                 "pipeline_status": len(records) - event_writes,
                 "pipeline_event": event_writes,
             }
+
+    def defer_forecast_cohort_projection(
+        self,
+        job_id: str,
+        *,
+        reconciliation_decision: str,
+        reconciliation_reason_class: str | None,
+        error_code: str,
+        error_message: str,
+        finished_at: datetime | None = None,
+        exit_code: int | None = None,
+        log_uri: str | None = None,
+    ) -> AcceptedSubmitCommitResult:
+        """Fail one current forecast projection closed without touching cohort members."""
+
+        source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._accepted_submit_job_for_id_unlocked(
+                job_id,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            if (
+                existing is None
+                or not accepted_submit_contract_is_current(existing)
+                or accepted_submit_row_kind(existing) != "master"
+            ):
+                return AcceptedSubmitCommitResult("stale", dict(existing or {}))
+            return self._defer_forecast_cohort_projection_unlocked(
+                existing,
+                reconciliation_decision=reconciliation_decision,
+                reconciliation_reason_class=reconciliation_reason_class,
+                error_code=error_code,
+                error_message=error_message,
+                finished_at=finished_at,
+                exit_code=exit_code,
+                log_uri=log_uri,
+            )
+
+    def _defer_forecast_cohort_projection_unlocked(
+        self,
+        existing: Mapping[str, Any],
+        *,
+        reconciliation_decision: str,
+        reconciliation_reason_class: str | None,
+        error_code: str,
+        error_message: str,
+        finished_at: datetime | None,
+        exit_code: int | None,
+        log_uri: str | None,
+    ) -> AcceptedSubmitCommitResult:
+        current_status = str(existing.get("status") or "")
+        if current_status in TERMINAL_PIPELINE_STATUSES:
+            return AcceptedSubmitCommitResult("idempotent", dict(existing))
+        if (
+            existing.get("submit_outcome") != "accepted"
+            or not str(existing.get("slurm_job_id") or "").isdigit()
+        ):
+            return AcceptedSubmitCommitResult("stale", dict(existing))
+        row = apply_accepted_submit_transition(
+            existing,
+            AcceptedSubmitTransition.accounting(
+                reconciliation_decision,
+                submit_outcome="accepted",
+                reconciliation_reason_class=reconciliation_reason_class,
+                status="reconcile_unverified",
+            ),
+        )
+        row.update(
+            {
+                "status": "reconcile_unverified",
+                "error_code": error_code,
+                "error_message": _durable_error_message(error_message),
+                "updated_at": _format_utc(_utcnow()),
+            }
+        )
+        if finished_at is not None:
+            row["finished_at"] = _format_utc(finished_at)
+        if exit_code is not None:
+            row["exit_code"] = exit_code
+        if log_uri is not None:
+            row["log_uri"] = log_uri
+        changed_fields = (
+            "status",
+            "reconciliation_source",
+            "reconciliation_decision",
+            "reconciliation_reason_class",
+            "matched_slurm_job_id",
+            "error_code",
+            "error_message",
+            "finished_at",
+            "exit_code",
+            "log_uri",
+        )
+        if all(row.get(field) == existing.get(field) for field in changed_fields):
+            return AcceptedSubmitCommitResult("idempotent", dict(existing))
+        written = self._write_pipeline_job_unlocked(
+            row,
+            exclusive_direct=False,
+            model_id=None,
+        )
+        return AcceptedSubmitCommitResult("applied", written)
 
     def update_pipeline_job_status(
         self,
@@ -3664,12 +3810,21 @@ class FileOrchestrationJournalRepository:
             with self._reconcile_inventory_file_lock_unlocked():
                 self._cleanup_reconcile_migration_temp_residues_unlocked()
                 marker_path = self.root / _RECONCILE_INVENTORY_MIGRATION_MARKER
+                rollback_fence = self._read_optional_json(
+                    self.root / _RECONCILE_INVENTORY_ROLLBACK_PREP_RECEIPT
+                )
+                if rollback_fence is not None:
+                    self._validated_reconcile_inventory_rollback_receipt(rollback_fence)
+                    raise FileOrchestrationJournalError(
+                        "file_journal_rollforward_required",
+                        field="reconcile_inventory_rollback_receipt",
+                    )
                 marker = self._read_optional_json(marker_path)
                 if marker is not None:
                     self._validate_reconcile_inventory_migration_marker(marker)
                     self._reconcile_inventory_migration_checked = True
                     return
-                self._backfill_reconcile_inventory_unlocked()
+                self._stable_backfill_reconcile_inventory_unlocked()
                 self._atomic_write_json_unlocked(
                     marker_path,
                     {
@@ -3679,6 +3834,567 @@ class FileOrchestrationJournalRepository:
                 )
                 self._cleanup_reconcile_migration_temp_residues_unlocked()
                 self._reconcile_inventory_migration_checked = True
+
+    def _prepare_reconcile_inventory_rollback_under_scheduler_lease(
+        self,
+        *,
+        scheduler_lease_identity: Mapping[str, Any],
+        scheduler_lease_guard: Callable[[], bool],
+        scheduler_state: str,
+        active_scheduler_processes: int,
+        checked_at: datetime,
+        checked_by: str,
+        target_writer_generation: str,
+    ) -> dict[str, Any]:
+        """Invalidate migration completion while the production lease is held."""
+
+        if scheduler_state != "stopped" or type(active_scheduler_processes) is not int:
+            raise FileOrchestrationJournalError(
+                "file_journal_rollback_preflight_invalid",
+                field="scheduler_state",
+            )
+        if active_scheduler_processes != 0:
+            raise FileOrchestrationJournalError(
+                "file_journal_rollback_preflight_active",
+                field="active_scheduler_processes",
+            )
+        checked_at = _ensure_utc(checked_at)
+        checked_by = _safe_identity_text(checked_by, field="checked_by")
+        target_writer_generation = _safe_identity_text(
+            target_writer_generation,
+            field="target_writer_generation",
+        )
+        lease_identity = self._validated_scheduler_lease_identity(scheduler_lease_identity)
+        with self._write_lock:
+            self._ensure_root_unlocked()
+            with self._reconcile_inventory_file_lock_unlocked():
+                self._cleanup_reconcile_migration_temp_residues_unlocked()
+                marker_path = self.root / _RECONCILE_INVENTORY_MIGRATION_MARKER
+                marker = self._read_optional_json(marker_path)
+                receipt_path = self.root / _RECONCILE_INVENTORY_ROLLBACK_PREP_RECEIPT
+                prior_receipt = self._read_optional_json(receipt_path)
+                rollforward_path = self.root / _RECONCILE_INVENTORY_ROLLFORWARD_RECEIPT
+                prior_rollforward = self._read_optional_json(rollforward_path)
+                if marker is None:
+                    if prior_receipt is not None:
+                        validated = self._validated_reconcile_inventory_rollback_receipt(
+                            prior_receipt
+                        )
+                        if (
+                            validated["status"] == "preparing"
+                            and validated["scheduler_lease_identity"] == lease_identity
+                        ):
+                            validated["status"] = "prepared"
+                            self._require_scheduler_lease_guard(scheduler_lease_guard)
+                            self._atomic_write_json_unlocked(receipt_path, validated)
+                        if (
+                            validated["status"] == "prepared"
+                            and validated["scheduler_lease_identity"] == lease_identity
+                        ):
+                            self._reconcile_inventory_migration_checked = False
+                            return validated
+                    raise FileOrchestrationJournalError(
+                        "file_journal_rollback_preparation_authority_missing",
+                        field="reconcile_inventory_migration",
+                    )
+                self._validate_reconcile_inventory_migration_marker(marker)
+                if prior_receipt is not None:
+                    raise FileOrchestrationJournalError(
+                        "file_journal_rollback_fence_conflict",
+                        field="reconcile_inventory_rollback_receipt",
+                    )
+                if prior_rollforward is not None:
+                    completed = self._validated_reconcile_inventory_rollforward_receipt(
+                        prior_rollforward
+                    )
+                    if completed["restored_marker"] != marker:
+                        raise FileOrchestrationJournalError(
+                            "file_journal_rollforward_state_invalid",
+                            field="reconcile_inventory_migration",
+                        )
+                    self._require_scheduler_lease_guard(scheduler_lease_guard)
+                    try:
+                        unlink_no_follow(rollforward_path, containment_root=self.root)
+                    except (FileNotFoundError, OSError, SafeFilesystemError) as error:
+                        raise FileOrchestrationJournalError(
+                            "file_journal_rollback_preparation_unavailable",
+                            field="reconcile_inventory_rollforward_receipt",
+                        ) from error
+                prepared_at = _format_utc(_utcnow())
+                preflight = {
+                    "scheduler_state": scheduler_state,
+                    "active_scheduler_processes": active_scheduler_processes,
+                    "checked_at": _format_utc(checked_at),
+                    "checked_by": checked_by,
+                    "target_writer_generation": target_writer_generation,
+                }
+                root_identity = self._journal_root_identity_unlocked()
+                signed = {
+                    "journal_root_identity": root_identity,
+                    "marker": marker,
+                    "preflight": preflight,
+                    "prepared_at": prepared_at,
+                    "scheduler_lease_identity": lease_identity,
+                }
+                receipt = {
+                    "schema_version": _RECONCILE_INVENTORY_ROLLBACK_PREP_SCHEMA_VERSION,
+                    "receipt_id": hashlib.sha256(
+                        json.dumps(signed, separators=(",", ":"), sort_keys=True).encode("utf-8")
+                    ).hexdigest(),
+                    "status": "preparing",
+                    "prepared_at": prepared_at,
+                    "preflight": preflight,
+                    "invalidated_marker": dict(marker),
+                    "journal_root_identity": root_identity,
+                    "scheduler_lease_identity": lease_identity,
+                }
+                self._require_scheduler_lease_guard(scheduler_lease_guard)
+                self._atomic_write_json_unlocked(receipt_path, receipt)
+                self._require_scheduler_lease_guard(scheduler_lease_guard)
+                try:
+                    unlink_no_follow(marker_path, containment_root=self.root)
+                except (FileNotFoundError, OSError, SafeFilesystemError) as error:
+                    raise FileOrchestrationJournalError(
+                        "file_journal_rollback_preparation_unavailable",
+                        field="reconcile_inventory_migration",
+                    ) from error
+                receipt["status"] = "prepared"
+                self._require_scheduler_lease_guard(scheduler_lease_guard)
+                self._atomic_write_json_unlocked(receipt_path, receipt)
+                self._cleanup_reconcile_migration_temp_residues_unlocked()
+                self._reconcile_inventory_migration_checked = False
+                return dict(receipt)
+
+    def _require_reconcile_inventory_rollback_prepared(
+        self,
+        *,
+        receipt_id: str,
+        scheduler_lease_identity: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Fail closed unless the old-writer launch boundary was prepared."""
+
+        expected_lease_identity = self._validated_scheduler_lease_identity(
+            scheduler_lease_identity
+        )
+        with self._write_lock:
+            self._ensure_root_unlocked()
+            with self._reconcile_inventory_file_lock_unlocked():
+                marker = self._read_optional_json(
+                    self.root / _RECONCILE_INVENTORY_MIGRATION_MARKER
+                )
+                receipt = self._read_optional_json(
+                    self.root / _RECONCILE_INVENTORY_ROLLBACK_PREP_RECEIPT
+                )
+                if marker is not None or receipt is None:
+                    raise FileOrchestrationJournalError(
+                        "file_journal_rollback_not_prepared",
+                        field="reconcile_inventory_migration",
+                    )
+                validated = self._validated_reconcile_inventory_rollback_receipt(receipt)
+                if (
+                    validated["status"] != "prepared"
+                    or validated["receipt_id"] != receipt_id
+                    or validated["scheduler_lease_identity"] != expected_lease_identity
+                ):
+                    raise FileOrchestrationJournalError(
+                        "file_journal_rollback_not_prepared",
+                        field="reconcile_inventory_migration",
+                    )
+                return validated
+
+    def current_generation_scheduler_rollback_blocker(self) -> dict[str, Any] | None:
+        """Return a bounded blocker while a prepared rollback fence is live."""
+
+        with self._write_lock:
+            self._ensure_root_unlocked()
+            with self._reconcile_inventory_file_lock_unlocked():
+                receipt = self._read_optional_json(
+                    self.root / _RECONCILE_INVENTORY_ROLLBACK_PREP_RECEIPT
+                )
+                if receipt is None:
+                    return None
+                try:
+                    validated = self._validated_reconcile_inventory_rollback_receipt(receipt)
+                except FileOrchestrationJournalError:
+                    return {"reason": "file_journal_rollback_fence_invalid", "receipt_id": None}
+                return {
+                    "reason": (
+                        "file_journal_rollback_fence_prepared"
+                        if validated["status"] in {"prepared", "rolling_forward"}
+                        else "file_journal_rollback_fence_invalid"
+                    ),
+                    "receipt_id": validated["receipt_id"],
+                }
+
+    def _complete_reconcile_inventory_rollforward_under_scheduler_lease(
+        self,
+        *,
+        preparation_receipt_id: str,
+        scheduler_lease_identity: Mapping[str, Any],
+        scheduler_lease_guard: Callable[[], bool],
+    ) -> dict[str, Any]:
+        expected_lease_identity = self._validated_scheduler_lease_identity(
+            scheduler_lease_identity
+        )
+        with self._write_lock:
+            self._ensure_root_unlocked()
+            with self._reconcile_inventory_file_lock_unlocked():
+                self._cleanup_reconcile_migration_temp_residues_unlocked()
+                marker_path = self.root / _RECONCILE_INVENTORY_MIGRATION_MARKER
+                fence_path = self.root / _RECONCILE_INVENTORY_ROLLBACK_PREP_RECEIPT
+                rollforward_path = self.root / _RECONCILE_INVENTORY_ROLLFORWARD_RECEIPT
+                fence = self._read_optional_json(fence_path)
+                prior_rollforward = self._read_optional_json(rollforward_path)
+                if fence is None:
+                    if prior_rollforward is not None:
+                        completed = self._validated_reconcile_inventory_rollforward_receipt(
+                            prior_rollforward
+                        )
+                        if (
+                            completed["preparation_receipt_id"] == preparation_receipt_id
+                            and completed["scheduler_lease_identity"] == expected_lease_identity
+                        ):
+                            completed_marker = self._read_optional_json(marker_path)
+                            if completed_marker != completed["restored_marker"]:
+                                raise FileOrchestrationJournalError(
+                                    "file_journal_rollforward_state_invalid",
+                                    field="reconcile_inventory_migration",
+                                )
+                            self._reconcile_inventory_migration_checked = True
+                            return completed
+                    raise FileOrchestrationJournalError(
+                        "file_journal_rollforward_not_prepared",
+                        field="reconcile_inventory_rollback_receipt",
+                    )
+                prepared = self._validated_reconcile_inventory_rollback_receipt(fence)
+                if (
+                    prepared["receipt_id"] != preparation_receipt_id
+                    or prepared["scheduler_lease_identity"] != expected_lease_identity
+                    or prepared["status"] not in {"prepared", "rolling_forward"}
+                ):
+                    raise FileOrchestrationJournalError(
+                        "file_journal_rollforward_not_prepared",
+                        field="reconcile_inventory_rollback_receipt",
+                    )
+                marker = self._read_optional_json(marker_path)
+                if prepared["status"] == "prepared":
+                    if marker is not None:
+                        raise FileOrchestrationJournalError(
+                            "file_journal_rollforward_state_invalid",
+                            field="reconcile_inventory_migration",
+                        )
+                    prepared["status"] = "rolling_forward"
+                    self._require_scheduler_lease_guard(scheduler_lease_guard)
+                    self._atomic_write_json_unlocked(fence_path, prepared)
+                if marker is None:
+                    self._stable_backfill_reconcile_inventory_unlocked()
+                    self._require_scheduler_lease_guard(scheduler_lease_guard)
+                    marker = {
+                        "schema_version": _RECONCILE_INVENTORY_MIGRATION_SCHEMA_VERSION,
+                        "completed_at": _format_utc(_utcnow()),
+                    }
+                    self._atomic_write_json_unlocked(marker_path, marker)
+                else:
+                    self._validate_reconcile_inventory_migration_marker(marker)
+                if prior_rollforward is not None:
+                    completed = self._validated_reconcile_inventory_rollforward_receipt(
+                        prior_rollforward
+                    )
+                    if (
+                        completed["preparation_receipt_id"] != preparation_receipt_id
+                        or completed["scheduler_lease_identity"] != expected_lease_identity
+                        or completed["restored_marker"] != marker
+                    ):
+                        raise FileOrchestrationJournalError(
+                            "file_journal_rollforward_receipt_conflict",
+                            field="reconcile_inventory_rollforward_receipt",
+                        )
+                else:
+                    completed = {
+                        "schema_version": _RECONCILE_INVENTORY_ROLLFORWARD_SCHEMA_VERSION,
+                        "preparation_receipt_id": preparation_receipt_id,
+                        "completed_at": _format_utc(_utcnow()),
+                        "journal_root_identity": self._journal_root_identity_unlocked(),
+                        "scheduler_lease_identity": expected_lease_identity,
+                        "restored_marker": dict(marker),
+                    }
+                    completed["receipt_id"] = hashlib.sha256(
+                        json.dumps(completed, separators=(",", ":"), sort_keys=True).encode("utf-8")
+                    ).hexdigest()
+                    self._require_scheduler_lease_guard(scheduler_lease_guard)
+                    self._atomic_write_json_unlocked(rollforward_path, completed)
+                self._require_scheduler_lease_guard(scheduler_lease_guard)
+                try:
+                    unlink_no_follow(fence_path, containment_root=self.root)
+                except (FileNotFoundError, OSError, SafeFilesystemError) as error:
+                    raise FileOrchestrationJournalError(
+                        "file_journal_rollforward_fence_consume_failed",
+                        field="reconcile_inventory_rollback_receipt",
+                    ) from error
+                self._cleanup_reconcile_migration_temp_residues_unlocked()
+                self._reconcile_inventory_migration_checked = True
+                return dict(completed)
+
+    def _require_scheduler_lease_guard(self, guard: Callable[[], bool]) -> None:
+        try:
+            held = guard()
+        except Exception as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_scheduler_lease_lost",
+                field="scheduler_lock",
+            ) from error
+        if not held:
+            raise FileOrchestrationJournalError(
+                "file_journal_scheduler_lease_lost",
+                field="scheduler_lock",
+            )
+
+    def _validated_reconcile_inventory_rollback_receipt(
+        self,
+        receipt: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        required = {
+            "schema_version",
+            "receipt_id",
+            "status",
+            "prepared_at",
+            "preflight",
+            "invalidated_marker",
+            "journal_root_identity",
+            "scheduler_lease_identity",
+        }
+        if (
+            set(receipt) != required
+            or receipt.get("schema_version")
+            != _RECONCILE_INVENTORY_ROLLBACK_PREP_SCHEMA_VERSION
+        ):
+            raise FileOrchestrationJournalError(
+                "file_journal_rollback_receipt_invalid",
+                field="reconcile_inventory_rollback_receipt",
+            )
+        receipt_id = receipt.get("receipt_id")
+        preflight = receipt.get("preflight")
+        invalidated_marker = receipt.get("invalidated_marker")
+        if (
+            not isinstance(receipt_id, str)
+            or receipt.get("status") not in {"preparing", "prepared", "rolling_forward"}
+            or not isinstance(preflight, Mapping)
+            or set(preflight)
+            != {
+                "scheduler_state",
+                "active_scheduler_processes",
+                "checked_at",
+                "checked_by",
+                "target_writer_generation",
+            }
+            or preflight.get("scheduler_state") != "stopped"
+            or type(preflight.get("active_scheduler_processes")) is not int
+            or preflight.get("active_scheduler_processes") != 0
+            or not isinstance(preflight.get("checked_by"), str)
+            or not isinstance(preflight.get("target_writer_generation"), str)
+            or not isinstance(invalidated_marker, Mapping)
+        ):
+            raise FileOrchestrationJournalError(
+                "file_journal_rollback_receipt_invalid",
+                field="reconcile_inventory_rollback_receipt",
+            )
+        self._validate_reconcile_inventory_migration_marker(invalidated_marker)
+        root_identity = self._validated_journal_root_identity(
+            receipt.get("journal_root_identity")
+        )
+        if root_identity != self._journal_root_identity_unlocked():
+            raise FileOrchestrationJournalError(
+                "file_journal_rollback_receipt_wrong_root",
+                field="reconcile_inventory_rollback_receipt",
+            )
+        lease_identity = self._validated_scheduler_lease_identity(
+            receipt.get("scheduler_lease_identity")
+        )
+        _coerce_datetime(receipt.get("prepared_at"), field="prepared_at")
+        _coerce_datetime(preflight.get("checked_at"), field="checked_at")
+        _safe_identity_text(preflight["checked_by"], field="checked_by")
+        _safe_identity_text(preflight["target_writer_generation"], field="target_writer_generation")
+        signed = {
+            "journal_root_identity": root_identity,
+            "marker": invalidated_marker,
+            "preflight": preflight,
+            "prepared_at": receipt.get("prepared_at"),
+            "scheduler_lease_identity": lease_identity,
+        }
+        expected_receipt_id = hashlib.sha256(
+            json.dumps(signed, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        if not re.fullmatch(r"[0-9a-f]{64}", receipt_id) or receipt_id != expected_receipt_id:
+            raise FileOrchestrationJournalError(
+                "file_journal_rollback_receipt_invalid",
+                field="reconcile_inventory_rollback_receipt",
+            )
+        return {
+            **dict(receipt),
+            "journal_root_identity": root_identity,
+            "scheduler_lease_identity": lease_identity,
+        }
+
+    def _validated_reconcile_inventory_rollforward_receipt(
+        self,
+        receipt: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        required = {
+            "schema_version",
+            "receipt_id",
+            "preparation_receipt_id",
+            "completed_at",
+            "journal_root_identity",
+            "scheduler_lease_identity",
+            "restored_marker",
+        }
+        if set(receipt) != required or receipt.get("schema_version") != _RECONCILE_INVENTORY_ROLLFORWARD_SCHEMA_VERSION:
+            raise FileOrchestrationJournalError(
+                "file_journal_rollforward_receipt_invalid",
+                field="reconcile_inventory_rollforward_receipt",
+            )
+        receipt_id = receipt.get("receipt_id")
+        preparation_receipt_id = receipt.get("preparation_receipt_id")
+        if (
+            not isinstance(receipt_id, str)
+            or re.fullmatch(r"[0-9a-f]{64}", receipt_id) is None
+            or not isinstance(preparation_receipt_id, str)
+            or re.fullmatch(r"[0-9a-f]{64}", preparation_receipt_id) is None
+        ):
+            raise FileOrchestrationJournalError(
+                "file_journal_rollforward_receipt_invalid",
+                field="reconcile_inventory_rollforward_receipt",
+            )
+        _coerce_datetime(receipt.get("completed_at"), field="completed_at")
+        root_identity = self._validated_journal_root_identity(
+            receipt.get("journal_root_identity")
+        )
+        if root_identity != self._journal_root_identity_unlocked():
+            raise FileOrchestrationJournalError(
+                "file_journal_rollforward_receipt_wrong_root",
+                field="reconcile_inventory_rollforward_receipt",
+            )
+        lease_identity = self._validated_scheduler_lease_identity(
+            receipt.get("scheduler_lease_identity")
+        )
+        restored_marker = receipt.get("restored_marker")
+        if not isinstance(restored_marker, Mapping):
+            raise FileOrchestrationJournalError(
+                "file_journal_rollforward_receipt_invalid",
+                field="reconcile_inventory_rollforward_receipt",
+            )
+        self._validate_reconcile_inventory_migration_marker(restored_marker)
+        unsigned = {key: value for key, value in receipt.items() if key != "receipt_id"}
+        expected = hashlib.sha256(
+            json.dumps(unsigned, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        if receipt_id != expected:
+            raise FileOrchestrationJournalError(
+                "file_journal_rollforward_receipt_invalid",
+                field="reconcile_inventory_rollforward_receipt",
+            )
+        return {
+            **dict(receipt),
+            "journal_root_identity": root_identity,
+            "scheduler_lease_identity": lease_identity,
+            "restored_marker": dict(restored_marker),
+        }
+
+    def _journal_root_identity_unlocked(self) -> dict[str, Any]:
+        try:
+            metadata = os.stat(self.root, follow_symlinks=False)
+        except OSError as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_root_identity_unavailable",
+                field="journal_root",
+            ) from error
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise FileOrchestrationJournalError(
+                "file_journal_root_identity_invalid",
+                field="journal_root",
+            )
+        return {
+            "path_digest": hashlib.sha256(str(self.root.absolute()).encode("utf-8")).hexdigest(),
+            "device": int(metadata.st_dev),
+            "inode": int(metadata.st_ino),
+        }
+
+    def _validated_journal_root_identity(self, value: Any) -> dict[str, Any]:
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != {"path_digest", "device", "inode"}
+            or not isinstance(value.get("path_digest"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", value["path_digest"]) is None
+            or type(value.get("device")) is not int
+            or type(value.get("inode")) is not int
+        ):
+            raise FileOrchestrationJournalError(
+                "file_journal_root_identity_invalid",
+                field="journal_root_identity",
+            )
+        return dict(value)
+
+    def _validated_scheduler_lease_identity(self, value: Any) -> dict[str, str]:
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != {"backend", "lock_path_digest", "workspace_root_digest"}
+            or value.get("backend") != "file"
+            or not isinstance(value.get("lock_path_digest"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", value["lock_path_digest"]) is None
+            or not isinstance(value.get("workspace_root_digest"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", value["workspace_root_digest"]) is None
+        ):
+            raise FileOrchestrationJournalError(
+                "file_journal_scheduler_lease_identity_invalid",
+                field="scheduler_lease_identity",
+            )
+        return {
+            "backend": "file",
+            "lock_path_digest": value["lock_path_digest"],
+            "workspace_root_digest": value["workspace_root_digest"],
+        }
+
+    def _stable_backfill_reconcile_inventory_unlocked(self) -> str:
+        before = self._reconcile_authority_fingerprint_unlocked()
+        self._backfill_reconcile_inventory_unlocked()
+        after = self._reconcile_authority_fingerprint_unlocked()
+        if before != after:
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_migration_unavailable",
+                field="reconcile_inventory_migration",
+            )
+        return after
+
+    def _reconcile_authority_fingerprint_unlocked(self) -> str:
+        paths = [
+            *self._iter_reconcile_direct_pipeline_job_paths(),
+            *self._iter_migration_legacy_active_paths(),
+            *self._iter_migration_journal_paths(),
+        ]
+        entries: list[tuple[str, int, int]] = []
+        for path in sorted(paths):
+            try:
+                metadata = stat_no_follow(path, containment_root=self.root)
+            except (FileNotFoundError, OSError, SafeFilesystemError) as error:
+                raise FileOrchestrationJournalError(
+                    "file_journal_reconcile_inventory_migration_invalid",
+                    field="reconcile_inventory_migration",
+                ) from error
+            if not stat.S_ISREG(metadata.st_mode):
+                raise FileOrchestrationJournalError(
+                    "file_journal_reconcile_inventory_migration_invalid",
+                    field="reconcile_inventory_migration",
+                )
+            entries.append(
+                (
+                    str(_relative_evidence(path, self.root)),
+                    int(metadata.st_size),
+                    int(metadata.st_mtime_ns),
+                )
+            )
+        return hashlib.sha256(
+            json.dumps(entries, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        ).hexdigest()
 
     def _reconcile_inventory_entry_names_unlocked(self) -> list[str]:
         directory = self.root / _RECONCILE_INVENTORY_DIRECTORY
@@ -3719,7 +4435,11 @@ class FileOrchestrationJournalRepository:
         return canonical
 
     def _cleanup_reconcile_migration_temp_residues_unlocked(self) -> None:
-        prefix = f".{_RECONCILE_INVENTORY_MIGRATION_MARKER}."
+        prefixes = (
+            f".{_RECONCILE_INVENTORY_MIGRATION_MARKER}.",
+            f".{_RECONCILE_INVENTORY_ROLLBACK_PREP_RECEIPT}.",
+            f".{_RECONCILE_INVENTORY_ROLLFORWARD_RECEIPT}.",
+        )
         try:
             entry_names = list_directory_no_follow_limited(
                 self.root,
@@ -3737,7 +4457,7 @@ class FileOrchestrationJournalRepository:
                 field="reconcile_inventory_migration",
             )
         for entry_name in entry_names:
-            if not entry_name.startswith(prefix):
+            if not entry_name.startswith(prefixes):
                 continue
             if _RECONCILE_MIGRATION_TEMP_RE.fullmatch(entry_name) is None:
                 raise FileOrchestrationJournalError(
@@ -3771,21 +4491,14 @@ class FileOrchestrationJournalRepository:
             self._sync_reconcile_inventory_for_row_unlocked(job)
         for job in self._iter_legacy_active_reconcile_records():
             self._sync_reconcile_inventory_for_row_unlocked(job)
-        for path in sorted(
-            _iter_jsonl_files(
-                self.root / "journal",
-                root=self.root,
-                max_files=self.max_files,
-                max_depth=self.max_depth,
-            )
-        ):
+        for path in self._iter_migration_journal_paths():
             source_id, cycle_time = _journal_identity_from_path(
                 path,
                 root=self.root,
                 surface="journal",
             )
             rows = _CycleRows()
-            for record in self._read_jsonl(path):
+            for record in self._read_migration_jsonl(path):
                 self._apply_journal_record(
                     rows,
                     record,
@@ -3796,15 +4509,7 @@ class FileOrchestrationJournalRepository:
                 self._sync_reconcile_inventory_for_row_unlocked(job)
 
     def _iter_legacy_active_reconcile_records(self) -> Iterable[dict[str, Any]]:
-        directory = self.root / _LEGACY_ACTIVE_RECONCILE_DIRECTORY
-        for path in sorted(
-            _iter_regular_json_files(
-                directory,
-                root=self.root,
-                max_files=self.max_files,
-                max_depth=1,
-            )
-        ):
+        for path in self._iter_migration_legacy_active_paths():
             payload = self._read_optional_json(path)
             if payload is None:
                 raise FileOrchestrationJournalError(
@@ -3815,6 +4520,48 @@ class FileOrchestrationJournalRepository:
                 payload,
                 expected_job_id=_safe_segment(path.stem),
             )
+
+    def _iter_migration_legacy_active_paths(self) -> list[Path]:
+        return sorted(
+            _iter_discovered_files(
+                self.root / _LEGACY_ACTIVE_RECONCILE_DIRECTORY,
+                root=self.root,
+                suffix=".json",
+                recursive=False,
+                max_files=self.max_files,
+                max_depth=1,
+                strict_disappearance=True,
+            )
+        )
+
+    def _iter_migration_journal_paths(self) -> list[Path]:
+        return sorted(
+            _iter_discovered_files(
+                self.root / "journal",
+                root=self.root,
+                suffix=".jsonl",
+                recursive=True,
+                max_files=self.max_files,
+                max_depth=self.max_depth,
+                strict_disappearance=True,
+            )
+        )
+
+    def _read_migration_jsonl(self, path: Path) -> list[dict[str, Any]]:
+        records = self._read_jsonl(path)
+        try:
+            mode = stat_no_follow(path, containment_root=self.root).st_mode
+        except (FileNotFoundError, OSError, SafeFilesystemError) as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_migration_invalid",
+                field="journal",
+            ) from error
+        if not stat.S_ISREG(mode):
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_migration_invalid",
+                field="journal",
+            )
+        return records
 
     def _validated_reconcile_inventory_anchor(
         self,
@@ -7816,6 +8563,7 @@ def _iter_discovered_files(
     recursive: bool,
     max_files: int,
     max_depth: int,
+    strict_disappearance: bool = False,
 ) -> Iterable[Path]:
     scanned_entries = 0
 
@@ -7830,6 +8578,11 @@ def _iter_discovered_files(
         try:
             current_mode = stat_no_follow(current, containment_root=root).st_mode
         except FileNotFoundError:
+            if strict_disappearance and current != directory:
+                raise FileOrchestrationJournalError(
+                    "file_journal_reconcile_inventory_migration_invalid",
+                    field=str(_relative_evidence(current, root)),
+                )
             return
         except (OSError, SafeFilesystemError) as error:
             raise FileOrchestrationJournalError(
@@ -7857,6 +8610,11 @@ def _iter_discovered_files(
                 max_entries=remaining_entries,
             )
         except FileNotFoundError:
+            if strict_disappearance:
+                raise FileOrchestrationJournalError(
+                    "file_journal_reconcile_inventory_migration_invalid",
+                    field=str(_relative_evidence(current, root)),
+                )
             return
         except (OSError, SafeFilesystemError) as error:
             raise FileOrchestrationJournalError(
@@ -7881,6 +8639,11 @@ def _iter_discovered_files(
             try:
                 mode = stat_no_follow(entry, containment_root=root).st_mode
             except FileNotFoundError:
+                if strict_disappearance:
+                    raise FileOrchestrationJournalError(
+                        "file_journal_reconcile_inventory_migration_invalid",
+                        field=str(_relative_evidence(entry, root)),
+                    )
                 continue
             except (OSError, SafeFilesystemError) as error:
                 raise FileOrchestrationJournalError(

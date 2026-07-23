@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow, ensure_directory_no_follow
 from services.orchestrator.file_orchestration_journal import (
@@ -38,6 +39,181 @@ HISTORICAL_MIGRATION_ROW_LIMITS = {
 EXPORT_FETCHMANY_BATCH_SIZE = 1_000
 
 _FAILED_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed", "cancelled"}
+
+
+def prepare_file_journal_rollback(
+    *,
+    journal_root: str | Path,
+    workspace_root: str | Path,
+    lock_path: str | Path | None = None,
+    scheduler_lock_backend: str = "file",
+    lock_ttl_seconds: int = 60,
+    scheduler_state: str,
+    active_scheduler_processes: int,
+    checked_at: datetime,
+    checked_by: str,
+    target_writer_generation: str,
+) -> dict[str, Any]:
+    """Produce the durable receipt required before launching an old writer."""
+
+    config, lease_identity = _rollback_file_lease_config(
+        journal_root=journal_root,
+        workspace_root=workspace_root,
+        lock_path=lock_path,
+        scheduler_lock_backend=scheduler_lock_backend,
+        lock_ttl_seconds=lock_ttl_seconds,
+    )
+    lease, heartbeat, pass_id = _acquire_rollback_file_lease(config, operation="prepare")
+    repository = FileOrchestrationJournalRepository(journal_root)
+    try:
+        return repository._prepare_reconcile_inventory_rollback_under_scheduler_lease(
+            scheduler_lease_identity=lease_identity,
+            scheduler_lease_guard=lambda: _rollback_lease_is_held(
+                lease,
+                heartbeat,
+                pass_id=pass_id,
+            ),
+            scheduler_state=scheduler_state,
+            active_scheduler_processes=active_scheduler_processes,
+            checked_at=checked_at,
+            checked_by=checked_by,
+            target_writer_generation=target_writer_generation,
+        )
+    finally:
+        try:
+            heartbeat.stop()
+        finally:
+            lease.release(pass_id=pass_id)
+
+
+def require_file_journal_rollback_prepared(
+    *,
+    journal_root: str | Path,
+    workspace_root: str | Path,
+    receipt_id: str,
+    lock_path: str | Path | None = None,
+    scheduler_lock_backend: str = "file",
+    lock_ttl_seconds: int = 60,
+) -> dict[str, Any]:
+    """Old-writer launch gate for the supported rollback path."""
+
+    _config, lease_identity = _rollback_file_lease_config(
+        journal_root=journal_root,
+        workspace_root=workspace_root,
+        lock_path=lock_path,
+        scheduler_lock_backend=scheduler_lock_backend,
+        lock_ttl_seconds=lock_ttl_seconds,
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+    return repository._require_reconcile_inventory_rollback_prepared(
+        receipt_id=receipt_id,
+        scheduler_lease_identity=lease_identity,
+    )
+
+
+def complete_file_journal_rollforward(
+    *,
+    journal_root: str | Path,
+    workspace_root: str | Path,
+    preparation_receipt_id: str,
+    lock_path: str | Path | None = None,
+    scheduler_lock_backend: str = "file",
+    lock_ttl_seconds: int = 60,
+) -> dict[str, Any]:
+    """Rebuild inventory and consume the rollback fence under the scheduler lease."""
+
+    config, lease_identity = _rollback_file_lease_config(
+        journal_root=journal_root,
+        workspace_root=workspace_root,
+        lock_path=lock_path,
+        scheduler_lock_backend=scheduler_lock_backend,
+        lock_ttl_seconds=lock_ttl_seconds,
+    )
+    lease, heartbeat, pass_id = _acquire_rollback_file_lease(config, operation="rollforward")
+    repository = FileOrchestrationJournalRepository(journal_root)
+    try:
+        return repository._complete_reconcile_inventory_rollforward_under_scheduler_lease(
+            preparation_receipt_id=preparation_receipt_id,
+            scheduler_lease_identity=lease_identity,
+            scheduler_lease_guard=lambda: _rollback_lease_is_held(
+                lease,
+                heartbeat,
+                pass_id=pass_id,
+            ),
+        )
+    finally:
+        try:
+            heartbeat.stop()
+        finally:
+            lease.release(pass_id=pass_id)
+
+
+def _rollback_file_lease_config(
+    *,
+    journal_root: str | Path,
+    workspace_root: str | Path,
+    lock_path: str | Path | None,
+    scheduler_lock_backend: str,
+    lock_ttl_seconds: int,
+) -> tuple[Any, dict[str, str]]:
+    from services.orchestrator.scheduler import ProductionSchedulerConfig
+
+    config = ProductionSchedulerConfig(
+        workspace_root=workspace_root,
+        lock_path=lock_path,
+        scheduler_db_free_required=True,
+        scheduler_lock_backend=scheduler_lock_backend,
+        scheduler_journal_root=journal_root,
+        lock_ttl_seconds=lock_ttl_seconds,
+    )
+    if config.scheduler_lock_backend != "file":
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_requires_file_scheduler_lease",
+            field="scheduler_lock_backend",
+        )
+    workspace = Path(config.workspace_root)
+    scheduler_lock = Path(config.lock_path)
+    identity = {
+        "backend": "file",
+        "lock_path_digest": hashlib.sha256(str(scheduler_lock).encode("utf-8")).hexdigest(),
+        "workspace_root_digest": hashlib.sha256(str(workspace).encode("utf-8")).hexdigest(),
+    }
+    return config, identity
+
+
+def _acquire_rollback_file_lease(config: Any, *, operation: str) -> tuple[Any, Any, str]:
+    from services.orchestrator.scheduler_lease import FileSchedulerLease, _LeaseHeartbeat
+
+    pass_id = f"file-journal-{operation}-{uuid4().hex}"
+    lease = FileSchedulerLease(
+        Path(config.lock_path),
+        ttl_seconds=config.lock_ttl_seconds,
+        workspace_root=Path(config.workspace_root),
+    )
+    acquired = lease.acquire(pass_id=pass_id, started_at=datetime.now(UTC))
+    if not acquired.get("acquired"):
+        raise FileOrchestrationJournalError(
+            "file_journal_scheduler_lease_contended",
+            field="scheduler_lock",
+        )
+    heartbeat = _LeaseHeartbeat(
+        lease,
+        pass_id,
+        max(1, config.lock_ttl_seconds // 3),
+    )
+    heartbeat.start()
+    if not _rollback_lease_is_held(lease, heartbeat, pass_id=pass_id):
+        heartbeat.stop()
+        lease.release(pass_id=pass_id)
+        raise FileOrchestrationJournalError(
+            "file_journal_scheduler_lease_lost",
+            field="scheduler_lock",
+        )
+    return lease, heartbeat, pass_id
+
+
+def _rollback_lease_is_held(lease: Any, heartbeat: Any, *, pass_id: str) -> bool:
+    return not heartbeat.lost and bool(lease.renew(pass_id=pass_id))
 
 
 def import_historical_scheduler_state(

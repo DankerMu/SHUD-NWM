@@ -532,10 +532,19 @@ Scenario evidence rows for section 5:
   Poll timeout returns `reconciling`, submits no downstream stage, remains
   restart-discoverable, and can be cancelled after reopen without replaying a
   completed cancellation receipt; fresh/reclaimed attempts clear the receipt
-  discriminator. The annual cost oracle uses
+  discriminator. Foreground, immediate-terminal, and resumed forecast
+  accounting now gate retry, hydro mutation, and downstream stages on the
+  committed durable projection result; master mismatch or incomplete/malformed
+  accounting remains `reconcile_unverified`. Migration-only journal and
+  legacy-active walkers fail closed on enumerate/stat/read disappearance.
+  Supported downgrade/roll-forward is fenced by the real production file lease,
+  root/lease-bound preparation and completion receipts, and a durable scheduler
+  blocker; live-lease, concurrent, tampered, stale, and wrong-root paths are
+  zero-mutation failures. The annual cost oracle uses
   the production cadence of two cycles per day and GFS+IFS per cycle (1,460
-  masters and 373,760 conceptual 256-member candidates per year), virtualizes
-  candidate-history traversal, and asserts directory/stat/read work is constant;
+  masters and 373,760 conceptual 256-member candidates per year), materializes
+  the 1,460 terminal journal files, virtualizes candidate-history traversal, and
+  asserts steady-state directory/stat/read work is constant;
   it also migrates at least 513 legacy active rows without losing the oldest.
   Whole and partial retry run through the real ForecastOrchestrator, file
   repository, and retry service with only the Slurm boundary faked. Slurm

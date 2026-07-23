@@ -343,6 +343,38 @@ systemctl --user enable --now nhms-scheduler-evidence-retention.timer
      marker-free legacy active rows 做可重入 backfill，完成后写
      `reconcile-inventory-migration-v1.json`。若首次迁移中断，marker 不落盘，重启会继续；稳态 pass 不再扫描
      全量 `pipeline-jobs/`、cycle journal 或 `pipeline-jobs/by-cycle/` candidate 历史。
+
+     **禁止直接回退到 pre-inventory writer。** 支持的回滚必须先停 timer/service，并用当前版本争用生产
+     scheduler file lease、写 preparation receipt 和 rollback fence；命令失败时不得切换代码：
+
+     ```bash
+     uv run nhms-pipeline prepare-file-journal-rollback \
+       --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" \
+       --workspace-root "$WORKSPACE_ROOT" \
+       --scheduler-lock-backend file \
+       --scheduler-state stopped \
+       --active-scheduler-processes 0 \
+       --checked-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+       --checked-by "$USER" \
+       --target-writer-generation '<rollback-git-sha>'
+     ```
+
+     preparation receipt 的 `receipt_id` 必须随回滚记录保存；旧 writer 启动前须以相同 journal root、workspace
+     和 receipt id 调用 `require_file_journal_rollback_prepared()` gate。rollback fence 存在期间，当前版本
+     scheduler 必须返回 `scheduler_rollback_fence_prepared`，不得自动 backfill 或提交业务任务。重新升级后，
+     在 timer/service 仍停止时执行显式 roll-forward；成功 receipt 落盘且 fence 被消费后才可恢复 timer：
+
+     ```bash
+     uv run nhms-pipeline complete-file-journal-rollforward \
+       --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" \
+       --workspace-root "$WORKSPACE_ROOT" \
+       --scheduler-lock-backend file \
+       --preparation-receipt-id '<preparation-receipt-id>'
+     ```
+
+     两条命令都必须取得与生产 scheduler 相同的 file lease；live lease、receipt 篡改/过期/跨 root 重放或
+     backfill 期间 authority 变化均 fail closed。node-22 回滚演练 receipt 必须同时保存 preparation、旧 writer
+     gate、roll-forward 和恢复后 inventory-only 证据。
      out-of-scope LOW 收尾 → #300。
 7b. ✅ **多源下载韧性**（PR #308，b4a2e85/eeb4d5c）：GFS 换 NODD 多镜像链（`GFS_SOURCE_BACKENDS=s3,gcs,azure,ftpprd,nomads`，共享 `.idx`+HTTP-Range+本地 cdo-clip，NOMADS grib-filter 末位回退）；
 IFS 云镜像优先（`IFS_OPEN_DATA_FALLBACK_SOURCES` 默认 `aws,azure,google,ecmwf`，ECMWF 直连 500 连接上限末位）。NOMADS 403=动态封禁 → 持久断路器（`OBJECT_STORE_ROOT/state/source_circuit/`，cooldown 内停重试）；

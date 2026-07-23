@@ -719,6 +719,56 @@ def run_once(self) -> SchedulerPassResult:
         heartbeat = _LeaseHeartbeat(lock, pass_id, max(1, self.config.lock_ttl_seconds // 3))
         heartbeat.start()
         try:
+            rollback_fence_reader = getattr(
+                self.active_repository,
+                "current_generation_scheduler_rollback_blocker",
+                None,
+            )
+            rollback_fence: Mapping[str, Any] | None = None
+            if db_free_required and callable(rollback_fence_reader):
+                try:
+                    rollback_fence = rollback_fence_reader()
+                except Exception:
+                    rollback_fence = {
+                        "reason": "file_journal_rollback_fence_invalid",
+                        "receipt_id": None,
+                    }
+            if rollback_fence is not None:
+                finished_at = _now(self.config)
+                evidence = self._base_evidence(pass_id, started_at)
+                evidence.update(
+                    {
+                        "status": "preflight_blocked",
+                        "finished_at": _format_utc(finished_at),
+                        "lock": lock_evidence,
+                        "root_preflight": root_preflight,
+                        "db_free_runtime": db_free_preflight,
+                        "rollback_fence": {
+                            "reason": str(rollback_fence.get("reason") or "unknown"),
+                            "receipt_id": rollback_fence.get("receipt_id"),
+                        },
+                        "counts": _empty_counts(),
+                        "candidates": [],
+                        "blocked_candidates": [],
+                        "skipped_candidates": [],
+                        "duplicate_exclusions": list(self.config.source_exclusions),
+                        "model_discovery": _empty_model_discovery(),
+                        "source_cycles": [],
+                        "model_run_evidence": [],
+                        "slurm_cancellation_evidence": [],
+                        "no_mutation_proof": _no_mutation_proof(),
+                        "execution_boundary": "scheduler_rollback_fence_prepared",
+                    }
+                )
+                status = _evidence_status(evidence, "preflight_blocked")
+                _finalize_timing_into_evidence(evidence, collector, status)
+                artifact_path = self._write_evidence(pass_id, evidence)
+                return SchedulerPassResult(
+                    pass_id=pass_id,
+                    status=status,
+                    evidence=evidence,
+                    artifact_path=artifact_path,
+                )
             progress_guard_limit = max(int(getattr(self.config, "progress_guard_max_no_progress_steps", 256)), 0)
             if progress_guard_limit == 0:
                 finished_at = _now(self.config)

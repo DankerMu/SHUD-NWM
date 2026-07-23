@@ -624,7 +624,7 @@ def submit_and_wait_cycle_stage(
         deps.aggregation_error_message(aggregation) if aggregation is not None else terminal.get("error_message")
     )
     if aggregation is not None:
-        orchestrator._record_cycle_stage_status_override(
+        durable_outcome = orchestrator._record_cycle_stage_status_override(
             stage,
             context,
             pipeline_job_id,
@@ -632,6 +632,9 @@ def submit_and_wait_cycle_stage(
             aggregation,
             log_uri or None,
         )
+        result_status = str(durable_outcome.get("status") or result_status)
+        result_error_code = durable_outcome.get("error_code")
+        result_error_message = durable_outcome.get("error_message")
     else:
         orchestrator._record_cycle_stage_accounting_event(stage, context, pipeline_job_id, terminal, log_uri=log_uri)
 
@@ -817,6 +820,10 @@ def resume_cycle_stage(
     status = str(job.get("status"))
     terminal = dict(job)
     deferred_publish_attempt: DisplayLogPublicationAttempt | None = None
+    accepted_submit_projection = bool(
+        getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
+        and is_forecast_cohort_stage(stage)
+    )
     if status not in deps.terminal_job_statuses and job.get("slurm_job_id"):
         terminal_observation = _call_orchestrator_helper(
             orchestrator,
@@ -859,7 +866,11 @@ def resume_cycle_stage(
             str(job["job_id"]),
         )
         status = aggregation.status
-        if str(job.get("status")) not in deps.terminal_job_statuses or status != str(job.get("status")):
+        if (
+            accepted_submit_projection
+            or str(job.get("status")) not in deps.terminal_job_statuses
+            or status != str(job.get("status"))
+        ):
             publication = orchestrator._display_log_publication_for_pipeline_job(job)
             publication_attempt: DisplayLogPublicationAttempt | None = None
             if publication is not None:
@@ -882,7 +893,7 @@ def resume_cycle_stage(
                     "Cannot compute a published log URI for the recovered pipeline job.",
                     {"job_id": str(job["job_id"]), "stage": stage.stage},
                 )
-            orchestrator._record_cycle_stage_status_override(
+            durable_outcome = orchestrator._record_cycle_stage_status_override(
                 stage,
                 context,
                 str(job["job_id"]),
@@ -890,6 +901,7 @@ def resume_cycle_stage(
                 aggregation,
                 log_uri,
             )
+            status = str(durable_outcome.get("status") or status)
             if publication_attempt is not None:
                 deferred_publish_attempt = publication_attempt
         if status == "partially_failed":
@@ -901,6 +913,9 @@ def resume_cycle_stage(
     updated_job = get_pipeline_job(str(job["job_id"])) if callable(get_pipeline_job) else None
     if updated_job is not None:
         result_log_uri = str(updated_job.get("log_uri") or "") or None
+        if accepted_submit_projection:
+            status = str(updated_job.get("status") or status)
+    effective_job = updated_job if accepted_submit_projection and updated_job is not None else job
 
     orchestrator._after_cycle_stage_terminal(stage, context, status, terminal, aggregation)
     orchestrator._raise_publish_error_after_durable_update(deferred_publish_attempt)
@@ -911,13 +926,17 @@ def resume_cycle_stage(
             pipeline_job_id=str(job["job_id"]),
             slurm_job_id=str(job.get("slurm_job_id") or ""),
             status=status,
-            exit_code=job.get("exit_code"),
-            error_code=job.get("error_code"),
-            error_message=job.get("error_message"),
+            exit_code=effective_job.get("exit_code"),
+            error_code=effective_job.get("error_code"),
+            error_message=effective_job.get("error_message"),
             log_uri=result_log_uri,
             accounting=deps.slurm_accounting_from_payload(terminal),
             task_results=deps.stage_task_result_evidence(aggregation, context=context),
-            finished_at=deps.parse_gateway_time(terminal.get("finished_at") or job.get("finished_at")),
+            finished_at=deps.parse_gateway_time(
+                (effective_job or {}).get("finished_at")
+                or terminal.get("finished_at")
+                or job.get("finished_at")
+            ),
         ),
         aggregation,
     )

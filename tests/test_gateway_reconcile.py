@@ -1058,7 +1058,7 @@ def test_file_cohort_terminal_tasks_project_exact_success_failure_and_restart(
     assert repository.get_pipeline_job(cohort["job_id"]) == cohort
     succeeded = repository._hydro_run_for("fcst_gfs_2026071200_model_0")
     failed = repository._hydro_run_for("fcst_gfs_2026071200_model_1")
-    assert succeeded["status"] == "created"
+    assert succeeded["status"] == "succeeded"
     assert succeeded["error_code"] is None
     assert succeeded["init_state_id"] == "state_0"
     assert succeeded["run_manifest_uri"] == before_success["run_manifest_uri"]
@@ -1173,11 +1173,12 @@ def test_file_cohort_18_member_partial_then_complete_is_monotonic_and_idempotent
     )
 
     assert partial.action == "task_accounting_incomplete"
-    assert partial.pipeline_event_write_count == 18
+    assert partial.pipeline_status_write_count == 1
+    assert partial.pipeline_event_write_count == 0
     assert partial_row["status"] == "reconcile_unverified"
-    assert len(partial_row["candidate_projections"]) == 17
+    assert partial_row["candidate_projections"] == []
     assert complete.action == "terminal"
-    assert complete.pipeline_event_write_count == 2
+    assert complete.pipeline_event_write_count == 19
     assert complete_row["status"] == "succeeded"
     assert len(complete_row["candidate_projections"]) == 18
     assert reconcile_inflight_jobs(repository, sacct_query=lambda _job_id: terminal(18)) == []
@@ -4813,16 +4814,13 @@ def test_active_reconcile_partition_finds_oldest_active_after_one_year_of_two_da
         canonical_forecast_cohort_members,
         forecast_cohort_digest,
     )
+    from services.orchestrator.file_orchestration_journal import _journal_record_for_write
     from services.orchestrator.reservation import slurm_comment_for
 
     repository = _file_cohort_repository(tmp_path, member_count=1, with_runtime_rows=False)
     key = "cycle_gfs_2026071200_forecast_fixture:forecast"
     job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
     _bind_current_file_cohort(repository, key, slurm_job_id="17667")
-    # Finish the one-time migration before adding historical scale. The next
-    # reopen is therefore a steady-state scheduler pass, not migration work.
-    assert [job.job_id for job in repository.query_inflight_jobs()] == [job_id]
-    assert (repository.root / "reconcile-inventory-migration-v1.json").is_file()
     master_path = repository.root / "pipeline-jobs" / f"{job_id}.json"
     template = json.loads(master_path.read_text(encoding="utf-8"))
     day_count = 365
@@ -4909,6 +4907,35 @@ def test_active_reconcile_partition_finds_oldest_active_after_one_year_of_two_da
                 )
                 path = repository.root / "pipeline-jobs" / f"{historical_job_id}.json"
                 path.write_text(json.dumps(historical, sort_keys=True), encoding="utf-8")
+                journal_record = _journal_record_for_write(
+                    "pipeline_job",
+                    payload,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    model_id=None,
+                    sequence=1,
+                )
+                repository._validate_outgoing_record(
+                    journal_record,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    record_type="pipeline_job",
+                    model_id=None,
+                )
+                journal_path = (
+                    repository.root / "journal" / source_id / f"{cycle_segment}.jsonl"
+                )
+                journal_path.parent.mkdir(parents=True, exist_ok=True)
+                journal_path.write_text(
+                    json.dumps(journal_record, separators=(",", ":"), sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+
+    # The first process performs the one strict migration over 1,460 real
+    # terminal journal files. Every later process must trust only marker + inventory.
+    migrated = type(repository)(repository.root)
+    assert [job.job_id for job in migrated.query_inflight_jobs()] == [job_id]
+    assert (repository.root / "reconcile-inventory-migration-v1.json").is_file()
 
     # Candidate history is sharded below by-cycle in production. Its annual
     # conceptual cardinality is 1,460 masters x 256 candidates = 373,760;
@@ -4983,6 +5010,12 @@ def test_active_reconcile_partition_finds_oldest_active_after_one_year_of_two_da
     inflight = reopened.query_inflight_jobs()
 
     assert history_count == day_count * len(cycle_hours) * len(source_ids) == 1460
+    historical_journal_paths = tuple(
+        path
+        for path in (repository.root / "journal").rglob("*.jsonl")
+        if path.name != "2026071200.jsonl"
+    )
+    assert len(historical_journal_paths) == 1460
     assert conceptual_candidate_count == 365 * 2 * 2 * 256 == 373760
     assert [job.job_id for job in inflight] == [job_id]
     assert len(tuple((repository.root / "reconcile-inventory").glob("*.json"))) == 1
@@ -4991,7 +5024,7 @@ def test_active_reconcile_partition_finds_oldest_active_after_one_year_of_two_da
     assert virtual_candidate_accesses == 0
     assert directory_calls == [".", "reconcile-inventory"]
     assert len(stat_calls) <= 8
-    assert len(read_calls) <= 4
+    assert len(read_calls) <= 5
 
 
 def test_reconcile_inventory_terminal_cleanup_and_stale_anchor_self_heal(tmp_path: Any) -> None:
@@ -5278,7 +5311,10 @@ def test_reconcile_inventory_migration_is_resumable_and_backfills_marker_free_ac
     assert len(tuple(inventory_directory.glob("*.json"))) == 2
 
 
-@pytest.mark.parametrize("target_kind", ["inventory", "migration_marker"])
+@pytest.mark.parametrize(
+    "target_kind",
+    ["inventory", "migration_marker", "rollback_receipt", "rollforward_receipt"],
+)
 def test_round8_atomic_temp_crash_residue_is_cleaned_after_real_child_kill(
     tmp_path: Any,
     target_kind: str,
@@ -5292,6 +5328,10 @@ def test_round8_atomic_temp_crash_residue_is_cleaned_after_real_child_kill(
     assert [job.job_id for job in repository.query_reserved_unbound_jobs()] == [job_id]
     if target_kind == "inventory":
         target = repository.root / "reconcile-inventory" / f"{job_id}.json"
+    elif target_kind == "rollback_receipt":
+        target = repository.root / "reconcile-inventory-rollback-preparation-v2.json"
+    elif target_kind == "rollforward_receipt":
+        target = repository.root / "reconcile-inventory-rollforward-v1.json"
     else:
         target = repository.root / "reconcile-inventory-migration-v1.json"
         target.unlink()
@@ -5483,6 +5523,449 @@ def test_round8_migration_discovers_journal_only_active_row(tmp_path: Any) -> No
 
     reopened = type(repository)(repository.root)
     assert [job.job_id for job in reopened.query_reserved_unbound_jobs()] == [job_id]
+
+
+@pytest.mark.parametrize("surface", ["journal", "legacy"])
+@pytest.mark.parametrize("boundary", ["stat", "read"])
+def test_round11_migration_disappearance_fails_without_marker_and_reopens_after_repair(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    surface: str,
+    boundary: str,
+) -> None:
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+
+    template = _file_cohort_repository(
+        tmp_path / "template",
+        member_count=1,
+        with_runtime_rows=False,
+    )
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    direct = template.root / "pipeline-jobs" / f"{job_id}.json"
+    journal = template.root / "journal" / "gfs" / "2026071200.jsonl"
+    root = tmp_path / f"{surface}-{boundary}" / "journal"
+    root.mkdir(parents=True)
+    if surface == "journal":
+        target = root / "journal" / "gfs" / "2026071200.jsonl"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(journal.read_bytes())
+    else:
+        target = root / "active-reconcile" / f"{job_id}.json"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(direct.read_bytes())
+    original = target.read_bytes()
+    repository = FileOrchestrationJournalRepository(root)
+    marker = root / "reconcile-inventory-migration-v1.json"
+
+    if boundary == "stat":
+        iterator_name = (
+            "_iter_migration_journal_paths"
+            if surface == "journal"
+            else "_iter_migration_legacy_active_paths"
+        )
+        original_iterator = getattr(repository, iterator_name)
+
+        def disappear_after_enumeration() -> list[Any]:
+            paths = original_iterator()
+            target.unlink()
+            return paths
+
+        monkeypatch.setattr(repository, iterator_name, disappear_after_enumeration)
+    elif surface == "journal":
+        original_read = repository._read_jsonl
+
+        def disappear_after_journal_read(path: Any) -> list[dict[str, Any]]:
+            records = original_read(path)
+            if path == target:
+                target.unlink()
+            return records
+
+        monkeypatch.setattr(repository, "_read_jsonl", disappear_after_journal_read)
+    else:
+        original_read = repository._read_optional_json
+
+        def disappear_after_legacy_read(path: Any) -> dict[str, Any] | None:
+            payload = original_read(path)
+            if path == target:
+                target.unlink()
+            return payload
+
+        monkeypatch.setattr(repository, "_read_optional_json", disappear_after_legacy_read)
+
+    with pytest.raises(FileOrchestrationJournalError):
+        repository.query_reserved_unbound_jobs()
+    assert repository._reconcile_inventory_migration_checked is False
+    assert not marker.exists()
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(original)
+    repaired = FileOrchestrationJournalRepository(root)
+    assert [job.job_id for job in repaired.query_reserved_unbound_jobs()] == [job_id]
+    assert marker.is_file()
+
+
+@pytest.mark.parametrize("surface", ["direct", "legacy", "journal"])
+def test_round12_rollforward_strictly_backfills_once_under_real_scheduler_lease(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    surface: str,
+) -> None:
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.file_orchestration_migration import (
+        complete_file_journal_rollforward,
+        prepare_file_journal_rollback,
+        require_file_journal_rollback_prepared,
+    )
+
+    template = _file_cohort_repository(
+        tmp_path / f"template-{surface}",
+        member_count=1,
+        with_runtime_rows=False,
+    )
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    if surface == "journal":
+        _bind_current_file_cohort(template, key, slurm_job_id="88201", status="running")
+
+    root = tmp_path / f"target-{surface}" / "journal"
+    workspace = tmp_path / f"workspace-{surface}"
+    workspace.mkdir()
+    target = FileOrchestrationJournalRepository(root)
+    assert target.query_reserved_unbound_jobs() == []
+    marker = root / "reconcile-inventory-migration-v1.json"
+    assert marker.is_file()
+    receipt = prepare_file_journal_rollback(
+        journal_root=root,
+        workspace_root=workspace,
+        scheduler_state="stopped",
+        active_scheduler_processes=0,
+        checked_at=datetime.now(UTC),
+        checked_by="round11-test-operator",
+        target_writer_generation="pre-reconcile-inventory",
+    )
+    assert receipt["status"] == "prepared"
+    assert not marker.exists()
+    assert require_file_journal_rollback_prepared(
+        journal_root=root,
+        workspace_root=workspace,
+        receipt_id=receipt["receipt_id"],
+    )["receipt_id"] == receipt["receipt_id"]
+
+    direct = template.root / "pipeline-jobs" / f"{job_id}.json"
+    if surface == "direct":
+        destination = root / "pipeline-jobs" / f"{job_id}.json"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(direct.read_bytes())
+    elif surface == "legacy":
+        destination = root / "active-reconcile" / f"{job_id}.json"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(direct.read_bytes())
+    else:
+        source_journal = template.root / "journal" / "gfs" / "2026071200.jsonl"
+        destination = root / "journal" / "gfs" / "2026071200.jsonl"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(source_journal.read_bytes())
+
+    with pytest.raises(FileOrchestrationJournalError, match="file_journal_rollforward_required"):
+        FileOrchestrationJournalRepository(root).query_inflight_jobs()
+
+    rollforward = complete_file_journal_rollforward(
+        journal_root=root,
+        workspace_root=workspace,
+        preparation_receipt_id=receipt["receipt_id"],
+    )
+    assert rollforward["preparation_receipt_id"] == receipt["receipt_id"]
+    reopened = FileOrchestrationJournalRepository(root)
+    if surface == "journal":
+        assert [job.job_id for job in reopened.query_inflight_jobs()] == [job_id]
+    else:
+        assert [job.job_id for job in reopened.query_reserved_unbound_jobs()] == [job_id]
+    assert (root / "reconcile-inventory" / f"{job_id}.json").is_file()
+    assert marker.is_file()
+    with pytest.raises(FileOrchestrationJournalError, match="file_journal_rollback_not_prepared"):
+        require_file_journal_rollback_prepared(
+            journal_root=root,
+            workspace_root=workspace,
+            receipt_id=receipt["receipt_id"],
+        )
+
+    steady = FileOrchestrationJournalRepository(root)
+
+    def backfill_forbidden() -> str:
+        raise AssertionError("migration marker must make steady-state history replay impossible")
+
+    monkeypatch.setattr(steady, "_stable_backfill_reconcile_inventory_unlocked", backfill_forbidden)
+    if surface == "journal":
+        assert [job.job_id for job in steady.query_inflight_jobs()] == [job_id]
+    else:
+        assert [job.job_id for job in steady.query_reserved_unbound_jobs()] == [job_id]
+
+
+def test_round12_live_scheduler_lease_blocks_prepare_without_mutating_authority(
+    tmp_path: Any,
+) -> None:
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.file_orchestration_migration import prepare_file_journal_rollback
+    from services.orchestrator.scheduler_lease import FileSchedulerLease
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    assert repository.query_inflight_jobs() == []
+    marker = repository.root / "reconcile-inventory-migration-v1.json"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    lock_path = workspace / "scheduler" / "production-scheduler.lock"
+    holder = FileSchedulerLease(lock_path, ttl_seconds=60, workspace_root=workspace)
+    assert holder.acquire(
+        pass_id="live-production-scheduler",
+        started_at=datetime.now(UTC),
+    )["acquired"] is True
+    assert marker.is_file()
+    marker_before = marker.read_bytes()
+    receipt_path = repository.root / "reconcile-inventory-rollback-preparation-v2.json"
+
+    try:
+        with pytest.raises(FileOrchestrationJournalError, match="file_journal_scheduler_lease_contended"):
+            prepare_file_journal_rollback(
+                journal_root=repository.root,
+                workspace_root=workspace,
+                scheduler_state="stopped",
+                active_scheduler_processes=0,
+                checked_at=datetime.now(UTC),
+                checked_by="round12-test-operator",
+                target_writer_generation="pre-reconcile-inventory",
+            )
+    finally:
+        holder.release(pass_id="live-production-scheduler")
+
+    assert marker.read_bytes() == marker_before
+    assert not receipt_path.exists()
+
+
+def test_round12_concurrent_prepare_holds_the_real_scheduler_mutation_authority(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from services.orchestrator.file_orchestration_migration import prepare_file_journal_rollback
+    from services.orchestrator.scheduler_lease import FileSchedulerLease
+
+    root = tmp_path / "journal"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = FileOrchestrationJournalRepository(root)
+    assert repository.query_inflight_jobs() == []
+    marker = root / "reconcile-inventory-migration-v1.json"
+    marker_before = marker.read_bytes()
+    entered = threading.Event()
+    continue_prepare = threading.Event()
+    original_prepare = (
+        FileOrchestrationJournalRepository._prepare_reconcile_inventory_rollback_under_scheduler_lease
+    )
+
+    def pause_after_lease_acquisition(self: Any, **kwargs: Any) -> dict[str, Any]:
+        entered.set()
+        assert continue_prepare.wait(timeout=5)
+        return original_prepare(self, **kwargs)
+
+    monkeypatch.setattr(
+        FileOrchestrationJournalRepository,
+        "_prepare_reconcile_inventory_rollback_under_scheduler_lease",
+        pause_after_lease_acquisition,
+    )
+    outcome: dict[str, Any] = {}
+
+    def prepare() -> None:
+        outcome.update(
+            prepare_file_journal_rollback(
+                journal_root=root,
+                workspace_root=workspace,
+                scheduler_state="stopped",
+                active_scheduler_processes=0,
+                checked_at=datetime.now(UTC),
+                checked_by="round12-test-operator",
+                target_writer_generation="pre-reconcile-inventory",
+            )
+        )
+
+    thread = threading.Thread(target=prepare)
+    thread.start()
+    assert entered.wait(timeout=5)
+    contender = FileSchedulerLease(
+        workspace / "scheduler" / "production-scheduler.lock",
+        ttl_seconds=60,
+        workspace_root=workspace,
+    )
+    contender_result = contender.acquire(
+        pass_id="concurrent-current-scheduler",
+        started_at=datetime.now(UTC),
+    )
+    assert contender_result["acquired"] is False
+    assert marker.read_bytes() == marker_before
+
+    continue_prepare.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert outcome["status"] == "prepared"
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("entrypoint", ["click", "argparse"])
+def test_round12_rollback_commands_emit_verifiable_receipts(
+    tmp_path: Any,
+    capsys: pytest.CaptureFixture[str],
+    entrypoint: str,
+) -> None:
+    from services.orchestrator import cli as cli_module
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.file_orchestration_migration import (
+        require_file_journal_rollback_prepared,
+    )
+
+    root = tmp_path / entrypoint / "journal"
+    workspace = tmp_path / entrypoint / "workspace"
+    workspace.mkdir(parents=True)
+    repository = FileOrchestrationJournalRepository(root)
+    assert repository.query_inflight_jobs() == []
+
+    argv = [
+        "prepare-file-journal-rollback",
+        "--journal-root",
+        str(root),
+        "--workspace-root",
+        str(workspace),
+        "--scheduler-state",
+        "stopped",
+        "--active-scheduler-processes",
+        "0",
+        "--checked-at",
+        "2026-07-23T12:00:00Z",
+        "--checked-by",
+        "node-22-operator",
+        "--target-writer-generation",
+        "pre-reconcile-inventory",
+    ]
+    result = (
+        cli_module._click_main(argv)
+        if entrypoint == "click"
+        else cli_module._argparse_main(argv)
+    )
+
+    assert result == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["status"] == "prepared"
+    assert require_file_journal_rollback_prepared(
+        journal_root=root,
+        workspace_root=workspace,
+        receipt_id=receipt["receipt_id"],
+    )["receipt_id"] == receipt["receipt_id"]
+
+    rollforward_argv = [
+        "complete-file-journal-rollforward",
+        "--journal-root",
+        str(root),
+        "--workspace-root",
+        str(workspace),
+        "--preparation-receipt-id",
+        receipt["receipt_id"],
+    ]
+    result = (
+        cli_module._click_main(rollforward_argv)
+        if entrypoint == "click"
+        else cli_module._argparse_main(rollforward_argv)
+    )
+    assert result == 0
+    rollforward = json.loads(capsys.readouterr().out)
+    assert rollforward["preparation_receipt_id"] == receipt["receipt_id"]
+    with pytest.raises(FileOrchestrationJournalError, match="file_journal_rollback_not_prepared"):
+        require_file_journal_rollback_prepared(
+            journal_root=root,
+            workspace_root=workspace,
+            receipt_id=receipt["receipt_id"],
+        )
+
+
+def test_round12_tampered_and_wrong_root_receipts_fail_closed(tmp_path: Any) -> None:
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.file_orchestration_migration import (
+        complete_file_journal_rollforward,
+        prepare_file_journal_rollback,
+        require_file_journal_rollback_prepared,
+    )
+
+    root = tmp_path / "source" / "journal"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = FileOrchestrationJournalRepository(root)
+    assert repository.query_inflight_jobs() == []
+    receipt = prepare_file_journal_rollback(
+        journal_root=root,
+        workspace_root=workspace,
+        scheduler_state="stopped",
+        active_scheduler_processes=0,
+        checked_at=datetime.now(UTC),
+        checked_by="round12-test-operator",
+        target_writer_generation="pre-reconcile-inventory",
+    )
+    receipt_path = root / "reconcile-inventory-rollback-preparation-v2.json"
+    original = receipt_path.read_bytes()
+    malformed = json.loads(original)
+    malformed["receipt_id"] = "0" * 64
+    receipt_path.write_text(json.dumps(malformed), encoding="utf-8")
+    with pytest.raises(FileOrchestrationJournalError, match="file_journal_rollback_receipt_invalid"):
+        require_file_journal_rollback_prepared(
+            journal_root=root,
+            workspace_root=workspace,
+            receipt_id=receipt["receipt_id"],
+        )
+    with pytest.raises(FileOrchestrationJournalError, match="file_journal_rollback_receipt_invalid"):
+        complete_file_journal_rollforward(
+            journal_root=root,
+            workspace_root=workspace,
+            preparation_receipt_id=receipt["receipt_id"],
+        )
+    receipt_path.write_bytes(original)
+    with pytest.raises(FileOrchestrationJournalError, match="file_journal_rollforward_not_prepared"):
+        complete_file_journal_rollforward(
+            journal_root=root,
+            workspace_root=workspace,
+            preparation_receipt_id="f" * 64,
+        )
+
+    wrong_root = tmp_path / "wrong" / "journal"
+    wrong_repository = FileOrchestrationJournalRepository(wrong_root)
+    assert wrong_repository.query_inflight_jobs() == []
+    (wrong_root / "reconcile-inventory-migration-v1.json").unlink()
+    wrong_receipt_path = wrong_root / receipt_path.name
+    wrong_receipt_path.write_bytes(original)
+    with pytest.raises(FileOrchestrationJournalError, match="file_journal_rollback_receipt_wrong_root"):
+        require_file_journal_rollback_prepared(
+            journal_root=wrong_root,
+            workspace_root=workspace,
+            receipt_id=receipt["receipt_id"],
+        )
+    with pytest.raises(FileOrchestrationJournalError, match="file_journal_rollback_receipt_wrong_root"):
+        complete_file_journal_rollforward(
+            journal_root=wrong_root,
+            workspace_root=workspace,
+            preparation_receipt_id=receipt["receipt_id"],
+        )
 
 
 def test_round8_legacy_active_migration_retains_oldest_across_513_rows(

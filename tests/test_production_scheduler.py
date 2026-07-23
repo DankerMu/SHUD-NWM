@@ -22846,6 +22846,57 @@ def test_db_free_file_lock_contention_is_bounded_and_no_submit(
     assert str(config.lock_path) not in rendered
 
 
+def test_db_free_prepared_rollback_fence_blocks_current_scheduler_after_lease_release(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    from services.orchestrator.file_orchestration_migration import (
+        complete_file_journal_rollforward,
+        prepare_file_journal_rollback,
+    )
+
+    _roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "rollback-fence")
+    config = ProductionSchedulerConfig()
+    repository = scheduler_module.FileOrchestrationJournalRepository(
+        paths["NHMS_SCHEDULER_JOURNAL_ROOT"]
+    )
+    assert repository.query_inflight_jobs() == []
+    receipt = prepare_file_journal_rollback(
+        journal_root=paths["NHMS_SCHEDULER_JOURNAL_ROOT"],
+        workspace_root=config.workspace_root,
+        lock_path=config.lock_path,
+        scheduler_lock_backend=str(config.scheduler_lock_backend),
+        lock_ttl_seconds=config.lock_ttl_seconds,
+        scheduler_state="stopped",
+        active_scheduler_processes=0,
+        checked_at=datetime.now(UTC),
+        checked_by="round12-test-operator",
+        target_writer_generation="pre-reconcile-inventory",
+    )
+
+    result = ProductionScheduler.from_env(config).run_once()
+
+    assert result.status == "preflight_blocked"
+    assert result.evidence["execution_boundary"] == "scheduler_rollback_fence_prepared"
+    assert result.evidence["rollback_fence"] == {
+        "reason": "file_journal_rollback_fence_prepared",
+        "receipt_id": receipt["receipt_id"],
+    }
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+
+    complete_file_journal_rollforward(
+        journal_root=paths["NHMS_SCHEDULER_JOURNAL_ROOT"],
+        workspace_root=config.workspace_root,
+        lock_path=config.lock_path,
+        scheduler_lock_backend=str(config.scheduler_lock_backend),
+        lock_ttl_seconds=config.lock_ttl_seconds,
+        preparation_receipt_id=receipt["receipt_id"],
+    )
+    resumed = ProductionScheduler.from_env(config).run_once()
+    assert resumed.evidence.get("execution_boundary") != "scheduler_rollback_fence_prepared"
+
+
 def test_db_free_file_lock_contention_masks_raw_existing_lock_payload(
     monkeypatch: Any,
     tmp_path: Path,
@@ -24532,22 +24583,13 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
         for item in reserved_evidence["candidate_summary"]
     )
     partial_summary = partial_reconcile["inflight"]["outcomes"][0]["candidate_summary"]
-    assert [item["array_task_outcome"] for item in partial_summary].count("succeeded") == 17
-    assert [item["array_task_outcome"] for item in partial_summary].count("unverified") == 1
-    assert all(
-        item["restart_stage"] == "state_save_qc"
-        for item in partial_summary
-        if item["array_task_outcome"] == "succeeded"
-    )
-    assert all(
-        item["restart_stage"] == "forecast"
-        for item in partial_summary
-        if item["array_task_outcome"] == "unverified"
-    )
+    assert [item["array_task_outcome"] for item in partial_summary].count("succeeded") == 0
+    assert [item["array_task_outcome"] for item in partial_summary].count("unverified") == 18
+    assert all(item["restart_stage"] == "forecast" for item in partial_summary)
     partial_parent = partial_repository.get_pipeline_job(reserved.job_id)
     assert partial_parent["slurm_job_id"] == initial_client.accepted_forecast_job_id
     assert partial_parent["status"] == "reconcile_unverified"
-    assert len(partial_parent["candidate_projections"]) == 17
+    assert partial_parent["candidate_projections"] == []
     assert partial_result.status == "restart_reconciled"
     assert partial_result.evidence["execution_boundary"] == "restart_reconcile"
     assert partial_result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
@@ -24567,14 +24609,17 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
             candidate_id=str(member["candidate_id"]),
         )
         assert candidate_state is not None
+        hydro_run = partial_repository._hydro_run_for(str(member["run_id"]))
+        assert hydro_run["status"] == "created"
         verified_snapshots[model_id] = {
-            "hydro_run": partial_repository._hydro_run_for(str(member["run_id"])),
+            "hydro_run": hydro_run,
             "event_ids": tuple(
                 event["event_id"]
                 for event in candidate_state["pipeline_events"]
                 if event.get("event_type") == "array_task_reconciled"
             ),
         }
+        assert verified_snapshots[model_id]["event_ids"] == ()
 
     complete_repository = scheduler_module.FileOrchestrationJournalRepository(root)
     complete_scheduler = _RealProductionScheduler(
@@ -24628,12 +24673,15 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
             candidate_id=str(member["candidate_id"]),
         )
         assert candidate_state is not None
-        assert complete_repository._hydro_run_for(str(member["run_id"])) == verified_snapshots[model_id]["hydro_run"]
-        assert tuple(
+        completed_hydro = complete_repository._hydro_run_for(str(member["run_id"]))
+        assert completed_hydro["status"] == "succeeded"
+        assert completed_hydro != verified_snapshots[model_id]["hydro_run"]
+        completed_event_ids = tuple(
             event["event_id"]
             for event in candidate_state["pipeline_events"]
             if event.get("event_type") == "array_task_reconciled"
-        ) == verified_snapshots[model_id]["event_ids"]
+        )
+        assert len(completed_event_ids) == 1
 
     monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast_state_save_qc")
     resumed_repository = scheduler_module.FileOrchestrationJournalRepository(root)

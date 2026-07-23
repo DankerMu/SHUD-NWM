@@ -11309,6 +11309,182 @@ def test_round10_forecast_poll_timeout_stops_chain_as_reconciling(
     )
 
 
+@pytest.mark.parametrize(
+    ("immediate_terminal", "failure_mode"),
+    [
+        pytest.param(False, "incomplete", id="foreground-incomplete"),
+        pytest.param(True, "incomplete", id="immediate-incomplete"),
+        pytest.param(False, "malformed", id="foreground-malformed"),
+        pytest.param(False, "master_mismatch", id="foreground-master-mismatch"),
+        pytest.param(True, "projection_conflict", id="immediate-projection-conflict"),
+    ],
+)
+def test_round11_forecast_projection_gate_uses_durable_reconciling_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    immediate_terminal: bool,
+    failure_mode: str,
+) -> None:
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = ImmediateTerminalSlurmClient() if immediate_terminal else FakeCycleSlurmClient()
+    retry_service = FileJournalRetryService(
+        repository,
+        RetryConfig(max_retries=1, backoff_schedule=[0]),
+    )
+    basins = _basins(2)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_2026050100_model_{index}",
+                "candidate_id": (
+                    f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic"
+                ),
+                "orchestration_run_id": "cycle_gfs_2026050100_forecast_cohort_fixture",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+
+    if failure_mode == "incomplete":
+        original_results = client.get_array_task_results
+        monkeypatch.setattr(
+            client,
+            "get_array_task_results",
+            lambda job_id: original_results(job_id)[:1],
+        )
+    elif failure_mode == "malformed":
+        client.malformed_array_accounting_stages.add("forecast")
+    elif failure_mode == "master_mismatch":
+        original_status = client.get_job_status
+
+        def mismatched_terminal(job_id: str) -> dict[str, Any]:
+            terminal = original_status(job_id)
+            if terminal["stage"] == "forecast" and terminal["status"] == "succeeded":
+                terminal["job_id"] = "999999"
+            return terminal
+
+        monkeypatch.setattr(client, "get_job_status", mismatched_terminal)
+    else:
+
+        def projection_conflict(*_args: Any, **_kwargs: Any) -> dict[str, int]:
+            raise FileOrchestrationJournalError(
+                "file_journal_task_identity_mismatch",
+                field="task_slurm_job_id",
+            )
+
+        monkeypatch.setattr(repository, "project_forecast_cohort_tasks", projection_conflict)
+
+    result = _orchestrator(
+        tmp_path,
+        repository,
+        client,
+        retry_service=retry_service,
+    ).orchestrate_cycle("gfs", "2026050100", basins)
+
+    assert result.status == "reconciling"
+    assert [submission["stage"] for submission in client.submissions] == ["forecast"]
+    forecast = result.stages[-1]
+    assert forecast.status == "reconcile_unverified"
+    durable = repository.get_pipeline_job(forecast.pipeline_job_id)
+    assert durable is not None
+    assert durable["status"] == "reconcile_unverified"
+    assert durable["candidate_projections"] == []
+    assert durable["error_code"] in {
+        "SLURM_TASK_ACCOUNTING_INCOMPLETE",
+        "SLURM_MASTER_IDENTITY_MISMATCH",
+        "SLURM_TASK_IDENTITY_MISMATCH",
+    }
+    jobs = repository.query_pipeline_jobs_by_cycle("gfs_2026050100")
+    assert [job["job_id"] for job in jobs] == [forecast.pipeline_job_id]
+    assert all(
+        repository._hydro_run_for(str(basin["run_id"]))["status"] == "created"
+        for basin in basins
+    )
+    cycle = repository._cycle_rows(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        model_id=None,
+    ).forecast_cycle
+    assert cycle is not None
+    assert cycle["status"] == "forecast_running"
+
+
+def test_round11_resumed_forecast_incomplete_projection_stays_reconciling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = FakeCycleSlurmClient()
+    basins = _basins(2)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_2026050100_model_{index}",
+                "candidate_id": (
+                    f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic"
+                ),
+                "orchestration_run_id": "cycle_gfs_2026050100_forecast_cohort_fixture",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    original_projector = repository.project_forecast_cohort_tasks
+
+    def crash_before_projection(*_args: Any, **_kwargs: Any) -> dict[str, int]:
+        raise RuntimeError("injected projection crash")
+
+    monkeypatch.setattr(repository, "project_forecast_cohort_tasks", crash_before_projection)
+    with pytest.raises(RuntimeError, match="injected projection crash"):
+        _orchestrator(tmp_path, repository, client).orchestrate_cycle(
+            "gfs", "2026050100", basins
+        )
+    monkeypatch.setattr(repository, "project_forecast_cohort_tasks", original_projector)
+    original_results = client.get_array_task_results
+    monkeypatch.setattr(
+        client,
+        "get_array_task_results",
+        lambda job_id: original_results(job_id)[:1],
+    )
+
+    reopened = FileOrchestrationJournalRepository(repository.root)
+    orchestrator = _orchestrator(tmp_path, reopened, client)
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    normalized = orchestrator._normalize_cycle_basins(basins, "gfs", cycle_time)
+    job_id = "job_cycle_gfs_2026050100_forecast_cohort_fixture_forecast"
+    job = reopened.get_pipeline_job(job_id)
+    assert job is not None
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_id="gfs_2026050100",
+        run_id=str(job["run_id"]),
+        all_basins=normalized,
+        active_basins=list(normalized),
+    )
+    result, aggregation = orchestrator._resume_cycle_stage(M3_STAGES[2], context, job)
+
+    assert result.status == "reconcile_unverified"
+    assert aggregation is not None
+    assert [submission["stage"] for submission in client.submissions] == ["forecast"]
+    durable = reopened.get_pipeline_job(result.pipeline_job_id)
+    assert durable is not None
+    assert durable["status"] == "reconcile_unverified"
+    assert durable["candidate_projections"] == []
+    assert durable["error_code"] == "SLURM_TASK_ACCOUNTING_INCOMPLETE"
+
+
 @pytest.mark.parametrize("invalid_status", [None, "", "FUTURE_STATE", ["running"]])
 def test_round10_forecast_unknown_submit_status_is_ambiguous_and_unbound(
     tmp_path: Path,

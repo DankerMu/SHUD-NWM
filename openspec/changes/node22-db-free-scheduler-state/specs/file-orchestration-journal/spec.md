@@ -447,6 +447,11 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
 - **AND** foreground polling, immediate-terminal submit responses, and restart
   reconciliation use the same typed cycle-lock transaction to persist terminal
   master state, task projections, candidate/hydro rows, and events together
+- **AND** foreground and resumed execution derive their effective stage result
+  from that committed durable master outcome, so incomplete accounting,
+  projection conflict, or a terminal response for a different Slurm master
+  remains `reconcile_unverified`, performs no candidate/hydro terminal mutation,
+  submits no retry, and cannot enter a downstream stage
 - **AND** restart discovery includes terminal current-version masters only when
   their terminal projection is incomplete, while replay of a complete
   projection is zero-write and cannot move an already progressed hydro backward
@@ -495,9 +500,27 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
 - **AND** every unexpected flat `.json` entry, including an unsafe filename or
   disappearance after enumeration, is an authority blocker rather than a
   skipped file
+- **AND** journal and legacy-active files use the same migration-only strict
+  disappearance rule at enumeration, stat, and read boundaries; ordinary
+  optional reads outside migration retain their compatibility semantics
 - **AND** the migration completion marker has exactly its schema version and a
   canonical aware-UTC `completed_at`; a missing, malformed, naive, or extended
   marker fails closed without setting process-local completion state
+- **AND** a supported downgrade first acquires the exact production file
+  scheduler lease, persists a root/lease-bound rollback preparation receipt,
+  removes the completion marker, and leaves a durable fence that blocks the
+  current-generation scheduler and automatic migration while the old writer is
+  allowed to run
+- **AND** roll-forward requires the matching preparation receipt and the same
+  scheduler lease; it performs one strict, crash-resumable backfill, restores
+  the completion marker, publishes a bound roll-forward receipt, and consumes
+  the fence before normal scheduling can resume
+- **AND** a live scheduler lease, a tampered/stale/wrong-root receipt, or a lost
+  lease fails closed without changing migration authority
+- **AND** steady-state restart discovery after migration reads only the marker
+  and active inventory and does not enumerate or stat historical journal files;
+  the four-masters-per-day annual oracle materializes 1,460 real journals to
+  prove this bound
 - **AND** the oldest active cohort remains discoverable after reopen while a
   terminal cohort is removed from the active index only in the same durable
   transition that makes it ineligible for reconciliation

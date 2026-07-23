@@ -13,7 +13,13 @@ from services.tile_publisher.publisher import failure_payload
 from workers.data_adapters.base import parse_cycle_time
 
 from .chain import AnalysisOrchestrator, OrchestratorError
-from .file_orchestration_migration import export_scheduler_state_from_postgres, write_migration_receipt
+from .file_orchestration_journal import FileOrchestrationJournalError
+from .file_orchestration_migration import (
+    complete_file_journal_rollforward,
+    export_scheduler_state_from_postgres,
+    prepare_file_journal_rollback,
+    write_migration_receipt,
+)
 from .retention import RetentionConfig, run_retention
 from .scheduler import MAX_CONTINUOUS_JSON_PASSES, ProductionScheduler, ProductionSchedulerConfig
 
@@ -96,6 +102,59 @@ def _run_cleanup(*, retention_days: int | None, dry_run: bool) -> dict[str, obje
         published_artifact_root=os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT"),
     )
     return result.to_dict()
+
+
+def _prepare_file_journal_rollback(
+    *,
+    journal_root: str,
+    workspace_root: str,
+    lock_path: str | None,
+    scheduler_lock_backend: str,
+    lock_ttl_seconds: int,
+    scheduler_state: str,
+    active_scheduler_processes: int,
+    checked_at: str,
+    checked_by: str,
+    target_writer_generation: str,
+) -> dict[str, object]:
+    normalized_checked_at = checked_at[:-1] + "+00:00" if checked_at.endswith("Z") else checked_at
+    try:
+        checked_at_value = datetime.fromisoformat(normalized_checked_at)
+    except ValueError as error:
+        raise ValueError("prepare-file-journal-rollback --checked-at must be ISO-8601") from error
+    if checked_at_value.tzinfo is None or checked_at_value.utcoffset() is None:
+        raise ValueError("prepare-file-journal-rollback --checked-at must include a timezone")
+    return prepare_file_journal_rollback(
+        journal_root=journal_root,
+        workspace_root=workspace_root,
+        lock_path=lock_path,
+        scheduler_lock_backend=scheduler_lock_backend,
+        lock_ttl_seconds=lock_ttl_seconds,
+        scheduler_state=scheduler_state,
+        active_scheduler_processes=active_scheduler_processes,
+        checked_at=checked_at_value,
+        checked_by=checked_by,
+        target_writer_generation=target_writer_generation,
+    )
+
+
+def _complete_file_journal_rollforward(
+    *,
+    journal_root: str,
+    workspace_root: str,
+    preparation_receipt_id: str,
+    lock_path: str | None,
+    scheduler_lock_backend: str,
+    lock_ttl_seconds: int,
+) -> dict[str, object]:
+    return complete_file_journal_rollforward(
+        journal_root=journal_root,
+        workspace_root=workspace_root,
+        preparation_receipt_id=preparation_receipt_id,
+        lock_path=lock_path,
+        scheduler_lock_backend=scheduler_lock_backend,
+        lock_ttl_seconds=lock_ttl_seconds,
+    )
 
 
 def _split_csv(values: Sequence[str] | None) -> tuple[str, ...]:
@@ -412,6 +471,76 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             click.echo(str(error), err=True)
             raise SystemExit(2) from error
 
+    @cli.command("prepare-file-journal-rollback")
+    @click.option("--journal-root", required=True)
+    @click.option("--workspace-root", required=True)
+    @click.option("--lock-path")
+    @click.option("--scheduler-lock-backend", default="file", show_default=True)
+    @click.option("--lock-ttl-seconds", default=60, type=int, show_default=True)
+    @click.option("--scheduler-state", required=True, type=click.Choice(["stopped"]))
+    @click.option("--active-scheduler-processes", required=True, type=int)
+    @click.option("--checked-at", required=True)
+    @click.option("--checked-by", required=True)
+    @click.option("--target-writer-generation", required=True)
+    def prepare_file_journal_rollback_command(
+        journal_root: str,
+        workspace_root: str,
+        lock_path: str | None,
+        scheduler_lock_backend: str,
+        lock_ttl_seconds: int,
+        scheduler_state: str,
+        active_scheduler_processes: int,
+        checked_at: str,
+        checked_by: str,
+        target_writer_generation: str,
+    ) -> None:
+        try:
+            receipt = _prepare_file_journal_rollback(
+                journal_root=journal_root,
+                workspace_root=workspace_root,
+                lock_path=lock_path,
+                scheduler_lock_backend=scheduler_lock_backend,
+                lock_ttl_seconds=lock_ttl_seconds,
+                scheduler_state=scheduler_state,
+                active_scheduler_processes=active_scheduler_processes,
+                checked_at=checked_at,
+                checked_by=checked_by,
+                target_writer_generation=target_writer_generation,
+            )
+            click.echo(json.dumps(receipt, sort_keys=True))
+        except (FileOrchestrationJournalError, ValueError) as error:
+            click.echo(str(error), err=True)
+            raise SystemExit(2) from error
+
+    @cli.command("complete-file-journal-rollforward")
+    @click.option("--journal-root", required=True)
+    @click.option("--workspace-root", required=True)
+    @click.option("--preparation-receipt-id", required=True)
+    @click.option("--lock-path")
+    @click.option("--scheduler-lock-backend", default="file", show_default=True)
+    @click.option("--lock-ttl-seconds", default=60, type=int, show_default=True)
+    def complete_file_journal_rollforward_command(
+        journal_root: str,
+        workspace_root: str,
+        preparation_receipt_id: str,
+        lock_path: str | None,
+        scheduler_lock_backend: str,
+        lock_ttl_seconds: int,
+    ) -> None:
+        try:
+            receipt = _complete_file_journal_rollforward(
+                journal_root=journal_root,
+                workspace_root=workspace_root,
+                preparation_receipt_id=preparation_receipt_id,
+                lock_path=lock_path,
+                scheduler_lock_backend=scheduler_lock_backend,
+                lock_ttl_seconds=lock_ttl_seconds,
+            )
+            click.echo(json.dumps(receipt, sort_keys=True))
+        except (FileOrchestrationJournalError, ValueError) as error:
+            click.echo(str(error), err=True)
+            raise SystemExit(2) from error
+
     @cli.command("plan-production")
     @click.option(
         "--source",
@@ -516,6 +645,24 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     migrate_parser.add_argument("--journal-root", required=True)
     migrate_parser.add_argument("--receipt-path")
     migrate_parser.add_argument("--allow-historical-node22", action="store_true")
+    rollback_parser = subparsers.add_parser("prepare-file-journal-rollback")
+    rollback_parser.add_argument("--journal-root", required=True)
+    rollback_parser.add_argument("--workspace-root", required=True)
+    rollback_parser.add_argument("--lock-path")
+    rollback_parser.add_argument("--scheduler-lock-backend", default="file")
+    rollback_parser.add_argument("--lock-ttl-seconds", default=60, type=int)
+    rollback_parser.add_argument("--scheduler-state", required=True, choices=("stopped",))
+    rollback_parser.add_argument("--active-scheduler-processes", required=True, type=int)
+    rollback_parser.add_argument("--checked-at", required=True)
+    rollback_parser.add_argument("--checked-by", required=True)
+    rollback_parser.add_argument("--target-writer-generation", required=True)
+    rollforward_parser = subparsers.add_parser("complete-file-journal-rollforward")
+    rollforward_parser.add_argument("--journal-root", required=True)
+    rollforward_parser.add_argument("--workspace-root", required=True)
+    rollforward_parser.add_argument("--preparation-receipt-id", required=True)
+    rollforward_parser.add_argument("--lock-path")
+    rollforward_parser.add_argument("--scheduler-lock-backend", default="file")
+    rollforward_parser.add_argument("--lock-ttl-seconds", default=60, type=int)
     plan_parser = subparsers.add_parser("plan-production")
     plan_parser.add_argument("--source", action="append", default=[])
     plan_parser.add_argument("--lookback-hours", type=int, default=None)
@@ -576,6 +723,40 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(receipt, sort_keys=True))
             return 0
         except (RuntimeError, ValueError) as error:
+            print(str(error), file=sys.stderr)
+            return 2
+    if args.command == "prepare-file-journal-rollback":
+        try:
+            receipt = _prepare_file_journal_rollback(
+                journal_root=args.journal_root,
+                workspace_root=args.workspace_root,
+                lock_path=args.lock_path,
+                scheduler_lock_backend=args.scheduler_lock_backend,
+                lock_ttl_seconds=args.lock_ttl_seconds,
+                scheduler_state=args.scheduler_state,
+                active_scheduler_processes=args.active_scheduler_processes,
+                checked_at=args.checked_at,
+                checked_by=args.checked_by,
+                target_writer_generation=args.target_writer_generation,
+            )
+            print(json.dumps(receipt, sort_keys=True))
+            return 0
+        except (FileOrchestrationJournalError, ValueError) as error:
+            print(str(error), file=sys.stderr)
+            return 2
+    if args.command == "complete-file-journal-rollforward":
+        try:
+            receipt = _complete_file_journal_rollforward(
+                journal_root=args.journal_root,
+                workspace_root=args.workspace_root,
+                preparation_receipt_id=args.preparation_receipt_id,
+                lock_path=args.lock_path,
+                scheduler_lock_backend=args.scheduler_lock_backend,
+                lock_ttl_seconds=args.lock_ttl_seconds,
+            )
+            print(json.dumps(receipt, sort_keys=True))
+            return 0
+        except (FileOrchestrationJournalError, ValueError) as error:
             print(str(error), file=sys.stderr)
             return 2
     if args.command == "plan-production":

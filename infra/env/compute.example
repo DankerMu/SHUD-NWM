@@ -89,7 +89,12 @@ NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE=flock
 # File-journal restart discovery is maintained in the durable
 # reconcile-inventory/ directory. The first upgraded pass performs a
 # crash-resumable current/legacy backfill and writes its migration marker;
-# there is no per-pass history scan-limit knob to tune.
+# there is no per-pass history scan-limit knob to tune. Never downgrade to a
+# pre-inventory writer directly: stop the scheduler, run
+# `nhms-pipeline prepare-file-journal-rollback` with this exact journal/workspace
+# and file lease, then require its receipt before the old writer starts. A
+# current-generation scheduler is fenced until the matching explicit
+# `complete-file-journal-rollforward` succeeds.
 # Bound source/cycle cohort submission and polling control threads only. Basin
 # compute concurrency is owned by the global Slurm array bound below plus
 # config/resource_profiles.yaml max_concurrent=32; this value must never be
