@@ -5,6 +5,10 @@ from typing import Any, Mapping, Sequence
 
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator import chain as _chain
+from services.orchestrator.accepted_submit_identity import (
+    accepted_submit_contract_is_current,
+    accepted_submit_row_kind,
+)
 from services.orchestrator.chain_types import (
     CycleOrchestrationContext,
     DisplayLogPublicationAttempt,
@@ -67,6 +71,10 @@ def _slurm_accounting_from_payload(*args: Any, **kwargs: Any) -> Any:
 
 def _slurm_client_error_cls() -> type[Exception]:
     return getattr(_chain, "SlurmClientError")
+
+
+def _is_current_accepted_master(job: Mapping[str, Any]) -> bool:
+    return accepted_submit_contract_is_current(job) and accepted_submit_row_kind(job) == "master"
 
 
 def _stage_status_message(*args: Any, **kwargs: Any) -> Any:
@@ -160,6 +168,11 @@ def sync_cycle_statuses(self: Any, cycle_id: str) -> list[dict[str, Any]]:
         new_status = _status_from_gateway_job(gateway_job)
         if new_status == str(job.get("status")):
             continue
+        current_master = _is_current_accepted_master(job)
+        if current_master and new_status in _terminal_job_statuses():
+            # Gateway master state is not sufficient terminal truth for a
+            # forecast array. Restart reconcile owns exact task projection.
+            continue
         publication = (
             self._display_log_publication_for_pipeline_job(job) if new_status in _terminal_job_statuses() else None
         )
@@ -169,16 +182,29 @@ def sync_cycle_statuses(self: Any, cycle_id: str) -> list[dict[str, Any]]:
             else None
         )
         log_uri = publication_attempt.advertised_uri if publication_attempt is not None else None
-        previous_status, record = self.repository.update_pipeline_job_status(
-            str(job["job_id"]),
-            new_status,
-            started_at=_parse_gateway_time(gateway_job.get("started_at")),
-            finished_at=_parse_gateway_time(gateway_job.get("finished_at")),
-            exit_code=gateway_job.get("exit_code"),
-            error_code=gateway_job.get("error_code"),
-            error_message=gateway_job.get("error_message"),
-            log_uri=str(log_uri) if log_uri else None,
-        )
+        if current_master:
+            transition = self.repository.transition_pipeline_job_runtime_status(
+                str(job["job_id"]),
+                new_status,
+                expected_statuses=(str(job.get("status") or ""),),
+                started_at=_parse_gateway_time(gateway_job.get("started_at")),
+                exit_code=gateway_job.get("exit_code"),
+            )
+            if not transition.committed:
+                continue
+            previous_status = str(job.get("status") or "")
+            record = dict(transition.row or {})
+        else:
+            previous_status, record = self.repository.update_pipeline_job_status(
+                str(job["job_id"]),
+                new_status,
+                started_at=_parse_gateway_time(gateway_job.get("started_at")),
+                finished_at=_parse_gateway_time(gateway_job.get("finished_at")),
+                exit_code=gateway_job.get("exit_code"),
+                error_code=gateway_job.get("error_code"),
+                error_message=gateway_job.get("error_message"),
+                log_uri=str(log_uri) if log_uri else None,
+            )
         if str(record.get("status")) != new_status:
             continue
         details = _safe_pipeline_event_details(
@@ -232,6 +258,32 @@ def cancel_active_cycle_jobs(self: Any, cycle_id: str, *, reason: str = "operato
         slurm_job_id = job.get("slurm_job_id")
         if status in _terminal_job_statuses() or not slurm_job_id:
             continue
+        current_master = _is_current_accepted_master(job)
+        if current_master:
+            intent = self.repository.request_pipeline_job_cancellation(
+                str(job["job_id"]),
+                expected_statuses=(status,),
+                reason=reason,
+            )
+            if not intent.committed:
+                continue
+            status = str((intent.row or {}).get("status") or "cancellation_pending")
+            self.repository.insert_pipeline_event(
+                entity_type="pipeline_job",
+                entity_id=str(job["job_id"]),
+                event_type="cancellation_requested",
+                status_from=str(job.get("status") or ""),
+                status_to=status,
+                message=f"Cancellation intent persisted for Slurm job {slurm_job_id}.",
+                details=_safe_pipeline_event_details(
+                    {
+                        "cycle_id": cycle_id,
+                        "reason": reason,
+                        "slurm_job_id": slurm_job_id,
+                        "replacement_submitted": False,
+                    }
+                ),
+            )
         try:
             cancelled_payload = _coerce_mapping(cancel_job(str(slurm_job_id)))
         except slurm_client_error_cls as error:
@@ -282,15 +334,31 @@ def cancel_active_cycle_jobs(self: Any, cycle_id: str, *, reason: str = "operato
                 )
                 continue
             raise
-        previous_status, record = self.repository.update_pipeline_job_status(
-            str(job["job_id"]),
-            "cancelled",
-            finished_at=_parse_gateway_time(cancelled_payload.get("finished_at")) or _utcnow(),
-            exit_code=cancelled_payload.get("exit_code"),
-            error_code=cancelled_payload.get("error_code"),
-            error_message=cancelled_payload.get("error_message"),
-            log_uri=job.get("log_uri"),
-        )
+        if current_master:
+            completion = self.repository.complete_pipeline_job_cancellation(
+                str(job["job_id"]),
+                finished_at=_parse_gateway_time(cancelled_payload.get("finished_at")) or _utcnow(),
+                exit_code=cancelled_payload.get("exit_code"),
+                error_code=cancelled_payload.get("error_code"),
+                error_message=cancelled_payload.get("error_message"),
+                log_uri=job.get("log_uri"),
+            )
+            if not completion.committed:
+                continue
+            previous_status = status
+            record = dict(completion.row or {})
+            persisted_status = str(record.get("status") or "reconcile_unverified")
+        else:
+            previous_status, record = self.repository.update_pipeline_job_status(
+                str(job["job_id"]),
+                "cancelled",
+                finished_at=_parse_gateway_time(cancelled_payload.get("finished_at")) or _utcnow(),
+                exit_code=cancelled_payload.get("exit_code"),
+                error_code=cancelled_payload.get("error_code"),
+                error_message=cancelled_payload.get("error_message"),
+                log_uri=job.get("log_uri"),
+            )
+            persisted_status = "cancelled"
         details = _safe_pipeline_event_details(
             {
                 "cycle_id": cycle_id,
@@ -313,8 +381,12 @@ def cancel_active_cycle_jobs(self: Any, cycle_id: str, *, reason: str = "operato
             entity_id=str(job["job_id"]),
             event_type="cancel",
             status_from=previous_status or status,
-            status_to="cancelled",
-            message=f"Cancelled Slurm job {slurm_job_id}; no replacement submitted in this pass.",
+            status_to=persisted_status,
+            message=(
+                f"Cancelled Slurm job {slurm_job_id}; exact task reconciliation remains pending."
+                if current_master
+                else f"Cancelled Slurm job {slurm_job_id}; no replacement submitted in this pass."
+            ),
             details=details,
         )
         cancelled.append(record)

@@ -86,6 +86,10 @@ NHMS_SCHEDULER_STDOUT_SUMMARY_ONLY=true
 # Keep these separate so one value never selects incompatible safety semantics.
 NHMS_SCHEDULER_LEASE_GUARD_MODE=atomic
 NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE=flock
+# File-journal restart discovery is maintained in the durable
+# reconcile-inventory/ directory. The first upgraded pass performs a
+# crash-resumable current/legacy backfill and writes its migration marker;
+# there is no per-pass history scan-limit knob to tune.
 # Bound source/cycle cohort submission and polling control threads only. Basin
 # compute concurrency is owned by the global Slurm array bound below plus
 # config/resource_profiles.yaml max_concurrent=32; this value must never be
@@ -102,6 +106,7 @@ NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND=32
 # `PrivateData` values must omit `jobs` and `all`. If either proof is missing,
 # unavailable, or restrictive, global zero-match is accounting-unavailable and
 # no retry is released; there is intentionally no acknowledgement override.
+# Both config probes are drained under byte, row, and wall-time bounds.
 NHMS_SCHEDULER_RECONCILE_ABSENCE_SECONDS=300
 NHMS_SCHEDULER_RECONCILE_SLURM_USER=frd_muziyao
 NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT=replace-with-node22-slurm-account

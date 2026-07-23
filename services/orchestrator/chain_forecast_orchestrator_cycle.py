@@ -5,7 +5,9 @@ from datetime import UTC, datetime
 from services.orchestrator import chain as _chain
 from services.orchestrator.accepted_submit_identity import (
     ACCEPTED_SUBMIT_CONTRACT_VERSION,
+    accepted_submit_contract_is_current,
     accepted_submit_pipeline_job_model_id,
+    accepted_submit_row_kind,
     canonical_forecast_cohort_members,
     forecast_cohort_digest,
     forecast_cohort_identity_is_valid,
@@ -171,7 +173,7 @@ class ForecastOrchestratorCycleMixin:
         terminal_time = _chain._pipeline_job_terminal_time(job)
         return terminal_time is None or terminal_time <= refreshed_upstream_finished_at
 
-    def _schedule_cycle_stage_retry(self, result: _chain.StageRunResult, _failure_number: int) -> str | None:
+    def _schedule_cycle_stage_retry(self, result: _chain.StageRunResult, failure_number: int) -> str | None:
         if self.retry_service is None:
             return None
         job = self._retry_job_for_stage_result(result)
@@ -179,6 +181,33 @@ class ForecastOrchestratorCycleMixin:
             return None
         retry_count = int(getattr(job, "retry_count", 0) or 0)
         backoff_seconds = _chain.compute_backoff_seconds(retry_count, self.retry_config.backoff_schedule)
+        get_pipeline_job = getattr(self.repository, "get_pipeline_job", None)
+        current = get_pipeline_job(result.pipeline_job_id) if callable(get_pipeline_job) else None
+        if (
+            isinstance(current, _chain.Mapping)
+            and accepted_submit_contract_is_current(current)
+            and accepted_submit_row_kind(current) == "master"
+        ):
+            should_retry = getattr(self.retry_service, "should_auto_retry", None)
+            if callable(should_retry) and not bool(should_retry(job)):
+                return None
+            # The next call to _submit_and_wait_cycle_stage owns creation of a
+            # clean, versioned reservation using the then-current basin cohort.
+            # Do not let the legacy retry adapter clone a marker-free row.
+            retry_marker = "_retry_"
+            base_job_id = result.pipeline_job_id
+            suffix_attempt = 0
+            if retry_marker in base_job_id:
+                possible_base, possible_attempt = base_job_id.rsplit(retry_marker, maxsplit=1)
+                try:
+                    suffix_attempt = max(int(possible_attempt), 0)
+                    base_job_id = possible_base
+                except ValueError:
+                    pass
+            next_attempt = max(retry_count, suffix_attempt, failure_number - 1) + 1
+            next_job_id = f"{base_job_id}{retry_marker}{next_attempt}"
+            _chain.time.sleep(backoff_seconds)
+            return next_job_id
         handled = self.retry_service.handle_failed_job(job)
         handled_status = str(getattr(handled, "status", ""))
         handled_job_id = str(getattr(handled, "job_id"))

@@ -335,9 +335,14 @@ systemctl --user enable --now nhms-scheduler-evidence-retention.timer
      Accepted-submit exact-comment reconcile 的全局 0/1/多重匹配证明会同时执行 `scontrol show config`
      （controller）和 `sacctmgr show config`（SlurmDBD）；两侧 `PrivateData` 都不含 `jobs`/`all` 时才允许
      `sacct --allusers`。任一命令不可用、字段缺失或配置受限时，本轮记为 accounting unavailable，不释放
-     retry，也没有可绕过的 env acknowledgement。`sacct` 按 12 小时时间页扫描 7 天窗口，并在一个
+     retry，也没有可绕过的 env acknowledgement。两个配置探针的 stdout/stderr 都受 byte、row 和 wall-time
+     上限约束，超限或超时同样 fail closed。`sacct` 按 12 小时时间页扫描 7 天窗口，并在一个
      reconcile pass 内缓存页面、跨页按 master job id 去重；每页独立执行 20,000 行/2 MiB 限制，整轮只共享
      wall-time deadline，避免将合法的 7 天 task/`.batch` 总量误判为超限。
+     文件 journal 的重启发现只读取 `reconcile-inventory/`：升级后的首次 pass 会在 flock 保护下对 current 与
+     marker-free legacy active rows 做可重入 backfill，完成后写
+     `reconcile-inventory-migration-v1.json`。若首次迁移中断，marker 不落盘，重启会继续；稳态 pass 不再扫描
+     全量 `pipeline-jobs/`、cycle journal 或 `pipeline-jobs/by-cycle/` candidate 历史。
      out-of-scope LOW 收尾 → #300。
 7b. ✅ **多源下载韧性**（PR #308，b4a2e85/eeb4d5c）：GFS 换 NODD 多镜像链（`GFS_SOURCE_BACKENDS=s3,gcs,azure,ftpprd,nomads`，共享 `.idx`+HTTP-Range+本地 cdo-clip，NOMADS grib-filter 末位回退）；
 IFS 云镜像优先（`IFS_OPEN_DATA_FALLBACK_SOURCES` 默认 `aws,azure,google,ecmwf`，ECMWF 直连 500 连接上限末位）。NOMADS 403=动态封禁 → 持久断路器（`OBJECT_STORE_ROOT/state/source_circuit/`，cooldown 内停重试）；

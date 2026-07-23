@@ -511,7 +511,16 @@ Scenario evidence rows for section 5:
   retaining the oldest active cohort after reopen, and stable
   unavailable/mismatch decisions do not grow the journal. Scheduler lease and
   journal transaction lock settings have distinct tested semantics;
-  unsupported shared-filesystem journal locking fails closed.
+  unsupported shared-filesystem journal locking fails closed. The inventory is
+  anchor-first for active journal writes, journal-first for terminal removal,
+  and is backfilled once for current and marker-free active rows under a
+  crash-resumable completion marker; steady-state queries perform no recursive
+  terminal/candidate fallback. The public reserve/bind/transition matrix proves
+  current-version authority is typed-only while legacy APIs remain compatible.
+  Accepted-submit whole/partial failure, sync, and cancel do not create legacy
+  retry clones or use generic master status writes; cancellation intent precedes
+  the external side effect. Proven rejection leaves no active marker. Slurm
+  visibility probes have executable stdout/stderr/row/time/reap bounds.
 
 - [ ] 9.6 Complete local, CI, and node-22 live verification.
   Evidence floor: the issue-targeted pytest command, `uv run ruff check .`, and

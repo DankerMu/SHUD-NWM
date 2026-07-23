@@ -80,6 +80,8 @@ MAX_COMMENT_SACCT_BYTES = 2 * 1024 * 1024
 MAX_COMMENT_SACCT_ROWS = 20_000
 COMMENT_SACCT_TIMEOUT_SECONDS = 30.0
 COMMENT_SACCT_VISIBILITY_TIMEOUT_SECONDS = 5.0
+MAX_VISIBILITY_PROBE_BYTES = 256 * 1024
+MAX_VISIBILITY_PROBE_ROWS = 5_000
 
 
 def _as_utc_datetime(value: Any) -> datetime | None:
@@ -208,21 +210,81 @@ def default_global_accounting_visibility_probe(slurm_bin_path: str = "") -> Call
         proven = True
         for command in ([scontrol, "show", "config"], [sacctmgr, "show", "config"]):
             try:
-                completed = subprocess.run(  # noqa: S603 - fixed argv, no shell.
+                stdout = _bounded_visibility_stdout(
                     command,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=COMMENT_SACCT_VISIBILITY_TIMEOUT_SECONDS,
                 )
-            except (OSError, subprocess.SubprocessError):
+            except ReconcileQueryUnavailable:
                 proven = False
                 continue
-            if completed.returncode != 0 or not _private_data_allows_global_jobs(completed.stdout):
+            if not _private_data_allows_global_jobs(stdout):
                 proven = False
         return proven
 
     return _probe
+
+
+def _bounded_visibility_stdout(command: Sequence[str]) -> str:
+    """Drain visibility-probe stdout/stderr with hard byte, row, and time bounds."""
+
+    try:
+        process = subprocess.Popen(  # noqa: S603 - fixed argv, no shell.
+            list(command),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as error:
+        raise ReconcileQueryUnavailable("visibility probe could not start") from error
+    if process.stdout is None or process.stderr is None:
+        _terminate_and_reap(process)
+        raise ReconcileQueryUnavailable("visibility probe pipes are unavailable")
+    streams = {process.stdout: bytearray(), process.stderr: bytearray()}
+    row_counts = {process.stdout: 0, process.stderr: 0}
+    selector = selectors.DefaultSelector()
+    deadline = time.monotonic() + COMMENT_SACCT_VISIBILITY_TIMEOUT_SECONDS
+    try:
+        for stream in streams:
+            selector.register(stream, selectors.EVENT_READ)
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ReconcileQueryUnavailable("visibility probe timed out")
+            events = selector.select(timeout=min(remaining, 0.25))
+            if not events:
+                if process.poll() is not None:
+                    for key in list(selector.get_map().values()):
+                        selector.unregister(key.fileobj)
+                    break
+                continue
+            for key, _mask in events:
+                stream = key.fileobj
+                chunk = os.read(stream.fileno(), 64 * 1024)
+                if not chunk:
+                    selector.unregister(stream)
+                    continue
+                streams[stream].extend(chunk)
+                row_counts[stream] += chunk.count(b"\n")
+                logical_rows = row_counts[stream] + int(
+                    bool(streams[stream]) and not streams[stream].endswith(b"\n")
+                )
+                if sum(len(output) for output in streams.values()) > MAX_VISIBILITY_PROBE_BYTES:
+                    raise ReconcileQuerySaturated("bytes")
+                if logical_rows > MAX_VISIBILITY_PROBE_ROWS:
+                    raise ReconcileQuerySaturated("rows")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ReconcileQueryUnavailable("visibility probe timed out")
+        return_code = process.wait(timeout=remaining)
+        if return_code != 0:
+            raise ReconcileQueryUnavailable(f"visibility probe returned {return_code}")
+        return bytes(streams[process.stdout]).decode("utf-8", errors="replace")
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ReconcileQueryUnavailable("visibility probe failed") from error
+    finally:
+        selector.close()
+        if process.poll() is None:
+            _terminate_and_reap(process)
+        else:
+            process.wait()
 
 
 def _private_data_allows_global_jobs(stdout: str) -> bool:

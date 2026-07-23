@@ -1519,7 +1519,10 @@ Invariant Matrix:
   retry fields, errors, or logs. An exact same-value replay is a zero-write
   read. Accepted bind, ambiguity/reconciliation, proven rejection, retry
   permission, next-attempt reclaim, and terminal projection occur only through
-  their typed cycle-lock APIs.
+  their typed cycle-lock APIs. Generic reserve/bind/unmarked-transition methods
+  cannot create current-version authority; whole/partial retry, status sync, and
+  cancel use typed current-version transitions rather than marker-free clones or
+  generic status writes.
 - Closed-enum invariant: task-accounting completeness is represented by
   pipeline status/error/projection fields and never adds values to the six-value
   `reconciliation_decision` contract. Reconciliation API inputs are normalized
@@ -1533,6 +1536,15 @@ Invariant Matrix:
   globally scanned direct-job namespace. Direct lookup/index/partition and
   audit retention keep per-cycle reads and restart discovery bounded at the
   supported 256-member cadence without deleting canonical journal truth.
+- Reconcile-inventory invariant: a new active anchor is durable before the
+  journal side effect, terminal journal truth precedes anchor removal, and
+  canonical replay repairs orphan/stale anchors. A crash-resumable one-time
+  backfill indexes both current-version and marker-free active rows, after which
+  steady-state restart never recursively enumerates terminal master or candidate
+  history.
+- Process-bound invariant: accounting discovery and its visibility probes share
+  explicit stdout, stderr, row, wall-time, termination, and reap limits; a probe
+  that saturates any bound cannot authorize absence retry.
 - Accepted-submit lookup invariant: versioned master reserve, transition,
   accepted bind, rejection, retry permission, and accounting adoption resolve
   the deterministic `pipeline_job_id` from exact direct plus its one cycle

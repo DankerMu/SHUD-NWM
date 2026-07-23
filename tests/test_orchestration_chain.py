@@ -8405,7 +8405,7 @@ def test_file_journal_forecast_terminal_projection_crash_recovers_after_reopen(
         "succeeded",
         "succeeded",
     ]
-    assert not (repository.root / "active-reconcile" / f"{job_id}.json").exists()
+    assert not (repository.root / "reconcile-inventory" / f"{job_id}.json").exists()
 
 
 def test_file_journal_forecast_explicit_rejection_terminalizes_without_secondary_error(

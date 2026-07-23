@@ -1303,7 +1303,7 @@ def test_file_orchestration_journal_reconcile_scan_skips_bad_journal_path(
     assert {job.job_id for job in inflight} == {"job_reconcile_pending_after_bad_path"}
 
 
-def test_file_orchestration_journal_recent_reconcile_scan_closes_directory_fds(tmp_path: Path) -> None:
+def test_file_orchestration_journal_reconcile_inventory_scan_closes_directory_fds(tmp_path: Path) -> None:
     journal_root = tmp_path / "journal"
     repository = FileOrchestrationJournalRepository(journal_root, max_files=64)
     for index in range(16):
@@ -1314,22 +1314,13 @@ def test_file_orchestration_journal_recent_reconcile_scan_closes_directory_fds(t
             status="pending",
         )
         job["slurm_job_id"] = str(5000 + index)
-        _write_jsonl(
-            journal_root / "journal" / "gfs" / f"{format_cycle_time(cycle_time)}_{index}.jsonl",
-            [
-                _journal_record(
-                    record_type="pipeline_job",
-                    source_id="gfs",
-                    cycle_time=cycle_time,
-                    payload=job,
-                    sequence=index + 1,
-                )
-            ],
-        )
+        repository.upsert_pipeline_job(job)
+
+    assert len(repository.query_inflight_jobs()) == 16
 
     before = _open_fd_count_or_skip()
     for _ in range(40):
-        assert list(repository._iter_recent_reconcile_journal_paths(8))
+        assert len(repository.query_inflight_jobs()) == 16
     after = _open_fd_count_or_skip()
 
     assert after - before <= 4
@@ -1399,11 +1390,9 @@ def test_file_orchestration_journal_cycle_rows_missing_alias_reads_close_parent_
     assert after - before <= 4
 
 
-def test_file_orchestration_journal_legacy_fallback_does_not_scan_beyond_bound(
-    monkeypatch: pytest.MonkeyPatch,
+def test_file_orchestration_journal_migration_backfill_is_not_limited_by_former_recent_bound(
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setenv("NHMS_FILE_RECONCILE_SCAN_LIMIT", "1")
     cycle_time = _dt("2026-06-28T00:00:00Z")
     repository = FileOrchestrationJournalRepository(tmp_path / "journal")
     old_reserved = _pipeline_reservation_record(cycle_time, job_id="job_reconcile_old_reserved")
@@ -1430,15 +1419,13 @@ def test_file_orchestration_journal_legacy_fallback_does_not_scan_beyond_bound(
     reserved = repository.query_reserved_unbound_jobs()
     inflight = repository.query_inflight_jobs()
 
-    assert reserved == []
-    assert inflight == []
+    assert [job.job_id for job in reserved] == ["job_reconcile_old_reserved"]
+    assert [job.job_id for job in inflight] == ["job_reconcile_old_inflight"]
 
 
-def test_file_orchestration_journal_legacy_fallback_skips_bad_entry_within_bound(
-    monkeypatch: pytest.MonkeyPatch,
+def test_file_orchestration_journal_migration_skips_bad_entry_and_keeps_old_active(
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setenv("NHMS_FILE_RECONCILE_SCAN_LIMIT", "1")
     cycle_time = _dt("2026-06-28T00:00:00Z")
     journal_root = tmp_path / "journal"
     repository = FileOrchestrationJournalRepository(journal_root)
@@ -1475,7 +1462,7 @@ def test_file_orchestration_journal_legacy_fallback_skips_bad_entry_within_bound
 
     reserved = repository.query_reserved_unbound_jobs()
 
-    assert reserved == []
+    assert [job.job_id for job in reserved] == ["job_reconcile_old_reserved_after_bad_direct"]
 
 
 def test_pipeline_event_public_surfaces_redact_runtime_root_recovery_details(tmp_path: Path) -> None:

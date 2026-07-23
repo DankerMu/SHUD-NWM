@@ -238,6 +238,11 @@ when they would change any current-version master authority field, including a
 retryable status or absence permission. Reclaim MUST independently require the
 complete current-attempt typed absence proof and immutable attempt anchor; a
 generic compatibility write cannot manufacture retry authority.
+The same restriction applies to generic reserve, bind, and unmarked submit
+transition APIs: a current-version reservation MUST start clean and unbound,
+accepted binding MUST use the attempt-aware commit boundary, and
+`absence_retry_permitted` MUST be produced only by the authoritative typed
+retry-permission boundary. Marker-free rows retain their legacy API behavior.
 
 A Gateway timeout MUST persist only the ambiguous submit outcome and MUST leave
 `reconciliation_source`, `reconciliation_decision`, and
@@ -442,6 +447,16 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
 - **AND** a durable active-reconcile index is atomically maintained by every
   typed current-version master transition, so restart discovery cost and public
   outcome materialization are bounded independently of terminal history size
+- **AND** a new active discovery anchor is durable before its journal side
+  effect; an orphan pre-journal anchor is removed by canonical replay, while a
+  journaled active row remains discoverable across a crash before direct/index
+  materialization and arbitrary later history
+- **AND** terminal journal truth commits before its discovery anchor is removed,
+  and stale terminal anchors are repaired on reopen
+- **AND** an idempotent, crash-resumable one-time backfill inventories existing
+  current-version and marker-free active rows under a durable completion marker;
+  steady-state restart queries do not recursively enumerate terminal master or
+  candidate history
 - **AND** the oldest active cohort remains discoverable after reopen while a
   terminal cohort is removed from the active index only in the same durable
   transition that makes it ineligible for reconciliation
@@ -465,6 +480,29 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
   without the additive cohort/member fields
 - **THEN** its existing status and identity contract remains valid
 - **AND** DB-free-only cohort fields are not made mandatory for that caller.
+
+#### Scenario: Accepted-submit retry and cycle control remain typed
+
+- **WHEN** a current-version forecast cohort has whole or partial terminal task
+  failure, status synchronization, or a cancellation request
+- **THEN** it does not create a marker-free retry clone or use a generic master
+  status mutation
+- **AND** retry stays within the attempt-aware accepted-submit lifecycle
+- **AND** non-terminal synchronization uses the typed runtime transition while
+  terminal truth is finalized only by exact task accounting/projection
+- **AND** cancellation intent is durable before the external cancel call, so a
+  process or Gateway failure remains recoverable on reopen
+- **AND** proven rejection without a real Slurm master ID is not retained as
+  terminal task-projection work in the active-reconcile inventory.
+
+#### Scenario: Accounting visibility probes are process-bounded
+
+- **WHEN** scheduler probes controller/accounting visibility with local Slurm
+  commands
+- **THEN** stdout, stderr, rows, wall time, termination, and process reap are
+  bounded before output materialization
+- **AND** saturation or timeout leaves accounting authority unproven and cannot
+  release retry permission.
 
 #### Scenario: Non-forecast array stages retain their prior contract
 
