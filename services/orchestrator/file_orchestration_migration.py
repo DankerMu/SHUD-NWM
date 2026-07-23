@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
-import sys
+import tempfile
 from collections.abc import Iterable, Mapping
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -17,6 +19,7 @@ from services.orchestrator.file_orchestration_journal import (
     FileOrchestrationJournalError,
     FileOrchestrationJournalRepository,
     _public_evidence,
+    _validated_git_writer_generation,
 )
 from services.orchestrator.scheduler_state import _format_utc
 from workers.data_adapters.base import parse_cycle_time
@@ -61,6 +64,11 @@ def prepare_file_journal_rollback(
 ) -> dict[str, Any]:
     """Produce the durable receipt required before launching an old writer."""
 
+    target_writer_generation = _validated_git_writer_generation(
+        target_writer_generation,
+        field="target_writer_generation",
+        invalid_reason="file_journal_rollback_target_writer_generation_invalid",
+    )
     config, lease_identity = _rollback_file_lease_config(
         journal_root=journal_root,
         workspace_root=workspace_root,
@@ -131,23 +139,11 @@ def launch_file_journal_rollback_writer(
 ) -> dict[str, Any]:
     """Validate the bound receipt and only then cross the old-writer exec boundary."""
 
+    arguments = _validated_production_writer_arguments(writer_args)
     repository_root, actual_writer_generation = _resolve_clean_writer_generation(
         writer_repository_root
     )
-    if isinstance(writer_args, str | bytes):
-        arguments: tuple[Any, ...] = ()
-    else:
-        arguments = tuple(writer_args)
-    if arguments[:1] == ("--",):
-        arguments = arguments[1:]
-    if not arguments or any(
-        not isinstance(arg, str) or not arg or "\x00" in arg
-        for arg in arguments
-    ):
-        raise FileOrchestrationJournalError(
-            "file_journal_rollback_writer_command_invalid",
-            field="writer_args",
-        )
+    writer_runtime, runtime_identity = _resolve_target_writer_runtime(repository_root)
     receipt = require_file_journal_rollback_prepared(
         journal_root=journal_root,
         workspace_root=workspace_root,
@@ -157,27 +153,144 @@ def launch_file_journal_rollback_writer(
         scheduler_lock_backend=scheduler_lock_backend,
         lock_ttl_seconds=lock_ttl_seconds,
     )
-    rechecked_root, rechecked_generation = _resolve_clean_writer_generation(
-        repository_root
-    )
-    if rechecked_root != repository_root or rechecked_generation != actual_writer_generation:
+    if receipt["preflight"]["dry_run"] is not False:
         raise FileOrchestrationJournalError(
-            "file_journal_rollback_writer_generation_changed",
-            field="writer_repository_root",
+            "file_journal_rollback_not_prepared",
+            field="reconcile_inventory_migration",
         )
-    command = (
-        sys.executable,
-        "-m",
-        "services.orchestrator.cli",
-        *arguments,
-    )
-    completed = _run_rollback_writer(command, cwd=repository_root, check=False)
+    with _materialize_commit_snapshot(repository_root, actual_writer_generation) as snapshot_root:
+        rechecked_root, rechecked_generation = _resolve_clean_writer_generation(
+            repository_root
+        )
+        rechecked_runtime, rechecked_runtime_identity = _resolve_target_writer_runtime(
+            repository_root
+        )
+        if (
+            rechecked_root != repository_root
+            or rechecked_generation != actual_writer_generation
+            or rechecked_runtime != writer_runtime
+            or rechecked_runtime_identity != runtime_identity
+        ):
+            raise FileOrchestrationJournalError(
+                "file_journal_rollback_writer_generation_changed",
+                field="writer_repository_root",
+            )
+        command = (
+            str(writer_runtime),
+            "-m",
+            "services.orchestrator.cli",
+            *arguments,
+        )
+        completed = _run_rollback_writer(command, cwd=snapshot_root, check=False)
     return {
         "preparation_receipt_id": receipt["receipt_id"],
         "actual_writer_generation": actual_writer_generation,
         "writer_repository_root": str(repository_root),
+        "dry_run": False,
         "writer_exit_code": int(completed.returncode),
     }
+
+
+def _validated_production_writer_arguments(writer_args: Iterable[str]) -> tuple[str, ...]:
+    if isinstance(writer_args, str | bytes):
+        arguments: tuple[Any, ...] = ()
+    else:
+        arguments = tuple(writer_args)
+    if arguments[:1] == ("--",):
+        arguments = arguments[1:]
+    invalid_mode = any(
+        argument in {"--plan", "--dry-run"}
+        or argument.startswith("--plan=")
+        or argument.startswith("--dry-run=")
+        for argument in arguments
+        if isinstance(argument, str)
+    )
+    if (
+        not arguments
+        or arguments[0] != "plan-production"
+        or arguments.count("--submit") != 1
+        or invalid_mode
+        or any(not isinstance(arg, str) or not arg or "\x00" in arg for arg in arguments)
+    ):
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_writer_command_invalid",
+            field="writer_args",
+        )
+    return arguments
+
+
+def _resolve_target_writer_runtime(repository_root: Path) -> tuple[Path, tuple[int, int]]:
+    runtime = repository_root / ".venv" / "bin" / "python"
+    try:
+        resolved_runtime = runtime.resolve(strict=True)
+        runtime_stat = runtime.stat()
+    except (OSError, RuntimeError) as error:
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_writer_runtime_unavailable",
+            field="writer_repository_root",
+        ) from error
+    if not resolved_runtime.is_file() or not os.access(runtime, os.X_OK):
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_writer_runtime_unavailable",
+            field="writer_repository_root",
+        )
+    return runtime.absolute(), (runtime_stat.st_dev, runtime_stat.st_ino)
+
+
+@contextmanager
+def _materialize_commit_snapshot(
+    repository_root: Path,
+    generation: str,
+) -> Iterator[Path]:
+    try:
+        temporary_root = tempfile.TemporaryDirectory(prefix="nhms-rollback-writer-")
+    except OSError as error:
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_writer_snapshot_unavailable",
+            field="writer_repository_root",
+        ) from error
+    with temporary_root:
+        snapshot_root = Path(temporary_root.name) / "repository"
+        try:
+            _run_bounded_git(
+                Path(temporary_root.name),
+                "clone",
+                "--no-local",
+                "--no-checkout",
+                "--quiet",
+                str(repository_root),
+                str(snapshot_root),
+            )
+            _run_bounded_git(
+                snapshot_root,
+                "checkout",
+                "--detach",
+                "--quiet",
+                generation,
+            )
+            snapshot_generation = _run_bounded_git(
+                snapshot_root,
+                "rev-parse",
+                "--verify",
+                "HEAD^{commit}",
+            ).lower()
+            snapshot_dirty = _run_bounded_git(
+                snapshot_root,
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            )
+        except FileOrchestrationJournalError as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_rollback_writer_snapshot_unavailable",
+                field="writer_repository_root",
+            ) from error
+        if snapshot_generation != generation or snapshot_dirty:
+            raise FileOrchestrationJournalError(
+                "file_journal_rollback_writer_snapshot_unavailable",
+                field="writer_repository_root",
+            )
+        yield snapshot_root
 
 
 def _resolve_clean_writer_generation(

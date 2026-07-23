@@ -3888,9 +3888,10 @@ class FileOrchestrationJournalRepository:
             )
         checked_at = _ensure_utc(checked_at)
         checked_by = _safe_identity_text(checked_by, field="checked_by")
-        target_writer_generation = _safe_identity_text(
+        target_writer_generation = _validated_git_writer_generation(
             target_writer_generation,
             field="target_writer_generation",
+            invalid_reason="file_journal_rollback_target_writer_generation_invalid",
         )
         lease_identity = self._validated_scheduler_lease_identity(scheduler_lease_identity)
         with self._write_lock:
@@ -3989,6 +3990,7 @@ class FileOrchestrationJournalRepository:
                     "checked_at": _format_utc(checked_at),
                     "checked_by": checked_by,
                     "target_writer_generation": target_writer_generation,
+                    "dry_run": False,
                 }
                 root_identity = self._journal_root_identity_unlocked()
                 signed = {
@@ -4254,12 +4256,14 @@ class FileOrchestrationJournalRepository:
                 "checked_at",
                 "checked_by",
                 "target_writer_generation",
+                "dry_run",
             }
             or preflight.get("scheduler_state") != "stopped"
             or type(preflight.get("active_scheduler_processes")) is not int
             or preflight.get("active_scheduler_processes") != 0
             or not isinstance(preflight.get("checked_by"), str)
             or not isinstance(preflight.get("target_writer_generation"), str)
+            or preflight.get("dry_run") is not False
             or not isinstance(invalidated_marker, Mapping)
         ):
             raise FileOrchestrationJournalError(
@@ -4281,7 +4285,11 @@ class FileOrchestrationJournalRepository:
         _coerce_datetime(receipt.get("prepared_at"), field="prepared_at")
         _coerce_datetime(preflight.get("checked_at"), field="checked_at")
         _safe_identity_text(preflight["checked_by"], field="checked_by")
-        _safe_identity_text(preflight["target_writer_generation"], field="target_writer_generation")
+        target_writer_generation = _validated_git_writer_generation(
+            preflight["target_writer_generation"],
+            field="target_writer_generation",
+            invalid_reason="file_journal_rollback_receipt_invalid",
+        )
         signed = {
             "journal_root_identity": root_identity,
             "marker": invalidated_marker,
@@ -4299,6 +4307,10 @@ class FileOrchestrationJournalRepository:
             )
         return {
             **dict(receipt),
+            "preflight": {
+                **dict(preflight),
+                "target_writer_generation": target_writer_generation,
+            },
             "journal_root_identity": root_identity,
             "scheduler_lease_identity": lease_identity,
         }
@@ -8188,24 +8200,22 @@ def _safe_identity_text(value: str, *, field: str) -> str:
 
 
 def _validated_actual_writer_generation(value: str) -> str:
-    if not isinstance(value, str):
-        raise FileOrchestrationJournalError(
-            "file_journal_rollback_writer_generation_unresolvable",
-            field="actual_writer_generation",
-        )
-    generation = _safe_identity_text(value, field="actual_writer_generation")
-    normalized = generation.casefold()
-    if (
-        normalized in {"unknown", "unresolved", "unresolvable", "dirty"}
-        or normalized.endswith("-dirty")
-        or normalized.endswith("+dirty")
-        or normalized.endswith(".dirty")
-    ):
-        raise FileOrchestrationJournalError(
-            "file_journal_rollback_writer_generation_unresolvable",
-            field="actual_writer_generation",
-        )
-    return generation
+    return _validated_git_writer_generation(
+        value,
+        field="actual_writer_generation",
+        invalid_reason="file_journal_rollback_writer_generation_unresolvable",
+    )
+
+
+def _validated_git_writer_generation(
+    value: str,
+    *,
+    field: str,
+    invalid_reason: str,
+) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", value) is None:
+        raise FileOrchestrationJournalError(invalid_reason, field=field)
+    return value.lower()
 
 
 def _validate_scheduler_visible_fields(row: Mapping[str, Any]) -> None:

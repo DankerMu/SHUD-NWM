@@ -22871,7 +22871,7 @@ def test_db_free_prepared_rollback_fence_blocks_current_scheduler_after_lease_re
         active_scheduler_processes=0,
         checked_at=datetime.now(UTC),
         checked_by="round12-test-operator",
-        target_writer_generation="pre-reconcile-inventory",
+        target_writer_generation="a" * 40,
     )
 
     result = ProductionScheduler.from_env(config).run_once()

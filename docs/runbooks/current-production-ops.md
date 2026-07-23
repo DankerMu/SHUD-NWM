@@ -244,6 +244,7 @@ ROLLBACK_SHA=$(git rev-parse '<rollback-ref>^{commit}')
 ROLLBACK_CHECKOUT="/scratch/frd_muziyao/nhms-rollback-${ROLLBACK_SHA}"
 git worktree add --detach "$ROLLBACK_CHECKOUT" "$ROLLBACK_SHA"
 (cd "$ROLLBACK_CHECKOUT" && uv sync --all-extras --dev)
+test -x "$ROLLBACK_CHECKOUT/.venv/bin/python"
 test -z "$(git -C "$ROLLBACK_CHECKOUT" status --porcelain=v1 --untracked-files=all)"
 
 systemctl --user stop nhms-compute-scheduler.timer nhms-compute-scheduler.service
@@ -260,7 +261,9 @@ uv run nhms-pipeline prepare-file-journal-rollback \
 
 保存 preparation `receipt_id`。旧 writer 只能由仍在当前版本的 controller 通过下面
 的 gate 启动；该命令不接受操作者自报的 actual generation，而是从即将运行的 checkout
-内部执行 `git rev-parse HEAD`、检查 tracked/untracked dirty 状态并在 launch 前复核：
+内部执行 `git rev-parse HEAD`、检查 tracked/untracked dirty 状态，并要求目标 checkout 的
+`.venv/bin/python` 存在且可执行。gate 只接受 `plan-production` 的一次真实 `--submit`；
+不带 `--submit`、`--plan` 或 `--dry-run` 都会在 writer 零启动时拒绝：
 
 ```bash
 uv run nhms-pipeline launch-file-journal-rollback-writer \
@@ -268,8 +271,13 @@ uv run nhms-pipeline launch-file-journal-rollback-writer \
   --workspace-root "$WORKSPACE_ROOT" \
   --receipt-id '<preparation-receipt-id>' \
   --writer-repository-root "$ROLLBACK_CHECKOUT" \
-  -- plan-production --continuous --max-passes 1
+  -- plan-production --submit --continuous --max-passes 1
 ```
+
+通过 receipt 后，controller 会把目标完整 SHA 物化为私有、临时、detached 的 clean
+commit 快照，并用目标 checkout 的 `.venv/bin/python` 在该快照中启动 writer；因此原
+checkout 在最终复核后切换到其他 commit，也不能改变本次实际执行的源码。私有快照在
+writer 退出后自动清理。
 
 `preparing` receipt 无论遗留在 marker 删除前还是删除后，都只能在重新取得同一 production
 file lease 后自动续成一个 `prepared` fence；不得人工删除 marker/receipt。fence 存在期间，
@@ -288,7 +296,8 @@ git worktree remove "$ROLLBACK_CHECKOUT"
 ```
 
 node-22 live drill 必须保存 preparation、old-writer launch、roll-forward 三段 receipt，
-并证明 A receipt 只能运行 clean A checkout；B/dirty/unresolved checkout 均为零启动。
+并证明 A receipt 只能运行 clean A commit 快照；B/dirty/unresolved checkout、不可用目标
+runtime 和非 submit 命令均为零启动。
 
 #### 3.1.2 DB-free file-provider 稳态刷新
 

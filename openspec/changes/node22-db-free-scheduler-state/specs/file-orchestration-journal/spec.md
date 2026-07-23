@@ -525,10 +525,18 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
   serialized, so atomic renew cannot interpret process-local temp-file
   contention as loss of the production lease
 - **AND** the only supported old-writer launch entry resolves a full immutable
-  Git generation from the clean checkout it will actually execute, compares it
-  with the preparation receipt, rechecks it before launch, and rejects dirty,
-  untracked, unresolved, changed, or mismatched checkouts before any writer is
-  started; caller-supplied generation claims are not launch authority
+  Git generation from the clean target checkout, and target-generation format
+  validation precedes every lease, marker, fence, or receipt mutation
+- **AND** that launch entry accepts only a real `plan-production` submission
+  containing exactly one `--submit`, rejects plan/dry-run/other commands, and
+  requires the target checkout's executable `.venv/bin/python`
+- **AND** after receipt validation it materializes the full target generation as
+  a private detached clean commit snapshot, rechecks the original checkout and
+  runtime identity before launch, and runs the snapshot with the target runtime,
+  so a post-check checkout switch cannot change the executed source
+- **AND** dirty, untracked, unresolved, changed, mismatched, runtime-unavailable,
+  or snapshot-unavailable targets are rejected before any writer is started;
+  caller-supplied generation claims are not launch authority
 - **AND** roll-forward requires the matching preparation receipt and the same
   scheduler lease; it performs one strict, crash-resumable backfill, restores
   the completion marker, publishes a bound roll-forward receipt, and consumes
