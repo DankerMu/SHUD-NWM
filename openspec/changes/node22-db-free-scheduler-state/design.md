@@ -1512,6 +1512,13 @@ Invariant Matrix:
   attempt, or anchor identity; only the typed reclaim boundary may advance
   attempt and anchor together under the cycle lock. A current-version row that
   is neither a valid master nor a valid candidate fails closed.
+- Typed-transition invariant: ordinary `upsert_pipeline_job` cannot change any
+  current-version master authority state, including Slurm binding, status,
+  submit outcome, reconciliation tuple/reason, projections, runtime timestamps,
+  retry fields, errors, or logs. An exact same-value replay is a zero-write
+  read. Accepted bind, ambiguity/reconciliation, proven rejection, retry
+  permission, next-attempt reclaim, and terminal projection occur only through
+  their typed cycle-lock APIs.
 - Closed-enum invariant: task-accounting completeness is represented by
   pipeline status/error/projection fields and never adds values to the six-value
   `reconciliation_decision` contract. Reconciliation API inputs are normalized

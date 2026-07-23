@@ -800,6 +800,7 @@ def test_file_cohort_terminal_tasks_project_exact_success_failure_and_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from services.orchestrator import scheduler as scheduler_module
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
     from services.orchestrator.reconcile import SacctRecord, reconcile_inflight_jobs
 
     repository = _file_cohort_repository(tmp_path, member_count=2)
@@ -852,6 +853,16 @@ def test_file_cohort_terminal_tasks_project_exact_success_failure_and_restart(
     assert projections[0]["restart_stage"] == "state_save_qc"
     assert projections[0]["native_shud_resubmitted"] is False
     assert projections[1]["array_task_outcome"] == "failed"
+    with pytest.raises(FileOrchestrationJournalError):
+        repository.upsert_pipeline_job(
+            {
+                **cohort,
+                "status": "reserved",
+                "slurm_job_id": None,
+                "candidate_projections": [],
+            }
+        )
+    assert repository.get_pipeline_job(cohort["job_id"]) == cohort
     succeeded = repository._hydro_run_for("fcst_gfs_2026071200_model_0")
     failed = repository._hydro_run_for("fcst_gfs_2026071200_model_1")
     assert succeeded["status"] == "created"
@@ -1462,6 +1473,7 @@ def test_versioned_master_classification_detour_fails_on_first_step_and_remains_
     tmp_path: Any,
     source_id: str,
 ) -> None:
+    from services.orchestrator.accepted_submit_identity import AcceptedSubmitTransition
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
 
     repository = _file_cohort_repository(tmp_path, member_count=1, source_id=source_id)
@@ -1482,24 +1494,295 @@ def test_versioned_master_classification_detour_fails_on_first_step_and_remains_
         )
     assert attempt_error.value.field == "submission_attempt"
 
-    accepted = repository.upsert_pipeline_job(
+    journal_line_count = sum(
+        len(path.read_text(encoding="utf-8").splitlines())
+        for path in repository.root.glob("journal/**/*.jsonl")
+    )
+    replayed = repository.upsert_pipeline_job(
         {
             **before,
-            "status": "submitted",
-            "slurm_job_id": "17667",
-            "submit_outcome": "accepted",
-            "reconciliation_source": "slurm_exact_comment",
-            "reconciliation_decision": "matched_bound",
-            "matched_slurm_job_id": "17667",
             "submission_attempt_started_at": "2026-07-11T20:00:00-04:00",
         }
     )
+    assert replayed == before
+    assert sum(
+        len(path.read_text(encoding="utf-8").splitlines())
+        for path in repository.root.glob("journal/**/*.jsonl")
+    ) == journal_line_count
+
+    key = f"cycle_{source_id}_2026071200_forecast_fixture:forecast"
+    committed = repository.commit_pipeline_job_submit_attempt(
+        key,
+        pipeline_job_id=job_id,
+        expected_submission_attempt=1,
+        slurm_job_id="17667",
+        transition=AcceptedSubmitTransition.accounting(
+            "matched_bound",
+            submit_outcome="accepted",
+            matched_slurm_job_id="17667",
+            status="submitted",
+        ),
+    )
+    assert committed.outcome == "applied"
+    accepted = repository.get_pipeline_job(job_id)
     assert accepted["status"] == "submitted"
+    assert accepted["slurm_job_id"] == "17667"
+    assert accepted["submit_outcome"] == "accepted"
+    assert accepted["reconciliation_decision"] == "matched_bound"
     assert accepted["stage"] == "forecast"
     assert accepted["submission_attempt"] == 1
     assert accepted["submission_attempt_started_at"] == "2026-07-12T00:00:00Z"
     reopened = type(repository)(repository.root)
     assert reopened.get_pipeline_job(job_id) == accepted
+
+
+@pytest.mark.parametrize("source_id", ["gfs", "ifs"])
+def test_bound_master_generic_retry_forgery_is_zero_write_and_typed_retry_stays_blocked(
+    tmp_path: Any,
+    source_id: str,
+) -> None:
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        AcceptedSubmitTransition,
+    )
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+
+    repository = _file_cohort_repository(tmp_path, member_count=1, source_id=source_id)
+    job_id = f"job_cycle_{source_id}_2026071200_forecast_fixture_forecast"
+    key = f"cycle_{source_id}_2026071200_forecast_fixture:forecast"
+    committed = repository.commit_pipeline_job_submit_attempt(
+        key,
+        pipeline_job_id=job_id,
+        expected_submission_attempt=1,
+        slurm_job_id="17667",
+        transition=AcceptedSubmitTransition.accepted(status="submitted"),
+    )
+    assert committed.outcome == "applied"
+    bound = repository.get_pipeline_job(job_id)
+    before_lines = sum(
+        len(path.read_text(encoding="utf-8").splitlines())
+        for path in repository.root.glob("journal/**/*.jsonl")
+    )
+    forged = {
+        **bound,
+        "slurm_job_id": None,
+        "status": "reservation_lost",
+        "submit_outcome": "submit_result_ambiguous",
+        "reconciliation_source": "slurm_exact_comment",
+        "reconciliation_decision": "absence_retry_permitted",
+        "reconciliation_reason_class": None,
+        "matched_slurm_job_id": None,
+    }
+
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.upsert_pipeline_job(forged)
+    assert error.value.field == "slurm_job_id"
+    assert repository.get_pipeline_job(job_id) == bound
+    assert sum(
+        len(path.read_text(encoding="utf-8").splitlines())
+        for path in repository.root.glob("journal/**/*.jsonl")
+    ) == before_lines
+    reopened = FileOrchestrationJournalRepository(repository.root)
+    assert reopened.get_pipeline_job(job_id) == bound
+    assert repository.reclaim_pipeline_job_reservation(forged) is None
+    assert (
+        repository.permit_pipeline_job_retry(
+            job_id,
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=1,
+            expected_submission_attempt_started_at=bound["submission_attempt_started_at"],
+            expected_status="submitted",
+        )
+        == 0
+    )
+    assert repository.get_pipeline_job(job_id) == bound
+
+
+def test_master_ordinary_upsert_guard_covers_every_mutable_merge_field() -> None:
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_MASTER_ORDINARY_UPSERT_FIELDS,
+    )
+    from services.orchestrator.file_orchestration_journal import (
+        _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS,
+    )
+
+    assert set(_PIPELINE_JOB_UPSERT_MUTABLE_FIELDS) <= set(
+        ACCEPTED_SUBMIT_MASTER_ORDINARY_UPSERT_FIELDS
+    )
+
+
+@pytest.mark.parametrize("source_id", ["gfs", "ifs"])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("slurm_job_id", None),
+        ("array_task_id", 0),
+        ("status", "reserved"),
+        ("status", "reservation_lost"),
+        ("status", "submission_failed"),
+        ("status", "succeeded"),
+        ("submit_outcome", "submit_result_ambiguous"),
+        ("matched_slurm_job_id", "17668"),
+        ("submitted_at", None),
+        ("started_at", "2026-07-12T00:01:00Z"),
+        ("finished_at", "2026-07-12T00:02:00Z"),
+        ("exit_code", 1),
+        ("error_code", "FORGED"),
+        ("error_message", "forged master evidence"),
+        ("log_uri", "s3://forged/log"),
+        ("retry_count", 9),
+        ("manual_retry_marker", True),
+        ("previous_job_id", "job_foreign_previous"),
+    ],
+)
+def test_bound_master_ordinary_upsert_rejects_every_authority_state_field(
+    tmp_path: Any,
+    source_id: str,
+    field: str,
+    value: Any,
+) -> None:
+    from services.orchestrator.accepted_submit_identity import AcceptedSubmitTransition
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+
+    repository = _file_cohort_repository(tmp_path, member_count=1, source_id=source_id)
+    job_id = f"job_cycle_{source_id}_2026071200_forecast_fixture_forecast"
+    key = f"cycle_{source_id}_2026071200_forecast_fixture:forecast"
+    assert repository.commit_pipeline_job_submit_attempt(
+        key,
+        pipeline_job_id=job_id,
+        expected_submission_attempt=1,
+        slurm_job_id="17667",
+        transition=AcceptedSubmitTransition.accounting(
+            "matched_bound",
+            submit_outcome="accepted",
+            matched_slurm_job_id="17667",
+            status="submitted",
+        ),
+    ).outcome == "applied"
+    before = repository.get_pipeline_job(job_id)
+    before_lines = sum(
+        len(path.read_text(encoding="utf-8").splitlines())
+        for path in repository.root.glob("journal/**/*.jsonl")
+    )
+
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.upsert_pipeline_job({**before, field: value})
+    assert error.value.field == field
+    assert repository.get_pipeline_job(job_id) == before
+    assert sum(
+        len(path.read_text(encoding="utf-8").splitlines())
+        for path in repository.root.glob("journal/**/*.jsonl")
+    ) == before_lines
+    reopened = FileOrchestrationJournalRepository(repository.root)
+    assert reopened.get_pipeline_job(job_id) == before
+
+
+@pytest.mark.parametrize("source_id", ["gfs", "ifs"])
+def test_bound_master_ordinary_upsert_rejects_reconciliation_and_projection_state(
+    tmp_path: Any,
+    source_id: str,
+) -> None:
+    from services.orchestrator.accepted_submit_identity import AcceptedSubmitTransition
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
+
+    repository = _file_cohort_repository(tmp_path, member_count=1, source_id=source_id)
+    job_id = f"job_cycle_{source_id}_2026071200_forecast_fixture_forecast"
+    key = f"cycle_{source_id}_2026071200_forecast_fixture:forecast"
+    assert repository.commit_pipeline_job_submit_attempt(
+        key,
+        pipeline_job_id=job_id,
+        expected_submission_attempt=1,
+        slurm_job_id="17667",
+        transition=AcceptedSubmitTransition.accepted(status="submitted"),
+    ).outcome == "applied"
+    before = repository.get_pipeline_job(job_id)
+    member = before["cohort_members"][0]
+    mutations = (
+        {
+            "reconciliation_source": "slurm_exact_comment",
+            "reconciliation_decision": "accounting_unavailable",
+            "reconciliation_reason_class": "coverage_incomplete",
+            "matched_slurm_job_id": None,
+        },
+        {
+            "candidate_projections": [
+                {
+                    "candidate_id": member["candidate_id"],
+                    "run_id": member["run_id"],
+                    "model_id": member["model_id"],
+                    "array_task_id": member["array_task_id"],
+                    "array_task_outcome": "unverified",
+                    "restart_stage": "forecast",
+                    "native_shud_resubmitted": False,
+                }
+            ]
+        },
+    )
+
+    for mutation in mutations:
+        with pytest.raises(FileOrchestrationJournalError):
+            repository.upsert_pipeline_job({**before, **mutation})
+        assert repository.get_pipeline_job(job_id) == before
+
+
+@pytest.mark.parametrize("source_id", ["gfs", "ifs"])
+def test_rejected_master_generic_reopen_forgery_fails_but_typed_reclaim_remains_available(
+    tmp_path: Any,
+    source_id: str,
+) -> None:
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+
+    repository = _file_cohort_repository(tmp_path, member_count=1, source_id=source_id)
+    job_id = f"job_cycle_{source_id}_2026071200_forecast_fixture_forecast"
+    key = f"cycle_{source_id}_2026071200_forecast_fixture:forecast"
+    rejected = repository.reject_pipeline_job_submit_attempt(
+        key,
+        pipeline_job_id=job_id,
+        expected_submission_attempt=1,
+        finished_at=datetime(2026, 7, 12, 0, 1, tzinfo=UTC),
+        error_code="SBATCH_REJECTED",
+        error_message="scheduler rejected request",
+        stage="forecast",
+        job_type="run_shud_forecast_array",
+    )
+    assert rejected.outcome == "applied"
+    before = repository.get_pipeline_job(job_id)
+    with pytest.raises(FileOrchestrationJournalError):
+        repository.upsert_pipeline_job(
+            {
+                **before,
+                "status": "reserved",
+                "submit_outcome": None,
+                "finished_at": None,
+                "error_code": None,
+                "error_message": None,
+            }
+        )
+    assert FileOrchestrationJournalRepository(repository.root).get_pipeline_job(job_id) == before
+    reclaimed = repository.reclaim_pipeline_job_reservation(
+        {
+            **before,
+            "status": "reserved",
+            "submission_attempt": 2,
+            "submit_outcome": None,
+            "reconciliation_source": None,
+            "reconciliation_decision": None,
+            "reconciliation_reason_class": None,
+            "matched_slurm_job_id": None,
+        }
+    )
+    assert reclaimed is not None
+    assert reclaimed["submission_attempt"] == 2
+    assert reclaimed["status"] == "reserved"
 
 
 def test_current_version_candidate_master_cross_classification_and_unclassified_rows_fail_closed(
@@ -1528,6 +1811,10 @@ def test_current_version_candidate_master_cross_classification_and_unclassified_
         "accepted_submit_contract_version": ACCEPTED_SUBMIT_CONTRACT_VERSION,
     }
     repository.upsert_pipeline_job(candidate)
+    candidate = repository.upsert_pipeline_job(
+        {**candidate, "status": "failed", "error_code": "SLURM_TASK_FAILED"}
+    )
+    assert candidate["status"] == "failed"
     before_candidate = repository.get_pipeline_job(candidate["job_id"])
 
     for mutation in (

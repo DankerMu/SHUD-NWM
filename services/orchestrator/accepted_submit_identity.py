@@ -77,6 +77,28 @@ ACCEPTED_SUBMIT_MASTER_IMMUTABLE_FIELDS = (
     "submission_attempt_started_at",
 )
 
+ACCEPTED_SUBMIT_MASTER_ORDINARY_UPSERT_FIELDS = (
+    *ACCEPTED_SUBMIT_MASTER_IMMUTABLE_FIELDS,
+    "slurm_job_id",
+    "status",
+    "submitted_at",
+    "started_at",
+    "finished_at",
+    "exit_code",
+    "retry_count",
+    "manual_retry_marker",
+    "previous_job_id",
+    "error_code",
+    "error_message",
+    "log_uri",
+    "submit_outcome",
+    "reconciliation_source",
+    "reconciliation_decision",
+    "reconciliation_reason_class",
+    "matched_slurm_job_id",
+    "candidate_projections",
+)
+
 _MEMBER_FIELDS = (
     "array_task_id",
     "candidate_id",
@@ -298,6 +320,21 @@ def accepted_submit_master_immutable_identity(row: Mapping[str, Any]) -> dict[st
     return {
         field: normalized.get(field)
         for field in ACCEPTED_SUBMIT_MASTER_IMMUTABLE_FIELDS
+    }
+
+
+def accepted_submit_master_ordinary_upsert_state(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Return all master authority state forbidden to ordinary upsert transitions."""
+
+    normalized = normalize_accepted_submit_evidence(row)
+    if accepted_submit_row_kind(normalized) != "master":
+        raise AcceptedSubmitEvidenceError(
+            "file_journal_evidence_invariant_invalid",
+            field="accepted_submit_row_kind",
+        )
+    return {
+        field: normalized.get(field)
+        for field in ACCEPTED_SUBMIT_MASTER_ORDINARY_UPSERT_FIELDS
     }
 
 
@@ -719,6 +756,7 @@ __all__ = (
     "ACCEPTED_SUBMIT_CONTRACT_VERSION",
     "ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD",
     "ACCEPTED_SUBMIT_MASTER_IMMUTABLE_FIELDS",
+    "ACCEPTED_SUBMIT_MASTER_ORDINARY_UPSERT_FIELDS",
     "ACCEPTED_PROJECTION_FIELDS",
     "ACCEPTED_RECONCILIATION_DECISIONS",
     "ACCEPTED_SUBMIT_OUTCOMES",
@@ -731,6 +769,7 @@ __all__ = (
     "accepted_submit_contract_is_current",
     "accepted_submit_master_identity_is_structural",
     "accepted_submit_master_immutable_identity",
+    "accepted_submit_master_ordinary_upsert_state",
     "accepted_submit_row_kind",
     "apply_accepted_submit_transition",
     "canonical_forecast_cohort_members",

@@ -223,7 +223,11 @@ under the cycle lock, and retry permission MUST compare the expected attempt
 number and anchor. Persisted current-version master classification and authority
 identity MUST be sticky: an ordinary upsert MUST NOT downgrade it to a
 non-master/candidate or mutate any master identity field, and only typed reclaim
-MAY advance attempt and anchor together.
+MAY advance attempt and anchor together. Ordinary upsert also MUST NOT change a
+versioned master's Slurm binding, status, outcome, reconciliation tuple/reason,
+projection, runtime/retry/error/log state; an exact replay MUST perform no
+authority write. Each legal master transition MUST use its typed commit,
+reconciliation, rejection, retry-permission, reclaim, or projection boundary.
 
 A Gateway timeout MUST persist only the ambiguous submit outcome and MUST leave
 `reconciliation_source`, `reconciliation_decision`, and
@@ -288,6 +292,19 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
   cannot bypass the same invariant
 - **AND** valid candidate rows and marker-free generic/legacy rows retain their
   documented compatibility behavior.
+
+#### Scenario: Generic upsert cannot forge a typed master transition
+
+- **WHEN** an accepted, rejected, retryable, or terminal versioned master is
+  presented to ordinary upsert with a changed Slurm ID, status, submit outcome,
+  reconciliation proof/reason, projection, runtime timestamp, retry, error, or
+  log field
+- **THEN** the mutation fails before append/direct materialization and reopen
+  preserves the original master exactly
+- **AND** clearing a bound Slurm ID or writing
+  `absence_retry_permitted` cannot make typed reclaim submit a second attempt
+- **AND** an exact same-value ordinary replay appends no journal record, while
+  the corresponding valid typed transition remains available.
 
 #### Scenario: Unique exact-comment match binds the accepted array
 

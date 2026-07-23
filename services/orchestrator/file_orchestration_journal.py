@@ -37,6 +37,7 @@ from services.orchestrator.accepted_submit_identity import (
     accepted_submit_contract_is_current,
     accepted_submit_master_identity_is_structural,
     accepted_submit_master_immutable_identity,
+    accepted_submit_master_ordinary_upsert_state,
     accepted_submit_row_kind,
     apply_accepted_submit_transition,
     normalize_accepted_submit_attempt_anchor,
@@ -1050,6 +1051,7 @@ class FileOrchestrationJournalRepository:
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
             existing = self._pipeline_job_for_id_unlocked(str(row["job_id"]))
             persisted_master_identity: dict[str, Any] | None = None
+            persisted_master_state: dict[str, Any] | None = None
             if existing is not None:
                 explicit_fields = set(record)
                 incoming = row
@@ -1058,6 +1060,7 @@ class FileOrchestrationJournalRepository:
                     existing
                 ) and accepted_submit_master_identity_is_structural(existing):
                     persisted_master_identity = _accepted_submit_master_identity(existing)
+                    persisted_master_state = _accepted_submit_master_state(existing)
                     for field, persisted_value in persisted_master_identity.items():
                         if field not in explicit_fields:
                             continue
@@ -1091,14 +1094,17 @@ class FileOrchestrationJournalRepository:
                 row["updated_at"] = _format_utc(_utcnow())
                 model_id = _optional_safe_identity(row, "model_id")
             _validate_accepted_submit_evidence(row)
-            if persisted_master_identity is not None:
-                merged_master_identity = _accepted_submit_master_identity(row)
-                for field, persisted_value in persisted_master_identity.items():
-                    if merged_master_identity[field] != persisted_value:
+            if persisted_master_state is not None:
+                merged_master_state = _accepted_submit_master_state(row)
+                for field, persisted_value in persisted_master_state.items():
+                    if merged_master_state[field] != persisted_value:
                         raise FileOrchestrationJournalError(
                             "file_journal_evidence_invariant_invalid",
                             field=field,
                         )
+                # An exact ordinary replay is a read, not an authority event:
+                # do not append another journal record or advance updated_at.
+                return _public_scheduler_row(existing)
             return self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
 
     def append_historical_pipeline_job(self, record: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -5282,6 +5288,13 @@ def _validate_accepted_submit_evidence(row: Mapping[str, Any]) -> None:
 def _accepted_submit_master_identity(row: Mapping[str, Any]) -> dict[str, Any]:
     try:
         return accepted_submit_master_immutable_identity(row)
+    except AcceptedSubmitEvidenceError as error:
+        raise FileOrchestrationJournalError(error.reason, field=error.field) from error
+
+
+def _accepted_submit_master_state(row: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        return accepted_submit_master_ordinary_upsert_state(row)
     except AcceptedSubmitEvidenceError as error:
         raise FileOrchestrationJournalError(error.reason, field=error.field) from error
 

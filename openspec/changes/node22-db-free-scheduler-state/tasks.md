@@ -496,7 +496,11 @@ Scenario evidence rows for section 5:
   Current-version master classification is sticky across ordinary upserts; an
   adversarial identity-field matrix and multi-step stage/classification detour
   fail on the first mutation with reopen parity, while typed reclaim and valid
-  candidate/legacy updates remain compatible.
+  candidate/legacy updates remain compatible. A full authority-state matrix
+  also proves generic upsert cannot clear a bound Slurm ID, forge retry
+  permission, rewrite reconciliation/projection/runtime evidence, or revive a
+  rejected/terminal master; exact replay is zero-write and each valid transition
+  remains available only through its typed API.
 
 - [ ] 9.6 Complete local, CI, and node-22 live verification.
   Evidence floor: the issue-targeted pytest command, `uv run ruff check .`, and
