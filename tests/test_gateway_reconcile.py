@@ -934,6 +934,9 @@ def test_changed_typed_reconciliation_transition_writes_once(tmp_path: Any) -> N
             status="reserved",
         ),
         accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=1,
+        expected_statuses=("reserved",),
+        require_unbound=True,
     )
     changed = repository.transition_pipeline_job_submit_evidence(
         job_id,
@@ -943,6 +946,9 @@ def test_changed_typed_reconciliation_transition_writes_once(tmp_path: Any) -> N
             status="reserved",
         ),
         accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=1,
+        expected_statuses=("reserved",),
+        require_unbound=True,
     )
     assert first.outcome == "applied"
     assert changed.outcome == "applied"
@@ -4151,6 +4157,7 @@ def test_versioned_accepted_submit_mutations_never_enumerate_unrelated_history(
         pipeline_job_id = f"job_cycle_{source_id}_2026071200_forecast_fixture_forecast"
         template_row = template.get_accepted_submit_pipeline_job(pipeline_job_id)
         repository = FileOrchestrationJournalRepository(tmp_path / "target")
+        assert repository.query_reserved_unbound_jobs() == []
         _seed_unrelated_history(repository)
     else:
         repository = _file_cohort_repository(
@@ -4160,6 +4167,7 @@ def test_versioned_accepted_submit_mutations_never_enumerate_unrelated_history(
         )
         pipeline_job_id = f"job_cycle_{source_id}_2026071200_forecast_fixture_forecast"
         template_row = None
+        assert len(repository.query_reserved_unbound_jobs()) == 1
         _seed_unrelated_history(repository)
     repository.max_records = 8
 
@@ -4795,6 +4803,7 @@ def test_active_reconcile_partition_finds_oldest_active_after_one_year_of_two_da
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from services.orchestrator import file_orchestration_journal as journal_module
     from services.orchestrator.accepted_submit_identity import (
         canonical_forecast_cohort_members,
         forecast_cohort_digest,
@@ -4811,16 +4820,20 @@ def test_active_reconcile_partition_finds_oldest_active_after_one_year_of_two_da
     assert (repository.root / "reconcile-inventory-migration-v1.json").is_file()
     master_path = repository.root / "pipeline-jobs" / f"{job_id}.json"
     template = json.loads(master_path.read_text(encoding="utf-8"))
+    day_count = 365
+    cycle_hours = (0, 12)
+    source_ids = ("gfs", "ifs")
+    candidates_per_master = 256
     history_count = 0
     history_start = datetime(2025, 7, 12, tzinfo=UTC)
     # Two cycles/day (00Z, 12Z) x two sources/cycle (GFS, IFS) is four
     # terminal cohort masters/day: 4 x 365 = 1,460 flat history records.
-    for day in range(365):
-        for cycle_hour in (0, 12):
+    for day in range(day_count):
+        for cycle_hour in cycle_hours:
             cycle_time = history_start + timedelta(days=day, hours=cycle_hour)
             cycle_segment = cycle_time.strftime("%Y%m%d%H")
             cycle_iso = cycle_time.isoformat().replace("+00:00", "Z")
-            for source_id in ("gfs", "ifs"):
+            for source_id in source_ids:
                 history_count += 1
                 run_id = f"cycle_{source_id}_{cycle_segment}_terminal_history"
                 historical_job_id = f"job_{run_id}_forecast"
@@ -4896,33 +4909,84 @@ def test_active_reconcile_partition_finds_oldest_active_after_one_year_of_two_da
     # conceptual cardinality is 1,460 masters x 256 candidates = 373,760;
     # steady-state reconcile must not enumerate that tree, so materializing it
     # here would only make the test slower without strengthening the invariant.
-    conceptual_candidate_count = history_count * 256
+    conceptual_candidate_count = (
+        day_count * len(cycle_hours) * len(source_ids) * candidates_per_master
+    )
     reopened = type(repository)(repository.root)
     read_optional_json = reopened._read_optional_json
     flat_history_reads = 0
     forbidden_scan_calls = 0
+    virtual_candidate_accesses = 0
+    directory_calls: list[str] = []
+    stat_calls: list[str] = []
+    read_calls: list[str] = []
+    original_list_directory = journal_module.list_directory_no_follow_limited
+    original_stat = journal_module.stat_no_follow
 
     def count_flat_history_reads(path: Any) -> Any:
         nonlocal flat_history_reads
+        relative = str(path.relative_to(repository.root))
+        read_calls.append(relative)
+        if "by-cycle" in path.parts:
+            return virtual_candidate_history_walker()
         if path.parent == repository.root / "pipeline-jobs" and "terminal_history" in path.name:
             flat_history_reads += 1
         return read_optional_json(path)
+
+    def virtual_candidate_history_walker(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal virtual_candidate_accesses
+        virtual_candidate_accesses += conceptual_candidate_count
+        raise AssertionError(
+            f"candidate-history traversal attempted {conceptual_candidate_count} virtual reads"
+        )
 
     def reject_global_scan(*_args: Any, **_kwargs: Any) -> Any:
         nonlocal forbidden_scan_calls
         forbidden_scan_calls += 1
         raise AssertionError("steady-state restart reconcile must use only the durable inventory")
 
+    def bounded_list(path: Any, **kwargs: Any) -> Any:
+        relative = str(path.relative_to(repository.root)) if path != repository.root else "."
+        directory_calls.append(relative)
+        if "by-cycle" in path.parts:
+            return virtual_candidate_history_walker()
+        assert relative not in {"pipeline-jobs", "journal", "pipeline-jobs/by-cycle"}
+        return original_list_directory(path, **kwargs)
+
+    def bounded_stat(path: Any, **kwargs: Any) -> Any:
+        relative = str(path.relative_to(repository.root))
+        stat_calls.append(relative)
+        assert "terminal_history" not in relative
+        if "by-cycle" in path.parts:
+            return virtual_candidate_history_walker()
+        return original_stat(path, **kwargs)
+
     monkeypatch.setattr(reopened, "_read_optional_json", count_flat_history_reads)
     monkeypatch.setattr(reopened, "_iter_reconcile_direct_pipeline_job_records", reject_global_scan)
+    monkeypatch.setattr(
+        reopened,
+        "_iter_direct_pipeline_job_records_for_cycle",
+        virtual_candidate_history_walker,
+    )
+    monkeypatch.setattr(
+        reopened,
+        "_direct_pipeline_job_records_for_cycle_cached",
+        virtual_candidate_history_walker,
+    )
+    monkeypatch.setattr(journal_module, "list_directory_no_follow_limited", bounded_list)
+    monkeypatch.setattr(journal_module, "stat_no_follow", bounded_stat)
     inflight = reopened.query_inflight_jobs()
 
-    assert history_count == 2 * 2 * 365 == 1460
-    assert conceptual_candidate_count == 373760
+    assert history_count == day_count * len(cycle_hours) * len(source_ids) == 1460
+    assert conceptual_candidate_count == 365 * 2 * 2 * 256 == 373760
     assert [job.job_id for job in inflight] == [job_id]
     assert len(tuple((repository.root / "reconcile-inventory").glob("*.json"))) == 1
     assert forbidden_scan_calls == 0
     assert flat_history_reads == 0
+    assert virtual_candidate_accesses == 0
+    assert directory_calls == [".", "reconcile-inventory"]
+    assert len(stat_calls) <= 8
+    assert len(read_calls) <= 4
 
 
 def test_reconcile_inventory_terminal_cleanup_and_stale_anchor_self_heal(tmp_path: Any) -> None:
@@ -4965,23 +5029,20 @@ def test_reconcile_inventory_terminal_cleanup_and_stale_anchor_self_heal(tmp_pat
 
 
 def test_rejected_current_master_never_occupies_reconcile_inventory(tmp_path: Any) -> None:
-    from services.orchestrator.accepted_submit_identity import (
-        ACCEPTED_SUBMIT_CONTRACT_VERSION,
-        AcceptedSubmitTransition,
-    )
-
     repository = _file_cohort_repository(tmp_path, member_count=1, with_runtime_rows=False)
     job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
     inventory_path = repository.root / "reconcile-inventory" / f"{job_id}.json"
     assert inventory_path.is_file()
 
-    rejected = repository.transition_pipeline_job_submit_evidence(
-        job_id,
-        AcceptedSubmitTransition.rejected(),
-        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+    rejected = repository.reject_pipeline_job_submit_attempt(
+        "cycle_gfs_2026071200_forecast_fixture:forecast",
+        pipeline_job_id=job_id,
         expected_submission_attempt=1,
-        expected_statuses=("reserved",),
-        require_unbound=True,
+        finished_at=datetime(2026, 7, 12, 0, 1, tzinfo=UTC),
+        error_code="SBATCH_SUBMISSION_FAILED",
+        error_message="submit rejected",
+        stage="forecast",
+        job_type="run_shud_forecast_array",
     )
     assert rejected.committed
     assert not inventory_path.exists()
@@ -5212,6 +5273,284 @@ def test_reconcile_inventory_migration_is_resumable_and_backfills_marker_free_ac
     assert len(tuple(inventory_directory.glob("*.json"))) == 2
 
 
+@pytest.mark.parametrize("target_kind", ["inventory", "migration_marker"])
+def test_round8_atomic_temp_crash_residue_is_cleaned_after_real_child_kill(
+    tmp_path: Any,
+    target_kind: str,
+) -> None:
+    import signal
+    import subprocess
+    import sys
+
+    repository = _file_cohort_repository(tmp_path, member_count=1, with_runtime_rows=False)
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    assert [job.job_id for job in repository.query_reserved_unbound_jobs()] == [job_id]
+    if target_kind == "inventory":
+        target = repository.root / "reconcile-inventory" / f"{job_id}.json"
+    else:
+        target = repository.root / "reconcile-inventory-migration-v1.json"
+        target.unlink()
+    script = """
+import os, signal, sys
+from pathlib import Path
+from packages.common import safe_fs
+target = Path(sys.argv[1])
+root = Path(sys.argv[2])
+def crash(*_args, **_kwargs):
+    os.kill(os.getpid(), signal.SIGKILL)
+safe_fs.os.replace = crash
+safe_fs.atomic_write_bytes_no_follow(
+    target, b'{}', containment_root=root, require_durable_replace=True
+)
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(target), str(repository.root)],
+        cwd=os.getcwd(),
+        check=False,
+    )
+    assert completed.returncode == -signal.SIGKILL
+    residues = tuple(target.parent.glob(f".{target.name}.*.tmp"))
+    assert len(residues) == 1
+
+    reopened = type(repository)(repository.root)
+    assert [job.job_id for job in reopened.query_reserved_unbound_jobs()] == [job_id]
+    assert not residues[0].exists()
+    assert (repository.root / "reconcile-inventory-migration-v1.json").is_file()
+
+
+@pytest.mark.parametrize(
+    ("entry_name", "make_symlink"),
+    [
+        ("unknown.tmp", False),
+        (".job_cycle_gfs_2026071200_forecast_fixture_forecast.json.bad.tmp", False),
+        (
+            ".job_cycle_gfs_2026071200_forecast_fixture_forecast.json."
+            "0123456789abcdef0123456789abcdef.tmp",
+            True,
+        ),
+    ],
+)
+def test_round8_inventory_unknown_or_nonregular_temp_entry_fails_closed(
+    tmp_path: Any,
+    entry_name: str,
+    make_symlink: bool,
+) -> None:
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
+
+    repository = _file_cohort_repository(tmp_path, member_count=1, with_runtime_rows=False)
+    assert len(repository.query_reserved_unbound_jobs()) == 1
+    entry = repository.root / "reconcile-inventory" / entry_name
+    if make_symlink:
+        entry.symlink_to(repository.root / "reconcile-inventory-migration-v1.json")
+    else:
+        entry.write_text("residue", encoding="utf-8")
+
+    with pytest.raises(FileOrchestrationJournalError):
+        type(repository)(repository.root).query_reserved_unbound_jobs()
+    assert entry.exists() or entry.is_symlink()
+
+
+def test_round8_migration_marker_malformed_temp_sibling_fails_closed(tmp_path: Any) -> None:
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
+
+    repository = _file_cohort_repository(tmp_path, member_count=1, with_runtime_rows=False)
+    marker = repository.root / "reconcile-inventory-migration-v1.json"
+    marker.unlink(missing_ok=True)
+    sibling = repository.root / ".reconcile-inventory-migration-v1.json.bad.tmp"
+    sibling.write_text("residue", encoding="utf-8")
+    with pytest.raises(FileOrchestrationJournalError):
+        type(repository)(repository.root).query_reserved_unbound_jobs()
+    assert sibling.is_file()
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    "surface",
+    [
+        "direct",
+        "direct_bytes",
+        "direct_nonregular",
+        "direct_unreadable",
+        "journal",
+        "journal_records",
+        "journal_unreadable",
+        "legacy",
+        "over_limit",
+    ],
+)
+def test_round8_migration_blocks_marker_until_every_authority_surface_is_repaired(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    surface: str,
+) -> None:
+    from services.orchestrator import file_orchestration_journal as journal_module
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+
+    repository = _file_cohort_repository(tmp_path, member_count=1, with_runtime_rows=False)
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    marker = repository.root / "reconcile-inventory-migration-v1.json"
+    marker.unlink(missing_ok=True)
+    for path in (repository.root / "reconcile-inventory").glob("*.json"):
+        path.unlink()
+    repairs: list[tuple[Any, bytes | None]] = []
+    unreadable_path = None
+    if surface in {"direct", "direct_bytes", "direct_nonregular", "direct_unreadable"}:
+        path = repository.root / "pipeline-jobs" / f"{job_id}.json"
+        if surface != "direct_unreadable":
+            repairs.append((path, path.read_bytes()))
+        if surface == "direct_nonregular":
+            path.unlink()
+            path.symlink_to(repository.root / "journal" / "gfs" / "2026071200.jsonl")
+        elif surface == "direct_bytes":
+            path.write_bytes(b"x" * 65)
+        elif surface == "direct_unreadable":
+            unreadable_path = path
+        else:
+            path.write_bytes(b"{not-json")
+    elif surface in {"journal", "journal_records", "journal_unreadable"}:
+        path = repository.root / "journal" / "gfs" / "2026071200.jsonl"
+        if surface != "journal_unreadable":
+            repairs.append((path, path.read_bytes()))
+        if surface == "journal_records":
+            path.write_bytes(path.read_bytes() + path.read_bytes())
+        elif surface == "journal_unreadable":
+            unreadable_path = path
+        else:
+            path.write_bytes(b"{not-json\n")
+    elif surface == "legacy":
+        path = repository.root / "active-reconcile" / "malformed.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        repairs.append((path, None))
+        path.write_bytes(b"{not-json")
+    else:
+        path = repository.root / "pipeline-jobs" / "extra.json"
+        repairs.append((path, None))
+        path.write_text("{}", encoding="utf-8")
+
+    limits: dict[str, int] = {}
+    original_record_limit = journal_module.MAX_FILE_JOURNAL_RECORDS
+    if surface == "over_limit":
+        limits["max_files"] = 1
+    elif surface == "direct_bytes":
+        limits["max_bytes"] = 64
+    elif surface == "journal_records":
+        monkeypatch.setattr(journal_module, "MAX_FILE_JOURNAL_RECORDS", 1)
+    original_read = journal_module.read_bytes_limited_no_follow
+    if unreadable_path is not None:
+
+        def deny_authority_read(path: Any, **kwargs: Any) -> Any:
+            if path == unreadable_path:
+                raise PermissionError("injected unreadable authority surface")
+            return original_read(path, **kwargs)
+
+        monkeypatch.setattr(journal_module, "read_bytes_limited_no_follow", deny_authority_read)
+    reopened = FileOrchestrationJournalRepository(repository.root, **limits)
+    with pytest.raises(FileOrchestrationJournalError):
+        reopened.query_reserved_unbound_jobs()
+    assert not marker.exists()
+
+    for path, content in repairs:
+        if path.is_symlink():
+            path.unlink()
+        if content is None:
+            path.unlink()
+        else:
+            path.write_bytes(content)
+    if surface == "journal_records":
+        monkeypatch.setattr(journal_module, "MAX_FILE_JOURNAL_RECORDS", original_record_limit)
+    if unreadable_path is not None:
+        monkeypatch.setattr(journal_module, "read_bytes_limited_no_follow", original_read)
+    repaired = FileOrchestrationJournalRepository(repository.root)
+    assert [job.job_id for job in repaired.query_reserved_unbound_jobs()] == [job_id]
+    assert marker.is_file()
+
+
+def test_round8_migration_discovers_journal_only_active_row(tmp_path: Any) -> None:
+    repository = _file_cohort_repository(tmp_path, member_count=1, with_runtime_rows=False)
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    (repository.root / "pipeline-jobs" / f"{job_id}.json").unlink()
+    (repository.root / "reconcile-inventory-migration-v1.json").unlink(missing_ok=True)
+    for path in (repository.root / "reconcile-inventory").glob("*.json"):
+        path.unlink()
+
+    reopened = type(repository)(repository.root)
+    assert [job.job_id for job in reopened.query_reserved_unbound_jobs()] == [job_id]
+
+
+def test_round8_legacy_active_migration_retains_oldest_across_513_rows(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.orchestrator import file_orchestration_journal as journal_module
+    from services.orchestrator.reservation import slurm_comment_for
+
+    repository = _file_cohort_repository(
+        tmp_path / "template",
+        member_count=1,
+        with_runtime_rows=False,
+        versioned=False,
+    )
+    template_job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    template = json.loads(
+        (repository.root / "pipeline-jobs" / f"{template_job_id}.json").read_text(encoding="utf-8")
+    )
+    target_root = tmp_path / "target" / "journal"
+    active = target_root / "active-reconcile"
+    active.mkdir(parents=True)
+    expected_ids: list[str] = []
+    for index in range(513):
+        job_id = f"job_legacy_active_{index:04d}"
+        run_id = f"cycle_gfs_2026071200_legacy_active_{index:04d}"
+        idempotency_key = f"{run_id}:forecast"
+        created_at = datetime(2025, 1, 1, tzinfo=UTC) + timedelta(seconds=index)
+        created = created_at.isoformat().replace("+00:00", "Z")
+        record = copy.deepcopy(template)
+        record.update({"job_id": job_id, "run_id": run_id})
+        record["payload"].update(
+            {
+                "job_id": job_id,
+                "run_id": run_id,
+                "idempotency_key": idempotency_key,
+                "slurm_comment": slurm_comment_for(idempotency_key),
+                "created_at": created,
+                "updated_at": created,
+            }
+        )
+        (active / f"{job_id}.json").write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+        expected_ids.append(job_id)
+
+    reopened = type(repository)(target_root)
+    recovered = reopened.query_reserved_unbound_jobs()
+    assert len(recovered) == 513
+    assert recovered[0].job_id == expected_ids[0]
+    assert {job.job_id for job in recovered} == set(expected_ids)
+    assert len(tuple((target_root / "reconcile-inventory").glob("*.json"))) == 513
+
+    # A fresh steady-state process must trust the completed migration marker
+    # for discovery and enumerate only the bounded inventory. Exact authority
+    # reads may still validate an anchor, but no legacy/direct/journal history
+    # walker is allowed to restart the one-time migration.
+    steady = type(repository)(target_root)
+    history_discovery_calls: list[str] = []
+
+    def history_discovery_forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        history_discovery_calls.append("called")
+        raise AssertionError("steady reopen must not enumerate migration history")
+
+    monkeypatch.setattr(steady, "_iter_legacy_active_reconcile_records", history_discovery_forbidden)
+    monkeypatch.setattr(steady, "_iter_reconcile_direct_pipeline_job_records", history_discovery_forbidden)
+    monkeypatch.setattr(journal_module, "_iter_jsonl_files", history_discovery_forbidden)
+    steady_recovered = steady.query_reserved_unbound_jobs()
+
+    assert history_discovery_calls == []
+    assert len(steady_recovered) == 513
+    assert steady_recovered[0].job_id == expected_ids[0]
+    assert {job.job_id for job in steady_recovered} == set(expected_ids)
+
+
 def test_current_master_public_compatibility_mutations_are_zero_write_rejected(
     tmp_path: Any,
 ) -> None:
@@ -5262,6 +5601,266 @@ def test_current_master_public_compatibility_mutations_are_zero_write_rejected(
             method(dict(before))
         assert empty.get_pipeline_job(job_id) is None
         assert not tuple(empty.root.glob("journal/**/*.jsonl"))
+
+
+@pytest.mark.parametrize(
+    "transition_factory",
+    [
+        pytest.param(lambda transition: transition.begin_attempt(), id="begin_attempt"),
+        pytest.param(lambda transition: transition.accepted(status="submitted"), id="accepted"),
+        pytest.param(lambda transition: transition.rejected(), id="rejected"),
+        pytest.param(
+            lambda transition: transition.accounting(
+                "matched_bound",
+                submit_outcome="accepted",
+                matched_slurm_job_id="88001",
+                status="submitted",
+            ),
+            id="matched_bound",
+        ),
+        pytest.param(
+            lambda transition: transition.accounting(
+                "absence_retry_permitted",
+                submit_outcome="submit_result_ambiguous",
+                status="reservation_lost",
+            ),
+            id="absence_retry_permitted",
+        ),
+    ],
+)
+def test_round8_generic_versioned_submit_api_rejects_dedicated_authority_transitions_zero_write(
+    tmp_path: Any,
+    transition_factory: Any,
+) -> None:
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        AcceptedSubmitTransition,
+    )
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
+
+    repository = _file_cohort_repository(tmp_path, member_count=1)
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    before = {
+        str(path.relative_to(repository.root)): path.read_bytes()
+        for path in repository.root.rglob("*")
+        if path.is_file()
+    }
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.transition_pipeline_job_submit_evidence(
+            job_id,
+            transition_factory(AcceptedSubmitTransition),
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=1,
+            expected_statuses=("reserved",),
+            require_unbound=True,
+        )
+    assert error.value.field == "transition"
+    assert {
+        str(path.relative_to(repository.root)): path.read_bytes()
+        for path in repository.root.rglob("*")
+        if path.is_file()
+    } == before
+
+
+@pytest.mark.parametrize(
+    "missing_cas",
+    ["attempt", "statuses", "unbound"],
+)
+def test_round8_generic_versioned_nonbinding_transition_requires_complete_cas(
+    tmp_path: Any,
+    missing_cas: str,
+) -> None:
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        AcceptedSubmitTransition,
+    )
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
+
+    repository = _file_cohort_repository(tmp_path, member_count=1)
+    kwargs = {
+        "accepted_submit_contract_version": ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        "expected_submission_attempt": 1,
+        "expected_statuses": ("reserved",),
+        "require_unbound": True,
+    }
+    if missing_cas == "attempt":
+        kwargs["expected_submission_attempt"] = None
+    elif missing_cas == "statuses":
+        kwargs["expected_statuses"] = None
+    else:
+        kwargs["require_unbound"] = False
+    with pytest.raises(FileOrchestrationJournalError, match="requires_cas"):
+        repository.transition_pipeline_job_submit_evidence(
+            "job_cycle_gfs_2026071200_forecast_fixture_forecast",
+            AcceptedSubmitTransition.accounting(
+                "absence_deferred",
+                submit_outcome="submit_result_ambiguous",
+                status="reserved",
+            ),
+            **kwargs,
+        )
+
+
+@pytest.mark.parametrize(
+    ("current_status", "target_status", "expected_outcome"),
+    [
+        ("submitted", "pending", "applied"),
+        ("submitted", "running", "applied"),
+        ("pending", "running", "applied"),
+        ("queued", "running", "applied"),
+        ("running", "reconcile_unverified", "applied"),
+        ("running", "pending", "stale"),
+        ("reconcile_unverified", "running", "stale"),
+        ("cancellation_pending", "running", "stale"),
+        ("submitted", "invented", "stale"),
+        ("invented", "running", "stale"),
+    ],
+)
+def test_round8_runtime_transition_graph_is_closed_monotonic_and_zero_writes_stale_edges(
+    tmp_path: Any,
+    current_status: str,
+    target_status: str,
+    expected_outcome: str,
+) -> None:
+    repository = _file_cohort_repository(tmp_path, member_count=1)
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    _bind_current_file_cohort(repository, key, slurm_job_id="88101", status=current_status)
+    before = {
+        str(path.relative_to(repository.root)): path.read_bytes()
+        for path in repository.root.rglob("*")
+        if path.is_file()
+    }
+    result = repository.transition_pipeline_job_runtime_status(
+        job_id,
+        target_status,
+        expected_statuses=(current_status,),
+    )
+    assert result.outcome == expected_outcome
+    if expected_outcome == "stale":
+        assert {
+            str(path.relative_to(repository.root)): path.read_bytes()
+            for path in repository.root.rglob("*")
+            if path.is_file()
+        } == before
+
+
+def test_round8_runtime_and_cancel_transitions_require_accepted_real_bound_master(
+    tmp_path: Any,
+) -> None:
+    repository = _file_cohort_repository(tmp_path, member_count=1)
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    before = repository.get_pipeline_job(job_id)
+    runtime = repository.transition_pipeline_job_runtime_status(job_id, "running")
+    cancel = repository.request_pipeline_job_cancellation(
+        job_id,
+        expected_statuses=("reserved",),
+        reason="operator",
+    )
+    assert (runtime.outcome, cancel.outcome) == ("stale", "stale")
+    assert repository.get_pipeline_job(job_id) == before
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("retry_count", 1),
+        ("manual_retry_marker", True),
+        ("previous_job_id", "previous-master"),
+        ("candidate_projections", "valid_projection"),
+        ("reconciliation_reason_class", "process_unavailable"),
+    ],
+)
+def test_round8_clean_reservation_guard_rejects_each_retry_and_authority_field_zero_write(
+    tmp_path: Any,
+    field: str,
+    value: Any,
+) -> None:
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+
+    template = _file_cohort_repository(tmp_path / "template", member_count=1)
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    clean = dict(template.get_pipeline_job(job_id))
+    clean.update(
+        {
+            "status": "reserved",
+            "slurm_job_id": None,
+            "submit_outcome": None,
+            "reconciliation_source": None,
+            "reconciliation_decision": None,
+            "reconciliation_reason_class": None,
+            "matched_slurm_job_id": None,
+            "candidate_projections": [],
+            "retry_count": 0,
+            "manual_retry_marker": False,
+            "previous_job_id": None,
+        }
+    )
+    if field == "candidate_projections":
+        clean[field] = [
+            {
+                **{
+                    key: clean["cohort_members"][0][key]
+                    for key in ("array_task_id", "candidate_id", "run_id", "model_id")
+                },
+                "array_task_outcome": "failed",
+                "restart_stage": "forecast",
+                "native_shud_resubmitted": False,
+            }
+        ]
+    else:
+        clean[field] = value
+    repository = FileOrchestrationJournalRepository(tmp_path / field / "journal")
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.reserve_pipeline_job(clean)
+    assert error.value.field == field
+    assert repository.get_pipeline_job(job_id) is None
+    assert not tuple(repository.root.glob("journal/**/*.jsonl"))
+    assert not tuple(repository.root.glob("pipeline-jobs/*.json"))
+    assert not tuple(repository.root.glob("reconcile-inventory/*.json"))
+
+
+def test_round8_cancellation_intent_is_sticky_and_completion_is_idempotent_after_reopen(
+    tmp_path: Any,
+) -> None:
+    repository = _file_cohort_repository(tmp_path, member_count=1)
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    _bind_current_file_cohort(repository, key, slurm_job_id="88102", status="running")
+    intent = repository.request_pipeline_job_cancellation(
+        job_id,
+        expected_statuses=("running",),
+        reason="operator",
+    )
+    assert intent.outcome == "applied"
+    reopened = type(repository)(repository.root)
+    stale_poll = reopened.transition_pipeline_job_runtime_status(
+        job_id,
+        "running",
+        expected_statuses=("cancellation_pending",),
+    )
+    assert stale_poll.outcome == "stale"
+    finished_at = datetime(2026, 7, 12, 0, 3, tzinfo=UTC)
+    first = reopened.complete_pipeline_job_cancellation(
+        job_id,
+        finished_at=finished_at,
+        exit_code=0,
+        error_code=None,
+        error_message=None,
+        log_uri=None,
+    )
+    second = type(repository)(repository.root).complete_pipeline_job_cancellation(
+        job_id,
+        finished_at=finished_at,
+        exit_code=0,
+        error_code=None,
+        error_message=None,
+        log_uri=None,
+    )
+    assert (first.outcome, second.outcome) == ("applied", "idempotent")
 
 
 def test_marker_free_master_compatibility_mutations_remain_available(tmp_path: Any) -> None:
@@ -5733,6 +6332,46 @@ def test_global_accounting_visibility_process_timeout_is_bounded(
         reconcile_module._bounded_visibility_stdout(
             [sys.executable, "-c", "import time; time.sleep(10)"],
         )
+
+
+@pytest.mark.parametrize("boundary", ["bytes", "rows", "timeout"])
+@pytest.mark.parametrize("stream_fd", [1, 2])
+def test_round8_visibility_probe_saturation_and_timeout_reap_actual_child_pid(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+    stream_fd: int,
+) -> None:
+    import sys
+
+    from services.orchestrator import reconcile as reconcile_module
+
+    pid_path = tmp_path / f"{boundary}-{stream_fd}.pid"
+    if boundary == "bytes":
+        monkeypatch.setattr(reconcile_module, "MAX_VISIBILITY_PROBE_BYTES", 64)
+        body = f"os.write({stream_fd}, b'x' * 4096)"
+        expected_error = reconcile_module.ReconcileQuerySaturated
+    elif boundary == "rows":
+        monkeypatch.setattr(reconcile_module, "MAX_VISIBILITY_PROBE_BYTES", 1024 * 1024)
+        monkeypatch.setattr(reconcile_module, "MAX_VISIBILITY_PROBE_ROWS", 2)
+        body = f"os.write({stream_fd}, b'x\\n' * 64)"
+        expected_error = reconcile_module.ReconcileQuerySaturated
+    else:
+        monkeypatch.setattr(reconcile_module, "COMMENT_SACCT_VISIBILITY_TIMEOUT_SECONDS", 0.05)
+        body = "time.sleep(10)"
+        expected_error = reconcile_module.ReconcileQueryUnavailable
+    script = (
+        "import os, pathlib, sys, time; "
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); "
+        + body
+    )
+    with pytest.raises(expected_error) as error:
+        reconcile_module._bounded_visibility_stdout([sys.executable, "-c", script, str(pid_path)])
+    if boundary in {"bytes", "rows"}:
+        assert error.value.boundary == boundary
+    child_pid = int(pid_path.read_text(encoding="utf-8"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
 
 
 @pytest.mark.parametrize(

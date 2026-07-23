@@ -240,9 +240,23 @@ complete current-attempt typed absence proof and immutable attempt anchor; a
 generic compatibility write cannot manufacture retry authority.
 The same restriction applies to generic reserve, bind, and unmarked submit
 transition APIs: a current-version reservation MUST start clean and unbound,
+including zero/false/null retry count, manual-retry marker, and previous-job
+provenance fields. Passing the current contract version to a generic API MUST
+NOT grant typed authority. The generic submit-evidence API MAY record only
+non-binding deferred/unavailable/mismatch/multiple-match decisions under an
+exact current-attempt state compare; begin-attempt, accepted or adopted
+binding, rejection, and absence retry permission MUST use their dedicated
+typed boundaries. In particular,
 accepted binding MUST use the attempt-aware commit boundary, and
 `absence_retry_permitted` MUST be produced only by the authoritative typed
 retry-permission boundary. Marker-free rows retain their legacy API behavior.
+
+A typed runtime synchronization transition MUST use a closed, monotonic state
+graph and MUST require an accepted or exactly adopted real Slurm binding.
+Unknown, backward, unbound, or pre-acceptance runtime updates MUST be
+zero-write. `cancellation_pending` is a sticky durable intent: ordinary
+queued/running accounting MUST NOT overwrite it, and only typed cancellation
+completion or exact terminal task accounting/projection MAY leave it.
 
 A Gateway timeout MUST persist only the ambiguous submit outcome and MUST leave
 `reconciliation_source`, `reconciliation_decision`, and
@@ -457,6 +471,14 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
   current-version and marker-free active rows under a durable completion marker;
   steady-state restart queries do not recursively enumerate terminal master or
   candidate history
+- **AND** a temporary file left by the inventory's own atomic-write protocol is
+  recognized only by its exact safe grammar, removed under the inventory lock,
+  and repaired from canonical truth, while every unknown directory entry still
+  fails closed
+- **AND** malformed, unreadable, byte-saturated, or record-saturated direct,
+  journal, or legacy-active authority input prevents the migration completion
+  marker; after repair, reopen resumes migration and publishes the marker only
+  after every authority surface is proven complete
 - **AND** the oldest active cohort remains discoverable after reopen while a
   terminal cohort is removed from the active index only in the same durable
   transition that makes it ineligible for reconciliation
@@ -492,6 +514,8 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
   terminal truth is finalized only by exact task accounting/projection
 - **AND** cancellation intent is durable before the external cancel call, so a
   process or Gateway failure remains recoverable on reopen
+- **AND** queued or running status observed after reopen preserves the pending
+  cancellation intent until typed cancel completion or exact terminal truth
 - **AND** proven rejection without a real Slurm master ID is not retained as
   terminal task-projection work in the active-reconcile inventory.
 

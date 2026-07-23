@@ -519,8 +519,20 @@ Scenario evidence rows for section 5:
   current-version authority is typed-only while legacy APIs remain compatible.
   Accepted-submit whole/partial failure, sync, and cancel do not create legacy
   retry clones or use generic master status writes; cancellation intent precedes
-  the external side effect. Proven rejection leaves no active marker. Slurm
-  visibility probes have executable stdout/stderr/row/time/reap bounds.
+  the external side effect and remains sticky across queued/running reopen
+  accounting until typed completion or exact terminal truth. Proven rejection
+  leaves no active marker. Inventory migration fails closed without publishing
+  its completion marker for malformed, unreadable, byte-saturated, or
+  record-saturated authority input, and exact atomic-temp residue is safely
+  repaired while unknown entries remain invalid. The annual cost oracle uses
+  the production cadence of two cycles per day and GFS+IFS per cycle (1,460
+  masters and 373,760 conceptual 256-member candidates per year), virtualizes
+  candidate-history traversal, and asserts directory/stat/read work is constant;
+  it also migrates at least 513 legacy active rows without losing the oldest.
+  Whole and partial retry run through the real ForecastOrchestrator, file
+  repository, and retry service with only the Slurm boundary faked. Slurm
+  visibility probes have executable stdout/stderr/row/time/reap bounds and
+  assert child reap on byte, row, and timeout exits.
 
 - [ ] 9.6 Complete local, CI, and node-22 live verification.
   Evidence floor: the issue-targeted pytest command, `uv run ruff check .`, and

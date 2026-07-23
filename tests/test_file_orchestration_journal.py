@@ -21,6 +21,7 @@ from services.orchestrator.file_orchestration_journal import (
     FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
     FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION,
     FileJournalRetryService,
+    FileOrchestrationJournalError,
     FileOrchestrationJournalRepository,
 )
 from services.orchestrator.retry import RetryConfig, RetryError, RetryNotFoundError
@@ -1279,7 +1280,7 @@ def test_file_orchestration_journal_exposes_restart_reconcile_store_interface(
     assert repository.query_reserved_unbound_jobs() == []
 
 
-def test_file_orchestration_journal_reconcile_scan_skips_bad_journal_path(
+def test_file_orchestration_journal_migration_blocks_bad_journal_path_until_repaired(
     tmp_path: Path,
 ) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
@@ -1298,9 +1299,15 @@ def test_file_orchestration_journal_reconcile_scan_skips_bad_journal_path(
     bad_path.parent.mkdir(parents=True)
     bad_path.write_text('{"record_type":"pipeline_job","job_id":"bad"}\n', encoding="utf-8")
 
-    inflight = repository.query_inflight_jobs()
+    with pytest.raises(FileOrchestrationJournalError):
+        repository.query_inflight_jobs()
+    assert not (journal_root / "reconcile-inventory-migration-v1.json").exists()
 
+    bad_path.unlink()
+    reopened = FileOrchestrationJournalRepository(journal_root)
+    inflight = reopened.query_inflight_jobs()
     assert {job.job_id for job in inflight} == {"job_reconcile_pending_after_bad_path"}
+    assert (journal_root / "reconcile-inventory-migration-v1.json").is_file()
 
 
 def test_file_orchestration_journal_reconcile_inventory_scan_closes_directory_fds(tmp_path: Path) -> None:

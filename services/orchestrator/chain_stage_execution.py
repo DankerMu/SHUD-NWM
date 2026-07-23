@@ -388,31 +388,10 @@ def submit_and_wait_cycle_stage(
                 )
                 rejection_batch_committed = getattr(transition_result, "committed", False)
             else:
-                transition = getattr(
-                    orchestrator.repository,
-                    "transition_pipeline_job_submit_evidence",
-                    None,
-                )
-                if not callable(transition):
-                    raise OrchestratorError(
-                        "ACCEPTED_SUBMIT_COMMIT_UNAVAILABLE",
-                        "submit rejection cannot be durably committed",
-                        {"stage": stage.stage},
-                    )
-                transition_kwargs = {
-                    "expected_submission_attempt": expected_attempt,
-                    "expected_statuses": ("reserved",),
-                    "require_unbound": True,
-                    "finished_at": deps.utcnow(),
-                    "error_code": getattr(error, "error_code", None) or "SBATCH_SUBMISSION_FAILED",
-                    "error_message": str(deps.redact_payload(str(error))),
-                }
-                if _accepts_keyword(transition, "accepted_submit_contract_version"):
-                    transition_kwargs["accepted_submit_contract_version"] = ACCEPTED_SUBMIT_CONTRACT_VERSION
-                transition_result = transition(
-                    pipeline_job_id,
-                    AcceptedSubmitTransition.rejected(),
-                    **transition_kwargs,
+                raise OrchestratorError(
+                    "ACCEPTED_SUBMIT_COMMIT_UNAVAILABLE",
+                    "submit rejection requires the dedicated durable transition API",
+                    {"stage": stage.stage},
                 )
             if not getattr(transition_result, "committed", False):
                 raise OrchestratorError(
@@ -1032,7 +1011,7 @@ def record_cycle_stage_poll_timeout(
     ):
         transition = getattr(
             orchestrator.repository,
-            "transition_pipeline_job_submit_evidence",
+            "transition_pipeline_job_runtime_status",
             None,
         )
         if not callable(transition):
@@ -1048,11 +1027,9 @@ def record_cycle_stage_poll_timeout(
             "error_message": message,
             "log_uri": log_uri,
         }
-        if _accepts_keyword(transition, "accepted_submit_contract_version"):
-            transition_kwargs["accepted_submit_contract_version"] = ACCEPTED_SUBMIT_CONTRACT_VERSION
         transition_result = transition(
             pipeline_job_id,
-            AcceptedSubmitTransition.accepted(status="reconcile_unverified"),
+            "reconcile_unverified",
             **transition_kwargs,
         )
         if not getattr(transition_result, "committed", False):

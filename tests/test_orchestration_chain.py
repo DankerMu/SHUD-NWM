@@ -8328,6 +8328,89 @@ def test_file_journal_forecast_timeout_stays_reconciling_with_durable_18_member_
     assert client.cancelled_jobs == []
 
 
+@pytest.mark.parametrize(
+    ("first_outcomes", "expected_retry_models"),
+    [
+        pytest.param(["failed", "failed"], ["model_0", "model_1"], id="whole_failure"),
+        pytest.param(["succeeded", "failed"], ["model_1"], id="partial_failure"),
+    ],
+)
+def test_round8_persistent_file_journal_forecast_retry_failure_to_success_is_one_coherent_chain(
+    tmp_path: Path,
+    first_outcomes: list[str],
+    expected_retry_models: list[str],
+) -> None:
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+
+    cycle = "2026050100"
+    basins = _basins(2)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_{cycle}_model_{index}",
+                "candidate_id": (
+                    f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic"
+                ),
+                "orchestration_run_id": f"cycle_gfs_{cycle}_forecast_cohort_fixture",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = FakeCycleSlurmClient(
+        array_results_by_stage={
+            "forecast": [first_outcomes, ["succeeded"] * len(expected_retry_models)]
+        }
+    )
+    retry_service = FileJournalRetryService(
+        repository,
+        RetryConfig(max_retries=1, backoff_schedule=[0]),
+    )
+    orchestrator = _orchestrator(
+        tmp_path,
+        repository,
+        client,
+        retry_service=retry_service,
+    )
+
+    result = orchestrator.orchestrate_cycle("gfs", cycle, basins)
+
+    forecast_submissions = [row for row in client.submissions if row["stage"] == "forecast"]
+    assert result.status == "complete"
+    assert len(forecast_submissions) == 2
+    assert [task["model_id"] for task in forecast_submissions[0]["tasks"]] == [
+        "model_0",
+        "model_1",
+    ]
+    assert [task["model_id"] for task in forecast_submissions[1]["tasks"]] == expected_retry_models
+    reopened = FileOrchestrationJournalRepository(repository.root)
+    masters = [
+        row
+        for row in reopened.query_pipeline_jobs_by_cycle("gfs_2026050100")
+        if row.get("stage") == "forecast" and row.get("model_id") is None
+    ]
+    assert len(masters) == 2
+    masters.sort(key=lambda row: int(row.get("submission_attempt") or 0))
+    assert [row["status"] for row in masters] == [
+        "failed" if len(expected_retry_models) == 2 else "partially_failed",
+        "succeeded",
+    ]
+    assert all(
+        row["accepted_submit_contract_version"] == ACCEPTED_SUBMIT_CONTRACT_VERSION
+        for row in masters
+    )
+    assert [row["submission_attempt"] for row in masters] == [1, 2]
+    assert len(masters[0]["cohort_members"]) == 2
+    assert [member["model_id"] for member in masters[1]["cohort_members"]] == expected_retry_models
+    assert all(row.get("manual_retry_marker") is not True for row in masters)
+
+
 @pytest.mark.parametrize("immediate_terminal", [False, True])
 def test_file_journal_forecast_terminal_projection_crash_recovers_after_reopen(
     tmp_path: Path,

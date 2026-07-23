@@ -126,6 +126,13 @@ _RECONCILE_INVENTORY_SCHEMA_VERSION = "nhms.scheduler.reconcile_inventory.v1"
 _RECONCILE_INVENTORY_MIGRATION_SCHEMA_VERSION = "nhms.scheduler.reconcile_inventory_migration.v1"
 _RECONCILE_INVENTORY_MIGRATION_MARKER = "reconcile-inventory-migration-v1.json"
 _LEGACY_ACTIVE_RECONCILE_DIRECTORY = "active-reconcile"
+_ATOMIC_TEMP_NONCE_RE = r"[0-9a-f]{32}"
+_RECONCILE_INVENTORY_TEMP_RE = re.compile(
+    rf"^\.(?P<target>[A-Za-z0-9_.-]+\.json)\.{_ATOMIC_TEMP_NONCE_RE}\.tmp$"
+)
+_RECONCILE_MIGRATION_TEMP_RE = re.compile(
+    rf"^\.{re.escape(_RECONCILE_INVENTORY_MIGRATION_MARKER)}\.{_ATOMIC_TEMP_NONCE_RE}\.tmp$"
+)
 _LATEST_REPLAY_ORDER_SENTINEL = MAX_FILE_JOURNAL_RECORDS + 1
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _FORECAST_RUN_ID_RE = re.compile(r"^fcst_([^_]+)_(\d{10})_(.+)$")
@@ -208,6 +215,23 @@ TERMINAL_PIPELINE_STATUSES = {
     "reservation_lost",
     "permanently_failed",
 }
+_ACCEPTED_RUNTIME_TRANSITIONS = {
+    "submitted": frozenset({"submitted", "pending", "queued", "running", "reconcile_unverified"}),
+    "pending": frozenset({"pending", "queued", "running", "reconcile_unverified"}),
+    "queued": frozenset({"queued", "running", "reconcile_unverified"}),
+    "running": frozenset({"running", "reconcile_unverified"}),
+    "cancellation_pending": frozenset({"cancellation_pending"}),
+    "reconcile_unverified": frozenset({"reconcile_unverified"}),
+}
+_GENERIC_VERSIONED_RECONCILIATION_DECISIONS = frozenset(
+    {
+        None,
+        "accounting_unavailable",
+        "absence_deferred",
+        "identity_mismatch_blocked",
+        "multiple_matches_blocked",
+    }
+)
 _TERMINAL_FORECAST_CYCLE_SUCCESS_STATUSES = {"complete", "succeeded", "parsed", "published"}
 _STAGE_STATUS_ORDER = {
     "download": 1,
@@ -416,6 +440,8 @@ class FileOrchestrationJournalRepository:
         ] = {}
         self._read_bytes_cache: dict[str, tuple[tuple[int, int, int], bytes, bool]] = {}
         self._read_bytes_cache_total = 0
+        self._reconcile_inventory_lock_depth = 0
+        self._reconcile_inventory_migration_checked = False
 
     def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
         try:
@@ -1137,20 +1163,8 @@ class FileOrchestrationJournalRepository:
             return self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
 
     def reserve_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any] | None:
-        row = self._pipeline_job_row(
-            {
-                **record,
-                "status": record.get("status", "reserved"),
-                "submitted_at": None,
-                "started_at": None,
-                "finished_at": None,
-                "exit_code": None,
-                "error_code": None,
-                "error_message": None,
-                "log_uri": None,
-            }
-        )
-        if accepted_submit_contract_is_current(row) and accepted_submit_row_kind(row) == "master":
+        if accepted_submit_contract_is_current(record) and accepted_submit_row_kind(record) == "master":
+            _accepted_submit_attempt_anchor(record.get("submission_attempt_started_at"))
             dirty_fields = {
                 field
                 for field in (
@@ -1171,15 +1185,32 @@ class FileOrchestrationJournalRepository:
                 )
                 if record.get(field) not in (None, "")
             }
-            if (
-                str(record.get("status") or "reserved") != "reserved"
-                or record.get("candidate_projections") not in (None, [], ())
-                or dirty_fields
-            ):
+            if record.get("retry_count") not in (None, 0):
+                dirty_fields.add("retry_count")
+            if record.get("manual_retry_marker") not in (None, False):
+                dirty_fields.add("manual_retry_marker")
+            if record.get("previous_job_id") not in (None, ""):
+                dirty_fields.add("previous_job_id")
+            if record.get("candidate_projections") not in (None, [], ()):
+                dirty_fields.add("candidate_projections")
+            if str(record.get("status") or "reserved") != "reserved" or dirty_fields:
                 raise FileOrchestrationJournalError(
                     "file_journal_clean_reservation_required",
                     field=sorted(dirty_fields)[0] if dirty_fields else "status",
                 )
+        row = self._pipeline_job_row(
+            {
+                **record,
+                "status": record.get("status", "reserved"),
+                "submitted_at": None,
+                "started_at": None,
+                "finished_at": None,
+                "exit_code": None,
+                "error_code": None,
+                "error_message": None,
+                "log_uri": None,
+            }
+        )
         source_id = _source_id_from_job(row)
         cycle_time = _cycle_time_from_job(row)
         model_id = _optional_safe_identity(row, "model_id")
@@ -1508,6 +1539,24 @@ class FileOrchestrationJournalRepository:
                 field=ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD,
             )
         if versioned:
+            if (
+                transition.submit_outcome != "submit_result_ambiguous"
+                or transition.reconciliation_decision
+                not in _GENERIC_VERSIONED_RECONCILIATION_DECISIONS
+            ):
+                raise FileOrchestrationJournalError(
+                    "file_journal_authority_transition_requires_typed_api",
+                    field="transition",
+                )
+            if (
+                expected_submission_attempt is None
+                or not expected_statuses
+                or not require_unbound
+            ):
+                raise FileOrchestrationJournalError(
+                    "file_journal_authority_transition_requires_cas",
+                    field="expected_submission_attempt",
+                )
             source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
         else:
             initial = self._pipeline_job_for_id_unlocked(job_id)
@@ -1593,7 +1642,11 @@ class FileOrchestrationJournalRepository:
         *,
         expected_statuses: Sequence[str] | None = None,
         started_at: datetime | None = None,
+        finished_at: datetime | None = None,
         exit_code: int | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        log_uri: str | None = None,
     ) -> AcceptedSubmitCommitResult:
         """Advance one current master through non-terminal runtime states."""
 
@@ -1615,19 +1668,43 @@ class FileOrchestrationJournalRepository:
                 or accepted_submit_row_kind(existing) != "master"
             ):
                 return AcceptedSubmitCommitResult("stale", dict(existing or {}))
+            if (
+                existing.get("submit_outcome") != "accepted"
+                or not str(existing.get("slurm_job_id") or "").isdigit()
+            ):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
             if expected_statuses is not None and str(existing.get("status") or "") not in set(
                 expected_statuses
             ):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            current_status = str(existing.get("status") or "")
+            if status not in _ACCEPTED_RUNTIME_TRANSITIONS.get(current_status, frozenset()):
                 return AcceptedSubmitCommitResult("stale", dict(existing))
             row = dict(existing)
             row["status"] = status
             if started_at is not None:
                 row["started_at"] = _format_utc(started_at)
+            if finished_at is not None:
+                row["finished_at"] = _format_utc(finished_at)
             if exit_code is not None:
                 row["exit_code"] = exit_code
+            if error_code is not None:
+                row["error_code"] = error_code
+            if error_message is not None:
+                row["error_message"] = _durable_error_message(error_message)
+            if log_uri is not None:
+                row["log_uri"] = log_uri
             if all(
                 row.get(field) == existing.get(field)
-                for field in ("status", "started_at", "exit_code")
+                for field in (
+                    "status",
+                    "started_at",
+                    "finished_at",
+                    "exit_code",
+                    "error_code",
+                    "error_message",
+                    "log_uri",
+                )
             ):
                 return AcceptedSubmitCommitResult("idempotent", dict(existing))
             row["updated_at"] = _format_utc(_utcnow())
@@ -1660,8 +1737,15 @@ class FileOrchestrationJournalRepository:
                 or accepted_submit_row_kind(existing) != "master"
             ):
                 return AcceptedSubmitCommitResult("stale", dict(existing or {}))
+            if (
+                existing.get("submit_outcome") != "accepted"
+                or not str(existing.get("slurm_job_id") or "").isdigit()
+            ):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
             if str(existing.get("status") or "") == "cancellation_pending":
                 return AcceptedSubmitCommitResult("idempotent", dict(existing))
+            if str(existing.get("status") or "") == "reconcile_unverified":
+                return AcceptedSubmitCommitResult("stale", dict(existing))
             if str(existing.get("status") or "") not in set(expected_statuses):
                 return AcceptedSubmitCommitResult("stale", dict(existing))
             row = dict(existing)
@@ -1695,20 +1779,36 @@ class FileOrchestrationJournalRepository:
                 source_id=source_id,
                 cycle_time=cycle_time,
             )
-            if (
-                existing is None
-                or not accepted_submit_contract_is_current(existing)
-                or accepted_submit_row_kind(existing) != "master"
-                or str(existing.get("status") or "") != "cancellation_pending"
-            ):
+            if existing is None:
                 return AcceptedSubmitCommitResult("stale", dict(existing or {}))
+            if (
+                not accepted_submit_contract_is_current(existing)
+                or accepted_submit_row_kind(existing) != "master"
+                or existing.get("submit_outcome") != "accepted"
+                or not str(existing.get("slurm_job_id") or "").isdigit()
+            ):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            desired_error_code = error_code or "SLURM_JOB_CANCELLED"
+            if str(existing.get("status") or "") == "reconcile_unverified":
+                desired = {
+                    "finished_at": _format_utc(finished_at),
+                    "exit_code": exit_code,
+                    "error_code": desired_error_code,
+                    "error_message": _durable_error_message(error_message),
+                    "log_uri": log_uri,
+                }
+                if all(existing.get(field) == value for field, value in desired.items()):
+                    return AcceptedSubmitCommitResult("idempotent", dict(existing))
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            if str(existing.get("status") or "") != "cancellation_pending":
+                return AcceptedSubmitCommitResult("stale", dict(existing))
             row = dict(existing)
             row.update(
                 {
                     "status": "reconcile_unverified",
                     "finished_at": _format_utc(finished_at),
                     "exit_code": exit_code,
-                    "error_code": error_code or "SLURM_JOB_CANCELLED",
+                    "error_code": desired_error_code,
                     "error_message": _durable_error_message(error_message),
                     "log_uri": log_uri,
                     "updated_at": _format_utc(_utcnow()),
@@ -3489,31 +3589,12 @@ class FileOrchestrationJournalRepository:
         yield from self._iter_reconcile_inventory_records()
 
     def _iter_reconcile_inventory_records(self) -> Iterable[dict[str, Any]]:
+        with self._write_lock:
+            self._ensure_root_unlocked()
+            with self._reconcile_inventory_file_lock_unlocked():
+                entry_names = self._reconcile_inventory_entry_names_unlocked()
         directory = self.root / _RECONCILE_INVENTORY_DIRECTORY
-        try:
-            entry_names = list_directory_no_follow_limited(
-                directory,
-                containment_root=self.root,
-                max_entries=self.max_files,
-            )
-        except FileNotFoundError:
-            return
-        except (OSError, SafeFilesystemError) as error:
-            raise FileOrchestrationJournalError(
-                "file_journal_reconcile_inventory_unavailable",
-                field="reconcile_inventory",
-            ) from error
-        if len(entry_names) > self.max_files:
-            raise FileOrchestrationJournalError(
-                "file_journal_record_limit_exceeded",
-                field="reconcile_inventory",
-            )
         for entry_name in sorted(entry_names):
-            if not entry_name.endswith(".json") or _SAFE_SEGMENT_RE.fullmatch(entry_name) is None:
-                raise FileOrchestrationJournalError(
-                    "file_journal_reconcile_inventory_invalid",
-                    field="reconcile_inventory",
-                )
             path = directory / entry_name
             anchor = self._read_optional_json(path)
             if anchor is None:
@@ -3541,18 +3622,17 @@ class FileOrchestrationJournalRepository:
                 yield canonical
 
     def _ensure_reconcile_inventory_migrated(self) -> None:
-        marker_path = self.root / _RECONCILE_INVENTORY_MIGRATION_MARKER
-        marker = self._read_optional_json(marker_path)
-        if marker is not None:
-            self._validate_reconcile_inventory_migration_marker(marker)
+        if self._reconcile_inventory_migration_checked:
             return
-        migration_cycle = datetime(1970, 1, 1, tzinfo=UTC)
         with self._write_lock:
             self._ensure_root_unlocked()
-            with self._cycle_file_lock_unlocked(source_id="gfs", cycle_time=migration_cycle):
+            with self._reconcile_inventory_file_lock_unlocked():
+                self._cleanup_reconcile_migration_temp_residues_unlocked()
+                marker_path = self.root / _RECONCILE_INVENTORY_MIGRATION_MARKER
                 marker = self._read_optional_json(marker_path)
                 if marker is not None:
                     self._validate_reconcile_inventory_migration_marker(marker)
+                    self._reconcile_inventory_migration_checked = True
                     return
                 self._backfill_reconcile_inventory_unlocked()
                 self._atomic_write_json_unlocked(
@@ -3562,6 +3642,91 @@ class FileOrchestrationJournalRepository:
                         "completed_at": _format_utc(_utcnow()),
                     },
                 )
+                self._cleanup_reconcile_migration_temp_residues_unlocked()
+                self._reconcile_inventory_migration_checked = True
+
+    def _reconcile_inventory_entry_names_unlocked(self) -> list[str]:
+        directory = self.root / _RECONCILE_INVENTORY_DIRECTORY
+        try:
+            entry_names = list_directory_no_follow_limited(
+                directory,
+                containment_root=self.root,
+                max_entries=self.max_files,
+            )
+        except FileNotFoundError:
+            return []
+        except (OSError, SafeFilesystemError) as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_unavailable",
+                field="reconcile_inventory",
+            ) from error
+        if len(entry_names) > self.max_files:
+            raise FileOrchestrationJournalError(
+                "file_journal_record_limit_exceeded",
+                field="reconcile_inventory",
+            )
+        canonical: list[str] = []
+        for entry_name in sorted(entry_names):
+            if entry_name.endswith(".json") and _SAFE_SEGMENT_RE.fullmatch(entry_name) is not None:
+                canonical.append(entry_name)
+                continue
+            match = _RECONCILE_INVENTORY_TEMP_RE.fullmatch(entry_name)
+            if match is not None and _SAFE_SEGMENT_RE.fullmatch(match.group("target")) is not None:
+                self._remove_reconcile_atomic_residue_unlocked(
+                    directory / entry_name,
+                    field="reconcile_inventory",
+                )
+                continue
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_invalid",
+                field="reconcile_inventory",
+            )
+        return canonical
+
+    def _cleanup_reconcile_migration_temp_residues_unlocked(self) -> None:
+        prefix = f".{_RECONCILE_INVENTORY_MIGRATION_MARKER}."
+        try:
+            entry_names = list_directory_no_follow_limited(
+                self.root,
+                containment_root=self.root,
+                max_entries=self.max_files,
+            )
+        except (OSError, SafeFilesystemError) as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_migration_unavailable",
+                field="reconcile_inventory_migration",
+            ) from error
+        if len(entry_names) > self.max_files:
+            raise FileOrchestrationJournalError(
+                "file_journal_record_limit_exceeded",
+                field="reconcile_inventory_migration",
+            )
+        for entry_name in entry_names:
+            if not entry_name.startswith(prefix):
+                continue
+            if _RECONCILE_MIGRATION_TEMP_RE.fullmatch(entry_name) is None:
+                raise FileOrchestrationJournalError(
+                    "file_journal_reconcile_inventory_migration_invalid",
+                    field="reconcile_inventory_migration",
+                )
+            self._remove_reconcile_atomic_residue_unlocked(
+                self.root / entry_name,
+                field="reconcile_inventory_migration",
+            )
+
+    def _remove_reconcile_atomic_residue_unlocked(self, path: Path, *, field: str) -> None:
+        try:
+            mode = stat_no_follow(path, containment_root=self.root).st_mode
+            if not stat.S_ISREG(mode):
+                raise SafeFilesystemError(f"Atomic residue must be a regular file: {path}")
+            unlink_no_follow(path, containment_root=self.root)
+        except FileNotFoundError:
+            return
+        except (OSError, SafeFilesystemError) as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_unavailable",
+                field=field,
+            ) from error
 
     def _backfill_reconcile_inventory_unlocked(self) -> None:
         # Flat direct jobs contain masters/legacy rows only for current
@@ -3579,26 +3744,19 @@ class FileOrchestrationJournalRepository:
                 max_depth=self.max_depth,
             )
         ):
-            try:
-                source_id, cycle_time = _journal_identity_from_path(
-                    path,
-                    root=self.root,
-                    surface="journal",
+            source_id, cycle_time = _journal_identity_from_path(
+                path,
+                root=self.root,
+                surface="journal",
+            )
+            rows = _CycleRows()
+            for record in self._read_jsonl(path):
+                self._apply_journal_record(
+                    rows,
+                    record,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
                 )
-                rows = _CycleRows()
-                for record in self._read_jsonl(path):
-                    self._apply_journal_record(
-                        rows,
-                        record,
-                        source_id=source_id,
-                        cycle_time=cycle_time,
-                    )
-            except FileOrchestrationJournalError:
-                # A malformed legacy surface cannot safely contribute an
-                # authority row. Valid direct records and journals still
-                # backfill, and the bad artifact remains available for
-                # operator inspection instead of blocking every restart pass.
-                continue
             for job in rows.pipeline_jobs.values():
                 self._sync_reconcile_inventory_for_row_unlocked(job)
 
@@ -3614,14 +3772,14 @@ class FileOrchestrationJournalRepository:
         ):
             payload = self._read_optional_json(path)
             if payload is None:
-                continue
-            try:
-                yield self._validated_direct_pipeline_job_record(
-                    payload,
-                    expected_job_id=_safe_segment(path.stem),
+                raise FileOrchestrationJournalError(
+                    "file_journal_reconcile_inventory_migration_invalid",
+                    field="active_reconcile",
                 )
-            except FileOrchestrationJournalError:
-                continue
+            yield self._validated_direct_pipeline_job_record(
+                payload,
+                expected_job_id=_safe_segment(path.stem),
+            )
 
     def _validated_reconcile_inventory_anchor(
         self,
@@ -3657,11 +3815,20 @@ class FileOrchestrationJournalRepository:
         cycle_time: datetime,
     ) -> dict[str, Any] | None:
         direct = self._direct_pipeline_job_record(job_id)
+        legacy_payload = self._read_optional_json(
+            self.root / _LEGACY_ACTIVE_RECONCILE_DIRECTORY / f"{_safe_segment(job_id)}.json"
+        )
+        legacy = (
+            self._validated_direct_pipeline_job_record(legacy_payload, expected_job_id=job_id)
+            if legacy_payload is not None
+            else None
+        )
         rows = _CycleRows()
         for record in self._read_jsonl(self._journal_path(source_id=source_id, cycle_time=cycle_time)):
             self._apply_journal_record(rows, record, source_id=source_id, cycle_time=cycle_time)
         replayed = rows.pipeline_jobs.get(job_id)
-        canonical = dict(replayed or direct) if replayed is not None or direct is not None else None
+        authority = replayed or direct or legacy
+        canonical = dict(authority) if authority is not None else None
         if canonical is None:
             return None
         if _source_id_from_job(canonical) != source_id or _cycle_time_from_job(canonical) != cycle_time:
@@ -3672,46 +3839,49 @@ class FileOrchestrationJournalRepository:
         return canonical
 
     def _sync_reconcile_inventory_for_row_unlocked(self, row: Mapping[str, Any]) -> bool:
-        row_kind = _reconcile_inventory_row_kind(row)
-        job_id = _required_safe_identity(row, "job_id")
-        if row_kind is None or not _job_needs_restart_reconcile(row):
-            self._remove_reconcile_inventory_anchor_unlocked(job_id)
-            return False
-        self._atomic_write_json_unlocked(
-            self.root / _RECONCILE_INVENTORY_DIRECTORY / f"{job_id}.json",
-            {
-                "schema_version": _RECONCILE_INVENTORY_SCHEMA_VERSION,
-                "job_id": job_id,
-                "source_id": _source_id_from_job(row),
-                "cycle_time": _format_utc(_cycle_time_from_job(row)),
-                "row_kind": row_kind,
-            },
-        )
-        return True
+        with self._reconcile_inventory_file_lock_unlocked():
+            row_kind = _reconcile_inventory_row_kind(row)
+            job_id = _required_safe_identity(row, "job_id")
+            if row_kind is None or not _job_needs_restart_reconcile(row):
+                self._remove_reconcile_inventory_anchor_unlocked(job_id)
+                return False
+            self._atomic_write_json_unlocked(
+                self.root / _RECONCILE_INVENTORY_DIRECTORY / f"{job_id}.json",
+                {
+                    "schema_version": _RECONCILE_INVENTORY_SCHEMA_VERSION,
+                    "job_id": job_id,
+                    "source_id": _source_id_from_job(row),
+                    "cycle_time": _format_utc(_cycle_time_from_job(row)),
+                    "row_kind": row_kind,
+                },
+            )
+            return True
 
     def _remove_reconcile_inventory_anchor_unlocked(self, job_id: str) -> None:
-        try:
-            unlink_no_follow(
-                self.root / _RECONCILE_INVENTORY_DIRECTORY / f"{_safe_segment(job_id)}.json",
-                containment_root=self.root,
-                missing_ok=True,
-            )
-        except (OSError, SafeFilesystemError) as error:
-            raise OrchestratorError(
-                "FILE_JOURNAL_WRITE_FAILED",
-                "failed to update reconcile inventory",
-                {"error_type": type(error).__name__},
-            ) from error
+        with self._reconcile_inventory_file_lock_unlocked():
+            try:
+                unlink_no_follow(
+                    self.root / _RECONCILE_INVENTORY_DIRECTORY / f"{_safe_segment(job_id)}.json",
+                    containment_root=self.root,
+                    missing_ok=True,
+                )
+            except (OSError, SafeFilesystemError) as error:
+                raise OrchestratorError(
+                    "FILE_JOURNAL_WRITE_FAILED",
+                    "failed to update reconcile inventory",
+                    {"error_type": type(error).__name__},
+                ) from error
 
     def _iter_reconcile_direct_pipeline_job_records(self) -> Iterable[dict[str, Any]]:
         for path in self._iter_reconcile_direct_pipeline_job_paths():
-            try:
-                expected_job_id = _safe_segment(path.stem)
-                payload = self._read_optional_json(path)
-                if payload is not None:
-                    yield self._validated_direct_pipeline_job_record(payload, expected_job_id=expected_job_id)
-            except FileOrchestrationJournalError:
-                continue
+            expected_job_id = _safe_segment(path.stem)
+            payload = self._read_optional_json(path)
+            if payload is None:
+                raise FileOrchestrationJournalError(
+                    "file_journal_reconcile_inventory_migration_invalid",
+                    field="pipeline_jobs",
+                )
+            yield self._validated_direct_pipeline_job_record(payload, expected_job_id=expected_job_id)
 
     def _iter_reconcile_direct_pipeline_job_paths(self) -> Iterable[Path]:
         directory = self.root / "pipeline-jobs"
@@ -3721,10 +3891,16 @@ class FileOrchestrationJournalRepository:
             directory_mode = stat_no_follow(directory, containment_root=self.root).st_mode
         except FileNotFoundError:
             return
-        except (OSError, SafeFilesystemError):
-            return
+        except (OSError, SafeFilesystemError) as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_migration_unavailable",
+                field="pipeline_jobs",
+            ) from error
         if not stat.S_ISDIR(directory_mode):
-            return
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_migration_invalid",
+                field="pipeline_jobs",
+            )
         try:
             entry_names = list_directory_no_follow_limited(
                 directory,
@@ -3733,10 +3909,16 @@ class FileOrchestrationJournalRepository:
             )
         except FileNotFoundError:
             return
-        except (OSError, SafeFilesystemError):
-            return
+        except (OSError, SafeFilesystemError) as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_migration_unavailable",
+                field="pipeline_jobs",
+            ) from error
         if len(entry_names) > self.max_files:
-            return
+            raise FileOrchestrationJournalError(
+                "file_journal_record_limit_exceeded",
+                field="pipeline_jobs",
+            )
         for entry_name in sorted(entry_names):
             if not entry_name.endswith(".json"):
                 continue
@@ -3747,10 +3929,17 @@ class FileOrchestrationJournalRepository:
                 mode = stat_no_follow(path, containment_root=self.root).st_mode
             except FileNotFoundError:
                 continue
-            except (OSError, SafeFilesystemError):
-                continue
-            if stat.S_ISREG(mode):
-                yield path
+            except (OSError, SafeFilesystemError) as error:
+                raise FileOrchestrationJournalError(
+                    "file_journal_reconcile_inventory_migration_unavailable",
+                    field="pipeline_jobs",
+                ) from error
+            if not stat.S_ISREG(mode):
+                raise FileOrchestrationJournalError(
+                    "file_journal_reconcile_inventory_migration_invalid",
+                    field="pipeline_jobs",
+                )
+            yield path
 
     def _model_context(self, model_id: str) -> dict[str, Any] | None:
         payload = self._read_optional_json(self.root / "models" / f"{_safe_segment(model_id)}.json")
@@ -4668,6 +4857,25 @@ class FileOrchestrationJournalRepository:
                 os.close(lock_fd)
             if parent_fd is not None:
                 os.close(parent_fd)
+
+    @contextmanager
+    def _reconcile_inventory_file_lock_unlocked(self) -> Iterable[None]:
+        """Serialize inventory mutation and orphan-temp cleanup across processes."""
+
+        if self._reconcile_inventory_lock_depth:
+            self._reconcile_inventory_lock_depth += 1
+            try:
+                yield
+            finally:
+                self._reconcile_inventory_lock_depth -= 1
+            return
+        migration_cycle = datetime(1970, 1, 1, tzinfo=UTC)
+        with self._cycle_file_lock_unlocked(source_id="gfs", cycle_time=migration_cycle):
+            self._reconcile_inventory_lock_depth = 1
+            try:
+                yield
+            finally:
+                self._reconcile_inventory_lock_depth = 0
 
     def _journal_path(self, *, source_id: str, cycle_time: datetime) -> Path:
         return self.root / "journal" / _safe_segment(source_id) / f"{format_cycle_time(cycle_time)}.jsonl"
