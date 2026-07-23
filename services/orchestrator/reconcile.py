@@ -1037,12 +1037,22 @@ def reconcile_inflight_jobs(
                     reconciliation_decision="matched_bound",
                 )
                 write_count = int(write_result.get("total") or 0)
+                projected_status = slurm_status.value
+                get_pipeline_job = getattr(store, "get_pipeline_job", None)
+                if accounting_complete and callable(get_pipeline_job):
+                    durable_master = get_pipeline_job(job.job_id)
+                    if isinstance(durable_master, Mapping) and durable_master.get("status") in {
+                        "succeeded",
+                        "partially_failed",
+                        "failed",
+                    }:
+                        projected_status = str(durable_master["status"])
                 outcomes.append(
                     ReconcileOutcome(
                         job_id=job.job_id,
                         slurm_job_id=str(slurm_job_id),
                         action="terminal" if accounting_complete else "task_accounting_incomplete",
-                        status=slurm_status.value if accounting_complete else RECONCILE_UNVERIFIED_STATUS,
+                        status=projected_status if accounting_complete else RECONCILE_UNVERIFIED_STATUS,
                         durable_write_kind="forecast_cohort_projection",
                         durable_write_count=write_count,
                         pipeline_status_write_count=int(write_result.get("pipeline_status") or 0),

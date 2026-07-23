@@ -447,6 +447,13 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
 - **AND** foreground polling, immediate-terminal submit responses, and restart
   reconciliation use the same typed cycle-lock transaction to persist terminal
   master state, task projections, candidate/hydro rows, and events together
+- **AND** that typed transaction is the only accepted-submit authority allowed
+  to mutate terminal hydro state; the legacy generic post-stage updater is not
+  invoked after it commits
+- **AND** the durable master outcome is derived from the complete normalized
+  task set (`succeeded` only when every task succeeds, `partially_failed` for a
+  mixed set, and `failed` when none succeeds), while the raw Slurm master state
+  remains evidence and cannot override contradictory child-task truth
 - **AND** foreground and resumed execution derive their effective stage result
   from that committed durable master outcome, so incomplete accounting,
   projection conflict, or a terminal response for a different Slurm master
@@ -511,6 +518,17 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
   removes the completion marker, and leaves a durable fence that blocks the
   current-generation scheduler and automatic migration while the old writer is
   allowed to run
+- **AND** every durable preparation cut point is re-entrant under that exact
+  lease: a valid `preparing` receipt left before or after marker removal is
+  resumed to one `prepared` fence without manual file surgery
+- **AND** heartbeat and synchronous guard renewal on the same lease instance are
+  serialized, so atomic renew cannot interpret process-local temp-file
+  contention as loss of the production lease
+- **AND** the only supported old-writer launch entry resolves a full immutable
+  Git generation from the clean checkout it will actually execute, compares it
+  with the preparation receipt, rechecks it before launch, and rejects dirty,
+  untracked, unresolved, changed, or mismatched checkouts before any writer is
+  started; caller-supplied generation claims are not launch authority
 - **AND** roll-forward requires the matching preparation receipt and the same
   scheduler lease; it performs one strict, crash-resumable backfill, restores
   the completion marker, publishes a bound roll-forward receipt, and consumes

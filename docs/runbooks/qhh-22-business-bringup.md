@@ -359,8 +359,23 @@ systemctl --user enable --now nhms-scheduler-evidence-retention.timer
        --target-writer-generation '<rollback-git-sha>'
      ```
 
-     preparation receipt 的 `receipt_id` 必须随回滚记录保存；旧 writer 启动前须以相同 journal root、workspace
-     和 receipt id 调用 `require_file_journal_rollback_prepared()` gate。rollback fence 存在期间，当前版本
+     `--target-writer-generation` 必须是计划运行 checkout 的完整 `git rev-parse HEAD`，不得使用短 SHA。
+     preparation receipt 的 `receipt_id` 必须随回滚记录保存；旧 writer 不得直接启动，也不得由操作者
+     自报 actual generation。必须从仍在当前版本的控制 checkout 调用
+     `launch-file-journal-rollback-writer`，让它从将要执行的 clean checkout 内部解析并复核 generation，
+     通过 gate 后才以该 checkout 的 Python 启动 writer：
+
+     ```bash
+     uv run nhms-pipeline launch-file-journal-rollback-writer \
+       --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" \
+       --workspace-root "$WORKSPACE_ROOT" \
+       --receipt-id '<preparation-receipt-id>' \
+       --writer-repository-root '<clean-rollback-checkout>' \
+       -- plan-production --continuous --max-passes 1
+     ```
+
+     checkout dirty、含 untracked 文件、无法解析、切换中或与 receipt target 不同均必须在 writer 零启动时
+     fail closed。rollback fence 存在期间，当前版本
      scheduler 必须返回 `scheduler_rollback_fence_prepared`，不得自动 backfill 或提交业务任务。重新升级后，
      在 timer/service 仍停止时执行显式 roll-forward；成功 receipt 落盘且 fence 被消费后才可恢复 timer：
 
@@ -372,7 +387,8 @@ systemctl --user enable --now nhms-scheduler-evidence-retention.timer
        --preparation-receipt-id '<preparation-receipt-id>'
      ```
 
-     两条命令都必须取得与生产 scheduler 相同的 file lease；live lease、receipt 篡改/过期/跨 root 重放或
+     preparation 和 roll-forward 命令都必须取得与生产 scheduler 相同的 file lease；live lease、
+     `preparing` 崩溃恢复失败、receipt 篡改/过期/跨 root 重放、writer checkout generation 不匹配或
      backfill 期间 authority 变化均 fail closed。node-22 回滚演练 receipt 必须同时保存 preparation、旧 writer
      gate、roll-forward 和恢复后 inventory-only 证据。
      out-of-scope LOW 收尾 → #300。

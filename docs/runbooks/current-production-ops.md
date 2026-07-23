@@ -1,6 +1,6 @@
 # Current Production Operations Runbook
 
-最后更新：2026-07-19
+最后更新：2026-07-23
 
 适用范围：node-27 active DB + ingest + display，node-22 Slurm/SHUD compute，
 以及两者共享的 NFS object-store/published 数据面。
@@ -233,7 +233,64 @@ authority、readiness 与 state index，不从 Basins 自动生成 IDW replaceme
 若只读 Basins 源中某个模型仅缺 `*.tsd.rl`，脚本会在私有 scratch copy
 里复制同覆盖期 radiation 模板，原始 NFS Basins 源保持不变。
 
-#### 3.1.1 DB-free file-provider 稳态刷新
+#### 3.1.1 DB-free scheduler 的受支持回滚/前滚
+
+禁止直接把 `/scratch/frd_muziyao/NWM` checkout 到 pre-inventory writer 后启动。
+受支持流程必须保留当前版本作为 rollback controller，并为目标 SHA 创建一个临时、
+clean、detached checkout；目标 generation 一律使用完整 SHA：
+
+```bash
+ROLLBACK_SHA=$(git rev-parse '<rollback-ref>^{commit}')
+ROLLBACK_CHECKOUT="/scratch/frd_muziyao/nhms-rollback-${ROLLBACK_SHA}"
+git worktree add --detach "$ROLLBACK_CHECKOUT" "$ROLLBACK_SHA"
+(cd "$ROLLBACK_CHECKOUT" && uv sync --all-extras --dev)
+test -z "$(git -C "$ROLLBACK_CHECKOUT" status --porcelain=v1 --untracked-files=all)"
+
+systemctl --user stop nhms-compute-scheduler.timer nhms-compute-scheduler.service
+uv run nhms-pipeline prepare-file-journal-rollback \
+  --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" \
+  --workspace-root "$WORKSPACE_ROOT" \
+  --scheduler-lock-backend file \
+  --scheduler-state stopped \
+  --active-scheduler-processes 0 \
+  --checked-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --checked-by "$USER" \
+  --target-writer-generation "$ROLLBACK_SHA"
+```
+
+保存 preparation `receipt_id`。旧 writer 只能由仍在当前版本的 controller 通过下面
+的 gate 启动；该命令不接受操作者自报的 actual generation，而是从即将运行的 checkout
+内部执行 `git rev-parse HEAD`、检查 tracked/untracked dirty 状态并在 launch 前复核：
+
+```bash
+uv run nhms-pipeline launch-file-journal-rollback-writer \
+  --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" \
+  --workspace-root "$WORKSPACE_ROOT" \
+  --receipt-id '<preparation-receipt-id>' \
+  --writer-repository-root "$ROLLBACK_CHECKOUT" \
+  -- plan-production --continuous --max-passes 1
+```
+
+`preparing` receipt 无论遗留在 marker 删除前还是删除后，都只能在重新取得同一 production
+file lease 后自动续成一个 `prepared` fence；不得人工删除 marker/receipt。fence 存在期间，
+当前 scheduler 必须以 `scheduler_rollback_fence_prepared` 拒绝业务提交。
+
+旧 writer 停止后，从当前版本执行前滚，成功消费 fence 后才能恢复 timer：
+
+```bash
+uv run nhms-pipeline complete-file-journal-rollforward \
+  --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" \
+  --workspace-root "$WORKSPACE_ROOT" \
+  --scheduler-lock-backend file \
+  --preparation-receipt-id '<preparation-receipt-id>'
+systemctl --user start nhms-compute-scheduler.timer
+git worktree remove "$ROLLBACK_CHECKOUT"
+```
+
+node-22 live drill 必须保存 preparation、old-writer launch、roll-forward 三段 receipt，
+并证明 A receipt 只能运行 clean A checkout；B/dirty/unresolved checkout 均为零启动。
+
+#### 3.1.2 DB-free file-provider 稳态刷新
 
 Registry、canonical readiness 和 state index 的 consumer freshness 上限均为
 168 小时；不得延长上限或只修改 `generated_at`。node-22 用独立 user-systemd

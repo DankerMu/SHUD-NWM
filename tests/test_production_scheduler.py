@@ -24366,9 +24366,18 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
     source_id: str,
 ) -> None:
     """Highest public seam: submit ambiguity -> bind/tasks -> state-save resume."""
+    from services.orchestrator import chain_forecast_execution
     from services.orchestrator.chain import OrchestratorError
     from services.orchestrator.reconcile import SacctRecord
     from tests.test_orchestration_chain import ImmediateTerminalSlurmClient
+
+    monkeypatch.setattr(
+        chain_forecast_execution,
+        "_update_array_forecast_hydro_statuses",
+        lambda *_args, **_kwargs: pytest.fail(
+            "accepted-submit projection must own hydro terminal writes"
+        ),
+    )
 
     root = tmp_path / "journal"
     models = [_model(f"model_{index}", f"basin_{index}") for index in range(18)]
@@ -24521,7 +24530,7 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
         )
         return SacctRecord(
             str(initial_client.accepted_forecast_job_id),
-            "FAILED" if retryable_failure_index is not None else "COMPLETED",
+            "COMPLETED",
             "nhms_forecast",
             comment=reserved.slurm_comment,
             user="scheduler-user",
@@ -24651,7 +24660,7 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
         if item["array_task_outcome"] == "failed"
     )
     complete_parent = complete_repository.get_pipeline_job(reserved.job_id)
-    assert complete_parent["status"] == "failed"
+    assert complete_parent["status"] == "partially_failed"
     assert len(complete_parent["candidate_projections"]) == 18
     assert [item["array_task_outcome"] for item in complete_parent["candidate_projections"]].count("failed") == 1
     failed_member = reserved.cohort_members[17]
@@ -24720,6 +24729,17 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
     submitted_stages = [submission["stage"] for submission in state_save_client.submissions]
     assert submitted_stages.count("state_save_qc") == 2
     assert submitted_stages.count("forecast") == 1
+    state_save_submissions = [
+        submission
+        for submission in state_save_client.submissions
+        if submission["stage"] == "state_save_qc"
+    ]
+    assert sorted(len(submission["tasks"]) for submission in state_save_submissions) == [1, 17]
+    assert {
+        str(task["model_id"])
+        for submission in state_save_submissions
+        for task in submission["tasks"]
+    } == {str(member["model_id"]) for member in reserved.cohort_members}
     state_save_submission = next(
         submission
         for submission in state_save_client.submissions
@@ -25313,6 +25333,59 @@ def test_renew_never_leaves_lock_empty_and_keeps_valid_json(tmp_path: Path) -> N
     for key in ("pass_id", "lease_token", "pid", "host", "started_at", "owner"):
         assert after[key] == before[key]
     # No stray temp file left behind by the atomic swap.
+    assert not (tmp_path / f"{lock_path.name}.renew.tmp").exists()
+
+
+def test_atomic_guard_heartbeat_and_synchronous_renew_do_not_self_contend(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    import threading
+    import time
+
+    monkeypatch.setenv("NHMS_SCHEDULER_LEASE_GUARD_MODE", "atomic")
+    lock_path = tmp_path / "scheduler.lock"
+    lease = FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
+    assert lease.acquire(pass_id="p1", started_at=_dt("2026-05-21T12:00:00Z"))["acquired"] is True
+    entered = threading.Event()
+    release_first_renew = threading.Event()
+    real_rewrite = lease._rewrite_lock_in_place
+    rewrite_calls = 0
+    active_rewrites = 0
+
+    def blocked_rewrite(payload: Mapping[str, Any], *, parent_fd: int) -> None:
+        nonlocal rewrite_calls, active_rewrites
+        rewrite_calls += 1
+        active_rewrites += 1
+        assert active_rewrites == 1
+        try:
+            if rewrite_calls == 1:
+                entered.set()
+                assert release_first_renew.wait(timeout=2)
+            real_rewrite(payload, parent_fd=parent_fd)
+        finally:
+            active_rewrites -= 1
+
+    monkeypatch.setattr(lease, "_rewrite_lock_in_place", blocked_rewrite)
+    heartbeat = _LeaseHeartbeat(lease, "p1", interval_seconds=0.01)
+    heartbeat.start()
+    assert entered.wait(timeout=2)
+    synchronous_result: list[bool] = []
+    synchronous = threading.Thread(
+        target=lambda: synchronous_result.append(lease.renew(pass_id="p1")),
+    )
+    synchronous.start()
+    time.sleep(0.05)
+    assert rewrite_calls == 1
+    assert heartbeat.lost is False
+
+    release_first_renew.set()
+    synchronous.join(timeout=2)
+    heartbeat.stop()
+    assert not synchronous.is_alive()
+    assert synchronous_result == [True]
+    assert heartbeat.lost is False
+    assert _read_lock(lock_path)["heartbeat_seq"] >= 2
     assert not (tmp_path / f"{lock_path.name}.renew.tmp").exists()
 
 

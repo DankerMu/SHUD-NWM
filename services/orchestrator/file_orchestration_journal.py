@@ -2253,6 +2253,7 @@ class FileOrchestrationJournalRepository:
             raise FileOrchestrationJournalError(
                 "file_journal_evidence_enum_invalid", field="master_status"
             )
+        del master_status, master_error_code
         source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
             existing = self._accepted_submit_job_for_id_unlocked(
@@ -2367,6 +2368,33 @@ class FileOrchestrationJournalRepository:
                     "pipeline_status": 1 if result.wrote else 0,
                     "pipeline_event": 0,
                 }
+            succeeded_tasks = sum(
+                item.get("array_task_outcome") == "succeeded"
+                for item in normalized_projections
+            )
+            if succeeded_tasks == len(normalized_projections):
+                projected_master_status = "succeeded"
+                projected_master_error_code = None
+            elif succeeded_tasks == 0:
+                projected_master_status = "failed"
+                projected_master_error_code = next(
+                    (
+                        str(item["error_code"])
+                        for item in normalized_projections
+                        if item.get("error_code") not in (None, "")
+                    ),
+                    "SLURM_ARRAY_TASK_FAILED",
+                )
+            else:
+                projected_master_status = "partially_failed"
+                projected_master_error_code = next(
+                    (
+                        str(item["error_code"])
+                        for item in normalized_projections
+                        if item.get("error_code") not in (None, "")
+                    ),
+                    "SLURM_ARRAY_TASK_FAILED",
+                )
             verified: list[dict[str, Any]] = []
             for projection in sorted(normalized_projections, key=lambda item: int(item["array_task_id"])):
                 if projection.get("array_task_outcome") not in {"succeeded", "failed"}:
@@ -2497,7 +2525,7 @@ class FileOrchestrationJournalRepository:
                     reconciliation_decision,
                     submit_outcome="accepted",
                     matched_slurm_job_id=master_slurm_job_id,
-                    status=master_status if complete else "reconcile_unverified",
+                    status=projected_master_status,
                 ),
             )
             cohort_row.update(
@@ -2505,7 +2533,7 @@ class FileOrchestrationJournalRepository:
                     "candidate_projections": [
                         existing_projections[task_id] for task_id in sorted(existing_projections)
                     ],
-                    "error_code": master_error_code if complete else "SLURM_TASK_ACCOUNTING_INCOMPLETE",
+                    "error_code": projected_master_error_code,
                     "updated_at": _format_utc(_utcnow()),
                 }
             )
@@ -3875,22 +3903,56 @@ class FileOrchestrationJournalRepository:
                 prior_receipt = self._read_optional_json(receipt_path)
                 rollforward_path = self.root / _RECONCILE_INVENTORY_ROLLFORWARD_RECEIPT
                 prior_rollforward = self._read_optional_json(rollforward_path)
-                if marker is None:
-                    if prior_receipt is not None:
-                        validated = self._validated_reconcile_inventory_rollback_receipt(
-                            prior_receipt
+                validated_prior: dict[str, Any] | None = None
+                if prior_receipt is not None:
+                    validated_prior = self._validated_reconcile_inventory_rollback_receipt(
+                        prior_receipt
+                    )
+                    if (
+                        validated_prior["scheduler_lease_identity"] != lease_identity
+                        or validated_prior["preflight"]["target_writer_generation"]
+                        != target_writer_generation
+                    ):
+                        raise FileOrchestrationJournalError(
+                            "file_journal_rollback_fence_conflict",
+                            field="reconcile_inventory_rollback_receipt",
                         )
-                        if (
-                            validated["status"] == "preparing"
-                            and validated["scheduler_lease_identity"] == lease_identity
-                        ):
+                if marker is not None and validated_prior is not None:
+                    if (
+                        validated_prior["status"] != "preparing"
+                        or validated_prior["invalidated_marker"] != marker
+                        or prior_rollforward is not None
+                    ):
+                        raise FileOrchestrationJournalError(
+                            "file_journal_rollback_fence_conflict",
+                            field="reconcile_inventory_rollback_receipt",
+                        )
+                    # Crash-resume boundary: the preparing receipt was made
+                    # durable but the migration marker was not yet consumed.
+                    # Re-acquiring the exact production lease is sufficient
+                    # authority to finish that same root/generation operation.
+                    self._require_scheduler_lease_guard(scheduler_lease_guard)
+                    try:
+                        unlink_no_follow(marker_path, containment_root=self.root)
+                    except (FileNotFoundError, OSError, SafeFilesystemError) as error:
+                        raise FileOrchestrationJournalError(
+                            "file_journal_rollback_preparation_unavailable",
+                            field="reconcile_inventory_migration",
+                        ) from error
+                    validated_prior["status"] = "prepared"
+                    self._require_scheduler_lease_guard(scheduler_lease_guard)
+                    self._atomic_write_json_unlocked(receipt_path, validated_prior)
+                    self._cleanup_reconcile_migration_temp_residues_unlocked()
+                    self._reconcile_inventory_migration_checked = False
+                    return dict(validated_prior)
+                if marker is None:
+                    if validated_prior is not None:
+                        validated = validated_prior
+                        if validated["status"] == "preparing":
                             validated["status"] = "prepared"
                             self._require_scheduler_lease_guard(scheduler_lease_guard)
                             self._atomic_write_json_unlocked(receipt_path, validated)
-                        if (
-                            validated["status"] == "prepared"
-                            and validated["scheduler_lease_identity"] == lease_identity
-                        ):
+                        if validated["status"] == "prepared":
                             self._reconcile_inventory_migration_checked = False
                             return validated
                     raise FileOrchestrationJournalError(
@@ -3898,7 +3960,7 @@ class FileOrchestrationJournalRepository:
                         field="reconcile_inventory_migration",
                     )
                 self._validate_reconcile_inventory_migration_marker(marker)
-                if prior_receipt is not None:
+                if validated_prior is not None:
                     raise FileOrchestrationJournalError(
                         "file_journal_rollback_fence_conflict",
                         field="reconcile_inventory_rollback_receipt",
@@ -3970,11 +4032,15 @@ class FileOrchestrationJournalRepository:
         *,
         receipt_id: str,
         scheduler_lease_identity: Mapping[str, Any],
+        actual_writer_generation: str,
     ) -> dict[str, Any]:
         """Fail closed unless the old-writer launch boundary was prepared."""
 
         expected_lease_identity = self._validated_scheduler_lease_identity(
             scheduler_lease_identity
+        )
+        actual_writer_generation = _validated_actual_writer_generation(
+            actual_writer_generation
         )
         with self._write_lock:
             self._ensure_root_unlocked()
@@ -3995,6 +4061,8 @@ class FileOrchestrationJournalRepository:
                     validated["status"] != "prepared"
                     or validated["receipt_id"] != receipt_id
                     or validated["scheduler_lease_identity"] != expected_lease_identity
+                    or validated["preflight"]["target_writer_generation"]
+                    != actual_writer_generation
                 ):
                     raise FileOrchestrationJournalError(
                         "file_journal_rollback_not_prepared",
@@ -8117,6 +8185,27 @@ def _safe_identity_text(value: str, *, field: str) -> str:
     ):
         raise FileOrchestrationJournalError("file_journal_unsafe_identity", field=field)
     return value
+
+
+def _validated_actual_writer_generation(value: str) -> str:
+    if not isinstance(value, str):
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_writer_generation_unresolvable",
+            field="actual_writer_generation",
+        )
+    generation = _safe_identity_text(value, field="actual_writer_generation")
+    normalized = generation.casefold()
+    if (
+        normalized in {"unknown", "unresolved", "unresolvable", "dirty"}
+        or normalized.endswith("-dirty")
+        or normalized.endswith("+dirty")
+        or normalized.endswith(".dirty")
+    ):
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_writer_generation_unresolvable",
+            field="actual_writer_generation",
+        )
+    return generation
 
 
 def _validate_scheduler_visible_fields(row: Mapping[str, Any]) -> None:

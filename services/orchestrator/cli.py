@@ -17,6 +17,7 @@ from .file_orchestration_journal import FileOrchestrationJournalError
 from .file_orchestration_migration import (
     complete_file_journal_rollforward,
     export_scheduler_state_from_postgres,
+    launch_file_journal_rollback_writer,
     prepare_file_journal_rollback,
     write_migration_receipt,
 )
@@ -151,6 +152,29 @@ def _complete_file_journal_rollforward(
         journal_root=journal_root,
         workspace_root=workspace_root,
         preparation_receipt_id=preparation_receipt_id,
+        lock_path=lock_path,
+        scheduler_lock_backend=scheduler_lock_backend,
+        lock_ttl_seconds=lock_ttl_seconds,
+    )
+
+
+def _launch_file_journal_rollback_writer(
+    *,
+    journal_root: str,
+    workspace_root: str,
+    receipt_id: str,
+    writer_repository_root: str,
+    writer_args: Sequence[str],
+    lock_path: str | None,
+    scheduler_lock_backend: str,
+    lock_ttl_seconds: int,
+) -> dict[str, object]:
+    return launch_file_journal_rollback_writer(
+        journal_root=journal_root,
+        workspace_root=workspace_root,
+        receipt_id=receipt_id,
+        writer_repository_root=writer_repository_root,
+        writer_args=writer_args,
         lock_path=lock_path,
         scheduler_lock_backend=scheduler_lock_backend,
         lock_ttl_seconds=lock_ttl_seconds,
@@ -512,6 +536,43 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             click.echo(str(error), err=True)
             raise SystemExit(2) from error
 
+    @cli.command("launch-file-journal-rollback-writer")
+    @click.option("--journal-root", required=True)
+    @click.option("--workspace-root", required=True)
+    @click.option("--receipt-id", required=True)
+    @click.option("--writer-repository-root", required=True)
+    @click.option("--lock-path")
+    @click.option("--scheduler-lock-backend", default="file", show_default=True)
+    @click.option("--lock-ttl-seconds", default=60, type=int, show_default=True)
+    @click.argument("writer_args", nargs=-1, required=True)
+    def launch_file_journal_rollback_writer_command(
+        journal_root: str,
+        workspace_root: str,
+        receipt_id: str,
+        writer_repository_root: str,
+        lock_path: str | None,
+        scheduler_lock_backend: str,
+        lock_ttl_seconds: int,
+        writer_args: tuple[str, ...],
+    ) -> None:
+        try:
+            result = _launch_file_journal_rollback_writer(
+                journal_root=journal_root,
+                workspace_root=workspace_root,
+                receipt_id=receipt_id,
+                writer_repository_root=writer_repository_root,
+                writer_args=writer_args,
+                lock_path=lock_path,
+                scheduler_lock_backend=scheduler_lock_backend,
+                lock_ttl_seconds=lock_ttl_seconds,
+            )
+            click.echo(json.dumps(result, sort_keys=True))
+            if result["writer_exit_code"] != 0:
+                raise SystemExit(int(result["writer_exit_code"]))
+        except (FileOrchestrationJournalError, ValueError) as error:
+            click.echo(str(error), err=True)
+            raise SystemExit(2) from error
+
     @cli.command("complete-file-journal-rollforward")
     @click.option("--journal-root", required=True)
     @click.option("--workspace-root", required=True)
@@ -656,6 +717,15 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     rollback_parser.add_argument("--checked-at", required=True)
     rollback_parser.add_argument("--checked-by", required=True)
     rollback_parser.add_argument("--target-writer-generation", required=True)
+    launch_rollback_parser = subparsers.add_parser("launch-file-journal-rollback-writer")
+    launch_rollback_parser.add_argument("--journal-root", required=True)
+    launch_rollback_parser.add_argument("--workspace-root", required=True)
+    launch_rollback_parser.add_argument("--receipt-id", required=True)
+    launch_rollback_parser.add_argument("--writer-repository-root", required=True)
+    launch_rollback_parser.add_argument("--lock-path")
+    launch_rollback_parser.add_argument("--scheduler-lock-backend", default="file")
+    launch_rollback_parser.add_argument("--lock-ttl-seconds", default=60, type=int)
+    launch_rollback_parser.add_argument("writer_args", nargs=argparse.REMAINDER)
     rollforward_parser = subparsers.add_parser("complete-file-journal-rollforward")
     rollforward_parser.add_argument("--journal-root", required=True)
     rollforward_parser.add_argument("--workspace-root", required=True)
@@ -741,6 +811,23 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps(receipt, sort_keys=True))
             return 0
+        except (FileOrchestrationJournalError, ValueError) as error:
+            print(str(error), file=sys.stderr)
+            return 2
+    if args.command == "launch-file-journal-rollback-writer":
+        try:
+            result = _launch_file_journal_rollback_writer(
+                journal_root=args.journal_root,
+                workspace_root=args.workspace_root,
+                receipt_id=args.receipt_id,
+                writer_repository_root=args.writer_repository_root,
+                writer_args=args.writer_args,
+                lock_path=args.lock_path,
+                scheduler_lock_backend=args.scheduler_lock_backend,
+                lock_ttl_seconds=args.lock_ttl_seconds,
+            )
+            print(json.dumps(result, sort_keys=True))
+            return int(result["writer_exit_code"])
         except (FileOrchestrationJournalError, ValueError) as error:
             print(str(error), file=sys.stderr)
             return 2

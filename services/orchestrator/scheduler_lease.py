@@ -133,6 +133,12 @@ class FileSchedulerLease:
         self.acquired = False
         self.lease_token: str | None = None
         self._owner_liveness_probe = owner_liveness_probe or _compat_owner_liveness_probe
+        # ``atomic`` guard mode has no process-local flock.  The heartbeat and
+        # an operation-bound synchronous lease check can therefore renew the
+        # same lease concurrently and contend on the atomic renew temp file.
+        # Serialize every mutation issued by this lease instance so that such
+        # self-contention can never be misreported as lease loss.
+        self._operation_lock = threading.RLock()
 
     def acquire(self, *, pass_id: str, started_at: datetime) -> dict[str, Any]:
         token = uuid4().hex
@@ -325,33 +331,34 @@ class FileSchedulerLease:
     def _guarded(self) -> Any:
         import fcntl
 
-        open_lock_parent_directory = _scheduler_compat_function(
-            "_open_lock_parent_directory",
-            _open_lock_parent_directory,
-        )
-        open_regular_guard_file = _scheduler_compat_function(
-            "_open_regular_guard_file",
-            _open_regular_guard_file,
-        )
-        parent_fd = open_lock_parent_directory(self.lock_path.parent, self.workspace_root)
-        if _file_lock_guard_mode() == "atomic":
+        with self._operation_lock:
+            open_lock_parent_directory = _scheduler_compat_function(
+                "_open_lock_parent_directory",
+                _open_lock_parent_directory,
+            )
+            open_regular_guard_file = _scheduler_compat_function(
+                "_open_regular_guard_file",
+                _open_regular_guard_file,
+            )
+            parent_fd = open_lock_parent_directory(self.lock_path.parent, self.workspace_root)
+            if _file_lock_guard_mode() == "atomic":
+                try:
+                    yield parent_fd
+                finally:
+                    os.close(parent_fd)
+                return
             try:
+                guard_fd = open_regular_guard_file(f"{self.lock_path.name}.guard", dir_fd=parent_fd)
+            except Exception:
+                os.close(parent_fd)
+                raise
+            try:
+                fcntl.flock(guard_fd, fcntl.LOCK_EX)
                 yield parent_fd
             finally:
+                fcntl.flock(guard_fd, fcntl.LOCK_UN)
+                os.close(guard_fd)
                 os.close(parent_fd)
-            return
-        try:
-            guard_fd = open_regular_guard_file(f"{self.lock_path.name}.guard", dir_fd=parent_fd)
-        except Exception:
-            os.close(parent_fd)
-            raise
-        try:
-            fcntl.flock(guard_fd, fcntl.LOCK_EX)
-            yield parent_fd
-        finally:
-            fcntl.flock(guard_fd, fcntl.LOCK_UN)
-            os.close(guard_fd)
-            os.close(parent_fd)
 
     def _existing_lock_state(self, now: datetime | None = None, *, parent_fd: int) -> dict[str, Any]:
         now = now or datetime.now(UTC)

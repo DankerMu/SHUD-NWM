@@ -8337,13 +8337,23 @@ def test_file_journal_forecast_timeout_stays_reconciling_with_durable_18_member_
 )
 def test_round8_persistent_file_journal_forecast_retry_failure_to_success_is_one_coherent_chain(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     first_outcomes: list[str],
     expected_retry_models: list[str],
 ) -> None:
+    from services.orchestrator import chain_forecast_execution
     from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
     from services.orchestrator.file_orchestration_journal import (
         FileJournalRetryService,
         FileOrchestrationJournalRepository,
+    )
+
+    monkeypatch.setattr(
+        chain_forecast_execution,
+        "_update_array_forecast_hydro_statuses",
+        lambda *_args, **_kwargs: pytest.fail(
+            "accepted-submit projection must own hydro terminal writes"
+        ),
     )
 
     cycle = "2026050100"
@@ -8411,11 +8421,72 @@ def test_round8_persistent_file_journal_forecast_retry_failure_to_success_is_one
     assert all(row.get("manual_retry_marker") is not True for row in masters)
 
 
+def test_accepted_submit_terminal_hook_preserves_parsed_and_published_hydro_rows() -> None:
+    from services.orchestrator import chain_forecast_execution
+    from services.orchestrator.chain import ArrayAggregation, ArrayTaskResult
+
+    class Repository:
+        supports_accepted_submit_reconcile = True
+
+        def __init__(self) -> None:
+            self.hydro_statuses = {"run_0": "parsed", "run_1": "published"}
+            self.hydro_writes: list[tuple[str, str]] = []
+            self.cycle_statuses: list[str] = []
+
+        def update_hydro_run_status(self, run_id: str, status: str, **_kwargs: Any) -> None:
+            self.hydro_writes.append((run_id, status))
+            self.hydro_statuses[run_id] = status
+
+        def update_forecast_cycle_status(self, **kwargs: Any) -> None:
+            self.cycle_statuses.append(str(kwargs["status"]))
+
+    repository = Repository()
+    orchestrator = types.SimpleNamespace(
+        repository=repository,
+        _partial_cycle_status=lambda _stage: "forecast_partial",
+    )
+    context = types.SimpleNamespace(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        active_basins=[
+            {"task_id": 0, "run_id": "run_0"},
+            {"task_id": 1, "run_id": "run_1"},
+        ],
+        had_partial=False,
+        last_partial_status=None,
+    )
+    aggregation = ArrayAggregation(
+        total=2,
+        succeeded=1,
+        failed=1,
+        cancelled=0,
+        task_results=(
+            ArrayTaskResult(0, "2001_0", "succeeded"),
+            ArrayTaskResult(1, "2001_1", "failed", error_code="SLURM_TIMEOUT"),
+        ),
+    )
+
+    chain_forecast_execution._after_cycle_stage_terminal(
+        orchestrator,
+        M3_STAGES[2],
+        context,
+        "partially_failed",
+        {"status": "partially_failed"},
+        aggregation,
+    )
+
+    assert repository.hydro_statuses == {"run_0": "parsed", "run_1": "published"}
+    assert repository.hydro_writes == []
+    assert repository.cycle_statuses == ["forecast_partial"]
+
+
 @pytest.mark.parametrize("immediate_terminal", [False, True])
 def test_file_journal_forecast_terminal_projection_crash_recovers_after_reopen(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     immediate_terminal: bool,
 ) -> None:
+    from services.orchestrator import chain_forecast_execution
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
     from services.orchestrator.reconcile import SacctRecord, reconcile_inflight_jobs
 
@@ -8489,6 +8560,40 @@ def test_file_journal_forecast_terminal_projection_crash_recovers_after_reopen(
         "succeeded",
     ]
     assert not (repository.root / "reconcile-inventory" / f"{job_id}.json").exists()
+
+    hydro_before_replay = {
+        str(basin["run_id"]): reopened._hydro_run_for(str(basin["run_id"]))
+        for basin in basins
+    }
+    monkeypatch.setattr(
+        chain_forecast_execution,
+        "_update_array_forecast_hydro_statuses",
+        lambda *_args, **_kwargs: pytest.fail(
+            "accepted-submit replay must not call the generic hydro updater"
+        ),
+    )
+    replay_orchestrator = _orchestrator(tmp_path, reopened, client)
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    normalized = replay_orchestrator._normalize_cycle_basins(basins, "gfs", cycle_time)
+    replay_context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_id="gfs_2026050100",
+        run_id=str(after["run_id"]),
+        all_basins=normalized,
+        active_basins=list(normalized),
+    )
+    replay_result, replay_aggregation = replay_orchestrator._resume_cycle_stage(
+        M3_STAGES[2],
+        replay_context,
+        after,
+    )
+    assert replay_result.status == "succeeded"
+    assert replay_aggregation is not None
+    assert {
+        run_id: reopened._hydro_run_for(run_id)
+        for run_id in hydro_before_replay
+    } == hydro_before_replay
 
 
 def test_file_journal_forecast_explicit_rejection_terminalizes_without_secondary_error(

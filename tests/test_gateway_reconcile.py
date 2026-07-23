@@ -1029,7 +1029,7 @@ def test_file_cohort_terminal_tasks_project_exact_success_failure_and_restart(
     )
     master = SacctRecord(
         slurm_job_id="17667",
-        raw_state="FAILED",
+        raw_state="COMPLETED",
         job_name="nhms_forecast",
         comment=f"nhms_idem:{key}",
         array_member_job_ids=("17667_0", "17667_1"),
@@ -1040,7 +1040,9 @@ def test_file_cohort_terminal_tasks_project_exact_success_failure_and_restart(
     outcomes = reconcile_inflight_jobs(repository, sacct_query=lambda _job_id: master)
 
     assert outcomes[0].action == "terminal"
+    assert outcomes[0].status == "partially_failed"
     cohort = repository.get_pipeline_job("job_cycle_gfs_2026071200_forecast_fixture_forecast")
+    assert cohort["status"] == "partially_failed"
     projections = cohort["candidate_projections"]
     assert projections[0]["array_task_outcome"] == "succeeded"
     assert projections[0]["restart_stage"] == "state_save_qc"
@@ -1131,6 +1133,56 @@ def test_file_cohort_terminal_tasks_project_exact_success_failure_and_restart(
     failed_decision = scheduler_module._candidate_state_decision(failed_candidate, failed_state)
     assert failed_decision is not None
     assert (failed_decision.action, failed_decision.reason) == ("retry", "retry_failed_candidate")
+
+
+@pytest.mark.parametrize(
+    ("task_outcomes", "raw_master_status", "expected_status"),
+    [
+        pytest.param(("succeeded", "succeeded"), "failed", "succeeded", id="all-success"),
+        pytest.param(("succeeded", "failed"), "succeeded", "partially_failed", id="mixed"),
+        pytest.param(("failed", "failed"), "succeeded", "failed", id="all-failed"),
+    ],
+)
+def test_file_cohort_complete_projection_derives_master_status_only_from_tasks(
+    tmp_path: Any,
+    task_outcomes: tuple[str, str],
+    raw_master_status: str,
+    expected_status: str,
+) -> None:
+    repository = _file_cohort_repository(tmp_path, member_count=2)
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    _bind_current_file_cohort(repository, key, slurm_job_id="17667")
+    members = repository.get_pipeline_job(job_id)["cohort_members"]
+    projections = [
+        {
+            **member,
+            "array_task_outcome": task_outcomes[index],
+            "task_slurm_job_id": f"17667_{index}",
+            "error_code": "SLURM_TIMEOUT" if task_outcomes[index] == "failed" else None,
+            "restart_stage": (
+                "state_save_qc" if task_outcomes[index] == "succeeded" else "forecast"
+            ),
+            "native_shud_resubmitted": False,
+        }
+        for index, member in enumerate(members)
+    ]
+
+    repository.project_forecast_cohort_tasks(
+        job_id,
+        master_slurm_job_id="17667",
+        projections=projections,
+        complete=True,
+        master_status=raw_master_status,
+        master_error_code="RAW_MASTER_STATUS_MUST_NOT_WIN",
+        reconciliation_decision="matched_bound",
+    )
+
+    durable = repository.get_pipeline_job(job_id)
+    assert durable["status"] == expected_status
+    assert durable["error_code"] == (
+        None if expected_status == "succeeded" else "SLURM_TIMEOUT"
+    )
 
 
 def test_file_cohort_18_member_partial_then_complete_is_monotonic_and_idempotent(
@@ -5655,6 +5707,7 @@ def test_round12_rollforward_strictly_backfills_once_under_real_scheduler_lease(
         journal_root=root,
         workspace_root=workspace,
         receipt_id=receipt["receipt_id"],
+        actual_writer_generation="pre-reconcile-inventory",
     )["receipt_id"] == receipt["receipt_id"]
 
     direct = template.root / "pipeline-jobs" / f"{job_id}.json"
@@ -5693,6 +5746,7 @@ def test_round12_rollforward_strictly_backfills_once_under_real_scheduler_lease(
             journal_root=root,
             workspace_root=workspace,
             receipt_id=receipt["receipt_id"],
+            actual_writer_generation="pre-reconcile-inventory",
         )
 
     steady = FileOrchestrationJournalRepository(root)
@@ -5820,13 +5874,345 @@ def test_round12_concurrent_prepare_holds_the_real_scheduler_mutation_authority(
     assert not marker.exists()
 
 
+def _round14_clean_writer_checkout(root: Any, *, content: str) -> tuple[Any, str]:
+    import subprocess
+    from pathlib import Path
+
+    checkout = Path(root)
+    checkout.mkdir(parents=True)
+    (checkout / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+    (checkout / "writer.txt").write_text(content, encoding="utf-8")
+    subprocess.run(("git", "init", "-q"), cwd=checkout, check=True)
+    subprocess.run(("git", "add", ".gitignore", "writer.txt"), cwd=checkout, check=True)
+    subprocess.run(
+        (
+            "git",
+            "-c",
+            "user.name=Round14 Test",
+            "-c",
+            "user.email=round14@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "writer fixture",
+        ),
+        cwd=checkout,
+        check=True,
+    )
+    generation = subprocess.run(
+        ("git", "rev-parse", "HEAD"),
+        cwd=checkout,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return checkout, generation
+
+
+def test_round14_prepare_resumes_after_receipt_write_before_marker_unlink(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pathlib import Path
+
+    from services.orchestrator import file_orchestration_journal as journal_module
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.file_orchestration_migration import (
+        complete_file_journal_rollforward,
+        prepare_file_journal_rollback,
+        require_file_journal_rollback_prepared,
+    )
+
+    root = tmp_path / "journal"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = FileOrchestrationJournalRepository(root)
+    assert repository.query_inflight_jobs() == []
+    marker = root / "reconcile-inventory-migration-v1.json"
+    receipt_path = root / "reconcile-inventory-rollback-preparation-v2.json"
+    real_unlink = journal_module.unlink_no_follow
+    crashed = False
+
+    def crash_before_marker_unlink(path: Any, **kwargs: Any) -> None:
+        nonlocal crashed
+        if Path(path) == marker and not crashed:
+            crashed = True
+            raise OSError("injected crash after preparing receipt")
+        real_unlink(path, **kwargs)
+
+    monkeypatch.setattr(journal_module, "unlink_no_follow", crash_before_marker_unlink)
+    with pytest.raises(
+        FileOrchestrationJournalError,
+        match="file_journal_rollback_preparation_unavailable",
+    ):
+        prepare_file_journal_rollback(
+            journal_root=root,
+            workspace_root=workspace,
+            scheduler_state="stopped",
+            active_scheduler_processes=0,
+            checked_at=datetime.now(UTC),
+            checked_by="round14-first-operator",
+            target_writer_generation="writer-A",
+        )
+    preparing = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert preparing["status"] == "preparing"
+    assert marker.is_file()
+
+    monkeypatch.setattr(journal_module, "unlink_no_follow", real_unlink)
+    with pytest.raises(
+        FileOrchestrationJournalError,
+        match="file_journal_rollback_fence_conflict",
+    ):
+        prepare_file_journal_rollback(
+            journal_root=root,
+            workspace_root=workspace,
+            scheduler_state="stopped",
+            active_scheduler_processes=0,
+            checked_at=datetime.now(UTC),
+            checked_by="round14-wrong-generation",
+            target_writer_generation="writer-B",
+        )
+    assert marker.is_file()
+    assert json.loads(receipt_path.read_text(encoding="utf-8")) == preparing
+    prepared = prepare_file_journal_rollback(
+        journal_root=root,
+        workspace_root=workspace,
+        scheduler_state="stopped",
+        active_scheduler_processes=0,
+        checked_at=datetime.now(UTC),
+        checked_by="round14-retry-operator",
+        target_writer_generation="writer-A",
+    )
+    assert prepared["status"] == "prepared"
+    assert prepared["receipt_id"] == preparing["receipt_id"]
+    assert not marker.exists()
+    assert prepare_file_journal_rollback(
+        journal_root=root,
+        workspace_root=workspace,
+        scheduler_state="stopped",
+        active_scheduler_processes=0,
+        checked_at=datetime.now(UTC),
+        checked_by="round14-idempotent-retry",
+        target_writer_generation="writer-A",
+    ) == prepared
+    assert require_file_journal_rollback_prepared(
+        journal_root=root,
+        workspace_root=workspace,
+        receipt_id=prepared["receipt_id"],
+        actual_writer_generation="writer-A",
+    )["status"] == "prepared"
+
+    rollforward = complete_file_journal_rollforward(
+        journal_root=root,
+        workspace_root=workspace,
+        preparation_receipt_id=prepared["receipt_id"],
+    )
+    assert rollforward["preparation_receipt_id"] == prepared["receipt_id"]
+    assert marker.is_file()
+    assert not receipt_path.exists()
+
+
+def test_round14_writer_launch_is_strictly_generation_bound_and_fail_closed(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+
+    from services.orchestrator import file_orchestration_migration as migration_module
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.file_orchestration_migration import (
+        launch_file_journal_rollback_writer,
+        prepare_file_journal_rollback,
+    )
+
+    root = tmp_path / "journal"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = FileOrchestrationJournalRepository(root)
+    assert repository.query_inflight_jobs() == []
+    checkout_a, generation_a = _round14_clean_writer_checkout(
+        tmp_path / "writer-a",
+        content="writer A\n",
+    )
+    checkout_b, _generation_b = _round14_clean_writer_checkout(
+        tmp_path / "writer-b",
+        content="writer B\n",
+    )
+    receipt = prepare_file_journal_rollback(
+        journal_root=root,
+        workspace_root=workspace,
+        scheduler_state="stopped",
+        active_scheduler_processes=0,
+        checked_at=datetime.now(UTC),
+        checked_by="round14-operator",
+        target_writer_generation=generation_a,
+    )
+    starts: list[tuple[tuple[str, ...], Any]] = []
+
+    def runner(argv: tuple[str, ...], *, cwd: Any, check: bool) -> Any:
+        assert check is False
+        starts.append((argv, cwd))
+        return type("Completed", (), {"returncode": 0})()
+
+    monkeypatch.setattr(migration_module, "_run_rollback_writer", runner)
+
+    launched = launch_file_journal_rollback_writer(
+        journal_root=root,
+        workspace_root=workspace,
+        receipt_id=receipt["receipt_id"],
+        writer_repository_root=checkout_a,
+        writer_args=("plan-production", "--plan"),
+    )
+    assert launched["writer_exit_code"] == 0
+    assert launched["actual_writer_generation"] == generation_a
+    assert launched["writer_repository_root"] == str(checkout_a.resolve())
+    assert len(starts) == 1
+    command, cwd = starts[0]
+    assert command == (
+        sys.executable,
+        "-m",
+        "services.orchestrator.cli",
+        "plan-production",
+        "--plan",
+    )
+    assert cwd == checkout_a.resolve()
+
+    real_resolver = migration_module._resolve_clean_writer_generation
+    resolution_calls = 0
+
+    def generation_changes_after_gate(repository_root: Any) -> tuple[Any, str]:
+        nonlocal resolution_calls
+        resolution_calls += 1
+        resolved_root, resolved_generation = real_resolver(repository_root)
+        if resolution_calls == 2:
+            return resolved_root, "f" * len(resolved_generation)
+        return resolved_root, resolved_generation
+
+    monkeypatch.setattr(
+        migration_module,
+        "_resolve_clean_writer_generation",
+        generation_changes_after_gate,
+    )
+    with pytest.raises(
+        FileOrchestrationJournalError,
+        match="file_journal_rollback_writer_generation_changed",
+    ):
+        launch_file_journal_rollback_writer(
+            journal_root=root,
+            workspace_root=workspace,
+            receipt_id=receipt["receipt_id"],
+            writer_repository_root=checkout_a,
+            writer_args=("plan-production", "--plan"),
+        )
+    assert len(starts) == 1
+    monkeypatch.setattr(
+        migration_module,
+        "_resolve_clean_writer_generation",
+        real_resolver,
+    )
+
+    with pytest.raises(FileOrchestrationJournalError, match="file_journal_rollback_not_prepared"):
+        launch_file_journal_rollback_writer(
+            journal_root=root,
+            workspace_root=workspace,
+            receipt_id=receipt["receipt_id"],
+            writer_repository_root=checkout_b,
+            writer_args=("plan-production", "--plan"),
+        )
+    assert len(starts) == 1
+
+    (checkout_a / "writer.txt").write_text("writer A dirty\n", encoding="utf-8")
+    with pytest.raises(
+        FileOrchestrationJournalError,
+        match="file_journal_rollback_writer_generation_dirty",
+    ):
+        launch_file_journal_rollback_writer(
+            journal_root=root,
+            workspace_root=workspace,
+            receipt_id=receipt["receipt_id"],
+            writer_repository_root=checkout_a,
+            writer_args=("plan-production", "--plan"),
+        )
+    (checkout_a / "writer.txt").write_text("writer A\n", encoding="utf-8")
+    (checkout_a / "untracked.txt").write_text("untracked\n", encoding="utf-8")
+    with pytest.raises(
+        FileOrchestrationJournalError,
+        match="file_journal_rollback_writer_generation_dirty",
+    ):
+        launch_file_journal_rollback_writer(
+            journal_root=root,
+            workspace_root=workspace,
+            receipt_id=receipt["receipt_id"],
+            writer_repository_root=checkout_a,
+            writer_args=("plan-production", "--plan"),
+        )
+    unresolvable = tmp_path / "not-a-repository"
+    unresolvable.mkdir()
+    for repository_root in (unresolvable, tmp_path / "missing-repository"):
+        with pytest.raises(FileOrchestrationJournalError):
+            launch_file_journal_rollback_writer(
+                journal_root=root,
+                workspace_root=workspace,
+                receipt_id=receipt["receipt_id"],
+                writer_repository_root=repository_root,
+                writer_args=("plan-production", "--plan"),
+            )
+    assert len(starts) == 1
+
+
+def test_round14_writer_generation_git_probe_timeout_fails_closed(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess
+
+    from services.orchestrator import file_orchestration_migration as migration_module
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
+
+    repository_root = tmp_path / "writer"
+    repository_root.mkdir()
+    observed: list[dict[str, Any]] = []
+
+    def timeout(*_args: Any, **kwargs: Any) -> Any:
+        observed.append(kwargs)
+        raise subprocess.TimeoutExpired(cmd="git", timeout=kwargs["timeout"])
+
+    monkeypatch.setattr(migration_module.subprocess, "run", timeout)
+    with pytest.raises(
+        FileOrchestrationJournalError,
+        match="file_journal_rollback_writer_generation_unresolvable",
+    ):
+        migration_module._resolve_clean_writer_generation(repository_root)
+
+    assert observed == [
+        {
+            "cwd": repository_root.resolve(),
+            "check": False,
+            "capture_output": True,
+            "shell": False,
+            "text": False,
+            "timeout": migration_module.ROLLBACK_WRITER_GIT_TIMEOUT_SECONDS,
+        }
+    ]
+
+
 @pytest.mark.parametrize("entrypoint", ["click", "argparse"])
 def test_round12_rollback_commands_emit_verifiable_receipts(
     tmp_path: Any,
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
     entrypoint: str,
 ) -> None:
+    import inspect
+
     from services.orchestrator import cli as cli_module
+    from services.orchestrator import file_orchestration_migration as migration_module
     from services.orchestrator.file_orchestration_journal import (
         FileOrchestrationJournalError,
         FileOrchestrationJournalRepository,
@@ -5840,6 +6226,17 @@ def test_round12_rollback_commands_emit_verifiable_receipts(
     workspace.mkdir(parents=True)
     repository = FileOrchestrationJournalRepository(root)
     assert repository.query_inflight_jobs() == []
+    assert "actual_writer_generation" not in inspect.signature(
+        cli_module._launch_file_journal_rollback_writer
+    ).parameters
+    checkout_a, generation_a = _round14_clean_writer_checkout(
+        tmp_path / entrypoint / "writer-a",
+        content="writer A\n",
+    )
+    checkout_b, _generation_b = _round14_clean_writer_checkout(
+        tmp_path / entrypoint / "writer-b",
+        content="writer B\n",
+    )
 
     argv = [
         "prepare-file-journal-rollback",
@@ -5856,7 +6253,7 @@ def test_round12_rollback_commands_emit_verifiable_receipts(
         "--checked-by",
         "node-22-operator",
         "--target-writer-generation",
-        "pre-reconcile-inventory",
+        generation_a,
     ]
     result = (
         cli_module._click_main(argv)
@@ -5871,7 +6268,53 @@ def test_round12_rollback_commands_emit_verifiable_receipts(
         journal_root=root,
         workspace_root=workspace,
         receipt_id=receipt["receipt_id"],
+        actual_writer_generation=generation_a,
     )["receipt_id"] == receipt["receipt_id"]
+
+    started: list[tuple[tuple[str, ...], Any]] = []
+
+    def run_writer(argv: tuple[str, ...], *, cwd: Any, check: bool) -> Any:
+        assert check is False
+        started.append((argv, cwd))
+        return type("Completed", (), {"returncode": 0})()
+
+    monkeypatch.setattr(migration_module, "_run_rollback_writer", run_writer)
+    launch_argv = [
+        "launch-file-journal-rollback-writer",
+        "--journal-root",
+        str(root),
+        "--workspace-root",
+        str(workspace),
+        "--receipt-id",
+        receipt["receipt_id"],
+        "--writer-repository-root",
+        str(checkout_a),
+        "--",
+        "plan-production",
+        "--plan",
+    ]
+    result = (
+        cli_module._click_main(launch_argv)
+        if entrypoint == "click"
+        else cli_module._argparse_main(launch_argv)
+    )
+    assert result == 0
+    launch = json.loads(capsys.readouterr().out)
+    assert launch["actual_writer_generation"] == generation_a
+    assert launch["writer_repository_root"] == str(checkout_a.resolve())
+    assert len(started) == 1
+    assert started[0][1] == checkout_a.resolve()
+
+    mismatch_argv = list(launch_argv)
+    mismatch_argv[mismatch_argv.index(str(checkout_a))] = str(checkout_b)
+    if entrypoint == "click":
+        with pytest.raises(SystemExit) as error:
+            cli_module._click_main(mismatch_argv)
+        assert error.value.code == 2
+    else:
+        assert cli_module._argparse_main(mismatch_argv) == 2
+    capsys.readouterr()
+    assert len(started) == 1
 
     rollforward_argv = [
         "complete-file-journal-rollforward",
@@ -5895,6 +6338,7 @@ def test_round12_rollback_commands_emit_verifiable_receipts(
             journal_root=root,
             workspace_root=workspace,
             receipt_id=receipt["receipt_id"],
+            actual_writer_generation=generation_a,
         )
 
 
@@ -5933,6 +6377,7 @@ def test_round12_tampered_and_wrong_root_receipts_fail_closed(tmp_path: Any) -> 
             journal_root=root,
             workspace_root=workspace,
             receipt_id=receipt["receipt_id"],
+            actual_writer_generation="pre-reconcile-inventory",
         )
     with pytest.raises(FileOrchestrationJournalError, match="file_journal_rollback_receipt_invalid"):
         complete_file_journal_rollforward(
@@ -5959,6 +6404,7 @@ def test_round12_tampered_and_wrong_root_receipts_fail_closed(tmp_path: Any) -> 
             journal_root=wrong_root,
             workspace_root=workspace,
             receipt_id=receipt["receipt_id"],
+            actual_writer_generation="pre-reconcile-inventory",
         )
     with pytest.raises(FileOrchestrationJournalError, match="file_journal_rollback_receipt_wrong_root"):
         complete_file_journal_rollforward(

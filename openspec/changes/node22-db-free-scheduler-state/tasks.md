@@ -539,8 +539,13 @@ Scenario evidence rows for section 5:
   legacy-active walkers fail closed on enumerate/stat/read disappearance.
   Supported downgrade/roll-forward is fenced by the real production file lease,
   root/lease-bound preparation and completion receipts, and a durable scheduler
-  blocker; live-lease, concurrent, tampered, stale, and wrong-root paths are
-  zero-mutation failures. The annual cost oracle uses
+  blocker. Every `preparing` crash cut point is re-entrant, same-instance atomic
+  lease renewal is serialized, and the old-writer launcher derives and rechecks
+  the generation from the clean checkout it actually executes instead of
+  accepting a caller claim; live-lease, concurrent, dirty/mismatched checkout,
+  tampered, stale, and wrong-root paths are zero-launch/zero-mutation failures.
+  Complete task truth derives the durable cohort outcome, and accepted-submit
+  typed projection is the sole hydro terminal mutator. The annual cost oracle uses
   the production cadence of two cycles per day and GFS+IFS per cycle (1,460
   masters and 373,760 conceptual 256-member candidates per year), materializes
   the 1,460 terminal journal files, virtualizes candidate-history traversal, and

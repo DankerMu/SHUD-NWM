@@ -527,7 +527,11 @@ def _after_cycle_stage_terminal(
 ) -> None:
     if result_status == "reconcile_unverified":
         return
-    if stage.stage == "forecast" and aggregation is not None:
+    accepted_submit_projection = bool(
+        getattr(self.repository, "supports_accepted_submit_reconcile", False)
+        and stage.stage == "forecast"
+    )
+    if stage.stage == "forecast" and aggregation is not None and not accepted_submit_projection:
         _update_array_forecast_hydro_statuses(self, context, aggregation)
     if result_status == "succeeded":
         if _stage_should_copyback_run_trees(self, stage):

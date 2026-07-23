@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import subprocess
+import sys
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -37,6 +40,8 @@ HISTORICAL_MIGRATION_ROW_LIMITS = {
     "pipeline_events": MAX_HISTORICAL_MIGRATION_ROWS_PER_RELATION,
 }
 EXPORT_FETCHMANY_BATCH_SIZE = 1_000
+ROLLBACK_WRITER_GIT_TIMEOUT_SECONDS = 10
+ROLLBACK_WRITER_GIT_OUTPUT_LIMIT_BYTES = 16_384
 
 _FAILED_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed", "cancelled"}
 
@@ -91,6 +96,7 @@ def require_file_journal_rollback_prepared(
     journal_root: str | Path,
     workspace_root: str | Path,
     receipt_id: str,
+    actual_writer_generation: str,
     lock_path: str | Path | None = None,
     scheduler_lock_backend: str = "file",
     lock_ttl_seconds: int = 60,
@@ -108,7 +114,178 @@ def require_file_journal_rollback_prepared(
     return repository._require_reconcile_inventory_rollback_prepared(
         receipt_id=receipt_id,
         scheduler_lease_identity=lease_identity,
+        actual_writer_generation=actual_writer_generation,
     )
+
+
+def launch_file_journal_rollback_writer(
+    *,
+    journal_root: str | Path,
+    workspace_root: str | Path,
+    receipt_id: str,
+    writer_repository_root: str | Path,
+    writer_args: Iterable[str],
+    lock_path: str | Path | None = None,
+    scheduler_lock_backend: str = "file",
+    lock_ttl_seconds: int = 60,
+) -> dict[str, Any]:
+    """Validate the bound receipt and only then cross the old-writer exec boundary."""
+
+    repository_root, actual_writer_generation = _resolve_clean_writer_generation(
+        writer_repository_root
+    )
+    if isinstance(writer_args, str | bytes):
+        arguments: tuple[Any, ...] = ()
+    else:
+        arguments = tuple(writer_args)
+    if arguments[:1] == ("--",):
+        arguments = arguments[1:]
+    if not arguments or any(
+        not isinstance(arg, str) or not arg or "\x00" in arg
+        for arg in arguments
+    ):
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_writer_command_invalid",
+            field="writer_args",
+        )
+    receipt = require_file_journal_rollback_prepared(
+        journal_root=journal_root,
+        workspace_root=workspace_root,
+        receipt_id=receipt_id,
+        actual_writer_generation=actual_writer_generation,
+        lock_path=lock_path,
+        scheduler_lock_backend=scheduler_lock_backend,
+        lock_ttl_seconds=lock_ttl_seconds,
+    )
+    rechecked_root, rechecked_generation = _resolve_clean_writer_generation(
+        repository_root
+    )
+    if rechecked_root != repository_root or rechecked_generation != actual_writer_generation:
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_writer_generation_changed",
+            field="writer_repository_root",
+        )
+    command = (
+        sys.executable,
+        "-m",
+        "services.orchestrator.cli",
+        *arguments,
+    )
+    completed = _run_rollback_writer(command, cwd=repository_root, check=False)
+    return {
+        "preparation_receipt_id": receipt["receipt_id"],
+        "actual_writer_generation": actual_writer_generation,
+        "writer_repository_root": str(repository_root),
+        "writer_exit_code": int(completed.returncode),
+    }
+
+
+def _resolve_clean_writer_generation(
+    writer_repository_root: str | Path,
+) -> tuple[Path, str]:
+    try:
+        repository_root = Path(writer_repository_root).resolve(strict=True)
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_writer_generation_unresolvable",
+            field="writer_repository_root",
+        ) from error
+    if not repository_root.is_dir():
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_writer_generation_unresolvable",
+            field="writer_repository_root",
+        )
+
+    top_level = _run_bounded_git(repository_root, "rev-parse", "--show-toplevel")
+    try:
+        resolved_top_level = Path(top_level).resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_writer_generation_unresolvable",
+            field="writer_repository_root",
+        ) from error
+    if resolved_top_level != repository_root:
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_writer_generation_unresolvable",
+            field="writer_repository_root",
+        )
+
+    generation = _run_bounded_git(
+        repository_root,
+        "rev-parse",
+        "--verify",
+        "HEAD^{commit}",
+    )
+    if re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", generation) is None:
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_writer_generation_unresolvable",
+            field="writer_repository_root",
+        )
+    dirty = _run_bounded_git(
+        repository_root,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+    )
+    if dirty:
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_writer_generation_dirty",
+            field="writer_repository_root",
+        )
+    return repository_root, generation.lower()
+
+
+def _run_bounded_git(repository_root: Path, *arguments: str) -> str:
+    try:
+        completed = subprocess.run(
+            ("git", *arguments),
+            cwd=repository_root,
+            check=False,
+            capture_output=True,
+            shell=False,
+            text=False,
+            timeout=ROLLBACK_WRITER_GIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_writer_generation_unresolvable",
+            field="writer_repository_root",
+        ) from error
+    stdout = completed.stdout
+    stderr = completed.stderr
+    if (
+        completed.returncode != 0
+        or not isinstance(stdout, bytes)
+        or not isinstance(stderr, bytes)
+        or len(stdout) > ROLLBACK_WRITER_GIT_OUTPUT_LIMIT_BYTES
+        or len(stderr) > ROLLBACK_WRITER_GIT_OUTPUT_LIMIT_BYTES
+    ):
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_writer_generation_unresolvable",
+            field="writer_repository_root",
+        )
+    try:
+        value = stdout.decode("utf-8", errors="strict").strip()
+    except UnicodeDecodeError as error:
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_writer_generation_unresolvable",
+            field="writer_repository_root",
+        ) from error
+    if "\n" in value or "\r" in value:
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_writer_generation_unresolvable",
+            field="writer_repository_root",
+        )
+    return value
+
+
+def _run_rollback_writer(
+    command: tuple[str, ...],
+    *,
+    cwd: Path,
+    check: bool,
+) -> subprocess.CompletedProcess[Any]:
+    return subprocess.run(command, cwd=cwd, check=check, shell=False)
 
 
 def complete_file_journal_rollforward(
