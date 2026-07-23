@@ -35,6 +35,8 @@ from services.orchestrator.accepted_submit_identity import (
     AcceptedSubmitEvidenceError,
     AcceptedSubmitTransition,
     accepted_submit_contract_is_current,
+    accepted_submit_master_identity_is_structural,
+    accepted_submit_master_immutable_identity,
     accepted_submit_row_kind,
     apply_accepted_submit_transition,
     normalize_accepted_submit_attempt_anchor,
@@ -1047,28 +1049,41 @@ class FileOrchestrationJournalRepository:
         model_id = _optional_safe_identity(row, "model_id")
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
             existing = self._pipeline_job_for_id_unlocked(str(row["job_id"]))
+            persisted_master_identity: dict[str, Any] | None = None
             if existing is not None:
                 explicit_fields = set(record)
                 incoming = row
-                if (
-                    accepted_submit_contract_is_current(existing)
-                    and accepted_submit_row_kind(existing) == "master"
-                ):
-                    if "submission_attempt" in explicit_fields and max(
-                        int(incoming.get("submission_attempt") or 1), 1
-                    ) != max(int(existing.get("submission_attempt") or 1), 1):
-                        raise FileOrchestrationJournalError(
-                            "file_journal_evidence_invariant_invalid",
-                            field="submission_attempt",
-                        )
-                    if "submission_attempt_started_at" in explicit_fields and (
-                        _accepted_submit_attempt_anchor(record.get("submission_attempt_started_at"))
-                        != _accepted_submit_attempt_anchor(existing.get("submission_attempt_started_at"))
-                    ):
-                        raise FileOrchestrationJournalError(
-                            "file_journal_evidence_invariant_invalid",
-                            field="submission_attempt_started_at",
-                        )
+                _validate_accepted_submit_evidence(existing)
+                if accepted_submit_contract_is_current(
+                    existing
+                ) and accepted_submit_master_identity_is_structural(existing):
+                    persisted_master_identity = _accepted_submit_master_identity(existing)
+                    for field, persisted_value in persisted_master_identity.items():
+                        if field not in explicit_fields:
+                            continue
+                        incoming_value = incoming.get(field)
+                        if field == "source_id":
+                            try:
+                                incoming_value = normalize_source_id(str(record.get(field) or ""))
+                            except ValueError as error:
+                                raise FileOrchestrationJournalError(
+                                    "file_journal_evidence_invariant_invalid",
+                                    field=field,
+                                ) from error
+                        elif field == "cycle_time":
+                            incoming_value = _optional_format_datetime(
+                                record.get(field), field=field
+                            )
+                        elif type(persisted_value) is bool and type(record.get(field)) is not bool:
+                            raise FileOrchestrationJournalError(
+                                "file_journal_evidence_type_invalid",
+                                field=field,
+                            )
+                        if incoming_value != persisted_value:
+                            raise FileOrchestrationJournalError(
+                                "file_journal_evidence_invariant_invalid",
+                                field=field,
+                            )
                 row = dict(existing)
                 for key in _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS:
                     if key in explicit_fields:
@@ -1076,6 +1091,14 @@ class FileOrchestrationJournalRepository:
                 row["updated_at"] = _format_utc(_utcnow())
                 model_id = _optional_safe_identity(row, "model_id")
             _validate_accepted_submit_evidence(row)
+            if persisted_master_identity is not None:
+                merged_master_identity = _accepted_submit_master_identity(row)
+                for field, persisted_value in persisted_master_identity.items():
+                    if merged_master_identity[field] != persisted_value:
+                        raise FileOrchestrationJournalError(
+                            "file_journal_evidence_invariant_invalid",
+                            field=field,
+                        )
             return self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
 
     def append_historical_pipeline_job(self, record: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -1147,6 +1170,15 @@ class FileOrchestrationJournalRepository:
                 or not matched_by_key
             ):
                 return None
+            if versioned_master:
+                existing_identity = _accepted_submit_master_identity(existing)
+                request_identity = _accepted_submit_master_identity(request_row)
+                if any(
+                    request_identity[field] != existing_identity[field]
+                    for field in existing_identity
+                    if field not in {"submission_attempt", "submission_attempt_started_at"}
+                ):
+                    return None
             existing_status = str(existing.get("status") or "")
             if matched_by_key:
                 if existing.get("slurm_job_id") not in (None, "") or existing_status not in {
@@ -1196,27 +1228,28 @@ class FileOrchestrationJournalRepository:
             # authority anchor is captured here, never copied from a stale
             # lock-external reclaim request.
             row["submission_attempt_started_at"] = _format_utc(_utcnow())
-            for key in (
-                "run_id",
-                "cycle_id",
-                "model_id",
-                "stage",
-                "candidate_id",
-                "job_type",
-                "slurm_comment",
-                "cohort_members",
-                "cohort_digest",
-                "restart_stage",
-                "expected_slurm_user",
-                "expected_slurm_account",
-                "slurm_ownership_required",
-                "native_shud_resubmitted",
-            ):
-                if key in request_row and request_row.get(key) not in (None, ""):
-                    row[key] = request_row[key]
-            for key in ("run_id", "cycle_id", "model_id", "stage", "candidate_id", "job_type"):
-                if row.get(key) in (None, "") and request_row.get(key) not in (None, ""):
-                    row[key] = request_row[key]
+            if not versioned_master:
+                for key in (
+                    "run_id",
+                    "cycle_id",
+                    "model_id",
+                    "stage",
+                    "candidate_id",
+                    "job_type",
+                    "slurm_comment",
+                    "cohort_members",
+                    "cohort_digest",
+                    "restart_stage",
+                    "expected_slurm_user",
+                    "expected_slurm_account",
+                    "slurm_ownership_required",
+                    "native_shud_resubmitted",
+                ):
+                    if key in request_row and request_row.get(key) not in (None, ""):
+                        row[key] = request_row[key]
+                for key in ("run_id", "cycle_id", "model_id", "stage", "candidate_id", "job_type"):
+                    if row.get(key) in (None, "") and request_row.get(key) not in (None, ""):
+                        row[key] = request_row[key]
             model_id = _optional_safe_identity(row, "model_id")
             return self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
 
@@ -5242,6 +5275,13 @@ def _validate_accepted_submit_evidence(row: Mapping[str, Any]) -> None:
 
     try:
         normalize_accepted_submit_evidence(row)
+    except AcceptedSubmitEvidenceError as error:
+        raise FileOrchestrationJournalError(error.reason, field=error.field) from error
+
+
+def _accepted_submit_master_identity(row: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        return accepted_submit_master_immutable_identity(row)
     except AcceptedSubmitEvidenceError as error:
         raise FileOrchestrationJournalError(error.reason, field=error.field) from error
 

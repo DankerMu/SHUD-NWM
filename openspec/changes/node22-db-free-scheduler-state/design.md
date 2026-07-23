@@ -1505,6 +1505,13 @@ Invariant Matrix:
   marker-free historical rows retain their legacy read contract. Ordinary
   same-attempt updates cannot change the anchor, and retry CAS compares both
   attempt number and anchor.
+- Sticky-authority invariant: once persisted, a current-version master remains
+  a master independently of mutable stage classification. Ordinary upsert
+  cannot change its contract/job/run/cycle/source, stage/job type,
+  candidate/idempotency/comment, cohort/digest, ownership, restart/native-SHUD,
+  attempt, or anchor identity; only the typed reclaim boundary may advance
+  attempt and anchor together under the cycle lock. A current-version row that
+  is neither a valid master nor a valid candidate fails closed.
 - Closed-enum invariant: task-accounting completeness is represented by
   pipeline status/error/projection fields and never adds values to the six-value
   `reconciliation_decision` contract. Reconciliation API inputs are normalized

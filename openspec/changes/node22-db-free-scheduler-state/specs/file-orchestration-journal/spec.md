@@ -220,7 +220,10 @@ idempotent, while a stale transition or different-ID collision MUST NOT mutate
 the winning row. Every versioned master MUST carry a valid aware-UTC immutable
 `submission_attempt_started_at`; a retry reclaim MUST create its next anchor
 under the cycle lock, and retry permission MUST compare the expected attempt
-number and anchor.
+number and anchor. Persisted current-version master classification and authority
+identity MUST be sticky: an ordinary upsert MUST NOT downgrade it to a
+non-master/candidate or mutate any master identity field, and only typed reclaim
+MAY advance attempt and anchor together.
 
 A Gateway timeout MUST persist only the ambiguous submit outcome and MUST leave
 `reconciliation_source`, `reconciliation_decision`, and
@@ -273,6 +276,18 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
   or accounting tuple before the next Gateway call
 - **AND** an immediate process restart reads the same clean pre-outcome state,
   without inheriting the prior attempt's absence proof.
+
+#### Scenario: Versioned master authority cannot escape validation
+
+- **WHEN** an ordinary upsert attempts to change a persisted versioned master's
+  stage/job type, model/task class, cohort/digest, idempotency/comment,
+  ownership, restart/native-SHUD, attempt, or anchor identity
+- **THEN** the first illegal mutation fails closed and the original durable
+  identity remains unchanged after reopen
+- **AND** a multi-step master-to-non-master-to-master classification detour
+  cannot bypass the same invariant
+- **AND** valid candidate rows and marker-free generic/legacy rows retain their
+  documented compatibility behavior.
 
 #### Scenario: Unique exact-comment match binds the accepted array
 

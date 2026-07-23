@@ -52,6 +52,31 @@ ACCEPTED_PROJECTION_FIELDS = frozenset(
     }
 )
 
+ACCEPTED_SUBMIT_MASTER_IMMUTABLE_FIELDS = (
+    ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD,
+    "job_id",
+    "run_id",
+    "cycle_id",
+    "source_id",
+    "cycle_time",
+    "job_type",
+    "stage",
+    "model_id",
+    "array_task_id",
+    "candidate_id",
+    "idempotency_key",
+    "slurm_comment",
+    "cohort_members",
+    "cohort_digest",
+    "restart_stage",
+    "native_shud_resubmitted",
+    "expected_slurm_user",
+    "expected_slurm_account",
+    "slurm_ownership_required",
+    "submission_attempt",
+    "submission_attempt_started_at",
+)
+
 _MEMBER_FIELDS = (
     "array_task_id",
     "candidate_id",
@@ -212,10 +237,21 @@ def accepted_submit_pipeline_job_model_id(
 
 
 def accepted_submit_row_kind(row: Mapping[str, Any]) -> str | None:
-    """Classify forecast master evidence separately from candidate task rows."""
+    """Classify legal forecast master evidence and candidate task rows."""
 
     if not is_forecast_cohort_stage_name(row.get("stage"), row.get("job_type")):
         return None
+    return _accepted_submit_structural_row_kind(row)
+
+
+def _accepted_submit_structural_row_kind(row: Mapping[str, Any]) -> str | None:
+    """Classify durable authority shape independently of mutable stage fields.
+
+    Legality is checked separately by :func:`normalize_accepted_submit_evidence`.
+    Keeping classification structural prevents an invalid stage update from
+    making a persisted master disappear from its authority contract.
+    """
+
     master_markers = (
         "cohort_digest",
         "cohort_members",
@@ -242,6 +278,27 @@ def accepted_submit_row_kind(row: Mapping[str, Any]) -> str | None:
     ):
         return "candidate"
     return None
+
+
+def accepted_submit_master_identity_is_structural(row: Mapping[str, Any]) -> bool:
+    """Return whether durable fields identify a master regardless of stage."""
+
+    return _accepted_submit_structural_row_kind(row) == "master"
+
+
+def accepted_submit_master_immutable_identity(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the canonical authority identity of one valid versioned master."""
+
+    normalized = normalize_accepted_submit_evidence(row)
+    if accepted_submit_row_kind(normalized) != "master":
+        raise AcceptedSubmitEvidenceError(
+            "file_journal_evidence_invariant_invalid",
+            field="accepted_submit_row_kind",
+        )
+    return {
+        field: normalized.get(field)
+        for field in ACCEPTED_SUBMIT_MASTER_IMMUTABLE_FIELDS
+    }
 
 
 def accepted_submit_contract_is_current(row: Mapping[str, Any]) -> bool:
@@ -316,16 +373,14 @@ def normalize_accepted_submit_evidence(row: Mapping[str, Any]) -> dict[str, Any]
     outcome = normalized.get("submit_outcome")
     if outcome is not None and outcome not in ACCEPTED_SUBMIT_OUTCOMES:
         raise AcceptedSubmitEvidenceError("file_journal_evidence_enum_invalid", field="submit_outcome")
-    if accepted_submit_row_kind(normalized) != "master":
-        return normalized
-    if normalized.get("model_id") not in (None, ""):
+    row_kind = _accepted_submit_structural_row_kind(normalized)
+    if row_kind is None:
         raise AcceptedSubmitEvidenceError(
-            "file_journal_evidence_invariant_invalid", field="model_id"
+            "file_journal_evidence_invariant_invalid", field="accepted_submit_row_kind"
         )
-    ownership_required = normalized.get("slurm_ownership_required")
-    if type(ownership_required) is not bool:
+    if not is_forecast_cohort_stage_name(normalized.get("stage"), normalized.get("job_type")):
         raise AcceptedSubmitEvidenceError(
-            "file_journal_evidence_type_invalid", field="slurm_ownership_required"
+            "file_journal_evidence_invariant_invalid", field="stage"
         )
     restart_stage = normalized.get("restart_stage")
     if restart_stage not in ACCEPTED_RESTART_STAGES:
@@ -334,6 +389,45 @@ def normalize_accepted_submit_evidence(row: Mapping[str, Any]) -> dict[str, Any]
     if native_resubmitted is not None and type(native_resubmitted) is not bool:
         raise AcceptedSubmitEvidenceError(
             "file_journal_evidence_type_invalid", field="native_shud_resubmitted"
+        )
+    if row_kind == "candidate":
+        if normalized.get("slurm_ownership_required") not in (None, False):
+            raise AcceptedSubmitEvidenceError(
+                "file_journal_evidence_invariant_invalid",
+                field="slurm_ownership_required",
+            )
+        if type(normalized.get("array_task_id")) is not int:
+            raise AcceptedSubmitEvidenceError(
+                "file_journal_evidence_type_invalid", field="array_task_id"
+            )
+        if not isinstance(normalized.get("model_id"), str) or not normalized["model_id"].strip():
+            raise AcceptedSubmitEvidenceError(
+                "file_journal_evidence_required", field="model_id"
+            )
+        if not isinstance(normalized.get("candidate_id"), str) or not normalized[
+            "candidate_id"
+        ].strip():
+            raise AcceptedSubmitEvidenceError(
+                "file_journal_evidence_required", field="candidate_id"
+            )
+        return normalized
+    if normalized.get("model_id") not in (None, ""):
+        raise AcceptedSubmitEvidenceError(
+            "file_journal_evidence_invariant_invalid", field="model_id"
+        )
+    if normalized.get("array_task_id") is not None:
+        raise AcceptedSubmitEvidenceError(
+            "file_journal_evidence_invariant_invalid", field="array_task_id"
+        )
+    ownership_required = normalized.get("slurm_ownership_required")
+    if type(ownership_required) is not bool:
+        raise AcceptedSubmitEvidenceError(
+            "file_journal_evidence_type_invalid", field="slurm_ownership_required"
+        )
+    submission_attempt = normalized.get("submission_attempt")
+    if type(submission_attempt) is not int or submission_attempt < 1:
+        raise AcceptedSubmitEvidenceError(
+            "file_journal_evidence_type_invalid", field="submission_attempt"
         )
     normalized["submission_attempt_started_at"] = normalize_accepted_submit_attempt_anchor(
         normalized.get("submission_attempt_started_at")
@@ -624,6 +718,7 @@ def forecast_cohort_identity_is_valid(identity: Mapping[str, Any]) -> bool:
 __all__ = (
     "ACCEPTED_SUBMIT_CONTRACT_VERSION",
     "ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD",
+    "ACCEPTED_SUBMIT_MASTER_IMMUTABLE_FIELDS",
     "ACCEPTED_PROJECTION_FIELDS",
     "ACCEPTED_RECONCILIATION_DECISIONS",
     "ACCEPTED_SUBMIT_OUTCOMES",
@@ -634,6 +729,8 @@ __all__ = (
     "MAX_FORECAST_COHORT_MEMBERS",
     "accepted_submit_pipeline_job_model_id",
     "accepted_submit_contract_is_current",
+    "accepted_submit_master_identity_is_structural",
+    "accepted_submit_master_immutable_identity",
     "accepted_submit_row_kind",
     "apply_accepted_submit_transition",
     "canonical_forecast_cohort_members",

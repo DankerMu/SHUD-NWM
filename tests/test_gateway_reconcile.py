@@ -636,7 +636,10 @@ def test_file_cohort_reclaim_begins_attempt_with_fresh_locked_anchor_and_cas(
     from datetime import timedelta
 
     from services.orchestrator import file_orchestration_journal as journal_module
-    from services.orchestrator.accepted_submit_identity import AcceptedSubmitTransition
+    from services.orchestrator.accepted_submit_identity import (
+        AcceptedSubmitTransition,
+        forecast_cohort_digest,
+    )
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
     from services.orchestrator.reconcile import reconcile_reserved_unbound_jobs
 
@@ -672,6 +675,12 @@ def test_file_cohort_reclaim_begins_attempt_with_fresh_locked_anchor_and_cas(
         "reconciliation_decision": None,
         "matched_slurm_job_id": None,
     }
+    changed_identity = copy.deepcopy(request)
+    changed_identity["cohort_members"][0]["basin_id"] = "foreign-basin"
+    changed_identity["cohort_digest"] = forecast_cohort_digest(changed_identity)
+    assert repository.reclaim_pipeline_job_reservation(changed_identity) is None
+    assert repository.get_pipeline_job(job_id) == attempt_one
+
     monkeypatch.setattr(journal_module, "_utcnow", lambda: locked_anchor)
     reclaimed = repository.reclaim_pipeline_job_reservation(request)
 
@@ -1020,11 +1029,8 @@ def test_file_cohort_runtime_manifest_identity_blocks_joint_member_and_digest_mu
     mutation: str,
 ) -> None:
     from services.orchestrator.accepted_submit_identity import forecast_cohort_digest
-    from services.orchestrator.reconcile import (
-        SacctRecord,
-        reconcile_inflight_jobs,
-        reconcile_reserved_unbound_jobs,
-    )
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
+    from services.orchestrator.reconcile import SacctRecord, reconcile_reserved_unbound_jobs
 
     repository = _file_cohort_repository(tmp_path, member_count=2)
     job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
@@ -1041,7 +1047,8 @@ def test_file_cohort_runtime_manifest_identity_blocks_joint_member_and_digest_mu
     if phase == "terminal_projection":
         assert reconcile_reserved_unbound_jobs(repository, comment_query=lambda _key: exact)[0].action == "bound"
 
-    identity = copy.deepcopy(repository.get_pipeline_job(job_id))
+    before = repository.get_pipeline_job(job_id)
+    identity = copy.deepcopy(before)
     members = identity["cohort_members"]
     if mutation == "candidate_cycle":
         members[0]["candidate_id"] = members[0]["candidate_id"].replace("2026-07-12", "2026-07-13")
@@ -1063,41 +1070,9 @@ def test_file_cohort_runtime_manifest_identity_blocks_joint_member_and_digest_mu
         for index, member in enumerate(members):
             member["array_task_id"] = index
     identity["cohort_digest"] = forecast_cohort_digest(identity)
-    if mutation in {"candidate_cycle", "scenario"}:
-        from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
-
-        with pytest.raises(FileOrchestrationJournalError, match="file_journal_evidence_invariant_invalid"):
-            repository.upsert_pipeline_job(identity)
-        return
-    repository.upsert_pipeline_job(identity)
-
-    before_hydro = [repository._hydro_run_for(f"fcst_gfs_2026071200_model_{index}") for index in range(2)]
-    if phase == "initial_bind":
-        outcome = reconcile_reserved_unbound_jobs(repository, comment_query=lambda _key: exact)[0]
-        assert repository.get_pipeline_job(job_id)["slurm_job_id"] is None
-    else:
-        tasks = tuple(
-            SacctRecord(
-                f"17667_{index}",
-                "COMPLETED",
-                "nhms_forecast",
-                comment=f"nhms_idem:{key}",
-                array_task_id=index,
-            )
-            for index in range(2)
-        )
-        terminal = SacctRecord(
-            "17667",
-            "COMPLETED",
-            "nhms_forecast",
-            comment=f"nhms_idem:{key}",
-            array_member_job_ids=tuple(task.slurm_job_id for task in tasks),
-            array_task_records=tasks,
-        )
-        outcome = reconcile_inflight_jobs(repository, sacct_query=lambda _job: terminal)[0]
-        assert not repository.get_pipeline_job(job_id).get("candidate_projections")
-    assert outcome.action == "identity_mismatch_blocked"
-    assert [repository._hydro_run_for(f"fcst_gfs_2026071200_model_{index}") for index in range(2)] == before_hydro
+    with pytest.raises(FileOrchestrationJournalError, match="file_journal_evidence_invariant_invalid"):
+        repository.upsert_pipeline_job(identity)
+    assert repository.get_pipeline_job(job_id) == before
 
 
 @pytest.mark.parametrize(
@@ -1174,6 +1149,7 @@ def test_accepted_submit_evidence_validator_fails_closed(mutator: Any, field: st
         "stage": "forecast",
         "submit_outcome": "accepted",
         "restart_stage": "forecast",
+        "submission_attempt": 1,
         "submission_attempt_started_at": datetime(2026, 7, 12, tzinfo=UTC),
         "slurm_ownership_required": False,
         "cohort_members": [{"array_task_id": 0}],
@@ -1397,6 +1373,210 @@ def test_candidate_submit_outcome_enum_fails_closed_on_every_file_surface(tmp_pa
         and job.get("file_journal", {}).get("field") == "submit_outcome"
         for job in queried
     )
+
+
+@pytest.mark.parametrize("source_id", ["gfs", "ifs"])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "contract_version",
+        "job_id",
+        "run_id",
+        "cycle_id",
+        "source_id",
+        "cycle_time",
+        "job_type",
+        "stage",
+        "model_id",
+        "array_task_id",
+        "candidate_id",
+        "idempotency_key",
+        "slurm_comment",
+        "cohort_members",
+        "cohort_digest",
+        "restart_stage",
+        "native_shud_resubmitted",
+        "expected_slurm_user",
+        "expected_slurm_account",
+        "slurm_ownership_required",
+        "submission_attempt",
+        "submission_attempt_started_at",
+    ],
+)
+def test_versioned_master_ordinary_upsert_rejects_every_immutable_authority_group(
+    tmp_path: Any,
+    source_id: str,
+    mutation: str,
+) -> None:
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+
+    repository = _file_cohort_repository(tmp_path, member_count=2, source_id=source_id)
+    job_id = f"job_cycle_{source_id}_2026071200_forecast_fixture_forecast"
+    before = repository.get_pipeline_job(job_id)
+    changed = copy.deepcopy(before)
+    replacements = {
+        "contract_version": ("accepted_submit_contract_version", "nhms.accepted_submit.v2"),
+        "job_id": ("job_id", f"{before['job_id']}_foreign"),
+        "run_id": ("run_id", f"{before['run_id']}_foreign"),
+        "cycle_id": ("cycle_id", f"{source_id}_2026071300"),
+        "source_id": ("source_id", "IFS" if source_id == "gfs" else "gfs"),
+        "cycle_time": ("cycle_time", "2026-07-13T00:00:00Z"),
+        "job_type": ("job_type", "forecast"),
+        "stage": ("stage", "run_shud_forecast"),
+        "model_id": ("model_id", "model_0"),
+        "array_task_id": ("array_task_id", 0),
+        "candidate_id": ("candidate_id", before["cohort_members"][0]["candidate_id"]),
+        "idempotency_key": ("idempotency_key", f"{before['idempotency_key']}:foreign"),
+        "slurm_comment": ("slurm_comment", "nhms_idem:foreign"),
+        "cohort_digest": ("cohort_digest", "0" * 64),
+        "restart_stage": ("restart_stage", "state_save_qc"),
+        "native_shud_resubmitted": ("native_shud_resubmitted", True),
+        "expected_slurm_user": ("expected_slurm_user", "foreign-user"),
+        "expected_slurm_account": ("expected_slurm_account", "foreign-account"),
+        "slurm_ownership_required": ("slurm_ownership_required", True),
+        "submission_attempt": ("submission_attempt", 2),
+        "submission_attempt_started_at": (
+            "submission_attempt_started_at",
+            datetime(2026, 7, 12, 0, 0, 1, tzinfo=UTC),
+        ),
+    }
+    if mutation == "cohort_members":
+        changed["cohort_members"][0]["basin_id"] = "foreign-basin"
+    else:
+        field, value = replacements[mutation]
+        changed[field] = value
+
+    with pytest.raises(FileOrchestrationJournalError):
+        repository.upsert_pipeline_job(changed)
+
+    assert repository.get_pipeline_job(job_id) == before
+    reopened = FileOrchestrationJournalRepository(repository.root)
+    assert reopened.get_pipeline_job(job_id) == before
+
+
+@pytest.mark.parametrize("source_id", ["gfs", "ifs"])
+def test_versioned_master_classification_detour_fails_on_first_step_and_remains_sticky(
+    tmp_path: Any,
+    source_id: str,
+) -> None:
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
+
+    repository = _file_cohort_repository(tmp_path, member_count=1, source_id=source_id)
+    job_id = f"job_cycle_{source_id}_2026071200_forecast_fixture_forecast"
+    before = repository.get_pipeline_job(job_id)
+
+    with pytest.raises(FileOrchestrationJournalError) as stage_error:
+        repository.upsert_pipeline_job({**before, "stage": "forcing"})
+    assert stage_error.value.field == "stage"
+
+    with pytest.raises(FileOrchestrationJournalError) as attempt_error:
+        repository.upsert_pipeline_job(
+            {
+                **before,
+                "submission_attempt": 2,
+                "submission_attempt_started_at": datetime(2026, 7, 12, 0, 1, tzinfo=UTC),
+            }
+        )
+    assert attempt_error.value.field == "submission_attempt"
+
+    accepted = repository.upsert_pipeline_job(
+        {
+            **before,
+            "status": "submitted",
+            "slurm_job_id": "17667",
+            "submit_outcome": "accepted",
+            "reconciliation_source": "slurm_exact_comment",
+            "reconciliation_decision": "matched_bound",
+            "matched_slurm_job_id": "17667",
+            "submission_attempt_started_at": "2026-07-11T20:00:00-04:00",
+        }
+    )
+    assert accepted["status"] == "submitted"
+    assert accepted["stage"] == "forecast"
+    assert accepted["submission_attempt"] == 1
+    assert accepted["submission_attempt_started_at"] == "2026-07-12T00:00:00Z"
+    reopened = type(repository)(repository.root)
+    assert reopened.get_pipeline_job(job_id) == accepted
+
+
+def test_current_version_candidate_master_cross_classification_and_unclassified_rows_fail_closed(
+    tmp_path: Any,
+) -> None:
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    candidate = {
+        "job_id": "job_fcst_gfs_2026071200_model_0_forecast_candidate_0",
+        "run_id": "fcst_gfs_2026071200_model_0",
+        "cycle_id": "gfs_2026071200",
+        "job_type": "run_shud_forecast_array",
+        "array_task_id": 0,
+        "model_id": "model_0",
+        "status": "succeeded",
+        "stage": "forecast",
+        "candidate_id": "gfs:2026-07-12T00:00:00Z:model_0:forecast_gfs_deterministic",
+        "submit_outcome": "accepted",
+        "restart_stage": "forecast",
+        "native_shud_resubmitted": False,
+        "accepted_submit_contract_version": ACCEPTED_SUBMIT_CONTRACT_VERSION,
+    }
+    repository.upsert_pipeline_job(candidate)
+    before_candidate = repository.get_pipeline_job(candidate["job_id"])
+
+    for mutation in (
+        {"stage": "forcing"},
+        {"model_id": None},
+        {"slurm_ownership_required": True},
+        {"cohort_members": [{"array_task_id": 0}], "cohort_digest": "0" * 64},
+    ):
+        with pytest.raises(FileOrchestrationJournalError):
+            repository.upsert_pipeline_job({**candidate, **mutation})
+        assert repository.get_pipeline_job(candidate["job_id"]) == before_candidate
+
+    unclassified = {
+        **candidate,
+        "job_id": "job_cycle_gfs_2026071200_unclassified_forecast",
+        "run_id": "cycle_gfs_2026071200_unclassified",
+        "model_id": None,
+        "array_task_id": None,
+        "candidate_id": None,
+    }
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.upsert_pipeline_job(unclassified)
+    assert error.value.field == "accepted_submit_row_kind"
+
+    master_repository = _file_cohort_repository(tmp_path / "master", member_count=1)
+    master_job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    before_master = master_repository.get_pipeline_job(master_job_id)
+    with pytest.raises(FileOrchestrationJournalError):
+        master_repository.upsert_pipeline_job(
+            {**before_master, "model_id": "model_0", "array_task_id": 0}
+        )
+    assert master_repository.get_pipeline_job(master_job_id) == before_master
+
+
+def test_marker_free_nonforecast_rows_keep_legacy_classification_compatibility() -> None:
+    from services.orchestrator.accepted_submit_identity import (
+        accepted_submit_row_kind,
+        normalize_accepted_submit_evidence,
+    )
+
+    legacy = {
+        "stage": "forcing",
+        "job_type": "produce_forcing_array",
+        "cohort_members": [{"array_task_id": 0}],
+        "cohort_digest": "historical-unversioned-value",
+    }
+
+    assert accepted_submit_row_kind(legacy) is None
+    assert normalize_accepted_submit_evidence(legacy) == legacy
 
 
 def test_master_model_id_corruption_blocks_query_instead_of_becoming_candidate(tmp_path: Any) -> None:
