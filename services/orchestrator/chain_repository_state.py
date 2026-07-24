@@ -865,7 +865,12 @@ def candidate_state_from_rows(
             state["failed_stage"] = None
             state["error_code"] = None
             state["error_message"] = None
-    elif not _has_terminal_completion_stage_success(candidate_jobs) and (
+    # Terminal completion must scan the same cycle-wide job base as the
+    # completed-stage evidence below: state_save_qc runs as a cycle-scope
+    # cohort job carrying no run_id/model_id, so a per-candidate filter can
+    # never observe it and reconciled forecast jobs would re-arm the
+    # state_save_qc restart marker forever.
+    elif not _has_terminal_completion_stage_success(jobs) and (
         completed_stage_evidence := _best_completed_stage_success_evidence(
             jobs,
             source_id=source_id,

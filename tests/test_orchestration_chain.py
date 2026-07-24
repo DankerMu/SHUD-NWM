@@ -6824,6 +6824,74 @@ def test_candidate_state_manual_forcing_retry_success_resumes_forecast_stage(tmp
     assert decision.evidence["restart_stage"] == "forecast"
 
 
+def test_candidate_state_cohort_qc_success_clears_reconciled_restart_marker(monkeypatch) -> None:
+    from services.orchestrator.chain_repository_state import candidate_state_from_rows
+
+    monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast_state_save_qc")
+    cycle_time = datetime(2026, 7, 12, 0, tzinfo=UTC)
+    reconciled_forecast = {
+        "job_id": "job_fcst_ifs_2026071200_model_b_forecast_reconciled_17884_0",
+        "run_id": "fcst_ifs_2026071200_model_b",
+        "cycle_id": "ifs_2026071200",
+        "job_type": "run_shud_forecast_array",
+        "stage": "forecast",
+        "model_id": "model_b",
+        "status": "succeeded",
+        "slurm_job_id": "17884_0",
+        "restart_stage": "state_save_qc",
+        "created_at": "2026-07-24T12:12:00Z",
+        "updated_at": "2026-07-24T12:12:00Z",
+    }
+    cohort_qc = {
+        "job_id": "job_cycle_ifs_2026071200_state_save_qc_cohort_fc3b73dd33ed_state_save_qc",
+        "run_id": "cycle_ifs_2026071200_state_save_qc_cohort_fc3b73dd33ed",
+        "cycle_id": "ifs_2026071200",
+        "job_type": "run_state_save_qc",
+        "stage": "state_save_qc",
+        "model_id": None,
+        "status": "succeeded",
+        "slurm_job_id": "17974",
+        "created_at": "2026-07-24T12:35:20Z",
+        "updated_at": "2026-07-24T12:40:46Z",
+    }
+
+    def build_state(jobs: list[dict[str, object]]) -> dict[str, object]:
+        return candidate_state_from_rows(
+            source_id="IFS",
+            cycle_time=cycle_time,
+            model_id="model_b",
+            run_id="fcst_ifs_2026071200_model_b",
+            forcing_version_id="forc_ifs_2026071200_model_b",
+            candidate_id="IFS:2026-07-12T00:00:00Z:model_b:forecast_ifs_deterministic",
+            hydro_run={
+                "run_id": "fcst_ifs_2026071200_model_b",
+                "model_id": "model_b",
+                "source_id": "IFS",
+                "cycle_time": cycle_time,
+                "status": "succeeded",
+                "init_state_id": "state_IFS_model_b_2026071200_ifs_2026071112_f012",
+            },
+            forcing_version=None,
+            forecast_cycle={
+                "cycle_id": "ifs_2026071200",
+                "source_id": "IFS",
+                "cycle_time": cycle_time,
+                "status": "forecast_complete",
+            },
+            pipeline_jobs=jobs,
+            pipeline_events=[],
+            retry_limit=3,
+        )
+
+    looping_state = build_state([reconciled_forecast])
+    assert looping_state["restart_stage"] == "state_save_qc"
+    assert looping_state["completed_stage_evidence"]["stage"] == "forecast"
+
+    completed_state = build_state([reconciled_forecast, cohort_qc])
+    assert completed_state.get("restart_stage") is None
+    assert completed_state.get("completed_stage_evidence") is None
+
+
 def test_psycopg_candidate_state_prefixed_s3_manifest_repairs_stale_failed_source_cycle() -> None:
     state = _source_cycle_retry_state(
         jobs=[
