@@ -18,13 +18,27 @@ mismatch. If accounting has no matching/verifiable row, the candidate is marked
 
 from __future__ import annotations
 
+import inspect
 import logging
+import os
+import selectors
 import subprocess
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Mapping
 
+from services.orchestrator.accepted_submit_identity import (
+    ACCEPTED_SUBMIT_CONTRACT_VERSION,
+    FORECAST_COHORT_STAGE_ALIASES,
+    AcceptedSubmitEvidenceError,
+    AcceptedSubmitTransition,
+    accepted_submit_contract_is_current,
+    forecast_cohort_identity_is_valid,
+    is_forecast_cohort_stage_name,
+    ordered_cohort_members,
+)
 from services.orchestrator.reservation import idempotency_key_from_comment
 from services.slurm_gateway.models import TERMINAL_STATUSES, SlurmJobStatus
 from services.slurm_gateway.real_backend import (
@@ -41,6 +55,7 @@ LOGGER = logging.getLogger(__name__)
 # accounting horizon; a fixed 7-day floor keeps a just-submitted master job
 # visible to reconcile-by-comment instead of being misjudged reservation_lost.
 COMMENT_SACCT_LOOKBACK_DAYS = 7
+COMMENT_SACCT_PAGE_HOURS = 12
 
 RECONCILE_UNVERIFIED_STATUS = "reconcile_unverified"
 # A reservation whose sbatch was never confirmed by accounting: sbatch did not
@@ -60,6 +75,34 @@ RESERVATION_ABSENCE_GRACE = timedelta(seconds=120)
 # Typed action for a reserved-unbound row that queried absent but is younger
 # than RESERVATION_ABSENCE_GRACE: deliberately NOT demoted this pass.
 ABSENCE_UNCONFIRMED_ACTION = "absence_unconfirmed"
+MAX_EXACT_COMMENT_MATCHES = 2
+MAX_COMMENT_SACCT_BYTES = 2 * 1024 * 1024
+MAX_COMMENT_SACCT_ROWS = 20_000
+COMMENT_SACCT_TIMEOUT_SECONDS = 30.0
+COMMENT_SACCT_VISIBILITY_TIMEOUT_SECONDS = 5.0
+MAX_VISIBILITY_PROBE_BYTES = 256 * 1024
+MAX_VISIBILITY_PROBE_ROWS = 5_000
+
+
+def _as_utc_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _strict_utc_datetime(value: Any) -> datetime | None:
+    """Accept only aware datetimes at evidence-authority boundaries."""
+
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        return None
+    try:
+        if value.utcoffset() is None:
+            return None
+        return value.astimezone(UTC)
+    except (OverflowError, TypeError, ValueError):
+        return None
 
 
 class ReconcileQueryUnavailable(Exception):
@@ -75,6 +118,26 @@ class ReconcileQueryUnavailable(Exception):
     actually confirmed.
     """
 
+    reason_class = "process_unavailable"
+
+    def __init__(self, message: str, *, reason_class: str | None = None) -> None:
+        super().__init__(message)
+        if reason_class is not None:
+            self.reason_class = reason_class
+
+
+class ReconcileQuerySaturated(ReconcileQueryUnavailable):
+    """A bounded accounting page exceeded a byte or logical-row ceiling."""
+
+    def __init__(self, boundary: str) -> None:
+        if boundary not in {"bytes", "rows"}:
+            raise ValueError("bounded accounting saturation boundary must be bytes or rows")
+        self.boundary = boundary
+        super().__init__(
+            f"sacct query exceeded bounded output ({boundary})",
+            reason_class=f"bounded_output_{boundary}_saturated",
+        )
+
 
 @dataclass(frozen=True)
 class SacctRecord:
@@ -85,6 +148,8 @@ class SacctRecord:
     job_name: str
     exit_code: str | None = None
     comment: str | None = None
+    user: str | None = None
+    account: str | None = None
     run_id: str | None = None
     model_id: str | None = None
     stage: str | None = None
@@ -95,6 +160,7 @@ class SacctRecord:
     stdout_identity: Mapping[str, Any] | None = None
     file_journal_identity: Mapping[str, Any] | None = None
     array_member_job_ids: tuple[str, ...] = ()
+    array_task_records: tuple["SacctRecord", ...] = ()
 
 
 # A sacct querier maps a slurm_job_id to its accounting record (or None when the
@@ -119,37 +185,130 @@ def default_sacct_querier(slurm_bin_path: str = "") -> SacctQuerier:
             sacct,
             "--parsable2",
             "--noheader",
-            "--format=JobID,JobName,State,ExitCode,Comment",
+            "--format=JobID,JobName,State,ExitCode,Comment,User,Account",
             f"--jobs={slurm_job_id}",
         ]
         try:
-            result = subprocess.run(  # noqa: S603 - fixed argv, no shell.
-                command,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError) as error:
+            stdout = _bounded_sacct_stdout(command)
+        except ReconcileQueryUnavailable as error:
             LOGGER.warning("sacct query failed for %s: %s", slurm_job_id, error)
-            raise ReconcileQueryUnavailable(
-                f"sacct query failed for {slurm_job_id}: {error}"
-            ) from error
-        if result.returncode != 0:
-            LOGGER.warning(
-                "sacct returned %s for %s", result.returncode, slurm_job_id
-            )
-            raise ReconcileQueryUnavailable(
-                f"sacct returned {result.returncode} for {slurm_job_id}"
-            )
+            raise
         # Query succeeded: a None here means accounting has no such row
         # (confirmed-absent), not that we failed to ask.
-        return _parse_master_sacct_row(result.stdout, slurm_job_id)
+        return _parse_master_sacct_row(stdout, slurm_job_id)
 
     return _query
 
 
-def default_comment_sacct_querier(slurm_bin_path: str = "") -> CommentSacctQuerier:
+def default_global_accounting_visibility_probe(slurm_bin_path: str = "") -> Callable[[], bool]:
+    """Prove controller and SlurmDBD both expose jobs to ``--allusers``."""
+
+    scontrol = f"{slurm_bin_path.rstrip('/')}/scontrol" if slurm_bin_path else "scontrol"
+    sacctmgr = f"{slurm_bin_path.rstrip('/')}/sacctmgr" if slurm_bin_path else "sacctmgr"
+
+    def _probe() -> bool:
+        proven = True
+        for command in ([scontrol, "show", "config"], [sacctmgr, "show", "config"]):
+            try:
+                stdout = _bounded_visibility_stdout(
+                    command,
+                )
+            except ReconcileQueryUnavailable:
+                proven = False
+                continue
+            if not _private_data_allows_global_jobs(stdout):
+                proven = False
+        return proven
+
+    return _probe
+
+
+def _bounded_visibility_stdout(command: Sequence[str]) -> str:
+    """Drain visibility-probe stdout/stderr with hard byte, row, and time bounds."""
+
+    try:
+        process = subprocess.Popen(  # noqa: S603 - fixed argv, no shell.
+            list(command),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as error:
+        raise ReconcileQueryUnavailable("visibility probe could not start") from error
+    if process.stdout is None or process.stderr is None:
+        _terminate_and_reap(process)
+        raise ReconcileQueryUnavailable("visibility probe pipes are unavailable")
+    streams = {process.stdout: bytearray(), process.stderr: bytearray()}
+    row_counts = {process.stdout: 0, process.stderr: 0}
+    selector = selectors.DefaultSelector()
+    deadline = time.monotonic() + COMMENT_SACCT_VISIBILITY_TIMEOUT_SECONDS
+    try:
+        for stream in streams:
+            selector.register(stream, selectors.EVENT_READ)
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ReconcileQueryUnavailable("visibility probe timed out")
+            events = selector.select(timeout=min(remaining, 0.25))
+            if not events:
+                if process.poll() is not None:
+                    for key in list(selector.get_map().values()):
+                        selector.unregister(key.fileobj)
+                    break
+                continue
+            for key, _mask in events:
+                stream = key.fileobj
+                chunk = os.read(stream.fileno(), 64 * 1024)
+                if not chunk:
+                    selector.unregister(stream)
+                    continue
+                streams[stream].extend(chunk)
+                row_counts[stream] += chunk.count(b"\n")
+                logical_rows = row_counts[stream] + int(
+                    bool(streams[stream]) and not streams[stream].endswith(b"\n")
+                )
+                if sum(len(output) for output in streams.values()) > MAX_VISIBILITY_PROBE_BYTES:
+                    raise ReconcileQuerySaturated("bytes")
+                if logical_rows > MAX_VISIBILITY_PROBE_ROWS:
+                    raise ReconcileQuerySaturated("rows")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ReconcileQueryUnavailable("visibility probe timed out")
+        return_code = process.wait(timeout=remaining)
+        if return_code != 0:
+            raise ReconcileQueryUnavailable(f"visibility probe returned {return_code}")
+        return bytes(streams[process.stdout]).decode("utf-8", errors="replace")
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ReconcileQueryUnavailable("visibility probe failed") from error
+    finally:
+        selector.close()
+        if process.poll() is None:
+            _terminate_and_reap(process)
+        else:
+            process.wait()
+
+
+def _private_data_allows_global_jobs(stdout: str) -> bool:
+    found = False
+    for line in stdout.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key.strip().lower() == "privatedata":
+            found = True
+            private_data = {
+                token.strip().lower()
+                for token in value.replace(",", " ").split()
+                if token.strip()
+            }
+            if "jobs" in private_data or "all" in private_data:
+                return False
+    return found
+
+
+def default_comment_sacct_querier(
+    slurm_bin_path: str = "",
+    *,
+    global_visibility_probe: Callable[[], bool] | None = None,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> CommentSacctQuerier:
     """Build a comment querier: idempotency_key -> the job sbatch recorded.
 
     Queries ``sacct`` for the master row whose ``Comment`` is
@@ -161,48 +320,263 @@ def default_comment_sacct_querier(slurm_bin_path: str = "") -> CommentSacctQueri
 
     sacct = f"{slurm_bin_path.rstrip('/')}/sacct" if slurm_bin_path else "sacct"
 
-    def _query(idempotency_key: str) -> SacctRecord | None:
+    indexed_matches_by_page: dict[
+        tuple[str, str, str, str], dict[str, tuple[SacctRecord, ...]]
+    ] = {}
+    scan_budget = _SacctScanBudget()
+    visibility_probe = global_visibility_probe or default_global_accounting_visibility_probe(slurm_bin_path)
+    visibility_proven: bool | None = None
+
+    def _pages() -> tuple[tuple[datetime, datetime], ...]:
+        end = now().astimezone(UTC).replace(microsecond=0)
+        floor = end - timedelta(days=COMMENT_SACCT_LOOKBACK_DAYS)
+        width = timedelta(hours=COMMENT_SACCT_PAGE_HOURS)
+        pages: list[tuple[datetime, datetime]] = []
+        while end > floor:
+            start = max(end - width, floor)
+            pages.append((start, end))
+            end = start
+        return tuple(pages)
+
+    # One querier instance is one scheduler/reconcile session. Freeze its full
+    # time window once so every key and owner/global scope shares identical page
+    # cache keys even while wall clock time advances during the scan.
+    pages = _pages()
+
+    def _query(
+        idempotency_key: str,
+        *,
+        expected_user: str | None = None,
+        expected_account: str | None = None,
+        accepted_submit_contract_version: str | None = None,
+        submission_attempt_started_at: datetime | None = None,
+    ) -> tuple[SacctRecord, ...]:
         target_comment = slurm_comment_for(idempotency_key)
-        # --starttime: without it sacct only returns jobs inside its default
-        # (often same-day) window, so an in-flight master submitted just before a
-        # crash can be invisible and misjudged reservation_lost. Mirror
-        # real_backend.list_jobs by passing an explicit conservative floor.
-        start_time = (
-            datetime.now(UTC) - timedelta(days=COMMENT_SACCT_LOOKBACK_DAYS)
-        ).strftime("%Y-%m-%dT%H:%M:%S")
-        command = [
-            sacct,
-            "--parsable2",
-            "--noheader",
-            "--format=JobID,JobName,State,ExitCode,Comment",
-            "--allusers",
-            f"--starttime={start_time}",
-        ]
-        try:
-            result = subprocess.run(  # noqa: S603 - fixed argv, no shell.
-                command,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError) as error:
-            LOGGER.warning("sacct comment query failed for %s: %s", idempotency_key, error)
-            raise ReconcileQueryUnavailable(
-                f"sacct comment query failed for {idempotency_key}: {error}"
-            ) from error
-        if result.returncode != 0:
-            LOGGER.warning("sacct comment query returned %s", result.returncode)
-            raise ReconcileQueryUnavailable(
-                f"sacct comment query returned {result.returncode}"
-            )
+        owner_scope = (str(expected_user or ""), str(expected_account or ""))
+        nonlocal visibility_proven
+        if accepted_submit_contract_version not in (None, ACCEPTED_SUBMIT_CONTRACT_VERSION):
+            raise ReconcileQueryUnavailable("accepted-submit contract version is unsupported")
+        if not any(owner_scope) and accepted_submit_contract_version == ACCEPTED_SUBMIT_CONTRACT_VERSION:
+            if visibility_proven is None:
+                visibility_proven = bool(visibility_probe())
+            if not visibility_proven:
+                raise ReconcileQueryUnavailable(
+                    "global accounting visibility is unproven",
+                    reason_class="accounting_authority_unproven",
+                )
+        budget = scan_budget
+        matches: list[SacctRecord] = []
+        seen_ids: set[str] = set()
+        for page_start, page_end in pages:
+            start_time = page_start.strftime("%Y-%m-%dT%H:%M:%S")
+            end_time = page_end.strftime("%Y-%m-%dT%H:%M:%S")
+            page_key = (*owner_scope, start_time, end_time)
+            if page_key not in indexed_matches_by_page:
+                command = [
+                    sacct,
+                    "--parsable2",
+                    "--noheader",
+                    "--format=JobID,JobName,State,ExitCode,Comment,User,Account",
+                    f"--starttime={start_time}",
+                    f"--endtime={end_time}",
+                ]
+                command.append(f"--user={owner_scope[0]}" if owner_scope[0] else "--allusers")
+                if owner_scope[1]:
+                    command.append(f"--accounts={owner_scope[1]}")
+                stdout = _bounded_sacct_page(command, budget)
+                indexed_matches_by_page[page_key] = _index_comment_sacct_matches(
+                    stdout,
+                    expected_user=owner_scope[0] or None,
+                    expected_account=owner_scope[1] or None,
+                )
+            for record in indexed_matches_by_page[page_key].get(target_comment, ()):
+                if record.slurm_job_id in seen_ids:
+                    continue
+                seen_ids.add(record.slurm_job_id)
+                matches.append(record)
+                if len(matches) >= MAX_EXACT_COMMENT_MATCHES:
+                    break
+            if len(matches) >= MAX_EXACT_COMMENT_MATCHES:
+                break
         # Below: the query succeeded. A None here is the authoritative
         # "accounting has no job for this comment" answer (confirmed-absent),
         # which is the ONLY case allowed to mark reservation_lost. A transient
         # failure never reaches here.
-        return _parse_comment_sacct_rows(result.stdout, target_comment)
+        coverage_start = pages[-1][0]
+        coverage_end = pages[0][1]
+        attempt_anchor = _as_utc_datetime(submission_attempt_started_at)
+        coverage_complete = bool(
+            attempt_anchor is not None and coverage_start <= attempt_anchor <= coverage_end
+        )
+        return CommentAccountingResult(
+            tuple(matches),
+            scope="owner" if any(owner_scope) else "global",
+            coverage_start=coverage_start,
+            coverage_end=coverage_end,
+            coverage_complete=coverage_complete,
+        )
 
     return _query
+
+
+@dataclass
+class _SacctScanBudget:
+    """One scan deadline plus independent limits applied to every time page."""
+
+    page_max_bytes: int = 0
+    page_max_rows: int = 0
+    deadline: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not self.page_max_bytes:
+            self.page_max_bytes = MAX_COMMENT_SACCT_BYTES
+        if not self.page_max_rows:
+            self.page_max_rows = MAX_COMMENT_SACCT_ROWS
+        if not self.deadline:
+            self.deadline = time.monotonic() + COMMENT_SACCT_TIMEOUT_SECONDS
+
+
+def _bounded_sacct_page(command: Sequence[str], budget: _SacctScanBudget) -> str:
+    """Call the bounded reader while retaining compatibility with injected fakes."""
+
+    try:
+        supports_budget = "budget" in inspect.signature(_bounded_sacct_stdout).parameters
+    except (TypeError, ValueError):
+        supports_budget = False
+    if supports_budget:
+        return _bounded_sacct_stdout(command, budget=budget)
+    if time.monotonic() >= budget.deadline:
+        raise ReconcileQueryUnavailable("sacct query timed out")
+    stdout = _bounded_sacct_stdout(command)
+    if time.monotonic() >= budget.deadline:
+        raise ReconcileQueryUnavailable("sacct query timed out")
+    encoded = stdout.encode("utf-8")
+    rows = stdout.count("\n") + int(bool(stdout) and not stdout.endswith("\n"))
+    if len(encoded) > budget.page_max_bytes:
+        raise ReconcileQuerySaturated("bytes")
+    if rows > budget.page_max_rows:
+        raise ReconcileQuerySaturated("rows")
+    return stdout
+
+
+def _bounded_sacct_stdout(command: Sequence[str], *, budget: _SacctScanBudget | None = None) -> str:
+    """Read sacct output with byte/row/time bounds and always reap the child."""
+
+    try:
+        process = subprocess.Popen(  # noqa: S603 - fixed argv, no shell.
+            list(command),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as error:
+        raise ReconcileQueryUnavailable("sacct query could not start") from error
+    stdout = process.stdout
+    if stdout is None:
+        _terminate_and_reap(process)
+        raise ReconcileQueryUnavailable("sacct query has no stdout")
+    output = bytearray()
+    row_count = 0
+    started = time.monotonic()
+    deadline = budget.deadline if budget is not None else started + COMMENT_SACCT_TIMEOUT_SECONDS
+    selector = selectors.DefaultSelector()
+    try:
+        selector.register(stdout, selectors.EVENT_READ)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ReconcileQueryUnavailable("sacct query timed out")
+            events = selector.select(timeout=min(remaining, 0.25))
+            if not events:
+                if process.poll() is not None:
+                    break
+                continue
+            chunk = os.read(stdout.fileno(), 64 * 1024)
+            if not chunk:
+                break
+            output.extend(chunk)
+            row_count += chunk.count(b"\n")
+            logical_row_count = row_count + int(bool(output) and not output.endswith(b"\n"))
+            byte_limit = budget.page_max_bytes if budget is not None else MAX_COMMENT_SACCT_BYTES
+            row_limit = budget.page_max_rows if budget is not None else MAX_COMMENT_SACCT_ROWS
+            if len(output) > byte_limit:
+                raise ReconcileQuerySaturated("bytes")
+            if logical_row_count > row_limit:
+                raise ReconcileQuerySaturated("rows")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ReconcileQueryUnavailable("sacct query timed out")
+        return_code = process.wait(timeout=remaining)
+        if return_code != 0:
+            raise ReconcileQueryUnavailable(f"sacct query returned {return_code}")
+        return bytes(output).decode("utf-8", errors="replace")
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ReconcileQueryUnavailable("sacct query failed") from error
+    finally:
+        selector.close()
+        if process.poll() is None:
+            _terminate_and_reap(process)
+        else:
+            process.wait()
+
+
+def _terminate_and_reap(process: subprocess.Popen[bytes]) -> None:
+    try:
+        process.terminate()
+        process.wait(timeout=1)
+    except (OSError, subprocess.SubprocessError):
+        try:
+            process.kill()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=1)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+def _index_comment_sacct_matches(
+    stdout: str,
+    *,
+    expected_user: str | None = None,
+    expected_account: str | None = None,
+) -> dict[str, tuple[SacctRecord, ...]]:
+    comments: dict[str, list[SacctRecord]] = {}
+    seen: dict[str, set[str]] = {}
+    for line in stdout.splitlines()[:MAX_COMMENT_SACCT_ROWS]:
+        fields = line.strip().split("|")
+        if len(fields) < 5:
+            continue
+        comment = fields[4].strip()
+        if not comment.startswith("nhms_idem:"):
+            continue
+        user = fields[5].strip() if len(fields) > 5 and fields[5].strip() else None
+        account = fields[6].strip() if len(fields) > 6 and fields[6].strip() else None
+        if expected_user and user != expected_user:
+            continue
+        if expected_account and account != expected_account:
+            continue
+        master_id = fields[0].split(".", 1)[0].split("_", 1)[0]
+        if not SLURM_JOB_ID_RE.fullmatch(master_id):
+            continue
+        comment_seen = seen.setdefault(comment, set())
+        if master_id in comment_seen:
+            continue
+        comment_seen.add(master_id)
+        matches = comments.setdefault(comment, [])
+        if len(matches) >= MAX_EXACT_COMMENT_MATCHES:
+            continue
+        matches.append(
+            SacctRecord(
+                slurm_job_id=master_id,
+                job_name=fields[1].strip(),
+                raw_state=fields[2].strip(),
+                exit_code=fields[3].strip() or None,
+                comment=comment,
+                user=user,
+                account=account,
+            )
+        )
+    return {comment: tuple(records) for comment, records in comments.items()}
 
 
 def _parse_comment_sacct_rows(stdout: str, target_comment: str) -> SacctRecord | None:
@@ -211,6 +585,18 @@ def _parse_comment_sacct_rows(stdout: str, target_comment: str) -> SacctRecord |
     "<master>_[<range>]") normalize down to the bare master id; step sub-rows
     ("<id>.batch"/"<id>.extern") are skipped. Returns None when no row matches
     (the authoritative confirmed-absent answer)."""
+    matches = _parse_comment_sacct_matches(stdout, target_comment, limit=1)
+    return matches[0] if matches else None
+
+
+def _parse_comment_sacct_matches(
+    stdout: str,
+    target_comment: str,
+    *,
+    limit: int,
+) -> tuple[SacctRecord, ...]:
+    matches: list[SacctRecord] = []
+    seen_master_ids: set[str] = set()
     for line in stdout.splitlines():
         line = line.strip()
         if not line:
@@ -233,14 +619,23 @@ def _parse_comment_sacct_rows(stdout: str, target_comment: str) -> SacctRecord |
         # into a bogus empty-id record / false confirmed-absent.
         if not SLURM_JOB_ID_RE.fullmatch(job_id):
             continue
-        return SacctRecord(
-            slurm_job_id=job_id,
-            job_name=fields[1],
-            raw_state=fields[2],
-            exit_code=fields[3] or None,
-            comment=fields[4].strip(),
+        if job_id in seen_master_ids:
+            continue
+        seen_master_ids.add(job_id)
+        matches.append(
+            SacctRecord(
+                slurm_job_id=job_id,
+                job_name=fields[1],
+                raw_state=fields[2],
+                exit_code=fields[3] or None,
+                comment=fields[4].strip(),
+                user=fields[5].strip() if len(fields) > 5 and fields[5].strip() else None,
+                account=fields[6].strip() if len(fields) > 6 and fields[6].strip() else None,
+            )
         )
-    return None
+        if len(matches) >= max(int(limit), 1):
+            break
+    return tuple(matches)
 
 
 def _parse_master_sacct_row(stdout: str, slurm_job_id: str) -> SacctRecord | None:
@@ -279,7 +674,16 @@ def _parse_master_sacct_row(stdout: str, slurm_job_id: str) -> SacctRecord | Non
         exact_fields = fields
 
     if exact_fields is not None:
-        return _sacct_record_from_fields(exact_fields)
+        exact = _sacct_record_from_fields(exact_fields)
+        if member_fields:
+            return SacctRecord(
+                **{
+                    **exact.__dict__,
+                    "array_member_job_ids": tuple(fields[0] for fields in member_fields),
+                    "array_task_records": tuple(_sacct_record_from_fields(fields) for fields in member_fields),
+                }
+            )
+        return exact
     if not target_is_array_task and member_fields:
         return _aggregate_array_member_rows(member_fields, target_job_id)
     return None
@@ -294,6 +698,8 @@ def _sacct_record_from_fields(fields: list[str]) -> SacctRecord:
         raw_state=fields[2],
         exit_code=fields[3] if len(fields) > 3 else None,
         comment=fields[4].strip() if len(fields) > 4 else None,
+        user=fields[5].strip() if len(fields) > 5 and fields[5].strip() else None,
+        account=fields[6].strip() if len(fields) > 6 and fields[6].strip() else None,
         task_id=task_id,
         array_task_id=task_id,
     )
@@ -313,11 +719,7 @@ def _aggregate_array_member_rows(
     non_terminal = [status for status in member_statuses if status not in TERMINAL_STATUSES]
     selected_fields: list[str] | None = None
     if non_terminal:
-        raw_state = (
-            "PENDING"
-            if all(status == SlurmJobStatus.SUBMITTED for status in member_statuses)
-            else "RUNNING"
-        )
+        raw_state = "PENDING" if all(status == SlurmJobStatus.SUBMITTED for status in member_statuses) else "RUNNING"
     elif SlurmJobStatus.FAILED in member_statuses:
         failed_index = member_statuses.index(SlurmJobStatus.FAILED)
         selected_fields = member_fields[failed_index]
@@ -331,22 +733,19 @@ def _aggregate_array_member_rows(
         raw_state = "COMPLETED"
 
     job_names = {fields[1].strip() for fields in member_fields}
-    comments = {
-        fields[4].strip()
-        for fields in member_fields
-        if len(fields) > 4 and fields[4].strip()
-    }
+    comments = {fields[4].strip() for fields in member_fields if len(fields) > 4 and fields[4].strip()}
+    users = {fields[5].strip() for fields in member_fields if len(fields) > 5 and fields[5].strip()}
+    accounts = {fields[6].strip() for fields in member_fields if len(fields) > 6 and fields[6].strip()}
     return SacctRecord(
         slurm_job_id=master_job_id,
         job_name=job_names.pop() if len(job_names) == 1 else "",
         raw_state=raw_state,
-        exit_code=(
-            selected_fields[3]
-            if selected_fields is not None and len(selected_fields) > 3
-            else None
-        ),
+        exit_code=(selected_fields[3] if selected_fields is not None and len(selected_fields) > 3 else None),
         comment=comments.pop() if len(comments) == 1 else None,
+        user=users.pop() if len(users) == 1 else None,
+        account=accounts.pop() if len(accounts) == 1 else None,
         array_member_job_ids=tuple(fields[0] for fields in member_fields),
+        array_task_records=tuple(_sacct_record_from_fields(fields) for fields in member_fields),
     )
 
 
@@ -357,6 +756,10 @@ class ReconcileOutcome:
     # "terminal" | "still_running" | "unverified" | "query_unavailable"
     action: str
     status: str
+    durable_write_kind: str | None = None
+    durable_write_count: int = 0
+    pipeline_status_write_count: int = 0
+    pipeline_event_write_count: int = 0
 
 
 def _expected_job_name_token(stage: str | None, job_type: str | None) -> str | None:
@@ -561,7 +964,16 @@ def reconcile_inflight_jobs(
         expected_token = _expected_job_name_token(job.stage, job.job_type)
         normalized = _normalize_slurm_state(record.raw_state) if record is not None else None
         slurm_status = SLURM_STATE_MAP.get(normalized, SlurmJobStatus.FAILED) if normalized is not None else None
-        requires_durable_identity = slurm_status in TERMINAL_STATUSES
+        cohort_members = getattr(job, "cohort_members", None)
+        file_cohort = bool(
+            getattr(store, "supports_accepted_submit_reconcile", False)
+            and _accepted_submit_versioned_job(job)
+            and _is_forecast_cohort_job(job)
+            and isinstance(cohort_members, Sequence)
+            and not isinstance(cohort_members, str | bytes)
+            and cohort_members
+        )
+        requires_durable_identity = slurm_status in TERMINAL_STATUSES and not file_cohort
 
         if record is None or not _identity_matches(
             record,
@@ -570,21 +982,41 @@ def reconcile_inflight_jobs(
             require_durable_identity=requires_durable_identity,
         ):
             # Cannot prove this is our candidate: mark typed, do NOT resubmit.
-            store.update_job_status(
-                job.job_id,
-                RECONCILE_UNVERIFIED_STATUS,
-                error_code="SLURM_RECONCILE_UNVERIFIED",
-                error_message=(
-                    "sacct could not verify the candidate identity for "
-                    f"slurm_job_id={slurm_job_id}."
-                ),
-            )
+            if file_cohort:
+                write_count = _transition_file_runtime_status(
+                    store,
+                    job,
+                    RECONCILE_UNVERIFIED_STATUS,
+                )
+            else:
+                store.update_job_status(
+                    job.job_id,
+                    RECONCILE_UNVERIFIED_STATUS,
+                    error_code="SLURM_RECONCILE_UNVERIFIED",
+                    error_message=(f"sacct could not verify the candidate identity for slurm_job_id={slurm_job_id}."),
+                )
+                write_count = 1
             outcomes.append(
                 ReconcileOutcome(
                     job_id=job.job_id,
                     slurm_job_id=str(slurm_job_id),
                     action="unverified",
                     status=RECONCILE_UNVERIFIED_STATUS,
+                    durable_write_kind="pipeline_job_status",
+                    durable_write_count=write_count,
+                )
+            )
+            continue
+
+        if file_cohort and not _terminal_file_cohort_identity_matches(store, record, job):
+            outcomes.append(
+                ReconcileOutcome(
+                    job_id=job.job_id,
+                    slurm_job_id=str(slurm_job_id),
+                    action="identity_mismatch_blocked",
+                    status=str(job.status),
+                    durable_write_kind=None,
+                    durable_write_count=0,
                 )
             )
             continue
@@ -592,11 +1024,43 @@ def reconcile_inflight_jobs(
         slurm_status = slurm_status or SlurmJobStatus.FAILED
 
         if slurm_status in TERMINAL_STATUSES:
-            error_code = (
-                map_slurm_error_code(record.raw_state)
-                if slurm_status == SlurmJobStatus.FAILED
-                else None
-            )
+            if file_cohort:
+                projections, accounting_complete = _file_cohort_task_projections(job, record)
+                error_code = map_slurm_error_code(record.raw_state) if slurm_status == SlurmJobStatus.FAILED else None
+                write_result = store.project_forecast_cohort_tasks(
+                    job.job_id,
+                    master_slurm_job_id=str(record.slurm_job_id),
+                    projections=projections,
+                    complete=accounting_complete,
+                    master_status=slurm_status.value,
+                    master_error_code=error_code,
+                    reconciliation_decision="matched_bound",
+                )
+                write_count = int(write_result.get("total") or 0)
+                projected_status = slurm_status.value
+                get_pipeline_job = getattr(store, "get_pipeline_job", None)
+                if accounting_complete and callable(get_pipeline_job):
+                    durable_master = get_pipeline_job(job.job_id)
+                    if isinstance(durable_master, Mapping) and durable_master.get("status") in {
+                        "succeeded",
+                        "partially_failed",
+                        "failed",
+                    }:
+                        projected_status = str(durable_master["status"])
+                outcomes.append(
+                    ReconcileOutcome(
+                        job_id=job.job_id,
+                        slurm_job_id=str(slurm_job_id),
+                        action="terminal" if accounting_complete else "task_accounting_incomplete",
+                        status=projected_status if accounting_complete else RECONCILE_UNVERIFIED_STATUS,
+                        durable_write_kind="forecast_cohort_projection",
+                        durable_write_count=write_count,
+                        pipeline_status_write_count=int(write_result.get("pipeline_status") or 0),
+                        pipeline_event_write_count=int(write_result.get("pipeline_event") or 0),
+                    )
+                )
+                continue
+            error_code = map_slurm_error_code(record.raw_state) if slurm_status == SlurmJobStatus.FAILED else None
             store.update_job_status(
                 job.job_id,
                 slurm_status.value,
@@ -608,28 +1072,195 @@ def reconcile_inflight_jobs(
                     slurm_job_id=str(slurm_job_id),
                     action="terminal",
                     status=slurm_status.value,
+                    durable_write_kind="pipeline_job_status",
+                    durable_write_count=1,
                 )
             )
             continue
 
         # Still running/queued: keep current status, never resubmit.
-        store.update_job_status(job.job_id, slurm_status.value)
+        if file_cohort:
+            write_count = _transition_file_runtime_status(store, job, slurm_status.value)
+        else:
+            store.update_job_status(job.job_id, slurm_status.value)
+            write_count = 1
         outcomes.append(
             ReconcileOutcome(
                 job_id=job.job_id,
                 slurm_job_id=str(slurm_job_id),
                 action="still_running",
                 status=slurm_status.value,
+                durable_write_kind="pipeline_job_status",
+                durable_write_count=write_count,
             )
         )
 
     return outcomes
 
 
+def _is_forecast_cohort_job(job: Any) -> bool:
+    stage = str(getattr(job, "stage", None) or "")
+    if stage:
+        return stage in FORECAST_COHORT_STAGE_ALIASES
+    return str(getattr(job, "job_type", None) or "") in FORECAST_COHORT_STAGE_ALIASES
+
+
+def _file_cohort_runtime_identity_matches(store: Any, identity: Mapping[str, Any]) -> bool:
+    validator = getattr(store, "forecast_cohort_runtime_identity_matches", None)
+    return callable(validator) and bool(validator(identity))
+
+
+def _terminal_file_cohort_identity_matches(store: Any, record: SacctRecord, job: Any) -> bool:
+    identity = vars(job) if hasattr(job, "__dict__") else {}
+    if not forecast_cohort_identity_is_valid(identity) or not _file_cohort_runtime_identity_matches(store, identity):
+        return False
+    expected_master = str(getattr(job, "slurm_job_id", None) or "")
+    if not expected_master or record.slurm_job_id != expected_master:
+        return False
+    if record.comment != str(getattr(job, "slurm_comment", None) or ""):
+        return False
+    if record.stage not in (None, "") and not is_forecast_cohort_stage_name(record.stage):
+        return False
+    expected_user = str(getattr(job, "expected_slurm_user", None) or "")
+    expected_account = str(getattr(job, "expected_slurm_account", None) or "")
+    if bool(getattr(job, "slurm_ownership_required", False)) and (
+        not expected_user or not expected_account or not record.user or not record.account
+    ):
+        return False
+    if expected_user and record.user != expected_user:
+        return False
+    if expected_account and record.account != expected_account:
+        return False
+    try:
+        member_ids = {
+            int(member["array_task_id"])
+            for member in ordered_cohort_members(getattr(job, "cohort_members", ()))
+        }
+    except (AcceptedSubmitEvidenceError, KeyError, TypeError, ValueError):
+        return False
+    observed_task_ids: set[int] = set()
+    observed_slurm_ids: set[str] = set()
+    for task in record.array_task_records:
+        raw_array_task_id = task.array_task_id
+        raw_task_id = task.task_id
+        if raw_array_task_id not in (None, "") and raw_task_id not in (None, ""):
+            try:
+                if int(raw_array_task_id) != int(raw_task_id):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        raw_id = raw_array_task_id if raw_array_task_id not in (None, "") else raw_task_id
+        try:
+            task_id = int(raw_id)
+        except (TypeError, ValueError):
+            return False
+        task_slurm_job_id = str(task.slurm_job_id or "")
+        if (
+            task_id not in member_ids
+            or task_id in observed_task_ids
+            or task_slurm_job_id in observed_slurm_ids
+            or task_slurm_job_id != f"{expected_master}_{task_id}"
+        ):
+            return False
+        observed_task_ids.add(task_id)
+        observed_slurm_ids.add(task_slurm_job_id)
+        if task.job_name.strip() not in _GENERIC_ARRAY_JOB_NAMES and not is_forecast_cohort_stage_name(
+            task.job_name.removeprefix("nhms_")
+        ):
+            return False
+        if task.comment not in (None, "", getattr(job, "slurm_comment", None)):
+            return False
+    return True
+
+
+def _file_cohort_task_projections(job: Any, record: SacctRecord) -> tuple[list[dict[str, Any]], bool]:
+    members = {
+        int(member["array_task_id"]): dict(member)
+        for member in ordered_cohort_members(getattr(job, "cohort_members", ()))
+    }
+    tasks: dict[int, list[SacctRecord]] = {}
+    accounting_complete = True
+    for task in record.array_task_records:
+        raw_task_id = task.array_task_id if task.array_task_id is not None else task.task_id
+        try:
+            task_id = int(raw_task_id)
+        except (TypeError, ValueError):
+            accounting_complete = False
+            continue
+        if task_id not in members:
+            accounting_complete = False
+            continue
+        tasks.setdefault(task_id, []).append(task)
+    if set(tasks) != set(members) or len(record.array_task_records) != len(members):
+        accounting_complete = False
+
+    projections: list[dict[str, Any]] = []
+    for task_id, member in sorted(members.items()):
+        task_records = tasks.get(task_id, [])
+        task = task_records[0] if len(task_records) == 1 else None
+        outcome = "unverified"
+        if len(task_records) > 1:
+            accounting_complete = False
+        elif task is not None:
+            normalized = _normalize_slurm_state(task.raw_state)
+            status = SLURM_STATE_MAP.get(normalized)
+            if status == SlurmJobStatus.SUCCEEDED:
+                outcome = "succeeded"
+            elif status in TERMINAL_STATUSES:
+                outcome = "failed"
+            else:
+                accounting_complete = False
+        if outcome == "unverified":
+            accounting_complete = False
+        projections.append(
+            {
+                "candidate_id": member.get("candidate_id"),
+                "run_id": member.get("run_id"),
+                "model_id": member.get("model_id"),
+                "array_task_id": task_id,
+                "array_task_outcome": outcome,
+                "task_slurm_job_id": task.slurm_job_id if task is not None else None,
+                "error_code": (None if outcome != "failed" or task is None else map_slurm_error_code(task.raw_state)),
+                "restart_stage": "state_save_qc" if outcome == "succeeded" else member.get("restart_stage"),
+                "native_shud_resubmitted": False,
+            }
+        )
+    return projections, accounting_complete
+
+
 # A comment querier maps an idempotency_key to the accounting record of the job
 # sbatch accepted under that ``--comment`` (or None when accounting has no such
 # job). Injectable so tests need no real cluster.
-CommentSacctQuerier = Callable[[str], "SacctRecord | None"]
+@dataclass(frozen=True)
+class CommentAccountingResult(Sequence[SacctRecord]):
+    """Explicit scope carried by the default exact-comment adapter."""
+
+    records: tuple[SacctRecord, ...]
+    scope: str  # ``owner`` or authoritative ``global``.
+    coverage_start: datetime | None = None
+    coverage_end: datetime | None = None
+    coverage_complete: bool = False
+
+    def __getitem__(self, index: int) -> SacctRecord:
+        return self.records[index]
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+    def __iter__(self) -> Iterator[SacctRecord]:
+        return iter(self.records)
+
+
+@dataclass(frozen=True)
+class _CommentAccountingProof:
+    kind: str
+    records: tuple[SacctRecord, ...] = ()
+    coverage_complete: bool = False
+    coverage_start: datetime | None = None
+    coverage_end: datetime | None = None
+
+
+CommentSacctQuerier = Callable[..., "CommentAccountingResult | SacctRecord | Sequence[SacctRecord] | None"]
 
 
 @dataclass(frozen=True)
@@ -646,6 +1277,13 @@ class ReservationReconcileOutcome:
     action: str
     status: str
     slurm_job_id: str | None = None
+    reconciliation_source: str | None = None
+    reconciliation_decision: str | None = None
+    matched_slurm_job_id: str | None = None
+    match_count: int | None = None
+    reconciliation_reason_class: str | None = None
+    durable_write_kind: str | None = None
+    durable_write_count: int = 0
 
 
 def reconcile_reserved_unbound_jobs(
@@ -653,6 +1291,7 @@ def reconcile_reserved_unbound_jobs(
     *,
     comment_query: CommentSacctQuerier,
     grace: timedelta = RESERVATION_ABSENCE_GRACE,
+    accepted_submit_grace: timedelta | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> list[ReservationReconcileOutcome]:
     """Reconcile the submit-crash window: reserved rows with no slurm_job_id.
@@ -695,9 +1334,70 @@ def reconcile_reserved_unbound_jobs(
         idempotency_key = job.idempotency_key
         if not idempotency_key:
             continue
+        accepted_submit_reconcile = _accepted_submit_reconcile_job(store, job)
+        file_forecast_cohort = bool(
+            getattr(store, "supports_accepted_submit_reconcile", False)
+            and _accepted_submit_versioned_job(job)
+            and _is_forecast_cohort_job(job)
+            and isinstance(getattr(job, "cohort_members", None), Sequence)
+            and not isinstance(getattr(job, "cohort_members", None), str | bytes)
+            and getattr(job, "cohort_members", None)
+        )
+        unversioned_file_forecast = bool(
+            getattr(store, "supports_accepted_submit_reconcile", False)
+            and not _accepted_submit_versioned_job(job)
+            and _is_forecast_cohort_job(job)
+            and isinstance(getattr(job, "cohort_members", None), Sequence)
+            and not isinstance(getattr(job, "cohort_members", None), str | bytes)
+            and getattr(job, "cohort_members", None)
+        )
+        if unversioned_file_forecast:
+            outcomes.append(
+                ReservationReconcileOutcome(
+                    job_id=job.job_id,
+                    idempotency_key=str(idempotency_key),
+                    action="legacy_unversioned_read_only",
+                    status=str(job.status),
+                )
+            )
+            continue
+        if file_forecast_cohort and not accepted_submit_reconcile:
+            write_count = _record_file_reconciliation(store, job, "identity_mismatch_blocked")
+            outcomes.append(
+                ReservationReconcileOutcome(
+                    job_id=job.job_id,
+                    idempotency_key=str(idempotency_key),
+                    action="identity_mismatch_blocked",
+                    status=str(job.status),
+                    reconciliation_source="slurm_exact_comment",
+                    reconciliation_decision="identity_mismatch_blocked",
+                    durable_write_kind="pipeline_job_reconciliation" if write_count else None,
+                    durable_write_count=write_count,
+                )
+            )
+            continue
 
+        if accepted_submit_reconcile and getattr(job, "submit_outcome", None) is None:
+            _transition_file_reconciliation(
+                store,
+                job,
+                AcceptedSubmitTransition.timeout(status=str(job.status)),
+            )
+
+        attempt_anchor = _job_attempt_anchor(job, accepted_submit_reconcile=accepted_submit_reconcile)
         try:
-            record = comment_query(str(idempotency_key))
+            expected_user = str(getattr(job, "expected_slurm_user", None) or "")
+            expected_account = str(getattr(job, "expected_slurm_account", None) or "")
+            proof = _query_comment_accounting_proof(
+                comment_query,
+                str(idempotency_key),
+                expected_user=expected_user if accepted_submit_reconcile else "",
+                expected_account=expected_account if accepted_submit_reconcile else "",
+                accepted_submit_contract_version=(
+                    ACCEPTED_SUBMIT_CONTRACT_VERSION if accepted_submit_reconcile else None
+                ),
+                submission_attempt_started_at=(attempt_anchor if accepted_submit_reconcile else None),
+            )
         except ReconcileQueryUnavailable as error:
             # Transient failure: we did NOT confirm absence. Keep the row
             # reserved (do not touch status) and retry on a later pass. Never
@@ -708,12 +1408,109 @@ def reconcile_reserved_unbound_jobs(
                 idempotency_key,
                 error,
             )
+            write_count = (
+                _record_file_reconciliation(
+                    store,
+                    job,
+                    "accounting_unavailable",
+                    reason_class=error.reason_class,
+                )
+                if accepted_submit_reconcile
+                else 0
+            )
             outcomes.append(
                 ReservationReconcileOutcome(
                     job_id=job.job_id,
                     idempotency_key=str(idempotency_key),
                     action="query_unavailable",
                     status=str(job.status),
+                    reconciliation_source="slurm_exact_comment" if accepted_submit_reconcile else None,
+                    reconciliation_decision="accounting_unavailable" if accepted_submit_reconcile else None,
+                    reconciliation_reason_class=(error.reason_class if accepted_submit_reconcile else None),
+                    durable_write_kind="pipeline_job_reconciliation" if write_count else None,
+                    durable_write_count=write_count,
+                )
+            )
+            continue
+        if (
+            accepted_submit_reconcile
+            and proof.kind == "global_absence"
+            and not _effective_versioned_absence_coverage(proof, attempt_anchor=attempt_anchor)
+        ):
+            write_count = _record_file_reconciliation(
+                store,
+                job,
+                "accounting_unavailable",
+                reason_class="coverage_incomplete",
+            )
+            outcomes.append(
+                ReservationReconcileOutcome(
+                    job_id=job.job_id,
+                    idempotency_key=str(idempotency_key),
+                    action="query_unavailable",
+                    status=str(job.status),
+                    reconciliation_source="slurm_exact_comment",
+                    reconciliation_decision="accounting_unavailable",
+                    reconciliation_reason_class="coverage_incomplete",
+                    durable_write_kind="pipeline_job_reconciliation" if write_count else None,
+                    durable_write_count=write_count,
+                )
+            )
+            continue
+        if accepted_submit_reconcile and proof.kind == "ambiguous":
+            write_count = _record_file_reconciliation(store, job, "multiple_matches_blocked")
+            outcomes.append(
+                ReservationReconcileOutcome(
+                    job_id=job.job_id,
+                    idempotency_key=str(idempotency_key),
+                    action="multiple_matches_blocked",
+                    status=str(job.status),
+                    reconciliation_source="slurm_exact_comment",
+                    reconciliation_decision="multiple_matches_blocked",
+                    match_count=min(len(proof.records), MAX_EXACT_COMMENT_MATCHES + 1),
+                    durable_write_kind="pipeline_job_reconciliation" if write_count else None,
+                    durable_write_count=write_count,
+                )
+            )
+            continue
+        if accepted_submit_reconcile and proof.kind == "foreign_collision":
+            write_count = _record_file_reconciliation(store, job, "identity_mismatch_blocked")
+            outcomes.append(
+                ReservationReconcileOutcome(
+                    job_id=job.job_id,
+                    idempotency_key=str(idempotency_key),
+                    action="identity_mismatch_blocked",
+                    status=str(job.status),
+                    reconciliation_source="slurm_exact_comment",
+                    reconciliation_decision="identity_mismatch_blocked",
+                    match_count=min(len(proof.records), MAX_EXACT_COMMENT_MATCHES + 1),
+                    durable_write_kind="pipeline_job_reconciliation" if write_count else None,
+                    durable_write_count=write_count,
+                )
+            )
+            continue
+        record = (
+            proof.records[0]
+            if proof.records and (proof.kind == "owned_match" or not accepted_submit_reconcile)
+            else None
+        )
+        if (
+            accepted_submit_reconcile
+            and record is not None
+            and not _reserved_record_identity_matches(store, record, job, str(idempotency_key))
+        ):
+            write_count = _record_file_reconciliation(store, job, "identity_mismatch_blocked")
+            outcomes.append(
+                ReservationReconcileOutcome(
+                    job_id=job.job_id,
+                    idempotency_key=str(idempotency_key),
+                    action="identity_mismatch_blocked",
+                    status=str(job.status),
+                    reconciliation_source="slurm_exact_comment",
+                    reconciliation_decision="identity_mismatch_blocked",
+                    match_count=1,
+                    durable_write_kind="pipeline_job_reconciliation" if write_count else None,
+                    durable_write_count=write_count,
                 )
             )
             continue
@@ -728,53 +1525,145 @@ def reconcile_reserved_unbound_jobs(
             or not SLURM_JOB_ID_RE.fullmatch(str(record.slurm_job_id))
         ):
             # Confirmed-absent BUT possibly just slurmdbd propagation lag: if the
-            # reservation's last sbatch attempt is younger than `grace`, defer
+            # reservation's immutable current-attempt anchor is younger than
+            # `grace`, defer
             # demotion to a later pass rather than risk demoting an in-flight job
-            # into a reclaim+re-sbatch double-submit. Anchor on updated_at —
-            # refreshed by the reserve INSERT, the reclaim takeover, AND bind — so
-            # a reclaimed+re-submitted reservation keeps grace coverage; created_at
-            # is left stale by reclaim and would silently drop that protection.
-            # (updated_at is NOT NULL by DB default; created_at is a legacy fallback.)
-            anchor = getattr(job, "updated_at", None)
-            if anchor is None:
-                anchor = getattr(job, "created_at", None)
+            # into a reclaim+re-sbatch double-submit. Accepted-submit cohorts use
+            # submission_attempt_started_at: reconciliation evidence may refresh
+            # updated_at, but cannot extend this attempt's grace. Legacy rows keep
+            # updated_at with created_at as their compatibility fallback.
+            anchor = attempt_anchor
             if anchor is not None:
                 if anchor.tzinfo is None:
                     anchor = anchor.replace(tzinfo=UTC)
-                if now() - anchor < grace:
+                absence_grace = (
+                    accepted_submit_grace
+                    if accepted_submit_reconcile and accepted_submit_grace is not None
+                    else grace
+                )
+                if now() - anchor < absence_grace:
+                    write_count = (
+                        _record_file_reconciliation(store, job, "absence_deferred")
+                        if accepted_submit_reconcile
+                        else 0
+                    )
                     outcomes.append(
                         ReservationReconcileOutcome(
                             job_id=job.job_id,
                             idempotency_key=str(idempotency_key),
                             action=ABSENCE_UNCONFIRMED_ACTION,
                             status=str(job.status),
+                            reconciliation_source="slurm_exact_comment" if accepted_submit_reconcile else None,
+                            reconciliation_decision="absence_deferred" if accepted_submit_reconcile else None,
+                            durable_write_kind="pipeline_job_reconciliation" if write_count else None,
+                            durable_write_count=write_count,
                         )
                     )
                     continue
-            store.update_job_status(
-                job.job_id,
-                RESERVATION_LOST_STATUS,
-                error_code="SLURM_RESERVATION_LOST",
-                error_message=(
-                    "sbatch acceptance for reservation "
-                    f"idempotency_key={idempotency_key} could not be confirmed in accounting."
-                ),
-            )
+            retry_permitted = False
+            permit_retry = getattr(store, "permit_pipeline_job_retry", None)
+            if accepted_submit_reconcile and callable(permit_retry):
+                retry_kwargs: dict[str, Any] = {
+                    "expected_submission_attempt": _job_submission_attempt(job),
+                    "expected_status": str(job.status),
+                }
+                retry_supports_anchor = _callable_accepts_keyword(
+                    permit_retry, "expected_submission_attempt_started_at"
+                )
+                if retry_supports_anchor:
+                    retry_kwargs["expected_submission_attempt_started_at"] = attempt_anchor
+                if _callable_accepts_keyword(permit_retry, "accepted_submit_contract_version"):
+                    retry_kwargs["accepted_submit_contract_version"] = ACCEPTED_SUBMIT_CONTRACT_VERSION
+                retry_write_count = (
+                    int(
+                        permit_retry(
+                            job.job_id,
+                            **retry_kwargs,
+                        )
+                    )
+                    if retry_supports_anchor
+                    else 0
+                )
+                retry_permitted = retry_write_count > 0
+            else:
+                store.update_job_status(
+                    job.job_id,
+                    RESERVATION_LOST_STATUS,
+                    error_code="SLURM_RESERVATION_LOST",
+                    error_message=(
+                        "sbatch acceptance for reservation "
+                        f"idempotency_key={idempotency_key} could not be confirmed in accounting."
+                    ),
+                )
+                retry_permitted = True
+                retry_write_count = 1
             outcomes.append(
                 ReservationReconcileOutcome(
                     job_id=job.job_id,
                     idempotency_key=str(idempotency_key),
-                    action="reservation_lost",
-                    status=RESERVATION_LOST_STATUS,
+                    action=(
+                        "absence_retry_permitted"
+                        if accepted_submit_reconcile and retry_permitted
+                        else "stale_attempt_blocked"
+                        if accepted_submit_reconcile
+                        else "reservation_lost"
+                    ),
+                    status=RESERVATION_LOST_STATUS if retry_permitted else str(job.status),
+                    reconciliation_source="slurm_exact_comment" if accepted_submit_reconcile else None,
+                    reconciliation_decision=(
+                        "absence_retry_permitted" if accepted_submit_reconcile and retry_permitted else None
+                    ),
+                    durable_write_kind=(
+                        "forecast_retry_permission"
+                        if accepted_submit_reconcile and retry_write_count
+                        else "pipeline_job_status"
+                        if not accepted_submit_reconcile
+                        else None
+                    ),
+                    durable_write_count=retry_write_count,
                 )
             )
             continue
 
-        bound = store.bind_reservation(
-            str(idempotency_key),
-            slurm_job_id=record.slurm_job_id,
-            status="submitted",
-        )
+        if accepted_submit_reconcile:
+            committer = getattr(store, "commit_pipeline_job_submit_attempt", None)
+            if not callable(committer):
+                raise ReconcileQueryUnavailable("accepted-submit commit API unavailable")
+            commit_kwargs: dict[str, Any] = {
+                "expected_submission_attempt": _job_submission_attempt(job),
+                "slurm_job_id": record.slurm_job_id,
+                "transition": AcceptedSubmitTransition.accounting(
+                    "matched_bound",
+                    submit_outcome="accepted",
+                    matched_slurm_job_id=record.slurm_job_id,
+                    status="submitted",
+                ),
+            }
+            if _callable_accepts_keyword(committer, "pipeline_job_id"):
+                commit_kwargs["pipeline_job_id"] = job.job_id
+            commit_result = committer(str(idempotency_key), **commit_kwargs)
+            if not commit_result.committed:
+                outcomes.append(
+                    ReservationReconcileOutcome(
+                        job_id=job.job_id,
+                        idempotency_key=str(idempotency_key),
+                        action="stale_attempt_blocked",
+                        status=str(job.status),
+                        reconciliation_source="slurm_exact_comment",
+                        reconciliation_decision=None,
+                        match_count=1,
+                    )
+                )
+                continue
+            bound = commit_result.row
+            write_count = int(commit_result.wrote)
+        else:
+            bound = store.bind_reservation(
+                str(idempotency_key),
+                slurm_job_id=record.slurm_job_id,
+                status="submitted",
+            )
+            write_count = 1 if bound is not None else 0
         bound_status = "submitted" if bound is not None else str(job.status)
         outcomes.append(
             ReservationReconcileOutcome(
@@ -783,7 +1672,378 @@ def reconcile_reserved_unbound_jobs(
                 action="bound",
                 status=bound_status,
                 slurm_job_id=record.slurm_job_id,
+                reconciliation_source="slurm_exact_comment" if accepted_submit_reconcile else None,
+                reconciliation_decision="matched_bound" if accepted_submit_reconcile else None,
+                matched_slurm_job_id=record.slurm_job_id if accepted_submit_reconcile else None,
+                match_count=1 if accepted_submit_reconcile else None,
+                durable_write_kind="reservation_bind" if write_count else None,
+                durable_write_count=write_count,
             )
         )
 
     return outcomes
+
+
+def _comment_query_records(
+    value: CommentAccountingResult | SacctRecord | Sequence[SacctRecord] | None,
+    *,
+    expected_user: str = "",
+    expected_account: str = "",
+) -> tuple[SacctRecord, ...]:
+    if value is None:
+        return ()
+    values = (value,) if isinstance(value, SacctRecord) else value
+    owned = (
+        item
+        for item in values
+        if isinstance(item, SacctRecord)
+        and (not expected_user or item.user == expected_user)
+        and (not expected_account or item.account == expected_account)
+    )
+    return tuple(item for _, item in zip(range(MAX_EXACT_COMMENT_MATCHES), owned, strict=False))
+
+
+def _bounded_comment_records(
+    value: CommentAccountingResult | SacctRecord | Sequence[SacctRecord] | None,
+) -> tuple[SacctRecord, ...]:
+    if value is None:
+        return ()
+    values = (value,) if isinstance(value, SacctRecord) else value
+    return tuple(
+        item
+        for _, item in zip(
+            range(MAX_EXACT_COMMENT_MATCHES),
+            (entry for entry in values if isinstance(entry, SacctRecord)),
+            strict=False,
+        )
+    )
+
+
+def _classify_global_comment_records(
+    records: tuple[SacctRecord, ...],
+    *,
+    expected_user: str,
+    expected_account: str,
+    coverage_complete: bool = False,
+    coverage_start: datetime | None = None,
+    coverage_end: datetime | None = None,
+) -> _CommentAccountingProof:
+    if not records:
+        return _CommentAccountingProof(
+            "global_absence",
+            coverage_complete=coverage_complete,
+            coverage_start=coverage_start,
+            coverage_end=coverage_end,
+        )
+    owned = tuple(
+        record
+        for record in records
+        if (not expected_user or record.user == expected_user)
+        and (not expected_account or record.account == expected_account)
+    )
+    foreign = tuple(record for record in records if record not in owned)
+    if foreign:
+        return _CommentAccountingProof("foreign_collision", records)
+    if len(owned) > 1:
+        return _CommentAccountingProof("ambiguous", owned)
+    if owned:
+        return _CommentAccountingProof("owned_match", owned)
+    return _CommentAccountingProof("global_absence")
+
+
+def _effective_versioned_absence_coverage(
+    proof: _CommentAccountingProof,
+    *,
+    attempt_anchor: datetime | None,
+) -> bool:
+    """Recompute absence authority from durable anchor and adapter bounds."""
+
+    anchor = _strict_utc_datetime(attempt_anchor)
+    coverage_start = _strict_utc_datetime(proof.coverage_start)
+    coverage_end = _strict_utc_datetime(proof.coverage_end)
+    return bool(
+        proof.coverage_complete is True
+        and anchor is not None
+        and coverage_start is not None
+        and coverage_end is not None
+        and coverage_start <= anchor <= coverage_end
+    )
+
+
+def _query_comment_accounting_proof(
+    comment_query: CommentSacctQuerier,
+    idempotency_key: str,
+    *,
+    expected_user: str,
+    expected_account: str,
+    accepted_submit_contract_version: str | None = None,
+    submission_attempt_started_at: datetime | None = None,
+) -> _CommentAccountingProof:
+    """Obtain an owner match or an authoritative global exact-comment proof."""
+
+    supports_scope = _comment_query_accepts_scope(comment_query)
+    if not supports_scope:
+        # A legacy one-argument fake represents a global collection. Never
+        # owner-filter it into a false zero-match proof.
+        global_value = comment_query(idempotency_key)
+        return _classify_global_comment_records(
+            _bounded_comment_records(global_value),
+            expected_user=expected_user,
+            expected_account=expected_account,
+            coverage_complete=accepted_submit_contract_version is None,
+        )
+
+    scoped_kwargs: dict[str, Any] = {
+        "expected_user": expected_user or None,
+        "expected_account": expected_account or None,
+    }
+    if accepted_submit_contract_version is not None and _comment_query_accepts_contract_version(comment_query):
+        scoped_kwargs["accepted_submit_contract_version"] = accepted_submit_contract_version
+    if submission_attempt_started_at is not None and _comment_query_accepts_attempt_anchor(comment_query):
+        scoped_kwargs["submission_attempt_started_at"] = submission_attempt_started_at
+    owner_value = comment_query(idempotency_key, **scoped_kwargs)
+    owner_records = _bounded_comment_records(owner_value)
+    if isinstance(owner_value, CommentAccountingResult) and owner_value.scope == "global":
+        return _classify_global_comment_records(
+            owner_records,
+            expected_user=expected_user,
+            expected_account=expected_account,
+            coverage_complete=owner_value.coverage_complete,
+            coverage_start=owner_value.coverage_start,
+            coverage_end=owner_value.coverage_end,
+        )
+    owned = _comment_query_records(
+        owner_records,
+        expected_user=expected_user,
+        expected_account=expected_account,
+    )
+    if len(owned) > 1:
+        return _CommentAccountingProof("ambiguous", owned)
+    if owner_records:
+        if not owned:
+            return _CommentAccountingProof("foreign_collision", owner_records)
+        owner_candidate = owned[0]
+    else:
+        owner_candidate = None
+
+    # Neither owner-scoped zero nor one owner candidate proves global identity.
+    # A bounded all-ownership view must prove either one identical owned master
+    # or zero exact-comment rows before bind/retry can proceed.
+    global_kwargs = dict(scoped_kwargs)
+    global_kwargs.update({"expected_user": None, "expected_account": None})
+    global_value = comment_query(idempotency_key, **global_kwargs)
+    if isinstance(global_value, CommentAccountingResult) and global_value.scope != "global":
+        raise ReconcileQueryUnavailable("exact-comment adapter did not provide global proof")
+    global_proof = _classify_global_comment_records(
+        _bounded_comment_records(global_value),
+        expected_user=expected_user,
+        expected_account=expected_account,
+        coverage_complete=(
+            global_value.coverage_complete
+            if isinstance(global_value, CommentAccountingResult)
+            else accepted_submit_contract_version is None
+        ),
+        coverage_start=(
+            global_value.coverage_start if isinstance(global_value, CommentAccountingResult) else None
+        ),
+        coverage_end=(
+            global_value.coverage_end if isinstance(global_value, CommentAccountingResult) else None
+        ),
+    )
+    if owner_candidate is not None and global_proof.kind == "owned_match":
+        global_candidate = global_proof.records[0]
+        if (
+            global_candidate.slurm_job_id != owner_candidate.slurm_job_id
+            or global_candidate.user != owner_candidate.user
+            or global_candidate.account != owner_candidate.account
+            or global_candidate.comment != owner_candidate.comment
+        ):
+            return _CommentAccountingProof(
+                "foreign_collision", (owner_candidate, global_candidate)
+            )
+    elif owner_candidate is not None and global_proof.kind == "global_absence":
+        return _CommentAccountingProof("foreign_collision", (owner_candidate,))
+    return global_proof
+
+
+def _comment_query_accepts_scope(comment_query: CommentSacctQuerier) -> bool:
+    try:
+        parameters = tuple(inspect.signature(comment_query).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    parameter_names = {parameter.name for parameter in parameters}
+    return any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters) or {
+        "expected_user",
+        "expected_account",
+    }.issubset(parameter_names)
+
+
+def _comment_query_accepts_contract_version(comment_query: CommentSacctQuerier) -> bool:
+    try:
+        parameters = tuple(inspect.signature(comment_query).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    return any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters) or any(
+        parameter.name == "accepted_submit_contract_version" for parameter in parameters
+    )
+
+
+def _comment_query_accepts_attempt_anchor(comment_query: CommentSacctQuerier) -> bool:
+    try:
+        parameters = tuple(inspect.signature(comment_query).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    return any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters) or any(
+        parameter.name == "submission_attempt_started_at" for parameter in parameters
+    )
+
+
+def _callable_accepts_keyword(callable_value: Callable[..., Any], name: str) -> bool:
+    try:
+        parameters = tuple(inspect.signature(callable_value).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    return any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters) or any(
+        parameter.name == name for parameter in parameters
+    )
+
+
+def _query_comment_accounting(
+    comment_query: CommentSacctQuerier,
+    idempotency_key: str,
+    *,
+    expected_user: str,
+    expected_account: str,
+    submission_attempt_started_at: datetime | None = None,
+) -> SacctRecord | Sequence[SacctRecord] | None:
+    """Compatibility wrapper for direct adapter callers."""
+
+    if _comment_query_accepts_scope(comment_query):
+        kwargs: dict[str, Any] = {
+            "expected_user": expected_user or None,
+            "expected_account": expected_account or None,
+        }
+        if submission_attempt_started_at is not None and _comment_query_accepts_attempt_anchor(comment_query):
+            kwargs["submission_attempt_started_at"] = submission_attempt_started_at
+        return comment_query(idempotency_key, **kwargs)
+    return comment_query(idempotency_key)
+
+
+def _job_submission_attempt(job: Any) -> int:
+    try:
+        return max(int(getattr(job, "submission_attempt", 1) or 1), 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _job_attempt_anchor(job: Any, *, accepted_submit_reconcile: bool) -> datetime | None:
+    if accepted_submit_reconcile:
+        # A versioned absence is authoritative only for the durable current
+        # attempt. Never substitute created_at/updated_at for missing evidence.
+        return _strict_utc_datetime(getattr(job, "submission_attempt_started_at", None))
+    anchor = getattr(job, "updated_at", None)
+    if anchor is None:
+        anchor = getattr(job, "created_at", None)
+    return _as_utc_datetime(anchor)
+
+
+def _record_file_reconciliation(
+    store: Any,
+    job: Any,
+    decision: str,
+    *,
+    reason_class: str | None = None,
+) -> int:
+    return _transition_file_reconciliation(
+        store,
+        job,
+        AcceptedSubmitTransition.accounting(
+            decision,
+            submit_outcome="submit_result_ambiguous",
+            reconciliation_reason_class=reason_class,
+        ),
+    )
+
+
+def _transition_file_reconciliation(
+    store: Any,
+    job: Any,
+    transition: AcceptedSubmitTransition,
+) -> int:
+    transitioner = getattr(store, "transition_pipeline_job_submit_evidence", None)
+    if callable(transitioner):
+        transition_kwargs: dict[str, Any] = {
+            "expected_submission_attempt": _job_submission_attempt(job),
+            "expected_statuses": (str(job.status),),
+            "require_unbound": getattr(job, "slurm_job_id", None) in (None, ""),
+        }
+        if _callable_accepts_keyword(transitioner, "accepted_submit_contract_version"):
+            transition_kwargs["accepted_submit_contract_version"] = ACCEPTED_SUBMIT_CONTRACT_VERSION
+        result = transitioner(
+            job.job_id,
+            transition,
+            **transition_kwargs,
+        )
+        return int(getattr(result, "wrote", False))
+    return 0
+
+
+def _transition_file_runtime_status(store: Any, job: Any, status: str) -> int:
+    transitioner = getattr(store, "transition_pipeline_job_runtime_status", None)
+    if not callable(transitioner):
+        return 0
+    result = transitioner(
+        job.job_id,
+        status,
+        expected_statuses=(str(job.status),),
+    )
+    return int(getattr(result, "wrote", False))
+
+
+def _reserved_record_identity_matches(store: Any, record: SacctRecord, job: Any, idempotency_key: str) -> bool:
+    identity = vars(job) if hasattr(job, "__dict__") else {}
+    if not forecast_cohort_identity_is_valid(identity) or not _file_cohort_runtime_identity_matches(store, identity):
+        return False
+    if idempotency_key_from_comment(record.comment) != idempotency_key:
+        return False
+    if not SLURM_JOB_ID_RE.fullmatch(str(record.slurm_job_id)):
+        return False
+    expected_token = _expected_job_name_token(getattr(job, "stage", None), getattr(job, "job_type", None))
+    if not _identity_matches(record, expected_token, job, require_durable_identity=False):
+        return False
+    for record_value, job_field in (
+        (record.run_id, "run_id"),
+        (record.stage, "stage"),
+        (record.pipeline_job_id, "job_id"),
+    ):
+        expected = getattr(job, job_field, None)
+        if record_value not in (None, "") and expected not in (None, "") and str(record_value) != str(expected):
+            return False
+    expected_user = str(getattr(job, "expected_slurm_user", None) or "")
+    expected_account = str(getattr(job, "expected_slurm_account", None) or "")
+    if bool(getattr(job, "slurm_ownership_required", False)) and (
+        not expected_user or not expected_account or not record.user or not record.account
+    ):
+        return False
+    if expected_user and record.user != expected_user:
+        return False
+    if expected_account and record.account != expected_account:
+        return False
+    return True
+
+
+def _accepted_submit_reconcile_job(store: Any, job: Any) -> bool:
+    identity = vars(job) if hasattr(job, "__dict__") else {}
+    pre_outcome_reservation = identity.get("submit_outcome") is None
+    return bool(
+        getattr(store, "supports_accepted_submit_reconcile", False)
+        and _accepted_submit_versioned_job(job)
+        and _is_forecast_cohort_job(job)
+        and forecast_cohort_identity_is_valid(identity)
+        and (pre_outcome_reservation or _file_cohort_runtime_identity_matches(store, identity))
+    )
+
+
+def _accepted_submit_versioned_job(job: Any) -> bool:
+    identity = vars(job) if hasattr(job, "__dict__") else job
+    return isinstance(identity, Mapping) and accepted_submit_contract_is_current(identity)

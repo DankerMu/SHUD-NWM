@@ -30,6 +30,11 @@ by `PsycopgOrchestratorRepository`.
 - **AND** read-modify-write appends, event-id allocation, reservation duplicate
   checks, direct snapshot materialization, and latest materialization are
   linearized by a durable per-cycle file lock
+- **AND** scheduler-pass lease configuration and journal-transaction guard
+  configuration have distinct, unambiguous semantics; a mode that omits
+  `flock` for the lease MUST NOT silently become `flock` for the journal
+- **AND** DB-free startup fails closed when the configured shared filesystem has
+  no supported cross-process journal transaction guard
 - **AND** direct pipeline-job snapshots are materialized only after the
   append-only journal truth is committed, so append failure cannot leave a
   direct-only reservation blocker
@@ -178,3 +183,519 @@ orchestration state behavior against existing scheduler semantics.
   decisions are visible to scheduler planning
 - **AND** DB-backed active/orchestrator repository factories are not called in
   DB-free read-side construction.
+
+### Requirement: Accepted forecast cohort submission is reconciled exactly once
+
+The system SHALL preserve and recover a DB-free forecast cohort across the window where
+Slurm accepted an array but the Gateway response did not durably return, without
+creating, adopting, or cancelling an array whose exact identity is unproven.
+
+Before invoking the Gateway, every reservation write MUST use strict durable
+replacement semantics: file and parent-directory durability plus parent
+identity verification are mandatory, and an indeterminate result MUST fail
+closed rather than report a usable reservation.
+
+Persisted and emitted reconciliation evidence MUST use `submit_outcome` in
+`accepted|submit_result_ambiguous|rejected`,
+`reconciliation_source=slurm_exact_comment`, and `reconciliation_decision` in
+`matched_bound|absence_deferred|absence_retry_permitted|multiple_matches_blocked|identity_mismatch_blocked|accounting_unavailable`.
+`matched_slurm_job_id` MUST remain null until an exact unique identity is
+proven. Candidate projection MUST use `array_task_id`, `array_task_outcome` in
+`succeeded|failed|unverified`, `restart_stage`, and
+`native_shud_resubmitted`.
+
+A reservation MAY temporarily omit `submit_outcome` only between its durable
+pre-submit write and durable Gateway-result classification. Restart recovery
+MUST atomically classify that state as `submit_result_ambiguous` before it
+persists any reconciliation decision. Task-accounting completeness MUST use
+pipeline status/error/projection fields and MUST NOT add values to the closed
+`reconciliation_decision` enum above.
+
+Reclaiming a reservation for a new submission attempt MUST atomically increment
+the attempt and clear `submit_outcome`, `reconciliation_source`,
+`reconciliation_decision`, and `matched_slurm_job_id` before the next Gateway
+call. Reopening the journal in that pre-Gateway window MUST NOT expose evidence
+from the prior attempt.
+
+Every submit/reconciliation transition MUST compare the durable submission
+attempt and expected state under the same cycle lock. Gateway success MUST
+atomically bind its Slurm ID and `accepted` outcome; accounting adoption MUST
+atomically bind the ID and `matched_bound` tuple. Repeating the same ID is
+idempotent, while a stale transition or different-ID collision MUST NOT mutate
+the winning row. Every versioned master MUST carry a valid aware-UTC immutable
+`submission_attempt_started_at`; a retry reclaim MUST create its next anchor
+under the cycle lock, and retry permission MUST compare the expected attempt
+number and anchor. Persisted current-version master classification and authority
+identity MUST be sticky: an ordinary upsert MUST NOT downgrade it to a
+non-master/candidate or mutate any master identity field, and only typed reclaim
+MAY advance attempt and anchor together. Ordinary upsert also MUST NOT change a
+versioned master's Slurm binding, status, outcome, reconciliation tuple/reason,
+projection, runtime/retry/error/log state; an exact replay MUST perform no
+authority write. Each legal master transition MUST use its typed commit,
+reconciliation, rejection, retry-permission, reclaim, or projection boundary.
+Generic status and reconciliation compatibility APIs MUST fail before writing
+when they would change any current-version master authority field, including a
+retryable status or absence permission. Reclaim MUST independently require the
+complete current-attempt typed absence proof and immutable attempt anchor; a
+generic compatibility write cannot manufacture retry authority.
+The same restriction applies to generic reserve, bind, and unmarked submit
+transition APIs: a current-version reservation MUST start clean and unbound,
+including zero/false/null retry count, manual-retry marker, and previous-job
+provenance fields. Passing the current contract version to a generic API MUST
+NOT grant typed authority. The generic submit-evidence API MAY record only
+non-binding deferred/unavailable/mismatch/multiple-match decisions under an
+exact current-attempt state compare; begin-attempt, accepted or adopted
+binding, rejection, and absence retry permission MUST use their dedicated
+typed boundaries. In particular,
+accepted binding MUST use the attempt-aware commit boundary, and
+`absence_retry_permitted` MUST be produced only by the authoritative typed
+retry-permission boundary. Marker-free rows retain their legacy API behavior.
+
+A typed runtime synchronization transition MUST use a closed, monotonic state
+graph and MUST require an accepted or exactly adopted real Slurm binding.
+Unknown, backward, unbound, or pre-acceptance runtime updates MUST be
+zero-write. `cancellation_pending` is a sticky durable intent: ordinary
+queued/running accounting MUST NOT overwrite it, and only typed cancellation
+completion or exact terminal task accounting/projection MAY leave it.
+Poll-timeout unverified state and a completed cancellation receipt MUST remain
+durably distinguishable. A reopened poll-timeout job MAY accept a typed
+cancellation intent and invoke the Gateway, while replay of a completed
+cancellation receipt MUST be idempotent and MUST NOT cancel again.
+The receipt discriminator is current-attempt typed authority: a fresh
+reservation MUST start false and reclaiming a new attempt MUST clear it.
+
+A Gateway timeout MUST persist only the ambiguous submit outcome and MUST leave
+`reconciliation_source`, `reconciliation_decision`, and
+`matched_slurm_job_id` null until accounting has actually been queried. The
+closed `submit_outcome` enum applies to both cohort-master and candidate-task
+rows.
+
+Only a typed, proven pre-acceptance rejection MAY persist `rejected`. Once a
+submit request may have reached `sbatch`, any transport error, parse failure,
+malformed success response, or unclassified Gateway failure MUST persist
+`submit_result_ambiguous` and reconcile by exact comment. A proven rejection
+MUST atomically terminalize the master and all matching-attempt hydro members;
+partial member terminalization MUST NOT be observable after reopen.
+The Gateway response adapter and accepted-bind commit boundary MUST both
+validate a closed submit-status enum. Null, empty, unknown, or otherwise
+malformed success status MUST NOT bind the returned Slurm ID; it remains a
+reserved, unbound ambiguous attempt in restart inventory until exact-comment
+reconciliation proves ownership. The same master-status enum MUST be validated
+when existing current-version journal/direct evidence is replayed; malformed
+persisted state fails closed rather than removing its anchor.
+
+Every repeated typed transition with the same normalized current-attempt state
+and evidence MUST be a zero-write replay: it MUST NOT append the cycle journal,
+rewrite direct state, or advance `updated_at`. A real typed evidence change MUST
+still append exactly once under the cycle lock.
+
+New accepted-submit master and candidate rows MUST carry an explicit contract
+version. Marker-free historical cohort-shaped rows MUST retain the legacy
+read/replay contract and MUST NOT be rejected for missing accepted-submit
+fields. Global accounting-visibility proof MUST be applied only to versioned
+accepted-submit cohorts, not to generic or non-DB-free reconciliation.
+
+#### Scenario: Forecast cohort reservation precedes the Gateway call
+
+- **WHEN** scheduler submits a source/cycle/restart-stage forecast cohort
+- **THEN** the file journal durably records its deterministic cohort identity,
+  ordered candidate/task member map, idempotency key, and exact Slurm comment
+  before the Gateway call
+- **AND** a real file-journal test reopens and observes that reservation inside
+  the fake Gateway boundary, before the external side effect
+- **AND** a Gateway response timeout records an ambiguous non-terminal submit
+  result rather than a permanent hydro or candidate failure.
+
+#### Scenario: Pre-outcome interruption and explicit rejection remain recoverable
+
+- **WHEN** a process restarts after the reservation write but before the Gateway
+  result was durably classified
+- **THEN** reconciliation first records `submit_result_ambiguous` and continues
+  exact-comment recovery, whether runtime member rows already exist or not
+- **AND** an exact-comment match without independently persisted runtime member
+  rows remains `identity_mismatch_blocked` rather than being bound
+- **AND WHEN** the Gateway explicitly rejects a forecast submission
+- **THEN** the journal accepts `submit_outcome=rejected`, terminalizes affected
+  hydro rows, and returns the ordinary submission-failure result without a
+  secondary evidence-validation failure.
+
+#### Scenario: Retry reclaim starts a clean attempt
+
+- **WHEN** authoritative accounting permits retry of an ambiguous attempt and
+  the scheduler reclaims its reservation
+- **THEN** the incremented attempt is durably `reserved` with no submit outcome
+  or accounting tuple before the next Gateway call
+- **AND** an immediate process restart reads the same clean pre-outcome state,
+  without inheriting the prior attempt's absence proof.
+
+#### Scenario: Versioned master authority cannot escape validation
+
+- **WHEN** an ordinary upsert attempts to change a persisted versioned master's
+  stage/job type, model/task class, cohort/digest, idempotency/comment,
+  ownership, restart/native-SHUD, attempt, or anchor identity
+- **THEN** the first illegal mutation fails closed and the original durable
+  identity remains unchanged after reopen
+- **AND** a multi-step master-to-non-master-to-master classification detour
+  cannot bypass the same invariant
+- **AND** valid candidate rows and marker-free generic/legacy rows retain their
+  documented compatibility behavior.
+
+#### Scenario: Generic upsert cannot forge a typed master transition
+
+- **WHEN** an accepted, rejected, retryable, or terminal versioned master is
+  presented to ordinary upsert with a changed Slurm ID, status, submit outcome,
+  reconciliation proof/reason, projection, runtime timestamp, retry, error, or
+  log field
+- **THEN** the mutation fails before append/direct materialization and reopen
+  preserves the original master exactly
+- **AND** clearing a bound Slurm ID or writing
+  `absence_retry_permitted` cannot make typed reclaim submit a second attempt
+- **AND** an exact same-value ordinary replay appends no journal record, while
+  the corresponding valid typed transition remains available.
+
+#### Scenario: Unique exact-comment match binds the accepted array
+
+- **WHEN** a later pass or process restart reconciles a reserved-unbound cohort
+  and authoritative accounting returns exactly one array with the exact comment
+  and matching source/cycle/stage/cohort identity
+- **THEN** the file journal binds that array master job ID and continues task
+  status reconciliation
+- **AND** scheduler neither submits nor cancels another forecast array.
+
+#### Scenario: Confirmed absence permits one bounded idempotent retry
+
+- **WHEN** authoritative exact-comment accounting returns zero matches from a
+  frozen query window that covers the current attempt anchor through query end,
+  before the configured reconciliation window expires
+- **THEN** the cohort remains in a bounded reconciling state and is not
+  resubmitted
+- **AND WHEN** authoritative zero-match evidence persists after the window
+- **THEN** the file journal permits exactly one idempotent submission attempt,
+  including under concurrent scheduler passes.
+- **AND WHEN** the current attempt predates the bounded accounting lookback, or
+  an adapter cannot prove full attempt coverage
+- **THEN** zero matches remain `accounting_unavailable` with bounded
+  `coverage_incomplete` evidence and MUST NOT permit retry.
+- **AND** reconcile MUST recompute coverage from valid aware
+  `coverage_start`/`coverage_end` bounds and the durable current-attempt anchor;
+  a completeness flag with missing, reversed, malformed, naive, or non-covering
+  bounds MUST NOT authorize absence.
+- **AND** an independently proven exact identity match MAY bind even when
+  absence coverage is incomplete.
+
+#### Scenario: Ownership mismatch is not authoritative absence
+
+- **WHEN** bounded exact-comment discovery finds a job owned by a different
+  Slurm user or account
+- **THEN** reconciliation records `identity_mismatch_blocked` and does not bind,
+  cancel, or submit another array
+- **AND** an owner-scoped zero result alone cannot become
+  `absence_retry_permitted`; retry requires bounded global zero-match proof.
+
+#### Scenario: Global accounting authority is proven and scale-bounded
+
+- **WHEN** scheduler preflight cannot prove that its principal sees jobs across
+  all users/accounts
+- **THEN** a successful empty `sacct --allusers` result is non-authoritative and
+  cannot permit retry
+- **AND WHEN** exact-comment discovery runs at the supported 256-member cadence
+- **THEN** it queries bounded time pages, counts an unterminated final row, and
+  aggregates at most the bounded zero/one/multiple proof without silently
+  discarding a row at the byte or row limit
+- **AND** all cohort queries in that reconcile session use the same frozen page
+  boundaries, so wall-clock advance cannot invalidate the page cache or starve
+  later GFS/IFS cohorts under the shared deadline.
+
+#### Scenario: Ambiguous or unavailable accounting fails closed
+
+- **WHEN** exact-comment accounting returns multiple matches, a mismatched
+  comment/cohort/stage/member identity, or an unavailable/non-authoritative
+  result
+- **THEN** scheduler does not bind, cancel, or submit another array
+- **AND** bounded evidence distinguishes multiple, mismatch, and unavailable
+  decisions so a later pass or operator can reconcile safely.
+
+#### Scenario: Accounting discovery and evidence are bounded and redacted
+
+- **WHEN** indexed exact-comment discovery proves multiple matches
+- **THEN** scheduler records `multiple_matches_blocked` with bounded count
+  evidence and no matched Slurm identity
+- **AND WHEN** a raw accounting page exceeds its configured byte/row limit
+- **THEN** scheduler records `accounting_unavailable` with a closed bounded
+  saturation reason class and MUST NOT bind, cancel, or permit retry
+- **AND** public evidence omits raw comments, credentials, local/shared-NFS
+  roots, and unbounded accounting payloads.
+
+#### Scenario: Inflight task accounting is bounded before materialization
+
+- **WHEN** master/task accounting exceeds its byte, row, or time limit
+- **THEN** reconciliation treats accounting as unavailable/incomplete and keeps
+  the cohort fail closed
+- **AND** the control process does not capture or split an unbounded output.
+- **AND** executable process-boundary tests cover byte, row, and wall-time
+  limits, including termination and reap behavior.
+
+#### Scenario: Terminal array tasks project to exact candidates
+
+- **WHEN** an adopted array has authoritative terminal task results
+- **THEN** each result is projected only to its exact reserved candidate/task
+  identity
+- **AND** the physical Slurm task ID suffix, reported task ID, canonical member
+  order, and reserved member identity all agree before any terminal projection
+- **AND** malformed, swapped, duplicate, or incomplete task identity remains
+  fail-closed without candidate or hydro mutation
+- **AND** foreground polling, immediate-terminal submit responses, and restart
+  reconciliation use the same typed cycle-lock transaction to persist terminal
+  master state, task projections, candidate/hydro rows, and events together
+- **AND** that typed transaction is the only accepted-submit authority allowed
+  to mutate terminal hydro state; the legacy generic post-stage updater is not
+  invoked after it commits
+- **AND** the durable master outcome is derived from the complete normalized
+  task set (`succeeded` only when every task succeeds, `partially_failed` for a
+  mixed set, and `failed` when none succeeds), while the raw Slurm master state
+  remains evidence and cannot override contradictory child-task truth
+- **AND** foreground and resumed execution derive their effective stage result
+  from that committed durable master outcome, so incomplete accounting,
+  projection conflict, or a terminal response for a different Slurm master
+  remains `reconcile_unverified`, performs no candidate/hydro terminal mutation,
+  submits no retry, and cannot enter a downstream stage
+- **AND** restart discovery includes terminal current-version masters only when
+  their terminal projection is incomplete, while replay of a complete
+  projection is zero-write and cannot move an already progressed hydro backward
+- **AND** successful forecast tasks clear their own stale
+  `SLURM_GATEWAY_UNAVAILABLE` hydro failure and resume at `state_save_qc`
+- **AND** failed or unverified tasks remain failed or reconciling without
+  relabelling/recomputing successful siblings.
+
+#### Scenario: Scheduler restart evidence proves the recovery result
+
+- **WHEN** reserved or inflight restart reconciliation changes a cohort
+- **THEN** public scheduler evidence includes the bounded submit/accounting
+  tuple, matched identity, cohort restart stage, native-SHUD resubmission flag,
+  and bounded candidate/task outcomes
+- **AND** it excludes raw comments, credentials, runtime roots, and raw
+  accounting rows.
+
+#### Scenario: Accepted-submit storage remains bounded over operational history
+
+- **WHEN** two daily forecast cycles each project one GFS and one IFS cohort
+  (four cohort masters per day) with up to 256 terminal members over long-term
+  history
+- **THEN** cycle reads and restart discovery do not enumerate every historical
+  member direct file or approach a global 100,000-file discovery limit
+- **AND** a durable active-reconcile index is atomically maintained by every
+  typed current-version master transition, so restart discovery cost and public
+  outcome materialization are bounded independently of terminal history size
+- **AND** a new active discovery anchor is durable before its journal side
+  effect; an orphan pre-journal anchor is removed by canonical replay, while a
+  journaled active row remains discoverable across a crash before direct/index
+  materialization and arbitrary later history
+- **AND** terminal journal truth commits before its discovery anchor is removed,
+  and stale terminal anchors are repaired on reopen
+- **AND** an idempotent, crash-resumable one-time backfill inventories existing
+  current-version and marker-free active rows under a durable completion marker;
+  steady-state restart queries do not recursively enumerate terminal master or
+  candidate history
+- **AND** a temporary file left by the inventory's own atomic-write protocol is
+  recognized only by its exact safe grammar, removed under the inventory lock,
+  and repaired from canonical truth, while every unknown directory entry still
+  fails closed
+- **AND** malformed, unreadable, byte-saturated, or record-saturated direct,
+  journal, or legacy-active authority input prevents the migration completion
+  marker; after repair, reopen resumes migration and publishes the marker only
+  after every authority surface is proven complete
+- **AND** every unexpected flat `.json` entry, including an unsafe filename or
+  disappearance after enumeration, is an authority blocker rather than a
+  skipped file
+- **AND** journal and legacy-active files use the same migration-only strict
+  disappearance rule at enumeration, stat, and read boundaries; ordinary
+  optional reads outside migration retain their compatibility semantics
+- **AND** the migration completion marker has exactly its schema version and a
+  canonical aware-UTC `completed_at`; a missing, malformed, naive, or extended
+  marker fails closed without setting process-local completion state
+- **AND** a supported downgrade first acquires the exact production file
+  scheduler lease, persists a root/lease-bound rollback preparation receipt,
+  removes the completion marker, and leaves a durable fence that blocks the
+  current-generation scheduler and automatic migration while the old writer is
+  allowed to run
+- **AND** every durable preparation cut point is re-entrant under that exact
+  lease: a valid `preparing` receipt left before or after marker removal is
+  resumed to one `prepared` fence without manual file surgery
+- **AND** heartbeat and synchronous guard renewal on the same lease instance are
+  serialized, so atomic renew cannot interpret process-local temp-file
+  contention as loss of the production lease
+- **AND** the only supported old-writer launch entry resolves a full immutable
+  Git generation from the clean target checkout, and target-generation format
+  validation precedes every lease, marker, fence, or receipt mutation
+- **AND** that launch entry accepts only a real `plan-production` submission
+  containing exactly one `--submit`, rejects plan/dry-run/eager-exit/other
+  commands and caller root/lock overrides, and requires the target checkout's
+  executable `.venv/bin/python`
+- **AND** after receipt validation it materializes the full target generation as
+  a private detached clean persistent source bundle and copies the already-opened,
+  identity-checked interpreter into a protected persistent runtime bundle;
+  both bundles SHALL be located beneath the workspace in the deterministic
+  private immutable retention root for the exact preparation receipt and target
+  generation, never beneath the target checkout or its venv;
+  active artifact validation SHALL traverse the complete runtime tree with a
+  bounded no-follow directory-descriptor walk, require every entry to be
+  owner-owned regular-file/directory only with its sealed non-writable mode,
+  reject symlink or special entries, and require only the bound interpreter to
+  carry executable mode;
+  that runtime bundle contains copied, non-symlinked interpreter libraries and
+  self-contained configuration, so removing or replacing the original venv
+  libraries/configuration cannot change later execution;
+  rechecking the original checkout and runtime before launch means a post-check
+  checkout or interpreter-path replacement cannot change the executed source or
+  interpreter
+- **AND** before the old writer starts, the current controller durably binds the
+  preparation receipt, journal/workspace/lease identity and target Git generation
+  as a `prepared` no-launch authority, then replaces it with the protected runtime
+  and protected source bundle as `active` before crossing the child-execution
+  boundary; the current HTTP Slurm gateway applies only that exact active
+  workspace binding even when the old writer does not understand the new manifest
+  fields, and conflicting explicit fields fail closed
+- **AND** launcher admission is exactly one matching durable `prepared`
+  authority for first launch or one matching durable `active` authority for
+  replay; missing authority and `completed` authority are zero-launch failures,
+  and only a new prepare may replace/archive a completed generation
+- **AND** the launcher overrides ambient configuration with the receipt-bound
+  journal root, workspace, file-lock backend and lock path, and carries the
+  protected target runtime and source through the HTTP Slurm gateway into forcing,
+  forecast and state-save worker templates; all three stages execute from the
+  bound source generation, while workspaces without an active binding preserve
+  their existing console entrypoints
+- **AND** each single, array, or direct-render Gateway request captures and
+  validates the workspace binding once, reuses that immutable request-local
+  value for every task and render step, rejects active-binding overrides of
+  `PATH`, `PYTHONPATH`, `PYTHONHOME`, or `VIRTUAL_ENV`; every active script unsets
+  `PYTHONHOME` and `VIRTUAL_ENV`, exports the bound source as the exact
+  `PYTHONPATH`, replaces ambient `PATH` with the bound runtime bin plus the fixed
+  minimal system path, and uses the exact bound interpreter for worker commands
+  and both forecast inline Python blocks
+- **AND** a separate cross-process rollback execution lock is held across the
+  complete old-writer process and inherited across launcher failure, so
+  roll-forward cannot consume the fence before or while that writer runs
+- **AND** deleting the entire original target checkout after active publication
+  cannot invalidate the binding or forcing, forecast, and state-save execution;
+  the protected runtime and source remain on shared workspace storage after launch
+  and are removed only after every submitted worker that references them is
+  terminal; both paths, the execution-binding identity and the fail-closed
+  retention contract are launch evidence
+- **AND** dirty, untracked, unresolved, changed, mismatched, runtime-unavailable,
+  or snapshot-unavailable targets are rejected before any writer is started;
+  caller-supplied generation claims are not launch authority
+- **AND** roll-forward requires the matching preparation receipt and the same
+  scheduler lease; before its first mutation it must use bounded current
+  reconcile-inventory authority—not global historical replay—to prove every
+  rollback-era job is in the explicit terminal allowlist; local/no-ID jobs,
+  blank/unknown statuses, partial cohort projection, and any
+  enumerate/stat/read disappearance block; it captures the root signatures for
+  reconcile-inventory, journal, latest, direct pipeline-jobs, and legacy-active
+  at query start, and any initially existing root disappearance, replacement, or
+  signature change through the final check reports
+  `file_journal_quiescence_authority_changed`; every directory entered by a
+  recursive authority walker is likewise signature-checked before list, after
+  list, and after child recursion, so nested pre-list deletion, replacement, or
+  addition cannot become an empty or different authority view. A root is empty
+  only when it stays nonexistent throughout the query. The proof query itself performs no
+  durable write, and unavailable evidence fails closed
+- **AND** roll-forward can cancel an unlaunched preparation only from the exact
+  durable `prepared` authority; missing or tampered authority fails closed, while
+  both `prepared` and `active` transition to `rolling_forward` before the strict
+  crash-resumable backfill, then to `completed` only after it restores the
+  completion marker, publishes the bound roll-forward receipt and consumes the
+  fence; replay resumes the persisted transition, and a later supported rollback
+  preserves prior completed binding evidence without mixing it into the new
+  preparation
+- **AND** a live scheduler lease, a tampered/stale/wrong-root receipt, or a lost
+  lease fails closed without changing migration authority
+- **AND** steady-state restart discovery after migration reads only the marker
+  and active inventory and does not enumerate or stat historical journal files;
+  the four-masters-per-day annual oracle materializes 1,460 real journals to
+  prove this bound
+- **AND** the oldest active cohort remains discoverable after reopen while a
+  terminal cohort is removed from the active index only in the same durable
+  transition that makes it ineligible for reconciliation
+- **AND** canonical journal evidence remains auditable under the documented
+  partition/index and retention contract.
+- **AND** versioned master reserve, accepted bind, rejection, retry permission,
+  and accounting adoption resolve their deterministic job only from exact
+  direct plus the corresponding cycle journal, so unrelated malformed or
+  over-limit history cannot block the current mutation.
+
+#### Scenario: Recovered success preserves run and QC provenance
+
+- **WHEN** a terminal successful task clears a stale transport failure
+- **THEN** its source/cycle/model, initial-state, output/checkpoint,
+  run-manifest, and QC lineage remain attached to the same candidate/run
+- **AND** reconcile does not synthesize a replacement forecast run.
+
+#### Scenario: Existing reconcile callers remain compatible
+
+- **WHEN** generic repository or non-DB-free reconcile processes a legacy row
+  without the additive cohort/member fields
+- **THEN** its existing status and identity contract remains valid
+- **AND** DB-free-only cohort fields are not made mandatory for that caller.
+
+#### Scenario: Accepted-submit retry and cycle control remain typed
+
+- **WHEN** a current-version forecast cohort has whole or partial terminal task
+  failure, status synchronization, or a cancellation request
+- **THEN** it does not create a marker-free retry clone or use a generic master
+  status mutation
+- **AND** retry stays within the attempt-aware accepted-submit lifecycle
+- **AND** retry permission requires a positive integer expected attempt and the
+  exact immutable attempt anchor under the same cycle lock; missing or invalid
+  CAS inputs are zero-write typed errors
+- **AND** non-terminal synchronization uses the typed runtime transition while
+  terminal truth is finalized only by exact task accounting/projection
+- **AND** cancellation intent is durable before the external cancel call, so a
+  process or Gateway failure remains recoverable on reopen
+- **AND** queued or running status observed after reopen preserves the pending
+  cancellation intent until typed cancel completion or exact terminal truth
+- **AND** a forecast poll timeout ends the current pass as `reconciling` and
+  cannot submit parse or state-save before exact terminal accounting
+- **AND** a poll-timeout unverified job can still persist a cancellation intent
+  and invoke the Gateway exactly once, while an existing cancellation receipt
+  remains idempotent
+- **AND** proven rejection without a real Slurm master ID is not retained as
+  terminal task-projection work in the active-reconcile inventory.
+
+#### Scenario: Accounting visibility probes are process-bounded
+
+- **WHEN** scheduler probes controller/accounting visibility with local Slurm
+  commands
+- **THEN** stdout, stderr, rows, wall time, termination, and process reap are
+  bounded before output materialization
+- **AND** saturation or timeout leaves accounting authority unproven and cannot
+  release retry permission.
+
+#### Scenario: Non-forecast array stages retain their prior contract
+
+- **WHEN** a non-forecast array stage receives a Gateway failure or a legacy
+  row contains cohort-like member fields
+- **THEN** #1112 does not project that stage as forecast success or attach
+  `restart_stage=state_save_qc`
+- **AND** the stage retains its pre-#1112 failure/retry behavior.
+
+### Requirement: Candidate restart stage survives cohort dispatch
+
+The system SHALL preserve each candidate's earliest incomplete canonical stage
+through restart-compatible grouping, durable cohort identity, run-context
+construction, and stage execution.
+
+#### Scenario: Downstream restart never repeats forecast
+
+- **WHEN** a recovered candidate has `restart_stage=state_save_qc`
+- **THEN** its execution cohort starts at `state_save_qc`
+- **AND** `run_shud_forecast_array` is not submitted
+- **AND** evidence records `native_shud_resubmitted=false`.
+
+#### Scenario: Mixed restart stages form distinct cohorts
+
+- **WHEN** selected candidates for one source/cycle include both `forecast` and
+  `state_save_qc` restart stages
+- **THEN** scheduler creates distinct deterministic cohort identities and
+  dispatches each from its own earliest incomplete stage
+- **AND** it does not lower the downstream cohort to `forecast`.

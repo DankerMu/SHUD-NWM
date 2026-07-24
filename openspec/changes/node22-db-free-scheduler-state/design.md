@@ -1244,6 +1244,411 @@ evidence: `block_declaration_missing` → `registry_cutover_declaration_missing`
 `transition_decision` is the coarse gate; the typed reason surfaces the
 specific field that failed.
 
+## Issue #1112 Fixture
+
+Fixture level: expanded/live-deployment
+Repair intensity: high
+
+Mandatory expanded triggers:
+
+- The failure sits in the accepted-submit/bind crash window: Slurm may own a
+  live 18-task array while the DB-free file journal still has no
+  `slurm_job_id`. Treating a transport timeout as rejection can either create
+  a duplicate array or permanently suppress a successful one.
+- Reconciliation mutates durable cohort, candidate, hydro-run, and array-task
+  state. Incorrect projection can clear real task failures or poison all
+  successful siblings with one stale cohort-level Gateway error.
+- `restart_stage` is a scheduler state-machine input. Losing
+  `state_save_qc` during grouping or run-context construction repeats native
+  SHUD forecast work and breaks verified warm-state continuity.
+- The node-22 live oracle changes production scheduler behavior and must prove
+  recovery on shared NFS while `DATABASE_URL` remains absent.
+
+Must preserve:
+
+- Reservation/comment identity is durable before every Gateway submission;
+  PostgreSQL and node-27 ingest/display remain outside this repair.
+- Exact identity is required before bind, cancellation, task projection, or
+  retry eligibility. An unverified or multiply matched Slurm job is never
+  adopted or cancelled.
+- File-journal append-first, per-cycle locking, materialized-latest ordering,
+  bounded reads, credential-safe evidence, and immutable operational receipts
+  remain unchanged.
+- Successful candidate siblings are never recomputed because another array
+  task failed; failed tasks are never relabelled successful.
+- Strict warm-start and model-generation gates remain fail closed.
+
+Must add/change:
+
+- Persist one forecast-cohort reservation carrying the exact idempotency key and Slurm
+  comment before the Gateway call. A transport timeout after submission is
+  recorded as `submit_result_ambiguous`, not as a permanent hydro/candidate
+  failure.
+- On restart, reconcile every reserved-unbound DB-free cohort by exact comment:
+  one identity binds the array; zero identities retain a bounded reconciling
+  state during the absence window and permit one idempotent submit attempt only
+  after that window; multiple identities, comment mismatch, or task/cohort
+  identity mismatch fail closed; unavailable accounting retains state for a
+  later retry.
+- Reconcile terminal array tasks against the reserved cohort member map and
+  project status per candidate. A successful forecast task clears only its
+  stale `SLURM_GATEWAY_UNAVAILABLE` hydro failure and resumes at
+  `state_save_qc`; a failed task remains failed/retry-eligible according to its
+  own identity.
+- Carry canonical `restart_stage` from candidate evidence through
+  restart-compatible grouping, deterministic cohort identity, basin manifest,
+  run context, and stage selection. Mixed stages form distinct durable
+  cohorts; `state_save_qc` cohorts cannot submit `run_shud_forecast_array`.
+- Emit bounded evidence containing reconciliation source, exact matched Slurm
+  identity, decision, candidate/task outcome, restart stage, and
+  `native_shud_resubmitted`.
+- Preserve pre-#1112 failure/retry behavior for non-forecast array stages;
+  accepted-submit member projection in this issue is limited to the canonical
+  forecast stage family.
+
+Persisted reconciliation/evidence contract for #1112:
+
+- `submit_outcome` is one of `accepted`, `submit_result_ambiguous`, or
+  `rejected`.
+- `reconciliation_source` is `slurm_exact_comment` when Slurm accounting is the
+  authority.
+- `reconciliation_decision` is one of `matched_bound`, `absence_deferred`,
+  `absence_retry_permitted`, `multiple_matches_blocked`,
+  `identity_mismatch_blocked`, or `accounting_unavailable`.
+- `matched_slurm_job_id` is present only after one exact identity is proven;
+  absence and blocked decisions persist `null`.
+- Candidate projections persist `array_task_id`, `array_task_outcome` in
+  `succeeded|failed|unverified`, `restart_stage`, and
+  `native_shud_resubmitted`.
+- Comment/accounting discovery is capped before materialization. An indexed
+  proof of multiple exact-comment matches maps to `multiple_matches_blocked`
+  with a bounded count/category only; raw page byte/row saturation cannot prove
+  multiplicity and remains fail-closed `accounting_unavailable`.
+
+Risk packs considered for #1112:
+
+- Public API / CLI / script entry: selected - `ProductionScheduler.run_once`,
+  production scheduler service/timer, and Slurm submission are active entries.
+- Config / project setup: selected - reconciliation/absence windows and
+  scheduler/Gateway runtime settings govern duplicate-prevention behavior.
+- File IO / path safety / overwrite: selected - the file journal is shared-NFS
+  durable truth and must preserve append-first/atomic materialization ordering.
+- Schema / columns / units / field names: selected - reservation, cohort member,
+  reconciliation, restart-stage, and task-result evidence are persisted public
+  contracts.
+- Auth / permissions / secrets: selected - the repair must remain DB-free and
+  keep Gateway/runtime roots and credentials out of evidence.
+- Concurrency / shared state / ordering: selected - timeout, restart, concurrent
+  scheduler pass, bind, and task projection race on one cohort identity.
+- Resource limits / large input / discovery: selected - comment/accounting
+  queries, evidence, and the 18-task GFS/IFS matrix must remain bounded.
+- Legacy compatibility / examples: selected - generic repository reconcile and
+  non-DB-free callers retain their current contract.
+- Error handling / rollback / partial outputs: selected - zero, unique,
+  multiple, mismatch, accounting-unavailable, partial failure, and process
+  restart are first-class branches.
+- Release / packaging / dependency compatibility: not selected - no dependency
+  or package-format change is required.
+- Documentation / migration notes: selected - node-22 live injection and
+  rollback receipts are merge evidence.
+- Geospatial / CRS / basin geometry: not selected - no geometry is read or
+  written.
+- Hydro-met time series / forcing windows: not selected - source/cycle identity
+  is preserved but forcing data semantics do not change.
+- SHUD numerical runtime / conservation / NaN: selected only at dispatch
+  boundary - native forecast must not be repeated for a downstream restart;
+  solver numerics are unchanged.
+- PostGIS / TimescaleDB domain behavior: not selected - node-22 remains DB-free.
+- Slurm production lifecycle / mock-vs-real parity: selected - exact comment
+  adoption, array task accounting, no duplicate/cancel, and live timeout
+  injection are the core repair.
+- External hydro-met providers / snapshot reproducibility: not selected - no
+  provider acquisition changes.
+- Run manifest / QC provenance: selected - recovered forecast success must
+  retain lineage and continue at state-save/QC.
+- Published NHMS artifacts / display identity: not selected - node-27 products
+  are outside the PR.
+
+Boundary-surface checklist:
+
+- Producers: cohort construction and reservation write the member map,
+  idempotency key, exact Slurm comment, restart stage, and submission-attempt
+  evidence before the external call through
+  `scheduler_execution.execute_candidate_cohort()` and
+  `chain_stage_execution.submit_array_stage()`.
+- Validators/preflight: exact-comment reconcile validates one master identity,
+  source/cycle/stage/cohort membership, array task identity, and accounting
+  authority before mutation through
+  `reconcile.reconcile_reserved_unbound_jobs()` and the stage/accounting
+  identity validators it calls.
+- Storage/cache/query: `FileOrchestrationJournalRepository` append-only records,
+  `reserve_pipeline_job()`, `bind_pipeline_job_reservation()`, job/hydro status
+  updates, direct job snapshots, latest views, pipeline events, and bounded
+  comment/accounting results.
+- Public entrypoints: `ProductionScheduler.run_once`, restart reconcile, cohort
+  execution, and `ForecastOrchestrator.orchestrate_cycle`.
+- External boundary: fake Gateway/Slurm injects acceptance followed by response
+  timeout; real node-22 `sbatch`/`sacct` is the live oracle.
+- Downstream consumers: candidate-state decision, permanent-failure guard,
+  `scheduler_execution.restart_compatible_candidate_cohorts()`,
+  `candidate_restart_stage()`, basin manifest/run context construction,
+  `chain_forecast_execution` stage dispatch, state-save/QC, and scheduler
+  candidate-state/evidence consumers.
+- Failure/rollback/stale state: zero/unique/multiple/mismatch/unavailable
+  accounting, partial tasks, process restart, stale Gateway failure, and an
+  existing accepted array with no durable bind.
+- Unchanged boundaries: node-27 ingest/display, PostgreSQL repositories, forcing
+  values, SHUD numerics, and published product identity.
+
+Invariant Matrix:
+
+- Governing invariant: for one deterministic source/cycle/restart-stage/member
+  forecast-cohort identity, at most one Slurm array may be submitted or adopted; an
+  ambiguous accepted-submit outcome remains non-terminal until exact
+  reconciliation proves ownership or a bounded, authoritative absence permits
+  exactly one idempotent retry.
+- Durable identity contract: source, cycle, stage, deterministic cohort run ID,
+  ordered member candidate/task identities, idempotency key, exact Slurm
+  comment, submission attempt, reconciliation decision, and bound master job
+  ID.
+- Durability contract: a file-journal write may return success only after the
+  replaced file and its directory entry are durably committed and the parent
+  identity remains the one validated before replacement. Any indeterminate
+  durability result fails closed before an external Gateway call.
+- Submission-state contract: the durable reservation may temporarily have no
+  `submit_outcome` only before the Gateway result is recorded. Restart recovery
+  atomically classifies that state as `submit_result_ambiguous` before writing a
+  reconciliation decision. An explicit Gateway rejection records the normative
+  `rejected` outcome and terminalizes the affected hydro rows; neither state may
+  make the journal validator fail while handling the original failure.
+- Submit-disposition contract: only a response that proves the external submit
+  was rejected before acceptance may write `rejected`. Transport loss,
+  post-`sbatch` parse failure, malformed success bodies, and unknown Gateway
+  failures are acceptance-unknown and enter exact-comment reconciliation.
+- Transition-truth contract: a Gateway timeout proves only
+  `submit_result_ambiguous`; it clears/leaves absent the reconciliation source,
+  decision, and matched ID. Those fields are written only by a completed
+  accounting query. Common evidence fields such as `submit_outcome` are
+  validated before master/candidate specialization so neither row kind can
+  bypass the closed enum.
+- Attempt-boundary contract: reclaiming a retry initializes the new submission
+  attempt atomically while holding the cycle lock. Before its Gateway result,
+  the new attempt has no `submit_outcome` and no reconciliation source,
+  decision, or matched ID; evidence proved for the prior attempt cannot cross
+  this boundary, including when the process stops immediately after reclaim.
+  Every versioned master carries one valid aware-UTC immutable
+  `submission_attempt_started_at`; reclaim creates the next anchor while
+  holding the lock and never trusts a lock-external request timestamp.
+- Attempt-CAS contract: timeout/accounting transitions compare the durable
+  submission attempt and expected reserved-unbound state under the cycle lock.
+  Normal Gateway success and accounting adoption atomically bind the accepted
+  Slurm ID with their complete evidence tuple; a same-ID repeat is idempotent,
+  while a different-ID collision never overwrites the winner.
+- Rejection-atomicity contract: a proven rejection commits the attempt master,
+  every matching member hydro failure, and required event evidence as one
+  cycle-lock journal batch. A failed batch leaves the reservation recoverable;
+  it cannot leave a terminal master with active member state.
+- Accounting-proof contract: an owner-scoped match identifies the bind
+  candidate but is not by itself proof of global uniqueness, and an owner-scoped
+  zero result is not authoritative global absence. Any bounded exact-comment
+  collision with a different owner/account is `identity_mismatch_blocked`;
+  binding requires one globally unique owned match, while retry eligibility
+  requires a bounded, authoritative proof that no exact-comment job exists under
+  any ownership.
+- Accounting-coverage contract: a zero-match result is authoritative only when
+  the frozen query window covers the current
+  `submission_attempt_started_at` through the query end. An older attempt or a
+  legacy/custom adapter that cannot prove that coverage remains
+  `accounting_unavailable` and cannot release retry permission. The reconcile
+  consumer recalculates coverage from valid aware start/end bounds and the
+  durable anchor; an adapter's completeness boolean alone has no authority.
+- Accounting-authority contract: successful command execution is not by itself
+  global visibility. Runtime preflight proves the scheduler principal's Slurm
+  accounting visibility (including job privacy), otherwise zero-match evidence
+  remains unavailable. Discovery pages a bounded time range before byte/row
+  materialization, freezes one page-window snapshot for the whole reconcile
+  session, and aggregates only the bounded exact-comment matches needed to
+  prove zero, one, or multiple results at the supported 256-member cadence.
+- Accounting-saturation contract: raw page byte/row saturation is not evidence
+  of multiple exact-comment matches. It remains fail-closed
+  `accounting_unavailable` with a closed, bounded reason class; only an indexed
+  proof of multiple exact matches becomes `multiple_matches_blocked`.
+- Independent-runtime contract: because runtime member rows are durably prepared
+  before the Gateway call, a pre-outcome reservation with no runtime rows cannot
+  have produced an accepted array. A later exact-comment match without those
+  rows is unverifiable and remains identity-mismatch blocked; the pre-outcome
+  recovery allowance applies to safe ambiguity/absence handling, not to
+  weakening bind identity.
+- Restart invariant: the earliest incomplete canonical stage is candidate
+  state. Grouping never lowers it, mixed stages never share a cohort, and a
+  `state_save_qc` cohort cannot enter native forecast.
+- Candidate outcome invariant: terminal array results are projected only to the
+  exact member identity; successful members clear stale transport failure and
+  advance, failed members remain failed, and absent/unverified members remain
+  reconciling.
+- Projection-schema invariant: every persisted projection maps by
+  `array_task_id` to exactly one canonical durable member and repeats that
+  member's candidate/run/model identity. Cohort digest and projection mapping
+  are validated on outgoing write and journal/latest/direct replay; missing or
+  malformed accepted-submit members fail closed instead of falling back to the
+  legacy reservation path.
+- Evidence invariant: every branch records bounded reconciliation source,
+  matched identity or safe absence/mismatch class, decision, restart stage,
+  and whether native SHUD was resubmitted; raw comments, local/shared-NFS roots,
+  credentials, and unbounded accounting rows never enter public evidence.
+- Version/compatibility invariant: the accepted-submit contract has an explicit
+  persisted version marker. Marker-free historical cohort-shaped rows remain
+  legacy read-only state and never acquire accepted-submit authority or become
+  invalid merely because additive fields are absent. Global visibility proof
+  is required only for versioned accepted-submit reconciliation.
+- Anchor-validation invariant: direct, journal, and latest replay reject a
+  versioned master whose attempt anchor is missing, malformed, or naive, while
+  marker-free historical rows retain their legacy read contract. Ordinary
+  same-attempt updates cannot change the anchor, and retry CAS compares both
+  attempt number and anchor.
+- Sticky-authority invariant: once persisted, a current-version master remains
+  a master independently of mutable stage classification. Ordinary upsert
+  cannot change its contract/job/run/cycle/source, stage/job type,
+  candidate/idempotency/comment, cohort/digest, ownership, restart/native-SHUD,
+  attempt, or anchor identity; only the typed reclaim boundary may advance
+  attempt and anchor together under the cycle lock. A current-version row that
+  is neither a valid master nor a valid candidate fails closed.
+- Typed-transition invariant: ordinary `upsert_pipeline_job` cannot change any
+  current-version master authority state, including Slurm binding, status,
+  submit outcome, reconciliation tuple/reason, projections, runtime timestamps,
+  retry fields, errors, or logs. An exact same-value replay is a zero-write
+  read. Accepted bind, ambiguity/reconciliation, proven rejection, retry
+  permission, next-attempt reclaim, and terminal projection occur only through
+  their typed cycle-lock APIs. Generic reserve/bind/unmarked-transition methods
+  cannot create current-version authority; whole/partial retry, status sync, and
+  cancel use typed current-version transitions rather than marker-free clones or
+  generic status writes.
+- Closed-enum invariant: task-accounting completeness is represented by
+  pipeline status/error/projection fields and never adds values to the six-value
+  `reconciliation_decision` contract. Reconciliation API inputs are normalized
+  to the same bounded projection allowlist before persistence.
+- Resource invariant: both exact-comment discovery and ordinary inflight
+  master/task accounting apply byte, row, and time limits before full
+  materialization. Model-less cohort truth remains in journal/direct storage
+  and is not copied into every model latest view; aggregate model-latest bytes
+  grow approximately linearly with cohort size.
+- Direct-storage invariant: terminal member projection does not amplify a
+  globally scanned direct-job namespace. Direct lookup/index/partition and
+  audit retention keep per-cycle reads and restart discovery bounded at the
+  supported 256-member cadence without deleting canonical journal truth.
+- Reconcile-inventory invariant: a new active anchor is durable before the
+  journal side effect, terminal journal truth precedes anchor removal, and
+  canonical replay repairs orphan/stale anchors. A crash-resumable one-time
+  backfill indexes both current-version and marker-free active rows, after which
+  steady-state restart never recursively enumerates terminal master or candidate
+  history.
+- Process-bound invariant: accounting discovery and its visibility probes share
+  explicit stdout, stderr, row, wall-time, termination, and reap limits; a probe
+  that saturates any bound cannot authorize absence retry.
+- Accepted-submit lookup invariant: versioned master reserve, transition,
+  accepted bind, rejection, retry permission, and accounting adoption resolve
+  the deterministic `pipeline_job_id` from exact direct plus its one cycle
+  journal. Unrelated historical latest/journal/direct records and their global
+  file/record limits cannot block the current attempt.
+- Compatibility invariant: generic repository and non-DB-free reconcile callers
+  keep their existing inputs/status behavior, while the new cohort/member fields
+  are additive for file-journal DB-free execution.
+- Provenance invariant: recovered task success preserves source/cycle/model,
+  initial-state, output/checkpoint, run-manifest, and QC lineage when clearing a
+  stale transport failure; reconcile does not synthesize a replacement run.
+- Highest feasible seam under test: drive `ProductionScheduler.run_once()` and
+  `ForecastOrchestrator.orchestrate_cycle()` with the real file-journal
+  repository and a fake Gateway/Slurm only at the external boundary; repository
+  unit tests supplement but do not replace this end-to-end seam.
+- Live proof boundary: node-22 bounded response-timeout injection on shared NFS,
+  exact `sacct` comment recovery, one array for 18 members, downstream
+  copyback/state-save progress, no scheduler `DATABASE_URL`, and a rollback
+  receipt.
+- Rollback execution-generation invariant: the current controller persists one
+  workspace-scoped execution binding before the old writer starts. `prepared`
+  binds the receipt and exact Git generation as durable no-launch authority;
+  launcher replaces it with `active` containing protected persistent Python
+  runtime and source bundles before child execution. Those bundles live under a
+  deterministic private, immutable workspace retention root keyed by the
+  preparation receipt and target generation; neither path is inside the target
+  checkout or its venv, and deleting the complete original checkout after active
+  publication cannot break later worker execution. Active binding validation
+  walks the complete retained runtime tree through bounded no-follow directory
+  descriptors: every entry is owner-owned, regular-file/directory only, and has
+  the exact sealed non-writable mode; the bound interpreter is the sole executable
+  file. The current Gateway injects
+  only active bundles into old-writer manifests, so forcing, forecast and
+  state-save cannot import the Gateway checkout's newer source generation.
+  Roll-forward is admitted only after a strict bounded current-authority query
+  over reconcile inventory and its exact journal/latest/direct/legacy sources
+  proves every rollback-era job belongs to the terminal allowlist. It captures
+  the reconcile-inventory, journal, latest, direct pipeline-jobs, and
+  legacy-active root identities before the proof; any root disappearance,
+  replacement, or signature change at stat/list/read or the final check fails
+  closed with one quiescence-authority reason. Recursive authority walkers also
+  capture and recheck every entered directory before list, after list, and after
+  child recursion, so a nested directory cannot silently lose, replace, or gain
+  an entry before its first list. A root is empty only if it remains nonexistent
+  throughout. The query never replays global annual
+  history and performs no durable write.
+  Gateway single/array/render requests capture that active binding once and
+  reuse it through task normalization and rendering. Active scripts unset
+  `PYTHONHOME` and `VIRTUAL_ENV`, export the bound source as the exact
+  `PYTHONPATH`, and replace rather than extend `PATH` with the bound runtime bin
+  plus the fixed minimal system path. Roll-forward then persists
+  `prepared|active` -> `rolling_forward`
+  -> `completed` around the crash-resumable inventory transition. Missing prepared
+  authority cannot authorize launch or cancellation. A first launch requires
+  the exact prepared binding; replay requires the exact active binding.
+  Completed bindings remain auditable
+  and cannot wedge or authorize a later preparation.
+
+Regression rows:
+
+- 18-member cohort; Slurm accepts `sbatch`; Gateway response times out -> one
+  durable reserved-unbound cohort, `submit_result_ambiguous`, no permanent
+  candidate failure, and exactly one Slurm array.
+- Process restart; exact comment has one matching array -> bind master ID,
+  reconcile tasks, and do not submit or cancel another forecast array.
+- Rollback writer generation A with Gateway checkout B -> the old manifest is
+  bound by the current Gateway to A's protected runtime and source for forcing,
+  forecast and state-save after the original A checkout is deleted; hostile
+  ambient Python bootstrap variables cannot affect the scripts, a conflicting
+  path fails closed, and an unrelated workspace keeps its ordinary console
+  entrypoint.
+- Old writer exits while any reserved/ambiguous/running job remains ->
+  roll-forward performs zero authority mutation; after all jobs settle it
+  resumes `active -> rolling_forward -> completed`, and a subsequent preparation
+  can establish a distinct binding without losing prior completed audit evidence.
+- Preparation is cancelled before launcher runs -> only the exact durable
+  `prepared` authority plus an empty unsettled-job query permits
+  `prepared` -> `rolling_forward` -> `completed`; deleted or tampered authority
+  leaves the fence unchanged.
+- Exact comment has zero matches before absence window -> remain reconciling;
+  zero matches after the window -> one idempotent retry attempt, with concurrent
+  passes unable to produce a second attempt.
+- Exact-comment accounting returns more than the bounded match limit ->
+  `multiple_matches_blocked` with bounded/redacted evidence and no adoption,
+  cancellation, or submission.
+- Exact comment has multiple matches, wrong comment, wrong cohort/stage/member
+  identity, or accounting is unavailable -> fail closed/retain for retry as
+  specified, with no bind, cancel, or submission.
+- 18 successful task rows plus stale `SLURM_GATEWAY_UNAVAILABLE` -> each exact
+  candidate becomes forecast-successful, stale hydro failure clears, and each
+  restarts at `state_save_qc` without native SHUD resubmission.
+- Partial terminal array -> successful siblings advance; only failed eligible
+  identities remain failed/retryable; no successful sibling is recomputed.
+- Recovered `state_save_qc` candidate -> only state-save/QC is submitted.
+- Mixed `forecast` and `state_save_qc` candidates -> separate deterministic
+  cohort identities and stage submissions.
+- GFS and IFS each carry the live 18-model file-journal shape -> no duplicate
+  forecast arrays across timeout, restart, and reconciliation.
+- Generic repository and non-DB-free reconcile fixtures -> unchanged behavior;
+  additive file-journal cohort fields do not become required for legacy rows.
+- Non-forecast array Gateway failure or stale row carrying cohort-like fields ->
+  preserves its prior stage behavior and never creates forecast projection or
+  `state_save_qc` restart evidence.
+
 ## Migration Plan
 
 1. Add DB-free runtime preflight and file-lock live proof while state remains

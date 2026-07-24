@@ -403,3 +403,192 @@ Scenario evidence rows for section 5:
   oracle, and existing DB-free scheduler tests (`test_production_scheduler`
   covering strict + non-strict, GFS/IFS, retry / restart) all pass with the
   new logic.
+
+## 9. Accepted Cohort Reconcile And Restart-Stage Preservation (#1112)
+
+- [x] 9.1 Persist deterministic forecast-cohort reservation, ordered member/task map,
+  idempotency key, exact Slurm comment, restart stage, and submission-attempt
+  evidence before the Gateway call.
+  Evidence floor: a real `FileOrchestrationJournalRepository` test observes the
+  reserved-unbound cohort before fake Gateway submission and a transport
+  timeout records `submit_result_ambiguous`, not permanent candidate/hydro
+  failure. The fake Gateway itself reopens the real file journal and observes
+  the reservation before performing or simulating the external side effect;
+  strict directory durability failures are injected through the real
+  orchestrator path and prove the Gateway spy is never invoked.
+
+- [x] 9.2 Reconcile reserved-unbound file-journal forecast cohorts by exact Slurm comment
+  and identity.
+  Evidence floor: unique match binds; zero match defers within the bounded
+  window and permits one idempotent attempt afterward; multiple, mismatch, and
+  accounting-unavailable outcomes do not bind/cancel/resubmit and emit distinct
+  bounded evidence using the fixture's fixed `reconciliation_decision` values.
+  A pre-outcome reservation interruption is first classified ambiguous; an
+  owner/account collision remains mismatch-blocked, and owner-scoped zero alone
+  cannot prove authoritative absence. A Gateway timeout carries no accounting
+  decision before the first query, and an exact match without independent
+  runtime rows remains blocked. Reclaiming a retry atomically starts a clean
+  pre-outcome attempt and cannot inherit the prior attempt's accounting tuple,
+  including across immediate reopen. Every branch is reopened from disk and
+  proves the persisted tuple equals the emitted tuple. Attempt-scoped CAS keeps
+  stale concurrent transitions from overwriting a bound row, and normal success
+  plus accounting adoption each atomically bind the complete evidence tuple;
+  same-ID replay is idempotent and different-ID collision is blocked. Only a
+  typed proven pre-acceptance rejection becomes `rejected`; post-request
+  parse/malformed/unknown failures remain ambiguous. Proven rejection commits
+  the master and every member hydro failure atomically with reopen parity.
+  Generic status/reconciliation compatibility APIs cannot forge retry
+  authority, reclaim independently requires the complete current-attempt typed
+  absence proof, and repeated identical typed evidence is a zero-write replay.
+
+- [x] 9.3 Project terminal array-task accounting to candidate-scoped
+  pipeline/hydro state.
+  Evidence floor: exact successful tasks clear only their stale
+  `SLURM_GATEWAY_UNAVAILABLE` state and resume at `state_save_qc`; failed tasks
+  remain failed/retry-eligible; successful siblings are not recomputed. The
+  canonical digest and every projection-to-member identity are validated on all
+  write/replay surfaces; malformed members fail closed, projection inputs are
+  bounded before persistence, and task-accounting state does not extend the
+  closed reconciliation-decision enum. Physical Slurm task suffixes agree with
+  canonical task IDs before projection; foreground, immediate-terminal, and
+  restart completion share one atomic typed projection transaction, and
+  terminal-incomplete recovery cannot regress an already completed projection.
+
+- [x] 9.4 Preserve canonical `restart_stage` through scheduler grouping,
+  deterministic cohort identity, basin manifest/run context, and stage
+  execution.
+  Evidence floor: a recovered `state_save_qc` candidate submits no native SHUD
+  forecast, and mixed `forecast`/`state_save_qc` candidates form distinct
+  cohorts with distinct durable identities.
+
+- [x] 9.5 Add highest-feasible-seam regressions for accepted-submit timeout and
+  restart recovery.
+  Evidence floor: `ProductionScheduler.run_once()` and
+  `ForecastOrchestrator.orchestrate_cycle()` use the real file journal with a
+  fake Gateway/Slurm boundary to prove one array for 18 members, exact-comment
+  bind after process restart, GFS/IFS parity, partial-task isolation, no cancel
+  before ownership proof, and required reconciliation/restart evidence.
+  The matrix also proves two concurrent post-window passes permit one retry,
+  over-limit accounting blocks with bounded evidence, runtime roots/credentials
+  are redacted, generic and non-DB-free reconcile callers remain compatible,
+  and recovered success preserves initial-state/run-manifest/checkpoint/QC
+  lineage. Non-forecast array failures and stale cohort-like rows are also
+  proven unable to create forecast or `state_save_qc` projections. Ordinary
+  inflight task accounting is byte/row/time bounded before materialization, and
+  aggregate per-model latest output grows approximately linearly for 18 and 256
+  members with warm-cache/reopen parity. Executable process-boundary tests cover
+  byte, row, and timeout termination/reap paths rather than mocking the bounded
+  reader.
+  Exact-comment discovery proves global visibility at preflight, uses bounded
+  time pages at the 256-member production cadence, and counts a final
+  unterminated record. Page boundaries are frozen per reconcile session so
+  advancing wall time cannot rescan/starve later cohort keys. Scheduler restart
+  evidence contains the bounded submit/accounting tuple, restart/native-SHUD
+  fields, and candidate/task outcomes for reserved and inflight branches.
+  Successful candidate summaries report projected `state_save_qc`, while
+  failed/unverified summaries retain `forecast`. Version-marked new rows and
+  marker-free legacy rows replay compatibly, DB-free visibility proof does not
+  affect generic reconciliation, and 256-member historical cycles do not grow
+  a globally scanned direct namespace toward its hard file limit. A zero-match
+  proof covers the current attempt anchor before releasing retry; older or
+  coverage-unproven attempts remain unavailable. Versioned master mutations use
+  exact/cycle-scoped reads despite unrelated malformed or over-limit history,
+  and raw page row/byte saturation emits bounded unavailable reason classes
+  rather than fabricating a multiple-match proof. Versioned masters require an
+  immutable aware-UTC attempt anchor across reserve/direct/journal/latest;
+  reclaim creates a new lock-owned anchor, retry CAS compares it, and the
+  consumer rejects completeness declarations whose bounds do not actually
+  contain the durable anchor while still allowing a proven exact match to bind.
+  Current-version master classification is sticky across ordinary upserts; an
+  adversarial identity-field matrix and multi-step stage/classification detour
+  fail on the first mutation with reopen parity, while typed reclaim and valid
+  candidate/legacy updates remain compatible. A full authority-state matrix
+  also proves generic upsert cannot clear a bound Slurm ID, forge retry
+  permission, rewrite reconciliation/projection/runtime evidence, or revive a
+  rejected/terminal master; exact replay is zero-write and each valid transition
+  remains available only through its typed API. A durable active-reconcile index
+  makes restart reads independent of one year of terminal master history while
+  retaining the oldest active cohort after reopen, and stable
+  unavailable/mismatch decisions do not grow the journal. Scheduler lease and
+  journal transaction lock settings have distinct tested semantics;
+  unsupported shared-filesystem journal locking fails closed. The inventory is
+  anchor-first for active journal writes, journal-first for terminal removal,
+  and is backfilled once for current and marker-free active rows under a
+  crash-resumable completion marker; steady-state queries perform no recursive
+  terminal/candidate fallback. The public reserve/bind/transition matrix proves
+  current-version authority is typed-only while legacy APIs remain compatible.
+  Accepted-submit whole/partial failure, sync, and cancel do not create legacy
+  retry clones or use generic master status writes; cancellation intent precedes
+  the external side effect and remains sticky across queued/running reopen
+  accounting until typed completion or exact terminal truth. Proven rejection
+  leaves no active marker. Inventory migration fails closed without publishing
+  its completion marker for malformed, unreadable, byte-saturated, or
+  record-saturated authority input, unsafe/disappearing flat JSON, or an
+  incomplete/non-canonical completion marker; exact atomic-temp residue is
+  safely repaired while unknown entries remain invalid. Gateway and typed
+  HTTP/custom response adapters, typed commit, and durable replay boundaries
+  reject null/empty/unknown accepted statuses as ambiguous or malformed, and
+  retry permission requires the exact positive attempt plus attempt anchor.
+  Poll timeout returns `reconciling`, submits no downstream stage, remains
+  restart-discoverable, and can be cancelled after reopen without replaying a
+  completed cancellation receipt; fresh/reclaimed attempts clear the receipt
+  discriminator. Foreground, immediate-terminal, and resumed forecast
+  accounting now gate retry, hydro mutation, and downstream stages on the
+  committed durable projection result; master mismatch or incomplete/malformed
+  accounting remains `reconcile_unverified`. Migration-only journal and
+  legacy-active walkers fail closed on enumerate/stat/read disappearance.
+  Supported downgrade/roll-forward is fenced by the real production file lease,
+  root/lease-bound preparation and completion receipts, and a durable scheduler
+  blocker. Every `preparing` crash cut point is re-entrant, same-instance atomic
+  lease renewal is serialized, and the old-writer launcher validates a full Git
+  generation before mutation, admits only a real `plan-production --submit`,
+  rejects root/lock overrides and eager exits, binds the child environment to the
+  receipt roots, and executes protected persistent source and runtime bundles
+  from a deterministic receipt/generation-scoped private immutable workspace
+  retention root behind a durable execution binding; deleting the complete
+  original checkout after active publication leaves all three worker stages
+  executable. Binding validation performs a bounded no-follow walk over every
+  runtime directory/file and rejects nested writable, symlink, or special entries
+  before Gateway submit. The current HTTP Slurm
+  gateway injects that binding for old manifests, so all three worker arrays use
+  the exact target runtime and source without changing ordinary unrelated
+  console-entrypoint submissions. A child-inherited execution lock excludes
+  roll-forward while the writer runs; a strict bounded current-inventory
+  terminal-allowlist query (including exact journal/latest/direct/legacy
+  authority, start/final identities for all five authority roots, and uniform
+  disappearance/replacement failure, including before/after-list signatures for
+  every recursively entered authority directory) and
+  crash-resumable `prepared|active` -> `rolling_forward` -> `completed` binding
+  transition exclude roll-forward while any accepted task can still reference
+  the bundles. The exact `prepared` authority permits a no-launch cancellation, while
+  missing/tampered authority is zero-mutation failure. Repeated rollback preserves
+  completed audit evidence without mixing generations.
+  First launch accepts only the exact prepared binding, replay only the exact
+  active binding, and completed replacement is prepare-only. Runtime libraries
+  and configuration are copied/protected without links to the original venv.
+  Each Gateway single/array/render request captures binding once, rejects active
+  Python-bootstrap environment overrides, unsets ambient Python home/venv state,
+  replaces ambient PATH/PYTHONPATH deterministically, and every worker/forecast
+  inline Python entry uses the exact bound interpreter.
+  Live-lease, concurrent,
+  dirty/mismatched checkout, unavailable runtime/snapshot, tampered, stale, and
+  wrong-root paths are zero-launch/zero-mutation failures.
+  Complete task truth derives the durable cohort outcome, and accepted-submit
+  typed projection is the sole hydro terminal mutator. The annual cost oracle uses
+  the production cadence of two cycles per day and GFS+IFS per cycle (1,460
+  masters and 373,760 conceptual 256-member candidates per year), materializes
+  the 1,460 terminal journal files, virtualizes candidate-history traversal, and
+  asserts steady-state directory/stat/read work is constant;
+  it also migrates at least 513 legacy active rows without losing the oldest.
+  Whole and partial retry run through the real ForecastOrchestrator, file
+  repository, and retry service with only the Slurm boundary faked. Slurm
+  visibility probes have executable stdout/stderr/row/time/reap bounds and
+  assert child reap on byte, row, and timeout exits.
+
+- [ ] 9.6 Complete local, CI, and node-22 live verification.
+  Evidence floor: the issue-targeted pytest command, `uv run ruff check .`, and
+  strict OpenSpec validation pass; CI is green at the frozen PR SHA; node-22
+  injects a bounded accepted-submit response timeout and proves automatic exact
+  comment recovery, one 18-task array, shared-NFS downstream copyback, no native
+  SHUD resubmission for `state_save_qc`, and no scheduler `DATABASE_URL`, with
+  explicit rollback receipt.

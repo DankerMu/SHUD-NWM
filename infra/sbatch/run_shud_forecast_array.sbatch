@@ -22,8 +22,11 @@ set -euo pipefail
 {{ export_line }}
 {% endfor %}
 
+{% if target_python_runtime | default('') %}
+cd "$NHMS_TARGET_PYTHON_SOURCE_ROOT"
+{% endif %}
 mkdir -p "$WORKSPACE_ROOT/$NHMS_RUN_ID/logs"
-VALIDATION_EXPECTED_OUTCOME="$(python - <<'PY'
+VALIDATION_EXPECTED_OUTCOME="$({% if target_python_runtime | default('') %}"$NHMS_TARGET_PYTHON_RUNTIME"{% else %}python{% endif %} - <<'PY'
 import os
 
 from packages.common.manifest_index import load_manifest_entry, resolve_task_id
@@ -35,7 +38,7 @@ PY
 )"
 if [[ "$VALIDATION_EXPECTED_OUTCOME" == "controlled_failure" ]]; then
   echo "{{controlled_failure_log_marker | default('NHMS_PRODUCTION_SLURM_CONTROLLED_FAILURE_EXPECTED')}}"
-  python - <<'PY'
+  {% if target_python_runtime | default('') %}"$NHMS_TARGET_PYTHON_RUNTIME"{% else %}python{% endif %} - <<'PY'
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -71,4 +74,10 @@ with TemporaryDirectory() as tmpdir:
 raise SystemExit(1)
 PY
 fi
-nhms-shud-runtime execute --manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"
+{% if target_python_runtime | default('') %}
+"$NHMS_TARGET_PYTHON_RUNTIME" -m workers.shud_runtime.cli execute \
+  --manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"
+{% else %}
+nhms-shud-runtime execute \
+  --manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"
+{% endif %}

@@ -1998,6 +1998,34 @@ def test_m3_cycle_orchestration_submits_all_stages_lazily(tmp_path: Path) -> Non
     assert {job["status"] for job in repository.jobs.values()} == {"succeeded"}
 
 
+def test_round18_target_runtime_reaches_all_worker_array_submission_manifests(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "target" / ".venv" / "bin" / ".nhms-rollback-python-test"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    runtime.chmod(0o700)
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(
+        tmp_path,
+        repository,
+        client,
+        target_python_runtime=str(runtime),
+    )
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    assert result.status == "complete"
+    worker_stages = {"forcing", "forecast", "state_save_qc"}
+    observed = {
+        submission["stage"]: submission["manifest"]["target_python_runtime"]
+        for submission in client.submissions
+        if submission["stage"] in worker_stages
+    }
+    assert observed == {stage: str(runtime) for stage in worker_stages}
+
+
 def test_terminal_stage_forecast_stops_before_parse_state_and_publish(tmp_path: Path) -> None:
     repository = FakeCycleRepository()
     client = FakeCycleSlurmClient()
@@ -3561,6 +3589,38 @@ def test_permanently_failed_stage_blocks_downstream_stages(tmp_path: Path) -> No
     assert [stage.status for stage in result.stages] == ["permanently_failed"]
     assert client.submissions == []
     assert repository.cycle_statuses[-1] == "failed_convert"
+
+
+def test_legacy_convert_reservation_lost_obeys_retry_limit_without_direct_submit(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    job_id = "job_cycle_gfs_2026050100_convert"
+    repository.jobs[job_id] = {
+        "job_id": job_id,
+        "run_id": "cycle_gfs_2026050100",
+        "cycle_id": "gfs_2026050100",
+        "job_type": "convert_canonical",
+        "slurm_job_id": None,
+        "model_id": None,
+        "status": "reservation_lost",
+        "stage": "convert",
+        "retry_count": 99,
+        "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
+        "started_at": None,
+        "finished_at": _fmt(_dt("2026-05-01T00:01:00Z")),
+        "exit_code": None,
+        "error_code": "SLURM_RESERVATION_LOST",
+        "error_message": "legacy reservation was not accepted",
+        "log_uri": None,
+    }
+    client = FakeCycleSlurmClient()
+    retry_service = FakeRetryService(max_retries=0)
+    orchestrator = _orchestrator(tmp_path, repository, client, retry_service=retry_service)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
+
+    assert result.status == "failed"
+    assert retry_service.handled_job_ids == [job_id]
+    assert client.submissions == []
 
 
 def test_failed_stage_auto_retries_before_downstream_stages(tmp_path: Path) -> None:
@@ -7917,6 +7977,7 @@ def _orchestrator(
     orchestrator_cls: type[ForecastOrchestrator] = ForecastOrchestrator,
     slurm_job_type_templates: dict[str, str] | None = None,
     slurm_env: dict[str, str] | None = None,
+    target_python_runtime: str | None = None,
     terminal_stage: str | None = None,
 ) -> ForecastOrchestrator:
     workspace = tmp_path / "workspace"
@@ -7929,6 +7990,7 @@ def _orchestrator(
         job_timeout_seconds=5,
         slurm_job_type_templates=slurm_job_type_templates or {},
         slurm_env=slurm_env or {},
+        target_python_runtime=target_python_runtime,
         terminal_stage=terminal_stage,
     )
     return orchestrator_cls(
@@ -8131,6 +8193,854 @@ class BoundedReadSequence(Sequence[Any]):
 
 def _fmt(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+@pytest.mark.parametrize("source_id", ["gfs", "IFS"])
+def test_file_journal_forecast_timeout_stays_reconciling_with_durable_18_member_cohort(
+    tmp_path: Path,
+    source_id: str,
+) -> None:
+    """One real journal closes timeout -> restart -> exact task projection."""
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from services.orchestrator.reconcile import (
+        CommentAccountingResult,
+        SacctRecord,
+        reconcile_inflight_jobs,
+        reconcile_reserved_unbound_jobs,
+    )
+
+    class _AcceptedTimeoutClient(FakeCycleSlurmClient):
+        def submit_job_array(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            accepted = super().submit_job_array(*args, **kwargs)
+            assert accepted["job_id"] == "2001"
+            raise RuntimeError("response lost after Gateway accepted the submit")
+
+    cycle = "2026050100"
+    source_segment = source_id.lower()
+    basins = _basins(18)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_{source_segment}_{cycle}_model_{index}",
+                "candidate_id": (
+                    f"{source_id}:2026-05-01T00:00:00Z:model_{index}:forecast_{source_segment}_deterministic"
+                ),
+                "orchestration_run_id": f"cycle_{source_segment}_{cycle}_forecast_cohort_fixture",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = _AcceptedTimeoutClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle(source_id, cycle, basins)
+
+    assert result.status == "reconciling"
+    assert len(client.jobs) == 1
+    rows = repository.query_reserved_unbound_jobs()
+    assert len(rows) == 1
+    reserved = rows[0]
+    assert reserved.submit_outcome == "submit_result_ambiguous"
+    assert (
+        reserved.reconciliation_source,
+        reserved.reconciliation_decision,
+        reserved.matched_slurm_job_id,
+    ) == (None, None, None)
+    assert reserved.slurm_job_id is None
+    assert reserved.slurm_comment == f"nhms_idem:{reserved.idempotency_key}"
+    assert reserved.restart_stage == "forecast"
+    assert reserved.native_shud_resubmitted is True
+    assert [member["array_task_id"] for member in reserved.cohort_members] == list(range(18))
+    assert all(member["restart_stage"] == "forecast" for member in reserved.cohort_members)
+    assert all(
+        (repository._hydro_run_for(str(basin["run_id"])) or {}).get("status") != "failed"
+        for basin in basins
+    )
+    assert reserved.submission_attempt == 1
+    assert reserved.submission_attempt_started_at is not None
+    assert len(reserved.cohort_digest) == 64
+    ambiguous_event = next(
+        event
+        for event in repository._cycle_rows(
+            source_id=source_segment,
+            cycle_time=_dt("2026-05-01T00:00:00Z"),
+            model_id=None,
+        ).pipeline_events
+        if event.get("event_type") == "submission_ambiguous"
+    )
+    assert (
+        ambiguous_event["details"].get("reconciliation_source"),
+        ambiguous_event["details"].get("reconciliation_decision"),
+        ambiguous_event["details"].get("matched_slurm_job_id"),
+    ) == (None, None, None)
+
+    rebuilt = FileOrchestrationJournalRepository(tmp_path / "journal")
+    reopened_reserved = rebuilt.query_reserved_unbound_jobs()[0]
+    accounting_query_count = 0
+    assert (
+        reopened_reserved.reconciliation_source,
+        reopened_reserved.reconciliation_decision,
+        reopened_reserved.matched_slurm_job_id,
+    ) == (None, None, None)
+    assert accounting_query_count == 0
+
+    def confirmed_zero(_key: str, **kwargs: Any) -> CommentAccountingResult:
+        nonlocal accounting_query_count
+        accounting_query_count += 1
+        anchor = kwargs["submission_attempt_started_at"]
+        return CommentAccountingResult(
+            (),
+            scope="global",
+            coverage_start=anchor,
+            coverage_end=anchor + timedelta(seconds=1),
+            coverage_complete=True,
+        )
+
+    deferred = reconcile_reserved_unbound_jobs(
+        rebuilt,
+        comment_query=confirmed_zero,
+        now=lambda: reopened_reserved.submission_attempt_started_at + timedelta(seconds=1),
+    )[0]
+    assert deferred.action == "absence_unconfirmed"
+    assert accounting_query_count == 1
+    after_first_query = rebuilt.query_reserved_unbound_jobs()[0]
+    assert (
+        after_first_query.reconciliation_source,
+        after_first_query.reconciliation_decision,
+        after_first_query.matched_slurm_job_id,
+    ) == ("slurm_exact_comment", "absence_deferred", None)
+
+    exact = SacctRecord(
+        "2001",
+        "RUNNING",
+        "nhms_forecast",
+        comment=reserved.slurm_comment,
+        run_id=reserved.run_id,
+        stage="forecast",
+        pipeline_job_id=reserved.job_id,
+    )
+    assert reconcile_reserved_unbound_jobs(rebuilt, comment_query=lambda _key: exact)[0].action == "bound"
+
+    def terminal(task_count: int) -> SacctRecord:
+        tasks = tuple(
+            SacctRecord(
+                f"2001_{index}",
+                "COMPLETED",
+                "nhms_forecast",
+                comment=reserved.slurm_comment,
+                array_task_id=index,
+            )
+            for index in range(task_count)
+        )
+        return SacctRecord(
+            "2001",
+            "COMPLETED",
+            "nhms_forecast",
+            comment=reserved.slurm_comment,
+            array_member_job_ids=tuple(task.slurm_job_id for task in tasks),
+            array_task_records=tasks,
+        )
+
+    if source_segment == "ifs":
+        assert reconcile_inflight_jobs(rebuilt, sacct_query=lambda _job_id: terminal(17))[0].action == (
+            "task_accounting_incomplete"
+        )
+    assert reconcile_inflight_jobs(rebuilt, sacct_query=lambda _job_id: terminal(18))[0].action == "terminal"
+    durable = rebuilt.get_pipeline_job(reserved.job_id)
+    assert durable["status"] == "succeeded"
+    assert len(durable["candidate_projections"]) == 18
+    assert all(item["restart_stage"] == "state_save_qc" for item in durable["candidate_projections"])
+    assert reconcile_inflight_jobs(rebuilt, sacct_query=lambda _job_id: terminal(18)) == []
+    assert len(client.jobs) == 1
+    assert client.cancelled_jobs == []
+
+
+@pytest.mark.parametrize(
+    ("first_outcomes", "expected_retry_models"),
+    [
+        pytest.param(["failed", "failed"], ["model_0", "model_1"], id="whole_failure"),
+        pytest.param(["succeeded", "failed"], ["model_1"], id="partial_failure"),
+    ],
+)
+def test_round8_persistent_file_journal_forecast_retry_failure_to_success_is_one_coherent_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first_outcomes: list[str],
+    expected_retry_models: list[str],
+) -> None:
+    from services.orchestrator import chain_forecast_execution
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+
+    monkeypatch.setattr(
+        chain_forecast_execution,
+        "_update_array_forecast_hydro_statuses",
+        lambda *_args, **_kwargs: pytest.fail(
+            "accepted-submit projection must own hydro terminal writes"
+        ),
+    )
+
+    cycle = "2026050100"
+    basins = _basins(2)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_{cycle}_model_{index}",
+                "candidate_id": (
+                    f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic"
+                ),
+                "orchestration_run_id": f"cycle_gfs_{cycle}_forecast_cohort_fixture",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = FakeCycleSlurmClient(
+        array_results_by_stage={
+            "forecast": [first_outcomes, ["succeeded"] * len(expected_retry_models)]
+        }
+    )
+    retry_service = FileJournalRetryService(
+        repository,
+        RetryConfig(max_retries=1, backoff_schedule=[0]),
+    )
+    orchestrator = _orchestrator(
+        tmp_path,
+        repository,
+        client,
+        retry_service=retry_service,
+    )
+
+    result = orchestrator.orchestrate_cycle("gfs", cycle, basins)
+
+    forecast_submissions = [row for row in client.submissions if row["stage"] == "forecast"]
+    assert result.status == "complete"
+    assert len(forecast_submissions) == 2
+    assert [task["model_id"] for task in forecast_submissions[0]["tasks"]] == [
+        "model_0",
+        "model_1",
+    ]
+    assert [task["model_id"] for task in forecast_submissions[1]["tasks"]] == expected_retry_models
+    reopened = FileOrchestrationJournalRepository(repository.root)
+    masters = [
+        row
+        for row in reopened.query_pipeline_jobs_by_cycle("gfs_2026050100")
+        if row.get("stage") == "forecast" and row.get("model_id") is None
+    ]
+    assert len(masters) == 2
+    masters.sort(key=lambda row: int(row.get("submission_attempt") or 0))
+    assert [row["status"] for row in masters] == [
+        "failed" if len(expected_retry_models) == 2 else "partially_failed",
+        "succeeded",
+    ]
+    assert all(
+        row["accepted_submit_contract_version"] == ACCEPTED_SUBMIT_CONTRACT_VERSION
+        for row in masters
+    )
+    assert [row["submission_attempt"] for row in masters] == [1, 2]
+    assert len(masters[0]["cohort_members"]) == 2
+    assert [member["model_id"] for member in masters[1]["cohort_members"]] == expected_retry_models
+    assert all(row.get("manual_retry_marker") is not True for row in masters)
+
+
+def test_accepted_submit_terminal_hook_preserves_parsed_and_published_hydro_rows() -> None:
+    from services.orchestrator import chain_forecast_execution
+    from services.orchestrator.chain import ArrayAggregation, ArrayTaskResult
+
+    class Repository:
+        supports_accepted_submit_reconcile = True
+
+        def __init__(self) -> None:
+            self.hydro_statuses = {"run_0": "parsed", "run_1": "published"}
+            self.hydro_writes: list[tuple[str, str]] = []
+            self.cycle_statuses: list[str] = []
+
+        def update_hydro_run_status(self, run_id: str, status: str, **_kwargs: Any) -> None:
+            self.hydro_writes.append((run_id, status))
+            self.hydro_statuses[run_id] = status
+
+        def update_forecast_cycle_status(self, **kwargs: Any) -> None:
+            self.cycle_statuses.append(str(kwargs["status"]))
+
+    repository = Repository()
+    orchestrator = types.SimpleNamespace(
+        repository=repository,
+        _partial_cycle_status=lambda _stage: "forecast_partial",
+    )
+    context = types.SimpleNamespace(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        active_basins=[
+            {"task_id": 0, "run_id": "run_0"},
+            {"task_id": 1, "run_id": "run_1"},
+        ],
+        had_partial=False,
+        last_partial_status=None,
+    )
+    aggregation = ArrayAggregation(
+        total=2,
+        succeeded=1,
+        failed=1,
+        cancelled=0,
+        task_results=(
+            ArrayTaskResult(0, "2001_0", "succeeded"),
+            ArrayTaskResult(1, "2001_1", "failed", error_code="SLURM_TIMEOUT"),
+        ),
+    )
+
+    chain_forecast_execution._after_cycle_stage_terminal(
+        orchestrator,
+        M3_STAGES[2],
+        context,
+        "partially_failed",
+        {"status": "partially_failed"},
+        aggregation,
+    )
+
+    assert repository.hydro_statuses == {"run_0": "parsed", "run_1": "published"}
+    assert repository.hydro_writes == []
+    assert repository.cycle_statuses == ["forecast_partial"]
+
+
+@pytest.mark.parametrize("immediate_terminal", [False, True])
+def test_file_journal_forecast_terminal_projection_crash_recovers_after_reopen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    immediate_terminal: bool,
+) -> None:
+    from services.orchestrator import chain_forecast_execution
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from services.orchestrator.reconcile import SacctRecord, reconcile_inflight_jobs
+
+    cycle = "2026050100"
+    basins = _basins(2)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_{cycle}_model_{index}",
+                "candidate_id": (
+                    f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic"
+                ),
+                "orchestration_run_id": f"cycle_gfs_{cycle}_forecast_cohort_fixture",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = ImmediateTerminalSlurmClient() if immediate_terminal else FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    real_project = repository.project_forecast_cohort_tasks
+    projection_calls = 0
+
+    def crash_before_projection(*args: Any, **kwargs: Any) -> dict[str, int]:
+        nonlocal projection_calls
+        projection_calls += 1
+        raise RuntimeError("injected crash before terminal projection transaction")
+
+    repository.project_forecast_cohort_tasks = crash_before_projection  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="injected crash"):
+        orchestrator.orchestrate_cycle("gfs", cycle, basins)
+    repository.project_forecast_cohort_tasks = real_project  # type: ignore[method-assign]
+
+    assert projection_calls == 1
+    job_id = f"job_cycle_gfs_{cycle}_forecast_cohort_fixture_forecast"
+    reopened = FileOrchestrationJournalRepository(repository.root)
+    before = reopened.get_pipeline_job(job_id)
+    assert before is not None
+    assert before["status"] in ({"submitted"} if immediate_terminal else {"running"})
+    assert before["candidate_projections"] == []
+    master_slurm_job_id = str(before["slurm_job_id"])
+    tasks = tuple(
+        SacctRecord(
+            f"{master_slurm_job_id}_{index}",
+            "COMPLETED",
+            "nhms_forecast",
+            comment=before["slurm_comment"],
+            array_task_id=index,
+        )
+        for index in range(2)
+    )
+    terminal = SacctRecord(
+        master_slurm_job_id,
+        "COMPLETED",
+        "nhms_forecast",
+        comment=before["slurm_comment"],
+        array_member_job_ids=tuple(task.slurm_job_id for task in tasks),
+        array_task_records=tasks,
+    )
+
+    outcome = reconcile_inflight_jobs(reopened, sacct_query=lambda _job_id: terminal)[0]
+    after = FileOrchestrationJournalRepository(repository.root).get_pipeline_job(job_id)
+
+    assert outcome.action == "terminal"
+    assert after is not None
+    assert after["status"] == "succeeded"
+    assert [item["array_task_outcome"] for item in after["candidate_projections"]] == [
+        "succeeded",
+        "succeeded",
+    ]
+    assert not (repository.root / "reconcile-inventory" / f"{job_id}.json").exists()
+
+    hydro_before_replay = {
+        str(basin["run_id"]): reopened._hydro_run_for(str(basin["run_id"]))
+        for basin in basins
+    }
+    monkeypatch.setattr(
+        chain_forecast_execution,
+        "_update_array_forecast_hydro_statuses",
+        lambda *_args, **_kwargs: pytest.fail(
+            "accepted-submit replay must not call the generic hydro updater"
+        ),
+    )
+    replay_orchestrator = _orchestrator(tmp_path, reopened, client)
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    normalized = replay_orchestrator._normalize_cycle_basins(basins, "gfs", cycle_time)
+    replay_context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_id="gfs_2026050100",
+        run_id=str(after["run_id"]),
+        all_basins=normalized,
+        active_basins=list(normalized),
+    )
+    replay_result, replay_aggregation = replay_orchestrator._resume_cycle_stage(
+        M3_STAGES[2],
+        replay_context,
+        after,
+    )
+    assert replay_result.status == "succeeded"
+    assert replay_aggregation is not None
+    assert {
+        run_id: reopened._hydro_run_for(run_id)
+        for run_id in hydro_before_replay
+    } == hydro_before_replay
+
+
+def test_file_journal_forecast_explicit_rejection_terminalizes_without_secondary_error(
+    tmp_path: Path,
+) -> None:
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    class _RejectedClient(FakeCycleSlurmClient):
+        def submit_job_array(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            from services.orchestrator.chain_config import SubmitDisposition
+
+            error = RuntimeError("gateway rejected submission")
+            error.submit_disposition = SubmitDisposition.REJECTED
+            raise error
+
+    cycle = "2026050100"
+    basins = _basins(2)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_{cycle}_model_{index}",
+                "candidate_id": (
+                    f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic"
+                ),
+                "orchestration_run_id": f"cycle_gfs_{cycle}_forecast_cohort_fixture",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    orchestrator = _orchestrator(tmp_path, repository, _RejectedClient())
+
+    result = orchestrator.orchestrate_cycle("gfs", cycle, basins)
+
+    assert result.status == "failed"
+    cohort = repository.query_pipeline_jobs_by_cycle(f"gfs_{cycle}")[0]
+    assert cohort["status"] == "submission_failed"
+    assert cohort["submit_outcome"] == "rejected"
+    assert all(
+        (repository._hydro_run_for(str(basin["run_id"])) or {}).get("status") == "failed"
+        for basin in basins
+    )
+
+
+@pytest.mark.parametrize(
+    ("status_code", "payload", "expected_error_code"),
+    [
+        (502, {"detail": {"error": {"code": "SLURM_PARSE_ERROR"}}}, "SLURM_PARSE_ERROR"),
+        (200, {"status": "submitted"}, "SLURM_GATEWAY_INVALID_RESPONSE"),
+    ],
+)
+def test_real_http_submit_uncertainty_keeps_file_cohort_reserved_for_reconcile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    payload: dict[str, Any],
+    expected_error_code: str,
+) -> None:
+    import httpx
+
+    from services.orchestrator.chain import HttpSlurmGatewayClient
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    class _HttpClient:
+        def __enter__(self) -> _HttpClient:
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def request(self, method: str, path: str, *, json: Any = None) -> httpx.Response:
+            del method, path, json
+            return httpx.Response(status_code, json=payload)
+
+    monkeypatch.setattr(httpx, "Client", lambda **_kwargs: _HttpClient())
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    orchestrator = _orchestrator(tmp_path, repository, HttpSlurmGatewayClient("http://gateway.test"))
+    raw_basins = _basins(2)
+    for index, basin in enumerate(raw_basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_2026050100_model_{index}",
+                "candidate_id": (
+                    f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic"
+                ),
+                "orchestration_run_id": "cycle_gfs_2026050100",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    basins = orchestrator._normalize_cycle_basins(raw_basins, "gfs", cycle_time)
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_id="gfs_2026050100",
+        run_id="cycle_gfs_2026050100",
+        all_basins=basins,
+        active_basins=list(basins),
+    )
+
+    result, aggregation = orchestrator._submit_and_wait_cycle_stage(M3_STAGES[2], context)
+
+    assert aggregation is None
+    assert result.status == "submit_result_ambiguous"
+    assert result.error_code == expected_error_code
+    row = repository.query_reserved_unbound_jobs()[0]
+    assert row.submit_outcome == "submit_result_ambiguous"
+    assert row.slurm_job_id is None
+    assert repository.reclaim_pipeline_job_reservation(vars(row)) is None
+    assert all(
+        (repository._hydro_run_for(str(basin["run_id"])) or {}).get("status") != "failed"
+        for basin in basins
+    )
+
+
+def test_real_http_proven_pre_submit_rejection_commits_master_hydro_and_event_batch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    from services.orchestrator.chain import HttpSlurmGatewayClient
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    class _HttpClient:
+        def __enter__(self) -> _HttpClient:
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def request(self, method: str, path: str, *, json: Any = None) -> httpx.Response:
+            del method, path, json
+            return httpx.Response(422, json={"error": {"code": "VALIDATION_ERROR"}})
+
+    monkeypatch.setattr(httpx, "Client", lambda **_kwargs: _HttpClient())
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    orchestrator = _orchestrator(tmp_path, repository, HttpSlurmGatewayClient("http://gateway.test"))
+    raw_basins = _basins(2)
+    for index, basin in enumerate(raw_basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_2026050100_model_{index}",
+                "candidate_id": (
+                    f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic"
+                ),
+                "orchestration_run_id": "cycle_gfs_2026050100",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    basins = orchestrator._normalize_cycle_basins(raw_basins, "gfs", cycle_time)
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_id="gfs_2026050100",
+        run_id="cycle_gfs_2026050100",
+        all_basins=basins,
+        active_basins=list(basins),
+    )
+
+    result, aggregation = orchestrator._submit_and_wait_cycle_stage(M3_STAGES[2], context)
+
+    assert aggregation is None
+    assert result.status == "submission_failed"
+    cohort = repository.get_pipeline_job(result.pipeline_job_id)
+    assert cohort["submit_outcome"] == "rejected"
+    assert cohort["status"] == "submission_failed"
+    assert all(
+        (repository._hydro_run_for(str(basin["run_id"])) or {})["status"] == "failed"
+        for basin in basins
+    )
+    events = repository._cycle_rows(source_id="gfs", cycle_time=cycle_time, model_id=None).pipeline_events
+    assert sum(event.get("event_type") == "submission" for event in events) == 1
+
+
+def test_file_journal_single_member_forecast_explicit_rejection_is_model_less_after_reopen(
+    tmp_path: Path,
+) -> None:
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    class _RejectedClient(FakeCycleSlurmClient):
+        def submit_job_array(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            from services.orchestrator.chain_config import SubmitDisposition
+
+            error = RuntimeError("gateway rejected single-member submission")
+            error.submit_disposition = SubmitDisposition.REJECTED
+            raise error
+
+    cycle = "2026050100"
+    basin = _basins(1)[0]
+    basin.update(
+        {
+            "run_id": f"fcst_gfs_{cycle}_model_0",
+            "candidate_id": "gfs:2026-05-01T00:00:00Z:model_0:forecast_gfs_deterministic",
+            "orchestration_run_id": f"cycle_gfs_{cycle}_forecast_cohort_fixture",
+            "restart_stage": "forecast",
+            "state_evidence": {"restart_stage": "forecast"},
+            "model_package_uri": "s3://nhms/models/model_0.tar",
+            "model_package_checksum": "sha256:model-0",
+        }
+    )
+    root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(root)
+    orchestrator = _orchestrator(tmp_path, repository, _RejectedClient())
+
+    result = orchestrator.orchestrate_cycle("gfs", cycle, [basin])
+
+    assert result.status == "failed"
+    assert result.stages[-1].status == "submission_failed"
+    cohort = next(
+        job
+        for job in repository.query_pipeline_jobs_by_cycle(f"gfs_{cycle}")
+        if job.get("submit_outcome") == "rejected"
+    )
+    assert cohort["status"] == "submission_failed"
+    assert cohort["model_id"] is None
+    assert cohort["submit_outcome"] == "rejected"
+    assert (repository._hydro_run_for(str(basin["run_id"])) or {})["status"] == "failed"
+
+    reopened = FileOrchestrationJournalRepository(root)
+    reopened_cohort = reopened.get_pipeline_job(str(cohort["job_id"]))
+    parity_fields = (
+        "job_id",
+        "status",
+        "model_id",
+        "submit_outcome",
+        "cohort_digest",
+        "cohort_members",
+        "error_code",
+    )
+    assert {field: reopened_cohort.get(field) for field in parity_fields} == {
+        field: cohort.get(field) for field in parity_fields
+    }
+    assert (reopened._hydro_run_for(str(basin["run_id"])) or {})["status"] == "failed"
+
+
+@pytest.mark.parametrize("source_id", ["gfs", "IFS"])
+def test_file_journal_post_window_concurrent_public_cycles_submit_one_retry(
+    tmp_path: Path,
+    source_id: str,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import timedelta
+    from threading import Lock
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from services.orchestrator.reconcile import CommentAccountingResult, reconcile_reserved_unbound_jobs
+
+    def authoritative_absence(_key: str, **kwargs: Any) -> CommentAccountingResult:
+        anchor = kwargs["submission_attempt_started_at"]
+        return CommentAccountingResult(
+            (),
+            scope="global",
+            coverage_start=anchor,
+            coverage_end=anchor,
+            coverage_complete=True,
+        )
+
+    class _AbsentFirstForecastClient(FakeCycleSlurmClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.forecast_attempts = 0
+            self.submit_lock = Lock()
+
+        def submit_job_array(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            with self.submit_lock:
+                if kwargs["stage_name"] == "forecast":
+                    self.forecast_attempts += 1
+                    if self.forecast_attempts == 1:
+                        raise OrchestratorError("SLURM_GATEWAY_UNAVAILABLE", "response timed out")
+                    self.submissions.append({"stage": "forecast"})
+                    raise OrchestratorError("SLURM_GATEWAY_UNAVAILABLE", "retry response timed out")
+                return super().submit_job_array(*args, **kwargs)
+
+    cycle = "2026050100"
+    source_segment = source_id.lower()
+    basins = _basins(18)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_{source_segment}_{cycle}_model_{index}",
+                "candidate_id": (
+                    f"{source_id}:2026-05-01T00:00:00Z:model_{index}:forecast_{source_segment}_deterministic"
+                ),
+                "orchestration_run_id": f"cycle_{source_segment}_{cycle}_forecast_cohort_retry",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    root = tmp_path / "journal"
+    client = _AbsentFirstForecastClient()
+    initial = _orchestrator(tmp_path, FileOrchestrationJournalRepository(root), client)
+    assert initial.orchestrate_cycle(source_id, cycle, basins).status == "reconciling"
+    reconciliation_repo = FileOrchestrationJournalRepository(root)
+    assert reconcile_reserved_unbound_jobs(
+        reconciliation_repo,
+        comment_query=authoritative_absence,
+        grace=timedelta(0),
+    )[0].action == "absence_retry_permitted"
+
+    def run_public_cycle(_index: int) -> Any:
+        try:
+            return _orchestrator(
+                tmp_path,
+                FileOrchestrationJournalRepository(root),
+                client,
+            ).orchestrate_cycle(source_id, cycle, basins)
+        except OrchestratorError as error:
+            return error
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(run_public_cycle, range(2)))
+
+    assert client.forecast_attempts == 2
+    attempt_two_repo = FileOrchestrationJournalRepository(root)
+    attempt_two = attempt_two_repo.query_reserved_unbound_jobs()[0]
+    assert attempt_two.submission_attempt == 2, [
+        (
+            row["job_id"],
+            row["idempotency_key"],
+            row["status"],
+            row["submission_attempt"],
+            row.get("reconciliation_decision"),
+        )
+        for row in attempt_two_repo.query_pipeline_jobs_by_cycle(f"{source_segment}_{cycle}")
+    ]
+    assert attempt_two.submit_outcome == "submit_result_ambiguous"
+    assert (
+        attempt_two.reconciliation_source,
+        attempt_two.reconciliation_decision,
+        attempt_two.matched_slurm_job_id,
+    ) == (None, None, None)
+    assert {
+        (attempt_two_repo._hydro_run_for(str(basin["run_id"])) or {}).get("submission_attempt")
+        for basin in basins
+    } == {2}
+    assert reconcile_reserved_unbound_jobs(
+        attempt_two_repo,
+        comment_query=authoritative_absence,
+        grace=timedelta(0),
+    )[0].action == "absence_retry_permitted"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        second_outcomes = list(pool.map(run_public_cycle, range(2)))
+
+    attempt_three_repo = FileOrchestrationJournalRepository(root)
+    attempt_three = attempt_three_repo.query_reserved_unbound_jobs()[0]
+    assert attempt_three.submission_attempt == 3
+    assert {
+        (attempt_three_repo._hydro_run_for(str(basin["run_id"])) or {}).get("submission_attempt")
+        for basin in basins
+    } == {3}
+    assert client.forecast_attempts == 3
+    assert sum(
+        submission["stage"] == "forecast" for submission in client.submissions
+    ) == 2
+    assert any(not isinstance(outcome, Exception) for outcome in outcomes)
+    assert any(not isinstance(outcome, Exception) for outcome in second_outcomes)
+    assert client.cancelled_jobs == []
+
+
+def test_file_journal_forcing_gateway_failure_keeps_legacy_failure_without_forecast_projection(
+    tmp_path: Path,
+) -> None:
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from services.orchestrator.reconcile import reconcile_inflight_jobs
+
+    class _AcceptedForcingTimeoutClient(FakeCycleSlurmClient):
+        def submit_job_array(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            accepted = super().submit_job_array(*args, **kwargs)
+            assert accepted["job_id"] == "2001"
+            raise OrchestratorError("SLURM_GATEWAY_UNAVAILABLE", "forcing response timed out")
+
+    cycle = "2026050100"
+    basins = _basins(2)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_{cycle}_model_{index}",
+                "candidate_id": f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic",
+                "orchestration_run_id": f"cycle_gfs_{cycle}_forcing_cohort_fixture",
+                "restart_stage": "forcing",
+                "state_evidence": {"restart_stage": "forcing"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    orchestrator = _orchestrator(tmp_path, repository, _AcceptedForcingTimeoutClient())
+
+    result = orchestrator.orchestrate_cycle("gfs", cycle, basins)
+
+    assert result.status == "failed"
+    jobs = repository.query_pipeline_jobs_by_cycle("gfs_2026050100")
+    forcing = next(job for job in jobs if job["stage"] == "forcing")
+    assert forcing["status"] == "submission_failed"
+    assert forcing["submit_outcome"] is None
+    assert forcing["cohort_members"] == []
+    assert forcing["candidate_projections"] == []
+    assert all(job["job_type"] != "run_shud_forecast_array" for job in jobs)
+    assert repository.query_reserved_unbound_jobs() == []
+    assert reconcile_inflight_jobs(
+        repository,
+        sacct_query=lambda _job_id: pytest.fail("terminal forcing rejection is not reconcile-inflight"),
+    ) == []
+    assert all(job.get("restart_stage") != "state_save_qc" for job in jobs)
 
 
 class _CaptureCursor:
@@ -8403,10 +9313,51 @@ def test_chain_http_slurm_gateway_client_legacy_subclass_uses_owner_module() -> 
     assert client._coerce_mapping is legacy_chain._coerce_mapping
     assert client._response_json_or_text is legacy_chain._response_json_or_text
     assert client._error_code_from_response is legacy_chain._error_code_from_response
+    assert client._validated_submit_response(
+        {"job_id": "mock_1", "status": "submitted"}
+    ) == {"job_id": "mock_1", "status": "submitted"}
 
     inventory_text = _chain_inventory_text()
     for token in ("HttpSlurmGatewayClient", "chain_slurm_client.HttpSlurmGatewayClient"):
         assert token in inventory_text
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"job_id": "mock_1"},
+        {"job_id": "mock_1", "status": None},
+        {"job_id": "mock_1", "status": ""},
+        {"job_id": "mock_1", "status": "pending"},
+        {"job_id": "mock_1", "status": "queued"},
+        {"job_id": "mock_1", "status": "unknown"},
+        {"job_id": "mock_1", "status": ["submitted"]},
+    ],
+)
+def test_round10_http_submit_response_rejects_status_outside_gateway_contract(
+    response: dict[str, Any],
+) -> None:
+    from services.orchestrator.chain import HttpSlurmGatewayClient, SlurmClientError
+    from services.orchestrator.chain_config import SubmitDisposition
+
+    client = HttpSlurmGatewayClient("http://gateway.example")
+    with pytest.raises(SlurmClientError) as exc_info:
+        client._validated_submit_response(response)
+    assert exc_info.value.error_code == "SLURM_GATEWAY_INVALID_RESPONSE"
+    assert exc_info.value.submit_disposition == SubmitDisposition.AMBIGUOUS
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["submitted", "running", "succeeded", "failed", "cancelled"],
+)
+def test_round10_http_submit_response_accepts_all_gateway_statuses(status: str) -> None:
+    from services.orchestrator.chain import HttpSlurmGatewayClient
+
+    response = {"job_id": "mock_1", "status": status}
+    assert HttpSlurmGatewayClient("http://gateway.example")._validated_submit_response(
+        response
+    ) == response
 
 
 def test_chain_tile_publisher_compat_facade_matches_owner_module_and_inventory(
@@ -10419,6 +11370,302 @@ def test_chain_stage_reservation_is_idempotent_across_resubmit(tmp_path: Path) -
     assert len(rows) == 1
 
 
+def test_round10_forecast_poll_timeout_stops_chain_as_reconciling(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    class Client(FakeCycleSlurmClient):
+        def _submit(
+            self, stage: str, run_id: str, model_id: str, payload: dict[str, Any]
+        ) -> dict[str, Any]:
+            response = super()._submit(stage, run_id, model_id, payload)
+            if stage != "forecast":
+                response["status"] = "succeeded"
+                response["finished_at"] = "2026-05-01T00:02:00Z"
+                response["exit_code"] = 0
+                self.jobs[response["job_id"]].update(response)
+            return response
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = Client(never_terminal_stage="forecast")
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    orchestrator.config = OrchestratorConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=tmp_path / "object-store",
+        object_store_prefix="s3://nhms",
+        poll_interval_seconds=1,
+        job_timeout_seconds=1,
+    )
+    monotonic_values = iter([0.0, 0.0, 2.0, 2.0])
+    monkeypatch.setattr("services.orchestrator.chain.time.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr("services.orchestrator.chain.time.sleep", lambda _seconds: None)
+
+    basins = _basins(2)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_2026050100_model_{index}",
+                "candidate_id": (
+                    f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic"
+                ),
+                "orchestration_run_id": "cycle_gfs_2026050100_forecast_cohort_fixture",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    assert result.status == "reconciling"
+    assert result.stages[-1].stage == "forecast"
+    assert result.stages[-1].status == "reconcile_unverified"
+    assert [submission["stage"] for submission in client.submissions] == ["forecast"]
+    job = repository.get_pipeline_job(result.stages[-1].pipeline_job_id)
+    assert job["status"] == "reconcile_unverified"
+    cycle = repository._cycle_rows(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        model_id=None,
+    ).forecast_cycle
+    assert cycle is not None
+    assert cycle["status"] == "forecast_running"
+    events = repository._cycle_rows(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        model_id=None,
+    ).pipeline_events
+    assert any(
+        event["event_type"] == "reconcile_unverified"
+        and event["status_to"] == "reconcile_unverified"
+        for event in events
+    )
+
+
+@pytest.mark.parametrize(
+    ("immediate_terminal", "failure_mode"),
+    [
+        pytest.param(False, "incomplete", id="foreground-incomplete"),
+        pytest.param(True, "incomplete", id="immediate-incomplete"),
+        pytest.param(False, "malformed", id="foreground-malformed"),
+        pytest.param(False, "master_mismatch", id="foreground-master-mismatch"),
+        pytest.param(True, "projection_conflict", id="immediate-projection-conflict"),
+    ],
+)
+def test_round11_forecast_projection_gate_uses_durable_reconciling_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    immediate_terminal: bool,
+    failure_mode: str,
+) -> None:
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = ImmediateTerminalSlurmClient() if immediate_terminal else FakeCycleSlurmClient()
+    retry_service = FileJournalRetryService(
+        repository,
+        RetryConfig(max_retries=1, backoff_schedule=[0]),
+    )
+    basins = _basins(2)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_2026050100_model_{index}",
+                "candidate_id": (
+                    f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic"
+                ),
+                "orchestration_run_id": "cycle_gfs_2026050100_forecast_cohort_fixture",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+
+    if failure_mode == "incomplete":
+        original_results = client.get_array_task_results
+        monkeypatch.setattr(
+            client,
+            "get_array_task_results",
+            lambda job_id: original_results(job_id)[:1],
+        )
+    elif failure_mode == "malformed":
+        client.malformed_array_accounting_stages.add("forecast")
+    elif failure_mode == "master_mismatch":
+        original_status = client.get_job_status
+
+        def mismatched_terminal(job_id: str) -> dict[str, Any]:
+            terminal = original_status(job_id)
+            if terminal["stage"] == "forecast" and terminal["status"] == "succeeded":
+                terminal["job_id"] = "999999"
+            return terminal
+
+        monkeypatch.setattr(client, "get_job_status", mismatched_terminal)
+    else:
+
+        def projection_conflict(*_args: Any, **_kwargs: Any) -> dict[str, int]:
+            raise FileOrchestrationJournalError(
+                "file_journal_task_identity_mismatch",
+                field="task_slurm_job_id",
+            )
+
+        monkeypatch.setattr(repository, "project_forecast_cohort_tasks", projection_conflict)
+
+    result = _orchestrator(
+        tmp_path,
+        repository,
+        client,
+        retry_service=retry_service,
+    ).orchestrate_cycle("gfs", "2026050100", basins)
+
+    assert result.status == "reconciling"
+    assert [submission["stage"] for submission in client.submissions] == ["forecast"]
+    forecast = result.stages[-1]
+    assert forecast.status == "reconcile_unverified"
+    durable = repository.get_pipeline_job(forecast.pipeline_job_id)
+    assert durable is not None
+    assert durable["status"] == "reconcile_unverified"
+    assert durable["candidate_projections"] == []
+    assert durable["error_code"] in {
+        "SLURM_TASK_ACCOUNTING_INCOMPLETE",
+        "SLURM_MASTER_IDENTITY_MISMATCH",
+        "SLURM_TASK_IDENTITY_MISMATCH",
+    }
+    jobs = repository.query_pipeline_jobs_by_cycle("gfs_2026050100")
+    assert [job["job_id"] for job in jobs] == [forecast.pipeline_job_id]
+    assert all(
+        repository._hydro_run_for(str(basin["run_id"]))["status"] == "created"
+        for basin in basins
+    )
+    cycle = repository._cycle_rows(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        model_id=None,
+    ).forecast_cycle
+    assert cycle is not None
+    assert cycle["status"] == "forecast_running"
+
+
+def test_round11_resumed_forecast_incomplete_projection_stays_reconciling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = FakeCycleSlurmClient()
+    basins = _basins(2)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_2026050100_model_{index}",
+                "candidate_id": (
+                    f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic"
+                ),
+                "orchestration_run_id": "cycle_gfs_2026050100_forecast_cohort_fixture",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    original_projector = repository.project_forecast_cohort_tasks
+
+    def crash_before_projection(*_args: Any, **_kwargs: Any) -> dict[str, int]:
+        raise RuntimeError("injected projection crash")
+
+    monkeypatch.setattr(repository, "project_forecast_cohort_tasks", crash_before_projection)
+    with pytest.raises(RuntimeError, match="injected projection crash"):
+        _orchestrator(tmp_path, repository, client).orchestrate_cycle(
+            "gfs", "2026050100", basins
+        )
+    monkeypatch.setattr(repository, "project_forecast_cohort_tasks", original_projector)
+    original_results = client.get_array_task_results
+    monkeypatch.setattr(
+        client,
+        "get_array_task_results",
+        lambda job_id: original_results(job_id)[:1],
+    )
+
+    reopened = FileOrchestrationJournalRepository(repository.root)
+    orchestrator = _orchestrator(tmp_path, reopened, client)
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    normalized = orchestrator._normalize_cycle_basins(basins, "gfs", cycle_time)
+    job_id = "job_cycle_gfs_2026050100_forecast_cohort_fixture_forecast"
+    job = reopened.get_pipeline_job(job_id)
+    assert job is not None
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_id="gfs_2026050100",
+        run_id=str(job["run_id"]),
+        all_basins=normalized,
+        active_basins=list(normalized),
+    )
+    result, aggregation = orchestrator._resume_cycle_stage(M3_STAGES[2], context, job)
+
+    assert result.status == "reconcile_unverified"
+    assert aggregation is not None
+    assert [submission["stage"] for submission in client.submissions] == ["forecast"]
+    durable = reopened.get_pipeline_job(result.pipeline_job_id)
+    assert durable is not None
+    assert durable["status"] == "reconcile_unverified"
+    assert durable["candidate_projections"] == []
+    assert durable["error_code"] == "SLURM_TASK_ACCOUNTING_INCOMPLETE"
+
+
+@pytest.mark.parametrize("invalid_status", [None, "", "FUTURE_STATE", ["running"]])
+def test_round10_forecast_unknown_submit_status_is_ambiguous_and_unbound(
+    tmp_path: Path,
+    invalid_status: Any,
+) -> None:
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    class Client(FakeCycleSlurmClient):
+        def submit_job_array(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            response = super().submit_job_array(*args, **kwargs)
+            if response["stage"] == "forecast":
+                response["status"] = invalid_status
+            return response
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = Client()
+    basins = _basins(2)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_2026050100_model_{index}",
+                "candidate_id": (
+                    f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic"
+                ),
+                "orchestration_run_id": "cycle_gfs_2026050100_forecast_cohort_fixture",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    result = _orchestrator(tmp_path, repository, client).orchestrate_cycle(
+        "gfs", "2026050100", basins
+    )
+
+    assert result.status == "reconciling"
+    forecast = result.stages[-1]
+    assert forecast.stage == "forecast"
+    assert forecast.status == "submit_result_ambiguous"
+    durable = repository.get_pipeline_job(forecast.pipeline_job_id)
+    assert durable["status"] == "reserved"
+    assert durable["slurm_job_id"] is None
+    assert durable["submit_outcome"] == "submit_result_ambiguous"
+    assert [submission["stage"] for submission in client.submissions] == ["forecast"]
+
+
 def test_manual_retry_terminal_stage_submits_new_attempt_identity(tmp_path: Path) -> None:
     """A manual retry must not reuse the old terminal stage job/idempotency key.
 
@@ -10502,7 +11749,8 @@ def test_missing_forecast_output_retry_resubmits_lost_forecast_identity(tmp_path
     store.session.commit()
 
     client = FakeCycleSlurmClient()
-    orchestrator = _orchestrator(tmp_path, repository, client)
+    retry_service = FakeRetryService(max_retries=1)
+    orchestrator = _orchestrator(tmp_path, repository, client, retry_service=retry_service)
     basins = _basins(1)
     basins[0]["orchestration_run_id"] = "cycle_gfs_2026050100_forecast_model_0"
     basins[0]["restart_stage"] = "forecast"
@@ -10529,6 +11777,7 @@ def test_missing_forecast_output_retry_resubmits_lost_forecast_identity(tmp_path
     assert retry_job["slurm_job_id"] == "2001"
     assert retry_job["idempotency_key"] == "cycle_gfs_2026050100_forecast_model_0:forecast:retry_1"
     assert client.submissions[0]["stage"] == "forecast"
+    assert retry_service.handled_job_ids == ["job_cycle_gfs_2026050100_forecast_model_0_forecast"]
     assert (
         client.submissions[0]["manifest"]["comment"]
         == "nhms_idem:cycle_gfs_2026050100_forecast_model_0:forecast:retry_1"
@@ -10536,6 +11785,8 @@ def test_missing_forecast_output_retry_resubmits_lost_forecast_identity(tmp_path
 
 
 def test_auto_manifest_repair_resubmits_terminal_restart_stages() -> None:
+    from services.orchestrator.accepted_submit_identity import forecast_cohort_digest
+
     context = CycleOrchestrationContext(
         source_id="gfs",
         cycle_time=datetime(2026, 5, 1, tzinfo=UTC),
@@ -10576,10 +11827,41 @@ def test_auto_manifest_repair_resubmits_terminal_restart_stages() -> None:
         "decision": "retry_missing_forecast_output",
         "restart_stage": "forecast",
     }
-    assert ForecastOrchestrator._terminal_stage_needs_manual_retry(
+    assert not ForecastOrchestrator._terminal_stage_needs_manual_retry(
         context,
         {"stage": "forecast", "status": "reservation_lost"},
     )
+    verified_cohort = {
+        "job_id": "job_cycle_gfs_2026050100_forecast_fixture_forecast",
+        "run_id": "cycle_gfs_2026050100_forecast_fixture",
+        "source_id": "gfs",
+        "cycle_id": "gfs_2026050100",
+        "job_type": "run_shud_forecast_array",
+        "stage": "forecast",
+        "status": "reservation_lost",
+        "slurm_job_id": None,
+        "idempotency_key": "cycle_gfs_2026050100_forecast_fixture:forecast",
+        "slurm_comment": "nhms_idem:cycle_gfs_2026050100_forecast_fixture:forecast",
+        "submit_outcome": "submit_result_ambiguous",
+        "restart_stage": "forecast",
+        "submission_attempt": 1,
+        "cohort_members": [
+            {
+                "array_task_id": 0,
+                "candidate_id": "gfs:2026-05-01T00:00:00Z:model_0:forecast_gfs_deterministic",
+                "run_id": "fcst_gfs_2026050100_model_0",
+                "model_id": "model_0",
+                "basin_id": "basin_0",
+                "scenario_id": "forecast_gfs_deterministic",
+                "restart_stage": "forecast",
+            }
+        ],
+        "reconciliation_source": "slurm_exact_comment",
+        "reconciliation_decision": "absence_retry_permitted",
+        "matched_slurm_job_id": None,
+    }
+    verified_cohort["cohort_digest"] = forecast_cohort_digest(verified_cohort)
+    assert ForecastOrchestrator._terminal_stage_needs_manual_retry(context, verified_cohort)
 
 
 def test_auto_manifest_repair_resubmits_terminal_cohort_when_every_basin_requires_it() -> None:

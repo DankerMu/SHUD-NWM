@@ -214,6 +214,36 @@ psql "$DATABASE_URL" -c "select run_id,status from hydro.hydro_run order by 1 de
 
 作业里每个 stage 以结构化 JSON（含 `error_code`/`status`）落到 `.out`，便于定位失败 stage。
 
+DB-free scheduler journal 的 `pipeline-jobs/` 只保留 cohort master 与 pre-#1112 legacy
+flat rows，供 bounded restart discovery 使用。#1112 之后的 terminal candidate direct
+projection 写入
+`pipeline-jobs/by-cycle/<source>/<YYYYMMDDHH>/<job_id>.json`；按 job-id 直接读取和按
+source/cycle 读取会命中该分区，但全局 restart/hard-limit scan 不递归枚举历史 candidate
+分区。`journal/<source>/<cycle>.jsonl` 仍是 append-only audit truth，`latest/` 仍是
+model-scoped materialized view；不得通过删除 journal 来控制 direct-file 数量，也不得把
+`by-cycle/` 搬回 flat namespace。marker-free legacy flat rows 保持只读兼容，不自动升级为
+accepted-submit reconcile authority。
+
+版本化 accepted-submit master 的 reserve/commit/reject/accounting-bind 只按确定的
+`pipeline_job_id` 读取 flat direct 与对应 `journal/<source>/<cycle>.jsonl`，不会为了匹配
+idempotency key 枚举无关历史 `latest/`、journal 或 direct 文件。exact-comment `sacct`
+仍固定查询七天、按 12 小时分页；零结果只有在查询覆盖从当前
+`submission_attempt_started_at` 一直到冻结的 query end 时才是权威 absence。attempt 早于
+七天 floor 时记录 `accounting_unavailable` + `coverage_incomplete`，保留 reservation，禁止
+retry；窗口内找到精确记录仍可绑定。页输出超过 row/byte 上限分别记录
+`bounded_output_rows_saturated` / `bounded_output_bytes_saturated`，这代表 accounting
+不可用，不代表已经证明多个 exact matches，因此同样禁止 bind、cancel 和 retry。公开
+evidence 只输出上述受限类别，不输出 raw comment、accounting row 或运行路径。
+
+版本化 master 的 `submission_attempt_started_at` 是当前 attempt 的必需、不可变 evidence：
+首次 reserve 必须提供合法的带时区时间；同一 attempt 的普通 upsert 不得改写；reclaim 只由
+持有 cycle lock 的成功方写入新的 UTC anchor，忽略锁外请求携带的时间。direct、journal 与
+latest replay 遇到缺失、无时区或畸形 anchor 均 fail closed。adapter 返回的
+`coverage_complete=true` 仅是声明，reconcile consumer 还会使用 durable anchor 重新验证
+`coverage_start <= anchor <= coverage_end`；缺 bounds、倒序、越界、畸形 bounds 或缺 durable
+anchor 一律降为 `accounting_unavailable` + `coverage_incomplete`，不得 retry。上述 coverage
+限制只约束零匹配 authority；身份已独立证明的 exact match 仍可绑定。
+
 **实时生产监控快照**（`nhms-monitor`，通用编排器，49883ea）——一次性扫 DB + Slurm 生成结构化健康快照，适合 cron/守护轮询：
 
 ```bash
@@ -301,6 +331,91 @@ systemctl --user enable --now nhms-scheduler-evidence-retention.timer
      归一化到裸 `<id>`)；grace-gate 锚 `updated_at`(reserve/reclaim/bind 三路径刷新)防 slurmdbd 滞后误把 in-flight 预留降级
      reservation_lost；reconcile 会话 commit 失败后 rollback 避免毒化后续 pass。**部署前置见 §2.3**（000029 必须先 apply）。
      **尚未 live**——overlapping-submit 实况 receipt 待 daemon live = #292，依赖 #287(验 m23 #255 鲜活摄取)。
+
+     Accepted-submit exact-comment reconcile 的全局 0/1/多重匹配证明会同时执行 `scontrol show config`
+     （controller）和 `sacctmgr show config`（SlurmDBD）；两侧 `PrivateData` 都不含 `jobs`/`all` 时才允许
+     `sacct --allusers`。任一命令不可用、字段缺失或配置受限时，本轮记为 accounting unavailable，不释放
+     retry，也没有可绕过的 env acknowledgement。两个配置探针的 stdout/stderr 都受 byte、row 和 wall-time
+     上限约束，超限或超时同样 fail closed。`sacct` 按 12 小时时间页扫描 7 天窗口，并在一个
+     reconcile pass 内缓存页面、跨页按 master job id 去重；每页独立执行 20,000 行/2 MiB 限制，整轮只共享
+     wall-time deadline，避免将合法的 7 天 task/`.batch` 总量误判为超限。
+     文件 journal 的重启发现只读取 `reconcile-inventory/`：升级后的首次 pass 会在 flock 保护下对 current 与
+     marker-free legacy active rows 做可重入 backfill，完成后写
+     `reconcile-inventory-migration-v1.json`。若首次迁移中断，marker 不落盘，重启会继续；稳态 pass 不再扫描
+     全量 `pipeline-jobs/`、cycle journal 或 `pipeline-jobs/by-cycle/` candidate 历史。
+
+     **禁止直接回退到 pre-inventory writer。** 支持的回滚必须先停 timer/service，并用当前版本争用生产
+     scheduler file lease、写 preparation receipt 和 rollback fence；命令失败时不得切换代码：
+
+     ```bash
+     uv run nhms-pipeline prepare-file-journal-rollback \
+       --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" \
+       --workspace-root "$WORKSPACE_ROOT" \
+       --scheduler-lock-backend file \
+       --scheduler-state stopped \
+       --active-scheduler-processes 0 \
+       --checked-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+       --checked-by "$USER" \
+       --target-writer-generation '<rollback-git-sha>'
+     ```
+
+     `--target-writer-generation` 必须是计划运行 checkout 的完整 `git rev-parse HEAD`，不得使用短 SHA；
+     格式校验发生在 file lease、marker、fence 或 receipt 的任何变更之前。
+     preparation receipt 的 `receipt_id` 必须随回滚记录保存；旧 writer 不得直接启动，也不得由操作者
+     自报 actual generation。必须从仍在当前版本的控制 checkout 调用
+     `launch-file-journal-rollback-writer`，让它从将要执行的 clean checkout 内部解析并复核 generation，
+     验证该 checkout 的 `.venv/bin/python` 存在且可执行，通过 gate 后才以该 runtime 启动 writer：
+
+     ```bash
+     uv run nhms-pipeline launch-file-journal-rollback-writer \
+       --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" \
+       --workspace-root "$WORKSPACE_ROOT" \
+       --receipt-id '<preparation-receipt-id>' \
+       --writer-repository-root '<clean-rollback-checkout>' \
+       -- plan-production --submit --continuous --max-passes 1
+     ```
+
+     launcher 只接受 `plan-production` 的一次真实 `--submit`；缺少 `--submit`、`--plan`、`--dry-run`、
+     `--help`/`--version`、root/lock override 或其他命令都必须在 writer 零启动时 fail closed。通过
+     receipt 后，controller 将完整目标 SHA 物化为
+     `WORKSPACE_ROOT/.nhms-rollback-execution-v1/<receipt>-<generation>/source`，并把已打开且
+     复核过的目标解释器复制到同一私有只读 generation root 的 `runtime`；两者均不位于原
+     checkout/venv，active binding 发布后删除整个原 checkout 也不得影响后续 worker。child 的
+     journal/workspace/file lock 由 receipt gate
+     强制绑定，ambient environment 不能改写。checkout dirty、含 untracked 文件、无法解析、切换中、
+     runtime 不可用或与 receipt target 不同也均必须零启动。rollback fence 存在期间，当前版本
+     scheduler 必须返回 `scheduler_rollback_fence_prepared`，不得自动 backfill 或提交业务任务。重新升级后，
+     在 timer/service 仍停止时执行显式 roll-forward；成功 receipt 落盘且 fence 被消费后才可恢复 timer：
+
+     ```bash
+     uv run nhms-pipeline complete-file-journal-rollforward \
+       --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" \
+       --workspace-root "$WORKSPACE_ROOT" \
+       --scheduler-lock-backend file \
+       --preparation-receipt-id '<preparation-receipt-id>'
+     ```
+
+     preparation 和 roll-forward 命令都必须取得与生产 scheduler 相同的 file lease；live lease、
+     `preparing` 崩溃恢复失败、receipt 篡改/过期/跨 root 重放、writer checkout generation 不匹配或
+     backfill 期间 authority 变化均 fail closed。node-22 回滚演练 receipt 必须同时保存 preparation、旧 writer
+     gate、roll-forward 和恢复后 inventory-only 证据。
+
+     `WORKSPACE_ROOT` 下的 generation retention root 必须位于 gateway/compute 共同可见路径；目标
+     checkout 和 `.venv` 只需在 active 发布前对 launcher 可见。该 runtime 经 manifest 和 HTTP
+     gateway 显式传给 forcing、forecast、state-save 三阶段；普通生产提交仍用原 console
+     entrypoint。runtime bundle 的 retention 为
+     `retained_fail_closed_until_operator_cleanup`：old writer 非零退出或 controller 崩溃也不得删除。
+     active binding 会 bounded/no-follow 遍历完整 runtime tree；nested file/dir 可写、symlink、
+     special entry 或非约定 executable mode 都必须在零 sbatch 时 fail closed。
+     active 脚本会 unset `PYTHONHOME`/`VIRTUAL_ENV`，固定 `PYTHONPATH` 为 bound source，并用 bound
+     runtime bin 加最小系统路径替换 ambient `PATH`；forecast 两段 heredoc 也使用 exact runtime。
+     launcher 的独立 execution flock 会阻止 old writer 存活期间的 roll-forward；在所有引用该 runtime
+     的 Slurm task 终态前，也不得人工前滚、恢复 timer 或删除 generation retention root。严格前滚查询
+     会固定 reconcile-inventory/journal/latest/pipeline-jobs/active-reconcile 五个 root 身份，任何消失、
+     替换或变化都统一 fail closed；recursive journal/latest walker 还会在每层目录 list 前后及 child
+     recursion 后复核该层签名，nested entry 不得静默消失、替换或新增。只有全程不存在的 root
+     可视为空。最终 receipt 必须保存 exact job
+     identity、三个 sbatch 中的同一 runtime/source 路径，以及 generation retention 清理结果。
      out-of-scope LOW 收尾 → #300。
 7b. ✅ **多源下载韧性**（PR #308，b4a2e85/eeb4d5c）：GFS 换 NODD 多镜像链（`GFS_SOURCE_BACKENDS=s3,gcs,azure,ftpprd,nomads`，共享 `.idx`+HTTP-Range+本地 cdo-clip，NOMADS grib-filter 末位回退）；
 IFS 云镜像优先（`IFS_OPEN_DATA_FALLBACK_SOURCES` 默认 `aws,azure,google,ecmwf`，ECMWF 直连 500 连接上限末位）。NOMADS 403=动态封禁 → 持久断路器（`OBJECT_STORE_ROOT/state/source_circuit/`，cooldown 内停重试）；

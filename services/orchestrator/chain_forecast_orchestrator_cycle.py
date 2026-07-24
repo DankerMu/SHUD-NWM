@@ -1,6 +1,17 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from services.orchestrator import chain as _chain
+from services.orchestrator.accepted_submit_identity import (
+    ACCEPTED_SUBMIT_CONTRACT_VERSION,
+    accepted_submit_contract_is_current,
+    accepted_submit_pipeline_job_model_id,
+    accepted_submit_row_kind,
+    canonical_forecast_cohort_members,
+    forecast_cohort_digest,
+    forecast_cohort_identity_is_valid,
+)
 
 _FORCE_TERMINAL_RESUBMIT_DECISIONS = {
     "retry_missing_forecast_output",
@@ -141,6 +152,8 @@ class ForecastOrchestratorCycleMixin:
     def _terminal_stage_needs_manual_retry(
         context: _chain.CycleOrchestrationContext, job: _chain.Mapping[str, _chain.Any]
     ) -> bool:
+        if str(job.get("status") or "") == "reservation_lost" and job.get("slurm_job_id") in (None, ""):
+            return _verified_accepted_submit_forecast_retry(job)
         if _terminal_stage_needs_forced_resubmit(context, job):
             return True
         if context.retry_attempt is None:
@@ -160,7 +173,7 @@ class ForecastOrchestratorCycleMixin:
         terminal_time = _chain._pipeline_job_terminal_time(job)
         return terminal_time is None or terminal_time <= refreshed_upstream_finished_at
 
-    def _schedule_cycle_stage_retry(self, result: _chain.StageRunResult, _failure_number: int) -> str | None:
+    def _schedule_cycle_stage_retry(self, result: _chain.StageRunResult, failure_number: int) -> str | None:
         if self.retry_service is None:
             return None
         job = self._retry_job_for_stage_result(result)
@@ -168,6 +181,33 @@ class ForecastOrchestratorCycleMixin:
             return None
         retry_count = int(getattr(job, "retry_count", 0) or 0)
         backoff_seconds = _chain.compute_backoff_seconds(retry_count, self.retry_config.backoff_schedule)
+        get_pipeline_job = getattr(self.repository, "get_pipeline_job", None)
+        current = get_pipeline_job(result.pipeline_job_id) if callable(get_pipeline_job) else None
+        if (
+            isinstance(current, _chain.Mapping)
+            and accepted_submit_contract_is_current(current)
+            and accepted_submit_row_kind(current) == "master"
+        ):
+            should_retry = getattr(self.retry_service, "should_auto_retry", None)
+            if callable(should_retry) and not bool(should_retry(job)):
+                return None
+            # The next call to _submit_and_wait_cycle_stage owns creation of a
+            # clean, versioned reservation using the then-current basin cohort.
+            # Do not let the legacy retry adapter clone a marker-free row.
+            retry_marker = "_retry_"
+            base_job_id = result.pipeline_job_id
+            suffix_attempt = 0
+            if retry_marker in base_job_id:
+                possible_base, possible_attempt = base_job_id.rsplit(retry_marker, maxsplit=1)
+                try:
+                    suffix_attempt = max(int(possible_attempt), 0)
+                    base_job_id = possible_base
+                except ValueError:
+                    pass
+            next_attempt = max(retry_count, suffix_attempt, failure_number - 1) + 1
+            next_job_id = f"{base_job_id}{retry_marker}{next_attempt}"
+            _chain.time.sleep(backoff_seconds)
+            return next_job_id
         handled = self.retry_service.handle_failed_job(job)
         handled_status = str(getattr(handled, "status", ""))
         handled_job_id = str(getattr(handled, "job_id"))
@@ -376,8 +416,8 @@ class ForecastOrchestratorCycleMixin:
         terminal: dict[str, _chain.Any],
         aggregation: _chain.ArrayAggregation,
         log_uri: str | None,
-    ) -> None:
-        _chain.chain_array_accounting.record_cycle_stage_status_override(
+    ) -> dict[str, _chain.Any]:
+        return _chain.chain_array_accounting.record_cycle_stage_status_override(
             self,
             stage,
             context,
@@ -458,17 +498,63 @@ class ForecastOrchestratorCycleMixin:
         """
         if not hasattr(self.repository, "reserve_pipeline_job"):
             return None
-        return _chain.reserve_candidate(
-            self.repository,
-            idempotency_key=idempotency_key,
-            job_id=pipeline_job_id,
-            run_id=context.run_id,
-            cycle_id=context.cycle_id,
-            job_type=stage.job_type,
-            model_id=_chain._cycle_pipeline_job_model_id(context),
-            stage=stage.stage,
-            candidate_id=context.run_id,
-        )
+        reservation_evidence = None
+        if (
+            getattr(self.repository, "supports_accepted_submit_reconcile", False)
+            and _chain.chain_stage_execution.is_forecast_cohort_stage(stage)
+        ):
+            submission_attempt = max(int(context.retry_attempt or 1), 1)
+            retry_marker = "_retry_"
+            if retry_marker in pipeline_job_id:
+                try:
+                    submission_attempt = max(
+                        submission_attempt,
+                        int(pipeline_job_id.rsplit(retry_marker, maxsplit=1)[1]) + 1,
+                    )
+                except ValueError:
+                    pass
+            members = canonical_forecast_cohort_members(
+                source_id=context.source_id,
+                cycle_time=context.cycle_time,
+                basins=context.active_basins,
+            )
+            expected_user = self.config.reconcile_slurm_user
+            expected_account = self.config.reconcile_slurm_account
+            reservation_evidence = {
+                "accepted_submit_contract_version": ACCEPTED_SUBMIT_CONTRACT_VERSION,
+                "slurm_comment": _chain.slurm_comment_for(idempotency_key),
+                "cohort_members": list(members),
+                "restart_stage": "forecast",
+                "submission_attempt": submission_attempt,
+                "submission_attempt_started_at": datetime.now(UTC),
+                "slurm_ownership_required": bool(expected_user and expected_account),
+                "expected_slurm_user": expected_user,
+                "expected_slurm_account": expected_account,
+                "native_shud_resubmitted": _chain.chain_stage_execution.is_forecast_cohort_stage(stage),
+            }
+        reserve_kwargs = {
+            "idempotency_key": idempotency_key,
+            "job_id": pipeline_job_id,
+            "run_id": context.run_id,
+            "cycle_id": context.cycle_id,
+            "job_type": stage.job_type,
+            "model_id": accepted_submit_pipeline_job_model_id(
+                supports_accepted_submit_reconcile=getattr(
+                    self.repository, "supports_accepted_submit_reconcile", False
+                ),
+                stage=stage.stage,
+                job_type=stage.job_type,
+                model_id=_chain._cycle_pipeline_job_model_id(context),
+            ),
+            "stage": stage.stage,
+            "candidate_id": context.run_id,
+        }
+        if reservation_evidence is not None:
+            reservation_evidence["cohort_digest"] = forecast_cohort_digest(
+                {"source_id": context.source_id, **reserve_kwargs, **reservation_evidence}
+            )
+            reserve_kwargs["reservation_evidence"] = reservation_evidence
+        return _chain.reserve_candidate(self.repository, **reserve_kwargs)
 
     def _reservation_already_inflight(self, reservation: _chain.ReservationResult | None) -> bool:
         """True when THIS pass lost the reservation and must NOT sbatch.
@@ -518,11 +604,19 @@ class ForecastOrchestratorCycleMixin:
         error: Exception,
         *,
         pipeline_job_id: str | None = None,
+        persist_pipeline_job: bool = True,
+        persist_pipeline_event: bool = True,
     ) -> _chain.StageRunResult:
         from services.orchestrator import chain_forecast_submission
 
         return chain_forecast_submission._record_submission_failure(
-            self, stage, context, error, pipeline_job_id=pipeline_job_id
+            self,
+            stage,
+            context,
+            error,
+            pipeline_job_id=pipeline_job_id,
+            persist_pipeline_job=persist_pipeline_job,
+            persist_pipeline_event=persist_pipeline_event,
         )
 
     def _skip_duplicate_submission(
@@ -706,6 +800,18 @@ def _terminal_stage_needs_forced_resubmit(
         if restart_stage is None or _STAGE_ORDER[job_stage] < _STAGE_ORDER[restart_stage]:
             return False
     return True
+
+
+def _verified_accepted_submit_forecast_retry(job: _chain.Mapping[str, _chain.Any]) -> bool:
+    """Allow the reclaim shortcut only for reconcile-verified forecast cohorts."""
+
+    return bool(
+        job.get("submit_outcome") in {"accepted", "submit_result_ambiguous"}
+        and job.get("reconciliation_source") == "slurm_exact_comment"
+        and job.get("reconciliation_decision") == "absence_retry_permitted"
+        and job.get("matched_slurm_job_id") is None
+        and forecast_cohort_identity_is_valid(job)
+    )
 
 
 def _canonical_stage(value: _chain.Any) -> str | None:

@@ -6,7 +6,7 @@ import os
 import re
 import stat
 import threading
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -23,10 +23,30 @@ from packages.common.safe_fs import (
     list_directory_no_follow_limited,
     read_bytes_limited_no_follow,
     stat_no_follow,
+    unlink_no_follow,
 )
 from packages.common.slurm_env import secret_manifest_value_reason
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator import chain_repository_state
+from services.orchestrator.accepted_submit_identity import (
+    ACCEPTED_PROJECTION_FIELDS,
+    ACCEPTED_SUBMIT_CONTRACT_VERSION,
+    ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD,
+    MAX_FORECAST_COHORT_MEMBERS,
+    AcceptedSubmitCommitResult,
+    AcceptedSubmitEvidenceError,
+    AcceptedSubmitTransition,
+    accepted_submit_contract_is_current,
+    accepted_submit_master_identity_is_structural,
+    accepted_submit_master_immutable_identity,
+    accepted_submit_master_ordinary_upsert_state,
+    accepted_submit_row_kind,
+    apply_accepted_submit_transition,
+    normalize_accepted_submit_attempt_anchor,
+    normalize_accepted_submit_evidence,
+    normalize_candidate_projections,
+    ordered_cohort_members,
+)
 from services.orchestrator.chain_repository import (
     ACTIVE_HYDRO_STATUSES,
     COMPLETED_HYDRO_STATUSES,
@@ -86,7 +106,8 @@ from services.orchestrator.scheduler_state import _ensure_utc, _evidence_safe, _
 from services.slurm_gateway.models import SubmitJobRequest
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
-FILE_LOCK_GUARD_MODE_ENV = "NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE"
+FILE_JOURNAL_LOCK_GUARD_MODE_ENV = "NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE"
+LEGACY_FILE_LOCK_GUARD_MODE_ENV = "NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE"
 FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION = "nhms.scheduler.file_orchestration_journal.v1"
 FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION = "nhms.scheduler.file_orchestration_latest.v1"
 FILE_ORCHESTRATION_PRIVATE_RECOVERY_SCHEMA_VERSION = "nhms.scheduler.file_orchestration_private_recovery.v1"
@@ -100,16 +121,40 @@ MAX_FILE_JOURNAL_PATH_SEGMENT_CHARS = 255
 MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES = 512
 MAX_FILE_JOURNAL_READ_CACHE_ENTRIES = 4096
 MAX_FILE_JOURNAL_READ_CACHE_BYTES = 64 * 1024 * 1024
-FILE_RECONCILE_SCAN_LIMIT_ENV = "NHMS_FILE_RECONCILE_SCAN_LIMIT"
-DEFAULT_FILE_RECONCILE_SCAN_LIMIT = 512
+_RECONCILE_INVENTORY_DIRECTORY = "reconcile-inventory"
+_RECONCILE_INVENTORY_SCHEMA_VERSION = "nhms.scheduler.reconcile_inventory.v1"
+_RECONCILE_INVENTORY_MIGRATION_SCHEMA_VERSION = "nhms.scheduler.reconcile_inventory_migration.v1"
+_RECONCILE_INVENTORY_MIGRATION_MARKER = "reconcile-inventory-migration-v1.json"
+_RECONCILE_INVENTORY_ROLLBACK_PREP_SCHEMA_VERSION = (
+    "nhms.scheduler.reconcile_inventory_rollback_preparation.v2"
+)
+_RECONCILE_INVENTORY_ROLLBACK_PREP_RECEIPT = "reconcile-inventory-rollback-preparation-v2.json"
+_RECONCILE_INVENTORY_ROLLFORWARD_SCHEMA_VERSION = (
+    "nhms.scheduler.reconcile_inventory_rollforward.v1"
+)
+_RECONCILE_INVENTORY_ROLLFORWARD_RECEIPT = "reconcile-inventory-rollforward-v1.json"
+_LEGACY_ACTIVE_RECONCILE_DIRECTORY = "active-reconcile"
+_ATOMIC_TEMP_NONCE_RE = r"[0-9a-f]{32}"
+_RECONCILE_INVENTORY_TEMP_RE = re.compile(
+    rf"^\.(?P<target>[A-Za-z0-9_.-]+\.json)\.{_ATOMIC_TEMP_NONCE_RE}\.tmp$"
+)
+_RECONCILE_MIGRATION_TEMP_RE = re.compile(
+    rf"^\.(?:{re.escape(_RECONCILE_INVENTORY_MIGRATION_MARKER)}|"
+    rf"{re.escape(_RECONCILE_INVENTORY_ROLLBACK_PREP_RECEIPT)}|"
+    rf"{re.escape(_RECONCILE_INVENTORY_ROLLFORWARD_RECEIPT)})\.{_ATOMIC_TEMP_NONCE_RE}\.tmp$"
+)
 _LATEST_REPLAY_ORDER_SENTINEL = MAX_FILE_JOURNAL_RECORDS + 1
+_UNSET = object()
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _FORECAST_RUN_ID_RE = re.compile(r"^fcst_([^_]+)_(\d{10})_(.+)$")
 _CYCLE_RUN_ID_RE = re.compile(r"^cycle_([^_]+)_(\d{10})$")
 _CYCLE_COHORT_RUN_ID_RE = re.compile(r"^cycle_([^_]+)_(\d{10})(?:_.+)?$")
+_CANDIDATE_JOB_ID_RE = re.compile(r"^job_fcst_([^_]+)_(\d{10})_.+$")
+_ACCEPTED_SUBMIT_MASTER_JOB_ID_RE = re.compile(r"^job_cycle_([^_]+)_(\d{10})_.+$")
 _REPLAY_SEQUENCE_FIELD = "_file_journal_replay_sequence"
 _REPLAY_ORDER_FIELD = "_file_journal_replay_order"
 _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS = (
+    "accepted_submit_contract_version",
     "slurm_job_id",
     "array_task_id",
     "model_id",
@@ -127,6 +172,23 @@ _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS = (
     "error_code",
     "error_message",
     "log_uri",
+    "submit_outcome",
+    "slurm_comment",
+    "cohort_members",
+    "cohort_digest",
+    "restart_stage",
+    "submission_attempt",
+    "submission_attempt_started_at",
+    "expected_slurm_user",
+    "expected_slurm_account",
+    "slurm_ownership_required",
+    "reconciliation_source",
+    "reconciliation_decision",
+    "reconciliation_reason_class",
+    "matched_slurm_job_id",
+    "candidate_projections",
+    "cancellation_receipt_recorded",
+    "native_shud_resubmitted",
 )
 _RUNTIME_ROOT_EVENT_CANDIDATE_PATHS = (
     ("runtime_root_contract",),
@@ -165,6 +227,23 @@ TERMINAL_PIPELINE_STATUSES = {
     "reservation_lost",
     "permanently_failed",
 }
+_ACCEPTED_RUNTIME_TRANSITIONS = {
+    "submitted": frozenset({"submitted", "pending", "queued", "running", "reconcile_unverified"}),
+    "pending": frozenset({"pending", "queued", "running", "reconcile_unverified"}),
+    "queued": frozenset({"queued", "running", "reconcile_unverified"}),
+    "running": frozenset({"running", "reconcile_unverified"}),
+    "cancellation_pending": frozenset({"cancellation_pending"}),
+    "reconcile_unverified": frozenset({"reconcile_unverified"}),
+}
+_GENERIC_VERSIONED_RECONCILIATION_DECISIONS = frozenset(
+    {
+        None,
+        "accounting_unavailable",
+        "absence_deferred",
+        "identity_mismatch_blocked",
+        "multiple_matches_blocked",
+    }
+)
 _TERMINAL_FORECAST_CYCLE_SUCCESS_STATUSES = {"complete", "succeeded", "parsed", "published"}
 _STAGE_STATUS_ORDER = {
     "download": 1,
@@ -339,6 +418,9 @@ class _RecordBudget:
 
 
 class FileOrchestrationJournalRepository:
+    # Capability marker used by the shared submit/reconcile paths.  Legacy and
+    # PostgreSQL repositories deliberately keep their historical behaviour.
+    supports_accepted_submit_reconcile = True
     """Read-side file implementation for scheduler orchestration state."""
 
     def __init__(
@@ -366,10 +448,12 @@ class FileOrchestrationJournalRepository:
         ] = {}
         self._direct_jobs_cycle_cache: dict[
             tuple[str, str],
-            tuple[tuple[int, int, int] | None, list[dict[str, Any]]],
+            tuple[tuple[Any, ...], list[dict[str, Any]]],
         ] = {}
         self._read_bytes_cache: dict[str, tuple[tuple[int, int, int], bytes, bool]] = {}
         self._read_bytes_cache_total = 0
+        self._reconcile_inventory_lock_depth = 0
+        self._reconcile_inventory_migration_checked = False
 
     def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
         try:
@@ -397,9 +481,7 @@ class FileOrchestrationJournalRepository:
         if _row_matches_candidate(hydro_run, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id):
             if str(hydro_run.get("status") or "") in ACTIVE_HYDRO_STATUSES and not has_terminal_completion:
                 return True
-        return any(
-            _job_is_active(job) for job in candidate_jobs
-        )
+        return any(_job_is_active(job) for job in candidate_jobs)
 
     def has_completed_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
         try:
@@ -416,14 +498,17 @@ class FileOrchestrationJournalRepository:
         )
         if hydro_run is not None and not hydro_run_matches:
             return False
-        if hydro_run_matches and str(hydro_run.get("status") or "") in COMPLETED_HYDRO_STATUSES:
-            return True
-        return any(
+        has_terminal_completion = any(
             _job_is_terminal_success(job)
             and _job_is_current_terminal_completion(job)
             and _job_matches_candidate(job, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
             for job in _current_terminal_jobs(rows.pipeline_jobs.values())
         )
+        if chain_repository_state._compute_state_save_qc_terminal_enabled():
+            return has_terminal_completion
+        if hydro_run_matches and str(hydro_run.get("status") or "") in COMPLETED_HYDRO_STATUSES:
+            return True
+        return has_terminal_completion
 
     def active_slurm_jobs(
         self,
@@ -588,11 +673,80 @@ class FileOrchestrationJournalRepository:
 
     def _pipeline_job_for_id_unlocked(self, job_id: str) -> dict[str, Any] | None:
         expected_job_id = _safe_segment(job_id)
+        direct_job = self._direct_pipeline_job_record(expected_job_id)
+        if direct_job is not None:
+            source_id = _source_id_from_job(direct_job)
+            cycle_time = _cycle_time_from_job(direct_job)
+            model_id = _optional_safe_identity(direct_job, "model_id")
+            if model_id is not None:
+                rows = self._cycle_rows(
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    model_id=model_id,
+                )
+            else:
+                rows = _CycleRows()
+                for record in self._read_jsonl(self._journal_path(source_id=source_id, cycle_time=cycle_time)):
+                    self._apply_journal_record(
+                        rows,
+                        record,
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                    )
+            replayed = rows.pipeline_jobs.get(expected_job_id)
+            return dict(replayed or direct_job)
         for job in self._iter_pipeline_job_records(include_direct=False):
             if str(job.get("job_id") or "") == expected_job_id:
                 return dict(job)
-        direct_job = self._direct_pipeline_job_record(expected_job_id)
-        return dict(direct_job) if direct_job is not None else None
+        return None
+
+    def get_accepted_submit_pipeline_job(self, pipeline_job_id: str) -> dict[str, Any] | None:
+        """Read one deterministic cohort master without global history discovery."""
+
+        source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(pipeline_job_id)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            row = self._accepted_submit_job_for_id_unlocked(
+                pipeline_job_id,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            return _public_scheduler_row(row) if row is not None else None
+
+    def _accepted_submit_job_for_id_unlocked(
+        self,
+        pipeline_job_id: str,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+    ) -> dict[str, Any] | None:
+        """Resolve exact direct plus the one cycle journal; never latest/global."""
+
+        expected_job_id = _safe_segment(pipeline_job_id)
+        canonical_source = _normalize_file_source_id(source_id, field="source_id")
+        direct = self._direct_pipeline_job_record(expected_job_id)
+        rows = _CycleRows()
+        for record in self._read_jsonl(
+            self._journal_path(source_id=canonical_source, cycle_time=cycle_time)
+        ):
+            self._apply_journal_record(
+                rows,
+                record,
+                source_id=canonical_source,
+                cycle_time=cycle_time,
+            )
+        replayed = rows.pipeline_jobs.get(expected_job_id)
+        row = dict(replayed or direct) if replayed is not None or direct is not None else None
+        if row is None:
+            return None
+        if (
+            _source_id_from_job(row) != canonical_source
+            or _cycle_time_from_job(row) != cycle_time.astimezone(UTC)
+        ):
+            raise FileOrchestrationJournalError(
+                "file_journal_identity_mismatch",
+                field="job_id",
+            )
+        return row
 
     def query_pipeline_jobs_by_cycle(self, cycle_id: str) -> list[dict[str, Any]]:
         try:
@@ -642,8 +796,7 @@ class FileOrchestrationJournalRepository:
         jobs = [
             _file_reconcile_namespace(job)
             for job in self._iter_reconcile_pipeline_job_records()
-            if str(job.get("status") or "")
-            in {"pending", "queued", "submitted", "running", "reconcile_unverified"}
+            if _job_needs_restart_reconcile(job)
             and _file_journal_real_slurm_job_id(job.get("slurm_job_id"))
         ]
         jobs.sort(
@@ -654,6 +807,196 @@ class FileOrchestrationJournalRepository:
             )
         )
         return jobs
+
+    def query_rollback_unsettled_jobs(self) -> list[SimpleNamespace]:
+        """Read bounded current authority and allow only explicitly settled jobs."""
+
+        authority_roots = {
+            name: self.root / name
+            for name in (
+                _RECONCILE_INVENTORY_DIRECTORY,
+                "journal",
+                "latest",
+                "pipeline-jobs",
+                _LEGACY_ACTIVE_RECONCILE_DIRECTORY,
+            )
+        }
+        authority_signatures = {
+            name: _stat_signature(path) for name, path in authority_roots.items()
+        }
+        records: dict[str, dict[str, Any]] = {}
+        try:
+            for job in self._iter_reconcile_inventory_records(
+                quiescence=True,
+                strict_disappearance=True,
+            ):
+                _upsert_by_key(records, job, key="job_id")
+            for job in self._iter_rollback_scope_pipeline_job_records(
+                authority_signatures=authority_signatures,
+            ):
+                if _job_blocks_rollback_quiescence(job):
+                    _upsert_by_key(records, job, key="job_id")
+        except FileOrchestrationJournalError:
+            self._require_rollback_authority_roots_unchanged(
+                authority_roots,
+                authority_signatures,
+            )
+            raise
+        self._require_rollback_authority_roots_unchanged(
+            authority_roots,
+            authority_signatures,
+        )
+        jobs = [_file_reconcile_namespace(job) for job in records.values()]
+        jobs.sort(
+            key=lambda job: (
+                _datetime_sort_key(getattr(job, "submitted_at", None)),
+                _datetime_sort_key(getattr(job, "created_at", None)),
+                str(job.job_id),
+            )
+        )
+        return jobs
+
+    def _require_rollback_authority_roots_unchanged(
+        self,
+        authority_roots: Mapping[str, Path],
+        authority_signatures: Mapping[str, tuple[int, int, int] | None],
+    ) -> None:
+        for name, path in authority_roots.items():
+            if _stat_signature(path) != authority_signatures[name]:
+                raise FileOrchestrationJournalError(
+                    "file_journal_quiescence_authority_changed",
+                    field=name.replace("-", "_"),
+                )
+
+    def _iter_rollback_scope_pipeline_job_records(
+        self,
+        *,
+        authority_signatures: Mapping[str, tuple[int, int, int] | None],
+    ) -> Iterable[dict[str, Any]]:
+        """Discover old-writer rows created after the rollback fence, not history."""
+
+        fence = self._read_optional_json(
+            self.root / _RECONCILE_INVENTORY_ROLLBACK_PREP_RECEIPT
+        )
+        if fence is None:
+            raise FileOrchestrationJournalError(
+                "file_journal_quiescence_authority_changed",
+                field="reconcile_inventory_rollback_receipt",
+            )
+        prepared = self._validated_reconcile_inventory_rollback_receipt(fence)
+        prepared_at = _coerce_datetime(prepared["prepared_at"], field="prepared_at").timestamp()
+        budget = _RecordBudget(max(self.max_records, 1), "rollback_scope_records")
+        records: dict[str, dict[str, Any]] = {}
+        selected_signatures: dict[Path, Any] = {}
+
+        def changed_since_prepare(path: Path) -> bool:
+            before = _stat_signature(path)
+            try:
+                metadata = stat_no_follow(path, containment_root=self.root)
+            except (FileNotFoundError, OSError, SafeFilesystemError) as error:
+                raise FileOrchestrationJournalError(
+                    "file_journal_quiescence_authority_changed",
+                    field=str(_relative_evidence(path, self.root)),
+                ) from error
+            if before != _stat_signature(path):
+                raise FileOrchestrationJournalError(
+                    "file_journal_quiescence_authority_changed",
+                    field=str(_relative_evidence(path, self.root)),
+                )
+            changed = metadata.st_mtime >= prepared_at
+            if changed:
+                selected_signatures[path] = before
+            return changed
+
+        for path in self._iter_reconcile_direct_pipeline_job_paths(
+            strict_disappearance=True,
+            expected_root_signature=authority_signatures["pipeline-jobs"],
+        ):
+            if not changed_since_prepare(path):
+                continue
+            payload = self._read_optional_json(path)
+            if payload is None or _stat_signature(path) != selected_signatures[path]:
+                raise FileOrchestrationJournalError(
+                    "file_journal_quiescence_authority_changed",
+                    field="pipeline_jobs",
+                )
+            budget.consume()
+            job = self._validated_direct_pipeline_job_record(
+                payload,
+                expected_job_id=_safe_segment(path.stem),
+            )
+            _upsert_by_key(records, job, key="job_id")
+
+        for path in self._iter_migration_journal_paths(
+            expected_root_signature=authority_signatures["journal"],
+        ):
+            if not changed_since_prepare(path):
+                continue
+            source_id, cycle_time = _journal_identity_from_path(
+                path, root=self.root, surface="journal"
+            )
+            rows = _CycleRows()
+            for record in self._read_migration_jsonl(path):
+                budget.consume()
+                self._apply_journal_record(
+                    rows,
+                    record,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                )
+            if _stat_signature(path) != selected_signatures[path]:
+                raise FileOrchestrationJournalError(
+                    "file_journal_quiescence_authority_changed",
+                    field="journal",
+                )
+            for job in rows.pipeline_jobs.values():
+                _upsert_by_key(records, job, key="job_id")
+
+        latest_paths = sorted(
+            _iter_discovered_files(
+                self.root / "latest",
+                root=self.root,
+                suffix=".json",
+                recursive=True,
+                max_files=self.max_files,
+                max_depth=self.max_depth,
+                strict_disappearance=True,
+                expected_root_signature=authority_signatures["latest"],
+            )
+        )
+        for path in latest_paths:
+            if not changed_since_prepare(path):
+                continue
+            payload = self._read_optional_json(path)
+            if payload is None:
+                raise FileOrchestrationJournalError(
+                    "file_journal_quiescence_authority_changed",
+                    field="latest",
+                )
+            source_id, cycle_time, model_id = _latest_identity_from_path(path, root=self.root)
+            rows = _CycleRows()
+            self._apply_latest_view(
+                rows,
+                payload,
+                source_id=source_id,
+                cycle_time=cycle_time,
+                expected_model_id=model_id,
+            )
+            if _stat_signature(path) != selected_signatures[path]:
+                raise FileOrchestrationJournalError(
+                    "file_journal_quiescence_authority_changed",
+                    field="latest",
+                )
+            for job in rows.pipeline_jobs.values():
+                budget.consume()
+                _upsert_by_key(records, job, key="job_id")
+
+        for job in self._iter_legacy_active_reconcile_records(
+            expected_root_signature=authority_signatures[_LEGACY_ACTIVE_RECONCILE_DIRECTORY],
+        ):
+            budget.consume()
+            _upsert_by_key(records, job, key="job_id")
+        yield from records.values()
 
     def bind_reservation(
         self,
@@ -751,11 +1094,15 @@ class FileOrchestrationJournalRepository:
 
     def create_hydro_run(self, context: Any, manifest: dict[str, Any]) -> dict[str, Any]:
         init_state = manifest.get("initial_state") if isinstance(manifest.get("initial_state"), Mapping) else {}
+        model = manifest.get("model") if isinstance(manifest.get("model"), Mapping) else {}
         row = {
             "run_id": str(context.run_id),
+            "candidate_id": manifest.get("candidate_id"),
             "run_type": manifest.get("run_type", "forecast"),
             "scenario_id": manifest["scenario_id"],
             "model_id": str(context.model_id),
+            "basin_id": model.get("basin_id") or getattr(context, "basin_id", None),
+            "array_task_id": manifest.get("array_task_id", getattr(context, "array_task_id", None)),
             "basin_version_id": str(context.basin_version_id),
             "forcing_version_id": str(context.forcing_version_id),
             "init_state_id": getattr(context, "init_state_id", None) or init_state.get("state_id"),
@@ -764,6 +1111,7 @@ class FileOrchestrationJournalRepository:
             "start_time": _format_utc(context.start_time),
             "end_time": _format_utc(context.end_time),
             "status": "created",
+            "submission_attempt": max(int(manifest.get("submission_attempt") or 1), 1),
             "run_manifest_uri": context.run_manifest_uri,
             "output_uri": context.output_uri,
             "log_uri": context.log_uri,
@@ -780,9 +1128,12 @@ class FileOrchestrationJournalRepository:
         cycle_time = parse_cycle_time(str(manifest["cycle_time"]))
         row = {
             "run_id": str(manifest["run_id"]),
+            "candidate_id": manifest.get("candidate_id"),
             "run_type": manifest.get("run_type", "forecast"),
             "scenario_id": manifest["scenario_id"],
             "model_id": str(model["model_id"]),
+            "basin_id": model.get("basin_id") or basin.get("basin_id"),
+            "array_task_id": basin.get("task_id"),
             "basin_version_id": str(model["basin_version_id"]),
             "forcing_version_id": forcing.get("forcing_version_id"),
             "init_state_id": initial_state.get("state_id") or basin.get("init_state_id"),
@@ -794,6 +1145,7 @@ class FileOrchestrationJournalRepository:
             "start_time": _format_utc(_coerce_datetime(manifest["start_time"], field="start_time")),
             "end_time": _format_utc(_coerce_datetime(manifest["end_time"], field="end_time")),
             "status": "created",
+            "submission_attempt": max(int(manifest.get("submission_attempt") or 1), 1),
             "run_manifest_uri": outputs.get("run_manifest_uri"),
             "output_uri": outputs.get("output_uri"),
             "log_uri": outputs.get("log_uri"),
@@ -831,6 +1183,58 @@ class FileOrchestrationJournalRepository:
             )
         return _public_scheduler_row(record)
 
+    def forecast_cohort_runtime_identity_matches(self, identity: Mapping[str, Any]) -> bool:
+        """Validate accepted-submit members against independently written run manifests."""
+        members = ordered_cohort_members(identity.get("cohort_members"))
+        if not members:
+            return False
+        try:
+            source_id = _normalize_file_source_id(identity.get("source_id"), field="source_id")
+            cycle_id = _required_safe_identity(identity, "cycle_id")
+            cycle_time = parse_cycle_time(cycle_id.split("_", maxsplit=1)[1])
+            submission_attempt = max(int(identity.get("submission_attempt") or 1), 1)
+            expected_cycle_time = _format_utc(cycle_time)
+            model_ids = [str(member.get("model_id") or "") for member in members]
+            if any(not model_id for model_id in model_ids):
+                return False
+            with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+                rows_by_model = self._cycle_rows_by_model_unlocked(
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    model_ids=model_ids,
+                    include_direct_jobs=False,
+                )
+            for member in members:
+                model_rows = rows_by_model.get(str(member.get("model_id") or ""))
+                hydro_run = model_rows.hydro_run if model_rows is not None else None
+                if hydro_run is None:
+                    return False
+                if {
+                    "candidate_id": str(hydro_run.get("candidate_id") or ""),
+                    "run_id": str(hydro_run.get("run_id") or ""),
+                    "model_id": str(hydro_run.get("model_id") or ""),
+                    "basin_id": str(hydro_run.get("basin_id") or ""),
+                    "scenario_id": str(hydro_run.get("scenario_id") or ""),
+                    "array_task_id": int(hydro_run.get("array_task_id")),
+                } != {
+                    "candidate_id": str(member.get("candidate_id") or ""),
+                    "run_id": str(member.get("run_id") or ""),
+                    "model_id": str(member.get("model_id") or ""),
+                    "basin_id": str(member.get("basin_id") or ""),
+                    "scenario_id": str(member.get("scenario_id") or ""),
+                    "array_task_id": int(member.get("array_task_id")),
+                }:
+                    return False
+                if (
+                    _normalize_file_source_id(hydro_run.get("source_id"), field="source_id") != source_id
+                    or _format_utc(_parse_cycle_time_field(hydro_run, "cycle_time")) != expected_cycle_time
+                    or max(int(hydro_run.get("submission_attempt") or 1), 1) != submission_attempt
+                ):
+                    return False
+        except (FileOrchestrationJournalError, IndexError, TypeError, ValueError):
+            return False
+        return True
+
     def update_hydro_run_status(
         self,
         run_id: str,
@@ -851,9 +1255,7 @@ class FileOrchestrationJournalRepository:
             row = dict(existing)
             safe_error_message = _durable_error_message(error_message)
             row.update({"status": status, "updated_at": _format_utc(_utcnow())})
-            for key, value in (
-                ("slurm_job_id", slurm_job_id),
-            ):
+            for key, value in (("slurm_job_id", slurm_job_id),):
                 if value is not None:
                     row[key] = value
             if status in {"pending", "created", "succeeded", "complete", "parsed", "published"}:
@@ -876,25 +1278,86 @@ class FileOrchestrationJournalRepository:
             return _public_scheduler_row(row)
 
     def upsert_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any]:
-        row = self._pipeline_job_row(record)
+        # Upserts may be partial status transitions for an existing cohort.
+        # Validate the accepted-submit contract only after merging with its
+        # canonical durable identity; fresh rows still validate in full.
+        row = self._pipeline_job_row(record, validate_accepted_submit=False)
         source_id = _source_id_from_job(row)
         cycle_time = _cycle_time_from_job(row)
         model_id = _optional_safe_identity(row, "model_id")
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
             existing = self._pipeline_job_for_id_unlocked(str(row["job_id"]))
+            persisted_master_identity: dict[str, Any] | None = None
+            persisted_master_state: dict[str, Any] | None = None
+            if existing is None:
+                _validate_accepted_submit_evidence(row)
+                if accepted_submit_contract_is_current(row) and accepted_submit_row_kind(row) == "master":
+                    raise FileOrchestrationJournalError(
+                        "file_journal_authority_transition_requires_typed_api",
+                        field="upsert_pipeline_job",
+                    )
             if existing is not None:
                 explicit_fields = set(record)
                 incoming = row
+                _validate_accepted_submit_evidence(existing)
+                if accepted_submit_contract_is_current(
+                    existing
+                ) and accepted_submit_master_identity_is_structural(existing):
+                    persisted_master_identity = _accepted_submit_master_identity(existing)
+                    persisted_master_state = _accepted_submit_master_state(existing)
+                    for field, persisted_value in persisted_master_identity.items():
+                        if field not in explicit_fields:
+                            continue
+                        incoming_value = incoming.get(field)
+                        if field == "source_id":
+                            try:
+                                incoming_value = normalize_source_id(str(record.get(field) or ""))
+                            except ValueError as error:
+                                raise FileOrchestrationJournalError(
+                                    "file_journal_evidence_invariant_invalid",
+                                    field=field,
+                                ) from error
+                        elif field == "cycle_time":
+                            incoming_value = _optional_format_datetime(
+                                record.get(field), field=field
+                            )
+                        elif type(persisted_value) is bool and type(record.get(field)) is not bool:
+                            raise FileOrchestrationJournalError(
+                                "file_journal_evidence_type_invalid",
+                                field=field,
+                            )
+                        if incoming_value != persisted_value:
+                            raise FileOrchestrationJournalError(
+                                "file_journal_evidence_invariant_invalid",
+                                field=field,
+                            )
                 row = dict(existing)
                 for key in _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS:
                     if key in explicit_fields:
                         row[key] = incoming[key]
                 row["updated_at"] = _format_utc(_utcnow())
                 model_id = _optional_safe_identity(row, "model_id")
+            _validate_accepted_submit_evidence(row)
+            if persisted_master_state is not None:
+                merged_master_state = _accepted_submit_master_state(row)
+                for field, persisted_value in persisted_master_state.items():
+                    if merged_master_state[field] != persisted_value:
+                        raise FileOrchestrationJournalError(
+                            "file_journal_evidence_invariant_invalid",
+                            field=field,
+                        )
+                # An exact ordinary replay is a read, not an authority event:
+                # do not append another journal record or advance updated_at.
+                return _public_scheduler_row(existing)
             return self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
 
     def append_historical_pipeline_job(self, record: Mapping[str, Any]) -> dict[str, Any] | None:
         row = self._pipeline_job_row(dict(record))
+        if accepted_submit_contract_is_current(row) and accepted_submit_row_kind(row) == "master":
+            raise FileOrchestrationJournalError(
+                "file_journal_authority_transition_requires_typed_api",
+                field="append_historical_pipeline_job",
+            )
         source_id = _source_id_from_job(row)
         cycle_time = _cycle_time_from_job(row)
         model_id = _optional_safe_identity(row, "model_id")
@@ -905,6 +1368,43 @@ class FileOrchestrationJournalRepository:
             return self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
 
     def reserve_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        if accepted_submit_contract_is_current(record) and accepted_submit_row_kind(record) == "master":
+            _accepted_submit_attempt_anchor(record.get("submission_attempt_started_at"))
+            dirty_fields = {
+                field
+                for field in (
+                    "slurm_job_id",
+                    "array_task_id",
+                    "submitted_at",
+                    "started_at",
+                    "finished_at",
+                    "exit_code",
+                    "error_code",
+                    "error_message",
+                    "log_uri",
+                    "submit_outcome",
+                    "reconciliation_source",
+                    "reconciliation_decision",
+                    "reconciliation_reason_class",
+                    "matched_slurm_job_id",
+                )
+                if record.get(field) not in (None, "")
+            }
+            if record.get("retry_count") not in (None, 0):
+                dirty_fields.add("retry_count")
+            if record.get("manual_retry_marker") not in (None, False):
+                dirty_fields.add("manual_retry_marker")
+            if record.get("previous_job_id") not in (None, ""):
+                dirty_fields.add("previous_job_id")
+            if record.get("candidate_projections") not in (None, [], ()):
+                dirty_fields.add("candidate_projections")
+            if record.get("cancellation_receipt_recorded") not in (None, False):
+                dirty_fields.add("cancellation_receipt_recorded")
+            if str(record.get("status") or "reserved") != "reserved" or dirty_fields:
+                raise FileOrchestrationJournalError(
+                    "file_journal_clean_reservation_required",
+                    field=sorted(dirty_fields)[0] if dirty_fields else "status",
+                )
         row = self._pipeline_job_row(
             {
                 **record,
@@ -927,17 +1427,82 @@ class FileOrchestrationJournalRepository:
             return self._write_pipeline_job_unlocked(row, exclusive_direct=True, model_id=model_id)
 
     def reclaim_pipeline_job_reservation(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        expected_current_attempt = record.get("expected_submission_attempt")
+        expected_current_anchor = record.get("expected_submission_attempt_started_at")
         request_row = self._pipeline_job_row(record)
         idempotency_key = str(request_row["idempotency_key"])
         source_id = _source_id_from_job(request_row)
         cycle_time = _cycle_time_from_job(request_row)
+        versioned_master = bool(
+            accepted_submit_contract_is_current(request_row)
+            and accepted_submit_row_kind(request_row) == "master"
+        )
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
-            existing = self._candidate_job_for_idempotency_unlocked(idempotency_key)
-            matched_by_key = existing is not None
+            existing = (
+                self._accepted_submit_job_for_id_unlocked(
+                    str(request_row["job_id"]),
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                )
+                if versioned_master
+                else self._candidate_job_for_idempotency_unlocked(idempotency_key)
+            )
+            matched_by_key = bool(
+                existing is not None and str(existing.get("idempotency_key") or "") == idempotency_key
+            )
             if existing is None and request_row.get("job_id") not in (None, ""):
-                existing = self._pipeline_job_for_id_unlocked(str(request_row["job_id"]))
+                existing = (
+                    None
+                    if versioned_master
+                    else self._pipeline_job_for_id_unlocked(str(request_row["job_id"]))
+                )
             if existing is None:
                 return None
+            existing_is_current_master = bool(
+                accepted_submit_contract_is_current(existing)
+                and accepted_submit_row_kind(existing) == "master"
+            )
+            if existing_is_current_master:
+                if not versioned_master:
+                    return None
+                if (
+                    str(existing.get("status") or "") != "reservation_lost"
+                    or existing.get("slurm_job_id") not in (None, "")
+                    or existing.get("submit_outcome") != "submit_result_ambiguous"
+                    or existing.get("reconciliation_source") != "slurm_exact_comment"
+                    or existing.get("reconciliation_decision") != "absence_retry_permitted"
+                    or existing.get("reconciliation_reason_class") is not None
+                    or existing.get("matched_slurm_job_id") is not None
+                    or expected_current_attempt is None
+                    or expected_current_anchor is None
+                ):
+                    return None
+                if max(int(existing.get("submission_attempt") or 1), 1) != max(
+                    int(expected_current_attempt), 1
+                ):
+                    return None
+                try:
+                    if _accepted_submit_attempt_anchor(
+                        existing.get("submission_attempt_started_at")
+                    ) != _accepted_submit_attempt_anchor(expected_current_anchor):
+                        return None
+                except FileOrchestrationJournalError:
+                    return None
+            if versioned_master and (
+                not accepted_submit_contract_is_current(existing)
+                or accepted_submit_row_kind(existing) != "master"
+                or not matched_by_key
+            ):
+                return None
+            if versioned_master:
+                existing_identity = _accepted_submit_master_identity(existing)
+                request_identity = _accepted_submit_master_identity(request_row)
+                if any(
+                    request_identity[field] != existing_identity[field]
+                    for field in existing_identity
+                    if field not in {"submission_attempt", "submission_attempt_started_at"}
+                ):
+                    return None
             existing_status = str(existing.get("status") or "")
             if matched_by_key:
                 if existing.get("slurm_job_id") not in (None, "") or existing_status not in {
@@ -950,10 +1515,20 @@ class FileOrchestrationJournalRepository:
                     existing.get("idempotency_key") not in (None, "")
                     or existing.get("slurm_job_id") not in (None, "")
                     or existing_status != "pending"
-                    or self._candidate_job_for_idempotency_unlocked(idempotency_key) is not None
+                    or (
+                        not versioned_master
+                        and self._candidate_job_for_idempotency_unlocked(idempotency_key) is not None
+                    )
                 ):
                     return None
-            row = dict(existing)
+            row = (
+                apply_accepted_submit_transition(
+                    existing,
+                    AcceptedSubmitTransition.begin_attempt(),
+                )
+                if accepted_submit_row_kind(existing) == "master"
+                else dict(existing)
+            )
             row.update(
                 {
                     "status": "reserved",
@@ -965,13 +1540,41 @@ class FileOrchestrationJournalRepository:
                     "exit_code": None,
                     "error_code": None,
                     "error_message": None,
+                    "cancellation_receipt_recorded": False,
                     "idempotency_key": idempotency_key,
                     "updated_at": _format_utc(_utcnow()),
                 }
             )
-            for key in ("run_id", "cycle_id", "model_id", "stage", "candidate_id", "job_type"):
-                if row.get(key) in (None, "") and request_row.get(key) not in (None, ""):
-                    row[key] = request_row[key]
+            row["submission_attempt"] = max(
+                int(existing.get("submission_attempt") or 1) + 1,
+                int(request_row.get("submission_attempt") or 1),
+            )
+            # The successful lock holder owns a new attempt. Its immutable
+            # authority anchor is captured here, never copied from a stale
+            # lock-external reclaim request.
+            row["submission_attempt_started_at"] = _format_utc(_utcnow())
+            if not versioned_master:
+                for key in (
+                    "run_id",
+                    "cycle_id",
+                    "model_id",
+                    "stage",
+                    "candidate_id",
+                    "job_type",
+                    "slurm_comment",
+                    "cohort_members",
+                    "cohort_digest",
+                    "restart_stage",
+                    "expected_slurm_user",
+                    "expected_slurm_account",
+                    "slurm_ownership_required",
+                    "native_shud_resubmitted",
+                ):
+                    if key in request_row and request_row.get(key) not in (None, ""):
+                        row[key] = request_row[key]
+                for key in ("run_id", "cycle_id", "model_id", "stage", "candidate_id", "job_type"):
+                    if row.get(key) in (None, "") and request_row.get(key) not in (None, ""):
+                        row[key] = request_row[key]
             model_id = _optional_safe_identity(row, "model_id")
             return self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
 
@@ -986,17 +1589,29 @@ class FileOrchestrationJournalRepository:
         initial = self._candidate_job_for_idempotency_unlocked(idempotency_key)
         if initial is None:
             return None
+        if accepted_submit_contract_is_current(initial) and accepted_submit_row_kind(initial) == "master":
+            raise FileOrchestrationJournalError(
+                "file_journal_authority_transition_requires_typed_api",
+                field="bind_reservation",
+            )
         source_id = _source_id_from_job(initial)
         cycle_time = _cycle_time_from_job(initial)
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
             existing = self._candidate_job_for_idempotency_unlocked(idempotency_key)
             if existing is None or existing.get("slurm_job_id") not in (None, ""):
                 return None
-            row = dict(existing)
+            if accepted_submit_contract_is_current(existing) and accepted_submit_row_kind(existing) == "master":
+                raise FileOrchestrationJournalError(
+                    "file_journal_authority_transition_requires_typed_api",
+                    field="bind_reservation",
+                )
+            row = apply_accepted_submit_transition(
+                existing,
+                AcceptedSubmitTransition.accepted(status=status),
+            )
             row.update(
                 {
                     "slurm_job_id": str(slurm_job_id),
-                    "status": status,
                     "submitted_at": row.get("submitted_at") or _format_utc(_utcnow()),
                     "updated_at": _format_utc(_utcnow()),
                 }
@@ -1005,6 +1620,1326 @@ class FileOrchestrationJournalRepository:
                 row["array_task_id"] = array_task_id
             model_id = _optional_safe_identity(row, "model_id")
             return self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
+
+    def commit_pipeline_job_submit_attempt(
+        self,
+        idempotency_key: str,
+        *,
+        pipeline_job_id: str | None = None,
+        expected_submission_attempt: int,
+        slurm_job_id: str,
+        transition: AcceptedSubmitTransition,
+        array_task_id: int | None = None,
+        submitted_at: datetime | None = None,
+        started_at: datetime | None = None,
+        finished_at: datetime | None = None,
+        exit_code: int | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        log_uri: str | None = None,
+    ) -> AcceptedSubmitCommitResult:
+        """Bind and transition exactly one still-current reservation attempt.
+
+        The attempt check, reserved-state check, unbound check, Slurm id bind,
+        and complete accepted-submit evidence transition all happen under the
+        same cycle lock and in one durable journal replacement.
+        """
+
+        if not isinstance(transition, AcceptedSubmitTransition):
+            raise TypeError("transition must be AcceptedSubmitTransition")
+        if transition.submit_outcome != "accepted":
+            raise ValueError("submit-attempt commit requires an accepted transition")
+        if type(transition.status) is not str or transition.status not in {
+            "submitted",
+            "pending",
+            "queued",
+            "running",
+        }:
+            raise FileOrchestrationJournalError(
+                "file_journal_evidence_enum_invalid", field="status"
+            )
+        requested_id = str(slurm_job_id)
+        if not requested_id.isdigit():
+            raise ValueError("submit-attempt commit requires a numeric Slurm master job id")
+        if (
+            transition.reconciliation_decision == "matched_bound"
+            and transition.matched_slurm_job_id != requested_id
+        ):
+            raise ValueError("matched accounting id must equal the bound Slurm job id")
+        if pipeline_job_id is not None:
+            source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(pipeline_job_id)
+        else:
+            initial = self._candidate_job_for_idempotency_unlocked(idempotency_key)
+            if initial is None:
+                return AcceptedSubmitCommitResult("missing")
+            source_id = _source_id_from_job(initial)
+            cycle_time = _cycle_time_from_job(initial)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = (
+                self._accepted_submit_job_for_id_unlocked(
+                    pipeline_job_id,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                )
+                if pipeline_job_id is not None
+                else self._candidate_job_for_idempotency_unlocked(idempotency_key)
+            )
+            if existing is None:
+                return AcceptedSubmitCommitResult("missing")
+            if pipeline_job_id is not None and (
+                not accepted_submit_contract_is_current(existing)
+                or accepted_submit_row_kind(existing) != "master"
+                or str(existing.get("idempotency_key") or "") != idempotency_key
+            ):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            current_id = str(existing.get("slurm_job_id") or "")
+            current_attempt = max(int(existing.get("submission_attempt") or 1), 1)
+            if current_attempt != max(int(expected_submission_attempt), 1):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            if current_id:
+                if current_id != requested_id:
+                    return AcceptedSubmitCommitResult("collision", dict(existing))
+                if (
+                    existing.get("submit_outcome") == transition.submit_outcome
+                    and existing.get("reconciliation_source") == transition.reconciliation_source
+                    and existing.get("reconciliation_decision") == transition.reconciliation_decision
+                    and existing.get("matched_slurm_job_id") == transition.matched_slurm_job_id
+                ):
+                    return AcceptedSubmitCommitResult("idempotent", dict(existing))
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            if str(existing.get("status") or "") != "reserved":
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            row = apply_accepted_submit_transition(existing, transition)
+            row.update(
+                {
+                    "slurm_job_id": requested_id,
+                    "submitted_at": _format_utc(submitted_at or _utcnow()),
+                    "started_at": _format_utc(started_at) if started_at is not None else None,
+                    "finished_at": _format_utc(finished_at) if finished_at is not None else None,
+                    "exit_code": exit_code,
+                    "error_code": error_code,
+                    "error_message": error_message,
+                    "log_uri": log_uri,
+                    "updated_at": _format_utc(_utcnow()),
+                }
+            )
+            if array_task_id is not None:
+                row["array_task_id"] = array_task_id
+            model_id = _optional_safe_identity(row, "model_id")
+            written = self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
+            return AcceptedSubmitCommitResult("applied", written)
+
+    def transition_pipeline_job_submit_evidence(
+        self,
+        job_id: str,
+        transition: AcceptedSubmitTransition,
+        *,
+        accepted_submit_contract_version: str | None = None,
+        expected_submission_attempt: int | None = None,
+        expected_statuses: Sequence[str] | None = None,
+        require_unbound: bool = False,
+        started_at: datetime | None = None,
+        finished_at: datetime | None = None,
+        exit_code: int | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        log_uri: str | None = None,
+    ) -> AcceptedSubmitCommitResult:
+        """Atomically replace submit outcome and the complete accounting tuple."""
+
+        if not isinstance(transition, AcceptedSubmitTransition):
+            raise TypeError("transition must be AcceptedSubmitTransition")
+        versioned = accepted_submit_contract_version == ACCEPTED_SUBMIT_CONTRACT_VERSION
+        if accepted_submit_contract_version not in (None, ACCEPTED_SUBMIT_CONTRACT_VERSION):
+            raise FileOrchestrationJournalError(
+                "file_journal_evidence_enum_invalid",
+                field=ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD,
+            )
+        if versioned:
+            if (
+                transition.submit_outcome != "submit_result_ambiguous"
+                or transition.reconciliation_decision
+                not in _GENERIC_VERSIONED_RECONCILIATION_DECISIONS
+            ):
+                raise FileOrchestrationJournalError(
+                    "file_journal_authority_transition_requires_typed_api",
+                    field="transition",
+                )
+            if (
+                expected_submission_attempt is None
+                or not expected_statuses
+                or not require_unbound
+            ):
+                raise FileOrchestrationJournalError(
+                    "file_journal_authority_transition_requires_cas",
+                    field="expected_submission_attempt",
+                )
+            source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
+        else:
+            initial = self._pipeline_job_for_id_unlocked(job_id)
+            if initial is None:
+                return AcceptedSubmitCommitResult("missing")
+            if accepted_submit_contract_is_current(initial) and accepted_submit_row_kind(initial) == "master":
+                raise FileOrchestrationJournalError(
+                    "file_journal_authority_transition_requires_typed_api",
+                    field="accepted_submit_contract_version",
+                )
+            source_id = _source_id_from_job(initial)
+            cycle_time = _cycle_time_from_job(initial)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = (
+                self._accepted_submit_job_for_id_unlocked(
+                    job_id,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                )
+                if versioned
+                else self._pipeline_job_for_id_unlocked(job_id)
+            )
+            if existing is None:
+                return AcceptedSubmitCommitResult("missing")
+            if not versioned and accepted_submit_contract_is_current(existing) and accepted_submit_row_kind(
+                existing
+            ) == "master":
+                raise FileOrchestrationJournalError(
+                    "file_journal_authority_transition_requires_typed_api",
+                    field="accepted_submit_contract_version",
+                )
+            if versioned and (
+                not accepted_submit_contract_is_current(existing)
+                or accepted_submit_row_kind(existing) != "master"
+            ):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            if expected_submission_attempt is not None and max(
+                int(existing.get("submission_attempt") or 1), 1
+            ) != max(int(expected_submission_attempt), 1):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            if expected_statuses is not None and str(existing.get("status") or "") not in set(expected_statuses):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            if require_unbound and existing.get("slurm_job_id") not in (None, ""):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            row = apply_accepted_submit_transition(existing, transition)
+            if started_at is not None:
+                row["started_at"] = _format_utc(started_at)
+            if finished_at is not None:
+                row["finished_at"] = _format_utc(finished_at)
+            if exit_code is not None:
+                row["exit_code"] = exit_code
+            if error_code is not None:
+                row["error_code"] = error_code
+            if error_message is not None:
+                row["error_message"] = _durable_error_message(error_message)
+            if log_uri is not None:
+                row["log_uri"] = log_uri
+            changed_fields = (
+                "submit_outcome",
+                "reconciliation_source",
+                "reconciliation_decision",
+                "reconciliation_reason_class",
+                "matched_slurm_job_id",
+                "status",
+                "started_at",
+                "finished_at",
+                "exit_code",
+                "error_code",
+                "error_message",
+                "log_uri",
+            )
+            if all(row.get(field) == existing.get(field) for field in changed_fields):
+                return AcceptedSubmitCommitResult("idempotent", dict(existing))
+            row["updated_at"] = _format_utc(_utcnow())
+            model_id = _optional_safe_identity(row, "model_id")
+            written = self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
+            return AcceptedSubmitCommitResult("applied", written)
+
+    def transition_pipeline_job_runtime_status(
+        self,
+        job_id: str,
+        status: str,
+        *,
+        expected_statuses: Sequence[str] | None = None,
+        started_at: datetime | None = None,
+        finished_at: datetime | None = None,
+        exit_code: int | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        log_uri: str | None = None,
+    ) -> AcceptedSubmitCommitResult:
+        """Advance one current master through non-terminal runtime states."""
+
+        if status in TERMINAL_PIPELINE_STATUSES:
+            raise FileOrchestrationJournalError(
+                "file_journal_terminal_projection_required",
+                field="status",
+            )
+        source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._accepted_submit_job_for_id_unlocked(
+                job_id,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            if (
+                existing is None
+                or not accepted_submit_contract_is_current(existing)
+                or accepted_submit_row_kind(existing) != "master"
+            ):
+                return AcceptedSubmitCommitResult("stale", dict(existing or {}))
+            if (
+                existing.get("submit_outcome") != "accepted"
+                or not str(existing.get("slurm_job_id") or "").isdigit()
+            ):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            if expected_statuses is not None and str(existing.get("status") or "") not in set(
+                expected_statuses
+            ):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            current_status = str(existing.get("status") or "")
+            if status not in _ACCEPTED_RUNTIME_TRANSITIONS.get(current_status, frozenset()):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            row = dict(existing)
+            row["status"] = status
+            if started_at is not None:
+                row["started_at"] = _format_utc(started_at)
+            if finished_at is not None:
+                row["finished_at"] = _format_utc(finished_at)
+            if exit_code is not None:
+                row["exit_code"] = exit_code
+            if error_code is not None:
+                row["error_code"] = error_code
+            if error_message is not None:
+                row["error_message"] = _durable_error_message(error_message)
+            if log_uri is not None:
+                row["log_uri"] = log_uri
+            if all(
+                row.get(field) == existing.get(field)
+                for field in (
+                    "status",
+                    "started_at",
+                    "finished_at",
+                    "exit_code",
+                    "error_code",
+                    "error_message",
+                    "log_uri",
+                )
+            ):
+                return AcceptedSubmitCommitResult("idempotent", dict(existing))
+            row["updated_at"] = _format_utc(_utcnow())
+            written = self._write_pipeline_job_unlocked(
+                row,
+                exclusive_direct=False,
+                model_id=None,
+            )
+            return AcceptedSubmitCommitResult("applied", written)
+
+    def request_pipeline_job_cancellation(
+        self,
+        job_id: str,
+        *,
+        expected_statuses: Sequence[str],
+        reason: str,
+    ) -> AcceptedSubmitCommitResult:
+        """Persist cancellation intent before the external Slurm side effect."""
+
+        source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._accepted_submit_job_for_id_unlocked(
+                job_id,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            if (
+                existing is None
+                or not accepted_submit_contract_is_current(existing)
+                or accepted_submit_row_kind(existing) != "master"
+            ):
+                return AcceptedSubmitCommitResult("stale", dict(existing or {}))
+            if (
+                existing.get("submit_outcome") != "accepted"
+                or not str(existing.get("slurm_job_id") or "").isdigit()
+            ):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            if str(existing.get("status") or "") == "cancellation_pending":
+                return AcceptedSubmitCommitResult("idempotent", dict(existing))
+            if (
+                str(existing.get("status") or "") == "reconcile_unverified"
+                and bool(existing.get("cancellation_receipt_recorded", False))
+            ):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            if str(existing.get("status") or "") not in set(expected_statuses):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            row = dict(existing)
+            row.update(
+                {
+                    "status": "cancellation_pending",
+                    "error_code": "SLURM_CANCELLATION_REQUESTED",
+                    "error_message": _durable_error_message(reason),
+                    "updated_at": _format_utc(_utcnow()),
+                }
+            )
+            written = self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=None)
+            return AcceptedSubmitCommitResult("applied", written)
+
+    def complete_pipeline_job_cancellation(
+        self,
+        job_id: str,
+        *,
+        finished_at: datetime,
+        exit_code: int | None,
+        error_code: str | None,
+        error_message: str | None,
+        log_uri: str | None,
+    ) -> AcceptedSubmitCommitResult:
+        """Record the Gateway receipt while deferring terminal truth to task accounting."""
+
+        source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._accepted_submit_job_for_id_unlocked(
+                job_id,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            if existing is None:
+                return AcceptedSubmitCommitResult("stale", dict(existing or {}))
+            if (
+                not accepted_submit_contract_is_current(existing)
+                or accepted_submit_row_kind(existing) != "master"
+                or existing.get("submit_outcome") != "accepted"
+                or not str(existing.get("slurm_job_id") or "").isdigit()
+            ):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            desired_error_code = error_code or "SLURM_JOB_CANCELLED"
+            if str(existing.get("status") or "") == "reconcile_unverified":
+                desired = {
+                    "finished_at": _format_utc(finished_at),
+                    "exit_code": exit_code,
+                    "error_code": desired_error_code,
+                    "error_message": _durable_error_message(error_message),
+                    "log_uri": log_uri,
+                    "cancellation_receipt_recorded": True,
+                }
+                if all(existing.get(field) == value for field, value in desired.items()):
+                    return AcceptedSubmitCommitResult("idempotent", dict(existing))
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            if str(existing.get("status") or "") != "cancellation_pending":
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            row = dict(existing)
+            row.update(
+                {
+                    "status": "reconcile_unverified",
+                    "finished_at": _format_utc(finished_at),
+                    "exit_code": exit_code,
+                    "error_code": desired_error_code,
+                    "error_message": _durable_error_message(error_message),
+                    "log_uri": log_uri,
+                    "cancellation_receipt_recorded": True,
+                    "updated_at": _format_utc(_utcnow()),
+                }
+            )
+            written = self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=None)
+            return AcceptedSubmitCommitResult("applied", written)
+
+    def reject_pipeline_job_submit_attempt(
+        self,
+        idempotency_key: str,
+        *,
+        pipeline_job_id: str | None = None,
+        expected_submission_attempt: int,
+        finished_at: datetime,
+        error_code: str,
+        error_message: str,
+        stage: str,
+        job_type: str,
+    ) -> AcceptedSubmitCommitResult:
+        """Reject one current attempt and its staged hydro cohort atomically."""
+
+        if pipeline_job_id is not None:
+            source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(pipeline_job_id)
+        else:
+            initial = self._candidate_job_for_idempotency_unlocked(idempotency_key)
+            if initial is None:
+                return AcceptedSubmitCommitResult("missing")
+            source_id = _source_id_from_job(initial)
+            cycle_time = _cycle_time_from_job(initial)
+        attempt = max(int(expected_submission_attempt), 1)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = (
+                self._accepted_submit_job_for_id_unlocked(
+                    pipeline_job_id,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                )
+                if pipeline_job_id is not None
+                else self._candidate_job_for_idempotency_unlocked(idempotency_key)
+            )
+            if existing is None:
+                return AcceptedSubmitCommitResult("missing")
+            if pipeline_job_id is not None and (
+                not accepted_submit_contract_is_current(existing)
+                or accepted_submit_row_kind(existing) != "master"
+                or str(existing.get("idempotency_key") or "") != idempotency_key
+            ):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            if (
+                max(int(existing.get("submission_attempt") or 1), 1) != attempt
+                or str(existing.get("status") or "") != "reserved"
+                or existing.get("slurm_job_id") not in (None, "")
+            ):
+                if (
+                    max(int(existing.get("submission_attempt") or 1), 1) == attempt
+                    and existing.get("submit_outcome") == "rejected"
+                    and str(existing.get("status") or "") == "submission_failed"
+                ):
+                    return AcceptedSubmitCommitResult("idempotent", dict(existing))
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+
+            safe_message = _durable_error_message(error_message)
+            master = apply_accepted_submit_transition(existing, AcceptedSubmitTransition.rejected())
+            master.update(
+                {
+                    "finished_at": _format_utc(finished_at),
+                    "error_code": error_code,
+                    "error_message": safe_message,
+                    "updated_at": _format_utc(_utcnow()),
+                }
+            )
+            payloads: list[tuple[str, dict[str, Any], str | None]] = []
+            touched_models: set[str] = set()
+            members = _bounded_cohort_members(existing.get("cohort_members"))
+            model_rows = self._cycle_rows_by_model_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_ids=(str(member.get("model_id") or "") for member in members),
+                include_direct_jobs=False,
+            )
+            for member in members:
+                run_id = str(member.get("run_id") or "")
+                model_id = str(member.get("model_id") or "")
+                if not run_id or not model_id:
+                    continue
+                snapshot = model_rows.get(model_id)
+                hydro = snapshot.hydro_run if snapshot is not None else None
+                if isinstance(hydro, Mapping) and str(hydro.get("run_id") or "") != run_id:
+                    hydro = None
+                if (
+                    hydro is None
+                    or max(int(hydro.get("submission_attempt") or 1), 1) != attempt
+                    or str(hydro.get("status") or "") not in ACTIVE_HYDRO_STATUSES
+                ):
+                    continue
+                hydro_row = dict(hydro)
+                hydro_row.update(
+                    {
+                        "status": "failed",
+                        "error_code": error_code,
+                        "error_message": safe_message,
+                        "updated_at": _format_utc(_utcnow()),
+                    }
+                )
+                payloads.append(("hydro_run", hydro_row, model_id))
+                touched_models.add(model_id)
+            payloads.append(("pipeline_job", master, None))
+            event = {
+                "event_id": self._next_accepted_submit_event_id_unlocked(
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                ),
+                "entity_type": "pipeline_job",
+                "entity_id": str(master["job_id"]),
+                "event_type": "submission",
+                "status_from": "reserved",
+                "status_to": "submission_failed",
+                "message": f"{stage} submission failed: {safe_message}",
+                "details": {
+                    "stage": stage,
+                    "job_type": job_type,
+                    "error": safe_message,
+                    "submit_outcome": "rejected",
+                    "submission_attempt": attempt,
+                },
+                "created_at": _format_utc(_utcnow()),
+            }
+            payloads.append(("pipeline_event", event, None))
+
+            next_sequence = self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
+            records: list[dict[str, Any]] = []
+            for offset, (record_type, payload, model_id) in enumerate(payloads):
+                record = _journal_record_for_write(
+                    record_type,
+                    payload,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    model_id=model_id,
+                    sequence=next_sequence + offset,
+                )
+                self._validate_outgoing_record(
+                    record,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    record_type=record_type,
+                    model_id=model_id,
+                )
+                records.append(record)
+            self._append_journal_records_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                records=records,
+            )
+            self._write_pipeline_job_direct_unlocked(master, records[-2])
+            for model_id in sorted(touched_models):
+                self._materialize_latest_unlocked(
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    model_id=model_id,
+                    include_direct_jobs=False,
+                )
+            return AcceptedSubmitCommitResult("applied", _public_scheduler_row(master))
+
+    def record_pipeline_job_reconciliation(
+        self,
+        job_id: str,
+        *,
+        submit_outcome: str | None = None,
+        reconciliation_decision: str | None = None,
+        matched_slurm_job_id: str | None = None,
+        candidate_projections: Sequence[Mapping[str, Any]] | None = None,
+        status: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Compatibility/projection API backed by complete typed transitions."""
+        initial = self._pipeline_job_for_id_unlocked(job_id)
+        if initial is None:
+            return None
+        if accepted_submit_contract_is_current(initial) and accepted_submit_row_kind(initial) == "master":
+            raise FileOrchestrationJournalError(
+                "file_journal_authority_transition_requires_typed_api",
+                field="pipeline_job_reconciliation",
+            )
+        source_id = _source_id_from_job(initial)
+        cycle_time = _cycle_time_from_job(initial)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._pipeline_job_for_id_unlocked(job_id)
+            if existing is None:
+                return None
+            if accepted_submit_contract_is_current(existing) and accepted_submit_row_kind(existing) == "master":
+                raise FileOrchestrationJournalError(
+                    "file_journal_authority_transition_requires_typed_api",
+                    field="pipeline_job_reconciliation",
+                )
+            row = dict(existing)
+            if reconciliation_decision is not None:
+                outcome = submit_outcome or str(existing.get("submit_outcome") or "")
+                row = apply_accepted_submit_transition(
+                    row,
+                    AcceptedSubmitTransition.accounting(
+                        reconciliation_decision,
+                        submit_outcome=outcome,
+                        matched_slurm_job_id=matched_slurm_job_id,
+                        status=status,
+                    ),
+                )
+            elif submit_outcome is not None:
+                row = apply_accepted_submit_transition(
+                    row,
+                    AcceptedSubmitTransition(submit_outcome=submit_outcome, status=status),
+                )
+            elif matched_slurm_job_id is not None:
+                raise FileOrchestrationJournalError(
+                    "file_journal_evidence_invariant_invalid", field="matched_slurm_job_id"
+                )
+            if candidate_projections is not None:
+                try:
+                    row["candidate_projections"] = normalize_candidate_projections(
+                        candidate_projections,
+                        cohort_members=existing.get("cohort_members"),
+                    )
+                except AcceptedSubmitEvidenceError as error:
+                    raise FileOrchestrationJournalError(error.reason, field=error.field) from error
+            if status is not None and submit_outcome is None and reconciliation_decision is None:
+                row["status"] = status
+            row["updated_at"] = _format_utc(_utcnow())
+            model_id = _optional_safe_identity(row, "model_id")
+            return self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
+
+    def permit_pipeline_job_retry(
+        self,
+        job_id: str,
+        *,
+        accepted_submit_contract_version: str | None = None,
+        expected_submission_attempt: int | None = None,
+        expected_submission_attempt_started_at: datetime | None = None,
+        expected_status: str = "reserved",
+    ) -> int:
+        """Move one still-reserved cohort to retryable exactly once under its cycle lock."""
+        versioned = accepted_submit_contract_version == ACCEPTED_SUBMIT_CONTRACT_VERSION
+        if versioned and (
+            type(expected_submission_attempt) is not int or expected_submission_attempt < 1
+        ):
+            raise FileOrchestrationJournalError(
+                "file_journal_evidence_type_invalid", field="expected_submission_attempt"
+            )
+        if versioned:
+            source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
+        else:
+            initial = self._pipeline_job_for_id_unlocked(job_id)
+            if initial is None:
+                return 0
+            if accepted_submit_contract_is_current(initial) and accepted_submit_row_kind(initial) == "master":
+                raise FileOrchestrationJournalError(
+                    "file_journal_authority_transition_requires_typed_api",
+                    field="accepted_submit_contract_version",
+                )
+            source_id = _source_id_from_job(initial)
+            cycle_time = _cycle_time_from_job(initial)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = (
+                self._accepted_submit_job_for_id_unlocked(
+                    job_id,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                )
+                if versioned
+                else self._pipeline_job_for_id_unlocked(job_id)
+            )
+            if existing is None or str(existing.get("status") or "") != expected_status:
+                return 0
+            if not versioned and accepted_submit_contract_is_current(existing) and accepted_submit_row_kind(
+                existing
+            ) == "master":
+                raise FileOrchestrationJournalError(
+                    "file_journal_authority_transition_requires_typed_api",
+                    field="accepted_submit_contract_version",
+                )
+            if versioned and (
+                not accepted_submit_contract_is_current(existing)
+                or accepted_submit_row_kind(existing) != "master"
+            ):
+                return 0
+            if versioned:
+                if expected_submission_attempt_started_at is None:
+                    return 0
+                try:
+                    anchor_matches = _accepted_submit_attempt_anchor(
+                        existing.get("submission_attempt_started_at")
+                    ) == _accepted_submit_attempt_anchor(expected_submission_attempt_started_at)
+                except FileOrchestrationJournalError:
+                    return 0
+                if not anchor_matches:
+                    return 0
+            if versioned and existing.get("submission_attempt") != expected_submission_attempt:
+                return 0
+            if not versioned and expected_submission_attempt is not None and max(
+                int(existing.get("submission_attempt") or 1), 1
+            ) != max(int(expected_submission_attempt), 1):
+                return 0
+            if existing.get("slurm_job_id") not in (None, ""):
+                return 0
+            cohort_row = apply_accepted_submit_transition(
+                existing,
+                AcceptedSubmitTransition.accounting(
+                    "absence_retry_permitted",
+                    submit_outcome="submit_result_ambiguous",
+                    status="reservation_lost",
+                ),
+            )
+            cohort_row.update(
+                {
+                    "updated_at": _format_utc(_utcnow()),
+                }
+            )
+            attempt = max(int(existing.get("submission_attempt") or 1), 1)
+            source_id = _source_id_from_job(existing)
+            cycle_time = _cycle_time_from_job(existing)
+            payloads: list[tuple[str, dict[str, Any], str | None]] = []
+            touched_models: set[str] = set()
+            members = _bounded_cohort_members(existing.get("cohort_members"))
+            model_rows = self._cycle_rows_by_model_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_ids=(str(member.get("model_id") or "") for member in members),
+                include_direct_jobs=False,
+            )
+            for member in members:
+                run_id = str(member.get("run_id") or "")
+                model_id = str(member.get("model_id") or "")
+                if not run_id or not model_id:
+                    continue
+                snapshot = model_rows.get(model_id)
+                hydro = snapshot.hydro_run if snapshot is not None else None
+                if isinstance(hydro, Mapping) and str(hydro.get("run_id") or "") != run_id:
+                    hydro = None
+                if (
+                    hydro is None
+                    or int(hydro.get("submission_attempt") or 1) != attempt
+                    or str(hydro.get("status") or "") not in ACTIVE_HYDRO_STATUSES
+                ):
+                    continue
+                hydro_row = dict(hydro)
+                hydro_row.update(
+                    {
+                        "status": "failed",
+                        "error_code": "SLURM_RESERVATION_LOST",
+                        "error_message": "Forecast submission was authoritatively absent; this attempt is retryable.",
+                        "updated_at": _format_utc(_utcnow()),
+                    }
+                )
+                payloads.append(("hydro_run", hydro_row, model_id))
+                touched_models.add(model_id)
+            payloads.append(("pipeline_job", cohort_row, _optional_safe_identity(cohort_row, "model_id")))
+            next_sequence = self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
+            records: list[dict[str, Any]] = []
+            for offset, (record_type, payload, model_id) in enumerate(payloads):
+                record = _journal_record_for_write(
+                    record_type,
+                    payload,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    model_id=model_id,
+                    sequence=next_sequence + offset,
+                )
+                self._validate_outgoing_record(
+                    record,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    record_type=record_type,
+                    model_id=model_id,
+                )
+                records.append(record)
+            self._append_journal_records_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                records=records,
+            )
+            self._write_pipeline_job_direct_unlocked(cohort_row, records[-1])
+            for model_id in sorted(touched_models):
+                self._materialize_latest_unlocked(
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    model_id=model_id,
+                    include_direct_jobs=False,
+                )
+            return len(records)
+
+    def project_forecast_cohort_tasks(
+        self,
+        job_id: str,
+        *,
+        master_slurm_job_id: str,
+        projections: Sequence[Mapping[str, Any]],
+        complete: bool,
+        master_status: str,
+        master_error_code: str | None,
+        reconciliation_decision: str,
+        finished_at: datetime | None = None,
+        exit_code: int | None = None,
+        master_error_message: str | None = None,
+        log_uri: str | None = None,
+    ) -> dict[str, int]:
+        """Project one accounting pass under one cycle lock and one materialization/model."""
+        if type(master_status) is not str or master_status not in {
+            "succeeded",
+            "partially_failed",
+            "failed",
+            "cancelled",
+        }:
+            raise FileOrchestrationJournalError(
+                "file_journal_evidence_enum_invalid", field="master_status"
+            )
+        del master_status, master_error_code
+        source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._accepted_submit_job_for_id_unlocked(
+                job_id,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            if (
+                existing is None
+                or not accepted_submit_contract_is_current(existing)
+                or accepted_submit_row_kind(existing) != "master"
+            ):
+                return {"total": 0, "pipeline_status": 0, "pipeline_event": 0}
+            if str(existing.get("slurm_job_id") or "") != master_slurm_job_id:
+                result = self._defer_forecast_cohort_projection_unlocked(
+                    existing,
+                    reconciliation_decision="identity_mismatch_blocked",
+                    reconciliation_reason_class=None,
+                    error_code="SLURM_MASTER_IDENTITY_MISMATCH",
+                    error_message="terminal Slurm master id did not match the durable accepted submit",
+                    finished_at=finished_at,
+                    exit_code=exit_code,
+                    log_uri=log_uri,
+                )
+                return {
+                    "total": 1 if result.wrote else 0,
+                    "pipeline_status": 1 if result.wrote else 0,
+                    "pipeline_event": 0,
+                }
+            if reconciliation_decision != "matched_bound":
+                raise FileOrchestrationJournalError(
+                    "file_journal_evidence_enum_invalid", field="reconciliation_decision"
+                )
+            existing_projections = {
+                int(item["array_task_id"]): dict(item)
+                for item in _bounded_candidate_projections(existing.get("candidate_projections"))
+                if str(item.get("array_task_id", "")).isdigit()
+            }
+            if len(projections) > MAX_FORECAST_COHORT_MEMBERS:
+                raise FileOrchestrationJournalError(
+                    "file_journal_evidence_limit_exceeded", field="candidate_projections"
+                )
+            members = {
+                int(member["array_task_id"]): dict(member)
+                for member in ordered_cohort_members(existing.get("cohort_members"))
+            }
+            normalized_projections: list[dict[str, Any]] = []
+            seen_task_ids: set[int] = set()
+            for projection in projections:
+                raw_task_id = projection.get("array_task_id")
+                if type(raw_task_id) is not int or raw_task_id in seen_task_ids:
+                    raise FileOrchestrationJournalError(
+                        "file_journal_task_identity_mismatch",
+                        field="array_task_id",
+                    )
+                seen_task_ids.add(raw_task_id)
+                bounded = _bounded_candidate_projections([projection])
+                try:
+                    item = normalize_candidate_projections(
+                        bounded,
+                        cohort_members=existing.get("cohort_members"),
+                    )[0]
+                except (AcceptedSubmitEvidenceError, IndexError) as error:
+                    raise FileOrchestrationJournalError(
+                        "file_journal_task_identity_mismatch",
+                        field=getattr(error, "field", "candidate_projections"),
+                    ) from error
+                outcome = item.get("array_task_outcome")
+                task_slurm_job_id = projection.get("task_slurm_job_id")
+                expected_task_slurm_job_id = f"{master_slurm_job_id}_{raw_task_id}"
+                if outcome in {"succeeded", "failed"} and str(task_slurm_job_id or "") != expected_task_slurm_job_id:
+                    raise FileOrchestrationJournalError(
+                        "file_journal_task_identity_mismatch",
+                        field="task_slurm_job_id",
+                    )
+                if task_slurm_job_id not in (None, "") and str(task_slurm_job_id) != expected_task_slurm_job_id:
+                    raise FileOrchestrationJournalError(
+                        "file_journal_task_identity_mismatch",
+                        field="task_slurm_job_id",
+                    )
+                normalized_projections.append(
+                    {
+                        **item,
+                        "task_slurm_job_id": task_slurm_job_id,
+                        "error_code": projection.get("error_code"),
+                    }
+                )
+            if seen_task_ids != set(members) or (
+                complete
+                and any(
+                    item.get("array_task_outcome") not in {"succeeded", "failed"}
+                    for item in normalized_projections
+                )
+            ):
+                raise FileOrchestrationJournalError(
+                    "file_journal_task_identity_mismatch",
+                    field="candidate_projections",
+                )
+            if not complete:
+                result = self._defer_forecast_cohort_projection_unlocked(
+                    existing,
+                    reconciliation_decision="accounting_unavailable",
+                    reconciliation_reason_class="coverage_incomplete",
+                    error_code="SLURM_TASK_ACCOUNTING_INCOMPLETE",
+                    error_message="terminal Slurm array task accounting was incomplete",
+                    finished_at=finished_at,
+                    exit_code=exit_code,
+                    log_uri=log_uri,
+                )
+                return {
+                    "total": 1 if result.wrote else 0,
+                    "pipeline_status": 1 if result.wrote else 0,
+                    "pipeline_event": 0,
+                }
+            succeeded_tasks = sum(
+                item.get("array_task_outcome") == "succeeded"
+                for item in normalized_projections
+            )
+            if succeeded_tasks == len(normalized_projections):
+                projected_master_status = "succeeded"
+                projected_master_error_code = None
+            elif succeeded_tasks == 0:
+                projected_master_status = "failed"
+                projected_master_error_code = next(
+                    (
+                        str(item["error_code"])
+                        for item in normalized_projections
+                        if item.get("error_code") not in (None, "")
+                    ),
+                    "SLURM_ARRAY_TASK_FAILED",
+                )
+            else:
+                projected_master_status = "partially_failed"
+                projected_master_error_code = next(
+                    (
+                        str(item["error_code"])
+                        for item in normalized_projections
+                        if item.get("error_code") not in (None, "")
+                    ),
+                    "SLURM_ARRAY_TASK_FAILED",
+                )
+            verified: list[dict[str, Any]] = []
+            for projection in sorted(normalized_projections, key=lambda item: int(item["array_task_id"])):
+                if projection.get("array_task_outcome") not in {"succeeded", "failed"}:
+                    continue
+                task_id = int(projection["array_task_id"])
+                previous = existing_projections.get(task_id)
+                if previous is not None and previous.get("array_task_outcome") in {"succeeded", "failed"}:
+                    continue
+                existing_projections[task_id] = {
+                    key: projection.get(key)
+                    for key in ACCEPTED_PROJECTION_FIELDS
+                }
+                verified.append(projection)
+
+            payloads: list[tuple[str, dict[str, Any], str | None]] = []
+            direct_jobs: list[dict[str, Any]] = []
+            touched_models: set[str] = set()
+            event_id = self._next_accepted_submit_event_id_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            model_rows = self._cycle_rows_by_model_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_ids=(
+                    str(projection["model_id"])
+                    for projection in verified
+                    if projection.get("model_id") not in (None, "")
+                ),
+                include_direct_jobs=False,
+            )
+            for projection in verified:
+                run_id = str(projection.get("run_id") or "")
+                model_id = str(projection.get("model_id") or "")
+                candidate_id = str(projection.get("candidate_id") or "")
+                task_id = int(projection["array_task_id"])
+                if not run_id or not model_id or not candidate_id:
+                    continue
+                task_status = str(projection["array_task_outcome"])
+                task_status = "succeeded" if task_status == "succeeded" else "failed"
+                candidate_job_id = f"job_{run_id}_forecast_reconciled_{master_slurm_job_id}_{task_id}"
+                candidate_job = self._pipeline_job_row(
+                    {
+                        "job_id": candidate_job_id,
+                        "run_id": run_id,
+                        "cycle_id": existing["cycle_id"],
+                        "job_type": "run_shud_forecast_array",
+                        "slurm_job_id": str(projection.get("task_slurm_job_id") or f"{master_slurm_job_id}_{task_id}"),
+                        "array_task_id": task_id,
+                        "model_id": model_id,
+                        "status": task_status,
+                        "stage": "forecast",
+                        "candidate_id": candidate_id,
+                        "error_code": None if task_status == "succeeded" else projection.get("error_code"),
+                        "submit_outcome": "accepted",
+                        "accepted_submit_contract_version": ACCEPTED_SUBMIT_CONTRACT_VERSION,
+                        "restart_stage": projection.get("restart_stage"),
+                        "native_shud_resubmitted": False,
+                    }
+                )
+                payloads.append(("pipeline_job", candidate_job, model_id))
+                direct_jobs.append(candidate_job)
+                event = {
+                    "event_id": event_id,
+                    "entity_type": "pipeline_job",
+                    "entity_id": candidate_job_id,
+                    "event_type": "array_task_reconciled",
+                    "status_from": "reconciling",
+                    "status_to": task_status,
+                    "message": None,
+                    "details": _bounded_candidate_projections([projection])[0],
+                    "created_at": _format_utc(_utcnow()),
+                }
+                event_id += 1
+                payloads.append(("pipeline_event", event, model_id))
+                model_snapshot = model_rows.get(model_id)
+                hydro = model_snapshot.hydro_run if model_snapshot is not None else None
+                if isinstance(hydro, Mapping) and str(hydro.get("run_id") or "") != run_id:
+                    hydro = None
+                hydro_status = str(hydro.get("status") or "") if isinstance(hydro, Mapping) else ""
+                hydro_error_code = hydro.get("error_code") if isinstance(hydro, Mapping) else None
+                hydro_is_retryable = (
+                    hydro_status in ACTIVE_HYDRO_STATUSES
+                    or (
+                        hydro_status == "failed"
+                        and hydro_error_code in {"SLURM_GATEWAY_UNAVAILABLE", "SLURM_RESERVATION_LOST"}
+                    )
+                )
+                if (
+                    task_status == "succeeded"
+                    and isinstance(hydro, Mapping)
+                    and hydro_is_retryable
+                    and hydro_error_code in {None, "SLURM_GATEWAY_UNAVAILABLE", "SLURM_RESERVATION_LOST"}
+                ):
+                    hydro_row = dict(hydro)
+                    hydro_row.update(
+                        {
+                            "status": "succeeded",
+                            "slurm_job_id": candidate_job["slurm_job_id"],
+                            "error_code": None,
+                            "error_message": None,
+                            "updated_at": _format_utc(_utcnow()),
+                        }
+                    )
+                    payloads.append(("hydro_run", hydro_row, model_id))
+                elif (
+                    task_status == "failed"
+                    and isinstance(hydro, Mapping)
+                    and hydro_is_retryable
+                    and hydro_error_code in {None, "SLURM_GATEWAY_UNAVAILABLE", "SLURM_RESERVATION_LOST"}
+                ):
+                    hydro_row = dict(hydro)
+                    hydro_row.update(
+                        {
+                            "status": "failed",
+                            "slurm_job_id": candidate_job["slurm_job_id"],
+                            "error_code": projection.get("error_code") or "SLURM_JOB_FAILED",
+                            "error_message": "terminal Slurm array task failed",
+                            "updated_at": _format_utc(_utcnow()),
+                        }
+                    )
+                    payloads.append(("hydro_run", hydro_row, model_id))
+                touched_models.add(model_id)
+
+            cohort_row = apply_accepted_submit_transition(
+                existing,
+                AcceptedSubmitTransition.accounting(
+                    reconciliation_decision,
+                    submit_outcome="accepted",
+                    matched_slurm_job_id=master_slurm_job_id,
+                    status=projected_master_status,
+                ),
+            )
+            cohort_row.update(
+                {
+                    "candidate_projections": [
+                        existing_projections[task_id] for task_id in sorted(existing_projections)
+                    ],
+                    "error_code": projected_master_error_code,
+                    "updated_at": _format_utc(_utcnow()),
+                }
+            )
+            if finished_at is not None:
+                cohort_row["finished_at"] = _format_utc(finished_at)
+            if exit_code is not None:
+                cohort_row["exit_code"] = exit_code
+            if master_error_message is not None:
+                cohort_row["error_message"] = _durable_error_message(master_error_message)
+            if log_uri is not None:
+                cohort_row["log_uri"] = log_uri
+            cohort_changed = any(
+                cohort_row.get(key) != existing.get(key)
+                for key in (
+                    "candidate_projections",
+                    "status",
+                    "error_code",
+                    "reconciliation_source",
+                    "reconciliation_decision",
+                    "matched_slurm_job_id",
+                    "finished_at",
+                    "exit_code",
+                    "error_message",
+                    "log_uri",
+                )
+            )
+            if cohort_changed:
+                payloads.append(("pipeline_job", cohort_row, _optional_safe_identity(cohort_row, "model_id")))
+                payloads.append(
+                    (
+                        "pipeline_event",
+                        {
+                            "event_id": event_id,
+                            "entity_type": "pipeline_job",
+                            "entity_id": str(cohort_row["job_id"]),
+                            "event_type": "status_change",
+                            "status_from": str(existing.get("status") or "") or None,
+                            "status_to": str(cohort_row.get("status") or "") or None,
+                            "message": "forecast cohort terminal projection committed",
+                            "details": {
+                                "slurm_job_id": master_slurm_job_id,
+                                "projection_complete": complete,
+                                "projected_task_count": len(existing_projections),
+                            },
+                            "created_at": _format_utc(_utcnow()),
+                        },
+                        None,
+                    )
+                )
+            if not payloads:
+                return {"total": 0, "pipeline_status": 0, "pipeline_event": 0}
+
+            next_sequence = self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
+            records: list[dict[str, Any]] = []
+            for offset, (record_type, payload, model_id) in enumerate(payloads):
+                record = _journal_record_for_write(
+                    record_type,
+                    payload,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    model_id=model_id,
+                    sequence=next_sequence + offset,
+                )
+                self._validate_outgoing_record(
+                    record,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    record_type=record_type,
+                    model_id=model_id,
+                )
+                records.append(record)
+            self._append_journal_records_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                records=records,
+            )
+            materialization_next_sequence = next_sequence + len(records)
+            self._apply_records_to_model_rows(
+                model_rows,
+                records,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            source_segments = _cycle_read_source_segments(
+                source_id=source_id,
+                source_segment_override=None,
+            )
+            cycle_segment = format_cycle_time(cycle_time)
+            for model_id, rows in model_rows.items():
+                rows.pipeline_events = _dedupe_events(rows.pipeline_events)
+                self._cache_cycle_rows(
+                    (source_id, cycle_segment, model_id, source_segments),
+                    rows,
+                    fingerprint=None,
+                )
+            pipeline_records = [record for record in records if str(record.get("record_type") or "") == "pipeline_job"]
+            for record, direct_job in zip(pipeline_records[: len(direct_jobs)], direct_jobs, strict=True):
+                self._write_pipeline_job_direct_unlocked(direct_job, record)
+            if cohort_changed:
+                self._write_pipeline_job_direct_unlocked(cohort_row, pipeline_records[-1])
+            for model_id in sorted(touched_models):
+                self._materialize_latest_unlocked(
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    model_id=model_id,
+                    next_sequence=materialization_next_sequence,
+                )
+            event_writes = sum(record_type == "pipeline_event" for record_type, _payload, _model in payloads)
+            return {
+                "total": len(records),
+                "pipeline_status": len(records) - event_writes,
+                "pipeline_event": event_writes,
+            }
+
+    def defer_forecast_cohort_projection(
+        self,
+        job_id: str,
+        *,
+        reconciliation_decision: str,
+        reconciliation_reason_class: str | None,
+        error_code: str,
+        error_message: str,
+        finished_at: datetime | None = None,
+        exit_code: int | None = None,
+        log_uri: str | None = None,
+    ) -> AcceptedSubmitCommitResult:
+        """Fail one current forecast projection closed without touching cohort members."""
+
+        source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._accepted_submit_job_for_id_unlocked(
+                job_id,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            if (
+                existing is None
+                or not accepted_submit_contract_is_current(existing)
+                or accepted_submit_row_kind(existing) != "master"
+            ):
+                return AcceptedSubmitCommitResult("stale", dict(existing or {}))
+            return self._defer_forecast_cohort_projection_unlocked(
+                existing,
+                reconciliation_decision=reconciliation_decision,
+                reconciliation_reason_class=reconciliation_reason_class,
+                error_code=error_code,
+                error_message=error_message,
+                finished_at=finished_at,
+                exit_code=exit_code,
+                log_uri=log_uri,
+            )
+
+    def _defer_forecast_cohort_projection_unlocked(
+        self,
+        existing: Mapping[str, Any],
+        *,
+        reconciliation_decision: str,
+        reconciliation_reason_class: str | None,
+        error_code: str,
+        error_message: str,
+        finished_at: datetime | None,
+        exit_code: int | None,
+        log_uri: str | None,
+    ) -> AcceptedSubmitCommitResult:
+        current_status = str(existing.get("status") or "")
+        if current_status in TERMINAL_PIPELINE_STATUSES:
+            return AcceptedSubmitCommitResult("idempotent", dict(existing))
+        if (
+            existing.get("submit_outcome") != "accepted"
+            or not str(existing.get("slurm_job_id") or "").isdigit()
+        ):
+            return AcceptedSubmitCommitResult("stale", dict(existing))
+        row = apply_accepted_submit_transition(
+            existing,
+            AcceptedSubmitTransition.accounting(
+                reconciliation_decision,
+                submit_outcome="accepted",
+                reconciliation_reason_class=reconciliation_reason_class,
+                status="reconcile_unverified",
+            ),
+        )
+        row.update(
+            {
+                "status": "reconcile_unverified",
+                "error_code": error_code,
+                "error_message": _durable_error_message(error_message),
+                "updated_at": _format_utc(_utcnow()),
+            }
+        )
+        if finished_at is not None:
+            row["finished_at"] = _format_utc(finished_at)
+        if exit_code is not None:
+            row["exit_code"] = exit_code
+        if log_uri is not None:
+            row["log_uri"] = log_uri
+        changed_fields = (
+            "status",
+            "reconciliation_source",
+            "reconciliation_decision",
+            "reconciliation_reason_class",
+            "matched_slurm_job_id",
+            "error_code",
+            "error_message",
+            "finished_at",
+            "exit_code",
+            "log_uri",
+        )
+        if all(row.get(field) == existing.get(field) for field in changed_fields):
+            return AcceptedSubmitCommitResult("idempotent", dict(existing))
+        written = self._write_pipeline_job_unlocked(
+            row,
+            exclusive_direct=False,
+            model_id=None,
+        )
+        return AcceptedSubmitCommitResult("applied", written)
 
     def update_pipeline_job_status(
         self,
@@ -1021,12 +2956,22 @@ class FileOrchestrationJournalRepository:
         initial = self._pipeline_job_for_id_unlocked(job_id)
         if initial is None:
             raise OrchestratorError("PIPELINE_JOB_NOT_FOUND", f"pipeline_job not found: {job_id}")
+        if accepted_submit_contract_is_current(initial) and accepted_submit_row_kind(initial) == "master":
+            raise FileOrchestrationJournalError(
+                "file_journal_authority_transition_requires_typed_api",
+                field="status",
+            )
         source_id = _source_id_from_job(initial)
         cycle_time = _cycle_time_from_job(initial)
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
             existing = self._pipeline_job_for_id_unlocked(job_id)
             if existing is None:
                 raise OrchestratorError("PIPELINE_JOB_NOT_FOUND", f"pipeline_job not found: {job_id}")
+            if accepted_submit_contract_is_current(existing) and accepted_submit_row_kind(existing) == "master":
+                raise FileOrchestrationJournalError(
+                    "file_journal_authority_transition_requires_typed_api",
+                    field="status",
+                )
             previous_status = str(existing.get("status") or "") or None
             terminal_guarded = previous_status in {"succeeded", "failed", "cancelled"} and status not in {
                 "partially_failed",
@@ -1408,6 +3353,126 @@ class FileOrchestrationJournalRepository:
         self._cache_cycle_rows(cache_key, rows, fingerprint=fingerprint)
         return _clone_cycle_rows(rows)
 
+    def _cycle_rows_by_model_unlocked(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_ids: Iterable[str],
+        include_direct_jobs: bool = True,
+    ) -> dict[str, _CycleRows]:
+        """Build exact model rows with one cycle-wide source scan.
+
+        ``_CycleRows`` has single hydro/forcing/context slots, so this must
+        reduce records into separate model containers rather than filtering
+        the lossy ``model_id=None`` merge.  The caller holds the cycle write
+        lock; the populated model caches therefore remain authoritative until
+        an append invalidates them.
+        """
+        source_id = _normalize_file_source_id(source_id, field="source_id")
+        normalized_model_ids = sorted({_safe_segment(model_id) for model_id in model_ids})
+        rows_by_model = {model_id: _CycleRows() for model_id in normalized_model_ids}
+        if not rows_by_model:
+            return {}
+        source_segments = _cycle_read_source_segments(
+            source_id=source_id,
+            source_segment_override=None,
+        )
+        cycle_segment = format_cycle_time(cycle_time)
+        for source_segment in source_segments:
+            for path in self._latest_paths(source_segment, cycle_segment, model_id=None):
+                model_id = _safe_segment(path.stem)
+                rows = rows_by_model.get(model_id)
+                if rows is None:
+                    continue
+                payload = self._read_optional_json(path)
+                if payload is not None:
+                    self._apply_latest_view(
+                        rows,
+                        payload,
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                        expected_model_id=model_id,
+                    )
+            self._apply_records_to_model_rows(
+                rows_by_model,
+                self._read_jsonl(self.root / "journal" / source_segment / f"{cycle_segment}.jsonl"),
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            self._apply_records_to_model_rows(
+                rows_by_model,
+                self._read_jsonl(self.root / "pipeline-events" / source_segment / f"{cycle_segment}.jsonl"),
+                source_id=source_id,
+                cycle_time=cycle_time,
+                expected_record_type="pipeline_event",
+            )
+        direct_jobs = (
+            self._direct_pipeline_job_records_for_cycle_cached(
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            if include_direct_jobs
+            else ()
+        )
+        for model_id, rows in rows_by_model.items():
+            for job in direct_jobs:
+                _insert_missing_by_key(rows.pipeline_jobs, job, key="job_id")
+            _filter_cycle_rows_for_model(rows, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+            rows.pipeline_events = _dedupe_events(rows.pipeline_events)
+            if include_direct_jobs:
+                self._cache_cycle_rows(
+                    (source_id, cycle_segment, model_id, source_segments),
+                    rows,
+                    fingerprint=None,
+                )
+        return {model_id: _clone_cycle_rows(rows) for model_id, rows in rows_by_model.items()}
+
+    def _apply_records_to_model_rows(
+        self,
+        rows_by_model: Mapping[str, _CycleRows],
+        records: Sequence[Mapping[str, Any]],
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        expected_record_type: str | None = None,
+    ) -> None:
+        """Route one decoded record batch into exact per-model reducers."""
+        for record in records:
+            payload = _payload_or_record_payload(record)
+            record_type = _record_type(record, payload)
+            _require_schema(record, FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION)
+            _require_source_cycle(record, source_id=source_id, cycle_time=cycle_time)
+            _require_record_payload_identity_match(record_type, record, payload)
+            if expected_record_type is not None and record_type != expected_record_type:
+                raise FileOrchestrationJournalError(
+                    "file_journal_record_type_mismatch",
+                    field="record_type",
+                    evidence={"expected": expected_record_type, "actual": record_type[:80]},
+                )
+            record_model_id = _record_model_id(
+                record,
+                payload,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            targets = (
+                ((record_model_id, rows_by_model[record_model_id]),)
+                if record_model_id in rows_by_model
+                else tuple(rows_by_model.items())
+                if record_model_id is None
+                else ()
+            )
+            for model_id, rows in targets:
+                self._apply_journal_record(
+                    rows,
+                    record,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    expected_record_type=expected_record_type,
+                    expected_model_id=model_id,
+                )
+
     def _direct_pipeline_job_records_for_cycle_cached(
         self,
         *,
@@ -1423,7 +3488,16 @@ class FileOrchestrationJournalRepository:
         unfiltered scan feeds the model_id=None rows.
         """
         cache_key = (source_id, format_cycle_time(cycle_time))
-        signature = _stat_signature(self.root / "pipeline-jobs")
+        signature = (
+            _stat_signature(self.root / "pipeline-jobs"),
+            _stat_signature(
+                self.root
+                / "pipeline-jobs"
+                / "by-cycle"
+                / _safe_segment(source_id)
+                / format_cycle_time(cycle_time)
+            ),
+        )
         cached = self._direct_jobs_cycle_cache.get(cache_key)
         if cached is not None and cached[0] == signature:
             return [dict(job) for job in cached[1]]
@@ -1458,6 +3532,7 @@ class FileOrchestrationJournalRepository:
         latest_entries: list[tuple[str, str, tuple[int, int, int] | None]] = []
         journal_signatures: list[tuple[str, tuple[int, int, int] | None]] = []
         event_signatures: list[tuple[str, tuple[int, int, int] | None]] = []
+        direct_partition_signatures: list[tuple[str, tuple[int, int, int] | None]] = []
         for source_segment in source_segments:
             try:
                 with os.scandir(self.root / "latest" / source_segment / cycle_segment) as it:
@@ -1488,9 +3563,18 @@ class FileOrchestrationJournalRepository:
                     _stat_signature(self.root / "pipeline-events" / source_segment / f"{cycle_segment}.jsonl"),
                 )
             )
+            direct_partition_signatures.append(
+                (
+                    source_segment,
+                    _stat_signature(
+                        self.root / "pipeline-jobs" / "by-cycle" / source_segment / cycle_segment
+                    ),
+                )
+            )
         return (
             tuple(journal_signatures),
             tuple(event_signatures),
+            tuple(direct_partition_signatures),
             tuple(sorted(latest_entries)),
             _stat_signature(self.root / "pipeline-jobs"),
         )
@@ -1573,6 +3657,7 @@ class FileOrchestrationJournalRepository:
                 cycle_time=cycle_time,
                 model_id=expected_model_id,
             )
+            _validate_accepted_submit_evidence(job)
             job = _with_latest_replay_order(job, latest_replay_sequence)
             _upsert_by_key(rows.pipeline_jobs, job, key="job_id")
         for event in _record_list(payload, "pipeline_events", "events", single_key="pipeline_event"):
@@ -1610,11 +3695,7 @@ class FileOrchestrationJournalRepository:
                 field="record_type",
                 evidence={"expected": expected_record_type, "actual": record_type[:80]},
             )
-        if (
-            expected_model_id is not None
-            and record_model_id is not None
-            and record_model_id != expected_model_id
-        ):
+        if expected_model_id is not None and record_model_id is not None and record_model_id != expected_model_id:
             return
         payload = _with_replay_order(payload, record)
         if record_type == "pipeline_job":
@@ -1624,6 +3705,7 @@ class FileOrchestrationJournalRepository:
                 cycle_time=cycle_time,
                 model_id=record_model_id if record_model_id is not None else expected_model_id,
             )
+            _validate_accepted_submit_evidence(payload)
             _upsert_by_key(rows.pipeline_jobs, payload, key="job_id")
         elif record_type == "pipeline_event":
             self._apply_event_record(rows, record, source_id=source_id, cycle_time=cycle_time)
@@ -1795,6 +3877,18 @@ class FileOrchestrationJournalRepository:
     def _direct_pipeline_job_record(self, expected_job_id: str) -> dict[str, Any] | None:
         payload = self._read_optional_json(self.root / "pipeline-jobs" / f"{expected_job_id}.json")
         if payload is None:
+            match = _CANDIDATE_JOB_ID_RE.fullmatch(expected_job_id)
+            if match is not None:
+                source_id = _normalize_file_source_id(match.group(1), field="job_id")
+                payload = self._read_optional_json(
+                    self.root
+                    / "pipeline-jobs"
+                    / "by-cycle"
+                    / _safe_segment(source_id)
+                    / _safe_segment(match.group(2))
+                    / f"{expected_job_id}.json"
+                )
+        if payload is None:
             return None
         return self._validated_direct_pipeline_job_record(payload, expected_job_id=expected_job_id)
 
@@ -1805,9 +3899,18 @@ class FileOrchestrationJournalRepository:
         cycle_time: datetime,
         model_id: str | None,
     ) -> Iterable[dict[str, Any]]:
-        directory = self.root / "pipeline-jobs"
+        directories = (
+            self.root / "pipeline-jobs",
+            self.root
+            / "pipeline-jobs"
+            / "by-cycle"
+            / _safe_segment(_normalize_file_source_id(source_id, field="source_id"))
+            / format_cycle_time(cycle_time),
+        )
         for path in sorted(
-            _iter_regular_json_files(
+            path
+            for directory in directories
+            for path in _iter_regular_json_files(
                 directory,
                 root=self.root,
                 max_files=self.max_files,
@@ -1875,64 +3978,723 @@ class FileOrchestrationJournalRepository:
         yield from jobs.values()
 
     def _iter_reconcile_pipeline_job_records(self) -> Iterable[dict[str, Any]]:
-        """Bounded restart-reconcile scan for DB-free file journals.
+        """Yield restart work from the durable inventory only.
 
-        The full read surface intentionally reconstructs historical state from
-        every latest/journal/direct file. Restart reconcile runs at the top of
-        every live scheduler pass, so it must not recursively validate the whole
-        journal tree before the progress guard can trip. Scan recent direct job
-        records and recent journal files only; candidate-scoped reads still use
-        the full identity-bound surfaces later in the pass.
+        A one-time, crash-resumable migration backfills deployments created
+        before the inventory existed. Once its marker is durable, normal passes
+        never enumerate flat master history, cycle journals, or candidate trees.
         """
 
-        jobs: dict[str, dict[str, Any]] = {}
-        budget = _RecordBudget(max(self.max_records, 1), "reconcile_pipeline_job_records")
-        for job in self._iter_reconcile_direct_pipeline_job_records():
-            if not _job_needs_restart_reconcile(job):
-                continue
-            budget.consume()
-            _upsert_by_key(jobs, job, key="job_id")
-        for path in self._iter_recent_reconcile_journal_paths(_file_reconcile_scan_limit()):
-            try:
-                source_id, cycle_time = _journal_identity_from_path(path, root=self.root, surface="journal")
-                records = self._read_jsonl(path)
-            except FileOrchestrationJournalError:
-                continue
-            rows = _CycleRows()
-            try:
-                for record in records:
-                    budget.consume()
-                    self._apply_journal_record(rows, record, source_id=source_id, cycle_time=cycle_time)
-            except FileOrchestrationJournalError:
-                continue
-            for job in rows.pipeline_jobs.values():
-                if not _job_needs_restart_reconcile(job):
-                    continue
-                _upsert_by_key(jobs, job, key="job_id")
-        yield from jobs.values()
+        self._ensure_reconcile_inventory_migrated()
+        yield from self._iter_reconcile_inventory_records()
 
-    def _iter_reconcile_direct_pipeline_job_records(self) -> Iterable[dict[str, Any]]:
-        for path in self._iter_reconcile_direct_pipeline_job_paths():
-            try:
-                expected_job_id = _safe_segment(path.stem)
-                payload = self._read_optional_json(path)
-                if payload is not None:
-                    yield self._validated_direct_pipeline_job_record(payload, expected_job_id=expected_job_id)
-            except FileOrchestrationJournalError:
+    def _iter_reconcile_inventory_records(
+        self,
+        *,
+        quiescence: bool = False,
+        strict_disappearance: bool = False,
+    ) -> Iterable[dict[str, Any]]:
+        with self._write_lock:
+            self._ensure_root_unlocked()
+            with self._reconcile_inventory_file_lock_unlocked():
+                entry_names = self._reconcile_inventory_entry_names_unlocked()
+        directory = self.root / _RECONCILE_INVENTORY_DIRECTORY
+        for entry_name in sorted(entry_names):
+            path = directory / entry_name
+            anchor = self._read_optional_json(path)
+            if anchor is None:
+                if strict_disappearance:
+                    raise FileOrchestrationJournalError(
+                        "file_journal_quiescence_authority_changed",
+                        field="reconcile_inventory",
+                    )
                 continue
+            expected_job_id = _safe_segment(entry_name.removesuffix(".json"))
+            source_id, cycle_time = self._validated_reconcile_inventory_anchor(
+                anchor,
+                expected_job_id=expected_job_id,
+            )
+            if strict_disappearance:
+                canonical = self._canonical_reconcile_job_unlocked(
+                    expected_job_id,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    strict_disappearance=strict_disappearance,
+                )
+            else:
+                with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+                    canonical = self._canonical_reconcile_job_unlocked(
+                        expected_job_id,
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                    )
+            blocking = canonical is not None and _job_blocks_rollback_quiescence(canonical)
+            if canonical is None or not blocking:
+                if strict_disappearance and canonical is None:
+                    raise FileOrchestrationJournalError(
+                        "file_journal_quiescence_authority_changed",
+                        field="reconcile_inventory",
+                    )
+                if not strict_disappearance:
+                    self._remove_reconcile_inventory_anchor_unlocked(expected_job_id)
+                continue
+            canonical_kind = _reconcile_inventory_row_kind(canonical)
+            if canonical_kind is None or canonical_kind != anchor.get("row_kind"):
+                raise FileOrchestrationJournalError(
+                    "file_journal_reconcile_inventory_invalid",
+                    field="reconcile_inventory",
+                )
+            if quiescence or _job_needs_restart_reconcile(canonical):
+                yield canonical
 
-    def _iter_reconcile_direct_pipeline_job_paths(self) -> Iterable[Path]:
-        directory = self.root / "pipeline-jobs"
-        if self.max_files <= 0 or self.max_depth < 0:
+    def _ensure_reconcile_inventory_migrated(self) -> None:
+        if self._reconcile_inventory_migration_checked:
             return
+        with self._write_lock:
+            self._ensure_root_unlocked()
+            with self._reconcile_inventory_file_lock_unlocked():
+                self._cleanup_reconcile_migration_temp_residues_unlocked()
+                marker_path = self.root / _RECONCILE_INVENTORY_MIGRATION_MARKER
+                rollback_fence = self._read_optional_json(
+                    self.root / _RECONCILE_INVENTORY_ROLLBACK_PREP_RECEIPT
+                )
+                if rollback_fence is not None:
+                    self._validated_reconcile_inventory_rollback_receipt(rollback_fence)
+                    raise FileOrchestrationJournalError(
+                        "file_journal_rollforward_required",
+                        field="reconcile_inventory_rollback_receipt",
+                    )
+                marker = self._read_optional_json(marker_path)
+                if marker is not None:
+                    self._validate_reconcile_inventory_migration_marker(marker)
+                    self._reconcile_inventory_migration_checked = True
+                    return
+                self._stable_backfill_reconcile_inventory_unlocked()
+                self._atomic_write_json_unlocked(
+                    marker_path,
+                    {
+                        "schema_version": _RECONCILE_INVENTORY_MIGRATION_SCHEMA_VERSION,
+                        "completed_at": _format_utc(_utcnow()),
+                    },
+                )
+                self._cleanup_reconcile_migration_temp_residues_unlocked()
+                self._reconcile_inventory_migration_checked = True
+
+    def _prepare_reconcile_inventory_rollback_under_scheduler_lease(
+        self,
+        *,
+        scheduler_lease_identity: Mapping[str, Any],
+        scheduler_lease_guard: Callable[[], bool],
+        scheduler_state: str,
+        active_scheduler_processes: int,
+        checked_at: datetime,
+        checked_by: str,
+        target_writer_generation: str,
+    ) -> dict[str, Any]:
+        """Invalidate migration completion while the production lease is held."""
+
+        if scheduler_state != "stopped" or type(active_scheduler_processes) is not int:
+            raise FileOrchestrationJournalError(
+                "file_journal_rollback_preflight_invalid",
+                field="scheduler_state",
+            )
+        if active_scheduler_processes != 0:
+            raise FileOrchestrationJournalError(
+                "file_journal_rollback_preflight_active",
+                field="active_scheduler_processes",
+            )
+        checked_at = _ensure_utc(checked_at)
+        checked_by = _safe_identity_text(checked_by, field="checked_by")
+        target_writer_generation = _validated_git_writer_generation(
+            target_writer_generation,
+            field="target_writer_generation",
+            invalid_reason="file_journal_rollback_target_writer_generation_invalid",
+        )
+        lease_identity = self._validated_scheduler_lease_identity(scheduler_lease_identity)
+        with self._write_lock:
+            self._ensure_root_unlocked()
+            with self._reconcile_inventory_file_lock_unlocked():
+                self._cleanup_reconcile_migration_temp_residues_unlocked()
+                marker_path = self.root / _RECONCILE_INVENTORY_MIGRATION_MARKER
+                marker = self._read_optional_json(marker_path)
+                receipt_path = self.root / _RECONCILE_INVENTORY_ROLLBACK_PREP_RECEIPT
+                prior_receipt = self._read_optional_json(receipt_path)
+                rollforward_path = self.root / _RECONCILE_INVENTORY_ROLLFORWARD_RECEIPT
+                prior_rollforward = self._read_optional_json(rollforward_path)
+                validated_prior: dict[str, Any] | None = None
+                if prior_receipt is not None:
+                    validated_prior = self._validated_reconcile_inventory_rollback_receipt(
+                        prior_receipt
+                    )
+                    if (
+                        validated_prior["scheduler_lease_identity"] != lease_identity
+                        or validated_prior["preflight"]["target_writer_generation"]
+                        != target_writer_generation
+                    ):
+                        raise FileOrchestrationJournalError(
+                            "file_journal_rollback_fence_conflict",
+                            field="reconcile_inventory_rollback_receipt",
+                        )
+                if marker is not None and validated_prior is not None:
+                    if (
+                        validated_prior["status"] != "preparing"
+                        or validated_prior["invalidated_marker"] != marker
+                        or prior_rollforward is not None
+                    ):
+                        raise FileOrchestrationJournalError(
+                            "file_journal_rollback_fence_conflict",
+                            field="reconcile_inventory_rollback_receipt",
+                        )
+                    # Crash-resume boundary: the preparing receipt was made
+                    # durable but the migration marker was not yet consumed.
+                    # Re-acquiring the exact production lease is sufficient
+                    # authority to finish that same root/generation operation.
+                    self._require_scheduler_lease_guard(scheduler_lease_guard)
+                    try:
+                        unlink_no_follow(marker_path, containment_root=self.root)
+                    except (FileNotFoundError, OSError, SafeFilesystemError) as error:
+                        raise FileOrchestrationJournalError(
+                            "file_journal_rollback_preparation_unavailable",
+                            field="reconcile_inventory_migration",
+                        ) from error
+                    validated_prior["status"] = "prepared"
+                    self._require_scheduler_lease_guard(scheduler_lease_guard)
+                    self._atomic_write_json_unlocked(receipt_path, validated_prior)
+                    self._cleanup_reconcile_migration_temp_residues_unlocked()
+                    self._reconcile_inventory_migration_checked = False
+                    return dict(validated_prior)
+                if marker is None:
+                    if validated_prior is not None:
+                        validated = validated_prior
+                        if validated["status"] == "preparing":
+                            validated["status"] = "prepared"
+                            self._require_scheduler_lease_guard(scheduler_lease_guard)
+                            self._atomic_write_json_unlocked(receipt_path, validated)
+                        if validated["status"] == "prepared":
+                            self._reconcile_inventory_migration_checked = False
+                            return validated
+                    raise FileOrchestrationJournalError(
+                        "file_journal_rollback_preparation_authority_missing",
+                        field="reconcile_inventory_migration",
+                    )
+                self._validate_reconcile_inventory_migration_marker(marker)
+                if validated_prior is not None:
+                    raise FileOrchestrationJournalError(
+                        "file_journal_rollback_fence_conflict",
+                        field="reconcile_inventory_rollback_receipt",
+                    )
+                if prior_rollforward is not None:
+                    completed = self._validated_reconcile_inventory_rollforward_receipt(
+                        prior_rollforward
+                    )
+                    if completed["restored_marker"] != marker:
+                        raise FileOrchestrationJournalError(
+                            "file_journal_rollforward_state_invalid",
+                            field="reconcile_inventory_migration",
+                        )
+                    self._require_scheduler_lease_guard(scheduler_lease_guard)
+                    try:
+                        unlink_no_follow(rollforward_path, containment_root=self.root)
+                    except (FileNotFoundError, OSError, SafeFilesystemError) as error:
+                        raise FileOrchestrationJournalError(
+                            "file_journal_rollback_preparation_unavailable",
+                            field="reconcile_inventory_rollforward_receipt",
+                        ) from error
+                prepared_at = _format_utc(_utcnow())
+                preflight = {
+                    "scheduler_state": scheduler_state,
+                    "active_scheduler_processes": active_scheduler_processes,
+                    "checked_at": _format_utc(checked_at),
+                    "checked_by": checked_by,
+                    "target_writer_generation": target_writer_generation,
+                    "dry_run": False,
+                }
+                root_identity = self._journal_root_identity_unlocked()
+                signed = {
+                    "journal_root_identity": root_identity,
+                    "marker": marker,
+                    "preflight": preflight,
+                    "prepared_at": prepared_at,
+                    "scheduler_lease_identity": lease_identity,
+                }
+                receipt = {
+                    "schema_version": _RECONCILE_INVENTORY_ROLLBACK_PREP_SCHEMA_VERSION,
+                    "receipt_id": hashlib.sha256(
+                        json.dumps(signed, separators=(",", ":"), sort_keys=True).encode("utf-8")
+                    ).hexdigest(),
+                    "status": "preparing",
+                    "prepared_at": prepared_at,
+                    "preflight": preflight,
+                    "invalidated_marker": dict(marker),
+                    "journal_root_identity": root_identity,
+                    "scheduler_lease_identity": lease_identity,
+                }
+                self._require_scheduler_lease_guard(scheduler_lease_guard)
+                self._atomic_write_json_unlocked(receipt_path, receipt)
+                self._require_scheduler_lease_guard(scheduler_lease_guard)
+                try:
+                    unlink_no_follow(marker_path, containment_root=self.root)
+                except (FileNotFoundError, OSError, SafeFilesystemError) as error:
+                    raise FileOrchestrationJournalError(
+                        "file_journal_rollback_preparation_unavailable",
+                        field="reconcile_inventory_migration",
+                    ) from error
+                receipt["status"] = "prepared"
+                self._require_scheduler_lease_guard(scheduler_lease_guard)
+                self._atomic_write_json_unlocked(receipt_path, receipt)
+                self._cleanup_reconcile_migration_temp_residues_unlocked()
+                self._reconcile_inventory_migration_checked = False
+                return dict(receipt)
+
+    def _require_reconcile_inventory_rollback_prepared(
+        self,
+        *,
+        receipt_id: str,
+        scheduler_lease_identity: Mapping[str, Any],
+        actual_writer_generation: str,
+    ) -> dict[str, Any]:
+        """Fail closed unless the old-writer launch boundary was prepared."""
+
+        expected_lease_identity = self._validated_scheduler_lease_identity(
+            scheduler_lease_identity
+        )
+        actual_writer_generation = _validated_actual_writer_generation(
+            actual_writer_generation
+        )
+        with self._write_lock:
+            self._ensure_root_unlocked()
+            with self._reconcile_inventory_file_lock_unlocked():
+                marker = self._read_optional_json(
+                    self.root / _RECONCILE_INVENTORY_MIGRATION_MARKER
+                )
+                receipt = self._read_optional_json(
+                    self.root / _RECONCILE_INVENTORY_ROLLBACK_PREP_RECEIPT
+                )
+                if marker is not None or receipt is None:
+                    raise FileOrchestrationJournalError(
+                        "file_journal_rollback_not_prepared",
+                        field="reconcile_inventory_migration",
+                    )
+                validated = self._validated_reconcile_inventory_rollback_receipt(receipt)
+                if (
+                    validated["status"] != "prepared"
+                    or validated["receipt_id"] != receipt_id
+                    or validated["scheduler_lease_identity"] != expected_lease_identity
+                    or validated["preflight"]["target_writer_generation"]
+                    != actual_writer_generation
+                ):
+                    raise FileOrchestrationJournalError(
+                        "file_journal_rollback_not_prepared",
+                        field="reconcile_inventory_migration",
+                    )
+                return validated
+
+    def current_generation_scheduler_rollback_blocker(self) -> dict[str, Any] | None:
+        """Return a bounded blocker while a prepared rollback fence is live."""
+
+        with self._write_lock:
+            self._ensure_root_unlocked()
+            with self._reconcile_inventory_file_lock_unlocked():
+                receipt = self._read_optional_json(
+                    self.root / _RECONCILE_INVENTORY_ROLLBACK_PREP_RECEIPT
+                )
+                if receipt is None:
+                    return None
+                try:
+                    validated = self._validated_reconcile_inventory_rollback_receipt(receipt)
+                except FileOrchestrationJournalError:
+                    return {"reason": "file_journal_rollback_fence_invalid", "receipt_id": None}
+                return {
+                    "reason": (
+                        "file_journal_rollback_fence_prepared"
+                        if validated["status"] in {"prepared", "rolling_forward"}
+                        else "file_journal_rollback_fence_invalid"
+                    ),
+                    "receipt_id": validated["receipt_id"],
+                }
+
+    def _complete_reconcile_inventory_rollforward_under_scheduler_lease(
+        self,
+        *,
+        preparation_receipt_id: str,
+        scheduler_lease_identity: Mapping[str, Any],
+        scheduler_lease_guard: Callable[[], bool],
+    ) -> dict[str, Any]:
+        expected_lease_identity = self._validated_scheduler_lease_identity(
+            scheduler_lease_identity
+        )
+        with self._write_lock:
+            self._ensure_root_unlocked()
+            with self._reconcile_inventory_file_lock_unlocked():
+                self._cleanup_reconcile_migration_temp_residues_unlocked()
+                marker_path = self.root / _RECONCILE_INVENTORY_MIGRATION_MARKER
+                fence_path = self.root / _RECONCILE_INVENTORY_ROLLBACK_PREP_RECEIPT
+                rollforward_path = self.root / _RECONCILE_INVENTORY_ROLLFORWARD_RECEIPT
+                fence = self._read_optional_json(fence_path)
+                prior_rollforward = self._read_optional_json(rollforward_path)
+                if fence is None:
+                    if prior_rollforward is not None:
+                        completed = self._validated_reconcile_inventory_rollforward_receipt(
+                            prior_rollforward
+                        )
+                        if (
+                            completed["preparation_receipt_id"] == preparation_receipt_id
+                            and completed["scheduler_lease_identity"] == expected_lease_identity
+                        ):
+                            completed_marker = self._read_optional_json(marker_path)
+                            if completed_marker != completed["restored_marker"]:
+                                raise FileOrchestrationJournalError(
+                                    "file_journal_rollforward_state_invalid",
+                                    field="reconcile_inventory_migration",
+                                )
+                            self._reconcile_inventory_migration_checked = True
+                            return completed
+                    raise FileOrchestrationJournalError(
+                        "file_journal_rollforward_not_prepared",
+                        field="reconcile_inventory_rollback_receipt",
+                    )
+                prepared = self._validated_reconcile_inventory_rollback_receipt(fence)
+                if (
+                    prepared["receipt_id"] != preparation_receipt_id
+                    or prepared["scheduler_lease_identity"] != expected_lease_identity
+                    or prepared["status"] not in {"prepared", "rolling_forward"}
+                ):
+                    raise FileOrchestrationJournalError(
+                        "file_journal_rollforward_not_prepared",
+                        field="reconcile_inventory_rollback_receipt",
+                    )
+                marker = self._read_optional_json(marker_path)
+                if prepared["status"] == "prepared":
+                    if marker is not None:
+                        raise FileOrchestrationJournalError(
+                            "file_journal_rollforward_state_invalid",
+                            field="reconcile_inventory_migration",
+                        )
+                    prepared["status"] = "rolling_forward"
+                    self._require_scheduler_lease_guard(scheduler_lease_guard)
+                    self._atomic_write_json_unlocked(fence_path, prepared)
+                if marker is None:
+                    self._stable_backfill_reconcile_inventory_unlocked()
+                    self._require_scheduler_lease_guard(scheduler_lease_guard)
+                    marker = {
+                        "schema_version": _RECONCILE_INVENTORY_MIGRATION_SCHEMA_VERSION,
+                        "completed_at": _format_utc(_utcnow()),
+                    }
+                    self._atomic_write_json_unlocked(marker_path, marker)
+                else:
+                    self._validate_reconcile_inventory_migration_marker(marker)
+                if prior_rollforward is not None:
+                    completed = self._validated_reconcile_inventory_rollforward_receipt(
+                        prior_rollforward
+                    )
+                    if (
+                        completed["preparation_receipt_id"] != preparation_receipt_id
+                        or completed["scheduler_lease_identity"] != expected_lease_identity
+                        or completed["restored_marker"] != marker
+                    ):
+                        raise FileOrchestrationJournalError(
+                            "file_journal_rollforward_receipt_conflict",
+                            field="reconcile_inventory_rollforward_receipt",
+                        )
+                else:
+                    completed = {
+                        "schema_version": _RECONCILE_INVENTORY_ROLLFORWARD_SCHEMA_VERSION,
+                        "preparation_receipt_id": preparation_receipt_id,
+                        "completed_at": _format_utc(_utcnow()),
+                        "journal_root_identity": self._journal_root_identity_unlocked(),
+                        "scheduler_lease_identity": expected_lease_identity,
+                        "restored_marker": dict(marker),
+                    }
+                    completed["receipt_id"] = hashlib.sha256(
+                        json.dumps(completed, separators=(",", ":"), sort_keys=True).encode("utf-8")
+                    ).hexdigest()
+                    self._require_scheduler_lease_guard(scheduler_lease_guard)
+                    self._atomic_write_json_unlocked(rollforward_path, completed)
+                self._require_scheduler_lease_guard(scheduler_lease_guard)
+                try:
+                    unlink_no_follow(fence_path, containment_root=self.root)
+                except (FileNotFoundError, OSError, SafeFilesystemError) as error:
+                    raise FileOrchestrationJournalError(
+                        "file_journal_rollforward_fence_consume_failed",
+                        field="reconcile_inventory_rollback_receipt",
+                    ) from error
+                self._cleanup_reconcile_migration_temp_residues_unlocked()
+                self._reconcile_inventory_migration_checked = True
+                return dict(completed)
+
+    def _require_scheduler_lease_guard(self, guard: Callable[[], bool]) -> None:
         try:
-            directory_mode = stat_no_follow(directory, containment_root=self.root).st_mode
-        except FileNotFoundError:
-            return
-        except (OSError, SafeFilesystemError):
-            return
-        if not stat.S_ISDIR(directory_mode):
-            return
+            held = guard()
+        except Exception as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_scheduler_lease_lost",
+                field="scheduler_lock",
+            ) from error
+        if not held:
+            raise FileOrchestrationJournalError(
+                "file_journal_scheduler_lease_lost",
+                field="scheduler_lock",
+            )
+
+    def _validated_reconcile_inventory_rollback_receipt(
+        self,
+        receipt: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        required = {
+            "schema_version",
+            "receipt_id",
+            "status",
+            "prepared_at",
+            "preflight",
+            "invalidated_marker",
+            "journal_root_identity",
+            "scheduler_lease_identity",
+        }
+        if (
+            set(receipt) != required
+            or receipt.get("schema_version")
+            != _RECONCILE_INVENTORY_ROLLBACK_PREP_SCHEMA_VERSION
+        ):
+            raise FileOrchestrationJournalError(
+                "file_journal_rollback_receipt_invalid",
+                field="reconcile_inventory_rollback_receipt",
+            )
+        receipt_id = receipt.get("receipt_id")
+        preflight = receipt.get("preflight")
+        invalidated_marker = receipt.get("invalidated_marker")
+        if (
+            not isinstance(receipt_id, str)
+            or receipt.get("status") not in {"preparing", "prepared", "rolling_forward"}
+            or not isinstance(preflight, Mapping)
+            or set(preflight)
+            != {
+                "scheduler_state",
+                "active_scheduler_processes",
+                "checked_at",
+                "checked_by",
+                "target_writer_generation",
+                "dry_run",
+            }
+            or preflight.get("scheduler_state") != "stopped"
+            or type(preflight.get("active_scheduler_processes")) is not int
+            or preflight.get("active_scheduler_processes") != 0
+            or not isinstance(preflight.get("checked_by"), str)
+            or not isinstance(preflight.get("target_writer_generation"), str)
+            or preflight.get("dry_run") is not False
+            or not isinstance(invalidated_marker, Mapping)
+        ):
+            raise FileOrchestrationJournalError(
+                "file_journal_rollback_receipt_invalid",
+                field="reconcile_inventory_rollback_receipt",
+            )
+        self._validate_reconcile_inventory_migration_marker(invalidated_marker)
+        root_identity = self._validated_journal_root_identity(
+            receipt.get("journal_root_identity")
+        )
+        if root_identity != self._journal_root_identity_unlocked():
+            raise FileOrchestrationJournalError(
+                "file_journal_rollback_receipt_wrong_root",
+                field="reconcile_inventory_rollback_receipt",
+            )
+        lease_identity = self._validated_scheduler_lease_identity(
+            receipt.get("scheduler_lease_identity")
+        )
+        _coerce_datetime(receipt.get("prepared_at"), field="prepared_at")
+        _coerce_datetime(preflight.get("checked_at"), field="checked_at")
+        _safe_identity_text(preflight["checked_by"], field="checked_by")
+        target_writer_generation = _validated_git_writer_generation(
+            preflight["target_writer_generation"],
+            field="target_writer_generation",
+            invalid_reason="file_journal_rollback_receipt_invalid",
+        )
+        signed = {
+            "journal_root_identity": root_identity,
+            "marker": invalidated_marker,
+            "preflight": preflight,
+            "prepared_at": receipt.get("prepared_at"),
+            "scheduler_lease_identity": lease_identity,
+        }
+        expected_receipt_id = hashlib.sha256(
+            json.dumps(signed, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        if not re.fullmatch(r"[0-9a-f]{64}", receipt_id) or receipt_id != expected_receipt_id:
+            raise FileOrchestrationJournalError(
+                "file_journal_rollback_receipt_invalid",
+                field="reconcile_inventory_rollback_receipt",
+            )
+        return {
+            **dict(receipt),
+            "preflight": {
+                **dict(preflight),
+                "target_writer_generation": target_writer_generation,
+            },
+            "journal_root_identity": root_identity,
+            "scheduler_lease_identity": lease_identity,
+        }
+
+    def _validated_reconcile_inventory_rollforward_receipt(
+        self,
+        receipt: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        required = {
+            "schema_version",
+            "receipt_id",
+            "preparation_receipt_id",
+            "completed_at",
+            "journal_root_identity",
+            "scheduler_lease_identity",
+            "restored_marker",
+        }
+        if set(receipt) != required or receipt.get("schema_version") != _RECONCILE_INVENTORY_ROLLFORWARD_SCHEMA_VERSION:
+            raise FileOrchestrationJournalError(
+                "file_journal_rollforward_receipt_invalid",
+                field="reconcile_inventory_rollforward_receipt",
+            )
+        receipt_id = receipt.get("receipt_id")
+        preparation_receipt_id = receipt.get("preparation_receipt_id")
+        if (
+            not isinstance(receipt_id, str)
+            or re.fullmatch(r"[0-9a-f]{64}", receipt_id) is None
+            or not isinstance(preparation_receipt_id, str)
+            or re.fullmatch(r"[0-9a-f]{64}", preparation_receipt_id) is None
+        ):
+            raise FileOrchestrationJournalError(
+                "file_journal_rollforward_receipt_invalid",
+                field="reconcile_inventory_rollforward_receipt",
+            )
+        _coerce_datetime(receipt.get("completed_at"), field="completed_at")
+        root_identity = self._validated_journal_root_identity(
+            receipt.get("journal_root_identity")
+        )
+        if root_identity != self._journal_root_identity_unlocked():
+            raise FileOrchestrationJournalError(
+                "file_journal_rollforward_receipt_wrong_root",
+                field="reconcile_inventory_rollforward_receipt",
+            )
+        lease_identity = self._validated_scheduler_lease_identity(
+            receipt.get("scheduler_lease_identity")
+        )
+        restored_marker = receipt.get("restored_marker")
+        if not isinstance(restored_marker, Mapping):
+            raise FileOrchestrationJournalError(
+                "file_journal_rollforward_receipt_invalid",
+                field="reconcile_inventory_rollforward_receipt",
+            )
+        self._validate_reconcile_inventory_migration_marker(restored_marker)
+        unsigned = {key: value for key, value in receipt.items() if key != "receipt_id"}
+        expected = hashlib.sha256(
+            json.dumps(unsigned, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        if receipt_id != expected:
+            raise FileOrchestrationJournalError(
+                "file_journal_rollforward_receipt_invalid",
+                field="reconcile_inventory_rollforward_receipt",
+            )
+        return {
+            **dict(receipt),
+            "journal_root_identity": root_identity,
+            "scheduler_lease_identity": lease_identity,
+            "restored_marker": dict(restored_marker),
+        }
+
+    def _journal_root_identity_unlocked(self) -> dict[str, Any]:
+        try:
+            metadata = os.stat(self.root, follow_symlinks=False)
+        except OSError as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_root_identity_unavailable",
+                field="journal_root",
+            ) from error
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise FileOrchestrationJournalError(
+                "file_journal_root_identity_invalid",
+                field="journal_root",
+            )
+        return {
+            "path_digest": hashlib.sha256(str(self.root.absolute()).encode("utf-8")).hexdigest(),
+            "device": int(metadata.st_dev),
+            "inode": int(metadata.st_ino),
+        }
+
+    def _validated_journal_root_identity(self, value: Any) -> dict[str, Any]:
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != {"path_digest", "device", "inode"}
+            or not isinstance(value.get("path_digest"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", value["path_digest"]) is None
+            or type(value.get("device")) is not int
+            or type(value.get("inode")) is not int
+        ):
+            raise FileOrchestrationJournalError(
+                "file_journal_root_identity_invalid",
+                field="journal_root_identity",
+            )
+        return dict(value)
+
+    def _validated_scheduler_lease_identity(self, value: Any) -> dict[str, str]:
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != {"backend", "lock_path_digest", "workspace_root_digest"}
+            or value.get("backend") != "file"
+            or not isinstance(value.get("lock_path_digest"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", value["lock_path_digest"]) is None
+            or not isinstance(value.get("workspace_root_digest"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", value["workspace_root_digest"]) is None
+        ):
+            raise FileOrchestrationJournalError(
+                "file_journal_scheduler_lease_identity_invalid",
+                field="scheduler_lease_identity",
+            )
+        return {
+            "backend": "file",
+            "lock_path_digest": value["lock_path_digest"],
+            "workspace_root_digest": value["workspace_root_digest"],
+        }
+
+    def _stable_backfill_reconcile_inventory_unlocked(self) -> str:
+        before = self._reconcile_authority_fingerprint_unlocked()
+        self._backfill_reconcile_inventory_unlocked()
+        after = self._reconcile_authority_fingerprint_unlocked()
+        if before != after:
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_migration_unavailable",
+                field="reconcile_inventory_migration",
+            )
+        return after
+
+    def _reconcile_authority_fingerprint_unlocked(self) -> str:
+        paths = [
+            *self._iter_reconcile_direct_pipeline_job_paths(),
+            *self._iter_migration_legacy_active_paths(),
+            *self._iter_migration_journal_paths(),
+        ]
+        entries: list[tuple[str, int, int]] = []
+        for path in sorted(paths):
+            try:
+                metadata = stat_no_follow(path, containment_root=self.root)
+            except (FileNotFoundError, OSError, SafeFilesystemError) as error:
+                raise FileOrchestrationJournalError(
+                    "file_journal_reconcile_inventory_migration_invalid",
+                    field="reconcile_inventory_migration",
+                ) from error
+            if not stat.S_ISREG(metadata.st_mode):
+                raise FileOrchestrationJournalError(
+                    "file_journal_reconcile_inventory_migration_invalid",
+                    field="reconcile_inventory_migration",
+                )
+            entries.append(
+                (
+                    str(_relative_evidence(path, self.root)),
+                    int(metadata.st_size),
+                    int(metadata.st_mtime_ns),
+                )
+            )
+        return hashlib.sha256(
+            json.dumps(entries, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        ).hexdigest()
+
+    def _reconcile_inventory_entry_names_unlocked(self) -> list[str]:
+        directory = self.root / _RECONCILE_INVENTORY_DIRECTORY
         try:
             entry_names = list_directory_no_follow_limited(
                 directory,
@@ -1940,74 +4702,460 @@ class FileOrchestrationJournalRepository:
                 max_entries=self.max_files,
             )
         except FileNotFoundError:
-            return
-        except (OSError, SafeFilesystemError):
-            return
+            return []
+        except (OSError, SafeFilesystemError) as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_unavailable",
+                field="reconcile_inventory",
+            ) from error
         if len(entry_names) > self.max_files:
-            return
+            raise FileOrchestrationJournalError(
+                "file_journal_record_limit_exceeded",
+                field="reconcile_inventory",
+            )
+        canonical: list[str] = []
         for entry_name in sorted(entry_names):
+            if entry_name.endswith(".json") and _SAFE_SEGMENT_RE.fullmatch(entry_name) is not None:
+                canonical.append(entry_name)
+                continue
+            match = _RECONCILE_INVENTORY_TEMP_RE.fullmatch(entry_name)
+            if match is not None and _SAFE_SEGMENT_RE.fullmatch(match.group("target")) is not None:
+                self._remove_reconcile_atomic_residue_unlocked(
+                    directory / entry_name,
+                    field="reconcile_inventory",
+                )
+                continue
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_invalid",
+                field="reconcile_inventory",
+            )
+        return canonical
+
+    def _cleanup_reconcile_migration_temp_residues_unlocked(self) -> None:
+        prefixes = (
+            f".{_RECONCILE_INVENTORY_MIGRATION_MARKER}.",
+            f".{_RECONCILE_INVENTORY_ROLLBACK_PREP_RECEIPT}.",
+            f".{_RECONCILE_INVENTORY_ROLLFORWARD_RECEIPT}.",
+        )
+        try:
+            entry_names = list_directory_no_follow_limited(
+                self.root,
+                containment_root=self.root,
+                max_entries=self.max_files,
+            )
+        except (OSError, SafeFilesystemError) as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_migration_unavailable",
+                field="reconcile_inventory_migration",
+            ) from error
+        if len(entry_names) > self.max_files:
+            raise FileOrchestrationJournalError(
+                "file_journal_record_limit_exceeded",
+                field="reconcile_inventory_migration",
+            )
+        for entry_name in entry_names:
+            if not entry_name.startswith(prefixes):
+                continue
+            if _RECONCILE_MIGRATION_TEMP_RE.fullmatch(entry_name) is None:
+                raise FileOrchestrationJournalError(
+                    "file_journal_reconcile_inventory_migration_invalid",
+                    field="reconcile_inventory_migration",
+                )
+            self._remove_reconcile_atomic_residue_unlocked(
+                self.root / entry_name,
+                field="reconcile_inventory_migration",
+            )
+
+    def _remove_reconcile_atomic_residue_unlocked(self, path: Path, *, field: str) -> None:
+        try:
+            mode = stat_no_follow(path, containment_root=self.root).st_mode
+            if not stat.S_ISREG(mode):
+                raise SafeFilesystemError(f"Atomic residue must be a regular file: {path}")
+            unlink_no_follow(path, containment_root=self.root)
+        except FileNotFoundError:
+            return
+        except (OSError, SafeFilesystemError) as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_unavailable",
+                field=field,
+            ) from error
+
+    def _backfill_reconcile_inventory_unlocked(self) -> None:
+        # Flat direct jobs contain masters/legacy rows only for current
+        # accepted-submit cohorts; current candidate history lives under
+        # pipeline-jobs/by-cycle and is deliberately never traversed here.
+        for job in self._iter_reconcile_direct_pipeline_job_records():
+            self._sync_reconcile_inventory_for_row_unlocked(job)
+        for job in self._iter_legacy_active_reconcile_records():
+            self._sync_reconcile_inventory_for_row_unlocked(job)
+        for path in self._iter_migration_journal_paths():
+            source_id, cycle_time = _journal_identity_from_path(
+                path,
+                root=self.root,
+                surface="journal",
+            )
+            rows = _CycleRows()
+            for record in self._read_migration_jsonl(path):
+                self._apply_journal_record(
+                    rows,
+                    record,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                )
+            for job in rows.pipeline_jobs.values():
+                self._sync_reconcile_inventory_for_row_unlocked(job)
+
+    def _iter_legacy_active_reconcile_records(
+        self,
+        *,
+        expected_root_signature: Any = _UNSET,
+    ) -> Iterable[dict[str, Any]]:
+        for path in self._iter_migration_legacy_active_paths(
+            expected_root_signature=expected_root_signature,
+        ):
+            payload = self._read_optional_json(path)
+            if payload is None:
+                raise FileOrchestrationJournalError(
+                    "file_journal_reconcile_inventory_migration_invalid",
+                    field="active_reconcile",
+                )
+            yield self._validated_direct_pipeline_job_record(
+                payload,
+                expected_job_id=_safe_segment(path.stem),
+            )
+
+    def _iter_migration_legacy_active_paths(
+        self,
+        *,
+        expected_root_signature: Any = _UNSET,
+    ) -> list[Path]:
+        return sorted(
+            _iter_discovered_files(
+                self.root / _LEGACY_ACTIVE_RECONCILE_DIRECTORY,
+                root=self.root,
+                suffix=".json",
+                recursive=False,
+                max_files=self.max_files,
+                max_depth=1,
+                strict_disappearance=True,
+                expected_root_signature=expected_root_signature,
+            )
+        )
+
+    def _iter_migration_journal_paths(
+        self,
+        *,
+        expected_root_signature: Any = _UNSET,
+    ) -> list[Path]:
+        return sorted(
+            _iter_discovered_files(
+                self.root / "journal",
+                root=self.root,
+                suffix=".jsonl",
+                recursive=True,
+                max_files=self.max_files,
+                max_depth=self.max_depth,
+                strict_disappearance=True,
+                expected_root_signature=expected_root_signature,
+            )
+        )
+
+    def _read_migration_jsonl(self, path: Path) -> list[dict[str, Any]]:
+        records = self._read_jsonl(path)
+        try:
+            mode = stat_no_follow(path, containment_root=self.root).st_mode
+        except (FileNotFoundError, OSError, SafeFilesystemError) as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_migration_invalid",
+                field="journal",
+            ) from error
+        if not stat.S_ISREG(mode):
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_migration_invalid",
+                field="journal",
+            )
+        return records
+
+    def _validated_reconcile_inventory_anchor(
+        self,
+        anchor: Mapping[str, Any],
+        *,
+        expected_job_id: str,
+    ) -> tuple[str, datetime]:
+        if (
+            anchor.get("schema_version") != _RECONCILE_INVENTORY_SCHEMA_VERSION
+            or anchor.get("job_id") != expected_job_id
+            or anchor.get("row_kind") not in {"current_master", "legacy"}
+        ):
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_invalid",
+                field="reconcile_inventory",
+            )
+        source_id = _required_source_id(anchor, "source_id")
+        cycle_time = _parse_cycle_time_field(anchor, "cycle_time")
+        return source_id, cycle_time
+
+    def _validate_reconcile_inventory_migration_marker(self, marker: Mapping[str, Any]) -> None:
+        if set(marker) != {"schema_version", "completed_at"} or marker.get(
+            "schema_version"
+        ) != _RECONCILE_INVENTORY_MIGRATION_SCHEMA_VERSION:
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_migration_invalid",
+                field="reconcile_inventory_migration",
+            )
+        completed_at = marker.get("completed_at")
+        if type(completed_at) is not str or not completed_at.endswith("Z"):
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_migration_invalid",
+                field="reconcile_inventory_migration",
+            )
+        try:
+            parsed = datetime.fromisoformat(completed_at.removesuffix("Z") + "+00:00")
+            canonical = _format_utc(_ensure_utc(parsed))
+        except (TypeError, ValueError, OverflowError) as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_migration_invalid",
+                field="reconcile_inventory_migration",
+            ) from error
+        if canonical != completed_at:
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_migration_invalid",
+                field="reconcile_inventory_migration",
+            )
+
+    def _canonical_reconcile_job_unlocked(
+        self,
+        job_id: str,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        strict_disappearance: bool = False,
+    ) -> dict[str, Any] | None:
+        direct_path = self.root / "pipeline-jobs" / f"{job_id}.json"
+        direct_paths = [direct_path]
+        candidate_match = _CANDIDATE_JOB_ID_RE.fullmatch(job_id)
+        if candidate_match is not None:
+            direct_paths.append(
+                self.root
+                / "pipeline-jobs"
+                / "by-cycle"
+                / _safe_segment(_normalize_file_source_id(source_id, field="source_id"))
+                / format_cycle_time(cycle_time)
+                / f"{job_id}.json"
+            )
+        legacy_path = self.root / _LEGACY_ACTIVE_RECONCILE_DIRECTORY / f"{_safe_segment(job_id)}.json"
+        journal_path = self._journal_path(source_id=source_id, cycle_time=cycle_time)
+        latest_directory = self.root / "latest" / _safe_segment(source_id) / format_cycle_time(cycle_time)
+        latest_paths = (
+            self._latest_paths(
+                _safe_segment(source_id),
+                format_cycle_time(cycle_time),
+                model_id=None,
+            )
+            if strict_disappearance
+            else []
+        )
+        watched_paths = (*direct_paths, legacy_path, journal_path, *latest_paths)
+        signatures = {path: _stat_signature(path) for path in watched_paths}
+        latest_directory_signature = _stat_signature(latest_directory)
+        direct = self._direct_pipeline_job_record(job_id)
+        legacy_payload = self._read_optional_json(legacy_path)
+        legacy = (
+            self._validated_direct_pipeline_job_record(legacy_payload, expected_job_id=job_id)
+            if legacy_payload is not None
+            else None
+        )
+        rows = _CycleRows()
+        latest_rows = _CycleRows()
+        for latest_path in latest_paths:
+            payload = self._read_optional_json(latest_path)
+            if payload is None:
+                continue
+            self._apply_latest_view(
+                latest_rows,
+                payload,
+                source_id=source_id,
+                cycle_time=cycle_time,
+                expected_model_id=_safe_segment(latest_path.stem),
+            )
+        for record in self._read_jsonl(journal_path):
+            self._apply_journal_record(rows, record, source_id=source_id, cycle_time=cycle_time)
+        if strict_disappearance and (
+            any(signature != _stat_signature(path) for path, signature in signatures.items())
+            or latest_directory_signature != _stat_signature(latest_directory)
+        ):
+            raise FileOrchestrationJournalError(
+                "file_journal_quiescence_authority_changed",
+                field="rollback_jobs",
+            )
+        replayed = rows.pipeline_jobs.get(job_id)
+        latest = latest_rows.pipeline_jobs.get(job_id)
+        authority = replayed or latest or direct or legacy
+        canonical = dict(authority) if authority is not None else None
+        if canonical is None:
+            return None
+        if _source_id_from_job(canonical) != source_id or _cycle_time_from_job(canonical) != cycle_time:
+            raise FileOrchestrationJournalError(
+                "file_journal_identity_mismatch",
+                field="reconcile_inventory",
+            )
+        return canonical
+
+    def _sync_reconcile_inventory_for_row_unlocked(self, row: Mapping[str, Any]) -> bool:
+        with self._reconcile_inventory_file_lock_unlocked():
+            row_kind = _reconcile_inventory_row_kind(row)
+            job_id = _required_safe_identity(row, "job_id")
+            if row_kind is None or not _job_blocks_rollback_quiescence(row):
+                self._remove_reconcile_inventory_anchor_unlocked(job_id)
+                return False
+            self._atomic_write_json_unlocked(
+                self.root / _RECONCILE_INVENTORY_DIRECTORY / f"{job_id}.json",
+                {
+                    "schema_version": _RECONCILE_INVENTORY_SCHEMA_VERSION,
+                    "job_id": job_id,
+                    "source_id": _source_id_from_job(row),
+                    "cycle_time": _format_utc(_cycle_time_from_job(row)),
+                    "row_kind": row_kind,
+                },
+            )
+            return True
+
+    def _remove_reconcile_inventory_anchor_unlocked(self, job_id: str) -> None:
+        with self._reconcile_inventory_file_lock_unlocked():
+            try:
+                unlink_no_follow(
+                    self.root / _RECONCILE_INVENTORY_DIRECTORY / f"{_safe_segment(job_id)}.json",
+                    containment_root=self.root,
+                    missing_ok=True,
+                )
+            except (OSError, SafeFilesystemError) as error:
+                raise OrchestratorError(
+                    "FILE_JOURNAL_WRITE_FAILED",
+                    "failed to update reconcile inventory",
+                    {"error_type": type(error).__name__},
+                ) from error
+
+    def _iter_reconcile_direct_pipeline_job_records(self) -> Iterable[dict[str, Any]]:
+        for path in self._iter_reconcile_direct_pipeline_job_paths():
+            expected_job_id = _safe_segment(path.stem)
+            payload = self._read_optional_json(path)
+            if payload is None:
+                raise FileOrchestrationJournalError(
+                    "file_journal_reconcile_inventory_migration_invalid",
+                    field="pipeline_jobs",
+                )
+            yield self._validated_direct_pipeline_job_record(payload, expected_job_id=expected_job_id)
+
+    def _iter_reconcile_direct_pipeline_job_paths(
+        self,
+        *,
+        strict_disappearance: bool = False,
+        expected_root_signature: Any = _UNSET,
+    ) -> Iterable[Path]:
+        directory = self.root / "pipeline-jobs"
+        if self.max_files <= 0 or self.max_depth < 0:
+            return
+        if (
+            expected_root_signature is not _UNSET
+            and _stat_signature(directory) != expected_root_signature
+        ):
+            raise FileOrchestrationJournalError(
+                "file_journal_quiescence_authority_changed",
+                field="pipeline_jobs",
+            )
+        try:
+            directory_mode = stat_no_follow(directory, containment_root=self.root).st_mode
+        except FileNotFoundError:
+            if strict_disappearance and expected_root_signature is not None:
+                raise FileOrchestrationJournalError(
+                    "file_journal_quiescence_authority_changed",
+                    field="pipeline_jobs",
+                )
+            return
+        except (OSError, SafeFilesystemError) as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_migration_unavailable",
+                field="pipeline_jobs",
+            ) from error
+        if not stat.S_ISDIR(directory_mode):
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_migration_invalid",
+                field="pipeline_jobs",
+            )
+        try:
+            entry_names = list_directory_no_follow_limited(
+                directory,
+                containment_root=self.root,
+                max_entries=self.max_files,
+            )
+        except FileNotFoundError:
+            if strict_disappearance:
+                raise FileOrchestrationJournalError(
+                    "file_journal_quiescence_authority_changed",
+                    field="pipeline_jobs",
+                )
+            return
+        except (OSError, SafeFilesystemError) as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_reconcile_inventory_migration_unavailable",
+                field="pipeline_jobs",
+            ) from error
+        if len(entry_names) > self.max_files:
+            raise FileOrchestrationJournalError(
+                "file_journal_record_limit_exceeded",
+                field="pipeline_jobs",
+            )
+        if (
+            expected_root_signature is not _UNSET
+            and _stat_signature(directory) != expected_root_signature
+        ):
+            raise FileOrchestrationJournalError(
+                "file_journal_quiescence_authority_changed",
+                field="pipeline_jobs",
+            )
+        for entry_name in sorted(entry_names):
+            if entry_name == "by-cycle":
+                try:
+                    mode = stat_no_follow(directory / entry_name, containment_root=self.root).st_mode
+                except (FileNotFoundError, OSError, SafeFilesystemError) as error:
+                    raise FileOrchestrationJournalError(
+                        "file_journal_reconcile_inventory_migration_invalid",
+                        field="pipeline_jobs",
+                    ) from error
+                if not stat.S_ISDIR(mode):
+                    raise FileOrchestrationJournalError(
+                        "file_journal_reconcile_inventory_migration_invalid",
+                        field="pipeline_jobs",
+                    )
+                continue
             if not entry_name.endswith(".json"):
-                continue
+                raise FileOrchestrationJournalError(
+                    "file_journal_reconcile_inventory_migration_invalid",
+                    field="pipeline_jobs",
+                )
             if _SAFE_SEGMENT_RE.fullmatch(entry_name) is None:
-                continue
+                raise FileOrchestrationJournalError(
+                    "file_journal_reconcile_inventory_migration_invalid",
+                    field="pipeline_jobs",
+                )
             path = directory / entry_name
             try:
                 mode = stat_no_follow(path, containment_root=self.root).st_mode
             except FileNotFoundError:
-                continue
-            except (OSError, SafeFilesystemError):
-                continue
-            if stat.S_ISREG(mode):
-                yield path
-
-    def _iter_recent_direct_pipeline_job_records(self, limit: int) -> Iterable[dict[str, Any]]:
-        for path in self._recent_files(self.root / "pipeline-jobs", suffix=".json", limit=limit):
-            try:
-                expected_job_id = _safe_segment(path.stem)
-                payload = self._read_optional_json(path)
-                if payload is not None:
-                    yield self._validated_direct_pipeline_job_record(payload, expected_job_id=expected_job_id)
-            except FileOrchestrationJournalError:
-                continue
-
-    def _iter_recent_reconcile_journal_paths(self, limit: int) -> Iterable[Path]:
-        yield from self._recent_files(self.root / "journal", suffix=".jsonl", limit=limit)
-
-    def _recent_files(self, directory: Path, *, suffix: str, limit: int) -> Iterable[Path]:
-        if limit <= 0 or not directory.exists():
-            return
-        discovered: list[tuple[int, str, Path]] = []
-        root = self.root.resolve(strict=False)
-        if suffix == ".jsonl":
-            iterator = _iter_jsonl_files(
-                directory,
-                root=self.root,
-                max_files=self.max_files,
-                max_depth=self.max_depth,
-            )
-        elif suffix == ".json":
-            iterator = _iter_regular_json_files(
-                directory,
-                root=self.root,
-                recursive=True,
-                max_files=self.max_files,
-                max_depth=self.max_depth,
-            )
-        else:
-            return
-        try:
-            paths = list(iterator)
-        except (FileOrchestrationJournalError, OSError):
-            return
-        for path in paths:
-            try:
-                resolved = path.resolve(strict=False)
-                rel = resolved.relative_to(root)
-                stat_result = path.stat()
-            except (OSError, ValueError):
-                continue
-            discovered.append((stat_result.st_mtime_ns, str(rel), path))
-        for _mtime, _rel, path in sorted(discovered, reverse=True)[:limit]:
+                raise FileOrchestrationJournalError(
+                    "file_journal_reconcile_inventory_migration_invalid",
+                    field="pipeline_jobs",
+                )
+            except (OSError, SafeFilesystemError) as error:
+                raise FileOrchestrationJournalError(
+                    "file_journal_reconcile_inventory_migration_unavailable",
+                    field="pipeline_jobs",
+                ) from error
+            if not stat.S_ISREG(mode):
+                raise FileOrchestrationJournalError(
+                    "file_journal_reconcile_inventory_migration_invalid",
+                    field="pipeline_jobs",
+                )
             yield path
 
     def _model_context(self, model_id: str) -> dict[str, Any] | None:
@@ -2141,6 +5289,7 @@ class FileOrchestrationJournalRepository:
             model_id=model_id,
             expected_job_id=expected_job_id,
         )
+        _validate_accepted_submit_evidence(payload)
         return payload
 
     def _write_hydro_run(self, row: Mapping[str, Any], *, retriable_only: bool) -> dict[str, Any]:
@@ -2150,10 +5299,15 @@ class FileOrchestrationJournalRepository:
         model_id = _required_safe_identity(row, "model_id")
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
             existing = self._hydro_run_for(str(row["run_id"]))
-            if retriable_only and existing is not None and str(existing.get("status") or "") not in {
-                "failed",
-                "cancelled",
-            }:
+            if (
+                retriable_only
+                and existing is not None
+                and str(existing.get("status") or "")
+                not in {
+                    "failed",
+                    "cancelled",
+                }
+            ):
                 raise OrchestratorError(
                     "HYDRO_RUN_NOT_RETRIABLE",
                     f"hydro_run already exists and is not retriable: {row['run_id']}",
@@ -2184,9 +5338,16 @@ class FileOrchestrationJournalRepository:
             return _public_scheduler_row(rows.hydro_run)
         return None
 
-    def _pipeline_job_row(self, record: Mapping[str, Any]) -> dict[str, Any]:
+    def _pipeline_job_row(
+        self,
+        record: Mapping[str, Any],
+        *,
+        validate_accepted_submit: bool = True,
+    ) -> dict[str, Any]:
         cycle_id = _required_safe_identity(record, "cycle_id")
         source_id, cycle_time = _source_cycle_from_cycle_id(cycle_id)
+        if validate_accepted_submit:
+            _validate_accepted_submit_evidence({**record, "source_id": source_id})
         now = _format_utc(_utcnow())
         row = {
             "job_id": _required_safe_identity(record, "job_id"),
@@ -2212,15 +5373,40 @@ class FileOrchestrationJournalRepository:
             "error_code": record.get("error_code"),
             "error_message": _durable_error_message(record.get("error_message")),
             "log_uri": record.get("log_uri"),
+            "submit_outcome": record.get("submit_outcome"),
+            "slurm_comment": record.get("slurm_comment"),
+            "cohort_members": _bounded_cohort_members(record.get("cohort_members")),
+            "cohort_digest": record.get("cohort_digest"),
+            "restart_stage": record.get("restart_stage"),
+            "submission_attempt": record.get("submission_attempt", 1),
+            "submission_attempt_started_at": _optional_format_datetime(
+                record.get("submission_attempt_started_at"), field="submission_attempt_started_at"
+            ),
+            "expected_slurm_user": record.get("expected_slurm_user"),
+            "expected_slurm_account": record.get("expected_slurm_account"),
+            "slurm_ownership_required": bool(record.get("slurm_ownership_required", False)),
+            "reconciliation_source": record.get("reconciliation_source"),
+            "reconciliation_decision": record.get("reconciliation_decision"),
+            "reconciliation_reason_class": record.get("reconciliation_reason_class"),
+            "matched_slurm_job_id": record.get("matched_slurm_job_id"),
+            "candidate_projections": _bounded_candidate_projections(record.get("candidate_projections")),
+            "cancellation_receipt_recorded": record.get("cancellation_receipt_recorded", False),
+            "native_shud_resubmitted": record.get("native_shud_resubmitted"),
             "created_at": _optional_format_datetime(record.get("created_at"), field="created_at") or now,
             "updated_at": _optional_format_datetime(record.get("updated_at"), field="updated_at") or now,
         }
+        if ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD in record:
+            row[ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD] = record.get(
+                ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD
+            )
         _validate_pipeline_job_identity(
             row,
             source_id=source_id,
             cycle_time=cycle_time,
             model_id=_optional_safe_identity(row, "model_id"),
         )
+        if validate_accepted_submit:
+            _validate_accepted_submit_evidence(row)
         return row
 
     def _write_pipeline_job(self, row: Mapping[str, Any], *, exclusive_direct: bool) -> dict[str, Any] | None:
@@ -2259,15 +5445,77 @@ class FileOrchestrationJournalRepository:
             record_type="pipeline_job",
             model_id=model_id,
         )
-        self._append_journal_record_unlocked(source_id=source_id, cycle_time=cycle_time, record=record)
-        direct_path = self.root / "pipeline-jobs" / f"{_required_safe_identity(row, 'job_id')}.json"
-        self._atomic_write_json_unlocked(direct_path, record)
+        anchor_path = self.root / _RECONCILE_INVENTORY_DIRECTORY / f"{_required_safe_identity(row, 'job_id')}.json"
+        anchor_preexisting = self._reconcile_inventory_anchor_exists_unlocked(anchor_path)
+        anchor_published = False
+        if _reconcile_inventory_row_kind(row) is not None and _job_needs_restart_reconcile(row):
+            anchor_published = self._sync_reconcile_inventory_for_row_unlocked(row)
+        try:
+            self._append_journal_record_unlocked(source_id=source_id, cycle_time=cycle_time, record=record)
+        except Exception:
+            if anchor_published and not anchor_preexisting:
+                self._remove_reconcile_inventory_anchor_unlocked(str(row["job_id"]))
+            raise
+        self._write_pipeline_job_direct_unlocked(row, record)
         if model_id is not None:
             self._materialize_latest_unlocked(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
         return _public_scheduler_row(row)
 
+    def _write_pipeline_job_direct_unlocked(
+        self,
+        row: Mapping[str, Any],
+        record: Mapping[str, Any],
+    ) -> None:
+        source_id = _source_id_from_job(row)
+        cycle_time = _cycle_time_from_job(row)
+        job_id = _required_safe_identity(row, "job_id")
+        if accepted_submit_contract_is_current(row) and accepted_submit_row_kind(row) == "candidate":
+            direct_path = (
+                self.root
+                / "pipeline-jobs"
+                / "by-cycle"
+                / _safe_segment(source_id)
+                / format_cycle_time(cycle_time)
+                / f"{job_id}.json"
+            )
+        else:
+            direct_path = self.root / "pipeline-jobs" / f"{job_id}.json"
+        self._atomic_write_json_unlocked(direct_path, record)
+        self._sync_reconcile_inventory_for_row_unlocked(row)
+        self._direct_jobs_cycle_cache.pop((source_id, format_cycle_time(cycle_time)), None)
+
+    def _reconcile_inventory_anchor_exists_unlocked(self, path: Path) -> bool:
+        try:
+            mode = stat_no_follow(path, containment_root=self.root).st_mode
+        except FileNotFoundError:
+            return False
+        except (OSError, SafeFilesystemError) as error:
+            raise OrchestratorError(
+                "FILE_JOURNAL_WRITE_FAILED",
+                "failed to inspect reconcile inventory anchor",
+                {"error_type": type(error).__name__},
+            ) from error
+        if not stat.S_ISREG(mode):
+            raise OrchestratorError(
+                "FILE_JOURNAL_WRITE_FAILED",
+                "reconcile inventory anchor must be a regular file",
+            )
+        return True
+
     def _pipeline_job_conflicts_unlocked(self, row: Mapping[str, Any]) -> bool:
         job_id = str(row.get("job_id") or "")
+        if accepted_submit_contract_is_current(row) and accepted_submit_row_kind(row) == "master":
+            source_id = _source_id_from_job(row)
+            cycle_time = _cycle_time_from_job(row)
+            return bool(
+                job_id
+                and self._accepted_submit_job_for_id_unlocked(
+                    job_id,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                )
+                is not None
+            )
         if job_id and self.get_pipeline_job(job_id) is not None:
             return True
         idempotency_key = row.get("idempotency_key")
@@ -2539,6 +5787,34 @@ class FileOrchestrationJournalRepository:
         event_ids = [_optional_positive_int(event.get("event_id")) or 0 for event in rows.pipeline_events]
         return max([sequence_floor, *event_ids], default=0) + 1
 
+    def _next_accepted_submit_event_id_unlocked(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+    ) -> int:
+        """Compute a cohort event id from exact cycle surfaces, excluding global direct files."""
+
+        sequence_floor = self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time) - 1
+        rows = _CycleRows()
+        cycle_segment = format_cycle_time(cycle_time)
+        for source_segment in _cycle_read_source_segments(
+            source_id=source_id,
+            source_segment_override=None,
+        ):
+            for surface in ("journal", "pipeline-events"):
+                for record in self._read_jsonl(
+                    self.root / surface / source_segment / f"{cycle_segment}.jsonl"
+                ):
+                    self._apply_journal_record(
+                        rows,
+                        record,
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                    )
+        event_ids = [_optional_positive_int(event.get("event_id")) or 0 for event in rows.pipeline_events]
+        return max([sequence_floor, *event_ids], default=0) + 1
+
     def _append_journal_record_unlocked(
         self,
         *,
@@ -2567,6 +5843,36 @@ class FileOrchestrationJournalRepository:
         self._atomic_write_bytes_unlocked(path, content)
         self._apply_record_to_cycle_rows_cache(source_id=source_id, cycle_time=cycle_time, record=record)
 
+    def _append_journal_records_unlocked(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        records: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """Append a validated record batch with one bounded journal rewrite."""
+        if not records:
+            return
+        path = self._journal_path(source_id=source_id, cycle_time=cycle_time)
+        try:
+            existing = read_bytes_limited_no_follow(path, max_bytes=self.max_bytes, containment_root=self.root)
+        except FileNotFoundError:
+            existing = b""
+        except (OSError, SafeFilesystemError) as error:
+            raise OrchestratorError(
+                "FILE_JOURNAL_WRITE_FAILED",
+                "failed to read existing file journal before batch append",
+                {"error_type": type(error).__name__},
+            ) from error
+        content = existing
+        if content and not content.endswith(b"\n"):
+            content += b"\n"
+        content += b"\n".join(_json_bytes(record).rstrip(b"\n") for record in records) + b"\n"
+        self._require_within_byte_limit(content, path)
+        self._atomic_write_bytes_unlocked(path, content)
+        for record in records:
+            self._apply_record_to_cycle_rows_cache(source_id=source_id, cycle_time=cycle_time, record=record)
+
     def _apply_record_to_cycle_rows_cache(
         self,
         *,
@@ -2586,9 +5892,7 @@ class FileOrchestrationJournalRepository:
         cycle_segment = format_cycle_time(cycle_time)
         base_key = (source_id, cycle_segment, None, None)
         stale_keys = [
-            key
-            for key in self._cycle_rows_cache
-            if key[0] == source_id and key[1] == cycle_segment and key != base_key
+            key for key in self._cycle_rows_cache if key[0] == source_id and key[1] == cycle_segment and key != base_key
         ]
         for key in stale_keys:
             self._cycle_rows_cache.pop(key, None)
@@ -2613,8 +5917,18 @@ class FileOrchestrationJournalRepository:
         cycle_time: datetime,
         model_id: str,
         next_sequence: int | None = None,
+        include_direct_jobs: bool = True,
     ) -> None:
-        rows = self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+        rows = (
+            self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+            if include_direct_jobs
+            else self._cycle_rows_by_model_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_ids=(model_id,),
+                include_direct_jobs=False,
+            )[model_id]
+        )
         if next_sequence is None:
             next_sequence = self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
         latest = {
@@ -2627,11 +5941,17 @@ class FileOrchestrationJournalRepository:
             "forecast_cycle": _strip_internal_fields(rows.forecast_cycle),
             "forcing_version": _strip_internal_fields(rows.forcing_version),
             "model_context": _strip_internal_fields(rows.model_context),
-            "pipeline_jobs": [_strip_internal_fields(job) for job in rows.pipeline_jobs.values()],
+            "pipeline_jobs": [
+                _strip_internal_fields(job)
+                for job in rows.pipeline_jobs.values()
+                if accepted_submit_row_kind(job) != "master"
+            ],
             "pipeline_events": [_strip_internal_fields(event) for event in rows.pipeline_events],
             "replay": {
                 "latest_sequence": next_sequence - 1,
-                "job_count": len(rows.pipeline_jobs),
+                "job_count": sum(
+                    accepted_submit_row_kind(job) != "master" for job in rows.pipeline_jobs.values()
+                ),
                 "event_count": len(rows.pipeline_events),
             },
         }
@@ -2682,7 +6002,12 @@ class FileOrchestrationJournalRepository:
 
     def _atomic_write_bytes_unlocked(self, path: Path, content: bytes) -> None:
         try:
-            atomic_write_bytes_no_follow(path, content, containment_root=self.root)
+            atomic_write_bytes_no_follow(
+                path,
+                content,
+                containment_root=self.root,
+                require_durable_replace=True,
+            )
         except (OSError, SafeFilesystemError) as error:
             raise OrchestratorError(
                 "FILE_JOURNAL_WRITE_FAILED",
@@ -2751,6 +6076,25 @@ class FileOrchestrationJournalRepository:
             if parent_fd is not None:
                 os.close(parent_fd)
 
+    @contextmanager
+    def _reconcile_inventory_file_lock_unlocked(self) -> Iterable[None]:
+        """Serialize inventory mutation and orphan-temp cleanup across processes."""
+
+        if self._reconcile_inventory_lock_depth:
+            self._reconcile_inventory_lock_depth += 1
+            try:
+                yield
+            finally:
+                self._reconcile_inventory_lock_depth -= 1
+            return
+        migration_cycle = datetime(1970, 1, 1, tzinfo=UTC)
+        with self._cycle_file_lock_unlocked(source_id="gfs", cycle_time=migration_cycle):
+            self._reconcile_inventory_lock_depth = 1
+            try:
+                yield
+            finally:
+                self._reconcile_inventory_lock_depth = 0
+
     def _journal_path(self, *, source_id: str, cycle_time: datetime) -> Path:
         return self.root / "journal" / _safe_segment(source_id) / f"{format_cycle_time(cycle_time)}.jsonl"
 
@@ -2766,20 +6110,20 @@ class FileOrchestrationJournalRepository:
 
 
 def _file_lock_guard_mode() -> str:
-    value = os.getenv(FILE_LOCK_GUARD_MODE_ENV, "flock").strip().lower()
+    configured = os.getenv(FILE_JOURNAL_LOCK_GUARD_MODE_ENV)
+    if configured is None:
+        legacy = os.getenv(LEGACY_FILE_LOCK_GUARD_MODE_ENV)
+        if legacy is not None and legacy.strip().lower() in {"atomic", "none", "off", "disabled"}:
+            raise SafeFilesystemError(
+                f"{LEGACY_FILE_LOCK_GUARD_MODE_ENV}={legacy.strip()} does not prove a "
+                "cross-process journal guard; configure "
+                f"{FILE_JOURNAL_LOCK_GUARD_MODE_ENV}=flock explicitly"
+            )
+        configured = legacy if legacy is not None else "flock"
+    value = configured.strip().lower()
     if value in {"", "flock", "fcntl"}:
         return "flock"
-    if value in {"atomic", "none", "off", "disabled"}:
-        return "atomic"
-    raise SafeFilesystemError(f"Unsupported {FILE_LOCK_GUARD_MODE_ENV}: {value}")
-
-
-def _file_reconcile_scan_limit() -> int:
-    value = os.getenv(FILE_RECONCILE_SCAN_LIMIT_ENV)
-    try:
-        return max(int(value), 1) if value not in (None, "") else DEFAULT_FILE_RECONCILE_SCAN_LIMIT
-    except (TypeError, ValueError):
-        return DEFAULT_FILE_RECONCILE_SCAN_LIMIT
+    raise SafeFilesystemError(f"Unsupported {FILE_JOURNAL_LOCK_GUARD_MODE_ENV}: {value}")
 
 
 class FileJournalRetryService:
@@ -2809,11 +6153,45 @@ class FileJournalRetryService:
         }
 
     def handle_failed_job(self, job: Any) -> SimpleNamespace:
+        current = self.repository.get_pipeline_job(str(_file_retry_job_value(job, "job_id") or ""))
+        if (
+            current is not None
+            and accepted_submit_contract_is_current(current)
+            and accepted_submit_row_kind(current) == "master"
+        ):
+            if not self.should_auto_retry(job):
+                return _file_retry_namespace(current)
+            retry_job_id, retry_count = _next_current_master_retry_identity(current)
+            return _file_retry_namespace(
+                {
+                    **current,
+                    "job_id": retry_job_id,
+                    "status": "pending",
+                    "retry_count": retry_count,
+                    "slurm_job_id": None,
+                }
+            )
         if self.should_auto_retry(job):
             return self.schedule_auto_retry(job)
         return self.mark_permanently_failed(job)
 
     def schedule_auto_retry(self, job: Any) -> SimpleNamespace:
+        current = self.repository.get_pipeline_job(str(_file_retry_job_value(job, "job_id") or ""))
+        if (
+            current is not None
+            and accepted_submit_contract_is_current(current)
+            and accepted_submit_row_kind(current) == "master"
+        ):
+            retry_job_id, retry_count = _next_current_master_retry_identity(current)
+            return _file_retry_namespace(
+                {
+                    **current,
+                    "job_id": retry_job_id,
+                    "status": "pending",
+                    "retry_count": retry_count,
+                    "slurm_job_id": None,
+                }
+            )
         source = _file_retry_job_record(job)
         previous_error = source.get("error_code")
         status_from = str(source.get("status") or "")
@@ -2878,7 +6256,6 @@ class FileJournalRetryService:
             },
         )
         return _file_retry_namespace(written)
-
     def mark_permanently_failed(self, job: Any) -> SimpleNamespace:
         source = _file_retry_job_record(job)
         if str(source.get("status") or "") == "permanently_failed":
@@ -3409,8 +6786,7 @@ class FileJournalRetryService:
             (
                 event
                 for event in rows.pipeline_events
-                if str(event.get("entity_id") or "") == job_id
-                and str(event.get("event_type") or "") == "retry"
+                if str(event.get("entity_id") or "") == job_id and str(event.get("event_type") or "") == "retry"
             ),
             key=lambda event: _optional_positive_int(event.get("event_id")) or 0,
             reverse=True,
@@ -3438,8 +6814,7 @@ class FileJournalRetryService:
         submission_events = [
             event
             for event in rows.pipeline_events
-            if str(event.get("entity_id") or "") == job_id
-            and str(event.get("event_type") or "") == "submission"
+            if str(event.get("entity_id") or "") == job_id and str(event.get("event_type") or "") == "submission"
         ]
         event_rows_total_count = len(submission_events)
         if job.get("manual_retry_marker") is True:
@@ -3611,6 +6986,22 @@ class FileJournalRetryService:
         if latest_status in TERMINAL_SUCCESS_RETRY_STATUSES:
             return None, None
         return None, None
+
+
+def _next_current_master_retry_identity(current: Mapping[str, Any]) -> tuple[str, int]:
+    job_id = str(current.get("job_id") or "")
+    base_job_id = job_id
+    suffix_attempt = 0
+    marker = "_retry_"
+    if marker in job_id:
+        possible_base, possible_attempt = job_id.rsplit(marker, maxsplit=1)
+        try:
+            suffix_attempt = max(int(possible_attempt), 0)
+            base_job_id = possible_base
+        except ValueError:
+            pass
+    retry_count = max(int(current.get("retry_count") or 0), suffix_attempt) + 1
+    return f"{base_job_id}{marker}{retry_count}", retry_count
 
 
 def _utcnow() -> datetime:
@@ -3857,7 +7248,15 @@ def _file_retry_job_text(job: Any, field: str) -> str | None:
 
 def _file_reconcile_namespace(row: Mapping[str, Any]) -> SimpleNamespace:
     payload = dict(row)
-    for dt_field in ("created_at", "updated_at", "submitted_at", "started_at", "finished_at", "cycle_time"):
+    for dt_field in (
+        "created_at",
+        "updated_at",
+        "submitted_at",
+        "started_at",
+        "finished_at",
+        "cycle_time",
+        "submission_attempt_started_at",
+    ):
         value = payload.get(dt_field)
         if value in (None, ""):
             continue
@@ -3868,26 +7267,126 @@ def _file_reconcile_namespace(row: Mapping[str, Any]) -> SimpleNamespace:
     return SimpleNamespace(**payload)
 
 
+def _bounded_cohort_members(value: Any) -> list[dict[str, Any]]:
+    """Return the durable, credential-safe ordered member identity map."""
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
+        return []
+    allowed = (
+        "array_task_id",
+        "candidate_id",
+        "run_id",
+        "model_id",
+        "basin_id",
+        "scenario_id",
+        "restart_stage",
+    )
+    result: list[dict[str, Any]] = []
+    for item in value[:256]:
+        if not isinstance(item, Mapping):
+            continue
+        member = {key: item.get(key) for key in allowed}
+        result.append(member)
+    return result
+
+
+def _bounded_candidate_projections(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
+        return []
+    allowed = (
+        "candidate_id",
+        "run_id",
+        "model_id",
+        "array_task_id",
+        "array_task_outcome",
+        "restart_stage",
+        "native_shud_resubmitted",
+    )
+    return [{key: item.get(key) for key in allowed} for item in value[:256] if isinstance(item, Mapping)]
+
+
+def _validate_accepted_submit_evidence(row: Mapping[str, Any]) -> None:
+    """Delegate every file surface to the canonical accepted-submit boundary."""
+
+    try:
+        normalize_accepted_submit_evidence(row)
+    except AcceptedSubmitEvidenceError as error:
+        raise FileOrchestrationJournalError(error.reason, field=error.field) from error
+
+
+def _accepted_submit_master_identity(row: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        return accepted_submit_master_immutable_identity(row)
+    except AcceptedSubmitEvidenceError as error:
+        raise FileOrchestrationJournalError(error.reason, field=error.field) from error
+
+
+def _accepted_submit_master_state(row: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        return accepted_submit_master_ordinary_upsert_state(row)
+    except AcceptedSubmitEvidenceError as error:
+        raise FileOrchestrationJournalError(error.reason, field=error.field) from error
+
+
+def _accepted_submit_attempt_anchor(value: Any) -> str:
+    try:
+        return normalize_accepted_submit_attempt_anchor(value)
+    except AcceptedSubmitEvidenceError as error:
+        raise FileOrchestrationJournalError(error.reason, field=error.field) from error
+
+
 def _file_journal_real_slurm_job_id(value: Any) -> bool:
     text = str(value or "")
     return bool(text and text.lower() != "local")
 
 
+def _reconcile_inventory_row_kind(job: Mapping[str, Any]) -> str | None:
+    if accepted_submit_contract_is_current(job):
+        return "current_master" if accepted_submit_row_kind(job) == "master" else None
+    return "legacy"
+
+
 def _job_needs_restart_reconcile(job: Mapping[str, Any]) -> bool:
     status = str(job.get("status") or "")
-    if (
-        status == "reserved"
-        and job.get("slurm_job_id") in (None, "")
-        and job.get("idempotency_key") not in (None, "")
-    ):
+    if accepted_submit_contract_is_current(job) and accepted_submit_row_kind(job) == "master":
+        if status in TERMINAL_PIPELINE_STATUSES:
+            if (
+                job.get("submit_outcome") != "accepted"
+                or not _file_journal_real_slurm_job_id(job.get("slurm_job_id"))
+            ):
+                return False
+            members = _bounded_cohort_members(job.get("cohort_members"))
+            projections = _bounded_candidate_projections(job.get("candidate_projections"))
+            member_ids = {
+                int(member["array_task_id"])
+                for member in members
+                if type(member.get("array_task_id")) is int
+            }
+            projected_ids = {
+                int(projection["array_task_id"])
+                for projection in projections
+                if type(projection.get("array_task_id")) is int
+                and projection.get("array_task_outcome") in {"succeeded", "failed"}
+            }
+            return not member_ids or projected_ids != member_ids
+    if status == "reserved" and job.get("slurm_job_id") in (None, "") and job.get("idempotency_key") not in (None, ""):
         return True
     return status in {
         "pending",
         "queued",
         "submitted",
         "running",
+        "cancellation_pending",
         "reconcile_unverified",
     } and _file_journal_real_slurm_job_id(job.get("slurm_job_id"))
+
+
+def _job_blocks_rollback_quiescence(job: Mapping[str, Any]) -> bool:
+    """Fail closed: only the explicit terminal allowlist can be quiescent."""
+
+    status = str(job.get("status") or "")
+    if status not in TERMINAL_PIPELINE_STATUSES:
+        return True
+    return _job_needs_restart_reconcile(job)
 
 
 def _file_retry_job_int(job: Any, field: str) -> int:
@@ -3926,11 +7425,7 @@ def _file_retry_job_record(job: Any) -> dict[str, Any]:
         "created_at",
         "updated_at",
     )
-    record = {
-        name: _file_retry_job_value(job, name)
-        for name in fields
-        if _file_retry_job_value(job, name) is not None
-    }
+    record = {name: _file_retry_job_value(job, name) for name in fields if _file_retry_job_value(job, name) is not None}
     for identity_field in ("job_id", "run_id", "cycle_id"):
         record[identity_field] = _safe_identity_text(str(record.get(identity_field) or ""), field=identity_field)
     record["job_type"] = str(record.get("job_type") or "")
@@ -4072,6 +7567,18 @@ def _source_cycle_from_cycle_id(cycle_id: str) -> tuple[str, datetime]:
             evidence={"expected": expected, "actual": cycle_id[:80]},
         )
     return source_id, cycle_time
+
+
+def _accepted_submit_source_cycle_from_job_id(pipeline_job_id: str) -> tuple[str, datetime]:
+    safe_job_id = _safe_identity_text(str(pipeline_job_id), field="job_id")
+    match = _ACCEPTED_SUBMIT_MASTER_JOB_ID_RE.fullmatch(safe_job_id)
+    if match is None:
+        raise FileOrchestrationJournalError("file_journal_invalid_identity", field="job_id")
+    source_id = _normalize_file_source_id(match.group(1), field="job_id")
+    try:
+        return source_id, parse_cycle_time(match.group(2))
+    except (TypeError, ValueError) as error:
+        raise FileOrchestrationJournalError("file_journal_invalid_cycle_time", field="job_id") from error
 
 
 def _source_id_from_job(job: Mapping[str, Any]) -> str:
@@ -4994,9 +8501,7 @@ def _optional_safe_identity(row: Mapping[str, Any], field: str) -> str | None:
 
 
 def _scalar_text(value: Any, *, field: str, invalid_reason: str) -> str:
-    if isinstance(value, Mapping) or (
-        isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray)
-    ):
+    if isinstance(value, Mapping) or (isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray)):
         raise FileOrchestrationJournalError(invalid_reason, field=field)
     if isinstance(value, bytes | bytearray):
         raise FileOrchestrationJournalError(invalid_reason, field=field)
@@ -5012,6 +8517,25 @@ def _safe_identity_text(value: str, *, field: str) -> str:
     ):
         raise FileOrchestrationJournalError("file_journal_unsafe_identity", field=field)
     return value
+
+
+def _validated_actual_writer_generation(value: str) -> str:
+    return _validated_git_writer_generation(
+        value,
+        field="actual_writer_generation",
+        invalid_reason="file_journal_rollback_writer_generation_unresolvable",
+    )
+
+
+def _validated_git_writer_generation(
+    value: str,
+    *,
+    field: str,
+    invalid_reason: str,
+) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", value) is None:
+        raise FileOrchestrationJournalError(invalid_reason, field=field)
+    return value.lower()
 
 
 def _validate_scheduler_visible_fields(row: Mapping[str, Any]) -> None:
@@ -5217,8 +8741,7 @@ def _validate_hydro_run_identity(
     expected_forecast_run_id = f"fcst_{source_id.lower()}_{cycle_stamp}_{model_id}"
     expected_cycle_run_prefix = f"cycle_{source_id.lower()}_{cycle_stamp}"
     if actual_run_id != expected_forecast_run_id and (
-        actual_run_id != expected_cycle_run_prefix
-        and not actual_run_id.startswith(f"{expected_cycle_run_prefix}_")
+        actual_run_id != expected_cycle_run_prefix and not actual_run_id.startswith(f"{expected_cycle_run_prefix}_")
     ):
         raise FileOrchestrationJournalError(
             "file_journal_run_mismatch",
@@ -5459,6 +8982,8 @@ def _iter_discovered_files(
     recursive: bool,
     max_files: int,
     max_depth: int,
+    strict_disappearance: bool = False,
+    expected_root_signature: Any = _UNSET,
 ) -> Iterable[Path]:
     scanned_entries = 0
 
@@ -5470,9 +8995,47 @@ def _iter_discovered_files(
                 field=str(_relative_evidence(current, root)),
                 evidence={"max_depth": max_depth},
             )
+        strict_authority_walk = strict_disappearance and expected_root_signature is not _UNSET
+        directory_signature = (
+            _stat_signature(current) if strict_authority_walk else _UNSET
+        )
+        if (
+            current == directory
+            and expected_root_signature is not _UNSET
+            and directory_signature != expected_root_signature
+        ):
+            raise FileOrchestrationJournalError(
+                "file_journal_quiescence_authority_changed",
+                field=str(_relative_evidence(current, root)),
+            )
+        if current != directory and strict_authority_walk and directory_signature is None:
+            raise FileOrchestrationJournalError(
+                "file_journal_quiescence_authority_changed",
+                field=str(_relative_evidence(current, root)),
+            )
+
+        def require_directory_unchanged() -> None:
+            if strict_authority_walk and _stat_signature(current) != directory_signature:
+                raise FileOrchestrationJournalError(
+                    "file_journal_quiescence_authority_changed",
+                    field=str(_relative_evidence(current, root)),
+                )
+
         try:
             current_mode = stat_no_follow(current, containment_root=root).st_mode
         except FileNotFoundError:
+            if strict_disappearance and expected_root_signature is not _UNSET and (
+                current != directory or expected_root_signature is not None
+            ):
+                raise FileOrchestrationJournalError(
+                    "file_journal_quiescence_authority_changed",
+                    field=str(_relative_evidence(current, root)),
+                )
+            if strict_disappearance and current != directory:
+                raise FileOrchestrationJournalError(
+                    "file_journal_reconcile_inventory_migration_invalid",
+                    field=str(_relative_evidence(current, root)),
+                )
             return
         except (OSError, SafeFilesystemError) as error:
             raise FileOrchestrationJournalError(
@@ -5480,6 +9043,7 @@ def _iter_discovered_files(
                 field=str(_relative_evidence(current, root)),
                 evidence={"error_type": type(error).__name__},
             ) from error
+        require_directory_unchanged()
         if not stat.S_ISDIR(current_mode):
             raise FileOrchestrationJournalError(
                 "file_journal_unsafe_scanned_entry",
@@ -5500,6 +9064,15 @@ def _iter_discovered_files(
                 max_entries=remaining_entries,
             )
         except FileNotFoundError:
+            if strict_disappearance:
+                raise FileOrchestrationJournalError(
+                    (
+                        "file_journal_quiescence_authority_changed"
+                        if expected_root_signature is not _UNSET
+                        else "file_journal_reconcile_inventory_migration_invalid"
+                    ),
+                    field=str(_relative_evidence(current, root)),
+                )
             return
         except (OSError, SafeFilesystemError) as error:
             raise FileOrchestrationJournalError(
@@ -5513,6 +9086,7 @@ def _iter_discovered_files(
                 field=str(_relative_evidence(directory, root)),
                 evidence={"max_files": max_files},
             )
+        require_directory_unchanged()
         scanned_entries += len(entry_names)
         for entry_name in sorted(entry_names):
             if _SAFE_SEGMENT_RE.fullmatch(entry_name) is None:
@@ -5524,6 +9098,15 @@ def _iter_discovered_files(
             try:
                 mode = stat_no_follow(entry, containment_root=root).st_mode
             except FileNotFoundError:
+                if strict_disappearance:
+                    raise FileOrchestrationJournalError(
+                        (
+                            "file_journal_quiescence_authority_changed"
+                            if expected_root_signature is not _UNSET
+                            else "file_journal_reconcile_inventory_migration_invalid"
+                        ),
+                        field=str(_relative_evidence(entry, root)),
+                    )
                 continue
             except (OSError, SafeFilesystemError) as error:
                 raise FileOrchestrationJournalError(
@@ -5543,6 +9126,7 @@ def _iter_discovered_files(
                         evidence={"entry_type": "not_regular_file"},
                     )
                 yield entry
+        require_directory_unchanged()
 
     yield from walk(directory, 0)
 

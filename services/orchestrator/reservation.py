@@ -30,7 +30,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Mapping
 
 from services.orchestrator.persistence import (
     RESERVATION_ACTIVE_STATUSES,
@@ -111,6 +111,7 @@ class ReservationResult:
     job_id: str
     status: str
     created: bool  # True => this pass wrote the reservation; False => reused.
+    submission_attempt: int = 1
 
     @property
     def already_inflight(self) -> bool:
@@ -188,6 +189,7 @@ def reserve_candidate(
     model_id: str | None,
     stage: str | None,
     candidate_id: str | None = None,
+    reservation_evidence: Mapping[str, Any] | None = None,
 ) -> ReservationResult:
     """Phase 1: durably reserve a candidate before ``sbatch``.
 
@@ -221,8 +223,7 @@ def reserve_candidate(
     pass (``created=False`` → already-inflight → no re-submit).
     """
 
-    record = repository.reserve_pipeline_job(
-        {
+    reservation_record = {
             "job_id": job_id,
             "run_id": run_id,
             "cycle_id": cycle_id,
@@ -233,7 +234,9 @@ def reserve_candidate(
             "idempotency_key": idempotency_key,
             "candidate_id": candidate_id,
         }
-    )
+    if reservation_evidence:
+        reservation_record.update(dict(reservation_evidence))
+    record = repository.reserve_pipeline_job(reservation_record)
     if record is not None:
         # Won the race: this pass is the unique creator of the reservation.
         return ReservationResult(
@@ -241,6 +244,7 @@ def reserve_candidate(
             job_id=str(record["job_id"]),
             status=str(record["status"]),
             created=True,
+            submission_attempt=_submission_attempt(record),
         )
 
     # The INSERT lost. Before treating this as already-inflight, try to ATOMICALLY
@@ -253,8 +257,7 @@ def reserve_candidate(
     # behaviour instead of raising.
     reclaim = getattr(repository, "reclaim_pipeline_job_reservation", None)
     if reclaim is not None:
-        reclaimed = reclaim(
-            {
+        reclaim_record = {
                 "job_id": job_id,
                 "run_id": run_id,
                 "cycle_id": cycle_id,
@@ -265,7 +268,22 @@ def reserve_candidate(
                 "idempotency_key": idempotency_key,
                 "candidate_id": candidate_id,
             }
-        )
+        if reservation_evidence:
+            reclaim_record.update(dict(reservation_evidence))
+            exact_getter = getattr(repository, "get_accepted_submit_pipeline_job", None)
+            if (
+                "accepted_submit_contract_version" in reservation_evidence
+                and callable(exact_getter)
+            ):
+                current = exact_getter(job_id)
+                if current is not None:
+                    reclaim_record["expected_submission_attempt"] = current.get(
+                        "submission_attempt"
+                    )
+                    reclaim_record["expected_submission_attempt_started_at"] = current.get(
+                        "submission_attempt_started_at"
+                    )
+        reclaimed = reclaim(reclaim_record)
         if reclaimed is not None:
             # We took the dead reservation back to 'reserved': THIS pass now owns
             # it and proceeds to sbatch, exactly as if it had inserted it.
@@ -274,13 +292,18 @@ def reserve_candidate(
                 job_id=str(reclaimed["job_id"]),
                 status=str(reclaimed["status"]),
                 created=True,
+                submission_attempt=_submission_attempt(reclaimed),
             )
 
     # Row is live (or a concurrent take-over beat us). We re-read ONLY to report
     # the existing row's status/job_id (logs/evidence). The loss is final for
     # this pass: ``created=False`` makes ``already_inflight`` True
     # unconditionally, so this pass never sbatches.
-    existing = repository.query_candidate_state(idempotency_key)
+    exact_getter = getattr(repository, "get_accepted_submit_pipeline_job", None)
+    if reservation_evidence and "accepted_submit_contract_version" in reservation_evidence and callable(exact_getter):
+        existing = exact_getter(job_id)
+    else:
+        existing = repository.query_candidate_state(idempotency_key)
     if existing is None:
         # Conflict reported but row vanished (e.g. concurrent cleanup): treat as
         # not-created with reserved status so the caller does not double-submit.
@@ -289,13 +312,22 @@ def reserve_candidate(
             job_id=job_id,
             status=RESERVED_STATUS,
             created=False,
+            submission_attempt=1,
         )
     return ReservationResult(
         idempotency_key=idempotency_key,
         job_id=str(existing["job_id"]),
         status=str(existing["status"]),
         created=False,
+        submission_attempt=_submission_attempt(existing),
     )
+
+
+def _submission_attempt(record: Mapping[str, Any]) -> int:
+    try:
+        return max(int(record.get("submission_attempt") or 1), 1)
+    except (TypeError, ValueError):
+        return 1
 
 
 def bind_reservation(

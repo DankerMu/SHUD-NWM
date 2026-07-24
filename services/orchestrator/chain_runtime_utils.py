@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence
 
 import httpx
 
+from packages.common.python_runtime import validated_target_python_runtime
 from packages.common.redaction import redact_payload
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.chain_stages import STAGES
@@ -190,12 +191,11 @@ def _replacement_retry_scoped_cycle_execution(basins: Sequence[Mapping[str, Any]
         # replacement cohort.  The run-scoped active-job check above still
         # rejects a real in-flight submission for this exact cohort.
         return True
-    if len(basins) != 1:
-        return False
-    state_evidence = basins[0].get("state_evidence")
-    if not isinstance(state_evidence, Mapping):
-        return False
-    if state_evidence.get("decision") == "retry_after_completed_stage":
+    completed_stage_restarts = []
+    for basin in basins:
+        state_evidence = basin.get("state_evidence")
+        if not isinstance(state_evidence, Mapping) or state_evidence.get("decision") != "retry_after_completed_stage":
+            break
         completed_stage = state_evidence.get("completed_stage_evidence")
         restart_stage = _canonical_restart_stage(
             state_evidence.get("restart_stage")
@@ -203,11 +203,18 @@ def _replacement_retry_scoped_cycle_execution(basins: Sequence[Mapping[str, Any]
             or (completed_stage.get("restart_stage") if isinstance(completed_stage, Mapping) else None)
             or (completed_stage.get("restart_from_stage") if isinstance(completed_stage, Mapping) else None)
         )
-        return (
+        completed_stage_restarts.append(
             isinstance(completed_stage, Mapping)
             and str(completed_stage.get("status") or "") in TERMINAL_PIPELINE_SUCCESS_STATUSES
             and restart_stage is not None
         )
+    if basins and len(completed_stage_restarts) == len(basins) and all(completed_stage_restarts):
+        return True
+    if len(basins) != 1:
+        return False
+    state_evidence = basins[0].get("state_evidence")
+    if not isinstance(state_evidence, Mapping):
+        return False
     if state_evidence.get("decision") == "retry_after_model_package_refresh":
         return True
     retry_policy = state_evidence.get("retry_policy")
@@ -985,7 +992,7 @@ def _template_export_lines(context: Mapping[str, Any]) -> list[str]:
         "OMP_NUM_THREADS": context.get("shud_threads", ""),
     }
     lines = [f"export {key}={shlex.quote(str(value or ''))}" for key, value in export_fields.items()]
-    lines.extend(_python_runtime_export_lines())
+    lines.extend(_python_runtime_export_lines(context.get("target_python_runtime")))
     grib_env_root = os.getenv("NHMS_GRIB_ENV_ROOT")
     if grib_env_root:
         # Compute nodes (cn01-24) lack cdo/libeccodes; inject the shared conda
@@ -1005,7 +1012,22 @@ def _first_nonempty(*values: Any) -> Any:
     return ""
 
 
-def _python_runtime_export_lines() -> list[str]:
+def _python_runtime_export_lines(target_python_runtime: Any = None) -> list[str]:
+    if target_python_runtime not in (None, ""):
+        try:
+            runtime = validated_target_python_runtime(target_python_runtime, required=True)
+        except ValueError as error:
+            raise OrchestratorError(
+                "INVALID_TARGET_PYTHON_RUNTIME",
+                str(error),
+                {"field": "target_python_runtime"},
+            ) from error
+        assert runtime is not None
+        runtime_path = Path(runtime)
+        return [
+            f"export NHMS_TARGET_PYTHON_RUNTIME={shlex.quote(runtime)}",
+            f"export PATH={shlex.quote(str(runtime_path.parent))}:$PATH",
+        ]
     explicit_bin = os.getenv("NHMS_PYTHON_VENV_BIN")
     candidates: list[Path] = []
     if explicit_bin:
@@ -1038,7 +1060,13 @@ def _response_json_or_text(response: httpx.Response) -> dict[str, Any] | str:
 
 def _error_code_from_response(details: dict[str, Any] | str) -> str:
     if isinstance(details, dict):
-        error = details.get("error")
-        if isinstance(error, dict) and isinstance(error.get("code"), str):
-            return error["code"]
+        value = details.get("error_code") or details.get("code")
+        if value not in (None, ""):
+            return str(value)
+        for key in ("error", "detail"):
+            nested = details.get(key)
+            if isinstance(nested, dict):
+                code = _error_code_from_response(nested)
+                if code != "SLURM_GATEWAY_ERROR":
+                    return code
     return "SLURM_GATEWAY_ERROR"

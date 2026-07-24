@@ -179,7 +179,15 @@ def _candidate_state_decision(
             },
         )
 
-    if hydro_status in DURABLE_HYDRO_SUCCESS_STATUSES and _terminal_hydro_truth_supersedes_failure(decision_state):
+    hydro_success_requires_state_save = (
+        completed_stage_retry is not None
+        and completed_stage_retry.get("restart_stage") == "state_save_qc"
+    )
+    if (
+        hydro_status in DURABLE_HYDRO_SUCCESS_STATUSES
+        and not hydro_success_requires_state_save
+        and _terminal_hydro_truth_supersedes_failure(decision_state)
+    ):
         return CandidateStateDecision(
             "skip",
             "terminal_hydro_success",

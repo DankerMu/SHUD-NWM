@@ -7,6 +7,10 @@ from datetime import UTC, datetime
 from typing import Any, Mapping, Protocol, Sequence
 
 from packages.common.redaction import redact_payload
+from services.orchestrator.accepted_submit_identity import (
+    accepted_submit_contract_is_current,
+    accepted_submit_row_kind,
+)
 from services.orchestrator.chain_types import (
     ArrayAggregation,
     ArrayTaskResult,
@@ -297,8 +301,115 @@ def record_cycle_stage_status_override(
     log_uri: str | None,
     *,
     deps: ArrayAccountingDependencies | None = None,
-) -> None:
+) -> dict[str, Any]:
     deps = deps or _default_dependencies()
+    if (
+        getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
+        and stage.stage in {"forecast", "run_shud_forecast", "run_shud_forecast_array"}
+    ):
+        projector = getattr(orchestrator.repository, "project_forecast_cohort_tasks", None)
+        if not callable(projector):
+            raise OrchestratorError(
+                "ACCEPTED_SUBMIT_PROJECTION_UNAVAILABLE",
+                "forecast cohort terminal projection API is unavailable",
+            )
+        tasks = {task.task_id: task for task in aggregation.task_results}
+        expected_task_ids = {
+            int(basin.get("task_id", index))
+            for index, basin in enumerate(context.active_basins)
+        }
+        complete = len(tasks) == len(aggregation.task_results) and set(tasks) == expected_task_ids
+        projections: list[dict[str, Any]] = []
+        for index, basin in enumerate(context.active_basins):
+            task_id = int(basin.get("task_id", index))
+            task = tasks.get(task_id)
+            outcome = "unverified"
+            if task is not None and task.status == "succeeded":
+                outcome = "succeeded"
+            elif task is not None and task.status in {"failed", "cancelled"}:
+                outcome = "failed"
+            else:
+                complete = False
+            projections.append(
+                {
+                    "candidate_id": basin.get("candidate_id"),
+                    "run_id": basin.get("run_id"),
+                    "model_id": basin.get("model_id"),
+                    "array_task_id": task_id,
+                    "array_task_outcome": outcome,
+                    "task_slurm_job_id": task.slurm_job_id if task is not None else None,
+                    "error_code": task.error_code if task is not None else None,
+                    "restart_stage": (
+                        "state_save_qc" if outcome == "succeeded" else basin.get("restart_stage") or "forecast"
+                    ),
+                    "native_shud_resubmitted": False,
+                }
+            )
+        master_slurm_job_id = str(terminal.get("job_id") or terminal.get("slurm_job_id") or "")
+        try:
+            projector(
+                pipeline_job_id,
+                master_slurm_job_id=master_slurm_job_id,
+                projections=projections,
+                complete=complete,
+                master_status=aggregation.status,
+                master_error_code=(
+                    deps.aggregation_error_code(aggregation) or terminal.get("error_code")
+                ),
+                reconciliation_decision="matched_bound",
+                finished_at=deps.parse_gateway_time(terminal.get("finished_at")) or deps.utcnow(),
+                exit_code=terminal.get("exit_code"),
+                master_error_message=(
+                    deps.aggregation_error_message(aggregation) or terminal.get("error_message")
+                ),
+                log_uri=log_uri,
+            )
+        except Exception as error:
+            if getattr(error, "reason", None) not in {
+                "file_journal_task_identity_mismatch",
+                "file_journal_evidence_invariant_invalid",
+                "file_journal_evidence_type_invalid",
+                "file_journal_evidence_enum_invalid",
+            }:
+                raise
+            deferrer = getattr(orchestrator.repository, "defer_forecast_cohort_projection", None)
+            if not callable(deferrer):
+                raise OrchestratorError(
+                    "ACCEPTED_SUBMIT_PROJECTION_UNAVAILABLE",
+                    "forecast cohort projection deferral API is unavailable",
+                ) from error
+            deferrer(
+                pipeline_job_id,
+                reconciliation_decision="identity_mismatch_blocked",
+                reconciliation_reason_class=None,
+                error_code="SLURM_TASK_IDENTITY_MISMATCH",
+                error_message="terminal Slurm array task accounting failed identity validation",
+                finished_at=deps.parse_gateway_time(terminal.get("finished_at")) or deps.utcnow(),
+                exit_code=terminal.get("exit_code"),
+                log_uri=log_uri,
+            )
+        get_pipeline_job = getattr(orchestrator.repository, "get_pipeline_job", None)
+        durable = get_pipeline_job(pipeline_job_id) if callable(get_pipeline_job) else None
+        effective_status = str(durable.get("status") or "") if isinstance(durable, Mapping) else ""
+        if (
+            not isinstance(durable, Mapping)
+            or not accepted_submit_contract_is_current(durable)
+            or accepted_submit_row_kind(durable) != "master"
+            or effective_status
+            not in {
+                "succeeded",
+                "partially_failed",
+                "failed",
+                "cancelled",
+                "reconcile_unverified",
+            }
+        ):
+            raise OrchestratorError(
+                "ACCEPTED_SUBMIT_PROJECTION_COMMIT_UNAVAILABLE",
+                "forecast cohort terminal projection did not produce a durable outcome",
+                {"pipeline_job_id": pipeline_job_id},
+            )
+        return dict(durable)
     previous_status, record = orchestrator.repository.update_pipeline_job_status(
         pipeline_job_id,
         aggregation.status,
@@ -309,7 +420,7 @@ def record_cycle_stage_status_override(
         log_uri=log_uri,
     )
     if str(record.get("status")) != aggregation.status:
-        return
+        return dict(record)
     task_payload = deps.stage_task_result_evidence(aggregation, context=context)
     orchestrator.repository.insert_pipeline_event(
         entity_type="pipeline_job",
@@ -340,6 +451,7 @@ def record_cycle_stage_status_override(
             }
         ),
     )
+    return dict(record)
 
 
 def record_cycle_stage_accounting_event(

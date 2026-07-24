@@ -21,7 +21,8 @@ MAX_LOCK_PAYLOAD_BYTES = 16_384
 # Bound production scheduler DB lock connects so a misconfigured/unreachable
 # database_url fails fast instead of hanging the scheduler pass.
 RECONCILE_DB_CONNECT_TIMEOUT_SECONDS = 5
-FILE_LOCK_GUARD_MODE_ENV = "NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE"
+FILE_LEASE_GUARD_MODE_ENV = "NHMS_SCHEDULER_LEASE_GUARD_MODE"
+LEGACY_FILE_LOCK_GUARD_MODE_ENV = "NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE"
 
 
 class UnsafeSchedulerLockError(OSError):
@@ -132,6 +133,12 @@ class FileSchedulerLease:
         self.acquired = False
         self.lease_token: str | None = None
         self._owner_liveness_probe = owner_liveness_probe or _compat_owner_liveness_probe
+        # ``atomic`` guard mode has no process-local flock.  The heartbeat and
+        # an operation-bound synchronous lease check can therefore renew the
+        # same lease concurrently and contend on the atomic renew temp file.
+        # Serialize every mutation issued by this lease instance so that such
+        # self-contention can never be misreported as lease loss.
+        self._operation_lock = threading.RLock()
 
     def acquire(self, *, pass_id: str, started_at: datetime) -> dict[str, Any]:
         token = uuid4().hex
@@ -324,33 +331,34 @@ class FileSchedulerLease:
     def _guarded(self) -> Any:
         import fcntl
 
-        open_lock_parent_directory = _scheduler_compat_function(
-            "_open_lock_parent_directory",
-            _open_lock_parent_directory,
-        )
-        open_regular_guard_file = _scheduler_compat_function(
-            "_open_regular_guard_file",
-            _open_regular_guard_file,
-        )
-        parent_fd = open_lock_parent_directory(self.lock_path.parent, self.workspace_root)
-        if _file_lock_guard_mode() == "atomic":
+        with self._operation_lock:
+            open_lock_parent_directory = _scheduler_compat_function(
+                "_open_lock_parent_directory",
+                _open_lock_parent_directory,
+            )
+            open_regular_guard_file = _scheduler_compat_function(
+                "_open_regular_guard_file",
+                _open_regular_guard_file,
+            )
+            parent_fd = open_lock_parent_directory(self.lock_path.parent, self.workspace_root)
+            if _file_lock_guard_mode() == "atomic":
+                try:
+                    yield parent_fd
+                finally:
+                    os.close(parent_fd)
+                return
             try:
+                guard_fd = open_regular_guard_file(f"{self.lock_path.name}.guard", dir_fd=parent_fd)
+            except Exception:
+                os.close(parent_fd)
+                raise
+            try:
+                fcntl.flock(guard_fd, fcntl.LOCK_EX)
                 yield parent_fd
             finally:
+                fcntl.flock(guard_fd, fcntl.LOCK_UN)
+                os.close(guard_fd)
                 os.close(parent_fd)
-            return
-        try:
-            guard_fd = open_regular_guard_file(f"{self.lock_path.name}.guard", dir_fd=parent_fd)
-        except Exception:
-            os.close(parent_fd)
-            raise
-        try:
-            fcntl.flock(guard_fd, fcntl.LOCK_EX)
-            yield parent_fd
-        finally:
-            fcntl.flock(guard_fd, fcntl.LOCK_UN)
-            os.close(guard_fd)
-            os.close(parent_fd)
 
     def _existing_lock_state(self, now: datetime | None = None, *, parent_fd: int) -> dict[str, Any]:
         now = now or datetime.now(UTC)
@@ -539,7 +547,10 @@ def _postgres_advisory_lock_key(value: str) -> int:
 
 
 def _file_lock_guard_mode() -> str:
-    value = os.getenv(FILE_LOCK_GUARD_MODE_ENV, "flock").strip().lower()
+    configured = os.getenv(FILE_LEASE_GUARD_MODE_ENV)
+    if configured is None:
+        configured = os.getenv(LEGACY_FILE_LOCK_GUARD_MODE_ENV, "flock")
+    value = configured.strip().lower()
     if value in {"", "flock", "fcntl"}:
         return "flock"
     if value in {"atomic", "none", "off", "disabled"}:

@@ -82,8 +82,19 @@ NHMS_SCHEDULER_MAX_PASSES=1
 # Keep systemd stdout operationally small; full pass evidence is still written
 # under NHMS_SCHEDULER_EVIDENCE_ROOT for audits and debugging.
 NHMS_SCHEDULER_STDOUT_SUMMARY_ONLY=true
-# Use atomic O_EXCL lock files on NFS mounts where flock can block on RPC.
-NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE=atomic
+# Lease-file CAS can run without a flock guard; the orchestration journal cannot.
+# Keep these separate so one value never selects incompatible safety semantics.
+NHMS_SCHEDULER_LEASE_GUARD_MODE=atomic
+NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE=flock
+# File-journal restart discovery is maintained in the durable
+# reconcile-inventory/ directory. The first upgraded pass performs a
+# crash-resumable current/legacy backfill and writes its migration marker;
+# there is no per-pass history scan-limit knob to tune. Never downgrade to a
+# pre-inventory writer directly: stop the scheduler, run
+# `nhms-pipeline prepare-file-journal-rollback` with this exact journal/workspace
+# and file lease, then require its receipt before the old writer starts. A
+# current-generation scheduler is fenced until the matching explicit
+# `complete-file-journal-rollforward` succeeds.
 # Bound source/cycle cohort submission and polling control threads only. Basin
 # compute concurrency is owned by the global Slurm array bound below plus
 # config/resource_profiles.yaml max_concurrent=32; this value must never be
@@ -91,6 +102,19 @@ NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE=atomic
 NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND=4
 # Strict aggregate ceiling across Slurm arrays submitted by one scheduler pass.
 NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND=32
+# Accepted-submit recovery waits this long for slurmdbd propagation before an
+# exact-comment absence can release one forecast cohort for retry. Both Slurm
+# ownership values must match sacct User/Account on node-22.
+# Exact-comment absence/collision proof also requires the scheduler account to
+# observe all jobs. Startup reconciliation verifies both controller config
+# (`scontrol show config`) and SlurmDBD config (`sacctmgr show config`): both
+# `PrivateData` values must omit `jobs` and `all`. If either proof is missing,
+# unavailable, or restrictive, global zero-match is accounting-unavailable and
+# no retry is released; there is intentionally no acknowledgement override.
+# Both config probes are drained under byte, row, and wall-time bounds.
+NHMS_SCHEDULER_RECONCILE_ABSENCE_SECONDS=300
+NHMS_SCHEDULER_RECONCILE_SLURM_USER=frd_muziyao
+NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT=replace-with-node22-slurm-account
 NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true
 # Discovery time is floored by this lag to the prior allowed-cycle boundary
 # (for example, with allowed hours 0,12, a lagged 18:01 UTC target floors to 12).
@@ -140,6 +164,9 @@ SHUD_EXECUTABLE=/opt/shud/bin/shud
 # sbatch on the login node — that is the diagnostic lane, not production.)
 SLURM_GATEWAY_URL=http://127.0.0.1:8081
 SLURM_GATEWAY_BACKEND=slurm
+# Optional common directory for sacct/scontrol/sacctmgr and other Slurm tools;
+# accepted-submit reconcile uses this same configured path for all three.
+SLURM_GATEWAY_SLURM_BIN_PATH=
 SLURM_GATEWAY_TEMPLATE_DIR=infra/sbatch
 SLURM_GATEWAY_WORKSPACE_DIR=/scratch/frd_muziyao/nhms-production/workspace
 # Optional comma-separated unhealthy compute nodes to avoid at submit time.

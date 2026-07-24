@@ -192,7 +192,7 @@ def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult
                     else:
                         stage_results.append(result)
 
-                    if result.status in {"failed", "submission_failed", "permanently_failed"}:
+                    if result.status in {"failed", "submission_failed", "reservation_lost", "permanently_failed"}:
                         retry_attempts += 1
                         retry_pipeline_job_id = self._schedule_cycle_stage_retry(result, retry_attempts)
                         if retry_pipeline_job_id is not None:
@@ -206,6 +206,16 @@ def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult
                             "failed",
                             tuple(stage_results),
                             _candidate_outcomes(context, final_status="failed"),
+                        )
+                        break
+
+                    if result.status in {"submit_result_ambiguous", "reconcile_unverified"}:
+                        pipeline_result = PipelineResult(
+                            context.run_id,
+                            context.cycle_id,
+                            "reconciling",
+                            tuple(stage_results),
+                            _candidate_outcomes(context, final_status="reconciling"),
                         )
                         break
 
@@ -515,7 +525,13 @@ def _after_cycle_stage_terminal(
     terminal: dict[str, Any],
     aggregation: ArrayAggregation | None,
 ) -> None:
-    if stage.stage == "forecast" and aggregation is not None:
+    if result_status == "reconcile_unverified":
+        return
+    accepted_submit_projection = bool(
+        getattr(self.repository, "supports_accepted_submit_reconcile", False)
+        and stage.stage == "forecast"
+    )
+    if stage.stage == "forecast" and aggregation is not None and not accepted_submit_projection:
         _update_array_forecast_hydro_statuses(self, context, aggregation)
     if result_status == "succeeded":
         if _stage_should_copyback_run_trees(self, stage):

@@ -4,8 +4,10 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 
+from packages.common.python_runtime import validated_target_python_runtime
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.chain_runtime_utils import _format_time
 from services.orchestrator.chain_stages import STAGES, terminal_stage_names
@@ -44,8 +46,26 @@ class AnalysisPipelineAlreadyActiveError(OrchestratorError):
         )
 
 
+class SubmitDisposition(str, Enum):
+    """Whether a failed submit is known not to have reached Slurm."""
+
+    REJECTED = "rejected"
+    AMBIGUOUS = "ambiguous"
+
+
 class SlurmClientError(OrchestratorError):
-    pass
+    def __init__(
+        self,
+        error_code: str,
+        message: str,
+        details: dict[str, object] | None = None,
+        *,
+        submit_disposition: SubmitDisposition | str | None = None,
+    ) -> None:
+        super().__init__(error_code, message, details)
+        self.submit_disposition = (
+            SubmitDisposition(submit_disposition) if submit_disposition is not None else None
+        )
 
 
 class SlurmAccountingEvidenceGap(OrchestratorError):
@@ -74,6 +94,9 @@ class OrchestratorConfig:
     terminal_stage: str | None = None
     slurm_job_type_templates: Mapping[str, str] = field(default_factory=dict)
     slurm_env: Mapping[str, str] = field(default_factory=dict)
+    target_python_runtime: str | None = None
+    reconcile_slurm_user: str | None = None
+    reconcile_slurm_account: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "workspace_root", Path(self.workspace_root).expanduser().resolve())
@@ -101,6 +124,17 @@ class OrchestratorConfig:
             {str(key): str(value) for key, value in dict(self.slurm_job_type_templates).items()},
         )
         object.__setattr__(self, "slurm_env", {str(key): str(value) for key, value in dict(self.slurm_env).items()})
+        object.__setattr__(
+            self,
+            "target_python_runtime",
+            validated_target_python_runtime(self.target_python_runtime),
+        )
+        object.__setattr__(self, "reconcile_slurm_user", _normalized_optional_identity(self.reconcile_slurm_user))
+        object.__setattr__(
+            self,
+            "reconcile_slurm_account",
+            _normalized_optional_identity(self.reconcile_slurm_account),
+        )
 
     @classmethod
     def from_env(cls) -> OrchestratorConfig:
@@ -120,6 +154,7 @@ class OrchestratorConfig:
             require_forecast_warm_start=_env_flag("NHMS_REQUIRE_FORECAST_WARM_START", default=False),
             forecast_warm_start_required_from=_env_cycle_time("NHMS_FORECAST_WARM_START_REQUIRED_FROM"),
             terminal_stage=os.getenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE") or None,
+            target_python_runtime=os.getenv("NHMS_TARGET_PYTHON_RUNTIME") or None,
         )
 
     def strict_forecast_warm_start_required_for(self, cycle_time: datetime) -> bool:
@@ -140,6 +175,11 @@ def _env_flag(name: str, *, default: bool) -> bool:
     if normalized in {"0", "false", "f", "no", "n", "off"}:
         return False
     raise ValueError(f"{name} must be a boolean value.")
+
+
+def _normalized_optional_identity(value: object) -> str | None:
+    text = str(value or "").strip()
+    return text or None
 
 
 def _env_cycle_time(name: str) -> datetime | None:

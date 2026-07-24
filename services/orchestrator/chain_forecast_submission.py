@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 from services.orchestrator import chain as _chain
+from services.orchestrator.accepted_submit_identity import accepted_submit_pipeline_job_model_id
 
 CycleOrchestrationContext = _chain.CycleOrchestrationContext
 OrchestratorError = _chain.OrchestratorError
@@ -40,19 +41,29 @@ def _record_submission_failure(
     error: Exception,
     *,
     pipeline_job_id: str | None = None,
+    persist_pipeline_job: bool = True,
+    persist_pipeline_event: bool = True,
 ) -> StageRunResult:
     pipeline_job_id = pipeline_job_id or _pipeline_job_id(context.run_id, stage.stage)
     now = _utcnow()
     message = str(redact_payload(str(error)))
     error_code = getattr(error, "error_code", None) or "SBATCH_SUBMISSION_FAILED"
-    self.repository.upsert_pipeline_job(
-        {
+    if persist_pipeline_job:
+        self.repository.upsert_pipeline_job(
+            {
             "job_id": pipeline_job_id,
             "run_id": context.run_id,
             "cycle_id": context.cycle_id,
             "job_type": stage.job_type,
             "slurm_job_id": None,
-            "model_id": _cycle_pipeline_job_model_id(context),
+            "model_id": accepted_submit_pipeline_job_model_id(
+                supports_accepted_submit_reconcile=getattr(
+                    self.repository, "supports_accepted_submit_reconcile", False
+                ),
+                stage=stage.stage,
+                job_type=stage.job_type,
+                model_id=_cycle_pipeline_job_model_id(context),
+            ),
             "status": "submission_failed",
             "stage": stage.stage,
             "submitted_at": now,
@@ -62,35 +73,36 @@ def _record_submission_failure(
             "error_code": error_code,
             "error_message": message,
             "log_uri": None,
-        }
-    )
-    self.repository.insert_pipeline_event(
-        entity_type="pipeline_job",
-        entity_id=pipeline_job_id,
-        event_type="submission",
-        status_from=None,
-        status_to="submission_failed",
-        message=f"{stage.stage} submission failed: {message}",
-        details=_safe_pipeline_event_details(
-            {
-                "stage": stage.stage,
-                "job_type": stage.job_type,
-                "error": message,
-                "runtime_root_contract": _submission_runtime_root_contract(
-                    {
-                        "workspace_dir": str(Path(self.config.workspace_root)),
-                        "object_store_root": str(Path(self.config.object_store_root)),
-                        "object_store_prefix": self.config.object_store_prefix,
-                        "published_artifact_root": os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT", ""),
-                        "published_artifact_uri_prefix": os.getenv(
-                            "NHMS_PUBLISHED_ARTIFACT_URI_PREFIX",
-                            "published://",
-                        ),
-                    }
-                ),
             }
-        ),
-    )
+        )
+    if persist_pipeline_event:
+        self.repository.insert_pipeline_event(
+            entity_type="pipeline_job",
+            entity_id=pipeline_job_id,
+            event_type="submission",
+            status_from=None,
+            status_to="submission_failed",
+            message=f"{stage.stage} submission failed: {message}",
+            details=_safe_pipeline_event_details(
+                {
+                    "stage": stage.stage,
+                    "job_type": stage.job_type,
+                    "error": message,
+                    "runtime_root_contract": _submission_runtime_root_contract(
+                        {
+                            "workspace_dir": str(Path(self.config.workspace_root)),
+                            "object_store_root": str(Path(self.config.object_store_root)),
+                            "object_store_prefix": self.config.object_store_prefix,
+                            "published_artifact_root": os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT", ""),
+                            "published_artifact_uri_prefix": os.getenv(
+                                "NHMS_PUBLISHED_ARTIFACT_URI_PREFIX",
+                                "published://",
+                            ),
+                        }
+                    ),
+                }
+            ),
+        )
     self.repository.update_forecast_cycle_status(
         source_id=context.source_id,
         cycle_time=context.cycle_time,

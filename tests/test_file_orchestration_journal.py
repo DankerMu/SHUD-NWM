@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
+import stat
 from datetime import UTC, datetime
 from multiprocessing import get_context
 from pathlib import Path
@@ -19,6 +21,7 @@ from services.orchestrator.file_orchestration_journal import (
     FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
     FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION,
     FileJournalRetryService,
+    FileOrchestrationJournalError,
     FileOrchestrationJournalRepository,
 )
 from services.orchestrator.retry import RetryConfig, RetryError, RetryNotFoundError
@@ -32,6 +35,70 @@ from tests.test_production_scheduler import (
     _write_db_free_raw_manifest_fixture,
 )
 from workers.data_adapters.base import cycle_id_for, format_cycle_time
+
+
+@pytest.mark.parametrize("fault", ["directory_fsync", "parent_identity"])
+def test_file_reservation_durability_uncertainty_blocks_gateway_before_side_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    from services.orchestrator.chain import M3_STAGES, CycleOrchestrationContext
+    from tests.test_orchestration_chain import FakeCycleSlurmClient, _basins, _orchestrator
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    repository._ensure_root_unlocked()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    basins = orchestrator._normalize_cycle_basins(_basins(2), "gfs", cycle_time)
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_id="gfs_2026062800",
+        run_id="cycle_gfs_2026062800",
+        all_basins=basins,
+        active_basins=list(basins),
+    )
+
+    if fault == "directory_fsync":
+        real_fsync = safe_fs.os.fsync
+
+        def fail_directory_fsync(fd: int) -> None:
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError(errno.EIO, "injected directory fsync failure")
+            real_fsync(fd)
+
+        monkeypatch.setattr(safe_fs.os, "fsync", fail_directory_fsync)
+    else:
+        real_verify = safe_fs._verify_fd_matches_path
+        real_fsync = safe_fs.os.fsync
+        directory_synced = False
+
+        def record_directory_fsync(fd: int) -> None:
+            nonlocal directory_synced
+            real_fsync(fd)
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                directory_synced = True
+
+        def fail_post_replace_parent_identity(fd: int, path: Path) -> None:
+            if directory_synced:
+                raise safe_fs.SafeFilesystemError("injected parent identity change")
+            real_verify(fd, path)
+
+        monkeypatch.setattr(safe_fs.os, "fsync", record_directory_fsync)
+        monkeypatch.setattr(safe_fs, "_verify_fd_matches_path", fail_post_replace_parent_identity)
+
+    with pytest.raises(OrchestratorError) as caught:
+        orchestrator._submit_and_wait_cycle_stage(M3_STAGES[2], context)
+    assert caught.value.error_code == "FILE_JOURNAL_WRITE_FAILED"
+    assert client.submissions == []
+
+    monkeypatch.undo()
+    reopened = FileOrchestrationJournalRepository(repository.root)
+    rows = reopened.query_pipeline_jobs_by_cycle("gfs_2026062800")
+    assert all(row.get("slurm_job_id") in (None, "") for row in rows)
+    assert all(row.get("status") not in {"submission_failed", "failed"} for row in rows)
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -1213,7 +1280,7 @@ def test_file_orchestration_journal_exposes_restart_reconcile_store_interface(
     assert repository.query_reserved_unbound_jobs() == []
 
 
-def test_file_orchestration_journal_reconcile_scan_skips_bad_journal_path(
+def test_file_orchestration_journal_migration_blocks_bad_journal_path_until_repaired(
     tmp_path: Path,
 ) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
@@ -1232,12 +1299,18 @@ def test_file_orchestration_journal_reconcile_scan_skips_bad_journal_path(
     bad_path.parent.mkdir(parents=True)
     bad_path.write_text('{"record_type":"pipeline_job","job_id":"bad"}\n', encoding="utf-8")
 
-    inflight = repository.query_inflight_jobs()
+    with pytest.raises(FileOrchestrationJournalError):
+        repository.query_inflight_jobs()
+    assert not (journal_root / "reconcile-inventory-migration-v1.json").exists()
 
+    bad_path.unlink()
+    reopened = FileOrchestrationJournalRepository(journal_root)
+    inflight = reopened.query_inflight_jobs()
     assert {job.job_id for job in inflight} == {"job_reconcile_pending_after_bad_path"}
+    assert (journal_root / "reconcile-inventory-migration-v1.json").is_file()
 
 
-def test_file_orchestration_journal_recent_reconcile_scan_closes_directory_fds(tmp_path: Path) -> None:
+def test_file_orchestration_journal_reconcile_inventory_scan_closes_directory_fds(tmp_path: Path) -> None:
     journal_root = tmp_path / "journal"
     repository = FileOrchestrationJournalRepository(journal_root, max_files=64)
     for index in range(16):
@@ -1248,22 +1321,13 @@ def test_file_orchestration_journal_recent_reconcile_scan_closes_directory_fds(t
             status="pending",
         )
         job["slurm_job_id"] = str(5000 + index)
-        _write_jsonl(
-            journal_root / "journal" / "gfs" / f"{format_cycle_time(cycle_time)}_{index}.jsonl",
-            [
-                _journal_record(
-                    record_type="pipeline_job",
-                    source_id="gfs",
-                    cycle_time=cycle_time,
-                    payload=job,
-                    sequence=index + 1,
-                )
-            ],
-        )
+        repository.upsert_pipeline_job(job)
+
+    assert len(repository.query_inflight_jobs()) == 16
 
     before = _open_fd_count_or_skip()
     for _ in range(40):
-        assert list(repository._iter_recent_reconcile_journal_paths(8))
+        assert len(repository.query_inflight_jobs()) == 16
     after = _open_fd_count_or_skip()
 
     assert after - before <= 4
@@ -1333,11 +1397,9 @@ def test_file_orchestration_journal_cycle_rows_missing_alias_reads_close_parent_
     assert after - before <= 4
 
 
-def test_file_orchestration_journal_reconcile_direct_scan_keeps_old_active_records(
-    monkeypatch: pytest.MonkeyPatch,
+def test_file_orchestration_journal_migration_backfill_is_not_limited_by_former_recent_bound(
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setenv("NHMS_FILE_RECONCILE_SCAN_LIMIT", "1")
     cycle_time = _dt("2026-06-28T00:00:00Z")
     repository = FileOrchestrationJournalRepository(tmp_path / "journal")
     old_reserved = _pipeline_reservation_record(cycle_time, job_id="job_reconcile_old_reserved")
@@ -1368,11 +1430,9 @@ def test_file_orchestration_journal_reconcile_direct_scan_keeps_old_active_recor
     assert [job.job_id for job in inflight] == ["job_reconcile_old_inflight"]
 
 
-def test_file_orchestration_journal_reconcile_direct_scan_skips_bad_entry_and_keeps_old_active_record(
-    monkeypatch: pytest.MonkeyPatch,
+def test_file_orchestration_journal_migration_fails_closed_on_bad_entry_then_keeps_old_active(
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setenv("NHMS_FILE_RECONCILE_SCAN_LIMIT", "1")
     cycle_time = _dt("2026-06-28T00:00:00Z")
     journal_root = tmp_path / "journal"
     repository = FileOrchestrationJournalRepository(journal_root)
@@ -1407,7 +1467,12 @@ def test_file_orchestration_journal_reconcile_direct_scan_skips_bad_entry_and_ke
     bad_direct_path = journal_root / "pipeline-jobs/unrelated bad direct.json"
     bad_direct_path.write_text("{not-json", encoding="utf-8")
 
-    reserved = repository.query_reserved_unbound_jobs()
+    with pytest.raises(FileOrchestrationJournalError):
+        repository.query_reserved_unbound_jobs()
+    assert not (journal_root / "reconcile-inventory-migration-v1.json").exists()
+
+    bad_direct_path.rename(journal_root / "quarantine-unrelated-bad-direct.json")
+    reserved = type(repository)(journal_root).query_reserved_unbound_jobs()
 
     assert [job.job_id for job in reserved] == ["job_reconcile_old_reserved_after_bad_direct"]
 

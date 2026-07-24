@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -719,6 +719,56 @@ def run_once(self) -> SchedulerPassResult:
         heartbeat = _LeaseHeartbeat(lock, pass_id, max(1, self.config.lock_ttl_seconds // 3))
         heartbeat.start()
         try:
+            rollback_fence_reader = getattr(
+                self.active_repository,
+                "current_generation_scheduler_rollback_blocker",
+                None,
+            )
+            rollback_fence: Mapping[str, Any] | None = None
+            if db_free_required and callable(rollback_fence_reader):
+                try:
+                    rollback_fence = rollback_fence_reader()
+                except Exception:
+                    rollback_fence = {
+                        "reason": "file_journal_rollback_fence_invalid",
+                        "receipt_id": None,
+                    }
+            if rollback_fence is not None:
+                finished_at = _now(self.config)
+                evidence = self._base_evidence(pass_id, started_at)
+                evidence.update(
+                    {
+                        "status": "preflight_blocked",
+                        "finished_at": _format_utc(finished_at),
+                        "lock": lock_evidence,
+                        "root_preflight": root_preflight,
+                        "db_free_runtime": db_free_preflight,
+                        "rollback_fence": {
+                            "reason": str(rollback_fence.get("reason") or "unknown"),
+                            "receipt_id": rollback_fence.get("receipt_id"),
+                        },
+                        "counts": _empty_counts(),
+                        "candidates": [],
+                        "blocked_candidates": [],
+                        "skipped_candidates": [],
+                        "duplicate_exclusions": list(self.config.source_exclusions),
+                        "model_discovery": _empty_model_discovery(),
+                        "source_cycles": [],
+                        "model_run_evidence": [],
+                        "slurm_cancellation_evidence": [],
+                        "no_mutation_proof": _no_mutation_proof(),
+                        "execution_boundary": "scheduler_rollback_fence_prepared",
+                    }
+                )
+                status = _evidence_status(evidence, "preflight_blocked")
+                _finalize_timing_into_evidence(evidence, collector, status)
+                artifact_path = self._write_evidence(pass_id, evidence)
+                return SchedulerPassResult(
+                    pass_id=pass_id,
+                    status=status,
+                    evidence=evidence,
+                    artifact_path=artifact_path,
+                )
             progress_guard_limit = max(int(getattr(self.config, "progress_guard_max_no_progress_steps", 256)), 0)
             if progress_guard_limit == 0:
                 finished_at = _now(self.config)
@@ -1440,6 +1490,7 @@ def _run_restart_reconcile(
         return {"status": "skipped", "reason": "reconcile_store_unavailable"}
 
     from services.orchestrator.reconcile import (
+        RESERVATION_ABSENCE_GRACE,
         reconcile_inflight_jobs,
         reconcile_reserved_unbound_jobs,
     )
@@ -1448,9 +1499,16 @@ def _run_restart_reconcile(
     reserved_call_start_ns = time.monotonic_ns()
     try:
         comment_query = self._restart_reconcile_comment_query()
-        reserved = reconcile_reserved_unbound_jobs(store, comment_query=comment_query)
+        reserved = reconcile_reserved_unbound_jobs(
+            store,
+            comment_query=comment_query,
+            accepted_submit_grace=timedelta(seconds=self.config.restart_reconcile_absence_seconds),
+        )
         evidence["reserved_unbound"] = {
             "count": len(reserved),
+            "absence_window_seconds": self.config.restart_reconcile_absence_seconds,
+            "accepted_submit_absence_window_seconds": self.config.restart_reconcile_absence_seconds,
+            "legacy_absence_window_seconds": int(RESERVATION_ABSENCE_GRACE.total_seconds()),
             "outcomes": [
                 {
                     "job_id": o.job_id,
@@ -1458,13 +1516,21 @@ def _run_restart_reconcile(
                     "action": o.action,
                     "status": o.status,
                     "slurm_job_id": o.slurm_job_id,
+                    "reconciliation_source": o.reconciliation_source,
+                    "reconciliation_decision": o.reconciliation_decision,
+                    "matched_slurm_job_id": o.matched_slurm_job_id,
+                    "match_count": o.match_count,
+                    "reconciliation_reason_class": o.reconciliation_reason_class,
+                    "durable_write_kind": o.durable_write_kind,
+                    "durable_write_count": o.durable_write_count,
+                    **_restart_reconcile_attempt_evidence(store, o.job_id),
                 }
                 for o in reserved
             ],
         }
     except Exception as error:  # noqa: BLE001 - recovery must never abort the pass.
         evidence["status"] = "error"
-        evidence["reserved_unbound_error"] = str(error)
+        evidence["reserved_unbound_error"] = _restart_reconcile_error_message(error)
         self._reset_reconcile_store_after_error()
     finally:
         if sacct_wait_sink is not None:
@@ -1483,19 +1549,104 @@ def _run_restart_reconcile(
                     "slurm_job_id": o.slurm_job_id,
                     "action": o.action,
                     "status": o.status,
+                    "durable_write_kind": o.durable_write_kind,
+                    "durable_write_count": o.durable_write_count,
+                    "pipeline_status_write_count": o.pipeline_status_write_count,
+                    "pipeline_event_write_count": o.pipeline_event_write_count,
+                    **_restart_reconcile_attempt_evidence(store, o.job_id),
                 }
                 for o in inflight
             ],
         }
     except Exception as error:  # noqa: BLE001 - recovery must never abort the pass.
         evidence["status"] = "error"
-        evidence["inflight_error"] = str(error)
+        evidence["inflight_error"] = _restart_reconcile_error_message(error)
         self._reset_reconcile_store_after_error()
     finally:
         if sacct_wait_sink is not None:
             inflight_delta_ms = (time.monotonic_ns() - inflight_call_start_ns) / 1_000_000.0
             sacct_wait_sink(inflight_delta_ms)
     return evidence
+
+
+def _restart_reconcile_attempt_evidence(store: Any, job_id: str) -> dict[str, Any]:
+    """Return the bounded public accepted-submit identity/evidence projection."""
+
+    getter = getattr(store, "get_pipeline_job", None) or getattr(store, "get_job", None)
+    if not callable(getter):
+        return {}
+    try:
+        row = getter(job_id)
+    except Exception:  # noqa: BLE001 - evidence enrichment cannot break reconcile.
+        return {}
+    if row is None:
+        return {}
+    values = dict(row) if isinstance(row, Mapping) else dict(vars(row))
+    raw_members = values.get("cohort_members")
+    members = raw_members if isinstance(raw_members, Sequence) and not isinstance(raw_members, str | bytes) else ()
+    raw_projections = values.get("candidate_projections")
+    projections = (
+        raw_projections
+        if isinstance(raw_projections, Sequence) and not isinstance(raw_projections, str | bytes)
+        else ()
+    )
+    projections_by_task = {
+        projection.get("array_task_id"): projection
+        for projection in projections[:256]
+        if isinstance(projection, Mapping)
+    }
+    candidate_summary = [
+        {
+            "array_task_id": member.get("array_task_id"),
+            "candidate_id": member.get("candidate_id"),
+            "model_id": member.get("model_id"),
+            "run_id": member.get("run_id"),
+            "array_task_outcome": (
+                projections_by_task.get(member.get("array_task_id"), {}).get("array_task_outcome") or "unverified"
+            ),
+            "restart_stage": (
+                projections_by_task.get(member.get("array_task_id"), {}).get("restart_stage")
+                or member.get("restart_stage")
+            ),
+            "native_shud_resubmitted": bool(
+                projections_by_task.get(member.get("array_task_id"), {}).get(
+                    "native_shud_resubmitted",
+                    values.get("native_shud_resubmitted", False),
+                )
+            ),
+        }
+        for member in members[:256]
+        if isinstance(member, Mapping)
+    ]
+    return {
+        "submission_attempt": max(int(values.get("submission_attempt") or 1), 1),
+        "submit_outcome": values.get("submit_outcome"),
+        "reconciliation_source": values.get("reconciliation_source"),
+        "reconciliation_decision": values.get("reconciliation_decision"),
+        "reconciliation_reason_class": values.get("reconciliation_reason_class"),
+        "matched_slurm_job_id": values.get("matched_slurm_job_id"),
+        "restart_stage": values.get("restart_stage"),
+        "native_shud_resubmitted": bool(values.get("native_shud_resubmitted", False)),
+        "candidate_summary": candidate_summary,
+        "candidate_summary_count": len(candidate_summary),
+    }
+
+
+def _restart_reconcile_error_message(error: Exception) -> str:
+    """Redact credentials and replace absolute filesystem tokens in evidence."""
+
+    redacted = str(redact_payload(str(error)))
+    return " ".join(_restart_reconcile_error_token(token) for token in redacted.split())
+
+
+def _restart_reconcile_error_token(token: str) -> str:
+    if token.lstrip("'\"([{<").startswith("/"):
+        return "[local-path]"
+    for separator in ("=", ":"):
+        key, found, value = token.partition(separator)
+        if found and value.lstrip("'\"([{<").startswith("/"):
+            return f"{key}{found}[local-path]"
+    return token
 
 
 def _reset_reconcile_store_after_error(self) -> None:
@@ -1577,7 +1728,7 @@ def _restart_reconcile_comment_query(self) -> Callable[[str], Any]:
         return self._reconcile_comment_query
     from services.orchestrator.reconcile import default_comment_sacct_querier
 
-    return default_comment_sacct_querier()
+    return default_comment_sacct_querier(_configured_slurm_bin_path())
 
 
 def _restart_reconcile_sacct_query(self) -> Callable[[str], Any]:
@@ -1585,7 +1736,18 @@ def _restart_reconcile_sacct_query(self) -> Callable[[str], Any]:
         return self._reconcile_sacct_query
     from services.orchestrator.reconcile import default_sacct_querier
 
-    return default_sacct_querier()
+    return default_sacct_querier(_configured_slurm_bin_path())
+
+
+def _configured_slurm_bin_path() -> str:
+    """Use the same configured Slurm binary directory as the real gateway."""
+
+    from services.slurm_gateway.config import SlurmGatewaySettings
+
+    try:
+        return str(SlurmGatewaySettings().slurm_bin_path or "").strip()
+    except Exception:  # noqa: BLE001 - reconcile construction remains fail-safe.
+        return ""
 
 
 def _run_retention(

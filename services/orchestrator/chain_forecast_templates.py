@@ -82,6 +82,7 @@ def render_stage_template(self, stage: StageDefinition, context: ForecastRunCont
         "max_concurrent": 1,
         "shud_threads": 1,
         "manifest_index_path": "",
+        "target_python_runtime": self.config.target_python_runtime or "",
     }
     template_context["export_lines"] = _template_export_lines(template_context)
     template_text = template_path.read_text(encoding="utf-8")
