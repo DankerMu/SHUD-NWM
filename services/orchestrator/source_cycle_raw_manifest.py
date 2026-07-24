@@ -33,6 +33,9 @@ NFS_RAW_STAGE_ROOT_ENV = "NHMS_SCHEDULER_NFS_RAW_STAGE_ROOT"
 NFS_RAW_STAGE_PREFIX_ENV = "NHMS_SCHEDULER_NFS_RAW_STAGE_PREFIX"
 NFS_RAW_MANIFEST_MAX_BYTES = 16 * 1024 * 1024
 NFS_RAW_MANIFEST_READY_SOURCE = "node27_nfs_raw_manifest"
+# Fixed deployment topology identity, not an environment-configurable policy.
+# Node-22 production sees node-27's shared object-store through this NFS path.
+NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT = Path("/ghdc/data/nwm/object-store")
 
 __all__ = (
     "NFS_RAW_MANIFEST_ENABLED_ENV",
@@ -43,6 +46,7 @@ __all__ = (
     "NFS_RAW_STAGE_ENABLED_ENV",
     "NFS_RAW_STAGE_PREFIX_ENV",
     "NFS_RAW_STAGE_ROOT_ENV",
+    "NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT",
     "NfsRawManifestStagingError",
     "forecast_cycle_from_raw_manifest_readiness",
     "nfs_raw_manifest_readiness",

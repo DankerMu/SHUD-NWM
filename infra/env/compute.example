@@ -131,6 +131,8 @@ NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE=8
 # but require raw manifests written by node-27 to the shared NFS object-store
 # before starting downstream stages. When enabled, missing/invalid raw manifests
 # block production candidates instead of falling back to node-22 downloads.
+# Both this root and NHMS_OBJECT_STORE_COPYBACK_ROOT must remain bound to the
+# fixed node-22 shared-NFS topology; moving both to staging still fails closed.
 NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST=true
 NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT=/ghdc/data/nwm/object-store
 NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX=s3://nhms

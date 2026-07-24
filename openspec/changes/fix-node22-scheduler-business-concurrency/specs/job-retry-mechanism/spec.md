@@ -112,9 +112,11 @@ same runtime repository and backend selectors as initial scheduler submissions.
   prefix `s3://nhms`
 - **AND** the root SHALL be allow-listed and use the existing canonical shared-
   NFS copyback mount rather than a duplicate mount declaration
-- **AND** runtime preflight SHALL require the resolved trusted raw root to equal
-  the resolved canonical copyback authority, so an arbitrary readable
-  allow-listed staging root cannot authorize repair
+- **AND** runtime preflight SHALL bind both the resolved trusted raw root and
+  resolved copyback authority to the fixed node-22 topology identity
+  `/ghdc/data/nwm/object-store`, as well as require them to equal each other, so
+  rebinding both mutable values to an arbitrary readable allow-listed staging
+  root cannot authorize repair
 - **AND** missing, mismatched, relative, outside-boundary, or malformed
   authority/root/prefix values SHALL fail static/runtime preflight without
   exposing either local path in public evidence.

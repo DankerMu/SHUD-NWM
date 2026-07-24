@@ -1252,8 +1252,12 @@ Exact-cycle missing-forcing regeneration (node-22 only):
    NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX=s3://nhms
    ```
 
-   `NHMS_OBJECT_STORE_COPYBACK_ROOT` is the canonical runtime authority, and
-   `NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT` must resolve to that exact directory.
+   Both variables are bindings to the fixed node-22 topology authority; neither
+   variable defines that authority. Runtime preflight requires both roots to
+   resolve to the canonical directory and to each other, so moving them together
+   to an allow-listed staging directory still fails before lock acquisition or
+   repair work. Public evidence records only redacted path placeholders and
+   boolean identity results.
    `/ghdc/data/nwm/object-store` is node-22's view of node-27
    `/home/ghdc/nwm/object-store`; it must remain in
    `NHMS_SCHEDULER_ALLOWED_ROOTS`. It is not the compute-visible staging root

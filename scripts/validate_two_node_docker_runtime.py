@@ -22,6 +22,8 @@ from urllib.parse import unquote, urlparse
 
 import yaml
 
+from services.orchestrator import source_cycle_raw_manifest
+
 CHANGE_ID = "m22-two-node-docker-readonly-display"
 DEFAULT_STATIC_REPORT = Path("artifacts/stage-change") / CHANGE_ID / "static-compose-env-check.json"
 DEFAULT_PREFLIGHT_ROOT = Path("artifacts/stage-change") / CHANGE_ID / "docker-preflight"
@@ -2527,7 +2529,14 @@ def _trusted_raw_manifest_root_is_valid(
     if not root.is_absolute() or any(part in {".", ".."} for part in root.parts):
         return False
     normalized = Path(os.path.normpath(raw_root))
-    if not mounted_nfs_root or normalized != Path(os.path.normpath(mounted_nfs_root)):
+    canonical_root = Path(
+        os.path.normpath(str(source_cycle_raw_manifest.NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT))
+    )
+    if (
+        normalized != canonical_root
+        or not mounted_nfs_root
+        or Path(os.path.normpath(mounted_nfs_root)) != canonical_root
+    ):
         return False
     for allowed in allowed_roots:
         allowed_path = Path(allowed)

@@ -10,6 +10,7 @@ from urllib.parse import unquote, urlparse
 
 from packages.common.redaction import redact_payload
 from services.orchestrator import scheduler as _scheduler
+from services.orchestrator import source_cycle_raw_manifest
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
 
 __all__ = ("ProductionSchedulerConfig",)
@@ -727,12 +728,13 @@ class ProductionSchedulerConfig:
             checks[env] = check
             if blocker is not None:
                 blockers.append(blocker)
-        _canonical_root_check, canonical_root_blocker = _db_free_path_check(
+        canonical_root_check, canonical_root_blocker = _db_free_path_check(
             _DB_FREE_CANONICAL_RAW_AUTHORITY_ENV,
             self.object_store_copyback_root,
             kind="readable_directory",
             allowed_roots=allowed_roots,
         )
+        checks[_DB_FREE_CANONICAL_RAW_AUTHORITY_ENV] = canonical_root_check
         if canonical_root_blocker is not None:
             blockers.append(canonical_root_blocker)
         raw_root_check, raw_root_blocker = _db_free_path_check(
@@ -744,6 +746,35 @@ class ProductionSchedulerConfig:
         checks[_DB_FREE_RAW_MANIFEST_ROOT_ENV] = raw_root_check
         if raw_root_blocker is not None:
             blockers.append(raw_root_blocker)
+        topology_identity = _db_free_path_identity(
+            source_cycle_raw_manifest.NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT
+        )
+        canonical_topology_matches: bool | None = None
+        if canonical_root_blocker is None:
+            canonical_topology_matches = (
+                _db_free_path_identity(self.object_store_copyback_root) == topology_identity
+            )
+            if not canonical_topology_matches:
+                blockers.append(
+                    _db_free_blocker(
+                        "db_free_raw_authority_topology_mismatch",
+                        _DB_FREE_CANONICAL_RAW_AUTHORITY_ENV,
+                        "canonical_topology_mismatch",
+                    )
+                )
+        canonical_root_check["topology_matches"] = canonical_topology_matches
+        raw_topology_matches: bool | None = None
+        if raw_root_blocker is None:
+            raw_topology_matches = _db_free_path_identity(self.nfs_raw_manifest_root) == topology_identity
+            if not raw_topology_matches:
+                blockers.append(
+                    _db_free_blocker(
+                        "db_free_raw_authority_topology_mismatch",
+                        _DB_FREE_RAW_MANIFEST_ROOT_ENV,
+                        "canonical_topology_mismatch",
+                    )
+                )
+        raw_root_check["topology_matches"] = raw_topology_matches
         authority_matches: bool | None = None
         if canonical_root_blocker is None and raw_root_blocker is None:
             authority_matches = _db_free_path_identity(

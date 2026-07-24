@@ -30,6 +30,7 @@ from services.orchestrator import scheduler_file_providers as scheduler_file_pro
 from services.orchestrator import scheduler_lease as scheduler_lease_module
 from services.orchestrator import scheduler_state as scheduler_state_module
 from services.orchestrator import scheduler_state_rows as scheduler_state_rows_module
+from services.orchestrator import source_cycle_raw_manifest as source_cycle_raw_manifest_module
 from services.orchestrator.chain import (
     M3_STAGES,
     OrchestratorConfig,
@@ -19204,6 +19205,12 @@ def _set_db_free_scheduler_env(monkeypatch: Any, root: Path) -> tuple[dict[str, 
     monkeypatch.setenv("NHMS_SCHEDULER_RECONCILE_SLURM_USER", "scheduler-user")
     monkeypatch.setenv("NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT", "scheduler-account")
     raw_manifest_root = roots["object_store_root"]
+    monkeypatch.setattr(
+        source_cycle_raw_manifest_module,
+        "NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT",
+        raw_manifest_root,
+        raising=False,
+    )
     monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(raw_manifest_root))
     monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(raw_manifest_root))
     monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX", "s3://nhms")
@@ -19274,6 +19281,51 @@ def test_db_free_runtime_preflight_rejects_allowlisted_noncanonical_raw_authorit
     assert str(canonical_root) not in rendered
 
 
+def test_db_free_runtime_preflight_rejects_copyback_and_raw_authority_rebound_together_without_work(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, _paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    canonical_root = Path(os.environ["NHMS_OBJECT_STORE_COPYBACK_ROOT"])
+    staging_root = roots["object_store_root"] / "allowlisted-staging" / "object-store"
+    staging_root.mkdir(parents=True)
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(staging_root))
+    monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(staging_root))
+    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(staging_root))
+    monkeypatch.setenv("NHMS_SCHEDULER_REPAIR_MISSING_FORCING", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_REPAIR_MISSING_FORCING_CYCLE_TIME", "2026-07-12T00:00:00Z")
+    monkeypatch.setenv("NHMS_SCHEDULER_BACKFILL_ENABLED", "false")
+    monkeypatch.setenv("NHMS_SCHEDULER_LOOKBACK_HOURS", "0")
+    monkeypatch.setenv("NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE", "1")
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+
+    config = ProductionSchedulerConfig(
+        backfill_enabled=False,
+        lookback_hours=0,
+        max_cycles_per_source=1,
+    )
+    preflight = config.db_free_runtime_preflight()
+    result = ProductionScheduler.from_env(config).run_once()
+    rendered = json.dumps({"preflight": preflight, "evidence": result.evidence}, sort_keys=True)
+
+    assert preflight["status"] == "blocked"
+    assert {
+        item["field"]
+        for item in preflight["blockers"]
+        if item["code"] == "db_free_raw_authority_topology_mismatch"
+    } == {
+        "NHMS_OBJECT_STORE_COPYBACK_ROOT",
+        "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT",
+    }
+    assert preflight["checks"]["NHMS_OBJECT_STORE_COPYBACK_ROOT"]["topology_matches"] is False
+    assert preflight["checks"]["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"]["topology_matches"] is False
+    assert preflight["checks"]["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"]["authority_matches"] is True
+    assert result.status == "preflight_blocked"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert str(staging_root) not in rendered
+    assert str(canonical_root) not in rendered
+
+
 def test_db_free_runtime_preflight_accepts_matching_canonical_raw_authority(
     monkeypatch: Any,
     tmp_path: Path,
@@ -19283,6 +19335,8 @@ def test_db_free_runtime_preflight_accepts_matching_canonical_raw_authority(
     preflight = ProductionSchedulerConfig().db_free_runtime_preflight()
 
     assert preflight["status"] == "ready"
+    assert preflight["checks"]["NHMS_OBJECT_STORE_COPYBACK_ROOT"]["topology_matches"] is True
+    assert preflight["checks"]["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"]["topology_matches"] is True
     assert preflight["checks"]["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"]["authority_matches"] is True
 
 

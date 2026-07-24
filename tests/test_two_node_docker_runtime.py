@@ -14,6 +14,7 @@ import pytest
 import yaml
 
 from scripts import validate_two_node_docker_runtime as docker_runtime
+from services.orchestrator import source_cycle_raw_manifest
 from services.production_closure import (
     two_node_e2e_docker_security,
 )
@@ -3138,10 +3139,12 @@ def test_node22_db_free_env_template_declares_trusted_nfs_raw_manifest_authority
     )
 
     assert env["NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST"] == "true"
-    assert env["NHMS_OBJECT_STORE_COPYBACK_ROOT"] == "/ghdc/data/nwm/object-store"
-    assert env["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"] == "/ghdc/data/nwm/object-store"
+    canonical_root = str(source_cycle_raw_manifest.NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT)
+    assert canonical_root == "/ghdc/data/nwm/object-store"
+    assert env["NHMS_OBJECT_STORE_COPYBACK_ROOT"] == canonical_root
+    assert env["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"] == canonical_root
     assert env["NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX"] == "s3://nhms"
-    assert "/ghdc/data/nwm/object-store" in env["NHMS_SCHEDULER_ALLOWED_ROOTS"].split(":")
+    assert canonical_root in env["NHMS_SCHEDULER_ALLOWED_ROOTS"].split(":")
 
     compose = docker_runtime.load_compose(REPO_ROOT / "infra/compose.compute.yml")
     scheduler_env = docker_runtime._service_environment(compose["services"]["scheduler-once"], env)
@@ -3194,6 +3197,27 @@ def test_static_checker_rejects_missing_or_malformed_trusted_raw_manifest_contra
     assert "user:secret" not in rendered
     assert "token=secret" not in rendered
     assert "example.invalid" not in rendered
+
+
+def test_static_checker_rejects_copyback_and_raw_authority_rebound_together(
+    tmp_path: Path,
+) -> None:
+    compose = _safe_compute_compose()
+    staging_root = "/scratch/frd_muziyao/nhms-production/object-store"
+    for service in compose["services"].values():
+        service["environment"]["OBJECT_STORE_ROOT"] = staging_root
+        service["environment"]["NHMS_OBJECT_STORE_COPYBACK_ROOT"] = staging_root
+        service["environment"]["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"] = staging_root
+    compute_compose = _write_compute_compose(tmp_path, compose)
+
+    result = _run_compute_static_check(compute_compose)
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "COMPUTE_SCHEDULER_NFS_RAW_MANIFEST_ROOT_INVALID"
+        and finding.service == "scheduler-once"
+        for finding in result.findings
+    )
 
 
 def test_static_checker_requires_trusted_raw_root_on_existing_nfs_mount_contract(

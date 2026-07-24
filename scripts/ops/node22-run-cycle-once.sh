@@ -23,6 +23,8 @@ Notes:
   - --repair-missing-forcing authorizes only this exact cycle to rebuild a missing
     direct-grid forcing package from a verified ready raw manifest. Without the
     flag, missing forcing remains fail-closed.
+  - The DB-free runtime preflight binds both configured raw-authority roots to
+    the fixed node-22 shared-NFS topology before lock acquisition or repair work.
 USAGE
 }
 
