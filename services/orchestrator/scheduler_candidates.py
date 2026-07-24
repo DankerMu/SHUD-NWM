@@ -321,19 +321,6 @@ def build_candidates(
                 skipped.append({**candidate.to_dict(), "reason": "active_duplicate_pipeline"})
                 continue
             strict_warm_start = context.strict_warm_start_for_candidate(candidate, cycle)
-            if (
-                strict_warm_start is not None
-                and not bool(strict_warm_start.get("ready"))
-                and not bool(getattr(context.config, "repair_missing_forcing", False))
-            ):
-                blocked.append(
-                    _blocked_candidate(
-                        candidate,
-                        str(strict_warm_start.get("reason") or "state_snapshot_index_unavailable"),
-                        state_evidence=strict_warm_start,
-                    )
-                )
-                continue
             successor_state = (
                 context.successor_state_for_candidate(candidate, cycle)
                 if callable(context.successor_state_for_candidate)
@@ -348,14 +335,32 @@ def build_candidates(
             ):
                 skipped.append({**candidate.to_dict(), "reason": "completed_duplicate_pipeline"})
                 continue
+            if (
+                strict_warm_start is not None
+                and not bool(strict_warm_start.get("ready"))
+                and not bool(getattr(context.config, "repair_missing_forcing", False))
+            ):
+                state_decision, warm_admission_blocker = _candidate_warm_admission_decision(
+                    context.config,
+                    candidate,
+                    raw_candidate_state,
+                    state_decision,
+                    strict_warm_start=strict_warm_start,
+                )
+                if warm_admission_blocker is not None:
+                    blocked.append(warm_admission_blocker)
+                    continue
             classify_candidate_state()
-            state_decision = _apply_explicit_missing_forcing_repair_policy(
+            state_decision, warm_admission_blocker = _candidate_warm_admission_decision(
                 context.config,
                 candidate,
                 raw_candidate_state,
                 state_decision,
                 strict_warm_start=strict_warm_start,
             )
+            if warm_admission_blocker is not None:
+                blocked.append(warm_admission_blocker)
+                continue
             if state_decision is not None and context.candidate_state_identity_mismatch_detector(
                 state_decision.evidence,
             ):
@@ -538,13 +543,17 @@ def build_candidates(
                                     event_limit=context.config.candidate_state_event_limit,
                                 )
                                 state_decision = context.candidate_state_decider(candidate, raw_candidate_state)
-                                state_decision = _apply_explicit_missing_forcing_repair_policy(
+                                state_decision, warm_admission_blocker = _candidate_warm_admission_decision(
                                     context.config,
                                     candidate,
                                     raw_candidate_state,
                                     state_decision,
                                     strict_warm_start=strict_warm_start,
+                                    admission_evidence={"slurm_state_sync": slurm_state_sync},
                                 )
+                                if warm_admission_blocker is not None:
+                                    blocked.append(warm_admission_blocker)
+                                    continue
                             if state_decision is not None:
                                 state_decision = CandidateStateDecision(
                                     action=state_decision.action,
@@ -835,13 +844,17 @@ def build_candidates(
                                 event_limit=context.config.candidate_state_event_limit,
                             )
                             state_decision = context.candidate_state_decider(candidate, raw_candidate_state)
-                            state_decision = _apply_explicit_missing_forcing_repair_policy(
+                            state_decision, warm_admission_blocker = _candidate_warm_admission_decision(
                                 context.config,
                                 candidate,
                                 raw_candidate_state,
                                 state_decision,
                                 strict_warm_start=strict_warm_start,
+                                admission_evidence={"slurm_state_sync": slurm_state_sync},
                             )
+                            if warm_admission_blocker is not None:
+                                blocked.append(warm_admission_blocker)
+                                continue
                         if state_decision is not None:
                             state_decision = CandidateStateDecision(
                                 action=state_decision.action,
@@ -1378,6 +1391,71 @@ def _repair_precondition_blocker(
     )
 
 
+def _decision_is_stable_missing_forcing_blocker(
+    decision: CandidateStateDecision | None,
+) -> bool:
+    if (
+        decision is None
+        or decision.action != "blocked"
+        or decision.reason != "missing_forcing_package_uri"
+        or decision.evidence.get("classifier") != "missing_upstream_artifact"
+        or str(decision.evidence.get("restart_stage") or "") != "forecast"
+    ):
+        return False
+    artifact_guard = decision.evidence.get("artifact_guard")
+    return (
+        isinstance(artifact_guard, Mapping)
+        and artifact_guard.get("artifact_type") == "forcing_package_uri"
+        and artifact_guard.get("stable_classifier") == "FORCING_PACKAGE_URI_MISSING"
+        and artifact_guard.get("artifact_exists") is False
+    )
+
+
+def _candidate_warm_admission_decision(
+    config: SchedulerConfigLike,
+    candidate: SchedulerCandidateLike,
+    raw_state: Mapping[str, Any] | None,
+    decision: CandidateStateDecision | None,
+    *,
+    strict_warm_start: Mapping[str, Any] | None,
+    admission_evidence: Mapping[str, Any] | None = None,
+) -> tuple[CandidateStateDecision | None, SchedulerCandidateLike | None]:
+    """Classify repair and preserve the ordinary strict-warm admission gate.
+
+    A failed warm gate can be evaluated by the repair policy only for the exact
+    operator target carrying the stable stored missing-forcing blocker.  All
+    other state classifications retain the same typed warm blocker as an
+    ordinary scheduler pass.  The helper owns both initial and post-sync
+    reclassification so a process-wide repair flag cannot admit siblings.
+    """
+
+    can_defer_warm_gate = _is_explicit_missing_forcing_repair_target(
+        config,
+        candidate.cycle_time_utc,
+    ) and _decision_is_stable_missing_forcing_blocker(decision)
+    classified = _apply_explicit_missing_forcing_repair_policy(
+        config,
+        candidate,
+        raw_state,
+        decision,
+        strict_warm_start=strict_warm_start,
+    )
+    if (
+        strict_warm_start is None
+        or bool(strict_warm_start.get("ready"))
+        or can_defer_warm_gate
+    ):
+        return classified, None
+    state_evidence = dict(strict_warm_start)
+    if admission_evidence is not None:
+        state_evidence = _merge_state_evidence(state_evidence, admission_evidence)
+    return classified, _blocked_candidate(
+        candidate,
+        str(strict_warm_start.get("reason") or "state_snapshot_index_unavailable"),
+        state_evidence=state_evidence,
+    )
+
+
 def _apply_explicit_missing_forcing_repair_policy(
     config: SchedulerConfigLike,
     candidate: SchedulerCandidateLike,
@@ -1395,11 +1473,7 @@ def _apply_explicit_missing_forcing_repair_policy(
 
     if not bool(getattr(config, "repair_missing_forcing", False)):
         return decision
-    if (
-        decision is None
-        or decision.action != "blocked"
-        or decision.reason != "missing_forcing_package_uri"
-    ):
+    if decision is None or decision.action != "blocked" or decision.reason != "missing_forcing_package_uri":
         return decision
 
     target_cycle = getattr(config, "repair_missing_forcing_cycle_time", None)
@@ -1445,16 +1519,9 @@ def _apply_explicit_missing_forcing_repair_policy(
         return rejected("direct_grid_contract_invalid", direct_grid_error=error.to_dict())
 
     artifact_guard = decision.evidence.get("artifact_guard")
-    if not isinstance(artifact_guard, Mapping):
+    if not _decision_is_stable_missing_forcing_blocker(decision):
         return rejected("missing_forcing_blocker_contract_invalid")
-    if (
-        artifact_guard.get("artifact_type") != "forcing_package_uri"
-        or artifact_guard.get("stable_classifier") != "FORCING_PACKAGE_URI_MISSING"
-        or artifact_guard.get("artifact_exists") is not False
-        or decision.evidence.get("classifier") != "missing_upstream_artifact"
-        or str(decision.evidence.get("restart_stage") or "") != "forecast"
-    ):
-        return rejected("missing_forcing_blocker_contract_invalid")
+    assert isinstance(artifact_guard, Mapping)
     if artifact_guard.get("unsafe_reason") not in (None, ""):
         return rejected(
             "forcing_artifact_reference_unsafe",

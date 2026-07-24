@@ -60,6 +60,19 @@ same runtime repository and backend selectors as initial scheduler submissions.
   versioned forcing retry reservation
 - **AND** public scheduler evidence MUST redact local raw roots and paths.
 
+#### Scenario: repair pass preserves ordinary sibling warm admission
+
+- **GIVEN** repair mode is enabled for one exact cycle
+- **WHEN** another candidate in that pass has no classified state, an ordinary
+  retry or other blocker, a different target cycle, or any classification other
+  than the stable `FORCING_PACKAGE_URI_MISSING` blocker
+- **AND** that candidate fails strict warm-start admission
+- **THEN** the candidate SHALL retain the ordinary typed warm-start blocker
+- **AND** it SHALL produce no forcing, forecast, local producer, orchestrator,
+  or Slurm work
+- **AND** initial classification and every post-Slurm-sync reclassification
+  SHALL apply this same candidate-scoped admission decision.
+
 #### Scenario: exact-cycle forcing repair preconditions fail closed
 
 - **WHEN** the explicit repair flag is absent, the target cycle is missing or
@@ -87,3 +100,16 @@ same runtime repository and backend selectors as initial scheduler submissions.
   `missing_forcing_package_uri` / `FORCING_PACKAGE_URI_MISSING` classification
 - **AND** canonical rejection details MUST be recorded only as nested repair
   evidence with zero submission.
+
+#### Scenario: DB-free deployment supplies trusted raw authority
+
+- **WHEN** an operator provisions node-22 from
+  `infra/env/compute.scheduler-dbfree.env.example` and the documented exact-cycle
+  wrapper
+- **THEN** the runtime SHALL receive the explicit trusted raw root
+  `/ghdc/data/nwm/object-store` and object prefix `s3://nhms`
+- **AND** the root SHALL be allow-listed and use the existing canonical shared-
+  NFS copyback mount rather than a duplicate mount declaration
+- **AND** missing, relative, outside-boundary, or malformed root/prefix values
+  SHALL fail static/runtime preflight without exposing the raw value in public
+  evidence.

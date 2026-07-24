@@ -29,6 +29,7 @@ _DB_FREE_PATH_SPECS = (
     ("scheduler_journal_root", "NHMS_SCHEDULER_JOURNAL_ROOT", "directory"),
     ("scheduler_state_index", "NHMS_SCHEDULER_STATE_INDEX", "file"),
 )
+_DB_FREE_RAW_MANIFEST_PREFIX_ENV = "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX"
 _DB_FREE_SUPPORTED_OBJECT_URI_SCHEMES = frozenset({"s3", "published"})
 _DB_FREE_DB_BACKEND_VALUES = frozenset({"postgres", "postgresql", "psycopg", "psycopg2", "pg"})
 _DB_FREE_OBJECT_STORE_PREFIX_ENV = "OBJECT_STORE_PREFIX"
@@ -180,11 +181,9 @@ class ProductionSchedulerConfig:
     )
     nfs_raw_manifest_root: Path | str | None = field(
         default_factory=lambda: os.getenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT")
-        or os.getenv("OBJECT_STORE_ROOT")
     )
     nfs_raw_manifest_prefix: str = field(
         default_factory=lambda: os.getenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX")
-        or os.getenv("OBJECT_STORE_PREFIX")
         or "s3://nhms"
     )
     require_direct_grid: bool = field(
@@ -723,6 +722,21 @@ class ProductionSchedulerConfig:
             checks[env] = check
             if blocker is not None:
                 blockers.append(blocker)
+        raw_root_check, raw_root_blocker = _db_free_path_check(
+            "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT",
+            self.nfs_raw_manifest_root,
+            kind="readable_directory",
+            allowed_roots=allowed_roots,
+        )
+        checks["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"] = raw_root_check
+        if raw_root_blocker is not None:
+            blockers.append(raw_root_blocker)
+        prefix_check, prefix_blocker = _db_free_raw_manifest_prefix_check(
+            self.nfs_raw_manifest_prefix
+        )
+        checks[_DB_FREE_RAW_MANIFEST_PREFIX_ENV] = prefix_check
+        if prefix_blocker is not None:
+            blockers.append(prefix_blocker)
         return {
             "status": "blocked" if blockers else "ready",
             "required": True,
@@ -1065,19 +1079,29 @@ def _db_free_path_check(
         return check, _db_free_blocker("db_free_required_path_unsafe", env, "unsafe", path=str(parent))
     exists = path.exists()
     check["exists"] = exists
-    if kind == "directory":
+    if kind in {"directory", "readable_directory"}:
         if not exists:
             return check, _db_free_blocker("db_free_required_path_not_found", env, "not_found", path=str(resolved))
         if path.is_symlink() or not path.is_dir():
             return check, _db_free_blocker("db_free_required_path_unsafe", env, "unsafe", path=str(resolved))
-        if not _scheduler._directory_is_writable(path):
+        if kind == "directory" and not _scheduler._directory_is_writable(path):
             return check, _db_free_blocker(
                 "db_free_required_path_not_writable",
                 env,
                 "not_writable",
                 path=str(resolved),
             )
-        check["writable"] = True
+        if kind == "directory":
+            check["writable"] = True
+        elif not os.access(path, os.R_OK | os.X_OK):
+            return check, _db_free_blocker(
+                "db_free_required_path_not_readable",
+                env,
+                "not_readable",
+                path=str(resolved),
+            )
+        else:
+            check["readable"] = True
         return check, None
     if not exists:
         return check, _db_free_blocker("db_free_required_path_not_found", env, "not_found", path=str(resolved))
@@ -1101,6 +1125,49 @@ def _db_free_file_is_readable(path: Path) -> bool:
     if path_stat.st_mode & 0o444 == 0:
         return False
     return os.access(path, os.R_OK)
+
+
+def _db_free_raw_manifest_prefix_evidence(value: Any) -> dict[str, Any]:
+    text = str(value or "").strip()
+    return {
+        "env": _DB_FREE_RAW_MANIFEST_PREFIX_ENV,
+        "configured": bool(text),
+        "value": "[object-prefix]" if text else None,
+    }
+
+
+def _db_free_raw_manifest_prefix_check(
+    value: Any,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    text = str(value or "").strip().rstrip("/")
+    check = _db_free_raw_manifest_prefix_evidence(text)
+    if not text:
+        return check, _db_free_blocker(
+            "db_free_raw_manifest_prefix_missing",
+            _DB_FREE_RAW_MANIFEST_PREFIX_ENV,
+            "missing",
+        )
+    try:
+        parsed = _db_free_urlparse(text)
+        unsafe_reason = _db_free_common_object_uri_unsafe_reason(text, parsed)
+        if (
+            parsed.scheme.lower() != "s3"
+            or not parsed.netloc
+            or unsafe_reason is not None
+        ):
+            raise ValueError(unsafe_reason or "unsupported_prefix")
+        raw_path = str(parsed.path or "").strip("/")
+        if raw_path:
+            _db_free_safe_object_key(raw_path)
+    except ValueError:
+        check["value"] = "[invalid-object-prefix]"
+        return check, _db_free_blocker(
+            "db_free_raw_manifest_prefix_invalid",
+            _DB_FREE_RAW_MANIFEST_PREFIX_ENV,
+            "invalid",
+        )
+    check.update({"scheme": "s3", "supported": True})
+    return check, None
 
 
 def _db_free_local_path_component_reason(path: Path) -> str | None:

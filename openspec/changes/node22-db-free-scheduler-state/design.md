@@ -1277,6 +1277,11 @@ Must preserve:
 - Successful candidate siblings are never recomputed because another array
   task failed; failed tasks are never relabelled successful.
 - Strict warm-start and model-generation gates remain fail closed.
+- A process-wide exact-cycle repair flag never relaxes strict warm admission for
+  an unrelated candidate. Only an exact-target candidate whose classified
+  stored decision is the stable `FORCING_PACKAGE_URI_MISSING` blocker may defer
+  that gate into repair-policy evaluation; initial and post-Slurm-sync
+  classifications use the same admission contract.
 
 Must add/change:
 
@@ -1305,6 +1310,11 @@ Must add/change:
 - Preserve pre-#1112 failure/retry behavior for non-forecast array stages;
   accepted-submit member projection in this issue is limited to the canonical
   forecast stage family.
+- The checked-in node-22 DB-free environment/compose contract supplies the
+  trusted shared-NFS raw root `/ghdc/data/nwm/object-store` and `s3://nhms`
+  prefix, keeps the root inside the scheduler allow-list and existing canonical
+  NFS copyback mount boundary, and rejects missing or malformed values without
+  publishing paths.
 
 Persisted reconciliation/evidence contract for #1112:
 

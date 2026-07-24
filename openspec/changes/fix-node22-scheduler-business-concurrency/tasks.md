@@ -29,7 +29,11 @@
   terminal forcing job creates a versioned forcing-first retry with exact warm
   identity in forecast manifests; canonical rejection preserves the stable
   missing-forcing classifier; simultaneous 18+18 cohorts remain within the
-  aggregate Slurm `%32` bound and repair config above 32 is rejected.
+  aggregate Slurm `%32` bound and repair config above 32 is rejected. Round-2
+  closure additionally proves no-state/ordinary-retry/target-mismatch siblings
+  retain their typed warm blocker, mixed cohorts admit only the stable exact
+  missing-forcing candidate, and both post-sync reclassification paths reuse
+  the same warm-admission decision.
 
 ## 2. Reconcile And Terminal-State Idempotency
 
@@ -80,4 +84,6 @@
 - [x] 4.6 Document the exact `--repair-missing-forcing --plan` and `--submit`
   operator commands, the raw/direct-grid/warm-state preconditions, and the
   evidence fields that prove forcing ran as a Slurm array rather than on the
-  login node.
+  login node. The checked-in DB-free template, compose contract, runtime
+  preflight, and static validator also require the trusted node-22 NFS raw root
+  and prefix while keeping public path evidence redacted.

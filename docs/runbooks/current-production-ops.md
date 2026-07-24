@@ -1240,6 +1240,21 @@ Exact-cycle missing-forcing regeneration (node-22 only):
    value alone cannot authorize repair. Every admitted basin must also have a
    complete warm state identity (`id`, URI, checksum, valid time, and warm
    lineage); missing, partial, cutover/cold-new, or cold state remains blocked.
+   Provision these values from the tracked
+   `infra/env/compute.scheduler-dbfree.env.example` into the ignored live
+   `infra/env/compute.scheduler-dbfree.env` (do not edit or commit the live
+   file):
+
+   ```bash
+   NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST=true
+   NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT=/ghdc/data/nwm/object-store
+   NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX=s3://nhms
+   ```
+
+   `/ghdc/data/nwm/object-store` is node-22's view of node-27
+   `/home/ghdc/nwm/object-store`; it must remain in
+   `NHMS_SCHEDULER_ALLOWED_ROOTS`. It is not the compute-visible staging root
+   under `/scratch` and must not be replaced by that path.
 2. Preview the exact UTC cycle. Omitting `--source` intentionally previews both
    configured GFS and IFS cohorts; omitting `--basin-id` retains all 18 active
    basins per source:
