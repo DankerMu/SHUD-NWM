@@ -178,6 +178,15 @@ class ProductionSchedulerConfig:
             32,
         )
     )
+    nfs_raw_manifest_root: Path | str | None = field(
+        default_factory=lambda: os.getenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT")
+        or os.getenv("OBJECT_STORE_ROOT")
+    )
+    nfs_raw_manifest_prefix: str = field(
+        default_factory=lambda: os.getenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX")
+        or os.getenv("OBJECT_STORE_PREFIX")
+        or "s3://nhms"
+    )
     require_direct_grid: bool = field(
         default_factory=lambda: _scheduler._env_flag("NHMS_SCHEDULER_REQUIRE_DIRECT_GRID")
     )
@@ -458,6 +467,10 @@ class ProductionSchedulerConfig:
                 raise ValueError(
                     "production scheduler repair_missing_forcing requires an exact-cycle, "
                     "single-cycle, backfill-disabled invocation"
+                )
+            if int(self.slurm_array_concurrency_bound) > 32:
+                raise ValueError(
+                    "production scheduler repair_missing_forcing Slurm array concurrency must not exceed 32"
                 )
         elif repair_cycle_time is not None:
             raise ValueError(

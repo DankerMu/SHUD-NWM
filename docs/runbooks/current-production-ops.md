@@ -1234,8 +1234,12 @@ Exact-cycle missing-forcing regeneration (node-22 only):
    18 source-scoped variants for each enabled source. The raw readiness record
    must say `status=ready`, `required=true`, and
    `source=node27_nfs_raw_manifest`. The scheduler re-reads the manifest and all
-   referenced raw files from `object_store_root`, so a stale journal `ready`
-   value alone cannot authorize repair.
+   referenced raw files from the trusted
+   `NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT`; the redacted public journal value
+   `[local-path]` is never used as an operational path. A stale journal `ready`
+   value alone cannot authorize repair. Every admitted basin must also have a
+   complete warm state identity (`id`, URI, checksum, valid time, and warm
+   lineage); missing, partial, cutover/cold-new, or cold state remains blocked.
 2. Preview the exact UTC cycle. Omitting `--source` intentionally previews both
    configured GFS and IFS cohorts; omitting `--basin-id` retains all 18 active
    basins per source:
@@ -1243,7 +1247,7 @@ Exact-cycle missing-forcing regeneration (node-22 only):
    ```bash
    cd /scratch/frd_muziyao/NWM
    scripts/ops/node22-run-cycle-once.sh \
-     --cycle-time 2026-07-24T00:00:00Z \
+     --cycle-time 2026-07-12T00:00:00Z \
      --repair-missing-forcing \
      --plan
    ```
@@ -1269,7 +1273,7 @@ Exact-cycle missing-forcing regeneration (node-22 only):
    ```bash
    cd /scratch/frd_muziyao/NWM
    scripts/ops/node22-run-cycle-once.sh \
-     --cycle-time 2026-07-24T00:00:00Z \
+     --cycle-time 2026-07-12T00:00:00Z \
      --repair-missing-forcing \
      --submit
    ```

@@ -21,6 +21,15 @@
   manifest absent/identity-mismatch rejection, malformed/unbounded operator
   use, preserved warm lineage with no cold fallback, and an 18-member forcing
   cohort routed through `produce_forcing_array` under the global bound of 32.
+- [x] 1.5 Close exact-cycle repair authority, state, retry, and concurrency
+  invariants found in PR review.
+  Evidence floor: production file-journal coverage proves trusted raw-root
+  revalidation with public path redaction; missing/partial/cold warm state stays
+  on the original blocker; real `ForecastOrchestrator` coverage proves a
+  terminal forcing job creates a versioned forcing-first retry with exact warm
+  identity in forecast manifests; canonical rejection preserves the stable
+  missing-forcing classifier; simultaneous 18+18 cohorts remain within the
+  aggregate Slurm `%32` bound and repair config above 32 is rejected.
 
 ## 2. Reconcile And Terminal-State Idempotency
 

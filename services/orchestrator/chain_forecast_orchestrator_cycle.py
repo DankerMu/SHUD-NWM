@@ -14,6 +14,7 @@ from services.orchestrator.accepted_submit_identity import (
 )
 
 _FORCE_TERMINAL_RESUBMIT_DECISIONS = {
+    "retry_repair_missing_forcing",
     "retry_missing_forecast_output",
     "retry_strict_warm_start_terminal_init_state_mismatch",
     "retry_strict_warm_start_terminal_run_manifest_missing",

@@ -41,6 +41,10 @@ same runtime repository and backend selectors as initial scheduler submissions.
 - **AND** node-22 production requires direct-grid forcing
 - **AND** the node-27 NFS raw manifest and all referenced raw files are present,
   ready, and match the requested source and exact cycle
+- **AND** the trusted NFS raw root comes from scheduler configuration rather
+  than a redacted public journal field
+- **AND** every selected candidate has a complete validated warm-state identity
+  containing state id, URI, checksum, valid time, and lineage
 - **WHEN** an operator runs the exact-cycle wrapper with
   `--repair-missing-forcing`
 - **THEN** only a candidate blocked solely by `FORCING_PACKAGE_URI_MISSING`
@@ -52,13 +56,34 @@ same runtime repository and backend selectors as initial scheduler submissions.
   global Slurm `%32` array bound
 - **AND** the scheduler MUST NOT invoke login-node forcing, submit forecast
   directly, fall back to cold start, or replace the selected warm-state lineage.
+- **AND** a terminal forcing job from a prior attempt MUST NOT suppress the new
+  versioned forcing retry reservation
+- **AND** public scheduler evidence MUST redact local raw roots and paths.
 
 #### Scenario: exact-cycle forcing repair preconditions fail closed
 
 - **WHEN** the explicit repair flag is absent, the target cycle is missing or
   malformed, the candidate is outside that exact cycle, direct-grid is not the
   required and valid model contract, the forcing reference is unsafe, or the
-  raw manifest is absent, stale, unreadable, or identity-mismatched
+  raw manifest is absent, stale, unreadable, or identity-mismatched, or warm
+  state is missing, partial, cold/cutover, or identity-mismatched
 - **THEN** the original missing-forcing blocker SHALL remain blocked
 - **AND** an explicitly requested but rejected repair SHALL record a stable
   rejection reason and SHALL NOT submit Slurm or SHUD work.
+
+#### Scenario: exact-cycle forcing repair preserves aggregate concurrency bound
+
+- **WHEN** GFS and IFS repair cohorts are eligible in the same scheduler pass
+- **THEN** their simultaneously active Slurm array throttles MUST sum to no more
+  than 32
+- **AND** repair configuration requesting an aggregate Slurm array concurrency
+  above 32 MUST be rejected before submission.
+
+#### Scenario: downstream canonical rejection preserves the original blocker
+
+- **WHEN** raw and warm repair preconditions pass but current canonical input is
+  not ready
+- **THEN** the candidate MUST retain top-level
+  `missing_forcing_package_uri` / `FORCING_PACKAGE_URI_MISSING` classification
+- **AND** canonical rejection details MUST be recorded only as nested repair
+  evidence with zero submission.

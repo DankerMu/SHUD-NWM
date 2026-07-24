@@ -11864,6 +11864,105 @@ def test_auto_manifest_repair_resubmits_terminal_restart_stages() -> None:
     assert ForecastOrchestrator._terminal_stage_needs_manual_retry(context, verified_cohort)
 
 
+def test_missing_forcing_repair_owns_terminal_forcing_resubmit() -> None:
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=datetime(2026, 5, 1, tzinfo=UTC),
+        cycle_id="gfs_2026050100",
+        run_id="cycle_gfs_2026050100_forcing_repair",
+        all_basins=[],
+        active_basins=[
+            {
+                "state_evidence": {
+                    "decision": "retry_repair_missing_forcing",
+                    "restart_stage": "forcing",
+                    "missing_forcing_repair": {"status": "authorized"},
+                }
+            }
+        ],
+        restart_stage="forcing",
+    )
+
+    assert ForecastOrchestrator._terminal_stage_needs_manual_retry(
+        context,
+        {"stage": "forcing", "status": "succeeded", "slurm_job_id": "old-forcing-job"},
+    )
+    assert not ForecastOrchestrator._terminal_stage_needs_manual_retry(
+        context,
+        {"stage": "convert", "status": "succeeded", "slurm_job_id": "old-convert-job"},
+    )
+
+
+def test_real_forecast_orchestrator_repair_resubmits_forcing_first_with_exact_warm_manifest(
+    tmp_path: Path,
+) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(
+        tmp_path,
+        repository,
+        client,
+        terminal_stage="forecast",
+    )
+    run_id = "cycle_gfs_2026050100_forcing_repair"
+    prior_job_id = f"job_{run_id}_forcing"
+    repository.jobs[prior_job_id] = {
+        "job_id": prior_job_id,
+        "run_id": run_id,
+        "cycle_id": "gfs_2026050100",
+        "job_type": "produce_forcing_array",
+        "slurm_job_id": "old-forcing-2000",
+        "model_id": None,
+        "stage": "forcing",
+        "status": "succeeded",
+        "submitted_at": "2026-05-01T00:00:00Z",
+        "finished_at": "2026-05-01T00:05:00Z",
+        "retry_count": 0,
+    }
+    basins = _basins(2)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "orchestration_run_id": run_id,
+                "restart_stage": "forcing",
+                "max_concurrent": 2,
+                "init_state_id": f"state_warm_{index}",
+                "init_state_uri": f"s3://nhms/states/gfs/model_{index}/state.cfg.ic",
+                "init_state_checksum": f"sha256:warm-{index}",
+                "init_state_valid_time": "2026-05-01T00:00:00Z",
+                "init_state_quality": "fresh",
+                "init_state_lineage": {"start_mode": "warm", "producer_cycle": "2026-04-30T12:00:00Z"},
+                "state_evidence": {
+                    "decision": "retry_repair_missing_forcing",
+                    "restart_stage": "forcing",
+                    "cold_fallback_allowed": False,
+                    "missing_forcing_repair": {"status": "authorized"},
+                },
+            }
+        )
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    assert result.status == "succeeded"
+    assert [submission["stage"] for submission in client.submissions] == ["forcing", "forecast"]
+    assert repository.jobs[prior_job_id]["status"] == "succeeded"
+    forcing_job = repository.jobs[f"{prior_job_id}_retry_1"]
+    assert forcing_job["idempotency_key"] == f"{run_id}:forcing:retry_1"
+    assert client.submissions[0]["manifest"]["max_concurrent"] == 2
+    forecast_submission = client.submissions[1]
+    assert forecast_submission["manifest"]["max_concurrent"] == 2
+    for index, task in enumerate(forecast_submission["tasks"]):
+        runtime_manifest = json.loads(Path(task["manifest_path"]).read_text(encoding="utf-8"))
+        initial_state = runtime_manifest["initial_state"]
+        assert initial_state["state_id"] == f"state_warm_{index}"
+        assert initial_state["ic_file_uri"] == (
+            f"s3://nhms/states/gfs/model_{index}/state.cfg.ic"
+        )
+        assert initial_state["checksum"] == f"sha256:warm-{index}"
+        assert initial_state["valid_time"] == "2026-05-01T00:00:00Z"
+        assert initial_state["lineage"]["start_mode"] == "warm"
+
+
 def test_auto_manifest_repair_resubmits_terminal_cohort_when_every_basin_requires_it() -> None:
     context = CycleOrchestrationContext(
         source_id="gfs",
