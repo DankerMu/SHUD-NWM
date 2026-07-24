@@ -144,6 +144,7 @@ _RECONCILE_MIGRATION_TEMP_RE = re.compile(
     rf"{re.escape(_RECONCILE_INVENTORY_ROLLFORWARD_RECEIPT)})\.{_ATOMIC_TEMP_NONCE_RE}\.tmp$"
 )
 _LATEST_REPLAY_ORDER_SENTINEL = MAX_FILE_JOURNAL_RECORDS + 1
+_UNSET = object()
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _FORECAST_RUN_ID_RE = re.compile(r"^fcst_([^_]+)_(\d{10})_(.+)$")
 _CYCLE_RUN_ID_RE = re.compile(r"^cycle_([^_]+)_(\d{10})$")
@@ -806,6 +807,196 @@ class FileOrchestrationJournalRepository:
             )
         )
         return jobs
+
+    def query_rollback_unsettled_jobs(self) -> list[SimpleNamespace]:
+        """Read bounded current authority and allow only explicitly settled jobs."""
+
+        authority_roots = {
+            name: self.root / name
+            for name in (
+                _RECONCILE_INVENTORY_DIRECTORY,
+                "journal",
+                "latest",
+                "pipeline-jobs",
+                _LEGACY_ACTIVE_RECONCILE_DIRECTORY,
+            )
+        }
+        authority_signatures = {
+            name: _stat_signature(path) for name, path in authority_roots.items()
+        }
+        records: dict[str, dict[str, Any]] = {}
+        try:
+            for job in self._iter_reconcile_inventory_records(
+                quiescence=True,
+                strict_disappearance=True,
+            ):
+                _upsert_by_key(records, job, key="job_id")
+            for job in self._iter_rollback_scope_pipeline_job_records(
+                authority_signatures=authority_signatures,
+            ):
+                if _job_blocks_rollback_quiescence(job):
+                    _upsert_by_key(records, job, key="job_id")
+        except FileOrchestrationJournalError:
+            self._require_rollback_authority_roots_unchanged(
+                authority_roots,
+                authority_signatures,
+            )
+            raise
+        self._require_rollback_authority_roots_unchanged(
+            authority_roots,
+            authority_signatures,
+        )
+        jobs = [_file_reconcile_namespace(job) for job in records.values()]
+        jobs.sort(
+            key=lambda job: (
+                _datetime_sort_key(getattr(job, "submitted_at", None)),
+                _datetime_sort_key(getattr(job, "created_at", None)),
+                str(job.job_id),
+            )
+        )
+        return jobs
+
+    def _require_rollback_authority_roots_unchanged(
+        self,
+        authority_roots: Mapping[str, Path],
+        authority_signatures: Mapping[str, tuple[int, int, int] | None],
+    ) -> None:
+        for name, path in authority_roots.items():
+            if _stat_signature(path) != authority_signatures[name]:
+                raise FileOrchestrationJournalError(
+                    "file_journal_quiescence_authority_changed",
+                    field=name.replace("-", "_"),
+                )
+
+    def _iter_rollback_scope_pipeline_job_records(
+        self,
+        *,
+        authority_signatures: Mapping[str, tuple[int, int, int] | None],
+    ) -> Iterable[dict[str, Any]]:
+        """Discover old-writer rows created after the rollback fence, not history."""
+
+        fence = self._read_optional_json(
+            self.root / _RECONCILE_INVENTORY_ROLLBACK_PREP_RECEIPT
+        )
+        if fence is None:
+            raise FileOrchestrationJournalError(
+                "file_journal_quiescence_authority_changed",
+                field="reconcile_inventory_rollback_receipt",
+            )
+        prepared = self._validated_reconcile_inventory_rollback_receipt(fence)
+        prepared_at = _coerce_datetime(prepared["prepared_at"], field="prepared_at").timestamp()
+        budget = _RecordBudget(max(self.max_records, 1), "rollback_scope_records")
+        records: dict[str, dict[str, Any]] = {}
+        selected_signatures: dict[Path, Any] = {}
+
+        def changed_since_prepare(path: Path) -> bool:
+            before = _stat_signature(path)
+            try:
+                metadata = stat_no_follow(path, containment_root=self.root)
+            except (FileNotFoundError, OSError, SafeFilesystemError) as error:
+                raise FileOrchestrationJournalError(
+                    "file_journal_quiescence_authority_changed",
+                    field=str(_relative_evidence(path, self.root)),
+                ) from error
+            if before != _stat_signature(path):
+                raise FileOrchestrationJournalError(
+                    "file_journal_quiescence_authority_changed",
+                    field=str(_relative_evidence(path, self.root)),
+                )
+            changed = metadata.st_mtime >= prepared_at
+            if changed:
+                selected_signatures[path] = before
+            return changed
+
+        for path in self._iter_reconcile_direct_pipeline_job_paths(
+            strict_disappearance=True,
+            expected_root_signature=authority_signatures["pipeline-jobs"],
+        ):
+            if not changed_since_prepare(path):
+                continue
+            payload = self._read_optional_json(path)
+            if payload is None or _stat_signature(path) != selected_signatures[path]:
+                raise FileOrchestrationJournalError(
+                    "file_journal_quiescence_authority_changed",
+                    field="pipeline_jobs",
+                )
+            budget.consume()
+            job = self._validated_direct_pipeline_job_record(
+                payload,
+                expected_job_id=_safe_segment(path.stem),
+            )
+            _upsert_by_key(records, job, key="job_id")
+
+        for path in self._iter_migration_journal_paths(
+            expected_root_signature=authority_signatures["journal"],
+        ):
+            if not changed_since_prepare(path):
+                continue
+            source_id, cycle_time = _journal_identity_from_path(
+                path, root=self.root, surface="journal"
+            )
+            rows = _CycleRows()
+            for record in self._read_migration_jsonl(path):
+                budget.consume()
+                self._apply_journal_record(
+                    rows,
+                    record,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                )
+            if _stat_signature(path) != selected_signatures[path]:
+                raise FileOrchestrationJournalError(
+                    "file_journal_quiescence_authority_changed",
+                    field="journal",
+                )
+            for job in rows.pipeline_jobs.values():
+                _upsert_by_key(records, job, key="job_id")
+
+        latest_paths = sorted(
+            _iter_discovered_files(
+                self.root / "latest",
+                root=self.root,
+                suffix=".json",
+                recursive=True,
+                max_files=self.max_files,
+                max_depth=self.max_depth,
+                strict_disappearance=True,
+                expected_root_signature=authority_signatures["latest"],
+            )
+        )
+        for path in latest_paths:
+            if not changed_since_prepare(path):
+                continue
+            payload = self._read_optional_json(path)
+            if payload is None:
+                raise FileOrchestrationJournalError(
+                    "file_journal_quiescence_authority_changed",
+                    field="latest",
+                )
+            source_id, cycle_time, model_id = _latest_identity_from_path(path, root=self.root)
+            rows = _CycleRows()
+            self._apply_latest_view(
+                rows,
+                payload,
+                source_id=source_id,
+                cycle_time=cycle_time,
+                expected_model_id=model_id,
+            )
+            if _stat_signature(path) != selected_signatures[path]:
+                raise FileOrchestrationJournalError(
+                    "file_journal_quiescence_authority_changed",
+                    field="latest",
+                )
+            for job in rows.pipeline_jobs.values():
+                budget.consume()
+                _upsert_by_key(records, job, key="job_id")
+
+        for job in self._iter_legacy_active_reconcile_records(
+            expected_root_signature=authority_signatures[_LEGACY_ACTIVE_RECONCILE_DIRECTORY],
+        ):
+            budget.consume()
+            _upsert_by_key(records, job, key="job_id")
+        yield from records.values()
 
     def bind_reservation(
         self,
@@ -3797,7 +3988,12 @@ class FileOrchestrationJournalRepository:
         self._ensure_reconcile_inventory_migrated()
         yield from self._iter_reconcile_inventory_records()
 
-    def _iter_reconcile_inventory_records(self) -> Iterable[dict[str, Any]]:
+    def _iter_reconcile_inventory_records(
+        self,
+        *,
+        quiescence: bool = False,
+        strict_disappearance: bool = False,
+    ) -> Iterable[dict[str, Any]]:
         with self._write_lock:
             self._ensure_root_unlocked()
             with self._reconcile_inventory_file_lock_unlocked():
@@ -3807,27 +4003,48 @@ class FileOrchestrationJournalRepository:
             path = directory / entry_name
             anchor = self._read_optional_json(path)
             if anchor is None:
+                if strict_disappearance:
+                    raise FileOrchestrationJournalError(
+                        "file_journal_quiescence_authority_changed",
+                        field="reconcile_inventory",
+                    )
                 continue
             expected_job_id = _safe_segment(entry_name.removesuffix(".json"))
             source_id, cycle_time = self._validated_reconcile_inventory_anchor(
                 anchor,
                 expected_job_id=expected_job_id,
             )
-            with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            if strict_disappearance:
                 canonical = self._canonical_reconcile_job_unlocked(
                     expected_job_id,
                     source_id=source_id,
                     cycle_time=cycle_time,
+                    strict_disappearance=strict_disappearance,
                 )
-                if canonical is None or not _job_needs_restart_reconcile(canonical):
-                    self._remove_reconcile_inventory_anchor_unlocked(expected_job_id)
-                    continue
-                canonical_kind = _reconcile_inventory_row_kind(canonical)
-                if canonical_kind is None or canonical_kind != anchor.get("row_kind"):
+            else:
+                with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+                    canonical = self._canonical_reconcile_job_unlocked(
+                        expected_job_id,
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                    )
+            blocking = canonical is not None and _job_blocks_rollback_quiescence(canonical)
+            if canonical is None or not blocking:
+                if strict_disappearance and canonical is None:
                     raise FileOrchestrationJournalError(
-                        "file_journal_reconcile_inventory_invalid",
+                        "file_journal_quiescence_authority_changed",
                         field="reconcile_inventory",
                     )
+                if not strict_disappearance:
+                    self._remove_reconcile_inventory_anchor_unlocked(expected_job_id)
+                continue
+            canonical_kind = _reconcile_inventory_row_kind(canonical)
+            if canonical_kind is None or canonical_kind != anchor.get("row_kind"):
+                raise FileOrchestrationJournalError(
+                    "file_journal_reconcile_inventory_invalid",
+                    field="reconcile_inventory",
+                )
+            if quiescence or _job_needs_restart_reconcile(canonical):
                 yield canonical
 
     def _ensure_reconcile_inventory_migrated(self) -> None:
@@ -4588,8 +4805,14 @@ class FileOrchestrationJournalRepository:
             for job in rows.pipeline_jobs.values():
                 self._sync_reconcile_inventory_for_row_unlocked(job)
 
-    def _iter_legacy_active_reconcile_records(self) -> Iterable[dict[str, Any]]:
-        for path in self._iter_migration_legacy_active_paths():
+    def _iter_legacy_active_reconcile_records(
+        self,
+        *,
+        expected_root_signature: Any = _UNSET,
+    ) -> Iterable[dict[str, Any]]:
+        for path in self._iter_migration_legacy_active_paths(
+            expected_root_signature=expected_root_signature,
+        ):
             payload = self._read_optional_json(path)
             if payload is None:
                 raise FileOrchestrationJournalError(
@@ -4601,7 +4824,11 @@ class FileOrchestrationJournalRepository:
                 expected_job_id=_safe_segment(path.stem),
             )
 
-    def _iter_migration_legacy_active_paths(self) -> list[Path]:
+    def _iter_migration_legacy_active_paths(
+        self,
+        *,
+        expected_root_signature: Any = _UNSET,
+    ) -> list[Path]:
         return sorted(
             _iter_discovered_files(
                 self.root / _LEGACY_ACTIVE_RECONCILE_DIRECTORY,
@@ -4611,10 +4838,15 @@ class FileOrchestrationJournalRepository:
                 max_files=self.max_files,
                 max_depth=1,
                 strict_disappearance=True,
+                expected_root_signature=expected_root_signature,
             )
         )
 
-    def _iter_migration_journal_paths(self) -> list[Path]:
+    def _iter_migration_journal_paths(
+        self,
+        *,
+        expected_root_signature: Any = _UNSET,
+    ) -> list[Path]:
         return sorted(
             _iter_discovered_files(
                 self.root / "journal",
@@ -4624,6 +4856,7 @@ class FileOrchestrationJournalRepository:
                 max_files=self.max_files,
                 max_depth=self.max_depth,
                 strict_disappearance=True,
+                expected_root_signature=expected_root_signature,
             )
         )
 
@@ -4696,21 +4929,68 @@ class FileOrchestrationJournalRepository:
         *,
         source_id: str,
         cycle_time: datetime,
+        strict_disappearance: bool = False,
     ) -> dict[str, Any] | None:
-        direct = self._direct_pipeline_job_record(job_id)
-        legacy_payload = self._read_optional_json(
-            self.root / _LEGACY_ACTIVE_RECONCILE_DIRECTORY / f"{_safe_segment(job_id)}.json"
+        direct_path = self.root / "pipeline-jobs" / f"{job_id}.json"
+        direct_paths = [direct_path]
+        candidate_match = _CANDIDATE_JOB_ID_RE.fullmatch(job_id)
+        if candidate_match is not None:
+            direct_paths.append(
+                self.root
+                / "pipeline-jobs"
+                / "by-cycle"
+                / _safe_segment(_normalize_file_source_id(source_id, field="source_id"))
+                / format_cycle_time(cycle_time)
+                / f"{job_id}.json"
+            )
+        legacy_path = self.root / _LEGACY_ACTIVE_RECONCILE_DIRECTORY / f"{_safe_segment(job_id)}.json"
+        journal_path = self._journal_path(source_id=source_id, cycle_time=cycle_time)
+        latest_directory = self.root / "latest" / _safe_segment(source_id) / format_cycle_time(cycle_time)
+        latest_paths = (
+            self._latest_paths(
+                _safe_segment(source_id),
+                format_cycle_time(cycle_time),
+                model_id=None,
+            )
+            if strict_disappearance
+            else []
         )
+        watched_paths = (*direct_paths, legacy_path, journal_path, *latest_paths)
+        signatures = {path: _stat_signature(path) for path in watched_paths}
+        latest_directory_signature = _stat_signature(latest_directory)
+        direct = self._direct_pipeline_job_record(job_id)
+        legacy_payload = self._read_optional_json(legacy_path)
         legacy = (
             self._validated_direct_pipeline_job_record(legacy_payload, expected_job_id=job_id)
             if legacy_payload is not None
             else None
         )
         rows = _CycleRows()
-        for record in self._read_jsonl(self._journal_path(source_id=source_id, cycle_time=cycle_time)):
+        latest_rows = _CycleRows()
+        for latest_path in latest_paths:
+            payload = self._read_optional_json(latest_path)
+            if payload is None:
+                continue
+            self._apply_latest_view(
+                latest_rows,
+                payload,
+                source_id=source_id,
+                cycle_time=cycle_time,
+                expected_model_id=_safe_segment(latest_path.stem),
+            )
+        for record in self._read_jsonl(journal_path):
             self._apply_journal_record(rows, record, source_id=source_id, cycle_time=cycle_time)
+        if strict_disappearance and (
+            any(signature != _stat_signature(path) for path, signature in signatures.items())
+            or latest_directory_signature != _stat_signature(latest_directory)
+        ):
+            raise FileOrchestrationJournalError(
+                "file_journal_quiescence_authority_changed",
+                field="rollback_jobs",
+            )
         replayed = rows.pipeline_jobs.get(job_id)
-        authority = replayed or direct or legacy
+        latest = latest_rows.pipeline_jobs.get(job_id)
+        authority = replayed or latest or direct or legacy
         canonical = dict(authority) if authority is not None else None
         if canonical is None:
             return None
@@ -4725,7 +5005,7 @@ class FileOrchestrationJournalRepository:
         with self._reconcile_inventory_file_lock_unlocked():
             row_kind = _reconcile_inventory_row_kind(row)
             job_id = _required_safe_identity(row, "job_id")
-            if row_kind is None or not _job_needs_restart_reconcile(row):
+            if row_kind is None or not _job_blocks_rollback_quiescence(row):
                 self._remove_reconcile_inventory_anchor_unlocked(job_id)
                 return False
             self._atomic_write_json_unlocked(
@@ -4766,13 +5046,31 @@ class FileOrchestrationJournalRepository:
                 )
             yield self._validated_direct_pipeline_job_record(payload, expected_job_id=expected_job_id)
 
-    def _iter_reconcile_direct_pipeline_job_paths(self) -> Iterable[Path]:
+    def _iter_reconcile_direct_pipeline_job_paths(
+        self,
+        *,
+        strict_disappearance: bool = False,
+        expected_root_signature: Any = _UNSET,
+    ) -> Iterable[Path]:
         directory = self.root / "pipeline-jobs"
         if self.max_files <= 0 or self.max_depth < 0:
             return
+        if (
+            expected_root_signature is not _UNSET
+            and _stat_signature(directory) != expected_root_signature
+        ):
+            raise FileOrchestrationJournalError(
+                "file_journal_quiescence_authority_changed",
+                field="pipeline_jobs",
+            )
         try:
             directory_mode = stat_no_follow(directory, containment_root=self.root).st_mode
         except FileNotFoundError:
+            if strict_disappearance and expected_root_signature is not None:
+                raise FileOrchestrationJournalError(
+                    "file_journal_quiescence_authority_changed",
+                    field="pipeline_jobs",
+                )
             return
         except (OSError, SafeFilesystemError) as error:
             raise FileOrchestrationJournalError(
@@ -4791,6 +5089,11 @@ class FileOrchestrationJournalRepository:
                 max_entries=self.max_files,
             )
         except FileNotFoundError:
+            if strict_disappearance:
+                raise FileOrchestrationJournalError(
+                    "file_journal_quiescence_authority_changed",
+                    field="pipeline_jobs",
+                )
             return
         except (OSError, SafeFilesystemError) as error:
             raise FileOrchestrationJournalError(
@@ -4800,6 +5103,14 @@ class FileOrchestrationJournalRepository:
         if len(entry_names) > self.max_files:
             raise FileOrchestrationJournalError(
                 "file_journal_record_limit_exceeded",
+                field="pipeline_jobs",
+            )
+        if (
+            expected_root_signature is not _UNSET
+            and _stat_signature(directory) != expected_root_signature
+        ):
+            raise FileOrchestrationJournalError(
+                "file_journal_quiescence_authority_changed",
                 field="pipeline_jobs",
             )
         for entry_name in sorted(entry_names):
@@ -7069,6 +7380,15 @@ def _job_needs_restart_reconcile(job: Mapping[str, Any]) -> bool:
     } and _file_journal_real_slurm_job_id(job.get("slurm_job_id"))
 
 
+def _job_blocks_rollback_quiescence(job: Mapping[str, Any]) -> bool:
+    """Fail closed: only the explicit terminal allowlist can be quiescent."""
+
+    status = str(job.get("status") or "")
+    if status not in TERMINAL_PIPELINE_STATUSES:
+        return True
+    return _job_needs_restart_reconcile(job)
+
+
 def _file_retry_job_int(job: Any, field: str) -> int:
     value = _file_retry_job_value(job, field)
     try:
@@ -8663,6 +8983,7 @@ def _iter_discovered_files(
     max_files: int,
     max_depth: int,
     strict_disappearance: bool = False,
+    expected_root_signature: Any = _UNSET,
 ) -> Iterable[Path]:
     scanned_entries = 0
 
@@ -8674,9 +8995,42 @@ def _iter_discovered_files(
                 field=str(_relative_evidence(current, root)),
                 evidence={"max_depth": max_depth},
             )
+        strict_authority_walk = strict_disappearance and expected_root_signature is not _UNSET
+        directory_signature = (
+            _stat_signature(current) if strict_authority_walk else _UNSET
+        )
+        if (
+            current == directory
+            and expected_root_signature is not _UNSET
+            and directory_signature != expected_root_signature
+        ):
+            raise FileOrchestrationJournalError(
+                "file_journal_quiescence_authority_changed",
+                field=str(_relative_evidence(current, root)),
+            )
+        if current != directory and strict_authority_walk and directory_signature is None:
+            raise FileOrchestrationJournalError(
+                "file_journal_quiescence_authority_changed",
+                field=str(_relative_evidence(current, root)),
+            )
+
+        def require_directory_unchanged() -> None:
+            if strict_authority_walk and _stat_signature(current) != directory_signature:
+                raise FileOrchestrationJournalError(
+                    "file_journal_quiescence_authority_changed",
+                    field=str(_relative_evidence(current, root)),
+                )
+
         try:
             current_mode = stat_no_follow(current, containment_root=root).st_mode
         except FileNotFoundError:
+            if strict_disappearance and expected_root_signature is not _UNSET and (
+                current != directory or expected_root_signature is not None
+            ):
+                raise FileOrchestrationJournalError(
+                    "file_journal_quiescence_authority_changed",
+                    field=str(_relative_evidence(current, root)),
+                )
             if strict_disappearance and current != directory:
                 raise FileOrchestrationJournalError(
                     "file_journal_reconcile_inventory_migration_invalid",
@@ -8689,6 +9043,7 @@ def _iter_discovered_files(
                 field=str(_relative_evidence(current, root)),
                 evidence={"error_type": type(error).__name__},
             ) from error
+        require_directory_unchanged()
         if not stat.S_ISDIR(current_mode):
             raise FileOrchestrationJournalError(
                 "file_journal_unsafe_scanned_entry",
@@ -8711,7 +9066,11 @@ def _iter_discovered_files(
         except FileNotFoundError:
             if strict_disappearance:
                 raise FileOrchestrationJournalError(
-                    "file_journal_reconcile_inventory_migration_invalid",
+                    (
+                        "file_journal_quiescence_authority_changed"
+                        if expected_root_signature is not _UNSET
+                        else "file_journal_reconcile_inventory_migration_invalid"
+                    ),
                     field=str(_relative_evidence(current, root)),
                 )
             return
@@ -8727,6 +9086,7 @@ def _iter_discovered_files(
                 field=str(_relative_evidence(directory, root)),
                 evidence={"max_files": max_files},
             )
+        require_directory_unchanged()
         scanned_entries += len(entry_names)
         for entry_name in sorted(entry_names):
             if _SAFE_SEGMENT_RE.fullmatch(entry_name) is None:
@@ -8740,7 +9100,11 @@ def _iter_discovered_files(
             except FileNotFoundError:
                 if strict_disappearance:
                     raise FileOrchestrationJournalError(
-                        "file_journal_reconcile_inventory_migration_invalid",
+                        (
+                            "file_journal_quiescence_authority_changed"
+                            if expected_root_signature is not _UNSET
+                            else "file_journal_reconcile_inventory_migration_invalid"
+                        ),
                         field=str(_relative_evidence(entry, root)),
                     )
                 continue
@@ -8762,6 +9126,7 @@ def _iter_discovered_files(
                         evidence={"entry_type": "not_regular_file"},
                     )
                 yield entry
+        require_directory_unchanged()
 
     yield from walk(directory, 0)
 

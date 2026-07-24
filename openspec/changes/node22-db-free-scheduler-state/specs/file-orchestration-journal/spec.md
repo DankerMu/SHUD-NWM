@@ -532,30 +532,82 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
   commands and caller root/lock overrides, and requires the target checkout's
   executable `.venv/bin/python`
 - **AND** after receipt validation it materializes the full target generation as
-  a private detached clean commit snapshot and copies the already-opened,
+  a private detached clean persistent source bundle and copies the already-opened,
   identity-checked interpreter into a protected persistent runtime bundle;
+  both bundles SHALL be located beneath the workspace in the deterministic
+  private immutable retention root for the exact preparation receipt and target
+  generation, never beneath the target checkout or its venv;
+  active artifact validation SHALL traverse the complete runtime tree with a
+  bounded no-follow directory-descriptor walk, require every entry to be
+  owner-owned regular-file/directory only with its sealed non-writable mode,
+  reject symlink or special entries, and require only the bound interpreter to
+  carry executable mode;
+  that runtime bundle contains copied, non-symlinked interpreter libraries and
+  self-contained configuration, so removing or replacing the original venv
+  libraries/configuration cannot change later execution;
   rechecking the original checkout and runtime before launch means a post-check
   checkout or interpreter-path replacement cannot change the executed source or
   interpreter
+- **AND** before the old writer starts, the current controller durably binds the
+  preparation receipt, journal/workspace/lease identity and target Git generation
+  as a `prepared` no-launch authority, then replaces it with the protected runtime
+  and protected source bundle as `active` before crossing the child-execution
+  boundary; the current HTTP Slurm gateway applies only that exact active
+  workspace binding even when the old writer does not understand the new manifest
+  fields, and conflicting explicit fields fail closed
+- **AND** launcher admission is exactly one matching durable `prepared`
+  authority for first launch or one matching durable `active` authority for
+  replay; missing authority and `completed` authority are zero-launch failures,
+  and only a new prepare may replace/archive a completed generation
 - **AND** the launcher overrides ambient configuration with the receipt-bound
   journal root, workspace, file-lock backend and lock path, and carries the
-  protected target runtime through the production scheduler, forecast
-  orchestrator, submission manifest and HTTP Slurm gateway into forcing,
-  forecast and state-save worker templates; submissions without an explicit
-  target runtime preserve their existing console entrypoints
+  protected target runtime and source through the HTTP Slurm gateway into forcing,
+  forecast and state-save worker templates; all three stages execute from the
+  bound source generation, while workspaces without an active binding preserve
+  their existing console entrypoints
+- **AND** each single, array, or direct-render Gateway request captures and
+  validates the workspace binding once, reuses that immutable request-local
+  value for every task and render step, rejects active-binding overrides of
+  `PATH`, `PYTHONPATH`, `PYTHONHOME`, or `VIRTUAL_ENV`; every active script unsets
+  `PYTHONHOME` and `VIRTUAL_ENV`, exports the bound source as the exact
+  `PYTHONPATH`, replaces ambient `PATH` with the bound runtime bin plus the fixed
+  minimal system path, and uses the exact bound interpreter for worker commands
+  and both forecast inline Python blocks
 - **AND** a separate cross-process rollback execution lock is held across the
   complete old-writer process and inherited across launcher failure, so
   roll-forward cannot consume the fence before or while that writer runs
-- **AND** the protected runtime remains on shared storage after launch and is
-  removed only after every submitted worker that references it is terminal;
-  its path and fail-closed retention contract are launch evidence
+- **AND** deleting the entire original target checkout after active publication
+  cannot invalidate the binding or forcing, forecast, and state-save execution;
+  the protected runtime and source remain on shared workspace storage after launch
+  and are removed only after every submitted worker that references them is
+  terminal; both paths, the execution-binding identity and the fail-closed
+  retention contract are launch evidence
 - **AND** dirty, untracked, unresolved, changed, mismatched, runtime-unavailable,
   or snapshot-unavailable targets are rejected before any writer is started;
   caller-supplied generation claims are not launch authority
 - **AND** roll-forward requires the matching preparation receipt and the same
-  scheduler lease; it performs one strict, crash-resumable backfill, restores
-  the completion marker, publishes a bound roll-forward receipt, and consumes
-  the fence before normal scheduling can resume
+  scheduler lease; before its first mutation it must use bounded current
+  reconcile-inventory authority—not global historical replay—to prove every
+  rollback-era job is in the explicit terminal allowlist; local/no-ID jobs,
+  blank/unknown statuses, partial cohort projection, and any
+  enumerate/stat/read disappearance block; it captures the root signatures for
+  reconcile-inventory, journal, latest, direct pipeline-jobs, and legacy-active
+  at query start, and any initially existing root disappearance, replacement, or
+  signature change through the final check reports
+  `file_journal_quiescence_authority_changed`; every directory entered by a
+  recursive authority walker is likewise signature-checked before list, after
+  list, and after child recursion, so nested pre-list deletion, replacement, or
+  addition cannot become an empty or different authority view. A root is empty
+  only when it stays nonexistent throughout the query. The proof query itself performs no
+  durable write, and unavailable evidence fails closed
+- **AND** roll-forward can cancel an unlaunched preparation only from the exact
+  durable `prepared` authority; missing or tampered authority fails closed, while
+  both `prepared` and `active` transition to `rolling_forward` before the strict
+  crash-resumable backfill, then to `completed` only after it restores the
+  completion marker, publishes the bound roll-forward receipt and consumes the
+  fence; replay resumes the persisted transition, and a later supported rollback
+  preserves prior completed binding evidence without mixing it into the new
+  preparation
 - **AND** a live scheduler lease, a tampered/stale/wrong-root receipt, or a lost
   lease fails closed without changing migration authority
 - **AND** steady-state restart discovery after migration reads only the marker

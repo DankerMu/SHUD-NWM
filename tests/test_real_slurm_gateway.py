@@ -120,6 +120,14 @@ def test_real_slurm_gateway_fake_binaries_cover_command_boundary(
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
 
     gateway = _gateway(tmp_path)
+    binding_captures: list[Path] = []
+    real_capture = gateway._capture_active_rollback_binding
+
+    def capture_once(workspace_root: Path):
+        binding_captures.append(workspace_root)
+        return real_capture(workspace_root)
+
+    monkeypatch.setattr(gateway, "_capture_active_rollback_binding", capture_once)
     request = SubmitJobRequest(
         run_id="run_001",
         model_id="model_001",
@@ -141,6 +149,7 @@ def test_real_slurm_gateway_fake_binaries_cover_command_boundary(
     assert array.job_id == "12345"
     assert array.manifest["array_task_count"] == 2
     assert array.manifest["max_concurrent"] == 2
+    assert binding_captures == [tmp_path / "workspace", tmp_path / "workspace"]
 
     status = gateway.get_job_status("12345")
     assert status.status == SlurmJobStatus.FAILED
@@ -420,6 +429,378 @@ def _production_manifest(tmp_path: Path, job_type: str) -> dict[str, object]:
         "year": 1993,
         "manifest_index_path": str(tmp_path / "manifest_index.json"),
     }
+
+
+def _write_active_rollback_binding(tmp_path: Path) -> dict[str, object]:
+    import hashlib
+    import sys
+
+    from packages.common.rollback_execution_binding import (
+        ROLLBACK_EXECUTION_BINDING_SCHEMA_VERSION,
+        binding_id_for,
+        rollback_execution_artifact_root,
+        seal_rollback_python_source_tree,
+        write_rollback_execution_binding,
+    )
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    journal = tmp_path / "journal"
+    journal.mkdir(exist_ok=True)
+    receipt_id = "a" * 64
+    generation = "d" * 40
+    retained = rollback_execution_artifact_root(workspace, receipt_id, generation)
+    retained.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    retained.parent.chmod(0o700)
+    source = retained / "source"
+    source.mkdir(parents=True)
+    (source / "bound_sentinel.py").write_text("GENERATION = 'A'\n", encoding="utf-8")
+    seal_rollback_python_source_tree(source)
+    runtime = retained / "runtime" / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} \"$@\"\n", encoding="utf-8")
+    runtime.chmod(0o500)
+    runtime_library = retained / "runtime" / "lib" / "python-test" / "site.py"
+    runtime_library.parent.mkdir(parents=True)
+    runtime_library.write_text("VALUE = 'retained'\n", encoding="utf-8")
+    runtime_library.chmod(0o400)
+    for directory in (
+        runtime_library.parent,
+        runtime_library.parent.parent,
+        runtime.parent,
+        runtime.parent.parent,
+    ):
+        directory.chmod(0o500)
+    retained.chmod(0o500)
+    metadata = journal.stat()
+    now = "2026-07-23T12:00:00Z"
+    binding: dict[str, object] = {
+        "schema_version": ROLLBACK_EXECUTION_BINDING_SCHEMA_VERSION,
+        "binding_id": "",
+        "status": "active",
+        "preparation_receipt_id": receipt_id,
+        "journal_root_identity": {
+            "path_digest": hashlib.sha256(str(journal).encode()).hexdigest(),
+            "device": metadata.st_dev,
+            "inode": metadata.st_ino,
+        },
+        "scheduler_lease_identity": {
+            "backend": "file",
+            "lock_path_digest": "b" * 64,
+            "workspace_root_digest": "c" * 64,
+        },
+        "workspace_root": str(workspace),
+        "lock_path": str(workspace / "scheduler" / "production-scheduler.lock"),
+        "target_writer_generation": generation,
+        "target_python_runtime": str(runtime),
+        "target_python_source_root": str(source),
+        "writer_repository_root": str(tmp_path / "rollback-checkout"),
+        "created_at": now,
+        "updated_at": now,
+    }
+    binding["binding_id"] = binding_id_for(binding)
+    return write_rollback_execution_binding(workspace, binding)
+
+
+def _count_active_binding_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, int]:
+    from services.slurm_gateway import real_backend as real_backend_module
+
+    calls = {"read": 0, "validate": 0}
+    real_read = real_backend_module.read_rollback_execution_binding
+    real_validate = real_backend_module.validate_rollback_execution_binding
+
+    def counted_read(*args, **kwargs):
+        calls["read"] += 1
+        return real_read(*args, **kwargs)
+
+    def counted_validate(*args, **kwargs):
+        calls["validate"] += 1
+        return real_validate(*args, **kwargs)
+
+    monkeypatch.setattr(real_backend_module, "read_rollback_execution_binding", counted_read)
+    monkeypatch.setattr(real_backend_module, "validate_rollback_execution_binding", counted_validate)
+    return calls
+
+
+def test_round22_active_binding_rejects_owner_writable_retention_generation(
+    tmp_path: Path,
+) -> None:
+    from packages.common.rollback_execution_binding import (
+        RollbackExecutionBindingError,
+        read_rollback_execution_binding,
+    )
+
+    binding = _write_active_rollback_binding(tmp_path)
+    retention_generation = Path(str(binding["target_python_source_root"])).parent
+    retention_generation.chmod(0o700)
+
+    with pytest.raises(
+        RollbackExecutionBindingError,
+        match="artifact has unsafe ownership or mode",
+    ):
+        read_rollback_execution_binding(tmp_path / "workspace", required=True)
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ["nested_file_writable", "nested_directory_writable", "nested_symlink", "nested_fifo"],
+)
+def test_round23_active_binding_nested_runtime_tamper_is_zero_submit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tamper: str,
+) -> None:
+    binding = _write_active_rollback_binding(tmp_path)
+    runtime_root = Path(str(binding["target_python_runtime"])).parent.parent
+    library_directory = runtime_root / "lib" / "python-test"
+    library_file = library_directory / "site.py"
+    if tamper == "nested_file_writable":
+        library_file.chmod(0o600)
+    elif tamper == "nested_directory_writable":
+        library_directory.chmod(0o700)
+    else:
+        library_directory.chmod(0o700)
+        tampered_entry = library_directory / ("alias.py" if tamper == "nested_symlink" else "pipe")
+        if tamper == "nested_symlink":
+            tampered_entry.symlink_to(library_file)
+        else:
+            if not hasattr(os, "mkfifo"):
+                pytest.skip("FIFO creation is unavailable on this platform")
+            os.mkfifo(tampered_entry)
+        library_directory.chmod(0o500)
+    commands: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "run", lambda command, **_kwargs: commands.append(command))
+    gateway = _production_gateway(tmp_path)
+
+    with pytest.raises(ManifestValidationError, match="Active rollback execution binding is invalid"):
+        gateway.submit_job(
+            SubmitJobRequest(
+                run_id="run_001",
+                model_id="model_001",
+                job_type="run_shud_analysis",
+                manifest=_production_manifest(tmp_path, "run_shud_analysis"),
+            )
+        )
+    assert commands == []
+
+
+def test_round21_active_binding_real_submit_job_captures_and_validates_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binding = _write_active_rollback_binding(tmp_path)
+    for key, value in {
+        "PATH": str(tmp_path / "hostile-path"),
+        "PYTHONPATH": str(tmp_path / "hostile-pythonpath"),
+        "PYTHONHOME": str(tmp_path / "hostile-pythonhome"),
+        "VIRTUAL_ENV": str(tmp_path / "hostile-venv"),
+    }.items():
+        monkeypatch.setenv(key, value)
+    calls = _count_active_binding_validation(monkeypatch)
+    commands: list[list[str]] = []
+    scripts: list[str] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        commands.append(command)
+        scripts.append(Path(command[-1]).read_text(encoding="utf-8"))
+        return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 12345\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    gateway = _production_gateway(tmp_path)
+    manifest = _production_manifest(tmp_path, "run_shud_analysis")
+    record = gateway.submit_job(
+        SubmitJobRequest(
+            run_id="run_001",
+            model_id="model_001",
+            job_type="run_shud_analysis",
+            manifest=manifest,
+        )
+    )
+
+    assert calls == {"read": 1, "validate": 1}
+    assert len(commands) == 1 and Path(commands[0][0]).name == "sbatch"
+    assert record.job_id == "12345"
+    for field in ("target_python_runtime", "target_python_source_root"):
+        assert record.manifest[field] == binding[field]
+        assert str(binding[field]) in scripts[0]
+    assert "unset PYTHONHOME" in scripts[0]
+    assert "unset VIRTUAL_ENV" in scripts[0]
+    expected_path = Path(str(binding["target_python_runtime"])).parent
+    assert f"export PATH={expected_path}:/usr/local/bin:/usr/bin:/bin" in scripts[0]
+    assert ":$PATH" not in scripts[0]
+    assert "hostile-" not in scripts[0]
+
+
+def test_round21_active_binding_real_submit_array_is_one_capture_and_exact_everywhere(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binding = _write_active_rollback_binding(tmp_path)
+    for key, value in {
+        "PATH": str(tmp_path / "hostile-path"),
+        "PYTHONPATH": str(tmp_path / "hostile-pythonpath"),
+        "PYTHONHOME": str(tmp_path / "hostile-pythonhome"),
+        "VIRTUAL_ENV": str(tmp_path / "hostile-venv"),
+    }.items():
+        monkeypatch.setenv(key, value)
+    calls = _count_active_binding_validation(monkeypatch)
+    commands: list[list[str]] = []
+    scripts: list[str] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        commands.append(command)
+        scripts.append(Path(command[-1]).read_text(encoding="utf-8"))
+        return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 22345\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    gateway = _production_gateway(tmp_path)
+    tasks = [_fake_array_task("run_001", "model_001"), _fake_array_task("run_002", "model_002")]
+    record = gateway.submit_job_array(
+        job_type="run_shud_forecast_array",
+        cycle_id="cycle_001",
+        stage_name="forecast",
+        tasks=tasks,
+        manifest=_production_manifest(tmp_path, "run_shud_forecast_array"),
+    )
+
+    assert calls == {"read": 1, "validate": 1}
+    assert len(commands) == 1
+    assert commands[0][1] == "--array=0-1%2"
+    assert record.job_id == "22345"
+    persisted_tasks = json.loads(Path(record.manifest["manifest_index_path"]).read_text(encoding="utf-8"))
+    assert len(persisted_tasks) == 2
+    for field in ("target_python_runtime", "target_python_source_root"):
+        assert record.manifest[field] == binding[field]
+        assert all(task[field] == binding[field] for task in persisted_tasks)
+        assert str(binding[field]) in scripts[0]
+    assert "unset PYTHONHOME" in scripts[0]
+    assert "unset VIRTUAL_ENV" in scripts[0]
+    expected_path = Path(str(binding["target_python_runtime"])).parent
+    assert f"export PATH={expected_path}:/usr/local/bin:/usr/bin:/bin" in scripts[0]
+    assert ":$PATH" not in scripts[0]
+    assert "hostile-" not in scripts[0]
+    assert scripts[0].count('"$NHMS_TARGET_PYTHON_RUNTIME" - <<\'PY\'') == 2
+
+
+@pytest.mark.parametrize("endpoint", ["single", "array"])
+@pytest.mark.parametrize("field", ["target_python_runtime", "target_python_source_root"])
+def test_round21_active_binding_submit_conflict_is_zero_sbatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+    field: str,
+) -> None:
+    _write_active_rollback_binding(tmp_path)
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **_kwargs: commands.append(command),
+    )
+    gateway = _production_gateway(tmp_path)
+    job_type = "run_shud_analysis" if endpoint == "single" else "run_shud_forecast_array"
+    manifest = {**_production_manifest(tmp_path, job_type), field: str(tmp_path / "hostile")}
+
+    with pytest.raises(ManifestValidationError, match="conflicts with the active rollback"):
+        if endpoint == "single":
+            gateway.submit_job(
+                SubmitJobRequest(
+                    run_id="run_001",
+                    model_id="model_001",
+                    job_type=job_type,
+                    manifest=manifest,
+                )
+            )
+        else:
+            gateway.submit_job_array(
+                job_type=job_type,
+                cycle_id="cycle_001",
+                stage_name="forecast",
+                tasks=[_fake_array_task("run_001", "model_001")],
+                manifest=manifest,
+            )
+    assert commands == []
+
+
+@pytest.mark.parametrize("endpoint", ["single", "array"])
+@pytest.mark.parametrize("key", ["PATH", "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"])
+def test_round21_active_binding_real_submit_rejects_hostile_bootstrap_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+    key: str,
+) -> None:
+    _write_active_rollback_binding(tmp_path)
+    commands: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "run", lambda command, **_kwargs: commands.append(command))
+    gateway = _production_gateway(tmp_path)
+    job_type = "run_shud_analysis" if endpoint == "single" else "run_shud_forecast_array"
+    manifest = {**_production_manifest(tmp_path, job_type), "slurm_env": {key: "/tmp/hostile"}}
+
+    with pytest.raises(ManifestValidationError, match="protects Python bootstrap"):
+        if endpoint == "single":
+            gateway.submit_job(
+                SubmitJobRequest(
+                    run_id="run_001",
+                    model_id="model_001",
+                    job_type=job_type,
+                    manifest=manifest,
+                )
+            )
+        else:
+            gateway.submit_job_array(
+                job_type=job_type,
+                cycle_id="cycle_001",
+                stage_name="forecast",
+                tasks=[_fake_array_task("run_001", "model_001")],
+                manifest=manifest,
+            )
+    assert commands == []
+
+
+@pytest.mark.parametrize("endpoint", ["single", "array"])
+@pytest.mark.parametrize("key", ["PATH", "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"])
+def test_round21_no_binding_real_submit_preserves_bootstrap_env_compatibility(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+    key: str,
+) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 32345\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    gateway = _production_gateway(tmp_path)
+    job_type = "run_shud_analysis" if endpoint == "single" else "run_shud_forecast_array"
+    manifest = {**_production_manifest(tmp_path, job_type), "slurm_env": {key: "/tmp/ordinary"}}
+    if endpoint == "single":
+        record = gateway.submit_job(
+            SubmitJobRequest(
+                run_id="run_001",
+                model_id="model_001",
+                job_type=job_type,
+                manifest=manifest,
+            )
+        )
+    else:
+        record = gateway.submit_job_array(
+            job_type=job_type,
+            cycle_id="cycle_001",
+            stage_name="forecast",
+            tasks=[_fake_array_task("run_001", "model_001")],
+            manifest=manifest,
+        )
+    assert record.job_id == "32345"
+    assert record.manifest["slurm_env"][key] == "/tmp/ordinary"
+    assert len(commands) == 1
 
 
 def test_submit_job_parses_sbatch_stdout(monkeypatch, tmp_path):
@@ -1666,6 +2047,9 @@ def test_round18_http_gateway_renders_only_explicit_target_runtime_for_worker_st
     target_runtime.parent.mkdir(parents=True)
     target_runtime.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     target_runtime.chmod(0o700)
+    target_source = tmp_path / "target" / ".venv" / ".nhms-rollback-source-test"
+    target_source.mkdir()
+    target_source.chmod(0o500)
     ambient_venv = tmp_path / "ambient-controller" / ".venv"
     ambient_bin = ambient_venv / "bin"
     ambient_bin.mkdir(parents=True)
@@ -1676,6 +2060,7 @@ def test_round18_http_gateway_renders_only_explicit_target_runtime_for_worker_st
     manifest = {
         **_production_manifest(tmp_path, job_type),
         "target_python_runtime": str(target_runtime),
+        "target_python_source_root": str(target_source),
         "manifest_index_path": str(manifest_index),
     }
 
@@ -1683,6 +2068,9 @@ def test_round18_http_gateway_renders_only_explicit_target_runtime_for_worker_st
 
     assert f"export NHMS_TARGET_PYTHON_RUNTIME={shlex.quote(str(target_runtime))}" in rendered
     assert f"export PATH={shlex.quote(str(target_runtime.parent))}:$PATH" in rendered
+    assert f"export NHMS_TARGET_PYTHON_SOURCE_ROOT={shlex.quote(str(target_source))}" in rendered
+    assert f"export PYTHONPATH={shlex.quote(str(target_source))}" in rendered
+    assert 'cd "$NHMS_TARGET_PYTHON_SOURCE_ROOT"' in rendered
     assert str(ambient_venv) not in rendered
     assert str(ambient_bin) not in rendered
     assert f'"$NHMS_TARGET_PYTHON_RUNTIME" -m {worker_module}' in rendered
@@ -1738,6 +2126,258 @@ def test_round18_http_gateway_rejects_mutable_target_runtime_symlink(tmp_path: P
 
     with pytest.raises(ManifestValidationError, match="target_python_runtime"):
         gateway.render_template("run_shud_forecast_array", manifest)
+
+
+@pytest.mark.parametrize(
+    ("job_type", "worker_module"),
+    [
+        ("produce_forcing_array", "workers.forcing_producer.cli"),
+        ("run_shud_forecast_array", "workers.shud_runtime.cli"),
+        ("save_state_snapshot_array", "packages.common.state_cli"),
+    ],
+)
+def test_round20_old_manifest_uses_durable_active_binding_source_and_runtime_from_a(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    job_type: str,
+    worker_module: str,
+) -> None:
+    import shutil
+    import sys
+
+    from packages.common.rollback_execution_binding import (
+        ROLLBACK_EXECUTION_BINDING_SCHEMA_VERSION,
+        binding_id_for,
+        rollback_execution_artifact_root,
+        seal_rollback_python_source_tree,
+        write_rollback_execution_binding,
+    )
+    from services.slurm_gateway import real_backend as real_backend_module
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    journal = tmp_path / "journal"
+    journal.mkdir()
+    receipt_id = "a" * 64
+    generation = "09a0cfb8" + "d" * 32
+    checkout = tmp_path / "rollback-checkout"
+    checkout.mkdir()
+    (checkout / "checkout-only.txt").write_text("must disappear\n", encoding="utf-8")
+    retained = rollback_execution_artifact_root(workspace, receipt_id, generation)
+    retained.parent.mkdir(mode=0o700, parents=True)
+    retained.parent.chmod(0o700)
+    source_a = retained / "source"
+    for package in (
+        source_a / "workers",
+        source_a / "workers" / "forcing_producer",
+        source_a / "workers" / "shud_runtime",
+        source_a / "packages",
+        source_a / "packages" / "common",
+    ):
+        package.mkdir(parents=True, exist_ok=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    (source_a / "packages" / "common" / "manifest_index.py").write_text(
+        "def resolve_task_id(value): return 0\n"
+        "def load_manifest_entry(path, task_id): return {}\n",
+        encoding="utf-8",
+    )
+    for module_path, sentinel in (
+        (source_a / "workers" / "forcing_producer" / "cli.py", "A:forcing"),
+        (source_a / "workers" / "shud_runtime" / "cli.py", "A:forecast"),
+        (source_a / "packages" / "common" / "state_cli.py", "A:state"),
+    ):
+        module_path.write_text(
+            "import os\nfrom pathlib import Path\n"
+            f"Path(os.environ['SENTINEL_OUT']).write_text('{sentinel}', encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+    source_a.chmod(0o500)
+    seal_rollback_python_source_tree(source_a)
+    runtime_a = retained / "runtime" / "bin" / "python"
+    runtime_a.parent.mkdir(parents=True)
+    runtime_a.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} \"$@\"\n", encoding="utf-8")
+    runtime_a.chmod(0o500)
+    runtime_a.parent.chmod(0o500)
+    runtime_a.parent.parent.chmod(0o500)
+    retained.chmod(0o500)
+    journal_stat = journal.stat()
+    now = "2026-07-23T12:00:00Z"
+    binding: dict[str, object] = {
+        "schema_version": ROLLBACK_EXECUTION_BINDING_SCHEMA_VERSION,
+        "binding_id": "",
+        "status": "active",
+        "preparation_receipt_id": receipt_id,
+        "journal_root_identity": {
+            "path_digest": __import__("hashlib").sha256(str(journal).encode()).hexdigest(),
+            "device": journal_stat.st_dev,
+            "inode": journal_stat.st_ino,
+        },
+        "scheduler_lease_identity": {
+            "backend": "file",
+            "lock_path_digest": "b" * 64,
+            "workspace_root_digest": "c" * 64,
+        },
+        "workspace_root": str(workspace),
+        "lock_path": str(workspace / "scheduler" / "production-scheduler.lock"),
+        "target_writer_generation": generation,
+        "target_python_runtime": str(runtime_a),
+        "target_python_source_root": str(source_a),
+        "writer_repository_root": str(checkout),
+        "created_at": now,
+        "updated_at": now,
+    }
+    binding["binding_id"] = binding_id_for(binding)
+    prepared_binding = {
+        **binding,
+        "binding_id": "",
+        "status": "prepared",
+        "target_python_runtime": None,
+        "target_python_source_root": None,
+        "writer_repository_root": None,
+    }
+    prepared_binding["binding_id"] = binding_id_for(prepared_binding)
+    write_rollback_execution_binding(workspace, prepared_binding)
+
+    gateway = _production_gateway(tmp_path)
+    gateway.settings.template_dir = str(Path(__file__).resolve().parents[1] / "infra" / "sbatch")
+    gateway_cwd_b = tmp_path / "gateway-current-source-b"
+    gateway_cwd_b.mkdir()
+    monkeypatch.chdir(gateway_cwd_b)
+    manifest_index = workspace / "cycle_001" / "manifests" / "old-09a0cfb8.json"
+    old_manifest = {
+        **_production_manifest(tmp_path, job_type),
+        "workspace_dir": str(workspace),
+        "manifest_index_path": str(manifest_index),
+    }
+    assert "target_python_runtime" not in old_manifest
+    assert "target_python_source_root" not in old_manifest
+
+    rendered_while_prepared = gateway.render_template(job_type, old_manifest, str(manifest_index))
+    assert "NHMS_TARGET_PYTHON_RUNTIME" not in rendered_while_prepared
+    assert "NHMS_TARGET_PYTHON_SOURCE_ROOT" not in rendered_while_prepared
+    write_rollback_execution_binding(workspace, binding)
+    shutil.rmtree(checkout)
+    assert not checkout.exists()
+    assert source_a.is_dir() and runtime_a.is_file()
+
+    binding_calls = {"read": 0, "validate": 0}
+    real_read_binding = real_backend_module.read_rollback_execution_binding
+    real_validate_binding = real_backend_module.validate_rollback_execution_binding
+
+    def counted_read_binding(*args, **kwargs):
+        binding_calls["read"] += 1
+        return real_read_binding(*args, **kwargs)
+
+    def counted_validate_binding(*args, **kwargs):
+        binding_calls["validate"] += 1
+        return real_validate_binding(*args, **kwargs)
+
+    monkeypatch.setattr(real_backend_module, "read_rollback_execution_binding", counted_read_binding)
+    monkeypatch.setattr(real_backend_module, "validate_rollback_execution_binding", counted_validate_binding)
+
+    rendered = gateway.render_template(job_type, old_manifest, str(manifest_index))
+    assert binding_calls == {"read": 1, "validate": 1}
+
+    assert f"export NHMS_TARGET_PYTHON_RUNTIME={shlex.quote(str(runtime_a))}" in rendered
+    assert f"export NHMS_TARGET_PYTHON_SOURCE_ROOT={shlex.quote(str(source_a))}" in rendered
+    assert "unset PYTHONHOME" in rendered
+    assert "unset VIRTUAL_ENV" in rendered
+    assert f"export PATH={runtime_a.parent}:/usr/local/bin:/usr/bin:/bin" in rendered
+    assert ":$PATH" not in rendered
+    assert 'cd "$NHMS_TARGET_PYTHON_SOURCE_ROOT"' in rendered
+    marker = tmp_path / f"{job_type}-sentinel"
+    hostile_bin = tmp_path / "hostile-bin"
+    hostile_bin.mkdir()
+    hostile_python_marker = tmp_path / "hostile-python-ran"
+    hostile_python = hostile_bin / "python"
+    hostile_python.write_text(
+        f"#!/bin/sh\necho hostile > {shlex.quote(str(hostile_python_marker))}\nexit 97\n",
+        encoding="utf-8",
+    )
+    hostile_python.chmod(0o700)
+    execution_env = {
+        **os.environ,
+        "PATH": str(hostile_bin),
+        "PYTHONPATH": str(tmp_path / "hostile-pythonpath"),
+        "PYTHONHOME": str(tmp_path / "hostile-pythonhome"),
+        "VIRTUAL_ENV": str(tmp_path / "hostile-venv"),
+        "SENTINEL_OUT": str(marker),
+        "SLURM_ARRAY_TASK_ID": "0",
+    }
+    subprocess.run(("/bin/bash", "-c", rendered), check=True, env=execution_env)
+    expected = {
+        "workers.forcing_producer.cli": "A:forcing",
+        "workers.shud_runtime.cli": "A:forecast",
+        "packages.common.state_cli": "A:state",
+    }
+    assert marker.read_text(encoding="utf-8") == expected[worker_module]
+    assert not hostile_python_marker.exists()
+    assert source_a.is_dir()
+    if job_type == "run_shud_forecast_array":
+        assert rendered.count('"$NHMS_TARGET_PYTHON_RUNTIME" - <<\'PY\'') == 2
+        assert "$(python - <<'PY'" not in rendered
+        assert "  python - <<'PY'" not in rendered
+
+    for hostile_key in ("PATH", "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"):
+        with pytest.raises(ManifestValidationError, match="protects Python bootstrap"):
+            gateway.render_template(
+                job_type,
+                {**old_manifest, "slurm_env": {hostile_key: "/tmp/hostile"}},
+                str(manifest_index),
+            )
+
+    other_workspace = workspace / "other"
+    other_workspace.mkdir()
+    other_manifest = {
+        **old_manifest,
+        "workspace_dir": str(other_workspace),
+        "manifest_index_path": str(other_workspace / "manifests" / "old-09a0cfb8.json"),
+    }
+    rendered_for_other_workspace = gateway.render_template(
+        job_type,
+        other_manifest,
+        str(other_manifest["manifest_index_path"]),
+    )
+    assert "NHMS_TARGET_PYTHON_RUNTIME" not in rendered_for_other_workspace
+
+    conflicting_runtime = tmp_path / "runtime-b"
+    conflicting_runtime.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    conflicting_runtime.chmod(0o500)
+    with pytest.raises(ManifestValidationError, match="conflicts with the active rollback"):
+        gateway.render_template(
+            job_type,
+            {**old_manifest, "target_python_runtime": str(conflicting_runtime)},
+            str(manifest_index),
+        )
+
+    binding["status"] = "rolling_forward"
+    binding["updated_at"] = "2026-07-23T12:01:00Z"
+    write_rollback_execution_binding(workspace, binding)
+    rendered_after_cut = gateway.render_template(job_type, old_manifest, str(manifest_index))
+    assert "NHMS_TARGET_PYTHON_RUNTIME" not in rendered_after_cut
+    console_entrypoint = {
+        "produce_forcing_array": "nhms-forcing produce",
+        "run_shud_forecast_array": "nhms-shud-runtime execute",
+        "save_state_snapshot_array": "nhms-state save",
+    }
+    assert console_entrypoint[job_type] in rendered_after_cut
+
+    binding["status"] = "completed"
+    binding["updated_at"] = "2026-07-23T12:02:00Z"
+    write_rollback_execution_binding(workspace, binding)
+    retained.chmod(0o700)
+    source_a.chmod(0o700)
+    for retained_path in source_a.rglob("*"):
+        if retained_path.is_dir():
+            retained_path.chmod(0o700)
+        elif retained_path.is_file():
+            retained_path.chmod(0o600)
+    shutil.rmtree(source_a)
+    runtime_a.parent.chmod(0o700)
+    runtime_a.unlink()
+    rendered_after_cleanup = gateway.render_template(job_type, old_manifest, str(manifest_index))
+    assert "NHMS_TARGET_PYTHON_RUNTIME" not in rendered_after_cleanup
+    assert console_entrypoint[job_type] in rendered_after_cleanup
 
 
 def test_render_template_preserves_safe_url_query_execution_input(tmp_path: Path) -> None:

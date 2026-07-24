@@ -377,8 +377,11 @@ systemctl --user enable --now nhms-scheduler-evidence-retention.timer
 
      launcher 只接受 `plan-production` 的一次真实 `--submit`；缺少 `--submit`、`--plan`、`--dry-run`、
      `--help`/`--version`、root/lock override 或其他命令都必须在 writer 零启动时 fail closed。通过
-     receipt 后，controller 将完整目标 SHA 物化为私有临时 detached clean 快照，并从已打开且复核过的
-     目标解释器复制权限锁紧的 runtime bundle；child 的 journal/workspace/file lock 由 receipt gate
+     receipt 后，controller 将完整目标 SHA 物化为
+     `WORKSPACE_ROOT/.nhms-rollback-execution-v1/<receipt>-<generation>/source`，并把已打开且
+     复核过的目标解释器复制到同一私有只读 generation root 的 `runtime`；两者均不位于原
+     checkout/venv，active binding 发布后删除整个原 checkout 也不得影响后续 worker。child 的
+     journal/workspace/file lock 由 receipt gate
      强制绑定，ambient environment 不能改写。checkout dirty、含 untracked 文件、无法解析、切换中、
      runtime 不可用或与 receipt target 不同也均必须零启动。rollback fence 存在期间，当前版本
      scheduler 必须返回 `scheduler_rollback_fence_prepared`，不得自动 backfill 或提交业务任务。重新升级后，
@@ -397,13 +400,22 @@ systemctl --user enable --now nhms-scheduler-evidence-retention.timer
      backfill 期间 authority 变化均 fail closed。node-22 回滚演练 receipt 必须同时保存 preparation、旧 writer
      gate、roll-forward 和恢复后 inventory-only 证据。
 
-     目标 checkout、`.venv` 和 launch JSON 返回的 `target_python_runtime` 必须位于 gateway/compute
-     共同可见路径。该 runtime 经 manifest 和 HTTP gateway 显式传给 forcing、forecast、state-save
-     三阶段；普通生产提交仍用原 console entrypoint。runtime bundle 的 retention 为
+     `WORKSPACE_ROOT` 下的 generation retention root 必须位于 gateway/compute 共同可见路径；目标
+     checkout 和 `.venv` 只需在 active 发布前对 launcher 可见。该 runtime 经 manifest 和 HTTP
+     gateway 显式传给 forcing、forecast、state-save 三阶段；普通生产提交仍用原 console
+     entrypoint。runtime bundle 的 retention 为
      `retained_fail_closed_until_operator_cleanup`：old writer 非零退出或 controller 崩溃也不得删除。
+     active binding 会 bounded/no-follow 遍历完整 runtime tree；nested file/dir 可写、symlink、
+     special entry 或非约定 executable mode 都必须在零 sbatch 时 fail closed。
+     active 脚本会 unset `PYTHONHOME`/`VIRTUAL_ENV`，固定 `PYTHONPATH` 为 bound source，并用 bound
+     runtime bin 加最小系统路径替换 ambient `PATH`；forecast 两段 heredoc 也使用 exact runtime。
      launcher 的独立 execution flock 会阻止 old writer 存活期间的 roll-forward；在所有引用该 runtime
-     的 Slurm task 终态前，也不得人工前滚、恢复 timer 或删除 rollback worktree。最终 receipt 必须保存
-     exact job identity、三个 sbatch 中的同一 runtime 路径，以及 worktree 清理结果。
+     的 Slurm task 终态前，也不得人工前滚、恢复 timer 或删除 generation retention root。严格前滚查询
+     会固定 reconcile-inventory/journal/latest/pipeline-jobs/active-reconcile 五个 root 身份，任何消失、
+     替换或变化都统一 fail closed；recursive journal/latest walker 还会在每层目录 list 前后及 child
+     recursion 后复核该层签名，nested entry 不得静默消失、替换或新增。只有全程不存在的 root
+     可视为空。最终 receipt 必须保存 exact job
+     identity、三个 sbatch 中的同一 runtime/source 路径，以及 generation retention 清理结果。
      out-of-scope LOW 收尾 → #300。
 7b. ✅ **多源下载韧性**（PR #308，b4a2e85/eeb4d5c）：GFS 换 NODD 多镜像链（`GFS_SOURCE_BACKENDS=s3,gcs,azure,ftpprd,nomads`，共享 `.idx`+HTTP-Range+本地 cdo-clip，NOMADS grib-filter 末位回退）；
 IFS 云镜像优先（`IFS_OPEN_DATA_FALLBACK_SOURCES` 默认 `aws,azure,google,ecmwf`，ECMWF 直连 500 连接上限末位）。NOMADS 403=动态封禁 → 持久断路器（`OBJECT_STORE_ROOT/state/source_circuit/`，cooldown 内停重试）；
