@@ -38,6 +38,11 @@
   submit even without ordinary DB-free mode, and both readiness and staging
   reject every entry outside the requested source/cycle raw prefix while the
   scheduler preserves the original missing-forcing blocker with zero work.
+  Round-5 closure binds repair to the canonical `s3://nhms` raw-manifest
+  prefix, requires payload manifest URI to equal that prefix plus the exact
+  manifest key, and validates exact source/cycle/filename key plus containment-
+  protected manifest-path identity before any target creation, lock, or
+  mutation in distinct-root and same-root staging.
 
 ## 2. Reconcile And Terminal-State Idempotency
 

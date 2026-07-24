@@ -19598,7 +19598,7 @@ def test_non_db_free_non_repair_runtime_preflight_remains_not_required(tmp_path:
         tmp_path / "workspace",
         object_store_copyback_root=arbitrary_root,
         nfs_raw_manifest_root=arbitrary_root,
-        nfs_raw_manifest_prefix="s3://nhms",
+        nfs_raw_manifest_prefix="s3://ordinary-compatible-authority/alternate",
         allowed_storage_roots=(tmp_path,),
     )
 
@@ -19609,6 +19609,112 @@ def test_non_db_free_non_repair_runtime_preflight_remains_not_required(tmp_path:
         "required": False,
         "blockers": [],
         "checks": {},
+    }
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=("plan", "submit"))
+@pytest.mark.parametrize(
+    "manifest_prefix",
+    ["s3://other", "s3://nhms/alternate"],
+    ids=("other-authority", "nested-prefix"),
+)
+def test_non_db_free_exact_repair_requires_canonical_raw_manifest_prefix_before_lock(
+    monkeypatch: Any,
+    tmp_path: Path,
+    dry_run: bool,
+    manifest_prefix: str,
+) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    canonical_root = tmp_path / "canonical-node22-object-store"
+    canonical_root.mkdir()
+    monkeypatch.setattr(
+        source_cycle_raw_manifest_module,
+        "NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT",
+        canonical_root,
+        raising=False,
+    )
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+    config = _config(
+        tmp_path / "workspace",
+        dry_run=dry_run,
+        lookback_hours=0,
+        max_cycles_per_source=1,
+        backfill_enabled=False,
+        repair_missing_forcing=True,
+        repair_missing_forcing_cycle_time=cycle_time,
+        object_store_copyback_root=canonical_root,
+        nfs_raw_manifest_root=canonical_root,
+        nfs_raw_manifest_prefix=manifest_prefix,
+        allowed_storage_roots=(tmp_path,),
+    )
+    orchestrator_calls: list[str] = []
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([]),
+        adapters={},
+        orchestrator_factory=lambda source_id: orchestrator_calls.append(source_id),
+    )
+
+    preflight = config.db_free_runtime_preflight()
+    result = scheduler.run_once()
+    rendered = json.dumps({"preflight": preflight, "evidence": result.evidence}, sort_keys=True)
+
+    assert config.db_free_required is False
+    assert preflight["status"] == "blocked"
+    prefix_check = preflight["checks"]["NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX"]
+    assert prefix_check["canonical_authority_required"] is True
+    assert prefix_check["authority_matches"] is False
+    assert any(
+        blocker["code"] == "db_free_raw_manifest_prefix_authority_mismatch"
+        and blocker["field"] == "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX"
+        for blocker in preflight["blockers"]
+    )
+    assert result.status == "preflight_blocked"
+    assert result.evidence["lock"]["reason"] == "db_free_runtime_preflight_blocked"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+    assert orchestrator_calls == []
+    assert manifest_prefix not in rendered
+
+
+def test_non_db_free_exact_repair_accepts_canonical_prefix_with_trailing_separator(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    canonical_root = tmp_path / "canonical-node22-object-store"
+    canonical_root.mkdir()
+    monkeypatch.setattr(
+        source_cycle_raw_manifest_module,
+        "NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT",
+        canonical_root,
+        raising=False,
+    )
+    config = _config(
+        tmp_path / "workspace",
+        dry_run=True,
+        lookback_hours=0,
+        max_cycles_per_source=1,
+        backfill_enabled=False,
+        repair_missing_forcing=True,
+        repair_missing_forcing_cycle_time=cycle_time,
+        object_store_copyback_root=canonical_root,
+        nfs_raw_manifest_root=canonical_root,
+        nfs_raw_manifest_prefix="s3://nhms/",
+        allowed_storage_roots=(tmp_path,),
+    )
+
+    preflight = config.db_free_runtime_preflight()
+
+    assert preflight["status"] == "ready"
+    assert preflight["checks"]["NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX"] == {
+        "env": "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX",
+        "configured": True,
+        "value": "[object-prefix]",
+        "scheme": "s3",
+        "supported": True,
+        "canonical_authority_required": True,
+        "authority_matches": True,
     }
 
 
@@ -23901,6 +24007,7 @@ def test_db_free_from_env_raw_missing_blocks_canonical_zero_without_submission(
         ("source_mismatch", "nfs_raw_manifest_manifest_source_mismatch"),
         ("cycle_mismatch", "nfs_raw_manifest_manifest_cycle_time_mismatch"),
         ("uri_mismatch", "nfs_raw_manifest_manifest_uri_mismatch"),
+        ("cross_prefix", "nfs_raw_manifest_manifest_uri_mismatch"),
         ("entries_missing", "nfs_raw_manifest_manifest_entries_missing"),
         ("local_key_invalid", "nfs_raw_manifest_manifest_entry_local_key_invalid"),
         ("raw_file_missing", "nfs_raw_manifest_raw_files_missing"),
@@ -23933,7 +24040,13 @@ def test_db_free_from_env_raw_invalid_blocks_without_submission(
         cycle_time=cycle_time,
         manifest_source_id="ifs" if case_name == "source_mismatch" else None,
         manifest_cycle_time="2026-05-21T00:00:00Z" if case_name == "cycle_mismatch" else None,
-        manifest_uri="s3://nhms/raw/gfs/2026052100/manifest.json" if case_name == "uri_mismatch" else None,
+        manifest_uri=(
+            "s3://nhms/raw/gfs/2026052100/manifest.json"
+            if case_name == "uri_mismatch"
+            else "s3://other/raw/gfs/2026052112/manifest.json"
+            if case_name == "cross_prefix"
+            else None
+        ),
         entries=raw_entries,
         write_raw_files=case_name not in {"local_key_invalid", "raw_file_missing"},
     )

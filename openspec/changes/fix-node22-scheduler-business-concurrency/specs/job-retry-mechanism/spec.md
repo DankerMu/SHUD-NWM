@@ -41,6 +41,8 @@ same runtime repository and backend selectors as initial scheduler submissions.
 - **AND** node-22 production requires direct-grid forcing
 - **AND** the node-27 NFS raw manifest and all referenced raw files are present,
   ready, and match the requested source and exact cycle
+- **AND** the manifest payload URI exactly equals the configured canonical
+  `s3://nhms` prefix plus that exact source/cycle manifest key
 - **AND** every manifest entry `local_key` is below the exact
   `raw/<normalized-source-variant>/<YYYYMMDDHH>/` prefix for that requested
   source and cycle, with the same validation applied again before staging
@@ -120,9 +122,26 @@ same runtime repository and backend selectors as initial scheduler submissions.
   `/ghdc/data/nwm/object-store`, as well as require them to equal each other, so
   rebinding both mutable values to an arbitrary readable allow-listed staging
   root cannot authorize repair
+- **AND** repair runtime preflight SHALL bind the configured raw-manifest
+  prefix to canonical `s3://nhms`; another S3 authority or a nested prefix
+  such as `s3://nhms/alternate` cannot authorize repair
 - **AND** explicit repair SHALL run this fixed-topology raw-authority preflight
   before lock acquisition in both plan and submit modes even when the ordinary
   DB-free scheduler flag is absent or disabled
 - **AND** missing, mismatched, relative, outside-boundary, or malformed
   authority/root/prefix values SHALL fail static/runtime preflight without
   exposing either local path in public evidence.
+
+#### Scenario: staging revalidates exact manifest object identity before mutation
+
+- **WHEN** trusted raw readiness is staged to a compute-visible object store
+- **THEN** the manifest key MUST exactly identify
+  `raw/<normalized-source-variant>/<YYYYMMDDHH>/manifest.json`
+- **AND** the supplied manifest path MUST resolve within the trusted source root
+  to the same containment-protected file as `<source-root>/<manifest-key>`
+- **AND** the payload manifest URI MUST equal the configured source prefix plus
+  that exact manifest key
+- **AND** wrong-source, wrong-cycle, wrong-filename, mismatched-path, or
+  cross-prefix evidence MUST fail with a stable reason before target directory
+  creation, destination lock acquisition, or target mutation, including when
+  source and target roots are the same.

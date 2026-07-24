@@ -796,7 +796,8 @@ class ProductionSchedulerConfig:
         )
         raw_root_check["authority_matches"] = authority_matches
         prefix_check, prefix_blocker = _db_free_raw_manifest_prefix_check(
-            self.nfs_raw_manifest_prefix
+            self.nfs_raw_manifest_prefix,
+            require_canonical=repair_authority_required,
         )
         checks[_DB_FREE_RAW_MANIFEST_PREFIX_ENV] = prefix_check
         if prefix_blocker is not None:
@@ -1212,6 +1213,8 @@ def _db_free_raw_manifest_prefix_evidence(value: Any) -> dict[str, Any]:
 
 def _db_free_raw_manifest_prefix_check(
     value: Any,
+    *,
+    require_canonical: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     text = str(value or "").strip().rstrip("/")
     check = _db_free_raw_manifest_prefix_evidence(text)
@@ -1240,7 +1243,25 @@ def _db_free_raw_manifest_prefix_check(
             _DB_FREE_RAW_MANIFEST_PREFIX_ENV,
             "invalid",
         )
-    check.update({"scheme": "s3", "supported": True})
+    authority_matches = (
+        text == source_cycle_raw_manifest.NODE22_CANONICAL_NFS_RAW_MANIFEST_PREFIX
+        if require_canonical
+        else None
+    )
+    check.update(
+        {
+            "scheme": "s3",
+            "supported": True,
+            "canonical_authority_required": require_canonical,
+            "authority_matches": authority_matches,
+        }
+    )
+    if authority_matches is False:
+        return check, _db_free_blocker(
+            "db_free_raw_manifest_prefix_authority_mismatch",
+            _DB_FREE_RAW_MANIFEST_PREFIX_ENV,
+            "canonical_authority_mismatch",
+        )
     return check, None
 
 
