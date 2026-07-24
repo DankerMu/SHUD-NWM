@@ -3172,6 +3172,26 @@ def test_node22_db_free_env_template_declares_trusted_nfs_raw_manifest_authority
             "https://user:secret@example.invalid/raw?token=secret",
             "COMPUTE_SCHEDULER_NFS_RAW_MANIFEST_PREFIX_INVALID",
         ),
+        (
+            "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX",
+            "s3://nhms-prod",
+            "COMPUTE_SCHEDULER_NFS_RAW_MANIFEST_PREFIX_INVALID",
+        ),
+        (
+            "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX",
+            "s3://other",
+            "COMPUTE_SCHEDULER_NFS_RAW_MANIFEST_PREFIX_INVALID",
+        ),
+        (
+            "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX",
+            "s3://nhms/path",
+            "COMPUTE_SCHEDULER_NFS_RAW_MANIFEST_PREFIX_INVALID",
+        ),
+        (
+            "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX",
+            "s3://nhms.evil",
+            "COMPUTE_SCHEDULER_NFS_RAW_MANIFEST_PREFIX_INVALID",
+        ),
     ],
 )
 def test_static_checker_rejects_missing_or_malformed_trusted_raw_manifest_contract(
@@ -3197,6 +3217,11 @@ def test_static_checker_rejects_missing_or_malformed_trusted_raw_manifest_contra
     assert "user:secret" not in rendered
     assert "token=secret" not in rendered
     assert "example.invalid" not in rendered
+
+
+@pytest.mark.parametrize("prefix", ["s3://nhms", "s3://nhms/", "  s3://nhms/  "])
+def test_trusted_raw_manifest_prefix_accepts_canonical_normalized_value(prefix: str) -> None:
+    assert docker_runtime._trusted_raw_manifest_prefix_is_valid(prefix)
 
 
 def test_static_checker_rejects_copyback_and_raw_authority_rebound_together(

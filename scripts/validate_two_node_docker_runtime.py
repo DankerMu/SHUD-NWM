@@ -2551,8 +2551,9 @@ def _trusted_raw_manifest_root_is_valid(
 
 
 def _trusted_raw_manifest_prefix_is_valid(raw_prefix: str) -> bool:
+    normalized_prefix = raw_prefix.strip().rstrip("/")
     try:
-        parsed = urlparse(raw_prefix.rstrip("/"))
+        parsed = urlparse(normalized_prefix)
         _ = parsed.port
     except ValueError:
         return False
@@ -2567,7 +2568,8 @@ def _trusted_raw_manifest_prefix_is_valid(raw_prefix: str) -> bool:
         return False
     decoded_path = unquote(str(parsed.path or ""))
     return (
-        "\\" not in decoded_path
+        normalized_prefix == source_cycle_raw_manifest.NODE22_CANONICAL_NFS_RAW_MANIFEST_PREFIX
+        and "\\" not in decoded_path
         and not any(ord(character) < 32 or ord(character) == 127 for character in decoded_path)
         and all(part not in {".", ".."} for part in PurePosixPath(decoded_path).parts)
     )
