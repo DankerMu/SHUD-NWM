@@ -173,6 +173,7 @@ COMPUTE_SCHEDULER_ENV = frozenset(
         "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX",
         "NHMS_SCHEDULER_JOURNAL_BACKEND",
         "NHMS_SCHEDULER_JOURNAL_ROOT",
+        "NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE",
         "NHMS_SCHEDULER_STATE_INDEX_BACKEND",
         "NHMS_SCHEDULER_STATE_INDEX",
         "NHMS_SCHEDULER_EVIDENCE_ROOT",
@@ -186,6 +187,8 @@ COMPUTE_SCHEDULER_ENV = frozenset(
         "NHMS_SCHEDULER_INTERVAL_SECONDS",
         "NHMS_SCHEDULER_MAX_PASSES",
         "NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE",
+        "NHMS_SCHEDULER_RECONCILE_SLURM_USER",
+        "NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT",
     }
 )
 COMPUTE_ADAPTER_ENV = frozenset(
@@ -206,6 +209,7 @@ COMPUTE_SCHEDULER_REQUIRED_ENV = frozenset(
         "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX",
         "NHMS_SCHEDULER_JOURNAL_BACKEND",
         "NHMS_SCHEDULER_JOURNAL_ROOT",
+        "NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE",
         "NHMS_SCHEDULER_STATE_INDEX_BACKEND",
         "NHMS_SCHEDULER_STATE_INDEX",
         "NHMS_SCHEDULER_EVIDENCE_ROOT",
@@ -216,6 +220,8 @@ COMPUTE_SCHEDULER_REQUIRED_ENV = frozenset(
         "NHMS_SCHEDULER_INTERVAL_SECONDS",
         "NHMS_SCHEDULER_MAX_PASSES",
         "NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE",
+        "NHMS_SCHEDULER_RECONCILE_SLURM_USER",
+        "NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT",
     }
 )
 CANONICAL_PUBLISHED_ENV = frozenset(
@@ -2413,6 +2419,21 @@ def _compute_scheduler_once_db_free_findings(path: Path, service_env: Mapping[st
                 path=str(path),
                 service="scheduler-once",
                 details={"key": "DATABASE_URL"},
+            )
+        )
+    journal_lock_guard_mode = service_env.get("NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE")
+    if journal_lock_guard_mode is not None and journal_lock_guard_mode != "flock":
+        findings.append(
+            Finding(
+                "COMPUTE_SCHEDULER_JOURNAL_LOCK_GUARD_MODE_INVALID",
+                "DB-free scheduler-once journal lock guard mode must be exactly flock.",
+                path=str(path),
+                service="scheduler-once",
+                details={
+                    "key": "NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE",
+                    "expected": "flock",
+                    "actual": journal_lock_guard_mode,
+                },
             )
         )
     for key in sorted(COMPUTE_DB_FREE_SCHEDULER_SELECTOR_ENV):

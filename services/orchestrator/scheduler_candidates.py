@@ -26,6 +26,10 @@ from services.orchestrator.scheduler_state import (
     _evidence_safe,
     _format_utc,
 )
+from services.orchestrator.source_cycle_raw_manifest import (
+    NFS_RAW_MANIFEST_READY_SOURCE,
+    nfs_raw_manifest_readiness,
+)
 from workers.data_adapters.base import CycleDiscovery, cycle_id_for
 from workers.forcing_producer.direct_grid_contract import (
     DirectGridContractError,
@@ -93,6 +97,9 @@ class SchedulerConfigLike(Protocol):
     candidate_state_event_limit: int
     cancel_active_slurm: bool
     dry_run: bool
+    require_direct_grid: bool
+    repair_missing_forcing: bool
+    repair_missing_forcing_cycle_time: datetime | None
 
 
 class SchedulerSourceCycleLike(Protocol):
@@ -285,6 +292,13 @@ def build_candidates(
                 else None
             )
             state_decision = context.candidate_state_decider(candidate, raw_candidate_state)
+            state_decision = _apply_explicit_missing_forcing_repair_policy(
+                context.config,
+                candidate,
+                raw_candidate_state,
+                state_decision,
+                strict_warm_start=strict_warm_start,
+            )
             if state_decision is not None and context.candidate_state_identity_mismatch_detector(
                 state_decision.evidence,
             ):
@@ -467,6 +481,13 @@ def build_candidates(
                                     event_limit=context.config.candidate_state_event_limit,
                                 )
                                 state_decision = context.candidate_state_decider(candidate, raw_candidate_state)
+                                state_decision = _apply_explicit_missing_forcing_repair_policy(
+                                    context.config,
+                                    candidate,
+                                    raw_candidate_state,
+                                    state_decision,
+                                    strict_warm_start=strict_warm_start,
+                                )
                             if state_decision is not None:
                                 state_decision = CandidateStateDecision(
                                     action=state_decision.action,
@@ -595,6 +616,20 @@ def build_candidates(
             raw_manifest_restart_applied = False
             canonical_readiness = context.canonical_readiness_for_candidate(candidate, cycle)
             if canonical_readiness is not None and not bool(canonical_readiness.get("ready")):
+                if _decision_is_authorized_missing_forcing_repair(state_decision):
+                    state_evidence = dict(state_decision.evidence)
+                    repair = dict(state_evidence.get("missing_forcing_repair") or {})
+                    repair.update({"status": "rejected", "reason": "canonical_not_ready"})
+                    state_evidence["missing_forcing_repair"] = repair
+                    state_evidence["canonical_readiness"] = canonical_readiness
+                    blocked.append(
+                        _blocked_candidate(
+                            candidate,
+                            str(canonical_readiness.get("reason") or "canonical_incomplete"),
+                            state_evidence=state_evidence,
+                        )
+                    )
+                    continue
                 if _canonical_evidence_is_fresh_zero_row(canonical_readiness):
                     state_evidence = {}
                     if state_decision is not None and state_decision.action == "retry":
@@ -729,6 +764,13 @@ def build_candidates(
                                 event_limit=context.config.candidate_state_event_limit,
                             )
                             state_decision = context.candidate_state_decider(candidate, raw_candidate_state)
+                            state_decision = _apply_explicit_missing_forcing_repair_policy(
+                                context.config,
+                                candidate,
+                                raw_candidate_state,
+                                state_decision,
+                                strict_warm_start=strict_warm_start,
+                            )
                         if state_decision is not None:
                             state_decision = CandidateStateDecision(
                                 action=state_decision.action,
@@ -1168,6 +1210,208 @@ def _nfs_raw_manifest_block_reason(evidence: Mapping[str, Any]) -> str:
     return reason if reason.startswith("nfs_raw_manifest_") else f"nfs_raw_manifest_{reason}"
 
 
+def _apply_explicit_missing_forcing_repair_policy(
+    config: SchedulerConfigLike,
+    candidate: SchedulerCandidateLike,
+    raw_state: Mapping[str, Any] | None,
+    decision: CandidateStateDecision | None,
+    *,
+    strict_warm_start: Mapping[str, Any] | None,
+) -> CandidateStateDecision | None:
+    """Authorize one exact-cycle forcing rebuild without weakening the default guard.
+
+    The policy is deliberately evaluated after the normal candidate-state
+    decision.  It can only reclassify the stable missing-forcing blocker; every
+    other blocker and retry decision remains owned by the normal state machine.
+    """
+
+    if not bool(getattr(config, "repair_missing_forcing", False)):
+        return decision
+    if (
+        decision is None
+        or decision.action != "blocked"
+        or decision.reason != "missing_forcing_package_uri"
+    ):
+        return decision
+
+    target_cycle = getattr(config, "repair_missing_forcing_cycle_time", None)
+    policy_evidence = {
+        "policy": "operator_exact_cycle_missing_forcing_repair",
+        "requested": True,
+        "target_cycle_time": _format_utc(target_cycle) if isinstance(target_cycle, datetime) else None,
+        "candidate_cycle_time": _format_utc(candidate.cycle_time_utc),
+        "source_id": candidate.source_id,
+        "model_id": candidate.model_id,
+        "candidate_id": candidate.candidate_id,
+        "default_policy": "fail_closed",
+        "plan_only": bool(config.dry_run),
+    }
+
+    def rejected(reason: str, **details: Any) -> CandidateStateDecision:
+        return CandidateStateDecision(
+            "blocked",
+            decision.reason,
+            {
+                **dict(decision.evidence),
+                "missing_forcing_repair": _evidence_safe(
+                    {
+                        **policy_evidence,
+                        "status": "rejected",
+                        "reason": reason,
+                        **details,
+                    }
+                ),
+            },
+        )
+
+    if not isinstance(target_cycle, datetime) or _format_utc(target_cycle) != _format_utc(
+        candidate.cycle_time_utc
+    ):
+        return rejected("exact_cycle_identity_mismatch")
+    if not bool(getattr(config, "require_direct_grid", False)):
+        return rejected("production_direct_grid_not_required")
+
+    resource_profile = candidate.resource_profile
+    direct_grid_section = (
+        resource_profile.get("direct_grid_forcing")
+        if isinstance(resource_profile, Mapping)
+        else None
+    )
+    if (
+        not isinstance(resource_profile, Mapping)
+        or resource_profile.get("forcing_mapping_mode") != "direct_grid"
+        or not isinstance(direct_grid_section, Mapping)
+    ):
+        return rejected("candidate_not_direct_grid")
+    try:
+        load_forcing_mapping_contract_from_manifest(
+            {
+                "forcing_mapping_mode": "direct_grid",
+                "direct_grid_forcing": direct_grid_section,
+            },
+            source_id=candidate.source_id,
+        )
+    except DirectGridContractError as error:
+        return rejected("direct_grid_contract_invalid", direct_grid_error=error.to_dict())
+
+    artifact_guard = decision.evidence.get("artifact_guard")
+    if not isinstance(artifact_guard, Mapping):
+        return rejected("missing_forcing_blocker_contract_invalid")
+    if (
+        artifact_guard.get("artifact_type") != "forcing_package_uri"
+        or artifact_guard.get("stable_classifier") != "FORCING_PACKAGE_URI_MISSING"
+        or artifact_guard.get("artifact_exists") is not False
+        or decision.evidence.get("classifier") != "missing_upstream_artifact"
+        or str(decision.evidence.get("restart_stage") or "") != "forecast"
+    ):
+        return rejected("missing_forcing_blocker_contract_invalid")
+    if artifact_guard.get("unsafe_reason") not in (None, ""):
+        return rejected(
+            "forcing_artifact_reference_unsafe",
+            unsafe_reason=artifact_guard.get("unsafe_reason"),
+        )
+
+    raw_manifest, raw_rejection = _verified_repair_raw_manifest(candidate, raw_state)
+    if raw_manifest is None:
+        return rejected(raw_rejection or "raw_manifest_not_ready")
+
+    repair_evidence: dict[str, Any] = {
+        **dict(decision.evidence),
+        "decision": "retry_repair_missing_forcing",
+        "reason": "operator_repair_missing_forcing",
+        "classifier": "operator_authorized_missing_forcing_repair",
+        "restart_stage": "forcing",
+        "restart_from_stage": "forcing",
+        "native_shud_resubmitted": True,
+        "replacement_submitted": False,
+        "durable_shud_output_reused": False,
+        "cold_fallback_allowed": False,
+        "initial_state_selection": "preserved",
+        "nfs_raw_manifest": raw_manifest,
+        "fresh_ingestion": {"required": False, "mode": "repair_missing_forcing"},
+        "raw_manifest_reuse": {
+            "status": "ready",
+            "source": NFS_RAW_MANIFEST_READY_SOURCE,
+            "manifest_uri": raw_manifest.get("manifest_uri"),
+        },
+        "missing_forcing_repair": {
+            **policy_evidence,
+            "status": "authorized",
+            "reason": "exact_cycle_direct_grid_raw_manifest_ready",
+            "restart_stage": "forcing",
+            "slurm_stage": "produce_forcing_array",
+            "login_node_forcing": False,
+        },
+        "retry_policy": {
+            **dict(decision.evidence.get("retry_policy") or {}),
+            "automatic_retry_allowed": False,
+            "operator_exact_cycle_repair_authorized": True,
+            "cold_fallback_allowed": False,
+        },
+    }
+    selected_state = (
+        strict_warm_start.get("candidate_state")
+        if isinstance(strict_warm_start, Mapping)
+        else None
+    )
+    if isinstance(selected_state, Mapping):
+        repair_evidence["candidate_state"] = _evidence_safe(dict(selected_state))
+        repair_evidence["strict_warm_start"] = _evidence_safe(dict(strict_warm_start))
+    return CandidateStateDecision(
+        "retry",
+        "operator_repair_missing_forcing",
+        _evidence_safe(repair_evidence),
+    )
+
+
+def _decision_is_authorized_missing_forcing_repair(
+    decision: CandidateStateDecision | None,
+) -> bool:
+    if decision is None or decision.action != "retry":
+        return False
+    repair = decision.evidence.get("missing_forcing_repair")
+    return (
+        isinstance(repair, Mapping)
+        and repair.get("status") == "authorized"
+        and decision.evidence.get("restart_stage") == "forcing"
+    )
+
+
+def _verified_repair_raw_manifest(
+    candidate: SchedulerCandidateLike,
+    raw_state: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    recorded = _nfs_raw_manifest_gate(raw_state)
+    if recorded is None or recorded.get("status") != "ready" or recorded.get("required") is not True:
+        return None, "raw_manifest_not_ready"
+    if str(recorded.get("source") or "") != NFS_RAW_MANIFEST_READY_SOURCE:
+        return None, "raw_manifest_authority_mismatch"
+    if not _nfs_raw_manifest_matches_source_cycle(candidate, recorded):
+        return None, "raw_manifest_identity_mismatch"
+    root = recorded.get("object_store_root")
+    if root in (None, ""):
+        return None, "raw_manifest_presence_unverified"
+    try:
+        actual = nfs_raw_manifest_readiness(
+            source_id=candidate.source_id,
+            cycle_time=candidate.cycle_time_utc,
+            object_store_root=str(root),
+            required=True,
+        )
+    except (OSError, ValueError):
+        return None, "raw_manifest_presence_unverified"
+    if actual.get("status") != "ready":
+        return None, "raw_manifest_not_ready"
+    if not _nfs_raw_manifest_matches_source_cycle(candidate, actual):
+        return None, "raw_manifest_identity_mismatch"
+    for key in ("manifest_key", "manifest_path"):
+        recorded_value = recorded.get(key)
+        actual_value = actual.get(key)
+        if recorded_value not in (None, "") and str(recorded_value) != str(actual_value):
+            return None, "raw_manifest_identity_mismatch"
+    return _evidence_safe(actual), None
+
+
 def _production_raw_manifest_missing_evidence(raw_state: Mapping[str, Any] | None) -> dict[str, Any]:
     evidence = _nfs_raw_manifest_gate(raw_state)
     if evidence is not None:
@@ -1392,6 +1636,13 @@ def _upgrade_retry_for_strict_warm_start_manifest(
     strict_evidence: Mapping[str, Any] | None,
 ) -> CandidateStateDecision | None:
     if state_decision is None or state_decision.action != "retry" or strict_evidence is None:
+        return state_decision
+    forcing_repair = state_decision.evidence.get("missing_forcing_repair")
+    if (
+        isinstance(forcing_repair, Mapping)
+        and forcing_repair.get("status") == "authorized"
+        and state_decision.evidence.get("restart_stage") == "forcing"
+    ):
         return state_decision
     if (
         state_decision.evidence.get("native_shud_resubmitted") is True

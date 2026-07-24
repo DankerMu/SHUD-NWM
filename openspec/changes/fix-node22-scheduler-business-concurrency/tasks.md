@@ -14,6 +14,13 @@
   Evidence floor: a historical successful forcing/forecast record with missing
   `forcing_package_uri` tree blocks before downstream forecast submission with a
   stable artifact/copyback code and no generic `NODE_FAILURE`.
+- [x] 1.4 Add an explicit exact-cycle missing-forcing recovery policy without
+  weakening the default blocker.
+  Evidence floor: focused tests cover default block, plan preview, authorized
+  missing-URI and missing-path recovery, non-direct-grid rejection, raw
+  manifest absent/identity-mismatch rejection, malformed/unbounded operator
+  use, preserved warm lineage with no cold fallback, and an 18-member forcing
+  cohort routed through `produce_forcing_array` under the global bound of 32.
 
 ## 2. Reconcile And Terminal-State Idempotency
 
@@ -61,3 +68,7 @@
   identities, Slurm submissions/reconcile terminal evidence, duplicate-free file
   journal progress, and lock release. An explicit no-work pass is safe-state
   evidence only and blocks issue completion until a business-work receipt exists.
+- [x] 4.6 Document the exact `--repair-missing-forcing --plan` and `--submit`
+  operator commands, the raw/direct-grid/warm-state preconditions, and the
+  evidence fields that prove forcing ran as a Slurm array rather than on the
+  login node.

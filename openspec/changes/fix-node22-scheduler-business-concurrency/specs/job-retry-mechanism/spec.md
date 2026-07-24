@@ -34,3 +34,31 @@ same runtime repository and backend selectors as initial scheduler submissions.
   before submitting forecast work
 - **AND** the failure MUST use a stable artifact/copyback classifier rather than
   generic `NODE_FAILURE`.
+
+#### Scenario: operator repairs one exact cycle from verified raw input
+
+- **GIVEN** the default missing-forcing policy remains fail-closed
+- **AND** node-22 production requires direct-grid forcing
+- **AND** the node-27 NFS raw manifest and all referenced raw files are present,
+  ready, and match the requested source and exact cycle
+- **WHEN** an operator runs the exact-cycle wrapper with
+  `--repair-missing-forcing`
+- **THEN** only a candidate blocked solely by `FORCING_PACKAGE_URI_MISSING`
+  SHALL be reclassified to restart at `forcing`
+- **AND** planning mode SHALL record an authorized/rejected policy decision
+  without submitting work
+- **AND** submit mode SHALL execute the existing `ForecastOrchestrator` chain
+  beginning with `produce_forcing_array`, retaining the source/cycle cohort and
+  global Slurm `%32` array bound
+- **AND** the scheduler MUST NOT invoke login-node forcing, submit forecast
+  directly, fall back to cold start, or replace the selected warm-state lineage.
+
+#### Scenario: exact-cycle forcing repair preconditions fail closed
+
+- **WHEN** the explicit repair flag is absent, the target cycle is missing or
+  malformed, the candidate is outside that exact cycle, direct-grid is not the
+  required and valid model contract, the forcing reference is unsafe, or the
+  raw manifest is absent, stale, unreadable, or identity-mismatched
+- **THEN** the original missing-forcing blocker SHALL remain blocked
+- **AND** an explicitly requested but rejected repair SHALL record a stable
+  rejection reason and SHALL NOT submit Slurm or SHUD work.

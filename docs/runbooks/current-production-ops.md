@@ -1215,15 +1215,75 @@ Safe online mitigation:
 
 1. Keep node-22 compute-only. Node-22 local PostgreSQL `:55433` is historical,
    archived, and stopped — do not connect it as a current runtime dependency.
-2. Restore the missing forcing package from preserved workspace products only
-   when the preserved files match the affected source/cycle/model identity.
-   Copy both the staging object-store path and shared NFS copyback root, then
-   verify file count and `forcing_package.json` checksum from node-22 and
-   node-27 views.
+2. The default missing-forcing policy is fail-closed. For a package that can be
+   regenerated, use the exact-cycle wrapper described below; do not edit the
+   file journal, submit forecast directly, or switch a warm candidate to cold.
+   Restoring preserved forcing bytes remains valid only when the preserved
+   package, checksum, source/cycle/model identity, staging object-store path,
+   and shared NFS copyback root all match.
 3. Clear only stale scheduler locks whose PID is dead or whose live pass was
    intentionally stopped; preserve the stale-lock evidence JSON.
 4. Restart scheduler from the latest merged code, not by hand-editing journal
    rows as a normal operating path.
+
+Exact-cycle missing-forcing regeneration (node-22 only):
+
+1. Confirm that the affected candidates are blocked only by
+   `missing_forcing_package_uri` / `FORCING_PACKAGE_URI_MISSING`; that
+   `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true`; and that the current registry has
+   18 source-scoped variants for each enabled source. The raw readiness record
+   must say `status=ready`, `required=true`, and
+   `source=node27_nfs_raw_manifest`. The scheduler re-reads the manifest and all
+   referenced raw files from `object_store_root`, so a stale journal `ready`
+   value alone cannot authorize repair.
+2. Preview the exact UTC cycle. Omitting `--source` intentionally previews both
+   configured GFS and IFS cohorts; omitting `--basin-id` retains all 18 active
+   basins per source:
+
+   ```bash
+   cd /scratch/frd_muziyao/NWM
+   scripts/ops/node22-run-cycle-once.sh \
+     --cycle-time 2026-07-24T00:00:00Z \
+     --repair-missing-forcing \
+     --plan
+   ```
+
+3. Inspect the evidence artifact printed by the wrapper. Every admitted repair
+   must contain:
+
+   ```text
+   state_evidence.missing_forcing_repair.status = authorized
+   state_evidence.missing_forcing_repair.restart_stage = forcing
+   state_evidence.missing_forcing_repair.slurm_stage = produce_forcing_array
+   state_evidence.missing_forcing_repair.login_node_forcing = false
+   state_evidence.cold_fallback_allowed = false
+   ```
+
+   A rejected preview retains the original missing-forcing blocker and records
+   a stable reason such as `raw_manifest_not_ready`,
+   `raw_manifest_identity_mismatch`, `candidate_not_direct_grid`, or
+   `exact_cycle_identity_mismatch`. Fix the stated precondition; do not bypass
+   it.
+4. Submit the same exact cycle only after the preview admits the intended set:
+
+   ```bash
+   cd /scratch/frd_muziyao/NWM
+   scripts/ops/node22-run-cycle-once.sh \
+     --cycle-time 2026-07-24T00:00:00Z \
+     --repair-missing-forcing \
+     --submit
+   ```
+
+   The process-scoped flag is cleared by the wrapper when omitted on later
+   invocations, even if a stale env file contains it. The scheduler rejects the
+   repair mode for continuous, backfill, multi-cycle, missing, or malformed
+   exact-cycle use.
+5. Acceptance requires one `produce_forcing_array` cohort per source with 18
+   members (for the current registry) and Slurm array throttles whose concurrent
+   total is at most 32. The subsequent forecast stage must retain each basin's
+   selected `init_state_*` and lineage. Login-node `ForcingProducer` calls,
+   forecast-only submission, cold fallback, a different cycle, or a raw
+   identity mismatch are failures, not degraded success.
 
 Business-readiness receipt after fix:
 

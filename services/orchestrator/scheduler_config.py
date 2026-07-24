@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 from urllib.parse import unquote, urlparse
@@ -49,6 +49,28 @@ _DB_FREE_CREDENTIAL_WORDS = (
     "session_key",
     "signature",
 )
+
+
+def _repair_missing_forcing_cycle_time(value: datetime | str | None) -> datetime | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ValueError(
+                "production scheduler repair_missing_forcing_cycle_time must be an ISO-8601 UTC time"
+            ) from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(
+            "production scheduler repair_missing_forcing_cycle_time must include a UTC offset"
+        )
+    return parsed.astimezone(UTC)
 
 
 @dataclass(frozen=True)
@@ -155,6 +177,15 @@ class ProductionSchedulerConfig:
             "NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND",
             32,
         )
+    )
+    require_direct_grid: bool = field(
+        default_factory=lambda: _scheduler._env_flag("NHMS_SCHEDULER_REQUIRE_DIRECT_GRID")
+    )
+    repair_missing_forcing: bool = field(
+        default_factory=lambda: _scheduler._env_flag("NHMS_SCHEDULER_REPAIR_MISSING_FORCING")
+    )
+    repair_missing_forcing_cycle_time: datetime | str | None = field(
+        default_factory=lambda: os.getenv("NHMS_SCHEDULER_REPAIR_MISSING_FORCING_CYCLE_TIME")
     )
     progress_guard_max_no_progress_steps: int = field(
         default_factory=lambda: _scheduler._env_int("NHMS_SCHEDULER_PROGRESS_GUARD_MAX_NO_PROGRESS_STEPS", 256)
@@ -408,6 +439,30 @@ class ProductionSchedulerConfig:
             "slurm_array_concurrency_bound",
             max(int(self.slurm_array_concurrency_bound), 1),
         )
+        object.__setattr__(self, "require_direct_grid", bool(self.require_direct_grid))
+        object.__setattr__(self, "repair_missing_forcing", bool(self.repair_missing_forcing))
+        repair_cycle_time = _repair_missing_forcing_cycle_time(
+            self.repair_missing_forcing_cycle_time,
+        )
+        object.__setattr__(self, "repair_missing_forcing_cycle_time", repair_cycle_time)
+        if self.repair_missing_forcing:
+            if repair_cycle_time is None:
+                raise ValueError(
+                    "production scheduler repair_missing_forcing requires an exact cycle time"
+                )
+            if self.continuous:
+                raise ValueError(
+                    "production scheduler repair_missing_forcing cannot run continuously"
+                )
+            if self.backfill_enabled or int(self.max_cycles_per_source) != 1 or int(self.lookback_hours) != 0:
+                raise ValueError(
+                    "production scheduler repair_missing_forcing requires an exact-cycle, "
+                    "single-cycle, backfill-disabled invocation"
+                )
+        elif repair_cycle_time is not None:
+            raise ValueError(
+                "production scheduler repair_missing_forcing_cycle_time requires repair_missing_forcing"
+            )
         object.__setattr__(
             self,
             "progress_guard_max_no_progress_steps",

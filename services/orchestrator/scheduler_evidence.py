@@ -100,6 +100,9 @@ class SchedulerEvidenceConfig(Protocol):
     retry_limit: int
     concurrent_submit_bound: int
     slurm_array_concurrency_bound: int
+    require_direct_grid: bool
+    repair_missing_forcing: bool
+    repair_missing_forcing_cycle_time: datetime | None
     database_url_configured: bool
     scheduler_db_free_required: bool
     scheduler_state_backend: str | None
@@ -817,6 +820,17 @@ def scheduler_runtime_config_evidence(config: SchedulerEvidenceConfig) -> dict[s
         "retry_limit": config.retry_limit,
         "concurrent_submit_bound": config.concurrent_submit_bound,
         "slurm_array_concurrency_bound": config.slurm_array_concurrency_bound,
+        "require_direct_grid": bool(getattr(config, "require_direct_grid", False)),
+        "missing_forcing_repair": {
+            "enabled": bool(getattr(config, "repair_missing_forcing", False)),
+            "exact_cycle_time": (
+                _format_utc(getattr(config, "repair_missing_forcing_cycle_time"))
+                if isinstance(getattr(config, "repair_missing_forcing_cycle_time", None), datetime)
+                else None
+            ),
+            "default_policy": "fail_closed",
+            "plan_only": bool(config.dry_run),
+        },
     }
     db_free_evidence = getattr(config, "db_free_runtime_evidence", None)
     if callable(db_free_evidence):

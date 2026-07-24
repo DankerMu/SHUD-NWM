@@ -3127,6 +3127,124 @@ def test_checked_in_compute_scheduler_once_is_db_free_without_database_url() -> 
         assert scheduler_env[key] == "file"
     for key in docker_runtime.COMPUTE_DB_FREE_SCHEDULER_PATH_ENV:
         assert scheduler_env[key].strip()
+    assert scheduler_env["NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE"] == "flock"
+    assert scheduler_env["NHMS_SCHEDULER_RECONCILE_SLURM_USER"].strip()
+    assert scheduler_env["NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT"].strip()
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "NHMS_SCHEDULER_RECONCILE_SLURM_USER",
+        "NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT",
+        "NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE",
+    ],
+)
+def test_static_checker_requires_scheduler_reconcile_and_journal_guard_runtime_env(
+    tmp_path: Path,
+    key: str,
+) -> None:
+    compose = _safe_compute_compose()
+    compose["services"]["scheduler-once"]["environment"].pop(key, None)
+    compute_compose = _write_compute_compose(tmp_path, compose)
+
+    result = _run_compute_static_check(compute_compose)
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "COMPUTE_RUNTIME_ENV_MISSING"
+        and finding.service == "scheduler-once"
+        and finding.details.get("key") == key
+        for finding in result.findings
+    )
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "NHMS_SCHEDULER_RECONCILE_SLURM_USER",
+        "NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT",
+    ],
+)
+def test_static_checker_rejects_blank_scheduler_reconcile_slurm_identity(
+    tmp_path: Path,
+    key: str,
+) -> None:
+    compose = _safe_compute_compose()
+    compose["services"]["scheduler-once"]["environment"][key] = ""
+    compute_compose = _write_compute_compose(tmp_path, compose)
+
+    result = _run_compute_static_check(compute_compose)
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "COMPUTE_RUNTIME_ENV_EMPTY"
+        and finding.service == "scheduler-once"
+        and finding.details.get("key") == key
+        for finding in result.findings
+    )
+
+
+@pytest.mark.parametrize("value", ["", "FLOCK", " flock ", "atomic"])
+def test_static_checker_requires_exact_flock_scheduler_journal_guard(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    compose = _safe_compute_compose()
+    compose["services"]["scheduler-once"]["environment"][
+        "NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE"
+    ] = value
+    compute_compose = _write_compute_compose(tmp_path, compose)
+
+    result = _run_compute_static_check(compute_compose)
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "COMPUTE_SCHEDULER_JOURNAL_LOCK_GUARD_MODE_INVALID"
+        and finding.service == "scheduler-once"
+        and finding.details.get("actual") == value
+        for finding in result.findings
+    )
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "NHMS_SCHEDULER_RECONCILE_SLURM_USER",
+        "NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT",
+        "NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE",
+    ],
+)
+@pytest.mark.parametrize("mutation", ["missing", "blank"])
+def test_static_checker_requires_scheduler_reconcile_and_journal_guard_in_compute_env(
+    tmp_path: Path,
+    key: str,
+    mutation: str,
+) -> None:
+    compute_env = docker_runtime.parse_env_file(REPO_ROOT / "infra/env/compute.example")
+    if mutation == "missing":
+        compute_env.pop(key)
+    else:
+        compute_env[key] = ""
+    compute_env_path = tmp_path / "compute.env"
+    compute_env_path.write_text(
+        "\n".join(f"{env_key}={value}" for env_key, value in compute_env.items()) + "\n",
+        encoding="utf-8",
+    )
+
+    result = docker_runtime.run_static_check(
+        compute_compose=Path("infra/compose.compute.yml"),
+        display_compose=Path("infra/compose.display.yml"),
+        compute_env=compute_env_path,
+        display_env=Path("infra/env/display.example"),
+        repo_root=REPO_ROOT,
+    )
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "ENV_REQUIRED_MISSING" and finding.details.get("key") == key
+        for finding in result.findings
+    )
 
 
 @pytest.mark.parametrize(
