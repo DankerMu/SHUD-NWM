@@ -385,8 +385,17 @@ def _filter_cycle_rows_for_model(
         for job_id, job in rows.pipeline_jobs.items()
         if _job_matches_candidate(job, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
     }
+    cycle_scope_job_ids = {
+        job_id
+        for job_id, job in rows.pipeline_jobs.items()
+        if _is_model_less_cycle_scope_job(job, source_id=source_id, cycle_time=cycle_time)
+    }
     rows.pipeline_events = [
-        event
+        (
+            _compact_cycle_scope_event(event)
+            if str(event.get("entity_id") or "") in cycle_scope_job_ids
+            else event
+        )
         for event in rows.pipeline_events
         if _event_matches_candidate_rows(
             event,
@@ -8022,6 +8031,16 @@ def _is_model_less_cycle_scope_job(
     cycle_run_id = f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}"
     run_id = str(job.get("run_id") or "")
     return run_id == cycle_run_id or run_id.startswith(f"{cycle_run_id}_")
+
+
+def _compact_cycle_scope_event(event: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop bulky details from events attributed via cycle-scope cohort jobs.
+
+    Cohort copyback/publish events carry multi-KB payloads; replicated into
+    every candidate state they multiply pass evidence past the size guard.
+    """
+
+    return {key: value for key, value in event.items() if key != "details"}
 
 
 def _compact_cycle_scope_job(job: Mapping[str, Any]) -> dict[str, Any]:
