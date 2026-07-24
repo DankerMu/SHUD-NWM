@@ -30,6 +30,8 @@ _DB_FREE_PATH_SPECS = (
     ("scheduler_state_index", "NHMS_SCHEDULER_STATE_INDEX", "file"),
 )
 _DB_FREE_RAW_MANIFEST_PREFIX_ENV = "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX"
+_DB_FREE_RAW_MANIFEST_ROOT_ENV = "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"
+_DB_FREE_CANONICAL_RAW_AUTHORITY_ENV = "NHMS_OBJECT_STORE_COPYBACK_ROOT"
 _DB_FREE_SUPPORTED_OBJECT_URI_SCHEMES = frozenset({"s3", "published"})
 _DB_FREE_DB_BACKEND_VALUES = frozenset({"postgres", "postgresql", "psycopg", "psycopg2", "pg"})
 _DB_FREE_OBJECT_STORE_PREFIX_ENV = "OBJECT_STORE_PREFIX"
@@ -179,8 +181,11 @@ class ProductionSchedulerConfig:
             32,
         )
     )
+    object_store_copyback_root: Path | str | None = field(
+        default_factory=lambda: os.getenv(_DB_FREE_CANONICAL_RAW_AUTHORITY_ENV)
+    )
     nfs_raw_manifest_root: Path | str | None = field(
-        default_factory=lambda: os.getenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT")
+        default_factory=lambda: os.getenv(_DB_FREE_RAW_MANIFEST_ROOT_ENV)
     )
     nfs_raw_manifest_prefix: str = field(
         default_factory=lambda: os.getenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX")
@@ -722,15 +727,40 @@ class ProductionSchedulerConfig:
             checks[env] = check
             if blocker is not None:
                 blockers.append(blocker)
+        _canonical_root_check, canonical_root_blocker = _db_free_path_check(
+            _DB_FREE_CANONICAL_RAW_AUTHORITY_ENV,
+            self.object_store_copyback_root,
+            kind="readable_directory",
+            allowed_roots=allowed_roots,
+        )
+        if canonical_root_blocker is not None:
+            blockers.append(canonical_root_blocker)
         raw_root_check, raw_root_blocker = _db_free_path_check(
-            "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT",
+            _DB_FREE_RAW_MANIFEST_ROOT_ENV,
             self.nfs_raw_manifest_root,
             kind="readable_directory",
             allowed_roots=allowed_roots,
         )
-        checks["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"] = raw_root_check
+        checks[_DB_FREE_RAW_MANIFEST_ROOT_ENV] = raw_root_check
         if raw_root_blocker is not None:
             blockers.append(raw_root_blocker)
+        authority_matches: bool | None = None
+        if canonical_root_blocker is None and raw_root_blocker is None:
+            authority_matches = _db_free_path_identity(
+                self.object_store_copyback_root
+            ) == _db_free_path_identity(self.nfs_raw_manifest_root)
+            if not authority_matches:
+                blockers.append(
+                    _db_free_blocker(
+                        "db_free_raw_authority_mismatch",
+                        _DB_FREE_RAW_MANIFEST_ROOT_ENV,
+                        "canonical_authority_mismatch",
+                    )
+                )
+        raw_root_check["canonical_authority_configured"] = (
+            self.object_store_copyback_root not in (None, "")
+        )
+        raw_root_check["authority_matches"] = authority_matches
         prefix_check, prefix_blocker = _db_free_raw_manifest_prefix_check(
             self.nfs_raw_manifest_prefix
         )
@@ -992,6 +1022,16 @@ def _db_free_allowed_roots(config: ProductionSchedulerConfig) -> tuple[Path, ...
         if root not in roots:
             roots.append(root)
     return tuple(roots)
+
+
+def _db_free_path_identity(value: str | Path | None) -> Path | None:
+    if value in (None, ""):
+        return None
+    path = _expanduser_for_mode(str(value).strip(), db_free_required=True)
+    try:
+        return path.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return path
 
 
 def _db_free_path_check(

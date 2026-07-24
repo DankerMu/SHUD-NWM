@@ -107,9 +107,14 @@ same runtime repository and backend selectors as initial scheduler submissions.
   `infra/env/compute.scheduler-dbfree.env.example` and the documented exact-cycle
   wrapper
 - **THEN** the runtime SHALL receive the explicit trusted raw root
-  `/ghdc/data/nwm/object-store` and object prefix `s3://nhms`
+  `/ghdc/data/nwm/object-store`, the canonical copyback authority
+  `NHMS_OBJECT_STORE_COPYBACK_ROOT=/ghdc/data/nwm/object-store`, and object
+  prefix `s3://nhms`
 - **AND** the root SHALL be allow-listed and use the existing canonical shared-
   NFS copyback mount rather than a duplicate mount declaration
-- **AND** missing, relative, outside-boundary, or malformed root/prefix values
-  SHALL fail static/runtime preflight without exposing the raw value in public
-  evidence.
+- **AND** runtime preflight SHALL require the resolved trusted raw root to equal
+  the resolved canonical copyback authority, so an arbitrary readable
+  allow-listed staging root cannot authorize repair
+- **AND** missing, mismatched, relative, outside-boundary, or malformed
+  authority/root/prefix values SHALL fail static/runtime preflight without
+  exposing either local path in public evidence.

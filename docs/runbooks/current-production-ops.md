@@ -1246,15 +1246,19 @@ Exact-cycle missing-forcing regeneration (node-22 only):
    file):
 
    ```bash
+   NHMS_OBJECT_STORE_COPYBACK_ROOT=/ghdc/data/nwm/object-store
    NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST=true
    NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT=/ghdc/data/nwm/object-store
    NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX=s3://nhms
    ```
 
+   `NHMS_OBJECT_STORE_COPYBACK_ROOT` is the canonical runtime authority, and
+   `NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT` must resolve to that exact directory.
    `/ghdc/data/nwm/object-store` is node-22's view of node-27
    `/home/ghdc/nwm/object-store`; it must remain in
    `NHMS_SCHEDULER_ALLOWED_ROOTS`. It is not the compute-visible staging root
-   under `/scratch` and must not be replaced by that path.
+   under `/scratch`; an allow-listed staging path cannot replace either
+   authority value.
 2. Preview the exact UTC cycle. Omitting `--source` intentionally previews both
    configured GFS and IFS cohorts; omitting `--basin-id` retains all 18 active
    basins per source:

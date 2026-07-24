@@ -52,6 +52,10 @@ Compute role, node 22:
   the checked-in `compute.example` matrix. `DATABASE_URL` may remain in
   `compute.env` only for `compute-api` or an explicit archived rollback drill;
   node-22 `:55433` is stopped/archived and is not scheduler runtime env.
+- The DB-free scheduler's trusted raw authority is the canonical shared-NFS
+  `NHMS_OBJECT_STORE_COPYBACK_ROOT`. Runtime preflight requires
+  `NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT` to resolve to that same allow-listed,
+  readable directory; an arbitrary allow-listed staging root is not authority.
 - Node-22 compute-control must set
   `NHMS_ORCHESTRATOR_TERMINAL_STAGE=forecast_state_save_qc` and
   `NHMS_REQUIRE_FORECAST_WARM_START=true`. That makes the scheduler run SHUD and

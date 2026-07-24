@@ -3138,9 +3138,15 @@ def test_node22_db_free_env_template_declares_trusted_nfs_raw_manifest_authority
     )
 
     assert env["NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST"] == "true"
+    assert env["NHMS_OBJECT_STORE_COPYBACK_ROOT"] == "/ghdc/data/nwm/object-store"
     assert env["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"] == "/ghdc/data/nwm/object-store"
     assert env["NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX"] == "s3://nhms"
     assert "/ghdc/data/nwm/object-store" in env["NHMS_SCHEDULER_ALLOWED_ROOTS"].split(":")
+
+    compose = docker_runtime.load_compose(REPO_ROOT / "infra/compose.compute.yml")
+    scheduler_env = docker_runtime._service_environment(compose["services"]["scheduler-once"], env)
+    assert scheduler_env["NHMS_OBJECT_STORE_COPYBACK_ROOT"] == env["NHMS_OBJECT_STORE_COPYBACK_ROOT"]
+    assert scheduler_env["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"] == env["NHMS_OBJECT_STORE_COPYBACK_ROOT"]
 
 
 @pytest.mark.parametrize(

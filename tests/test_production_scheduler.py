@@ -6265,6 +6265,7 @@ def test_node22_exact_cycle_wrapper_scopes_missing_forcing_repair_to_explicit_fl
         'printf "%s\\n" "${NHMS_SCHEDULER_REPAIR_MISSING_FORCING_CYCLE_TIME-<unset>}" >> "${CAPTURE}"\n'
         'printf "%s\\n" "${NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT-<unset>}" >> "${CAPTURE}"\n'
         'printf "%s\\n" "${NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX-<unset>}" >> "${CAPTURE}"\n'
+        'printf "%s\\n" "${NHMS_OBJECT_STORE_COPYBACK_ROOT-<unset>}" >> "${CAPTURE}"\n'
         'printf "%s\\n" "$@" >> "${CAPTURE}"\n',
         encoding="utf-8",
     )
@@ -6273,7 +6274,8 @@ def test_node22_exact_cycle_wrapper_scopes_missing_forcing_repair_to_explicit_fl
     env_file.write_text(
         "NHMS_SCHEDULER_REPAIR_MISSING_FORCING=true\n"
         "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT=/ghdc/data/nwm/object-store\n"
-        "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX=s3://nhms\n",
+        "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX=s3://nhms\n"
+        "NHMS_OBJECT_STORE_COPYBACK_ROOT=/ghdc/data/nwm/object-store\n",
         encoding="utf-8",
     )
     env = {
@@ -6301,13 +6303,14 @@ def test_node22_exact_cycle_wrapper_scopes_missing_forcing_repair_to_explicit_fl
 
     assert completed.returncode == 0, completed.stderr
     lines = capture.read_text(encoding="utf-8").splitlines()
-    assert lines[:4] == [
+    assert lines[:5] == [
         expected_enabled,
         expected_cycle,
         "/ghdc/data/nwm/object-store",
         "s3://nhms",
+        "/ghdc/data/nwm/object-store",
     ]
-    assert lines[4:] == [
+    assert lines[5:] == [
         "-m",
         "services.orchestrator.cli",
         "plan-production",
@@ -19200,8 +19203,8 @@ def _set_db_free_scheduler_env(monkeypatch: Any, root: Path) -> tuple[dict[str, 
     monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
     monkeypatch.setenv("NHMS_SCHEDULER_RECONCILE_SLURM_USER", "scheduler-user")
     monkeypatch.setenv("NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT", "scheduler-account")
-    raw_manifest_root = roots["object_store_root"] / "raw-manifest-authority"
-    raw_manifest_root.mkdir(parents=True, exist_ok=True)
+    raw_manifest_root = roots["object_store_root"]
+    monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(raw_manifest_root))
     monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(raw_manifest_root))
     monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX", "s3://nhms")
     monkeypatch.delenv("DATABASE_URL", raising=False)
@@ -19246,6 +19249,58 @@ def test_db_free_runtime_preflight_requires_explicit_trusted_nfs_raw_manifest_ro
     )
     assert blocker["code"] == "db_free_required_path_missing"
     assert "OBJECT_STORE_ROOT" not in json.dumps(preflight, sort_keys=True)
+
+
+def test_db_free_runtime_preflight_rejects_allowlisted_noncanonical_raw_authority_without_leak(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, _paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    canonical_root = Path(os.environ["NHMS_OBJECT_STORE_COPYBACK_ROOT"])
+    staging_root = roots["object_store_root"] / "allowlisted-staging" / "object-store"
+    staging_root.mkdir(parents=True)
+    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(staging_root))
+
+    preflight = ProductionSchedulerConfig().db_free_runtime_preflight()
+    rendered = json.dumps(preflight, sort_keys=True)
+
+    assert preflight["status"] == "blocked"
+    assert any(
+        item["code"] == "db_free_raw_authority_mismatch"
+        and item["field"] == "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"
+        for item in preflight["blockers"]
+    )
+    assert str(staging_root) not in rendered
+    assert str(canonical_root) not in rendered
+
+
+def test_db_free_runtime_preflight_accepts_matching_canonical_raw_authority(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+
+    preflight = ProductionSchedulerConfig().db_free_runtime_preflight()
+
+    assert preflight["status"] == "ready"
+    assert preflight["checks"]["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"]["authority_matches"] is True
+
+
+def test_db_free_runtime_preflight_requires_canonical_copyback_authority(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("NHMS_OBJECT_STORE_COPYBACK_ROOT")
+
+    preflight = ProductionSchedulerConfig().db_free_runtime_preflight()
+
+    assert preflight["status"] == "blocked"
+    assert any(
+        item["code"] == "db_free_required_path_missing"
+        and item["field"] == "NHMS_OBJECT_STORE_COPYBACK_ROOT"
+        for item in preflight["blockers"]
+    )
 
 
 def test_db_free_runtime_preflight_rejects_malformed_raw_manifest_prefix_without_leak(
