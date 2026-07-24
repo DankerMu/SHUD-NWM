@@ -1047,6 +1047,79 @@ def test_file_orchestration_journal_lifecycle_writes_materialize_latest_and_repl
     assert reloaded.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
 
 
+def test_file_journal_candidate_state_attributes_cohort_qc_to_candidates(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast_state_save_qc")
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    repository.ensure_forecast_cycle(source_id="gfs", cycle_time=cycle_time)
+    repository.create_hydro_run_from_basin(
+        {"source_id": "gfs"},
+        {
+            "run_id": "fcst_gfs_2026062800_model_a",
+            "run_type": "forecast",
+            "scenario_id": "scenario_a",
+            "source_id": "gfs",
+            "cycle_time": cycle_time.isoformat(),
+            "start_time": cycle_time.isoformat(),
+            "end_time": cycle_time.isoformat(),
+            "model": {"model_id": "model_a", "basin_version_id": "basin_version_a"},
+            "forcing": {"forcing_version_id": "forc_gfs_2026062800_model_a"},
+            "outputs": {"run_manifest_uri": "s3://nhms/manifests/run.json"},
+        },
+    )
+    repository.update_hydro_run_status("fcst_gfs_2026062800_model_a", "succeeded", slurm_job_id="7001")
+    reconciled = _source_job(
+        cycle_time,
+        source_id="gfs",
+        job_id="job_fcst_gfs_2026062800_model_a_forecast_reconciled_7001_0",
+    )
+    reconciled.update(
+        {
+            "status": "succeeded",
+            "restart_stage": "state_save_qc",
+            "slurm_job_id": "7001_0",
+        }
+    )
+    repository.upsert_pipeline_job(reconciled)
+    cohort_qc = _source_job(
+        cycle_time,
+        source_id="gfs",
+        job_id="job_cycle_gfs_2026062800_state_save_qc_cohort_abc123_state_save_qc",
+        stage="state_save_qc",
+    )
+    cohort_qc.update(
+        {
+            "run_id": "cycle_gfs_2026062800_state_save_qc_cohort_abc123",
+            "model_id": None,
+            "job_type": "run_state_save_qc",
+            "status": "succeeded",
+            "slurm_job_id": "7002",
+            "idempotency_key": "gfs:gfs_2026062800:cohort:state_save_qc:abc123",
+        }
+    )
+    repository.upsert_pipeline_job(cohort_qc)
+
+    state = repository.candidate_state(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        model_id="model_a",
+        run_id="fcst_gfs_2026062800_model_a",
+        forcing_version_id="forc_gfs_2026062800_model_a",
+        candidate_id=None,
+        retry_limit=3,
+        job_limit=50,
+        event_limit=50,
+    )
+
+    assert state is not None
+    stages = {str(job.get("stage")) for job in state.get("pipeline_jobs") or []}
+    assert "state_save_qc" in stages
+    assert state.get("restart_stage") is None
+    assert state.get("completed_stage_evidence") is None
+
+
 def test_file_orchestration_journal_write_strips_redaction_placeholders(tmp_path: Path) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
     journal_root = tmp_path / "journal"

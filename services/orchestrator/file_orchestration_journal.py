@@ -7993,10 +7993,17 @@ def _job_matches_candidate(job: Mapping[str, Any], *, source_id: str, cycle_time
     candidate_run_id = f"fcst_{source_id.lower()}_{cycle_stamp}_{model_id}"
     if str(job.get("cycle_id") or "") != cycle_id:
         return False
+    run_id = str(job.get("run_id") or "")
     return (
-        str(job.get("run_id") or "") in {candidate_run_id, cycle_run_id}
+        run_id in {candidate_run_id, cycle_run_id}
         or str(job.get("model_id") or "") == model_id
-        or (job.get("model_id") in (None, "") and str(job.get("run_id") or "") == cycle_run_id)
+        # Model-less cycle-scope cohort jobs (e.g. state_save_qc cohorts with
+        # run_id "cycle_<source>_<stamp>_<suffix>") belong to every candidate
+        # in the cycle; the DB query path already includes them via cycle_id.
+        or (
+            job.get("model_id") in (None, "")
+            and (run_id == cycle_run_id or run_id.startswith(f"{cycle_run_id}_"))
+        )
     )
 
 
