@@ -377,26 +377,12 @@ def _filter_cycle_rows_for_model(
         else None
     )
     rows.pipeline_jobs = {
-        job_id: (
-            _compact_cycle_scope_job(job)
-            if _is_model_less_cycle_scope_job(job, source_id=source_id, cycle_time=cycle_time)
-            else job
-        )
+        job_id: job
         for job_id, job in rows.pipeline_jobs.items()
         if _job_matches_candidate(job, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
     }
-    cycle_scope_job_ids = {
-        job_id
-        for job_id, job in rows.pipeline_jobs.items()
-        if _is_model_less_cycle_scope_job(job, source_id=source_id, cycle_time=cycle_time)
-        and str(job.get("stage") or "") in _CYCLE_SCOPE_COMPLETION_STAGES
-    }
     rows.pipeline_events = [
-        (
-            _compact_cycle_scope_event(event)
-            if str(event.get("entity_id") or "") in cycle_scope_job_ids
-            else event
-        )
+        event
         for event in rows.pipeline_events
         if _event_matches_candidate_rows(
             event,
@@ -605,6 +591,19 @@ class FileOrchestrationJournalRepository:
                 job_limit=job_limit,
                 event_limit=event_limit,
             )
+        # Evidence-size guard: cohort (model-less cycle-scope) jobs are
+        # attributed to every candidate of the cycle; replicating their full
+        # payloads (cohort_members, candidate_projections, completion-stage
+        # copyback details) into all 18 candidate states multiplies pass
+        # evidence past the 5MB limit. Compact them ONLY on this public
+        # candidate-state surface — internal reads and latest-view
+        # materialization must keep full fidelity.
+        cycle_scope_completion_job_ids = {
+            str(job.get("job_id") or "")
+            for job in rows.pipeline_jobs.values()
+            if _is_model_less_cycle_scope_job(job, source_id=canonical_source_id, cycle_time=cycle_time)
+            and str(job.get("stage") or "") in _CYCLE_SCOPE_COMPLETION_STAGES
+        }
         state = chain_repository_state.candidate_state_from_rows(
             source_id=canonical_source_id,
             cycle_time=cycle_time,
@@ -613,8 +612,24 @@ class FileOrchestrationJournalRepository:
             forcing_version_id=canonical_forcing_version_id,
             candidate_id=canonical_candidate_id,
             hydro_run=rows.hydro_run,
-            pipeline_jobs=[_public_scheduler_row(job) for job in rows.pipeline_jobs.values()],
-            pipeline_events=[_public_scheduler_row(event) for event in rows.pipeline_events],
+            pipeline_jobs=[
+                _public_scheduler_row(
+                    _compact_cycle_scope_job(job)
+                    if _is_model_less_cycle_scope_job(
+                        job, source_id=canonical_source_id, cycle_time=cycle_time
+                    )
+                    else job
+                )
+                for job in rows.pipeline_jobs.values()
+            ],
+            pipeline_events=[
+                _public_scheduler_row(
+                    _compact_cycle_scope_event(event)
+                    if str(event.get("entity_id") or "") in cycle_scope_completion_job_ids
+                    else event
+                )
+                for event in rows.pipeline_events
+            ],
             forcing_version=rows.forcing_version,
             forecast_cycle=rows.forecast_cycle,
             retry_limit=retry_limit,
