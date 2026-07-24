@@ -155,6 +155,95 @@ def test_terminal_warm_state_same_id_with_repaired_checksum_requires_forecast_re
     assert upgraded.evidence["native_shud_resubmitted"] is True
 
 
+def test_terminal_run_manifest_with_redacted_uri_matches_when_identity_agrees() -> None:
+    decision = CandidateStateDecision(
+        action="retry",
+        reason="resume_after_completed_stage",
+        evidence={
+            "decision": "retry_after_completed_stage",
+            "restart_stage": "state_save_qc",
+            "run_manifest_initial_state": {
+                "state_id": "state_ifs_huai_2026070812",
+                "checksum": "shared-checksum",
+                "ic_file_uri": "[object-uri]",
+                "valid_time": "2026-07-08T12:00:00Z",
+            },
+        },
+    )
+    strict = {
+        "ready": True,
+        "candidate_state": {
+            "init_state_id": "state_ifs_huai_2026070812",
+            "init_state_checksum": "shared-checksum",
+            "init_state_uri": "s3://nhms/states/ifs/huai/2026070812/state.cfg.ic",
+            "init_state_valid_time": "2026-07-08T12:00:00Z",
+        },
+    }
+
+    upgraded = scheduler_candidates_module._upgrade_retry_for_strict_warm_start_manifest(
+        decision,
+        strict,
+    )
+
+    assert upgraded is decision
+
+
+def test_terminal_run_manifest_with_redacted_uri_still_detects_checksum_mismatch() -> None:
+    decision = CandidateStateDecision(
+        action="retry",
+        reason="resume_after_completed_stage",
+        evidence={
+            "decision": "retry_after_completed_stage",
+            "restart_stage": "state_save_qc",
+            "run_manifest_initial_state": {
+                "state_id": "state_ifs_huai_2026070812",
+                "checksum": "stale-checksum",
+                "ic_file_uri": "[object-uri]",
+                "valid_time": "2026-07-08T12:00:00Z",
+            },
+        },
+    )
+    strict = {
+        "ready": True,
+        "candidate_state": {
+            "init_state_id": "state_ifs_huai_2026070812",
+            "init_state_checksum": "repaired-complete-checksum",
+            "init_state_uri": "s3://nhms/states/ifs/huai/2026070812/state.cfg.ic",
+            "init_state_valid_time": "2026-07-08T12:00:00Z",
+        },
+    }
+
+    upgraded = scheduler_candidates_module._upgrade_retry_for_strict_warm_start_manifest(
+        decision,
+        strict,
+    )
+
+    assert upgraded is not None
+    assert upgraded.reason == "strict_warm_start_retry_run_manifest_mismatch"
+    assert upgraded.evidence["restart_stage"] == "forecast"
+
+
+def test_warm_state_record_matches_skips_redaction_placeholders() -> None:
+    selected = {
+        "init_state_id": "state_ifs_huai_2026070812",
+        "init_state_checksum": "shared-checksum",
+        "init_state_uri": "s3://nhms/states/ifs/huai/2026070812/state.cfg.ic",
+        "init_state_valid_time": "2026-07-08T12:00:00Z",
+    }
+    redacted_observed = {
+        "state_id": "state_ifs_huai_2026070812",
+        "checksum": "shared-checksum",
+        "ic_file_uri": "[object-uri]",
+        "valid_time": "2026-07-08T12:00:00Z",
+    }
+    divergent_observed = {**redacted_observed, "ic_file_uri": "s3://nhms/states/other/state.cfg.ic"}
+    redacted_selected = {**selected, "init_state_uri": "[object-uri]"}
+
+    assert scheduler_candidates_module._warm_state_record_matches(selected, redacted_observed)
+    assert not scheduler_candidates_module._warm_state_record_matches(selected, divergent_observed)
+    assert scheduler_candidates_module._warm_state_record_matches(redacted_selected, redacted_observed)
+
+
 def test_terminal_pipeline_state_same_id_with_repaired_checksum_is_not_current() -> None:
     terminal = {
         "terminal_source": "pipeline_job",

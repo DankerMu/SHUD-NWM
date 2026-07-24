@@ -1861,6 +1861,11 @@ def _state_field(record: Mapping[str, Any], field: str) -> Any:
     return None
 
 
+_EVIDENCE_REDACTION_PLACEHOLDERS = frozenset(
+    {"[object-uri]", "[uri]", "[local-path]", "[redacted]", "sha256:[redacted]"}
+)
+
+
 def _warm_state_record_matches(selected: Mapping[str, Any], observed: Mapping[str, Any]) -> bool:
     """Require every selected warm-state identity field to match the observed run.
 
@@ -1868,13 +1873,21 @@ def _warm_state_record_matches(selected: Mapping[str, Any], observed: Mapping[st
     its checksum changes. Comparing the ID alone would therefore let a terminal run
     produced from the corrupt object masquerade as current and skip the required
     forecast replay.
+
+    Evidence sanitizers replace URIs/paths with placeholders such as
+    ``[object-uri]``; a placeholder means the value was withheld, not that it
+    differs, so redacted fields are skipped instead of failing the match.
     """
 
     for field in ("state_id", "checksum", "uri", "valid_time"):
         expected = _state_field(selected, field)
         if expected in (None, ""):
             continue
+        if str(expected) in _EVIDENCE_REDACTION_PLACEHOLDERS:
+            continue
         actual = _state_field(observed, field)
+        if str(actual or "") in _EVIDENCE_REDACTION_PLACEHOLDERS:
+            continue
         if str(actual or "") != str(expected):
             return False
     return True
