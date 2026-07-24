@@ -171,11 +171,23 @@ def _fit_bounded_evidence_payload(
 
 
 def _compact_required_bounded_fields(payload: dict[str, Any]) -> None:
+    runtime_config = payload.get("runtime_config")
+    runtime_db_free = runtime_config.get("db_free_runtime") if isinstance(runtime_config, Mapping) else None
+    runtime_contract_carries_selectors = bool(
+        isinstance(runtime_db_free, Mapping)
+        and isinstance(runtime_db_free.get("selectors"), Mapping)
+        and isinstance(runtime_db_free.get("paths"), Mapping)
+    )
     for field_name in _scheduler_evidence._REQUIRED_BOUNDED_EVIDENCE_FIELDS:
         if field_name not in payload:
             continue
         if field_name == "counts":
             payload[field_name] = _compact_counts(payload[field_name])
+        elif field_name == "db_free_runtime":
+            payload[field_name] = _compact_db_free_runtime(
+                payload[field_name],
+                omit_runtime_contract_checks=runtime_contract_carries_selectors,
+            )
         elif field_name not in {"schema_version", "pass_id", "status", "artifact_path", "limit"}:
             payload[field_name] = _compact_required_bounded_field(field_name, payload[field_name])
 
@@ -344,7 +356,11 @@ def _compact_runtime_config(value: Any) -> Any:
     return compact
 
 
-def _compact_db_free_runtime(value: Any) -> Any:
+def _compact_db_free_runtime(
+    value: Any,
+    *,
+    omit_runtime_contract_checks: bool = False,
+) -> Any:
     if not isinstance(value, Mapping):
         return _bounded_retained_field_summary("db_free_runtime", value)
     compact = _compact_mapping(
@@ -377,11 +393,10 @@ def _compact_db_free_runtime(value: Any) -> Any:
         }
     checks = value.get("checks")
     if isinstance(checks, Mapping):
-        compact["checks"] = {
-            str(env): _compact_db_free_path_or_check(check)
-            for env, check in checks.items()
-            if isinstance(check, Mapping)
-        }
+        compact["checks"] = _compact_db_free_preflight_checks(
+            checks,
+            omit_runtime_contract_checks=omit_runtime_contract_checks,
+        )
     blockers = value.get("blockers")
     if isinstance(blockers, Sequence) and not isinstance(blockers, str | bytes | bytearray):
         compact["blockers"] = [
@@ -400,6 +415,50 @@ def _compact_db_free_runtime(value: Any) -> Any:
         and "checks" not in compact
     ):
         compact["evidence"] = _compact_db_free_runtime(nested_evidence)
+    return compact
+
+
+def _compact_db_free_preflight_checks(
+    value: Mapping[str, Any],
+    *,
+    omit_runtime_contract_checks: bool,
+) -> dict[str, Any]:
+    """Keep preflight-only proof without duplicating runtime selector evidence."""
+
+    compact: dict[str, Any] = {}
+    authority_roots = {
+        "NHMS_OBJECT_STORE_COPYBACK_ROOT",
+        "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT",
+    }
+    for raw_env, raw_check in value.items():
+        if not isinstance(raw_check, Mapping):
+            continue
+        env = str(raw_env)
+        if "selected" in raw_check or "file_selected" in raw_check:
+            if omit_runtime_contract_checks:
+                continue
+            compact[env] = _compact_mapping(
+                raw_check,
+                ("configured", "selected", "required_value", "file_selected"),
+            )
+        elif env == "database_url":
+            continue
+        elif env in authority_roots:
+            compact[env] = _compact_mapping(
+                raw_check,
+                (
+                    "path",
+                    "topology_matches",
+                    "authority_matches",
+                    "canonical_authority_configured",
+                ),
+            )
+        elif env == "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX":
+            compact[env] = _compact_mapping(raw_check, ("configured", "scheme", "supported"))
+        elif "path" in raw_check:
+            compact[env] = _compact_mapping(raw_check, ("path",))
+        else:
+            compact[env] = _compact_mapping(raw_check, ("configured", "value_recorded"))
     return compact
 
 

@@ -7,6 +7,8 @@ import os
 import re
 import shutil
 import stat
+import subprocess
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -29,6 +31,7 @@ from services.orchestrator import scheduler_file_providers as scheduler_file_pro
 from services.orchestrator import scheduler_lease as scheduler_lease_module
 from services.orchestrator import scheduler_state as scheduler_state_module
 from services.orchestrator import scheduler_state_rows as scheduler_state_rows_module
+from services.orchestrator import source_cycle_raw_manifest as source_cycle_raw_manifest_module
 from services.orchestrator.chain import (
     M3_STAGES,
     OrchestratorConfig,
@@ -6104,6 +6107,1227 @@ def test_missing_forcing_package_blocks_forecast_resume_before_submission(
     assert orchestrator.calls == []
 
 
+def _missing_forcing_repair_direct_grid_profile(source_id: str = "gfs") -> dict[str, Any]:
+    grid_id = f"{source_id.lower()}_0p25"
+    return {
+        "runnable": True,
+        "memory_gb": 8,
+        "forcing_mapping_mode": "direct_grid",
+        "direct_grid_forcing": {
+            "forcing_mapping_mode": "direct_grid",
+            "binding_uri": f"s3://nhms/mappings/{source_id.lower()}/binding.json",
+            "binding_checksum": "sha256:" + "a" * 64,
+            "model_input_package_id": f"input-{source_id.lower()}",
+            "sp_att_path": "input/mesh/SpatialData/sp.att",
+            "sp_att_checksum": "sha256:" + "b" * 64,
+            "applicable_source_ids": [source_id],
+            "grid_id": grid_id,
+            "grid_signature": "c" * 64,
+            "stations": [
+                {
+                    "station_id": f"{source_id.lower()}-station-1",
+                    "shud_forcing_index": 1,
+                    "forcing_filename": "X100Y30.csv",
+                    "longitude": 100.0,
+                    "latitude": 30.0,
+                    "x": 100.0,
+                    "y": 30.0,
+                    "z": 0.0,
+                    "grid_id": grid_id,
+                    "grid_cell_id": "100:30",
+                }
+            ],
+        },
+    }
+
+
+def _write_missing_forcing_repair_raw_manifest(
+    root: Path,
+    *,
+    source_id: str = "gfs",
+    cycle_time: datetime,
+) -> dict[str, Any]:
+    cycle_text = format_cycle_time(cycle_time)
+    raw_key = f"raw/{source_id.lower()}/{cycle_text}/{source_id.lower()}.f000.grib2"
+    raw_path = root / raw_key
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_path.write_bytes(b"verified-raw-input")
+    manifest_path = root / f"raw/{source_id.lower()}/{cycle_text}/manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "source_id": source_id,
+                "cycle_time": _format_iso_z(cycle_time),
+                "manifest_uri": f"s3://nhms/raw/{source_id.lower()}/{cycle_text}/manifest.json",
+                "entries": [
+                    {
+                        "remote_url": f"https://example.invalid/{source_id.lower()}",
+                        "local_key": raw_key,
+                        "variable": "prcp_rate_or_amount",
+                        "forecast_hour": 0,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    readiness = nfs_raw_manifest_readiness(
+        source_id=source_id,
+        cycle_time=cycle_time,
+        object_store_root=root,
+        object_store_prefix="s3://nhms",
+        required=True,
+    )
+    assert readiness["status"] == "ready"
+    return readiness
+
+
+def _missing_forcing_retry_state(
+    candidate: Any,
+    *,
+    raw_manifest: Mapping[str, Any] | None,
+    forcing_package_uri: str | None = None,
+) -> dict[str, Any]:
+    state = {
+        **_production_identity_fixture(),
+        "candidate_id": candidate.candidate_id,
+        "hydro_status": "created",
+        "pipeline_status": "succeeded",
+        "completed_stage_evidence": {
+            "stage": "forcing",
+            "status": "succeeded",
+            "restart_stage": "forecast",
+        },
+    }
+    if forcing_package_uri is not None:
+        state["forcing_package_uri"] = forcing_package_uri
+    if raw_manifest is not None:
+        state["nfs_raw_manifest"] = dict(raw_manifest)
+    return state
+
+
+def _missing_forcing_repair_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cycle_time: datetime,
+    dry_run: bool,
+    raw_root: Path | None = None,
+    require_direct_grid: bool = True,
+) -> ProductionSchedulerConfig:
+    authority_root = raw_root or tmp_path / "repair-raw-authority"
+    authority_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        source_cycle_raw_manifest_module,
+        "NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT",
+        authority_root,
+        raising=False,
+    )
+    return _config(
+        tmp_path,
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=dry_run,
+        lookback_hours=0,
+        cycle_lag_hours=6,
+        max_cycles_per_source=1,
+        backfill_enabled=False,
+        require_direct_grid=require_direct_grid,
+        repair_missing_forcing=True,
+        repair_missing_forcing_cycle_time=cycle_time,
+        slurm_array_concurrency_bound=32,
+        object_store_copyback_root=authority_root,
+        nfs_raw_manifest_root=authority_root,
+        allowed_storage_roots=(tmp_path,),
+    )
+
+
+def _complete_missing_forcing_repair_warm_state() -> dict[str, Any]:
+    return {
+        "ready": True,
+        "candidate_state": {
+            "init_state_id": "state_gfs_model_a_2026052100",
+            "init_state_uri": "s3://nhms/states/gfs/model_a/2026052100/state.cfg.ic",
+            "init_state_checksum": "sha256:warm-complete",
+            "init_state_valid_time": "2026-05-21T06:00:00Z",
+            "init_state_quality": "fresh",
+            "init_state_lineage": {"start_mode": "warm", "producer_cycle": "2026-05-21T00:00:00Z"},
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("repair_flag", "expected_enabled", "expected_cycle"),
+    [
+        ([], "false", "<unset>"),
+        (["--repair-missing-forcing"], "true", "2026-05-21T06:00:00Z"),
+    ],
+)
+def test_node22_exact_cycle_wrapper_scopes_missing_forcing_repair_to_explicit_flag(
+    tmp_path: Path,
+    repair_flag: list[str],
+    expected_enabled: str,
+    expected_cycle: str,
+) -> None:
+    fake_repo = tmp_path / "node22-repo"
+    fake_python = fake_repo / ".venv/bin/python"
+    fake_python.parent.mkdir(parents=True)
+    capture = tmp_path / "wrapper-capture.txt"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "${NHMS_SCHEDULER_REPAIR_MISSING_FORCING}" > "${CAPTURE}"\n'
+        'printf "%s\\n" "${NHMS_SCHEDULER_REPAIR_MISSING_FORCING_CYCLE_TIME-<unset>}" >> "${CAPTURE}"\n'
+        'printf "%s\\n" "${NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT-<unset>}" >> "${CAPTURE}"\n'
+        'printf "%s\\n" "${NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX-<unset>}" >> "${CAPTURE}"\n'
+        'printf "%s\\n" "${NHMS_OBJECT_STORE_COPYBACK_ROOT-<unset>}" >> "${CAPTURE}"\n'
+        'printf "%s\\n" "$@" >> "${CAPTURE}"\n',
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    env_file = tmp_path / "scheduler.env"
+    env_file.write_text(
+        "NHMS_SCHEDULER_REPAIR_MISSING_FORCING=true\n"
+        "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT=/ghdc/data/nwm/object-store\n"
+        "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX=s3://nhms\n"
+        "NHMS_OBJECT_STORE_COPYBACK_ROOT=/ghdc/data/nwm/object-store\n",
+        encoding="utf-8",
+    )
+    env = {
+        **os.environ,
+        "NHMS_NODE22_REPO": str(fake_repo),
+        "NHMS_NODE22_SCHEDULER_ENV": str(env_file),
+        "CAPTURE": str(capture),
+    }
+    script = Path(__file__).parents[1] / "scripts/ops/node22-run-cycle-once.sh"
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(script),
+            "--cycle-time",
+            "2026-05-21T06:00:00Z",
+            *repair_flag,
+            "--plan",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    lines = capture.read_text(encoding="utf-8").splitlines()
+    assert lines[:5] == [
+        expected_enabled,
+        expected_cycle,
+        "/ghdc/data/nwm/object-store",
+        "s3://nhms",
+        "/ghdc/data/nwm/object-store",
+    ]
+    assert lines[5:] == [
+        "-m",
+        "services.orchestrator.cli",
+        "plan-production",
+        "--cycle-time",
+        "2026-05-21T06:00:00Z",
+        "--disable-backfill",
+        "--plan",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("mode", "db_free_value"),
+    [("--plan", None), ("--submit", "false")],
+    ids=("plan-db-free-omitted", "submit-db-free-false"),
+)
+def test_node22_exact_cycle_wrapper_repair_runs_authority_preflight_without_db_free_mode(
+    tmp_path: Path,
+    mode: str,
+    db_free_value: str | None,
+) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    raw_root = tmp_path / "alternate-ready-object-store"
+    readiness = _write_missing_forcing_repair_raw_manifest(raw_root, cycle_time=cycle_time)
+    assert readiness["status"] == "ready"
+    fake_repo = tmp_path / "node22-repo"
+    fake_python = fake_repo / ".venv/bin/python"
+    fake_python.parent.mkdir(parents=True)
+    fake_python.write_text(
+        '#!/usr/bin/env bash\nexec "$NHMS_TEST_REAL_PYTHON" "$@"\n',
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    roots = {
+        "workspace": tmp_path / "workspace",
+        "published": tmp_path / "published",
+        "logs": tmp_path / "logs",
+        "runtime": tmp_path / "runtime",
+        "temp": tmp_path / "temp",
+    }
+    for root in roots.values():
+        root.mkdir(parents=True)
+    (roots["workspace"] / "scheduler").mkdir()
+    (roots["workspace"] / "evidence").mkdir()
+    env_lines = [
+        f"WORKSPACE_ROOT={roots['workspace']}",
+        f"OBJECT_STORE_ROOT={raw_root}",
+        f"NHMS_PUBLISHED_ARTIFACT_ROOT={roots['published']}",
+        f"SLURM_SHARED_LOG_ROOT={roots['logs']}",
+        f"NHMS_SCHEDULER_RUNTIME_ROOT={roots['runtime']}",
+        f"NHMS_SCHEDULER_TEMP_ROOT={roots['temp']}",
+        f"NHMS_SCHEDULER_LOCK_ROOT={roots['workspace'] / 'scheduler'}",
+        f"NHMS_SCHEDULER_EVIDENCE_ROOT={roots['workspace'] / 'evidence'}",
+        f"NHMS_SCHEDULER_ALLOWED_ROOTS={tmp_path}",
+        f"NHMS_OBJECT_STORE_COPYBACK_ROOT={raw_root}",
+        f"NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT={raw_root}",
+        "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX=s3://nhms",
+        "DATABASE_URL=postgresql://scheduler@127.0.0.1:1/unused",
+    ]
+    if db_free_value is not None:
+        env_lines.append(f"NHMS_SCHEDULER_DB_FREE_REQUIRED={db_free_value}")
+    env_file = tmp_path / "scheduler.env"
+    env_file.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
+    script = Path(__file__).parents[1] / "scripts/ops/node22-run-cycle-once.sh"
+    env = {
+        **os.environ,
+        "NHMS_NODE22_REPO": str(fake_repo),
+        "NHMS_NODE22_SCHEDULER_ENV": str(env_file),
+        "NHMS_TEST_REAL_PYTHON": sys.executable,
+        "PYTHONPATH": str(Path(__file__).parents[1]),
+    }
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(script),
+            "--cycle-time",
+            "2026-05-21T06:00:00Z",
+            "--repair-missing-forcing",
+            mode,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout.splitlines()[-1])
+    rendered = json.dumps(payload, sort_keys=True)
+    assert payload["status"] == "preflight_blocked"
+    assert payload["execution_boundary"] == "db_free_runtime_preflight_blocked"
+    assert payload["lock"]["reason"] == "db_free_runtime_preflight_blocked"
+    assert payload["runtime_config"]["scheduler_db_free_required"] is False
+    assert payload["runtime_config"]["missing_forcing_repair"]["enabled"] is True
+    assert payload["counts"]["submitted_count"] == 0
+    assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
+    assert "alternate-ready-object-store" not in rendered
+    assert "alternate-ready-object-store" not in completed.stdout
+    assert "/ghdc/data/nwm/object-store" not in rendered
+
+
+def test_exact_cycle_missing_forcing_repair_plan_previews_forcing_array_without_submission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    candidate = _scheduler_candidate_fixture()
+    readiness = _write_missing_forcing_repair_raw_manifest(
+        tmp_path / "nfs-raw",
+        cycle_time=cycle_time,
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _missing_forcing_repair_config(
+            tmp_path,
+            monkeypatch,
+            cycle_time=cycle_time,
+            dry_run=True,
+            raw_root=tmp_path / "nfs-raw",
+        ),
+        registry=FakeRegistry(
+            [
+                _model(
+                    "model_a",
+                    "basin_a",
+                    resource_profile=_missing_forcing_repair_direct_grid_profile(),
+                )
+            ]
+        ),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(
+            _missing_forcing_retry_state(candidate, raw_manifest=readiness)
+        ),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+    scheduler._strict_warm_start_for_candidate = lambda *_args: {
+        "ready": True,
+        "candidate_state": {
+            "init_state_id": "state_gfs_model_a_2026052100",
+            "init_state_uri": "s3://nhms/states/gfs/model_a/2026052100/state.cfg.ic",
+            "init_state_checksum": "sha256:warm-plan",
+            "init_state_valid_time": "2026-05-21T06:00:00Z",
+            "init_state_quality": "fresh",
+            "init_state_lineage": {"start_mode": "warm", "producer_cycle": "2026-05-21T00:00:00Z"},
+        },
+    }  # type: ignore[method-assign]
+
+    result = scheduler.run_once()
+
+    assert result.status == "planned"
+    assert orchestrator.calls == []
+    assert len(result.evidence["candidates"]) == 1
+    state_evidence = result.evidence["candidates"][0]["state_evidence"]
+    assert state_evidence["restart_stage"] == "forcing"
+    assert state_evidence["missing_forcing_repair"] == {
+        "policy": "operator_exact_cycle_missing_forcing_repair",
+        "requested": True,
+        "target_cycle_time": "2026-05-21T06:00:00Z",
+        "candidate_cycle_time": "2026-05-21T06:00:00Z",
+        "source_id": "gfs",
+        "model_id": "model_a",
+        "candidate_id": candidate.candidate_id,
+        "default_policy": "fail_closed",
+        "plan_only": True,
+        "status": "authorized",
+        "reason": "exact_cycle_direct_grid_raw_manifest_ready",
+        "restart_stage": "forcing",
+        "slurm_stage": "produce_forcing_array",
+        "login_node_forcing": False,
+    }
+    assert result.evidence["runtime_config"]["missing_forcing_repair"]["enabled"] is True
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+    rendered = json.dumps(result.evidence, sort_keys=True, default=str)
+    assert str(tmp_path / "nfs-raw") not in rendered
+    assert state_evidence["nfs_raw_manifest"]["object_store_root"] == "[local-path]"
+
+
+def test_file_journal_missing_forcing_repair_uses_trusted_raw_root_and_public_redaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-05-21T00:00:00Z")
+    generated_at = _dt("2026-05-21T06:00:00Z")
+    raw_root = tmp_path / "node27-nfs-raw"
+    _write_missing_forcing_repair_raw_manifest(raw_root, cycle_time=cycle_time)
+    monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(raw_root))
+    monkeypatch.setattr(
+        source_cycle_raw_manifest_module,
+        "NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT",
+        raw_root,
+        raising=False,
+    )
+    journal = scheduler_module.FileOrchestrationJournalRepository(tmp_path / "journal")
+    journal.ensure_forecast_cycle(source_id="gfs", cycle_time=cycle_time)
+    journal.upsert_pipeline_job(
+        {
+            "job_id": "job_cycle_gfs_2026052100_model_a_forcing",
+            "run_id": "cycle_gfs_2026052100_model_a",
+            "candidate_id": "cycle_gfs_2026052100_model_a",
+            "cycle_id": "gfs_2026052100",
+            "cycle_time": _format_iso_z(cycle_time),
+            "source_id": "gfs",
+            "model_id": "model_a",
+            "job_type": "produce_forcing_array",
+            "stage": "forcing",
+            "status": "succeeded",
+            "slurm_job_id": "6102",
+            "retry_count": 0,
+            "created_at": _format_iso_z(generated_at - timedelta(minutes=20)),
+            "updated_at": _format_iso_z(generated_at - timedelta(minutes=10)),
+        }
+    )
+    scheduler = ProductionScheduler(
+        _config(
+            tmp_path,
+            now=generated_at,
+            sources=("gfs",),
+            allowed_cycle_hours_utc=(0, 12),
+            dry_run=True,
+            lookback_hours=0,
+            cycle_lag_hours=6,
+            max_cycles_per_source=1,
+            backfill_enabled=False,
+            require_direct_grid=True,
+            repair_missing_forcing=True,
+            repair_missing_forcing_cycle_time=cycle_time,
+            slurm_array_concurrency_bound=32,
+            object_store_copyback_root=raw_root,
+            nfs_raw_manifest_root=raw_root,
+            allowed_storage_roots=(tmp_path,),
+        ),
+        registry=FakeRegistry(
+            [_model("model_a", "basin_a", resource_profile=_missing_forcing_repair_direct_grid_profile())]
+        ),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T00:00:00Z", True)])},
+        active_repository=journal,
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: pytest.fail("plan mode must not submit"),
+    )
+    scheduler._strict_warm_start_for_candidate = lambda *_args: {  # type: ignore[method-assign]
+        "ready": True,
+        "candidate_state": {
+            "init_state_id": "state_gfs_model_a_2026052012",
+            "init_state_uri": "s3://nhms/states/gfs/model_a/2026052012/state.cfg.ic",
+            "init_state_checksum": "sha256:file-journal-warm",
+            "init_state_valid_time": "2026-05-21T00:00:00Z",
+            "init_state_quality": "fresh",
+            "init_state_lineage": {"start_mode": "warm", "producer_cycle": "2026-05-20T12:00:00Z"},
+        },
+    }
+
+    result = scheduler.run_once()
+
+    assert result.status == "planned"
+    assert len(result.evidence["candidates"]) == 1
+    state_evidence = result.evidence["candidates"][0]["state_evidence"]
+    assert state_evidence["missing_forcing_repair"]["status"] == "authorized"
+    assert state_evidence["nfs_raw_manifest"]["object_store_root"] == "[local-path]"
+    assert state_evidence["nfs_raw_manifest"]["manifest_path"] == "[local-path]"
+    assert str(raw_root) not in json.dumps(result.evidence, sort_keys=True, default=str)
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+
+
+@pytest.mark.parametrize(
+    ("case_name", "mutate", "expected_reason"),
+    [
+        ("raw_missing", lambda state: state.pop("nfs_raw_manifest"), "raw_manifest_not_ready"),
+        (
+            "raw_identity_mismatch",
+            lambda state: state["nfs_raw_manifest"].update({"cycle_id": "gfs_2026052112"}),
+            "raw_manifest_identity_mismatch",
+        ),
+    ],
+)
+def test_exact_cycle_missing_forcing_repair_rejects_unverified_raw_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case_name: str,
+    mutate: Any,
+    expected_reason: str,
+) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    candidate = _scheduler_candidate_fixture()
+    readiness = _write_missing_forcing_repair_raw_manifest(
+        tmp_path / f"nfs-raw-{case_name}",
+        cycle_time=cycle_time,
+    )
+    state = _missing_forcing_retry_state(candidate, raw_manifest=readiness)
+    mutate(state)
+    scheduler = ProductionScheduler(
+        _missing_forcing_repair_config(
+            tmp_path,
+            monkeypatch,
+            cycle_time=cycle_time,
+            dry_run=True,
+            raw_root=tmp_path / f"nfs-raw-{case_name}",
+        ),
+        registry=FakeRegistry(
+            [_model("model_a", "basin_a", resource_profile=_missing_forcing_repair_direct_grid_profile())]
+        ),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(state),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: pytest.fail("rejected repair must not submit"),
+    )
+    scheduler._strict_warm_start_for_candidate = (  # type: ignore[method-assign]
+        lambda *_args: _complete_missing_forcing_repair_warm_state()
+    )
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"][0]
+    assert blocked["reason"] == "missing_forcing_package_uri"
+    assert blocked["state_evidence"]["missing_forcing_repair"]["status"] == "rejected"
+    assert blocked["state_evidence"]["missing_forcing_repair"]["reason"] == expected_reason
+    assert result.evidence["counts"]["submitted_count"] == 0
+
+
+def test_exact_cycle_missing_forcing_repair_rejects_non_direct_grid_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    candidate = _scheduler_candidate_fixture()
+    readiness = _write_missing_forcing_repair_raw_manifest(
+        tmp_path / "nfs-raw-idw",
+        cycle_time=cycle_time,
+    )
+    scheduler = ProductionScheduler(
+        _missing_forcing_repair_config(
+            tmp_path,
+            monkeypatch,
+            cycle_time=cycle_time,
+            dry_run=True,
+            require_direct_grid=False,
+        ),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(
+            _missing_forcing_retry_state(candidate, raw_manifest=readiness)
+        ),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: pytest.fail("IDW repair must not submit"),
+    )
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"][0]
+    assert blocked["state_evidence"]["missing_forcing_repair"]["reason"] == (
+        "production_direct_grid_not_required"
+    )
+    assert result.evidence["counts"]["submitted_count"] == 0
+
+
+def test_missing_forcing_repair_rejects_when_canonical_input_is_not_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    candidate = _scheduler_candidate_fixture()
+    readiness = _write_missing_forcing_repair_raw_manifest(
+        tmp_path / "nfs-raw-no-canonical",
+        cycle_time=cycle_time,
+    )
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
+    scheduler = ProductionScheduler(
+        _missing_forcing_repair_config(
+            tmp_path,
+            monkeypatch,
+            cycle_time=cycle_time,
+            dry_run=True,
+            raw_root=tmp_path / "nfs-raw-no-canonical",
+        ),
+        registry=FakeRegistry(
+            [_model("model_a", "basin_a", resource_profile=_missing_forcing_repair_direct_grid_profile())]
+        ),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [("2026-05-21T06:00:00Z", True)],
+                policy_identity=policy,
+                source_object_identity=source_object,
+            )
+        },
+        active_repository=RawCandidateStateRepository(
+            _missing_forcing_retry_state(candidate, raw_manifest=readiness)
+        ),
+        canonical_readiness_provider=_fresh_zero_row_readiness_provider(
+            cycle_time,
+            policy=policy,
+            source_object=source_object,
+        ),
+        orchestrator_factory=lambda _source_id: pytest.fail("canonical-missing repair must not submit"),
+    )
+    scheduler._strict_warm_start_for_candidate = lambda *_args: {
+        "ready": True,
+        "candidate_state": {
+            "init_state_id": "state_gfs_model_a_2026052100",
+            "init_state_uri": "s3://nhms/states/gfs/model_a/2026052100/state.cfg.ic",
+            "init_state_checksum": "sha256:warm-canonical",
+            "init_state_valid_time": "2026-05-21T06:00:00Z",
+            "init_state_quality": "fresh",
+            "init_state_lineage": {"start_mode": "warm"},
+        },
+    }  # type: ignore[method-assign]
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"][0]
+    assert blocked["state_evidence"]["missing_forcing_repair"]["status"] == "rejected"
+    assert blocked["state_evidence"]["missing_forcing_repair"]["reason"] == "canonical_not_ready"
+    assert blocked["state_evidence"]["missing_forcing_repair"]["canonical_readiness"]["ready"] is False
+    assert "canonical_readiness" not in blocked["state_evidence"]
+    assert blocked["reason"] == "missing_forcing_package_uri"
+    assert blocked["state_evidence"]["reason"] == "missing_forcing_package_uri"
+    assert blocked["state_evidence"]["classifier"] == "missing_upstream_artifact"
+    assert blocked["state_evidence"]["artifact_guard"]["stable_classifier"] == (
+        "FORCING_PACKAGE_URI_MISSING"
+    )
+    assert result.evidence["counts"]["submitted_count"] == 0
+
+
+@pytest.mark.parametrize(
+    "ordinary_state",
+    [
+        None,
+        {
+            "pipeline_status": "failed",
+            "failed_stage": "forcing",
+            "error_code": "NODE_FAILURE",
+            "retry_count": 0,
+        },
+    ],
+    ids=["no_candidate_state", "ordinary_retry"],
+)
+def test_missing_forcing_repair_keeps_ordinary_strict_warm_blocker_before_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ordinary_state: dict[str, Any] | None,
+) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _missing_forcing_repair_config(
+            tmp_path,
+            monkeypatch,
+            cycle_time=cycle_time,
+            dry_run=False,
+        ),
+        registry=FakeRegistry(
+            [_model("model_a", "basin_a", resource_profile=_missing_forcing_repair_direct_grid_profile())]
+        ),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=PerModelCandidateStateRepository({"model_a": ordinary_state}),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+    scheduler._strict_warm_start_for_candidate = lambda *_args: {  # type: ignore[method-assign]
+        "ready": False,
+        "reason": "state_snapshot_index_prior_checkpoint_missing_after_history",
+        "typed_reason": "state_snapshot_index_prior_checkpoint_missing_after_history",
+    }
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["counts"]["slurm_status_sync_count"] == 0
+    assert result.evidence["blocked_candidates"][0]["reason"] == (
+        "state_snapshot_index_prior_checkpoint_missing_after_history"
+    )
+    assert orchestrator.calls == []
+
+
+def test_missing_forcing_repair_mixed_cohort_admits_only_stable_missing_forcing_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    raw_root = tmp_path / "nfs-raw-mixed"
+    readiness = _write_missing_forcing_repair_raw_manifest(raw_root, cycle_time=cycle_time)
+    candidate = _scheduler_candidate_fixture()
+    orchestrator = FakeProductionOrchestrator()
+    forcing_producer = FakeForcingProducer()
+    scheduler = ProductionScheduler(
+        _missing_forcing_repair_config(
+            tmp_path,
+            monkeypatch,
+            cycle_time=cycle_time,
+            dry_run=False,
+            raw_root=raw_root,
+        ),
+        registry=FakeRegistry(
+            [
+                _model(
+                    "model_a",
+                    "basin_a",
+                    resource_profile=_missing_forcing_repair_direct_grid_profile(),
+                ),
+                _model(
+                    "model_b",
+                    "basin_b",
+                    resource_profile=_missing_forcing_repair_direct_grid_profile(),
+                ),
+            ]
+        ),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=PerModelCandidateStateRepository(
+            {
+                "model_a": _missing_forcing_retry_state(candidate, raw_manifest=readiness),
+                "model_b": None,
+            }
+        ),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        forcing_producer=forcing_producer,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    def strict_warm(candidate_arg: Any, *_args: Any) -> dict[str, Any]:
+        if candidate_arg.model_id == "model_a":
+            return _complete_missing_forcing_repair_warm_state()
+        return {
+            "ready": False,
+            "reason": "state_snapshot_index_prior_checkpoint_missing_after_history",
+        }
+
+    scheduler._strict_warm_start_for_candidate = strict_warm  # type: ignore[method-assign]
+
+    result = scheduler.run_once()
+
+    assert result.status == "submitted"
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert [(item["model_id"], item["reason"]) for item in result.evidence["blocked_candidates"]] == [
+        ("model_b", "state_snapshot_index_prior_checkpoint_missing_after_history")
+    ]
+    assert len(orchestrator.calls) == 1
+    assert [basin["model_id"] for basin in orchestrator.calls[0]["basins"]] == ["model_a"]
+    assert {basin["restart_stage"] for basin in orchestrator.calls[0]["basins"]} == {"forcing"}
+    assert forcing_producer.calls == []
+
+
+@pytest.mark.parametrize("initial_decision", ["active", "retry"])
+def test_missing_forcing_repair_post_sync_reclassification_rechecks_strict_warm_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    initial_decision: str,
+) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    strict_warm = _complete_missing_forcing_repair_warm_state()
+    active_job = {
+        "job_id": "job_forcing",
+        "slurm_job_id": "7777",
+        "status": "running",
+        "stage": "forcing",
+    }
+
+    class SyncingRepository(CandidateAndActiveRepository):
+        def __init__(self) -> None:
+            self.synced = False
+            first_state = (
+                {
+                    "pipeline_status": "running",
+                    "pipeline_jobs": [active_job],
+                }
+                if initial_decision == "active"
+                else {
+                    "pipeline_status": "failed",
+                    "failed_stage": "forcing",
+                    "error_code": "NODE_FAILURE",
+                    "retry_count": 0,
+                }
+            )
+            super().__init__(first_state, [active_job])
+
+        def candidate_state(self, **kwargs: Any) -> dict[str, Any]:
+            if not self.synced:
+                return super().candidate_state(**kwargs)
+            return {
+                "pipeline_status": "failed",
+                "failed_stage": "forcing",
+                "error_code": "NODE_FAILURE",
+                "retry_count": 0,
+                "run_id": kwargs["run_id"],
+                "forcing_version_id": kwargs["forcing_version_id"],
+                "candidate_id": kwargs["candidate_id"],
+            }
+
+        def active_slurm_jobs(self, **kwargs: Any) -> list[dict[str, Any]]:
+            return [] if self.synced else super().active_slurm_jobs(**kwargs)
+
+    repository = SyncingRepository()
+
+    class SyncingOrchestrator(FakeProductionOrchestrator):
+        def sync_cycle_statuses(self, cycle_id: str) -> list[dict[str, Any]]:
+            repository.synced = True
+            strict_warm.clear()
+            strict_warm.update(
+                {
+                    "ready": False,
+                    "reason": "state_snapshot_index_prior_checkpoint_missing_after_history",
+                }
+            )
+            return [
+                {
+                    **active_job,
+                    "cycle_id": cycle_id,
+                    "status": "failed",
+                    "error_code": "NODE_FAILURE",
+                }
+            ]
+
+    orchestrator = SyncingOrchestrator()
+    scheduler = ProductionScheduler(
+        _missing_forcing_repair_config(
+            tmp_path,
+            monkeypatch,
+            cycle_time=cycle_time,
+            dry_run=False,
+        ),
+        registry=FakeRegistry(
+            [_model("model_a", "basin_a", resource_profile=_missing_forcing_repair_direct_grid_profile())]
+        ),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=repository,
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+    scheduler._strict_warm_start_for_candidate = lambda *_args: strict_warm  # type: ignore[method-assign]
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["counts"]["slurm_status_sync_count"] == 1
+    assert result.evidence["blocked_candidates"][0]["reason"] == (
+        "state_snapshot_index_prior_checkpoint_missing_after_history"
+    )
+    assert orchestrator.calls == []
+
+
+def test_missing_forcing_repair_target_mismatch_preserves_ordinary_warm_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    config = replace(
+        _missing_forcing_repair_config(
+            tmp_path,
+            monkeypatch,
+            cycle_time=cycle_time,
+            dry_run=False,
+        ),
+        repair_missing_forcing_cycle_time=_dt("2026-05-21T00:00:00Z"),
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry(
+            [_model("model_a", "basin_a", resource_profile=_missing_forcing_repair_direct_grid_profile())]
+        ),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=PerModelCandidateStateRepository({"model_a": None}),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+    scheduler._strict_warm_start_for_candidate = lambda *_args: {  # type: ignore[method-assign]
+        "ready": False,
+        "reason": "state_snapshot_index_prior_checkpoint_missing_after_history",
+    }
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["blocked_candidates"][0]["reason"] == (
+        "state_snapshot_index_prior_checkpoint_missing_after_history"
+    )
+    assert orchestrator.calls == []
+
+
+def test_missing_forcing_repair_rejects_candidate_outside_exact_operator_cycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    candidate = _scheduler_candidate_fixture()
+    readiness = _write_missing_forcing_repair_raw_manifest(
+        tmp_path / "nfs-raw-cycle-mismatch",
+        cycle_time=cycle_time,
+    )
+    config = _missing_forcing_repair_config(
+        tmp_path,
+        monkeypatch,
+        cycle_time=cycle_time,
+        dry_run=True,
+    )
+    config = replace(
+        config,
+        repair_missing_forcing_cycle_time=_dt("2026-05-21T00:00:00Z"),
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry(
+            [_model("model_a", "basin_a", resource_profile=_missing_forcing_repair_direct_grid_profile())]
+        ),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(
+            _missing_forcing_retry_state(candidate, raw_manifest=readiness)
+        ),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: pytest.fail("wrong-cycle repair must not submit"),
+    )
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"][0]
+    assert blocked["state_evidence"]["missing_forcing_repair"]["reason"] == (
+        "exact_cycle_identity_mismatch"
+    )
+    assert result.evidence["counts"]["submitted_count"] == 0
+
+
+def test_missing_forcing_repair_config_rejects_unbounded_or_malformed_operator_use(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="requires an exact cycle time"):
+        _config(
+            tmp_path,
+            lookback_hours=0,
+            backfill_enabled=False,
+            repair_missing_forcing=True,
+        )
+    with pytest.raises(ValueError, match="ISO-8601 UTC time"):
+        _config(
+            tmp_path,
+            lookback_hours=0,
+            backfill_enabled=False,
+            repair_missing_forcing=True,
+            repair_missing_forcing_cycle_time="not-a-cycle",
+        )
+    with pytest.raises(ValueError, match="exact-cycle"):
+        _config(
+            tmp_path,
+            repair_missing_forcing=True,
+            repair_missing_forcing_cycle_time="2026-05-21T06:00:00Z",
+        )
+
+
+def test_exact_cycle_missing_forcing_repair_rebuilds_missing_path_and_preserves_warm_lineage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    candidate = _scheduler_candidate_fixture()
+    readiness = _write_missing_forcing_repair_raw_manifest(
+        tmp_path / "nfs-raw-submit",
+        cycle_time=cycle_time,
+    )
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    missing_forcing_path = object_store_root / "forcing/gfs/2026052106/model_a/package.json"
+    assert not missing_forcing_path.exists()
+    orchestrator = FakeProductionOrchestrator()
+    forcing_producer = FakeForcingProducer()
+    scheduler = ProductionScheduler(
+        _missing_forcing_repair_config(
+            tmp_path,
+            monkeypatch,
+            cycle_time=cycle_time,
+            dry_run=False,
+            raw_root=tmp_path / "nfs-raw-submit",
+        ),
+        registry=FakeRegistry(
+            [_model("model_a", "basin_a", resource_profile=_missing_forcing_repair_direct_grid_profile())]
+        ),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(
+            _missing_forcing_retry_state(
+                candidate,
+                raw_manifest=readiness,
+                forcing_package_uri=str(missing_forcing_path),
+            )
+        ),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        forcing_producer=forcing_producer,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+    warm_state = {
+        "ready": True,
+        "candidate_state": {
+            "init_state_id": "state_gfs_model_a_2026052100",
+            "init_state_uri": "s3://nhms/states/gfs/model_a/2026052100/state.cfg.ic",
+            "init_state_checksum": "sha256:warm",
+            "init_state_valid_time": "2026-05-21T06:00:00Z",
+            "init_state_quality": "fresh",
+            "init_state_lineage": {"start_mode": "warm", "producer_cycle": "2026-05-21T00:00:00Z"},
+        },
+    }
+    scheduler._strict_warm_start_for_candidate = lambda *_args: warm_state  # type: ignore[method-assign]
+
+    result = scheduler.run_once()
+
+    assert result.status == "submitted"
+    assert forcing_producer.calls == []
+    assert len(orchestrator.calls) == 1
+    basin = orchestrator.calls[0]["basins"][0]
+    assert basin["restart_stage"] == "forcing"
+    assert basin["init_state_id"] == "state_gfs_model_a_2026052100"
+    assert basin["init_state_uri"] == "s3://nhms/states/gfs/model_a/2026052100/state.cfg.ic"
+    assert basin["init_state_checksum"] == "sha256:warm"
+    assert basin["init_state_valid_time"] == "2026-05-21T06:00:00Z"
+    assert basin["init_state_quality"] == "fresh"
+    assert basin["init_state_lineage"]["start_mode"] == "warm"
+    assert basin["state_evidence"]["cold_fallback_allowed"] is False
+    assert basin["state_evidence"]["missing_forcing_repair"]["slurm_stage"] == "produce_forcing_array"
+    assert basin["max_concurrent"] == 1
+
+
+def test_exact_cycle_missing_forcing_repair_keeps_18_members_in_one_forcing_cohort(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    readiness = _write_missing_forcing_repair_raw_manifest(
+        tmp_path / "nfs-raw-cohort",
+        cycle_time=cycle_time,
+    )
+
+    class MissingForcingCohortRepository(FakeActiveRepository):
+        def __init__(self) -> None:
+            super().__init__(active=False, completed=False)
+
+        def candidate_state(self, **_kwargs: Any) -> dict[str, Any]:
+            return {
+                "hydro_status": "created",
+                "pipeline_status": "succeeded",
+                "completed_stage_evidence": {
+                    "stage": "forcing",
+                    "status": "succeeded",
+                    "restart_stage": "forecast",
+                },
+                "nfs_raw_manifest": readiness,
+            }
+
+    orchestrator = FakeProductionOrchestrator()
+    models = [
+        _model(
+            f"model_{index:02d}",
+            f"basin_{index:02d}",
+            resource_profile=_missing_forcing_repair_direct_grid_profile(),
+        )
+        for index in range(18)
+    ]
+    scheduler = ProductionScheduler(
+        _missing_forcing_repair_config(
+            tmp_path,
+            monkeypatch,
+            cycle_time=cycle_time,
+            dry_run=False,
+            raw_root=tmp_path / "nfs-raw-cohort",
+        ),
+        registry=FakeRegistry(models),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=MissingForcingCohortRepository(),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+    warm_state = {
+        "ready": True,
+        "candidate_state": {
+            "init_state_id": "state_gfs_2026052100",
+            "init_state_uri": "s3://nhms/states/gfs/shared/2026052100/state.cfg.ic",
+            "init_state_checksum": "sha256:warm-cohort",
+            "init_state_valid_time": "2026-05-21T06:00:00Z",
+            "init_state_quality": "fresh",
+            "init_state_lineage": {"start_mode": "warm", "producer_cycle": "2026-05-21T00:00:00Z"},
+        },
+    }
+    scheduler._strict_warm_start_for_candidate = lambda *_args: warm_state  # type: ignore[method-assign]
+
+    result = scheduler.run_once()
+
+    assert result.status == "submitted"
+    assert len(orchestrator.calls) == 1
+    basins = orchestrator.calls[0]["basins"]
+    assert len(basins) == 18
+    assert {basin["restart_stage"] for basin in basins} == {"forcing"}
+    assert {basin["max_concurrent"] for basin in basins} == {18}
+    assert all(
+        basin["state_evidence"]["missing_forcing_repair"]["slurm_stage"]
+        == "produce_forcing_array"
+        for basin in basins
+    )
+
+
+@pytest.mark.parametrize(
+    ("strict_warm_start", "expected_reason"),
+    [
+        (None, "warm_state_missing"),
+        ({"ready": False}, "warm_state_not_ready"),
+        (
+            {
+                "ready": True,
+                "candidate_state": {
+                    "init_state_id": "state_partial",
+                    "init_state_uri": "s3://nhms/states/partial/state.cfg.ic",
+                },
+            },
+            "warm_state_identity_incomplete",
+        ),
+        (
+            {
+                "ready": True,
+                "candidate_state": {
+                    "init_state_id": "state_cold",
+                    "init_state_uri": "s3://nhms/states/cold/state.cfg.ic",
+                    "init_state_checksum": "sha256:cold",
+                    "init_state_valid_time": "2026-05-21T06:00:00Z",
+                    "init_state_quality": "cold_start_no_state",
+                    "init_state_lineage": {"start_mode": "cold"},
+                },
+            },
+            "warm_state_not_warm",
+        ),
+    ],
+)
+def test_missing_forcing_repair_rejects_missing_partial_or_cold_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    strict_warm_start: Mapping[str, Any] | None,
+    expected_reason: str,
+) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    candidate = _scheduler_candidate_fixture()
+    raw_root = tmp_path / f"nfs-raw-{expected_reason}"
+    readiness = _write_missing_forcing_repair_raw_manifest(raw_root, cycle_time=cycle_time)
+    scheduler = ProductionScheduler(
+        _missing_forcing_repair_config(
+            tmp_path,
+            monkeypatch,
+            cycle_time=cycle_time,
+            dry_run=True,
+            raw_root=raw_root,
+        ),
+        registry=FakeRegistry(
+            [_model("model_a", "basin_a", resource_profile=_missing_forcing_repair_direct_grid_profile())]
+        ),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(
+            _missing_forcing_retry_state(candidate, raw_manifest=readiness)
+        ),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: pytest.fail("invalid warm state must not submit"),
+    )
+    scheduler._strict_warm_start_for_candidate = lambda *_args: strict_warm_start  # type: ignore[method-assign]
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"][0]
+    assert blocked["reason"] == "missing_forcing_package_uri"
+    assert blocked["state_evidence"]["missing_forcing_repair"]["reason"] == expected_reason
+    assert result.evidence["counts"]["submitted_count"] == 0
+
+
+def test_missing_forcing_repair_rejects_slurm_array_bound_above_32(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="repair_missing_forcing.*32"):
+        _config(
+            tmp_path,
+            lookback_hours=0,
+            max_cycles_per_source=1,
+            backfill_enabled=False,
+            repair_missing_forcing=True,
+            repair_missing_forcing_cycle_time="2026-05-21T06:00:00Z",
+            slurm_array_concurrency_bound=33,
+        )
+
+
+def test_missing_forcing_repair_accepts_validated_state_index_lineage_without_start_mode() -> None:
+    candidate = _scheduler_candidate_fixture()
+    selected = {
+        "state_id": "state_gfs_model_a_2026052100",
+        "state_uri": "s3://nhms/states/gfs/model_a/2026052100/state.cfg.ic",
+        "checksum": "sha256:state-index",
+        "valid_time": "2026-05-21T06:00:00Z",
+        "usable_flag": True,
+        "init_state_quality": "fresh",
+        "lineage": {
+            "source_id": "gfs",
+            "cycle_id": "gfs_2026052100",
+            "lead_hours": 6,
+            "state_index_schema_version": "nhms.state_snapshot_index.v1",
+        },
+    }
+
+    actual, reason = scheduler_candidates_module._verified_repair_warm_state(
+        candidate,
+        {"ready": True, "candidate_state": selected},
+    )
+
+    assert reason is None
+    assert actual == selected
+
+
 @pytest.mark.parametrize("failed_stage", ["parse", "publish"])
 def test_missing_copyback_source_blocks_downstream_resume_before_submission(
     failed_stage: str,
@@ -7584,9 +8808,11 @@ def test_bounded_evidence_payload_shim_summarizes_large_retained_fields_within_l
     assert "slurm_submit_called" in shim_payload["no_mutation_proof"]
 
 
+@pytest.mark.parametrize("max_evidence_bytes", [5_000, 4_500])
 def test_db_free_bounded_evidence_preserves_runtime_selector_proof(
     monkeypatch: Any,
     tmp_path: Path,
+    max_evidence_bytes: int,
 ) -> None:
     _roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
     config = ProductionSchedulerConfig(now=_dt("2026-06-27T16:00:00Z"))
@@ -7598,11 +8824,11 @@ def test_db_free_bounded_evidence_preserves_runtime_selector_proof(
     bounded = scheduler_module._bounded_evidence_payload(
         payload,
         reason="evidence_size_limit_exceeded",
-        max_evidence_bytes=5_000,
+        max_evidence_bytes=max_evidence_bytes,
     )
     rendered = json.dumps(bounded, separators=(",", ":"), sort_keys=True)
 
-    assert len(rendered.encode("utf-8")) <= 5_000
+    assert len(rendered.encode("utf-8")) <= max_evidence_bytes
     assert bounded["status"] == "resource_limit_blocked"
     runtime_config = bounded["runtime_config"]
     assert runtime_config["database_url_configured"] is False
@@ -7619,10 +8845,45 @@ def test_db_free_bounded_evidence_preserves_runtime_selector_proof(
     assert db_free_runtime["selectors"]["NHMS_SCHEDULER_REGISTRY_BACKEND"]["selected"] == "file"
     assert db_free_runtime["paths"]["NHMS_SCHEDULER_REGISTRY_MANIFEST"]["path"] == "[local-path]"
     assert bounded["db_free_runtime"]["status"] == "ready"
-    assert bounded["db_free_runtime"]["checks"]["NHMS_SCHEDULER_REGISTRY_MANIFEST"]["path"] == "[local-path]"
+    preflight_checks = bounded["db_free_runtime"]["checks"]
+    assert "NHMS_SCHEDULER_REGISTRY_BACKEND" not in preflight_checks
+    assert preflight_checks["NHMS_SCHEDULER_REGISTRY_MANIFEST"]["path"] == "[local-path]"
+    assert preflight_checks["NHMS_OBJECT_STORE_COPYBACK_ROOT"] == {
+        "path": "[local-path]",
+        "topology_matches": True,
+    }
+    assert preflight_checks["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"] == {
+        "path": "[local-path]",
+        "topology_matches": True,
+        "authority_matches": True,
+        "canonical_authority_configured": True,
+    }
     for path in paths.values():
         assert str(path) not in rendered
     assert "db-free-local-root" not in rendered
+
+
+def test_db_free_bounded_evidence_keeps_preflight_selectors_without_runtime_duplicate(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    config = ProductionSchedulerConfig(now=_dt("2026-06-27T16:00:00Z"))
+    payload = _large_scheduler_evidence_payload("scheduler_2026062716_dbfree_preflight_only")
+    runtime_config = scheduler_module._scheduler_runtime_config_evidence(config)
+    runtime_config.pop("db_free_runtime")
+    payload["runtime_config"] = runtime_config
+    payload["db_free_runtime"] = config.db_free_runtime_preflight()
+
+    bounded = scheduler_module._bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=5_000,
+    )
+
+    selector_check = bounded["db_free_runtime"]["checks"]["NHMS_SCHEDULER_REGISTRY_BACKEND"]
+    assert selector_check["selected"] == "file"
+    assert selector_check["file_selected"] is True
 
 
 def test_bounded_evidence_preserves_timing_block_on_size_fallback() -> None:
@@ -18126,6 +19387,16 @@ def _set_db_free_scheduler_env(monkeypatch: Any, root: Path) -> tuple[dict[str, 
     monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
     monkeypatch.setenv("NHMS_SCHEDULER_RECONCILE_SLURM_USER", "scheduler-user")
     monkeypatch.setenv("NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT", "scheduler-account")
+    raw_manifest_root = roots["object_store_root"]
+    monkeypatch.setattr(
+        source_cycle_raw_manifest_module,
+        "NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT",
+        raw_manifest_root,
+        raising=False,
+    )
+    monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(raw_manifest_root))
+    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(raw_manifest_root))
+    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX", "s3://nhms")
     monkeypatch.delenv("DATABASE_URL", raising=False)
     for key in _DB_FREE_SELECTOR_ENV_KEYS:
         monkeypatch.setenv(key, "file")
@@ -18140,12 +19411,353 @@ def _set_db_free_scheduler_env(monkeypatch: Any, root: Path) -> tuple[dict[str, 
         "NHMS_SCHEDULER_STATE_INDEX": object_index_dir / "state-index.json",
     }
     for key, path in paths.items():
-        if key == "NHMS_SCHEDULER_JOURNAL_ROOT":
+        if key in {
+            "NHMS_SCHEDULER_JOURNAL_ROOT",
+            "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT",
+        }:
             path.mkdir(parents=True, exist_ok=True)
         else:
             path.write_text("{}", encoding="utf-8")
         monkeypatch.setenv(key, str(path))
     return roots, paths
+
+
+def test_db_free_runtime_preflight_requires_explicit_trusted_nfs_raw_manifest_root(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", raising=False)
+
+    preflight = ProductionSchedulerConfig().db_free_runtime_preflight()
+
+    assert preflight["status"] == "blocked"
+    blocker = next(
+        item
+        for item in preflight["blockers"]
+        if item["field"] == "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"
+    )
+    assert blocker["code"] == "db_free_required_path_missing"
+    assert "OBJECT_STORE_ROOT" not in json.dumps(preflight, sort_keys=True)
+
+
+def test_db_free_runtime_preflight_rejects_allowlisted_noncanonical_raw_authority_without_leak(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, _paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    canonical_root = Path(os.environ["NHMS_OBJECT_STORE_COPYBACK_ROOT"])
+    staging_root = roots["object_store_root"] / "allowlisted-staging" / "object-store"
+    staging_root.mkdir(parents=True)
+    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(staging_root))
+
+    preflight = ProductionSchedulerConfig().db_free_runtime_preflight()
+    rendered = json.dumps(preflight, sort_keys=True)
+
+    assert preflight["status"] == "blocked"
+    assert any(
+        item["code"] == "db_free_raw_authority_mismatch"
+        and item["field"] == "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"
+        for item in preflight["blockers"]
+    )
+    assert str(staging_root) not in rendered
+    assert str(canonical_root) not in rendered
+
+
+def test_db_free_runtime_preflight_rejects_copyback_and_raw_authority_rebound_together_without_work(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, _paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    canonical_root = Path(os.environ["NHMS_OBJECT_STORE_COPYBACK_ROOT"])
+    staging_root = roots["object_store_root"] / "allowlisted-staging" / "object-store"
+    staging_root.mkdir(parents=True)
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(staging_root))
+    monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(staging_root))
+    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(staging_root))
+    monkeypatch.setenv("NHMS_SCHEDULER_REPAIR_MISSING_FORCING", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_REPAIR_MISSING_FORCING_CYCLE_TIME", "2026-07-12T00:00:00Z")
+    monkeypatch.setenv("NHMS_SCHEDULER_BACKFILL_ENABLED", "false")
+    monkeypatch.setenv("NHMS_SCHEDULER_LOOKBACK_HOURS", "0")
+    monkeypatch.setenv("NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE", "1")
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+
+    config = ProductionSchedulerConfig(
+        backfill_enabled=False,
+        lookback_hours=0,
+        max_cycles_per_source=1,
+    )
+    preflight = config.db_free_runtime_preflight()
+    result = ProductionScheduler.from_env(config).run_once()
+    rendered = json.dumps({"preflight": preflight, "evidence": result.evidence}, sort_keys=True)
+
+    assert preflight["status"] == "blocked"
+    assert {
+        item["field"]
+        for item in preflight["blockers"]
+        if item["code"] == "db_free_raw_authority_topology_mismatch"
+    } == {
+        "NHMS_OBJECT_STORE_COPYBACK_ROOT",
+        "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT",
+    }
+    assert preflight["checks"]["NHMS_OBJECT_STORE_COPYBACK_ROOT"]["topology_matches"] is False
+    assert preflight["checks"]["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"]["topology_matches"] is False
+    assert preflight["checks"]["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"]["authority_matches"] is True
+    assert result.status == "preflight_blocked"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert str(staging_root) not in rendered
+    assert str(canonical_root) not in rendered
+
+
+def test_db_free_runtime_preflight_accepts_matching_canonical_raw_authority(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+
+    preflight = ProductionSchedulerConfig().db_free_runtime_preflight()
+
+    assert preflight["status"] == "ready"
+    assert preflight["checks"]["NHMS_OBJECT_STORE_COPYBACK_ROOT"]["topology_matches"] is True
+    assert preflight["checks"]["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"]["topology_matches"] is True
+    assert preflight["checks"]["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"]["authority_matches"] is True
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=("plan", "submit"))
+def test_non_db_free_exact_repair_blocks_arbitrary_ready_raw_authority_before_lock(
+    monkeypatch: Any,
+    tmp_path: Path,
+    dry_run: bool,
+) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    canonical_root = tmp_path / "canonical-node22-object-store"
+    arbitrary_root = tmp_path / "alternate-ready-object-store"
+    canonical_root.mkdir()
+    readiness = _write_missing_forcing_repair_raw_manifest(
+        arbitrary_root,
+        cycle_time=cycle_time,
+    )
+    assert readiness["status"] == "ready"
+    monkeypatch.setattr(
+        source_cycle_raw_manifest_module,
+        "NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT",
+        canonical_root,
+        raising=False,
+    )
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+    config = _config(
+        tmp_path / "workspace",
+        dry_run=dry_run,
+        lookback_hours=0,
+        max_cycles_per_source=1,
+        backfill_enabled=False,
+        repair_missing_forcing=True,
+        repair_missing_forcing_cycle_time=cycle_time,
+        object_store_copyback_root=arbitrary_root,
+        nfs_raw_manifest_root=arbitrary_root,
+        nfs_raw_manifest_prefix="s3://nhms",
+        allowed_storage_roots=(tmp_path,),
+    )
+    orchestrator_calls: list[str] = []
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([]),
+        adapters={},
+        orchestrator_factory=lambda source_id: orchestrator_calls.append(source_id),
+    )
+
+    preflight = config.db_free_runtime_preflight()
+    result = scheduler.run_once()
+    rendered = json.dumps({"preflight": preflight, "evidence": result.evidence}, sort_keys=True)
+
+    assert config.db_free_required is False
+    assert preflight["status"] == "blocked"
+    assert "database_url" not in preflight["checks"]
+    assert {
+        blocker["field"]
+        for blocker in preflight["blockers"]
+        if blocker["code"] == "db_free_raw_authority_topology_mismatch"
+    } == {
+        "NHMS_OBJECT_STORE_COPYBACK_ROOT",
+        "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT",
+    }
+    assert result.status == "preflight_blocked"
+    assert result.evidence["execution_boundary"] == "db_free_runtime_preflight_blocked"
+    assert result.evidence["lock"]["reason"] == "db_free_runtime_preflight_blocked"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+    assert orchestrator_calls == []
+    assert str(arbitrary_root) not in rendered
+    assert str(canonical_root) not in rendered
+
+
+def test_non_db_free_non_repair_runtime_preflight_remains_not_required(tmp_path: Path) -> None:
+    arbitrary_root = tmp_path / "ordinary-object-store"
+    arbitrary_root.mkdir()
+    config = _config(
+        tmp_path / "workspace",
+        object_store_copyback_root=arbitrary_root,
+        nfs_raw_manifest_root=arbitrary_root,
+        nfs_raw_manifest_prefix="s3://ordinary-compatible-authority/alternate",
+        allowed_storage_roots=(tmp_path,),
+    )
+
+    assert config.db_free_required is False
+    assert config.repair_missing_forcing is False
+    assert config.db_free_runtime_preflight() == {
+        "status": "not_required",
+        "required": False,
+        "blockers": [],
+        "checks": {},
+    }
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=("plan", "submit"))
+@pytest.mark.parametrize(
+    "manifest_prefix",
+    ["s3://other", "s3://nhms/alternate"],
+    ids=("other-authority", "nested-prefix"),
+)
+def test_non_db_free_exact_repair_requires_canonical_raw_manifest_prefix_before_lock(
+    monkeypatch: Any,
+    tmp_path: Path,
+    dry_run: bool,
+    manifest_prefix: str,
+) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    canonical_root = tmp_path / "canonical-node22-object-store"
+    canonical_root.mkdir()
+    monkeypatch.setattr(
+        source_cycle_raw_manifest_module,
+        "NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT",
+        canonical_root,
+        raising=False,
+    )
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+    config = _config(
+        tmp_path / "workspace",
+        dry_run=dry_run,
+        lookback_hours=0,
+        max_cycles_per_source=1,
+        backfill_enabled=False,
+        repair_missing_forcing=True,
+        repair_missing_forcing_cycle_time=cycle_time,
+        object_store_copyback_root=canonical_root,
+        nfs_raw_manifest_root=canonical_root,
+        nfs_raw_manifest_prefix=manifest_prefix,
+        allowed_storage_roots=(tmp_path,),
+    )
+    orchestrator_calls: list[str] = []
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([]),
+        adapters={},
+        orchestrator_factory=lambda source_id: orchestrator_calls.append(source_id),
+    )
+
+    preflight = config.db_free_runtime_preflight()
+    result = scheduler.run_once()
+    rendered = json.dumps({"preflight": preflight, "evidence": result.evidence}, sort_keys=True)
+
+    assert config.db_free_required is False
+    assert preflight["status"] == "blocked"
+    prefix_check = preflight["checks"]["NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX"]
+    assert prefix_check["canonical_authority_required"] is True
+    assert prefix_check["authority_matches"] is False
+    assert any(
+        blocker["code"] == "db_free_raw_manifest_prefix_authority_mismatch"
+        and blocker["field"] == "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX"
+        for blocker in preflight["blockers"]
+    )
+    assert result.status == "preflight_blocked"
+    assert result.evidence["lock"]["reason"] == "db_free_runtime_preflight_blocked"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+    assert orchestrator_calls == []
+    assert manifest_prefix not in rendered
+
+
+def test_non_db_free_exact_repair_accepts_canonical_prefix_with_trailing_separator(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    canonical_root = tmp_path / "canonical-node22-object-store"
+    canonical_root.mkdir()
+    monkeypatch.setattr(
+        source_cycle_raw_manifest_module,
+        "NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT",
+        canonical_root,
+        raising=False,
+    )
+    config = _config(
+        tmp_path / "workspace",
+        dry_run=True,
+        lookback_hours=0,
+        max_cycles_per_source=1,
+        backfill_enabled=False,
+        repair_missing_forcing=True,
+        repair_missing_forcing_cycle_time=cycle_time,
+        object_store_copyback_root=canonical_root,
+        nfs_raw_manifest_root=canonical_root,
+        nfs_raw_manifest_prefix="s3://nhms/",
+        allowed_storage_roots=(tmp_path,),
+    )
+
+    preflight = config.db_free_runtime_preflight()
+
+    assert preflight["status"] == "ready"
+    assert preflight["checks"]["NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX"] == {
+        "env": "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX",
+        "configured": True,
+        "value": "[object-prefix]",
+        "scheme": "s3",
+        "supported": True,
+        "canonical_authority_required": True,
+        "authority_matches": True,
+    }
+
+
+def test_db_free_runtime_preflight_requires_canonical_copyback_authority(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("NHMS_OBJECT_STORE_COPYBACK_ROOT")
+
+    preflight = ProductionSchedulerConfig().db_free_runtime_preflight()
+
+    assert preflight["status"] == "blocked"
+    assert any(
+        item["code"] == "db_free_required_path_missing"
+        and item["field"] == "NHMS_OBJECT_STORE_COPYBACK_ROOT"
+        for item in preflight["blockers"]
+    )
+
+
+def test_db_free_runtime_preflight_rejects_malformed_raw_manifest_prefix_without_leak(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, _paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(roots["object_store_root"]))
+    malformed = "https://user:secret@example.invalid/raw?token=secret"
+    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX", malformed)
+
+    preflight = ProductionSchedulerConfig().db_free_runtime_preflight()
+    rendered = json.dumps(preflight, sort_keys=True)
+
+    assert preflight["status"] == "blocked"
+    blocker = next(
+        item
+        for item in preflight["blockers"]
+        if item["field"] == "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX"
+    )
+    assert blocker["code"] == "db_free_raw_manifest_prefix_invalid"
+    assert malformed not in rendered
+    assert "user:secret" not in rendered
+    assert "token=secret" not in rendered
+    assert "example.invalid" not in rendered
 
 
 @pytest.mark.parametrize("missing_field", ["user", "account", "blank_user", "blank_account"])
@@ -22395,6 +24007,7 @@ def test_db_free_from_env_raw_missing_blocks_canonical_zero_without_submission(
         ("source_mismatch", "nfs_raw_manifest_manifest_source_mismatch"),
         ("cycle_mismatch", "nfs_raw_manifest_manifest_cycle_time_mismatch"),
         ("uri_mismatch", "nfs_raw_manifest_manifest_uri_mismatch"),
+        ("cross_prefix", "nfs_raw_manifest_manifest_uri_mismatch"),
         ("entries_missing", "nfs_raw_manifest_manifest_entries_missing"),
         ("local_key_invalid", "nfs_raw_manifest_manifest_entry_local_key_invalid"),
         ("raw_file_missing", "nfs_raw_manifest_raw_files_missing"),
@@ -22427,7 +24040,13 @@ def test_db_free_from_env_raw_invalid_blocks_without_submission(
         cycle_time=cycle_time,
         manifest_source_id="ifs" if case_name == "source_mismatch" else None,
         manifest_cycle_time="2026-05-21T00:00:00Z" if case_name == "cycle_mismatch" else None,
-        manifest_uri="s3://nhms/raw/gfs/2026052100/manifest.json" if case_name == "uri_mismatch" else None,
+        manifest_uri=(
+            "s3://nhms/raw/gfs/2026052100/manifest.json"
+            if case_name == "uri_mismatch"
+            else "s3://other/raw/gfs/2026052112/manifest.json"
+            if case_name == "cross_prefix"
+            else None
+        ),
         entries=raw_entries,
         write_raw_files=case_name not in {"local_key_invalid", "raw_file_missing"},
     )
@@ -22467,6 +24086,263 @@ def test_db_free_from_env_raw_invalid_blocks_without_submission(
     assert "download_source_cycle" not in rendered
     assert str(roots["object_store_root"]) not in rendered
     assert str(raw_fixture["manifest_path"]) not in rendered
+
+
+def _seed_db_free_missing_forcing_blocker(
+    repository: Any,
+    *,
+    cycle_time: datetime,
+    generated_at: datetime,
+) -> None:
+    cycle_segment = format_cycle_time(cycle_time)
+    repository.ensure_forecast_cycle(source_id="gfs", cycle_time=cycle_time)
+    repository.upsert_pipeline_job(
+        {
+            "job_id": f"job_cycle_gfs_{cycle_segment}_model_a_forcing",
+            "run_id": f"cycle_gfs_{cycle_segment}_model_a",
+            "candidate_id": f"cycle_gfs_{cycle_segment}_model_a",
+            "cycle_id": cycle_id_for("gfs", cycle_time),
+            "cycle_time": _format_iso_z(cycle_time),
+            "source_id": "gfs",
+            "model_id": "model_a",
+            "job_type": "produce_forcing_array",
+            "stage": "forcing",
+            "status": "succeeded",
+            "slurm_job_id": "6102",
+            "retry_count": 1,
+            "created_at": _format_iso_z(generated_at - timedelta(minutes=20)),
+            "updated_at": _format_iso_z(generated_at - timedelta(minutes=10)),
+        }
+    )
+
+
+def _db_free_missing_forcing_repair_scheduler(
+    monkeypatch: Any,
+    tmp_path: Path,
+    *,
+    raw_case: str,
+    direct_grid_failure: str | None = None,
+    seed_missing_forcing: bool = True,
+) -> tuple[ProductionScheduler, Path]:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    cycle_time = _dt("2026-05-21T12:00:00Z")
+    direct_grid_model = _model(
+        "model_a",
+        "basin_a",
+        resource_profile=_missing_forcing_repair_direct_grid_profile(),
+    )
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=cycle_time,
+        model=direct_grid_model,
+    )
+    if raw_case != "missing":
+        entries = None
+        if raw_case == "wrong_source_entry":
+            entries = [{"local_key": "raw/ifs/2026052112/ifs.f000.bundle.grib2", "forecast_hour": 0}]
+        elif raw_case == "wrong_cycle_entry":
+            entries = [{"local_key": "raw/gfs/2026052100/gfs.f000.bundle.grib2", "forecast_hour": 0}]
+        raw_fixture = _write_db_free_raw_manifest_fixture(
+            roots,
+            cycle_time=cycle_time,
+            entries=entries,
+        )
+        if raw_case == "invalid_json":
+            raw_fixture["manifest_path"].write_text("{", encoding="utf-8")
+    monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(roots["object_store_root"]))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+
+    model = fixture["model"]
+    if direct_grid_failure is not None:
+        resource_profile = dict(model["resource_profile"])
+        direct_grid = dict(resource_profile["direct_grid_forcing"])
+        if direct_grid_failure == "malformed":
+            direct_grid.pop("binding_uri")
+        elif direct_grid_failure == "out_of_scope":
+            direct_grid["applicable_source_ids"] = ["IFS"]
+        else:
+            raise AssertionError(f"unsupported direct-grid failure fixture: {direct_grid_failure}")
+        resource_profile["direct_grid_forcing"] = direct_grid
+        model = {**model, "resource_profile": resource_profile}
+
+    repository = scheduler_module.FileOrchestrationJournalRepository(
+        paths["NHMS_SCHEDULER_JOURNAL_ROOT"]
+    )
+    if seed_missing_forcing:
+        _seed_db_free_missing_forcing_blocker(
+            repository,
+            cycle_time=cycle_time,
+            generated_at=cycle_time,
+        )
+    scheduler = ProductionScheduler(
+        _config(
+            roots["workspace_root"],
+            now=cycle_time,
+            sources=("gfs",),
+            allowed_cycle_hours_utc=(0, 12),
+            lookback_hours=0,
+            cycle_lag_hours=0,
+            max_cycles_per_source=1,
+            backfill_enabled=False,
+            dry_run=False,
+            require_direct_grid=True,
+            repair_missing_forcing=True,
+            repair_missing_forcing_cycle_time=cycle_time,
+            slurm_array_concurrency_bound=32,
+            nfs_raw_manifest_root=roots["object_store_root"],
+        ),
+        registry=FakeRegistry([model]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T12:00:00Z", True)])},
+        active_repository=repository,
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: pytest.fail(
+            "rejected exact-cycle repair must not construct an orchestrator"
+        ),
+    )
+    return scheduler, roots["object_store_root"]
+
+
+@pytest.mark.parametrize(
+    ("raw_case", "expected_reason"),
+    [
+        ("missing", "nfs_raw_manifest_manifest_not_found"),
+        ("invalid_json", "nfs_raw_manifest_manifest_invalid_json"),
+    ],
+)
+def test_db_free_file_journal_exact_repair_preserves_missing_forcing_for_raw_discovery_failure(
+    monkeypatch: Any,
+    tmp_path: Path,
+    raw_case: str,
+    expected_reason: str,
+) -> None:
+    scheduler, raw_root = _db_free_missing_forcing_repair_scheduler(
+        monkeypatch,
+        tmp_path / raw_case,
+        raw_case=raw_case,
+    )
+    state_calls: list[dict[str, Any]] = []
+    candidate_state = scheduler.active_repository.candidate_state
+
+    def counting_candidate_state(**kwargs: Any) -> dict[str, Any] | None:
+        state_calls.append(dict(kwargs))
+        return candidate_state(**kwargs)
+
+    monkeypatch.setattr(scheduler.active_repository, "candidate_state", counting_candidate_state)
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"][0]
+    state_evidence = blocked["state_evidence"]
+    repair = state_evidence["missing_forcing_repair"]
+    assert blocked["reason"] == "missing_forcing_package_uri"
+    assert state_evidence["error_code"] == "FORCING_PACKAGE_URI_MISSING"
+    assert repair["status"] == "rejected"
+    assert repair["reason"] == expected_reason
+    assert repair["detail"]["precondition"] == "source_discovery"
+    assert repair["detail"]["blocker"]["reason"] == expected_reason
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+    assert len(state_calls) == 1
+    assert str(raw_root) not in json.dumps(result.evidence, sort_keys=True, default=str)
+
+
+@pytest.mark.parametrize("raw_case", ["wrong_source_entry", "wrong_cycle_entry"])
+def test_db_free_file_journal_exact_repair_preserves_missing_forcing_for_entry_identity_failure(
+    monkeypatch: Any,
+    tmp_path: Path,
+    raw_case: str,
+) -> None:
+    scheduler, raw_root = _db_free_missing_forcing_repair_scheduler(
+        monkeypatch,
+        tmp_path / raw_case,
+        raw_case=raw_case,
+    )
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"][0]
+    state_evidence = blocked["state_evidence"]
+    repair = state_evidence["missing_forcing_repair"]
+    expected_reason = "nfs_raw_manifest_manifest_entry_local_key_identity_mismatch"
+    assert blocked["reason"] == "missing_forcing_package_uri"
+    assert state_evidence["error_code"] == "FORCING_PACKAGE_URI_MISSING"
+    assert repair["status"] == "rejected"
+    assert repair["reason"] == expected_reason
+    assert repair["detail"]["precondition"] == "source_discovery"
+    assert repair["detail"]["blocker"]["reason"] == expected_reason
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+    assert str(raw_root) not in json.dumps(result.evidence, sort_keys=True, default=str)
+
+
+def test_db_free_exact_repair_keeps_ordinary_discovery_blocker_for_other_original_state(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    scheduler, raw_root = _db_free_missing_forcing_repair_scheduler(
+        monkeypatch,
+        tmp_path / "other-original-state",
+        raw_case="missing",
+        seed_missing_forcing=False,
+    )
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"][0]
+    assert blocked["reason"] == "nfs_raw_manifest_manifest_not_found"
+    assert "missing_forcing_repair" not in blocked["state_evidence"]
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+    assert str(raw_root) not in json.dumps(result.evidence, sort_keys=True, default=str)
+
+
+@pytest.mark.parametrize(
+    ("direct_grid_failure", "expected_reason", "evidence_key", "expected_field"),
+    [
+        ("malformed", "direct_grid_contract_invalid", "direct_grid_contract", "binding_uri"),
+        (
+            "out_of_scope",
+            "direct_grid_source_out_of_scope",
+            "direct_grid_source_scope",
+            "direct_grid_source_out_of_scope",
+        ),
+    ],
+)
+def test_db_free_file_journal_exact_repair_preserves_missing_forcing_for_direct_grid_failure(
+    monkeypatch: Any,
+    tmp_path: Path,
+    direct_grid_failure: str,
+    expected_reason: str,
+    evidence_key: str,
+    expected_field: str,
+) -> None:
+    scheduler, raw_root = _db_free_missing_forcing_repair_scheduler(
+        monkeypatch,
+        tmp_path / direct_grid_failure,
+        raw_case="ready",
+        direct_grid_failure=direct_grid_failure,
+    )
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"][0]
+    state_evidence = blocked["state_evidence"]
+    repair = state_evidence["missing_forcing_repair"]
+    assert blocked["reason"] == "missing_forcing_package_uri"
+    assert state_evidence["error_code"] == "FORCING_PACKAGE_URI_MISSING"
+    assert repair["status"] == "rejected"
+    assert repair["reason"] == expected_reason
+    assert repair["detail"]["precondition"] == "direct_grid_contract"
+    direct_grid_evidence = repair["detail"]["blocker"][evidence_key]
+    assert direct_grid_evidence.get("field", direct_grid_evidence.get("code")) == expected_field
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+    assert str(raw_root) not in json.dumps(result.evidence, sort_keys=True, default=str)
 
 
 def test_db_free_scheduler_fake_slurm_submission_writes_file_journal_without_database_url(
@@ -25072,7 +26948,9 @@ def test_concurrency_stays_within_configured_bound(tmp_path: Path) -> None:
     assert peak >= 2
 
 
-def test_bound_32_dispatches_36_candidates_as_two_cross_source_slurm_cohorts(tmp_path: Path) -> None:
+def test_repair_bound_32_dispatches_36_candidates_as_two_cross_source_slurm_cohorts(
+    tmp_path: Path,
+) -> None:
     import threading
     import time as _time
 
@@ -25121,13 +26999,32 @@ def test_bound_32_dispatches_36_candidates_as_two_cross_source_slurm_cohorts(tmp
             )
 
     scheduler = ProductionScheduler(
-        _config(tmp_path, sources=("gfs", "IFS"), concurrent_submit_bound=32),
+        _config(
+            tmp_path,
+            sources=("gfs", "IFS"),
+            concurrent_submit_bound=32,
+            slurm_array_concurrency_bound=32,
+            lookback_hours=0,
+            max_cycles_per_source=1,
+            backfill_enabled=False,
+            repair_missing_forcing=True,
+            repair_missing_forcing_cycle_time="2026-05-21T06:00:00Z",
+        ),
         registry=FakeRegistry([_model("model_00", "basin_00")]),
         adapters={"gfs": FakeAdapter("gfs", []), "IFS": FakeAdapter("IFS", [])},
         orchestrator_factory=lambda _source_id: _Bound32Orchestrator(),
     )
     candidates = [
-        _concurrency_candidate(source, f"model_{index:02d}", f"basin_{index:02d}")
+        replace(
+            _concurrency_candidate(source, f"model_{index:02d}", f"basin_{index:02d}"),
+            state_evidence={
+                "decision": "retry_repair_missing_forcing",
+                "restart_stage": "forcing",
+                "fresh_ingestion": {"required": False, "mode": "repair_missing_forcing"},
+                "raw_manifest_reuse": {"status": "ready"},
+                "missing_forcing_repair": {"status": "authorized"},
+            },
+        )
         for source in ("gfs", "IFS")
         for index in range(18)
     ]

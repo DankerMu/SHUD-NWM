@@ -14,6 +14,7 @@ import pytest
 import yaml
 
 from scripts import validate_two_node_docker_runtime as docker_runtime
+from services.orchestrator import source_cycle_raw_manifest
 from services.production_closure import (
     two_node_e2e_docker_security,
 )
@@ -3127,6 +3128,257 @@ def test_checked_in_compute_scheduler_once_is_db_free_without_database_url() -> 
         assert scheduler_env[key] == "file"
     for key in docker_runtime.COMPUTE_DB_FREE_SCHEDULER_PATH_ENV:
         assert scheduler_env[key].strip()
+    assert scheduler_env["NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE"] == "flock"
+    assert scheduler_env["NHMS_SCHEDULER_RECONCILE_SLURM_USER"].strip()
+    assert scheduler_env["NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT"].strip()
+
+
+def test_node22_db_free_env_template_declares_trusted_nfs_raw_manifest_authority() -> None:
+    env = docker_runtime.parse_env_file(
+        REPO_ROOT / "infra/env/compute.scheduler-dbfree.env.example"
+    )
+
+    assert env["NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST"] == "true"
+    canonical_root = str(source_cycle_raw_manifest.NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT)
+    assert canonical_root == "/ghdc/data/nwm/object-store"
+    assert env["NHMS_OBJECT_STORE_COPYBACK_ROOT"] == canonical_root
+    assert env["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"] == canonical_root
+    assert env["NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX"] == "s3://nhms"
+    assert canonical_root in env["NHMS_SCHEDULER_ALLOWED_ROOTS"].split(":")
+
+    compose = docker_runtime.load_compose(REPO_ROOT / "infra/compose.compute.yml")
+    scheduler_env = docker_runtime._service_environment(compose["services"]["scheduler-once"], env)
+    assert scheduler_env["NHMS_OBJECT_STORE_COPYBACK_ROOT"] == env["NHMS_OBJECT_STORE_COPYBACK_ROOT"]
+    assert scheduler_env["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"] == env["NHMS_OBJECT_STORE_COPYBACK_ROOT"]
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "expected_code"),
+    [
+        ("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", "", "COMPUTE_RUNTIME_ENV_EMPTY"),
+        ("NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX", "", "COMPUTE_RUNTIME_ENV_EMPTY"),
+        (
+            "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT",
+            "relative/raw-manifest-root",
+            "COMPUTE_SCHEDULER_NFS_RAW_MANIFEST_ROOT_INVALID",
+        ),
+        (
+            "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT",
+            "/scratch/frd_muziyao/nhms-production/object-store",
+            "COMPUTE_SCHEDULER_NFS_RAW_MANIFEST_ROOT_INVALID",
+        ),
+        (
+            "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX",
+            "https://user:secret@example.invalid/raw?token=secret",
+            "COMPUTE_SCHEDULER_NFS_RAW_MANIFEST_PREFIX_INVALID",
+        ),
+        (
+            "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX",
+            "s3://nhms-prod",
+            "COMPUTE_SCHEDULER_NFS_RAW_MANIFEST_PREFIX_INVALID",
+        ),
+        (
+            "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX",
+            "s3://other",
+            "COMPUTE_SCHEDULER_NFS_RAW_MANIFEST_PREFIX_INVALID",
+        ),
+        (
+            "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX",
+            "s3://nhms/path",
+            "COMPUTE_SCHEDULER_NFS_RAW_MANIFEST_PREFIX_INVALID",
+        ),
+        (
+            "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX",
+            "s3://nhms.evil",
+            "COMPUTE_SCHEDULER_NFS_RAW_MANIFEST_PREFIX_INVALID",
+        ),
+    ],
+)
+def test_static_checker_rejects_missing_or_malformed_trusted_raw_manifest_contract(
+    tmp_path: Path,
+    key: str,
+    value: str,
+    expected_code: str,
+) -> None:
+    compose = _safe_compute_compose()
+    compose["services"]["scheduler-once"]["environment"][key] = value
+    compute_compose = _write_compute_compose(tmp_path, compose)
+
+    result = _run_compute_static_check(compute_compose)
+    rendered = json.dumps([finding.to_dict() for finding in result.findings], sort_keys=True)
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == expected_code
+        and finding.service == "scheduler-once"
+        and finding.details.get("key") == key
+        for finding in result.findings
+    )
+    assert "user:secret" not in rendered
+    assert "token=secret" not in rendered
+    assert "example.invalid" not in rendered
+
+
+@pytest.mark.parametrize("prefix", ["s3://nhms", "s3://nhms/", "  s3://nhms/  "])
+def test_trusted_raw_manifest_prefix_accepts_canonical_normalized_value(prefix: str) -> None:
+    assert docker_runtime._trusted_raw_manifest_prefix_is_valid(prefix)
+
+
+def test_static_checker_rejects_copyback_and_raw_authority_rebound_together(
+    tmp_path: Path,
+) -> None:
+    compose = _safe_compute_compose()
+    staging_root = "/scratch/frd_muziyao/nhms-production/object-store"
+    for service in compose["services"].values():
+        service["environment"]["OBJECT_STORE_ROOT"] = staging_root
+        service["environment"]["NHMS_OBJECT_STORE_COPYBACK_ROOT"] = staging_root
+        service["environment"]["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"] = staging_root
+    compute_compose = _write_compute_compose(tmp_path, compose)
+
+    result = _run_compute_static_check(compute_compose)
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "COMPUTE_SCHEDULER_NFS_RAW_MANIFEST_ROOT_INVALID"
+        and finding.service == "scheduler-once"
+        for finding in result.findings
+    )
+
+
+def test_static_checker_requires_trusted_raw_root_on_existing_nfs_mount_contract(
+    tmp_path: Path,
+) -> None:
+    compose = _safe_compute_compose()
+    for service in compose["services"].values():
+        service["volumes"] = [
+            volume
+            for volume in service["volumes"]
+            if "NHMS_OBJECT_STORE_COPYBACK_ROOT" not in str(volume.get("target", ""))
+        ]
+    compute_compose = _write_compute_compose(tmp_path, compose)
+
+    result = _run_compute_static_check(compute_compose)
+
+    assert result.status == "FAIL"
+    scheduler_codes = {
+        finding.code for finding in result.findings if finding.service == "scheduler-once"
+    }
+    assert "COMPUTE_OBJECT_STORE_COPYBACK_MOUNT_MISSING" in scheduler_codes
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "NHMS_SCHEDULER_RECONCILE_SLURM_USER",
+        "NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT",
+        "NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE",
+    ],
+)
+def test_static_checker_requires_scheduler_reconcile_and_journal_guard_runtime_env(
+    tmp_path: Path,
+    key: str,
+) -> None:
+    compose = _safe_compute_compose()
+    compose["services"]["scheduler-once"]["environment"].pop(key, None)
+    compute_compose = _write_compute_compose(tmp_path, compose)
+
+    result = _run_compute_static_check(compute_compose)
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "COMPUTE_RUNTIME_ENV_MISSING"
+        and finding.service == "scheduler-once"
+        and finding.details.get("key") == key
+        for finding in result.findings
+    )
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "NHMS_SCHEDULER_RECONCILE_SLURM_USER",
+        "NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT",
+    ],
+)
+def test_static_checker_rejects_blank_scheduler_reconcile_slurm_identity(
+    tmp_path: Path,
+    key: str,
+) -> None:
+    compose = _safe_compute_compose()
+    compose["services"]["scheduler-once"]["environment"][key] = ""
+    compute_compose = _write_compute_compose(tmp_path, compose)
+
+    result = _run_compute_static_check(compute_compose)
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "COMPUTE_RUNTIME_ENV_EMPTY"
+        and finding.service == "scheduler-once"
+        and finding.details.get("key") == key
+        for finding in result.findings
+    )
+
+
+@pytest.mark.parametrize("value", ["", "FLOCK", " flock ", "atomic"])
+def test_static_checker_requires_exact_flock_scheduler_journal_guard(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    compose = _safe_compute_compose()
+    compose["services"]["scheduler-once"]["environment"][
+        "NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE"
+    ] = value
+    compute_compose = _write_compute_compose(tmp_path, compose)
+
+    result = _run_compute_static_check(compute_compose)
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "COMPUTE_SCHEDULER_JOURNAL_LOCK_GUARD_MODE_INVALID"
+        and finding.service == "scheduler-once"
+        and finding.details.get("actual") == value
+        for finding in result.findings
+    )
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "NHMS_SCHEDULER_RECONCILE_SLURM_USER",
+        "NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT",
+        "NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE",
+    ],
+)
+@pytest.mark.parametrize("mutation", ["missing", "blank"])
+def test_static_checker_requires_scheduler_reconcile_and_journal_guard_in_compute_env(
+    tmp_path: Path,
+    key: str,
+    mutation: str,
+) -> None:
+    compute_env = docker_runtime.parse_env_file(REPO_ROOT / "infra/env/compute.example")
+    if mutation == "missing":
+        compute_env.pop(key)
+    else:
+        compute_env[key] = ""
+    compute_env_path = tmp_path / "compute.env"
+    compute_env_path.write_text(
+        "\n".join(f"{env_key}={value}" for env_key, value in compute_env.items()) + "\n",
+        encoding="utf-8",
+    )
+
+    result = docker_runtime.run_static_check(
+        compute_compose=Path("infra/compose.compute.yml"),
+        display_compose=Path("infra/compose.display.yml"),
+        compute_env=compute_env_path,
+        display_env=Path("infra/env/display.example"),
+        repo_root=REPO_ROOT,
+    )
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "ENV_REQUIRED_MISSING" and finding.details.get("key") == key
+        for finding in result.findings
+    )
 
 
 @pytest.mark.parametrize(

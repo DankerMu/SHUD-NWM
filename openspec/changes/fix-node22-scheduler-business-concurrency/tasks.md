@@ -14,6 +14,35 @@
   Evidence floor: a historical successful forcing/forecast record with missing
   `forcing_package_uri` tree blocks before downstream forecast submission with a
   stable artifact/copyback code and no generic `NODE_FAILURE`.
+- [x] 1.4 Add an explicit exact-cycle missing-forcing recovery policy without
+  weakening the default blocker.
+  Evidence floor: focused tests cover default block, plan preview, authorized
+  missing-URI and missing-path recovery, non-direct-grid rejection, raw
+  manifest absent/identity-mismatch rejection, malformed/unbounded operator
+  use, preserved warm lineage with no cold fallback, and an 18-member forcing
+  cohort routed through `produce_forcing_array` under the global bound of 32.
+- [x] 1.5 Close exact-cycle repair authority, state, retry, and concurrency
+  invariants found in PR review.
+  Evidence floor: production file-journal coverage proves trusted raw-root
+  revalidation with public path redaction; missing/partial/cold warm state stays
+  on the original blocker; real `ForecastOrchestrator` coverage proves a
+  terminal forcing job creates a versioned forcing-first retry with exact warm
+  identity in forecast manifests; canonical rejection preserves the stable
+  missing-forcing classifier; simultaneous 18+18 cohorts remain within the
+  aggregate Slurm `%32` bound and repair config above 32 is rejected. Round-2
+  closure additionally proves no-state/ordinary-retry/target-mismatch siblings
+  retain their typed warm blocker, mixed cohorts admit only the stable exact
+  missing-forcing candidate, and both post-sync reclassification paths reuse
+  the same warm-admission decision. Phase-7 closure additionally proves repair
+  runs fixed-topology raw/copyback authority preflight before lock in plan and
+  submit even without ordinary DB-free mode, and both readiness and staging
+  reject every entry outside the requested source/cycle raw prefix while the
+  scheduler preserves the original missing-forcing blocker with zero work.
+  Round-5 closure binds repair to the canonical `s3://nhms` raw-manifest
+  prefix, requires payload manifest URI to equal that prefix plus the exact
+  manifest key, and validates exact source/cycle/filename key plus containment-
+  protected manifest-path identity before any target creation, lock, or
+  mutation in distinct-root and same-root staging.
 
 ## 2. Reconcile And Terminal-State Idempotency
 
@@ -61,3 +90,9 @@
   identities, Slurm submissions/reconcile terminal evidence, duplicate-free file
   journal progress, and lock release. An explicit no-work pass is safe-state
   evidence only and blocks issue completion until a business-work receipt exists.
+- [x] 4.6 Document the exact `--repair-missing-forcing --plan` and `--submit`
+  operator commands, the raw/direct-grid/warm-state preconditions, and the
+  evidence fields that prove forcing ran as a Slurm array rather than on the
+  login node. The checked-in DB-free template, compose contract, runtime
+  preflight, and static validator also require the trusted node-22 NFS raw root
+  and prefix while keeping public path evidence redacted.

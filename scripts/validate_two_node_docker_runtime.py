@@ -16,10 +16,13 @@ import tempfile
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 import yaml
+
+from services.orchestrator import source_cycle_raw_manifest
 
 CHANGE_ID = "m22-two-node-docker-readonly-display"
 DEFAULT_STATIC_REPORT = Path("artifacts/stage-change") / CHANGE_ID / "static-compose-env-check.json"
@@ -173,12 +176,16 @@ COMPUTE_SCHEDULER_ENV = frozenset(
         "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX",
         "NHMS_SCHEDULER_JOURNAL_BACKEND",
         "NHMS_SCHEDULER_JOURNAL_ROOT",
+        "NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE",
         "NHMS_SCHEDULER_STATE_INDEX_BACKEND",
         "NHMS_SCHEDULER_STATE_INDEX",
         "NHMS_SCHEDULER_EVIDENCE_ROOT",
         "NHMS_SCHEDULER_RUNTIME_ROOT",
         "NHMS_SCHEDULER_TEMP_ROOT",
         "NHMS_SCHEDULER_ALLOWED_ROOTS",
+        "NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST",
+        "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT",
+        "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX",
         "NHMS_SCHEDULER_SOURCES",
         "NHMS_SCHEDULER_MODEL_IDS",
         "NHMS_SCHEDULER_BASIN_IDS",
@@ -186,6 +193,8 @@ COMPUTE_SCHEDULER_ENV = frozenset(
         "NHMS_SCHEDULER_INTERVAL_SECONDS",
         "NHMS_SCHEDULER_MAX_PASSES",
         "NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE",
+        "NHMS_SCHEDULER_RECONCILE_SLURM_USER",
+        "NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT",
     }
 )
 COMPUTE_ADAPTER_ENV = frozenset(
@@ -206,16 +215,22 @@ COMPUTE_SCHEDULER_REQUIRED_ENV = frozenset(
         "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX",
         "NHMS_SCHEDULER_JOURNAL_BACKEND",
         "NHMS_SCHEDULER_JOURNAL_ROOT",
+        "NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE",
         "NHMS_SCHEDULER_STATE_INDEX_BACKEND",
         "NHMS_SCHEDULER_STATE_INDEX",
         "NHMS_SCHEDULER_EVIDENCE_ROOT",
         "NHMS_SCHEDULER_RUNTIME_ROOT",
         "NHMS_SCHEDULER_TEMP_ROOT",
         "NHMS_SCHEDULER_ALLOWED_ROOTS",
+        "NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST",
+        "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT",
+        "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX",
         "NHMS_SCHEDULER_SOURCES",
         "NHMS_SCHEDULER_INTERVAL_SECONDS",
         "NHMS_SCHEDULER_MAX_PASSES",
         "NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE",
+        "NHMS_SCHEDULER_RECONCILE_SLURM_USER",
+        "NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT",
     }
 )
 CANONICAL_PUBLISHED_ENV = frozenset(
@@ -268,6 +283,7 @@ COMPUTE_DB_FREE_SCHEDULER_PATH_ENV = frozenset(
         "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX",
         "NHMS_SCHEDULER_JOURNAL_ROOT",
         "NHMS_SCHEDULER_STATE_INDEX",
+        "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT",
     }
 )
 DISPLAY_REQUIRED_RUNTIME_ENV = frozenset(
@@ -2415,6 +2431,66 @@ def _compute_scheduler_once_db_free_findings(path: Path, service_env: Mapping[st
                 details={"key": "DATABASE_URL"},
             )
         )
+    raw_manifest_required = service_env.get(
+        "NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST",
+        "",
+    ).strip().lower()
+    if raw_manifest_required != "true":
+        findings.append(
+            Finding(
+                "COMPUTE_SCHEDULER_NFS_RAW_MANIFEST_REQUIRED_INVALID",
+                "DB-free scheduler-once must require trusted NFS raw manifests.",
+                path=str(path),
+                service="scheduler-once",
+                details={"key": "NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST"},
+            )
+        )
+    raw_manifest_root = service_env.get("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", "").strip()
+    allowed_roots = tuple(
+        item.strip()
+        for item in service_env.get("NHMS_SCHEDULER_ALLOWED_ROOTS", "").split(os.pathsep)
+        if item.strip()
+    )
+    if raw_manifest_root and not _trusted_raw_manifest_root_is_valid(
+        raw_manifest_root,
+        allowed_roots,
+        mounted_nfs_root=service_env.get("NHMS_OBJECT_STORE_COPYBACK_ROOT", ""),
+    ):
+        findings.append(
+            Finding(
+                "COMPUTE_SCHEDULER_NFS_RAW_MANIFEST_ROOT_INVALID",
+                "Trusted NFS raw-manifest root must be absolute, allow-listed, and use the canonical NFS mount.",
+                path=str(path),
+                service="scheduler-once",
+                details={"key": "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"},
+            )
+        )
+    raw_manifest_prefix = service_env.get("NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX", "").strip()
+    if raw_manifest_prefix and not _trusted_raw_manifest_prefix_is_valid(raw_manifest_prefix):
+        findings.append(
+            Finding(
+                "COMPUTE_SCHEDULER_NFS_RAW_MANIFEST_PREFIX_INVALID",
+                "Trusted NFS raw-manifest prefix must be a credential-free s3 object prefix.",
+                path=str(path),
+                service="scheduler-once",
+                details={"key": "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX"},
+            )
+        )
+    journal_lock_guard_mode = service_env.get("NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE")
+    if journal_lock_guard_mode is not None and journal_lock_guard_mode != "flock":
+        findings.append(
+            Finding(
+                "COMPUTE_SCHEDULER_JOURNAL_LOCK_GUARD_MODE_INVALID",
+                "DB-free scheduler-once journal lock guard mode must be exactly flock.",
+                path=str(path),
+                service="scheduler-once",
+                details={
+                    "key": "NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE",
+                    "expected": "flock",
+                    "actual": journal_lock_guard_mode,
+                },
+            )
+        )
     for key in sorted(COMPUTE_DB_FREE_SCHEDULER_SELECTOR_ENV):
         actual = service_env.get(key)
         if actual is None:
@@ -2441,6 +2517,62 @@ def _compute_scheduler_once_db_free_findings(path: Path, service_env: Mapping[st
                 )
             )
     return findings
+
+
+def _trusted_raw_manifest_root_is_valid(
+    raw_root: str,
+    allowed_roots: Sequence[str],
+    *,
+    mounted_nfs_root: str,
+) -> bool:
+    root = Path(raw_root)
+    if not root.is_absolute() or any(part in {".", ".."} for part in root.parts):
+        return False
+    normalized = Path(os.path.normpath(raw_root))
+    canonical_root = Path(
+        os.path.normpath(str(source_cycle_raw_manifest.NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT))
+    )
+    if (
+        normalized != canonical_root
+        or not mounted_nfs_root
+        or Path(os.path.normpath(mounted_nfs_root)) != canonical_root
+    ):
+        return False
+    for allowed in allowed_roots:
+        allowed_path = Path(allowed)
+        if not allowed_path.is_absolute():
+            continue
+        try:
+            normalized.relative_to(Path(os.path.normpath(allowed)))
+        except ValueError:
+            continue
+        return True
+    return False
+
+
+def _trusted_raw_manifest_prefix_is_valid(raw_prefix: str) -> bool:
+    normalized_prefix = raw_prefix.strip().rstrip("/")
+    try:
+        parsed = urlparse(normalized_prefix)
+        _ = parsed.port
+    except ValueError:
+        return False
+    if (
+        parsed.scheme.lower() != "s3"
+        or not parsed.netloc
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        return False
+    decoded_path = unquote(str(parsed.path or ""))
+    return (
+        normalized_prefix == source_cycle_raw_manifest.NODE22_CANONICAL_NFS_RAW_MANIFEST_PREFIX
+        and "\\" not in decoded_path
+        and not any(ord(character) < 32 or ord(character) == 127 for character in decoded_path)
+        and all(part not in {".", ".."} for part in PurePosixPath(decoded_path).parts)
+    )
 
 
 def _compute_extra_hosts_findings(path: Path, service_name: str, service: Mapping[str, Any]) -> list[Finding]:

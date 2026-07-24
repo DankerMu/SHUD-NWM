@@ -4,6 +4,7 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Protocol
 
 from packages.common.source_identity import normalize_source_id
@@ -12,6 +13,7 @@ from services.orchestrator.chain_source_cycle import (
     RAW_MANIFEST_READY_CYCLE_STATUSES,
     _raw_manifest_uri_matches_source_cycle,
 )
+from services.orchestrator.scheduler_file_providers import _public_raw_manifest_evidence
 from services.orchestrator.scheduler_state import (
     CandidateStateDecision,
     _bounded_active_slurm_jobs,
@@ -25,6 +27,10 @@ from services.orchestrator.scheduler_state import (
     _ensure_utc,
     _evidence_safe,
     _format_utc,
+)
+from services.orchestrator.source_cycle_raw_manifest import (
+    NFS_RAW_MANIFEST_READY_SOURCE,
+    nfs_raw_manifest_readiness,
 )
 from workers.data_adapters.base import CycleDiscovery, cycle_id_for
 from workers.forcing_producer.direct_grid_contract import (
@@ -93,6 +99,11 @@ class SchedulerConfigLike(Protocol):
     candidate_state_event_limit: int
     cancel_active_slurm: bool
     dry_run: bool
+    require_direct_grid: bool
+    repair_missing_forcing: bool
+    repair_missing_forcing_cycle_time: datetime | None
+    nfs_raw_manifest_root: str | Path | None
+    nfs_raw_manifest_prefix: str
 
 
 class SchedulerSourceCycleLike(Protocol):
@@ -182,7 +193,15 @@ def build_candidates(
         discovery = cycle.discovery
         has_active_orchestration: bool | None = None
         for model in models:
-            if _direct_grid_model_source_is_out_of_scope(model, discovery):
+            model_source_is_out_of_scope = _direct_grid_model_source_is_out_of_scope(
+                model,
+                discovery,
+            )
+            repair_target = _is_explicit_missing_forcing_repair_target(
+                context.config,
+                discovery.cycle_time,
+            )
+            if model_source_is_out_of_scope and not repair_target:
                 continue
             if len(candidates) + len(blocked) + len(skipped) >= max_candidates:
                 raise SchedulerResourceLimitError(
@@ -204,18 +223,75 @@ def build_candidates(
                 duplicate_exclusions.append({"type": "candidate", **exclusion})
                 continue
             seen_candidate_ids.add(candidate.candidate_id)
-            if not discovery.available:
-                blocked.append(
-                    _blocked_candidate(
-                        candidate,
-                        discovery.reason or "source_cycle_unavailable",
-                        state_evidence=_source_blocked_evidence(candidate, discovery),
+            raw_candidate_state: Mapping[str, Any] | None = None
+            state_decision: CandidateStateDecision | None = None
+            candidate_state_classified = False
+
+            def classify_candidate_state() -> None:
+                nonlocal raw_candidate_state, state_decision, candidate_state_classified
+                if candidate_state_classified:
+                    return
+                raw_candidate_state = (
+                    context.candidate_state_provider_caller(
+                        state_provider,
+                        source_id=discovery.source_id,
+                        cycle_time=discovery.cycle_time,
+                        model_id=model.model_id,
+                        run_id=candidate.run_id,
+                        forcing_version_id=candidate.forcing_version_id,
+                        candidate_id=candidate.candidate_id,
+                        retry_limit=context.config.retry_limit,
+                        job_limit=context.config.candidate_state_job_limit,
+                        event_limit=context.config.candidate_state_event_limit,
                     )
+                    if callable(state_provider)
+                    else None
                 )
+                state_decision = context.candidate_state_decider(candidate, raw_candidate_state)
+                candidate_state_classified = True
+
+            if model_source_is_out_of_scope:
+                classify_candidate_state()
+                direct_grid_scope_block = _direct_grid_source_scope_block(candidate, discovery)
+                repair_blocker = _repair_precondition_blocker(
+                    context.config,
+                    candidate,
+                    state_decision,
+                    direct_grid_scope_block,
+                    precondition="direct_grid_contract",
+                )
+                if repair_blocker is not None:
+                    blocked.append(repair_blocker)
+                continue
+            if not discovery.available:
+                if repair_target:
+                    classify_candidate_state()
+                discovery_block = _blocked_candidate(
+                    candidate,
+                    discovery.reason or "source_cycle_unavailable",
+                    state_evidence=_source_blocked_evidence(candidate, discovery),
+                )
+                repair_blocker = _repair_precondition_blocker(
+                    context.config,
+                    candidate,
+                    state_decision,
+                    discovery_block,
+                    precondition="source_discovery",
+                )
+                blocked.append(repair_blocker or discovery_block)
                 continue
             direct_grid_scope_block = _direct_grid_source_scope_block(candidate, discovery)
             if direct_grid_scope_block is not None:
-                blocked.append(direct_grid_scope_block)
+                if repair_target:
+                    classify_candidate_state()
+                repair_blocker = _repair_precondition_blocker(
+                    context.config,
+                    candidate,
+                    state_decision,
+                    direct_grid_scope_block,
+                    precondition="direct_grid_contract",
+                )
+                blocked.append(repair_blocker or direct_grid_scope_block)
                 continue
             if has_active_orchestration is None:
                 has_active_orchestration = bool(
@@ -245,15 +321,6 @@ def build_candidates(
                 skipped.append({**candidate.to_dict(), "reason": "active_duplicate_pipeline"})
                 continue
             strict_warm_start = context.strict_warm_start_for_candidate(candidate, cycle)
-            if strict_warm_start is not None and not bool(strict_warm_start.get("ready")):
-                blocked.append(
-                    _blocked_candidate(
-                        candidate,
-                        str(strict_warm_start.get("reason") or "state_snapshot_index_unavailable"),
-                        state_evidence=strict_warm_start,
-                    )
-                )
-                continue
             successor_state = (
                 context.successor_state_for_candidate(candidate, cycle)
                 if callable(context.successor_state_for_candidate)
@@ -268,23 +335,32 @@ def build_candidates(
             ):
                 skipped.append({**candidate.to_dict(), "reason": "completed_duplicate_pipeline"})
                 continue
-            raw_candidate_state = (
-                context.candidate_state_provider_caller(
-                    state_provider,
-                    source_id=discovery.source_id,
-                    cycle_time=discovery.cycle_time,
-                    model_id=model.model_id,
-                    run_id=candidate.run_id,
-                    forcing_version_id=candidate.forcing_version_id,
-                    candidate_id=candidate.candidate_id,
-                    retry_limit=context.config.retry_limit,
-                    job_limit=context.config.candidate_state_job_limit,
-                    event_limit=context.config.candidate_state_event_limit,
+            if (
+                strict_warm_start is not None
+                and not bool(strict_warm_start.get("ready"))
+                and not bool(getattr(context.config, "repair_missing_forcing", False))
+            ):
+                state_decision, warm_admission_blocker = _candidate_warm_admission_decision(
+                    context.config,
+                    candidate,
+                    raw_candidate_state,
+                    state_decision,
+                    strict_warm_start=strict_warm_start,
                 )
-                if callable(state_provider)
-                else None
+                if warm_admission_blocker is not None:
+                    blocked.append(warm_admission_blocker)
+                    continue
+            classify_candidate_state()
+            state_decision, warm_admission_blocker = _candidate_warm_admission_decision(
+                context.config,
+                candidate,
+                raw_candidate_state,
+                state_decision,
+                strict_warm_start=strict_warm_start,
             )
-            state_decision = context.candidate_state_decider(candidate, raw_candidate_state)
+            if warm_admission_blocker is not None:
+                blocked.append(warm_admission_blocker)
+                continue
             if state_decision is not None and context.candidate_state_identity_mismatch_detector(
                 state_decision.evidence,
             ):
@@ -467,6 +543,17 @@ def build_candidates(
                                     event_limit=context.config.candidate_state_event_limit,
                                 )
                                 state_decision = context.candidate_state_decider(candidate, raw_candidate_state)
+                                state_decision, warm_admission_blocker = _candidate_warm_admission_decision(
+                                    context.config,
+                                    candidate,
+                                    raw_candidate_state,
+                                    state_decision,
+                                    strict_warm_start=strict_warm_start,
+                                    admission_evidence={"slurm_state_sync": slurm_state_sync},
+                                )
+                                if warm_admission_blocker is not None:
+                                    blocked.append(warm_admission_blocker)
+                                    continue
                             if state_decision is not None:
                                 state_decision = CandidateStateDecision(
                                     action=state_decision.action,
@@ -595,6 +682,34 @@ def build_candidates(
             raw_manifest_restart_applied = False
             canonical_readiness = context.canonical_readiness_for_candidate(candidate, cycle)
             if canonical_readiness is not None and not bool(canonical_readiness.get("ready")):
+                if _decision_is_authorized_missing_forcing_repair(state_decision):
+                    state_evidence = dict(state_decision.evidence)
+                    repair = dict(state_evidence.get("missing_forcing_repair") or {})
+                    repair.update(
+                        {
+                            "status": "rejected",
+                            "reason": "canonical_not_ready",
+                            "canonical_readiness": _evidence_safe(canonical_readiness),
+                        }
+                    )
+                    state_evidence["missing_forcing_repair"] = repair
+                    state_evidence.update(
+                        {
+                            "decision": "blocked_missing_forcing_package_uri",
+                            "reason": "missing_forcing_package_uri",
+                            "classifier": "missing_upstream_artifact",
+                            "restart_stage": "forecast",
+                            "restart_from_stage": "forecast",
+                        }
+                    )
+                    blocked.append(
+                        _blocked_candidate(
+                            candidate,
+                            "missing_forcing_package_uri",
+                            state_evidence=state_evidence,
+                        )
+                    )
+                    continue
                 if _canonical_evidence_is_fresh_zero_row(canonical_readiness):
                     state_evidence = {}
                     if state_decision is not None and state_decision.action == "retry":
@@ -729,6 +844,17 @@ def build_candidates(
                                 event_limit=context.config.candidate_state_event_limit,
                             )
                             state_decision = context.candidate_state_decider(candidate, raw_candidate_state)
+                            state_decision, warm_admission_blocker = _candidate_warm_admission_decision(
+                                context.config,
+                                candidate,
+                                raw_candidate_state,
+                                state_decision,
+                                strict_warm_start=strict_warm_start,
+                                admission_evidence={"slurm_state_sync": slurm_state_sync},
+                            )
+                            if warm_admission_blocker is not None:
+                                blocked.append(warm_admission_blocker)
+                                continue
                         if state_decision is not None:
                             state_decision = CandidateStateDecision(
                                 action=state_decision.action,
@@ -1168,6 +1294,373 @@ def _nfs_raw_manifest_block_reason(evidence: Mapping[str, Any]) -> str:
     return reason if reason.startswith("nfs_raw_manifest_") else f"nfs_raw_manifest_{reason}"
 
 
+def _is_explicit_missing_forcing_repair_target(
+    config: SchedulerConfigLike,
+    cycle_time: datetime,
+) -> bool:
+    if not bool(getattr(config, "repair_missing_forcing", False)):
+        return False
+    target_cycle = getattr(config, "repair_missing_forcing_cycle_time", None)
+    return isinstance(target_cycle, datetime) and _format_utc(target_cycle) == _format_utc(
+        cycle_time
+    )
+
+
+def _missing_forcing_repair_policy_evidence(
+    config: SchedulerConfigLike,
+    candidate: SchedulerCandidateLike,
+) -> dict[str, Any]:
+    target_cycle = getattr(config, "repair_missing_forcing_cycle_time", None)
+    return {
+        "policy": "operator_exact_cycle_missing_forcing_repair",
+        "requested": True,
+        "target_cycle_time": _format_utc(target_cycle) if isinstance(target_cycle, datetime) else None,
+        "candidate_cycle_time": _format_utc(candidate.cycle_time_utc),
+        "source_id": candidate.source_id,
+        "model_id": candidate.model_id,
+        "candidate_id": candidate.candidate_id,
+        "default_policy": "fail_closed",
+        "plan_only": bool(config.dry_run),
+    }
+
+
+def _missing_forcing_repair_rejected_decision(
+    config: SchedulerConfigLike,
+    candidate: SchedulerCandidateLike,
+    decision: CandidateStateDecision,
+    reason: str,
+    **details: Any,
+) -> CandidateStateDecision:
+    original_evidence = dict(decision.evidence)
+    original_raw_manifest = original_evidence.get("nfs_raw_manifest")
+    if isinstance(original_raw_manifest, Mapping):
+        original_evidence["nfs_raw_manifest"] = _public_raw_manifest_evidence(
+            original_raw_manifest
+        )
+    return CandidateStateDecision(
+        "blocked",
+        decision.reason,
+        {
+            **original_evidence,
+            "missing_forcing_repair": _evidence_safe(
+                {
+                    **_missing_forcing_repair_policy_evidence(config, candidate),
+                    "status": "rejected",
+                    "reason": reason,
+                    **details,
+                }
+            ),
+        },
+    )
+
+
+def _repair_precondition_blocker(
+    config: SchedulerConfigLike,
+    candidate: SchedulerCandidateLike,
+    decision: CandidateStateDecision | None,
+    ordinary_blocker: SchedulerCandidateLike | None,
+    *,
+    precondition: str,
+) -> SchedulerCandidateLike | None:
+    if (
+        not _is_explicit_missing_forcing_repair_target(config, candidate.cycle_time_utc)
+        or decision is None
+        or decision.action != "blocked"
+        or decision.reason != "missing_forcing_package_uri"
+        or ordinary_blocker is None
+    ):
+        return None
+    reason = ordinary_blocker.reason or "repair_precondition_blocked"
+    rejection = _missing_forcing_repair_rejected_decision(
+        config,
+        candidate,
+        decision,
+        reason,
+        detail={
+            "precondition": precondition,
+            "blocker": {
+                "reason": reason,
+                **dict(ordinary_blocker.state_evidence),
+            },
+        },
+    )
+    return _blocked_candidate(
+        candidate,
+        rejection.reason or "missing_forcing_package_uri",
+        state_evidence=rejection.evidence,
+    )
+
+
+def _decision_is_stable_missing_forcing_blocker(
+    decision: CandidateStateDecision | None,
+) -> bool:
+    if (
+        decision is None
+        or decision.action != "blocked"
+        or decision.reason != "missing_forcing_package_uri"
+        or decision.evidence.get("classifier") != "missing_upstream_artifact"
+        or str(decision.evidence.get("restart_stage") or "") != "forecast"
+    ):
+        return False
+    artifact_guard = decision.evidence.get("artifact_guard")
+    return (
+        isinstance(artifact_guard, Mapping)
+        and artifact_guard.get("artifact_type") == "forcing_package_uri"
+        and artifact_guard.get("stable_classifier") == "FORCING_PACKAGE_URI_MISSING"
+        and artifact_guard.get("artifact_exists") is False
+    )
+
+
+def _candidate_warm_admission_decision(
+    config: SchedulerConfigLike,
+    candidate: SchedulerCandidateLike,
+    raw_state: Mapping[str, Any] | None,
+    decision: CandidateStateDecision | None,
+    *,
+    strict_warm_start: Mapping[str, Any] | None,
+    admission_evidence: Mapping[str, Any] | None = None,
+) -> tuple[CandidateStateDecision | None, SchedulerCandidateLike | None]:
+    """Classify repair and preserve the ordinary strict-warm admission gate.
+
+    A failed warm gate can be evaluated by the repair policy only for the exact
+    operator target carrying the stable stored missing-forcing blocker.  All
+    other state classifications retain the same typed warm blocker as an
+    ordinary scheduler pass.  The helper owns both initial and post-sync
+    reclassification so a process-wide repair flag cannot admit siblings.
+    """
+
+    can_defer_warm_gate = _is_explicit_missing_forcing_repair_target(
+        config,
+        candidate.cycle_time_utc,
+    ) and _decision_is_stable_missing_forcing_blocker(decision)
+    classified = _apply_explicit_missing_forcing_repair_policy(
+        config,
+        candidate,
+        raw_state,
+        decision,
+        strict_warm_start=strict_warm_start,
+    )
+    if (
+        strict_warm_start is None
+        or bool(strict_warm_start.get("ready"))
+        or can_defer_warm_gate
+    ):
+        return classified, None
+    state_evidence = dict(strict_warm_start)
+    if admission_evidence is not None:
+        state_evidence = _merge_state_evidence(state_evidence, admission_evidence)
+    return classified, _blocked_candidate(
+        candidate,
+        str(strict_warm_start.get("reason") or "state_snapshot_index_unavailable"),
+        state_evidence=state_evidence,
+    )
+
+
+def _apply_explicit_missing_forcing_repair_policy(
+    config: SchedulerConfigLike,
+    candidate: SchedulerCandidateLike,
+    raw_state: Mapping[str, Any] | None,
+    decision: CandidateStateDecision | None,
+    *,
+    strict_warm_start: Mapping[str, Any] | None,
+) -> CandidateStateDecision | None:
+    """Authorize one exact-cycle forcing rebuild without weakening the default guard.
+
+    The policy is deliberately evaluated after the normal candidate-state
+    decision.  It can only reclassify the stable missing-forcing blocker; every
+    other blocker and retry decision remains owned by the normal state machine.
+    """
+
+    if not bool(getattr(config, "repair_missing_forcing", False)):
+        return decision
+    if decision is None or decision.action != "blocked" or decision.reason != "missing_forcing_package_uri":
+        return decision
+
+    target_cycle = getattr(config, "repair_missing_forcing_cycle_time", None)
+    policy_evidence = _missing_forcing_repair_policy_evidence(config, candidate)
+
+    def rejected(reason: str, **details: Any) -> CandidateStateDecision:
+        return _missing_forcing_repair_rejected_decision(
+            config,
+            candidate,
+            decision,
+            reason,
+            **details,
+        )
+
+    if not isinstance(target_cycle, datetime) or _format_utc(target_cycle) != _format_utc(
+        candidate.cycle_time_utc
+    ):
+        return rejected("exact_cycle_identity_mismatch")
+    if not bool(getattr(config, "require_direct_grid", False)):
+        return rejected("production_direct_grid_not_required")
+
+    resource_profile = candidate.resource_profile
+    direct_grid_section = (
+        resource_profile.get("direct_grid_forcing")
+        if isinstance(resource_profile, Mapping)
+        else None
+    )
+    if (
+        not isinstance(resource_profile, Mapping)
+        or resource_profile.get("forcing_mapping_mode") != "direct_grid"
+        or not isinstance(direct_grid_section, Mapping)
+    ):
+        return rejected("candidate_not_direct_grid")
+    try:
+        load_forcing_mapping_contract_from_manifest(
+            {
+                "forcing_mapping_mode": "direct_grid",
+                "direct_grid_forcing": direct_grid_section,
+            },
+            source_id=candidate.source_id,
+        )
+    except DirectGridContractError as error:
+        return rejected("direct_grid_contract_invalid", direct_grid_error=error.to_dict())
+
+    artifact_guard = decision.evidence.get("artifact_guard")
+    if not _decision_is_stable_missing_forcing_blocker(decision):
+        return rejected("missing_forcing_blocker_contract_invalid")
+    assert isinstance(artifact_guard, Mapping)
+    if artifact_guard.get("unsafe_reason") not in (None, ""):
+        return rejected(
+            "forcing_artifact_reference_unsafe",
+            unsafe_reason=artifact_guard.get("unsafe_reason"),
+        )
+
+    warm_state, warm_rejection = _verified_repair_warm_state(candidate, strict_warm_start)
+    if warm_state is None:
+        return rejected(warm_rejection or "warm_state_missing")
+
+    raw_manifest, raw_rejection = _verified_repair_raw_manifest(config, candidate, raw_state)
+    if raw_manifest is None:
+        return rejected(raw_rejection or "raw_manifest_not_ready")
+
+    repair_evidence: dict[str, Any] = {
+        **dict(decision.evidence),
+        "decision": "retry_repair_missing_forcing",
+        "reason": "operator_repair_missing_forcing",
+        "classifier": "operator_authorized_missing_forcing_repair",
+        "restart_stage": "forcing",
+        "restart_from_stage": "forcing",
+        "native_shud_resubmitted": True,
+        "replacement_submitted": False,
+        "durable_shud_output_reused": False,
+        "cold_fallback_allowed": False,
+        "initial_state_selection": "preserved",
+        "nfs_raw_manifest": raw_manifest,
+        "fresh_ingestion": {"required": False, "mode": "repair_missing_forcing"},
+        "raw_manifest_reuse": {
+            "status": "ready",
+            "source": NFS_RAW_MANIFEST_READY_SOURCE,
+            "manifest_uri": raw_manifest.get("manifest_uri"),
+        },
+        "missing_forcing_repair": {
+            **policy_evidence,
+            "status": "authorized",
+            "reason": "exact_cycle_direct_grid_raw_manifest_ready",
+            "restart_stage": "forcing",
+            "slurm_stage": "produce_forcing_array",
+            "login_node_forcing": False,
+        },
+        "retry_policy": {
+            **dict(decision.evidence.get("retry_policy") or {}),
+            "automatic_retry_allowed": False,
+            "operator_exact_cycle_repair_authorized": True,
+            "cold_fallback_allowed": False,
+        },
+    }
+    repair_evidence["candidate_state"] = _evidence_safe(dict(warm_state))
+    repair_evidence["strict_warm_start"] = _evidence_safe(dict(strict_warm_start or {}))
+    return CandidateStateDecision(
+        "retry",
+        "operator_repair_missing_forcing",
+        _evidence_safe(repair_evidence),
+    )
+
+
+def _decision_is_authorized_missing_forcing_repair(
+    decision: CandidateStateDecision | None,
+) -> bool:
+    if decision is None or decision.action != "retry":
+        return False
+    repair = decision.evidence.get("missing_forcing_repair")
+    return (
+        isinstance(repair, Mapping)
+        and repair.get("status") == "authorized"
+        and decision.evidence.get("restart_stage") == "forcing"
+    )
+
+
+def _verified_repair_raw_manifest(
+    config: SchedulerConfigLike,
+    candidate: SchedulerCandidateLike,
+    raw_state: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    recorded = _nfs_raw_manifest_gate(raw_state)
+    if recorded is None or recorded.get("status") != "ready" or recorded.get("required") is not True:
+        return None, "raw_manifest_not_ready"
+    if str(recorded.get("source") or "") != NFS_RAW_MANIFEST_READY_SOURCE:
+        return None, "raw_manifest_authority_mismatch"
+    if not _nfs_raw_manifest_matches_source_cycle(candidate, recorded):
+        return None, "raw_manifest_identity_mismatch"
+    root = getattr(config, "nfs_raw_manifest_root", None)
+    if root in (None, ""):
+        return None, "raw_manifest_presence_unverified"
+    try:
+        actual = nfs_raw_manifest_readiness(
+            source_id=candidate.source_id,
+            cycle_time=candidate.cycle_time_utc,
+            object_store_root=str(root),
+            object_store_prefix=str(getattr(config, "nfs_raw_manifest_prefix", "s3://nhms")),
+            required=True,
+        )
+    except (OSError, ValueError):
+        return None, "raw_manifest_presence_unverified"
+    if actual.get("status") != "ready":
+        return None, "raw_manifest_not_ready"
+    if not _nfs_raw_manifest_matches_source_cycle(candidate, actual):
+        return None, "raw_manifest_identity_mismatch"
+    for key in ("manifest_key",):
+        recorded_value = recorded.get(key)
+        actual_value = actual.get(key)
+        if recorded_value not in (None, "") and str(recorded_value) != str(actual_value):
+            return None, "raw_manifest_identity_mismatch"
+    return _public_raw_manifest_evidence(actual), None
+
+
+def _verified_repair_warm_state(
+    candidate: SchedulerCandidateLike,
+    strict_warm_start: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if not isinstance(strict_warm_start, Mapping):
+        return None, "warm_state_missing"
+    if strict_warm_start.get("ready") is not True:
+        return None, "warm_state_not_ready"
+    selected = strict_warm_start.get("candidate_state")
+    if not isinstance(selected, Mapping):
+        return None, "warm_state_missing"
+    required_fields = ("state_id", "uri", "checksum", "valid_time")
+    if any(_state_field(selected, field) in (None, "") for field in required_fields):
+        return None, "warm_state_identity_incomplete"
+    try:
+        valid_time = _ensure_utc(
+            datetime.fromisoformat(str(_state_field(selected, "valid_time")).replace("Z", "+00:00"))
+        )
+    except (TypeError, ValueError):
+        return None, "warm_state_identity_incomplete"
+    if _format_utc(valid_time) != _format_utc(candidate.cycle_time_utc):
+        return None, "warm_state_valid_time_mismatch"
+    lineage = selected.get("init_state_lineage") or selected.get("lineage")
+    quality = str(selected.get("init_state_quality") or selected.get("quality") or "").lower()
+    start_mode = str(lineage.get("start_mode") or "").lower() if isinstance(lineage, Mapping) else ""
+    if not isinstance(lineage, Mapping) or not lineage:
+        return None, "warm_state_identity_incomplete"
+    if "cold" in quality or (start_mode and not start_mode.startswith("warm")):
+        return None, "warm_state_not_warm"
+    return dict(selected), None
+
+
 def _production_raw_manifest_missing_evidence(raw_state: Mapping[str, Any] | None) -> dict[str, Any]:
     evidence = _nfs_raw_manifest_gate(raw_state)
     if evidence is not None:
@@ -1392,6 +1885,13 @@ def _upgrade_retry_for_strict_warm_start_manifest(
     strict_evidence: Mapping[str, Any] | None,
 ) -> CandidateStateDecision | None:
     if state_decision is None or state_decision.action != "retry" or strict_evidence is None:
+        return state_decision
+    forcing_repair = state_decision.evidence.get("missing_forcing_repair")
+    if (
+        isinstance(forcing_repair, Mapping)
+        and forcing_repair.get("status") == "authorized"
+        and state_decision.evidence.get("restart_stage") == "forcing"
+    ):
         return state_decision
     if (
         state_decision.evidence.get("native_shud_resubmitted") is True

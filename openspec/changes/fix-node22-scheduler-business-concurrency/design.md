@@ -163,7 +163,8 @@ Invariant Matrix:
 - Producers: retry manifest builder, chain stage submission, Slurm gateway,
   SHUD runtime stdout, file journal.
 - Validators/preflight: scheduler candidate/state decision, artifact existence
-  checks, reconcile identity proof, DB-free preflight.
+  checks, exact-cycle repair policy, NFS raw manifest revalidation, direct-grid
+  contract validation, reconcile identity proof, DB-free preflight.
 - Storage/cache/query: file orchestration journal, latest snapshots,
   object-store roots, NFS copyback roots.
 - Public routes/entrypoints: scheduler CLI/systemd service/timer; manual retry
@@ -183,6 +184,10 @@ Invariant Matrix:
     with explicit evidence and no Slurm submission.
   - Missing `forcing_package_uri` on downstream resume -> stable artifact
     blocker/restart-from-upstream decision, not generic `NODE_FAILURE`.
+  - Explicit exact-cycle missing-forcing repair with matching direct-grid/raw
+    identity -> preserve selected warm-state lineage and restart the existing
+    Slurm cohort at `produce_forcing_array`; without the flag or on any
+    precondition mismatch -> retain the original blocker and submit nothing.
   - Slurm `COMPLETED|0:0` for matching array task identity -> reconcile marks
     task succeeded.
   - Slurm terminal status with only generic job name and no identity proof ->

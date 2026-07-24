@@ -14,7 +14,10 @@ from services.orchestrator import scheduler as _scheduler
 def _scheduler_lock_evidence_root_preflight(config: Any) -> dict[str, Any]:
     if not config.require_runtime_roots:
         return _scheduler._scheduler_root_preflight_not_required(config)
-    evidence_safe_paths = bool(getattr(config, "db_free_required", False))
+    evidence_safe_paths = bool(
+        getattr(config, "db_free_required", False)
+        or getattr(config, "repair_missing_forcing", False)
+    )
     allowed_roots = _scheduler._scheduler_allowed_roots(config)
     allowed_roots_check, allowed_roots_blocker = _scheduler._scheduler_allowed_roots_policy_check(
         config,
@@ -69,7 +72,10 @@ def _scheduler_lock_evidence_root_preflight(config: Any) -> dict[str, Any]:
 def _scheduler_runtime_root_preflight(config: Any) -> dict[str, Any]:
     if not config.require_runtime_roots:
         return _scheduler._scheduler_root_preflight_not_required(config)
-    evidence_safe_paths = bool(getattr(config, "db_free_required", False))
+    evidence_safe_paths = bool(
+        getattr(config, "db_free_required", False)
+        or getattr(config, "repair_missing_forcing", False)
+    )
     allowed_roots = _scheduler._scheduler_allowed_roots(config)
     allowed_roots_check, allowed_roots_blocker = _scheduler._scheduler_allowed_roots_policy_check(
         config,

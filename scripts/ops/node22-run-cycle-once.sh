@@ -9,16 +9,22 @@ MODE="--plan"
 SOURCE_ARGS=()
 BASIN_ARGS=()
 CYCLE_TIME=""
+REPAIR_MISSING_FORCING="false"
 
 usage() {
   cat <<'USAGE'
 Usage:
-  scripts/ops/node22-run-cycle-once.sh --cycle-time YYYY-MM-DDTHH:MM:SSZ [--source gfs|IFS] [--basin-id ID ...] [--plan|--submit]
+  scripts/ops/node22-run-cycle-once.sh --cycle-time YYYY-MM-DDTHH:MM:SSZ [--source gfs|IFS] [--basin-id ID ...] [--repair-missing-forcing] [--plan|--submit]
 
 Notes:
   - Sources default to the scheduler env when omitted.
   - Basin filters are optional; omit --basin-id to run every active basin in the registry.
   - --cycle-time pins a single source cycle and disables backfill gap ordering.
+  - --repair-missing-forcing authorizes only this exact cycle to rebuild a missing
+    direct-grid forcing package from a verified ready raw manifest. Without the
+    flag, missing forcing remains fail-closed.
+  - The DB-free runtime preflight binds both configured raw-authority roots to
+    the fixed node-22 shared-NFS topology before lock acquisition or repair work.
 USAGE
 }
 
@@ -42,6 +48,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --submit)
       MODE="--submit"
+      shift
+      ;;
+    --repair-missing-forcing)
+      REPAIR_MISSING_FORCING="true"
       shift
       ;;
     -h|--help)
@@ -75,6 +85,12 @@ set +a
 export NHMS_SERVICE_ROLE="${NHMS_SERVICE_ROLE:-compute_control}"
 export SLURM_GATEWAY_URL="${SLURM_GATEWAY_URL:-http://127.0.0.1:8090}"
 export NHMS_PRODUCTION_SLURM_ENABLED="${NHMS_PRODUCTION_SLURM_ENABLED:-true}"
+export NHMS_SCHEDULER_REPAIR_MISSING_FORCING="$REPAIR_MISSING_FORCING"
+if [ "$REPAIR_MISSING_FORCING" = "true" ]; then
+  export NHMS_SCHEDULER_REPAIR_MISSING_FORCING_CYCLE_TIME="$CYCLE_TIME"
+else
+  unset NHMS_SCHEDULER_REPAIR_MISSING_FORCING_CYCLE_TIME
+fi
 
 exec "$REPO/.venv/bin/python" -m services.orchestrator.cli plan-production \
   "${SOURCE_ARGS[@]}" \

@@ -11,6 +11,11 @@ make bounded progress under concurrent submission.
 - Validate restart/resume candidates before downstream forecast retry so a
   missing `forcing_package_uri` tree is reported as a stable artifact recovery
   blocker instead of generic `NODE_FAILURE`.
+- Keep that blocker fail-closed by default while providing an explicit
+  exact-cycle operator repair that revalidates the node-27 NFS raw manifest,
+  requires a valid production direct-grid contract, preserves warm-state
+  lineage, and restarts through the existing Slurm `produce_forcing_array`
+  cohort rather than login-node forcing or forecast-only submission.
 - Preserve DB-free scheduler/runtime flags in manual and automatic retry Slurm
   manifests, including forecast retries on node-22.
 - Reconcile Slurm array tasks using durable manifest/task identity, not only

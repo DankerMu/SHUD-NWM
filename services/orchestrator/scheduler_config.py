@@ -3,13 +3,14 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 from urllib.parse import unquote, urlparse
 
 from packages.common.redaction import redact_payload
 from services.orchestrator import scheduler as _scheduler
+from services.orchestrator import source_cycle_raw_manifest
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
 
 __all__ = ("ProductionSchedulerConfig",)
@@ -29,6 +30,9 @@ _DB_FREE_PATH_SPECS = (
     ("scheduler_journal_root", "NHMS_SCHEDULER_JOURNAL_ROOT", "directory"),
     ("scheduler_state_index", "NHMS_SCHEDULER_STATE_INDEX", "file"),
 )
+_DB_FREE_RAW_MANIFEST_PREFIX_ENV = "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX"
+_DB_FREE_RAW_MANIFEST_ROOT_ENV = "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"
+_DB_FREE_CANONICAL_RAW_AUTHORITY_ENV = "NHMS_OBJECT_STORE_COPYBACK_ROOT"
 _DB_FREE_SUPPORTED_OBJECT_URI_SCHEMES = frozenset({"s3", "published"})
 _DB_FREE_DB_BACKEND_VALUES = frozenset({"postgres", "postgresql", "psycopg", "psycopg2", "pg"})
 _DB_FREE_OBJECT_STORE_PREFIX_ENV = "OBJECT_STORE_PREFIX"
@@ -49,6 +53,28 @@ _DB_FREE_CREDENTIAL_WORDS = (
     "session_key",
     "signature",
 )
+
+
+def _repair_missing_forcing_cycle_time(value: datetime | str | None) -> datetime | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ValueError(
+                "production scheduler repair_missing_forcing_cycle_time must be an ISO-8601 UTC time"
+            ) from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(
+            "production scheduler repair_missing_forcing_cycle_time must include a UTC offset"
+        )
+    return parsed.astimezone(UTC)
 
 
 @dataclass(frozen=True)
@@ -155,6 +181,25 @@ class ProductionSchedulerConfig:
             "NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND",
             32,
         )
+    )
+    object_store_copyback_root: Path | str | None = field(
+        default_factory=lambda: os.getenv(_DB_FREE_CANONICAL_RAW_AUTHORITY_ENV)
+    )
+    nfs_raw_manifest_root: Path | str | None = field(
+        default_factory=lambda: os.getenv(_DB_FREE_RAW_MANIFEST_ROOT_ENV)
+    )
+    nfs_raw_manifest_prefix: str = field(
+        default_factory=lambda: os.getenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX")
+        or "s3://nhms"
+    )
+    require_direct_grid: bool = field(
+        default_factory=lambda: _scheduler._env_flag("NHMS_SCHEDULER_REQUIRE_DIRECT_GRID")
+    )
+    repair_missing_forcing: bool = field(
+        default_factory=lambda: _scheduler._env_flag("NHMS_SCHEDULER_REPAIR_MISSING_FORCING")
+    )
+    repair_missing_forcing_cycle_time: datetime | str | None = field(
+        default_factory=lambda: os.getenv("NHMS_SCHEDULER_REPAIR_MISSING_FORCING_CYCLE_TIME")
     )
     progress_guard_max_no_progress_steps: int = field(
         default_factory=lambda: _scheduler._env_int("NHMS_SCHEDULER_PROGRESS_GUARD_MAX_NO_PROGRESS_STEPS", 256)
@@ -408,6 +453,34 @@ class ProductionSchedulerConfig:
             "slurm_array_concurrency_bound",
             max(int(self.slurm_array_concurrency_bound), 1),
         )
+        object.__setattr__(self, "require_direct_grid", bool(self.require_direct_grid))
+        object.__setattr__(self, "repair_missing_forcing", bool(self.repair_missing_forcing))
+        repair_cycle_time = _repair_missing_forcing_cycle_time(
+            self.repair_missing_forcing_cycle_time,
+        )
+        object.__setattr__(self, "repair_missing_forcing_cycle_time", repair_cycle_time)
+        if self.repair_missing_forcing:
+            if repair_cycle_time is None:
+                raise ValueError(
+                    "production scheduler repair_missing_forcing requires an exact cycle time"
+                )
+            if self.continuous:
+                raise ValueError(
+                    "production scheduler repair_missing_forcing cannot run continuously"
+                )
+            if self.backfill_enabled or int(self.max_cycles_per_source) != 1 or int(self.lookback_hours) != 0:
+                raise ValueError(
+                    "production scheduler repair_missing_forcing requires an exact-cycle, "
+                    "single-cycle, backfill-disabled invocation"
+                )
+            if int(self.slurm_array_concurrency_bound) > 32:
+                raise ValueError(
+                    "production scheduler repair_missing_forcing Slurm array concurrency must not exceed 32"
+                )
+        elif repair_cycle_time is not None:
+            raise ValueError(
+                "production scheduler repair_missing_forcing_cycle_time requires repair_missing_forcing"
+            )
         object.__setattr__(
             self,
             "progress_guard_max_no_progress_steps",
@@ -599,7 +672,8 @@ class ProductionSchedulerConfig:
         }
 
     def db_free_runtime_preflight(self) -> dict[str, Any]:
-        if not self.scheduler_db_free_required:
+        repair_authority_required = bool(self.repair_missing_forcing)
+        if not self.scheduler_db_free_required and not repair_authority_required:
             return {
                 "status": "not_required",
                 "required": False,
@@ -608,53 +682,126 @@ class ProductionSchedulerConfig:
             }
         checks: dict[str, Any] = {}
         blockers: list[dict[str, Any]] = []
-        checks["database_url"] = {
-            "env": "DATABASE_URL",
-            "configured": bool(self.database_url_configured),
-            "value_recorded": False,
-        }
-        if self.database_url_configured:
-            blockers.append(
-                {
-                    "code": "database_url_forbidden",
-                    "field": "DATABASE_URL",
-                    "reason": "database_url_forbidden",
-                    "message": "DB-free scheduler mode forbids scheduler DATABASE_URL before lock acquisition.",
-                }
-            )
-        if self.slurm_execution_enabled:
-            for field_name, env_name in (
-                ("reconcile_slurm_user", "NHMS_SCHEDULER_RECONCILE_SLURM_USER"),
-                ("reconcile_slurm_account", "NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT"),
-            ):
-                value = getattr(self, field_name)
-                checks[env_name] = {
-                    "env": env_name,
-                    "configured": value is not None,
-                    "value_recorded": False,
-                }
-                if value is None:
-                    blockers.append(
-                        {
-                            "code": "accepted_submit_owner_missing",
-                            "field": env_name,
-                            "reason": "accepted_submit_owner_missing",
-                            "message": "DB-free Slurm execution requires exact accepted-submit ownership.",
-                        }
-                    )
-        for attr, env, _legacy_default in _DB_FREE_SELECTOR_SPECS:
-            value = getattr(self, attr)
-            check, blocker = _db_free_selector_check(env, value)
-            checks[env] = check
-            if blocker is not None:
-                blockers.append(blocker)
+        if self.scheduler_db_free_required:
+            checks["database_url"] = {
+                "env": "DATABASE_URL",
+                "configured": bool(self.database_url_configured),
+                "value_recorded": False,
+            }
+            if self.database_url_configured:
+                blockers.append(
+                    {
+                        "code": "database_url_forbidden",
+                        "field": "DATABASE_URL",
+                        "reason": "database_url_forbidden",
+                        "message": "DB-free scheduler mode forbids scheduler DATABASE_URL before lock acquisition.",
+                    }
+                )
+            if self.slurm_execution_enabled:
+                for field_name, env_name in (
+                    ("reconcile_slurm_user", "NHMS_SCHEDULER_RECONCILE_SLURM_USER"),
+                    ("reconcile_slurm_account", "NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT"),
+                ):
+                    value = getattr(self, field_name)
+                    checks[env_name] = {
+                        "env": env_name,
+                        "configured": value is not None,
+                        "value_recorded": False,
+                    }
+                    if value is None:
+                        blockers.append(
+                            {
+                                "code": "accepted_submit_owner_missing",
+                                "field": env_name,
+                                "reason": "accepted_submit_owner_missing",
+                                "message": "DB-free Slurm execution requires exact accepted-submit ownership.",
+                            }
+                        )
+            for attr, env, _legacy_default in _DB_FREE_SELECTOR_SPECS:
+                value = getattr(self, attr)
+                check, blocker = _db_free_selector_check(env, value)
+                checks[env] = check
+                if blocker is not None:
+                    blockers.append(blocker)
         allowed_roots = _db_free_allowed_roots(self)
-        for attr, env, kind in _DB_FREE_PATH_SPECS:
-            value = getattr(self, attr)
-            check, blocker = _db_free_path_check(env, value, kind=kind, allowed_roots=allowed_roots)
-            checks[env] = check
-            if blocker is not None:
-                blockers.append(blocker)
+        if self.scheduler_db_free_required:
+            for attr, env, kind in _DB_FREE_PATH_SPECS:
+                value = getattr(self, attr)
+                check, blocker = _db_free_path_check(env, value, kind=kind, allowed_roots=allowed_roots)
+                checks[env] = check
+                if blocker is not None:
+                    blockers.append(blocker)
+        canonical_root_check, canonical_root_blocker = _db_free_path_check(
+            _DB_FREE_CANONICAL_RAW_AUTHORITY_ENV,
+            self.object_store_copyback_root,
+            kind="readable_directory",
+            allowed_roots=allowed_roots,
+        )
+        checks[_DB_FREE_CANONICAL_RAW_AUTHORITY_ENV] = canonical_root_check
+        if canonical_root_blocker is not None:
+            blockers.append(canonical_root_blocker)
+        raw_root_check, raw_root_blocker = _db_free_path_check(
+            _DB_FREE_RAW_MANIFEST_ROOT_ENV,
+            self.nfs_raw_manifest_root,
+            kind="readable_directory",
+            allowed_roots=allowed_roots,
+        )
+        checks[_DB_FREE_RAW_MANIFEST_ROOT_ENV] = raw_root_check
+        if raw_root_blocker is not None:
+            blockers.append(raw_root_blocker)
+        topology_identity = _db_free_path_identity(
+            source_cycle_raw_manifest.NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT
+        )
+        canonical_topology_matches: bool | None = None
+        if canonical_root_blocker is None:
+            canonical_topology_matches = (
+                _db_free_path_identity(self.object_store_copyback_root) == topology_identity
+            )
+            if not canonical_topology_matches:
+                blockers.append(
+                    _db_free_blocker(
+                        "db_free_raw_authority_topology_mismatch",
+                        _DB_FREE_CANONICAL_RAW_AUTHORITY_ENV,
+                        "canonical_topology_mismatch",
+                    )
+                )
+        canonical_root_check["topology_matches"] = canonical_topology_matches
+        raw_topology_matches: bool | None = None
+        if raw_root_blocker is None:
+            raw_topology_matches = _db_free_path_identity(self.nfs_raw_manifest_root) == topology_identity
+            if not raw_topology_matches:
+                blockers.append(
+                    _db_free_blocker(
+                        "db_free_raw_authority_topology_mismatch",
+                        _DB_FREE_RAW_MANIFEST_ROOT_ENV,
+                        "canonical_topology_mismatch",
+                    )
+                )
+        raw_root_check["topology_matches"] = raw_topology_matches
+        authority_matches: bool | None = None
+        if canonical_root_blocker is None and raw_root_blocker is None:
+            authority_matches = _db_free_path_identity(
+                self.object_store_copyback_root
+            ) == _db_free_path_identity(self.nfs_raw_manifest_root)
+            if not authority_matches:
+                blockers.append(
+                    _db_free_blocker(
+                        "db_free_raw_authority_mismatch",
+                        _DB_FREE_RAW_MANIFEST_ROOT_ENV,
+                        "canonical_authority_mismatch",
+                    )
+                )
+        raw_root_check["canonical_authority_configured"] = (
+            self.object_store_copyback_root not in (None, "")
+        )
+        raw_root_check["authority_matches"] = authority_matches
+        prefix_check, prefix_blocker = _db_free_raw_manifest_prefix_check(
+            self.nfs_raw_manifest_prefix,
+            require_canonical=repair_authority_required,
+        )
+        checks[_DB_FREE_RAW_MANIFEST_PREFIX_ENV] = prefix_check
+        if prefix_blocker is not None:
+            blockers.append(prefix_blocker)
         return {
             "status": "blocked" if blockers else "ready",
             "required": True,
@@ -912,6 +1059,16 @@ def _db_free_allowed_roots(config: ProductionSchedulerConfig) -> tuple[Path, ...
     return tuple(roots)
 
 
+def _db_free_path_identity(value: str | Path | None) -> Path | None:
+    if value in (None, ""):
+        return None
+    path = _expanduser_for_mode(str(value).strip(), db_free_required=True)
+    try:
+        return path.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return path
+
+
 def _db_free_path_check(
     env: str,
     value: str | Path | None,
@@ -997,19 +1154,29 @@ def _db_free_path_check(
         return check, _db_free_blocker("db_free_required_path_unsafe", env, "unsafe", path=str(parent))
     exists = path.exists()
     check["exists"] = exists
-    if kind == "directory":
+    if kind in {"directory", "readable_directory"}:
         if not exists:
             return check, _db_free_blocker("db_free_required_path_not_found", env, "not_found", path=str(resolved))
         if path.is_symlink() or not path.is_dir():
             return check, _db_free_blocker("db_free_required_path_unsafe", env, "unsafe", path=str(resolved))
-        if not _scheduler._directory_is_writable(path):
+        if kind == "directory" and not _scheduler._directory_is_writable(path):
             return check, _db_free_blocker(
                 "db_free_required_path_not_writable",
                 env,
                 "not_writable",
                 path=str(resolved),
             )
-        check["writable"] = True
+        if kind == "directory":
+            check["writable"] = True
+        elif not os.access(path, os.R_OK | os.X_OK):
+            return check, _db_free_blocker(
+                "db_free_required_path_not_readable",
+                env,
+                "not_readable",
+                path=str(resolved),
+            )
+        else:
+            check["readable"] = True
         return check, None
     if not exists:
         return check, _db_free_blocker("db_free_required_path_not_found", env, "not_found", path=str(resolved))
@@ -1033,6 +1200,69 @@ def _db_free_file_is_readable(path: Path) -> bool:
     if path_stat.st_mode & 0o444 == 0:
         return False
     return os.access(path, os.R_OK)
+
+
+def _db_free_raw_manifest_prefix_evidence(value: Any) -> dict[str, Any]:
+    text = str(value or "").strip()
+    return {
+        "env": _DB_FREE_RAW_MANIFEST_PREFIX_ENV,
+        "configured": bool(text),
+        "value": "[object-prefix]" if text else None,
+    }
+
+
+def _db_free_raw_manifest_prefix_check(
+    value: Any,
+    *,
+    require_canonical: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    text = str(value or "").strip().rstrip("/")
+    check = _db_free_raw_manifest_prefix_evidence(text)
+    if not text:
+        return check, _db_free_blocker(
+            "db_free_raw_manifest_prefix_missing",
+            _DB_FREE_RAW_MANIFEST_PREFIX_ENV,
+            "missing",
+        )
+    try:
+        parsed = _db_free_urlparse(text)
+        unsafe_reason = _db_free_common_object_uri_unsafe_reason(text, parsed)
+        if (
+            parsed.scheme.lower() != "s3"
+            or not parsed.netloc
+            or unsafe_reason is not None
+        ):
+            raise ValueError(unsafe_reason or "unsupported_prefix")
+        raw_path = str(parsed.path or "").strip("/")
+        if raw_path:
+            _db_free_safe_object_key(raw_path)
+    except ValueError:
+        check["value"] = "[invalid-object-prefix]"
+        return check, _db_free_blocker(
+            "db_free_raw_manifest_prefix_invalid",
+            _DB_FREE_RAW_MANIFEST_PREFIX_ENV,
+            "invalid",
+        )
+    authority_matches = (
+        text == source_cycle_raw_manifest.NODE22_CANONICAL_NFS_RAW_MANIFEST_PREFIX
+        if require_canonical
+        else None
+    )
+    check.update(
+        {
+            "scheme": "s3",
+            "supported": True,
+            "canonical_authority_required": require_canonical,
+            "authority_matches": authority_matches,
+        }
+    )
+    if authority_matches is False:
+        return check, _db_free_blocker(
+            "db_free_raw_manifest_prefix_authority_mismatch",
+            _DB_FREE_RAW_MANIFEST_PREFIX_ENV,
+            "canonical_authority_mismatch",
+        )
+    return check, None
 
 
 def _db_free_local_path_component_reason(path: Path) -> str | None:

@@ -270,7 +270,8 @@ def _candidate_skips_pre_orchestration_forcing(
     raw_manifest_reuse = state_evidence.get("raw_manifest_reuse")
     return (
         isinstance(fresh_ingestion, Mapping)
-        and str(fresh_ingestion.get("mode") or "") == "reuse_raw_then_convert"
+        and str(fresh_ingestion.get("mode") or "")
+        in {"reuse_raw_then_convert", "repair_missing_forcing"}
         and isinstance(raw_manifest_reuse, Mapping)
         and str(raw_manifest_reuse.get("status") or "") == "ready"
     )

@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from packages.common.provider_atomic import ProviderAtomicError, provider_destination_lock
@@ -33,6 +33,10 @@ NFS_RAW_STAGE_ROOT_ENV = "NHMS_SCHEDULER_NFS_RAW_STAGE_ROOT"
 NFS_RAW_STAGE_PREFIX_ENV = "NHMS_SCHEDULER_NFS_RAW_STAGE_PREFIX"
 NFS_RAW_MANIFEST_MAX_BYTES = 16 * 1024 * 1024
 NFS_RAW_MANIFEST_READY_SOURCE = "node27_nfs_raw_manifest"
+# Fixed deployment topology identity, not an environment-configurable policy.
+# Node-22 production sees node-27's shared object-store through this NFS path.
+NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT = Path("/ghdc/data/nwm/object-store")
+NODE22_CANONICAL_NFS_RAW_MANIFEST_PREFIX = "s3://nhms"
 
 __all__ = (
     "NFS_RAW_MANIFEST_ENABLED_ENV",
@@ -43,6 +47,8 @@ __all__ = (
     "NFS_RAW_STAGE_ENABLED_ENV",
     "NFS_RAW_STAGE_PREFIX_ENV",
     "NFS_RAW_STAGE_ROOT_ENV",
+    "NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT",
+    "NODE22_CANONICAL_NFS_RAW_MANIFEST_PREFIX",
     "NfsRawManifestStagingError",
     "forecast_cycle_from_raw_manifest_readiness",
     "nfs_raw_manifest_readiness",
@@ -163,7 +169,13 @@ def nfs_raw_manifest_readiness(
             "manifest_path": str(manifest_path),
         }
 
-    validation_error = _validate_manifest_identity(payload, source_id=source_id, cycle_time=cycle_time)
+    validation_error = _validate_manifest_identity(
+        payload,
+        source_id=source_id,
+        cycle_time=cycle_time,
+        manifest_key=manifest_key,
+        object_store_prefix=object_store_prefix,
+    )
     if validation_error is not None:
         return {
             **root_evidence,
@@ -182,7 +194,11 @@ def nfs_raw_manifest_readiness(
             "manifest_key": manifest_key,
             "manifest_path": str(manifest_path),
         }
-    local_keys, entry_error = _entry_local_keys(entries)
+    local_keys, entry_error = _entry_local_keys(
+        entries,
+        source_id=source_id,
+        cycle_time=cycle_time,
+    )
     if entry_error is not None:
         return {
             **root_evidence,
@@ -205,8 +221,6 @@ def nfs_raw_manifest_readiness(
         }
 
     manifest_uri = str(payload.get("manifest_uri") or "").strip()
-    if not manifest_uri:
-        manifest_uri = _manifest_uri_for_key(manifest_key, object_store_prefix)
     return {
         **root_evidence,
         **file_evidence,
@@ -324,6 +338,9 @@ def stage_nfs_raw_manifest_from_env(state_evidence: Mapping[str, Any]) -> dict[s
     return stage_nfs_raw_manifest_to_object_store(
         nfs_raw_manifest,
         target_object_store_root=target_root,
+        source_object_store_prefix=os.getenv(NFS_RAW_MANIFEST_PREFIX_ENV)
+        or os.getenv("OBJECT_STORE_PREFIX")
+        or NODE22_CANONICAL_NFS_RAW_MANIFEST_PREFIX,
         target_object_store_prefix=os.getenv(NFS_RAW_STAGE_PREFIX_ENV)
         or os.getenv("OBJECT_STORE_PREFIX")
         or os.getenv(NFS_RAW_MANIFEST_PREFIX_ENV)
@@ -335,6 +352,7 @@ def stage_nfs_raw_manifest_to_object_store(
     readiness: Mapping[str, Any],
     *,
     target_object_store_root: str | Path,
+    source_object_store_prefix: str = NODE22_CANONICAL_NFS_RAW_MANIFEST_PREFIX,
     target_object_store_prefix: str = "s3://nhms",
 ) -> dict[str, Any]:
     if readiness.get("status") != "ready":
@@ -345,56 +363,91 @@ def stage_nfs_raw_manifest_to_object_store(
     if source_root_value in (None, "") or manifest_path_value in (None, "") or not manifest_key:
         raise NfsRawManifestStagingError("NFS raw manifest evidence is missing source root or manifest path.")
 
-    source_root = verify_directory_no_follow(_absolute_path(str(source_root_value)))
-    target_root = ensure_directory_no_follow(_absolute_path(target_object_store_root))
     try:
-        if source_root.samefile(target_root):
-            return {
-                "status": "skipped",
-                "reason": "source_target_same",
-                "source": NFS_RAW_MANIFEST_READY_SOURCE,
-                "source_object_store_root": "[local-path]",
-                "target_object_store_root": "[local-path]",
-                "manifest_uri": _object_uri_evidence(str(readiness.get("manifest_uri") or "")),
-                "manifest_key": manifest_key,
-            }
+        source_id = normalize_source_id(str(readiness.get("source_id") or ""))
+        cycle_time = parse_cycle_time(str(readiness.get("cycle_time") or ""))
+    except (TypeError, ValueError) as error:
+        raise NfsRawManifestStagingError("manifest_key_identity_mismatch") from error
+    if manifest_key not in _candidate_manifest_keys(source_id, format_cycle_time(cycle_time)):
+        raise NfsRawManifestStagingError("manifest_key_identity_mismatch")
+    source_root = verify_directory_no_follow(_absolute_path(str(source_root_value)))
+    manifest_path = _absolute_path(str(manifest_path_value))
+    expected_manifest_path = source_root / manifest_key
+    try:
+        stat_no_follow(manifest_path, containment_root=source_root)
+        stat_no_follow(expected_manifest_path, containment_root=source_root)
+        manifest_path_matches = manifest_path.samefile(expected_manifest_path)
+    except (FileNotFoundError, OSError, SafeFilesystemError) as error:
+        raise NfsRawManifestStagingError("manifest_path_identity_mismatch") from error
+    if not manifest_path_matches:
+        raise NfsRawManifestStagingError("manifest_path_identity_mismatch")
+
+    try:
+        validated_manifest_bytes = read_bytes_limited_no_follow(
+            manifest_path,
+            max_bytes=NFS_RAW_MANIFEST_MAX_BYTES,
+            containment_root=source_root,
+        )
+    except (OSError, SafeFilesystemError) as error:
+        raise NfsRawManifestStagingError("manifest_unreadable") from error
+    payload, payload_error = _parse_manifest_payload(
+        validated_manifest_bytes,
+        max_manifest_bytes=NFS_RAW_MANIFEST_MAX_BYTES,
+    )
+    if payload_error is not None:
+        raise NfsRawManifestStagingError(str(payload_error.get("reason") or "manifest_unreadable"))
+    validation_error = _validate_manifest_identity(
+        payload,
+        source_id=source_id,
+        cycle_time=cycle_time,
+        manifest_key=manifest_key,
+        object_store_prefix=source_object_store_prefix,
+    )
+    if validation_error is not None:
+        raise NfsRawManifestStagingError(
+            str(validation_error.get("reason") or "manifest_identity_invalid")
+        )
+    entries = payload.get("entries")
+    if not isinstance(entries, Sequence) or isinstance(entries, str | bytes | bytearray) or not entries:
+        raise NfsRawManifestStagingError("manifest_entries_missing")
+    local_keys, entry_error = _entry_local_keys(
+        entries,
+        source_id=source_id,
+        cycle_time=cycle_time,
+    )
+    if entry_error is not None:
+        raise NfsRawManifestStagingError(str(entry_error.get("reason") or "manifest_entry_invalid"))
+    _file_evidence, file_error = _verify_entry_files(source_root, local_keys)
+    if file_error is not None:
+        raise NfsRawManifestStagingError(str(file_error.get("reason") or "raw_files_invalid"))
+    target_root = ensure_directory_no_follow(_absolute_path(target_object_store_root))
+    source_target_same = False
+    try:
+        source_target_same = source_root.samefile(target_root)
     except OSError:
         pass
-
-    manifest_path = _absolute_path(str(manifest_path_value))
     target_manifest_path = target_root / manifest_key
     ensure_directory_no_follow(target_manifest_path.parent, containment_root=target_root)
     try:
         with provider_destination_lock(target_manifest_path, containment_root=target_root):
-            payload, payload_error = _read_manifest_payload(
-                manifest_path,
-                root=source_root,
-                max_manifest_bytes=NFS_RAW_MANIFEST_MAX_BYTES,
-            )
-            if payload_error is not None:
-                raise NfsRawManifestStagingError(str(payload_error.get("reason") or "manifest_unreadable"))
-            source_id = str(readiness.get("source_id") or "")
-            cycle_time = parse_cycle_time(str(readiness.get("cycle_time") or ""))
-            validation_error = _validate_manifest_identity(payload, source_id=source_id, cycle_time=cycle_time)
-            if validation_error is not None:
-                raise NfsRawManifestStagingError(
-                    str(validation_error.get("reason") or "manifest_identity_invalid")
-                )
-            entries = payload.get("entries")
-            if not isinstance(entries, Sequence) or isinstance(entries, str | bytes | bytearray) or not entries:
-                raise NfsRawManifestStagingError("manifest_entries_missing")
-            local_keys, entry_error = _entry_local_keys(entries)
-            if entry_error is not None:
-                raise NfsRawManifestStagingError(str(entry_error.get("reason") or "manifest_entry_invalid"))
-            _file_evidence, file_error = _verify_entry_files(source_root, local_keys)
-            if file_error is not None:
-                raise NfsRawManifestStagingError(str(file_error.get("reason") or "raw_files_invalid"))
-
             source_manifest_bytes = read_bytes_limited_no_follow(
                 manifest_path,
                 max_bytes=NFS_RAW_MANIFEST_MAX_BYTES,
                 containment_root=source_root,
             )
+            if source_manifest_bytes != validated_manifest_bytes:
+                raise NfsRawManifestStagingError("source_manifest_changed_before_staging")
+            if source_target_same:
+                return _nfs_stage_result(
+                    readiness=readiness,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    manifest_key=manifest_key,
+                    target_object_store_prefix=target_object_store_prefix,
+                    status="skipped",
+                    reason="source_target_same",
+                )
+
             if _staged_target_matches_source(
                 target_root=target_root,
                 target_manifest_path=target_manifest_path,
@@ -512,6 +565,14 @@ def _read_manifest_payload(
         content = read_bytes_limited_no_follow(path, max_bytes=max_manifest_bytes, containment_root=root)
     except (OSError, SafeFilesystemError) as error:
         return {}, {"reason": "manifest_unreadable", "error": str(error)}
+    return _parse_manifest_payload(content, max_manifest_bytes=max_manifest_bytes)
+
+
+def _parse_manifest_payload(
+    content: bytes,
+    *,
+    max_manifest_bytes: int,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
     if len(content) > max_manifest_bytes:
         return {}, {"reason": "manifest_too_large", "max_bytes": max_manifest_bytes}
     try:
@@ -555,6 +616,8 @@ def _validate_manifest_identity(
     *,
     source_id: str,
     cycle_time: datetime,
+    manifest_key: str,
+    object_store_prefix: str,
 ) -> dict[str, Any] | None:
     try:
         manifest_source = normalize_source_id(str(payload.get("source_id") or ""))
@@ -577,16 +640,20 @@ def _validate_manifest_identity(
             "expected_cycle_time": _format_time(cycle_time),
         }
     manifest_uri = str(payload.get("manifest_uri") or "").strip()
-    if manifest_uri and not _manifest_uri_matches_source_cycle(
-        manifest_uri,
-        source_id=source_id,
-        cycle_time=cycle_time,
-    ):
+    expected_manifest_uri = _manifest_uri_for_key(manifest_key, object_store_prefix)
+    if manifest_uri != expected_manifest_uri:
         return {"reason": "manifest_uri_mismatch", "manifest_uri": manifest_uri}
     return None
 
 
-def _entry_local_keys(entries: Sequence[Any]) -> tuple[list[str], dict[str, Any] | None]:
+def _entry_local_keys(
+    entries: Sequence[Any],
+    *,
+    source_id: str,
+    cycle_time: datetime,
+) -> tuple[list[str], dict[str, Any] | None]:
+    expected_source = normalize_source_id(source_id)
+    expected_cycle = format_cycle_time(parse_cycle_time(cycle_time))
     local_keys: list[str] = []
     for index, entry in enumerate(entries):
         if not isinstance(entry, Mapping):
@@ -601,6 +668,19 @@ def _entry_local_keys(entries: Sequence[Any]) -> tuple[list[str], dict[str, Any]
                 "entry_index": index,
                 "local_key": local_key,
                 "error": validation.error,
+            }
+        parts = local_key.split("/")
+        if (
+            len(parts) < 4
+            or parts[0] != "raw"
+            or parts[1].lower() != expected_source.lower()
+            or parts[2] != expected_cycle
+        ):
+            return [], {
+                "reason": "manifest_entry_local_key_identity_mismatch",
+                "entry_index": index,
+                "expected_source_id": expected_source,
+                "expected_cycle": expected_cycle,
             }
         local_keys.append(local_key)
     return local_keys, None
@@ -662,40 +742,6 @@ def _manifest_uri_for_key(key: str, object_store_prefix: str) -> str:
     if not prefix:
         return key
     return f"{prefix}/{key}"
-
-
-def _manifest_uri_matches_source_cycle(manifest_uri: str, *, source_id: str, cycle_time: datetime) -> bool:
-    value = manifest_uri.strip()
-    if not value:
-        return False
-    parsed = urlparse(value)
-    if parsed.scheme:
-        if parsed.scheme != "s3" or not parsed.netloc or parsed.params or parsed.query or parsed.fragment:
-            return False
-        key = unquote(parsed.path).strip("/")
-        return _manifest_key_suffix_matches_source_cycle(key, source_id=source_id, cycle_time=cycle_time)
-    if parsed.netloc:
-        return False
-    key = unquote(value).strip("/")
-    parts = key.split("/")
-    return len(parts) == 4 and _manifest_key_suffix_matches_source_cycle(
-        key,
-        source_id=source_id,
-        cycle_time=cycle_time,
-    )
-
-
-def _manifest_key_suffix_matches_source_cycle(key: str, *, source_id: str, cycle_time: datetime) -> bool:
-    parts = key.split("/")
-    if len(parts) < 4 or any(part in {"", ".", ".."} for part in parts):
-        return False
-    raw, source, cycle, filename = parts[-4:]
-    return (
-        raw == "raw"
-        and source.lower() == normalize_source_id(source_id).lower()
-        and cycle == format_cycle_time(cycle_time)
-        and filename == "manifest.json"
-    )
 
 
 def _bounded_manifest_metadata(value: Any) -> dict[str, Any]:
