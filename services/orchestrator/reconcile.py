@@ -1117,7 +1117,14 @@ def _terminal_file_cohort_identity_matches(store: Any, record: SacctRecord, job:
     expected_master = str(getattr(job, "slurm_job_id", None) or "")
     if not expected_master or record.slurm_job_id != expected_master:
         return False
-    if record.comment != str(getattr(job, "slurm_comment", None) or ""):
+    # Clusters without ``AccountingStoreFlags=job_comment`` never persist the
+    # sbatch comment into accounting, so an empty record comment is "not
+    # stored", not "different job". Identity then rests on the remaining
+    # gates: exact master id (queried by our own durable binding), ownership
+    # (user/account), stage-family job name, and the exact task-id bijection
+    # against cohort_members. A present-but-different comment stays fatal.
+    record_comment = str(record.comment or "")
+    if record_comment and record_comment != str(getattr(job, "slurm_comment", None) or ""):
         return False
     if record.stage not in (None, "") and not is_forecast_cohort_stage_name(record.stage):
         return False

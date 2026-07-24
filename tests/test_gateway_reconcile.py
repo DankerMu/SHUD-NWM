@@ -2220,6 +2220,8 @@ def test_file_cohort_task_identity_errors_block_every_projection(tmp_path: Any) 
         {"stage": "forcing"},
         {"user": "wrong-user"},
         {"account": "wrong-account"},
+        {"comment": None, "user": "wrong-user"},
+        {"comment": None, "account": "wrong-account"},
     ],
 )
 def test_file_cohort_terminal_identity_mismatch_never_projects(
@@ -2259,6 +2261,49 @@ def test_file_cohort_terminal_identity_mismatch_never_projects(
     assert outcome.durable_write_count == 0
     assert repository.get_pipeline_job(job_id) == before
     assert len(repository.query_pipeline_jobs_by_cycle("gfs_2026071200")) == 1
+
+
+def test_file_cohort_terminal_projects_when_accounting_stores_no_comment(
+    tmp_path: Any,
+) -> None:
+    """Clusters without ``AccountingStoreFlags=job_comment`` report an empty
+    sacct Comment; ownership + master-id + task-bijection identity must still
+    reconcile the crashed cohort master instead of blocking forever."""
+    from services.orchestrator.reconcile import SacctRecord, reconcile_inflight_jobs
+
+    repository = _file_cohort_repository(
+        tmp_path,
+        expected_user="scheduler-user",
+        expected_account="scheduler-account",
+    )
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    _bind_current_file_cohort(repository, key, slurm_job_id="17667")
+    tasks = tuple(
+        SacctRecord(f"17667_{index}", "COMPLETED", "nhms_forecast", array_task_id=index)
+        for index in range(18)
+    )
+    record = SacctRecord(
+        "17667",
+        "COMPLETED",
+        "nhms_forecast",
+        comment=None,
+        user="scheduler-user",
+        account="scheduler-account",
+        array_member_job_ids=tuple(task.slurm_job_id for task in tasks),
+        array_task_records=tasks,
+    )
+
+    outcome = reconcile_inflight_jobs(repository, sacct_query=lambda _job_id: record)[0]
+
+    assert outcome.action == "terminal"
+    assert outcome.status == "succeeded"
+    cohort = repository.get_pipeline_job(job_id)
+    assert cohort["status"] == "succeeded"
+    assert all(
+        projection["array_task_outcome"] == "succeeded"
+        for projection in cohort["candidate_projections"]
+    )
 
 
 @pytest.mark.parametrize("member_count", [2, 256])
