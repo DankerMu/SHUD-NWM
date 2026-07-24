@@ -193,7 +193,15 @@ def build_candidates(
         discovery = cycle.discovery
         has_active_orchestration: bool | None = None
         for model in models:
-            if _direct_grid_model_source_is_out_of_scope(model, discovery):
+            model_source_is_out_of_scope = _direct_grid_model_source_is_out_of_scope(
+                model,
+                discovery,
+            )
+            repair_target = _is_explicit_missing_forcing_repair_target(
+                context.config,
+                discovery.cycle_time,
+            )
+            if model_source_is_out_of_scope and not repair_target:
                 continue
             if len(candidates) + len(blocked) + len(skipped) >= max_candidates:
                 raise SchedulerResourceLimitError(
@@ -215,18 +223,75 @@ def build_candidates(
                 duplicate_exclusions.append({"type": "candidate", **exclusion})
                 continue
             seen_candidate_ids.add(candidate.candidate_id)
-            if not discovery.available:
-                blocked.append(
-                    _blocked_candidate(
-                        candidate,
-                        discovery.reason or "source_cycle_unavailable",
-                        state_evidence=_source_blocked_evidence(candidate, discovery),
+            raw_candidate_state: Mapping[str, Any] | None = None
+            state_decision: CandidateStateDecision | None = None
+            candidate_state_classified = False
+
+            def classify_candidate_state() -> None:
+                nonlocal raw_candidate_state, state_decision, candidate_state_classified
+                if candidate_state_classified:
+                    return
+                raw_candidate_state = (
+                    context.candidate_state_provider_caller(
+                        state_provider,
+                        source_id=discovery.source_id,
+                        cycle_time=discovery.cycle_time,
+                        model_id=model.model_id,
+                        run_id=candidate.run_id,
+                        forcing_version_id=candidate.forcing_version_id,
+                        candidate_id=candidate.candidate_id,
+                        retry_limit=context.config.retry_limit,
+                        job_limit=context.config.candidate_state_job_limit,
+                        event_limit=context.config.candidate_state_event_limit,
                     )
+                    if callable(state_provider)
+                    else None
                 )
+                state_decision = context.candidate_state_decider(candidate, raw_candidate_state)
+                candidate_state_classified = True
+
+            if model_source_is_out_of_scope:
+                classify_candidate_state()
+                direct_grid_scope_block = _direct_grid_source_scope_block(candidate, discovery)
+                repair_blocker = _repair_precondition_blocker(
+                    context.config,
+                    candidate,
+                    state_decision,
+                    direct_grid_scope_block,
+                    precondition="direct_grid_contract",
+                )
+                if repair_blocker is not None:
+                    blocked.append(repair_blocker)
+                continue
+            if not discovery.available:
+                if repair_target:
+                    classify_candidate_state()
+                discovery_block = _blocked_candidate(
+                    candidate,
+                    discovery.reason or "source_cycle_unavailable",
+                    state_evidence=_source_blocked_evidence(candidate, discovery),
+                )
+                repair_blocker = _repair_precondition_blocker(
+                    context.config,
+                    candidate,
+                    state_decision,
+                    discovery_block,
+                    precondition="source_discovery",
+                )
+                blocked.append(repair_blocker or discovery_block)
                 continue
             direct_grid_scope_block = _direct_grid_source_scope_block(candidate, discovery)
             if direct_grid_scope_block is not None:
-                blocked.append(direct_grid_scope_block)
+                if repair_target:
+                    classify_candidate_state()
+                repair_blocker = _repair_precondition_blocker(
+                    context.config,
+                    candidate,
+                    state_decision,
+                    direct_grid_scope_block,
+                    precondition="direct_grid_contract",
+                )
+                blocked.append(repair_blocker or direct_grid_scope_block)
                 continue
             if has_active_orchestration is None:
                 has_active_orchestration = bool(
@@ -283,23 +348,7 @@ def build_candidates(
             ):
                 skipped.append({**candidate.to_dict(), "reason": "completed_duplicate_pipeline"})
                 continue
-            raw_candidate_state = (
-                context.candidate_state_provider_caller(
-                    state_provider,
-                    source_id=discovery.source_id,
-                    cycle_time=discovery.cycle_time,
-                    model_id=model.model_id,
-                    run_id=candidate.run_id,
-                    forcing_version_id=candidate.forcing_version_id,
-                    candidate_id=candidate.candidate_id,
-                    retry_limit=context.config.retry_limit,
-                    job_limit=context.config.candidate_state_job_limit,
-                    event_limit=context.config.candidate_state_event_limit,
-                )
-                if callable(state_provider)
-                else None
-            )
-            state_decision = context.candidate_state_decider(candidate, raw_candidate_state)
+            classify_candidate_state()
             state_decision = _apply_explicit_missing_forcing_repair_policy(
                 context.config,
                 candidate,
@@ -1232,6 +1281,103 @@ def _nfs_raw_manifest_block_reason(evidence: Mapping[str, Any]) -> str:
     return reason if reason.startswith("nfs_raw_manifest_") else f"nfs_raw_manifest_{reason}"
 
 
+def _is_explicit_missing_forcing_repair_target(
+    config: SchedulerConfigLike,
+    cycle_time: datetime,
+) -> bool:
+    if not bool(getattr(config, "repair_missing_forcing", False)):
+        return False
+    target_cycle = getattr(config, "repair_missing_forcing_cycle_time", None)
+    return isinstance(target_cycle, datetime) and _format_utc(target_cycle) == _format_utc(
+        cycle_time
+    )
+
+
+def _missing_forcing_repair_policy_evidence(
+    config: SchedulerConfigLike,
+    candidate: SchedulerCandidateLike,
+) -> dict[str, Any]:
+    target_cycle = getattr(config, "repair_missing_forcing_cycle_time", None)
+    return {
+        "policy": "operator_exact_cycle_missing_forcing_repair",
+        "requested": True,
+        "target_cycle_time": _format_utc(target_cycle) if isinstance(target_cycle, datetime) else None,
+        "candidate_cycle_time": _format_utc(candidate.cycle_time_utc),
+        "source_id": candidate.source_id,
+        "model_id": candidate.model_id,
+        "candidate_id": candidate.candidate_id,
+        "default_policy": "fail_closed",
+        "plan_only": bool(config.dry_run),
+    }
+
+
+def _missing_forcing_repair_rejected_decision(
+    config: SchedulerConfigLike,
+    candidate: SchedulerCandidateLike,
+    decision: CandidateStateDecision,
+    reason: str,
+    **details: Any,
+) -> CandidateStateDecision:
+    original_evidence = dict(decision.evidence)
+    original_raw_manifest = original_evidence.get("nfs_raw_manifest")
+    if isinstance(original_raw_manifest, Mapping):
+        original_evidence["nfs_raw_manifest"] = _public_raw_manifest_evidence(
+            original_raw_manifest
+        )
+    return CandidateStateDecision(
+        "blocked",
+        decision.reason,
+        {
+            **original_evidence,
+            "missing_forcing_repair": _evidence_safe(
+                {
+                    **_missing_forcing_repair_policy_evidence(config, candidate),
+                    "status": "rejected",
+                    "reason": reason,
+                    **details,
+                }
+            ),
+        },
+    )
+
+
+def _repair_precondition_blocker(
+    config: SchedulerConfigLike,
+    candidate: SchedulerCandidateLike,
+    decision: CandidateStateDecision | None,
+    ordinary_blocker: SchedulerCandidateLike | None,
+    *,
+    precondition: str,
+) -> SchedulerCandidateLike | None:
+    if (
+        not _is_explicit_missing_forcing_repair_target(config, candidate.cycle_time_utc)
+        or decision is None
+        or decision.action != "blocked"
+        or decision.reason != "missing_forcing_package_uri"
+        or ordinary_blocker is None
+    ):
+        return None
+    reason = ordinary_blocker.reason or "repair_precondition_blocked"
+    rejection = _missing_forcing_repair_rejected_decision(
+        config,
+        candidate,
+        decision,
+        reason,
+        detail={
+            "precondition": precondition,
+            "blocker": {
+                "reason": reason,
+                **dict(ordinary_blocker.state_evidence),
+            },
+        },
+    )
+    return _blocked_candidate(
+        candidate,
+        rejection.reason or "missing_forcing_package_uri",
+        state_evidence=rejection.evidence,
+    )
+
+
 def _apply_explicit_missing_forcing_repair_policy(
     config: SchedulerConfigLike,
     candidate: SchedulerCandidateLike,
@@ -1257,39 +1403,15 @@ def _apply_explicit_missing_forcing_repair_policy(
         return decision
 
     target_cycle = getattr(config, "repair_missing_forcing_cycle_time", None)
-    policy_evidence = {
-        "policy": "operator_exact_cycle_missing_forcing_repair",
-        "requested": True,
-        "target_cycle_time": _format_utc(target_cycle) if isinstance(target_cycle, datetime) else None,
-        "candidate_cycle_time": _format_utc(candidate.cycle_time_utc),
-        "source_id": candidate.source_id,
-        "model_id": candidate.model_id,
-        "candidate_id": candidate.candidate_id,
-        "default_policy": "fail_closed",
-        "plan_only": bool(config.dry_run),
-    }
+    policy_evidence = _missing_forcing_repair_policy_evidence(config, candidate)
 
     def rejected(reason: str, **details: Any) -> CandidateStateDecision:
-        original_evidence = dict(decision.evidence)
-        original_raw_manifest = original_evidence.get("nfs_raw_manifest")
-        if isinstance(original_raw_manifest, Mapping):
-            original_evidence["nfs_raw_manifest"] = _public_raw_manifest_evidence(
-                original_raw_manifest
-            )
-        return CandidateStateDecision(
-            "blocked",
-            decision.reason,
-            {
-                **original_evidence,
-                "missing_forcing_repair": _evidence_safe(
-                    {
-                        **policy_evidence,
-                        "status": "rejected",
-                        "reason": reason,
-                        **details,
-                    }
-                ),
-            },
+        return _missing_forcing_repair_rejected_decision(
+            config,
+            candidate,
+            decision,
+            reason,
+            **details,
         )
 
     if not isinstance(target_cycle, datetime) or _format_utc(target_cycle) != _format_utc(

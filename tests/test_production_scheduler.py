@@ -23292,6 +23292,225 @@ def test_db_free_from_env_raw_invalid_blocks_without_submission(
     assert str(raw_fixture["manifest_path"]) not in rendered
 
 
+def _seed_db_free_missing_forcing_blocker(
+    repository: Any,
+    *,
+    cycle_time: datetime,
+    generated_at: datetime,
+) -> None:
+    cycle_segment = format_cycle_time(cycle_time)
+    repository.ensure_forecast_cycle(source_id="gfs", cycle_time=cycle_time)
+    repository.upsert_pipeline_job(
+        {
+            "job_id": f"job_cycle_gfs_{cycle_segment}_model_a_forcing",
+            "run_id": f"cycle_gfs_{cycle_segment}_model_a",
+            "candidate_id": f"cycle_gfs_{cycle_segment}_model_a",
+            "cycle_id": cycle_id_for("gfs", cycle_time),
+            "cycle_time": _format_iso_z(cycle_time),
+            "source_id": "gfs",
+            "model_id": "model_a",
+            "job_type": "produce_forcing_array",
+            "stage": "forcing",
+            "status": "succeeded",
+            "slurm_job_id": "6102",
+            "retry_count": 1,
+            "created_at": _format_iso_z(generated_at - timedelta(minutes=20)),
+            "updated_at": _format_iso_z(generated_at - timedelta(minutes=10)),
+        }
+    )
+
+
+def _db_free_missing_forcing_repair_scheduler(
+    monkeypatch: Any,
+    tmp_path: Path,
+    *,
+    raw_case: str,
+    direct_grid_failure: str | None = None,
+    seed_missing_forcing: bool = True,
+) -> tuple[ProductionScheduler, Path]:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    cycle_time = _dt("2026-05-21T12:00:00Z")
+    direct_grid_model = _model(
+        "model_a",
+        "basin_a",
+        resource_profile=_missing_forcing_repair_direct_grid_profile(),
+    )
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=cycle_time,
+        model=direct_grid_model,
+    )
+    if raw_case != "missing":
+        raw_fixture = _write_db_free_raw_manifest_fixture(roots, cycle_time=cycle_time)
+        if raw_case == "invalid_json":
+            raw_fixture["manifest_path"].write_text("{", encoding="utf-8")
+    monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(roots["object_store_root"]))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+
+    model = fixture["model"]
+    if direct_grid_failure is not None:
+        resource_profile = dict(model["resource_profile"])
+        direct_grid = dict(resource_profile["direct_grid_forcing"])
+        if direct_grid_failure == "malformed":
+            direct_grid.pop("binding_uri")
+        elif direct_grid_failure == "out_of_scope":
+            direct_grid["applicable_source_ids"] = ["IFS"]
+        else:
+            raise AssertionError(f"unsupported direct-grid failure fixture: {direct_grid_failure}")
+        resource_profile["direct_grid_forcing"] = direct_grid
+        model = {**model, "resource_profile": resource_profile}
+
+    repository = scheduler_module.FileOrchestrationJournalRepository(
+        paths["NHMS_SCHEDULER_JOURNAL_ROOT"]
+    )
+    if seed_missing_forcing:
+        _seed_db_free_missing_forcing_blocker(
+            repository,
+            cycle_time=cycle_time,
+            generated_at=cycle_time,
+        )
+    scheduler = ProductionScheduler(
+        _config(
+            roots["workspace_root"],
+            now=cycle_time,
+            sources=("gfs",),
+            allowed_cycle_hours_utc=(0, 12),
+            lookback_hours=0,
+            cycle_lag_hours=0,
+            max_cycles_per_source=1,
+            backfill_enabled=False,
+            dry_run=False,
+            require_direct_grid=True,
+            repair_missing_forcing=True,
+            repair_missing_forcing_cycle_time=cycle_time,
+            slurm_array_concurrency_bound=32,
+            nfs_raw_manifest_root=roots["object_store_root"],
+        ),
+        registry=FakeRegistry([model]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T12:00:00Z", True)])},
+        active_repository=repository,
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: pytest.fail(
+            "rejected exact-cycle repair must not construct an orchestrator"
+        ),
+    )
+    return scheduler, roots["object_store_root"]
+
+
+@pytest.mark.parametrize(
+    ("raw_case", "expected_reason"),
+    [
+        ("missing", "nfs_raw_manifest_manifest_not_found"),
+        ("invalid_json", "nfs_raw_manifest_manifest_invalid_json"),
+    ],
+)
+def test_db_free_file_journal_exact_repair_preserves_missing_forcing_for_raw_discovery_failure(
+    monkeypatch: Any,
+    tmp_path: Path,
+    raw_case: str,
+    expected_reason: str,
+) -> None:
+    scheduler, raw_root = _db_free_missing_forcing_repair_scheduler(
+        monkeypatch,
+        tmp_path / raw_case,
+        raw_case=raw_case,
+    )
+    state_calls: list[dict[str, Any]] = []
+    candidate_state = scheduler.active_repository.candidate_state
+
+    def counting_candidate_state(**kwargs: Any) -> dict[str, Any] | None:
+        state_calls.append(dict(kwargs))
+        return candidate_state(**kwargs)
+
+    monkeypatch.setattr(scheduler.active_repository, "candidate_state", counting_candidate_state)
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"][0]
+    state_evidence = blocked["state_evidence"]
+    repair = state_evidence["missing_forcing_repair"]
+    assert blocked["reason"] == "missing_forcing_package_uri"
+    assert state_evidence["error_code"] == "FORCING_PACKAGE_URI_MISSING"
+    assert repair["status"] == "rejected"
+    assert repair["reason"] == expected_reason
+    assert repair["detail"]["precondition"] == "source_discovery"
+    assert repair["detail"]["blocker"]["reason"] == expected_reason
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+    assert len(state_calls) == 1
+    assert str(raw_root) not in json.dumps(result.evidence, sort_keys=True, default=str)
+
+
+def test_db_free_exact_repair_keeps_ordinary_discovery_blocker_for_other_original_state(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    scheduler, raw_root = _db_free_missing_forcing_repair_scheduler(
+        monkeypatch,
+        tmp_path / "other-original-state",
+        raw_case="missing",
+        seed_missing_forcing=False,
+    )
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"][0]
+    assert blocked["reason"] == "nfs_raw_manifest_manifest_not_found"
+    assert "missing_forcing_repair" not in blocked["state_evidence"]
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+    assert str(raw_root) not in json.dumps(result.evidence, sort_keys=True, default=str)
+
+
+@pytest.mark.parametrize(
+    ("direct_grid_failure", "expected_reason", "evidence_key", "expected_field"),
+    [
+        ("malformed", "direct_grid_contract_invalid", "direct_grid_contract", "binding_uri"),
+        (
+            "out_of_scope",
+            "direct_grid_source_out_of_scope",
+            "direct_grid_source_scope",
+            "direct_grid_source_out_of_scope",
+        ),
+    ],
+)
+def test_db_free_file_journal_exact_repair_preserves_missing_forcing_for_direct_grid_failure(
+    monkeypatch: Any,
+    tmp_path: Path,
+    direct_grid_failure: str,
+    expected_reason: str,
+    evidence_key: str,
+    expected_field: str,
+) -> None:
+    scheduler, raw_root = _db_free_missing_forcing_repair_scheduler(
+        monkeypatch,
+        tmp_path / direct_grid_failure,
+        raw_case="ready",
+        direct_grid_failure=direct_grid_failure,
+    )
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"][0]
+    state_evidence = blocked["state_evidence"]
+    repair = state_evidence["missing_forcing_repair"]
+    assert blocked["reason"] == "missing_forcing_package_uri"
+    assert state_evidence["error_code"] == "FORCING_PACKAGE_URI_MISSING"
+    assert repair["status"] == "rejected"
+    assert repair["reason"] == expected_reason
+    assert repair["detail"]["precondition"] == "direct_grid_contract"
+    direct_grid_evidence = repair["detail"]["blocker"][evidence_key]
+    assert direct_grid_evidence.get("field", direct_grid_evidence.get("code")) == expected_field
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+    assert str(raw_root) not in json.dumps(result.evidence, sort_keys=True, default=str)
+
+
 def test_db_free_scheduler_fake_slurm_submission_writes_file_journal_without_database_url(
     monkeypatch: Any,
     tmp_path: Path,
