@@ -27,6 +27,8 @@ ROLLBACK_EXECUTION_BINDING_ARCHIVE_DIRECTORY = "rollback-execution-bindings-v1"
 ROLLBACK_EXECUTION_ARTIFACTS_DIRECTORY = ".nhms-rollback-execution-v1"
 MAX_ROLLBACK_EXECUTION_BINDING_BYTES = 64 * 1024
 MAX_ROLLBACK_SOURCE_TREE_ENTRIES = 200_000
+MAX_ROLLBACK_RUNTIME_TREE_ENTRIES = 200_000
+MAX_ROLLBACK_RUNTIME_TREE_DEPTH = 64
 ROLLBACK_EXECUTION_BINDING_STATUSES = frozenset(
     {"prepared", "active", "rolling_forward", "completed"}
 )
@@ -305,6 +307,7 @@ def validate_rollback_execution_binding(
         _require_owned_immutable(artifact_root, regular=False)
         _require_owned_immutable(runtime, regular=True)
         _require_owned_immutable(source, regular=False)
+        _inspect_rollback_python_runtime_tree(artifact_root / "runtime", runtime)
         _inspect_rollback_python_source_tree(source, seal=False)
     return binding
 
@@ -371,6 +374,131 @@ def _require_owned_private_directory(path: Path) -> None:
     ):
         raise RollbackExecutionBindingError(
             "rollback execution retention root has unsafe ownership or mode"
+        )
+
+
+def _inspect_rollback_python_runtime_tree(runtime_root: Path, runtime: Path) -> None:
+    try:
+        runtime_relative = runtime.relative_to(runtime_root)
+        root_fd = open_directory_no_follow(runtime_root)
+        count = [0]
+        executable_seen = [False]
+        try:
+            _inspect_rollback_python_runtime_directory(
+                root_fd,
+                relative_parts=(),
+                runtime_relative=runtime_relative.parts,
+                depth=0,
+                count=count,
+                executable_seen=executable_seen,
+            )
+            _require_runtime_entry(
+                os.fstat(root_fd),
+                directory=True,
+                executable=False,
+            )
+        finally:
+            os.close(root_fd)
+        if not executable_seen[0]:
+            raise RollbackExecutionBindingError("rollback Python runtime executable is missing")
+    except RollbackExecutionBindingError:
+        raise
+    except (FileNotFoundError, OSError, SafeFilesystemError, ValueError) as error:
+        raise RollbackExecutionBindingError("rollback Python runtime tree is unsafe") from error
+
+
+def _inspect_rollback_python_runtime_directory(
+    directory_fd: int,
+    *,
+    relative_parts: tuple[str, ...],
+    runtime_relative: tuple[str, ...],
+    depth: int,
+    count: list[int],
+    executable_seen: list[bool],
+) -> None:
+    if depth > MAX_ROLLBACK_RUNTIME_TREE_DEPTH:
+        raise RollbackExecutionBindingError("rollback Python runtime tree exceeds its depth limit")
+    with os.scandir(directory_fd) as entries:
+        for entry in entries:
+            name = entry.name
+            count[0] += 1
+            if count[0] > MAX_ROLLBACK_RUNTIME_TREE_ENTRIES:
+                raise RollbackExecutionBindingError(
+                    "rollback Python runtime tree exceeds its entry limit"
+                )
+            entry_parts = (*relative_parts, name)
+            metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISDIR(metadata.st_mode):
+                child_fd = os.open(
+                    name,
+                    os.O_RDONLY
+                    | os.O_DIRECTORY
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_CLOEXEC", 0),
+                    dir_fd=directory_fd,
+                )
+                try:
+                    opened = os.fstat(child_fd)
+                    if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+                        raise RollbackExecutionBindingError(
+                            "rollback Python runtime directory changed"
+                        )
+                    _require_runtime_entry(opened, directory=True, executable=False)
+                    _inspect_rollback_python_runtime_directory(
+                        child_fd,
+                        relative_parts=entry_parts,
+                        runtime_relative=runtime_relative,
+                        depth=depth + 1,
+                        count=count,
+                        executable_seen=executable_seen,
+                    )
+                    reopened = os.fstat(child_fd)
+                    if (reopened.st_dev, reopened.st_ino) != (opened.st_dev, opened.st_ino):
+                        raise RollbackExecutionBindingError(
+                            "rollback Python runtime directory changed"
+                        )
+                    _require_runtime_entry(reopened, directory=True, executable=False)
+                finally:
+                    os.close(child_fd)
+                continue
+            if stat.S_ISREG(metadata.st_mode):
+                file_fd = os.open(
+                    name,
+                    os.O_RDONLY
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_CLOEXEC", 0),
+                    dir_fd=directory_fd,
+                )
+                try:
+                    opened = os.fstat(file_fd)
+                    if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+                        raise RollbackExecutionBindingError("rollback Python runtime file changed")
+                    executable = entry_parts == runtime_relative
+                    _require_runtime_entry(opened, directory=False, executable=executable)
+                    executable_seen[0] = executable_seen[0] or executable
+                finally:
+                    os.close(file_fd)
+                continue
+            raise RollbackExecutionBindingError(
+                "rollback Python runtime tree contains a non-regular entry"
+            )
+
+
+def _require_runtime_entry(
+    metadata: os.stat_result,
+    *,
+    directory: bool,
+    executable: bool,
+) -> None:
+    expected_type = stat.S_ISDIR(metadata.st_mode) if directory else stat.S_ISREG(metadata.st_mode)
+    expected_mode = 0o500 if directory or executable else 0o400
+    if (
+        not expected_type
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != expected_mode
+    ):
+        raise RollbackExecutionBindingError(
+            "rollback Python runtime tree has unsafe ownership, type, or mode"
         )
 
 

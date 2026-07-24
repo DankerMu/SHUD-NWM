@@ -537,6 +537,11 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
   both bundles SHALL be located beneath the workspace in the deterministic
   private immutable retention root for the exact preparation receipt and target
   generation, never beneath the target checkout or its venv;
+  active artifact validation SHALL traverse the complete runtime tree with a
+  bounded no-follow directory-descriptor walk, require every entry to be
+  owner-owned regular-file/directory only with its sealed non-writable mode,
+  reject symlink or special entries, and require only the bound interpreter to
+  carry executable mode;
   that runtime bundle contains copied, non-symlinked interpreter libraries and
   self-contained configuration, so removing or replacing the original venv
   libraries/configuration cannot change later execution;
@@ -589,8 +594,11 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
   reconcile-inventory, journal, latest, direct pipeline-jobs, and legacy-active
   at query start, and any initially existing root disappearance, replacement, or
   signature change through the final check reports
-  `file_journal_quiescence_authority_changed`; a root is empty only when it stays
-  nonexistent throughout the query. The proof query itself performs no
+  `file_journal_quiescence_authority_changed`; every directory entered by a
+  recursive authority walker is likewise signature-checked before list, after
+  list, and after child recursion, so nested pre-list deletion, replacement, or
+  addition cannot become an empty or different authority view. A root is empty
+  only when it stays nonexistent throughout the query. The proof query itself performs no
   durable write, and unavailable evidence fails closed
 - **AND** roll-forward can cancel an unlaunched preparation only from the exact
   durable `prepared` authority; missing or tampered authority fails closed, while

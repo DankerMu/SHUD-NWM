@@ -460,6 +460,17 @@ def _write_active_rollback_binding(tmp_path: Path) -> dict[str, object]:
     runtime.parent.mkdir(parents=True)
     runtime.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} \"$@\"\n", encoding="utf-8")
     runtime.chmod(0o500)
+    runtime_library = retained / "runtime" / "lib" / "python-test" / "site.py"
+    runtime_library.parent.mkdir(parents=True)
+    runtime_library.write_text("VALUE = 'retained'\n", encoding="utf-8")
+    runtime_library.chmod(0o400)
+    for directory in (
+        runtime_library.parent,
+        runtime_library.parent.parent,
+        runtime.parent,
+        runtime.parent.parent,
+    ):
+        directory.chmod(0o500)
     retained.chmod(0o500)
     metadata = journal.stat()
     now = "2026-07-23T12:00:00Z"
@@ -530,6 +541,49 @@ def test_round22_active_binding_rejects_owner_writable_retention_generation(
         match="artifact has unsafe ownership or mode",
     ):
         read_rollback_execution_binding(tmp_path / "workspace", required=True)
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ["nested_file_writable", "nested_directory_writable", "nested_symlink", "nested_fifo"],
+)
+def test_round23_active_binding_nested_runtime_tamper_is_zero_submit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tamper: str,
+) -> None:
+    binding = _write_active_rollback_binding(tmp_path)
+    runtime_root = Path(str(binding["target_python_runtime"])).parent.parent
+    library_directory = runtime_root / "lib" / "python-test"
+    library_file = library_directory / "site.py"
+    if tamper == "nested_file_writable":
+        library_file.chmod(0o600)
+    elif tamper == "nested_directory_writable":
+        library_directory.chmod(0o700)
+    else:
+        library_directory.chmod(0o700)
+        tampered_entry = library_directory / ("alias.py" if tamper == "nested_symlink" else "pipe")
+        if tamper == "nested_symlink":
+            tampered_entry.symlink_to(library_file)
+        else:
+            if not hasattr(os, "mkfifo"):
+                pytest.skip("FIFO creation is unavailable on this platform")
+            os.mkfifo(tampered_entry)
+        library_directory.chmod(0o500)
+    commands: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "run", lambda command, **_kwargs: commands.append(command))
+    gateway = _production_gateway(tmp_path)
+
+    with pytest.raises(ManifestValidationError, match="Active rollback execution binding is invalid"):
+        gateway.submit_job(
+            SubmitJobRequest(
+                run_id="run_001",
+                model_id="model_001",
+                job_type="run_shud_analysis",
+                manifest=_production_manifest(tmp_path, "run_shud_analysis"),
+            )
+        )
+    assert commands == []
 
 
 def test_round21_active_binding_real_submit_job_captures_and_validates_once(
@@ -2143,6 +2197,8 @@ def test_round20_old_manifest_uses_durable_active_binding_source_and_runtime_fro
     runtime_a.parent.mkdir(parents=True)
     runtime_a.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} \"$@\"\n", encoding="utf-8")
     runtime_a.chmod(0o500)
+    runtime_a.parent.chmod(0o500)
+    runtime_a.parent.parent.chmod(0o500)
     retained.chmod(0o500)
     journal_stat = journal.stat()
     now = "2026-07-23T12:00:00Z"
@@ -2317,6 +2373,7 @@ def test_round20_old_manifest_uses_durable_active_binding_source_and_runtime_fro
         elif retained_path.is_file():
             retained_path.chmod(0o600)
     shutil.rmtree(source_a)
+    runtime_a.parent.chmod(0o700)
     runtime_a.unlink()
     rendered_after_cleanup = gateway.render_template(job_type, old_manifest, str(manifest_index))
     assert "NHMS_TARGET_PYTHON_RUNTIME" not in rendered_after_cleanup

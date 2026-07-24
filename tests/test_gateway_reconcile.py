@@ -5967,6 +5967,8 @@ def _round20_write_execution_binding(
     runtime.parent.mkdir(parents=True)
     runtime.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     runtime.chmod(0o500)
+    runtime.parent.chmod(0o500)
+    runtime.parent.parent.chmod(0o500)
     assets.chmod(0o500)
     configured_lock = Path(lock_path or workspace_root / "scheduler" / "production-scheduler.lock").resolve()
     binding: dict[str, Any] = {
@@ -8288,8 +8290,11 @@ def test_round21_rollforward_archive_failure_recovers_without_reopening_launch(
         "journal_enumerate",
         "journal_stat",
         "journal_read",
+        "journal_replace_read",
         "direct_read",
         "latest_read",
+        "latest_stat",
+        "latest_replace_read",
         "legacy_read",
     ],
 )
@@ -8332,7 +8337,7 @@ def test_round21_rollforward_authority_disappearance_is_zero_mutation(
     template = _file_cohort_repository(
         tmp_path / "authority",
         member_count=1,
-        with_runtime_rows=cut == "latest_read",
+        with_runtime_rows=cut.startswith("latest"),
     )
     key = "cycle_gfs_2026071200_forecast_fixture:forecast"
     _bind_current_file_cohort(template, key, slurm_job_id="17667")
@@ -8343,7 +8348,7 @@ def test_round21_rollforward_authority_disappearance_is_zero_mutation(
         target = root / "pipeline-jobs" / source.name
         target.parent.mkdir(parents=True)
         shutil.copyfile(source, target)
-    elif cut == "latest_read":
+    elif cut.startswith("latest"):
         source = next((template.root / "latest").rglob("*.json"))
         target = root / source.relative_to(template.root)
         target.parent.mkdir(parents=True)
@@ -8368,19 +8373,32 @@ def test_round21_rollforward_authority_disappearance_is_zero_mutation(
     fence_before = fence.read_bytes()
     binding_before = binding_path.read_bytes()
 
-    if cut in {"inventory_read", "journal_read", "direct_read", "latest_read", "legacy_read"}:
-        method_name = "_read_jsonl" if cut == "journal_read" else "_read_optional_json"
+    if cut in {
+        "inventory_read",
+        "journal_read",
+        "journal_replace_read",
+        "direct_read",
+        "latest_read",
+        "latest_replace_read",
+        "legacy_read",
+    }:
+        method_name = "_read_jsonl" if cut.startswith("journal") else "_read_optional_json"
         real_method = getattr(FileOrchestrationJournalRepository, method_name)
 
         def disappear_after_read(self: Any, path: Any) -> Any:
             payload = real_method(self, path)
             selected = anchor if cut == "inventory_read" else target
             if path == selected and selected.exists():
-                selected.unlink()
+                if "replace" in cut:
+                    content = selected.read_bytes()
+                    selected.unlink()
+                    selected.write_bytes(content)
+                else:
+                    selected.unlink()
             return payload
 
         monkeypatch.setattr(FileOrchestrationJournalRepository, method_name, disappear_after_read)
-    elif cut == "journal_stat":
+    elif cut in {"journal_stat", "latest_stat"}:
         real_signature = journal_module._stat_signature
         target_calls = 0
 
@@ -8539,6 +8557,107 @@ def test_round22_strict_authority_root_change_is_uniform_zero_mutation(
 
     monkeypatch.setattr(journal_module, "list_directory_no_follow_limited", change_root)
 
+    with pytest.raises(
+        FileOrchestrationJournalError,
+        match="file_journal_rollforward_quiescence_unavailable",
+    ) as exc_info:
+        complete_file_journal_rollforward(
+            journal_root=root,
+            workspace_root=workspace,
+            preparation_receipt_id=receipt["receipt_id"],
+        )
+    assert isinstance(exc_info.value.__cause__, FileOrchestrationJournalError)
+    assert exc_info.value.__cause__.reason == "file_journal_quiescence_authority_changed"
+    assert fence.read_bytes() == fence_before
+    assert binding_path.read_bytes() == binding_before
+
+
+@pytest.mark.parametrize("surface", ["journal", "latest"])
+@pytest.mark.parametrize("mutation", ["delete", "replace", "add"])
+def test_round23_nested_authority_change_before_first_list_is_zero_mutation(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    surface: str,
+    mutation: str,
+) -> None:
+    import shutil
+
+    from packages.common.rollback_execution_binding import rollback_execution_binding_path
+    from services.orchestrator import file_orchestration_journal as journal_module
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.file_orchestration_migration import (
+        complete_file_journal_rollforward,
+        prepare_file_journal_rollback,
+    )
+
+    root = tmp_path / "journal-root"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = FileOrchestrationJournalRepository(root)
+    assert repository.query_inflight_jobs() == []
+    receipt = prepare_file_journal_rollback(
+        journal_root=root,
+        workspace_root=workspace,
+        scheduler_state="stopped",
+        active_scheduler_processes=0,
+        checked_at=datetime.now(UTC),
+        checked_by=f"round23-nested-{surface}-{mutation}",
+        target_writer_generation="a" * 40,
+    )
+    _round20_write_execution_binding(
+        workspace=workspace,
+        receipt=receipt,
+        generation="a" * 40,
+    )
+    template = _file_cohort_repository(
+        tmp_path / "authority",
+        member_count=1,
+        with_runtime_rows=surface == "latest",
+    )
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    _bind_current_file_cohort(template, key, slurm_job_id="17667")
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    if surface == "journal":
+        source = next((template.root / "journal").rglob("*.jsonl"))
+    else:
+        source = next((template.root / "latest").rglob("*.json"))
+    target = root / source.relative_to(template.root)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, target)
+    visible_before_mutation = [job.job_id for job in repository.query_rollback_unsettled_jobs()]
+    if surface == "journal":
+        assert visible_before_mutation == [job_id]
+    fence = root / "reconcile-inventory-rollback-preparation-v2.json"
+    binding_path = rollback_execution_binding_path(workspace)
+    fence_before = fence.read_bytes()
+    binding_before = binding_path.read_bytes()
+    target_content = target.read_bytes()
+    real_list = journal_module.list_directory_no_follow_limited
+    injected = False
+
+    def change_nested_directory(directory: Any, **kwargs: Any) -> Any:
+        nonlocal injected
+        if directory != target.parent or injected:
+            return real_list(directory, **kwargs)
+        injected = True
+        if mutation == "delete":
+            target.unlink()
+        elif mutation == "replace":
+            target.unlink()
+            target.write_bytes(target_content)
+        else:
+            suffix = ".jsonl" if surface == "journal" else ".json"
+            (target.parent / f"added{suffix}").write_bytes(target_content)
+        return real_list(directory, **kwargs)
+
+    monkeypatch.setattr(
+        journal_module,
+        "list_directory_no_follow_limited",
+        change_nested_directory,
+    )
     with pytest.raises(
         FileOrchestrationJournalError,
         match="file_journal_rollforward_quiescence_unavailable",

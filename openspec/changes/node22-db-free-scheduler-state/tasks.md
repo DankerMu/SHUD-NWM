@@ -547,14 +547,17 @@ Scenario evidence rows for section 5:
   from a deterministic receipt/generation-scoped private immutable workspace
   retention root behind a durable execution binding; deleting the complete
   original checkout after active publication leaves all three worker stages
-  executable. The current HTTP Slurm
+  executable. Binding validation performs a bounded no-follow walk over every
+  runtime directory/file and rejects nested writable, symlink, or special entries
+  before Gateway submit. The current HTTP Slurm
   gateway injects that binding for old manifests, so all three worker arrays use
   the exact target runtime and source without changing ordinary unrelated
   console-entrypoint submissions. A child-inherited execution lock excludes
   roll-forward while the writer runs; a strict bounded current-inventory
   terminal-allowlist query (including exact journal/latest/direct/legacy
   authority, start/final identities for all five authority roots, and uniform
-  disappearance/replacement failure) and
+  disappearance/replacement failure, including before/after-list signatures for
+  every recursively entered authority directory) and
   crash-resumable `prepared|active` -> `rolling_forward` -> `completed` binding
   transition exclude roll-forward while any accepted task can still reference
   the bundles. The exact `prepared` authority permits a no-launch cancellation, while

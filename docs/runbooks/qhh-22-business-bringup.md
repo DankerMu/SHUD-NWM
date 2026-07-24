@@ -405,12 +405,16 @@ systemctl --user enable --now nhms-scheduler-evidence-retention.timer
      gateway 显式传给 forcing、forecast、state-save 三阶段；普通生产提交仍用原 console
      entrypoint。runtime bundle 的 retention 为
      `retained_fail_closed_until_operator_cleanup`：old writer 非零退出或 controller 崩溃也不得删除。
+     active binding 会 bounded/no-follow 遍历完整 runtime tree；nested file/dir 可写、symlink、
+     special entry 或非约定 executable mode 都必须在零 sbatch 时 fail closed。
      active 脚本会 unset `PYTHONHOME`/`VIRTUAL_ENV`，固定 `PYTHONPATH` 为 bound source，并用 bound
      runtime bin 加最小系统路径替换 ambient `PATH`；forecast 两段 heredoc 也使用 exact runtime。
      launcher 的独立 execution flock 会阻止 old writer 存活期间的 roll-forward；在所有引用该 runtime
      的 Slurm task 终态前，也不得人工前滚、恢复 timer 或删除 generation retention root。严格前滚查询
      会固定 reconcile-inventory/journal/latest/pipeline-jobs/active-reconcile 五个 root 身份，任何消失、
-     替换或变化都统一 fail closed；只有全程不存在的 root 可视为空。最终 receipt 必须保存 exact job
+     替换或变化都统一 fail closed；recursive journal/latest walker 还会在每层目录 list 前后及 child
+     recursion 后复核该层签名，nested entry 不得静默消失、替换或新增。只有全程不存在的 root
+     可视为空。最终 receipt 必须保存 exact job
      identity、三个 sbatch 中的同一 runtime/source 路径，以及 generation retention 清理结果。
      out-of-scope LOW 收尾 → #300。
 7b. ✅ **多源下载韧性**（PR #308，b4a2e85/eeb4d5c）：GFS 换 NODD 多镜像链（`GFS_SOURCE_BACKENDS=s3,gcs,azure,ftpprd,nomads`，共享 `.idx`+HTTP-Range+本地 cdo-clip，NOMADS grib-filter 末位回退）；

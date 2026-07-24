@@ -8995,15 +8995,32 @@ def _iter_discovered_files(
                 field=str(_relative_evidence(current, root)),
                 evidence={"max_depth": max_depth},
             )
+        strict_authority_walk = strict_disappearance and expected_root_signature is not _UNSET
+        directory_signature = (
+            _stat_signature(current) if strict_authority_walk else _UNSET
+        )
         if (
             current == directory
             and expected_root_signature is not _UNSET
-            and _stat_signature(current) != expected_root_signature
+            and directory_signature != expected_root_signature
         ):
             raise FileOrchestrationJournalError(
                 "file_journal_quiescence_authority_changed",
                 field=str(_relative_evidence(current, root)),
             )
+        if current != directory and strict_authority_walk and directory_signature is None:
+            raise FileOrchestrationJournalError(
+                "file_journal_quiescence_authority_changed",
+                field=str(_relative_evidence(current, root)),
+            )
+
+        def require_directory_unchanged() -> None:
+            if strict_authority_walk and _stat_signature(current) != directory_signature:
+                raise FileOrchestrationJournalError(
+                    "file_journal_quiescence_authority_changed",
+                    field=str(_relative_evidence(current, root)),
+                )
+
         try:
             current_mode = stat_no_follow(current, containment_root=root).st_mode
         except FileNotFoundError:
@@ -9026,6 +9043,7 @@ def _iter_discovered_files(
                 field=str(_relative_evidence(current, root)),
                 evidence={"error_type": type(error).__name__},
             ) from error
+        require_directory_unchanged()
         if not stat.S_ISDIR(current_mode):
             raise FileOrchestrationJournalError(
                 "file_journal_unsafe_scanned_entry",
@@ -9068,15 +9086,7 @@ def _iter_discovered_files(
                 field=str(_relative_evidence(directory, root)),
                 evidence={"max_files": max_files},
             )
-        if (
-            current == directory
-            and expected_root_signature is not _UNSET
-            and _stat_signature(current) != expected_root_signature
-        ):
-            raise FileOrchestrationJournalError(
-                "file_journal_quiescence_authority_changed",
-                field=str(_relative_evidence(current, root)),
-            )
+        require_directory_unchanged()
         scanned_entries += len(entry_names)
         for entry_name in sorted(entry_names):
             if _SAFE_SEGMENT_RE.fullmatch(entry_name) is None:
@@ -9116,6 +9126,7 @@ def _iter_discovered_files(
                         evidence={"entry_type": "not_regular_file"},
                     )
                 yield entry
+        require_directory_unchanged()
 
     yield from walk(directory, 0)
 

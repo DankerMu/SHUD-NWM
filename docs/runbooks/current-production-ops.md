@@ -302,7 +302,9 @@ launcher 首次启动只接受 exact `prepared`，重放只接受 exact `active`
 source 与 runtime bundle 都以
 `retained_fail_closed_until_operator_cleanup` 保留，launch JSON 中的
 `target_python_source_root`、`target_python_runtime` 和
-`rollback_execution_binding_id` 是审计路径/身份。不要单独删除任一 bundle；只有所有引用
+`rollback_execution_binding_id` 是审计路径/身份。每次 active binding 捕获都会用 bounded
+no-follow walk 复核完整 runtime tree；任何 nested file/dir 可写、symlink、special entry 或
+非约定 executable mode 都会在零 sbatch 时拒绝。不要单独删除任一 bundle；只有所有引用
 它们的 Slurm task 均已终态且前滚完成后，才能清理该 workspace generation retention root；
 原 rollback checkout 是独立对象，active 发布后可删除，不能把它当作 bundle retention owner。
 
@@ -330,7 +332,9 @@ bounded reconcile inventory 读取 exact current journal/latest/direct/legacy au
 fence/binding；该 quiescence proof 本身也不会创建或更新 journal/lock authority。查询开始时
 会固定 `reconcile-inventory/`、`journal/`、`latest/`、`pipeline-jobs/`、
 `active-reconcile/` 五个 root 的签名；任一原本存在的 root 消失、被替换或在最终复核前变化，
-统一报 `file_journal_quiescence_authority_changed`。只有全程不存在的 root 才可视为空。确认
+统一报 `file_journal_quiescence_authority_changed`。journal/latest 等 recursive walker 还会在
+每层目录 list 前、list 后和 child recursion 后复核该层签名，nested entry 不能在首次 list 前
+被静默删除、替换或新增。只有全程不存在的 root 才可视为空。确认
 source/runtime 仍存在且任务全部收敛后，binding 按
 `active -> rolling_forward -> completed` 迁移；中途崩溃可从
 `rolling_forward` 续跑。若 prepare 后决定不启动 old writer，也只能由 exact `prepared`
