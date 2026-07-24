@@ -1047,6 +1047,39 @@ def test_file_orchestration_journal_lifecycle_writes_materialize_latest_and_repl
     assert reloaded.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
 
 
+def test_file_orchestration_journal_write_strips_redaction_placeholders(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    repository.ensure_forecast_cycle(source_id="gfs", cycle_time=cycle_time)
+    repository.create_hydro_run_from_basin(
+        {"source_id": "gfs"},
+        {
+            "run_id": "fcst_gfs_2026062800_model_a",
+            "run_type": "forecast",
+            "scenario_id": "scenario_a",
+            "source_id": "gfs",
+            "cycle_time": cycle_time.isoformat(),
+            "start_time": cycle_time.isoformat(),
+            "end_time": cycle_time.isoformat(),
+            "model": {"model_id": "model_a", "basin_version_id": "basin_version_a"},
+            "forcing": {"forcing_version_id": "forc_gfs_2026062800_model_a"},
+            "outputs": {
+                "run_manifest_uri": "[object-uri]",
+                "output_uri": "[object-uri]",
+                "log_uri": "s3://nhms/logs/run.log",
+            },
+        },
+    )
+
+    latest = json.loads((journal_root / "latest/gfs/2026062800/model_a.json").read_text(encoding="utf-8"))
+    stored = latest["hydro_run"]
+    assert stored["run_manifest_uri"] is None
+    assert stored["output_uri"] is None
+    assert stored["log_uri"] == "s3://nhms/logs/run.log"
+
+
 def test_file_orchestration_journal_ensure_forecast_cycle_preserves_existing_status(tmp_path: Path) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
     repository = FileOrchestrationJournalRepository(tmp_path / "journal")

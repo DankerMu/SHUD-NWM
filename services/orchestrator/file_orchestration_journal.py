@@ -5555,6 +5555,7 @@ class FileOrchestrationJournalRepository:
         materialize_model_id: str | None = None,
         sequence: int | None = None,
     ) -> None:
+        payload = _strip_redaction_placeholders(payload)
         payload = _redact_durable_error_message_fields(record_type, payload)
         private_recovery_payload = dict(payload) if record_type == "pipeline_event" else None
         if record_type == "pipeline_event":
@@ -7766,6 +7767,30 @@ def _stable_sha256(value: str) -> str:
 
 def _public_scheduler_row(row: Mapping[str, Any]) -> dict[str, Any]:
     return _public_evidence(row)
+
+
+_PERSISTED_REDACTION_PLACEHOLDERS = frozenset({"[object-uri]", "[uri]"})
+
+
+def _strip_redaction_placeholders(value: Any) -> Any:
+    """Drop object-URI display placeholders from durable journal payloads.
+
+    Public query results replace object URIs with placeholders such as
+    ``[object-uri]``. A caller that round-trips those rows into a write must
+    not launder the placeholders into durable state: store ``None`` (value
+    withheld) instead, so decision paths never compare against placeholders.
+    ``[local-path]``/``[redacted]`` are intentionally persisted for
+    runtime-root and secret evidence and stay untouched, as does the
+    deliberate pipeline-event public sanitization applied after this step.
+    """
+
+    if isinstance(value, Mapping):
+        return {key: _strip_redaction_placeholders(nested) for key, nested in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [_strip_redaction_placeholders(item) for item in value]
+    if isinstance(value, str) and value in _PERSISTED_REDACTION_PLACEHOLDERS:
+        return None
+    return value
 
 
 def _public_candidate_state(state: Mapping[str, Any]) -> dict[str, Any]:
