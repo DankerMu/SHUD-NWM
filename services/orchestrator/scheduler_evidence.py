@@ -701,7 +701,10 @@ def evidence_write_error_payload(
 
 
 def scheduler_resolved_runtime_roots(config: SchedulerEvidenceConfig) -> dict[str, Any]:
-    evidence_safe_paths = bool(getattr(config, "scheduler_db_free_required", False))
+    evidence_safe_paths = bool(
+        getattr(config, "scheduler_db_free_required", False)
+        or getattr(config, "repair_missing_forcing", False)
+    )
     return {
         "workspace_root": root_evidence_item(
             config.workspace_root,

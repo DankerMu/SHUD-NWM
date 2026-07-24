@@ -186,7 +186,11 @@ def nfs_raw_manifest_readiness(
             "manifest_key": manifest_key,
             "manifest_path": str(manifest_path),
         }
-    local_keys, entry_error = _entry_local_keys(entries)
+    local_keys, entry_error = _entry_local_keys(
+        entries,
+        source_id=source_id,
+        cycle_time=cycle_time,
+    )
     if entry_error is not None:
         return {
             **root_evidence,
@@ -351,17 +355,9 @@ def stage_nfs_raw_manifest_to_object_store(
 
     source_root = verify_directory_no_follow(_absolute_path(str(source_root_value)))
     target_root = ensure_directory_no_follow(_absolute_path(target_object_store_root))
+    source_target_same = False
     try:
-        if source_root.samefile(target_root):
-            return {
-                "status": "skipped",
-                "reason": "source_target_same",
-                "source": NFS_RAW_MANIFEST_READY_SOURCE,
-                "source_object_store_root": "[local-path]",
-                "target_object_store_root": "[local-path]",
-                "manifest_uri": _object_uri_evidence(str(readiness.get("manifest_uri") or "")),
-                "manifest_key": manifest_key,
-            }
+        source_target_same = source_root.samefile(target_root)
     except OSError:
         pass
 
@@ -387,12 +383,26 @@ def stage_nfs_raw_manifest_to_object_store(
             entries = payload.get("entries")
             if not isinstance(entries, Sequence) or isinstance(entries, str | bytes | bytearray) or not entries:
                 raise NfsRawManifestStagingError("manifest_entries_missing")
-            local_keys, entry_error = _entry_local_keys(entries)
+            local_keys, entry_error = _entry_local_keys(
+                entries,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
             if entry_error is not None:
                 raise NfsRawManifestStagingError(str(entry_error.get("reason") or "manifest_entry_invalid"))
             _file_evidence, file_error = _verify_entry_files(source_root, local_keys)
             if file_error is not None:
                 raise NfsRawManifestStagingError(str(file_error.get("reason") or "raw_files_invalid"))
+            if source_target_same:
+                return _nfs_stage_result(
+                    readiness=readiness,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    manifest_key=manifest_key,
+                    target_object_store_prefix=target_object_store_prefix,
+                    status="skipped",
+                    reason="source_target_same",
+                )
 
             source_manifest_bytes = read_bytes_limited_no_follow(
                 manifest_path,
@@ -590,7 +600,14 @@ def _validate_manifest_identity(
     return None
 
 
-def _entry_local_keys(entries: Sequence[Any]) -> tuple[list[str], dict[str, Any] | None]:
+def _entry_local_keys(
+    entries: Sequence[Any],
+    *,
+    source_id: str,
+    cycle_time: datetime,
+) -> tuple[list[str], dict[str, Any] | None]:
+    expected_source = normalize_source_id(source_id)
+    expected_cycle = format_cycle_time(parse_cycle_time(cycle_time))
     local_keys: list[str] = []
     for index, entry in enumerate(entries):
         if not isinstance(entry, Mapping):
@@ -605,6 +622,19 @@ def _entry_local_keys(entries: Sequence[Any]) -> tuple[list[str], dict[str, Any]
                 "entry_index": index,
                 "local_key": local_key,
                 "error": validation.error,
+            }
+        parts = local_key.split("/")
+        if (
+            len(parts) < 4
+            or parts[0] != "raw"
+            or parts[1].lower() != expected_source.lower()
+            or parts[2] != expected_cycle
+        ):
+            return [], {
+                "reason": "manifest_entry_local_key_identity_mismatch",
+                "entry_index": index,
+                "expected_source_id": expected_source,
+                "expected_cycle": expected_cycle,
             }
         local_keys.append(local_key)
     return local_keys, None

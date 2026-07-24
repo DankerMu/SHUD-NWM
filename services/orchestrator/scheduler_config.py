@@ -672,7 +672,8 @@ class ProductionSchedulerConfig:
         }
 
     def db_free_runtime_preflight(self) -> dict[str, Any]:
-        if not self.scheduler_db_free_required:
+        repair_authority_required = bool(self.repair_missing_forcing)
+        if not self.scheduler_db_free_required and not repair_authority_required:
             return {
                 "status": "not_required",
                 "required": False,
@@ -681,53 +682,55 @@ class ProductionSchedulerConfig:
             }
         checks: dict[str, Any] = {}
         blockers: list[dict[str, Any]] = []
-        checks["database_url"] = {
-            "env": "DATABASE_URL",
-            "configured": bool(self.database_url_configured),
-            "value_recorded": False,
-        }
-        if self.database_url_configured:
-            blockers.append(
-                {
-                    "code": "database_url_forbidden",
-                    "field": "DATABASE_URL",
-                    "reason": "database_url_forbidden",
-                    "message": "DB-free scheduler mode forbids scheduler DATABASE_URL before lock acquisition.",
-                }
-            )
-        if self.slurm_execution_enabled:
-            for field_name, env_name in (
-                ("reconcile_slurm_user", "NHMS_SCHEDULER_RECONCILE_SLURM_USER"),
-                ("reconcile_slurm_account", "NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT"),
-            ):
-                value = getattr(self, field_name)
-                checks[env_name] = {
-                    "env": env_name,
-                    "configured": value is not None,
-                    "value_recorded": False,
-                }
-                if value is None:
-                    blockers.append(
-                        {
-                            "code": "accepted_submit_owner_missing",
-                            "field": env_name,
-                            "reason": "accepted_submit_owner_missing",
-                            "message": "DB-free Slurm execution requires exact accepted-submit ownership.",
-                        }
-                    )
-        for attr, env, _legacy_default in _DB_FREE_SELECTOR_SPECS:
-            value = getattr(self, attr)
-            check, blocker = _db_free_selector_check(env, value)
-            checks[env] = check
-            if blocker is not None:
-                blockers.append(blocker)
+        if self.scheduler_db_free_required:
+            checks["database_url"] = {
+                "env": "DATABASE_URL",
+                "configured": bool(self.database_url_configured),
+                "value_recorded": False,
+            }
+            if self.database_url_configured:
+                blockers.append(
+                    {
+                        "code": "database_url_forbidden",
+                        "field": "DATABASE_URL",
+                        "reason": "database_url_forbidden",
+                        "message": "DB-free scheduler mode forbids scheduler DATABASE_URL before lock acquisition.",
+                    }
+                )
+            if self.slurm_execution_enabled:
+                for field_name, env_name in (
+                    ("reconcile_slurm_user", "NHMS_SCHEDULER_RECONCILE_SLURM_USER"),
+                    ("reconcile_slurm_account", "NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT"),
+                ):
+                    value = getattr(self, field_name)
+                    checks[env_name] = {
+                        "env": env_name,
+                        "configured": value is not None,
+                        "value_recorded": False,
+                    }
+                    if value is None:
+                        blockers.append(
+                            {
+                                "code": "accepted_submit_owner_missing",
+                                "field": env_name,
+                                "reason": "accepted_submit_owner_missing",
+                                "message": "DB-free Slurm execution requires exact accepted-submit ownership.",
+                            }
+                        )
+            for attr, env, _legacy_default in _DB_FREE_SELECTOR_SPECS:
+                value = getattr(self, attr)
+                check, blocker = _db_free_selector_check(env, value)
+                checks[env] = check
+                if blocker is not None:
+                    blockers.append(blocker)
         allowed_roots = _db_free_allowed_roots(self)
-        for attr, env, kind in _DB_FREE_PATH_SPECS:
-            value = getattr(self, attr)
-            check, blocker = _db_free_path_check(env, value, kind=kind, allowed_roots=allowed_roots)
-            checks[env] = check
-            if blocker is not None:
-                blockers.append(blocker)
+        if self.scheduler_db_free_required:
+            for attr, env, kind in _DB_FREE_PATH_SPECS:
+                value = getattr(self, attr)
+                check, blocker = _db_free_path_check(env, value, kind=kind, allowed_roots=allowed_roots)
+                checks[env] = check
+                if blocker is not None:
+                    blockers.append(blocker)
         canonical_root_check, canonical_root_blocker = _db_free_path_check(
             _DB_FREE_CANONICAL_RAW_AUTHORITY_ENV,
             self.object_store_copyback_root,

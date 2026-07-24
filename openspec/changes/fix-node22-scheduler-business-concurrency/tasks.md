@@ -33,7 +33,11 @@
   closure additionally proves no-state/ordinary-retry/target-mismatch siblings
   retain their typed warm blocker, mixed cohorts admit only the stable exact
   missing-forcing candidate, and both post-sync reclassification paths reuse
-  the same warm-admission decision.
+  the same warm-admission decision. Phase-7 closure additionally proves repair
+  runs fixed-topology raw/copyback authority preflight before lock in plan and
+  submit even without ordinary DB-free mode, and both readiness and staging
+  reject every entry outside the requested source/cycle raw prefix while the
+  scheduler preserves the original missing-forcing blocker with zero work.
 
 ## 2. Reconcile And Terminal-State Idempotency
 

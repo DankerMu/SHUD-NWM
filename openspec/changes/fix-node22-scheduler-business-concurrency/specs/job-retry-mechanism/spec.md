@@ -41,6 +41,9 @@ same runtime repository and backend selectors as initial scheduler submissions.
 - **AND** node-22 production requires direct-grid forcing
 - **AND** the node-27 NFS raw manifest and all referenced raw files are present,
   ready, and match the requested source and exact cycle
+- **AND** every manifest entry `local_key` is below the exact
+  `raw/<normalized-source-variant>/<YYYYMMDDHH>/` prefix for that requested
+  source and cycle, with the same validation applied again before staging
 - **AND** the trusted NFS raw root comes from scheduler configuration rather
   than a redacted public journal field
 - **AND** every selected candidate has a complete validated warm-state identity
@@ -117,6 +120,9 @@ same runtime repository and backend selectors as initial scheduler submissions.
   `/ghdc/data/nwm/object-store`, as well as require them to equal each other, so
   rebinding both mutable values to an arbitrary readable allow-listed staging
   root cannot authorize repair
+- **AND** explicit repair SHALL run this fixed-topology raw-authority preflight
+  before lock acquisition in both plan and submit modes even when the ordinary
+  DB-free scheduler flag is absent or disabled
 - **AND** missing, mismatched, relative, outside-boundary, or malformed
   authority/root/prefix values SHALL fail static/runtime preflight without
   exposing either local path in public evidence.

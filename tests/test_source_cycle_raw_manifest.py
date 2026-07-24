@@ -136,6 +136,79 @@ def test_nfs_raw_manifest_readiness_accepts_ifs_uppercase_storage(tmp_path: Path
     assert readiness["manifest_key"] == "raw/IFS/2026062612/manifest.json"
 
 
+@pytest.mark.parametrize(
+    "local_key",
+    [
+        "raw/ifs/2026062612/foreign-source.grib2",
+        "raw/gfs/2026062600/foreign-cycle.grib2",
+    ],
+    ids=("wrong-source", "wrong-cycle"),
+)
+def test_nfs_raw_manifest_readiness_rejects_entry_outside_requested_source_cycle(
+    tmp_path: Path,
+    local_key: str,
+) -> None:
+    _write_manifest(tmp_path, entries=[{"local_key": local_key}])
+
+    readiness = nfs_raw_manifest_readiness(
+        source_id="gfs",
+        cycle_time=datetime(2026, 6, 26, 12, tzinfo=UTC),
+        object_store_root=tmp_path,
+        required=True,
+    )
+
+    assert (tmp_path / local_key).read_bytes() == b"grib-bytes"
+    assert readiness["status"] == "invalid"
+    assert readiness["reason"] == "manifest_entry_local_key_identity_mismatch"
+    assert readiness["entry_index"] == 0
+    assert readiness["expected_source_id"] == "gfs"
+    assert readiness["expected_cycle"] == "2026062612"
+
+
+@pytest.mark.parametrize(
+    "local_key",
+    [
+        "raw/ifs/2026062612/foreign-source.grib2",
+        "raw/gfs/2026062600/foreign-cycle.grib2",
+    ],
+    ids=("wrong-source", "wrong-cycle"),
+)
+@pytest.mark.parametrize("same_root", [False, True], ids=("distinct-root", "same-root"))
+def test_stage_nfs_raw_manifest_revalidates_entry_source_cycle_from_forged_readiness(
+    tmp_path: Path,
+    local_key: str,
+    same_root: bool,
+) -> None:
+    source_root = tmp_path / "nfs"
+    _write_manifest(source_root, entries=[{"local_key": local_key}])
+    forged_readiness = {
+        "status": "ready",
+        "required": True,
+        "source": "node27_nfs_raw_manifest",
+        "source_id": "gfs",
+        "cycle_id": "gfs_2026062612",
+        "cycle_time": "2026-06-26T12:00:00Z",
+        "manifest_uri": "s3://nhms/raw/gfs/2026062612/manifest.json",
+        "manifest_key": "raw/gfs/2026062612/manifest.json",
+        "manifest_path": str(source_root / "raw/gfs/2026062612/manifest.json"),
+        "object_store_root": str(source_root),
+    }
+
+    with pytest.raises(
+        NfsRawManifestStagingError,
+        match="^manifest_entry_local_key_identity_mismatch$",
+    ):
+        stage_nfs_raw_manifest_to_object_store(
+            forged_readiness,
+            target_object_store_root=(
+                source_root if same_root else tmp_path / "scratch-object-store"
+            ),
+        )
+
+    if not same_root:
+        assert not (tmp_path / "scratch-object-store/raw/gfs/2026062612/manifest.json").exists()
+
+
 def test_nfs_raw_manifest_readiness_rejects_manifest_before_files_land(tmp_path: Path) -> None:
     entries = [
         {
