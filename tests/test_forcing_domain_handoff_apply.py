@@ -5,6 +5,7 @@ import copy
 import json
 import shutil
 from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -138,6 +139,48 @@ def test_apply_from_parser_envelope_is_idempotent_for_reapply() -> None:
     assert second["row_counts"] == EXPECTED_COUNTS
     assert connection.commits == 2
     assert {table: len(rows) for table, rows in connection.tables.items()} == EXPECTED_COUNTS
+
+
+def test_timeseries_delete_is_time_bounded_and_guard_covers_existing_rows() -> None:
+    """The replace DELETE must carry a valid_time window (so TimescaleDB can
+    exclude unrelated compressed chunks) and the guard window must widen to
+    existing rows of the same forcing_version_id outside the incoming batch."""
+    envelope = _parse_complete()
+    batch_rows = envelope["parsed"]["met.forcing_station_timeseries"]
+    forcing_version_id = batch_rows[0]["forcing_version_id"]
+    batch_min = min(
+        datetime.fromisoformat(str(row["valid_time"]).replace("Z", "+00:00"))
+        for row in batch_rows
+    )
+    old_time = (batch_min - timedelta(days=45)).astimezone(UTC)
+    connection = _FakeConnection()
+    connection.tables["met.forcing_station_timeseries"].append(
+        {"forcing_version_id": forcing_version_id, "valid_time": old_time}
+    )
+
+    report = apply_module.apply_forcing_domain_handoff(envelope, connection=connection)
+
+    assert report["status"] == "applied"
+    delete_calls = [
+        (statement, params)
+        for _, statement, params in connection.executions
+        if statement.strip().lower().startswith("delete from met.forcing_station_timeseries")
+    ]
+    assert delete_calls, "timeseries DELETE must run"
+    statement, params = delete_calls[0]
+    assert "valid_time >=" in statement and "valid_time <=" in statement
+    assert params[0] == forcing_version_id
+    assert params[1] == old_time
+    guard_lookups = [
+        params
+        for _, statement, params in connection.executions
+        if statement.strip().lower().startswith(
+            "select chunk_schema, chunk_name from timescaledb_information.chunks"
+        )
+        and params and params[0] == "met"
+    ]
+    assert guard_lookups, "compressed-chunk guard must run for the timeseries batch"
+    assert any(lookup[3] == old_time for lookup in guard_lookups)
 
 
 def test_existing_placeholder_forcing_version_is_completed_by_apply() -> None:
@@ -844,6 +887,15 @@ class _FakeCursor:
                     1 for row in self.connection.state["met.met_station"] if row["station_id"] in station_ids
                 )
             }
+            return
+        if normalized.startswith("select min(valid_time), max(valid_time) from met.forcing_station_timeseries"):
+            forcing_version_id = parameters[0]
+            valid_times = [
+                row["valid_time"]
+                for row in self.connection.state["met.forcing_station_timeseries"]
+                if row["forcing_version_id"] == forcing_version_id
+            ]
+            self._fetchone = (min(valid_times, default=None), max(valid_times, default=None))
             return
         if normalized.startswith("select count(*) as rows from met.forcing_station_timeseries"):
             forcing_version_id = parameters[0]

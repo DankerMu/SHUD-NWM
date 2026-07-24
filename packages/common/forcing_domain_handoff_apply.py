@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -729,13 +730,42 @@ def _upsert_met_stations(cursor: Any, stations: Sequence[Mapping[str, Any]]) -> 
         )
 
 
+def _coerce_valid_time(value: Any) -> datetime | None:
+    """Normalize a valid_time (ISO string from the parser envelope or datetime
+    from the DB) into an aware UTC datetime so window min/max stay comparable."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
 def _replace_forcing_station_timeseries(
     cursor: Any,
     forcing_version_id: str,
     rows: Sequence[Mapping[str, Any]],
 ) -> None:
-    valid_time_min = min((row["valid_time"] for row in rows), default=None)
-    valid_time_max = max((row["valid_time"] for row in rows), default=None)
+    # The DELETE must carry a valid_time window so the planner can exclude
+    # compressed chunks: TimescaleDB rejects an unbounded DELETE on a
+    # hypertable with ANY compressed chunk, even when no row matches. Mirror
+    # workers/output_parser/parser.py: window = existing rows ∪ incoming
+    # batch, guard certifies that union, DELETE is bounded to it.
+    batch_times = [_coerce_valid_time(row["valid_time"]) for row in rows]
+    valid_time_min = min(batch_times, default=None)
+    valid_time_max = max(batch_times, default=None)
+    cursor.execute(
+        "SELECT min(valid_time), max(valid_time) FROM met.forcing_station_timeseries "
+        "WHERE forcing_version_id = %s",
+        (forcing_version_id,),
+    )
+    existing = cursor.fetchone() or (None, None)
+    existing_min = _coerce_valid_time(existing[0])
+    existing_max = _coerce_valid_time(existing[1])
+    if existing_min is not None:
+        valid_time_min = min(valid_time_min, existing_min) if valid_time_min is not None else existing_min
+    if existing_max is not None:
+        valid_time_max = max(valid_time_max, existing_max) if valid_time_max is not None else existing_max
     check_batch_targets_uncompressed(
         cursor,
         hypertable_schema="met",
@@ -743,10 +773,12 @@ def _replace_forcing_station_timeseries(
         valid_time_min=valid_time_min,
         valid_time_max=valid_time_max,
     )
-    cursor.execute(
-        "DELETE FROM met.forcing_station_timeseries WHERE forcing_version_id = %s",
-        (forcing_version_id,),
-    )
+    if valid_time_min is not None:
+        cursor.execute(
+            "DELETE FROM met.forcing_station_timeseries "
+            "WHERE forcing_version_id = %s AND valid_time >= %s AND valid_time <= %s",
+            (forcing_version_id, valid_time_min, valid_time_max),
+        )
     tuples = [tuple(row[column] for column in FORCING_STATION_TIMESERIES_COLUMNS) for row in rows]
     if tuples:
         execute_values(
