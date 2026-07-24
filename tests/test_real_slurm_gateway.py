@@ -438,6 +438,7 @@ def _write_active_rollback_binding(tmp_path: Path) -> dict[str, object]:
     from packages.common.rollback_execution_binding import (
         ROLLBACK_EXECUTION_BINDING_SCHEMA_VERSION,
         binding_id_for,
+        rollback_execution_artifact_root,
         seal_rollback_python_source_tree,
         write_rollback_execution_binding,
     )
@@ -446,21 +447,27 @@ def _write_active_rollback_binding(tmp_path: Path) -> dict[str, object]:
     workspace.mkdir(exist_ok=True)
     journal = tmp_path / "journal"
     journal.mkdir(exist_ok=True)
-    source = tmp_path / "retained" / "source"
+    receipt_id = "a" * 64
+    generation = "d" * 40
+    retained = rollback_execution_artifact_root(workspace, receipt_id, generation)
+    retained.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    retained.parent.chmod(0o700)
+    source = retained / "source"
     source.mkdir(parents=True)
     (source / "bound_sentinel.py").write_text("GENERATION = 'A'\n", encoding="utf-8")
     seal_rollback_python_source_tree(source)
-    runtime = tmp_path / "retained" / "runtime" / "bin" / "python"
+    runtime = retained / "runtime" / "bin" / "python"
     runtime.parent.mkdir(parents=True)
     runtime.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} \"$@\"\n", encoding="utf-8")
     runtime.chmod(0o500)
+    retained.chmod(0o500)
     metadata = journal.stat()
     now = "2026-07-23T12:00:00Z"
     binding: dict[str, object] = {
         "schema_version": ROLLBACK_EXECUTION_BINDING_SCHEMA_VERSION,
         "binding_id": "",
         "status": "active",
-        "preparation_receipt_id": "a" * 64,
+        "preparation_receipt_id": receipt_id,
         "journal_root_identity": {
             "path_digest": hashlib.sha256(str(journal).encode()).hexdigest(),
             "device": metadata.st_dev,
@@ -473,7 +480,7 @@ def _write_active_rollback_binding(tmp_path: Path) -> dict[str, object]:
         },
         "workspace_root": str(workspace),
         "lock_path": str(workspace / "scheduler" / "production-scheduler.lock"),
-        "target_writer_generation": "d" * 40,
+        "target_writer_generation": generation,
         "target_python_runtime": str(runtime),
         "target_python_source_root": str(source),
         "writer_repository_root": str(tmp_path / "rollback-checkout"),
@@ -506,11 +513,37 @@ def _count_active_binding_validation(
     return calls
 
 
+def test_round22_active_binding_rejects_owner_writable_retention_generation(
+    tmp_path: Path,
+) -> None:
+    from packages.common.rollback_execution_binding import (
+        RollbackExecutionBindingError,
+        read_rollback_execution_binding,
+    )
+
+    binding = _write_active_rollback_binding(tmp_path)
+    retention_generation = Path(str(binding["target_python_source_root"])).parent
+    retention_generation.chmod(0o700)
+
+    with pytest.raises(
+        RollbackExecutionBindingError,
+        match="artifact has unsafe ownership or mode",
+    ):
+        read_rollback_execution_binding(tmp_path / "workspace", required=True)
+
+
 def test_round21_active_binding_real_submit_job_captures_and_validates_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     binding = _write_active_rollback_binding(tmp_path)
+    for key, value in {
+        "PATH": str(tmp_path / "hostile-path"),
+        "PYTHONPATH": str(tmp_path / "hostile-pythonpath"),
+        "PYTHONHOME": str(tmp_path / "hostile-pythonhome"),
+        "VIRTUAL_ENV": str(tmp_path / "hostile-venv"),
+    }.items():
+        monkeypatch.setenv(key, value)
     calls = _count_active_binding_validation(monkeypatch)
     commands: list[list[str]] = []
     scripts: list[str] = []
@@ -539,6 +572,12 @@ def test_round21_active_binding_real_submit_job_captures_and_validates_once(
     for field in ("target_python_runtime", "target_python_source_root"):
         assert record.manifest[field] == binding[field]
         assert str(binding[field]) in scripts[0]
+    assert "unset PYTHONHOME" in scripts[0]
+    assert "unset VIRTUAL_ENV" in scripts[0]
+    expected_path = Path(str(binding["target_python_runtime"])).parent
+    assert f"export PATH={expected_path}:/usr/local/bin:/usr/bin:/bin" in scripts[0]
+    assert ":$PATH" not in scripts[0]
+    assert "hostile-" not in scripts[0]
 
 
 def test_round21_active_binding_real_submit_array_is_one_capture_and_exact_everywhere(
@@ -546,6 +585,13 @@ def test_round21_active_binding_real_submit_array_is_one_capture_and_exact_every
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     binding = _write_active_rollback_binding(tmp_path)
+    for key, value in {
+        "PATH": str(tmp_path / "hostile-path"),
+        "PYTHONPATH": str(tmp_path / "hostile-pythonpath"),
+        "PYTHONHOME": str(tmp_path / "hostile-pythonhome"),
+        "VIRTUAL_ENV": str(tmp_path / "hostile-venv"),
+    }.items():
+        monkeypatch.setenv(key, value)
     calls = _count_active_binding_validation(monkeypatch)
     commands: list[list[str]] = []
     scripts: list[str] = []
@@ -577,6 +623,12 @@ def test_round21_active_binding_real_submit_array_is_one_capture_and_exact_every
         assert record.manifest[field] == binding[field]
         assert all(task[field] == binding[field] for task in persisted_tasks)
         assert str(binding[field]) in scripts[0]
+    assert "unset PYTHONHOME" in scripts[0]
+    assert "unset VIRTUAL_ENV" in scripts[0]
+    expected_path = Path(str(binding["target_python_runtime"])).parent
+    assert f"export PATH={expected_path}:/usr/local/bin:/usr/bin:/bin" in scripts[0]
+    assert ":$PATH" not in scripts[0]
+    assert "hostile-" not in scripts[0]
     assert scripts[0].count('"$NHMS_TARGET_PYTHON_RUNTIME" - <<\'PY\'') == 2
 
 
@@ -2042,6 +2094,7 @@ def test_round20_old_manifest_uses_durable_active_binding_source_and_runtime_fro
     from packages.common.rollback_execution_binding import (
         ROLLBACK_EXECUTION_BINDING_SCHEMA_VERSION,
         binding_id_for,
+        rollback_execution_artifact_root,
         seal_rollback_python_source_tree,
         write_rollback_execution_binding,
     )
@@ -2051,7 +2104,15 @@ def test_round20_old_manifest_uses_durable_active_binding_source_and_runtime_fro
     workspace.mkdir()
     journal = tmp_path / "journal"
     journal.mkdir()
-    source_a = tmp_path / "rollback-checkout" / ".venv" / ".nhms-rollback-source-a"
+    receipt_id = "a" * 64
+    generation = "09a0cfb8" + "d" * 32
+    checkout = tmp_path / "rollback-checkout"
+    checkout.mkdir()
+    (checkout / "checkout-only.txt").write_text("must disappear\n", encoding="utf-8")
+    retained = rollback_execution_artifact_root(workspace, receipt_id, generation)
+    retained.parent.mkdir(mode=0o700, parents=True)
+    retained.parent.chmod(0o700)
+    source_a = retained / "source"
     for package in (
         source_a / "workers",
         source_a / "workers" / "forcing_producer",
@@ -2078,17 +2139,18 @@ def test_round20_old_manifest_uses_durable_active_binding_source_and_runtime_fro
         )
     source_a.chmod(0o500)
     seal_rollback_python_source_tree(source_a)
-    runtime_a = tmp_path / "rollback-checkout" / ".venv" / ".nhms-runtime" / "bin" / "python"
+    runtime_a = retained / "runtime" / "bin" / "python"
     runtime_a.parent.mkdir(parents=True)
     runtime_a.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} \"$@\"\n", encoding="utf-8")
     runtime_a.chmod(0o500)
+    retained.chmod(0o500)
     journal_stat = journal.stat()
     now = "2026-07-23T12:00:00Z"
     binding: dict[str, object] = {
         "schema_version": ROLLBACK_EXECUTION_BINDING_SCHEMA_VERSION,
         "binding_id": "",
         "status": "active",
-        "preparation_receipt_id": "a" * 64,
+        "preparation_receipt_id": receipt_id,
         "journal_root_identity": {
             "path_digest": __import__("hashlib").sha256(str(journal).encode()).hexdigest(),
             "device": journal_stat.st_dev,
@@ -2101,10 +2163,10 @@ def test_round20_old_manifest_uses_durable_active_binding_source_and_runtime_fro
         },
         "workspace_root": str(workspace),
         "lock_path": str(workspace / "scheduler" / "production-scheduler.lock"),
-        "target_writer_generation": "09a0cfb8" + "d" * 32,
+        "target_writer_generation": generation,
         "target_python_runtime": str(runtime_a),
         "target_python_source_root": str(source_a),
-        "writer_repository_root": str(tmp_path / "rollback-checkout"),
+        "writer_repository_root": str(checkout),
         "created_at": now,
         "updated_at": now,
     }
@@ -2138,6 +2200,9 @@ def test_round20_old_manifest_uses_durable_active_binding_source_and_runtime_fro
     assert "NHMS_TARGET_PYTHON_RUNTIME" not in rendered_while_prepared
     assert "NHMS_TARGET_PYTHON_SOURCE_ROOT" not in rendered_while_prepared
     write_rollback_execution_binding(workspace, binding)
+    shutil.rmtree(checkout)
+    assert not checkout.exists()
+    assert source_a.is_dir() and runtime_a.is_file()
 
     binding_calls = {"read": 0, "validate": 0}
     real_read_binding = real_backend_module.read_rollback_execution_binding
@@ -2159,16 +2224,38 @@ def test_round20_old_manifest_uses_durable_active_binding_source_and_runtime_fro
 
     assert f"export NHMS_TARGET_PYTHON_RUNTIME={shlex.quote(str(runtime_a))}" in rendered
     assert f"export NHMS_TARGET_PYTHON_SOURCE_ROOT={shlex.quote(str(source_a))}" in rendered
+    assert "unset PYTHONHOME" in rendered
+    assert "unset VIRTUAL_ENV" in rendered
+    assert f"export PATH={runtime_a.parent}:/usr/local/bin:/usr/bin:/bin" in rendered
+    assert ":$PATH" not in rendered
     assert 'cd "$NHMS_TARGET_PYTHON_SOURCE_ROOT"' in rendered
     marker = tmp_path / f"{job_type}-sentinel"
-    execution_env = {**os.environ, "SENTINEL_OUT": str(marker), "SLURM_ARRAY_TASK_ID": "0"}
-    subprocess.run(("bash", "-c", rendered), check=True, env=execution_env)
+    hostile_bin = tmp_path / "hostile-bin"
+    hostile_bin.mkdir()
+    hostile_python_marker = tmp_path / "hostile-python-ran"
+    hostile_python = hostile_bin / "python"
+    hostile_python.write_text(
+        f"#!/bin/sh\necho hostile > {shlex.quote(str(hostile_python_marker))}\nexit 97\n",
+        encoding="utf-8",
+    )
+    hostile_python.chmod(0o700)
+    execution_env = {
+        **os.environ,
+        "PATH": str(hostile_bin),
+        "PYTHONPATH": str(tmp_path / "hostile-pythonpath"),
+        "PYTHONHOME": str(tmp_path / "hostile-pythonhome"),
+        "VIRTUAL_ENV": str(tmp_path / "hostile-venv"),
+        "SENTINEL_OUT": str(marker),
+        "SLURM_ARRAY_TASK_ID": "0",
+    }
+    subprocess.run(("/bin/bash", "-c", rendered), check=True, env=execution_env)
     expected = {
         "workers.forcing_producer.cli": "A:forcing",
         "workers.shud_runtime.cli": "A:forecast",
         "packages.common.state_cli": "A:state",
     }
     assert marker.read_text(encoding="utf-8") == expected[worker_module]
+    assert not hostile_python_marker.exists()
     assert source_a.is_dir()
     if job_type == "run_shud_forecast_array":
         assert rendered.count('"$NHMS_TARGET_PYTHON_RUNTIME" - <<\'PY\'') == 2
@@ -2222,6 +2309,7 @@ def test_round20_old_manifest_uses_durable_active_binding_source_and_runtime_fro
     binding["status"] = "completed"
     binding["updated_at"] = "2026-07-23T12:02:00Z"
     write_rollback_execution_binding(workspace, binding)
+    retained.chmod(0o700)
     source_a.chmod(0o700)
     for retained_path in source_a.rglob("*"):
         if retained_path.is_dir():

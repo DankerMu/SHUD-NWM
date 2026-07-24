@@ -5948,11 +5948,18 @@ def _round20_write_execution_binding(
     from packages.common.rollback_execution_binding import (
         ROLLBACK_EXECUTION_BINDING_SCHEMA_VERSION,
         binding_id_for,
+        rollback_execution_artifact_root,
         write_rollback_execution_binding,
     )
 
     workspace_root = Path(workspace).resolve()
-    assets = workspace_root / ".round20-rollback-assets" / receipt["receipt_id"]
+    assets = rollback_execution_artifact_root(
+        workspace_root,
+        receipt["receipt_id"],
+        generation,
+    )
+    assets.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    assets.parent.chmod(0o700)
     source_root = assets / "source"
     source_root.mkdir(parents=True)
     source_root.chmod(0o500)
@@ -5960,6 +5967,7 @@ def _round20_write_execution_binding(
     runtime.parent.mkdir(parents=True)
     runtime.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     runtime.chmod(0o500)
+    assets.chmod(0o500)
     configured_lock = Path(lock_path or workspace_root / "scheduler" / "production-scheduler.lock").resolve()
     binding: dict[str, Any] = {
         "schema_version": ROLLBACK_EXECUTION_BINDING_SCHEMA_VERSION,
@@ -7564,6 +7572,7 @@ def test_round14_writer_launch_is_strictly_generation_bound_and_fail_closed(
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import shutil
     import subprocess
     import sys
     from pathlib import Path
@@ -7639,8 +7648,12 @@ def test_round14_writer_launch_is_strictly_generation_bound_and_fail_closed(
     command, cwd, snapshot_content, child_env = starts[0]
     assert Path(command[0]).name == "python"
     assert Path(command[0]).parent.name == "bin"
-    assert Path(command[0]).parent.parent.parent == checkout_a / ".venv"
-    assert Path(command[0]).parent.parent.name.startswith(".nhms-rollback-runtime-")
+    retained_generation = (
+        workspace
+        / ".nhms-rollback-execution-v1"
+        / f"{receipt['receipt_id']}-{generation_a}"
+    )
+    assert Path(command[0]).parent.parent == retained_generation / "runtime"
     assert command[1:] == (
         "-m",
         "services.orchestrator.cli",
@@ -7666,7 +7679,7 @@ def test_round14_writer_launch_is_strictly_generation_bound_and_fail_closed(
     assert snapshot_content == "writer A\n"
     assert cwd == Path(launched["target_python_source_root"])
     assert cwd.is_dir()
-    retained_root = Path(command[0]).parent.parent
+    retained_root = retained_generation / "runtime"
     assert not any(path.is_symlink() for path in retained_root.rglob("*"))
     retained_config = (retained_root / "pyvenv.cfg").read_text(encoding="utf-8")
     assert str(checkout_a / ".target-python") not in retained_config
@@ -7740,7 +7753,6 @@ def test_round14_writer_launch_is_strictly_generation_bound_and_fail_closed(
             writer_args=("plan-production", "--submit"),
         )
     assert len(starts) == 2
-
     (checkout_a / "writer.txt").write_text("writer A dirty\n", encoding="utf-8")
     with pytest.raises(
         FileOrchestrationJournalError,
@@ -7798,6 +7810,24 @@ def test_round14_writer_launch_is_strictly_generation_bound_and_fail_closed(
             writer_args=("plan-production", "--submit"),
         )
     assert len(starts) == 2
+    shutil.rmtree(checkout_a)
+    assert not checkout_a.exists()
+    retained_binding = read_rollback_execution_binding(workspace, required=True)
+    assert retained_binding is not None
+    assert Path(retained_binding["target_python_source_root"]) == retained_generation / "source"
+    assert Path(retained_binding["target_python_runtime"]) == retained_generation / "runtime/bin/python"
+    post_checkout_removal = subprocess.run(
+        (
+            retained_binding["target_python_runtime"],
+            "-c",
+            "from pathlib import Path; print(Path('writer.txt').read_text().strip())",
+        ),
+        cwd=retained_binding["target_python_source_root"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert post_checkout_removal.stdout.strip() == "writer A"
 
 
 def test_round21_launcher_rejects_missing_prepared_binding_without_start(
@@ -8253,7 +8283,15 @@ def test_round21_rollforward_archive_failure_recovers_without_reopening_launch(
 
 @pytest.mark.parametrize(
     "cut",
-    ["inventory_read", "journal_enumerate", "journal_stat", "journal_read", "direct_read"],
+    [
+        "inventory_read",
+        "journal_enumerate",
+        "journal_stat",
+        "journal_read",
+        "direct_read",
+        "latest_read",
+        "legacy_read",
+    ],
 )
 def test_round21_rollforward_authority_disappearance_is_zero_mutation(
     tmp_path: Any,
@@ -8291,7 +8329,11 @@ def test_round21_rollforward_authority_disappearance_is_zero_mutation(
         receipt=receipt,
         generation="a" * 40,
     )
-    template = _file_cohort_repository(tmp_path / "authority", member_count=1, with_runtime_rows=False)
+    template = _file_cohort_repository(
+        tmp_path / "authority",
+        member_count=1,
+        with_runtime_rows=cut == "latest_read",
+    )
     key = "cycle_gfs_2026071200_forecast_fixture:forecast"
     _bind_current_file_cohort(template, key, slurm_job_id="17667")
     job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
@@ -8299,6 +8341,16 @@ def test_round21_rollforward_authority_disappearance_is_zero_mutation(
     if cut == "direct_read":
         source = template.root / "pipeline-jobs" / f"{job_id}.json"
         target = root / "pipeline-jobs" / source.name
+        target.parent.mkdir(parents=True)
+        shutil.copyfile(source, target)
+    elif cut == "latest_read":
+        source = next((template.root / "latest").rglob("*.json"))
+        target = root / source.relative_to(template.root)
+        target.parent.mkdir(parents=True)
+        shutil.copyfile(source, target)
+    elif cut == "legacy_read":
+        source = template.root / "pipeline-jobs" / f"{job_id}.json"
+        target = root / "active-reconcile" / source.name
         target.parent.mkdir(parents=True)
         shutil.copyfile(source, target)
     else:
@@ -8316,7 +8368,7 @@ def test_round21_rollforward_authority_disappearance_is_zero_mutation(
     fence_before = fence.read_bytes()
     binding_before = binding_path.read_bytes()
 
-    if cut in {"inventory_read", "journal_read", "direct_read"}:
+    if cut in {"inventory_read", "journal_read", "direct_read", "latest_read", "legacy_read"}:
         method_name = "_read_jsonl" if cut == "journal_read" else "_read_optional_json"
         real_method = getattr(FileOrchestrationJournalRepository, method_name)
 
@@ -8359,12 +8411,14 @@ def test_round21_rollforward_authority_disappearance_is_zero_mutation(
     with pytest.raises(
         FileOrchestrationJournalError,
         match="file_journal_rollforward_quiescence_unavailable",
-    ):
+    ) as exc_info:
         complete_file_journal_rollforward(
             journal_root=root,
             workspace_root=workspace,
             preparation_receipt_id=receipt["receipt_id"],
         )
+    assert isinstance(exc_info.value.__cause__, FileOrchestrationJournalError)
+    assert exc_info.value.__cause__.reason == "file_journal_quiescence_authority_changed"
     assert fence.read_bytes() == fence_before
     assert binding_path.read_bytes() == binding_before
 
@@ -8416,6 +8470,88 @@ def test_round21_strict_quiescence_query_is_read_only_for_current_authority(
         if path.is_file()
     }
     assert after == before
+
+
+@pytest.mark.parametrize(
+    "authority_root_name",
+    ["reconcile-inventory", "journal", "latest", "pipeline-jobs", "active-reconcile"],
+)
+@pytest.mark.parametrize("boundary", ["stat_to_list_disappear", "after_list_replace"])
+def test_round22_strict_authority_root_change_is_uniform_zero_mutation(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    authority_root_name: str,
+    boundary: str,
+) -> None:
+    import shutil
+
+    from packages.common.rollback_execution_binding import rollback_execution_binding_path
+    from services.orchestrator import file_orchestration_journal as journal_module
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.file_orchestration_migration import (
+        complete_file_journal_rollforward,
+        prepare_file_journal_rollback,
+    )
+
+    root = tmp_path / "journal-root"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    assert FileOrchestrationJournalRepository(root).query_inflight_jobs() == []
+    receipt = prepare_file_journal_rollback(
+        journal_root=root,
+        workspace_root=workspace,
+        scheduler_state="stopped",
+        active_scheduler_processes=0,
+        checked_at=datetime.now(UTC),
+        checked_by=f"round22-root-{authority_root_name}-{boundary}",
+        target_writer_generation="a" * 40,
+    )
+    _round20_write_execution_binding(
+        workspace=workspace,
+        receipt=receipt,
+        generation="a" * 40,
+    )
+    authority_root = root / authority_root_name
+    authority_root.mkdir(exist_ok=True)
+    fence = root / "reconcile-inventory-rollback-preparation-v2.json"
+    binding_path = rollback_execution_binding_path(workspace)
+    fence_before = fence.read_bytes()
+    binding_before = binding_path.read_bytes()
+    real_list = journal_module.list_directory_no_follow_limited
+    injected = False
+
+    def change_root(directory: Any, **kwargs: Any) -> Any:
+        nonlocal injected
+        if directory != authority_root or injected:
+            return real_list(directory, **kwargs)
+        injected = True
+        if boundary == "stat_to_list_disappear":
+            shutil.rmtree(authority_root)
+            return real_list(directory, **kwargs)
+        names = real_list(directory, **kwargs)
+        displaced = authority_root.with_name(f"{authority_root.name}-displaced")
+        authority_root.rename(displaced)
+        authority_root.mkdir()
+        return names
+
+    monkeypatch.setattr(journal_module, "list_directory_no_follow_limited", change_root)
+
+    with pytest.raises(
+        FileOrchestrationJournalError,
+        match="file_journal_rollforward_quiescence_unavailable",
+    ) as exc_info:
+        complete_file_journal_rollforward(
+            journal_root=root,
+            workspace_root=workspace,
+            preparation_receipt_id=receipt["receipt_id"],
+        )
+    assert isinstance(exc_info.value.__cause__, FileOrchestrationJournalError)
+    assert exc_info.value.__cause__.reason == "file_journal_quiescence_authority_changed"
+    assert fence.read_bytes() == fence_before
+    assert binding_path.read_bytes() == binding_before
 
 
 def test_round14_writer_generation_git_probe_timeout_fails_closed(

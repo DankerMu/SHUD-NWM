@@ -96,6 +96,7 @@ MAX_SLURM_ERROR_SNIPPET_BYTES = 2048
 DEFAULT_LIST_LOOKBACK_HOURS = 24
 MAX_LOG_BYTES = 10 * 1024 * 1024
 _ACTIVE_BINDING_BOOTSTRAP_ENV_KEYS = frozenset({"PATH", "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"})
+_ACTIVE_ROLLBACK_SYSTEM_PATH = "/usr/local/bin:/usr/bin:/bin"
 LOG_TRUNCATION_MARKER = "\n\n[truncated: log exceeded 10485760 bytes]\n"
 
 FREEFORM_STRING_FIELDS = {
@@ -734,6 +735,7 @@ class RealSlurmGateway(SlurmGateway):
         context["slurm_env_exports"] = [
             f"export {key}={shlex.quote(value)}" for key, value in sorted(slurm_env.items())
         ]
+        context["active_rollback_binding"] = active_binding is not None
         context["export_lines"] = self._template_export_lines(context)
 
         environment = SandboxedEnvironment(undefined=StrictUndefined, autoescape=False)
@@ -1011,9 +1013,16 @@ class RealSlurmGateway(SlurmGateway):
             )
         lines: list[str] = []
         lines.extend(f"export {key}={shlex.quote(str(value or ''))}" for key, value in export_fields.items())
-        lines.extend(_python_runtime_export_lines(context.get("target_python_runtime")))
+        active_rollback_binding = context.get("active_rollback_binding") is True
+        lines.extend(
+            _python_runtime_export_lines(
+                context.get("target_python_runtime"),
+                isolate_ambient=active_rollback_binding,
+            )
+        )
         lines.extend(_python_source_export_lines(context.get("target_python_source_root")))
-        lines.extend(_grib_runtime_export_lines())
+        if not active_rollback_binding:
+            lines.extend(_grib_runtime_export_lines())
         return lines
 
     def _submit_rendered_script(
@@ -1810,7 +1819,11 @@ class RealSlurmGateway(SlurmGateway):
         return datetime.now(UTC)
 
 
-def _python_runtime_export_lines(target_python_runtime: Any = None) -> list[str]:
+def _python_runtime_export_lines(
+    target_python_runtime: Any = None,
+    *,
+    isolate_ambient: bool = False,
+) -> list[str]:
     if target_python_runtime not in (None, ""):
         try:
             runtime = validated_target_python_runtime(target_python_runtime, required=True)
@@ -1821,6 +1834,16 @@ def _python_runtime_export_lines(target_python_runtime: Any = None) -> list[str]
             ) from error
         assert runtime is not None
         runtime_path = Path(runtime)
+        if isolate_ambient:
+            return [
+                "unset PYTHONHOME",
+                "unset VIRTUAL_ENV",
+                f"export NHMS_TARGET_PYTHON_RUNTIME={shlex.quote(runtime)}",
+                (
+                    f"export PATH={shlex.quote(str(runtime_path.parent))}:"
+                    f"{_ACTIVE_ROLLBACK_SYSTEM_PATH}"
+                ),
+            ]
         return [
             f"export NHMS_TARGET_PYTHON_RUNTIME={shlex.quote(runtime)}",
             f"export PATH={shlex.quote(str(runtime_path.parent))}:$PATH",

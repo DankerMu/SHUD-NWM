@@ -544,13 +544,17 @@ Scenario evidence rows for section 5:
   generation before mutation, admits only a real `plan-production --submit`,
   rejects root/lock overrides and eager exits, binds the child environment to the
   receipt roots, and executes protected persistent source and runtime bundles
-  behind a durable workspace-scoped execution binding. The current HTTP Slurm
+  from a deterministic receipt/generation-scoped private immutable workspace
+  retention root behind a durable execution binding; deleting the complete
+  original checkout after active publication leaves all three worker stages
+  executable. The current HTTP Slurm
   gateway injects that binding for old manifests, so all three worker arrays use
   the exact target runtime and source without changing ordinary unrelated
   console-entrypoint submissions. A child-inherited execution lock excludes
   roll-forward while the writer runs; a strict bounded current-inventory
   terminal-allowlist query (including exact journal/latest/direct/legacy
-  authority and disappearance failure) and
+  authority, start/final identities for all five authority roots, and uniform
+  disappearance/replacement failure) and
   crash-resumable `prepared|active` -> `rolling_forward` -> `completed` binding
   transition exclude roll-forward while any accepted task can still reference
   the bundles. The exact `prepared` authority permits a no-launch cancellation, while
@@ -560,8 +564,9 @@ Scenario evidence rows for section 5:
   active binding, and completed replacement is prepare-only. Runtime libraries
   and configuration are copied/protected without links to the original venv.
   Each Gateway single/array/render request captures binding once, rejects active
-  Python-bootstrap environment overrides, and every worker/forecast inline
-  Python entry uses the exact bound interpreter.
+  Python-bootstrap environment overrides, unsets ambient Python home/venv state,
+  replaces ambient PATH/PYTHONPATH deterministically, and every worker/forecast
+  inline Python entry uses the exact bound interpreter.
   Live-lease, concurrent,
   dirty/mismatched checkout, unavailable runtime/snapshot, tampered, stale, and
   wrong-root paths are zero-launch/zero-mutation failures.

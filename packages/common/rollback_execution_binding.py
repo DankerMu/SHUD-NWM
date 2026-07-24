@@ -24,6 +24,7 @@ from packages.common.safe_fs import (
 ROLLBACK_EXECUTION_BINDING_SCHEMA_VERSION = "nhms.scheduler.rollback_execution_binding.v1"
 ROLLBACK_EXECUTION_BINDING_NAME = "rollback-execution-binding-v1.json"
 ROLLBACK_EXECUTION_BINDING_ARCHIVE_DIRECTORY = "rollback-execution-bindings-v1"
+ROLLBACK_EXECUTION_ARTIFACTS_DIRECTORY = ".nhms-rollback-execution-v1"
 MAX_ROLLBACK_EXECUTION_BINDING_BYTES = 64 * 1024
 MAX_ROLLBACK_SOURCE_TREE_ENTRIES = 200_000
 ROLLBACK_EXECUTION_BINDING_STATUSES = frozenset(
@@ -48,6 +49,21 @@ def rollback_execution_binding_archive_path(
         raise RollbackExecutionBindingError("rollback execution binding archive identity is invalid")
     workspace = Path(workspace_root).expanduser().resolve()
     return workspace / "scheduler" / ROLLBACK_EXECUTION_BINDING_ARCHIVE_DIRECTORY / f"{binding_id}.json"
+
+
+def rollback_execution_artifact_root(
+    workspace_root: str | Path,
+    preparation_receipt_id: str,
+    target_writer_generation: str,
+) -> Path:
+    if not _hex_identity(preparation_receipt_id, 64) or not _hex_identity(
+        target_writer_generation,
+        (40, 64),
+    ):
+        raise RollbackExecutionBindingError("rollback execution artifact identity is invalid")
+    workspace = Path(workspace_root).expanduser().resolve()
+    identity = f"{preparation_receipt_id}-{target_writer_generation}"
+    return workspace / ROLLBACK_EXECUTION_ARTIFACTS_DIRECTORY / identity
 
 
 def binding_identity_payload(binding: Mapping[str, Any]) -> dict[str, Any]:
@@ -275,6 +291,18 @@ def validate_rollback_execution_binding(
             )
         except ValueError as error:
             raise RollbackExecutionBindingError("rollback execution binding artifact is unavailable") from error
+        artifact_root = rollback_execution_artifact_root(
+            workspace,
+            binding["preparation_receipt_id"],
+            binding["target_writer_generation"],
+        )
+        if runtime != artifact_root / "runtime" / "bin" / "python" or source != artifact_root / "source":
+            raise RollbackExecutionBindingError(
+                "rollback execution binding artifacts are outside the retained generation"
+            )
+        retention_parent = artifact_root.parent
+        _require_owned_private_directory(retention_parent)
+        _require_owned_immutable(artifact_root, regular=False)
         _require_owned_immutable(runtime, regular=True)
         _require_owned_immutable(source, regular=False)
         _inspect_rollback_python_source_tree(source, seal=False)
@@ -326,9 +354,24 @@ def _require_owned_immutable(path: Path, *, regular: bool) -> None:
     if (
         not expected_type
         or metadata.st_uid != os.geteuid()
-        or stat.S_IMODE(metadata.st_mode) & 0o022
+        or stat.S_IMODE(metadata.st_mode) & 0o222
     ):
         raise RollbackExecutionBindingError("rollback execution binding artifact has unsafe ownership or mode")
+
+
+def _require_owned_private_directory(path: Path) -> None:
+    try:
+        metadata = path.stat(follow_symlinks=False)
+    except OSError as error:
+        raise RollbackExecutionBindingError("rollback execution retention root is unavailable") from error
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+    ):
+        raise RollbackExecutionBindingError(
+            "rollback execution retention root has unsafe ownership or mode"
+        )
 
 
 def _inspect_rollback_python_source_tree(source_root: Path, *, seal: bool) -> None:
@@ -415,11 +458,13 @@ def _require_source_entry(
 __all__ = (
     "ROLLBACK_EXECUTION_BINDING_NAME",
     "ROLLBACK_EXECUTION_BINDING_ARCHIVE_DIRECTORY",
+    "ROLLBACK_EXECUTION_ARTIFACTS_DIRECTORY",
     "ROLLBACK_EXECUTION_BINDING_SCHEMA_VERSION",
     "RollbackExecutionBindingError",
     "archive_completed_rollback_execution_binding",
     "binding_id_for",
     "read_rollback_execution_binding",
+    "rollback_execution_artifact_root",
     "rollback_execution_binding_path",
     "rollback_execution_binding_archive_path",
     "seal_rollback_python_source_tree",

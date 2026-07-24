@@ -23,6 +23,7 @@ from packages.common.rollback_execution_binding import (
     archive_completed_rollback_execution_binding,
     binding_id_for,
     read_rollback_execution_binding,
+    rollback_execution_artifact_root,
     seal_rollback_python_source_tree,
     write_rollback_execution_binding,
 )
@@ -280,11 +281,16 @@ def launch_file_journal_rollback_writer(
                     actual_writer_generation=actual_writer_generation,
                 )
             if existing_binding["status"] == "prepared":
+                retention_root = _prepare_rollback_retention_root(
+                    config.workspace_root,
+                    receipt_id=receipt["receipt_id"],
+                    generation=actual_writer_generation,
+                )
                 snapshot_root = retained.enter_context(
                     _materialize_commit_snapshot(
                         repository_root,
                         actual_writer_generation,
-                        retention_key=receipt["receipt_id"],
+                        snapshot_root=retention_root / "source",
                     )
                 )
                 bound_runtime = retained.enter_context(
@@ -292,6 +298,7 @@ def launch_file_journal_rollback_writer(
                         writer_runtime,
                         resolved_runtime=resolved_runtime,
                         runtime_identity=runtime_identity,
+                        bundle_root=retention_root / "runtime",
                     )
                 )
                 rechecked_root, rechecked_generation = _resolve_clean_writer_generation(repository_root)
@@ -309,6 +316,7 @@ def launch_file_journal_rollback_writer(
                         "file_journal_rollback_writer_generation_changed",
                         field="writer_repository_root",
                     )
+                os.chmod(retention_root, 0o500)
                 created_at = _format_utc(datetime.now(UTC))
                 binding: dict[str, Any] = {
                     "schema_version": ROLLBACK_EXECUTION_BINDING_SCHEMA_VERSION,
@@ -468,6 +476,47 @@ def _require_matching_prepared_rollback_binding(
         )
 
 
+def _prepare_rollback_retention_root(
+    workspace_root: Path,
+    *,
+    receipt_id: str,
+    generation: str,
+) -> Path:
+    try:
+        workspace = Path(workspace_root).resolve(strict=True)
+        retention_root = rollback_execution_artifact_root(
+            workspace,
+            receipt_id,
+            generation,
+        )
+        container = retention_root.parent
+        ensure_directory_no_follow(container, containment_root=workspace)
+        os.chmod(container, 0o700)
+        container_metadata = os.stat(container, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(container_metadata.st_mode)
+            or container_metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(container_metadata.st_mode) & 0o077
+        ):
+            raise OSError("rollback retention container is unsafe")
+        try:
+            os.mkdir(retention_root, mode=0o700)
+        except FileExistsError:
+            metadata = os.stat(retention_root, follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_uid != os.geteuid()
+                or stat.S_IMODE(metadata.st_mode) & 0o222
+            ):
+                raise OSError("rollback retention generation is incomplete or unsafe")
+        return retention_root
+    except (OSError, SafeFilesystemError, RollbackExecutionBindingError) as error:
+        raise FileOrchestrationJournalError(
+            "file_journal_rollback_execution_retention_unavailable",
+            field="rollback_execution_binding",
+        ) from error
+
+
 def _resolve_target_writer_runtime(
     repository_root: Path,
 ) -> tuple[Path, Path, tuple[int, int]]:
@@ -499,11 +548,27 @@ def _materialize_bound_runtime(
     *,
     resolved_runtime: Path,
     runtime_identity: tuple[int, int],
+    bundle_root: Path,
 ) -> Iterator[_BoundRuntime]:
     venv_root = writer_runtime.parent.parent
-    bundle_root = venv_root / f".nhms-rollback-runtime-{uuid4().hex}"
     bundle_bin = bundle_root / "bin"
     bound_path = bundle_bin / "python"
+    if bundle_root.exists():
+        try:
+            metadata = bound_path.stat(follow_symlinks=False)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or stat.S_IMODE(metadata.st_mode) & 0o222
+                or stat.S_IMODE(metadata.st_mode) & 0o111 == 0
+            ):
+                raise OSError("retained runtime is invalid")
+        except OSError as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_rollback_writer_runtime_unavailable",
+                field="writer_repository_root",
+            ) from error
+        yield _BoundRuntime(path=bound_path)
+        return
     source_fd: int | None = None
     try:
         source_fd = os.open(
@@ -689,15 +754,8 @@ def _materialize_commit_snapshot(
     repository_root: Path,
     generation: str,
     *,
-    retention_key: str,
+    snapshot_root: Path,
 ) -> Iterator[Path]:
-    if re.fullmatch(r"[0-9a-f]{64}", retention_key) is None:
-        raise FileOrchestrationJournalError(
-            "file_journal_rollback_writer_snapshot_unavailable",
-            field="writer_repository_root",
-        )
-    venv_root = repository_root / ".venv"
-    snapshot_root = venv_root / f".nhms-rollback-source-{retention_key}"
     if snapshot_root.exists():
         try:
             existing_root, existing_generation = _resolve_clean_writer_generation(snapshot_root)
@@ -714,7 +772,9 @@ def _materialize_commit_snapshot(
         yield snapshot_root
         return
     try:
-        temporary_root = Path(tempfile.mkdtemp(prefix=".nhms-rollback-source-tmp-", dir=venv_root))
+        temporary_root = Path(
+            tempfile.mkdtemp(prefix=".nhms-rollback-source-tmp-", dir=snapshot_root.parent)
+        )
     except OSError as error:
         raise FileOrchestrationJournalError(
             "file_journal_rollback_writer_snapshot_unavailable",

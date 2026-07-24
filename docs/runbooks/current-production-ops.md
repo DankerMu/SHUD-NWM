@@ -259,9 +259,10 @@ uv run nhms-pipeline prepare-file-journal-rollback \
   --target-writer-generation "$ROLLBACK_SHA"
 ```
 
-`ROLLBACK_CHECKOUT` 及其 `.venv` 必须位于 Slurm gateway 与计算节点都可访问的共享路径；
-从 controller 启动到所有由本次 rollback pass 提交的 Slurm task 结束前，不得执行
-`uv sync`、切换该 checkout 或删除其 `.venv`。
+`ROLLBACK_CHECKOUT` 及其 `.venv` 只需在 launcher 完成 active binding 发布前可由当前
+controller 读取；不要在 gate 运行中执行 `uv sync`、切换 checkout 或改写解释器。active
+发布后，计算节点依赖的是 `WORKSPACE_ROOT/.nhms-rollback-execution-v1/` 下由
+`<receipt_id>-<target_generation>` 唯一确定的共享保留目录，不再依赖原 checkout 或其 venv。
 
 保存 preparation `receipt_id`。旧 writer 只能由仍在当前版本的 controller 通过下面
 的 gate 启动；该命令不接受操作者自报的 actual generation，而是从即将运行的 checkout
@@ -279,9 +280,11 @@ uv run nhms-pipeline launch-file-journal-rollback-writer \
   -- plan-production --submit --continuous --max-passes 1
 ```
 
-通过 receipt 后，controller 会把目标完整 SHA 物化为私有、detached、权限锁紧的持久
-clean source bundle，并从已经打开和复核过的目标解释器复制一个内容固定的私有 runtime
-bundle；runtime 自带复制且锁紧的库和配置，不保留指回原 venv 的软链。prepare 成功前，controller 先写入 workspace-scoped `prepared` execution binding，
+通过 receipt 后，controller 会把目标完整 SHA 物化到上述 workspace-scoped、私有且只读的
+generation retention root，并从已经打开和复核过的目标解释器复制一个内容固定的 runtime；
+runtime 自带复制且锁紧的库和配置，不保留指回原 venv 的软链。active binding 发布后，即使
+删除整个原 checkout，binding 校验及 forcing、forecast、state-save 执行也必须继续成功。
+prepare 成功前，controller 先写入 workspace-scoped `prepared` execution binding，
 把 preparation receipt、journal/workspace/file-lock 与目标 generation 绑定为 no-launch
 authority；launcher 在 child 启动前将其替换为包含 source/runtime 的 `active` binding。
 ambient environment 不能改写这些值；即使旧版本 writer 不认识新 manifest 字段，当前
@@ -290,7 +293,9 @@ forecast、state-save 三阶段都会切换到该 source 并使用该 runtime；
 普通生产提交仍使用原 console entrypoint。
 每个 Gateway single/array/direct-render 请求只捕获并验证一次 binding，array task 复用同一
 request-local 结果；active 期间拒绝调用方覆盖 `PATH`、`PYTHONPATH`、`PYTHONHOME`、
-`VIRTUAL_ENV`，worker 命令及 forecast inline Python 都必须使用 exact bound runtime。
+`VIRTUAL_ENV`；生成脚本会 unset `PYTHONHOME`/`VIRTUAL_ENV`，把 `PYTHONPATH` 固定为 bound
+source，并把 `PATH` 替换为 bound runtime bin 加固定最小系统路径，不继承 gateway 的
+ambient `PATH`。worker 命令及 forecast 两段 inline Python 都必须使用 exact bound runtime。
 launcher 首次启动只接受 exact `prepared`，重放只接受 exact `active`；binding 缺失或为
 `completed` 都是零启动，completed generation 只能由下一次 prepare 归档并替换。
 
@@ -298,7 +303,8 @@ source 与 runtime bundle 都以
 `retained_fail_closed_until_operator_cleanup` 保留，launch JSON 中的
 `target_python_source_root`、`target_python_runtime` 和
 `rollback_execution_binding_id` 是审计路径/身份。不要单独删除任一 bundle；只有所有引用
-它们的 Slurm task 均已终态且前滚完成后，才能随整个 rollback worktree 一起清理。
+它们的 Slurm task 均已终态且前滚完成后，才能清理该 workspace generation retention root；
+原 rollback checkout 是独立对象，active 发布后可删除，不能把它当作 bundle retention owner。
 
 `preparing` receipt 无论遗留在 marker 删除前还是删除后，都只能在重新取得同一 production
 file lease 后自动续成一个 `prepared` fence；不得人工删除 marker/receipt。fence 存在期间，
@@ -313,7 +319,6 @@ uv run nhms-pipeline complete-file-journal-rollforward \
   --scheduler-lock-backend file \
   --preparation-receipt-id '<preparation-receipt-id>'
 systemctl --user start nhms-compute-scheduler.timer
-git worktree remove "$ROLLBACK_CHECKOUT"
 ```
 
 launcher 持有独立的 rollback execution flock，并把 fd 传给 child；即使 controller
@@ -322,13 +327,16 @@ launcher 持有独立的 rollback execution flock，并把 fd 传给 child；即
 bounded reconcile inventory 读取 exact current journal/latest/direct/legacy authority，不扫描
 年度历史：只有显式 terminal allowlist 可通过；local/no-ID、空/未知状态、partial cohort，
 以及 enumerate/stat/read 期间 authority 消失或查询不可用，都会拒绝前滚且不改变
-fence/binding；该 quiescence proof 本身也不会创建或更新 journal/lock authority。确认
-source/runtime 仍存在且任务
-全部收敛后，binding 按 `active -> rolling_forward -> completed` 迁移；中途崩溃可从
+fence/binding；该 quiescence proof 本身也不会创建或更新 journal/lock authority。查询开始时
+会固定 `reconcile-inventory/`、`journal/`、`latest/`、`pipeline-jobs/`、
+`active-reconcile/` 五个 root 的签名；任一原本存在的 root 消失、被替换或在最终复核前变化，
+统一报 `file_journal_quiescence_authority_changed`。只有全程不存在的 root 才可视为空。确认
+source/runtime 仍存在且任务全部收敛后，binding 按
+`active -> rolling_forward -> completed` 迁移；中途崩溃可从
 `rolling_forward` 续跑。若 prepare 后决定不启动 old writer，也只能由 exact `prepared`
 authority 在 unsettled job 为空时执行 `prepared -> rolling_forward -> completed`；binding
-缺失或被篡改时禁止手工删除 fence。只有 completed receipt 才允许恢复 timer 或删除
-worktree。
+缺失或被篡改时禁止手工删除 fence。只有 completed receipt 才允许恢复 timer 或清理
+receipt/generation retention root；原 worktree 可在 active 发布后独立删除。
 
 node-22 live drill 必须保存 preparation、old-writer launch、roll-forward 三段 receipt，
 并证明 A receipt 只能运行 clean A commit 快照；B/dirty/unresolved checkout、不可用目标

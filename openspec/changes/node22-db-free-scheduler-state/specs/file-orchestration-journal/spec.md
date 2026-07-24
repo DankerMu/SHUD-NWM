@@ -534,6 +534,9 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
 - **AND** after receipt validation it materializes the full target generation as
   a private detached clean persistent source bundle and copies the already-opened,
   identity-checked interpreter into a protected persistent runtime bundle;
+  both bundles SHALL be located beneath the workspace in the deterministic
+  private immutable retention root for the exact preparation receipt and target
+  generation, never beneath the target checkout or its venv;
   that runtime bundle contains copied, non-symlinked interpreter libraries and
   self-contained configuration, so removing or replacing the original venv
   libraries/configuration cannot change later execution;
@@ -560,12 +563,17 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
 - **AND** each single, array, or direct-render Gateway request captures and
   validates the workspace binding once, reuses that immutable request-local
   value for every task and render step, rejects active-binding overrides of
-  `PATH`, `PYTHONPATH`, `PYTHONHOME`, or `VIRTUAL_ENV`, and uses the exact bound
-  interpreter for worker commands and forecast inline Python
+  `PATH`, `PYTHONPATH`, `PYTHONHOME`, or `VIRTUAL_ENV`; every active script unsets
+  `PYTHONHOME` and `VIRTUAL_ENV`, exports the bound source as the exact
+  `PYTHONPATH`, replaces ambient `PATH` with the bound runtime bin plus the fixed
+  minimal system path, and uses the exact bound interpreter for worker commands
+  and both forecast inline Python blocks
 - **AND** a separate cross-process rollback execution lock is held across the
   complete old-writer process and inherited across launcher failure, so
   roll-forward cannot consume the fence before or while that writer runs
-- **AND** the protected runtime and source remain on shared storage after launch
+- **AND** deleting the entire original target checkout after active publication
+  cannot invalidate the binding or forcing, forecast, and state-save execution;
+  the protected runtime and source remain on shared workspace storage after launch
   and are removed only after every submitted worker that references them is
   terminal; both paths, the execution-binding identity and the fail-closed
   retention contract are launch evidence
@@ -577,7 +585,12 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
   reconcile-inventory authority—not global historical replay—to prove every
   rollback-era job is in the explicit terminal allowlist; local/no-ID jobs,
   blank/unknown statuses, partial cohort projection, and any
-  enumerate/stat/read disappearance block; the proof query itself performs no
+  enumerate/stat/read disappearance block; it captures the root signatures for
+  reconcile-inventory, journal, latest, direct pipeline-jobs, and legacy-active
+  at query start, and any initially existing root disappearance, replacement, or
+  signature change through the final check reports
+  `file_journal_quiescence_authority_changed`; a root is empty only when it stays
+  nonexistent throughout the query. The proof query itself performs no
   durable write, and unavailable evidence fails closed
 - **AND** roll-forward can cancel an unlaunched preparation only from the exact
   durable `prepared` authority; missing or tampered authority fails closed, while

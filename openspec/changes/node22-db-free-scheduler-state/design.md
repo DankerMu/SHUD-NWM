@@ -1568,16 +1568,27 @@ Invariant Matrix:
   workspace-scoped execution binding before the old writer starts. `prepared`
   binds the receipt and exact Git generation as durable no-launch authority;
   launcher replaces it with `active` containing protected persistent Python
-  runtime and source bundles before child execution. The current Gateway injects
+  runtime and source bundles before child execution. Those bundles live under a
+  deterministic private, immutable workspace retention root keyed by the
+  preparation receipt and target generation; neither path is inside the target
+  checkout or its venv, and deleting the complete original checkout after active
+  publication cannot break later worker execution. The current Gateway injects
   only active bundles into old-writer manifests, so forcing, forecast and
   state-save cannot import the Gateway checkout's newer source generation.
   Roll-forward is admitted only after a strict bounded current-authority query
   over reconcile inventory and its exact journal/latest/direct/legacy sources
-  proves every rollback-era job belongs to the terminal allowlist; it never
-  replays global annual history, performs no durable write, and any authority
-  disappearance fails closed.
+  proves every rollback-era job belongs to the terminal allowlist. It captures
+  the reconcile-inventory, journal, latest, direct pipeline-jobs, and
+  legacy-active root identities before the proof; any root disappearance,
+  replacement, or signature change at stat/list/read or the final check fails
+  closed with one quiescence-authority reason, while a root is empty only if it
+  remains nonexistent throughout. The query never replays global annual
+  history and performs no durable write.
   Gateway single/array/render requests capture that active binding once and
-  reuse it through task normalization and rendering. Roll-forward then persists
+  reuse it through task normalization and rendering. Active scripts unset
+  `PYTHONHOME` and `VIRTUAL_ENV`, export the bound source as the exact
+  `PYTHONPATH`, and replace rather than extend `PATH` with the bound runtime bin
+  plus the fixed minimal system path. Roll-forward then persists
   `prepared|active` -> `rolling_forward`
   -> `completed` around the crash-resumable inventory transition. Missing prepared
   authority cannot authorize launch or cancellation. A first launch requires
@@ -1594,8 +1605,10 @@ Regression rows:
   reconcile tasks, and do not submit or cancel another forecast array.
 - Rollback writer generation A with Gateway checkout B -> the old manifest is
   bound by the current Gateway to A's protected runtime and source for forcing,
-  forecast and state-save; a conflicting path fails closed and an unrelated
-  workspace keeps its ordinary console entrypoint.
+  forecast and state-save after the original A checkout is deleted; hostile
+  ambient Python bootstrap variables cannot affect the scripts, a conflicting
+  path fails closed, and an unrelated workspace keeps its ordinary console
+  entrypoint.
 - Old writer exits while any reserved/ambiguous/running job remains ->
   roll-forward performs zero authority mutation; after all jobs settle it
   resumes `active -> rolling_forward -> completed`, and a subsequent preparation
