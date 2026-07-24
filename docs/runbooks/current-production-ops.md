@@ -281,13 +281,18 @@ uv run nhms-pipeline launch-file-journal-rollback-writer \
 
 通过 receipt 后，controller 会把目标完整 SHA 物化为私有、detached、权限锁紧的持久
 clean source bundle，并从已经打开和复核过的目标解释器复制一个内容固定的私有 runtime
-bundle。prepare 成功前，controller 先写入 workspace-scoped `prepared` execution binding，
+bundle；runtime 自带复制且锁紧的库和配置，不保留指回原 venv 的软链。prepare 成功前，controller 先写入 workspace-scoped `prepared` execution binding，
 把 preparation receipt、journal/workspace/file-lock 与目标 generation 绑定为 no-launch
 authority；launcher 在 child 启动前将其替换为包含 source/runtime 的 `active` binding。
 ambient environment 不能改写这些值；即使旧版本 writer 不认识新 manifest 字段，当前
 HTTP Slurm gateway 也只会按 exact workspace 注入 active binding。forcing、
 forecast、state-save 三阶段都会切换到该 source 并使用该 runtime；无 active binding 的
 普通生产提交仍使用原 console entrypoint。
+每个 Gateway single/array/direct-render 请求只捕获并验证一次 binding，array task 复用同一
+request-local 结果；active 期间拒绝调用方覆盖 `PATH`、`PYTHONPATH`、`PYTHONHOME`、
+`VIRTUAL_ENV`，worker 命令及 forecast inline Python 都必须使用 exact bound runtime。
+launcher 首次启动只接受 exact `prepared`，重放只接受 exact `active`；binding 缺失或为
+`completed` 都是零启动，completed generation 只能由下一次 prepare 归档并替换。
 
 source 与 runtime bundle 都以
 `retained_fail_closed_until_operator_cleanup` 保留，launch JSON 中的
@@ -313,9 +318,12 @@ git worktree remove "$ROLLBACK_CHECKOUT"
 
 launcher 持有独立的 rollback execution flock，并把 fd 传给 child；即使 controller
 崩溃，只要 old writer 仍存活，roll-forward 也会以
-`file_journal_rollback_execution_active` fail closed。前滚命令还会在首次状态迁移前扫描
-durable journal：任一 reserved、ambiguous、reconciling、queued、running 或其他非终态 job，
-以及查询不可用，都会拒绝前滚且不改变 fence/binding。确认 source/runtime 仍存在且任务
+`file_journal_rollback_execution_active` fail closed。前滚命令还会在首次状态迁移前只按
+bounded reconcile inventory 读取 exact current journal/latest/direct/legacy authority，不扫描
+年度历史：只有显式 terminal allowlist 可通过；local/no-ID、空/未知状态、partial cohort，
+以及 enumerate/stat/read 期间 authority 消失或查询不可用，都会拒绝前滚且不改变
+fence/binding；该 quiescence proof 本身也不会创建或更新 journal/lock authority。确认
+source/runtime 仍存在且任务
 全部收敛后，binding 按 `active -> rolling_forward -> completed` 迁移；中途崩溃可从
 `rolling_forward` 续跑。若 prepare 后决定不启动 old writer，也只能由 exact `prepared`
 authority 在 unsettled job 为空时执行 `prepared -> rolling_forward -> completed`；binding

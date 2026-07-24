@@ -120,6 +120,14 @@ def test_real_slurm_gateway_fake_binaries_cover_command_boundary(
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
 
     gateway = _gateway(tmp_path)
+    binding_captures: list[Path] = []
+    real_capture = gateway._capture_active_rollback_binding
+
+    def capture_once(workspace_root: Path):
+        binding_captures.append(workspace_root)
+        return real_capture(workspace_root)
+
+    monkeypatch.setattr(gateway, "_capture_active_rollback_binding", capture_once)
     request = SubmitJobRequest(
         run_id="run_001",
         model_id="model_001",
@@ -141,6 +149,7 @@ def test_real_slurm_gateway_fake_binaries_cover_command_boundary(
     assert array.job_id == "12345"
     assert array.manifest["array_task_count"] == 2
     assert array.manifest["max_concurrent"] == 2
+    assert binding_captures == [tmp_path / "workspace", tmp_path / "workspace"]
 
     status = gateway.get_job_status("12345")
     assert status.status == SlurmJobStatus.FAILED
@@ -420,6 +429,272 @@ def _production_manifest(tmp_path: Path, job_type: str) -> dict[str, object]:
         "year": 1993,
         "manifest_index_path": str(tmp_path / "manifest_index.json"),
     }
+
+
+def _write_active_rollback_binding(tmp_path: Path) -> dict[str, object]:
+    import hashlib
+    import sys
+
+    from packages.common.rollback_execution_binding import (
+        ROLLBACK_EXECUTION_BINDING_SCHEMA_VERSION,
+        binding_id_for,
+        seal_rollback_python_source_tree,
+        write_rollback_execution_binding,
+    )
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    journal = tmp_path / "journal"
+    journal.mkdir(exist_ok=True)
+    source = tmp_path / "retained" / "source"
+    source.mkdir(parents=True)
+    (source / "bound_sentinel.py").write_text("GENERATION = 'A'\n", encoding="utf-8")
+    seal_rollback_python_source_tree(source)
+    runtime = tmp_path / "retained" / "runtime" / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} \"$@\"\n", encoding="utf-8")
+    runtime.chmod(0o500)
+    metadata = journal.stat()
+    now = "2026-07-23T12:00:00Z"
+    binding: dict[str, object] = {
+        "schema_version": ROLLBACK_EXECUTION_BINDING_SCHEMA_VERSION,
+        "binding_id": "",
+        "status": "active",
+        "preparation_receipt_id": "a" * 64,
+        "journal_root_identity": {
+            "path_digest": hashlib.sha256(str(journal).encode()).hexdigest(),
+            "device": metadata.st_dev,
+            "inode": metadata.st_ino,
+        },
+        "scheduler_lease_identity": {
+            "backend": "file",
+            "lock_path_digest": "b" * 64,
+            "workspace_root_digest": "c" * 64,
+        },
+        "workspace_root": str(workspace),
+        "lock_path": str(workspace / "scheduler" / "production-scheduler.lock"),
+        "target_writer_generation": "d" * 40,
+        "target_python_runtime": str(runtime),
+        "target_python_source_root": str(source),
+        "writer_repository_root": str(tmp_path / "rollback-checkout"),
+        "created_at": now,
+        "updated_at": now,
+    }
+    binding["binding_id"] = binding_id_for(binding)
+    return write_rollback_execution_binding(workspace, binding)
+
+
+def _count_active_binding_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, int]:
+    from services.slurm_gateway import real_backend as real_backend_module
+
+    calls = {"read": 0, "validate": 0}
+    real_read = real_backend_module.read_rollback_execution_binding
+    real_validate = real_backend_module.validate_rollback_execution_binding
+
+    def counted_read(*args, **kwargs):
+        calls["read"] += 1
+        return real_read(*args, **kwargs)
+
+    def counted_validate(*args, **kwargs):
+        calls["validate"] += 1
+        return real_validate(*args, **kwargs)
+
+    monkeypatch.setattr(real_backend_module, "read_rollback_execution_binding", counted_read)
+    monkeypatch.setattr(real_backend_module, "validate_rollback_execution_binding", counted_validate)
+    return calls
+
+
+def test_round21_active_binding_real_submit_job_captures_and_validates_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binding = _write_active_rollback_binding(tmp_path)
+    calls = _count_active_binding_validation(monkeypatch)
+    commands: list[list[str]] = []
+    scripts: list[str] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        commands.append(command)
+        scripts.append(Path(command[-1]).read_text(encoding="utf-8"))
+        return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 12345\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    gateway = _production_gateway(tmp_path)
+    manifest = _production_manifest(tmp_path, "run_shud_analysis")
+    record = gateway.submit_job(
+        SubmitJobRequest(
+            run_id="run_001",
+            model_id="model_001",
+            job_type="run_shud_analysis",
+            manifest=manifest,
+        )
+    )
+
+    assert calls == {"read": 1, "validate": 1}
+    assert len(commands) == 1 and Path(commands[0][0]).name == "sbatch"
+    assert record.job_id == "12345"
+    for field in ("target_python_runtime", "target_python_source_root"):
+        assert record.manifest[field] == binding[field]
+        assert str(binding[field]) in scripts[0]
+
+
+def test_round21_active_binding_real_submit_array_is_one_capture_and_exact_everywhere(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binding = _write_active_rollback_binding(tmp_path)
+    calls = _count_active_binding_validation(monkeypatch)
+    commands: list[list[str]] = []
+    scripts: list[str] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        commands.append(command)
+        scripts.append(Path(command[-1]).read_text(encoding="utf-8"))
+        return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 22345\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    gateway = _production_gateway(tmp_path)
+    tasks = [_fake_array_task("run_001", "model_001"), _fake_array_task("run_002", "model_002")]
+    record = gateway.submit_job_array(
+        job_type="run_shud_forecast_array",
+        cycle_id="cycle_001",
+        stage_name="forecast",
+        tasks=tasks,
+        manifest=_production_manifest(tmp_path, "run_shud_forecast_array"),
+    )
+
+    assert calls == {"read": 1, "validate": 1}
+    assert len(commands) == 1
+    assert commands[0][1] == "--array=0-1%2"
+    assert record.job_id == "22345"
+    persisted_tasks = json.loads(Path(record.manifest["manifest_index_path"]).read_text(encoding="utf-8"))
+    assert len(persisted_tasks) == 2
+    for field in ("target_python_runtime", "target_python_source_root"):
+        assert record.manifest[field] == binding[field]
+        assert all(task[field] == binding[field] for task in persisted_tasks)
+        assert str(binding[field]) in scripts[0]
+    assert scripts[0].count('"$NHMS_TARGET_PYTHON_RUNTIME" - <<\'PY\'') == 2
+
+
+@pytest.mark.parametrize("endpoint", ["single", "array"])
+@pytest.mark.parametrize("field", ["target_python_runtime", "target_python_source_root"])
+def test_round21_active_binding_submit_conflict_is_zero_sbatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+    field: str,
+) -> None:
+    _write_active_rollback_binding(tmp_path)
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **_kwargs: commands.append(command),
+    )
+    gateway = _production_gateway(tmp_path)
+    job_type = "run_shud_analysis" if endpoint == "single" else "run_shud_forecast_array"
+    manifest = {**_production_manifest(tmp_path, job_type), field: str(tmp_path / "hostile")}
+
+    with pytest.raises(ManifestValidationError, match="conflicts with the active rollback"):
+        if endpoint == "single":
+            gateway.submit_job(
+                SubmitJobRequest(
+                    run_id="run_001",
+                    model_id="model_001",
+                    job_type=job_type,
+                    manifest=manifest,
+                )
+            )
+        else:
+            gateway.submit_job_array(
+                job_type=job_type,
+                cycle_id="cycle_001",
+                stage_name="forecast",
+                tasks=[_fake_array_task("run_001", "model_001")],
+                manifest=manifest,
+            )
+    assert commands == []
+
+
+@pytest.mark.parametrize("endpoint", ["single", "array"])
+@pytest.mark.parametrize("key", ["PATH", "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"])
+def test_round21_active_binding_real_submit_rejects_hostile_bootstrap_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+    key: str,
+) -> None:
+    _write_active_rollback_binding(tmp_path)
+    commands: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "run", lambda command, **_kwargs: commands.append(command))
+    gateway = _production_gateway(tmp_path)
+    job_type = "run_shud_analysis" if endpoint == "single" else "run_shud_forecast_array"
+    manifest = {**_production_manifest(tmp_path, job_type), "slurm_env": {key: "/tmp/hostile"}}
+
+    with pytest.raises(ManifestValidationError, match="protects Python bootstrap"):
+        if endpoint == "single":
+            gateway.submit_job(
+                SubmitJobRequest(
+                    run_id="run_001",
+                    model_id="model_001",
+                    job_type=job_type,
+                    manifest=manifest,
+                )
+            )
+        else:
+            gateway.submit_job_array(
+                job_type=job_type,
+                cycle_id="cycle_001",
+                stage_name="forecast",
+                tasks=[_fake_array_task("run_001", "model_001")],
+                manifest=manifest,
+            )
+    assert commands == []
+
+
+@pytest.mark.parametrize("endpoint", ["single", "array"])
+@pytest.mark.parametrize("key", ["PATH", "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"])
+def test_round21_no_binding_real_submit_preserves_bootstrap_env_compatibility(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+    key: str,
+) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 32345\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    gateway = _production_gateway(tmp_path)
+    job_type = "run_shud_analysis" if endpoint == "single" else "run_shud_forecast_array"
+    manifest = {**_production_manifest(tmp_path, job_type), "slurm_env": {key: "/tmp/ordinary"}}
+    if endpoint == "single":
+        record = gateway.submit_job(
+            SubmitJobRequest(
+                run_id="run_001",
+                model_id="model_001",
+                job_type=job_type,
+                manifest=manifest,
+            )
+        )
+    else:
+        record = gateway.submit_job_array(
+            job_type=job_type,
+            cycle_id="cycle_001",
+            stage_name="forecast",
+            tasks=[_fake_array_task("run_001", "model_001")],
+            manifest=manifest,
+        )
+    assert record.job_id == "32345"
+    assert record.manifest["slurm_env"][key] == "/tmp/ordinary"
+    assert len(commands) == 1
 
 
 def test_submit_job_parses_sbatch_stdout(monkeypatch, tmp_path):
@@ -1770,6 +2045,7 @@ def test_round20_old_manifest_uses_durable_active_binding_source_and_runtime_fro
         seal_rollback_python_source_tree,
         write_rollback_execution_binding,
     )
+    from services.slurm_gateway import real_backend as real_backend_module
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1863,7 +2139,23 @@ def test_round20_old_manifest_uses_durable_active_binding_source_and_runtime_fro
     assert "NHMS_TARGET_PYTHON_SOURCE_ROOT" not in rendered_while_prepared
     write_rollback_execution_binding(workspace, binding)
 
+    binding_calls = {"read": 0, "validate": 0}
+    real_read_binding = real_backend_module.read_rollback_execution_binding
+    real_validate_binding = real_backend_module.validate_rollback_execution_binding
+
+    def counted_read_binding(*args, **kwargs):
+        binding_calls["read"] += 1
+        return real_read_binding(*args, **kwargs)
+
+    def counted_validate_binding(*args, **kwargs):
+        binding_calls["validate"] += 1
+        return real_validate_binding(*args, **kwargs)
+
+    monkeypatch.setattr(real_backend_module, "read_rollback_execution_binding", counted_read_binding)
+    monkeypatch.setattr(real_backend_module, "validate_rollback_execution_binding", counted_validate_binding)
+
     rendered = gateway.render_template(job_type, old_manifest, str(manifest_index))
+    assert binding_calls == {"read": 1, "validate": 1}
 
     assert f"export NHMS_TARGET_PYTHON_RUNTIME={shlex.quote(str(runtime_a))}" in rendered
     assert f"export NHMS_TARGET_PYTHON_SOURCE_ROOT={shlex.quote(str(source_a))}" in rendered
@@ -1878,6 +2170,18 @@ def test_round20_old_manifest_uses_durable_active_binding_source_and_runtime_fro
     }
     assert marker.read_text(encoding="utf-8") == expected[worker_module]
     assert source_a.is_dir()
+    if job_type == "run_shud_forecast_array":
+        assert rendered.count('"$NHMS_TARGET_PYTHON_RUNTIME" - <<\'PY\'') == 2
+        assert "$(python - <<'PY'" not in rendered
+        assert "  python - <<'PY'" not in rendered
+
+    for hostile_key in ("PATH", "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"):
+        with pytest.raises(ManifestValidationError, match="protects Python bootstrap"):
+            gateway.render_template(
+                job_type,
+                {**old_manifest, "slurm_env": {hostile_key: "/tmp/hostile"}},
+                str(manifest_index),
+            )
 
     other_workspace = workspace / "other"
     other_workspace.mkdir()

@@ -534,6 +534,9 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
 - **AND** after receipt validation it materializes the full target generation as
   a private detached clean persistent source bundle and copies the already-opened,
   identity-checked interpreter into a protected persistent runtime bundle;
+  that runtime bundle contains copied, non-symlinked interpreter libraries and
+  self-contained configuration, so removing or replacing the original venv
+  libraries/configuration cannot change later execution;
   rechecking the original checkout and runtime before launch means a post-check
   checkout or interpreter-path replacement cannot change the executed source or
   interpreter
@@ -544,12 +547,21 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
   boundary; the current HTTP Slurm gateway applies only that exact active
   workspace binding even when the old writer does not understand the new manifest
   fields, and conflicting explicit fields fail closed
+- **AND** launcher admission is exactly one matching durable `prepared`
+  authority for first launch or one matching durable `active` authority for
+  replay; missing authority and `completed` authority are zero-launch failures,
+  and only a new prepare may replace/archive a completed generation
 - **AND** the launcher overrides ambient configuration with the receipt-bound
   journal root, workspace, file-lock backend and lock path, and carries the
   protected target runtime and source through the HTTP Slurm gateway into forcing,
   forecast and state-save worker templates; all three stages execute from the
   bound source generation, while workspaces without an active binding preserve
   their existing console entrypoints
+- **AND** each single, array, or direct-render Gateway request captures and
+  validates the workspace binding once, reuses that immutable request-local
+  value for every task and render step, rejects active-binding overrides of
+  `PATH`, `PYTHONPATH`, `PYTHONHOME`, or `VIRTUAL_ENV`, and uses the exact bound
+  interpreter for worker commands and forecast inline Python
 - **AND** a separate cross-process rollback execution lock is held across the
   complete old-writer process and inherited across launcher failure, so
   roll-forward cannot consume the fence before or while that writer runs
@@ -561,9 +573,12 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
   or snapshot-unavailable targets are rejected before any writer is started;
   caller-supplied generation claims are not launch authority
 - **AND** roll-forward requires the matching preparation receipt and the same
-  scheduler lease; before its first mutation it must prove the durable journal
-  has no reserved, ambiguous, reconciling, queued, running, or otherwise
-  non-terminal rollback-era job, and unavailable quiescence evidence fails closed
+  scheduler lease; before its first mutation it must use bounded current
+  reconcile-inventory authority—not global historical replay—to prove every
+  rollback-era job is in the explicit terminal allowlist; local/no-ID jobs,
+  blank/unknown statuses, partial cohort projection, and any
+  enumerate/stat/read disappearance block; the proof query itself performs no
+  durable write, and unavailable evidence fails closed
 - **AND** roll-forward can cancel an unlaunched preparation only from the exact
   durable `prepared` authority; missing or tampered authority fails closed, while
   both `prepared` and `active` transition to `rolling_forward` before the strict

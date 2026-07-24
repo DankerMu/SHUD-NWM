@@ -1571,10 +1571,18 @@ Invariant Matrix:
   runtime and source bundles before child execution. The current Gateway injects
   only active bundles into old-writer manifests, so forcing, forecast and
   state-save cannot import the Gateway checkout's newer source generation.
-  Roll-forward is admitted only after a bounded journal query proves every
-  rollback-era job settled, then persists `prepared|active` -> `rolling_forward`
+  Roll-forward is admitted only after a strict bounded current-authority query
+  over reconcile inventory and its exact journal/latest/direct/legacy sources
+  proves every rollback-era job belongs to the terminal allowlist; it never
+  replays global annual history, performs no durable write, and any authority
+  disappearance fails closed.
+  Gateway single/array/render requests capture that active binding once and
+  reuse it through task normalization and rendering. Roll-forward then persists
+  `prepared|active` -> `rolling_forward`
   -> `completed` around the crash-resumable inventory transition. Missing prepared
-  authority cannot authorize cancellation. Completed bindings remain auditable
+  authority cannot authorize launch or cancellation. A first launch requires
+  the exact prepared binding; replay requires the exact active binding.
+  Completed bindings remain auditable
   and cannot wedge or authorize a later preparation.
 
 Regression rows:

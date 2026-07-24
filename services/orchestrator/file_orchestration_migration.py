@@ -267,18 +267,11 @@ def launch_file_journal_rollback_writer(
                 field="rollback_execution_binding",
             ) from error
         with ExitStack() as retained:
-            if existing_binding is not None and existing_binding["status"] == "completed":
-                try:
-                    archive_completed_rollback_execution_binding(
-                        config.workspace_root,
-                        existing_binding,
-                    )
-                except RollbackExecutionBindingError as error:
-                    raise FileOrchestrationJournalError(
-                        "file_journal_rollback_execution_binding_archive_unavailable",
-                        field="rollback_execution_binding",
-                    ) from error
-                existing_binding = None
+            if existing_binding is None or existing_binding["status"] == "completed":
+                raise FileOrchestrationJournalError(
+                    "file_journal_rollback_execution_binding_conflict",
+                    field="rollback_execution_binding",
+                )
             if existing_binding is not None and existing_binding["status"] == "prepared":
                 _require_matching_prepared_rollback_binding(
                     existing_binding,
@@ -286,7 +279,7 @@ def launch_file_journal_rollback_writer(
                     config=config,
                     actual_writer_generation=actual_writer_generation,
                 )
-            if existing_binding is None or existing_binding["status"] == "prepared":
+            if existing_binding["status"] == "prepared":
                 snapshot_root = retained.enter_context(
                     _materialize_commit_snapshot(
                         repository_root,
@@ -526,7 +519,13 @@ def _materialize_bound_runtime(
         source_config_stat = source_config.stat(follow_symlinks=False)
         if not stat.S_ISREG(source_config_stat.st_mode):
             raise OSError("target venv is missing pyvenv.cfg")
-        shutil.copyfile(source_config, bundle_root / "pyvenv.cfg", follow_symlinks=False)
+        config_lines = source_config.read_text(encoding="utf-8").splitlines()
+        retained_config = [
+            line for line in config_lines
+            if not line.lower().startswith(("home =", "executable =", "command ="))
+        ]
+        retained_config.insert(0, f"home = {bundle_bin}")
+        (bundle_root / "pyvenv.cfg").write_text("\n".join(retained_config) + "\n", encoding="utf-8")
         _materialize_bound_runtime_libraries(
             bundle_root=bundle_root,
             venv_root=venv_root,
@@ -537,6 +536,7 @@ def _materialize_bound_runtime(
             bound_path=bound_path,
             runtime_identity=runtime_identity,
         )
+        _seal_bound_runtime_tree(bundle_root)
         os.chmod(bundle_root / "pyvenv.cfg", 0o400)
         os.chmod(bundle_bin, 0o500)
         os.chmod(bundle_root, 0o500)
@@ -606,18 +606,24 @@ def _materialize_bound_runtime_libraries(
 ) -> None:
     bundle_lib = bundle_root / "lib"
     bundle_lib.mkdir(mode=0o700)
-    source_roots = (venv_root / "lib", resolved_runtime.parent.parent / "lib")
+    source_roots = (resolved_runtime.parent.parent / "lib", venv_root / "lib")
     for source_root in source_roots:
         if not source_root.is_dir():
             continue
         for source_entry in source_root.iterdir():
-            destination = bundle_lib / source_entry.name
-            if destination.exists() or destination.is_symlink():
+            if source_entry.is_file() and source_entry.name.startswith("libpython"):
+                shutil.copy2(source_entry, bundle_lib / source_entry.name, follow_symlinks=True)
                 continue
-            destination.symlink_to(source_entry)
-    source_lib64 = venv_root / "lib64"
-    if source_lib64.is_dir():
-        (bundle_root / "lib64").symlink_to(source_lib64)
+            if not re.fullmatch(r"python\d+(?:\.\d+)?", source_entry.name):
+                continue
+            destination = bundle_lib / source_entry.name
+            shutil.copytree(
+                source_entry,
+                destination,
+                dirs_exist_ok=True,
+                symlinks=False,
+                copy_function=shutil.copy2,
+            )
     os.chmod(bundle_lib, 0o500)
 
 
@@ -632,6 +638,21 @@ def _cleanup_bound_runtime_bundle(bundle_root: Path) -> None:
     if bundle_lib.exists():
         os.chmod(bundle_lib, 0o700)
     shutil.rmtree(bundle_root)
+
+
+def _seal_bound_runtime_tree(bundle_root: Path) -> None:
+    for directory, directory_names, file_names in os.walk(bundle_root, followlinks=False):
+        current = Path(directory)
+        for name in (*directory_names, *file_names):
+            entry = current / name
+            if entry.is_symlink():
+                raise OSError("bound runtime cannot retain symlinks")
+        for file_name in file_names:
+            entry = current / file_name
+            mode = 0o500 if entry == bundle_root / "bin" / "python" else 0o400
+            os.chmod(entry, mode)
+        for directory_name in directory_names:
+            os.chmod(current / directory_name, 0o500)
 
 
 def _rollback_writer_environment(
@@ -958,6 +979,16 @@ def complete_file_journal_rollforward(
             if binding["status"] in {"prepared", "active"}:
                 try:
                     unsettled = repository.query_rollback_unsettled_jobs()
+                except FileOrchestrationJournalError as error:
+                    if error.reason in {
+                        "file_journal_rollback_receipt_invalid",
+                        "file_journal_rollback_receipt_wrong_root",
+                    }:
+                        raise
+                    raise FileOrchestrationJournalError(
+                        "file_journal_rollforward_quiescence_unavailable",
+                        field="rollback_jobs",
+                    ) from error
                 except Exception as error:
                     raise FileOrchestrationJournalError(
                         "file_journal_rollforward_quiescence_unavailable",

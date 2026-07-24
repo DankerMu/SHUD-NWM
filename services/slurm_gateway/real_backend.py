@@ -28,6 +28,7 @@ from packages.common.redaction import redact_text
 from packages.common.rollback_execution_binding import (
     RollbackExecutionBindingError,
     read_rollback_execution_binding,
+    validate_rollback_execution_binding,
 )
 from packages.common.safe_fs import (
     SafeFilesystemError,
@@ -94,6 +95,7 @@ MAX_SLURM_COMMAND_OUTPUT_BYTES = 256 * 1024
 MAX_SLURM_ERROR_SNIPPET_BYTES = 2048
 DEFAULT_LIST_LOOKBACK_HOURS = 24
 MAX_LOG_BYTES = 10 * 1024 * 1024
+_ACTIVE_BINDING_BOOTSTRAP_ENV_KEYS = frozenset({"PATH", "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"})
 LOG_TRUNCATION_MARKER = "\n\n[truncated: log exceeded 10485760 bytes]\n"
 
 FREEFORM_STRING_FIELDS = {
@@ -195,7 +197,9 @@ class RealSlurmGateway(SlurmGateway):
     def submit_job(self, request: SubmitJobRequest) -> SlurmJobRecord:
         manifest = request.normalized_manifest()
         self._validate_manifest_secret_scan(manifest)
-        manifest = self._manifest_with_active_rollback_binding(manifest)
+        workspace_root = self._resolve_submission_workspace_dir(manifest.get("workspace_dir"))
+        active_binding = self._capture_active_rollback_binding(workspace_root)
+        manifest = self._manifest_with_captured_rollback_binding(manifest, active_binding)
         run_id = request.resolved_run_id()
         model_id = request.resolved_model_id()
         job_type = request.resolved_job_type()
@@ -214,10 +218,15 @@ class RealSlurmGateway(SlurmGateway):
         if job_type:
             manifest["job_type"] = job_type
         self._require_manifest_fields(manifest, ["run_id", "model_id", "job_type"])
-        manifest["slurm_env"] = self._validate_slurm_env(manifest.get("slurm_env") or {})
+        manifest["slurm_env"] = self._validate_slurm_env(
+            manifest.get("slurm_env") or {},
+            active_binding=active_binding,
+        )
         self._validate_manifest(manifest)
 
-        rendered_script = self.render_template(str(manifest["job_type"]), manifest)
+        rendered_script = self._render_template_with_binding(
+            str(manifest["job_type"]), manifest, active_binding=active_binding
+        )
         job_id = self._submit_rendered_script(rendered_script, comment=_request_comment(request))
         now = self._now()
         record = SlurmJobRecord(
@@ -253,29 +262,28 @@ class RealSlurmGateway(SlurmGateway):
         if not task_list:
             raise SlurmValidationError("Cannot submit array job with 0 tasks")
         self._validate_requested_template_mapping(job_type, base_manifest)
-        slurm_env = self._validate_slurm_env(base_manifest.get("slurm_env") or {})
+        requested_workspace = str(base_manifest.get("workspace_dir") or "").strip()
+        workspace_root = self._resolve_submission_workspace_dir(requested_workspace)
+        active_binding = self._capture_active_rollback_binding(workspace_root)
+        task_list = self._tasks_with_submission_workspace(
+            task_list,
+            workspace_root,
+            require_match=bool(requested_workspace),
+        )
+        base_manifest = self._manifest_with_captured_rollback_binding(base_manifest, active_binding)
+        task_list = [
+            self._manifest_with_captured_rollback_binding(task, active_binding)
+            for task in task_list
+        ]
+        slurm_env = self._validate_slurm_env(
+            base_manifest.get("slurm_env") or {}, active_binding=active_binding
+        )
         self._validate_manifest(base_manifest)
         self._validate_manifest_index_bounds(task_list)
         for index, task in enumerate(task_list):
             task_manifest = dict(task)
             task_manifest.setdefault("task_id", index)
             self._validate_manifest(task_manifest)
-
-        requested_workspace = str(base_manifest.get("workspace_dir") or "").strip()
-        workspace_root = self._resolve_submission_workspace_dir(requested_workspace)
-        task_list = self._tasks_with_submission_workspace(
-            task_list,
-            workspace_root,
-            require_match=bool(requested_workspace),
-        )
-        base_manifest = self._manifest_with_active_rollback_binding(
-            base_manifest,
-            workspace_root=workspace_root,
-        )
-        task_list = [
-            self._manifest_with_active_rollback_binding(task, workspace_root=workspace_root)
-            for task in task_list
-        ]
         first_task = dict(task_list[0])
         model_id = str(first_task.get("model_id") or base_manifest.get("model_id") or "")
         profile = self.resolve_resource_profile(model_id)
@@ -306,7 +314,13 @@ class RealSlurmGateway(SlurmGateway):
         }
         self._require_manifest_fields(render_manifest, ["run_id", "model_id", "job_type", "cycle_id", "stage_name"])
         self._validate_manifest(render_manifest)
-        rendered_script = self.render_template(job_type, render_manifest, str(manifest_index_path), profile=profile)
+        rendered_script = self._render_template_with_binding(
+            job_type,
+            render_manifest,
+            str(manifest_index_path),
+            profile=profile,
+            active_binding=active_binding,
+        )
 
         array_spec = f"0-{task_count - 1}%{effective_max_concurrent}"
         array_comment = base_manifest.get("comment") if isinstance(base_manifest, Mapping) else None
@@ -659,12 +673,31 @@ class RealSlurmGateway(SlurmGateway):
         manifest_index_path: str = "",
         profile: Mapping[str, Any] | None = None,
     ) -> str:
+        workspace_root = self._resolve_submission_workspace_dir(manifest.get("workspace_dir"))
+        active_binding = self._capture_active_rollback_binding(workspace_root)
+        return self._render_template_with_binding(
+            job_type,
+            manifest,
+            manifest_index_path,
+            profile,
+            active_binding=active_binding,
+        )
+
+    def _render_template_with_binding(
+        self,
+        job_type: str,
+        manifest: Mapping[str, Any],
+        manifest_index_path: str = "",
+        profile: Mapping[str, Any] | None = None,
+        *,
+        active_binding: Mapping[str, Any] | None,
+    ) -> str:
         manifest_dict = dict(manifest)
         manifest_dict["job_type"] = job_type
         manifest_dict.setdefault("stage_name", manifest_dict.get("stage") or job_type)
         manifest_dict.setdefault("workspace_dir", str(Path(self.settings.workspace_dir)))
         manifest_dict.setdefault("manifest_index_path", manifest_index_path)
-        manifest_dict = self._manifest_with_active_rollback_binding(manifest_dict)
+        manifest_dict = self._manifest_with_captured_rollback_binding(manifest_dict, active_binding)
         self._validate_manifest(manifest_dict)
         target_python_runtime = self._validated_target_python_runtime(
             manifest_dict.get("target_python_runtime")
@@ -681,7 +714,9 @@ class RealSlurmGateway(SlurmGateway):
                 "Target Python runtime and source root must be supplied together.",
                 {"field": "manifest.target_python_runtime"},
             )
-        slurm_env = self._validate_slurm_env(manifest_dict.get("slurm_env") or {})
+        slurm_env = self._validate_slurm_env(
+            manifest_dict.get("slurm_env") or {}, active_binding=active_binding
+        )
         resource_profile = dict(profile or self.resolve_resource_profile(str(manifest_dict.get("model_id") or "")))
         try:
             resource_profile = validate_resource_profile(resource_profile)
@@ -839,7 +874,12 @@ class RealSlurmGateway(SlurmGateway):
             return value
         return "[redacted]"
 
-    def _validate_slurm_env(self, value: Any) -> dict[str, str]:
+    def _validate_slurm_env(
+        self,
+        value: Any,
+        *,
+        active_binding: Mapping[str, Any] | None = None,
+    ) -> dict[str, str]:
         if value in (None, ""):
             return {}
         if not isinstance(value, Mapping):
@@ -848,6 +888,11 @@ class RealSlurmGateway(SlurmGateway):
         for key, raw_value in value.items():
             key_text = str(key)
             value_text = str(raw_value)
+            if active_binding is not None and key_text in _ACTIVE_BINDING_BOOTSTRAP_ENV_KEYS:
+                raise ManifestValidationError(
+                    "Active rollback binding protects Python bootstrap environment variables.",
+                    {"field": f"slurm_env.{key_text}"},
+                )
             key_secret_reason = secret_manifest_key_reason(key_text)
             if key_secret_reason is not None:
                 raise ManifestValidationError(
@@ -1568,33 +1613,32 @@ class RealSlurmGateway(SlurmGateway):
         except ValueError as error:
             raise ManifestValidationError(str(error), {"field": field}) from error
 
-    def _manifest_with_active_rollback_binding(
+    def _capture_active_rollback_binding(
         self,
-        manifest: Mapping[str, Any],
-        *,
-        workspace_root: Path | None = None,
-    ) -> dict[str, Any]:
-        normalized = dict(manifest)
-        resolved_workspace = workspace_root or self._resolve_submission_workspace_dir(
-            normalized.get("workspace_dir")
-        )
+        workspace_root: Path,
+    ) -> dict[str, Any] | None:
         try:
-            binding = read_rollback_execution_binding(
-                resolved_workspace,
-                require_artifacts=False,
+            binding = read_rollback_execution_binding(workspace_root, require_artifacts=False)
+            if binding is None or binding["status"] != "active":
+                return None
+            return validate_rollback_execution_binding(
+                binding,
+                expected_workspace_root=workspace_root,
+                require_artifacts=True,
             )
-            if binding is not None and binding["status"] == "active":
-                binding = read_rollback_execution_binding(
-                    resolved_workspace,
-                    required=True,
-                    require_artifacts=True,
-                )
         except RollbackExecutionBindingError as error:
             raise ManifestValidationError(
                 "Active rollback execution binding is invalid.",
                 {"field": "rollback_execution_binding"},
             ) from error
-        if binding is None or binding["status"] != "active":
+
+    def _manifest_with_captured_rollback_binding(
+        self,
+        manifest: Mapping[str, Any],
+        binding: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        normalized = dict(manifest)
+        if binding is None:
             return normalized
         for field in ("target_python_runtime", "target_python_source_root"):
             requested = normalized.get(field)
