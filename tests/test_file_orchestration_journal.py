@@ -1114,10 +1114,15 @@ def test_file_journal_candidate_state_attributes_cohort_qc_to_candidates(
     )
 
     assert state is not None
-    stages = {str(job.get("stage")) for job in state.get("pipeline_jobs") or []}
-    assert "state_save_qc" in stages
+    qc_jobs = [job for job in state.get("pipeline_jobs") or [] if job.get("stage") == "state_save_qc"]
+    assert qc_jobs
     assert state.get("restart_stage") is None
     assert state.get("completed_stage_evidence") is None
+    # Cohort jobs are shared by all candidates: only the compact projection may
+    # be attributed, or pass evidence multiplies past the size guard.
+    for job in qc_jobs:
+        assert "cohort_members" not in job
+        assert "candidate_projections" not in job
 
 
 def test_file_orchestration_journal_write_strips_redaction_placeholders(tmp_path: Path) -> None:

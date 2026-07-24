@@ -377,7 +377,11 @@ def _filter_cycle_rows_for_model(
         else None
     )
     rows.pipeline_jobs = {
-        job_id: job
+        job_id: (
+            _compact_cycle_scope_job(job)
+            if _is_model_less_cycle_scope_job(job, source_id=source_id, cycle_time=cycle_time)
+            else job
+        )
         for job_id, job in rows.pipeline_jobs.items()
         if _job_matches_candidate(job, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
     }
@@ -7983,6 +7987,53 @@ def _job_is_current_terminal_completion(job: Mapping[str, Any]) -> bool:
 
 def _current_terminal_jobs(jobs: Iterable[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     return [job for job in jobs if chain_repository_state._record_allowed_for_compute_state_terminal(job)]
+
+
+_CYCLE_SCOPE_JOB_PROJECTION_KEYS = (
+    "job_id",
+    "run_id",
+    "cycle_id",
+    "cycle_time",
+    "source_id",
+    "model_id",
+    "job_type",
+    "stage",
+    "status",
+    "slurm_job_id",
+    "array_task_id",
+    "error_code",
+    "restart_stage",
+    "restart_from_stage",
+    "retry_count",
+    "created_at",
+    "updated_at",
+    "submitted_at",
+    "started_at",
+    "finished_at",
+)
+
+
+def _is_model_less_cycle_scope_job(
+    job: Mapping[str, Any], *, source_id: str, cycle_time: datetime
+) -> bool:
+    if job.get("model_id") not in (None, ""):
+        return False
+    source_id = _normalize_file_source_id(source_id, field="source_id")
+    cycle_run_id = f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}"
+    run_id = str(job.get("run_id") or "")
+    return run_id == cycle_run_id or run_id.startswith(f"{cycle_run_id}_")
+
+
+def _compact_cycle_scope_job(job: Mapping[str, Any]) -> dict[str, Any]:
+    """Project a cycle-scope cohort job onto its per-candidate identity fields.
+
+    Cohort jobs are attributed to every candidate in the cycle; copying their
+    full payload (cohort_members, candidate_projections, ...) into each of the
+    18 candidate states multiplies pass evidence past the size guard. Decision
+    logic only reads identity, stage, status, and timestamps.
+    """
+
+    return {key: job[key] for key in _CYCLE_SCOPE_JOB_PROJECTION_KEYS if key in job}
 
 
 def _job_matches_candidate(job: Mapping[str, Any], *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
