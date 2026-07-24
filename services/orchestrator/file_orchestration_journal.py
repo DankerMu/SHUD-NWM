@@ -389,6 +389,7 @@ def _filter_cycle_rows_for_model(
         job_id
         for job_id, job in rows.pipeline_jobs.items()
         if _is_model_less_cycle_scope_job(job, source_id=source_id, cycle_time=cycle_time)
+        and str(job.get("stage") or "") in _CYCLE_SCOPE_COMPLETION_STAGES
     }
     rows.pipeline_events = [
         (
@@ -8033,11 +8034,16 @@ def _is_model_less_cycle_scope_job(
     return run_id == cycle_run_id or run_id.startswith(f"{cycle_run_id}_")
 
 
+_CYCLE_SCOPE_COMPLETION_STAGES = frozenset({"parse", "state_save_qc", "publish"})
+
+
 def _compact_cycle_scope_event(event: Mapping[str, Any]) -> dict[str, Any]:
-    """Drop bulky details from events attributed via cycle-scope cohort jobs.
+    """Drop bulky details from completion-stage cohort events.
 
     Cohort copyback/publish events carry multi-KB payloads; replicated into
     every candidate state they multiply pass evidence past the size guard.
+    Submission-stage events (download/forcing/convert) keep their details -
+    they hold per-candidate evidence such as runtime-root contracts.
     """
 
     return {key: value for key, value in event.items() if key != "details"}
