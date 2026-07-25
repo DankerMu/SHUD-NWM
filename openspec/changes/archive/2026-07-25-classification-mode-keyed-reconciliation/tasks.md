@@ -106,5 +106,5 @@ full 分支 R2-N1 等式与 bootstrap 对偶不弱化；`_classify_registry` 划
 - [x] 3.2 `uv run ruff check .` 通过。
 - [x] 3.3 `openspec validate classification-mode-keyed-reconciliation
       --strict --no-interactive` 通过。
-- [ ] 3.4 schema/example 同步（json-schema-validate CI gate 绿）。
+- [x] 3.4 schema/example 同步（json-schema-validate CI gate 绿）。
 - [x] 3.5 scope 核查：diff 仅触及 Impact 列出的文件。
