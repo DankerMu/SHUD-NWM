@@ -5840,6 +5840,12 @@ _CROSS_PIN_SHAPE: dict[str, Any] = {
             "full",
             id="replace_uncertain_full",
         ),
+        pytest.param(
+            "published_receipt_failed",
+            "primary_receipt_failed",
+            "full",
+            id="published_receipt_failed_full",
+        ),
     ],
 )
 def test_honest_mode_outcome_pairs_validate(outcome: str, reason: str, mode: str) -> None:
@@ -5859,6 +5865,12 @@ def test_honest_mode_outcome_pairs_validate(outcome: str, reason: str, mode: str
         pytest.param("published", "success", "id_only", id="published_claiming_id_only"),
         pytest.param("dry_run", "dry_run_complete", "bogus", id="mode_outside_enum"),
         pytest.param("published", "success", "", id="empty_mode"),
+        pytest.param(
+            "published_receipt_failed",
+            "primary_receipt_failed",
+            "id_only",
+            id="published_receipt_failed_claiming_id_only",
+        ),
     ],
 )
 def test_forged_mode_outcome_combinations_are_rejected(
@@ -5872,6 +5884,60 @@ def test_forged_mode_outcome_combinations_are_rejected(
         refresh._validate_registry_classification_field(
             _classification_receipt(classification, outcome=outcome, reason=reason)
         )
+
+
+def test_forged_emergency_record_cannot_buy_leniency_with_id_only_mode() -> None:
+    """#1140 C1: the `published_receipt_failed` cross-pin has teeth.
+
+    That outcome is stamped only onto an already committed `published` receipt,
+    so it always classified in full mode — and it is the ONLY outcome
+    `reconstruct_primary_receipt` accepts off the untrusted emergency slot.
+    This payload breaks the full previous-side equality (`unchanged 1 +
+    package_changed 0 + removed 0 != previous_model_count 3`) yet satisfies
+    every id-only rule, so without the cross-pin a forged emergency record
+    would buy the lenient branch just by declaring `mode="id_only"`.
+    """
+    classification = _mode_classification(
+        mode="id_only",
+        previous_sha="1" * 64,
+        previous_count=3,
+        added=[],
+        unchanged=["basin-101"],
+        removed=[],
+        prospective_count=1,
+    )
+
+    with pytest.raises(ValueError, match="receipt_classification_invalid"):
+        refresh._validate_registry_classification_field(
+            _classification_receipt(
+                classification,
+                outcome="published_receipt_failed",
+                reason="primary_receipt_failed",
+            )
+        )
+
+
+def test_honest_published_receipt_failed_classification_still_validates() -> None:
+    """#1140 C1 honest direction: the cross-pin must not break the real
+    emergency-reconstruct corpus.  A committed publish that lost only its
+    primary receipt carries a balanced full-mode classification and validates."""
+    classification = _mode_classification(
+        mode="full",
+        previous_sha="1" * 64,
+        previous_count=1,
+        added=["basin-201"],
+        unchanged=["basin-101"],
+        removed=[],
+        prospective_count=2,
+    )
+
+    refresh._validate_registry_classification_field(
+        _classification_receipt(
+            classification,
+            outcome="published_receipt_failed",
+            reason="primary_receipt_failed",
+        )
+    )
 
 
 @pytest.mark.parametrize(
@@ -5993,6 +6059,135 @@ def test_id_only_mode_keeps_every_dry_run_constraint(shape: dict[str, Any]) -> N
     outcomes — they are guarantees of the id-only classify path, not of the
     `dry_run` terminal outcome, so none of them may be lost in the move."""
     classification = _mode_classification(mode="id_only", **shape)
+
+    with pytest.raises(ValueError, match="receipt_classification_invalid"):
+        refresh._validate_registry_classification_field(
+            _classification_receipt(
+                classification, outcome="failed", reason="provider_invalid"
+            )
+        )
+
+
+def test_classification_key_set_rejects_an_unknown_extra_key() -> None:
+    """#1140 T1: the key-set guard's `keys - required - optional` component.
+
+    `mode` widened the accepted key set from "exactly required" to "required plus
+    a named optional"; the payload below is the otherwise-clean stub with ONE
+    unknown key added, so only that component can reject it.  Without it any
+    junk key rides along on an on-disk receipt."""
+    classification = {**_classification_stub(), "bogus": 1}
+
+    with pytest.raises(ValueError, match="receipt_classification_invalid"):
+        refresh._validate_registry_classification_field(
+            _classification_receipt(
+                classification, outcome="published", reason="success"
+            )
+        )
+
+
+def test_classification_key_set_rejects_a_missing_required_key() -> None:
+    """#1140 T1: the key-set guard's `required <= keys` component.
+
+    `previous_registry_sha256` is dropped entirely.  Its absence is invisible to
+    every downstream rule — `.get()` yields None, which is exactly the legal
+    bootstrap value the stub already carries — so only the required-subset check
+    can reject this receipt."""
+    classification = dict(_classification_stub())
+    del classification["previous_registry_sha256"]
+
+    with pytest.raises(ValueError, match="receipt_classification_invalid"):
+        refresh._validate_registry_classification_field(
+            _classification_receipt(
+                classification, outcome="published", reason="success"
+            )
+        )
+
+
+def test_id_only_mode_rejects_non_empty_package_changed() -> None:
+    """#1140 T2: the id-only branch's `package_changed_total != 0` pin.
+
+    The id-only classify path never reads a prospective checksum, so it cannot
+    emit a `package_changed` row.  Every adjacent id-only rule is satisfied on
+    purpose — notably `added 0 + unchanged 1 + package_changed 1 ==
+    prospective_count 2` — so only the zero-pin can reject it."""
+    classification = _mode_classification(
+        mode="id_only",
+        previous_sha="1" * 64,
+        previous_count=2,
+        added=[],
+        unchanged=["basin-101"],
+        removed=[],
+        prospective_count=2,
+    )
+    classification["package_changed"] = {
+        "items": [
+            {
+                "model_id": "basin-102",
+                "old_checksum": "a" * 64,
+                "new_checksum": "b" * 64,
+            }
+        ],
+        "total": 1,
+        "truncated": False,
+    }
+
+    with pytest.raises(ValueError, match="receipt_classification_invalid"):
+        refresh._validate_registry_classification_field(
+            _classification_receipt(
+                classification, outcome="failed", reason="provider_invalid"
+            )
+        )
+
+
+def test_id_only_mode_rejects_non_empty_declared_cutovers() -> None:
+    """#1140 T2: the id-only branch's `declared_total != 0` pin.
+
+    Declarations are matched against `package_changed`, which the id-only path
+    never populates, so a declared row is forged.  The group is expressed as a
+    truncated bucket (`total 1`, no items) so `declared_cutovers ⊆
+    package_changed` still holds and `package_changed` can stay empty —
+    otherwise the subset rule, or the package_changed zero-pin, would mask this
+    one."""
+    classification = _mode_classification(
+        mode="id_only",
+        previous_sha="1" * 64,
+        previous_count=2,
+        added=[],
+        unchanged=["basin-101"],
+        removed=[],
+        prospective_count=1,
+    )
+    classification["declared_cutovers"] = {
+        "items": [],
+        "total": 1,
+        "truncated": True,
+    }
+
+    with pytest.raises(ValueError, match="receipt_classification_invalid"):
+        refresh._validate_registry_classification_field(
+            _classification_receipt(
+                classification, outcome="failed", reason="provider_invalid"
+            )
+        )
+
+
+def test_id_only_mode_keeps_the_prospective_count_equality() -> None:
+    """#1140 T2: the id-only branch's `added + unchanged + package_changed ==
+    prospective_model_count` equality.
+
+    id-only leniency drops the PREVIOUS-side equality only; the prospective side
+    is still fully partitioned by the classify path.  Here `added 1 + unchanged
+    1 + package_changed 0 != prospective_count 3` while every other id-only rule
+    holds (`unchanged 1 <= previous_model_count 3`, no removals, no refusals)."""
+    classification = _mode_classification(
+        mode="id_only",
+        previous_sha="1" * 64,
+        previous_count=3,
+        added=["basin-103"],
+        unchanged=["basin-101"],
+        removed=[],
+        prospective_count=3,
+    )
 
     with pytest.raises(ValueError, match="receipt_classification_invalid"):
         refresh._validate_registry_classification_field(

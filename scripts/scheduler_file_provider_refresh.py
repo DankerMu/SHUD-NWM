@@ -2006,8 +2006,8 @@ def _enforce_registry_classification_reconciliation(
       every refused row.  The full previous-side equality is NOT applied here:
       removals are never computed, so previous rows absent from the
       prospective set are legitimately unaccounted for.  Mode and outcome are
-      cross-checked: ``dry_run`` requires ``id_only`` and ``published``
-      requires ``full``.
+      cross-checked: ``dry_run`` requires ``id_only`` while ``published`` and
+      ``published_receipt_failed`` require ``full``.
     * ``published``: ``refused.total == 0`` (a non-zero refusal would have
       raised before commit).
     * refusal outcomes: ``refused.total >= 1``.
@@ -2077,6 +2077,14 @@ def _enforce_registry_classification_reconciliation(
         if outcome == "dry_run" and mode != "id_only":
             raise ValueError("receipt_classification_invalid")
         if outcome == "published" and mode != "full":
+            raise ValueError("receipt_classification_invalid")
+        # `published_receipt_failed` is only ever stamped onto an already
+        # committed `published` receipt (see the primary-receipt publish
+        # fallback), so it too always classified in full mode — and it is the
+        # ONE outcome `reconstruct_primary_receipt` accepts off the untrusted
+        # emergency slot.  Without this pin a forged emergency record could
+        # claim `mode="id_only"` and skip the full previous-side equality.
+        if outcome == "published_receipt_failed" and mode != "full":
             raise ValueError("receipt_classification_invalid")
         id_only = mode == "id_only"
 
