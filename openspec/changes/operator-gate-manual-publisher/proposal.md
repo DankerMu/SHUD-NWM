@@ -2,7 +2,7 @@
 
 ## Why
 
-Design D7#7 (`openspec/changes/node22-scheduler-registry-refresh/design.md:231-240`)
+Design D7#7 (`openspec/changes/node22-scheduler-registry-refresh/design.md:228-240`, assertion at `:234-240`)
 claims concurrent non-refresh writers — explicitly "the manual publisher" —
 are "stopped at commit time by the `expected_preimage` CAS in
 `atomic_replace_provider_bytes`". The CAS plumbing exists
@@ -50,10 +50,11 @@ while the CLI runs in maintenance windows where operator gating suffices
   expected-preimage writer list — otherwise archiving that change lands a
   normative clause contradicting this one. Destination-lock serialization
   wording stays (the CLI does take that lock at commit).
-- `scripts/publish_scheduler_file_registry.py` `main()`: unconditional
-  startup WARNING line on stderr (mirroring the existing
-  `--allow-uncovered-cutover` banner style) telling the operator to
-  confirm the refresh timer is not active. Safe for existing consumers:
+- `scripts/publish_scheduler_file_registry.py` `main()`: startup WARNING
+  line on stderr after `_parse_args`, before any I/O (mirroring the
+  existing `--allow-uncovered-cutover` banner style) telling the operator
+  to confirm the refresh timer AND its oneshot service are not active.
+  Safe for existing consumers:
   every stderr JSON reader in the test suite parses
   `strip().splitlines()[-1]`.
 - Tests: warning presence pinned on both a success run and a failure run;
