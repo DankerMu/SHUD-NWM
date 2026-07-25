@@ -45,10 +45,10 @@ totals are filled consistently. Defense-in-depth gap, issue-verified.
 - `_classify_registry` construction-side behavior.
 - Other receipt fields/invariants (`declared_cutovers ⊆ package_changed`,
   refused lower bound, etc. — independently checked).
-- The `dry_run` early-return branch (`:1978-1990`): it skips ALL
+- The `dry_run` early-return branch (`:1977-1987`): it skips ALL
   previous-registry reconciliation (bootstrap and non-bootstrap alike), so
   the new check is unreachable for `outcome="dry_run"` receipts. That
-  pre-existing defense-in-depth gap is routed to its own tracked issue;
+  pre-existing defense-in-depth gap is tracked as issue #1135;
   the spec scenario here is scoped to non-dry_run outcomes.
 - The rejected alternative (treating bootstrap as `previous_count == 0` in
   the same branch): changes the null-semantics contract of

@@ -41,16 +41,15 @@ Risk packs considered (core):
   (a) non-empty `removed` (total 1) → `outcome="failed"`,
   `reason="registry_cutover_removal_refused"`, `refused` covering the
   removed entry (MUST be a refusal outcome — `published` requires
-  `refused==0` at `:2021-2024`);
+  `refused==0` at `:2024-2028`);
   (b) non-empty `unchanged` (total 1) → `outcome="published"`,
   `reason="success"`, `refused` total 0, `prospective_model_count` adjusted
   so added+unchanged+package_changed still equals it (MUST be a non-refusal
-  reason — refusal reasons require `refused>=1` at `:2027-2029`); carry the
+  reason — refusal reasons require `refused>=1` at `:2030-2032`); carry the
   full provider triple `["registry","readiness","state"]` (`:1729-1733`)
   or the receipt fails `receipt_provider_invalid` first;
   (c) non-empty `package_changed` (total 1) → `outcome="failed"`,
-  `reason="registry_cutover_undeclared"`, `refused` covering it
-  (`transition_mode` `"replace"`).
+  `reason="registry_cutover_undeclared"`, `refused` covering it.
   Each asserts `pytest.raises(ValueError)` with
   `"receipt_classification_invalid"`. Do NOT add jsonschema assertions —
   the schema encodes no reconciliation equalities, so there is no
