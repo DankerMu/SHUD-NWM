@@ -21,7 +21,7 @@ packs：concurrency（本 change 恰是把并发防护显式归为 operator-gate
       （runbook 显式禁令 + CLI 启动 WARNING）；`expected_preimage` CAS
       参数仅由内部 refresh runner 使用，CLI `main()` 不 populate。
       `:228-233` 的 refresh-vs-refresh `refresh_lock` 叙述保留不动。
-- [ ] 1.1b（评审 P1-2）同一 change 的
+- [x] 1.1b（评审 P1-2）同一 change 的
       `specs/scheduler-registry-refresh/spec.md:5-8`：从
       expected-preimage writer 列表移除 "manual"（destination-lock 串行
       化部分保留——manual CLI 提交时确实取该锁）；顺带读 `:41-47` 场景
@@ -40,7 +40,7 @@ packs：concurrency（本 change 恰是把并发防护显式归为 operator-gate
       **timer inactive/disabled 且 service 非 activating/active**（oneshot
       service 可能在 timer 停后仍在执行）才可运行 CLI；跑完恢复 timer。
       中文、贴合该段既有风格。
-- [ ] 1.2b（评审 P1-1）`docs/runbooks/current-production-ops.md:357-359`
+- [x] 1.2b（评审 P1-1）`docs/runbooks/current-production-ops.md:357-359`
       §3.1.2：删除"CLI 与 timer 等共用 expected-preimage 检查、并发者不
       会覆盖较新权威内容"的断言，改为——CLI 提交时仅短暂持有
       destination lock、不传 expected_preimage，对 refresh timer 的并发
