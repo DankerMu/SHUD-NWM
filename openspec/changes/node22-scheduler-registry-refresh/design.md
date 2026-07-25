@@ -231,13 +231,29 @@ The registry publisher gains a precommit compatibility gate:
    lock itself is only entered briefly inside `atomic_replace_provider_bytes`
    at commit time. A concurrent refresh attempts to acquire the same
    `refresh_lock` and fails immediately (`already_running`), so no two gate
-   evaluations race. Concurrent NON-refresh writers (e.g. the manual
-   publisher) are excluded from the same `refresh_lock` but are stopped at
-   commit time by the `expected_preimage` CAS in
-   `atomic_replace_provider_bytes` — a concurrent write that lands between
-   snapshot and commit raises `provider_preimage_changed` and the refresh
-   restores its owned lanes without touching the concurrent authoritative
-   generation.
+   evaluations race. Concurrent NON-refresh writers are excluded from the
+   same `refresh_lock`; whether they are *detected* depends on whether they
+   populate `expected_preimage`. The refresh runner's own lanes and the
+   state-index copyback in `packages/common/state_manager.py` do populate it,
+   so a concurrent write landing between their snapshot and commit raises
+   `provider_preimage_changed` in `atomic_replace_provider_bytes` and the
+   refresh restores its owned lanes without touching the concurrent
+   authoritative generation. **The manual publisher is not such a writer
+   (#1104).** `publish_all_basin_scheduler_registry` accepts
+   `expected_preimage` and forwards it, but the CLI `main()` never populates
+   it: the CAS parameter is exercised only by the internal refresh runner
+   (plus that copyback path). The manual CLI does take the destination-derived
+   lock briefly at commit, so bytes never interleave — but a refresh that
+   commits inside the CLI's snapshot→commit window is silently overwritten
+   with no `provider_preimage_changed` evidence. Manual-publisher concurrency
+   is therefore **operator-gated, not code-gated**: an explicit prohibition in
+   `docs/runbooks/current-production-ops.md` (never run the CLI while
+   `nhms-scheduler-file-provider-refresh.timer` or its oneshot service is
+   active, with a paired `systemctl --user status` check) plus an
+   unconditional CLI startup stderr WARNING pointing at that rule. Wiring CAS
+   into `main()` stays available as future hardening if real concurrent use
+   appears; it needs snapshot-window handling and an operator retry path,
+   which the maintenance-window usage does not currently justify.
 8. **Manual publisher parity** — `scripts/publish_scheduler_file_registry.py`
    now wires the same gate through `publish_all_basin_scheduler_registry`'s
    `precommit_validator` so operators cannot bypass by running the manual

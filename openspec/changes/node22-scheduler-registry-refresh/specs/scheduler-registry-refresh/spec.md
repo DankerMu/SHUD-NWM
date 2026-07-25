@@ -3,9 +3,13 @@
 ### Requirement: Every file-provider writer participates in one fail-safe transaction
 
 The system SHALL refresh every node-22 provider before its 168-hour consumer
-limit and SHALL serialize canonical destination replacement with an expected-
-preimage check shared by refresh, manual, lifecycle, readiness, and state
-writers.
+limit and SHALL serialize canonical destination replacement on the
+destination-derived lock across refresh, manual, lifecycle, readiness, and
+state writers, with an expected-preimage check shared by the refresh,
+lifecycle, readiness, and state writers. The manual publisher CLI takes that
+lock but supplies no expected preimage; its concurrency with the refresh timer
+is operator-gated (runbook prohibition plus a CLI startup warning), not
+CAS-gated.
 
 #### Scenario: Valid full inventory is published
 
@@ -40,11 +44,16 @@ writers.
 
 #### Scenario: Timer manual and lifecycle writers contend
 
-- **WHEN** any two canonical registry writers overlap
+- **WHEN** any two canonical registry writers hold overlapping
+  destination-derived lock windows
 - **THEN** exactly one owns the shared destination-derived lock
 - **AND** the contender replaces no canonical bytes and emits no success
 - **AND** the existing manual CLI arguments and successful output remain
-  compatible when no contention exists.
+  compatible when no contention exists
+- **AND** this lock guarantee does not extend to a manual publisher CLI run
+  whose lock window does not overlap but whose snapshot precedes another
+  writer's commit: the CLI supplies no expected preimage, so that window is
+  covered by the operator prohibition, not by code.
 
 #### Scenario: Readiness or state changes during renewal
 

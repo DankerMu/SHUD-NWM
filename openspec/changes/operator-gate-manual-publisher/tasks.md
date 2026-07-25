@@ -14,7 +14,7 @@ packs：concurrency（本 change 恰是把并发防护显式归为 operator-gate
 
 ## 1. Implementation
 
-- [ ] 1.1 `openspec/changes/node22-scheduler-registry-refresh/design.md`
+- [x] 1.1 `openspec/changes/node22-scheduler-registry-refresh/design.md`
       D7#7（`:228-240`，要改的断言句在 `:234-240`）：删除"stopped at
       commit time by the `expected_preimage` CAS"对 manual publisher 的
       断言，改为事实措辞——manual publisher 并发为 operator-gated
@@ -30,7 +30,7 @@ packs：concurrency（本 change 恰是把并发防护显式归为 operator-gate
       snapshot→commit 窗口不成立；措辞如需收窄一并改，若判定超范围则在
       proposal Out of Scope 明写并留 follow-up 记录，不得默认无视。
       改后重跑 3.1 strict validate。
-- [ ] 1.2 `docs/runbooks/current-production-ops.md` 手动 publisher CLI 段
+- [x] 1.2 `docs/runbooks/current-production-ops.md` 手动 publisher CLI 段
       （`:613-617` 一带）：新增显式条目——
       `nhms-scheduler-file-provider-refresh.timer` 活跃期**严禁**运行
       manual publisher CLI（CLI 路径无 CAS 防护，会静默覆写 refresh 产
@@ -46,7 +46,7 @@ packs：concurrency（本 change 恰是把并发防护显式归为 operator-gate
       destination lock、不传 expected_preimage，对 refresh timer 的并发
       保护是 operator-gated（指向 §manual publisher CLI 条目），非代码强
       制；lock 与其余 writer 的 preimage 叙述保留不动。
-- [ ] 1.3 `scripts/publish_scheduler_file_registry.py` `main()`：WARNING
+- [x] 1.3 `scripts/publish_scheduler_file_registry.py` `main()`：WARNING
       打印位置在 `_parse_args` 之后、任何 I/O 与 gate 计算之前（argparse
       usage error exit 2 无 WARNING，属界定内，评审 P2-5）；无条件向
       stderr 打印一行（风格镜像 `--allow-uncovered-cutover` banner），
@@ -56,13 +56,13 @@ packs：concurrency（本 change 恰是把并发防护显式归为 operator-gate
 
 ## 2. Tests (requirement-driven)
 
-- [ ] 2.1 warning 钉（成功路径）：既有成功 e2e 之上断言 stderr 含 WARNING
+- [x] 2.1 warning 钉（成功路径）：既有成功 e2e 之上断言 stderr 含 WARNING
       行（含 `nhms-scheduler-file-provider-refresh.timer` 关键子串）。
       红证：pre-change 无该行。
-- [ ] 2.2 warning + JSON 共存钉（失败路径）：任一确定性失败参数下，stderr
+- [x] 2.2 warning + JSON 共存钉（失败路径）：任一确定性失败参数下，stderr
       同时 (a) 含 WARNING 行，(b) `strip().splitlines()[-1]` 仍解析出既有
       JSON 载荷且字段不变。红证：pre-change (a) 失败。
-- [ ] 2.3 既有全量：`uv run pytest -q
+- [x] 2.3 既有全量：`uv run pytest -q
       tests/test_publish_scheduler_file_registry.py` 全绿，零删除零弱化
       （评审核实：本 CLI 无整段 stderr JSON 解析断言，全部 last-line/子
       串模式）。`:1372` 的 `assert "WARNING" in err` 在新增启动 WARNING
@@ -71,12 +71,12 @@ packs：concurrency（本 change 恰是把并发防护显式归为 operator-gate
 
 ## 3. Verification (issue 验收标准)
 
-- [ ] 3.1 `openspec validate node22-scheduler-registry-refresh --strict
+- [x] 3.1 `openspec validate node22-scheduler-registry-refresh --strict
       --no-interactive` 通过（design.md 改后）。
-- [ ] 3.2 `openspec validate operator-gate-manual-publisher --strict
+- [x] 3.2 `openspec validate operator-gate-manual-publisher --strict
       --no-interactive` 通过。
-- [ ] 3.3 `uv run pytest -q tests/test_publish_scheduler_file_registry.py`
+- [x] 3.3 `uv run pytest -q tests/test_publish_scheduler_file_registry.py`
       全绿（附计数）。
-- [ ] 3.4 `uv run ruff check .` 通过；`npx markdownlint-cli2
+- [x] 3.4 `uv run ruff check .` 通过；`npx markdownlint-cli2
       docs/runbooks/current-production-ops.md` 干净。
-- [ ] 3.5 scope 核查：diff 仅触及 Impact 列出的文件。
+- [x] 3.5 scope 核查：diff 仅触及 Impact 列出的文件。
