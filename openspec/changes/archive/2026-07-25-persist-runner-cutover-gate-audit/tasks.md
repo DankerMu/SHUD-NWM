@@ -102,5 +102,5 @@ migration（optional key 向后兼容，`_lenient_receipt_order` 宽松读不受
 - [x] 3.2 `uv run ruff check .` 通过。
 - [x] 3.3 `openspec validate persist-runner-cutover-gate-audit --strict
       --no-interactive` 通过。
-- [ ] 3.4 schema/example 同步（json-schema-validate CI gate 绿）。
+- [x] 3.4 schema/example 同步（json-schema-validate CI gate 绿）。
 - [x] 3.5 scope 核查：diff 仅触及 Impact 列出的文件。
