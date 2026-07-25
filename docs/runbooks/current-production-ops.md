@@ -417,11 +417,11 @@ readiness、复制巨大 products、生成空 index、DB fallback 或 timestamp-
 
 ```bash
 scripts/scheduler_file_provider_refresh_once.sh --dry-run
-jq '{outcome,reason,database_free,providers,orphans}' \
+jq '{outcome,reason,database_free,cutover_gate,providers,orphans}' \
   /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json
 
 scripts/scheduler_file_provider_refresh_once.sh
-jq '{outcome,reason,database_free,providers,orphans}' \
+jq '{outcome,reason,database_free,cutover_gate,providers,orphans}' \
   /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json
 ```
 
@@ -606,6 +606,26 @@ bypassed_allow_uncovered_cutover, not_wired}`、`declaration_env`（enforced 时
 registry_manifest` 返回的 dict 里的 `cutover_gate` 字段），所以 downstream 直接读
 `manifest-last.json` 的 companion receipt 也能看到同一份 audit。
 
+第三条通道是 **runner refresh receipt**（#1132）：自动 timer 路径的
+`refresh_scheduler_file_providers` 把同一个 audit 块写进
+`.../provider-refresh/receipts/latest.json` 的 `.cutover_gate`，`published`、
+`dry_run`、cutover refusal、rollback（`restored_previous` / `replace_uncertain`）
+和 catch-all failure receipt 都带；只有在 gate 装上之前就失败的 run（lock contention、
+provider preimage 冲突）才**整个字段缺席**——不写 `null` 占位，缺席本身就表示"gate 没跑"。
+
+```bash
+# runner receipt（自动 timer 路径的 audit 通道）
+jq '.cutover_gate' \
+  /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json
+# 期望：{"mode": "enforced", "declaration_env": "NHMS_REGISTRY_CUTOVER_DECLARATION_PATH",
+#       "declaration_present": false}   # 无 cutover 在途时 false 是正常值
+```
+
+Runner 路径没有 `--allow-uncovered-cutover`，所以这里的 `mode` 恒为 `enforced`；出现
+其它值说明这份 receipt 不是本 runner 写的。`declaration_present` 则让事后 forensics
+能区分两种 refusal：`false` = 运维根本没 staged declaration，`true` = staged 了但没覆盖
+这次漂移（对照同一 receipt 的 `registry_classification.refused` 定位具体 model）。
+
 任何一次 `--allow-uncovered-cutover` 之后，运维必须 `jq '.cutover_gate'` 核对：
 
 ```bash
@@ -636,6 +656,9 @@ post-#1080 shape。
 等于本次刚 commit 的 canonical SHA-256、`refused.total == 0`、`declared_cutovers`
 里的 entry 与 `entries` 数量与 declaration 完全一致。任何 `refused` 都禁止把 timer
 enable；那说明当前 declaration 与 prospective 不匹配、需要重新提交。
+同一次核对里还要 `jq '.cutover_gate'` 确认是 `{"mode": "enforced", "declaration_env":
+"NHMS_REGISTRY_CUTOVER_DECLARATION_PATH", "declaration_present": <bool>}`；字段缺席
+说明这份 receipt 来自 gate 装上之前就失败的 run，不能用来 enable timer。
 
 成功 manual refresh 后才建立稳态：
 
