@@ -888,7 +888,17 @@ class _FakeCursor:
                 )
             }
             return
-        if normalized.startswith("select min(valid_time), max(valid_time) from met.forcing_station_timeseries"):
+        if normalized.startswith("select 1 from met.forcing_station_timeseries"):
+            forcing_version_id = parameters[0]
+            exists = any(
+                row["forcing_version_id"] == forcing_version_id
+                for row in self.connection.state["met.forcing_station_timeseries"]
+            )
+            self._fetchone = (1,) if exists else None
+            return
+        if normalized.startswith(
+            "with existing as materialized ( select valid_time from met.forcing_station_timeseries"
+        ):
             forcing_version_id = parameters[0]
             valid_times = [
                 row["valid_time"]

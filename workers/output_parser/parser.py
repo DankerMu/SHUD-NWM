@@ -685,18 +685,42 @@ class PsycopgOutputParserRepository:
         replacement_windows: dict[tuple[str, str, str], tuple[datetime, datetime]] = {}
         for replacement_key in replacement_keys:
             with self._connection.cursor() as cursor:
+                # Existence probe first (pkey prefix descent). A bare min/max
+                # with these filters makes the planner walk valid_time_idx
+                # backward per chunk hunting for the first matching row — for
+                # a NEW run (0 rows) that is a full index scan of every chunk.
+                # The MATERIALIZED fence on the fallback blocks the same
+                # min/max transform so the window read stays on the pkey
+                # prefix and touches only this key's rows.
                 cursor.execute(
                     """
-                    SELECT MIN(valid_time) AS valid_time_min,
-                           MAX(valid_time) AS valid_time_max
-                    FROM hydro.river_timeseries
+                    SELECT 1 FROM hydro.river_timeseries
                     WHERE run_id = %s
                       AND river_network_version_id = %s
                       AND variable = %s
+                    LIMIT 1
                     """,
                     replacement_key,
                 )
-                existing_window = cursor.fetchone()
+                if cursor.fetchone() is None:
+                    existing_window = (None, None)
+                else:
+                    cursor.execute(
+                        """
+                        WITH existing AS MATERIALIZED (
+                            SELECT valid_time
+                            FROM hydro.river_timeseries
+                            WHERE run_id = %s
+                              AND river_network_version_id = %s
+                              AND variable = %s
+                        )
+                        SELECT MIN(valid_time) AS valid_time_min,
+                               MAX(valid_time) AS valid_time_max
+                        FROM existing
+                        """,
+                        replacement_key,
+                    )
+                    existing_window = cursor.fetchone()
             incoming_min, incoming_max = incoming_windows[replacement_key]
             existing_min = _result_value(existing_window, "valid_time_min", 0)
             existing_max = _result_value(existing_window, "valid_time_max", 1)

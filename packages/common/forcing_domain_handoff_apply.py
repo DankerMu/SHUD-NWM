@@ -754,12 +754,28 @@ def _replace_forcing_station_timeseries(
     batch_times = [_coerce_valid_time(row["valid_time"]) for row in rows]
     valid_time_min = min(batch_times, default=None)
     valid_time_max = max(batch_times, default=None)
+    # Existence probe first (pkey prefix descent). A bare min/max with this
+    # filter makes the planner walk valid_time_idx backward per chunk hunting
+    # for the first matching row — for a NEW forcing_version (0 rows) that is
+    # a full index scan of every chunk. The MATERIALIZED fence on the fallback
+    # blocks the same min/max transform so the window read stays on the pkey
+    # prefix and touches only this version's rows.
     cursor.execute(
-        "SELECT min(valid_time), max(valid_time) FROM met.forcing_station_timeseries "
-        "WHERE forcing_version_id = %s",
+        "SELECT 1 FROM met.forcing_station_timeseries "
+        "WHERE forcing_version_id = %s LIMIT 1",
         (forcing_version_id,),
     )
-    existing = cursor.fetchone() or (None, None)
+    if cursor.fetchone() is None:
+        existing = (None, None)
+    else:
+        cursor.execute(
+            "WITH existing AS MATERIALIZED ("
+            "    SELECT valid_time FROM met.forcing_station_timeseries"
+            "    WHERE forcing_version_id = %s"
+            ") SELECT min(valid_time), max(valid_time) FROM existing",
+            (forcing_version_id,),
+        )
+        existing = cursor.fetchone() or (None, None)
     existing_min = _coerce_valid_time(existing[0])
     existing_max = _coerce_valid_time(existing[1])
     if existing_min is not None:

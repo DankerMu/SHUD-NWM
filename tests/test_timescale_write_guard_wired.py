@@ -72,6 +72,12 @@ class _RecordingCursor:
         if _CHUNKS_QUERY_MARKER in normalized:
             self._last_fetchone = self.connection.compressed_chunk_row
             return
+        if "select 1 from hydro.river_timeseries" in " ".join(normalized.split()):
+            # Existence probe before the window read: report a row only when
+            # the fixture models pre-existing rows for the replacement key.
+            window = self.connection.existing_river_window
+            self._last_fetchone = (1,) if window and window[0] is not None else None
+            return
         if "select min(valid_time) as valid_time_min" in " ".join(normalized.split()):
             self._last_fetchone = self.connection.existing_river_window
             return
@@ -461,13 +467,15 @@ def test_handoff_apply_guard_blocks_before_delete_on_compressed_chunk(
     assert executed_values == [], "INSERT MUST NOT fire when guard raises"
 
 
-def test_handoff_apply_empty_rows_shortcircuits_guard(
+def test_handoff_apply_empty_rows_no_existing_skips_guard_and_delete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Empty ``rows`` yields ``valid_time_min/max = None`` — guard short-circuits.
+    """Empty ``rows`` and no existing rows — guard short-circuits, no DELETE.
 
-    Pre-guard behavior: DELETE fired but no INSERT. Post-guard behavior must
-    match (an empty batch has no compressed-chunk overlap semantic).
+    With the time-bounded replace (731eb2a7) no window can be constructed
+    from an empty batch with no existing rows, and an unbounded DELETE is
+    exactly what TimescaleDB rejects once any chunk is compressed — so the
+    DELETE must NOT fire.
     """
     connection = _RecordingConnection()
 
@@ -481,12 +489,11 @@ def test_handoff_apply_empty_rows_shortcircuits_guard(
     # Guard short-circuits — no catalog lookup, no SET LOCAL statement.
     guard_idx = _index_of_first(connection.executions, _CHUNKS_QUERY_MARKER)
     assert guard_idx == -1
-    # DELETE still runs (pre-guard behavior preserved).
     delete_idx = _index_of_first(
         connection.executions,
         "DELETE FROM met.forcing_station_timeseries",
     )
-    assert delete_idx >= 0
+    assert delete_idx == -1
 
 
 def test_output_parser_empty_batch_shortcircuits_guard() -> None:
