@@ -83,9 +83,13 @@ existing one.
   `scripts/publish_scheduler_file_registry.py`,
   `schemas/scheduler_file_provider_refresh_receipt.schema.json` (+example),
   `tests/test_scheduler_file_provider_refresh.py`,
-  `tests/test_publish_scheduler_file_registry.py`.
-- The #1097 design-doc three-channel sentence becomes true as written; no
-  doc edits needed.
+  `tests/test_publish_scheduler_file_registry.py`,
+  `docs/runbooks/current-production-ops.md` (review-driven addition: the
+  cross-review found the new runner-receipt audit channel missing from the
+  ops runbook — third-channel section, jq touchpoints, transitional
+  pre-#1132 absence note).
+- The #1097 design-doc three-channel sentence becomes true as written for
+  the runner-receipt channel; no design-doc edits needed.
 - Receipt consumers: the schema is the contract; adding an OPTIONAL key
   preserves every existing reader. The runtime validator's allowed-set IS
   exact-match (`RECEIPT_KEYS`/`RECEIPT_OPTIONAL_KEYS`, `:174`/`:1645`), so

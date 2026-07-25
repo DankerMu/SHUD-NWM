@@ -425,6 +425,10 @@ jq '{outcome,reason,database_free,cutover_gate,providers,orphans}' \
   /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json
 ```
 
+（这两条 projection 里的 `"cutover_gate": null` 只是 `jq` 对象构造对缺失 key 的补位产物，
+表示 receipt 里根本没有该字段，**不是** 持久化的 `null` 占位；要区分请直接
+`jq 'has("cutover_gate")'`。）
+
 `published` receipt 必须绑定三个 shared canonical 文件以及
 `NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST` 指向的 private compute-visible registry mirror。
 shared registry 与 worker mirror 必须具有完全相同的物理 SHA-256 和 model count；
@@ -611,7 +615,8 @@ registry_manifest` 返回的 dict 里的 `cutover_gate` 字段），所以 downs
 `.../provider-refresh/receipts/latest.json` 的 `.cutover_gate`，`published`、
 `dry_run`、cutover refusal、rollback（`restored_previous` / `replace_uncertain`）
 和 catch-all failure receipt 都带；只有在 gate 装上之前就失败的 run（lock contention、
-provider preimage 冲突）才**整个字段缺席**——不写 `null` 占位，缺席本身就表示"gate 没跑"。
+provider preimage 冲突）才**整个字段缺席**——不写 `null` 占位，缺席本身就表示"gate 没跑"
+（或系 pre-#1132 版本写下的 receipt，见下"升级 pre-#1132 receipt"）。
 
 ```bash
 # runner receipt（自动 timer 路径的 audit 通道）
@@ -650,6 +655,12 @@ latest.json 的 monotonic-order 排序，legacy shape 不会触发 `receipt_clas
 file_provider_refresh.sh --enable`（内部走 `validate_current_receipt`）会看到完整
 post-#1080 shape。
 
+**升级 pre-#1132 receipt**：#1132 部署之前写下的 receipt（包括正常的 `published`）同样
+没有 `.cutover_gate`，所以字段缺席的含义是"pre-#1132 老 receipt **或** run 在 gate 块
+构造前就失败"。判定红旗前先确认 receipt 的版次：比对 `.started_at` 与 #1132 部署时间，
+或者干脆跑一次 manual refresh 拿新 receipt。新 receipt 一定带 `.cutover_gate`；若此时
+仍然缺席，才是真正"gate 之前失败"的信号。
+
 启用 refresh timer 前必须 `jq '.registry_classification'
 /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json`
 核对：`previous_registry_sha256` 等于 shared canonical 的实际 SHA-256、`new_registry_sha256`
@@ -658,7 +669,9 @@ post-#1080 shape。
 enable；那说明当前 declaration 与 prospective 不匹配、需要重新提交。
 同一次核对里还要 `jq '.cutover_gate'` 确认是 `{"mode": "enforced", "declaration_env":
 "NHMS_REGISTRY_CUTOVER_DECLARATION_PATH", "declaration_present": <bool>}`；字段缺席
-说明这份 receipt 来自 gate 装上之前就失败的 run，不能用来 enable timer。
+说明这份 receipt 来自 gate 装上之前就失败的 run（或是 pre-#1132 版次，见上），
+两种情况都不能用来 enable timer——先跑一次 manual refresh 拿到带 `.cutover_gate` 的新
+receipt。
 
 成功 manual refresh 后才建立稳态：
 
