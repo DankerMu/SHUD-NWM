@@ -53,10 +53,10 @@ existing one.
   `additionalProperties: false`. Example file updated (schema currently
   has top-level `additionalProperties: false` at `:6` — without the schema
   change the key cannot land).
-- `scripts/publish_scheduler_file_registry.py`: the three stderr failure
-  payloads (`:1251/:1255/:1267`) embed
-  `normalize_cutover_gate_audit(cutover_gate_audit)` instead of the raw
-  inline dict.
+- `scripts/publish_scheduler_file_registry.py`: the audit block is
+  normalized ONCE before the `try` (never inside an except handler), and
+  the success summary (`:1243`) plus the three stderr failure payloads
+  (`:1251/:1255/:1267`) all share that normalized value.
 - Tests: (a) runner-level assertion that the on-disk refresh receipt's
   `cutover_gate` equals the runner-constructed three fields (enforced +
   declaration_present true AND false variants); (b) CLI wiring test —
@@ -87,7 +87,8 @@ existing one.
 - The #1097 design-doc three-channel sentence becomes true as written; no
   doc edits needed.
 - Receipt consumers: the schema is the contract; adding an OPTIONAL key
-  preserves every existing reader (validator required-key sets unchanged
-  unless a test asserts exact top-level key sets — implementer must check
-  `_validate_receipt`'s required/allowed key handling and extend the
-  ALLOWED set if it is exact-match, without making the key required).
+  preserves every existing reader. The runtime validator's allowed-set IS
+  exact-match (`RECEIPT_KEYS`/`RECEIPT_OPTIONAL_KEYS`, `:174`/`:1645`), so
+  `cutover_gate` must join `RECEIPT_OPTIONAL_KEYS` (never `RECEIPT_KEYS`) —
+  see tasks 1.2. Schema `declaration_env` carries `maxLength: 512` to
+  match the runtime `MAX_STRING_LENGTH` bound.

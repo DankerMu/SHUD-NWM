@@ -70,8 +70,12 @@ migration（optional key 向后兼容，`_lenient_receipt_order` 宽松读不受
       断言，防"写 null"回归）。
 - [ ] 2.3 契约负向：恶意第四字段 / 非法 mode 的 `cutover_gate` 块——
       (a) schema 校验拒绝（既有 schema-validation 测试机制内）；
-      (b) 伪造 emergency record 经 `reconstruct_primary_receipt` 路径被
-      `_validate_receipt` 以 `receipt_cutover_gate_invalid` 拒绝。
+      (b) 直接调 `refresh._validate_receipt(伪造 receipt)` 断言
+      `receipt_cutover_gate_invalid`（`:1142-1144` 会把 ValueError 吞成
+      `RefreshError("emergency_record_invalid")`，不能在 reconstruct 路径断
+      内层字符串；沿用 `:3690+` 既有直调模式），并另钉
+      `reconstruct_primary_receipt` 读该载荷时抛 `RefreshError` 且 reason
+      为 `emergency_record_invalid`。
 - [ ] 2.4 CLI wiring 钉（mutant-sensitive，#1132 评论验收建议）：
       `tests/test_publish_scheduler_file_registry.py` 中 monkeypatch CLI
       模块的 `normalize_cutover_gate_audit` 返回**合法三字段哨兵块**
