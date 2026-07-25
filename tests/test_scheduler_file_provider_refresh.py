@@ -2509,7 +2509,49 @@ def test_installer_enable_lifecycle_and_failure_restore_with_fake_systemctl(tmp_
         )
 
 
-def _write_wrapper_execution_fixture(tmp_path: Path, *, include_forbidden: bool = False) -> tuple[Path, Path]:
+def _bash_major_version(executable: str) -> int | None:
+    probe = subprocess.run(
+        [executable, "-c", 'echo "${BASH_VERSINFO[0]}"'],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode != 0:
+        return None
+    try:
+        return int(probe.stdout.strip())
+    except ValueError:
+        return None
+
+
+def _require_modern_bash() -> str:
+    """Resolve a bash >= 4 interpreter for wrapper rejection-semantics tests.
+
+    macOS ships bash 3.2 as ``/bin/bash``, where a failing ``[[ ]]`` does not
+    abort under ``set -e``. The wrapper's allowlist/parse rejections are bare
+    ``[[ ]]`` asserts, so they only hold on bash >= 4.
+    """
+    candidates = ["/bin/bash"]
+    path_bash = shutil.which("bash")
+    if path_bash and path_bash not in candidates:
+        candidates.append(path_bash)
+    for candidate in candidates:
+        version = _bash_major_version(candidate)
+        if version is not None and version >= 4:
+            return candidate
+    pytest.skip(
+        "requires bash >= 4 (bash 3.2 does not abort on a failing [[ ]] under set -e, "
+        f"so wrapper allowlist semantics are unverifiable); probed: {candidates}"
+    )
+
+
+def _write_wrapper_execution_fixture(
+    tmp_path: Path,
+    *,
+    include_forbidden: bool = False,
+    declaration_path: str | None = None,
+    extra_env_lines: list[str] | None = None,
+) -> tuple[Path, Path]:
     root = Path(__file__).resolve().parents[1]
     repo = tmp_path / "repo"
     env_dir = repo / "infra/env"
@@ -2534,6 +2576,10 @@ def _write_wrapper_execution_fixture(tmp_path: Path, *, include_forbidden: bool 
     lines = [f"{key}={value}" for key, value in configured.items()]
     if include_forbidden:
         lines.append("DATABASE_URL=must-not-load")
+    if declaration_path is not None:
+        lines.append(f"NHMS_REGISTRY_CUTOVER_DECLARATION_PATH={declaration_path}")
+    if extra_env_lines:
+        lines.extend(extra_env_lines)
     env_file = env_dir / "compute.scheduler-provider-refresh.env"
     env_file.write_text("\n".join(lines) + "\n")
     env_file.chmod(0o600)
@@ -2556,6 +2602,7 @@ def _write_wrapper_execution_fixture(tmp_path: Path, *, include_forbidden: bool 
         "printf 'DATABASE_URL=%s\\n' \"${DATABASE_URL-<unset>}\"\n"
         "printf 'PGHOST=%s\\n' \"${PGHOST-<unset>}\"\n"
         "printf 'PWD=%s\\n' \"$PWD\"\n"
+        "printf 'CUTOVER=%s\\n' \"${NHMS_REGISTRY_CUTOVER_DECLARATION_PATH-<unset>}\"\n"
         "printf 'ARGS=%s\\n' \"$*\"\n"
     )
     interpreter.chmod(0o755)
@@ -2604,7 +2651,68 @@ def test_wrapper_clean_environment_loads_fixed_config_and_strips_inherited_db_se
     assert "DATABASE_URL=<unset>" in result.stdout
     assert "PGHOST=<unset>" in result.stdout
     assert f"PWD={tmp_path / 'repo'}" in result.stdout
+    # #1095: the cutover declaration path is optional; its absence must keep the
+    # runner's safe-refuse default (undeclared package cutovers stay refused).
+    assert "CUTOVER=<unset>" in result.stdout
     assert result.stdout.rstrip().endswith("-m scripts.scheduler_file_provider_refresh --dry-run")
+
+
+def test_wrapper_admits_cutover_declaration_path_and_exports_it_to_the_runner(tmp_path: Path) -> None:
+    bash = _require_modern_bash()
+    declaration_path = "/private/cutover/declaration-last.json"
+    wrapper, marker = _write_wrapper_execution_fixture(tmp_path, declaration_path=declaration_path)
+
+    result = subprocess.run(
+        [bash, str(wrapper), "--dry-run"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={"HOME": str(tmp_path), "PATH": os.environ["PATH"]},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert marker.exists()
+    assert f"CUTOVER={declaration_path}" in result.stdout
+    assert result.stdout.rstrip().endswith("-m scripts.scheduler_file_provider_refresh --dry-run")
+    # The wrapper allowlist and the runner reader must name the same variable,
+    # otherwise the systemd path silently loses the declaration again.
+    assert refresh.CUTOVER_DECLARATION_ENV == "NHMS_REGISTRY_CUTOVER_DECLARATION_PATH"
+
+
+def test_wrapper_rejects_unknown_key_outside_the_allowlist(tmp_path: Path) -> None:
+    bash = _require_modern_bash()
+    wrapper, marker = _write_wrapper_execution_fixture(
+        tmp_path, extra_env_lines=["NHMS_SOMETHING_ELSE=x"]
+    )
+
+    result = subprocess.run(
+        [bash, str(wrapper), "--dry-run"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={"HOME": str(tmp_path), "PATH": os.environ["PATH"]},
+    )
+
+    assert result.returncode != 0
+    assert not marker.exists()
+    assert "ARGS=" not in result.stdout
+
+
+def test_wrapper_rejects_blank_cutover_declaration_path(tmp_path: Path) -> None:
+    bash = _require_modern_bash()
+    wrapper, marker = _write_wrapper_execution_fixture(tmp_path, declaration_path="")
+
+    result = subprocess.run(
+        [bash, str(wrapper), "--dry-run"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={"HOME": str(tmp_path), "PATH": os.environ["PATH"]},
+    )
+
+    assert result.returncode != 0
+    assert not marker.exists()
+    assert "ARGS=" not in result.stdout
 
 
 def test_wrapper_rejects_forbidden_selector_in_mode_0600_env_before_exec(tmp_path: Path) -> None:

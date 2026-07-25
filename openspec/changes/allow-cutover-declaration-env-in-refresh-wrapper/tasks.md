@@ -19,7 +19,7 @@ Risk packs considered (core):
 
 ## 1. Wrapper + tests + docs
 
-- [ ] 1.1 `scripts/scheduler_file_provider_refresh_once.sh:17`: append
+- [x] 1.1 `scripts/scheduler_file_provider_refresh_once.sh:17`: append
   `|NHMS_REGISTRY_CUTOVER_DECLARATION_PATH` inside the `allowed_keys`
   alternation (before the closing `)$`). Do NOT add it to the `required`
   loop (`:45-54`), do NOT touch the `REQUIRE_DIRECT_GRID` value assertion
@@ -27,7 +27,7 @@ Risk packs considered (core):
   checks.
   Evidence floor: `git diff` of the wrapper shows exactly the one-line regex
   change.
-- [ ] 1.2 Wrapper regression test (new), using
+- [x] 1.2 Wrapper regression test (new), using
   `_write_wrapper_execution_fixture` (`tests/test_scheduler_file_provider_refresh.py:2512`
   — extend the fixture helper minimally to (i) accept a keyword-only
   `declaration_path: str | None = None` appended to the generated env file
@@ -55,7 +55,7 @@ Risk packs considered (core):
   `/opt/homebrew/bin/bash`) satisfies this; node-27 remains the oracle
   when no local bash >= 4 exists. The tests SKIP only where no bash >= 4
   is resolvable.
-- [ ] 1.3 Absence + closed-set regressions:
+- [x] 1.3 Absence + closed-set regressions:
   (i) the existing
   `test_wrapper_clean_environment_loads_fixed_config_and_strips_inherited_db_selectors`
   (`:2572`) runs withOUT the key — extend it with one assertion pinning
@@ -74,9 +74,9 @@ Risk packs considered (core):
   `test_wrapper_rejects_forbidden_selector_in_mode_0600_env_before_exec`
   (`:2610`) — it passes unmodified (its reject path uses explicit
   `exit 2`).
-  Evidence floor: full wrapper-test subset green (on node-27 for the
-  bash >= 4 tests; macOS shows them as skipped).
-- [ ] 1.4 `infra/env/compute.scheduler-provider-refresh.env.example`: add a
+  Evidence floor: full wrapper-test subset green on a bash >= 4 host (the
+  guarded tests skip only where no bash >= 4 is resolvable).
+- [x] 1.4 `infra/env/compute.scheduler-provider-refresh.env.example`: add a
   COMMENTED block for `NHMS_REGISTRY_CUTOVER_DECLARATION_PATH` — purpose
   (declared package cutover), default-absent semantics (gate refuses
   undeclared cutovers), operator lifecycle (set absolute path during a
@@ -89,7 +89,7 @@ Risk packs considered (core):
   Evidence floor: the existing contract test asserting example content
   (`:2237` family) stays green; the commented key must NOT be an active
   line.
-- [ ] 1.5 `docs/runbooks/current-production-ops.md` cutover gate section
+- [x] 1.5 `docs/runbooks/current-production-ops.md` cutover gate section
   (`:479-534`): add the systemd-path procedure (edit EnvironmentFile with
   the key → run/await the timer or trigger the service → verify
   `declared_cutovers`/accepted receipt → DELETE the key line, never blank
@@ -102,11 +102,11 @@ Risk packs considered (core):
 
 ## 2. Change-level verification floor
 
-- [ ] 2.1 `uv run pytest -q tests/test_scheduler_file_provider_refresh.py`
+- [x] 2.1 `uv run pytest -q tests/test_scheduler_file_provider_refresh.py`
   green (full suite).
-- [ ] 2.2 `uv run ruff check .` clean.
-- [ ] 2.3 `openspec validate allow-cutover-declaration-env-in-refresh-wrapper
+- [x] 2.2 `uv run ruff check .` clean.
+- [x] 2.3 `openspec validate allow-cutover-declaration-env-in-refresh-wrapper
   --strict --no-interactive` PASS.
-- [ ] 2.4 Scope check: changed files exactly = wrapper script, tests file,
+- [x] 2.4 Scope check: changed files exactly = wrapper script, tests file,
   env example, runbook (+ this fixture). `git diff --name-only
   origin/master...HEAD` confirms; no schema/, no other scripts/.

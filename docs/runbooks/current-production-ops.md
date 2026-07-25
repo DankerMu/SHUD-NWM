@@ -500,9 +500,10 @@ canonical replace 前退出、非零：
 Cutover declaration 是 `nhms.scheduler.registry_package_cutover.v1`（schema：
 `schemas/scheduler_registry_package_cutover.schema.json`；参考 example：
 `schemas/examples/scheduler_registry_package_cutover.example.json`）。文件路径通过
-新增的 optional env `NHMS_REGISTRY_CUTOVER_DECLARATION_PATH` 传入 refresh 进程；
-env 未设置或空值等同于"无 declaration"（只有当没有 `package_changed`/`removed`
-时才允许）。示例：
+新增的 optional env `NHMS_REGISTRY_CUTOVER_DECLARATION_PATH` 传入 refresh 进程。
+**手动 CLI 路径**（自己 `export` 后直接跑 runner）：env 未设置或空值等同于"无
+declaration"（只有当没有 `package_changed`/`removed` 时才允许）。**systemd 路径**
+不同：空值会在 wrapper 解析阶段就 abort（见下"systemd 路径"）。示例：
 
 ```json
 {
@@ -528,10 +529,33 @@ identical 的 generation string，所以"先看被拒 receipt -> 拷 generation 
 重跑 refresh"这个循环里，第二次 refresh 一定能匹配 declaration；只有 prospective
 model set 真正变了，generation 才会变（这时也必须重新出 declaration）。
 
-操作流程：先看被拒 receipt -> 拷 generation / old/new checksum 到 declaration -> 提交
-declaration 到 mode-0600 路径 -> `export NHMS_REGISTRY_CUTOVER_DECLARATION_PATH=<path>` ->
-重跑 refresh。`effective_cycle_utc` 必须精确对齐 00:00 或 12:00 UTC，且落在
+操作流程（手动 CLI 路径）：先看被拒 receipt -> 拷 generation / old/new checksum 到
+declaration -> 提交 declaration 到 mode-0600 路径 ->
+`export NHMS_REGISTRY_CUTOVER_DECLARATION_PATH=<path>` -> 重跑 refresh。
+`effective_cycle_utc` 必须精确对齐 00:00 或 12:00 UTC，且落在
 `[now-24h, now+168h]` 区间；`transition_mode` 目前仅支持 `replace`。
+
+**systemd 路径（timer/service，#1095 起可用）**：wrapper
+`scripts/scheduler_file_provider_refresh_once.sh` 把 EnvironmentFile 当数据解析并只接受固定
+key allowlist；`NHMS_REGISTRY_CUTOVER_DECLARATION_PATH` **自 #1095 起在 allowlist 内**
+（optional，不在 required 集合里）。声明期间按下列顺序操作：
+
+1. 提交 declaration 到 mode-0600 路径（同上，generation / old/new checksum 从被拒
+   receipt 拷贝）。
+2. 在 node-22 编辑 EnvironmentFile
+   `/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-provider-refresh.env`（保持
+   mode 0600、非 symlink），**新增一行**
+   `NHMS_REGISTRY_CUTOVER_DECLARATION_PATH=<declaration 绝对路径>`。
+3. 等下一次 timer 触发，或手动触发一次：
+   `systemctl --user start nhms-scheduler-file-provider-refresh.service`
+   （wrapper 在 `nhms-compute-scheduler.service` 活跃时会 exit 3 拒跑）。
+4. 核对 receipt：`registry_classification.declared_cutovers` 覆盖本次
+   `package_changed`，且 outcome 为 accepted/published（不是
+   `registry_cutover_undeclared` / `registry_cutover_declaration_invalid`）。
+5. Cutover 落地后**删除整行**，不要留 `NHMS_REGISTRY_CUTOVER_DECLARATION_PATH=` 空值：
+   wrapper 的 `-n "$value"` 解析检查会对空值直接 fail-fast（bare exit 1，无 stdout），
+   service 会启动失败。空值 **不等同于** key 不存在；只有删掉整行才回到"无 declaration"
+   的安全默认（此后再有未声明的 package 漂移会照常被 refuse）。
 
 **Consumer-side note (Issue #1081 §8)**：`NHMS_REGISTRY_CUTOVER_DECLARATION_PATH`
 同时被 scheduler consumer (`services/orchestrator/scheduler_generation.load_
