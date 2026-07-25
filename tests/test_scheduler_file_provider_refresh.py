@@ -3718,6 +3718,148 @@ def test_receipt_validator_rejects_previous_count_mismatch(tmp_path: Path) -> No
     assert "receipt_classification_invalid" in str(info.value)
 
 
+def test_receipt_validator_rejects_bootstrap_receipt_with_removed_entries() -> None:
+    """#1096: a bootstrap receipt (``previous_registry_sha256`` null) claims no
+    previous canonical registry existed, so nothing could have been removed.
+    Pre-#1096 this tampered shape validated clean: the
+    ``added + unchanged + package_changed == prospective_model_count``
+    equality constrains nothing about ``removed`` and the refused lower bound
+    is satisfied by listing the removal as refused."""
+    receipt = refresh._receipt(
+        run_id="refresh_bootstrap_removed",
+        started=refresh.datetime(2026, 7, 14, tzinfo=refresh.UTC),
+        outcome="failed",
+        reason="registry_cutover_removal_refused",
+        phase="precommit",
+        providers=[],
+        registry_classification={
+            "previous_registry_sha256": None,
+            "new_registry_sha256": None,
+            "previous_model_count": None,
+            "prospective_model_count": 0,
+            "added": {"items": [], "total": 0, "truncated": False},
+            "unchanged": {"items": [], "total": 0, "truncated": False},
+            "removed": {"items": ["basin-102"], "total": 1, "truncated": False},
+            "package_changed": {"items": [], "total": 0, "truncated": False},
+            "refused": {
+                "items": [
+                    {
+                        "model_id": "basin-102",
+                        "old_checksum": "a" * 64,
+                        "new_checksum": None,
+                        "reason": "registry_cutover_removal_refused",
+                    }
+                ],
+                "total": 1,
+                "truncated": False,
+            },
+            "declared_cutovers": {"items": [], "total": 0, "truncated": False},
+        },
+    )
+    with pytest.raises(ValueError) as info:
+        refresh._validate_receipt(receipt)
+    assert "receipt_classification_invalid" in str(info.value)
+
+
+def test_receipt_validator_rejects_bootstrap_receipt_with_unchanged_entries() -> None:
+    """#1096 symmetric forgery: a bootstrap receipt cannot carry ``unchanged``
+    rows either.  Here every adjacent check is satisfied on purpose —
+    ``prospective_model_count`` is filled to match added+unchanged+
+    package_changed, ``refused`` is empty (required for ``published``), and the
+    full ``registry/readiness/state`` provider triple is present — so only the
+    bootstrap sum invariant can reject it."""
+    provider = {
+        "name": "registry",
+        "before_sha256": None,
+        "before_inode": None,
+        "before_schema_version": None,
+        "before_generated_at": None,
+        "before_payload_checksum": None,
+        "after_sha256": "c" * 64,
+        "after_schema_version": "v1",
+        "after_generated_at": "2026-07-14T01:00:00Z",
+        "after_payload_checksum": "sha256:" + "d" * 64,
+        "entry_count": 1,
+    }
+    receipt = refresh._receipt(
+        run_id="refresh_bootstrap_unchanged",
+        started=refresh.datetime(2026, 7, 14, tzinfo=refresh.UTC),
+        outcome="published",
+        reason="success",
+        phase="complete",
+        providers=[
+            provider,
+            {**provider, "name": "readiness"},
+            {**provider, "name": "state"},
+        ],
+        registry_classification={
+            "previous_registry_sha256": None,
+            "new_registry_sha256": None,
+            "previous_model_count": None,
+            "prospective_model_count": 1,
+            "added": {"items": [], "total": 0, "truncated": False},
+            "unchanged": {"items": ["basin-103"], "total": 1, "truncated": False},
+            "removed": {"items": [], "total": 0, "truncated": False},
+            "package_changed": {"items": [], "total": 0, "truncated": False},
+            "refused": {"items": [], "total": 0, "truncated": False},
+            "declared_cutovers": {"items": [], "total": 0, "truncated": False},
+        },
+    )
+    with pytest.raises(ValueError) as info:
+        refresh._validate_receipt(receipt)
+    assert "receipt_classification_invalid" in str(info.value)
+
+
+def test_receipt_validator_rejects_bootstrap_receipt_with_package_changed_entries() -> None:
+    """#1096: a bootstrap receipt cannot carry ``package_changed`` rows — a
+    package change requires an ``old_checksum`` from a previous canonical
+    registry that, by the null ``previous_registry_sha256``, never existed."""
+    receipt = refresh._receipt(
+        run_id="refresh_bootstrap_package_changed",
+        started=refresh.datetime(2026, 7, 14, tzinfo=refresh.UTC),
+        outcome="failed",
+        reason="registry_cutover_undeclared",
+        phase="precommit",
+        providers=[],
+        registry_classification={
+            "previous_registry_sha256": None,
+            "new_registry_sha256": None,
+            "previous_model_count": None,
+            "prospective_model_count": 1,
+            "added": {"items": [], "total": 0, "truncated": False},
+            "unchanged": {"items": [], "total": 0, "truncated": False},
+            "removed": {"items": [], "total": 0, "truncated": False},
+            "package_changed": {
+                "items": [
+                    {
+                        "model_id": "basin-104",
+                        "old_checksum": "a" * 64,
+                        "new_checksum": "c" * 64,
+                    }
+                ],
+                "total": 1,
+                "truncated": False,
+            },
+            "refused": {
+                "items": [
+                    {
+                        "model_id": "basin-104",
+                        "old_checksum": "a" * 64,
+                        "new_checksum": "c" * 64,
+                        "reason": "registry_cutover_undeclared",
+                    }
+                ],
+                "total": 1,
+                "truncated": False,
+            },
+            "declared_cutovers": {"items": [], "total": 0, "truncated": False},
+        },
+    )
+    with pytest.raises(ValueError) as info:
+        refresh._validate_receipt(receipt)
+    assert "receipt_classification_invalid" in str(info.value)
+
+
 def test_reconciliation_formula_helper_catches_declared_not_in_package_changed(
     tmp_path: Path,
 ) -> None:
