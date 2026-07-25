@@ -36,6 +36,10 @@ full 分支 R2-N1 等式与 bootstrap 对偶不弱化；`_classify_registry` 划
       不变）。交叉钉：`outcome == "dry_run"` ∧ `mode == "full"` 拒；
       `outcome == "published"` ∧ `mode == "id_only"` 拒（伪造组合；
       `restored_previous`/`replace_uncertain`/`failed` + `full` 合法）。
+      id_only 分支在 return 之前保留终末钉（评审 P2-1）：`reason ∈
+      REGISTRY_CUTOVER_REFUSAL_REASONS` 时 `refused_total >= 1`（写入侧
+      `:2813-2824` 置 refusal reason 与追加 refused 行是同一次动作，二者
+      必须同在同灭——防"抹平 refused 桶"篡改在新 receipt 上失守）。
       docstring 的 governing invariants 段同步措辞。
 - [ ] 1.4 schema：`registry_classification.properties` 增 `mode` enum
       `["id_only", "full"]`，**不进** `required`（legacy 兼容）；
@@ -67,7 +71,9 @@ full 分支 R2-N1 等式与 bootstrap 对偶不弱化；`_classify_registry` 划
       （previous=None）+ outcome=failed + mode=id_only → 通过；previous
       无 removal + outcome=failed + mode=id_only → 通过；两者各补一个带
       `__declaration__` refusal（reason=registry_cutover_declaration_invalid）
-      的变体 → 通过（P1-1 爆点）；id-only refused 带其它 reason → 拒。
+      的变体 → 通过（P1-1 爆点）；id-only refused 带其它 reason → 拒；
+      `mode="id_only"` + `reason="registry_cutover_declaration_invalid"`
+      + `refused.total==0` → 拒（P2-1 终末钉不回退）。
       (d) 端到端 declaration 变体：dry_run + 坏 declaration 文件 →
       receipt 落盘、reason 保留 `registry_cutover_declaration_invalid`
       （红证：按未含 P1-1 修正的实现会以 `primary_receipt_failed` 失败）。
