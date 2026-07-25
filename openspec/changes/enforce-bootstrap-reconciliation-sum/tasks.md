@@ -21,7 +21,7 @@ Risk packs considered (core):
 
 ## 1. Validator + regression tests
 
-- [ ] 1.1 `scripts/scheduler_file_provider_refresh.py`, inside the
+- [x] 1.1 `scripts/scheduler_file_provider_refresh.py`, inside the
   `previous_sha is None` branch (`:1995-2000`), after the existing
   `if previous_count is not None: raise`, add the dual equality:
   `if unchanged_total + package_changed_total + removed_total != 0:` →
@@ -30,7 +30,7 @@ Risk packs considered (core):
   be unchanged/package_changed/removed). No other branch or function
   touched.
   Evidence floor: `uv run ruff check .` clean; full suite green (task 2.1).
-- [ ] 1.2 Three negative receipt-tampering tests in
+- [x] 1.2 Three negative receipt-tampering tests in
   `tests/test_scheduler_file_provider_refresh.py`, mirroring the
   validator-negative pattern at `:3538` (build a bootstrap receipt with
   `previous_registry_sha256=None`, `previous_model_count=None`). The
@@ -58,7 +58,7 @@ Risk packs considered (core):
   (e.g. stash the production hunk or run from a master worktree):
   all 3 must FAIL (receipt validates clean); green after the 1.1 line.
   Record both outputs verbatim.
-- [ ] 1.3 Bootstrap happy-path regression (fixture-review pre-identified;
+- [x] 1.3 Bootstrap happy-path regression (fixture-review pre-identified;
   re-run and confirm green post-change): the `_classification_stub()`
   helper (`tests/test_scheduler_file_provider_refresh.py:457`) is bootstrap
   -shaped (null sha/count, empty buckets) and flows through
@@ -74,12 +74,12 @@ Risk packs considered (core):
 
 ## 2. Change-level verification floor
 
-- [ ] 2.1 `uv run pytest -q tests/test_scheduler_file_provider_refresh.py`
+- [x] 2.1 `uv run pytest -q tests/test_scheduler_file_provider_refresh.py`
   green (full suite).
-- [ ] 2.2 `uv run ruff check .` clean.
-- [ ] 2.3 `openspec validate enforce-bootstrap-reconciliation-sum --strict
+- [x] 2.2 `uv run ruff check .` clean.
+- [x] 2.3 `openspec validate enforce-bootstrap-reconciliation-sum --strict
   --no-interactive` PASS.
-- [ ] 2.4 Scope check: production diff confined to the bootstrap branch of
+- [x] 2.4 Scope check: production diff confined to the bootstrap branch of
   `_enforce_registry_classification_reconciliation`
   (`git diff origin/master -- scripts/scheduler_file_provider_refresh.py`
   shows exactly one hunk there); no schema, no other production file.

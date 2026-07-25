@@ -1998,6 +1998,11 @@ def _enforce_registry_classification_reconciliation(
         # no previous SHA is contradictory shape.
         if previous_count is not None:
             raise ValueError("receipt_classification_invalid")
+        # Dual of the non-bootstrap equality below: with no previous registry
+        # there is nothing to carry over, so no row can be unchanged,
+        # package_changed, or removed.
+        if unchanged_total + package_changed_total + removed_total != 0:
+            raise ValueError("receipt_classification_invalid")
     else:
         if (
             not isinstance(previous_count, int)
