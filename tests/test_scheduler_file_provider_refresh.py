@@ -6551,6 +6551,10 @@ _FORGED_ID_ONLY_REFUSED_BUCKETS: list[Any] = [
         id="items_wiped_total_inflated",
     ),
     pytest.param(
+        {"items": [], "total": 1, "truncated": True},
+        id="wiped_items_inflated_total_truncated",
+    ),
+    pytest.param(
         {"items": [_DECLARATION_REFUSAL_ITEM], "total": 2, "truncated": True},
         id="truncated_bucket",
     ),

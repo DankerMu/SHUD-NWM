@@ -120,17 +120,6 @@
           "rounds": 1
         }
       ]
-    },
-    "1144": {
-      "ceilingPrs": [],
-      "gateEntries": 0,
-      "closed": [
-        {
-          "pr": 0,
-          "outcome": "abandoned",
-          "rounds": 0
-        }
-      ]
     }
   }
 }

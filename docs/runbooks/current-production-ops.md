@@ -520,9 +520,8 @@ receipt 会带 `outcome: "failed"` + 真实 reason + `mode: "id_only"` 正常落
 
 **升级 pre-#1140 receipt**：#1140 部署之前写下的 receipt 的 `registry_classification` 里
 没有 `mode` 字段，这属正常、不是篡改信号；校验对这种老 receipt 回退到按
-`outcome == "dry_run"` 选分支，即 #1140 之前的行为。判定版次的方法同下文的 pre-#1132 段：
-比对 `.started_at` 与 #1140 部署时间，或者跑一次 manual refresh 拿新 receipt——新 receipt
-一定带 `mode`。
+`outcome == "dry_run"` 选分支，即 #1140 之前的行为。判定版次：比对 `.started_at` 与
+#1140 部署时间，或者跑一次 manual refresh 拿新 receipt——新 receipt 一定带 `mode`。
 
 Cutover declaration 是 `nhms.scheduler.registry_package_cutover.v1`（schema：
 `schemas/scheduler_registry_package_cutover.schema.json`；参考 example：
