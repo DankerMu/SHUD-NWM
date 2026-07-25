@@ -13,8 +13,19 @@
   (for example a readiness derivation error)
 - **THEN** `refresh_scheduler_file_providers` SHALL NOT raise
   `primary_receipt_failed`; the receipt SHALL persist to both the history
-  and latest channels with `outcome="failed"`, the injected true reason,
-  and the id-only classification retained with `mode="id_only"`
+  and latest channels (no newer receipt present) with `outcome="failed"`,
+  the injected true reason, and the id-only classification retained with
+  `mode="id_only"`
+
+#### Scenario: An id-only classification may carry the declaration-invalid refusal marker
+
+- **WHEN** an `outcome="failed"` receipt carries `mode="id_only"` with
+  `reason="registry_cutover_declaration_invalid"` and refused entries
+  whose reason is `registry_cutover_declaration_invalid` (the synthetic
+  `__declaration__` marker the writer appends after classification,
+  dry_run included)
+- **THEN** validation SHALL pass; an id-only `refused` entry with any
+  other reason SHALL raise `receipt_classification_invalid`
 
 #### Scenario: Forged mode/outcome combinations are rejected
 
@@ -43,7 +54,7 @@
 
 ### Requirement: The receipt validator SHALL bind dry_run receipts to the reconciliation constraints that hold in id-only mode
 
-`_enforce_registry_classification_reconciliation` SHALL apply the id-only constraint set to every receipt whose classification carries `mode="id_only"` (falling back to `outcome="dry_run"` keying when the legacy receipt has no mode field), rejecting any such receipt whose classification violates a constraint that the id-only classify path guarantees by construction, specifically: `removed.total` must be zero, `previous_registry_sha256` and `previous_model_count` must be null together or non-null together (with a non-boolean integer count >= 0), `new_registry_sha256` must be null (an id-only classification only arises from dry_run, which never publishes a registry), when no previous registry is recorded `unchanged.total` must also be zero (with an empty `previous_by_id` every prospective row classifies as added — the dry_run dual of the bootstrap sum invariant), and when a previous registry exists `unchanged.total` must not exceed `previous_model_count`. The validator SHALL NOT apply the full previous-side equality (`unchanged + package_changed + removed == previous_model_count`) to id-only classifications, because the id-only path never evaluates removals — regardless of the receipt's terminal outcome.
+`_enforce_registry_classification_reconciliation` SHALL apply the id-only constraint set to every receipt whose classification carries `mode="id_only"` (falling back to `outcome="dry_run"` keying when the legacy receipt has no mode field), rejecting any such receipt whose classification violates a constraint that the id-only classify path guarantees by construction, specifically: `removed.total` must be zero, `package_changed.total` and `declared_cutovers.total` must be zero, every `refused` entry's reason must be `registry_cutover_declaration_invalid` (the synthetic `__declaration__` marker is the only refusal the writer can attach to an id-only classification; the legacy outcome-keyed fallback keeps rejecting all refused entries as before), `previous_registry_sha256` and `previous_model_count` must be null together or non-null together (with a non-boolean integer count >= 0), `new_registry_sha256` must be null (an id-only classification only arises from dry_run, which never publishes a registry), when no previous registry is recorded `unchanged.total` must also be zero (with an empty `previous_by_id` every prospective row classifies as added — the dry_run dual of the bootstrap sum invariant), and when a previous registry exists `unchanged.total` must not exceed `previous_model_count`. The validator SHALL NOT apply the full previous-side equality (`unchanged + package_changed + removed == previous_model_count`) to id-only classifications, because the id-only path never evaluates removals — regardless of the receipt's terminal outcome.
 
 #### Scenario: Tampered dry_run receipt with removed entries is rejected
 

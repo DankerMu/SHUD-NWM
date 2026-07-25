@@ -6,11 +6,11 @@
 id-only branch by `outcome == "dry_run"`
 (`scripts/scheduler_file_provider_refresh.py:2040`), but the WRITER keys
 the id-only classification on the `dry_run` flag
-(`_classify_registry` early-return, `:2610-2618`). The two coincide only
+(`_classify_registry` early-return, `:2609-2617`). The two coincide only
 on the happy path. When a dry_run refresh fails AFTER the precommit gate
 (readiness derivation, `provider_invalid`, …), the failure receipt carries
 `outcome="failed"` plus the honest id-only classification; the validator
-routes it into the full-equality branch (`:2100-2108`), and whenever the
+routes it into the full-equality branch (`:2088-2106`), and whenever the
 previous canonical registry contains a model absent from the prospective
 set — exactly the removal-preview scenario dry_run exists for —
 `unchanged + 0 + 0 != previous_count` raises
@@ -45,7 +45,13 @@ must be optional at every layer.
   admits optional `mode` (when present: must be `"id_only"` or `"full"`);
   `_enforce_registry_classification_reconciliation` branches on `mode`
   when present, falling back to `outcome == "dry_run"` for legacy
-  receipts. Cross-pins: `outcome == "dry_run"` with `mode == "full"` and
+  receipts. The id-only branch's refusal constraint loosens by exactly one
+  reason: the writer appends the synthetic `__declaration__` refusal AFTER
+  `_classify_registry` regardless of dry_run (`:2813-2824`), so an id-only
+  classification may carry refused entries whose reason is
+  `registry_cutover_declaration_invalid` — any other refusal reason still
+  rejects, and `package_changed`/`declared_cutovers` stay pinned to zero.
+  Cross-pins: `outcome == "dry_run"` with `mode == "full"` and
   `outcome == "published"` with `mode == "id_only"` are forged
   combinations and reject.
 - Schema + example: `registry_classification.properties.mode` optional
@@ -78,8 +84,21 @@ must be optional at every layer.
   dry_run-failure receipt survivability).
 - Affected code: `scripts/scheduler_file_provider_refresh.py`,
   `schemas/scheduler_file_provider_refresh_receipt.schema.json` (+example),
-  `tests/test_scheduler_file_provider_refresh.py`.
+  `tests/test_scheduler_file_provider_refresh.py`,
+  `docs/runbooks/current-production-ops.md` (classification-section `mode`
+  semantics + pre-#1140 absence note, mirroring the pre-#1132 precedent).
 - Receipt consumers: optional key, exact key-set validator extended the
   same way #1132 extended `RECEIPT_OPTIONAL_KEYS`; rollback direction
   (old validator rejects mode-carrying receipts) is the same pre-existing
   pattern already tracked by #1143 — noted, not expanded here.
+- The merged #1096 bootstrap-sum requirement
+  (`openspec/specs/scheduler-registry-refresh/spec.md:118-131`) keeps its
+  outcome-phrased wording: under mode routing its invariant is equivalently
+  covered by the id-only branch's three zero-pins (removed/package_changed
+  zero, bootstrap unchanged zero), each strictly stronger than the summed
+  form — no MODIFIED delta needed, behavior unchanged.
+- The live (unarchived) change
+  `openspec/changes/node22-scheduler-registry-refresh/specs/.../spec.md:380-403`
+  still states the unconditional previous-side equality — pre-existing
+  drift introduced by #1135, not touched here (issue-scoped: this change
+  only modifies the merged capability spec).
