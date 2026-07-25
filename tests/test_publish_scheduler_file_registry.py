@@ -612,9 +612,12 @@ def test_real_registry_refresh_keeps_packages_private_and_canonical_manifest_sha
         directory.mkdir(exist_ok=True)
         directory.chmod(0o700)
     # #1097 / spec scenario 2: capture the runner-built audit block on its way
-    # into the publisher and the summary on its way out, so the assertion
-    # below compares the producer's block against what the manifest companion
-    # receipt actually persisted (call-through spy — the real publisher runs).
+    # into the publisher and the receipt dict handed back on its way out, so
+    # the assertion below compares the producer's block against what the real
+    # publisher returned (call-through spy — the real publisher runs). On this
+    # runner channel the returned block is the only evidence: the runner's own
+    # receipt drops cutover_gate via _provider_evidence, so nothing persists it
+    # here; CLI-channel persistence is covered by a separate test.
     monkeypatch.delenv(refresh.CUTOVER_DECLARATION_ENV, raising=False)
     real_publish_all = refresh.publish_all_basin_scheduler_registry
     passthrough: dict[str, Any] = {}
