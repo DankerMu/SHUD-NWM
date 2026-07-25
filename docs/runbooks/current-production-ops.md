@@ -355,8 +355,14 @@ Registry、canonical readiness 和 state index 的 consumer freshness 上限均�
 timer 每日从权威内容完整重验并重发三个 provider，scheduler consumer 仍然只读、
 fail closed。direct-grid 生产模式下 timer 重发当前已验证 registry；
 `publish_scheduler_file_registry.py` 只负责 baseline staging，不能直写 canonical。
-它与 timer、model lifecycle、readiness/state writer 使用同一个
-destination-derived lock 和 expected-preimage 检查，并发者不会覆盖较新的权威内容。
+它与 timer、model lifecycle、readiness/state writer 共用同一个 destination-derived
+lock（CLI 在 commit 时短暂持有），但 **CLI 不传 `expected_preimage`**：`main()` 从不
+populate 该参数，expected-preimage 检查只由 refresh runner 自身的
+registry/worker-mirror/readiness/state lane（含回滚路径）与 `state_manager` 的
+state-index copyback 使用。因此 CLI 对 refresh timer 的并发保护是 **operator-gated 而非代码强制**——
+若 refresh 在 CLI 的 snapshot→commit 窗口内提交，CLI 会静默覆写它且不会报
+`provider_preimage_changed`。运行前必须按下面"手动 publisher CLI"条目确认 timer 与
+oneshot service 均非活跃。其余 writer 之间的 lock + preimage 语义不变。
 refresh user unit 不启用 `PrivateTmp`：node-22 的 user-systemd mount namespace 会在该模式下
 拒绝进程打开 `/`，与 provider 的绝对路径逐级 no-follow 校验冲突；私有边界继续由 mode-0600
 env、mode-0700 workspace/receipt/emergency/lock 目录、`UMask=0077` 和 DB selector 清除保证。
@@ -615,6 +621,31 @@ manual publisher 默认也会跑 cutover gate，语义与 refresh runner 一致�
 不会替换 canonical。仅在 bootstrap（没有 previous canonical `manifest-last.json`）或
 显式一次性 recovery 时使用 `--allow-uncovered-cutover` 跳过（会在 stderr 打印 WARNING）。
 常规运维必须走 declaration + 重跑，绝不 default 到 bypass。
+
+**并发禁令（#1104，operator-gated）**：`nhms-scheduler-file-provider-refresh.timer`
+或其 oneshot service 处于活跃状态时，**严禁**运行 manual publisher CLI。CLI 路径
+**没有** CAS 防护——`main()` 不传 `expected_preimage`，若 refresh 在 CLI 的
+snapshot→commit 窗口内提交，CLI 会静默覆写 refresh 刚发布的 canonical bytes，且
+两边都不会出现 `provider_preimage_changed` 证据。这条边界只靠运维纪律保证，代码
+不会拦你；CLI 每次启动都会在 stderr 打印一行 WARNING 提醒本条。运行前必须成对确认：
+
+```bash
+systemctl --user status nhms-scheduler-file-provider-refresh.timer \
+  nhms-scheduler-file-provider-refresh.service --no-pager
+```
+
+判据（两条**同时**满足才可运行 CLI）：
+
+- timer 为 `inactive` / `disabled`（`Active: inactive (dead)`）；
+- service **不是** `activating` 或 `active`——oneshot service 可能在 timer 停掉后
+  仍在执行本次 tick，只看 timer 会漏判。
+
+标准做法：先 `systemctl --user stop nhms-scheduler-file-provider-refresh.timer`，
+再重跑上面的成对 status 确认 service 也已退出，然后运行 CLI；跑完
+`systemctl --user start nhms-scheduler-file-provider-refresh.timer` 恢复 timer，并用
+`systemctl --user list-timers nhms-scheduler-file-provider-refresh.timer --no-pager`
+核对下次 tick 已排上。若 status 显示 service 正在跑，等它自然结束，不要 kill——
+中途打断会留下未完成的 canonical replace 状态。
 
 **`cutover_gate` audit（R2-A1，v2 summary）**：CLI 每次退出（成功 summary 到 stdout、
 失败 error payload 到 stderr）都会写入一个 `cutover_gate` audit 块，schema 是

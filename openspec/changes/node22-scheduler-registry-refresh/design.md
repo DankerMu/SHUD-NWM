@@ -39,7 +39,7 @@ stays read-only and fail closed. A failed consumer tick cannot renew the
 evidence it judges. Extending TTL was rejected because it hides stale object
 references.
 
-### D2. Every provider writer uses destination lock plus expected-preimage CAS
+### D2. Every provider writer uses destination lock plus optional expected-preimage CAS
 
 The common low-level atomic writer for registry/readiness/state acquires one
 destination-derived lock, optionally verifies an expected preimage digest and
@@ -231,13 +231,29 @@ The registry publisher gains a precommit compatibility gate:
    lock itself is only entered briefly inside `atomic_replace_provider_bytes`
    at commit time. A concurrent refresh attempts to acquire the same
    `refresh_lock` and fails immediately (`already_running`), so no two gate
-   evaluations race. Concurrent NON-refresh writers (e.g. the manual
-   publisher) are excluded from the same `refresh_lock` but are stopped at
-   commit time by the `expected_preimage` CAS in
-   `atomic_replace_provider_bytes` — a concurrent write that lands between
-   snapshot and commit raises `provider_preimage_changed` and the refresh
-   restores its owned lanes without touching the concurrent authoritative
-   generation.
+   evaluations race. Concurrent NON-refresh writers are excluded from the
+   same `refresh_lock`; whether they are *detected* depends on whether they
+   populate `expected_preimage`. The refresh runner's own lanes and the
+   state-index copyback in `packages/common/state_manager.py` do populate it,
+   so a concurrent write landing between their snapshot and commit raises
+   `provider_preimage_changed` in `atomic_replace_provider_bytes` and the
+   refresh restores its owned lanes without touching the concurrent
+   authoritative generation. **The manual publisher is not such a writer
+   (#1104).** `publish_all_basin_scheduler_registry` accepts
+   `expected_preimage` and forwards it, but the CLI `main()` never populates
+   it: the CAS parameter is exercised only by the internal refresh runner
+   (plus that copyback path). The manual CLI does take the destination-derived
+   lock briefly at commit, so bytes never interleave — but a refresh that
+   commits inside the CLI's snapshot→commit window is silently overwritten
+   with no `provider_preimage_changed` evidence. Manual-publisher concurrency
+   is therefore **operator-gated, not code-gated**: an explicit prohibition in
+   `docs/runbooks/current-production-ops.md` (never run the CLI while
+   `nhms-scheduler-file-provider-refresh.timer` or its oneshot service is
+   active, with a paired `systemctl --user status` check) plus an
+   unconditional CLI startup stderr WARNING pointing at that rule. Wiring CAS
+   into `main()` stays available as future hardening if real concurrent use
+   appears; it needs snapshot-window handling and an operator retry path,
+   which the maintenance-window usage does not currently justify.
 8. **Manual publisher parity** — `scripts/publish_scheduler_file_registry.py`
    now wires the same gate through `publish_all_basin_scheduler_registry`'s
    `precommit_validator` so operators cannot bypass by running the manual
@@ -427,8 +443,11 @@ Regression rows:
   outputs and published receipt; new registry packages are
   private-only, the canonical manifest is shared, and deleting a private
   package makes the unchanged scheduler consumer fail closed.
-- Any provider writer overlap -> destination lock + expected-preimage CAS; new
-  authoritative entries are never overwritten and no multi-lock deadlock.
+- Any provider writer overlap -> destination lock serializes every writer with
+  no multi-lock deadlock; the refresh runner's expected-preimage CAS aborts
+  `provider_preimage_changed` rather than losing newer authoritative entries.
+  The manual publisher CLI supplies no preimage: its overlap with the refresh
+  timer is operator-gated (D7#7), not CAS-gated.
 - Pre-commit invalid/path/limit/provider failure -> complete old stat tuple;
   capped immutable orphan evidence only.
 - Replace/fsync/post-read/receipt failure -> phase-correct restored/indeterminate

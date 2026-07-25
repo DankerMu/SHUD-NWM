@@ -1,9 +1,11 @@
 ## 1. File-Provider Refresh Transaction
 
 - [x] 1.1 Add a bounded refresh runner/wrapper and common provider atomic-write
-  seam: one destination lock at a time plus optional digest/inode expected-
-  preimage CAS shared by registry/manual/lifecycle/readiness/state writers;
-  concurrent authoritative updates return `provider_preimage_changed`.
+  seam: one destination lock at a time serializing registry/manual/lifecycle/
+  readiness/state writers, plus optional digest/inode expected-preimage CAS
+  populated by the refresh runner's own lanes and the state-index copyback
+  (the manual CLI takes the lock but supplies no preimage); concurrent
+  authoritative updates return `provider_preimage_changed`.
 - [x] 1.2 Reuse `publish_all_basin_scheduler_registry`; permit only bounded
   immutable content-addressed package orphan candidates before canonical commit
   and never auto-delete them. Derive each package version from the publisher's

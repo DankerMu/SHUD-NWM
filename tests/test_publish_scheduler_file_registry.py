@@ -1369,7 +1369,9 @@ def test_manual_cli_allow_uncovered_bypasses_gate_with_warning(
     captured = capsys.readouterr()
     err = captured.err
     out = captured.out
-    assert "WARNING" in err
+    # #1104 (P2-4): a bare `"WARNING" in err` became vacuous once every run
+    # emits the operator-gate startup warning, so pin the bypass banner itself.
+    assert "WARNING: --allow-uncovered-cutover disables the #1080 registry" in err
     assert "allow-uncovered-cutover" in err
     # With bypass, publish should proceed (canonical bytes replaced).
     assert exit_code == 0
@@ -1718,3 +1720,111 @@ def test_cli_failure_payload_cutover_gate_is_produced_by_shared_normalizer(
 
     payload = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
     assert payload["cutover_gate"] == _NORMALIZER_SENTINEL, payload
+
+
+# ---------------------------------------------------------------------------
+# #1104: manual-publisher concurrency is operator-gated, not CAS-gated.
+#
+# `main()` never populates `expected_preimage`, so nothing in code stops the
+# manual CLI from overwriting a refresh commit that lands between its snapshot
+# and its own commit.  The mitigation is an explicit runbook prohibition, and
+# the CLI must point every operator at it on startup.  These pins prove the
+# warning reaches stderr on both a successful and a failing run, and that the
+# machine-readable failure payload still parses from the final stderr line.
+# ---------------------------------------------------------------------------
+
+_REFRESH_TIMER_UNIT = "nhms-scheduler-file-provider-refresh.timer"
+
+# Captured from the pre-#1104 CLI for the `registry_publish_error` trigger:
+# the startup warning must not perturb one byte of this payload.
+_PREFIX_MISSING_FAILURE_PAYLOAD = {
+    "cutover_gate": {
+        "declaration_env": "NHMS_REGISTRY_CUTOVER_DECLARATION_PATH",
+        "declaration_present": False,
+        "mode": "enforced",
+    },
+    "error_code": "SCHEDULER_REGISTRY_OBJECT_STORE_PREFIX_MISSING",
+    "message": "OBJECT_STORE_PREFIX or --object-store-prefix is required.",
+}
+
+
+def test_cli_prints_operator_gate_warning_on_successful_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#1104 / 2.1: a run that publishes successfully still emits the
+    operator-gate startup warning as its FIRST stderr line, naming the refresh
+    timer unit, and leaves the stdout summary untouched."""
+    inventory = {
+        "schema_version": "basins.discovery.v1",
+        "root": str(tmp_path / "Basins"),
+        "resolved_root": str(tmp_path / "Basins"),
+        "model_count": 1,
+        "models": [_inventory_model("first")],
+        "warnings": [],
+    }
+    monkeypatch.setattr(registry_script, "discover_basins_inventory", lambda _root: inventory)
+    monkeypatch.setattr(registry_script, "publish_basins_package", _fake_publish_basins_package)
+    monkeypatch.setattr(
+        registry_script,
+        "prepare_basins_import_sources",
+        lambda inventory_path, package_manifest_path: _fake_sources(
+            inventory, Path(package_manifest_path)
+        ),
+    )
+    canonical = tmp_path / "shared/scheduler/registry/manifest-last.json"
+    canonical.parent.mkdir(parents=True)
+    monkeypatch.delenv("NHMS_REGISTRY_CUTOVER_DECLARATION_PATH", raising=False)
+
+    argv = [
+        "--basins-root",
+        str(tmp_path / "Basins"),
+        "--registry-manifest",
+        str(canonical),
+        "--object-store-root",
+        str(tmp_path / "private-objects"),
+        "--object-store-prefix",
+        "s3://nhms",
+        "--work-dir",
+        str(tmp_path / "work"),
+        # Bootstrap bypass: the only deterministic exit-0 CLI path in this
+        # suite.  The pin below is on the startup warning, which is emitted
+        # before the bypass branch is even evaluated.
+        "--allow-uncovered-cutover",
+    ]
+
+    exit_code = registry_script.main(argv)
+    captured = capsys.readouterr()
+    startup_line = captured.err.strip().splitlines()[0]
+
+    assert _REFRESH_TIMER_UNIT in startup_line, captured.err
+    assert "WARNING" in startup_line, captured.err
+    # P2-4: the startup warning must stay distinguishable from the
+    # `--allow-uncovered-cutover` bypass banner, which is asserted separately.
+    assert "allow-uncovered-cutover" not in startup_line, captured.err
+    assert exit_code == 0
+    # The warning is stderr-only: the stdout summary contract is unchanged.
+    summary = json.loads(captured.out)
+    assert summary["schema_version"] == "nhms.scheduler.basins_file_registry_publish.v2"
+
+
+def test_cli_startup_warning_coexists_with_failure_json_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#1104 / 2.2: on a deterministic failure the startup warning leads
+    stderr and the existing JSON error payload still parses byte-for-byte
+    identically from the final stderr line — the whole suite (and node-22
+    operators) read that channel with ``strip().splitlines()[-1]``."""
+    argv = _install_cli_failure("registry_publish_error", tmp_path, monkeypatch)
+
+    assert registry_script.main(argv) == 1
+
+    err = capsys.readouterr().err
+    lines = err.strip().splitlines()
+    assert _REFRESH_TIMER_UNIT in lines[0], err
+    assert json.loads(lines[-1]) == _PREFIX_MISSING_FAILURE_PAYLOAD, err
+    # Exactly one added line: warning + payload, nothing else on the channel.
+    assert len(lines) == 2, err

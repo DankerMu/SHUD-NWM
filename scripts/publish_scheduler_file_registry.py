@@ -81,6 +81,21 @@ SCHEMA_VERSION = "nhms.scheduler.basins_file_registry_publish.v2"
 # hard-coded here so the CLI can audit it even when the refresh module is not
 # imported (bootstrap path).
 CUTOVER_DECLARATION_ENV_NAME = "NHMS_REGISTRY_CUTOVER_DECLARATION_PATH"
+# #1104: `main()` does not populate `expected_preimage`, so this CLI has NO
+# code-level protection against overwriting a provider refresh that commits
+# between our snapshot and our own commit.  The protection is an operator
+# prohibition documented in the runbook; every run announces it on stderr.
+# Deliberately free of the substring `allow-uncovered-cutover` so it stays
+# distinguishable from the bypass banner.
+OPERATOR_GATE_WARNING = (
+    "WARNING: manual publisher concurrency is operator-gated, not CAS-gated. "
+    "Confirm nhms-scheduler-file-provider-refresh.timer is inactive/disabled "
+    "AND nhms-scheduler-file-provider-refresh.service is not activating/active "
+    "before publishing: systemctl --user status "
+    "nhms-scheduler-file-provider-refresh.timer "
+    "nhms-scheduler-file-provider-refresh.service --no-pager. "
+    "See docs/runbooks/current-production-ops.md (manual publisher CLI)."
+)
 DEFAULT_PACKAGE_VERSION_TEMPLATE = "vbasins-{slug_id}-{content_hash}-{source_hash}"
 DEFAULT_SOURCE_POLICY = {
     "forcing_source": "node27_raw_handoff",
@@ -1186,6 +1201,11 @@ def _build_manual_cutover_gate(
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
+    # #1104: this CLI never populates `expected_preimage`, so a provider
+    # refresh committing between our snapshot and our commit would be silently
+    # overwritten.  Concurrency with the refresh timer is operator-gated by the
+    # runbook, not by code -- say so before any I/O happens.
+    print(OPERATOR_GATE_WARNING, file=sys.stderr)
     resolved_registry_manifest = args.registry_manifest or _default_registry_manifest()
     precommit_validator: Callable[
         [Path, Sequence[Mapping[str, Any]], Sequence[Mapping[str, Any]]], None
