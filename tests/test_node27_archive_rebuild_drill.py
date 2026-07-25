@@ -1253,6 +1253,68 @@ def test_d2_insert_rows_only_uses_column_intersection() -> None:
     assert len(params) == 2, params  # only the two prod-row columns bound
 
 
+def test_insert_rows_excludes_generated_always_columns() -> None:
+    """#1121: prod rows carry GENERATED ALWAYS column values (SELECT *), but
+    PostgreSQL rejects explicit inserts into them — the lifter must leave
+    them to staging to recompute (migration 000048 stream_type regression).
+    """
+    conn = _RecordingStagingConn()
+    lifter = drill.PsycopgRegistryLifterOps(prod_conn=object(), staging_conn=conn)
+    lifter._staging_columns[("core", "river_segment")] = {
+        "river_segment_id": "text",
+        "river_network_version_id": "text",
+        "properties_json": "jsonb",
+        "stream_type": "float8",
+    }
+    lifter._staging_generated[("core", "river_segment")] = frozenset({"stream_type"})
+    lifter.insert_rows(
+        "core.river_segment",
+        [
+            {
+                "river_segment_id": "seg-1",
+                "river_network_version_id": "rnv-1",
+                "properties_json": {"Type": "3"},
+                "stream_type": 3.0,
+            }
+        ],
+    )
+    stmt, params = conn.cursors[0].executed[0]
+    assert len(params) == 3, params  # stream_type NOT bound
+    assert "stream_type" not in str(stmt)
+
+
+def test_staging_column_types_caches_generated_always_set() -> None:
+    """The single information_schema query populates both column-type and
+    generated-column caches (no second catalog round trip)."""
+
+    class _InfoSchemaCursor(_RecordingCursor):
+        def fetchall(self) -> list[Any]:
+            return [
+                ("river_segment_id", "text", "NEVER"),
+                ("properties_json", "jsonb", "NEVER"),
+                ("stream_type", "float8", "ALWAYS"),
+            ]
+
+    class _InfoSchemaConn(_RecordingStagingConn):
+        def cursor(self, *args: Any, **kwargs: Any) -> _RecordingCursor:
+            c = _InfoSchemaCursor()
+            self.cursors.append(c)
+            return c
+
+    conn = _InfoSchemaConn()
+    lifter = drill.PsycopgRegistryLifterOps(prod_conn=object(), staging_conn=conn)
+    columns = lifter._staging_column_types("core", "river_segment")
+    assert columns == {
+        "river_segment_id": "text",
+        "properties_json": "jsonb",
+        "stream_type": "float8",
+    }
+    assert lifter._staging_generated[("core", "river_segment")] == frozenset(
+        {"stream_type"}
+    )
+    assert len(conn.cursors) == 1  # one catalog query, both caches filled
+
+
 def test_c_is_2_workspace_cleaned_on_pass(tmp_path: Path, zstd_bin: Path) -> None:
     """C1 / C-is-2: workspace removed on PASS."""
     manifest_path, manifest = _write_fixture_runs_archive(tmp_path)

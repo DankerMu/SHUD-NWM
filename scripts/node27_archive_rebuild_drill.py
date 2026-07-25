@@ -918,6 +918,8 @@ class PsycopgRegistryLifterOps(RegistryLifterOps):
         self._staging = staging_conn
         # Cache: (schema, table) -> {column_name: udt_name} on staging.
         self._staging_columns: dict[tuple[str, str], dict[str, str]] = {}
+        # Cache: (schema, table) -> staging columns with is_generated='ALWAYS'.
+        self._staging_generated: dict[tuple[str, str], frozenset[str]] = {}
 
     def select_where(
         self, table: str, predicates: Mapping[str, Any]
@@ -937,24 +939,36 @@ class PsycopgRegistryLifterOps(RegistryLifterOps):
             return [dict(row) for row in cursor.fetchall()]
 
     def _staging_column_types(self, schema: str, name: str) -> dict[str, str]:
-        """Return ``{column_name: udt_name}`` for staging table, cached."""
+        """Return ``{column_name: udt_name}`` for staging table, cached.
+
+        The same information_schema query also caches which columns are
+        ``is_generated = 'ALWAYS'`` (issue #1121: migration 000048 made
+        ``core.river_segment.stream_type`` generated after the drill landed;
+        explicit inserts into generated columns are rejected by PostgreSQL,
+        so the lifter must leave them to staging to recompute).
+        """
         key = (schema, name)
         cached = self._staging_columns.get(key)
         if cached is not None:
             return cached
         with self._staging.cursor() as cursor:
             cursor.execute(
-                "SELECT column_name, udt_name FROM information_schema.columns "
+                "SELECT column_name, udt_name, is_generated "
+                "FROM information_schema.columns "
                 "WHERE table_schema = %s AND table_name = %s",
                 (schema, name),
             )
-            columns = {str(row[0]): str(row[1]) for row in cursor.fetchall()}
+            rows = cursor.fetchall()
+        columns = {str(row[0]): str(row[1]) for row in rows}
         if not columns:
             raise RegistryClosureIncompleteError(
                 f"staging table {schema}.{name} not found in information_schema.columns "
                 "— migration drift?"
             )
         self._staging_columns[key] = columns
+        self._staging_generated[key] = frozenset(
+            str(row[0]) for row in rows if str(row[2]) == "ALWAYS"
+        )
         return columns
 
     @staticmethod
@@ -994,8 +1008,16 @@ class PsycopgRegistryLifterOps(RegistryLifterOps):
                 f"missing from staging: {drift}"
             )
         # Insert only the intersection so a staging-only column with a
-        # default is left to Postgres.
-        columns = [column for column in prod_columns if column in staging_columns]
+        # default is left to Postgres. Generated columns are excluded even
+        # when present in prod rows — PostgreSQL rejects explicit inserts
+        # into them and recomputes the value from the same source columns
+        # (issue #1121).
+        generated_columns = self._staging_generated.get((schema, name), frozenset())
+        columns = [
+            column
+            for column in prod_columns
+            if column in staging_columns and column not in generated_columns
+        ]
         placeholders = sql.SQL(", ").join(sql.Placeholder() * len(columns))
         stmt = sql.SQL(
             "INSERT INTO {}.{} ({}) VALUES ({}) ON CONFLICT DO NOTHING"
