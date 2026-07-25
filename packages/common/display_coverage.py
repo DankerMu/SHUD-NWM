@@ -42,10 +42,20 @@ from packages.common.forecast_store import (
 #   * horizon / station-variable params are named (%(horizon)s, %(variables)s,
 #     %(variable_count)s) instead of positional.
 #   * the final projection emits the coverage columns keyed by run_id for upsert.
+#   * station_sample_rows / river_sample_rows carry NULL-guarded %(scan_*)s
+#     pushdown predicates. The planner cannot push the candidate_runs CTE-join
+#     equalities into the hypertable scans, so without them every per-run
+#     refresh seq-scans BOTH hypertables end to end (measured 633s for one run
+#     at 180M forcing + 730M river rows). ``_refresh`` prefetches the single
+#     run's scalar identity/window and binds it here, enabling chunk exclusion
+#     and the existing (forcing_version_id, basin_version_id, lower(source_id),
+#     variable, valid_time) / (run_id, basin_version_id,
+#     river_network_version_id, variable, valid_time) indexes. The values are
+#     exactly the join equalities for that run, so the result set is identical;
+#     with NULL bindings the guards fold away and the query is unchanged.
 # Keeping the arithmetic identical is what guarantees parity with the CTE path.
 # ---------------------------------------------------------------------------
-_COVERAGE_CTES = """
-        WITH candidate_runs AS (
+_CANDIDATE_RUNS_SQL = """
             SELECT
                 h.run_id,
                 h.model_id,
@@ -88,7 +98,29 @@ _COVERAGE_CTES = """
               AND h.status IN ('succeeded', 'parsed', 'published')
               AND h.cycle_time IS NOT NULL
               AND (%(run_id)s IS NULL OR h.run_id = %(run_id)s)
-        ),
+"""
+
+_SCAN_HEADER_SQL = (
+    "WITH candidate_runs AS ("
+    + _CANDIDATE_RUNS_SQL
+    + """        )
+        SELECT
+            run_id,
+            forcing_version_id,
+            basin_version_id,
+            river_network_version_id,
+            LOWER(source_id) AS source_id_lower,
+            display_start_time,
+            display_end_time
+        FROM candidate_runs
+"""
+)
+
+_COVERAGE_CTES = (
+    """
+        WITH candidate_runs AS ("""
+    + _CANDIDATE_RUNS_SQL
+    + """        ),
         station_sample_rows AS (
             SELECT
                 cr.run_id,
@@ -112,6 +144,16 @@ _COVERAGE_CTES = """
             WHERE fst.variable = ANY(%(variables)s)
               AND fst.valid_time >= cr.display_start_time
               AND fst.valid_time <= cr.display_end_time
+              AND (%(scan_forcing_version_id)s IS NULL
+                   OR fst.forcing_version_id = %(scan_forcing_version_id)s)
+              AND (%(scan_basin_version_id)s IS NULL
+                   OR fst.basin_version_id = %(scan_basin_version_id)s)
+              AND (%(scan_source_id_lower)s IS NULL
+                   OR LOWER(fst.source_id) = %(scan_source_id_lower)s)
+              AND (%(scan_display_start)s IS NULL
+                   OR fst.valid_time >= %(scan_display_start)s)
+              AND (%(scan_display_end)s IS NULL
+                   OR fst.valid_time <= %(scan_display_end)s)
               AND EXISTS (
                   SELECT 1
                   FROM met.interp_weight iw
@@ -325,6 +367,15 @@ _COVERAGE_CTES = """
             WHERE rt.variable = 'q_down'
               AND rt.valid_time >= cr.display_start_time
               AND rt.valid_time <= cr.display_end_time
+              AND (%(scan_run_id)s IS NULL OR rt.run_id = %(scan_run_id)s)
+              AND (%(scan_basin_version_id)s IS NULL
+                   OR rt.basin_version_id = %(scan_basin_version_id)s)
+              AND (%(scan_river_network_version_id)s IS NULL
+                   OR rt.river_network_version_id = %(scan_river_network_version_id)s)
+              AND (%(scan_display_start)s IS NULL
+                   OR rt.valid_time >= %(scan_display_start)s)
+              AND (%(scan_display_end)s IS NULL
+                   OR rt.valid_time <= %(scan_display_end)s)
         ),
         river_identity_coverage AS (
             SELECT
@@ -422,6 +473,7 @@ _COVERAGE_CTES = """
              AND hc.river_network_version_id = cr.river_network_version_id
         )
 """
+)
 
 _REFRESH_SQL = (
     _COVERAGE_CTES
@@ -494,8 +546,19 @@ def _refresh_statement_timeout_ms() -> int:
     return value
 
 
+_SCAN_PARAM_KEYS = (
+    "scan_run_id",
+    "scan_forcing_version_id",
+    "scan_basin_version_id",
+    "scan_river_network_version_id",
+    "scan_source_id_lower",
+    "scan_display_start",
+    "scan_display_end",
+)
+
+
 def _refresh(connection: Any, run_id: str | None) -> list[str]:
-    params = {
+    params: dict[str, Any] = {
         "horizon": QHH_LATEST_EXPECTED_HORIZON_HOURS,
         # Per-run refresh: run_id uniquely identifies the run and its basin, so
         # no basin filter is needed (basin-agnostic — works for any basin).
@@ -504,8 +567,28 @@ def _refresh(connection: Any, run_id: str | None) -> list[str]:
         "variables": list(MVP_STATION_VARIABLES),
         "variable_count": len(MVP_STATION_VARIABLES),
     }
+    params.update(dict.fromkeys(_SCAN_PARAM_KEYS))
     with connection.cursor(cursor_factory=RealDictCursor) as cursor:
         cursor.execute("SET LOCAL statement_timeout = %s", (_refresh_statement_timeout_ms(),))
+        if run_id is not None:
+            # Prefetch the run's scalar identity/window and bind it as pushdown
+            # predicates — without this the planner seq-scans both hypertables
+            # (see the _COVERAGE_CTES header comment). No header row means the
+            # run is not coverage-eligible: skip the heavy query entirely.
+            cursor.execute(_SCAN_HEADER_SQL, params)
+            headers = cursor.fetchall()
+            if not headers:
+                return []
+            header = headers[0]
+            params.update(
+                scan_run_id=header["run_id"],
+                scan_forcing_version_id=header["forcing_version_id"],
+                scan_basin_version_id=header["basin_version_id"],
+                scan_river_network_version_id=header["river_network_version_id"],
+                scan_source_id_lower=header["source_id_lower"],
+                scan_display_start=header["display_start_time"],
+                scan_display_end=header["display_end_time"],
+            )
         cursor.execute(_REFRESH_SQL, params)
         rows = cursor.fetchall()
     return [r["run_id"] for r in rows]
