@@ -1851,6 +1851,13 @@ def _validate_cutover_gate_field(receipt: Mapping[str, Any]) -> None:
 
 
 _CLASSIFICATION_GROUP_KEYS = frozenset({"items", "total", "truncated"})
+# #1140: optional classification keys.  `mode` records which partition
+# `_classify_registry` ran (`id_only` on the dry_run early return, `full`
+# otherwise).  It stays OPTIONAL because the validator also reads untrusted
+# on-disk receipts written before #1140 (`reconstruct_primary_receipt` /
+# `validate_current_receipt`), which carry no such key.
+CLASSIFICATION_MODES = frozenset({"id_only", "full"})
+_CLASSIFICATION_OPTIONAL_KEYS = frozenset({"mode"})
 
 
 def _validate_registry_classification_field(receipt: Mapping[str, Any]) -> None:
@@ -1881,8 +1888,15 @@ def _validate_registry_classification_field(receipt: Mapping[str, Any]) -> None:
         "refused",
         "declared_cutovers",
     }
-    if set(classification) != required:
+    keys = set(classification)
+    # Same difference pattern as RECEIPT_KEYS/RECEIPT_OPTIONAL_KEYS (#1132):
+    # every required key present, and no key outside required ∪ optional.
+    if not required <= keys or (keys - required) - _CLASSIFICATION_OPTIONAL_KEYS:
         raise ValueError("receipt_classification_invalid")
+    if "mode" in classification:
+        mode = classification.get("mode")
+        if not isinstance(mode, str) or mode not in CLASSIFICATION_MODES:
+            raise ValueError("receipt_classification_invalid")
     for hash_field in ("previous_registry_sha256", "new_registry_sha256"):
         value = classification.get(hash_field)
         if value is not None:
@@ -1972,19 +1986,28 @@ def _enforce_registry_classification_reconciliation(
     * ``refused`` covers every ``removed`` entry, every ``package_changed``
       entry not in ``declared_cutovers``, and every ``declaration_invalid``
       entry (including synthetic ``__declaration__`` markers).
-    * ``dry_run``: reconciliation runs in id-only mode; ``package_changed``
-      may legitimately be zero because prospective rows carry only ids.
+    * id-only mode (``classification.mode == "id_only"``, i.e. the dry_run
+      partition of ``_classify_registry``; legacy receipts with no ``mode``
+      key fall back to ``outcome == "dry_run"``): ``package_changed`` may
+      legitimately be zero because prospective rows carry only ids.
       The constraints the id-only classify path still guarantees ARE
-      enforced (#1135): ``removed.total == 0`` (dry_run returns before the
-      removal loop), ``previous_registry_sha256``/``previous_model_count``
-      null together or non-null together (count a non-boolean int >= 0),
-      ``unchanged <= previous_model_count`` when a previous registry
-      exists, ``unchanged.total == 0`` on bootstrap (a null
+      enforced (#1135): ``removed.total == 0`` (the id-only path returns
+      before the removal loop), ``previous_registry_sha256``/
+      ``previous_model_count`` null together or non-null together (count a
+      non-boolean int >= 0), ``unchanged <= previous_model_count`` when a
+      previous registry exists, ``unchanged.total == 0`` on bootstrap (a null
       ``previous_registry_sha256`` means an empty previous set, so every
       prospective row classifies as added), and ``new_registry_sha256 is
-      None`` (a dry_run never publishes).  The full previous-side equality is NOT applied here:
+      None`` (an id-only classification only arises from dry_run, which never
+      publishes).  ``refused`` may hold only the synthetic
+      ``__declaration__`` marker's ``registry_cutover_declaration_invalid``
+      reason — the writer appends it after ``_classify_registry`` regardless
+      of dry_run — while the legacy outcome-keyed fallback keeps rejecting
+      every refused row.  The full previous-side equality is NOT applied here:
       removals are never computed, so previous rows absent from the
-      prospective set are legitimately unaccounted for.
+      prospective set are legitimately unaccounted for.  Mode and outcome are
+      cross-checked: ``dry_run`` requires ``id_only`` while ``published`` and
+      ``published_receipt_failed`` require ``full``.
     * ``published``: ``refused.total == 0`` (a non-zero refusal would have
       raised before commit).
     * refusal outcomes: ``refused.total >= 1``.
@@ -2037,12 +2060,56 @@ def _enforce_registry_classification_reconciliation(
     ):
         raise ValueError("receipt_classification_invalid")
 
-    if outcome == "dry_run":
-        # dry_run classification is id-only; prospective rows have no
-        # checksum, so package_changed/refused stay empty by construction.
-        if package_changed_total != 0 or refused_total != 0 or declared_total != 0:
+    # #1140: branch on the partition `_classify_registry` actually ran, not on
+    # the terminal outcome.  A dry_run that fails AFTER the precommit gate
+    # carries an honest id-only classification on an `outcome="failed"`
+    # receipt; keying on the outcome routed it into the full-equality branch
+    # and destroyed the receipt.  Legacy (pre-#1140) receipts carry no `mode`
+    # and keep the outcome-keyed selection verbatim.
+    mode = classification.get("mode")
+    if mode is None:
+        id_only = outcome == "dry_run"
+    else:
+        if not isinstance(mode, str) or mode not in CLASSIFICATION_MODES:
             raise ValueError("receipt_classification_invalid")
-        # Even in dry_run the added+unchanged+package_changed equality must
+        # Forged combinations: dry_run is the only producer of an id-only
+        # classification, and a publish always classified in full mode.
+        if outcome == "dry_run" and mode != "id_only":
+            raise ValueError("receipt_classification_invalid")
+        if outcome == "published" and mode != "full":
+            raise ValueError("receipt_classification_invalid")
+        # `published_receipt_failed` is only ever stamped onto an already
+        # committed `published` receipt (see the primary-receipt publish
+        # fallback), so it too always classified in full mode — and it is the
+        # ONE outcome `reconstruct_primary_receipt` accepts off the untrusted
+        # emergency slot.  Without this pin a forged emergency record could
+        # claim `mode="id_only"` and skip the full previous-side equality.
+        if outcome == "published_receipt_failed" and mode != "full":
+            raise ValueError("receipt_classification_invalid")
+        id_only = mode == "id_only"
+
+    if id_only:
+        # id-only classification: prospective rows have no checksum, so
+        # package_changed/declared_cutovers stay empty by construction.
+        if package_changed_total != 0 or declared_total != 0:
+            raise ValueError("receipt_classification_invalid")
+        if mode is None:
+            # Legacy outcome-keyed fallback: behavior frozen as it was before
+            # #1140 — any refused row on a dry_run receipt is forged.
+            if refused_total != 0:
+                raise ValueError("receipt_classification_invalid")
+        else:
+            # The writer appends the synthetic `__declaration__` refusal after
+            # `_classify_registry` without consulting dry_run, so
+            # `registry_cutover_declaration_invalid` is the only refusal an
+            # id-only classification can carry; every other reason is forged.
+            if any(
+                not isinstance(item, Mapping)
+                or item.get("reason") != "registry_cutover_declaration_invalid"
+                for item in _items("refused")
+            ):
+                raise ValueError("receipt_classification_invalid")
+        # Even in id-only mode the added+unchanged+package_changed equality must
         # bind to the pinned prospective_model_count (package_changed is 0
         # here so this reduces to added+unchanged == prospective_count).
         if added_total + unchanged_total + package_changed_total != prospective_count:
@@ -2073,8 +2140,16 @@ def _enforce_registry_classification_reconciliation(
             # equality does NOT hold in dry_run (removals uncomputed).
             if unchanged_total > prev_count:
                 raise ValueError("receipt_classification_invalid")
-        # dry_run never publishes; the writer pins new_registry_sha256 to None.
+        # An id-only classification only arises from dry_run, which never
+        # publishes; the writer pins new_registry_sha256 to None.
         if classification.get("new_registry_sha256") is not None:
+            raise ValueError("receipt_classification_invalid")
+        # Terminal pin, kept here as well as on the full path: the writer sets
+        # the receipt-level refusal reason and appends the refused row in one
+        # action, so the two must stand or fall together.  Without it an
+        # id-only receipt could keep its refusal reason while its refused
+        # bucket is wiped flat.
+        if reason in REGISTRY_CUTOVER_REFUSAL_REASONS and refused_total < 1:
             raise ValueError("receipt_classification_invalid")
         return
 
@@ -2483,6 +2558,11 @@ class _RegistryClassification:
     # classification whose totals silently drop or gain a row.
     previous_model_count: int | None = None
     prospective_model_count: int = 0
+    # #1140: which partition the classifier actually ran.  ``_classify_registry``
+    # keys its lenient id-only early return on ``dry_run``, and the receipt
+    # validator has to select the same branch — reading the terminal outcome
+    # instead misroutes every dry_run that fails AFTER the gate.
+    mode: str = "full"
     added: list[str] = dataclass_field(default_factory=list)
     unchanged: list[str] = dataclass_field(default_factory=list)
     removed: list[str] = dataclass_field(default_factory=list)
@@ -2506,6 +2586,7 @@ class _RegistryClassification:
             "new_registry_sha256": self.new_registry_sha256,
             "previous_model_count": self.previous_model_count,
             "prospective_model_count": int(self.prospective_model_count),
+            "mode": self.mode,
             "added": id_group(sorted(self.added)),
             "unchanged": id_group(sorted(self.unchanged)),
             "removed": id_group(sorted(self.removed)),
@@ -2607,6 +2688,10 @@ def _classify_registry(
     # so checksum-based drift cannot be observed and we do a lenient id-only
     # classification.  Operators preview additions this way.
     if dry_run:
+        # #1140: record the partition actually taken so the receipt validator
+        # can reconcile against the id-only rules no matter which terminal
+        # outcome the run ends on.
+        result.mode = "id_only"
         for model_id in prospective_by_id:
             if model_id in previous_by_id:
                 result.unchanged.append(model_id)

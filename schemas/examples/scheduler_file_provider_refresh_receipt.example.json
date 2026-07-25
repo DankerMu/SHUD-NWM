@@ -82,6 +82,7 @@
     "new_registry_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
     "previous_model_count": 13,
     "prospective_model_count": 19,
+    "mode": "full",
     "added": {
       "items": [
         "basin-001",
