@@ -1922,6 +1922,17 @@ def _enforce_registry_classification_reconciliation(
       entry (including synthetic ``__declaration__`` markers).
     * ``dry_run``: reconciliation runs in id-only mode; ``package_changed``
       may legitimately be zero because prospective rows carry only ids.
+      The constraints the id-only classify path still guarantees ARE
+      enforced (#1135): ``removed.total == 0`` (dry_run returns before the
+      removal loop), ``previous_registry_sha256``/``previous_model_count``
+      null together or non-null together (count a non-boolean int >= 0),
+      ``unchanged <= previous_model_count`` when a previous registry
+      exists, ``unchanged.total == 0`` on bootstrap (a null
+      ``previous_registry_sha256`` means an empty previous set, so every
+      prospective row classifies as added), and ``new_registry_sha256 is
+      None`` (a dry_run never publishes).  The full previous-side equality is NOT applied here:
+      removals are never computed, so previous rows absent from the
+      prospective set are legitimately unaccounted for.
     * ``published``: ``refused.total == 0`` (a non-zero refusal would have
       raised before commit).
     * refusal outcomes: ``refused.total >= 1``.
@@ -1983,6 +1994,35 @@ def _enforce_registry_classification_reconciliation(
         # bind to the pinned prospective_model_count (package_changed is 0
         # here so this reduces to added+unchanged == prospective_count).
         if added_total + unchanged_total + package_changed_total != prospective_count:
+            raise ValueError("receipt_classification_invalid")
+        # #1135: dry_run returns before the removal loop (`_classify_registry`
+        # bails at the id-only classification), so any removed row is forged.
+        if removed_total != 0:
+            raise ValueError("receipt_classification_invalid")
+        prev_count = classification.get("previous_model_count")
+        prev_sha = classification.get("previous_registry_sha256")
+        if prev_sha is None:
+            # Bootstrap: no previous canonical registry means no pinned count.
+            if prev_count is not None:
+                raise ValueError("receipt_classification_invalid")
+            # Dual of the `unchanged <= prev_count` bound below: with an empty
+            # previous_by_id every prospective row classifies as added.
+            if unchanged_total != 0:
+                raise ValueError("receipt_classification_invalid")
+        else:
+            if (
+                not isinstance(prev_count, int)
+                or isinstance(prev_count, bool)
+                or prev_count < 0
+            ):
+                raise ValueError("receipt_classification_invalid")
+            # Upper bound only — `unchanged` are ids present in BOTH sets, so
+            # it cannot exceed the previous count.  The full previous-side
+            # equality does NOT hold in dry_run (removals uncomputed).
+            if unchanged_total > prev_count:
+                raise ValueError("receipt_classification_invalid")
+        # dry_run never publishes; the writer pins new_registry_sha256 to None.
+        if classification.get("new_registry_sha256") is not None:
             raise ValueError("receipt_classification_invalid")
         return
 
