@@ -33,20 +33,20 @@ Risk packs considered (core):
 
 ## 1. Shared module extraction
 
-- [ ] 1.1 Create `packages/scheduler/__init__.py` +
+- [x] 1.1 Create `packages/scheduler/__init__.py` +
   `packages/scheduler/registry_audit.py` holding `CUTOVER_GATE_MODES`,
   `SchedulerRegistryPublishError`, and `normalize_cutover_gate_audit` (moved
   verbatim from `scripts/publish_scheduler_file_registry.py:74,122,419-466`;
   public name loses the leading underscore).
   Evidence floor: module imports cleanly; `uv run ruff check .` clean.
-- [ ] 1.2 `scripts/publish_scheduler_file_registry.py`: delete local
+- [x] 1.2 `scripts/publish_scheduler_file_registry.py`: delete local
   definitions, import the three names, keep module-level re-export aliases
   (`SchedulerRegistryPublishError = ...` etc.) and the internal
   `_normalize_cutover_gate_audit = normalize_cutover_gate_audit` alias if
   call sites keep the old name.
   Evidence floor: `uv run pytest -q tests/test_publish_scheduler_file_registry.py`
   green unmodified (import-path compatibility proven by existing suite).
-- [ ] 1.3 `services/orchestrator/scheduler_file_providers.py`: replace the
+- [x] 1.3 `services/orchestrator/scheduler_file_providers.py`: replace the
   inline lenient mirror (if-guard `:618`, dict `:619-623`) with the shared
   normalizer, invoked BEFORE `_write_json_bytes` commits (see design.md ordering
   decision); `cutover_gate is None` keeps omitting the receipt key.
@@ -57,7 +57,7 @@ Risk packs considered (core):
 
 ## 2. Test coverage (issue acceptance (a)-(d) + e2e)
 
-- [ ] 2.1 Four normalizer unit tests (new, in
+- [x] 2.1 Four normalizer unit tests (new, in
   `tests/test_publish_scheduler_file_registry.py` or a new
   `tests/test_registry_audit.py` — implementer picks, stating reason):
   (a) non-Mapping → raise with code `SCHEDULER_REGISTRY_CUTOVER_AUDIT_INVALID`;
@@ -68,7 +68,7 @@ Risk packs considered (core):
   Evidence floor: 4 tests red against pre-change manifest channel semantics
   where applicable (b/c via manifest path) or against absent shared module,
   green after.
-- [ ] 2.2 Manifest-channel fail-closed test (DIRECT call boundary — the only
+- [x] 2.2 Manifest-channel fail-closed test (DIRECT call boundary — the only
   place the code is observable, see design.md Error-code visibility
   boundary): `publish_scheduler_registry_manifest` called directly with
   malformed `cutover_gate` raises `SchedulerRegistryPublishError` with code
@@ -76,7 +76,7 @@ Risk packs considered (core):
   (assert destination absent/unchanged).
   Evidence floor: test red on master (silent `"not_wired"` receipt, manifest
   committed), green after.
-- [ ] 2.3 Runner e2e passthrough assertion: after a full
+- [x] 2.3 Runner e2e passthrough assertion: after a full
   `publish_all_basin_scheduler_registry` run, the manifest receipt embeds
   `cutover_gate` byte-for-byte equal to the producer block
   (`mode`/`declaration_env`/`declaration_present`).
@@ -86,7 +86,7 @@ Risk packs considered (core):
   locally break the receipt mirror (e.g. drop a field or rewrite mode) and
   show the assertion goes red, then restore — record both outputs; an
   assertion that cannot go red is not evidence.
-- [ ] 2.4 None-semantics pins (spec Scenarios 3+4, currently unasserted
+- [x] 2.4 None-semantics pins (spec Scenarios 3+4, currently unasserted
   anywhere in the repo): (i) direct
   `publish_scheduler_registry_manifest(cutover_gate=None)` →
   `"cutover_gate" not in receipt`; (ii) aggregate
@@ -100,12 +100,12 @@ Risk packs considered (core):
 
 ## 3. Change-level verification floor
 
-- [ ] 3.1 `uv run pytest -q tests/test_publish_scheduler_file_registry.py
+- [x] 3.1 `uv run pytest -q tests/test_publish_scheduler_file_registry.py
   tests/test_scheduler_file_provider_refresh.py` green.
-- [ ] 3.2 `uv run ruff check .` clean.
-- [ ] 3.3 `openspec validate unify-cutover-gate-audit-normalizer --strict
+- [x] 3.2 `uv run ruff check .` clean.
+- [x] 3.3 `openspec validate unify-cutover-gate-audit-normalizer --strict
   --no-interactive` PASS.
-- [ ] 3.4 Sibling-caller sweep: run every test file surfaced by BOTH greps —
+- [x] 3.4 Sibling-caller sweep: run every test file surfaced by BOTH greps —
   `grep -rln "SchedulerRegistryPublishError\|CUTOVER_GATE_MODES" tests/`
   (moved-name consumers) and
   `grep -rln "publish_scheduler_registry_manifest" tests/ scripts/ services/`
