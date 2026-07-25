@@ -1,0 +1,15 @@
+{
+  "issues": {
+    "1106": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1126,
+          "outcome": "merged",
+          "rounds": 1
+        }
+      ]
+    }
+  }
+}
