@@ -718,6 +718,37 @@ refresh 把 `latest.json` 重写掉，新 receipt 一定带 `.cutover_gate`，`-
 的 receipt 才算复位。gate 装上之前就失败的 run（lock contention、provider preimage 冲突）
 其 outcome 既非 `published`/`dry_run` 也不带 refusal reason，缺席依旧合法，无需处置。
 
+**回滚方向（#1143：post-#1132 receipt + pre-#1132 代码）**：反向 skew 的症状串是
+`--enable` → `validate_current_receipt` → `emergency_record_invalid`——与升级方向同码，
+但根因相反：旧校验器的顶层键校验是**精确 allowed-set**（`RECEIPT_OPTIONAL_KEYS` 不含
+`cutover_gate`），带该键的新 receipt 被判 `receipt_shape_invalid` 后就地转码。这是
+**版本 skew，不是 provider 漂移**——`emergency_record_invalid` 在别处意味着"落盘证据与
+实际 provider 不一致"，回滚（热修 / bisect / 紧急回退）的高压场景里最容易被误读成数据
+事故。判别：`jq 'has("cutover_gate")' .../provider-refresh/receipts/latest.json` 为
+`true`，而当前 checkout 的 `RECEIPT_OPTIONAL_KEYS`（`scripts/scheduler_file_provider_refresh.py`）
+不含它，即为本条。同期落在 emergency slot 的 receipt 同样带该键，
+`reconstruct_primary_receipt` 在旧 checkout 上也会以 `emergency_record_invalid` 失败——
+受影响的不止 `--enable`。处置：用**旧代码**跑一次 manual refresh，让 `latest.json` 回到
+旧 shape 后再 `--enable`；行为全程 fail-closed（不写坏 canonical provider、不静默降级），
+且写路径不被旧 receipt 阻塞（`_publish_primary_receipt` 的 lenient reader 只读
+`(started_at, run_id)` 排序、不跑 `_validate_receipt`），所以下一次旧代码 refresh 即自愈。
+**不要手工删 `latest.json`**：它同时是 monotonic-order 的排序锚点，删掉只会把可判别的
+版本 skew 变成无锚点的空白现场，而正确处置（跑一次 refresh）本来就会覆盖它。
+
+上述两个方向是"**receipt 新增顶层可选键**"的通用后果，不是 `cutover_gate` 一次性的坑：
+精确 allowed-set 天然单向兼容——新代码认旧 receipt（少可选键，放行），旧代码不认新
+receipt（多未知键，`receipt_shape_invalid`）。嵌套键同理（#1140 给
+`registry_classification` 加的 `mode` 在 pre-#1140 校验器上以
+`receipt_classification_invalid` 拒绝，传导路径与处置完全相同）。速查：
+
+| 方向 | 症状 | 阻塞 `--enable`? | 处置 |
+| --- | --- | --- | --- |
+| 升级：pre-#1080/#1132 receipt + 新代码 | `validate_current_receipt` 报 `emergency_record_invalid`（缺 `registry_classification` / `.cutover_gate`） | 是（refresh 写路径不阻塞） | 新代码跑一次**成功** manual refresh |
+| 回滚：post-#1132/#1140 receipt + 旧代码 | 同码 `emergency_record_invalid`（多未知键 → `receipt_shape_invalid` / `receipt_classification_invalid`）；emergency slot reconstruct 同样失败 | 是（refresh 写路径不阻塞） | 旧代码跑一次 manual refresh；勿删 `latest.json` |
+
+下一次给 receipt 加顶层（或嵌套 exact-set 内）可选键时，在本小节的表里加一行即可，
+不要再散落一次性备注。
+
 启用 refresh timer 前必须 `jq '.registry_classification'
 /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json`
 核对：`previous_registry_sha256` 等于 shared canonical 的实际 SHA-256、`new_registry_sha256`
