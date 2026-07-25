@@ -15,6 +15,7 @@ from scripts import scheduler_file_provider_refresh as refresh
 from services.orchestrator.scheduler_file_providers import (
     FileSchedulerModelRegistry,
     publish_canonical_readiness_index,
+    publish_scheduler_registry_manifest,
 )
 from workers.canonical_converter.converter import required_standard_variables_for_source
 from workers.model_registry.basins_radiation_template import repair_missing_tsd_rl_for_basin, repair_performed
@@ -560,6 +561,7 @@ def test_registry_precommit_receives_same_generation_identities_before_manifest_
 
 def test_real_registry_refresh_keeps_packages_private_and_canonical_manifest_shared(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from tests.test_basins_registry_import import _write_registry_fixture
 
@@ -609,6 +611,24 @@ def test_real_registry_refresh_keeps_packages_private_and_canonical_manifest_sha
     for directory in (runtime, work, receipts, emergency):
         directory.mkdir(exist_ok=True)
         directory.chmod(0o700)
+    # #1097 / spec scenario 2: capture the runner-built audit block on its way
+    # into the publisher and the receipt dict handed back on its way out, so
+    # the assertion below compares the producer's block against what the real
+    # publisher returned (call-through spy — the real publisher runs). On this
+    # runner channel the returned block is the only evidence: the runner's own
+    # receipt drops cutover_gate via _provider_evidence, so nothing persists it
+    # here; CLI-channel persistence is covered by a separate test.
+    monkeypatch.delenv(refresh.CUTOVER_DECLARATION_ENV, raising=False)
+    real_publish_all = refresh.publish_all_basin_scheduler_registry
+    passthrough: dict[str, Any] = {}
+
+    def _spy_publish_all(**kwargs: Any) -> dict[str, Any]:
+        passthrough["producer_block"] = kwargs.get("cutover_gate")
+        summary = real_publish_all(**kwargs)
+        passthrough["summary"] = summary
+        return summary
+
+    monkeypatch.setattr(refresh, "publish_all_basin_scheduler_registry", _spy_publish_all)
     receipt = refresh.refresh_scheduler_file_providers(
         refresh.RefreshConfig(
             basins_root=basins_root,
@@ -631,6 +651,18 @@ def test_real_registry_refresh_keeps_packages_private_and_canonical_manifest_sha
         "readiness",
         "state",
     ]
+    # #1097 / spec scenario 2: the runner's enforced audit block survives into
+    # the manifest companion receipt byte-for-byte — no field dropped, no mode
+    # rewritten between producer and persisted receipt.
+    producer_block = passthrough["producer_block"]
+    assert producer_block == {
+        "mode": "enforced",
+        "declaration_env": refresh.CUTOVER_DECLARATION_ENV,
+        "declaration_present": False,
+    }, producer_block
+    receipt_block = passthrough["summary"]["registry"]["cutover_gate"]
+    assert receipt_block == producer_block, receipt_block
+    assert json.dumps(receipt_block, sort_keys=True) == json.dumps(producer_block, sort_keys=True)
     assert not (shared_providers / "models").exists()
     registry = FileSchedulerModelRegistry(
         registry_manifest,
@@ -1452,5 +1484,152 @@ def test_manual_cli_records_declaration_present_when_env_resolves_to_file(
         "declaration_env": "NHMS_REGISTRY_CUTOVER_DECLARATION_PATH",
         "declaration_present": True,
     }, payload
+
+
+# ---------------------------------------------------------------------------
+# #1097: cutover_gate audit on the manifest channel
+# ---------------------------------------------------------------------------
+
+
+_MALFORMED_CUTOVER_GATES: list[Any] = [
+    pytest.param(["enforced"], id="non_mapping"),
+    pytest.param({"mode": ""}, id="empty_mode"),
+    pytest.param({"mode": "gate_off"}, id="mode_outside_audited_set"),
+    pytest.param(
+        {"mode": "enforced", "declaration_env": 42, "declaration_present": True},
+        id="non_string_declaration_env",
+    ),
+]
+
+
+def _registry_destination(tmp_path: Path) -> Path:
+    destination = tmp_path / "shared/scheduler/registry/manifest-last.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    return destination
+
+
+@pytest.mark.parametrize("cutover_gate", _MALFORMED_CUTOVER_GATES)
+def test_manifest_publish_refuses_malformed_cutover_gate_before_commit(
+    tmp_path: Path,
+    cutover_gate: Any,
+) -> None:
+    """#1097: the manifest channel is fail-closed on a malformed audit block.
+
+    Before the unification it mirrored the block leniently AFTER the commit —
+    an empty/unknown mode was silently rewritten to ``"not_wired"`` and the
+    manifest was published anyway, so operators read contradictory audit facts
+    from the companion receipt and the CLI summary.  Now the shared strict
+    normalizer runs before the manifest bytes are committed.
+    """
+    destination = _registry_destination(tmp_path)
+
+    with pytest.raises(registry_script.SchedulerRegistryPublishError) as excinfo:
+        publish_scheduler_registry_manifest(
+            [],
+            destination,
+            object_store_root=tmp_path / "objects",
+            object_store_prefix="s3://nhms",
+            cutover_gate=cutover_gate,
+        )
+
+    assert excinfo.value.error_code == "SCHEDULER_REGISTRY_CUTOVER_AUDIT_INVALID"
+    assert not destination.exists(), "malformed audit input must not commit a manifest"
+
+
+def test_manifest_publish_leaves_previous_bytes_intact_on_malformed_cutover_gate(
+    tmp_path: Path,
+) -> None:
+    """#1097: with a manifest already in place the refusal is a no-op — the
+    previously canonical bytes stay byte-identical (spec scenario 1's
+    "absent or unchanged" other half)."""
+    destination = _registry_destination(tmp_path)
+    previous = publish_scheduler_registry_manifest(
+        [],
+        destination,
+        object_store_root=tmp_path / "objects",
+        object_store_prefix="s3://nhms",
+        cutover_gate={
+            "mode": "enforced",
+            "declaration_env": registry_script.CUTOVER_DECLARATION_ENV_NAME,
+            "declaration_present": True,
+        },
+    )
+    before = destination.read_bytes()
+    assert previous["cutover_gate"]["mode"] == "enforced"
+
+    with pytest.raises(registry_script.SchedulerRegistryPublishError) as excinfo:
+        publish_scheduler_registry_manifest(
+            [],
+            destination,
+            object_store_root=tmp_path / "objects",
+            object_store_prefix="s3://nhms",
+            cutover_gate={"mode": "gate_off"},
+        )
+
+    assert excinfo.value.error_code == "SCHEDULER_REGISTRY_CUTOVER_AUDIT_INVALID"
+    assert destination.read_bytes() == before
+
+
+def test_direct_manifest_publish_without_cutover_gate_omits_the_receipt_key(
+    tmp_path: Path,
+) -> None:
+    """#1097 / spec scenario 4: the direct callers that never wire the gate
+    (worker mirror, require-direct-grid, direct-grid provisioning) keep the
+    pre-existing key-omitting receipt shape — ``None`` must NOT be embedded as
+    a ``not_wired`` block on this entry point."""
+    destination = _registry_destination(tmp_path)
+
+    receipt = publish_scheduler_registry_manifest(
+        [],
+        destination,
+        object_store_root=tmp_path / "objects",
+        object_store_prefix="s3://nhms",
+        cutover_gate=None,
+    )
+
+    assert "cutover_gate" not in receipt, receipt
+    assert destination.is_file()
+
+
+def test_aggregate_publish_without_cutover_gate_records_not_wired_on_both_channels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1097 / spec scenario 3: the CLI aggregate entry normalizes at its own
+    boundary, so an unwired run records the same ``not_wired`` block on the
+    summary AND on the manifest companion receipt (unlike the direct manifest
+    caller above, which omits the key)."""
+    inventory = {
+        "schema_version": "basins.discovery.v1",
+        "root": str(tmp_path / "Basins"),
+        "resolved_root": str(tmp_path / "Basins"),
+        "model_count": 1,
+        "models": [_inventory_model("first")],
+        "warnings": [],
+    }
+    monkeypatch.setattr(registry_script, "discover_basins_inventory", lambda _root: inventory)
+    monkeypatch.setattr(registry_script, "publish_basins_package", _fake_publish_basins_package)
+    monkeypatch.setattr(
+        registry_script,
+        "prepare_basins_import_sources",
+        lambda inventory_path, package_manifest_path: _fake_sources(inventory, Path(package_manifest_path)),
+    )
+
+    summary = registry_script.publish_all_basin_scheduler_registry(
+        basins_root=tmp_path / "Basins",
+        registry_manifest=tmp_path / "objects/scheduler/registry/manifest-last.json",
+        object_store_root=tmp_path / "objects",
+        object_store_prefix="s3://nhms",
+        work_dir=tmp_path / "work",
+        cutover_gate=None,
+    )
+
+    not_wired = {
+        "mode": "not_wired",
+        "declaration_env": None,
+        "declaration_present": False,
+    }
+    assert summary["cutover_gate"] == not_wired
+    assert summary["registry"]["cutover_gate"] == not_wired
 
 

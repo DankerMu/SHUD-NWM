@@ -26,6 +26,16 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from packages.common.object_store import LocalObjectStore
+
+# #1097: the audit contract lives in `packages/scheduler/registry_audit.py` so
+# the CLI and the manifest publisher share one definition.  These names stay
+# importable from this module (`CUTOVER_GATE_MODES` is re-exported only for
+# import-path compatibility, hence the noqa).
+from packages.scheduler.registry_audit import (
+    CUTOVER_GATE_MODES,  # noqa: F401
+    SchedulerRegistryPublishError,
+    normalize_cutover_gate_audit,
+)
 from services.orchestrator.scheduler_file_providers import (
     ProviderPreimage,
     SchedulerFileProviderError,
@@ -71,13 +81,6 @@ SCHEMA_VERSION = "nhms.scheduler.basins_file_registry_publish.v2"
 # hard-coded here so the CLI can audit it even when the refresh module is not
 # imported (bootstrap path).
 CUTOVER_DECLARATION_ENV_NAME = "NHMS_REGISTRY_CUTOVER_DECLARATION_PATH"
-CUTOVER_GATE_MODES = frozenset(
-    {
-        "enforced",
-        "bypassed_allow_uncovered_cutover",
-        "not_wired",
-    }
-)
 DEFAULT_PACKAGE_VERSION_TEMPLATE = "vbasins-{slug_id}-{content_hash}-{source_hash}"
 DEFAULT_SOURCE_POLICY = {
     "forcing_source": "node27_raw_handoff",
@@ -119,16 +122,6 @@ class WorkspaceBudget(Protocol):
     def rescan(self) -> None: ...
 
 
-class SchedulerRegistryPublishError(RuntimeError):
-    def __init__(self, error_code: str, message: str, *, details: Mapping[str, Any] | None = None) -> None:
-        super().__init__(message)
-        self.error_code = error_code
-        self.details = dict(details or {})
-
-    def to_payload(self) -> dict[str, Any]:
-        return {"error_code": self.error_code, "message": str(self), **self.details}
-
-
 def publish_all_basin_scheduler_registry(
     *,
     basins_root: str | Path | None,
@@ -160,7 +153,7 @@ def publish_all_basin_scheduler_registry(
     max_contexts: int | None = None,
     cutover_gate: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    audited_cutover_gate = _normalize_cutover_gate_audit(cutover_gate)
+    audited_cutover_gate = normalize_cutover_gate_audit(cutover_gate)
     root = resolve_basins_root(str(basins_root) if basins_root not in (None, "") else None)
     resolved_object_root = _required_path(
         object_store_root or os.getenv("OBJECT_STORE_ROOT"),
@@ -414,56 +407,6 @@ def publish_all_basin_scheduler_registry(
     if output_path is not None:
         _write_json(output_path, summary)
     return summary
-
-
-def _normalize_cutover_gate_audit(
-    cutover_gate: Mapping[str, Any] | None,
-) -> dict[str, Any]:
-    """Return a bounded, well-typed `cutover_gate` audit block for the summary.
-
-    R2-A1 requires every summary path (bypass/normal/dry-run) and the manifest
-    publication receipt to persist the same three-field audit shape:
-
-    - ``mode``: one of ``CUTOVER_GATE_MODES``; missing input becomes
-      ``"not_wired"`` so callers that never opted in are recorded truthfully
-      instead of masquerading as ``"enforced"``.
-    - ``declaration_env``: the env name consulted (``str``) when the gate ran
-      enforced, else ``None`` — bypass and not_wired never consult an env.
-    - ``declaration_present``: ``bool``; whether the env resolved to a
-      readable declaration file.  Defaults to ``False`` when absent.
-    """
-    if cutover_gate is None:
-        return {
-            "mode": "not_wired",
-            "declaration_env": None,
-            "declaration_present": False,
-        }
-    if not isinstance(cutover_gate, Mapping):
-        raise SchedulerRegistryPublishError(
-            "SCHEDULER_REGISTRY_CUTOVER_AUDIT_INVALID",
-            "cutover_gate audit must be a mapping.",
-            details={"provided_type": type(cutover_gate).__name__},
-        )
-    mode = cutover_gate.get("mode")
-    if mode not in CUTOVER_GATE_MODES:
-        raise SchedulerRegistryPublishError(
-            "SCHEDULER_REGISTRY_CUTOVER_AUDIT_INVALID",
-            "cutover_gate.mode must be one of the audited modes.",
-            details={"mode": mode, "allowed": sorted(CUTOVER_GATE_MODES)},
-        )
-    env_name = cutover_gate.get("declaration_env")
-    if env_name is not None and not isinstance(env_name, str):
-        raise SchedulerRegistryPublishError(
-            "SCHEDULER_REGISTRY_CUTOVER_AUDIT_INVALID",
-            "cutover_gate.declaration_env must be a string or null.",
-            details={"provided_type": type(env_name).__name__},
-        )
-    declaration_present = bool(cutover_gate.get("declaration_present"))
-    return {
-        "mode": str(mode),
-        "declaration_env": env_name,
-        "declaration_present": declaration_present,
-    }
 
 
 def _guard_resources(validator: Callable[[Path], None] | None, workspace: Path) -> None:

@@ -27,6 +27,7 @@ from packages.common.safe_fs import (
     stat_no_follow,
 )
 from packages.common.source_identity import normalize_source_id
+from packages.scheduler.registry_audit import normalize_cutover_gate_audit
 from services.orchestrator import source_cycle_raw_manifest
 from services.orchestrator.scheduler_state import _ensure_utc, _evidence_safe, _format_utc
 from workers.canonical_converter.converter import evaluate_canonical_readiness
@@ -591,6 +592,13 @@ def publish_scheduler_registry_manifest(
     checksum = _sha256_label(content_without_checksum)
     payload["checksum"] = checksum
     content = _canonical_json_bytes(payload, pretty=True)
+    # #1097: validate the audit block BEFORE anything is committed, so a
+    # malformed block fails the publish outright instead of leaving committed
+    # manifest bytes behind a half-assembled receipt.  `None` keeps meaning
+    # "caller never wired the gate" — the receipt then omits the key.
+    audited_cutover_gate = (
+        normalize_cutover_gate_audit(cutover_gate) if cutover_gate is not None else None
+    )
     _validate_registry_manifest(payload, content=content, manifest_uri=str(destination_uri), roots=roots)
     committed = _write_json_bytes(
         str(destination_uri),
@@ -615,12 +623,8 @@ def publish_scheduler_registry_manifest(
     # R2-A1: mirror the caller's cutover_gate audit block on the receipt so
     # downstream operators reading `manifest-last.json`'s companion receipt
     # see the same audit fact the CLI summary/runner receipt records.
-    if cutover_gate is not None:
-        receipt["cutover_gate"] = {
-            "mode": str(cutover_gate.get("mode") or "not_wired"),
-            "declaration_env": cutover_gate.get("declaration_env"),
-            "declaration_present": bool(cutover_gate.get("declaration_present")),
-        }
+    if audited_cutover_gate is not None:
+        receipt["cutover_gate"] = audited_cutover_gate
     return _evidence_safe(receipt)
 
 
