@@ -11,7 +11,7 @@ runner constructs `runner_cutover_gate_audit`
 (`scripts/scheduler_file_provider_refresh.py:807-817`) and passes it to the
 publisher (`:865`), the returned manifest receipt (which embeds the
 normalized block) flows into `_provider_evidence`'s 11-field whitelist
-projection (`:1601-1626`) and the block is dropped; the on-disk refresh
+projection (`:1601-1621`) and the block is dropped; the on-disk refresh
 receipt (`:1573-1598`) has no `cutover_gate` key. Consequence: for a
 routine systemd/runner refresh there is NO on-disk evidence whether the
 gate ran enforced or bypassed — exactly the indistinguishability R2-A1 set
@@ -26,18 +26,26 @@ alternative "只兑现一半" leaves routine runner refreshes forensically
 blind, and #1141's cross-review added mutant evidence (comment on #1132)
 that the strongest-looking CLI e2e provides zero normalizer coverage. The
 bundled sub-decision (also per the issue's recommended route): the three
-CLI stderr failure payloads route through the shared normalizer, making
-the #1097 spec sentence fact rather than narrative.
+CLI stderr failure payloads route through the shared normalizer — this is
+NEW audited behavior extending the three persisted channels to failure
+diagnostics (stderr is not one of the #1097 requirement's persisted
+channels), so it gets its own ADDED requirement rather than riding on the
+existing one.
 
 ## What Changes
 
-- `scripts/scheduler_file_provider_refresh.py`: the receipt builder gains
-  an optional `cutover_gate` parameter; the direct-grid runner path passes
-  its constructed audit block, and the builder persists
+- `scripts/scheduler_file_provider_refresh.py`: the receipt builder
+  `_receipt` gains an optional `cutover_gate` parameter; the registry
+  publish path (the audit block is constructed unconditionally at `:811`,
+  covering both the `:822` direct-grid and `:865` all-basin branches)
+  passes its constructed audit block, and the builder persists
   `normalize_cutover_gate_audit(block)` (shared single definition point —
   import from `packages.scheduler.registry_audit`) as a top-level optional
-  receipt key. Paths that never construct the block (non-registry
-  refreshes, early failures before the gate) omit the key.
+  receipt key. Paths reached before the block is constructed (lock
+  contention, provider-preimage failures) omit the key. The runtime
+  receipt validator gains a matching `cutover_gate` check so schema and
+  `_validate_receipt` keep rejecting the same corpus (the file's own
+  stated invariant).
 - `schemas/scheduler_file_provider_refresh_receipt.schema.json`: top-level
   optional `cutover_gate` object — `mode` enum
   (enforced/bypassed_allow_uncovered_cutover/not_wired), `declaration_env`
@@ -68,8 +76,9 @@ the #1097 spec sentence fact rather than narrative.
 
 ## Impact
 
-- Affected specs: `scheduler-registry-refresh` (ADDED requirement: runner
-  receipt persists the audit block).
+- Affected specs: `scheduler-registry-refresh` (two ADDED requirements:
+  runner receipt persists the audit block; CLI failure diagnostics carry a
+  normalizer-produced block).
 - Affected code: `scripts/scheduler_file_provider_refresh.py`,
   `scripts/publish_scheduler_file_registry.py`,
   `schemas/scheduler_file_provider_refresh_receipt.schema.json` (+example),
