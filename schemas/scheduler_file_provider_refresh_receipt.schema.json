@@ -337,7 +337,7 @@
     {
       "if": {"properties": {"outcome": {"enum": ["published", "dry_run"]}}, "required": ["outcome"]},
       "then": {
-        "required": ["registry_classification"],
+        "required": ["registry_classification", "cutover_gate"],
         "properties": {
           "providers": {
             "oneOf": [
@@ -378,7 +378,7 @@
         },
         "required": ["reason"]
       },
-      "then": {"required": ["registry_classification"]}
+      "then": {"required": ["registry_classification", "cutover_gate"]}
     }
   ]
 }
