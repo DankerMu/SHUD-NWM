@@ -78,7 +78,8 @@ while the CLI runs in maintenance windows where operator gating suffices
 - Affected code: `scripts/publish_scheduler_file_registry.py` (one
   stderr line), `tests/test_publish_scheduler_file_registry.py`,
   `docs/runbooks/current-production-ops.md` (two sections),
-  `openspec/changes/node22-scheduler-registry-refresh/design.md` +
-  `.../specs/scheduler-registry-refresh/spec.md` (writer-list fix).
+  `openspec/changes/node22-scheduler-registry-refresh/design.md` (D7#7, D2
+  heading, invariant matrix) + `.../specs/scheduler-registry-refresh/spec.md`
+  + `.../tasks.md` (writer-list / preimage-population fixes).
 - No receipt/schema/DB surface. No behavior change beyond the added
   warning line.

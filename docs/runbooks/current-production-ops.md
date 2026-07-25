@@ -357,8 +357,9 @@ fail closed。direct-grid 生产模式下 timer 重发当前已验证 registry�
 `publish_scheduler_file_registry.py` 只负责 baseline staging，不能直写 canonical。
 它与 timer、model lifecycle、readiness/state writer 共用同一个 destination-derived
 lock（CLI 在 commit 时短暂持有），但 **CLI 不传 `expected_preimage`**：`main()` 从不
-populate 该参数，expected-preimage 检查只由 refresh runner 和 lifecycle/readiness/state
-writer 使用。因此 CLI 对 refresh timer 的并发保护是 **operator-gated 而非代码强制**——
+populate 该参数，expected-preimage 检查只由 refresh runner 自身的
+registry/worker-mirror/readiness/state lane（含回滚路径）与 `state_manager` 的
+state-index copyback 使用。因此 CLI 对 refresh timer 的并发保护是 **operator-gated 而非代码强制**——
 若 refresh 在 CLI 的 snapshot→commit 窗口内提交，CLI 会静默覆写它且不会报
 `provider_preimage_changed`。运行前必须按下面"手动 publisher CLI"条目确认 timer 与
 oneshot service 均非活跃。其余 writer 之间的 lock + preimage 语义不变。

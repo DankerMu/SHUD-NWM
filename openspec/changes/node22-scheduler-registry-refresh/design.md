@@ -39,7 +39,7 @@ stays read-only and fail closed. A failed consumer tick cannot renew the
 evidence it judges. Extending TTL was rejected because it hides stale object
 references.
 
-### D2. Every provider writer uses destination lock plus expected-preimage CAS
+### D2. Every provider writer uses destination lock plus optional expected-preimage CAS
 
 The common low-level atomic writer for registry/readiness/state acquires one
 destination-derived lock, optionally verifies an expected preimage digest and
@@ -443,8 +443,11 @@ Regression rows:
   outputs and published receipt; new registry packages are
   private-only, the canonical manifest is shared, and deleting a private
   package makes the unchanged scheduler consumer fail closed.
-- Any provider writer overlap -> destination lock + expected-preimage CAS; new
-  authoritative entries are never overwritten and no multi-lock deadlock.
+- Any provider writer overlap -> destination lock serializes every writer with
+  no multi-lock deadlock; the refresh runner's expected-preimage CAS aborts
+  `provider_preimage_changed` rather than losing newer authoritative entries.
+  The manual publisher CLI supplies no preimage: its overlap with the refresh
+  timer is operator-gated (D7#7), not CAS-gated.
 - Pre-commit invalid/path/limit/provider failure -> complete old stat tuple;
   capped immutable orphan evidence only.
 - Replace/fsync/post-read/receipt failure -> phase-correct restored/indeterminate

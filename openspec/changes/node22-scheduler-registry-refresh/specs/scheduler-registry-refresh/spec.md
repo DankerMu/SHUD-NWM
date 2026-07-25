@@ -5,8 +5,9 @@
 The system SHALL refresh every node-22 provider before its 168-hour consumer
 limit and SHALL serialize canonical destination replacement on the
 destination-derived lock across refresh, manual, lifecycle, readiness, and
-state writers, with an expected-preimage check shared by the refresh,
-lifecycle, readiness, and state writers. The manual publisher CLI takes that
+state writers, with an expected-preimage check populated only by the refresh
+runner's own lanes (registry, worker mirror, readiness, state, and rollback)
+and the state-index copyback. The manual publisher CLI takes that
 lock but supplies no expected preimage; its concurrency with the refresh timer
 is operator-gated (runbook prohibition plus a CLI startup warning), not
 CAS-gated.
