@@ -3638,8 +3638,12 @@ def test_static_checker_rejects_dev_compose_as_production_input() -> None:
     assert "DEV_COMPOSE_PRODUCTION_MISUSE" in _codes(result)
 
 
-def test_preflight_records_blocked_when_docker_is_unavailable(tmp_path: Path) -> None:
+def test_preflight_records_blocked_when_docker_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     evidence_root = tmp_path / "artifacts" / "preflight"
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "artifacts" / "tmp"))
 
     result = docker_runtime.run_preflight(
         evidence_root=evidence_root,
@@ -3667,8 +3671,12 @@ def test_preflight_records_blocked_when_docker_is_unavailable(tmp_path: Path) ->
     assert {blocker["code"] for blocker in payload["blockers"]} >= {"DOCKER_UNAVAILABLE"}
 
 
-def test_preflight_records_blocked_when_space_is_low(tmp_path: Path) -> None:
+def test_preflight_records_blocked_when_space_is_low(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     evidence_root = tmp_path / "artifacts" / "preflight"
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "artifacts" / "tmp"))
 
     result = docker_runtime.run_preflight(
         evidence_root=evidence_root,
@@ -3747,6 +3755,10 @@ def test_static_report_replaces_output_symlink_without_writing_target(tmp_path: 
     assert json.loads(report_path.read_text(encoding="utf-8"))["status"] == "PASS"
 
 
+@pytest.mark.skipif(
+    not os.access("/scratch/frd_muziyao", os.W_OK),
+    reason="requires writable /scratch/frd_muziyao (node-22 host contract)",
+)
 def test_static_report_explicit_evidence_run_id_overrides_scratch_path_inference(tmp_path: Path) -> None:
     repo_root = tmp_path
     report_path = Path("/scratch/frd_muziyao/nwm-test/run-static-explicit/docker-security/static.json")
@@ -3809,7 +3821,7 @@ def test_preflight_blocks_explicit_tmpdir_outside_approved_roots(
 
     assert result.status == "BLOCKED"
     payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
-    assert payload["tmpdir"] == "/tmp"
+    assert payload["tmpdir"] == str(Path("/tmp").resolve())
     assert {blocker["code"] for blocker in payload["blockers"]} == {"TMPDIR_OUTSIDE_APPROVED_ROOT"}
     assert {command["returncode"] for command in payload["commands"].values()} == {125}
 
@@ -4257,7 +4269,11 @@ def test_entrypoint_allows_safe_explicit_display_command() -> None:
     assert "nhms-entrypoint[" not in completed.stderr
 
 
-def test_docker_smoke_records_blocked_and_replaces_stale_pass_when_preflight_blocks(tmp_path: Path) -> None:
+def test_docker_smoke_records_blocked_and_replaces_stale_pass_when_preflight_blocks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "artifacts" / "tmp"))
     evidence_root = tmp_path / "artifacts" / "docker-smoke"
     evidence_root.mkdir(parents=True)
     evidence_path = evidence_root / "docker-smoke.json"
@@ -4288,9 +4304,24 @@ def test_docker_smoke_records_blocked_and_replaces_stale_pass_when_preflight_blo
     assert payload["status"] == "BLOCKED"
     assert payload["checked_at"] != "2000-01-01T00:00:00Z"
     assert {blocker["code"] for blocker in payload["blockers"]} == {"DOCKER_PREFLIGHT_BLOCKED"}
+    nested_preflight = json.loads(
+        (evidence_root / "preflight" / "docker-preflight.json").read_text(encoding="utf-8")
+    )
+    nested_codes = {blocker["code"] for blocker in nested_preflight["blockers"]}
+    assert nested_codes >= {
+        "DOCKER_UNAVAILABLE",
+        "DOCKER_COMPOSE_UNAVAILABLE",
+        "DOCKER_ROOT_UNAVAILABLE",
+        "DOCKER_SYSTEM_DF_UNAVAILABLE",
+    }
+    assert "TMPDIR_OUTSIDE_APPROVED_ROOT" not in nested_codes
 
 
-def test_docker_smoke_records_fail_and_replaces_stale_pass_when_build_fails(tmp_path: Path) -> None:
+def test_docker_smoke_records_fail_and_replaces_stale_pass_when_build_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "artifacts" / "tmp"))
     evidence_root = tmp_path / "artifacts" / "docker-smoke"
     evidence_root.mkdir(parents=True)
     evidence_path = evidence_root / "docker-smoke.json"
@@ -4323,7 +4354,12 @@ def test_docker_smoke_records_fail_and_replaces_stale_pass_when_build_fails(tmp_
     assert {blocker["code"] for blocker in payload["blockers"]} == {"DOCKER_BUILD_FAILED"}
 
 
-def test_docker_smoke_records_blocked_when_build_is_network_blocked(tmp_path: Path) -> None:
+def test_docker_smoke_records_blocked_when_build_is_network_blocked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "artifacts" / "tmp"))
+
     result = docker_runtime.run_docker_smoke(
         evidence_root=tmp_path / "artifacts" / "docker-smoke",
         repo_root=tmp_path,
@@ -4380,6 +4416,10 @@ def test_docker_smoke_passes_with_expected_role_boundary_probe_results(
     assert f"{object_store_root}:{object_store_root}:ro" in start_args
 
 
+@pytest.mark.skipif(
+    not os.access("/scratch/frd_muziyao", os.W_OK),
+    reason="requires writable /scratch/frd_muziyao (node-22 host contract)",
+)
 def test_docker_smoke_explicit_evidence_run_id_binds_scratch_layout_and_nested_preflight(tmp_path: Path) -> None:
     evidence_root = Path("/scratch/frd_muziyao/nwm-test/run-smoke-explicit/docker-security")
 
@@ -4411,24 +4451,38 @@ def test_docker_smoke_explicit_evidence_run_id_binds_scratch_layout_and_nested_p
 )
 def test_docker_smoke_required_probe_failure_never_passes(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     probe_name: str,
     expected_code: str,
 ) -> None:
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "artifacts" / "tmp"))
+    evidence_root = tmp_path / "artifacts" / "docker-smoke"
+
     result = docker_runtime.run_docker_smoke(
-        evidence_root=tmp_path / "artifacts" / "docker-smoke",
+        evidence_root=evidence_root,
         repo_root=tmp_path,
         min_free_bytes=100,
         command_runner=_docker_smoke_probe_failure_runner(probe_name),
         disk_usage_provider=_high_space,
     )
 
+    # The FAIL must come from the probe stage, not from a BLOCKED preflight early-exit.
+    nested_preflight = json.loads(
+        (evidence_root / "preflight" / "docker-preflight.json").read_text(encoding="utf-8")
+    )
+    assert nested_preflight["status"] == "PASS"
     assert result.status == "FAIL"
     payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
     assert payload["status"] == "FAIL"
     assert expected_code in {blocker["code"] for blocker in payload["blockers"]}
 
 
-def test_docker_smoke_image_inspect_failure_never_passes(tmp_path: Path) -> None:
+def test_docker_smoke_image_inspect_failure_never_passes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "artifacts" / "tmp"))
+
     result = docker_runtime.run_docker_smoke(
         evidence_root=tmp_path / "artifacts" / "docker-smoke",
         repo_root=tmp_path,
@@ -4445,7 +4499,12 @@ def test_docker_smoke_image_inspect_failure_never_passes(tmp_path: Path) -> None
     assert {blocker["code"] for blocker in payload["blockers"]} == {"IMAGE_INSPECT_FAILED"}
 
 
-def test_docker_smoke_display_startup_cleanup_failure_never_passes(tmp_path: Path) -> None:
+def test_docker_smoke_display_startup_cleanup_failure_never_passes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "artifacts" / "tmp"))
+
     result = docker_runtime.run_docker_smoke(
         evidence_root=tmp_path / "artifacts" / "docker-smoke",
         repo_root=tmp_path,
