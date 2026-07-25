@@ -10,7 +10,7 @@ export const meta = {
 
 // args: { changeName: string, epicNumber: number, stageLabel?: string }
 
-// NOTE: duplicated in full-pipeline.workflow.js + SKILL.md Stage 5.5 — keep in sync
+// NOTE: duplicated in full-pipeline.workflow.js + references/stage-5-issues.md Stage 5.5 维度表 — keep in sync
 const ALIGNMENT_SCHEMA = {
   type: "object",
   properties: {

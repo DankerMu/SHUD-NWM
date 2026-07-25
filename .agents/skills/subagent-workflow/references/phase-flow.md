@@ -9,7 +9,7 @@ Skip DAG selection if the user specified an issue number.
 1. Run `gh issue list --state open --limit 50 --json number,title,labels,state`.
 2. Read each non-epic issue body for `Depends on #XX`; cross-reference with closed issues.
 3. Auto-select by phase `p0 > p1 > p2 > p3`, then priority `critical > high > medium`, then `type:backend` over `type:android`, then lower issue number.
-4. Read the selected issue body and relevant comments. Extract an OpenSpec change name if the issue names one.
+4. Read the selected issue body and relevant comments. Extract an OpenSpec change name if the issue names one. Consume the upstream contract fields when present (`stage-change-pipeline` 0.16.0+ issues carry them): `Suggested fixture level` seeds the Phase 0.5 triage, and `Minimal mergeable slice` is recorded into the evidence bundle — it is the declared first cut that the gate's split default and any `Split rebuttal` must anchor to (`gates.md`). Both fields are absent on legacy or hand-written issues; proceed without them.
 5. Locate `openspec/changes/<change-name>/{proposal.md,design.md,tasks.md}` in the active repo or workspace. If the change is missing, create it in Phase 0.5 before implementation.
 6. Resolve the project profile (lookup order):
    1. If `openspec/project-profile.md` exists, load it as the active profile.
@@ -36,7 +36,7 @@ The profile is a living document, not a one-shot. It does not change per issue, 
 
 1. Create a short triage from issue, repo context, expected change surface, and the active project profile (`openspec/project-profile.md`).
    - Profile-gap maintenance: if the issue touches an entry surface, contract, risk axis, domain pack, or verification-matrix surface the profile does not yet describe, update `openspec/project-profile.md` before continuing. Keep the profile a living artifact; do not edit it for ordinary issues that already fit it.
-2. Assign fixture level: `none`, `compact`, or `expanded`. Mandatory expanded triggers live in `issue-risk-contract.md`.
+2. Assign fixture level: `none`, `compact`, or `expanded`. Mandatory expanded triggers live in `issue-risk-contract.md`. When the issue carries an upstream `Suggested fixture level`, start from it; overriding — in **either** direction — takes a one-line recorded reason in the triage. Do not exceed it merely because the issue is important.
 3. Assign repair intensity:
    - `low`: isolated, low blast-radius change; focused fixes are acceptable.
    - `medium`: normal implementation with selected risk packs; second same-class finding triggers pattern escalation.
@@ -71,7 +71,7 @@ The profile is a living document, not a one-shot. It does not change per issue, 
    ```
 9. For high or broad-expanded repair intensity, also add a compact boundary-surface checklist to the fixture. Use only relevant categories: shared helper roots, public entrypoints, read surfaces, write/delete/overwrite surfaces, staging/publish/rollback surfaces, producer/consumer evidence boundaries, stale-state/idempotency boundaries, and unchanged downstream consumers.
 10. Run one focused fixture review with a read-only `reviewer` subagent; it checks only fixture completeness. For high or broad-expanded fixtures, the review must specifically validate the `Invariant Matrix`; if it is absent or too vague, the fixture review is `revise`.
-11. If review says `revise`, update the OpenSpec change and rerun the fixture review once.
+11. If review says `revise`, update the OpenSpec change and rerun the fixture review. **Fixture repair is bounded: at most two revise-and-rerun iterations per issue.** A third `revise` verdict is no longer a fixture problem — it reclassifies the issue as **upstream-contract-defective**: stop, report the concrete gaps on the source issue, and when the issue came from `stage-change-pipeline`, route it into that pipeline's sizing-retro (`contract-gap`) so the issue is repaired where it was born.
 12. Run `openspec validate <change-name> --strict --no-interactive`; do not proceed until it passes.
 
 ## Phase 1: Implementer Subagent Implementation
@@ -141,7 +141,9 @@ Select reviewers from fixture level:
 - `high` or `broad-expanded`: use all 4 standard reviewers (Correctness, Integration, Security/Performance, Test & Evidence Coverage). Escalate to 6 reviewers when the PR touches DB-backed state, retry/cancellation, publish/delete/rollback, schema/evidence contracts, security boundaries, production config, or shared helper/state-machine roots. The two additional reviewers are `Spec Compliance` and `Invariant / State Machine / Compatibility`.
 - Initial round only: if repository policy requires a fixed number of evidence comments, follow it only when it does not conflict with the six-reviewer high-risk escalation defined in `phase-flow.md` Phase 4; otherwise post a consolidated evidence bundle rather than reducing reviewer coverage.
 
-Before spawning any comprehensive round's reviewers (initial or Phase 6.5 rerun), run the packaged evidence-hygiene linter `scripts/evidence_check.py`, passing the current PR body draft and evidence manifest via `--file`. A non-zero exit means the orchestrator's own bookkeeping is stale — unreplaced template placeholders, a current/frozen-head SHA claim that does not match HEAD, or a `Round N pending` claim the ledger already recorded. Fix the bookkeeping directly before spawning: it is orchestrator paperwork, not an implementer fix task, and it consumes no review round and gets no ledger line. Reviewer-authored reports are exempt from the placeholder scan by design; a review round is the most expensive linter there is, so reviewers get only what this script cannot judge.
+When Phase 4 starts, open the gate CLI with the issue binding: `review_gate.py open --pr <N> --issue <M>` — the `--issue` flag arms the cross-PR ceiling memory (`gates.md`), which is what makes a successor PR for a ceiling-hit issue escalate instead of restarting the argument from zero.
+
+Before spawning any comprehensive round's reviewers (initial or Phase 6.5 rerun), run the packaged evidence-hygiene linter `scripts/evidence_check.py`, passing the current PR body draft and evidence manifest via `--file`. A non-zero exit means the orchestrator's own bookkeeping is stale — unreplaced template placeholders, a current/frozen-head SHA claim that does not match HEAD, a `Round N pending` claim the ledger already recorded, or a **locked review gate** (register the persisted retro before any further ordinary action). Fix the bookkeeping directly before spawning: it is orchestrator paperwork, not an implementer fix task, and it consumes no review round and gets no ledger line. Reviewer-authored reports are exempt from the placeholder scan by design; a review round is the most expensive linter there is, so reviewers get only what this script cannot judge.
 
 Include the PR description's `偏离记录` section in every reviewer brief: deviations are where the implementer made choices the plan did not cover, so review attention goes there first. Use `phase-4-cross-review.md` to build the parallel reviewer-subagent briefs. Prefer spawning the full reviewer set as parallel subagents in one batch (Claude Code: multiple Task calls in one message; Codex: parallel subagents). Reviewer subagents are read-only and return their complete reports as their final messages; the orchestrator collects each returned report and persists it to `<REVIEW_DIR>/<report file>` (default `<REVIEW_DIR>` = `.workplans/<issue-or-pr>/review/`). Do not post PR comments in this phase.
 
@@ -150,7 +152,12 @@ Review rounds:
 - Round 1 uses the risk-adaptive reviewer count above.
 - After a Phase 6 fix pass, rerun cross-review before Phase 7 on the current head (classified exceptions rerun only their own gates: Phase 8 `ci-only` repairs and Phase 7 `local-repair` fixes). Post-fix rounds default to the **pinned risk-pack core only** (typically 2-3 reviewers): the lenses selected by the fixture's risk packs are pinned, present in every round, and carry the fix-regression recall. Free slots — complementary lenses from reviewer packs not yet used on this PR (`risk-adaptive-cross-review` `reviewer-packages.md`) — rotate back in only when the previous round had a critical/major finding or a failure-class repeat (ledger `repeats prior class: yes`); rotation is additive and never rotates out a pinned lens. This is a cost governor: comprehensive rounds are the most expensive unit in the workflow, so lens breadth is bought only when the ledger signals it. Record each round's lens mix in the evidence bundle; the policy is adjudicated by the review-loop log's lens attribution (Phase 8), keep/cut via the existing ADR mechanism.
 - Every post-fix round must still cover the full updated PR diff and OpenSpec fixture — a prior round can miss issues outside the fix area — but coverage is structured for cost: exactly one reviewer per round keeps full-PR comprehensive scope, and the remaining reviewers focus on the fix delta, its blast radius, and regression surfaces while retaining full-diff access. Never run a round with zero full-scope reviewers.
-- A cross-review round is clean only when it has no actionable findings. Critical/major findings and test coverage gaps always return to Phase 5-6. Minor findings must be fixed or explicitly deferred with issue/OpenSpec/user-instruction basis. When the `issue-scribe` agent is installed, "deferred with issue basis" means delegating the deferred finding to `issue-scribe` (it verifies, dedups, and files the tracked issue) and recording the returned issue URL in the evidence bundle; a deferral with neither an issue URL nor a recorded reason is not a valid deferral.
+- A cross-review round is clean only when it has no actionable findings remaining after deferral routing. What a verified finding buys is decided by severity — the unit being rationed is the post-fix comprehensive re-review round, the most expensive unit in the workflow, and it is bought only for P1+ (`finding-contract.md` Severity Crosswalk: P0=critical, P1=major, P2=minor):
+  - **Critical/major (P0/P1) findings and test coverage gaps always return to Phase 5-6.** "P1+" means verified merge-blocking per the Phase 4.5 fixture-tier bias — at `high`/`broad-expanded` a blocking PLAUSIBLE-P1 triggers the fix pass; at `compact` only CONFIRMED does.
+  - **When a P1+ fix pass runs anyway, minor (P2) findings enter the same fix checklist by default** — the re-review round is already being paid for, so P2 fixes ride along at near-zero marginal cost. Deferring a P2 out of a P1-triggered fix pass requires Downgrading-grade recorded rationale (`finding-contract.md`), e.g. the fix would expand scope beyond the fixture.
+  - **When verification leaves only minor (P2) findings — no critical/major, no coverage gap — the default flips: batch-defer with routing instead of fix.** Route every P2 (issue-scribe or a recorded one-line reason), record the round **clean** (routing resolves the findings; the deferral count lands in the loop-log `residual_deferred` and the evidence bundle, and routed P2s still count as catches), and proceed to Phase 7. Never spawn a fix pass plus re-review round for P2-only remains.
+  - **Coverage carve-out (non-negotiable)**: `test-evidence`/coverage findings for behavior this PR introduces are never batch-deferred regardless of assigned severity — the existing `wontfix` ban stands.
+  - Deferral routing itself is unchanged and hard: when the `issue-scribe` agent is installed, "deferred with issue basis" means delegating the deferred finding to `issue-scribe` (it verifies, dedups, and files the tracked issue) and recording the returned issue URL in the evidence bundle; a deferral with neither an issue URL nor a recorded reason is not a valid deferral, and the Phase 8 gate blocks on it.
 - When a comprehensive cross-review round comes back clean, record `Last clean reviewed SHA: <sha>` in the evidence bundle. This recorded SHA — not the frozen final HEAD — is the rollback anchor the Phase 8 pre-merge gate resets to if a later fix round corrupts a clean reviewed state.
 - **Round ledger bookkeeping is mandatory**: every comprehensive round ends by appending its ledger line, and the next action is chosen from that line — format, counter semantics, CLI mechanics, and skip-block rule in `gates.md` (Round Ledger).
 - A finding is actionable only if it satisfies the finding contract defined in the `risk-adaptive-cross-review` skill (`finding-contract.md`): severity, failure class, violated invariant/contract, concrete scenario, evidence, fix direction, required test/proof, sibling surfaces, and blocking status. Treat vague concerns, style preferences, and untestable possibilities as non-blocking notes unless the orchestrator can complete the missing fields from the diff and fixture.
@@ -196,16 +203,7 @@ Combine:
 - Local verification failures
 - Test coverage gaps from `tasks.md`
 
-First classify all findings by failure class and selected risk pack. Common classes include:
-
-- path binding / traversal / symlink / overwrite
-- evidence ingestion / bounded reads / JSON complexity
-- schema / audit / receipt contract
-- lane lifecycle / existing artifact state / partial outputs
-- public CLI / config / environment boundary
-- publish / rollback / cleanup semantics
-- numerical / resource / runtime bounds
-- compatibility / legacy consumer drift
+First classify all findings by failure class and selected risk pack, using the closed Failure-Class Vocabulary in `risk-adaptive-cross-review` `finding-contract.md` (one label per finding; the project profile's domain packs may motivate which classes to expect, but the labels come from the canonical whitelist, never a local fork).
 
 Drop or downgrade non-actionable review notes before fix planning unless the orchestrator can complete the actionable finding contract from the diff, fixture, and verification evidence.
 
@@ -215,6 +213,7 @@ Produce one checklist grouped by failure class. For each group include severity,
 
 Rules:
 
+- Phase 5 exists only when P1+ triggered it — a P2-only verification result exits at Phase 4 via batch-defer with routing and never reaches fix synthesis. When Phase 5 does run, verified P2s are on the checklist by default (ride-along); dropping one requires the recorded Downgrading rationale from the Phase 4 round rule.
 - `wontfix` must cite spec/design, issue text, OpenSpec non-goal, or explicit user instruction.
 - Test coverage gaps are never `wontfix`.
 - **Diagnosis gate (cause-unknown only)**: a finding or verification/CI failure whose cause is not established from the failing output enters the fix list only after a diagnosis task (Phase 6 diagnosis brief) has produced a **red-capable command already run at least once** (invocation + output pasted), a minimal repro, and a confirmed hypothesis with evidence. Ordinary findings with an exact file/line and evident cause skip this gate — no diagnosis tax on the first touch. A finding whose fix failed to close it in a prior round re-enters Phase 5 through this gate.
@@ -527,6 +526,7 @@ Before requesting merge approval or running a pre-authorized auto-merge, verify 
   - **(b) "review not required" record**: the fixture risk tier is `none` and the Phase 2 audit found no risk, and that fact is persisted in the evidence bundle against the frozen `FULL_SHA`. This is the only path that legitimately skips Phase 4/4.5/7 (see Phase 4 `none` handling and the Phase 2 audit).
   - Missing both (a) and (b) is a skip block: do not merge, and record it for the accountability log.
 - No posted evidence presents stale findings as current.
+- **Branch-tip integrity (deterministic)**: after freezing, run `git fetch origin` and confirm `git rev-parse HEAD` equals `git rev-parse origin/<branch>` — everything local is pushed before the merge fires; a merge of an un-pushed branch silently drops committed work. Prefer merge-commit mode (`--merge`) for workflow PRs; where repo policy forces `--squash`, this tip check is mandatory, not advisory.
 - **Deferral routing**: every explicitly deferred finding and every 剩余风险/已知限制 entry in the work summary carries either a tracked issue URL (delegated to `issue-scribe` when installed) or a recorded one-line reason why no issue is filed. An unrouted deferral is a gate failure, not a silent drop.
 - **Completion self-audit (premature-completion guard)**: re-derive each issue acceptance criterion and each selected `tasks.md` item and confirm the diff/tests actually satisfy it — not "the agent said done". Use the project profile's verification matrix to map each touched surface to its verification command and expected evidence; a matrix row for a touched surface that was never executed on the final head counts as an uncovered criterion. Confirm no leftover edge/error path the fixture required is unhandled, and that the final changes are internally consistent (no two fixes that contradict each other). Any uncovered criterion blocks the merge and returns to Phase 5-6; it does not become a silent deferral.
 - **Oracle integrity**: confirm the OpenSpec fixture, acceptance criteria, existing tests, and CI gates were not weakened, deleted, or rewritten to make the gate pass (`risk-adaptive-cross-review` → `finding-contract.md` Oracle Integrity). A test/spec change is legitimate only when it tracks a real contract change recorded in the OpenSpec change, never to silence a failure.
@@ -542,6 +542,8 @@ Then stop for explicit merge approval unless the user explicitly pre-authorized 
 After approval:
 
 ```bash
+git fetch origin
+[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/<branch>)" ] || echo "ABORT: local tip != origin tip - push first"
 gh pr merge <PR#> --merge --delete-branch
 DEFAULT_BRANCH=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)
 DEFAULT_BRANCH=${DEFAULT_BRANCH#origin/}
@@ -550,20 +552,35 @@ git checkout "$DEFAULT_BRANCH" && git pull
 gh issue close <ISSUE#> --comment "Closed via merged PR #<PR#>. <summary>"
 ```
 
-When the gate CLI is in use, run `review_gate.py close` after the merge (or when abandoning the PR) so `.review-gate.json` is removed and the `review-gate` spawn fence returns to no-op.
+Then archive the merged OpenSpec change as merge follow-up — this workflow owns the change's end of life, not just its birth: run `openspec archive <change-name>` (non-interactively where the CLI supports it) so the spec deltas fold into the main specs and `openspec/changes/` does not accrete merged-but-active changes. Commit the archival together with the accountability-log line below.
+
+When the gate CLI is in use, run `review_gate.py close --outcome merged` after the merge — or `close --outcome superseded-by-split|abandoned|descoped` when the PR ends any other way — so `.review-gate.json` is removed, the outcome lands in the cross-PR issue memory (`.review-gate-issues.json`, committed), and the `review-gate` spawn fence returns to no-op.
 
 ### Cross-Run Loop Accountability
 
-After a successful merge, append exactly one line to the host repo's committed, append-only review-loop log (`docs/review-loop-log.jsonl`, or the project's existing operational-log location). Commit it as merge follow-up, not inside the PR.
+After a successful merge **or a terminal gate outcome**, append exactly one line to the host repo's committed, append-only review-loop log (`docs/review-loop-log.jsonl`, or the project's existing operational-log location). Commit it as merge follow-up, not inside the PR.
+
+Merged line:
 
 ```json
 {"issue":<N>,"pr":<N>,"date":"<merge-date>","fixture":"none|compact|expanded|high|broad-expanded","rounds":<comprehensive-rounds>,"gate_net_catch":<n>,"verdicts":{"confirmed":<n>,"plausible":<n>,"refuted":<n>},"residual_deferred":<n>,"premerge_skip_blocks":<n>,"round_lenses":[["<lens>","..."],["..."]],"catches":[{"round":<n>,"lens":"<lens>","class":"<failure class>","severity":"<sev>"}]}
 ```
 
+Terminal line — a PR closed by the round ceiling, abandonment, or a descope decision gets a line too, with `"outcome"` and the successor pointers. Merge-only logging is survivorship bias: the cost governor's firings must be queryable in the same place as its successes:
+
+```json
+{"issue":<N>,"pr":<N>,"date":"<date>","fixture":"<level>","rounds":<n>,"outcome":"ceiling-split|abandoned|descoped","children":[<pr-or-issue numbers, when split>],"note":"<one line>"}
+```
+
+- **Coverage is per PR, no silent aggregation**: every merged PR gets its own line, including split children and batch sub-PRs — several sub-PRs delivering one logical issue means several lines sharing the issue number, each with its own rounds/verdicts.
+- **Validation before append**: compose the line into a local file and run `scripts/evidence_check.py --loop-log-entry <file>` first — required keys, outcome vocabulary, and the fixture token are machine-checked. `fixture` is the effective tier as **one canonical token** (`high`/`broad-expanded` subsume `expanded` when repair intensity escalated): composites like `expanded/high` and ad-hoc labels like `standard` fragment the per-level keep/cut sample and are rejected.
 - `gate_net_catch`: the accountability metric — count of verified findings (CONFIRMED plus merge-blocking PLAUSIBLE) the review/verify loop caught that local Phase 2 verification AND CI did not already surface. It measures the unique value the cross-review + verifier loop adds beyond the cheaper machine gates.
 - `premerge_skip_blocks`: times the pre-merge evidence hard-gate had to block this PR for missing/stale evidence (the dim-8 skip-rate signal).
 - `round_lenses`: the lens mix actually used per round (index 0 = round 1) — the instrumentation for the pinned-core + rotating-free-slots trial.
 - `catches`: one entry per `gate_net_catch` finding — the round it surfaced, the lens (reviewer pack) that produced it, its failure class and severity. This attributes later-round catches to either the pinned core (fix-regression recall) or a rotated-in lens (blind-spot recall).
+- A terminal line is also the signal that obligates the upstream sizing-retro: when the issue came from `stage-change-pipeline`, report the outcome back so the slicing/contract verdict is recorded where the issue was born, and split children re-enter that pipeline's Stage 5 contract.
+
+**Consume the log, don't just append to it**: after appending, run `scripts/loop_log_audit.py --log docs/review-loop-log.jsonl`. Exit 2 means a decision is now owed — a fixture level has reached the keep/cut sample with zero net catch, or the lens-rotation trial has reached its attribution sample. Record the ADR in `docs/adr/` (or a one-line recorded deferral with reason) before starting the next issue.
 
 Rotation keep/cut criterion (same human-call mechanism as below, minimum sample ~8 merged multi-round PRs): if later-round catches concentrate in rotated-in lenses, rotation is buying real union recall — keep. If they come almost entirely from pinned-core lenses on fix-touched code, rotation buys nothing — record the cut in `docs/adr/` and revert follow-up rounds to the round-1 mix.
 

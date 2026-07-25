@@ -7,7 +7,7 @@ description: >
   risk-adaptive, multi-perspective, parallel, cross-review, or high-risk PR review. Not for
   ordinary quick review.
 invocation_posture: hybrid
-version: 0.4.1
+version: 0.4.2
 ---
 
 # Risk-Adaptive Cross Review

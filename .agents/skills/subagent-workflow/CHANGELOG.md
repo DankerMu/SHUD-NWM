@@ -5,6 +5,54 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-07-25
+
+### Added
+
+- **Phase 4.5 disposition 轴（verifier 0.4.0 对接）**：verdict 之外，每个 CONFIRMED/PLAUSIBLE candidate 附带一个 disposition —— `FIX_NOW` / `DEFER` / `DISCARD`，由 verifier 的三测试机械推导（T1 真实输入域可达性、T2 依赖边界可观察影响、T3 oracle 锚定；本 workflow 中 OpenSpec fixture 与 Invariant Matrix 为最高锚级）。护栏：CONFIRMED P0 永不 DISCARD；DEFER/DISCARD 必须引证决定性测试；证据不足归 FIX_NOW/DEFER。
+
+### Changed
+
+- `gates.md`：ledger 的 `verified findings: <n>` 只计 disposition 为 FIX_NOW 的 candidate；DEFER/DISCARD 不进计数、不触发 gate，留痕于 `verify-<CLASS_ID>.md`，DEFER 并入既有 round-close 路由（issue-scribe URL 或记录理由）。
+- Phase 4.5 模板：REFUTED 不再包含 "pure style with no observable effect" —— 纯风格属实项如实给 verdict，由 T2 测试 DISCARD。
+
+## [0.30.0] - 2026-07-23
+
+### Changed
+
+- **结构减重：删战史散文与手抄词表，行为契约零变化**。随 0.28.0/0.29.0 规则写入的实测战例（Phase 0.5 过度配档轶事、Phase 8 分支尖三事故、archive 墓地、幸存者偏差示例、per-PR 覆盖与 carve-out 的 field-data 从句等）已完成说服使命——规则本体保留，论据出场：`phase-flow.md` 八处战史从句删除；Phase 5 手抄失效类清单（path binding/traversal 等 8 条）替换为 canonical `finding-contract.md` Failure-Class Vocabulary 指针（去镜像，单一事实源）；`gates.md` per-issue ceiling memory 段与 round-ceiling 行压缩。零代码、零 CLI、零 gate 语义变更。
+
+## [0.29.0] - 2026-07-23
+
+### Changed
+
+- **P2 延期默认 + P1 顺风车：严重度配给复审轮**（动机：0.26.0 把复审轮定价为全流程最贵单元后，剩下的浪费形态就是"为低严重度 remains 单独买一轮"——P2-only 的验证结果今天仍默认走修复→复审循环，而 P1 触发的修复过里 P2 又可以被随手 defer，两个方向都错）。新规则按严重度分流（P0/P1/P2 ↔ critical/major/minor 的 crosswalk 落 canonical `finding-contract.md` 0.4.2，工作流侧指针引用）：
+  - P1+（按 Phase 4.5 档位偏置解释：high/broad-expanded 下阻塞 PLAUSIBLE-P1 也算）与测试覆盖缺口照旧必回 Phase 5-6；
+  - P1+ 修复过存在时，已验证 P2 **默认进同一张 fix checklist**（复审轮反正要买，P2 搭车边际成本≈0）；想 defer 出去须给 Downgrading 级记录理由；
+  - 验证后**仅剩 P2**（无 critical/major、无覆盖缺口）：默认反转为**批量路由出场**——每条 P2 走 issue-scribe 或一行记录理由，该轮记 clean（路由即解决；deferral 计数落 loop-log `residual_deferred` 与证据束，路由的 P2 仍计 catch），直通 Phase 7，绝不为 P2-only 单独起修复+复审轮；
+  - **覆盖类 carve-out 不可协商**：本 PR 新行为的 `test-evidence`/覆盖 finding 无论定级一律不入批量延期（wontfix 禁令不动）——实跑数据里它是复发最凶的失效类，延期默认不得成为它的旁路。
+  - Ledger 语义配套（gates.md）：全部路由完成的 minor-only 轮记 clean，不触发任何 gate——不为一个马上出场的轮烧 retro。安全网不变：Phase 7 独立终审照跑，Phase 8 deferral-routing 硬门兜底路由质量。零代码零 CLI 变更。落点：phase-flow Phase 4 轮规则重写 + Phase 5 入口规则、gates.md Round Ledger、SKILL.md verify-before-fix 核心规则。
+
+## [0.28.0] - 2026-07-23
+
+联合改版（与 `stage-change-pipeline` 0.16.0 同批）：0.24-0.27 上线后对 SHUD-Harness（26 merges）与 xagent（71 行 log + 未入账的双撞顶）的实跑复盘显示，5 轮硬顶/lens 钉死/红证明/compact 分级基本按设计生效，但暴露四个结构缺口——最贵的失效类根因一半在上游切片契约。本版补下游侧，动机逐条来自实跑证据。
+
+### Added
+
+- **终局记账行 + 子 PR 全覆盖**（动机：xagent 全周期最贵的两个循环——同一 issue 连撞两次 5 轮 ceiling——在 `review-loop-log.jsonl` 里零记录，因为日志只在 merge 时写行；SHUD 一周 16 个 merge 只记了 6 行，漏的恰是拆分/批量子 PR）。round-ceiling 拆分/放弃/降档也必须追加一行（`outcome` 字段 + `children` 指针）；每个 merge 的 PR 各得一行，拆分/批量子 PR 不得静默聚合。终局行同时是上游 `stage-change-pipeline` sizing-retro 的触发信号。落点：phase-flow Phase 8 Cross-Run Loop Accountability、gates.md ceiling 行、SKILL.md 问责规则。
+- **`review_gate.py` per-issue ceiling 记忆**（动机：xagent #291 第一个 PR 撞顶拆分后，第二个 PR 从零开始又用两次"不可独立拆分"的 depth 散文 rebuttal 烧满第二个 5 轮 ceiling——被迫拆分后最小子 PR 一轮全绿，证明 rebuttal 从头就是错的。gate 状态 per-PR，同一 issue 的后继 PR 可以无限重启论证）。`open --pr N --issue M` 启用跨 PR 记忆：`.review-gate-issues.json` 在 `close` 后存活（建议提交进仓库），记录每 issue 的 ceiling PR、gate 进门数与 `close --outcome`（merged|superseded-by-split|abandoned|descoped）。曾撞顶 issue 的后继 PR 以 escalated 态打开：depth/noise retro 被 CLI 拒绝，除非 `record-retro --user-approved "<一行用户决策>"`（进 ledger 可审计）——拆/降/停的决策移到后继 PR 开始时到人面前，不是烧完预算之后。breadth/converging 不受影响；锚点（既往 ceiling）由 not-clean 轮推导不可造假，用户决策口子保住"真复发 invariant 不被逼进禁止的拆分"（与 0.25.0 否决可游戏硬门的论证一致）。无 `--issue` 时行为与旧版完全一致。
+- **`evidence_check.py` 两项新检查**：(1) gate-lock——`.review-gate.json` 为 locked 即 exit 2（动机：xagent pr-314 自曝 round 3 忘跑 gate 转换、纠正动作与 round 4 先行、retro 事后补记——CLI 可被"忘记调用"绕过，hook 只覆盖 Claude Code；本检查让绕过在下一个 spawn/发帖点被机械拦截）；(2) `--loop-log-entry`——待追加的 loop-log 行先过词表校验：fixture 必须是 `none|compact|expanded|high|broad-expanded` 单 token（动机：xagent 自造 `standard`/`light` 10 行、SHUD 全程复合标签 `expanded/high`，keep/cut 按档分桶的样本被双双打碎），outcome 词表、必填键、日期格式同查；merged 行必须有 `gate_net_catch`/`verdicts`，终局行豁免。
+- **`loop_log_audit.py`（新脚本）：keep/cut 从散文期望变机械事实**（动机：xagent 7-19 后 ~15 行 `gate_net_catch=0` 早已超过自定的 ~8 样本裁决阈值、SHUD 两次 ceiling 人工豁免只留在 workplan 笔记——两库都在收集无人消费的数据，因为没有任何东西说"现在该裁了"）。读 loop-log 输出：按档零净捕获样本达阈 → `DECIDABLE keep-cut`；多轮 PR lens 归因样本达阈 → `DECIDABLE lens-rotation`（core/rotated 计数）；词表外标签与终局事件计为 NOTE。exit 2 = 有裁决欠账：先落 ADR（或一行记录的 deferral）再开下一个 issue。Phase 8 追加日志后必跑。
+- 需求驱动单测 24 例新增（review_gate 7、evidence_check 8、loop_log_audit 11——per-issue 记忆全生命周期、escalated 拒绝与用户决策放行、gate-lock、词表校验、keep/cut 判定阈值、归因计数、响亮失败）。
+
+### Changed
+
+- **上游契约从单向交接改为回路**（SKILL.md Upstream Contract + phase-flow Phase 0/0.5）：消费 `stage-change-pipeline` 0.16.0 issue 的 `Suggested fixture level`（triage 从它起判，双向偏离记录一行理由——动机：SHUD 26/26 全按最重档跑，契约明文 "prefer compact when uncertain" 形同虚设，分级偏离必须变成可见决策）与 `Minimal mergeable slice`（gates.md `Split rebuttal` 的反驳对象锚定为这一刀，不再是泛泛散文）；两字段缺席时降级兼容。
+- **Phase 0.5 fixture 修复封顶 2 轮**：第三个 `revise` 不再是 fixture 问题而是上游契约缺陷——停下、把具体缺口上报源 issue 与上游 sizing-retro（`contract-gap`），不在下游继续修（动机：xagent 终局拆分子项未重过上游契约、实现前烧三轮 fixture-repair——成本从上游没做的事变成下游空转）。
+- **Pre-merge 硬门新增分支尖一致性条款 + merge 流程前置检查**：`git fetch origin` 后本地 HEAD 必须等于 origin 分支尖才可 merge；建议 workflow PR 用 merge-commit 模式（动机：xagent 三次 squash-merge 吃掉未 push 的已提交修复、各需恢复 PR，日志里有原话诉求）。
+- **Phase 8 认领 OpenSpec change 的生命终点**：merge 后 `openspec archive <change>` 作为 merge follow-up 与日志行同提交（动机：xagent 35+ active change 仅 3 个归档——change 的出生有两个 skill 管，死亡无人认领）。
+- issue-risk-contract：Risk Triage 模板新增 `Upstream suggested level:` 行；固化"日志 fixture 字段 = 单 token 有效档"规则。
+
 ## [0.27.0] - 2026-07-17
 
 ### Added

@@ -115,7 +115,8 @@ Verifier contract:
 - If two candidates in the batch turn out to be the same defect, verdict both and flag the duplication in the note — do not silently collapse them.
 - `CONFIRMED`: the failing scenario is constructible from the diff, fixture, or existing contracts/tests. Cite the constructing evidence.
 - `PLAUSIBLE`: reachable but not fully constructible. Default here for realistic runtime states — rare error paths, falsy-zero treated as missing, off-by-one at a boundary the code does not exclude, concurrency races, retry storms, stale cache/DB rows, regex/allowlist that lost an anchor. Do not refute a candidate merely for being "speculative" or "depends on runtime state" when the state is realistic.
-- `REFUTED`: only when constructible from the code — factually wrong (quote the actual line), provably impossible (cite the type/constant/invariant), already handled in this diff (cite the guard), or pure style with no observable effect.
+- `REFUTED`: only when constructible from the code — factually wrong (quote the actual line), provably impossible (cite the type/constant/invariant), or already handled in this diff (cite the guard). A true-but-style-only concern is verdicted honestly and discarded via disposition, not REFUTED.
+- Every CONFIRMED/PLAUSIBLE candidate also gets exactly one disposition — `FIX_NOW`, `DEFER`, or `DISCARD` — per the verifier agent's three tests (T1 reachability in the real input domain, T2 observable impact at a depended-on boundary, T3 oracle anchor; in this workflow the OpenSpec fixture and `Invariant Matrix` are the top anchor rung). CONFIRMED P0 is never DISCARD; each DEFER/DISCARD must cite its decisive test; inconclusive evidence resolves to FIX_NOW/DEFER, never DISCARD.
 - Use only evidence from the diff, OpenSpec fixture, existing code/contracts, or tests. Do not invent a scenario to confirm or a guard to refute.
 
 Spawn one `verifier` subagent per failure-class batch (working directory `<absolute repo path>`), in parallel:
@@ -144,14 +145,16 @@ Inputs:
 Adjudication:
 - CONFIRMED: scenario constructible from diff/fixture/contracts; cite the evidence.
 - PLAUSIBLE: realistic but not fully constructible runtime state; explain reachability.
-- REFUTED: factually wrong (quote line), provably impossible (cite type/constant/invariant), already handled (cite guard), or pure style. Only when constructible from the code.
+- REFUTED: factually wrong (quote line), provably impossible (cite type/constant/invariant), or already handled (cite guard). Only when constructible from the code; style-only truths get a disposition instead.
+- Disposition (CONFIRMED/PLAUSIBLE only): FIX_NOW | DEFER | DISCARD per your operating guide's three tests (T1 reachability, T2 observable impact, T3 oracle anchor — the fixture and Invariant Matrix are the top anchor rung). CONFIRMED P0 is never DISCARD; cite the decisive test on every DEFER/DISCARD; when inconclusive choose FIX_NOW/DEFER.
 
 Output:
 Verifier verdicts for batch: <CLASS_ID>
 Reviewed head SHA: <FULL_SHA>
 Per-candidate verdicts:
 - <CANDIDATE_ID>: CONFIRMED|PLAUSIBLE|REFUTED
-  Evidence: <quoted line / cited guard / reachability path>
+  Disposition: FIX_NOW|DEFER|DISCARD (omit for REFUTED)
+  Evidence: <quoted line / cited guard / reachability path; for DEFER/DISCARD also the decisive test>
   Note: <one line, or "None.">
 - ...one entry per candidate in the batch
 ```

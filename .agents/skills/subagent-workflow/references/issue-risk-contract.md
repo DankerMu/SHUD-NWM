@@ -46,6 +46,7 @@ Issue type: feature|bugfix|refactor|docs|release|test
 Project profile: Generic|SHUD|rSHUD|AutoSHUD|... (from project-profiles.md)
 Blast radius: low|medium|high|critical
 Fixture level: none|compact|expanded
+Upstream suggested level: <none|compact|expanded|absent> (agree | override: <one-line reason>)
 Why:
 - <1-4 concrete triggers>
 Selected risk packs:
@@ -61,7 +62,9 @@ Evidence floor:
 - `compact`: ordinary isolated code change; no shared entrypoint, no format/schema change, no file publish/delete behavior.
 - `expanded`: any shared entrypoint, public API, file format/schema, solver/runtime/numerical behavior, geospatial/time-series data, external data discovery, file publish/delete/rollback, legacy compatibility, ambiguous issue scope, or high user-visible risk.
 
-Prefer `compact` when uncertain unless a trigger above is present. Do not expand merely because the issue is important.
+Prefer `compact` when uncertain unless a trigger above is present. Do not expand merely because the issue is important. When the issue carries an upstream `Suggested fixture level` (`stage-change-pipeline` Stage 5), the triage starts from it and any divergence — up or down — is recorded with a one-line reason on the `Upstream suggested level:` line; the upstream author saw the module boundary and expected PR scope, so silent re-triage in either direction is a contract drift, not a free choice.
+
+**Canonical vocabulary is this file, and log lines use one token.** The levels are exactly `none | compact | expanded`, with `high`/`broad-expanded` as repair-intensity escalations. The accountability log's `fixture` field records the effective tier as a single token from `none|compact|expanded|high|broad-expanded` (`high`/`broad-expanded` subsume `expanded`); composites (`expanded/high`) and ad-hoc labels (`standard`, `light`) are rejected by `evidence_check.py --loop-log-entry` because they fragment the per-level keep/cut sample that `loop_log_audit.py` adjudicates.
 
 Artifact set per fixture level (validated against openspec CLI 1.3.x — fixture weight scales with risk, fixture existence does not):
 

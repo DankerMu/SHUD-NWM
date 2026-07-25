@@ -5,7 +5,9 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
-## [0.4.1] - 2026-07-11
+## [0.4.2] - 2026-07-23
+
+- Severity Crosswalk 补上自家下游的词表映射：`subagent-workflow` ledger/CLI（`review_gate.py --highest`、round-ledger、gate 规则）的 `critical|major|minor|none` ↔ 本契约 P0/P1/P2/Note（Note 无 ledger 表示，`none` 表示 clean 轮而非 Note）。此前该映射只是隐式约定——外来词表（review/entropy-review）都有 crosswalk，唯独最重的消费方没有；0.29.0 的 P2 延期默认规则以严重度分流修复经济学，映射从此是承重的，写死在 canonical 处，工作流侧只指针引用。
 
 - Tighten the hybrid trigger description from 489 to 387 characters (slimming batch 6), eval-gated by the new cross-skill routing suite (`skill-lifecycle-manager/eval/cross-skill-routing-cases.json`): three A/B runs, zero per-case routing regressions, candidate 27/27 on the final run (deepseek-v4-pro-guan judge via dmxapi). All negative redirects preserved.
 

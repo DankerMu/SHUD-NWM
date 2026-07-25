@@ -348,7 +348,7 @@ const p0Residual = activeFindings.filter((f) => f.severity === "P0").length;
 const p1Residual = activeFindings.filter((f) => f.severity === "P1").length;
 
 // Accountability log line for docs/stage-pipeline-log.jsonl. The sandbox has no clock,
-// so "date" is omitted here — the orchestrator adds it before appending (see SKILL.md).
+// so "date" is omitted here — the orchestrator adds it before appending (see references/loop-accountability.md).
 const logEntry = {
   change: changeName,
   rounds: round,

@@ -199,7 +199,7 @@ const ISSUE_RESULT_SCHEMA = {
   required: ["epicNumber", "subIssueNumbers"]
 };
 
-// NOTE: duplicated in issue-alignment.workflow.js + SKILL.md Stage 5.5 — keep in sync
+// NOTE: duplicated in issue-alignment.workflow.js + references/stage-5-issues.md Stage 5.5 维度表 — keep in sync
 const ALIGNMENT_SCHEMA = {
   type: "object",
   properties: {
@@ -722,7 +722,7 @@ const overallVerdict = reviewVerdict === "clean" && alignVerdict === "clean" ? "
 log(`Final: review=${reviewVerdict}, alignment=${alignVerdict}, overall=${overallVerdict}`);
 
 // Accountability log line for docs/stage-pipeline-log.jsonl. The sandbox has no clock,
-// so "date" is omitted here — the orchestrator adds it before appending (see SKILL.md).
+// so "date" is omitted here — the orchestrator adds it before appending (see references/loop-accountability.md).
 const p0Residual = activeFindings.filter((f) => f.severity === "P0").length;
 const p1Residual = activeFindings.filter((f) => f.severity === "P1").length;
 const logEntry = {

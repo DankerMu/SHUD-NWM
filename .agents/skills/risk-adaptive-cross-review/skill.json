@@ -3,7 +3,7 @@
   "name": "risk-adaptive-cross-review",
   "displayName": "Risk-Adaptive Cross Review",
   "description": "Multi-perspective, risk-adaptive review for PRs, diffs, branches, OpenSpec changes, or stage artifacts — reviewers split across correctness, integration, security/performance, test evidence, spec compliance, or invariant/state-machine compatibility. Use on explicit asks for risk-adaptive, multi-perspective, parallel, cross-review, or high-risk PR review. Not for ordinary quick review.",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "maturity": "experimental",
   "categories": [
     "review",

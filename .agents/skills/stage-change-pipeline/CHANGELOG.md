@@ -5,6 +5,28 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-23
+
+### Changed
+
+- **结构重构：照搬 `subagent-workflow` 的薄核架构，SKILL.md 33KB → 8KB，行为契约零变化**。触发即载入的 SKILL.md 只留路由（When Not to Use / 概览 / 跳过策略）、**不可协商项索引**（压测门禁 EITHER/OR + 主会话时序、seams 清单、P0+P1 双阻塞、4.5 ack 凭据、Stage 5 契约字段名、收尾问责、终局回流）与启动入口（`Workflow()` 调用示例唯一一份，消除此前三处重复的 grillGate 形态）：
+  - 新增 `references/stage-flow.md`：Stage 1→5.5 完整执行契约整体下沉（原文迁移），漏读的机械兜底是 workflow.js 拒启 + ack 凭据 + 硬编码回环。
+  - 新增 `references/stage-2-artifacts.md`（逐 artifact 写法/命令骨架）与 `references/stage-5-issues.md`（分组原则全文/创建步骤/issue 正文模板/5.5 维度表），由 stage-flow.md 引用。
+  - 编排器四步日志流程移入 `references/loop-accountability.md`（与 schema/kill/ratchet 同处）。
+  - Stage 3/4/4.5 教学性清单删除（"典型 P0 问题类型"等），brief 构建与核销步骤收拢成段；三路分工表、oracle 完整性、回环判定原文保留在 stage-flow.md。
+  - 契约两个可拆性字段与终局回流的实测战史从句删除——论据已完成说服使命，规则本体不动。workflow 脚本注释的三处 SKILL.md 指针同步改指新位置。
+
+## [0.16.0] - 2026-07-23
+
+联合改版（与 `subagent-workflow` 0.28.0 同批）。实跑复盘归因：下游最贵的失效类——xagent #291 同一 issue 连撞两次 5 轮 review ceiling（约 10 轮，超过当年 #131 单 PR 事故的量级）、被迫终局拆分后最小子 PR 一轮全绿；SHUD issue-79 十连 same-invariant 手动门后撞顶拆分、子 PR 三轮收敛——根因一半在本流水线：Stage 5 承诺"小 PR + 预期 PR 边界"却不提供可证伪的可拆性声明，切片失败的代价全部在下游烧掉、零回流。本版把单向交接改成回路。
+
+### Added
+
+- **实现就绪契约新增两个字段**（Stage 5 契约清单 + 步骤 4 issue 正文模板，Stage 3 Tasks-可执行性审核路新增对应检查项）：
+  - `Suggested fixture level`：`none|compact|expanded` + 一行理由，词表以下游 `issue-risk-contract.md` 为单一事实源（指针不镜像，沿用 gh-create-issue agent-brief 先例）。动机：上游最了解模块边界与预期 PR 体量却不预判分级，实测下游要么整段时期全按最重档跑（SHUD 26/26 expanded/high，无视 "prefer compact"）、要么自造词表外标签（xagent `standard`/`light`）。下游从该建议起判，双向偏离都须记录理由——分级偏离从默认行为变成可见决策。
+  - `Minimal mergeable slice`：首刀声明——若需拆分，最小可独立合并保绿的子集（真原子写 `atomic: <理由>`；expand–contract 批次天然满足）。动机：下游 `Split rebuttal` 是自由散文时被泛泛反驳连续骗过两次（#291 双 ceiling），拆分默认无锚可锚；此字段让反驳对象变成一把具体的刀。Stage 3 审核核对该刀是否真能独立保绿——防止它像当年裸 `"passed"` 一样被敷衍填写（0.15.0 已为同类失效付过一次学费）。
+- **终局回流（sizing-retro）**（SKILL.md 跨运行问责第 2 节 + `loop-accountability.md` 第 4 节 schema）：下游任何 PR 以 round-ceiling 拆分/放弃/降档收场，都是本流水线一次切片或契约失败的证据，必须回流——(1) 拆分子工作项重过 Stage 5 全字段契约 + 一轮轻量 Stage 5.5 对齐审核（仅限拆分子 issue），不得以裸 PR/裸 fixture 出生（实测绕过契约的拆分子项实现前烧三轮 fixture 修复；下游 0.28.0 起两轮封顶后会作为 `contract-gap` 上报回来）；(2) 向 `docs/stage-pipeline-log.jsonl` 追加 sizing-retro 行，裁决 `slice-error|contract-gap|genuinely-hard` + 一行"下一个同类阶段怎么切"。边界：这是问责不是跨 change 学习，sizing-retro 不注入后续 change 的审核 brief（非目标不变）；顺带治好 stage-pipeline-log 躺尸病——日志此前只记成功运行，恰好错过它声称要问责的最贵事件。sizing-retro 行不计入 kill 标准样本。
+
 ## [0.15.1] - 2026-07-17
 
 ### Fixed

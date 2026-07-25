@@ -76,6 +76,12 @@ cross-run logging stay consistent.
 - **`review` skill**: P0 → P0, P1 → P1, P2 → P2; P3/Nit → Note.
 - **`entropy-review`**: E0 → P1 (P0 when it breaks a selected risk-pack
   invariant); E1 → P2; E2 → P2; E3 → Note.
+- **`subagent-workflow` ledger/CLI vocabulary** (`review_gate.py --highest`,
+  round-ledger lines, gate rules): P0 → `critical`, P1 → `major`,
+  P2 → `minor`; Note is non-actionable and gets no ledger representation
+  (`--highest none` means a clean round, not a Note). This mapping is
+  canonical here; the workflow's references point at it rather than
+  restating it.
 
 Map `entropy-review` dimensions onto this contract's Failure-Class Vocabulary:
 
