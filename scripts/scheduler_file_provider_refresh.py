@@ -1829,12 +1829,29 @@ _CUTOVER_GATE_KEYS = frozenset({"mode", "declaration_env", "declaration_present"
 def _validate_cutover_gate_field(receipt: Mapping[str, Any]) -> None:
     """Admit exactly the normalizer's three-field shape (#1132).
 
-    The key is optional, but a present key must hold a well-typed block: the
-    schema and this validator have to reject the same corpus, so an explicit
-    ``null`` (which the schema's ``"type": "object"`` refuses) is rejected here
-    too rather than treated as absence.
+    The key stays optional at the key-set level (``RECEIPT_OPTIONAL_KEYS``)
+    because runs that fail before the audit block is constructed omit it, but
+    a present key must hold a well-typed block: the schema and this validator
+    have to reject the same corpus, so an explicit ``null`` (which the
+    schema's ``"type": "object"`` refuses) is rejected here too rather than
+    treated as absence.
+
+    #1144: on the outcomes where the runner ALWAYS built the block before
+    reaching the receipt (``published``/``dry_run``, or any registry-cutover
+    refusal reason) absence is itself forged — the same corpus the schema's
+    two ``allOf`` branches now require ``cutover_gate`` on.  The condition
+    mirrors ``_validate_registry_classification_field``'s
+    ``requires_classification``; the reason is distinct from
+    ``receipt_cutover_gate_invalid`` so operators can tell "block missing"
+    from "block malformed".
     """
     if "cutover_gate" not in receipt:
+        requires_cutover_gate = (
+            receipt.get("outcome") in {"dry_run", "published"}
+            or receipt.get("reason") in REGISTRY_CUTOVER_REFUSAL_REASONS
+        )
+        if requires_cutover_gate:
+            raise ValueError("receipt_cutover_gate_required")
         return
     cutover_gate = receipt.get("cutover_gate")
     if not isinstance(cutover_gate, Mapping) or set(cutover_gate) != _CUTOVER_GATE_KEYS:
@@ -2002,8 +2019,11 @@ def _enforce_registry_classification_reconciliation(
       publishes).  ``refused`` may hold only the synthetic
       ``__declaration__`` marker's ``registry_cutover_declaration_invalid``
       reason — the writer appends it after ``_classify_registry`` regardless
-      of dry_run — while the legacy outcome-keyed fallback keeps rejecting
-      every refused row.  The full previous-side equality is NOT applied here:
+      of dry_run — and #1144 bounds that bucket to AT MOST one untruncated
+      marker row (``total == len(items) <= 1``) which never rides a
+      ``dry_run`` receipt, because the declaration failure that produces it
+      terminates the run as ``outcome="failed"``; the legacy outcome-keyed
+      fallback keeps rejecting every refused row.  The full previous-side equality is NOT applied here:
       removals are never computed, so previous rows absent from the
       prospective set are legitimately unaccounted for.  Mode and outcome are
       cross-checked: ``dry_run`` requires ``id_only`` while ``published`` and
@@ -2103,11 +2123,36 @@ def _enforce_registry_classification_reconciliation(
             # `_classify_registry` without consulting dry_run, so
             # `registry_cutover_declaration_invalid` is the only refusal an
             # id-only classification can carry; every other reason is forged.
+            refused_items = _items("refused")
             if any(
                 not isinstance(item, Mapping)
                 or item.get("reason") != "registry_cutover_declaration_invalid"
-                for item in _items("refused")
+                for item in refused_items
             ):
+                raise ValueError("receipt_classification_invalid")
+            # #1144: bound the bucket itself.  `_classify_registry` returns an
+            # EMPTY refused list on the id-only early return, and the single
+            # place that can extend it (`_registry_precommit_gate`'s
+            # declaration-load failure) appends exactly one synthetic
+            # `__declaration__` row — which `to_receipt` never truncates.  So
+            # anything beyond one untruncated marker row is forged, including
+            # a wiped `items` list carrying an inflated `total`.
+            refused_group = classification.get("refused")
+            if (
+                not isinstance(refused_group, Mapping)
+                or refused_group.get("truncated") is not False
+                or refused_total != len(refused_items)
+                or refused_total > 1
+                or any(
+                    item.get("model_id") != "__declaration__" for item in refused_items
+                )
+            ):
+                raise ValueError("receipt_classification_invalid")
+            # That declaration failure sets the refusal reason, which makes
+            # `_registry_precommit_gate` raise before the dry_run receipt is
+            # built, so the run terminates as `outcome="failed"`: a dry_run
+            # receipt carrying ANY refusal has no legal writer.
+            if outcome == "dry_run" and refused_total != 0:
                 raise ValueError("receipt_classification_invalid")
         # Even in id-only mode the added+unchanged+package_changed equality must
         # bind to the pinned prospective_model_count (package_changed is 0

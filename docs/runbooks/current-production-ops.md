@@ -702,11 +702,22 @@ latest.json 的 monotonic-order 排序，legacy shape 不会触发 `receipt_clas
 file_provider_refresh.sh --enable`（内部走 `validate_current_receipt`）会看到完整
 post-#1080 shape。
 
-**升级 pre-#1132 receipt**：#1132 部署之前写下的 receipt（包括正常的 `published`）同样
-没有 `.cutover_gate`，所以字段缺席的含义是"pre-#1132 老 receipt **或** run 在 gate 块
-构造前就失败"。判定红旗前先确认 receipt 的版次：比对 `.started_at` 与 #1132 部署时间，
-或者干脆跑一次 manual refresh 拿新 receipt。新 receipt 一定带 `.cutover_gate`；若此时
-仍然缺席，才是真正"gate 之前失败"的信号。
+**receipt 契约升级/回滚兼容性（升级 pre-#1132 receipt）**：#1132 部署之前写下的 receipt
+（包括正常的 `published`）同样没有 `.cutover_gate`。#1144 起这**不再是需要 operator 判断的
+软信号**：`outcome` 为 `published`/`dry_run`、或 `reason` 为三个 registry-cutover refusal
+之一的 receipt 必须带该字段，schema 与 `_validate_receipt` 同批拒绝缺席语料（运行时 reason
+为 `receipt_cutover_gate_required`）。后果落在
+`install_node22_scheduler_file_provider_refresh.sh --enable` 上：
+它内部走 `validate_current_receipt`，读到 pre-#1132 的 published
+`latest.json` 会直接抛 `emergency_record_invalid`（`phase="receipt"`），与"receipt 被篡改"
+同码——升级后第一次 `--enable` 失败时先 `jq 'has("cutover_gate")'` 看是不是这个原因。
+处置与 pre-#1080 段（见上）一致：跑一次**成功**（`outcome == "published"`）的 manual
+refresh 把 `latest.json` 重写掉，新 receipt 一定带 `.cutover_gate`，`--enable` 随即通过。
+旧 receipt 不会阻塞 refresh 的写路径——`_publish_primary_receipt` 同样用 lenient reader 只读
+`(started_at, run_id)` 排序。注意 refused/failed 的 refresh 也会重写 `latest.json`，但
+`outcome != "published"` 仍被 `validate_current_receipt` 拒绝，必须拿到一次真正 published
+的 receipt 才算复位。gate 装上之前就失败的 run（lock contention、provider preimage 冲突）
+其 outcome 既非 `published`/`dry_run` 也不带 refusal reason，缺席依旧合法，无需处置。
 
 启用 refresh timer 前必须 `jq '.registry_classification'
 /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json`
@@ -715,9 +726,12 @@ post-#1080 shape。
 里的 entry 与 `entries` 数量与 declaration 完全一致。任何 `refused` 都禁止把 timer
 enable；那说明当前 declaration 与 prospective 不匹配、需要重新提交。
 同一次核对里还要 `jq '.cutover_gate'` 确认是 `{"mode": "enforced", "declaration_env":
-"NHMS_REGISTRY_CUTOVER_DECLARATION_PATH", "declaration_present": <bool>}`；字段缺席
-说明这份 receipt 来自 gate 装上之前就失败的 run（或是 pre-#1132 版次，见上），
-两种情况都不能用来 enable timer——先跑一次 manual refresh 拿到带 `.cutover_gate` 的新
+"NHMS_REGISTRY_CUTOVER_DECLARATION_PATH", "declaration_present": <bool>}`。#1144 起这项
+核对由 `--enable` 自己硬性执行：published receipt 缺 `.cutover_gate`，
+`validate_current_receipt` 直接以 `emergency_record_invalid` 失败，没有"人工确认一下再
+enable"的余地。字段缺席只有两种来源——gate 装上之前就失败的 run，或 pre-#1132 版次
+（见上"receipt 契约升级/回滚兼容性"）；前者 outcome 本来就不是 `published`，同样过不了
+`--enable`。两种情况一律先跑一次**成功**的 manual refresh 拿到带 `.cutover_gate` 的新
 receipt。
 
 成功 manual refresh 后才建立稳态：
