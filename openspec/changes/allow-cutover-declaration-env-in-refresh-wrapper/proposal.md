@@ -34,9 +34,10 @@ round-1 遗留.)
   than duplicate where sensible.
 - Runner-side acceptance is ALREADY pinned: declared-cutover accept with
   `CUTOVER_DECLARATION_ENV` set is tested at `:3493` and `:4111` (monkeypatch
-  setenv + declaration file → accepted/declared receipt). The wrapper test
-  proves propagation; the composition (env file → wrapper → runner env →
-  accepted_declared) is covered by the two halves meeting at the same env
+  setenv + declaration file → published receipt with `declared_cutovers`
+  coverage). The wrapper test proves propagation; the composition (env file
+  → wrapper → runner env → declared cutover accepted at the gate) is
+  covered by the two halves meeting at the same env
   variable name — assert the name identity
   (`refresh.CUTOVER_DECLARATION_ENV == "NHMS_REGISTRY_CUTOVER_DECLARATION_PATH"`)
   in the new wrapper test so the two halves cannot silently diverge.

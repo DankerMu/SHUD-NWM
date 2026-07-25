@@ -2510,12 +2510,16 @@ def test_installer_enable_lifecycle_and_failure_restore_with_fake_systemctl(tmp_
 
 
 def _bash_major_version(executable: str) -> int | None:
-    probe = subprocess.run(
-        [executable, "-c", 'echo "${BASH_VERSINFO[0]}"'],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        probe = subprocess.run(
+            [executable, "-c", 'echo "${BASH_VERSINFO[0]}"'],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        # Missing/unexecutable candidate: fall back to the next one (or skip).
+        return None
     if probe.returncode != 0:
         return None
     try:

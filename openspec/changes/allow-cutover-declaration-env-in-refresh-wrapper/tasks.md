@@ -91,8 +91,9 @@ Risk packs considered (core):
   line.
 - [x] 1.5 `docs/runbooks/current-production-ops.md` cutover gate section
   (`:479-534`): add the systemd-path procedure (edit EnvironmentFile with
-  the key → run/await the timer or trigger the service → verify
-  `declared_cutovers`/accepted receipt → DELETE the key line, never blank
+  the key → run/await the timer or trigger the service → verify the
+  receipt (outcome `published`, `declared_cutovers` covering the change,
+  reason not a cutover refusal) → DELETE the key line, never blank
   it), noting the wrapper admits the key as of #1095. Scope the existing
   "env 未设置或空值等同于'无 declaration'" sentence (`:503-504`) to the
   manual-CLI path — on the systemd path an empty value aborts the wrapper

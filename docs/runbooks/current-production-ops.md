@@ -492,7 +492,8 @@ canonical replace 前退出、非零：
   prospective 里消失。#1080 不允许 removal；需要下线一个流域走单独的 declared workflow，
   否则不要动 `NHMS_BASINS_ROOT` 里的对应目录。
 - `registry_cutover_declaration_invalid`：declaration 文件本身或某条 entry 无效。常见
-  原因：schema 不匹配、`generation` 与 prospective 不一致、`old_checksum`/`new_checksum`
+  原因：`NHMS_REGISTRY_CUTOVER_DECLARATION_PATH` 指向的文件不存在 / 不可读（已被删除或
+  轮转走）、schema 不匹配、`generation` 与 prospective 不一致、`old_checksum`/`new_checksum`
   与实际不符、`effective_cycle_utc` 未对齐 00:00 或 12:00 UTC、超出 24h 过期 / 168h
   未来窗口、entry 里有 duplicate `model_id`、declaration 文件是 symlink/非常规文件、
   超过 256 KiB。
@@ -546,14 +547,35 @@ key allowlist；`NHMS_REGISTRY_CUTOVER_DECLARATION_PATH` **自 #1095 起在 allo
    `/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-provider-refresh.env`（保持
    mode 0600、非 symlink），**新增一行**
    `NHMS_REGISTRY_CUTOVER_DECLARATION_PATH=<declaration 绝对路径>`。
-3. 等下一次 timer 触发，或手动触发一次：
-   `systemctl --user start nhms-scheduler-file-provider-refresh.service`
-   （wrapper 在 `nhms-compute-scheduler.service` 活跃时会 exit 3 拒跑）。
+3. 等下一次 timer 触发，或手动触发一次：先
+   `systemctl --user is-active nhms-compute-scheduler.service` 确认它**不是** active，
+   再 `systemctl --user start nhms-scheduler-file-provider-refresh.service`。
+   unit 的 `ExecCondition`（`infra/systemd/nhms-scheduler-file-provider-refresh.service`）
+   在 scheduler 活跃时会在 ExecStart **之前**短路：`start` 仍然返回 0、unit 被 skip、
+   **不产生任何 receipt**（journal 里是 condition failed）。**不要把 `start` 返回 0
+   当成"已执行"**，一律以新 receipt 为准。wrapper 自己的 exit 3 只保护直接手工调用
+   `scripts/scheduler_file_provider_refresh_once.sh` 的场景。
 4. 核对 receipt：`registry_classification.declared_cutovers` 覆盖本次
-   `package_changed`，且 outcome 为 accepted/published（不是
-   `registry_cutover_undeclared` / `registry_cutover_declaration_invalid`）。
-5. Cutover 落地后**删除整行**，不要留 `NHMS_REGISTRY_CUTOVER_DECLARATION_PATH=` 空值：
-   wrapper 的 `-n "$value"` 解析检查会对空值直接 fail-fast（bare exit 1，无 stdout），
+   `package_changed`，且 outcome 为 `published`（timer 路径的 ExecStart 不带
+   `--dry-run`，见上述 unit 文件），reason 不是 `registry_cutover_undeclared` /
+   `registry_cutover_removal_refused` / `registry_cutover_declaration_invalid`
+   —— 这三个是 outcome=`failed` 时的 refusal reason，不是 outcome 取值
+   （receipt outcome 枚举只有 `dry_run` / `published` / `already_running` /
+   `failed` / `replace_uncertain` / `restored_previous` / `published_receipt_failed`）。
+5. Cutover 落地后**删除整行**。这不是可选的清理，而是主要失效模式：把非空行留着，
+   一旦 declaration 过期（`effective_cycle_utc` 超出
+   `CUTOVER_PAST_TOLERANCE=24h`，见 `scripts/scheduler_file_provider_refresh.py:107`、
+   `:2327`）、文件被删除或轮转掉（`:2283-2289` 的 `OSError` 直接判 invalid）、
+   或 declaration 的 `generation` 相对新的 prospective 过期（`:2556+`），
+   **每一次**后续 refresh 都会以 outcome=`failed`、reason=
+   `registry_cutover_declaration_invalid` 拒跑——每日 timer 管线从此停摆，直到有人删掉这一行。
+   前两类（过期 / 文件不可读）是 declaration **加载**失败，在 `:2704-2732` 无条件生效，
+   连 zero-drift 和 `--dry-run` 预览都不豁免；generation 过期则在每一次真实 publish
+   （timer 路径）上拒跑。检测信号：看最新 receipt 的
+   `jq -r '.outcome, .reason'`——`failed` + `registry_cutover_declaration_invalid`
+   且没人在做 cutover，基本就是这条 leftover 行。
+   同样不要留 `NHMS_REGISTRY_CUTOVER_DECLARATION_PATH=` 空值：wrapper 的
+   `-n "$value"` 解析检查会对空值直接 fail-fast（bare exit 1，无 stdout），
    service 会启动失败。空值 **不等同于** key 不存在；只有删掉整行才回到"无 declaration"
    的安全默认（此后再有未声明的 package 漂移会照常被 refuse）。
 
