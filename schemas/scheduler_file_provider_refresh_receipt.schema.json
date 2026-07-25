@@ -165,6 +165,16 @@
       "maxItems": 64,
       "items": {"type": "string", "maxLength": 512, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"}
     },
+    "cutover_gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "declaration_env", "declaration_present"],
+      "properties": {
+        "mode": {"enum": ["enforced", "bypassed_allow_uncovered_cutover", "not_wired"]},
+        "declaration_env": {"type": ["string", "null"], "maxLength": 512},
+        "declaration_present": {"type": "boolean"}
+      }
+    },
     "registry_classification": {
       "type": "object",
       "additionalProperties": false,

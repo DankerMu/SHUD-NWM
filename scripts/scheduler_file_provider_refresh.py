@@ -42,6 +42,10 @@ from packages.common.state_manager import (
     StateManagerError,
     publish_state_snapshot_index,
 )
+from packages.scheduler.registry_audit import (
+    CUTOVER_GATE_MODES,
+    normalize_cutover_gate_audit,
+)
 from scripts.publish_scheduler_file_registry import (
     SchedulerRegistryPublishError,
     publish_all_basin_scheduler_registry,
@@ -169,9 +173,13 @@ RECEIPT_KEYS = frozenset(
         "residues",
     }
 )
-# Optional top-level key emitted whenever the registry-cutover gate ran.  The
-# schema (allOf conditional) requires it on dry_run/published/refusal outcomes.
-RECEIPT_OPTIONAL_KEYS = frozenset({"registry_classification"})
+# Optional top-level keys.  `registry_classification` is emitted whenever the
+# registry-cutover gate ran (the schema's allOf conditional requires it on
+# dry_run/published/refusal outcomes); `cutover_gate` (#1132) is emitted
+# whenever the runner constructed the audit block.  The allowed-set below is
+# exact-match, so a key missing here makes every receipt carrying it fail as
+# `receipt_shape_invalid`.
+RECEIPT_OPTIONAL_KEYS = frozenset({"registry_classification", "cutover_gate"})
 
 
 class RefreshError(RuntimeError):
@@ -583,6 +591,10 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
     # Populated by the registry precommit gate; must be included on every
     # dry_run/published/refusal receipt per #1080 spec.
     registry_classification: dict[str, Any] | None = None
+    # Bound only once the registry publish path constructs the audit block;
+    # receipts built before that (lock contention, provider-preimage failures)
+    # pass None and omit the key.
+    runner_cutover_gate_audit: dict[str, Any] | None = None
     cutover_declaration_env = os.getenv(CUTOVER_DECLARATION_ENV, "").strip() or None
 
     def rollback_receipt_if_needed(*, preserve_failure: bool = False) -> dict[str, Any] | None:
@@ -606,6 +618,7 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                 orphan_discovered_total=orphan_discovered_total,
                 orphan_attempted_total=orphan_attempted_total,
                 registry_classification=registry_classification,
+                cutover_gate=runner_cutover_gate_audit,
             )
         return _receipt(
             run_id=run_id,
@@ -619,6 +632,7 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
             orphan_discovered_total=orphan_discovered_total,
             orphan_attempted_total=orphan_attempted_total,
             registry_classification=registry_classification,
+            cutover_gate=runner_cutover_gate_audit,
         )
 
     try:
@@ -1007,6 +1021,7 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                 orphan_discovered_total=orphan_discovered_total,
                 orphan_attempted_total=orphan_attempted_total,
                 registry_classification=registry_classification,
+                cutover_gate=runner_cutover_gate_audit,
             )
     except ProviderAtomicError as error:
         rollback_receipt = rollback_receipt_if_needed(
@@ -1026,6 +1041,7 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
             phase=error.phase,
             providers=committed,
             registry_classification=registry_classification,
+            cutover_gate=runner_cutover_gate_audit,
         )
     except (RefreshError, SchedulerRegistryPublishError, SchedulerFileProviderError, StateManagerError) as error:
         reason = getattr(error, "reason", None) or getattr(error, "error_code", None) or "provider_invalid"
@@ -1083,6 +1099,7 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                 orphan_discovered_total=orphan_discovered_total,
                 orphan_attempted_total=orphan_attempted_total,
                 registry_classification=registry_classification,
+                cutover_gate=runner_cutover_gate_audit,
             )
     except Exception:
         rollback_receipt = rollback_receipt_if_needed()
@@ -1094,6 +1111,7 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
             phase="precommit",
             providers=committed,
             registry_classification=registry_classification,
+            cutover_gate=runner_cutover_gate_audit,
         )
 
     try:
@@ -1565,6 +1583,7 @@ def _receipt(
     orphan_discovered_total: int | None = None,
     orphan_attempted_total: int | None = None,
     registry_classification: Mapping[str, Any] | None = None,
+    cutover_gate: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     evidence = list(orphan_paths[:MAX_ORPHAN_EVIDENCE])
     total = len(orphan_paths) if orphan_total is None else orphan_total
@@ -1595,6 +1614,11 @@ def _receipt(
     if registry_classification is not None:
         # deep-copy through json to freeze the payload against later mutation.
         receipt["registry_classification"] = json.loads(json.dumps(registry_classification))
+    if cutover_gate is not None:
+        # #1132: the shared normalizer is the single definition point of the
+        # audit block, and it returns a fresh scalar-only dict — no separate
+        # freeze needed.  Runs that never built a block omit the key.
+        receipt["cutover_gate"] = normalize_cutover_gate_audit(cutover_gate)
     return receipt
 
 
@@ -1794,8 +1818,36 @@ def _validate_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
     ):
         raise ValueError("receipt_orphan_limit")
     _validate_registry_classification_field(receipt)
+    _validate_cutover_gate_field(receipt)
     _validate_value_bounds(receipt)
     return json.loads(json.dumps(receipt, ensure_ascii=True))
+
+
+_CUTOVER_GATE_KEYS = frozenset({"mode", "declaration_env", "declaration_present"})
+
+
+def _validate_cutover_gate_field(receipt: Mapping[str, Any]) -> None:
+    """Admit exactly the normalizer's three-field shape (#1132).
+
+    The key is optional, but a present key must hold a well-typed block: the
+    schema and this validator have to reject the same corpus, so an explicit
+    ``null`` (which the schema's ``"type": "object"`` refuses) is rejected here
+    too rather than treated as absence.
+    """
+    if "cutover_gate" not in receipt:
+        return
+    cutover_gate = receipt.get("cutover_gate")
+    if not isinstance(cutover_gate, Mapping) or set(cutover_gate) != _CUTOVER_GATE_KEYS:
+        raise ValueError("receipt_cutover_gate_invalid")
+    if cutover_gate.get("mode") not in CUTOVER_GATE_MODES:
+        raise ValueError("receipt_cutover_gate_invalid")
+    declaration_env = cutover_gate.get("declaration_env")
+    if declaration_env is not None and (
+        not isinstance(declaration_env, str) or len(declaration_env) > MAX_STRING_LENGTH
+    ):
+        raise ValueError("receipt_cutover_gate_invalid")
+    if not isinstance(cutover_gate.get("declaration_present"), bool):
+        raise ValueError("receipt_cutover_gate_invalid")
 
 
 _CLASSIFICATION_GROUP_KEYS = frozenset({"items", "total", "truncated"})

@@ -1220,6 +1220,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 os.getenv(CUTOVER_DECLARATION_ENV_NAME, "").strip() or None
             ),
         }
+    # #1132: normalize once, outside the try, so the success summary and all
+    # three stderr failure payloads share one audited block.  The normalizer
+    # raises, so it must never run inside an except handler.
+    cutover_gate_audit = normalize_cutover_gate_audit(cutover_gate_audit)
     try:
         summary = publish_all_basin_scheduler_registry(
             basins_root=args.basins_root,

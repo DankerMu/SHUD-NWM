@@ -1637,3 +1637,84 @@ def test_aggregate_publish_without_cutover_gate_records_not_wired_on_both_channe
     assert summary["registry"]["cutover_gate"] == not_wired
 
 
+
+
+# ---------------------------------------------------------------------------
+# #1132: CLI failure diagnostics route through the shared normalizer
+# ---------------------------------------------------------------------------
+
+
+_CLI_FAILURE_TRIGGERS = (
+    "registry_publish_error",
+    "basins_discovery_error",
+    "file_provider_error",
+)
+# A legal three-field block: an illegal sentinel would be refused by the
+# un-stubbed services-side normalizer and the CLI would fail down a different
+# branch (pass for the wrong reason).
+_NORMALIZER_SENTINEL = {
+    "mode": "not_wired",
+    "declaration_env": "SENTINEL_ENV",
+    "declaration_present": False,
+}
+
+
+def _install_cli_failure(
+    trigger: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> list[str]:
+    """Drive ``main`` into one specific stderr failure branch, cutover-free.
+
+    Each trigger is a deterministic error with no cutover-gate involvement, so
+    the payload assertion cannot pass because of an unrelated refusal.
+    """
+    options = {
+        "--basins-root": str(tmp_path / "Basins"),
+        "--registry-manifest": str(tmp_path / "shared/scheduler/registry/manifest-last.json"),
+        "--object-store-root": str(tmp_path / "private-objects"),
+        "--object-store-prefix": "s3://nhms",
+        "--work-dir": str(tmp_path / "work"),
+    }
+    if trigger == "registry_publish_error":
+        monkeypatch.delenv("OBJECT_STORE_PREFIX", raising=False)
+        options["--object-store-prefix"] = ""
+    elif trigger == "basins_discovery_error":
+        options["--basins-root"] = str(tmp_path / "missing-basins")
+    else:
+        def raise_provider_error(**kwargs: object) -> dict[str, Any]:
+            del kwargs
+            raise registry_script.SchedulerFileProviderError(
+                "registry_manifest_invalid", field="models", evidence={"phase": "publish"}
+            )
+
+        monkeypatch.setattr(
+            registry_script, "publish_all_basin_scheduler_registry", raise_provider_error
+        )
+    return [item for pair in options.items() for item in pair]
+
+
+@pytest.mark.parametrize("trigger", _CLI_FAILURE_TRIGGERS)
+def test_cli_failure_payload_cutover_gate_is_produced_by_shared_normalizer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    trigger: str,
+) -> None:
+    """#1132: every stderr failure payload must carry the SHARED normalizer's
+    output, not an inline literal.
+
+    Pins the call, not the value: the legal literals the CLI builds are fixed
+    points of normalization, so a value-equality assertion stays green against
+    an implementation that never calls the normalizer.  Stubbing the normalizer
+    to return a sentinel is the only assertion that bites.
+    """
+    monkeypatch.setattr(
+        registry_script,
+        "normalize_cutover_gate_audit",
+        lambda cutover_gate: dict(_NORMALIZER_SENTINEL),
+    )
+    argv = _install_cli_failure(trigger, tmp_path, monkeypatch)
+
+    assert registry_script.main(argv) == 1
+
+    payload = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert payload["cutover_gate"] == _NORMALIZER_SENTINEL, payload
