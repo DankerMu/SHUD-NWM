@@ -1243,12 +1243,26 @@ Order is load-bearing:
   - Input: production chunks for the drilled window compressed.
     Expected: drill completes without decompressing or writing any
     production chunk.
-- [ ] 5.2 node-27 live: execute the drill.
+- [x] 5.2 node-27 live: execute the drill.
   Evidence floor: committed PASS receipt covering at least one `forcing/`
   cycle, one `runs/` cycle, and one `db-export` salvage object, with
   declared (source, window) tuples satisfying the coverage rule for the
   planned 14-day drop window; zero count mismatches; production hypertable
   row counts unchanged by the drill. This unlocks 6.3.
+  §5.2 note (2026-07-25): first live PASS committed at
+  `docs/runbooks/receipts/tier-node27-timeseries-storage/archive-rebuild-drill/first-live-pass-20260725T053420Z.json`
+  (15 runs cycles reingested with exact count parity, 3 forcing cycles,
+  4 db-export selectors). Two deviations from the letter of this floor,
+  documented in that directory's README: (a) the live drop window is the
+  **21-day** window `[2026-06-04, 2026-06-18]` — the 14-day cutoff was
+  refused by the completeness gate (pending-archive frontier at
+  2026-06-20), which is the gate working, and coverage tuples satisfy the
+  rule for the actual configured window consumed by 6.3; (b) legacy
+  SHUD-package-only forcing archives are verified in file-integrity mode
+  (no domain-handoff payloads exist to reingest — issue #1124 tracks
+  domain-bundle replay for post-cutover archives), with DB-truth forcing
+  coverage supplied by the db-export lane per the retention gate's
+  union rule. Live-only defects #1121/#1122/#1124 fixed en route.
 
 ## 6. Gated DB retention (`timeseries-db-retention`)
 
@@ -1326,6 +1340,14 @@ Order is load-bearing:
   test rows 2-4 (dry-run + enforce + metadata invariant) remain
   pending upstream #849/#851/#853/#854 §5.2 live receipts and
   systemd unit installation on node-27, tracked separately by #856.
+  §6.3 update (2026-07-25, Step B of #1071): with §5.2's drill PASS and
+  a fresh recurring-audit completeness receipt, the first gates-passing
+  dry-run is committed at
+  `docs/runbooks/receipts/tier-node27-timeseries-storage/timeseries-retention/dry-run-first-live-20260725T054745Z.json`
+  (window_days=21, 4 candidate chunks, 2 boundary-partial deferred;
+  rationale for 21 vs the planned 14 in that directory's README).
+  §6.3's remaining step — the first enforce run — is Step C (#1072) and
+  requires explicit human authorization.
 
 ## 8. Live-cascade defect closure
 

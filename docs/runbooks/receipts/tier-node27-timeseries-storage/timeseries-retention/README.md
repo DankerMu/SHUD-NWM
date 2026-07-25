@@ -19,28 +19,39 @@ exit code 1, `mode=enforce`. Schema-valid per
 branch). This satisfies §6.3 test row 1 ("Missing or stale completeness
 receipt … Expected: refusal, non-zero exit, reason in the receipt").
 
+### `dry-run-first-live-20260725T054745Z.json`
+
+First gates-passing dry-run (2026-07-25, Step B of issue #1071). Both
+gate receipts were live and fresh: the recurring audit's completeness
+receipt (generated `2026-07-25T03:40Z`, age ~2h < 26h bound) and the
+drill's first live PASS receipt
+(`../archive-rebuild-drill/first-live-pass-20260725T053420Z.json`).
+
+Configuration: `WINDOW_DAYS=21` (cutoff `2026-06-24T12Z` against
+watermark reference_time `2026-07-15T12Z`), `PER_TICK_BOUND=5`,
+`ENFORCE=0`. **Why 21 and not the spec's planned 14**: a 14-day probe
+(cutoff `2026-07-01T12Z`) was correctly refused with
+`COMPLETENESS_RECEIPT_PENDING_IN_DROP_WINDOW` — 39 runs-lane subjects
+in cycles from `2026-06-20T12Z` through `2026-06-25` were still pending-archive (mover
+frontier at 2026-06-20), so the wider window keeps the drop window
+`[2026-06-04, 2026-06-18]` clear of the pending frontier. That refusal
+is the gate working as specified, not a bypass.
+
+Result: `outcome=dry-run`, rc=0. Four candidate chunks
+(`_hyper_3_8`, `_hyper_3_1`, `_hyper_1_6`, `_hyper_1_3` — both detail
+hypertables represented) and two boundary-partial chunks correctly held
+in `deferred_remainder` (`_hyper_3_7`, `_hyper_1_5`). No chunk was
+dropped (dry-run).
+
 ## Enforce path status
 
-The dry-run + first-enforce evidence required by §6.3's remaining
-three test rows depends on upstream live receipts that have not yet
-landed on node-27:
-
-- `nhms-node27-storage-inventory-audit.{service,timer}` — the systemd
-  units defined by issue #849 are NOT installed on node-27; no
-  archive-completeness receipt exists to feed the retention gate.
-- `nhms-node27-timeseries-compression.{service,timer}` — the systemd
-  units from issue #853 are NOT installed on node-27; compression
-  migration 000047 has not been applied against the live TimescaleDB;
-  there are no compressed chunks to observe under retention.
-- `scripts/node27_archive_rebuild_drill.py` §5.2 live PASS receipt
-  (issue #854 follow-up) — has NOT been produced against a fresh
-  staging DB on node-27.
-
-Once these upstream live receipts land under their respective issues,
-the retention dry-run + enforce sequence in §6.3 can be exercised end
-to end. Until then, this refusal-path receipt is the only live
-retention evidence achievable without touching production data
-without a valid gate.
+All upstream gates are now live on node-27: the recurring
+storage-inventory-audit produces fresh completeness receipts, the
+compression timer runs (receipts under `../timeseries-compression/`),
+and the drill PASS receipt above unlocks §6.3. The remaining §6.3 step
+is the **first enforce run** (`drop_chunks` on production), which is
+Step C of issue #1072 and requires explicit human authorization — it
+must NOT be run as a follow-on of the dry-run.
 
 ## Reproduction
 

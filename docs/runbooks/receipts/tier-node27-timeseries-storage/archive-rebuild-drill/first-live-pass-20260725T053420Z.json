@@ -1,0 +1,286 @@
+{
+  "comparisons": {
+    "counts": [
+      {
+        "actual": 274344,
+        "expected": 274344,
+        "item": "fcst_gfs_2026060400_basins_qhh_shud"
+      },
+      {
+        "actual": 274344,
+        "expected": 274344,
+        "item": "fcst_gfs_2026060500_basins_qhh_shud"
+      },
+      {
+        "actual": 274344,
+        "expected": 274344,
+        "item": "fcst_gfs_2026060600_basins_qhh_shud"
+      },
+      {
+        "actual": 274344,
+        "expected": 274344,
+        "item": "fcst_gfs_2026060700_basins_qhh_shud"
+      },
+      {
+        "actual": 274344,
+        "expected": 274344,
+        "item": "fcst_gfs_2026060800_basins_qhh_shud"
+      },
+      {
+        "actual": 274344,
+        "expected": 274344,
+        "item": "fcst_gfs_2026060900_basins_qhh_shud"
+      },
+      {
+        "actual": 274344,
+        "expected": 274344,
+        "item": "fcst_gfs_2026061000_basins_qhh_shud"
+      },
+      {
+        "actual": 274344,
+        "expected": 274344,
+        "item": "fcst_gfs_2026061100_basins_qhh_shud"
+      },
+      {
+        "actual": 274344,
+        "expected": 274344,
+        "item": "fcst_gfs_2026061200_basins_qhh_shud"
+      },
+      {
+        "actual": 274344,
+        "expected": 274344,
+        "item": "fcst_gfs_2026061300_basins_qhh_shud"
+      },
+      {
+        "actual": 274344,
+        "expected": 274344,
+        "item": "fcst_gfs_2026061400_basins_qhh_shud"
+      },
+      {
+        "actual": 274344,
+        "expected": 274344,
+        "item": "fcst_gfs_2026061500_basins_qhh_shud"
+      },
+      {
+        "actual": 274344,
+        "expected": 274344,
+        "item": "fcst_gfs_2026061600_basins_qhh_shud"
+      },
+      {
+        "actual": 274344,
+        "expected": 274344,
+        "item": "fcst_gfs_2026061700_basins_qhh_shud"
+      },
+      {
+        "actual": 274344,
+        "expected": 274344,
+        "item": "fcst_gfs_2026061800_basins_qhh_shud"
+      },
+      {
+        "actual": 390,
+        "expected": 390,
+        "item": "forcing-gfs-2026061600-basins_qhh_vbasins-basins_qhh_shud (file-integrity)"
+      },
+      {
+        "actual": 390,
+        "expected": 390,
+        "item": "forcing-gfs-2026061700-basins_qhh_vbasins-basins_qhh_shud (file-integrity)"
+      },
+      {
+        "actual": 390,
+        "expected": 390,
+        "item": "forcing-gfs-2026061800-basins_qhh_vbasins-basins_qhh_shud (file-integrity)"
+      }
+    ],
+    "cycles": [
+      "fcst_gfs_2026060400_basins_qhh_shud",
+      "fcst_gfs_2026060500_basins_qhh_shud",
+      "fcst_gfs_2026060600_basins_qhh_shud",
+      "fcst_gfs_2026060700_basins_qhh_shud",
+      "fcst_gfs_2026060800_basins_qhh_shud",
+      "fcst_gfs_2026060900_basins_qhh_shud",
+      "fcst_gfs_2026061000_basins_qhh_shud",
+      "fcst_gfs_2026061100_basins_qhh_shud",
+      "fcst_gfs_2026061200_basins_qhh_shud",
+      "fcst_gfs_2026061300_basins_qhh_shud",
+      "fcst_gfs_2026061400_basins_qhh_shud",
+      "fcst_gfs_2026061500_basins_qhh_shud",
+      "fcst_gfs_2026061600_basins_qhh_shud",
+      "fcst_gfs_2026061700_basins_qhh_shud",
+      "fcst_gfs_2026061800_basins_qhh_shud",
+      "forcing-gfs-2026061600-basins_qhh_vbasins-basins_qhh_shud",
+      "forcing-gfs-2026061700-basins_qhh_vbasins-basins_qhh_shud",
+      "forcing-gfs-2026061800-basins_qhh_vbasins-basins_qhh_shud"
+    ],
+    "selectors": [
+      "forcing_version_id=forc_gfs_2026060100_basins_qhh_shud",
+      "forcing_version_id=forc_gfs_2026060600_basins_qhh_shud",
+      "forcing_version_id=forc_gfs_2026061106_basins_qhh_shud",
+      "forcing_version_id=forc_gfs_2026061400_basins_qhh_shud"
+    ]
+  },
+  "coverage": [
+    {
+      "source": "db-export",
+      "window": {
+        "end": "2026-06-08T00:00:00Z",
+        "start": "2026-06-01T00:00:00Z"
+      }
+    },
+    {
+      "source": "db-export",
+      "window": {
+        "end": "2026-06-13T00:00:00Z",
+        "start": "2026-06-06T00:00:00Z"
+      }
+    },
+    {
+      "source": "db-export",
+      "window": {
+        "end": "2026-06-18T06:00:00Z",
+        "start": "2026-06-11T06:00:00Z"
+      }
+    },
+    {
+      "source": "db-export",
+      "window": {
+        "end": "2026-06-21T00:00:00Z",
+        "start": "2026-06-14T00:00:00Z"
+      }
+    },
+    {
+      "source": "runs",
+      "window": {
+        "end": "2026-06-11T00:00:00Z",
+        "start": "2026-06-04T00:00:00Z"
+      }
+    },
+    {
+      "source": "runs",
+      "window": {
+        "end": "2026-06-12T00:00:00Z",
+        "start": "2026-06-05T00:00:00Z"
+      }
+    },
+    {
+      "source": "runs",
+      "window": {
+        "end": "2026-06-13T00:00:00Z",
+        "start": "2026-06-06T00:00:00Z"
+      }
+    },
+    {
+      "source": "runs",
+      "window": {
+        "end": "2026-06-14T00:00:00Z",
+        "start": "2026-06-07T00:00:00Z"
+      }
+    },
+    {
+      "source": "runs",
+      "window": {
+        "end": "2026-06-15T00:00:00Z",
+        "start": "2026-06-08T00:00:00Z"
+      }
+    },
+    {
+      "source": "runs",
+      "window": {
+        "end": "2026-06-16T00:00:00Z",
+        "start": "2026-06-09T00:00:00Z"
+      }
+    },
+    {
+      "source": "runs",
+      "window": {
+        "end": "2026-06-17T00:00:00Z",
+        "start": "2026-06-10T00:00:00Z"
+      }
+    },
+    {
+      "source": "runs",
+      "window": {
+        "end": "2026-06-18T00:00:00Z",
+        "start": "2026-06-11T00:00:00Z"
+      }
+    },
+    {
+      "source": "runs",
+      "window": {
+        "end": "2026-06-19T00:00:00Z",
+        "start": "2026-06-12T00:00:00Z"
+      }
+    },
+    {
+      "source": "runs",
+      "window": {
+        "end": "2026-06-20T00:00:00Z",
+        "start": "2026-06-13T00:00:00Z"
+      }
+    },
+    {
+      "source": "runs",
+      "window": {
+        "end": "2026-06-21T00:00:00Z",
+        "start": "2026-06-14T00:00:00Z"
+      }
+    },
+    {
+      "source": "runs",
+      "window": {
+        "end": "2026-06-22T00:00:00Z",
+        "start": "2026-06-15T00:00:00Z"
+      }
+    },
+    {
+      "source": "runs",
+      "window": {
+        "end": "2026-06-23T00:00:00Z",
+        "start": "2026-06-16T00:00:00Z"
+      }
+    },
+    {
+      "source": "runs",
+      "window": {
+        "end": "2026-06-24T00:00:00Z",
+        "start": "2026-06-17T00:00:00Z"
+      }
+    },
+    {
+      "source": "runs",
+      "window": {
+        "end": "2026-06-25T00:00:00Z",
+        "start": "2026-06-18T00:00:00Z"
+      }
+    },
+    {
+      "source": "forcing",
+      "window": {
+        "end": "2026-06-23T00:00:00Z",
+        "start": "2026-06-16T00:00:00Z"
+      }
+    },
+    {
+      "source": "forcing",
+      "window": {
+        "end": "2026-06-24T00:00:00Z",
+        "start": "2026-06-17T00:00:00Z"
+      }
+    },
+    {
+      "source": "forcing",
+      "window": {
+        "end": "2026-06-25T00:00:00Z",
+        "start": "2026-06-18T00:00:00Z"
+      }
+    }
+  ],
+  "generated_at": "2026-07-25T05:34:20Z",
+  "schema_version": "1.0",
+  "staging_database": {
+    "database": "nhms_archive_drill",
+    "instance_id": "node27-primary-pg15",
+    "schema": "archive_drill_20260725T053420Z"
+  },
+  "verdict": "PASS"
+}
