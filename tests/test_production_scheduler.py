@@ -22985,9 +22985,9 @@ def test_db_free_strict_warm_start_reopens_completed_producer_missing_successor_
     # assertion and the two structural sub-field asserts that survive the
     # branch change — ``restart_stage`` and ``strict_warm_start.*`` (the
     # branch-specific ``successor_state`` field of the pre-§8 fixture does
-    # not appear on this branch; a dedicated test would need a fixture
-    # whose terminal decision matches init_state_id but not successor
-    # checkpoint — tracked as #1108).
+    # not appear on this branch; the matching-init_state_id / missing
+    # successor-checkpoint branch is covered by
+    # ``test_db_free_terminal_success_reopens_when_successor_checkpoint_missing``).
     assert evidence["registry_cutover_transition"]["decision"] == "cold_new_model"
     assert evidence["generation"].startswith("manifest-")
     assert evidence["reason"] == "strict_warm_start_terminal_init_state_mismatch"
