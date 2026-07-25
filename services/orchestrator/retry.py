@@ -29,6 +29,7 @@ TRANSIENT_ERROR_CODES: set[str] = {
     "STORAGE_WRITE_FAILED",
     "SBATCH_SUBMISSION_FAILED",
     "SLURM_UNAVAILABLE",
+    "SLURM_RESERVATION_LOST",
     "SOURCE_CYCLE_UNAVAILABLE",
     "SOURCE_UNAVAILABLE",
     "ADAPTER_UNAVAILABLE",
@@ -166,6 +167,7 @@ def failure_classifier(error_code: str | None) -> str:
         "OUT_OF_MEMORY",
         "PREEMPTED",
         "SLURM_UNAVAILABLE",
+        "SLURM_RESERVATION_LOST",
         "SBATCH_SUBMISSION_FAILED",
         "STORAGE_WRITE_FAILED",
     }:

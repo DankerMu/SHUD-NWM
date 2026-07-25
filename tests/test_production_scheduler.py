@@ -13110,7 +13110,7 @@ def test_rate_limited_cycle_does_not_consume_source_budget_or_rewrite_as_unavail
     assert deferred["discovery_evidence"]["attempted_sources"] == attempted_sources
 
 
-@pytest.mark.parametrize("error_code", ["NODE_FAILURE", "OUT_OF_MEMORY"])
+@pytest.mark.parametrize("error_code", ["NODE_FAILURE", "OUT_OF_MEMORY", "SLURM_RESERVATION_LOST"])
 def test_candidate_state_transient_runtime_failure_retries_failed_scope_with_reuse_evidence(
     tmp_path: Path,
     error_code: str,
@@ -13306,6 +13306,7 @@ def test_warm_start_checkpoint_repair_does_not_auto_retry_in_production(tmp_path
         ("POLICY_BLOCKED", "policy_blocked"),
         ("SLURM_TIMEOUT", "retry_limit_exhausted"),
         ("OUT_OF_MEMORY", "retry_limit_exhausted"),
+        ("SLURM_RESERVATION_LOST", "retry_limit_exhausted"),
     ],
 )
 def test_candidate_state_permanent_or_exhausted_failure_blocks_auto_retry(
