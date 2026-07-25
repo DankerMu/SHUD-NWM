@@ -1121,18 +1121,22 @@ def test_env_override_does_not_admit_missing_predecessor(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    """§8.9 (b): env=false + declaration configured → §8 blocks, does NOT admit.
+    """§8.9 (b): env=false + generation-matched history but no predecessor
+    checkpoint → §8 blocks with
+    ``state_snapshot_index_prior_checkpoint_missing_after_history``.
 
-    Fixture: declaration whose ``effective_cycle_utc`` is 18h before ``now``
-    (2026-05-21T00Z vs 2026-05-21T18Z) — the schema validator classifies this
-    outside the cutover window and the §8 gate settles on
-    ``registry_cutover_declaration_stale``.  The specific block reason is
-    subordinate to the invariant "env=false did NOT bypass §8" (candidates
-    empty, len(blocked) == 1).  For the branch that surfaces
-    ``state_snapshot_index_prior_checkpoint_missing_after_history`` the
-    fixture would need a valid declaration (in-window) + generation-matched
-    state entry at cycle - 12h but NO successor checkpoint at cycle_time —
-    tracked separately if needed.
+    Fixture (#1109 reshape): a valid, in-window declaration (effective
+    2026-05-21T00Z, 18h before ``now`` and inside the 24h past tolerance) so
+    the gate clears the declaration layer, plus ONE current-generation state
+    entry at 2026-05-21T00Z — strictly earlier than the 12Z candidate cycle
+    and NOT at the expected predecessor identity key
+    (``valid_time`` = candidate cycle 12Z, ``cycle_id`` = gfs_2026052100,
+    ``lead_hours`` = 12).  The transition matrix therefore takes the
+    current-generation branch and returns ``block_predecessor_pending``; the
+    gate falls through to the exact-warm-start check, which reports
+    ``state_snapshot_index_exact_checkpoint_missing``, and — because usable
+    history DOES exist — settles on the AC5 defect branch this test guards
+    (``scheduler_generation_gate.py`` fallback reason).
     """
     from services.orchestrator import scheduler as scheduler_module
     from services.orchestrator.scheduler import ProductionSchedulerConfig
@@ -1163,32 +1167,46 @@ def test_env_override_does_not_admit_missing_predecessor(
         forecast_hours=_gfs_default_forecast_hours(),
         generated_at=generated_at,
     )
+    candidate_checksum = (
+        fixture["package_checksum"]
+        if _looks_like_hex64(fixture["package_checksum"])
+        else "b" * 64
+    )
+    # Current-generation history strictly BEFORE the candidate cycle and away
+    # from the expected predecessor key: history_exists is True while the
+    # exact predecessor checkpoint stays absent.
     _write_db_free_state_index_fixture(
         roots,
         paths,
         cycle_time=cycle_time,
-        package_checksum=fixture["package_checksum"],
+        package_checksum=candidate_checksum,
         generated_at=generated_at,
-        entries=[_old_generation_state_entry(roots)],
+        entries=[
+            _old_generation_state_entry(
+                roots,
+                old_package_checksum=candidate_checksum,
+                state_id="state_current_gen_prior_history",
+                valid_time="2026-05-21T00:00:00Z",
+                cycle_id="gfs_2026052012",
+                lead_hours=12,
+            )
+        ],
     )
-    # Write a valid declaration whose effective_cycle_utc is BEFORE the
-    # candidate cycle → the transition matrix requires an exact NEW-gen
-    # predecessor at (cycle - 12h), which does not exist → §8.6
-    # block_predecessor_pending.
+    # Valid, in-window declaration binding the candidate generation.  Its
+    # effective cycle is 00Z, NOT the candidate's 12Z, so a mis-seeded index
+    # can never admit via cold_declared_cutover — it would fail loudly.
     declaration_path = tmp_path / "cutover-declaration.json"
-    _pkg = fixture["package_checksum"]
-    _pkg_hex = generation.derive_generation(_pkg)
     declaration_path.write_text(
         json.dumps(
             {
                 "schema_version": generation.CUTOVER_DECLARATION_SCHEMA_VERSION,
                 "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
-                "generation": _pkg_hex,
+                "generation": generation.derive_generation(candidate_checksum),
                 "entries": [
                     {
                         "model_id": "model_a",
                         "old_checksum": "a" * 64,
-                        "new_checksum": _pkg if _looks_like_hex64(_pkg) else "b" * 64,
+                        "new_checksum": candidate_checksum,
                         "effective_cycle_utc": "2026-05-21T00:00:00Z",
                         "transition_mode": "replace",
                     }
@@ -1204,9 +1222,7 @@ def test_env_override_does_not_admit_missing_predecessor(
         **fixture["model"],
         "resource_profile": {
             **dict(fixture["model"]["resource_profile"]),
-            "package_checksum": fixture["package_checksum"]
-            if _looks_like_hex64(fixture["package_checksum"])
-            else "b" * 64,
+            "package_checksum": candidate_checksum,
         },
     }
     monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
@@ -1242,10 +1258,12 @@ def test_env_override_does_not_admit_missing_predecessor(
     assert len(blocked) == 1
     # R1-A4 invariant: single-value pin, no OR-set. See
     # .workplans/1081/review/review-failure-retro-round3.md.
-    # This fixture's declaration is out-of-window (effective 18h before now)
-    # so the schema validator's stale classification fires the
-    # ``block_declaration_stale`` branch deterministically.
-    assert blocked[0].reason == "registry_cutover_declaration_stale"
+    # #1109: the promised state-lineage branch — generation-matched history
+    # exists but the expected predecessor checkpoint does not.
+    assert (
+        blocked[0].reason
+        == "state_snapshot_index_prior_checkpoint_missing_after_history"
+    )
     transition_decision = (
         blocked[0].state_evidence.get("registry_cutover_transition", {}).get(
             "decision"
@@ -1253,7 +1271,7 @@ def test_env_override_does_not_admit_missing_predecessor(
     )
     assert (
         transition_decision
-        == generation.TransitionDecision.BLOCK_DECLARATION_STALE
+        == generation.TransitionDecision.BLOCK_PREDECESSOR_PENDING
     )
 
 
@@ -1261,18 +1279,20 @@ def test_env_override_does_not_admit_wrong_generation_checkpoint(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    """§8.9 (c): env=false + no declaration configured → §8 blocks with
-    ``registry_cutover_declaration_missing``, does NOT admit.
+    """§8.9 (c): env=false + a wrong-generation checkpoint at the expected
+    predecessor key → §8 blocks with
+    ``state_snapshot_index_generation_mismatch``.
 
-    Fixture: no ``CUTOVER_DECLARATION`` env is set on-disk, so the §8 gate
-    fires ``block_declaration_missing`` deterministically.  With no
-    declaration the ``state_snapshot_index_generation_mismatch`` branch is
-    unreachable — a fixture aimed at that specific branch would need a
-    declaration whose new_generation differs from the state entry at the
-    expected key AND the env wired for the declaration path.  The invariant
-    tested here is "env=false does NOT admit"; the specific block reason
-    ``registry_cutover_declaration_missing`` is the concrete branch the
-    fixture drives.
+    Fixture (#1109 reshape): a valid, in-window declaration plus TWO state
+    entries — an OLD-generation one AT the expected predecessor identity key
+    (``valid_time`` = candidate cycle 2026-05-21T12Z, ``cycle_id`` =
+    gfs_2026052100, ``lead_hours`` = 12, per
+    ``packages/common/state_manager.py`` key geometry) and a
+    current-generation one elsewhere (00Z) so
+    ``exists_current_generation`` is True.  The transition matrix therefore
+    takes the current-generation branch, where the wrong-generation
+    predecessor guard fires ``block_wrong_generation`` — the core §8
+    invariant that the env override must never loosen.
     """
     from services.orchestrator import scheduler as scheduler_module
     from services.orchestrator.scheduler import ProductionSchedulerConfig
@@ -1303,29 +1323,69 @@ def test_env_override_does_not_admit_wrong_generation_checkpoint(
         forecast_hours=_gfs_default_forecast_hours(),
         generated_at=generated_at,
     )
-    # Wrong-generation state entry sitting AT the expected predecessor key
-    # (2026-05-21T00Z for a 12h lead) — this drives BLOCK_WRONG_GENERATION
-    # or BLOCK_DECLARATION_MISSING at the §8 gate, never admit.
+    candidate_checksum = (
+        fixture["package_checksum"]
+        if _looks_like_hex64(fixture["package_checksum"])
+        else "b" * 64
+    )
+    # Wrong-generation state entry sitting AT the expected predecessor key:
+    # valid_time == candidate cycle (12Z), cycle_id == cycle - 12h,
+    # lead_hours == 12.
     wrong_gen_entry = _old_generation_state_entry(
         roots,
         state_id="state_wrong_gen_at_expected_key",
-        valid_time="2026-05-21T00:00:00Z",
+        valid_time="2026-05-21T12:00:00Z",
         cycle_id="gfs_2026052100",
+        lead_hours=12,
+    )
+    # Current-generation history elsewhere so the transition matrix reaches
+    # the current-generation branch instead of the cutover-boundary one.
+    current_gen_entry = _old_generation_state_entry(
+        roots,
+        old_package_checksum=candidate_checksum,
+        state_id="state_current_gen_history",
+        valid_time="2026-05-21T00:00:00Z",
+        cycle_id="gfs_2026052012",
         lead_hours=12,
     )
     _write_db_free_state_index_fixture(
         roots,
         paths,
         cycle_time=cycle_time,
-        package_checksum=fixture["package_checksum"],
+        package_checksum=candidate_checksum,
         generated_at=generated_at,
-        entries=[wrong_gen_entry],
+        entries=[wrong_gen_entry, current_gen_entry],
+    )
+    # Valid, in-window declaration (effective 00Z, not the candidate's 12Z so
+    # a mis-seeded index cannot admit via cold_declared_cutover).
+    declaration_path = tmp_path / "cutover-declaration.json"
+    declaration_path.write_text(
+        json.dumps(
+            {
+                "schema_version": generation.CUTOVER_DECLARATION_SCHEMA_VERSION,
+                "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
+                "generation": generation.derive_generation(candidate_checksum),
+                "entries": [
+                    {
+                        "model_id": "model_a",
+                        "old_checksum": "a" * 64,
+                        "new_checksum": candidate_checksum,
+                        "effective_cycle_utc": "2026-05-21T00:00:00Z",
+                        "transition_mode": "replace",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        generation.CUTOVER_DECLARATION_ENV, str(declaration_path)
     )
     model = {
         **fixture["model"],
         "resource_profile": {
             **dict(fixture["model"]["resource_profile"]),
-            "package_checksum": fixture["package_checksum"],
+            "package_checksum": candidate_checksum,
         },
     }
     monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
@@ -1360,19 +1420,19 @@ def test_env_override_does_not_admit_wrong_generation_checkpoint(
     assert len(blocked) == 1
     # R1-A4 invariant: single-value pin, no OR-set. See
     # .workplans/1081/review/review-failure-retro-round3.md.
-    # The fixture writes no declaration on-disk (env unset), so the §8 gate
-    # deterministically fires ``block_declaration_missing`` — the
-    # ``state_snapshot_index_generation_mismatch`` branch would require a
-    # declaration to be configured and is unreachable here.
-    assert blocked[0].reason == "registry_cutover_declaration_missing"
-    transition_decision = (
-        blocked[0].state_evidence.get("registry_cutover_transition", {}).get(
-            "decision"
-        )
-    )
+    # #1109: the promised state-lineage branch — a wrong-generation entry at
+    # the expected predecessor key must block, env override notwithstanding.
+    assert blocked[0].reason == "state_snapshot_index_generation_mismatch"
+    transition = blocked[0].state_evidence.get("registry_cutover_transition", {})
     assert (
-        transition_decision
-        == generation.TransitionDecision.BLOCK_DECLARATION_MISSING
+        transition.get("decision")
+        == generation.TransitionDecision.BLOCK_WRONG_GENERATION
+    )
+    # Pin the current-generation branch (not the cutover-boundary one) so a
+    # fixture drift back to the declaration-bound path is visible.
+    assert (
+        transition.get("declaration", {}).get("window_direction")
+        == "current_generation_history"
     )
 
 
