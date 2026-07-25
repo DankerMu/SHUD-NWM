@@ -1927,8 +1927,10 @@ def _enforce_registry_classification_reconciliation(
       removal loop), ``previous_registry_sha256``/``previous_model_count``
       null together or non-null together (count a non-boolean int >= 0),
       ``unchanged <= previous_model_count`` when a previous registry
-      exists, and ``new_registry_sha256 is None`` (a dry_run never
-      publishes).  The full previous-side equality is NOT applied here:
+      exists, ``unchanged.total == 0`` on bootstrap (a null
+      ``previous_registry_sha256`` means an empty previous set, so every
+      prospective row classifies as added), and ``new_registry_sha256 is
+      None`` (a dry_run never publishes).  The full previous-side equality is NOT applied here:
       removals are never computed, so previous rows absent from the
       prospective set are legitimately unaccounted for.
     * ``published``: ``refused.total == 0`` (a non-zero refusal would have
@@ -2002,6 +2004,10 @@ def _enforce_registry_classification_reconciliation(
         if prev_sha is None:
             # Bootstrap: no previous canonical registry means no pinned count.
             if prev_count is not None:
+                raise ValueError("receipt_classification_invalid")
+            # Dual of the `unchanged <= prev_count` bound below: with an empty
+            # previous_by_id every prospective row classifies as added.
+            if unchanged_total != 0:
                 raise ValueError("receipt_classification_invalid")
         else:
             if (

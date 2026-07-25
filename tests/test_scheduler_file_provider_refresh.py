@@ -4822,6 +4822,29 @@ def test_dry_run_reconciliation_rejects_unchanged_above_previous_count() -> None
         )
 
 
+def test_dry_run_reconciliation_rejects_bootstrap_unchanged_entries() -> None:
+    """#1135(iv-dual): the bootstrap counterpart of the ``unchanged <=
+    previous_model_count`` bound.  A null ``previous_registry_sha256`` means
+    ``_classify_registry`` built an empty ``previous_by_id``, so every
+    prospective row lands in ``added`` and no row can be ``unchanged``.  Every
+    adjacent dry_run check is satisfied on purpose (added+unchanged ==
+    prospective, removed 0, null count with null sha) so only the bootstrap
+    ``unchanged`` rule can reject it."""
+    classification = _dry_run_classification(
+        previous_sha=None,
+        previous_count=None,
+        added=[],
+        unchanged=["basin-101", "basin-102", "basin-103"],
+        removed=[],
+        prospective_count=3,
+    )
+
+    with pytest.raises(ValueError, match="receipt_classification_invalid"):
+        refresh._enforce_registry_classification_reconciliation(
+            classification, outcome="dry_run", reason="dry_run_complete"
+        )
+
+
 def test_dry_run_reconciliation_rejects_forged_new_registry_sha() -> None:
     """#1135(v): a dry_run never publishes a canonical registry, so the writer
     pins ``new_registry_sha256`` to None; a well-formed 64-hex value here is a
@@ -4881,3 +4904,51 @@ def test_dry_run_reconciliation_accepts_previous_models_absent_from_prospective(
     refresh._enforce_registry_classification_reconciliation(
         classification, outcome="dry_run", reason="dry_run_complete"
     )
+
+
+def test_receipt_validator_rejects_dry_run_receipt_with_forged_new_registry_sha() -> None:
+    """#1135 wiring: the dry_run constraints must be reachable through
+    ``_validate_receipt``, not just by direct call.  Built like the #1096
+    receipt-level tests (full ``registry/readiness/state`` provider triple, so
+    the provider gate cannot fire ``receipt_provider_invalid`` first) and
+    tampered ONLY with a forged ``new_registry_sha256`` — a dry_run-exclusive
+    rule with no counterpart on the publish path, so a receipt whose outcome is
+    routed away from the dry_run branch would validate clean."""
+    provider = {
+        "name": "registry",
+        "before_sha256": "1" * 64,
+        "before_inode": None,
+        "before_schema_version": "v1",
+        "before_generated_at": "2026-07-14T00:00:00Z",
+        "before_payload_checksum": "sha256:" + "b" * 64,
+        "after_sha256": "c" * 64,
+        "after_schema_version": "v1",
+        "after_generated_at": "2026-07-14T01:00:00Z",
+        "after_payload_checksum": "sha256:" + "d" * 64,
+        "entry_count": 4,
+    }
+    receipt = refresh._receipt(
+        run_id="refresh_dry_run_forged_new_sha",
+        started=refresh.datetime(2026, 7, 14, tzinfo=refresh.UTC),
+        outcome="dry_run",
+        reason="dry_run_complete",
+        phase="complete",
+        providers=[
+            provider,
+            {**provider, "name": "readiness"},
+            {**provider, "name": "state"},
+        ],
+        registry_classification=_dry_run_classification(
+            previous_sha="1" * 64,
+            previous_count=2,
+            added=["basin-103", "basin-104"],
+            unchanged=["basin-101", "basin-102"],
+            removed=[],
+            prospective_count=4,
+            new_registry_sha256="2" * 64,
+        ),
+    )
+
+    with pytest.raises(ValueError) as info:
+        refresh._validate_receipt(receipt)
+    assert "receipt_classification_invalid" in str(info.value)
