@@ -17,7 +17,7 @@ Risk packs considered (core):
 
 ## 1. Regression tests
 
-- [ ] 1.1 Add parametrized unit tests in
+- [x] 1.1 Add parametrized unit tests in
   `tests/test_scheduler_file_provider_refresh.py` calling
   `refresh._rows_have_identical_identity` directly with minimal dicts
   (do NOT extend `_registry_row`):
@@ -42,7 +42,7 @@ Risk packs considered (core):
   Evidence floor: all new tests green on head;
   `uv run pytest -q tests/test_scheduler_file_provider_refresh.py` full-suite
   green; `uv run ruff check .` clean.
-- [ ] 1.2 MANDATORY mutation-check: locally mutate the flat compare to
+- [x] 1.2 MANDATORY mutation-check: locally mutate the flat compare to
   `bool(row.get(field_name)) != bool(previous_row.get(field_name))`
   (`scripts/scheduler_file_provider_refresh.py:2452-2454`) → scenario (d)
   must go red; restore the original line and re-run green. Record both
@@ -52,12 +52,12 @@ Risk packs considered (core):
 
 ## 2. Change-level verification floor
 
-- [ ] 2.1 `uv run pytest -q tests/test_scheduler_file_provider_refresh.py`
+- [x] 2.1 `uv run pytest -q tests/test_scheduler_file_provider_refresh.py`
   green (full suite, not just new tests).
-- [ ] 2.2 `uv run ruff check .` clean.
-- [ ] 2.3 `openspec validate pin-identity-equality-none-semantics --strict
+- [x] 2.2 `uv run ruff check .` clean.
+- [x] 2.3 `openspec validate pin-identity-equality-none-semantics --strict
   --no-interactive` PASS.
-- [ ] 2.4 Zero production-code change (issue acceptance criterion 5):
+- [x] 2.4 Zero production-code change (issue acceptance criterion 5):
   `git diff --name-only origin/master...HEAD -- scripts/ packages/ apps/
   services/ workers/` is empty; outside `openspec/` the only changed file is
   `tests/test_scheduler_file_provider_refresh.py`.
