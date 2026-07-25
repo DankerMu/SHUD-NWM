@@ -1310,8 +1310,8 @@ def _ingest_runs_cycle(
 def _ingest_forcing_cycle(
     archive_dir: Path,
     manifest: Mapping[str, Any],
-    *,
     staging_conn: Any,
+    *,
     object_store_prefix: str = "s3://nhms",
 ) -> Mapping[str, Any]:
     """Reuse ``apply_forcing_domain_handoff_path`` with an injected connection."""

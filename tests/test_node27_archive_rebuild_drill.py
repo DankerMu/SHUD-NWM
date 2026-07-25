@@ -1365,6 +1365,19 @@ def test_staging_segment_count_falls_back_to_bare_count_when_subset_empty() -> N
     assert count == 42
 
 
+def test_default_ingest_adapters_bind_dispatch_call_shapes() -> None:
+    """The ingest dispatch calls the default adapters with fixed shapes
+    (runs: 2 positional + staging_database_url kwarg; forcing: 3 positional).
+    A keyword-only drift in an adapter signature is a live-only TypeError —
+    no unit test executes the real adapters end to end."""
+    import inspect
+
+    inspect.signature(drill._ingest_runs_cycle).bind(
+        Path("/ws"), {}, staging_database_url="postgresql://x"
+    )
+    inspect.signature(drill._ingest_forcing_cycle).bind(Path("/dest"), {}, object())
+
+
 def test_c_is_2_workspace_cleaned_on_pass(tmp_path: Path, zstd_bin: Path) -> None:
     """C1 / C-is-2: workspace removed on PASS."""
     manifest_path, manifest = _write_fixture_runs_archive(tmp_path)
