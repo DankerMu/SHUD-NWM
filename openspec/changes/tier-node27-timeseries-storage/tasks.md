@@ -1306,7 +1306,7 @@ Order is load-bearing:
   Test rows:
   - Input: resource-governance audit run (systemctl mocked).
     Expected: receipt includes retention service/timer states.
-- [ ] 6.3 node-27 live: dry-run receipt review, then first enforce run.
+- [x] 6.3 node-27 live: dry-run receipt review, then first enforce run.
   Evidence floor: committed dry-run receipt reviewed first; first enforce
   gated on 5.2's drill PASS plus a fresh archive-completeness receipt from
   the recurring audit (2.3) — compression (4.5) is not a gate; committed
@@ -1315,6 +1315,19 @@ Order is load-bearing:
   reported. Steady state: timer-driven enforce keeps passing gates via
   recurring audit receipts; a drill re-run is required whenever the drill
   receipt exceeds its validity window or archive tooling/format changes.
+  §6.3 delivery (2026-07-25, Step C #1072, human go on the issue): first
+  live enforce receipt committed at
+  `docs/runbooks/receipts/tier-node27-timeseries-storage/timeseries-retention/first-enforce-20260725T061740Z.json`
+  (outcome=enforced, 4 chunks dropped, 2 boundary-partial deferred, 87
+  salvage-backed windows). Before/after evidence, metadata row-count
+  invariant proof (all five tables unchanged), DB size delta
+  (−19,097,174,016 B), reversibility footnote, and steady-state gate
+  behavior are in that directory's README, which also documents the
+  contention refusal receipt
+  (`refusal-drop-contention-20260725T055600Z.json`) and the known
+  `freed_bytes` under-report for compressed chunks (follow-up issue).
+  Retention timer remains disabled; enabling it is a separate operator
+  decision recorded in the README.
 
 ## 7. Docs and verification floor
 

@@ -43,15 +43,103 @@ hypertables represented) and two boundary-partial chunks correctly held
 in `deferred_remainder` (`_hyper_3_7`, `_hyper_1_5`). No chunk was
 dropped (dry-run).
 
-## Enforce path status
+### `refusal-drop-contention-20260725T055600Z.json`
 
-All upstream gates are now live on node-27: the recurring
-storage-inventory-audit produces fresh completeness receipts, the
-compression timer runs (receipts under `../timeseries-compression/`),
-and the drill PASS receipt above unlocks §6.3. The remaining §6.3 step
-is the **first enforce run** (`drop_chunks` on production), which is
-Step C of issue #1072 and requires explicit human authorization — it
-must NOT be run as a follow-on of the dry-run.
+First enforce attempt (Step C, #1072), run while live autopipe ingest
+(6 workers) was writing. Both gates passed and the runner entered the
+DROP phase, but `drop_chunks('_hyper_3_8_chunk')` waited the full 300s
+`_DROP_TIMEOUT_MS` on a tuple lock in TimescaleDB's `dimension_slice`
+catalog (held by concurrent chunk-routing inserts) and was canceled by
+the statement timeout. Outcome: `refused`,
+`refusal_reason=RETENTION_DROP_FAILED:...statement timeout`, exit 1,
+**zero chunks dropped** — live proof the DROP phase fails safe under
+contention. Remediation: stop `nhms-node27-autopipe.timer`, let the
+in-flight pass finish (~10 min), enforce in the quiet window, restart
+the timer.
+
+### `first-enforce-20260725T061740Z.json`
+
+First live enforce (Step C, #1072; human go recorded on the issue).
+Executed 2026-07-25T06:17Z in a quiet window (autopipe timer stopped,
+zero active writers), single tick, `--enforce` CLI flag (env stays
+`ENFORCE=0`). Outcome: `enforced`, rc=0. Dropped all 4 candidates from
+the dry-run; both boundary-partial chunks stayed in
+`deferred_remainder`; 87 db-export-provenance windows recorded in
+`salvage_backed_windows`.
+
+#### Pre-enforce checklist (precondition receipts)
+
+- Completeness receipt: generated `2026-07-25T03:40Z` (age ~2.5h < 26h
+  bound), from the recurring audit timer.
+- Drill PASS receipt: `../archive-rebuild-drill/first-live-pass-20260725T053420Z.json`
+  (age <1h < 30d bound), coverage spans the drop window.
+- Dry-run receipt reviewed: `dry-run-first-live-20260725T054745Z.json`
+  (4 candidates = the 4 dropped; PER_TICK_BOUND=5 not binding).
+- Schema-only catalog snapshot:
+  `~/nwm-presync-backup-20260725/nhms-schema-pre-enforce-20260725T055544Z.sql`
+  on node-27 (outside the repo per sync discipline).
+
+#### Before/after evidence (2026-07-25, UTC)
+
+| Metric | Before (05:5xZ) | After (06:2xZ) | Δ |
+| --- | --- | --- | --- |
+| `hypertable_size('hydro.river_timeseries')` | 658,673,786,880 | 657,517,953,024 | −1,155,833,856 |
+| `hypertable_size('met.forcing_station_timeseries')` | 95,055,085,568 | 77,113,745,408 | −17,941,340,160 |
+| `pg_database_size('nhms')` | 754,661,249,839 | 735,564,075,823 | **−19,097,174,016 (~17.8 GiB)** |
+| chunks (hydro / met) | 8 / 8 | 6 / 6 | −2 / −2 |
+| `hydro.hydro_run` rows | 1,557 | 1,557 | 0 |
+| `hydro.run_display_coverage` rows | 1,557 | 1,557 | 0 |
+| `met.forcing_version` rows | 1,557 | 1,557 | 0 |
+| `hydro.state_snapshot` rows | 0 | 0 | 0 |
+| `ops.qc_result` rows | 1,610 | 1,610 | 0 |
+
+Metadata row-count invariant (§8.3 test row 4): **unchanged** across
+all five tables. The four dropped chunks are absent from
+`timescaledb_information.chunks` post-enforce. Display API answered
+200 immediately after; the autopipe timer was restarted in the same
+minute.
+
+The DB size delta (−19,097,174,016 B) equals the pre-enforce
+`chunks_detailed_size` sum of the four candidates exactly
+(535,822,336 + 620,011,520 + 538,116,096 + 17,403,224,064).
+
+#### Known receipt limitation: `freed_bytes` under-reports compressed chunks
+
+The receipt's per-chunk `freed_bytes` sum is 17,403,371,520 —
+1,693,802,496 bytes (~1.7 GB) less than the true reclaim. For the three **compressed**
+candidates the runner measured only the main chunk relation (57,344 /
+57,344 / 32,768 bytes); the actual bytes live in the compressed
+sibling relation that `drop_chunks` also removes. The uncompressed
+candidate (`_hyper_1_3`, 17,403,224,064) is accurate. Tracked as a
+follow-up issue (receipt-accuracy only; the drop itself and the H4
+"measured before drop" ordering are correct).
+
+#### Reversibility footnote
+
+`drop_chunks` is not per-chunk reversible. The tested recovery oracle
+for the dropped window is Step B's drill PASS receipt
+(`../archive-rebuild-drill/first-live-pass-20260725T053420Z.json`):
+runs-lane reingest proven on a fresh staging DB at exact count parity,
+db-export salvage objects sha256+row-count verified. The salvage
+`COPY FROM` and raw-source replay paths remain never-executed against
+production (see #1072's reversibility warning).
+
+## Steady-state gate behavior
+
+- `nhms-node27-timeseries-retention.timer` (OnCalendar 05:15 UTC
+  daily) is currently **disabled** — enabling it is a separate
+  operator decision, deferred until the operator has observed manual
+  runs; the enforce path also needs env `ENFORCE=1`, which stays `0`.
+- Each tick re-evaluates both gates: the completeness receipt must be
+  <26h old (recurring audit timer refreshes daily) and the drill PASS
+  receipt <30d old with coverage spanning the tick's drop window.
+- A drill re-run is required when the PASS receipt ages past 30 days,
+  when archive tooling or formats change, or when the drop window
+  advances beyond the receipt's declared coverage.
+- Under live ingest, a DROP-phase statement timeout on
+  `dimension_slice` contention is possible (see the refusal receipt
+  above); the runner fails safe and the tick can be retried in a quiet
+  window.
 
 ## Reproduction
 

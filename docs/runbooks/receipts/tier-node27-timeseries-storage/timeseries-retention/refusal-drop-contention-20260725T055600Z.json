@@ -1,0 +1,1 @@
+{"cutoff":"2026-06-24T12:00:00Z","generated_at":"2026-07-25T05:56:00.920456Z","mode":"enforce","outcome":"refused","reference_time":"2026-07-15T12:00:00Z","refusal_reason":"RETENTION_DROP_FAILED:hydro._hyper_3_8_chunk: canceling statement due to statement timeout\nCONTEXT:  while locking tuple (0,8) in relation \"dimension_slice\"\n","schema_version":"1.0","window_days":21}
