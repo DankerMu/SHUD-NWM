@@ -167,7 +167,7 @@ The systemd refresh wrapper's EnvironmentFile allowlist SHALL accept `NHMS_REGIS
 
 ### Requirement: The receipt validator SHALL bind dry_run receipts to the reconciliation constraints that hold in id-only mode
 
-`_enforce_registry_classification_reconciliation` SHALL apply the id-only constraint set to every receipt whose classification carries `mode="id_only"` (falling back to `outcome="dry_run"` keying when the legacy receipt has no mode field), rejecting any such receipt whose classification violates a constraint that the id-only classify path guarantees by construction, specifically: `removed.total` must be zero, `package_changed.total` and `declared_cutovers.total` must be zero, every `refused` entry's reason must be `registry_cutover_declaration_invalid` (the synthetic `__declaration__` marker is the only refusal the writer can attach to an id-only classification; the legacy outcome-keyed fallback keeps rejecting all refused entries as before), a receipt-level cutover refusal `reason` still requires `refused.total >= 1` (writer sets the refusal reason and appends the refused row in the same action — the two must stand or fall together), `previous_registry_sha256` and `previous_model_count` must be null together or non-null together (with a non-boolean integer count >= 0), `new_registry_sha256` must be null (an id-only classification only arises from dry_run, which never publishes a registry), when no previous registry is recorded `unchanged.total` must also be zero (with an empty `previous_by_id` every prospective row classifies as added — the dry_run dual of the bootstrap sum invariant), and when a previous registry exists `unchanged.total` must not exceed `previous_model_count`. The validator SHALL NOT apply the full previous-side equality (`unchanged + package_changed + removed == previous_model_count`) to id-only classifications, because the id-only path never evaluates removals — regardless of the receipt's terminal outcome.
+`_enforce_registry_classification_reconciliation` SHALL apply the id-only constraint set to every receipt whose classification carries `mode="id_only"` (falling back to `outcome="dry_run"` keying when the legacy receipt has no mode field), rejecting any such receipt whose classification violates a constraint that the id-only classify path guarantees by construction, specifically: `removed.total` must be zero, `package_changed.total` and `declared_cutovers.total` must be zero, every `refused` entry's reason must be `registry_cutover_declaration_invalid` (the synthetic `__declaration__` marker is the only refusal the writer can attach to an id-only classification; the legacy outcome-keyed fallback keeps rejecting all refused entries as before), a receipt-level cutover refusal `reason` still requires `refused.total >= 1` (writer sets the refusal reason and appends the refused row in the same action — the two must stand or fall together), `previous_registry_sha256` and `previous_model_count` must be null together or non-null together (with a non-boolean integer count >= 0), `new_registry_sha256` must be null (an id-only classification only arises from dry_run, which never publishes a registry), when no previous registry is recorded `unchanged.total` must also be zero (with an empty `previous_by_id` every prospective row classifies as added — the dry_run dual of the bootstrap sum invariant), and when a previous registry exists `unchanged.total` must not exceed `previous_model_count`. The validator SHALL NOT apply the full previous-side equality (`unchanged + package_changed + removed == previous_model_count`) to id-only classifications, because the id-only path never evaluates removals — regardless of the receipt's terminal outcome. On the mode-keyed id-only arm the validator SHALL additionally require the `refused` group to be untruncated with `total == len(items)` and `total <= 1` and every entry's `model_id` equal to the synthetic `__declaration__` marker, and SHALL reject any `outcome="dry_run"` receipt whose refused total is non-zero (a declaration failure always terminates with `outcome="failed"`, so no legal writer emits a dry_run refusal); the legacy no-mode arm keeps rejecting all refused entries unchanged.
 
 #### Scenario: Tampered dry_run receipt with removed entries is rejected
 
@@ -230,9 +230,26 @@ The systemd refresh wrapper's EnvironmentFile allowlist SHALL accept `NHMS_REGIS
 - **THEN** validation SHALL pass without raising — the lenient branch is
   selected by mode, not by the terminal outcome
 
+#### Scenario: Forged id-only refused buckets are rejected
+
+- **WHEN** an id-only (`mode="id_only"`) classification carries a
+  `refused` group with empty `items` and a non-zero `total`, or
+  `truncated=true`, or more than one entry, or an entry whose `model_id`
+  is not `__declaration__`
+- **THEN** validation SHALL raise `receipt_classification_invalid`
+
+#### Scenario: dry_run receipts carrying any refusal are rejected
+
+- **WHEN** a receipt has `outcome="dry_run"` and a `refused` group with
+  `total >= 1`, even when the single entry is an otherwise well-formed
+  synthetic `__declaration__` row
+- **THEN** validation SHALL raise `receipt_classification_invalid`
+- **AND** an `outcome="failed"` id-only receipt carrying the same single
+  well-formed `__declaration__` refusal SHALL keep passing
+
 ### Requirement: The runner refresh receipt SHALL persist the normalized cutover_gate audit block whenever the runner constructs the audit block
 
-When a scheduler file-provider refresh run constructs a cutover-gate audit block (registry publish path), the persisted refresh receipt SHALL carry that block, normalized by the shared normalizer, as a top-level optional `cutover_gate` key — so that gated and bypassed runs are distinguishable from the on-disk runner artifact alone; runs that fail before the block is constructed SHALL omit the key entirely (never persist a null placeholder), and the receipt JSON Schema and the runtime receipt validator SHALL both admit exactly the three normalized fields (`mode`, `declaration_env`, `declaration_present`) and reject additional or malformed fields over the same corpus.
+When a scheduler file-provider refresh run constructs a cutover-gate audit block (registry publish path), the persisted refresh receipt SHALL carry that block, normalized by the shared normalizer, as a top-level optional `cutover_gate` key — so that gated and bypassed runs are distinguishable from the on-disk runner artifact alone; runs that fail before the block is constructed SHALL omit the key entirely (never persist a null placeholder), and the receipt JSON Schema and the runtime receipt validator SHALL both admit exactly the three normalized fields (`mode`, `declaration_env`, `declaration_present`) and reject additional or malformed fields over the same corpus; on any receipt whose `outcome` is `published` or `dry_run`, or whose `reason` is one of the registry-cutover refusal reasons, both the receipt JSON Schema and the runtime receipt validator SHALL additionally require the `cutover_gate` key to be present, rejecting its absence with the distinct runtime reason `receipt_cutover_gate_required`, while receipts from runs that fail before the block is constructed remain valid without the key.
 
 #### Scenario: Registry-publish refresh persists the audit block
 
@@ -258,6 +275,35 @@ When a scheduler file-provider refresh run constructs a cutover-gate audit block
   against the receipt JSON Schema, or read back from disk through the
   runtime receipt validator
 - **THEN** both validations SHALL fail
+
+#### Scenario: Gated outcomes missing the audit block are rejected by both validators
+
+- **WHEN** a receipt with `outcome="published"` or `outcome="dry_run"`
+  carries no `cutover_gate` key and is validated against the receipt
+  JSON Schema and the runtime receipt validator
+- **THEN** the schema validation SHALL fail
+- **AND** the runtime validator SHALL raise
+  `receipt_cutover_gate_required`
+
+#### Scenario: Registry-cutover refusal receipts missing the audit block are rejected
+
+- **WHEN** a receipt whose `reason` is `registry_cutover_undeclared`,
+  `registry_cutover_removal_refused`, or
+  `registry_cutover_declaration_invalid` carries no `cutover_gate` key
+- **THEN** both the schema and the runtime validator SHALL reject it,
+  the runtime side with `receipt_cutover_gate_required`
+
+#### Scenario: Early-failure receipts remain valid without the key and the upgrade path is documented
+
+- **WHEN** a receipt from a run that failed before audit-block
+  construction (for example lock contention) omits `cutover_gate`, or an
+  operator upgrades a node whose `latest.json` is a pre-#1132 published
+  receipt without the key
+- **THEN** the early-failure receipt SHALL pass both validators
+- **AND** the runbook SHALL document that the legacy published receipt
+  now fails `validate_current_receipt` (the install `--enable`
+  validation step) and that one manual refresh rewriting `latest.json`
+  clears it, the refresh write path itself being unblocked
 
 ### Requirement: CLI registry-publish failure diagnostics SHALL carry a normalizer-produced cutover_gate block
 
