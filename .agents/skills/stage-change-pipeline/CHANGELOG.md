@@ -5,6 +5,25 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-07-17
+
+### Fixed
+
+- **凭证时点语义**：明确 `grillGate` 凭证以启动时点的最终共识为准——Stage 2 期间经用户确认的决策变更须先更新凭证对应分支再启动。否则照抄 grill 时点快照会让 Stage 3 把合理变更判成"漂移"，强制 artifact 对齐过期决策。
+
+## [0.15.0] - 2026-07-17
+
+### Added
+
+- **Grill 结论闭环消费**（补 0.14.0 留下的断链：凭证只用于校验和计数，分支内容校验后即被丢弃，结论传导全靠对话记忆）：
+  - Stage 2 新增强制输入规则：每个已拍板分支的结论必须落入对应 artifact（设计决策进 design.md，范围/边界类进 proposal 的 What Changes/Non-goals）；开放项要么解决、要么显式写成 open question/non-goal。
+  - `full-pipeline.workflow.js` 把凭证对象渲染成 Grill ledger 文本块（`[decided:user|fact-check]` / `[open]` 逐条），注入 Stage 3 的 design-consistency 与 spec-completeness 两路审核 prompt，逐条核对：漂移、矛盾、开放项静默消失均为 finding。`skipped:<理由>` 运行不注入。review-loop 独立运行无上游凭证，不含此块（同步注释已标注差异）。
+
+### Changed
+
+- **压测门禁从声明升级为凭证（breaking：`grillGate` 参数形态变更）**。实跑发现管道内 grill 强度塌缩为敷衍几问——裸 `"passed"` 字符串是纯自我声明，workflow 只校验格式不校验证据，而管道推进压力天然把模型推向最便宜的"过门"路径（与 subagent-workflow 三轮硬门被跳过是同一失效类：散文规则输给目标竞争）。现在 `full-pipeline.workflow.js` 只接受逐分支凭证对象 `{ status: "passed", branches: [{ branch, decision, decidedBy: "user"|"fact-check" }], openItems, userConfirmed: true }`（每分支需有非空结论且 `decidedBy` 合法、`userConfirmed` 必须为 true）或 `"skipped:<理由>"`；裸 `"passed"` 拒绝启动。凭证数据源 = grill-me 0.4.0 的逐分支收敛清单（其铁律 8 同步声明：嵌入时退出判据与单独使用一致）。
+- Stage 1 门禁措辞同步：passed 的判据是分支收敛 + 用户确认，不是问题个数；轮数由决策树分支数决定，不由管道进度决定。`logEntry.grill_gate` 落盘形态改为 `passed:branches=<n>,open=<n>`，压测深度随跳过率一并可审计（`references/loop-accountability.md` 同步）。
+
 ## [0.13.0] - 2026-07-16
 
 ### Added

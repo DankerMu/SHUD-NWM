@@ -46,9 +46,10 @@ The profile is a living document, not a one-shot. It does not change per issue, 
 5. If missing, create the change:
    ```bash
    openspec new change <change-name> --description "<short issue summary>"
-   openspec instructions --change <change-name>
+   # artifact is required: proposal | design | specs | tasks - run once per artifact being authored
+   openspec instructions <artifact> --change <change-name>
    ```
-6. The orchestrator may directly edit `openspec/changes/<change>/**`; keep artifacts concise and focused.
+6. The orchestrator may directly edit `openspec/changes/<change>/**`; keep artifacts concise and focused. Author only the artifact set the fixture level requires (`issue-risk-contract.md` Fixture Level Rules): `none`/`compact` = `proposal.md` + `tasks.md` + one minimal spec delta (`design.md` exempt); `expanded` and above = full set.
 7. Ensure `tasks.md` maps every selected risk pack to a scenario-level test, verification command, or explicit non-goal with input and expected output.
 8. For high or broad-expanded repair intensity, add a compact `Invariant Matrix` to the fixture before implementation. This is a hard gate, not an optional review aid:
    ```text
@@ -113,6 +114,7 @@ Run the local CI-equivalent pipeline for the project as recorded in the active p
 Then do a read-only audit against the OpenSpec fixture:
 
 - Error/failure paths have tests.
+- The implementer's report includes the batched red-proof evidence for new-behavior tests (the red run output against pre-change source, per the implementer contract), and `git stash list` shows no leftover `red-proof` entry — a missing proof or a stranded stash is a finding.
 - Selected risk packs are evidenced.
 - CI-sensitive timers/processes are stable.
 - Existing consumers and compatibility axes still work.
@@ -137,21 +139,23 @@ Select reviewers from fixture level:
 - `compact`: run 1-2 reviewers focused on changed behavior and selected risk packs.
 - `expanded`: run 2-4 reviewers; use all 4 for shared entrypoints, file/schema/publish behavior, solver/runtime behavior, or legacy compatibility.
 - `high` or `broad-expanded`: use all 4 standard reviewers (Correctness, Integration, Security/Performance, Test & Evidence Coverage). Escalate to 6 reviewers when the PR touches DB-backed state, retry/cancellation, publish/delete/rollback, schema/evidence contracts, security boundaries, production config, or shared helper/state-machine roots. The two additional reviewers are `Spec Compliance` and `Invariant / State Machine / Compatibility`.
-- Initial round only: if repository policy requires a fixed number of evidence comments, follow it only when it does not conflict with the 6-review high-risk escalation in `SKILL.md`; otherwise post a consolidated evidence bundle rather than reducing reviewer coverage.
+- Initial round only: if repository policy requires a fixed number of evidence comments, follow it only when it does not conflict with the six-reviewer high-risk escalation defined in `phase-flow.md` Phase 4; otherwise post a consolidated evidence bundle rather than reducing reviewer coverage.
+
+Before spawning any comprehensive round's reviewers (initial or Phase 6.5 rerun), run the packaged evidence-hygiene linter `scripts/evidence_check.py`, passing the current PR body draft and evidence manifest via `--file`. A non-zero exit means the orchestrator's own bookkeeping is stale — unreplaced template placeholders, a current/frozen-head SHA claim that does not match HEAD, or a `Round N pending` claim the ledger already recorded. Fix the bookkeeping directly before spawning: it is orchestrator paperwork, not an implementer fix task, and it consumes no review round and gets no ledger line. Reviewer-authored reports are exempt from the placeholder scan by design; a review round is the most expensive linter there is, so reviewers get only what this script cannot judge.
 
 Include the PR description's `偏离记录` section in every reviewer brief: deviations are where the implementer made choices the plan did not cover, so review attention goes there first. Use `phase-4-cross-review.md` to build the parallel reviewer-subagent briefs. Prefer spawning the full reviewer set as parallel subagents in one batch (Claude Code: multiple Task calls in one message; Codex: parallel subagents). Reviewer subagents are read-only and return their complete reports as their final messages; the orchestrator collects each returned report and persists it to `<REVIEW_DIR>/<report file>` (default `<REVIEW_DIR>` = `.workplans/<issue-or-pr>/review/`). Do not post PR comments in this phase.
 
 Review rounds:
 
 - Round 1 uses the risk-adaptive reviewer count above.
-- After a Phase 6 fix pass, rerun cross-review before Phase 7 with the same risk-adaptive reviewer count on the current head. The follow-up mix follows the **pinned-core + rotating-free-slots** policy (instrumented trial): lenses selected by the fixture's risk packs are pinned and present in every round; the remaining free slots rotate to complementary lenses from reviewer packs not yet used on this PR (`risk-adaptive-cross-review` `reviewer-packages.md`). Rotation is additive on the free dimension only — never rotate out a pinned risk-pack lens (same-lens rounds share blind spots; rotation buys union recall at zero marginal cost, but only the pinned core carries fix-regression recall). Record each round's lens mix in the evidence bundle; the policy is adjudicated by the review-loop log's lens attribution (Phase 8), keep/cut via the existing ADR mechanism.
-- Do not narrow follow-up rounds to only the risk areas touched by the fix. A prior round can miss issues outside the fix area, so each post-fix round must be a comprehensive review of the updated PR diff and OpenSpec fixture before Phase 7.
+- After a Phase 6 fix pass, rerun cross-review before Phase 7 on the current head (classified exceptions rerun only their own gates: Phase 8 `ci-only` repairs and Phase 7 `local-repair` fixes). Post-fix rounds default to the **pinned risk-pack core only** (typically 2-3 reviewers): the lenses selected by the fixture's risk packs are pinned, present in every round, and carry the fix-regression recall. Free slots — complementary lenses from reviewer packs not yet used on this PR (`risk-adaptive-cross-review` `reviewer-packages.md`) — rotate back in only when the previous round had a critical/major finding or a failure-class repeat (ledger `repeats prior class: yes`); rotation is additive and never rotates out a pinned lens. This is a cost governor: comprehensive rounds are the most expensive unit in the workflow, so lens breadth is bought only when the ledger signals it. Record each round's lens mix in the evidence bundle; the policy is adjudicated by the review-loop log's lens attribution (Phase 8), keep/cut via the existing ADR mechanism.
+- Every post-fix round must still cover the full updated PR diff and OpenSpec fixture — a prior round can miss issues outside the fix area — but coverage is structured for cost: exactly one reviewer per round keeps full-PR comprehensive scope, and the remaining reviewers focus on the fix delta, its blast radius, and regression surfaces while retaining full-diff access. Never run a round with zero full-scope reviewers.
 - A cross-review round is clean only when it has no actionable findings. Critical/major findings and test coverage gaps always return to Phase 5-6. Minor findings must be fixed or explicitly deferred with issue/OpenSpec/user-instruction basis. When the `issue-scribe` agent is installed, "deferred with issue basis" means delegating the deferred finding to `issue-scribe` (it verifies, dedups, and files the tracked issue) and recording the returned issue URL in the evidence bundle; a deferral with neither an issue URL nor a recorded reason is not a valid deferral.
 - When a comprehensive cross-review round comes back clean, record `Last clean reviewed SHA: <sha>` in the evidence bundle. This recorded SHA — not the frozen final HEAD — is the rollback anchor the Phase 8 pre-merge gate resets to if a later fix round corrupts a clean reviewed state.
+- **Round ledger bookkeeping is mandatory**: every comprehensive round ends by appending its ledger line, and the next action is chosen from that line — format, counter semantics, CLI mechanics, and skip-block rule in `gates.md` (Round Ledger).
 - A finding is actionable only if it satisfies the finding contract defined in the `risk-adaptive-cross-review` skill (`finding-contract.md`): severity, failure class, violated invariant/contract, concrete scenario, evidence, fix direction, required test/proof, sibling surfaces, and blocking status. Treat vague concerns, style preferences, and untestable possibilities as non-blocking notes unless the orchestrator can complete the missing fields from the diff and fixture.
 - If a follow-up round finds the same failure class in another module, helper, or sibling surface, treat that as an invariant miss, not as a new isolated finding. Trigger Phase 6.2 before issuing the next fix prompt.
-- If the third comprehensive cross-review round is not clean — any actionable findings, same failure class or not — the three-round hard gate triggers. Stop ordinary review/fix looping immediately; this is not permission to abandon the issue. Do not run another implementer fix, cross-review, Phase 7 final review, CI wait-for-merge, or merge until a Review Failure Retro is persisted to the local evidence directory or PR working notes and its corrective action chosen (Phase 5 template and default-action mapping). The retro's failure shape decides whether this is a strategy pivot (breadth/depth/noise) or a bounded continuation of the ordinary loop (converging — healthy convergence is common and is not a pathology signal).
-- If review/fix activity has consumed more than one working day, or the same invariant keeps failing in sibling surfaces, run a Review Failure Retro before any further review round. The retro must change the next action: update fixture/matrix, broaden or split implementation scope, strengthen reviewer prompts, or make a user-visible scope call only when the decision cannot be derived from issue/OpenSpec evidence.
+- Gate triggers (three-round, working-day, same-invariant), the no-trend-exemption rule, and everything that follows a trigger are governed by `gates.md` (Gate Table). Healthy convergence is common and is not a pathology signal — but it is claimed inside the persisted retro, never before it.
 - While reviewers run, use the same silent long-wait rule as Phase 1. Avoid verbose `tail`, `watch`, or frequent status polling unless a reviewer fails or exceeds the expected timeout.
 - If parallel review tooling fails without producing reports, diagnose the subagent failure once, then re-spawn the same reviewer-subagent set in parallel. Do not count a failed no-report invocation as a comprehensive review round.
 - Phase 4 reviewers emit candidate findings, not final merge-blocking verdicts. Do not feed reviewer reports straight into Phase 5; they must pass the Phase 4.5 verification gate first.
@@ -245,37 +249,7 @@ Rules:
 - When pattern escalation is `yes`, the next fix prompt must be cross-cutting. Do not create one prompt per cited line.
 - For high/broad-expanded escalations, the regression matrix must include at least one negative/adversarial case for each affected surface category, unless the category is explicitly `none` or out of scope.
 - If cross-review reports are clean and coverage complete, and no ordinary-loop gate has triggered, skip Phase 6 and continue toward Phase 7.
-- If the three-round hard gate has triggered (third comprehensive cross-review round not clean — any actionable findings, same failure class or not), or the working-day/same-invariant retro trigger in Phase 4 fired, write a Review Failure Retro instead of another ordinary fix list:
-  ```text
-  Review Failure Retro:
-  PR: #<N>, current head SHA: <sha>
-  Failure classes: <names>
-  Rounds affected: <rounds, with per-round SHA/report paths>
-  Failure shape: breadth | depth | noise | converging
-  - breadth: findings spread across independent surfaces with no shared root cause
-  - depth: the same invariant/failure class recurring across rounds or sibling surfaces
-  - noise: findings mostly REFUTED or non-actionable per the finding contract
-  - converging: healthy convergence — no failure class repeats across rounds, and the
-    verified-finding count and highest severity are non-increasing round over round
-    with at least one strictly decreasing (cite the per-round numbers as evidence)
-  Why Phase 5/6 did not close it:
-  - Fixture scope gap: yes|no - <reason>
-  - Fix prompt too narrow: yes|no - <reason>
-  - Reviewer finding contract vague/inconsistent: yes|no - <reason>
-  - Missing regression evidence: yes|no - <reason>
-  - Cause never diagnosed (no red repro before fixes): yes|no - <reason>
-  - PR too broad / should split: yes|no - <reason>
-  Next corrective action:
-  - <PR split | refactor/redesign | diagnosis task | invariant closure retry | fixture update | user scope decision | reviewer downgrade with rationale | bounded loop extension (converging only)>
-  ```
-- Default corrective action follows the failure shape; deviating from the default requires a recorded reason in the retro:
-  - `breadth` -> **PR split** along independent surface boundaries within the issue/OpenSpec scope. Each child PR re-enters the workflow as a new PR with its own fresh round counter; the parent PR's evidence bundle records the split plan and which findings each child PR absorbs.
-  - `depth` -> refactor/redesign or a diagnosis task on the recurring invariant. Splitting a recurring invariant is forbidden: every child PR inherits the same defect and each burns its own review rounds.
-  - `noise` -> reviewer-pattern downgrade with recorded rationale (and reviewer-prompt strengthening for the next round).
-  - `converging` -> **bounded loop extension**: continue the ordinary Phase 5-6-6.5 loop for at most 2 further comprehensive cross-review rounds. The retro stays short — the convergence-trend numbers are the whole argument; skip the strategy sections. `converging` is only selectable when its evidence line holds (no repeated failure class, non-increasing count and severity); a single critical/major finding in round 3 or any same-class repeat disqualifies it.
-- The retro must be persisted before any further implementation/review action; summarizing it in chat is not enough. After it is persisted, continue by executing the selected corrective action unless a genuine product/scope decision is required from the user.
-- Post-gate budget (breadth/depth/noise): after the corrective action, run at most one comprehensive cross-review. If that round still reports any critical/major finding, do not return to narrow line-item repair — re-enter this gate with an updated retro and choose a stronger action (e.g. escalate invariant-closure retry to refactor/redesign or PR split).
-- Post-gate budget (converging): the extension is 2 rounds, hard. If the 5th comprehensive round is still not clean, re-enter this gate; `converging` is no longer selectable for this PR — choose breadth, depth, or noise. `converging` may be selected at most once per PR.
+- If any ordinary-loop gate has triggered (`gates.md` Gate Table), write and persist the Review Failure Retro instead of another ordinary fix list — template, failure shapes, default actions, post-gate budgets, and CLI registration all in `gates.md`.
 - Do not edit implementation files while synthesizing.
 
 ## Phase 6: Implementer Subagent Fix Pass
@@ -423,11 +397,11 @@ If the invariant audit reports findings, return to Phase 6 with an invariant-clo
 
 ## Phase 6.5: Repeat Cross-Review After Fixes
 
-After a Phase 6 fix pass (and Phase 6.2 when a pattern escalation triggered it), rerun a full Phase 4-style comprehensive cross-review on the current head, except for CI-only repairs classified in Phase 8. Use the same risk-adaptive reviewer count as Phase 4 with the pinned-core + rotating-free-slots mix (Phase 4 review rounds); do not narrow the rerun to only the fixed area, because a prior round can miss issues outside it.
+After a Phase 6 fix pass (and Phase 6.2 when a pattern escalation triggered it), rerun a full Phase 4-style comprehensive cross-review on the current head, except for CI-only repairs classified in Phase 8 and `local-repair` fixes classified in Phase 7. Use the post-fix reviewer mix defined in Phase 4 review rounds: pinned-core default, signal-triggered free-slot rotation, one full-scope reviewer with the rest delta-focused. The round as a whole must still cover the full diff — a prior round can miss issues outside the fix area.
 
 When the rerun round comes back clean, record `Last clean reviewed SHA: <sha>` in the evidence bundle as the rollback anchor (see the Phase 4 review-round rule).
 
-Continue Phase 5-6-6.5 loops only while no ordinary-loop gate has triggered and until the latest comprehensive cross-review round is clean. Count repeated same-class findings as invariant misses requiring another cross-cutting closure pass, not as fresh isolated issues. Do not continue ordinary loops past a non-clean third comprehensive cross-review round; the three-round hard gate applies — persist the Review Failure Retro, classify the failure shape (breadth/depth/noise/converging), and continue by executing the selected corrective action (default: PR split for breadth, refactor/redesign or diagnosis for depth, reviewer downgrade for noise, a once-per-PR 2-round bounded extension for converging — at round 5 converging is no longer selectable). Escalate only for real blockers, contradictory requirements, missing tooling, or unresolved product/scope decisions.
+Continue Phase 5-6-6.5 loops only while no ordinary-loop gate has triggered and until the latest comprehensive cross-review round is clean. Append each rerun round's ledger line before choosing the next action; the ledger's `gate` field — not the impression that findings are trending down — decides whether the loop may continue (`gates.md`; hard ceiling: 5 comprehensive rounds per PR, beyond which the only corrective action is a PR split). Count repeated same-class findings as invariant misses requiring another cross-cutting closure pass, not as fresh isolated issues. Escalate only for real blockers, contradictory requirements, missing tooling, or unresolved product/scope decisions.
 
 ## Phase 7: Independent Final Review
 
@@ -437,9 +411,13 @@ Mandatory for every PR.
 2. Spawn a clean-context `reviewer` subagent for read-only final review. It must not edit files, invoke this workflow, use skills, or spawn further subagents.
 3. Provide PR number, branch, full SHA, diff scope/changed files, OpenSpec files, fixture level/risk packs, all cross-review round summaries, the verified-findings list, and fix summary.
 4. Run this as the **Gap Sweep** defined in `risk-adaptive-cross-review` (`SKILL.md` → Synthesis): a fresh clean-slate pass with the already-verified findings visible, looking only for real defects not already listed — especially removed behavior never re-established, caller/callee contract drift, boundary/error/cleanup paths, async ordering and cancellation, cross-tenant/permission paths, migration/backfill, cache invalidation, and wrapper recursion. It must also confirm test coverage vs `tasks.md` and pre-existing consumer compatibility. Apply the Reject When precision gate; do not pad when the sweep is clean.
-5. Convert critical/major findings into Phase 6 style fix prompts.
-6. Commit each logical fix after verification and push.
-7. Do not post PR comments until Phase 7 is complete.
+5. Classify each critical/major finding's fix before delegating (same spirit as the Phase 8 `ci-only`/`semantic` split):
+   - `local-repair`: test-only or evidence-only additions, or a single-file local fix with a covering test that touches no contract, shared helper, `Invariant Matrix` surface, auth/path/publish behavior, or public API. For `high`/`broad-expanded` fixtures only test/evidence-only changes qualify — any source behavior change is `semantic`.
+   - `semantic`: everything else.
+6. `local-repair` path: delegate the fix (Phase 6 style prompt), run Phase 2 verification, commit/push, record the classification and rationale in the evidence bundle, then rerun the Phase 7 final review on the new head. No comprehensive cross-review round is required and the round counter does not move. At most two `local-repair` loops per PR; a third Phase 7 finding pass is `semantic` by definition — a gap sweep that keeps finding issues is a signal, not a nuisance.
+7. `semantic` path: return to Phase 5-6; the post-fix Phase 6.5 comprehensive round applies (it increments the round counter and the three-round hard-gate machinery), then rerun Phase 7 on the new head.
+8. Commit each logical fix after verification and push.
+9. Do not post PR comments until Phase 7 is complete.
 
 ## Phase 8: Evidence, CI, Merge Gate
 
@@ -469,6 +447,7 @@ Generate evidence locally before posting:
 3. Create the Chinese work-summary markdown file.
 4. Inspect with `sed -n` or equivalent before posting.
 5. Check:
+   - `scripts/evidence_check.py --file <each drafted body/comment file>` exits 0 (no unreplaced placeholders or TODO/TBD markers, current/frozen-head SHA claims match the frozen `HEAD`, no stale `Round N pending` lines);
    - frozen SHA is the final `HEAD`;
    - comments do not present stale findings as current findings;
    - prior findings are clearly marked as resolved when included;
@@ -542,9 +521,9 @@ Before requesting merge approval or running a pre-authorized auto-merge, verify 
 
 - The review track is satisfied by EITHER (a) or (b):
   - **(a) SHA-matched review artifacts**, all present for the frozen final HEAD:
-    - The PR `Agent Review` section lists the reviewer agents actually used and a `Reviewed head SHA` equal to the frozen `FULL_SHA`.
-    - The Phase 4.5 verifier verdict table for the final head is persisted in the review evidence directory (`<REVIEW_DIR>`, default `.workplans/<issue-or-pr>/review/`).
-    - The latest comprehensive cross-review round is clean (no actionable findings) and the Phase 7 final review is complete on the final head.
+    - The PR `Agent Review` section lists the reviewer agents actually used and a `Reviewed head SHA` that is either the frozen `FULL_SHA` or the recorded `Last clean reviewed SHA` with every later commit recorded as a Phase 8 `ci-only` repair or Phase 7 `local-repair` fix (an unclassified commit after the clean SHA is a gate failure).
+    - The Phase 4.5 verifier verdict tables for the comprehensive rounds actually run are persisted in the review evidence directory (`<REVIEW_DIR>`, default `.workplans/<issue-or-pr>/review/`).
+    - The latest comprehensive cross-review round is clean (no actionable findings) at the recorded `Last clean reviewed SHA`, and the Phase 7 final review is complete on the frozen final HEAD.
   - **(b) "review not required" record**: the fixture risk tier is `none` and the Phase 2 audit found no risk, and that fact is persisted in the evidence bundle against the frozen `FULL_SHA`. This is the only path that legitimately skips Phase 4/4.5/7 (see Phase 4 `none` handling and the Phase 2 audit).
   - Missing both (a) and (b) is a skip block: do not merge, and record it for the accountability log.
 - No posted evidence presents stale findings as current.
@@ -570,6 +549,8 @@ DEFAULT_BRANCH=${DEFAULT_BRANCH#origin/}
 git checkout "$DEFAULT_BRANCH" && git pull
 gh issue close <ISSUE#> --comment "Closed via merged PR #<PR#>. <summary>"
 ```
+
+When the gate CLI is in use, run `review_gate.py close` after the merge (or when abandoning the PR) so `.review-gate.json` is removed and the `review-gate` spawn fence returns to no-op.
 
 ### Cross-Run Loop Accountability
 

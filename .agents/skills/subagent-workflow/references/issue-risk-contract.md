@@ -20,12 +20,13 @@ Use local CLI commands:
 
 ```bash
 openspec new change <change-name> --description "<short issue summary>"
-openspec instructions --change <change-name>
+# artifact is required: proposal | design | specs | tasks - run once per artifact being authored
+openspec instructions <artifact> --change <change-name>
 openspec validate <change-name> --strict --no-interactive
 openspec show <change-name>
 ```
 
-If `openspec new change` creates only a skeleton, the orchestrator should directly fill `proposal.md`, `design.md`, `tasks.md`, and any required spec deltas according to `openspec instructions --change <change-name>`. Keep this concise; implementation code and runtime tests still go through the `implementer` subagent.
+If `openspec new change` creates only a skeleton, the orchestrator should directly fill `proposal.md`, `design.md`, `tasks.md`, and any required spec deltas according to the per-artifact `openspec instructions <artifact> --change <change-name>` output. Keep this concise; implementation code and runtime tests still go through the `implementer` subagent.
 
 ## Project Profiles
 
@@ -61,6 +62,12 @@ Evidence floor:
 - `expanded`: any shared entrypoint, public API, file format/schema, solver/runtime/numerical behavior, geospatial/time-series data, external data discovery, file publish/delete/rollback, legacy compatibility, ambiguous issue scope, or high user-visible risk.
 
 Prefer `compact` when uncertain unless a trigger above is present. Do not expand merely because the issue is important.
+
+Artifact set per fixture level (validated against openspec CLI 1.3.x — fixture weight scales with risk, fixture existence does not):
+
+- `none` / `compact`: `proposal.md` (a few lines of why/what) + `tasks.md` + one **minimal spec delta** — a single requirement with one `#### Scenario:` block covering the actual behavior change. The delta is never skippable: `openspec validate` hard-requires at least one delta, and the delta is the only artifact `openspec archive` folds into the main specs. `design.md` is exempt at these levels (CLI-verified optional); state the one-line exemption in `proposal.md` and record risk-pack selections in `tasks.md`.
+- `expanded`: full set — `proposal.md`, `design.md`, `tasks.md`, spec deltas.
+- `high` / `broad-expanded` repair intensity: full set plus the `Invariant Matrix` (unchanged).
 
 Mandatory `expanded` triggers. If the issue text, expected change surface, or likely diff touches any of these core triggers, do not downgrade:
 
@@ -147,7 +154,7 @@ Closure requires:
 
 ## Compact OpenSpec Fixture Content
 
-Target 10-20 lines inside `design.md` or `tasks.md`.
+Target 10-20 lines inside `tasks.md` (`design.md` is exempt at this level).
 
 ```text
 Fixture level: compact
@@ -253,7 +260,7 @@ Subagent boundary:
 - If the task cannot be completed without nested AI delegation, stop and report the blocker.
 
 Review the OpenSpec change fixture for issue #<N>.
-Inputs: issue body/comments, the OpenSpec files proposal.md, design.md, tasks.md, relevant nearby docs/tests.
+Inputs: issue body/comments, the OpenSpec files proposal.md, tasks.md, spec deltas (plus design.md when the fixture level requires it), relevant nearby docs/tests.
 Check:
 - Fixture level is not under-classified, especially mandatory expanded triggers.
 - Every risk pack is marked selected/not selected with a defensible reason.

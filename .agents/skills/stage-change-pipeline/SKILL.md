@@ -9,7 +9,7 @@ description: >
 license: MIT
 metadata:
   author: danker
-  version: "0.13.0"
+  version: "0.15.1"
 ---
 
 # Stage Change Pipeline
@@ -81,10 +81,10 @@ Stage 5.5: Issue-Change 对齐审核 (≤2 轮)
 
 **压测门禁（EITHER/OR，必须留痕）**：进入 Stage 2 之前，对设计压测做出显式决策，二选一：
 
-- **跑**：用 `grill-me` 沿决策树逐分支压测（多轮、一次一问），把未言明假设、隐藏依赖和模糊边界逼清，再创建 OpenSpec change；启动 `full-pipeline.workflow.js` 时传 `grillGate: "passed"`。
+- **跑**：用 `grill-me` 沿决策树逐分支压测（多轮、一次一问），把未言明假设、隐藏依赖和模糊边界逼清，再创建 OpenSpec change。**收敛判据与单独使用 grill-me 完全一致**：每个关键分支要么用户拍板、要么显式列为开放项，且用户明确确认共同理解（grill-me 铁律 7）——压测轮数由决策树的分支数决定，不由管道推进压力决定，"问了几个问题"不是 passed 的判据。启动 `full-pipeline.workflow.js` 时传逐分支凭证：`grillGate: { status: "passed", branches: [{ branch, decision, decidedBy: "user"|"fact-check" }], openItems: [...], userConfirmed: true }`。
 - **跳过**：阶段计划确实简单清晰时可以跳过，但必须写明理由，传 `grillGate: "skipped:<理由>"`。
 
-`full-pipeline.workflow.js` 校验该参数：缺失或格式不符**直接拒绝启动**——"忘了"不再是合法状态。注意时序：grill-me 的多轮盘问只能发生在主会话（Workflow 子代理无法与用户交互），必须在启动脚本之前完成，脚本内无法补跑。该决策随 `logEntry.grill_gate` 落入 `docs/stage-pipeline-log.jsonl`，跳过率可审计。
+`full-pipeline.workflow.js` 校验该参数：缺失、格式不符或裸 `"passed"` 字符串**直接拒绝启动**——声明不是证据，逐分支清单才是；"忘了"和"敷衍跑两问"都不再是合法状态。注意时序：grill-me 的多轮盘问只能发生在主会话（Workflow 子代理无法与用户交互），必须在启动脚本之前完成，脚本内无法补跑。该决策以 `passed:branches=<n>,open=<n>` 或 `skipped:<理由>` 形态随 `logEntry.grill_gate` 落入 `docs/stage-pipeline-log.jsonl`，跳过率与压测深度均可审计。
 
 **判断切入点**：如果 `openspec/changes/<name>/` 已存在且 `openspec status` 显示 artifacts complete，跳到 Stage 3。
 
@@ -93,6 +93,8 @@ Stage 5.5: Issue-Change 对齐审核 (≤2 轮)
 ## Stage 2: OpenSpec Change 创建
 
 **目标**：生成 proposal → design → specs → tasks 四个 artifact。
+
+**Grill 清单是强制输入**（Stage 1 压测跑过时）：每个已拍板分支的结论必须落入对应 artifact——设计决策进 design.md 的技术决策，范围/边界类结论进 proposal 的 What Changes 或 Non-goals；每个开放项要么在 Stage 2 被解决，要么显式写成 proposal/design 的 open question 或 non-goal。压测结论不靠对话记忆传导：`full-pipeline` 会把 `grillGate` 凭证里的逐分支清单注入 Stage 3 审核 prompt，逐条核对——漂移、矛盾或开放项静默消失都是 finding。凭证以**启动时点**的最终共识为准：Stage 2 期间经用户确认的决策变更，先更新凭证里对应分支再启动——ledger 核对的是最终共识，不是 grill 时点的快照。
 
 **前置**：确认 `openspec` CLI 可用（`which openspec`），项目已初始化（`openspec/` 目录存在，否则执行 `openspec init --tools claude`）。
 
@@ -340,7 +342,12 @@ Workflow({
     changeName: "<name>",
     designDocs: ["path/to/doc.md"],
     stageLabel: "<optional-stage-label>",
-    grillGate: "passed"   // 或 "skipped:<理由>"；缺失/格式不符脚本拒绝启动（见 Stage 1 压测门禁）
+    grillGate: {          // 或 "skipped:<理由>"；缺失/格式不符/裸 "passed" 均拒绝启动（见 Stage 1 压测门禁）
+      status: "passed",
+      branches: [{ branch: "<决策分支>", decision: "<结论>", decidedBy: "user" }],
+      openItems: [],
+      userConfirmed: true
+    }
   }
 })
 ```
@@ -377,10 +384,10 @@ Workflow({
 > 用时估算与最小命令集（openspec/gh 命令模板）见 [references/quick-reference.md](references/quick-reference.md)。
 
 **依赖**：
-- `full-pipeline.workflow.js` — **推荐入口**，Stage 3→5.5 全逻辑 inline（无 `workflow()` 嵌套，可安全作为顶层或子 workflow 调用），调用：`Workflow({ scriptPath: "<dir>/full-pipeline.workflow.js", args: { changeName: "<name>", designDocs: ["..."], stageLabel: "<optional>", grillGate: "passed" | "skipped:<理由>" } })`
+- `full-pipeline.workflow.js` — **推荐入口**，Stage 3→5.5 全逻辑 inline（无 `workflow()` 嵌套，可安全作为顶层或子 workflow 调用），调用：`Workflow({ scriptPath: "<dir>/full-pipeline.workflow.js", args: { changeName: "<name>", designDocs: ["..."], stageLabel: "<optional>", grillGate: {status:"passed", branches:[...], userConfirmed:true} | "skipped:<理由>" } })`
 - `review-loop.workflow.js` — Stage 3→4→4.5 回环（独立使用，不需要 full-pipeline 时调用）
 - `issue-alignment.workflow.js` — Stage 5.5 对齐审核（独立使用，不需要 full-pipeline 时调用）
-- `grill-me` skill — Stage 1→2 之间的设计压测（EITHER/OR 门禁：要么在主会话跑完，要么留痕跳过；由 `full-pipeline` 的 `grillGate` 参数强制，缺失拒绝启动）
+- `grill-me` skill — Stage 1→2 之间的设计压测（EITHER/OR 门禁：要么在主会话跑完并提交逐分支凭证对象，要么留痕跳过；由 `full-pipeline` 的 `grillGate` 参数强制，缺失、格式不符或裸 `"passed"` 均拒绝启动）
 - `reviewer` subagent — Stage 3 三路并行审核执行（由 workflow 脚本 spawn）
 - `verifier` subagent — Stage 4.5 独立验证门核销（由 workflow 脚本 spawn，不得复用修复者）
 - `docs/stage-pipeline-log.jsonl`（消费仓库内，已提交）— 跨运行 catch-rate 问责与 kill 标准
