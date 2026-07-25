@@ -1275,6 +1275,153 @@ def test_env_override_does_not_admit_missing_predecessor(
     )
 
 
+def test_env_override_does_not_admit_stale_declaration(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """§8.9: env=false + a stale declaration → ``block_declaration_stale``.
+
+    Restores the stale-propagation integration pin that the #1109 T15(b)
+    reshape removed: before the reshape, T15(b)'s fixture settled on
+    ``registry_cutover_declaration_stale``, and it was this repo's only
+    ``_build_candidates``-level assertion proving that
+    ``TransitionDecision.BLOCK_DECLARATION_STALE`` is a member of
+    ``scheduler_generation_gate._DECLARATION_LEVEL_BLOCKS``.  Reusing the old
+    geometry (old-generation history + env override off) with the D8.2
+    generation-field mismatch as the explicit stale trigger, this test keeps
+    that integration seam covered while T15(b) pins the state-lineage branch.
+    """
+    from services.orchestrator import scheduler as scheduler_module
+    from services.orchestrator.scheduler import ProductionSchedulerConfig
+    from tests.test_production_scheduler import (
+        FakeRegistry,
+        ProductionScheduler,
+        _gfs_default_forecast_hours,
+        _old_generation_state_entry,
+        _set_db_free_scheduler_env,
+        _write_db_free_file_provider_fixtures,
+        _write_db_free_state_index_fixture,
+    )
+    from tests.test_production_scheduler import (
+        _dt as _pdt,
+    )
+    from workers.data_adapters.base import CycleDiscovery
+
+    roots, paths = _set_db_free_scheduler_env(
+        monkeypatch, tmp_path / "db-free-local-root"
+    )
+    cycle_time = _pdt("2026-05-21T12:00:00Z")
+    generated_at = _pdt("2026-05-21T18:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    candidate_checksum = (
+        fixture["package_checksum"]
+        if _looks_like_hex64(fixture["package_checksum"])
+        else "b" * 64
+    )
+    # Old-generation-only history puts the candidate on the cutover boundary
+    # (§8.4 branch (d)), where the declaration must bind identity.
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=candidate_checksum,
+        generated_at=generated_at,
+        entries=[_old_generation_state_entry(roots)],
+    )
+    # Schema-valid, in-window declaration whose ``generation`` field does NOT
+    # equal ``derive_generation(entry.new_checksum)`` — the D8.2
+    # ``generation_field_mismatch`` stale trigger.  ``new_checksum`` still
+    # binds the candidate so the earlier ``new_checksum_mismatch`` branch
+    # cannot claim the decision.
+    stale_generation = "manifest-000000000000"
+    assert stale_generation != generation.derive_generation(candidate_checksum)
+    declaration_path = tmp_path / "cutover-declaration.json"
+    declaration_path.write_text(
+        json.dumps(
+            {
+                "schema_version": generation.CUTOVER_DECLARATION_SCHEMA_VERSION,
+                "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
+                "generation": stale_generation,
+                "entries": [
+                    {
+                        "model_id": "model_a",
+                        "old_checksum": "a" * 64,
+                        "new_checksum": candidate_checksum,
+                        "effective_cycle_utc": "2026-05-21T00:00:00Z",
+                        "transition_mode": "replace",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        generation.CUTOVER_DECLARATION_ENV, str(declaration_path)
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": candidate_checksum,
+        },
+    }
+    # §8.9 CRITICAL: the env is false — it must NOT loosen the gate.
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(
+            now=generated_at, allowed_cycle_hours_utc=(0, 12)
+        ),
+        registry=FakeRegistry([model]),
+        adapters={},
+        orchestrator_factory=lambda _source_id: pytest.fail(
+            "stale-declaration cutover must not build orchestrator"
+        ),
+    )
+    candidates, blocked, skipped, duplicate_exclusions, slurm_sync = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(model)],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052112",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=12,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+    assert candidates == []
+    assert len(blocked) == 1
+    assert skipped == []
+    assert duplicate_exclusions == []
+    assert slurm_sync == []
+    # R1-A4 invariant: single-value pin, no OR-set. See
+    # .workplans/1081/review/review-failure-retro-round3.md.
+    # This is the assertion that dies if BLOCK_DECLARATION_STALE is dropped
+    # from ``scheduler_generation_gate._DECLARATION_LEVEL_BLOCKS``.
+    assert blocked[0].reason == "registry_cutover_declaration_stale"
+    transition_decision = (
+        blocked[0].state_evidence.get("registry_cutover_transition", {}).get(
+            "decision"
+        )
+    )
+    assert (
+        transition_decision
+        == generation.TransitionDecision.BLOCK_DECLARATION_STALE
+    )
+
+
 def test_env_override_does_not_admit_wrong_generation_checkpoint(
     monkeypatch: Any,
     tmp_path: Path,
