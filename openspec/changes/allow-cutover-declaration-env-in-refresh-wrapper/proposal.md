@@ -74,6 +74,7 @@ round-1 遗留.)
   for deliberate new assertions.
 - Platform note: the new wrapper red-proof/rejection tests are bash >= 4
   gated (macOS `/bin/bash` 3.2 does not abort on failing `[[ ]]` under
-  `set -e`); red/green evidence is captured on node-27.
+  `set -e`); red/green evidence is captured on any bash >= 4 host (local
+  homebrew bash suffices; node-27 is the fallback oracle).
 - Deployment note: node-22 picks the change up via `git pull --ff-only` (the
   wrapper runs from the repo checkout); no service-unit change needed.
