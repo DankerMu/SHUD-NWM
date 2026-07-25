@@ -1322,19 +1322,30 @@ def _ingest_forcing_cycle(
     *,
     object_store_prefix: str = "s3://nhms",
 ) -> Mapping[str, Any]:
-    """Reuse ``apply_forcing_domain_handoff_path`` with an injected connection."""
-    from packages.common.forcing_domain_handoff_apply import (
-        apply_forcing_domain_handoff_path,
-    )
+    """Forcing-lane ingest, branched on the archived package format.
 
-    manifest_path = archive_dir / "forcing_package.json"
-    report = apply_forcing_domain_handoff_path(
-        manifest_path,
-        object_store_root=archive_dir,
-        object_store_prefix=object_store_prefix,
-        connection=staging_conn,
+    Real forcing archives come in two shapes (mover
+    ``_FORCING_DOMAIN_BUNDLE`` is optional):
+
+    - Legacy SHUD-package-only (every archive as of 2026-07: tsd + debug
+      csv + ``forcing_package.json`` + ``shud/*.csv``). The domain-handoff
+      payloads were never archived and the source object-store dirs are
+      gone — there is nothing to replay into
+      ``met.forcing_station_timeseries``. Restore-time sha256 verification
+      is the whole attestation; DB-truth coverage for the table comes from
+      the db-export salvage lane.
+    - Domain-bundle archives (``forcing_domain_package.json`` +
+      ``payloads/``). Replaying them needs the run-level handoff manifest
+      as the ``apply_forcing_domain_handoff_path`` entry point; not
+      implemented yet — fail closed rather than pretend coverage.
+    """
+    forcing_version_id = manifest["identity"].get("forcing_version_id")
+    if not (archive_dir / "forcing_domain_package.json").is_file():
+        return {"forcing_version_id": forcing_version_id, "mode": "file-integrity"}
+    raise ArchiveManifestMismatchError(
+        "forcing domain bundle replay is not supported yet; "
+        "drill the cycle via the db-export lane instead"
     )
-    return {"forcing_version_id": manifest["identity"].get("forcing_version_id"), "report": report}
 
 
 # ---------------------------------------------------------------------------
@@ -1545,7 +1556,10 @@ def _run_drill_body(
                         cycles.append(cycle_label)
                         counts.append(
                             {
-                                "item": cycle_label,
+                                # verification.cycle_label may carry a
+                                # "(file-integrity)" mode tag for legacy
+                                # bundle-less forcing archives.
+                                "item": verification.cycle_label,
                                 "expected": verification.expected_row_count,
                                 "actual": verification.staging_row_count,
                             }
@@ -1767,13 +1781,29 @@ def _verify_product_cycle(
             raise ArchiveManifestMismatchError(
                 "forcing manifest producer.subject_id is missing"
             )
+        window = _identity_window(manifest)
+        if not (dest_dir / "forcing_domain_package.json").is_file():
+            # Legacy SHUD-package-only archive (see _ingest_forcing_cycle):
+            # re-attest the restored file set against the archive manifest
+            # declaration; every member's sha256 was verified at restore.
+            declared = manifest.get("files")
+            if not isinstance(declared, list) or not declared:
+                raise ArchiveManifestMismatchError(
+                    "forcing archive manifest files must be a non-empty array"
+                )
+            restored = sum(1 for path in dest_dir.rglob("*") if path.is_file())
+            return ProductVerification(
+                cycle_label=f"{cycle_label} (file-integrity)",
+                expected_row_count=len(declared),
+                staging_row_count=restored,
+                coverage={"source": "forcing", "window": window},
+            )
         expected = _forcing_expected_row_count(dest_dir)
         staging_rows = _staging_row_count(
             staging_conn,
             "met.forcing_station_timeseries",
             {"forcing_version_id": forcing_version_id},
         )
-        window = _identity_window(manifest)
         return ProductVerification(
             cycle_label=cycle_label,
             expected_row_count=expected,

@@ -1413,6 +1413,78 @@ def test_ingest_runs_cycle_uses_drill_statement_timeout(
     assert drill._DRILL_PARSER_STATEMENT_TIMEOUT_MS > 60_000
 
 
+def _legacy_forcing_manifest() -> dict[str, Any]:
+    return {
+        "identity": {
+            "lane": "forcing",
+            "source": "gfs",
+            "cycle_identity": "2026061600",
+            "basin_version_id": "basins_qhh_vbasins",
+            "model_id": "basins_qhh_shud",
+            "forcing_version_id": "forc-v1",
+        },
+        "producer": {
+            "subject_id": "forc-v1",
+            "start_time": "2026-06-16T00:00:00Z",
+            "end_time": "2026-06-23T00:00:00Z",
+        },
+        "files": [
+            {"path": "forcing.tsd.forc"},
+            {"path": "forcing_package.json"},
+            {"path": "shud/X100.05Y36.45.csv"},
+        ],
+    }
+
+
+def test_ingest_forcing_legacy_package_skips_db_apply(tmp_path: Path) -> None:
+    """Legacy SHUD-package-only forcing archives carry no domain-handoff
+    payloads (they were never archived and the source dirs are gone) —
+    the adapter must not attempt a DB replay."""
+    (tmp_path / "forcing_package.json").write_text("{}")
+    result = drill._ingest_forcing_cycle(
+        tmp_path, _legacy_forcing_manifest(), object()
+    )
+    assert result == {"forcing_version_id": "forc-v1", "mode": "file-integrity"}
+
+
+def test_ingest_forcing_domain_bundle_fails_closed(tmp_path: Path) -> None:
+    """Domain-bundle archives need the run-level handoff manifest to
+    replay; until that lands the drill must fail closed, not fake it."""
+    (tmp_path / "forcing_domain_package.json").write_text("{}")
+    with pytest.raises(drill.ArchiveManifestMismatchError):
+        drill._ingest_forcing_cycle(tmp_path, _legacy_forcing_manifest(), object())
+
+
+def test_verify_forcing_legacy_reattests_restored_file_set(tmp_path: Path) -> None:
+    """Legacy forcing verification counts restored files against the
+    archive manifest declaration and tags the counts item with the
+    file-integrity mode."""
+    (tmp_path / "shud").mkdir()
+    (tmp_path / "forcing.tsd.forc").write_text("tsd")
+    (tmp_path / "forcing_package.json").write_text("{}")
+    (tmp_path / "shud" / "X100.05Y36.45.csv").write_text("csv")
+    verification = drill._verify_product_cycle(
+        tmp_path, _legacy_forcing_manifest(), staging_conn=object()
+    )
+    assert verification.matches
+    assert verification.expected_row_count == 3
+    assert verification.cycle_label.endswith("(file-integrity)")
+    assert verification.coverage == {
+        "source": "forcing",
+        "window": {"start": "2026-06-16T00:00:00Z", "end": "2026-06-23T00:00:00Z"},
+    }
+
+
+def test_verify_forcing_legacy_detects_missing_restored_file(tmp_path: Path) -> None:
+    """A restored tree missing a declared member must not count-match."""
+    (tmp_path / "forcing.tsd.forc").write_text("tsd")
+    (tmp_path / "forcing_package.json").write_text("{}")
+    verification = drill._verify_product_cycle(
+        tmp_path, _legacy_forcing_manifest(), staging_conn=object()
+    )
+    assert not verification.matches
+
+
 def test_c_is_2_workspace_cleaned_on_pass(tmp_path: Path, zstd_bin: Path) -> None:
     """C1 / C-is-2: workspace removed on PASS."""
     manifest_path, manifest = _write_fixture_runs_archive(tmp_path)
