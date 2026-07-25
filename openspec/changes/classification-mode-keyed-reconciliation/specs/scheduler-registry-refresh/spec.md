@@ -34,7 +34,11 @@
 
 - **WHEN** a receipt carries `outcome="dry_run"` with
   `classification.mode="full"`, or `outcome="published"` with
-  `classification.mode="id_only"`, or a `mode` outside `id_only`/`full`
+  `classification.mode="id_only"`, or `outcome="published_receipt_failed"`
+  with `classification.mode="id_only"` (that outcome only arises from a
+  committed real publish, always classified in full mode — and it is the
+  one shape the emergency-reconstruct channel republishes), or a `mode`
+  outside `id_only`/`full`
 - **THEN** validation SHALL raise `receipt_classification_invalid`
 
 #### Scenario: Legacy mode-less receipts keep their current behavior
