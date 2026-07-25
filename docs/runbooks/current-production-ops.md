@@ -728,15 +728,20 @@ refresh 把 `latest.json` 重写掉，新 receipt 一定带 `.cutover_gate`，`-
 `true`，而当前 checkout 的 `RECEIPT_OPTIONAL_KEYS`（`scripts/scheduler_file_provider_refresh.py`）
 不含它，即为本条。同期落在 emergency slot 的 receipt 同样带该键，
 `reconstruct_primary_receipt` 在旧 checkout 上也会以 `emergency_record_invalid` 失败——
-受影响的不止 `--enable`。处置：用**旧代码**跑一次 manual refresh，让 `latest.json` 回到
-旧 shape 后再 `--enable`；行为全程 fail-closed（不写坏 canonical provider、不静默降级），
+受影响的不止 `--enable`。处置：用**旧代码**跑一次**成功**（`outcome == "published"`）的
+manual refresh，让 `latest.json` 回到旧 shape 后再 `--enable`（refused/failed 的 refresh
+也会重写 `latest.json`，shape 问题消失但 `outcome != "published"` 仍被拒，同升级方向）；
+注意 refresh 自愈**只覆盖 `latest.json`**——emergency slot 是独立落盘文件，普通 refresh
+不读它，`--recover-emergency` 需要在**新代码** checkout 下执行（只有新校验器认这份
+shape）。行为全程 fail-closed（不写坏 canonical provider、不静默降级），
 且写路径不被旧 receipt 阻塞（`_publish_primary_receipt` 的 lenient reader 只读
 `(started_at, run_id)` 排序、不跑 `_validate_receipt`），所以下一次旧代码 refresh 即自愈。
 **不要手工删 `latest.json`**：它同时是 monotonic-order 的排序锚点，删掉只会把可判别的
 版本 skew 变成无锚点的空白现场，而正确处置（跑一次 refresh）本来就会覆盖它。
 
 上述两个方向是"**receipt 新增顶层可选键**"的通用后果，不是 `cutover_gate` 一次性的坑：
-精确 allowed-set 天然单向兼容——新代码认旧 receipt（少可选键，放行），旧代码不认新
+精确 allowed-set 天然单向兼容——新代码在 **shape 层**认旧 receipt（少可选键，放行；
+条件必填规则另算，如 #1144 的 presence 条件仍会拒掉旧 published receipt），旧代码不认新
 receipt（多未知键，`receipt_shape_invalid`）。嵌套键同理（#1140 给
 `registry_classification` 加的 `mode` 在 pre-#1140 校验器上以
 `receipt_classification_invalid` 拒绝，传导路径与处置完全相同）。速查：
@@ -744,7 +749,7 @@ receipt（多未知键，`receipt_shape_invalid`）。嵌套键同理（#1140 �
 | 方向 | 症状 | 阻塞 `--enable`? | 处置 |
 | --- | --- | --- | --- |
 | 升级：pre-#1080/#1132 receipt + 新代码 | `validate_current_receipt` 报 `emergency_record_invalid`（缺 `registry_classification` / `.cutover_gate`） | 是（refresh 写路径不阻塞） | 新代码跑一次**成功** manual refresh |
-| 回滚：post-#1132/#1140 receipt + 旧代码 | 同码 `emergency_record_invalid`（多未知键 → `receipt_shape_invalid` / `receipt_classification_invalid`）；emergency slot reconstruct 同样失败 | 是（refresh 写路径不阻塞） | 旧代码跑一次 manual refresh；勿删 `latest.json` |
+| 回滚：post-#1132/#1140 receipt + 旧代码 | 同码 `emergency_record_invalid`（多未知键 → `receipt_shape_invalid` / `receipt_classification_invalid`）；emergency slot reconstruct 同样失败 | 是（refresh 写路径不阻塞） | 旧代码跑一次**成功** manual refresh；emergency slot 用新代码 `--recover-emergency`；勿删 `latest.json` |
 
 下一次给 receipt 加顶层（或嵌套 exact-set 内）可选键时，在本小节的表里加一行即可，
 不要再散落一次性备注。
