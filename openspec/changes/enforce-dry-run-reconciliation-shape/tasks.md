@@ -19,7 +19,7 @@ Risk packs considered (core):
 
 ## 1. Validator + tests
 
-- [ ] 1.1 `scripts/scheduler_file_provider_refresh.py` dry_run branch
+- [x] 1.1 `scripts/scheduler_file_provider_refresh.py` dry_run branch
   (`:1977-1987` — `if outcome == "dry_run":` at :1977, early `return` at
   :1987; NOTE :1988-1992 is the post-return non-dry_run section and must
   stay untouched), inside
@@ -46,7 +46,7 @@ Risk packs considered (core):
   constraints.
   Evidence floor: `git diff` confined to the dry_run branch + docstring;
   the post-`return` sections untouched.
-- [ ] 1.2 Negative tests (append to
+- [x] 1.2 Negative tests (append to
   `tests/test_scheduler_file_provider_refresh.py`). CALL SHAPE IS PINNED
   (fixture-review P2-2): call the validator DIRECTLY —
   `refresh._enforce_registry_classification_reconciliation(classification,
@@ -82,7 +82,7 @@ Risk packs considered (core):
   `git show`): all five must FAIL with "DID NOT RAISE" (the tampered
   classifications are currently ACCEPTED). No `receipt_provider_invalid`
   may appear in the red output. Record outputs verbatim. Green after 1.1.
-- [ ] 1.3 Honest dry_run happy-path regression (one test, SAME direct-call
+- [x] 1.3 Honest dry_run happy-path regression (one test, SAME direct-call
   shape as 1.2): classification shaped exactly as the writer produces for
   "prospective has additions AND previous has models absent from
   prospective" — e.g. previous_sha=<64-hex>, previous_count=3,
@@ -96,7 +96,7 @@ Risk packs considered (core):
   Also confirm existing dry_run happy-path tests stay green unmodified.
   Evidence floor: test passes pre-change AND post-change (it guards against
   over-tightening, not the gap itself) — record both runs.
-- [ ] 1.4 Sibling-surface check (read-only, record result in PR body): no
+- [x] 1.4 Sibling-surface check (read-only, record result in PR body): no
   other caller constructs dry_run receipts that would newly fail — grep
   for `_enforce_registry_classification_reconciliation` call sites and any
   fixture receipts with `outcome="dry_run"` in tests; adjust NONE of them
@@ -105,10 +105,10 @@ Risk packs considered (core):
 
 ## 2. Change-level verification floor
 
-- [ ] 2.1 `uv run pytest -q tests/test_scheduler_file_provider_refresh.py`
+- [x] 2.1 `uv run pytest -q tests/test_scheduler_file_provider_refresh.py`
   green (full suite).
-- [ ] 2.2 `uv run ruff check .` clean.
-- [ ] 2.3 `openspec validate enforce-dry-run-reconciliation-shape --strict
+- [x] 2.2 `uv run ruff check .` clean.
+- [x] 2.3 `openspec validate enforce-dry-run-reconciliation-shape --strict
   --no-interactive` PASS.
-- [ ] 2.4 Scope check: `git diff --name-only origin/master...HEAD` = the
+- [x] 2.4 Scope check: `git diff --name-only origin/master...HEAD` = the
   validator script, the tests file, this fixture. Nothing else.

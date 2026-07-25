@@ -4713,3 +4713,171 @@ def test_publish_primary_receipt_replaces_corrupt_latest(
     assert {path.stem for path in (root / "history").iterdir()} == {
         "refresh_after_corruption"
     }
+
+
+def _dry_run_classification(
+    *,
+    previous_sha: str | None,
+    previous_count: object,
+    added: list[str],
+    unchanged: list[str],
+    removed: list[str],
+    prospective_count: int,
+    new_registry_sha256: str | None = None,
+) -> dict[str, object]:
+    """#1135: dry_run classification payload shaped like ``_classify_registry``'s
+    id-only output — ``package_changed``/``refused``/``declared_cutovers`` are
+    empty by construction.  Every #1135 test below keeps
+    ``added + unchanged == prospective_count`` so the PRE-existing dry_run
+    checks accept the payload and only the tampered field can reject it."""
+    return {
+        "previous_registry_sha256": previous_sha,
+        "new_registry_sha256": new_registry_sha256,
+        "previous_model_count": previous_count,
+        "prospective_model_count": prospective_count,
+        "added": {"items": added, "total": len(added), "truncated": False},
+        "unchanged": {
+            "items": unchanged,
+            "total": len(unchanged),
+            "truncated": False,
+        },
+        "removed": {"items": removed, "total": len(removed), "truncated": False},
+        "package_changed": {"items": [], "total": 0, "truncated": False},
+        "refused": {"items": [], "total": 0, "truncated": False},
+        "declared_cutovers": {"items": [], "total": 0, "truncated": False},
+    }
+
+
+def test_dry_run_reconciliation_rejects_bootstrap_removed_entries() -> None:
+    """#1135(i): a bootstrap dry_run cannot carry removals — dry_run classify
+    returns before the removal loop, so the removal is forged."""
+    classification = _dry_run_classification(
+        previous_sha=None,
+        previous_count=None,
+        added=["basin-101"],
+        unchanged=[],
+        removed=["basin-102"],
+        prospective_count=1,
+    )
+
+    with pytest.raises(ValueError, match="receipt_classification_invalid"):
+        refresh._enforce_registry_classification_reconciliation(
+            classification, outcome="dry_run", reason="dry_run_complete"
+        )
+
+
+def test_dry_run_reconciliation_rejects_non_bootstrap_removed_entries() -> None:
+    """#1135(ii): the same forgery with a previous registry recorded.  All
+    previous-side numbers stay self-consistent (unchanged 2 <= previous 5), so
+    only the ``removed.total != 0`` rule can reject it."""
+    classification = _dry_run_classification(
+        previous_sha="1" * 64,
+        previous_count=5,
+        added=["basin-103"],
+        unchanged=["basin-101", "basin-102"],
+        removed=["basin-104"],
+        prospective_count=3,
+    )
+
+    with pytest.raises(ValueError, match="receipt_classification_invalid"):
+        refresh._enforce_registry_classification_reconciliation(
+            classification, outcome="dry_run", reason="dry_run_complete"
+        )
+
+
+def test_dry_run_reconciliation_rejects_count_without_previous_sha() -> None:
+    """#1135(iii): contradictory shape — a null ``previous_registry_sha256``
+    claims no previous canonical registry, so the pinned count must be null
+    too."""
+    classification = _dry_run_classification(
+        previous_sha=None,
+        previous_count=7,
+        added=["basin-101"],
+        unchanged=[],
+        removed=[],
+        prospective_count=1,
+    )
+
+    with pytest.raises(ValueError, match="receipt_classification_invalid"):
+        refresh._enforce_registry_classification_reconciliation(
+            classification, outcome="dry_run", reason="dry_run_complete"
+        )
+
+
+def test_dry_run_reconciliation_rejects_unchanged_above_previous_count() -> None:
+    """#1135(iv): ``unchanged`` rows are ids present in BOTH sets, so their
+    total cannot exceed the pinned ``previous_model_count``."""
+    classification = _dry_run_classification(
+        previous_sha="1" * 64,
+        previous_count=2,
+        added=[],
+        unchanged=["basin-101", "basin-102", "basin-103"],
+        removed=[],
+        prospective_count=3,
+    )
+
+    with pytest.raises(ValueError, match="receipt_classification_invalid"):
+        refresh._enforce_registry_classification_reconciliation(
+            classification, outcome="dry_run", reason="dry_run_complete"
+        )
+
+
+def test_dry_run_reconciliation_rejects_forged_new_registry_sha() -> None:
+    """#1135(v): a dry_run never publishes a canonical registry, so the writer
+    pins ``new_registry_sha256`` to None; a well-formed 64-hex value here is a
+    forged publish claim (format validation alone accepts it)."""
+    classification = _dry_run_classification(
+        previous_sha="1" * 64,
+        previous_count=3,
+        added=["basin-103", "basin-104"],
+        unchanged=["basin-101", "basin-102"],
+        removed=[],
+        prospective_count=4,
+        new_registry_sha256="2" * 64,
+    )
+
+    with pytest.raises(ValueError, match="receipt_classification_invalid"):
+        refresh._enforce_registry_classification_reconciliation(
+            classification, outcome="dry_run", reason="dry_run_complete"
+        )
+
+
+def test_dry_run_reconciliation_rejects_boolean_previous_count() -> None:
+    """#1135: pins the branch-local isinstance/bool guard.  Only meaningful via
+    this direct call — on the ``_validate_receipt`` path
+    ``_validate_registry_classification_field`` already rejects boolean counts
+    for every outcome, so a receipt-level version would be vacuously green."""
+    classification = _dry_run_classification(
+        previous_sha="1" * 64,
+        previous_count=True,
+        added=["basin-101"],
+        unchanged=[],
+        removed=[],
+        prospective_count=1,
+    )
+
+    with pytest.raises(ValueError, match="receipt_classification_invalid"):
+        refresh._enforce_registry_classification_reconciliation(
+            classification, outcome="dry_run", reason="dry_run_complete"
+        )
+
+
+def test_dry_run_reconciliation_accepts_previous_models_absent_from_prospective() -> None:
+    """#1135 acceptance criterion 4: the previous-side sum equality
+    (``unchanged + package_changed + removed == previous_model_count``) must
+    NEVER be applied to dry_run.  This is the writer's honest output when the
+    previous registry holds 3 models, 2 of them survive into a 4-model
+    prospective set and 1 is absent: 2 + 0 + 0 != 3 by design, because dry_run
+    never computes removals.  Must not raise."""
+    classification = _dry_run_classification(
+        previous_sha="1" * 64,
+        previous_count=3,
+        added=["basin-103", "basin-104"],
+        unchanged=["basin-101", "basin-102"],
+        removed=[],
+        prospective_count=4,
+    )
+
+    refresh._enforce_registry_classification_reconciliation(
+        classification, outcome="dry_run", reason="dry_run_complete"
+    )
