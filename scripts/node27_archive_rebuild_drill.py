@@ -1278,6 +1278,11 @@ def load_salvage_manifest(path: Path) -> dict[str, Any]:
 # Product ingest adapters (H1 injection — never .from_env())
 # ---------------------------------------------------------------------------
 
+# The drill shares the PG instance with live autopipe ingest; a full-run
+# INSERT into the staging hypertable can exceed the parser's 60s online
+# default under that contention. Batch verification tolerates minutes.
+_DRILL_PARSER_STATEMENT_TIMEOUT_MS = 300_000
+
 
 def _ingest_runs_cycle(
     workspace_root: Path,
@@ -1301,7 +1306,10 @@ def _ingest_runs_cycle(
         object_store_prefix="s3://nhms",
     )
     object_store = LocalObjectStore(config.object_store_root, config.object_store_prefix)
-    repository = PsycopgOutputParserRepository(database_url=staging_database_url)
+    repository = PsycopgOutputParserRepository(
+        database_url=staging_database_url,
+        statement_timeout_ms=_DRILL_PARSER_STATEMENT_TIMEOUT_MS,
+    )
     parser = OutputParser(config=config, repository=repository, object_store=object_store)
     result = parser.parse_run(run_id)
     return {"run_id": run_id, "rows_written": result.rows_written}

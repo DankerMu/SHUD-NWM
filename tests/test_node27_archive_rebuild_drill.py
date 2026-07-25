@@ -37,6 +37,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import jsonschema
@@ -1376,6 +1377,40 @@ def test_default_ingest_adapters_bind_dispatch_call_shapes() -> None:
         Path("/ws"), {}, staging_database_url="postgresql://x"
     )
     inspect.signature(drill._ingest_forcing_cycle).bind(Path("/dest"), {}, object())
+
+
+def test_ingest_runs_cycle_uses_drill_statement_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The drill shares the PG instance with live ingest; the parser's 60s
+    online default cancels full-run staging INSERTs under contention. The
+    runs adapter must construct the repository with the drill's batch
+    timeout."""
+    import workers.output_parser.parser as parser_mod
+
+    captured: dict[str, Any] = {}
+
+    class _FakeRepo:
+        def __init__(self, *, database_url: str, statement_timeout_ms: int = 0) -> None:
+            captured["timeout_ms"] = statement_timeout_ms
+
+    class _FakeParser:
+        def __init__(self, *, config: Any, repository: Any, object_store: Any) -> None:
+            pass
+
+        def parse_run(self, run_id: str) -> Any:
+            return SimpleNamespace(rows_written=7)
+
+    monkeypatch.setattr(parser_mod, "PsycopgOutputParserRepository", _FakeRepo)
+    monkeypatch.setattr(parser_mod, "OutputParser", _FakeParser)
+    result = drill._ingest_runs_cycle(
+        tmp_path,
+        {"identity": {"run_id": "r1"}},
+        staging_database_url="postgresql://staging/x",
+    )
+    assert result == {"run_id": "r1", "rows_written": 7}
+    assert captured["timeout_ms"] == drill._DRILL_PARSER_STATEMENT_TIMEOUT_MS
+    assert drill._DRILL_PARSER_STATEMENT_TIMEOUT_MS > 60_000
 
 
 def test_c_is_2_workspace_cleaned_on_pass(tmp_path: Path, zstd_bin: Path) -> None:
