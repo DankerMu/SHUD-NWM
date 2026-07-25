@@ -4,7 +4,7 @@
 
 ### Requirement: Manual publisher concurrency SHALL be operator-gated and the CLI SHALL warn about the refresh-timer prohibition on startup
 
-The manual publisher CLI's concurrency with the provider-refresh timer is governed by an explicit operator prohibition (runbook), not by an `expected_preimage` CAS — the CLI SHALL print an unconditional startup WARNING line to stderr naming the refresh timer unit and directing the operator to confirm it is not active, the warning SHALL NOT alter exit codes or corrupt the machine-readable stderr JSON payload (which remains parseable from the final stderr line), and no design or operations document may claim CAS protection for the manual-publisher path while `main()` does not populate `expected_preimage`.
+The manual publisher CLI's concurrency with the provider-refresh timer is governed by an explicit operator prohibition (runbook), not by an `expected_preimage` CAS — the CLI SHALL print a startup WARNING line to stderr, unconditional for every run that reaches argument-validated startup (argparse usage errors, exit 2, are out of scope), naming the refresh timer unit and directing the operator to confirm the timer AND its oneshot service are not active; the warning SHALL NOT alter exit codes or corrupt the machine-readable stderr JSON payload (which remains parseable from the final stderr line), and no design, spec, or operations document may claim CAS protection for the manual-publisher path while `main()` does not populate `expected_preimage`.
 
 #### Scenario: Startup warning is present on success and failure runs
 

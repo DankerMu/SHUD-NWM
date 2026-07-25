@@ -37,12 +37,19 @@ while the CLI runs in maintenance windows where operator gating suffices
   ("manual publisher concurrency is operator-gated via the runbook; the
   `expected_preimage` CAS parameter is exercised only by the internal
   refresh runner; the CLI does not populate it").
-- `docs/runbooks/current-production-ops.md` manual-publisher section
-  (~:613-616): explicit entry — running the manual publisher CLI while
-  `nhms-scheduler-file-provider-refresh.timer` is active is PROHIBITED;
-  include the `systemctl --user status
-  nhms-scheduler-file-provider-refresh.timer` check command and the
-  rationale (no CAS protection on the CLI path).
+- `docs/runbooks/current-production-ops.md`, TWO places: (a) the
+  manual-publisher section (~:613-617) — explicit entry: running the
+  manual publisher CLI while `nhms-scheduler-file-provider-refresh.timer`
+  OR its oneshot service is active is PROHIBITED, with the paired
+  `systemctl --user status <timer> <service> --no-pager` check and
+  accept-criteria; (b) §3.1.2 (~:357-359) — the same false claim ("CLI
+  shares the expected-preimage check; concurrent writers cannot overwrite
+  newer authoritative content") is corrected to the operator-gated fact.
+- `openspec/changes/node22-scheduler-registry-refresh/specs/scheduler-registry-refresh/spec.md:5-8`
+  (the still-open change's requirement text): remove "manual" from the
+  expected-preimage writer list — otherwise archiving that change lands a
+  normative clause contradicting this one. Destination-lock serialization
+  wording stays (the CLI does take that lock at commit).
 - `scripts/publish_scheduler_file_registry.py` `main()`: unconditional
   startup WARNING line on stderr (mirroring the existing
   `--allow-uncovered-cutover` banner style) telling the operator to
@@ -69,7 +76,8 @@ while the CLI runs in maintenance windows where operator gating suffices
   place; that change must stay `openspec validate --strict` green).
 - Affected code: `scripts/publish_scheduler_file_registry.py` (one
   stderr line), `tests/test_publish_scheduler_file_registry.py`,
-  `docs/runbooks/current-production-ops.md`,
-  `openspec/changes/node22-scheduler-registry-refresh/design.md`.
+  `docs/runbooks/current-production-ops.md` (two sections),
+  `openspec/changes/node22-scheduler-registry-refresh/design.md` +
+  `.../specs/scheduler-registry-refresh/spec.md` (writer-list fix).
 - No receipt/schema/DB surface. No behavior change beyond the added
   warning line.
