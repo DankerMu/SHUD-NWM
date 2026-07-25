@@ -4325,3 +4325,137 @@ def test_provider_atomic_cas_refuses_concurrent_authoritative_swap(
     assert info.value.reason == "provider_preimage_changed"
     # Concurrent bytes preserved unchanged.
     assert canonical.read_bytes() == b"authoritative-new\n"
+
+
+# ---------------------------------------------------------------------------
+# #1094 lenient receipt-order fail-safe — direct branch coverage.
+# ``_lenient_receipt_order`` is the reader guarding C-A2: a legacy or
+# corrupted on-disk ``latest.json`` must never brick the next refresh's
+# primary-receipt publish.  Every malformed shape returns ``None`` (never
+# raises) so ``_publish_primary_receipt`` defaults to ``replace_latest=True``.
+# The T9 tests above cover only well-formed pre-#1080 payloads; these pin the
+# fail-safe branches themselves.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(None, id="non-mapping-none"),
+        pytest.param("not a mapping", id="non-mapping-str"),
+        pytest.param([1, 2, 3], id="non-mapping-list"),
+        pytest.param({"started_at": "2026-07-01T00:00:00Z"}, id="run-id-missing"),
+        pytest.param(
+            {"run_id": "", "started_at": "2026-07-01T00:00:00Z"}, id="run-id-empty"
+        ),
+        pytest.param(
+            {"run_id": 42, "started_at": "2026-07-01T00:00:00Z"}, id="run-id-non-str"
+        ),
+        pytest.param(
+            {"run_id": "refresh_x", "started_at": "not-a-datetime"},
+            id="started-at-unparsable",
+        ),
+        pytest.param({"run_id": "refresh_x"}, id="started-at-missing"),
+    ],
+)
+def test_lenient_receipt_order_returns_none_for_malformed_payload(
+    payload: object,
+) -> None:
+    """#1094 (a)/(b)/(c): every malformed payload shape fails safe to ``None``.
+
+    Non-Mapping payloads (including the ``None`` that
+    ``_publish_primary_receipt`` substitutes for undecodable/non-JSON
+    ``latest.json`` bytes), a missing/empty/non-str ``run_id``, and a
+    missing/unparsable ``started_at`` must all return ``None`` rather than
+    raise — a raise here bricks the next daily refresh's publish.
+    """
+    assert refresh._lenient_receipt_order(payload) is None
+
+
+@pytest.mark.parametrize(
+    "started_at",
+    [
+        pytest.param("2026-07-01T00:00:00Z", id="utc-zulu"),
+        pytest.param("2026-07-01T08:00:00+08:00", id="non-utc-offset"),
+    ],
+)
+def test_lenient_receipt_order_returns_tz_aware_order_for_valid_payload(
+    started_at: str,
+) -> None:
+    """#1094: a valid payload yields ``(started_at, run_id)`` with the
+    datetime timezone-aware and normalized to UTC — pins against a future
+    naive-datetime regression that would make order comparison in
+    ``_publish_primary_receipt`` raise on tz-aware/naive mixing.
+    """
+    order = refresh._lenient_receipt_order(
+        {"run_id": "refresh_x", "started_at": started_at}
+    )
+
+    assert order is not None
+    started, run_id = order
+    assert run_id == "refresh_x"
+    assert started.tzinfo is not None
+    assert started.utcoffset() == timedelta(0)
+    assert started == refresh.datetime(2026, 7, 1, tzinfo=refresh.UTC)
+
+
+@pytest.mark.parametrize(
+    "corrupt_bytes",
+    [
+        pytest.param(b"{ not json", id="json-decode-error"),
+        pytest.param(b"\x80\x81", id="unicode-decode-error"),
+    ],
+)
+def test_publish_primary_receipt_replaces_corrupt_latest(
+    tmp_path: Path, corrupt_bytes: bytes
+) -> None:
+    """#1094 end-to-end: a corrupted ``latest.json`` does not brick the next
+    publish.  Both members of the catch tuple in ``_publish_primary_receipt``
+    are exercised — ``b"{ not json"`` raises ``json.JSONDecodeError`` and
+    ``b"\\x80\\x81"`` raises ``UnicodeDecodeError``; either way the existing
+    payload becomes ``None``, ``_lenient_receipt_order`` fails safe, and the
+    new receipt is published over the top.
+    """
+    root = tmp_path / "receipts"
+    root.mkdir(mode=0o700)
+    provider = {
+        "name": "registry",
+        "before_sha256": "1" * 64,
+        "before_inode": 100,
+        "before_schema_version": "nhms.scheduler.file_model_registry.v1",
+        "before_generated_at": "2026-07-01T00:00:00Z",
+        "before_payload_checksum": "sha256:" + "a" * 64,
+        "after_sha256": "2" * 64,
+        "after_schema_version": "nhms.scheduler.file_model_registry.v1",
+        "after_generated_at": "2026-07-01T01:00:00Z",
+        "after_payload_checksum": "sha256:" + "b" * 64,
+        "entry_count": 13,
+    }
+    receipt = refresh._receipt(
+        run_id="refresh_after_corruption",
+        started=refresh.datetime(2026, 7, 14, tzinfo=refresh.UTC),
+        outcome="published",
+        reason="success",
+        phase="complete",
+        providers=[
+            provider,
+            {**provider, "name": "readiness"},
+            {**provider, "name": "state"},
+        ],
+        registry_classification=_classification_stub(),
+    )
+    (root / "latest.json").write_bytes(corrupt_bytes)
+
+    # Must not raise: the corrupt bytes are unreadable, so the publisher
+    # defaults to replace.
+    refresh._publish_primary_receipt(root, receipt)
+
+    assert (root / "latest.json").read_bytes() == refresh._receipt_bytes(
+        refresh._validate_receipt(receipt)
+    )
+    # Implementation-independent check (mirrors the monotonic test's style):
+    # the persisted JSON is the new receipt itself.
+    assert json.loads((root / "latest.json").read_text()) == receipt
+    assert {path.stem for path in (root / "history").iterdir()} == {
+        "refresh_after_corruption"
+    }

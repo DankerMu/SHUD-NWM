@@ -18,7 +18,7 @@ Risk packs considered (core):
 
 ## 1. Regression tests
 
-- [ ] 1.1 Parametrized direct test of `refresh._lenient_receipt_order` in
+- [x] 1.1 Parametrized direct test of `refresh._lenient_receipt_order` in
   `tests/test_scheduler_file_provider_refresh.py`, asserting `is None` for:
   (a) `None`, `"not a mapping"`, `[1, 2, 3]` (non-Mapping);
   (b) `{"started_at": "2026-07-01T00:00:00Z"}` (run_id missing),
@@ -28,12 +28,12 @@ Risk packs considered (core):
   `{"run_id": "refresh_x"}` (started_at missing).
   Evidence floor: all params green on head; issue acceptance criterion 1
   (≥4 cases across a/b/c/d-missing) satisfied.
-- [ ] 1.2 Happy-path pin: valid payload
+- [x] 1.2 Happy-path pin: valid payload
   (e.g. `{"run_id": "refresh_x", "started_at": "2026-07-01T00:00:00Z"}`)
   returns a `(datetime, run_id)` tuple, `run_id` equal to input, datetime
   tz-aware (`tzinfo is not None` and equals the parsed instant in UTC).
   Evidence floor: green on head (issue acceptance criterion 3).
-- [ ] 1.3 End-to-end fail-safe test, parametrized over corrupt seeds
+- [x] 1.3 End-to-end fail-safe test, parametrized over corrupt seeds
   `[b"{ not json", b"\x80\x81"]` (the first triggers `JSONDecodeError`, the
   second `UnicodeDecodeError` — pins BOTH members of the catch tuple at
   `scripts/scheduler_file_provider_refresh.py:1517`): build a valid receipt
@@ -46,7 +46,7 @@ Risk packs considered (core):
   implementation-independent check `json.loads((root / "latest.json").read_text())
   == receipt` (mirrors the monotonic test's style at `:1853`).
   Evidence floor: both params green on head (issue acceptance criterion 2).
-- [ ] 1.4 MANDATORY mutation-check: locally change the non-Mapping branch
+- [x] 1.4 MANDATORY mutation-check: locally change the non-Mapping branch
   `return None` (`scripts/scheduler_file_provider_refresh.py:1480` — the
   line INSIDE the `if not isinstance(payload, Mapping):` guard at `:1479`,
   NOT `:1481` which is the `run_id` line) to
@@ -58,13 +58,13 @@ Risk packs considered (core):
 
 ## 2. Change-level verification floor
 
-- [ ] 2.1 `uv run pytest -q tests/test_scheduler_file_provider_refresh.py`
+- [x] 2.1 `uv run pytest -q tests/test_scheduler_file_provider_refresh.py`
   green (full suite; T9 tests `:3763`/`:3839` and monotonic test `:1830`
   unmodified).
-- [ ] 2.2 `uv run ruff check .` clean.
-- [ ] 2.3 `openspec validate pin-lenient-receipt-order-failsafe --strict
+- [x] 2.2 `uv run ruff check .` clean.
+- [x] 2.3 `openspec validate pin-lenient-receipt-order-failsafe --strict
   --no-interactive` PASS.
-- [ ] 2.4 Zero production-code change (issue acceptance criterion 4):
+- [x] 2.4 Zero production-code change (issue acceptance criterion 4):
   `git diff --name-only origin/master...HEAD -- scripts/ packages/ apps/
   services/ workers/` is empty; outside `openspec/` the only changed file is
   `tests/test_scheduler_file_provider_refresh.py`.
