@@ -99,6 +99,17 @@ def test_normalizer_defaults_missing_declaration_present_to_false(
     }
 
 
+@pytest.mark.parametrize("declaration_present", [True, False])
+def test_normalizer_passes_real_bool_declaration_present_through(declaration_present: bool) -> None:
+    """#1131: a real bool survives the type check unchanged — rejecting non-bools
+    must not overwrite the caller's recorded presence with a constant."""
+    audited = registry_audit.normalize_cutover_gate_audit(
+        {"mode": "enforced", "declaration_env": "E", "declaration_present": declaration_present}
+    )
+
+    assert audited["declaration_present"] is declaration_present
+
+
 def test_normalizer_maps_none_to_not_wired_fallback() -> None:
     """(d) `None` means "caller never wired the gate", recorded truthfully."""
     assert registry_audit.normalize_cutover_gate_audit(None) == {
