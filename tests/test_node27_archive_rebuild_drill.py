@@ -1315,6 +1315,56 @@ def test_staging_column_types_caches_generated_always_set() -> None:
     assert len(conn.cursors) == 1  # one catalog query, both caches filled
 
 
+class _SegmentCountCursor(_RecordingCursor):
+    """Scripted cursor for ``_staging_segment_count``: routes fetchone by the
+    last executed statement (model_instance lookup / filtered count /
+    fallback bare count)."""
+
+    def __init__(self, filtered_count: int, bare_count: int) -> None:
+        super().__init__()
+        self._filtered = filtered_count
+        self._bare = bare_count
+
+    def fetchone(self) -> Any | None:
+        stmt = str(self.executed[-1][0]).lower()
+        if "model_instance" in stmt:
+            return ("rnv-1",)
+        if "shud_output_river" in stmt:
+            return (self._filtered,)
+        return (self._bare,)
+
+
+class _SegmentCountConn(_RecordingStagingConn):
+    def __init__(self, filtered_count: int, bare_count: int) -> None:
+        super().__init__()
+        self._counts = (filtered_count, bare_count)
+
+    def cursor(self, *args: Any, **kwargs: Any) -> _RecordingCursor:
+        c = _SegmentCountCursor(*self._counts)
+        self.cursors.append(c)
+        return c
+
+
+def test_staging_segment_count_uses_shud_output_subset() -> None:
+    """#1122: expected rivqdown column count must mirror the production
+    parser's ``load_river_segments`` oracle — the shud_output_river subset —
+    not the physical row count (registries carry a duplicate seed set)."""
+    conn = _SegmentCountConn(filtered_count=1633, bare_count=3266)
+    count = drill._staging_segment_count(conn, {"run_id": "run-1"})
+    assert count == 1633
+    # Fallback query never issued when the subset is non-empty.
+    stmts = [str(s).lower() for s, _ in conn.cursors[0].executed]
+    assert sum("count(*)" in s for s in stmts) == 1
+
+
+def test_staging_segment_count_falls_back_to_bare_count_when_subset_empty() -> None:
+    """Parity with load_river_segments: no shud_output_river-tagged rows →
+    fall back to all rows for the network."""
+    conn = _SegmentCountConn(filtered_count=0, bare_count=42)
+    count = drill._staging_segment_count(conn, {"run_id": "run-1"})
+    assert count == 42
+
+
 def test_c_is_2_workspace_cleaned_on_pass(tmp_path: Path, zstd_bin: Path) -> None:
     """C1 / C-is-2: workspace removed on PASS."""
     manifest_path, manifest = _write_fixture_runs_archive(tmp_path)

@@ -1797,7 +1797,16 @@ def _staging_row_count(
 
 
 def _staging_segment_count(conn: Any, identity: Mapping[str, Any]) -> int:
-    """Count river_segment rows that ingest would iterate for this run."""
+    """Count river_segment rows that ingest would iterate for this run.
+
+    MUST mirror ``workers/output_parser/parser.py::load_river_segments``:
+    the SHUD-output subset (``properties_json->>'shud_output_river' =
+    'true'``) with a bare-count fallback when the subset is empty. A bare
+    count(*) over-counts on registries carrying non-output reach rows
+    (issue #1122: every network holds a duplicate seed set — 2x the
+    declared segment_count — and the archived rivqdown column count
+    matches the output subset, not the physical row count).
+    """
     with conn.cursor() as cursor:
         cursor.execute(
             "SELECT river_network_version_id FROM core.model_instance WHERE model_id = "
@@ -1810,6 +1819,16 @@ def _staging_segment_count(conn: Any, identity: Mapping[str, Any]) -> int:
                 f"staging.core.model_instance missing for run_id={identity['run_id']!r}"
             )
         river_network_version_id = row[0]
+        cursor.execute(
+            "SELECT count(*) FROM core.river_segment "
+            "WHERE river_network_version_id = %s "
+            "AND COALESCE(properties_json->>'shud_output_river', 'false') = 'true'",
+            (river_network_version_id,),
+        )
+        count_row = cursor.fetchone()
+        count = int(count_row[0]) if count_row else 0
+        if count:
+            return count
         cursor.execute(
             "SELECT count(*) FROM core.river_segment WHERE river_network_version_id = %s",
             (river_network_version_id,),
