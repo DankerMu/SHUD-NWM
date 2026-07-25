@@ -4062,6 +4062,101 @@ def test_cutover_gate_escalates_missing_nested_identity(tmp_path: Path) -> None:
     assert payload["package_changed"]["total"] == 1
 
 
+# ---------------------------------------------------------------------------
+# #1093 identity-equality None/missing semantics — direct predicate coverage.
+# Minimal dicts (not ``_registry_row``) so exactly one identity field differs
+# between the two sides; every other identity field is equal or equally absent.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("row", "previous_row"),
+    [
+        pytest.param(
+            {"lifecycle_state": None},
+            {"lifecycle_state": None},
+            id="flat-field-none-on-both-sides",
+        ),
+        pytest.param(
+            {"resource_profile": {"source_inventory_checksum": None}},
+            {"resource_profile": {"source_inventory_checksum": None}},
+            id="nested-checksum-none-on-both-sides",
+        ),
+        pytest.param(
+            {"package_checksum": f"sha256:{'a' * 64}"},
+            {"package_checksum": f"sha256:{'a' * 64}"},
+            id="resource-profile-missing-on-both-sides",
+        ),
+        pytest.param(
+            {"basin_version_id": "v1"},
+            {"basin_version_id": "v1", "lifecycle_state": None},
+            id="flat-field-missing-versus-explicit-none",
+        ),
+    ],
+)
+def test_identity_predicate_treats_symmetric_absence_as_identical(
+    row: dict[str, object], previous_row: dict[str, object]
+) -> None:
+    """#1093 (a)/(b)/(c)/(f): symmetric absence is identity, not drift.
+
+    Both-None flat fields, both-None nested
+    ``resource_profile.source_inventory_checksum``, and a top-level
+    ``resource_profile`` missing on both sides (sentinel == sentinel) all
+    classify as ``unchanged``.  A flat field missing on one side and
+    explicitly ``None`` on the other is also identical because ``dict.get()``
+    collapses both to ``None`` — pinned here against a sentinel-based rewrite
+    of the flat path that would silently flip it to drift.
+    """
+    assert refresh._rows_have_identical_identity(row, previous_row) is True
+    assert refresh._rows_have_identical_identity(previous_row, row) is True
+
+
+@pytest.mark.parametrize(
+    ("row", "previous_row"),
+    [
+        pytest.param(
+            {"segment_count": 0},
+            {"segment_count": None},
+            id="segment-count-zero-versus-none",
+        ),
+        pytest.param(
+            {"lifecycle_state": ""},
+            {"lifecycle_state": None},
+            id="lifecycle-state-empty-string-versus-none",
+        ),
+    ],
+)
+def test_identity_predicate_rejects_asymmetric_falsy_flat_values(
+    row: dict[str, object], previous_row: dict[str, object]
+) -> None:
+    """#1093 (d): a falsy non-None flat value versus ``None`` is drift.
+
+    ``0`` and ``""`` are deliberately chosen: a truthiness comparison
+    (``bool(row.get(f)) != bool(previous_row.get(f))``) would conflate them
+    with ``None`` and misclassify real drift as ``unchanged``.
+    """
+    assert refresh._rows_have_identical_identity(row, previous_row) is False
+    assert refresh._rows_have_identical_identity(previous_row, row) is False
+
+
+def test_identity_predicate_rejects_missing_nested_key_versus_explicit_null() -> None:
+    """#1093 (e): a missing top-level ``resource_profile`` differs from an
+    explicit ``source_inventory_checksum: null``.
+
+    ``_extract_nested_identity`` returns its ``_MISSING_IDENTITY`` sentinel on
+    any path gap precisely so a rebuilt profile that dropped the checksum key
+    cannot ride through as ``unchanged``.
+    """
+    row = {"basin_version_id": "v1"}
+    previous_row = {
+        "basin_version_id": "v1",
+        "resource_profile": {"source_inventory_checksum": None},
+    }
+
+    assert refresh._rows_have_identical_identity(row, previous_row) is False
+    assert refresh._rows_have_identical_identity(previous_row, row) is False
+
+
 def test_load_previous_canonical_rejects_oversize_file(tmp_path: Path) -> None:
     """T (C-F1): explicit ``len > MAX`` sentinel after
     ``read_bytes_limited_no_follow`` in ``_load_previous_canonical_registry``."""
