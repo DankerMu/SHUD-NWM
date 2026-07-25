@@ -502,6 +502,21 @@ canonical replace 前退出、非零：
   未来窗口、entry 里有 duplicate `model_id`、declaration 文件是 symlink/非常规文件、
   超过 256 KiB。
 
+**分类 `mode`（#1140）**：`registry_classification` 还带一个 `mode` 字段，记录这次 refresh
+实际跑的分类分支。`id_only` 只来自 `dry_run`——prospective 行只有 `model_id`/`basin_id`、
+没有 checksum，所以观察不到漂移，也不评估 removal；`full` 来自真实 publish 路径（包括
+published、cutover refusal、rollback 和 gate 之后失败的 receipt）。receipt 校验按 `mode`
+而不是 `outcome` 选对账规则，所以一次 dry_run 若在 gate 之后失败（例如 readiness 派生报错），
+receipt 会带 `outcome: "failed"` + 真实 reason + `mode: "id_only"` 正常落盘，不再被
+`primary_receipt_failed` 顶掉、连 receipt 都不留。`outcome` 与 `mode` 的交叉伪造
+（`dry_run` 配 `full`、`published` 配 `id_only`）一律拒。
+
+**升级 pre-#1140 receipt**：#1140 部署之前写下的 receipt 的 `registry_classification` 里
+没有 `mode` 字段，这属正常、不是篡改信号；校验对这种老 receipt 回退到按
+`outcome == "dry_run"` 选分支，即 #1140 之前的行为。判定版次的方法同上面的 pre-#1132 段：
+比对 `.started_at` 与 #1140 部署时间，或者跑一次 manual refresh 拿新 receipt——新 receipt
+一定带 `mode`。
+
 Cutover declaration 是 `nhms.scheduler.registry_package_cutover.v1`（schema：
 `schemas/scheduler_registry_package_cutover.schema.json`；参考 example：
 `schemas/examples/scheduler_registry_package_cutover.example.json`）。文件路径通过
