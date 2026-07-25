@@ -2,7 +2,7 @@
 
 `packages/scheduler/registry_audit.py` is the single definition point every
 persistence channel (CLI summary, runner receipt, manifest companion receipt)
-must route through.  These tests pin the four strict branches directly on the
+must route through.  These tests pin the strict branches directly on the
 shared module plus the re-export identity the CLI/runner import paths depend
 on; channel-level behavior lives in
 `tests/test_publish_scheduler_file_registry.py`.
@@ -49,6 +49,54 @@ def test_normalizer_rejects_non_string_declaration_env() -> None:
 
     assert excinfo.value.error_code == "SCHEDULER_REGISTRY_CUTOVER_AUDIT_INVALID"
     assert excinfo.value.to_payload()["provided_type"] == "int"
+
+
+@pytest.mark.parametrize("declaration_present", ["no", 1, 0, 1.0, []])
+def test_normalizer_rejects_non_bool_declaration_present(declaration_present: Any) -> None:
+    """#1131: `declaration_present` is a bool; non-bools are rejected, not coerced.
+
+    Both truthy (`"no"`, `1`, `1.0`) and falsy (`0`, `[]`) inputs must raise —
+    coercion in either direction would fabricate an audit fact about whether a
+    cutover declaration was staged.  The block is otherwise fully valid so the
+    refusal can only come from this arm, not the mode/env arms.
+    """
+    with pytest.raises(registry_audit.SchedulerRegistryPublishError) as excinfo:
+        registry_audit.normalize_cutover_gate_audit(
+            {
+                "mode": "enforced",
+                "declaration_env": "E",
+                "declaration_present": declaration_present,
+            }
+        )
+
+    assert excinfo.value.error_code == "SCHEDULER_REGISTRY_CUTOVER_AUDIT_INVALID"
+    assert excinfo.value.details["provided_type"] == type(declaration_present).__name__
+    assert excinfo.value.to_payload()["provided_type"] == type(declaration_present).__name__
+
+
+@pytest.mark.parametrize(
+    "cutover_gate",
+    [
+        pytest.param({"mode": "enforced", "declaration_env": "E"}, id="key_absent"),
+        pytest.param(
+            {"mode": "enforced", "declaration_env": "E", "declaration_present": None},
+            id="explicit_none",
+        ),
+    ],
+)
+def test_normalizer_defaults_missing_declaration_present_to_false(
+    cutover_gate: dict[str, Any],
+) -> None:
+    """#1131: the absent/None default stays `False` — rejecting non-bools must
+    not turn "caller never recorded presence" into an error."""
+    audited = registry_audit.normalize_cutover_gate_audit(cutover_gate)
+
+    assert audited["declaration_present"] is False
+    assert audited == {
+        "mode": "enforced",
+        "declaration_env": "E",
+        "declaration_present": False,
+    }
 
 
 def test_normalizer_maps_none_to_not_wired_fallback() -> None:

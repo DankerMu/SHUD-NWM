@@ -1499,6 +1499,10 @@ _MALFORMED_CUTOVER_GATES: list[Any] = [
         {"mode": "enforced", "declaration_env": 42, "declaration_present": True},
         id="non_string_declaration_env",
     ),
+    pytest.param(
+        {"mode": "enforced", "declaration_env": "E", "declaration_present": "no"},
+        id="non_bool_declaration_present",
+    ),
 ]
 
 

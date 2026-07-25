@@ -17,7 +17,7 @@ Risk packs considered (core):
 
 ## 1. Normalizer + tests + spec
 
-- [ ] 1.1 `packages/scheduler/registry_audit.py:80`: replace
+- [x] 1.1 `packages/scheduler/registry_audit.py:80`: replace
   `declaration_present = bool(cutover_gate.get("declaration_present"))`
   with a fail-closed read:
   ```python
@@ -36,7 +36,7 @@ Risk packs considered (core):
   case's observable output is unchanged. Update the module/function
   docstring sentence describing the three-field shape.
   Evidence floor: `git diff` confined to this field's handling + docstring.
-- [ ] 1.2 `tests/test_registry_audit.py`: add
+- [x] 1.2 `tests/test_registry_audit.py`: add
   `test_normalizer_rejects_non_bool_declaration_present` parametrized over
   at least `"no"`, `1`, `0`, `1.0`, `[]` (mix of truthy and falsy
   non-bools — the falsy ones prove reject-not-coerce in BOTH directions).
@@ -58,7 +58,7 @@ Risk packs considered (core):
   coerced, e.g. `"no"` → True), NOT with an assertion mismatch on some
   other field; the missing-key test must pass pre AND post (default
   unchanged). Record outputs verbatim.
-- [ ] 1.3 Spec alignment (change `unify-cutover-gate-audit-normalizer` is
+- [x] 1.3 Spec alignment (change `unify-cutover-gate-audit-normalizer` is
   archived → this change carries a MODIFIED requirement in
   `specs/scheduler-registry-refresh/spec.md` restating the normalizer
   requirement with the `declaration_present` rejection scenario added).
@@ -68,7 +68,7 @@ Risk packs considered (core):
   requirement verbatim; add one rejection scenario.
   Evidence floor: `openspec validate reject-non-bool-declaration-present
   --strict --no-interactive` PASS.
-- [ ] 1.35 Channel-level pin (fixture-review P2-2, route (a)): add one
+- [x] 1.35 Channel-level pin (fixture-review P2-2, route (a)): add one
   `pytest.param({"mode": "enforced", "declaration_env": "E",
   "declaration_present": "no"}, id="non_bool_declaration_present")` to
   `_MALFORMED_CUTOVER_GATES` (`tests/test_publish_scheduler_file_registry.py:1494-1502`)
@@ -77,7 +77,7 @@ Risk packs considered (core):
   `declaration_present`.
   Evidence floor: `uv run pytest -q tests/test_publish_scheduler_file_registry.py
   -k malformed_cutover_gate` green including the new param.
-- [ ] 1.4 Caller sweep (read-only, record in PR body): confirm the only
+- [x] 1.4 Caller sweep (read-only, record in PR body): confirm the only
   in-tree producers pass real bools —
   `scripts/publish_scheduler_file_registry.py:1206/:1216` and
   `scripts/scheduler_file_provider_refresh.py:811-817` — and no other
@@ -86,13 +86,13 @@ Risk packs considered (core):
 
 ## 2. Change-level verification floor
 
-- [ ] 2.1 `uv run pytest -q tests/test_registry_audit.py
+- [x] 2.1 `uv run pytest -q tests/test_registry_audit.py
   tests/test_publish_scheduler_file_registry.py
   tests/test_scheduler_file_provider_refresh.py` green.
-- [ ] 2.2 `uv run ruff check .` clean.
-- [ ] 2.3 `openspec validate reject-non-bool-declaration-present --strict
+- [x] 2.2 `uv run ruff check .` clean.
+- [x] 2.3 `openspec validate reject-non-bool-declaration-present --strict
   --no-interactive` PASS.
-- [ ] 2.4 Scope check: `git diff --name-only origin/master...HEAD` =
+- [x] 2.4 Scope check: `git diff --name-only origin/master...HEAD` =
   registry_audit.py, test_registry_audit.py,
   test_publish_scheduler_file_registry.py (one pytest.param), this
   fixture. Nothing else.

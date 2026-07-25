@@ -49,7 +49,9 @@ def normalize_cutover_gate_audit(
     - ``declaration_env``: the env name consulted (``str``) when the gate ran
       enforced, else ``None`` — bypass and not_wired never consult an env.
     - ``declaration_present``: ``bool``; whether the env resolved to a
-      readable declaration file.  Defaults to ``False`` when absent.
+      readable declaration file.  Absent (or explicit ``None``) defaults to
+      ``False``; any other non-``bool`` value is rejected instead of coerced,
+      so a stringy ``"no"`` can never be audited as presence.
     """
     if cutover_gate is None:
         return {
@@ -77,7 +79,15 @@ def normalize_cutover_gate_audit(
             "cutover_gate.declaration_env must be a string or null.",
             details={"provided_type": type(env_name).__name__},
         )
-    declaration_present = bool(cutover_gate.get("declaration_present"))
+    declaration_present = cutover_gate.get("declaration_present")
+    if declaration_present is None:
+        declaration_present = False
+    elif not isinstance(declaration_present, bool):
+        raise SchedulerRegistryPublishError(
+            "SCHEDULER_REGISTRY_CUTOVER_AUDIT_INVALID",
+            "cutover_gate.declaration_present must be a boolean.",
+            details={"provided_type": type(declaration_present).__name__},
+        )
     return {
         "mode": str(mode),
         "declaration_env": env_name,
