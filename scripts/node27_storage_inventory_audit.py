@@ -617,8 +617,6 @@ def _verify_product_producer_provenance(subject: InventorySubject, manifest: Map
         "kind": expected_kind,
         "subject_id": subject.subject_id,
         "manifest_path": expected_path,
-        "start_time": _time(subject.start),
-        "end_time": _time(subject.end),
         "model_id": subject.model_id,
         "basin_version_id": subject.basin_version_id,
     }
@@ -627,6 +625,18 @@ def _verify_product_producer_provenance(subject: InventorySubject, manifest: Map
             raise AuditBlocked(
                 f"product archive producer {field} differs from DB inventory for {subject.subject_id}"
             )
+    # Coverage window is containment, not equality: an archive may hold more than the DB
+    # row (truncated ingest), but never less.
+    window_blocked = (
+        f"product archive producer window does not contain DB inventory window for {subject.subject_id}"
+    )
+    try:
+        producer_start = _parse_time(producer.get("start_time"))
+        producer_end = _parse_time(producer.get("end_time"))
+    except AuditBlocked as error:
+        raise AuditBlocked(window_blocked) from error
+    if producer_start > subject.start or producer_end < subject.end:
+        raise AuditBlocked(window_blocked)
     digest = producer.get("manifest_sha256")
     if not isinstance(digest, str):
         raise AuditBlocked(f"product archive producer manifest digest is missing: {subject.subject_id}")

@@ -341,25 +341,67 @@ def test_product_archive_coverage_reads_and_rejects_tampered_tar_members(tmp_pat
 
 
 @pytest.mark.parametrize(
-    ("field", "value"),
+    ("case", "subject_start", "subject_end"),
     [
-        ("subject_id", "other"),
-        ("manifest_path", "other.json"),
-        ("manifest_sha256", "b" * 64),
-        ("start_time", "2026-04-30T00:00:00Z"),
-        ("model_id", "other-model"),
-        ("basin_version_id", "other-basin"),
+        ("equal", START, END),
+        ("superset_end", START, END - timedelta(hours=3)),
+        ("superset_start", START + timedelta(hours=3), END),
+    ],
+)
+def test_product_archive_producer_window_containing_db_window_completes(
+    tmp_path: Path, case: str, subject_start: datetime, subject_end: datetime
+) -> None:
+    """A producer window equal to or wider than the DB window is verified coverage."""
+    config, forcing_subject, _run_subject = _write_forcing_and_run_product_archives(tmp_path)
+    subject = replace(forcing_subject, start=subject_start, end=subject_end)
+    assert audit.verify_product_archive(
+        subject, config.archive_root, config.object_store_prefix, config.zstd_path
+    ) == audit.Coverage("product-archive", ("member-verified product archive present",))
+
+
+def test_product_archive_producer_window_missing_db_coverage_blocks(tmp_path: Path) -> None:
+    config, forcing_subject, _run_subject = _write_forcing_and_run_product_archives(tmp_path)
+    subject = replace(forcing_subject, end=END + timedelta(hours=3))
+    with pytest.raises(
+        audit.AuditBlocked,
+        match="product archive producer window does not contain DB inventory window for forcing-a",
+    ):
+        audit.verify_product_archive(subject, config.archive_root, config.object_store_prefix, config.zstd_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("subject_id", "other", "producer|schema"),
+        ("manifest_path", "other.json", "producer|schema"),
+        ("manifest_sha256", "b" * 64, "producer|schema"),
+        # Producer start AFTER the subject start: violates containment (an earlier producer
+        # start would be legitimate coverage and must not be asserted as drift).
+        (
+            "start_time",
+            "2026-05-01T03:00:00Z",
+            "product archive producer window does not contain DB inventory window for forcing-a",
+        ),
+        # Unparseable producer window: blocks with the sanitized subject-level window
+        # message, never leaking the raw `_parse_time` value.
+        (
+            "start_time",
+            "not-a-time",
+            "product archive producer window does not contain DB inventory window for forcing-a",
+        ),
+        ("model_id", "other-model", "producer|schema"),
+        ("basin_version_id", "other-basin", "producer|schema"),
     ],
 )
 def test_product_archive_forcing_provenance_drift_blocks_completion(
-    tmp_path: Path, field: str, value: str
+    tmp_path: Path, field: str, value: str, message: str
 ) -> None:
     config, subject, _run_subject = _write_forcing_and_run_product_archives(tmp_path)
     paths = audit.archive_provenance_paths(config.archive_root, identity=subject.archive_identity)
     manifest = json.loads(paths.manifest.read_text())
     manifest["producer"][field] = value
     paths.manifest.write_text(json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(audit.AuditBlocked, match="producer|schema"):
+    with pytest.raises(audit.AuditBlocked, match=message):
         audit.verify_product_archive(subject, config.archive_root, config.object_store_prefix, config.zstd_path)
 
 
