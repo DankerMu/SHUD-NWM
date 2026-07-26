@@ -5682,8 +5682,10 @@ def test_completed_pipeline_init_state_id_returns_none_for_unjudgeable_rows(
             _latest_view(cycle_time=cycle_time, hydro_status="complete"),
         )
     elif leg == "hydro_run_absent":
-        # ``state_save_qc`` terminal mode: completion is decided from pipeline
-        # jobs and there is no hydro_run row to read an identity from.
+        # Completion is carried by a terminal pipeline job with no hydro_run
+        # row at all, so there is no identity to read.  No terminal-stage env
+        # is set: this leg holds under the default stage as well as under
+        # ``forecast_state_save_qc`` (that mode is pinned separately below).
         terminal_job = _active_job(cycle_time)
         terminal_job.update(
             {
@@ -5720,13 +5722,15 @@ def test_completed_pipeline_init_state_id_ignores_superseded_hydro_placeholder(
 ) -> None:
     """The judged identity must be the COMPLETED run's row.
 
-    ``state_save_qc`` terminal mode decides completion from the pipeline job,
-    while the ``hydro_run`` row is still a ``created`` placeholder that the
-    write side already populated with an ``init_state_id``.  That placeholder
-    does not describe the run that completed, so the accessor declines rather
-    than handing the scheduler an identity to quarantine on.
+    Under the ``forecast_state_save_qc`` terminal stage (the value
+    ``chain_repository_state._compute_state_save_qc_terminal_enabled`` compares
+    against) completion is decided from the pipeline job alone, while the
+    ``hydro_run`` row is still a ``created`` placeholder that the write side
+    already populated with an ``init_state_id``.  That placeholder does not
+    describe the run that completed, so the accessor declines rather than
+    handing the scheduler an identity to quarantine on.
     """
-    monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "state_save_qc")
+    monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast_state_save_qc")
     cycle_time = _dt("2026-06-28T00:00:00Z")
     cycle_stamp = format_cycle_time(cycle_time)
     journal_root = tmp_path / "journal"

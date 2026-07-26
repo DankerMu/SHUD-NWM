@@ -4,7 +4,7 @@
 
 ### Requirement: Completed-cycle skips SHALL be gated by journal-recorded predecessor identity
 
-When readiness scoring would skip cycle T as already completed, the scheduler SHALL compare the completed journal entry's recorded `init_state_id` against the expected predecessor identity token for T (computed from the candidate's source, model, cycle time, expected predecessor `cycle_id`, and required lead hours); when the recorded identity shares the expected token's base key (same source, model, and valid time) but carries a different lineage suffix, the scheduler SHALL treat T as not-canonical-ready without suppressing backfill selection and without mutating or deleting the journal entry, while a matching token, an absent or suffix-less recorded identity, or a recorded identity with a different base key (including earlier-valid-time fallback warm-start states) SHALL preserve the existing skip behavior unchanged.
+When readiness scoring would skip cycle T as already completed, the scheduler SHALL compare the `init_state_id` recorded on the COMPLETED hydro run's row of the journal entry against the expected predecessor identity token for T (computed from the candidate's source, model, cycle time, expected predecessor `cycle_id`, and required lead hours); when that recorded identity shares the expected token's base key (same source, model, and valid time) but carries a different lineage suffix, the scheduler SHALL treat T as not-canonical-ready without suppressing backfill selection and without mutating or deleting the journal entry, while a matching token, an absent or suffix-less recorded identity, a recorded identity with a different base key (including earlier-valid-time fallback warm-start states), or an identity recorded only on a non-completed (placeholder) hydro-run row superseded by a pipeline terminal SHALL preserve the existing skip behavior unchanged.
 
 #### Scenario: Positive identity mismatch quarantines the completed entry
 
@@ -27,6 +27,15 @@ When readiness scoring would skip cycle T as already completed, the scheduler SH
 
 - **WHEN** the completed cycle-T entry records no `init_state_id`, or records
   a suffix-less legacy identity equal to the expected token's base key
+- **THEN** no quarantine judgement is made and T is skipped as completed
+  exactly as before this change
+
+#### Scenario: Superseded placeholder hydro-run row is not judged
+
+- **WHEN** the completed cycle-T entry's completion is decided by a pipeline
+  terminal while its hydro-run row is a non-completed placeholder
+  (`created`/`staged`/`submitted`) carrying a recorded `init_state_id` —
+  such as under the `forecast_state_save_qc` terminal mode
 - **THEN** no quarantine judgement is made and T is skipped as completed
   exactly as before this change
 
