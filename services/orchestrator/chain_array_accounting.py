@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -23,6 +24,19 @@ from services.orchestrator.production_contract import production_status_for
 
 class _ObjectStoreLike(Protocol):
     def uri_for_key(self, key: str) -> str: ...
+
+
+# DB-free per-task failure classifier channel (see ``workers/shud_runtime/runtime.py``).
+# The compute task writes ``logs/task_outcome.json`` into its workspace log dir and the
+# existing log mirror uploads it to ``runs/<run_id>/logs/`` in the object store.  The
+# ``run_id`` key is cycle-stable and the mirrored copy outlives the attempt that wrote
+# it, so every receipt also carries the attempt binding (Slurm array master job id +
+# array task id) this module verifies before trusting the classifier.
+TASK_OUTCOME_SCHEMA_VERSION = "nhms.shud_task_outcome.v1"
+TASK_OUTCOME_RECEIPT_FILENAME = "task_outcome.json"
+TASK_OUTCOME_MAX_BYTES = 16 * 1024
+DEFAULT_TASK_ERROR_CODE = "NODE_FAILURE"
+_SAFE_RUN_ID_COMPONENT = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 @dataclass(frozen=True)
@@ -571,6 +585,7 @@ def parse_sacct_array_results(
 ) -> ArrayAggregation:
     deps = deps or _default_dependencies()
     task_pattern = re.compile(rf"^{re.escape(master_job_id)}_(\d+)$")
+    basins_by_task = _basins_by_task_id(context)
     results: list[ArrayTaskResult] = []
     for raw_line in stdout.splitlines():
         if not raw_line.strip():
@@ -595,7 +610,16 @@ def parse_sacct_array_results(
                 slurm_job_id=job_id,
                 status=task_status,
                 exit_code=deps.parse_slurm_exit_code(raw_exit_code),
-                error_code=None if task_status == "succeeded" else "NODE_FAILURE",
+                error_code=(
+                    None
+                    if task_status == "succeeded"
+                    else _resolve_task_error_code(
+                        object_store,
+                        basins_by_task.get(task_id),
+                        master_job_id=master_job_id,
+                        task_id=task_id,
+                    )
+                ),
                 log_uri=deps.context_array_log_uri(context, object_store, master_job_id, task_id),
                 accounting=extras,
             )
@@ -638,6 +662,7 @@ def coerce_array_aggregation(
                 object_store=object_store,
             )
     if isinstance(raw_results, Sequence) and not isinstance(raw_results, str | bytes):
+        basins_by_task = _basins_by_task_id(context)
         task_results = []
         for index, item in enumerate(raw_results):
             item_dict = deps.coerce_mapping(item)
@@ -655,7 +680,16 @@ def coerce_array_aggregation(
                     error_code=(
                         str(item_dict.get("error_code"))
                         if item_dict.get("error_code") not in (None, "")
-                        else (None if status == "succeeded" else "NODE_FAILURE")
+                        else (
+                            None
+                            if status == "succeeded"
+                            else _resolve_task_error_code(
+                                object_store,
+                                basins_by_task.get(task_id),
+                                master_job_id=master_job_id,
+                                task_id=task_id,
+                            )
+                        )
                     ),
                     error_message=str(item_dict.get("error_message"))
                     if item_dict.get("error_message") not in (None, "")
@@ -805,6 +839,124 @@ def stage_task_result_evidence(
                     payload[key] = value
         results.append(deps.safe_pipeline_event_details(payload))
     return tuple(results)
+
+
+def _basins_by_task_id(context: CycleOrchestrationContext | None) -> dict[int, Mapping[str, Any]]:
+    """Rebuild the task -> basin mapping using the module's canonical keying rule.
+
+    ``record_array_task_outcomes`` keeps its own local mapping; the stamp sites
+    below run on the re-indexed cohort and must key on the member's own
+    ``run_id``, never ``context.run_id``.
+    """
+
+    if context is None:
+        return {}
+    mapping: dict[int, Mapping[str, Any]] = {}
+    for index, basin in enumerate(getattr(context, "active_basins", ()) or ()):
+        if not isinstance(basin, Mapping):
+            continue
+        try:
+            task_id = int(basin.get("task_id", index))
+        except (TypeError, ValueError):
+            continue
+        mapping[task_id] = basin
+    return mapping
+
+
+def _resolve_task_error_code(
+    object_store: _ObjectStoreLike | None,
+    basin: Mapping[str, Any] | None,
+    *,
+    master_job_id: str | None = None,
+    task_id: int | None = None,
+    fallback: str = DEFAULT_TASK_ERROR_CODE,
+) -> str:
+    """Return the task-produced failure classifier, or ``fallback`` (fail-safe).
+
+    Absent, unreadable, malformed, schema-mismatched, or attempt-mismatched
+    receipts degrade to the generic fallback; this resolver never raises.
+    """
+
+    receipt = _read_task_outcome_receipt(object_store, basin)
+    if receipt is None:
+        return fallback
+    if str(receipt.get("schema_version") or "") != TASK_OUTCOME_SCHEMA_VERSION:
+        return fallback
+    if not _receipt_matches_attempt(receipt, master_job_id=master_job_id, task_id=task_id):
+        return fallback
+    error_code = receipt.get("error_code")
+    if not isinstance(error_code, str) or not error_code.strip():
+        return fallback
+    return error_code.strip()
+
+
+def _receipt_matches_attempt(
+    receipt: Mapping[str, Any],
+    *,
+    master_job_id: str | None,
+    task_id: int | None,
+) -> bool:
+    """Return whether the receipt was written by the attempt being accounted.
+
+    ``run_id`` is cycle-stable and the object-store copy survives a retry, so a
+    receipt left by an earlier attempt would otherwise be re-read and stamped as
+    the classifier for a task that was killed before its runtime hook ever ran
+    (CANCELLED / OOM / preempt).  The Slurm array master id plus the array task
+    id is the only identity both the writer and this reader observe per attempt;
+    an unbound receipt (no identity recorded) is never trusted.
+    """
+
+    recorded_job_id = str(receipt.get("slurm_job_id") or "").strip()
+    current_job_id = str(master_job_id or "").strip()
+    if not recorded_job_id or not current_job_id or recorded_job_id != current_job_id:
+        return False
+    recorded_task_id = receipt.get("array_task_id")
+    if recorded_task_id in (None, "") or task_id is None:
+        return False
+    try:
+        return int(recorded_task_id) == int(task_id)
+    except (TypeError, ValueError):
+        return False
+
+
+def _read_task_outcome_receipt(
+    object_store: _ObjectStoreLike | None,
+    basin: Mapping[str, Any] | None,
+) -> Mapping[str, Any] | None:
+    if object_store is None or not isinstance(basin, Mapping):
+        return None
+    run_id = basin.get("run_id")
+    if run_id in (None, ""):
+        return None
+    normalized = _safe_run_id_component(str(run_id))
+    if normalized is None:
+        return None
+    key = f"runs/{normalized}/logs/{TASK_OUTCOME_RECEIPT_FILENAME}"
+    try:
+        reader = getattr(object_store, "read_bytes_limited", None)
+        if callable(reader):
+            raw = reader(key, max_bytes=TASK_OUTCOME_MAX_BYTES)
+        else:
+            reader = getattr(object_store, "read_bytes", None)
+            if not callable(reader):
+                return None
+            raw = reader(key)
+        payload = json.loads(bytes(raw).decode("utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, Mapping) else None
+
+
+def _safe_run_id_component(value: str) -> str | None:
+    """Mirror the runtime writer's ``_safe_path_component`` normalization."""
+
+    if not value or value.startswith("-"):
+        return None
+    if "\x00" in value or "/" in value or "\\" in value or ".." in value:
+        return None
+    if _SAFE_RUN_ID_COMPONENT.fullmatch(value) is None:
+        return None
+    return value
 
 
 def context_array_log_uri(

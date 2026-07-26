@@ -80,6 +80,13 @@ from workers.shud_runtime import runtime as shud_runtime_module
 
 _TEST_CANONICAL_READINESS_PROVIDER_UNSET = object()
 _TEST_OBJECT_STORE_ROOT = Path(os.environ.get("TMPDIR", "/tmp")).resolve() / "nhms-test-object-store"
+# Recorded forcing provenance for failure states whose subject is the retry state
+# machine rather than artifact provenance.  Since #1160 a forecast-stage failure
+# with NO recorded forcing URI is demoted to the stable missing-forcing blocker
+# (fail-closed by design); these fixtures record the URI they always implied.  No
+# ``OBJECT_STORE_ROOT`` is configured in these tests, so the recorded artifact
+# counts as existing and the guard correctly stands down.
+_RECORDED_FORCING_PACKAGE_URI = "s3://nhms/forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json"
 
 
 def test_retry_with_stale_cold_manifest_is_upgraded_to_warm_forecast_rerun() -> None:
@@ -2711,6 +2718,7 @@ def test_unsubmitted_auto_retry_placeholder_does_not_block_scheduler_retry(tmp_p
             "pipeline_status": "pending",
             "failed_stage": "forecast",
             "error_code": "NODE_FAILURE",
+            "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
             "retry_count": 1,
             "retry_limit": 3,
             "forecast_cycle": {
@@ -2779,6 +2787,7 @@ def test_candidate_scoped_retry_bypasses_active_pipeline_guard(tmp_path: Path) -
             "pipeline_status": "pending",
             "failed_stage": "forecast",
             "error_code": "NODE_FAILURE",
+            "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
             "retry_count": 1,
             "retry_limit": 3,
             "pipeline_jobs": [
@@ -5023,6 +5032,7 @@ def test_nested_failed_task_identity_remains_available_when_failure_state_is_can
         "pipeline_status": "failed",
         "failed_stage": "forecast",
         "error_code": "NODE_FAILURE",
+        "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
         "retry_count": 1,
         "pipeline_events": [
             {
@@ -5069,6 +5079,7 @@ def test_non_authoritative_task_results_do_not_populate_retry_task_identity() ->
         "pipeline_status": "failed",
         "failed_stage": "forecast",
         "error_code": "NODE_FAILURE",
+        "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
         "retry_count": 1,
         "pipeline_events": [
             {
@@ -5630,6 +5641,7 @@ def test_non_authoritative_task_results_preserve_candidate_scoped_retry(
         "pipeline_status": "failed",
         "failed_stage": "forecast",
         "error_code": "NODE_FAILURE",
+        "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
         "retry_count": 1,
         "pipeline_events": [
             {
@@ -6194,6 +6206,605 @@ def test_missing_forcing_package_blocks_forecast_resume_before_submission(
     assert blocked["reason"] == "missing_forcing_package_uri"
     assert blocked["state_evidence"]["error_code"] == "FORCING_PACKAGE_URI_MISSING"
     assert orchestrator.calls == []
+
+
+def _forecast_failure_state(candidate: Any, **overrides: Any) -> dict[str, Any]:
+    """Failure-state geometry of the live #1160 incident (failed forecast cohort)."""
+
+    state = {
+        **_production_identity_fixture(),
+        "candidate_id": candidate.candidate_id,
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "pipeline_status": "failed",
+        "failed_stage": "forecast",
+        "error_code": "NODE_FAILURE",
+    }
+    state.update(overrides)
+    return state
+
+
+def _assert_stable_missing_forcing_blocker(decision: Any, *, artifact_uri: str | None) -> None:
+    from services.orchestrator.scheduler_candidates import _decision_is_stable_missing_forcing_blocker
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "missing_forcing_package_uri")
+    assert decision.evidence["decision"] == "blocked_missing_upstream_artifact"
+    assert decision.evidence["error_code"] == "FORCING_PACKAGE_URI_MISSING"
+    assert decision.evidence["classifier"] == "missing_upstream_artifact"
+    assert decision.evidence["restart_stage"] == "forecast"
+    assert decision.evidence["replacement_submitted"] is False
+    assert decision.evidence["artifact_guard"] == {
+        "artifact_type": "forcing_package_uri",
+        "artifact_uri": artifact_uri,
+        "artifact_exists": False,
+        "unsafe_reason": None,
+        "stable_classifier": "FORCING_PACKAGE_URI_MISSING",
+        "planned_retry_decision": "retry_failed",
+        "planned_retry_reason": "retry_failed_candidate",
+    }
+    assert _decision_is_stable_missing_forcing_blocker(decision) is True
+
+
+def test_failed_forecast_with_recorded_missing_forcing_blocks_instead_of_retrying(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    state = _forecast_failure_state(
+        candidate,
+        forcing_package_uri="forcing/gfs/2026052106/model_a/package.json",
+    )
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    _assert_stable_missing_forcing_blocker(
+        decision,
+        artifact_uri="forcing/gfs/2026052106/model_a/package.json",
+    )
+
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(state),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["blocked_candidates"][0]["reason"] == "missing_forcing_package_uri"
+    assert orchestrator.calls == []
+
+
+def test_failed_forecast_without_recorded_forcing_uri_blocks_instead_of_retrying(
+    tmp_path: Path,
+) -> None:
+    # Incident geometry: the live node-22 journal records ``forcing_version: null``
+    # for gfs_2026072000 -- no forcing URI was ever produced.
+    candidate = _scheduler_candidate_fixture()
+    state = _forecast_failure_state(candidate)
+    assert "forcing_package_uri" not in state
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    _assert_stable_missing_forcing_blocker(decision, artifact_uri=None)
+
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(state),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["blocked_candidates"][0]["reason"] == "missing_forcing_package_uri"
+    assert orchestrator.calls == []
+
+
+def test_permanently_classified_missing_forcing_stays_repair_eligible(tmp_path: Path) -> None:
+    # L1-ordering trap: post-L1 the recorded code is the real (non-transient)
+    # classifier, so the permanent-failure branch fires first.  Without the guard
+    # at that branch the decision degrades to ``permanent_failure_guard`` and the
+    # ``--repair-missing-forcing`` channel becomes a NO-OP.
+    del tmp_path
+    candidate = _scheduler_candidate_fixture()
+    state = _forecast_failure_state(candidate, error_code="ARTIFACT_NOT_FOUND")
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    _assert_stable_missing_forcing_blocker(decision, artifact_uri=None)
+
+
+def test_model_package_refresh_retry_still_blocks_on_missing_forcing_provenance() -> None:
+    # The refresh branch returns BEFORE the permanent/fallback branches, so it
+    # needs its own guard consult: without it a package refresh would re-issue
+    # the forecast retry the missing-forcing demotion exists to stop.
+    candidate = _scheduler_candidate_fixture()
+    state = _forecast_failure_state(
+        candidate,
+        error_code="ARTIFACT_NOT_FOUND",
+        run_manifest_model_package={
+            "source": "run_manifest",
+            "status": "superseded",
+            "model_package_uri_sha256": "0" * 64,
+        },
+    )
+    assert "forcing_package_uri" not in state
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    _assert_stable_missing_forcing_blocker(decision, artifact_uri=None)
+    assert decision.evidence["artifact_guard"]["planned_retry_reason"] == "retry_failed_candidate"
+
+
+def test_policy_blocked_forecast_without_forcing_provenance_keeps_the_true_cause_visible() -> None:
+    # Endorsed consequence of the demotion ruling: the stable repair-eligible
+    # blocker replaces the surfaced decision, but the real classifier stays in
+    # the evidence so operators are never told a policy block was a data gap.
+    from services.orchestrator.scheduler_candidates import _decision_is_stable_missing_forcing_blocker
+
+    candidate = _scheduler_candidate_fixture()
+    state = _forecast_failure_state(
+        candidate,
+        error_code="POLICY_BLOCKED",
+        error_message="submission blocked by policy",
+        retry_count=3,
+        retry_limit=3,
+        pipeline_jobs=[
+            {
+                "job_id": "job_cycle_gfs_2026052106_model_a_forecast_retry_3",
+                "run_id": candidate.run_id,
+                "model_id": candidate.model_id,
+                "candidate_id": candidate.candidate_id,
+                "cycle_id": candidate.cycle_id,
+                "stage": "forecast",
+                "job_type": "run_shud_forecast_array",
+                "status": "failed",
+                "retry_count": 3,
+                "error_code": "POLICY_BLOCKED",
+                "error_message": "submission blocked by policy",
+            }
+        ],
+    )
+    assert "forcing_package_uri" not in state
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "missing_forcing_package_uri")
+    assert decision.evidence["error_code"] == "FORCING_PACKAGE_URI_MISSING"
+    assert _decision_is_stable_missing_forcing_blocker(decision) is True
+    assert [job["error_code"] for job in decision.evidence["pipeline_jobs"]] == ["POLICY_BLOCKED"]
+    assert decision.evidence["retry_policy"]["attempt"] == 3
+
+
+def test_healthy_candidate_reaching_failure_fallback_region_keeps_none_decision(
+    tmp_path: Path,
+) -> None:
+    candidate = _scheduler_candidate_fixture()
+    state = {
+        **_production_identity_fixture(),
+        "candidate_id": candidate.candidate_id,
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "stage": "forecast",
+    }
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is None
+
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(state),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert result.evidence["blocked_candidates"] == []
+    assert orchestrator.calls
+
+
+def test_running_candidate_without_forcing_uri_still_skips_as_active_duplicate() -> None:
+    candidate = _scheduler_candidate_fixture()
+    state = {
+        **_production_identity_fixture(),
+        "candidate_id": candidate.candidate_id,
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "pipeline_status": "running",
+        "stage": "forecast",
+    }
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("skip", "active_duplicate_pipeline")
+
+
+def test_cancelled_candidate_without_forcing_uri_still_requires_manual_retry() -> None:
+    candidate = _scheduler_candidate_fixture()
+    state = {
+        **_production_identity_fixture(),
+        "candidate_id": candidate.candidate_id,
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "pipeline_status": "cancelled",
+        "failed_stage": "forecast",
+    }
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "manual_retry_required_after_cancelled")
+
+
+def test_failed_candidate_with_missing_copyback_source_blocks_instead_of_retrying() -> None:
+    # Disclosed coupling: wiring the full guard also activates its copyback half
+    # for failed candidates.  Same fail-closed direction, pinned here on purpose.
+    candidate = _scheduler_candidate_fixture()
+    state = _forecast_failure_state(
+        candidate,
+        failed_stage="copyback",
+        # Non-transient code keeps the forecast-output recompute branch out of the
+        # way; the explicit ``retryable`` override keeps the state off the
+        # permanent branch, so the decision really lands on the failure fallback.
+        error_code="COPYBACK_FAILED",
+        retryable=True,
+        copyback_source_required=True,
+    )
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "missing_copyback_source")
+    assert decision.evidence["error_code"] == "COPYBACK_SOURCE_MISSING"
+    assert decision.evidence["artifact_guard"]["artifact_type"] == "copyback_source"
+    assert decision.evidence["artifact_guard"]["artifact_exists"] is False
+    assert decision.evidence["restart_stage"] == "copyback"
+
+
+def _state_with_forecast_retry_jobs(candidate: Any, jobs: list[dict[str, Any]]) -> dict[str, Any]:
+    identity = _production_identity_fixture()
+    scoped_jobs = [
+        {
+            "run_id": candidate.run_id,
+            "model_id": candidate.model_id,
+            "candidate_id": candidate.candidate_id,
+            "cycle_id": candidate.cycle_id,
+            **job,
+        }
+        for job in jobs
+    ]
+    return {
+        **identity,
+        "candidate_id": candidate.candidate_id,
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "forcing_package_uri": "s3://nhms/forcing/gfs/2026052106/model_a/package.json",
+        "pipeline_status": "failed",
+        "failed_stage": "forecast",
+        "error_code": "NODE_FAILURE",
+        "retry_limit": 3,
+        "pipeline_jobs": scoped_jobs,
+    }
+
+
+def test_state_retry_attempt_honors_forecast_retry_suffix_and_exhausts_the_limit() -> None:
+    """Unit leg: hand-built state, no top-level ``retry_count``."""
+
+    from services.orchestrator import scheduler_state_failure
+
+    candidate = _scheduler_candidate_fixture()
+    state = _state_with_forecast_retry_jobs(
+        candidate,
+        [
+            {
+                "job_id": "job_cycle_gfs_2026052106_model_a_forecast_retry_65",
+                "stage": "forecast",
+                "job_type": "run_shud_forecast_array",
+                "status": "failed",
+                "retry_count": 0,
+            }
+        ],
+    )
+
+    assert scheduler_state_failure._state_retry_attempt(state, stage="forecast") == 65
+
+    failure = scheduler_state_failure._failure_policy_payload(state)
+
+    assert failure["attempt"] == 65
+    assert failure["limit_exhausted"] is True
+    assert failure["retryable"] is False
+
+
+def test_projected_state_retry_attempt_honors_forecast_suffix_despite_flat_retry_count() -> None:
+    """Projection leg: a REAL state always carries a top-level ``retry_count``.
+
+    ``candidate_state_from_rows`` writes ``retry_count`` unconditionally (0 when
+    the journal's clean-reservation invariant reset it), so a flat-value
+    short-circuit would make the stage-scoped derivation unreachable on every
+    production state -- exactly the live #1160 geometry.
+    """
+
+    from services.orchestrator import scheduler_state_failure
+
+    candidate = _scheduler_candidate_fixture()
+    state = chain_repository_state_module.candidate_state_from_rows(
+        source_id=candidate.source_id,
+        cycle_time=candidate.cycle_time_utc,
+        model_id=candidate.model_id,
+        run_id=candidate.run_id,
+        forcing_version_id=candidate.forcing_version_id,
+        candidate_id=candidate.candidate_id,
+        hydro_run={"run_id": candidate.run_id, "status": "failed"},
+        pipeline_jobs=[
+            {
+                "job_id": "job_cycle_gfs_2026052106_model_a_forecast_retry_65",
+                "run_id": candidate.run_id,
+                "cycle_id": candidate.cycle_id,
+                "model_id": candidate.model_id,
+                "candidate_id": candidate.candidate_id,
+                "status": "failed",
+                "stage": "forecast",
+                "job_type": "run_shud_forecast_array",
+                "slurm_job_id": "4065",
+                "retry_count": 0,
+                "error_code": "NODE_FAILURE",
+                "error_message": "array tasks failed",
+                "updated_at": "2026-05-21T06:45:00Z",
+            }
+        ],
+        pipeline_events=[],
+        forcing_version=None,
+        forecast_cycle=None,
+        retry_limit=3,
+    )
+
+    assert state is not None
+    assert state["retry_count"] == 0
+    assert state["failed_stage"] == "forecast"
+
+    assert scheduler_state_failure._state_retry_attempt(state, stage="forecast") == 65
+
+    failure = scheduler_state_failure._failure_policy_payload(state)
+
+    assert failure["attempt"] == 65
+    assert failure["limit_exhausted"] is True
+    assert failure["retryable"] is False
+
+
+def _cross_stage_retry_suffix_state(candidate: Any) -> dict[str, Any]:
+    return _state_with_forecast_retry_jobs(
+        candidate,
+        [
+            {
+                # Completed FORCING retry: its budget must not exhaust forecast's.
+                "job_id": "job_cycle_gfs_2026052106_model_a_forcing_retry_3",
+                "stage": "forcing",
+                "job_type": "produce_forcing_array",
+                "status": "succeeded",
+                "retry_count": 0,
+            },
+            {
+                # Production id shape: several stage tokens in one id.  Stage
+                # identity comes from the ``stage`` field, never id substrings.
+                "job_id": "job_cycle_gfs_2026052106_convert_model_0_forecast_retry_1_retry_2",
+                "stage": "convert",
+                "job_type": "convert_canonical",
+                "status": "succeeded",
+                "retry_count": 0,
+            },
+            {
+                # FIRST forecast failure: no retry suffix, budget untouched.
+                "job_id": "job_cycle_gfs_2026052106_model_a_forecast",
+                "stage": "forecast",
+                "job_type": "run_shud_forecast_array",
+                "status": "failed",
+                "retry_count": 0,
+            },
+        ],
+    )
+
+
+def test_cross_stage_retry_suffix_does_not_exhaust_the_forecast_budget() -> None:
+    """Unchanged-behavior pin: green before AND after #1160 (no new kwarg used)."""
+
+    from services.orchestrator import scheduler_state_failure
+
+    candidate = _scheduler_candidate_fixture()
+    state = _cross_stage_retry_suffix_state(candidate)
+
+    failure = scheduler_state_failure._failure_policy_payload(state)
+
+    assert failure["attempt"] == 0
+    assert failure["limit_exhausted"] is False
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("retry", "retry_failed_candidate")
+
+
+def test_state_retry_attempt_ignores_retry_suffix_of_another_stage() -> None:
+    """New-seam coverage: the ``stage=`` scoping introduced by #1160."""
+
+    from services.orchestrator import scheduler_state_failure
+
+    candidate = _scheduler_candidate_fixture()
+    state = _cross_stage_retry_suffix_state(candidate)
+
+    assert scheduler_state_failure._state_retry_attempt(state, stage="forecast") == 0
+
+
+def test_manual_retry_default_attempt_unchanged_without_stage_matching_suffix() -> None:
+    """Unchanged-behavior pin: green before AND after #1160 (no new kwarg used)."""
+
+    from services.orchestrator import scheduler_state_rows
+
+    assert scheduler_state_rows._state_retry_attempt(_forcing_retry_suffix_state()) == 0
+
+
+def test_stage_scoped_retry_attempt_derives_only_the_matching_stage_suffix() -> None:
+    """New-seam coverage: the ``stage=`` scoping introduced by #1160."""
+
+    from services.orchestrator import scheduler_state_rows
+
+    state = _forcing_retry_suffix_state()
+
+    assert scheduler_state_rows._state_retry_attempt(state, stage="forecast") == 0
+    assert scheduler_state_rows._state_retry_attempt(state, stage="forcing") == 3
+
+
+def _forcing_retry_suffix_state() -> dict[str, Any]:
+    return {
+        "pipeline_jobs": [
+            {
+                "job_id": "job_cycle_gfs_2026052106_model_a_forcing_retry_3",
+                "stage": "forcing",
+                "status": "succeeded",
+                "retry_count": 0,
+            }
+        ]
+    }
+
+
+def _state_with_exhausted_cycle_scope_download(
+    candidate: Any,
+    *,
+    forcing_version: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Projected state: a cycle-scope download retried to exhaustion, then a FIRST forecast failure.
+
+    ``state["pipeline_jobs"]`` is the UNFILTERED cycle-wide list, so it carries
+    model-less cycle-scope rows whose ``retry_count`` the auto-retry service
+    really does persist (they are not master rows, so the clean-reservation
+    invariant never resets them).  The candidate-scoped flat ``retry_count``
+    stays 0 -- the forecast has not been retried even once.
+    """
+
+    cycle_run_id = f"cycle_gfs_{format_cycle_time(candidate.cycle_time_utc)}"
+    return chain_repository_state_module.candidate_state_from_rows(
+        source_id=candidate.source_id,
+        cycle_time=candidate.cycle_time_utc,
+        model_id=candidate.model_id,
+        run_id=candidate.run_id,
+        forcing_version_id=candidate.forcing_version_id,
+        candidate_id=candidate.candidate_id,
+        hydro_run={"run_id": candidate.run_id, "status": "failed"},
+        pipeline_jobs=[
+            {
+                "job_id": f"job_{cycle_run_id}_download_retry_1_retry_2_retry_3",
+                "run_id": cycle_run_id,
+                "cycle_id": candidate.cycle_id,
+                "model_id": None,
+                "candidate_id": None,
+                "status": "succeeded",
+                "stage": "download",
+                "job_type": "download_source_cycle",
+                "retry_count": 3,
+                "updated_at": "2026-05-21T06:20:00Z",
+            },
+            {
+                "job_id": f"job_{cycle_run_id}_model_a_forecast",
+                "run_id": candidate.run_id,
+                "cycle_id": candidate.cycle_id,
+                "model_id": candidate.model_id,
+                "candidate_id": candidate.candidate_id,
+                "status": "failed",
+                "stage": "forecast",
+                "job_type": "run_shud_forecast_array",
+                "slurm_job_id": "9100",
+                "retry_count": 0,
+                "error_code": "NODE_FAILURE",
+                "error_message": "array tasks failed",
+                "updated_at": "2026-05-21T06:45:00Z",
+            },
+        ],
+        pipeline_events=[],
+        forcing_version=forcing_version,
+        forecast_cycle=None,
+        retry_limit=3,
+    )
+
+
+def test_cycle_scope_retry_count_does_not_exhaust_the_candidate_forecast_budget() -> None:
+    from services.orchestrator import scheduler_state_failure
+
+    candidate = _scheduler_candidate_fixture()
+    state = _state_with_exhausted_cycle_scope_download(candidate)
+
+    assert state is not None
+    # Premise: the cycle-scope row really is in the projection, and its recorded
+    # count really is at the limit, while the candidate's own flat count is 0.
+    assert state["retry_count"] == 0
+    assert [job["retry_count"] for job in state["pipeline_jobs"]] == [3, 0]
+
+    assert scheduler_state_failure._state_retry_attempt(state, stage="forecast") == 0
+
+    failure = scheduler_state_failure._failure_policy_payload(state)
+
+    assert failure["attempt"] == 0
+    assert failure["limit_exhausted"] is False
+    assert failure["permanent"] is False
+
+
+def test_failed_forecast_after_exhausted_cycle_scope_download_still_retries() -> None:
+    # Must-preserve: ``retry_failed_candidate`` remains the decision for failed
+    # candidates whose recorded upstream artifacts all exist.
+    candidate = _scheduler_candidate_fixture()
+    state = _state_with_exhausted_cycle_scope_download(
+        candidate,
+        forcing_version={
+            "forcing_version_id": candidate.forcing_version_id,
+            "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
+            "status": "ready",
+        },
+    )
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("retry", "retry_failed_candidate")
+    assert decision.evidence["retry_policy"]["manual_retry_required"] is False
+    assert decision.evidence["retry_policy"]["attempt"] == 0
+
+
+def test_manual_retry_previous_attempt_ignores_cycle_scope_retry_counts() -> None:
+    # Sibling ``stage=`` call site (``_manual_retry_state_evidence``): the new
+    # attempt must count the candidate's own forecast retries, not the cycle's.
+    candidate = _scheduler_candidate_fixture()
+    state = _state_with_exhausted_cycle_scope_download(
+        candidate,
+        forcing_version={
+            "forcing_version_id": candidate.forcing_version_id,
+            "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
+            "status": "ready",
+        },
+    )
+    state["manual_retry"] = {"requested": True}
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("retry", "manual_retry_requested")
+    assert decision.evidence["manual_retry"]["previous_attempt"] == 0
+    assert decision.evidence["retry_policy"]["attempt"] == 1
 
 
 def _missing_forcing_repair_direct_grid_profile(source_id: str = "gfs") -> dict[str, Any]:
@@ -13121,6 +13732,7 @@ def test_candidate_state_transient_runtime_failure_retries_failed_scope_with_reu
             "pipeline_status": "failed",
             "failed_stage": "forecast",
             "error_code": error_code,
+            "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
             "retry_count": 1,
             "retry_limit": 3,
             "array_task_id": 2,
@@ -13157,6 +13769,7 @@ def test_cold_start_quarantined_failure_recomputes_from_forecast(tmp_path: Path)
             "failed_stage": "state_save_qc",
             "error_code": "COLD_START_QUARANTINED",
             "error_message": "Cold-start products were quarantined after warm-start policy enforcement.",
+            "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
             "retry_count": 3,
             "retry_limit": 3,
         }
@@ -13320,6 +13933,7 @@ def test_candidate_state_permanent_or_exhausted_failure_blocks_auto_retry(
             "pipeline_status": "failed",
             "failed_stage": "forecast",
             "error_code": error_code,
+            "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
             "retry_count": 3,
             "retry_limit": 3,
         }
@@ -13365,6 +13979,7 @@ def test_model_package_refresh_allows_automatic_retry_after_retry_limit_exhauste
             "pipeline_status": "failed",
             "failed_stage": "forecast",
             "error_code": "SLURM_TIMEOUT",
+            "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
             "retry_count": 3,
             "retry_limit": 3,
             "run_manifest_model_package": {
@@ -13418,6 +14033,7 @@ def test_same_model_package_still_blocks_after_retry_limit_exhausted(tmp_path: P
             "pipeline_status": "failed",
             "failed_stage": "forecast",
             "error_code": "SLURM_TIMEOUT",
+            "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
             "retry_count": 3,
             "retry_limit": 3,
             "run_manifest_model_package": {
@@ -13666,6 +14282,7 @@ def test_db_shaped_transient_failure_uses_scheduler_retry_limit_without_state_re
             "pipeline_status": "failed",
             "failed_stage": "forecast",
             "error_code": "SLURM_TIMEOUT",
+            "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
             "retry_count": 3,
         }
     )
@@ -14000,6 +14617,7 @@ def test_candidate_state_rows_and_events_are_bounded_before_evidence_amplificati
             "pipeline_status": "failed",
             "failed_stage": "forecast",
             "error_code": "NODE_FAILURE",
+            "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
         }
     )
     scheduler = ProductionScheduler(
@@ -14303,6 +14921,7 @@ def test_latest_bounded_candidate_state_row_wins_over_older_truncated_rows(
             "pipeline_status": latest_status,
             "failed_stage": "forecast" if latest_status == "permanently_failed" else None,
             "error_code": "INVALID_MANIFEST" if latest_status == "permanently_failed" else None,
+            "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
             "retry_count": 3,
         }
     )
@@ -14414,6 +15033,7 @@ def test_stale_manual_retry_marker_does_not_override_newer_blocking_truth(
             "pipeline_status": latest_status,
             "failed_stage": "forecast" if latest_status == "permanently_failed" else None,
             "error_code": "INVALID_MANIFEST" if latest_status == "permanently_failed" else None,
+            "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
             "retry_count": 3,
             "pipeline_jobs": [latest_job],
             "pipeline_events": [
@@ -26325,13 +26945,59 @@ def test_scheduler_run_once_reconciles_real_file_journal_reservation(tmp_path: P
     assert job["status"] == "running"
 
 
+def _record_journal_forcing_provenance(
+    root: Path,
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    model_id: str,
+    forcing_package_uri: str,
+) -> None:
+    """Append the forcing_version row the forcing stage would have durably recorded.
+
+    The fixture cohort is reconciled straight from sacct, so nothing ever writes
+    forcing provenance for its members; this restores the ordinary geometry in
+    which a failed forecast member DOES have a recorded, existing forcing package.
+    """
+
+    cycle_segment = format_cycle_time(cycle_time)
+    journal_paths = sorted((root / "journal").glob(f"*/{cycle_segment}.jsonl"))
+    assert journal_paths, "fixture journal must already hold the cycle's records"
+    payload = {
+        "forcing_version_id": f"forc_{source_id.lower()}_{cycle_segment}_{model_id}",
+        "forcing_package_uri": forcing_package_uri,
+        "source_id": source_id,
+        "cycle_time": cycle_time.isoformat(),
+        "model_id": model_id,
+        "status": "ready",
+    }
+    record = {
+        "schema_version": file_orchestration_journal_module.FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
+        "record_type": "forcing_version",
+        "source_id": source_id,
+        "cycle_time": cycle_time.isoformat(),
+        "model_id": model_id,
+        "payload": payload,
+    }
+    with journal_paths[0].open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
+
+
 @pytest.mark.parametrize("source_id", ["gfs", "IFS"])
+@pytest.mark.parametrize("forcing_recorded", [True, False])
 def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     source_id: str,
+    forcing_recorded: bool,
 ) -> None:
-    """Highest public seam: submit ambiguity -> bind/tasks -> state-save resume."""
+    """Highest public seam: submit ambiguity -> bind/tasks -> state-save resume.
+
+    ``forcing_recorded`` toggles the failed member's forcing provenance: with it
+    the member is re-forecast exactly as before #1160; without it (the live
+    incident geometry, ``forcing_version: null``) the missing-forcing guard
+    demotes it to the stable repair-eligible blocker.
+    """
     from services.orchestrator import chain_forecast_execution
     from services.orchestrator.chain import OrchestratorError
     from services.orchestrator.reconcile import SacctRecord
@@ -26658,6 +27324,18 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
         )
         assert len(completed_event_ids) == 1
 
+    if forcing_recorded:
+        _record_journal_forcing_provenance(
+            root,
+            source_id=source_id,
+            cycle_time=_dt("2026-05-21T06:00:00Z"),
+            model_id=str(failed_member["model_id"]),
+            forcing_package_uri=(
+                f"s3://nhms/forcing/{source_id.lower()}/2026052106/"
+                f"{failed_member['model_id']}/forcing_package.json"
+            ),
+        )
+
     monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast_state_save_qc")
     resumed_repository = scheduler_module.FileOrchestrationJournalRepository(root)
     state_save_client = ImmediateTerminalSlurmClient()
@@ -26693,31 +27371,61 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
         for candidate in resumed_result.evidence["candidates"]
     ]
     submitted_stages = [submission["stage"] for submission in state_save_client.submissions]
-    assert submitted_stages.count("state_save_qc") == 2
-    assert submitted_stages.count("forecast") == 1
+    forecast_submissions = [
+        submission for submission in state_save_client.submissions if submission["stage"] == "forecast"
+    ]
+    if forcing_recorded:
+        # Recorded + existing forcing provenance: exactly the failed member is
+        # re-forecast, and the 17 verified members resume into state_save_qc.
+        assert submitted_stages.count("state_save_qc") == 2
+        assert submitted_stages.count("forecast") == 1
+        assert {task["model_id"] for task in forecast_submissions[0]["tasks"]} == {
+            str(failed_member["model_id"])
+        }
+        assert not [
+            candidate
+            for candidate in resumed_result.evidence["blocked_candidates"]
+            if candidate.get("reason") == "missing_forcing_package_uri"
+        ]
+    else:
+        # Since #1160 the single failed member is NOT forecast-resubmitted: this
+        # journal records no forcing provenance for it (``forcing_version: null``
+        # -- the live incident geometry), so the missing-forcing guard demotes it
+        # to the stable repair-eligible blocker instead of spinning the forecast
+        # cohort.  The 17 verified members still resume straight into state_save_qc.
+        assert submitted_stages.count("state_save_qc") == 1
+        assert submitted_stages.count("forecast") == 0
+        blocked_failed_member = next(
+            candidate
+            for candidate in resumed_result.evidence["blocked_candidates"]
+            if str(candidate.get("model_id")) == str(failed_member["model_id"])
+        )
+        assert blocked_failed_member["reason"] == "missing_forcing_package_uri"
+        assert blocked_failed_member["state_evidence"]["classifier"] == "missing_upstream_artifact"
+        assert blocked_failed_member["state_evidence"]["restart_stage"] == "forecast"
+        assert blocked_failed_member["state_evidence"]["artifact_guard"]["artifact_exists"] is False
     state_save_submissions = [
         submission
         for submission in state_save_client.submissions
         if submission["stage"] == "state_save_qc"
     ]
-    assert sorted(len(submission["tasks"]) for submission in state_save_submissions) == [1, 17]
+    assert sorted(len(submission["tasks"]) for submission in state_save_submissions) == (
+        [1, 17] if forcing_recorded else [17]
+    )
+    resumed_members = reserved.cohort_members if forcing_recorded else reserved.cohort_members[:17]
     assert {
         str(task["model_id"])
         for submission in state_save_submissions
         for task in submission["tasks"]
-    } == {str(member["model_id"]) for member in reserved.cohort_members}
+    } == {str(member["model_id"]) for member in resumed_members}
     state_save_submission = next(
         submission
         for submission in state_save_client.submissions
         if submission["stage"] == "state_save_qc" and len(submission["tasks"]) == 17
     )
-    forecast_submission = next(
-        submission for submission in state_save_client.submissions if submission["stage"] == "forecast"
-    )
     assert {task["model_id"] for task in state_save_submission["tasks"]} == {
         str(member["model_id"]) for member in reserved.cohort_members[:17]
     }
-    assert {task["model_id"] for task in forecast_submission["tasks"]} == {str(failed_member["model_id"])}
     for lineage in state_save_submission["manifest"]["model_runs"]:
         original = initial_runtime_manifests[str(lineage["model_id"])]
         assert original["runtime"]["state_checkpoint_hours"]
@@ -26810,7 +27518,14 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
     reopened_hydro = resumed_repository._hydro_run_for(success_run_id)
     assert reopened_hydro["run_id"] == success_manifest["run_id"]
     assert reopened_hydro["candidate_id"] == success_manifest["candidate_id"]
-    assert success_model_id not in {task["model_id"] for task in forecast_submission["tasks"]}
+    if forcing_recorded:
+        # A verified member must never be dragged back into the failed member's
+        # forecast rerun.
+        assert success_model_id not in {task["model_id"] for task in forecast_submissions[0]["tasks"]}
+    else:
+        # No forecast cohort was resubmitted at all, so no verified member can
+        # have been dragged back into a forecast rerun.
+        assert forecast_submissions == []
     assert len(resumed_repository.get_pipeline_job(reserved.job_id)["candidate_projections"]) == 18
 
 

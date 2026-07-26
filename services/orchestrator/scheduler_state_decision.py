@@ -297,12 +297,43 @@ def _candidate_state_decision(
     if downstream_after_raw_repair is not None:
         return CandidateStateDecision("retry", "retry_downstream_after_raw_repair", downstream_after_raw_repair)
 
+    # Failure-state guard, consulted AT the emitting return points below (never as
+    # an unconditional pre-pass): each branch is already gated by its own failure
+    # condition, so healthy/running candidates never compute or reach it.
+    failure_retry_evidence: dict[str, Any] | None = None
+    missing_forcing_evidence: dict[str, Any] | None = None
+    missing_forcing_computed = False
+
+    def _failure_retry() -> dict[str, Any]:
+        nonlocal failure_retry_evidence
+        if failure_retry_evidence is None:
+            failure_retry_evidence = _retry_failure_evidence(candidate, decision_state, evidence)
+        return failure_retry_evidence
+
+    def _missing_forcing_block() -> dict[str, Any] | None:
+        nonlocal missing_forcing_evidence, missing_forcing_computed
+        if not missing_forcing_computed:
+            missing_forcing_computed = True
+            missing_forcing_evidence = _missing_upstream_forecast_artifact_evidence(
+                candidate,
+                decision_state,
+                evidence,
+                _failure_retry(),
+            )
+        return missing_forcing_evidence
+
     package_refresh = _model_package_refresh_retry_evidence(candidate, decision_state, evidence)
     if package_refresh is not None:
+        missing_upstream_artifact = _missing_forcing_block()
+        if missing_upstream_artifact is not None:
+            return _missing_upstream_artifact_decision(missing_upstream_artifact)
         return CandidateStateDecision("retry", "retry_after_model_package_refresh", package_refresh)
 
     permanent = _permanent_failure_evidence(candidate, decision_state, evidence)
     if permanent is not None:
+        missing_upstream_artifact = _missing_forcing_block()
+        if missing_upstream_artifact is not None:
+            return _missing_upstream_artifact_decision(missing_upstream_artifact)
         return CandidateStateDecision(
             "blocked",
             str(permanent.get("reason") or "permanent_failure_guard"),
@@ -320,13 +351,24 @@ def _candidate_state_decision(
     if pipeline_status in FAILED_PIPELINE_STATUSES or hydro_status == "failed" or _state_has_failure_signal(
         decision_state,
     ):
+        missing_upstream_artifact = _missing_forcing_block()
+        if missing_upstream_artifact is not None:
+            return _missing_upstream_artifact_decision(missing_upstream_artifact)
         return CandidateStateDecision(
             "retry",
             "retry_failed_candidate",
-            _retry_failure_evidence(candidate, decision_state, evidence),
+            _failure_retry(),
         )
 
     return None
+
+
+def _missing_upstream_artifact_decision(evidence: Mapping[str, Any]) -> CandidateStateDecision:
+    return CandidateStateDecision(
+        "blocked",
+        str(evidence.get("reason") or "missing_upstream_artifact"),
+        evidence,
+    )
 
 
 _COMPLETED_CYCLE_STATUSES = frozenset({"complete", "completed", "succeeded", "published", "done"})

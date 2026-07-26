@@ -98,6 +98,11 @@ from services.orchestrator.retry import (
     classify_failure,
     compute_backoff_seconds,
 )
+from services.orchestrator.retry_identity import (
+    RETRY_JOB_ID_MARKER,
+    effective_retry_attempt,
+    split_retry_job_identity,
+)
 from services.orchestrator.scheduler_file_providers import (
     _public_raw_manifest_evidence,
     _sanitize_file_provider_evidence_scalar,
@@ -7069,18 +7074,9 @@ class FileJournalRetryService:
 
 def _next_current_master_retry_identity(current: Mapping[str, Any]) -> tuple[str, int]:
     job_id = str(current.get("job_id") or "")
-    base_job_id = job_id
-    suffix_attempt = 0
-    marker = "_retry_"
-    if marker in job_id:
-        possible_base, possible_attempt = job_id.rsplit(marker, maxsplit=1)
-        try:
-            suffix_attempt = max(int(possible_attempt), 0)
-            base_job_id = possible_base
-        except ValueError:
-            pass
-    retry_count = max(int(current.get("retry_count") or 0), suffix_attempt) + 1
-    return f"{base_job_id}{marker}{retry_count}", retry_count
+    base_job_id, _suffix_attempt = split_retry_job_identity(job_id)
+    retry_count = effective_retry_attempt(job_id, current.get("retry_count")) + 1
+    return f"{base_job_id}{RETRY_JOB_ID_MARKER}{retry_count}", retry_count
 
 
 def _utcnow() -> datetime:

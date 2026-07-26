@@ -12,6 +12,7 @@ from services.orchestrator.accepted_submit_identity import (
     forecast_cohort_digest,
     forecast_cohort_identity_is_valid,
 )
+from services.orchestrator.retry_identity import RETRY_JOB_ID_MARKER, split_retry_job_identity
 
 _FORCE_TERMINAL_RESUBMIT_DECISIONS = {
     "retry_repair_missing_forcing",
@@ -195,18 +196,9 @@ class ForecastOrchestratorCycleMixin:
             # The next call to _submit_and_wait_cycle_stage owns creation of a
             # clean, versioned reservation using the then-current basin cohort.
             # Do not let the legacy retry adapter clone a marker-free row.
-            retry_marker = "_retry_"
-            base_job_id = result.pipeline_job_id
-            suffix_attempt = 0
-            if retry_marker in base_job_id:
-                possible_base, possible_attempt = base_job_id.rsplit(retry_marker, maxsplit=1)
-                try:
-                    suffix_attempt = max(int(possible_attempt), 0)
-                    base_job_id = possible_base
-                except ValueError:
-                    pass
+            base_job_id, suffix_attempt = split_retry_job_identity(result.pipeline_job_id)
             next_attempt = max(retry_count, suffix_attempt, failure_number - 1) + 1
-            next_job_id = f"{base_job_id}{retry_marker}{next_attempt}"
+            next_job_id = f"{base_job_id}{RETRY_JOB_ID_MARKER}{next_attempt}"
             _chain.time.sleep(backoff_seconds)
             return next_job_id
         handled = self.retry_service.handle_failed_job(job)

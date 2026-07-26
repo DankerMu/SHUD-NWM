@@ -23,6 +23,7 @@ from services.orchestrator.scheduler_state_manual_retry import (
 )
 from services.orchestrator.scheduler_state_rows import (
     _bounded_task_result_rows,
+    _canonical_downstream_stage,
     _event_has_failure_signal,
     _is_source_cycle_download_stage,
     _pipeline_job_is_repaired_stage_evidence,
@@ -36,8 +37,6 @@ from services.orchestrator.scheduler_state_rows import (
 )
 from services.orchestrator.scheduler_state_types import (
     ACTIVE_PIPELINE_STATUSES,
-    DOWNSTREAM_RESTART_STAGES,
-    DOWNSTREAM_STAGE_ALIASES,
     FAILED_PIPELINE_STATUSES,
     NATIVE_SHUD_STAGE_ALIASES,
     TERMINAL_PIPELINE_SUCCESS_STATUSES,
@@ -59,14 +58,6 @@ def _failed_stage(state: Mapping[str, Any]) -> str | None:
         status = str(job.get("status") or "")
         if status in FAILED_PIPELINE_STATUSES and job.get("stage") not in (None, ""):
             return str(job["stage"])
-    return None
-
-def _canonical_downstream_stage(stage: str | None) -> str | None:
-    if stage is None:
-        return None
-    normalized = DOWNSTREAM_STAGE_ALIASES.get(stage)
-    if normalized in DOWNSTREAM_RESTART_STAGES:
-        return normalized
     return None
 
 def _durable_shud_output_exists(state: Mapping[str, Any]) -> bool:
@@ -97,10 +88,10 @@ def _failure_policy_payload(
     manual: bool = False,
 ) -> dict[str, Any]:
     error_code = _state_error_code(state) or default_error_code or "UNKNOWN_FAILURE"
-    attempt = _state_retry_attempt(state)
+    stage = _failed_stage(state)
+    attempt = _state_retry_attempt(state, stage=stage)
     retry_limit = _state_retry_limit(state)
     classification = classify_failure(error_code, attempt=attempt, retry_limit=retry_limit, manual=manual)
-    stage = _failed_stage(state)
     explicit_classifier = state.get("failure_classifier") or state.get("classifier")
     if explicit_classifier not in (None, ""):
         classification["classifier"] = str(explicit_classifier)
@@ -655,7 +646,7 @@ def _completed_upstream_stage_retry_evidence(
         "retry_policy": {
             "automatic_retry_allowed": True,
             "manual_retry_required": False,
-            "attempt": _state_retry_attempt(state),
+            "attempt": _state_retry_attempt(state, stage=restart_stage),
             "retry_limit": _state_retry_limit(state),
         },
         "identity": {
@@ -1077,7 +1068,7 @@ def _cancelled_state_evidence(
         "retry_policy": {
             "automatic_retry_allowed": False,
             "manual_retry_required": True,
-            "attempt": _state_retry_attempt(state),
+            "attempt": _state_retry_attempt(state, stage=_failed_stage(state)),
             "retry_limit": _state_retry_limit(state),
         },
         "identity": {
@@ -1094,7 +1085,7 @@ def _manual_retry_state_evidence(
     failure = _failure_policy_payload(state, manual=True)
     manual = _manual_retry_payload(state)
     prior_failure = _prior_failure_reason(state) or failure["reason_code"]
-    previous_attempt = _state_retry_attempt(state)
+    previous_attempt = _state_retry_attempt(state, stage=_failed_stage(state))
     new_attempt = _manual_retry_new_attempt(state, previous_attempt=previous_attempt)
     evidence = {
         **base_evidence,
