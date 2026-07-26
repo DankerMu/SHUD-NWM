@@ -6684,6 +6684,129 @@ def _forcing_retry_suffix_state() -> dict[str, Any]:
     }
 
 
+def _state_with_exhausted_cycle_scope_download(
+    candidate: Any,
+    *,
+    forcing_version: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Projected state: a cycle-scope download retried to exhaustion, then a FIRST forecast failure.
+
+    ``state["pipeline_jobs"]`` is the UNFILTERED cycle-wide list, so it carries
+    model-less cycle-scope rows whose ``retry_count`` the auto-retry service
+    really does persist (they are not master rows, so the clean-reservation
+    invariant never resets them).  The candidate-scoped flat ``retry_count``
+    stays 0 -- the forecast has not been retried even once.
+    """
+
+    cycle_run_id = f"cycle_gfs_{format_cycle_time(candidate.cycle_time_utc)}"
+    return chain_repository_state_module.candidate_state_from_rows(
+        source_id=candidate.source_id,
+        cycle_time=candidate.cycle_time_utc,
+        model_id=candidate.model_id,
+        run_id=candidate.run_id,
+        forcing_version_id=candidate.forcing_version_id,
+        candidate_id=candidate.candidate_id,
+        hydro_run={"run_id": candidate.run_id, "status": "failed"},
+        pipeline_jobs=[
+            {
+                "job_id": f"job_{cycle_run_id}_download_retry_1_retry_2_retry_3",
+                "run_id": cycle_run_id,
+                "cycle_id": candidate.cycle_id,
+                "model_id": None,
+                "candidate_id": None,
+                "status": "succeeded",
+                "stage": "download",
+                "job_type": "download_source_cycle",
+                "retry_count": 3,
+                "updated_at": "2026-05-21T06:20:00Z",
+            },
+            {
+                "job_id": f"job_{cycle_run_id}_model_a_forecast",
+                "run_id": candidate.run_id,
+                "cycle_id": candidate.cycle_id,
+                "model_id": candidate.model_id,
+                "candidate_id": candidate.candidate_id,
+                "status": "failed",
+                "stage": "forecast",
+                "job_type": "run_shud_forecast_array",
+                "slurm_job_id": "9100",
+                "retry_count": 0,
+                "error_code": "NODE_FAILURE",
+                "error_message": "array tasks failed",
+                "updated_at": "2026-05-21T06:45:00Z",
+            },
+        ],
+        pipeline_events=[],
+        forcing_version=forcing_version,
+        forecast_cycle=None,
+        retry_limit=3,
+    )
+
+
+def test_cycle_scope_retry_count_does_not_exhaust_the_candidate_forecast_budget() -> None:
+    from services.orchestrator import scheduler_state_failure
+
+    candidate = _scheduler_candidate_fixture()
+    state = _state_with_exhausted_cycle_scope_download(candidate)
+
+    assert state is not None
+    # Premise: the cycle-scope row really is in the projection, and its recorded
+    # count really is at the limit, while the candidate's own flat count is 0.
+    assert state["retry_count"] == 0
+    assert [job["retry_count"] for job in state["pipeline_jobs"]] == [3, 0]
+
+    assert scheduler_state_failure._state_retry_attempt(state, stage="forecast") == 0
+
+    failure = scheduler_state_failure._failure_policy_payload(state)
+
+    assert failure["attempt"] == 0
+    assert failure["limit_exhausted"] is False
+    assert failure["permanent"] is False
+
+
+def test_failed_forecast_after_exhausted_cycle_scope_download_still_retries() -> None:
+    # Must-preserve: ``retry_failed_candidate`` remains the decision for failed
+    # candidates whose recorded upstream artifacts all exist.
+    candidate = _scheduler_candidate_fixture()
+    state = _state_with_exhausted_cycle_scope_download(
+        candidate,
+        forcing_version={
+            "forcing_version_id": candidate.forcing_version_id,
+            "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
+            "status": "ready",
+        },
+    )
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("retry", "retry_failed_candidate")
+    assert decision.evidence["retry_policy"]["manual_retry_required"] is False
+    assert decision.evidence["retry_policy"]["attempt"] == 0
+
+
+def test_manual_retry_previous_attempt_ignores_cycle_scope_retry_counts() -> None:
+    # Sibling ``stage=`` call site (``_manual_retry_state_evidence``): the new
+    # attempt must count the candidate's own forecast retries, not the cycle's.
+    candidate = _scheduler_candidate_fixture()
+    state = _state_with_exhausted_cycle_scope_download(
+        candidate,
+        forcing_version={
+            "forcing_version_id": candidate.forcing_version_id,
+            "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
+            "status": "ready",
+        },
+    )
+    state["manual_retry"] = {"requested": True}
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("retry", "manual_retry_requested")
+    assert decision.evidence["manual_retry"]["previous_attempt"] == 0
+    assert decision.evidence["retry_policy"]["attempt"] == 1
+
+
 def _missing_forcing_repair_direct_grid_profile(source_id: str = "gfs") -> dict[str, Any]:
     grid_id = f"{source_id.lower()}_0p25"
     return {

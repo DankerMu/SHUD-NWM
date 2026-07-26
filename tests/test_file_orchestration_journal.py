@@ -2003,6 +2003,57 @@ def test_file_journal_retry_service_schedules_auto_retry_and_records_event(tmp_p
     assert retry_event["details"]["failure"]["retryable"] is True
 
 
+def test_file_journal_auto_retry_persists_retry_count_on_cycle_scope_rows(tmp_path: Path) -> None:
+    """Cycle-scope (model-less) rows are NOT master rows: their retry_count is durable.
+
+    The clean-reservation invariant resets ``retry_count`` only on forecast-cohort
+    master rows, so any consumer that treats a cycle-wide job's recorded count as
+    "always 0" is reading a premise the journal never guarantees.
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    cycle_run_id = f"cycle_gfs_{format_cycle_time(cycle_time)}"
+    record = {
+        "job_id": f"job_{cycle_run_id}_download",
+        "run_id": cycle_run_id,
+        "cycle_id": cycle_id_for("gfs", cycle_time),
+        "source_id": "gfs",
+        "job_type": "download_source_cycle",
+        "model_id": None,
+        "status": "reserved",
+        "stage": "download",
+        "idempotency_key": f"gfs:{cycle_id_for('gfs', cycle_time)}:download",
+    }
+    repository.reserve_pipeline_job(record)
+    repository.bind_pipeline_job_reservation(record["idempotency_key"], slurm_job_id="9001")
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+
+    job_id = record["job_id"]
+    retry_counts = []
+    for _ in range(3):
+        repository.update_pipeline_job_status(
+            job_id,
+            "failed",
+            error_code="SLURM_TIMEOUT",
+            finished_at=cycle_time,
+        )
+        handled = service.handle_failed_job(repository.get_pipeline_job(job_id))
+        job_id = handled.job_id
+        retry_counts.append(repository.get_pipeline_job(job_id)["retry_count"])
+
+    assert retry_counts == [1, 2, 3]
+    assert repository.get_pipeline_job(job_id)["model_id"] is None
+    # Every candidate of the cycle sees the model-less row -- and its durable
+    # non-zero count -- in the unfiltered ``pipeline_jobs`` projection.
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    assert state is not None
+    cycle_scope_counts = {
+        job["job_id"]: job["retry_count"] for job in state["pipeline_jobs"] if job["model_id"] is None
+    }
+    assert max(cycle_scope_counts.values()) == 3
+
+
 def test_file_journal_manual_retry_manifest_uses_source_cycle_fields_for_convert(tmp_path: Path) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
     workspace_root = tmp_path / "workspace"

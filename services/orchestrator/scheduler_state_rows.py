@@ -425,23 +425,23 @@ def _canonical_downstream_stage(stage: str | None) -> str | None:
 def _state_retry_attempt(state: Mapping[str, Any], *, stage: str | None = None) -> int:
     """Return the retry attempt recorded for ``state``, scoped to ``stage`` when given.
 
-    Only the SUFFIX half of the derivation is stage-scoped: just jobs whose
-    stage matches contribute their durable ``_retry_<n>`` suffix attempt, so a
-    completed ``forcing`` retry's suffix cannot exhaust the forecast budget.
-    Stage identity for that match comes from the job projection's authoritative
-    ``stage`` field — never from job-id substrings, because production ids embed
-    several stage tokens (``..._convert_model_0_forecast_retry_1_retry_2``).
-    The recorded-count half is NOT stage-scoped: every job's raw ``retry_count``
-    still feeds the max, exactly as master does, so the value is unchanged from
-    master whenever no matching suffix exists (and unobservable today anyway —
-    the journal's clean-reservation invariant pins those counts to 0 in the
-    DB-free deployment).
+    With ``stage`` supplied the answer is ``max(flat, stage-matching jobs)``:
+    the state's own candidate-scoped ``retry_count`` is the floor, and ONLY jobs
+    whose canonical stage matches contribute anything beyond it — via their
+    durable ``_retry_<n>`` suffix attempt.  Non-matching jobs contribute nothing,
+    because ``pipeline_jobs`` is the unfiltered cycle-wide list while the flat
+    count is candidate-scoped; charging a cycle-scope download's persisted
+    ``retry_count`` to the forecast budget would block candidates whose own
+    forecast has not been retried once.  Stage identity comes from the job
+    projection's authoritative ``stage`` field — never from job-id substrings,
+    because production ids embed several stage tokens
+    (``..._convert_model_0_forecast_retry_1_retry_2``).
 
-    A real projected state ALWAYS carries a top-level ``retry_count`` (the
-    journal's clean-reservation invariant pins it to 0), so the flat value can
-    never short-circuit the stage-scoped derivation: with ``stage`` supplied the
-    two are combined with ``max``.  Without ``stage`` the flat-first order is
-    preserved byte-for-byte for the evidence-owner / manual-retry consumers.
+    Without ``stage`` the flat-first order and the cross-job recorded-count max
+    are preserved byte-for-byte for the evidence-owner / manual-retry consumers.
+    The flat value never short-circuits the stage-scoped derivation: a real
+    projected state ALWAYS carries a top-level ``retry_count`` (0 whenever the
+    journal's clean-reservation invariant reset the forecast master row).
     """
 
     flat = _state_flat_retry_attempt(state)
@@ -467,8 +467,15 @@ def _state_job_retry_attempt(state: Mapping[str, Any], canonical_stage: str | No
 
 def _job_retry_attempt(job: Mapping[str, Any], canonical_stage: str | None) -> int:
     recorded = _coerce_int(job.get("retry_count"), default=0)
-    if canonical_stage is None or _canonical_downstream_stage(_job_stage_name(job)) != canonical_stage:
+    if canonical_stage is None:
         return recorded
+    if _canonical_downstream_stage(_job_stage_name(job)) != canonical_stage:
+        # ``pipeline_jobs`` is the UNFILTERED cycle-wide list: it carries
+        # model-less cycle-scope rows (download / convert / forcing / parse /
+        # state_save_qc / publish) whose ``retry_count`` the auto-retry service
+        # durably persists.  Counting them would charge another scope's retries
+        # to this candidate's stage budget.
+        return 0
     return effective_retry_attempt(job.get("job_id"), recorded)
 
 def _job_stage_name(job: Mapping[str, Any]) -> str | None:
