@@ -425,11 +425,17 @@ def _canonical_downstream_stage(stage: str | None) -> str | None:
 def _state_retry_attempt(state: Mapping[str, Any], *, stage: str | None = None) -> int:
     """Return the retry attempt recorded for ``state``, scoped to ``stage`` when given.
 
-    Stage identity comes from the job projection's authoritative ``stage`` field —
-    never from job-id substrings, because production ids embed several stage
-    tokens (``..._convert_model_0_forecast_retry_1_retry_2``).  Only jobs whose
+    Only the SUFFIX half of the derivation is stage-scoped: just jobs whose
     stage matches contribute their durable ``_retry_<n>`` suffix attempt, so a
-    completed ``forcing`` retry cannot exhaust the forecast budget.
+    completed ``forcing`` retry's suffix cannot exhaust the forecast budget.
+    Stage identity for that match comes from the job projection's authoritative
+    ``stage`` field — never from job-id substrings, because production ids embed
+    several stage tokens (``..._convert_model_0_forecast_retry_1_retry_2``).
+    The recorded-count half is NOT stage-scoped: every job's raw ``retry_count``
+    still feeds the max, exactly as master does, so the value is unchanged from
+    master whenever no matching suffix exists (and unobservable today anyway —
+    the journal's clean-reservation invariant pins those counts to 0 in the
+    DB-free deployment).
 
     A real projected state ALWAYS carries a top-level ``retry_count`` (the
     journal's clean-reservation invariant pins it to 0), so the flat value can
