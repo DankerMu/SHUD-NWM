@@ -220,7 +220,10 @@ jobs:
       needs.changes.outputs.backend == 'true' &&
       github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 35: scheduler/orchestration PRs select the heaviest test files; the
+    # selected suite alone runs ~20 min on hosted runners (observed twice
+    # cancelled at the old 20-min cap with 0 failures at 83% progress).
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
         with:
