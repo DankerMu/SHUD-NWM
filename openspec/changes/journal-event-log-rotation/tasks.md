@@ -186,11 +186,11 @@ across segments, reconcile per-row quarantine, error `field` plumbing.
 
 ## 3. Verification
 
-- [ ] 3.1 `uv run pytest -q tests/test_file_orchestration_journal.py
+- [x] 3.1 `uv run pytest -q tests/test_file_orchestration_journal.py
       tests/test_file_orchestration_journal_read_cache.py
       tests/test_production_scheduler.py tests/test_orchestration_chain.py`
-- [ ] 3.2 `uv run ruff check .`
-- [ ] 3.3 `openspec validate journal-event-log-rotation --strict
+- [x] 3.2 `uv run ruff check .`
+- [x] 3.3 `openspec validate journal-event-log-rotation --strict
       --no-interactive`
 
 ## 4. Spec delta

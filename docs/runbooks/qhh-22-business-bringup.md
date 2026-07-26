@@ -230,7 +230,8 @@ accepted-submit reconcile authority。
 不重写历史、不删除；base segment 滚动后即冻结，新行只落最后一个 segment；replay 按
 segment 顺序拼接，等价于单文件。超出 3 段以 `file_journal_segment_limit_exceeded` fail
 closed，缺失前序 segment（如只有 `<cycle>.5.jsonl`）以 `file_journal_segment_gap` fail
-closed。运维不要手工创建、改名或删除 segment 文件；`pipeline-events/` 同一套布局。
+closed。运维不要手工创建、改名或删除 segment 文件；`pipeline-events/` 只读容忍同一布局
+（本仓库不写该 surface）。
 
 版本化 accepted-submit master 的 reserve/commit/reject/accounting-bind 只按确定的
 `pipeline_job_id` 读取 flat direct 与对应 `journal/<source>/<cycle>.jsonl`（含其

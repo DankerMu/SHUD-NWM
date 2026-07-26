@@ -6262,13 +6262,6 @@ class FileOrchestrationJournalRepository:
             finally:
                 self._reconcile_inventory_lock_depth = 0
 
-    def _journal_path(self, *, source_id: str, cycle_time: datetime) -> Path:
-        """Base (segment 0) path of a cycle event log."""
-
-        return self._journal_directory(source_id=source_id) / _journal_segment_name(
-            format_cycle_time(cycle_time), 0
-        )
-
     def _journal_directory(self, *, source_id: str, surface: str = "journal") -> Path:
         return self.root / surface / _safe_segment(source_id)
 

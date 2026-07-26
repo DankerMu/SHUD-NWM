@@ -5986,6 +5986,132 @@ def test_file_journal_oversized_record_fails_closed_without_creating_a_segment(
     assert _segment_paths(journal_root, cycle_time) == []
 
 
+def _oversized_record(cycle_time: datetime, *, sequence: int, padding: int) -> dict[str, Any]:
+    payload = _active_job(cycle_time)
+    payload["error_message"] = "x" * padding
+    return _journal_record(
+        record_type="pipeline_job",
+        source_id="gfs",
+        cycle_time=cycle_time,
+        payload=payload,
+        sequence=sequence,
+    )
+
+
+def test_file_journal_oversized_record_never_rolls_a_non_empty_segment_over(
+    tmp_path: Path,
+) -> None:
+    """2.4 (non-empty base) — an oversized payload must not trigger rollover.
+
+    A fresh cycle short-circuits the rollover branch on ``existing`` alone, so
+    the geometry that actually exercises the ``len(pending) <= max_bytes``
+    guard is a near-full NON-EMPTY segment: the append must still fail with
+    the byte-limit reason, write nothing, and leave no empty continuation
+    file behind.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    cycle_segment = format_cycle_time(cycle_time)
+    journal_root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(journal_root)
+    repository.upsert_pipeline_job(_rotation_job(cycle_time, error_message="pad-0"))
+
+    base = journal_root / "journal" / "gfs" / f"{cycle_segment}.jsonl"
+    frozen_base = base.read_bytes()
+    continuation = journal_root / "journal" / "gfs" / f"{cycle_segment}.1.jsonl"
+    tight = _tight_repository(journal_root, base, headroom=16)
+    oversized = _oversized_record(cycle_time, sequence=2, padding=tight.max_bytes)
+    assert len(json.dumps(oversized, sort_keys=True, separators=(",", ":")).encode()) > tight.max_bytes
+
+    with tight._locked_cycle_write(source_id="gfs", cycle_time=cycle_time):
+        with pytest.raises(FileOrchestrationJournalError) as single_caught:
+            tight._append_journal_record_unlocked(
+                source_id="gfs",
+                cycle_time=cycle_time,
+                record=oversized,
+            )
+    assert single_caught.value.reason == "file_journal_byte_limit_exceeded"
+    assert base.read_bytes() == frozen_base
+    assert not continuation.exists()
+    assert _segment_paths(journal_root, cycle_time) == [f"{cycle_segment}.jsonl"]
+
+    with tight._locked_cycle_write(source_id="gfs", cycle_time=cycle_time):
+        with pytest.raises(FileOrchestrationJournalError) as batch_caught:
+            tight._append_journal_records_unlocked(
+                source_id="gfs",
+                cycle_time=cycle_time,
+                records=[oversized],
+            )
+    assert batch_caught.value.reason == "file_journal_byte_limit_exceeded"
+    assert base.read_bytes() == frozen_base
+    assert not continuation.exists()
+    assert _segment_paths(journal_root, cycle_time) == [f"{cycle_segment}.jsonl"]
+
+
+def test_file_journal_oversized_record_at_the_segment_cap_stays_byte_limit(
+    tmp_path: Path,
+) -> None:
+    """2.4 (cap) — segment exhaustion stays distinguishable from an oversized record.
+
+    At the cap the two fail-closed reasons collide: only the
+    ``len(pending) <= max_bytes`` guard keeps an oversized record reporting
+    ``file_journal_byte_limit_exceeded`` instead of masquerading as
+    ``file_journal_segment_limit_exceeded``.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    cycle_segment = format_cycle_time(cycle_time)
+    journal_root = tmp_path / "journal"
+    filled = [
+        _journal_record(
+            record_type="pipeline_job",
+            source_id="gfs",
+            cycle_time=cycle_time,
+            payload=_active_job(cycle_time),
+            sequence=sequence,
+        )
+        for sequence in (1, 2, 3)
+    ]
+    names = [
+        f"{cycle_segment}.jsonl",
+        f"{cycle_segment}.1.jsonl",
+        f"{cycle_segment}.2.jsonl",
+    ]
+    for name, record in zip(names, filled, strict=True):
+        _write_jsonl(journal_root / "journal" / "gfs" / name, [record])
+    last = journal_root / "journal" / "gfs" / names[-1]
+    frozen = {name: (journal_root / "journal" / "gfs" / name).read_bytes() for name in names}
+    tight = _tight_repository(journal_root, last, headroom=16)
+    oversized = _oversized_record(cycle_time, sequence=4, padding=tight.max_bytes)
+
+    with tight._locked_cycle_write(source_id="gfs", cycle_time=cycle_time):
+        with pytest.raises(FileOrchestrationJournalError) as caught:
+            tight._append_journal_record_unlocked(
+                source_id="gfs",
+                cycle_time=cycle_time,
+                record=oversized,
+            )
+    assert caught.value.reason == "file_journal_byte_limit_exceeded"
+    assert caught.value.reason != "file_journal_segment_limit_exceeded"
+    assert {name: (journal_root / "journal" / "gfs" / name).read_bytes() for name in names} == frozen
+    assert _segment_paths(journal_root, cycle_time) == sorted(names)
+
+    # A record that DOES fit a fresh segment is what the cap rejects.
+    with tight._locked_cycle_write(source_id="gfs", cycle_time=cycle_time):
+        with pytest.raises(FileOrchestrationJournalError) as cap_caught:
+            tight._append_journal_record_unlocked(
+                source_id="gfs",
+                cycle_time=cycle_time,
+                record=_journal_record(
+                    record_type="pipeline_job",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    payload=_active_job(cycle_time),
+                    sequence=4,
+                ),
+            )
+    assert cap_caught.value.reason == "file_journal_segment_limit_exceeded"
+    assert _segment_paths(journal_root, cycle_time) == sorted(names)
+
+
 def test_file_journal_batch_append_rolls_the_whole_batch_into_one_segment(
     tmp_path: Path,
 ) -> None:
@@ -6049,21 +6175,53 @@ def test_file_journal_cross_segment_sequences_and_event_ids_never_reuse(
     continuation = journal_root / "journal" / "gfs" / f"{format_cycle_time(cycle_time)}.1.jsonl"
     continuation_sequences = [record["sequence"] for record in tight._read_jsonl(continuation, segment_index=1)]
     all_sequences = [*base_sequences, *continuation_sequences]
+    assert base_sequences == [1, 2, 3]
+    assert continuation_sequences == [4, 5]
     assert all_sequences == sorted(all_sequences)
     assert len(set(all_sequences)) == len(all_sequences)
-    assert event["event_id"] > max(base_sequences)
-    assert tight._next_sequence_unlocked(source_id="gfs", cycle_time=cycle_time) > max(all_sequences)
-    assert (
-        tight._next_accepted_submit_event_id_unlocked(source_id="gfs", cycle_time=cycle_time)
-        > max(all_sequences)
+    # Exact values, not a bound: a floor that missed the continuation segment
+    # would hand out an id the segment already used.
+    assert event["event_id"] == 5
+    assert tight._next_sequence_unlocked(source_id="gfs", cycle_time=cycle_time) == 6
+    assert tight._next_accepted_submit_event_id_unlocked(source_id="gfs", cycle_time=cycle_time) == 6
+
+    # A continuation-segment event id far above every base id: the floor is
+    # 100 only if the segment was read. A base-only floor would answer 6.
+    segment_event = _journal_record(
+        record_type="pipeline_event",
+        source_id="gfs",
+        cycle_time=cycle_time,
+        payload={
+            "event_id": 99,
+            "entity_type": "pipeline_job",
+            "entity_id": "job_rotation",
+            "event_type": "status_changed",
+            "status_from": "queued",
+            "status_to": "running",
+            "created_at": "2026-06-28T00:05:00Z",
+        },
+        sequence=2,
     )
+    segment_event["event_id"] = 99
+    segment_event["entity_id"] = "job_rotation"
+    with tight._locked_cycle_write(source_id="gfs", cycle_time=cycle_time):
+        tight._append_journal_records_unlocked(
+            source_id="gfs",
+            cycle_time=cycle_time,
+            records=[segment_event],
+        )
+
+    assert tight._next_accepted_submit_event_id_unlocked(source_id="gfs", cycle_time=cycle_time) == 100
 
 
 def test_file_journal_cycle_rows_cache_observes_continuation_segments(tmp_path: Path) -> None:
-    """2.7 — rollover invalidates the cycle rows cache of another reader.
+    """2.7 — rollover alone invalidates the cycle rows cache of another reader.
 
     The base segment is frozen after rollover, so a fingerprint that watched
-    only the base file would serve its stale rows forever.
+    only the base file would serve its stale rows forever.  The second write
+    is therefore JOURNAL-ONLY: no latest view and no direct job file is
+    rewritten, so the newly created continuation segment is the sole on-disk
+    change the fingerprint could possibly notice.
     """
     cycle_time = _dt("2026-06-28T00:00:00Z")
     journal_root = tmp_path / "journal"
@@ -6077,8 +6235,37 @@ def test_file_journal_cycle_rows_cache_observes_continuation_segments(tmp_path: 
         source_id="gfs", cycle_time=cycle_time, model_id="model_a"
     ).pipeline_jobs["job_rotation"]["error_message"] == "pad-2"
 
+    # Reuse the last durable record so the continuation carries a real row,
+    # then append it as a bare journal write (the 2.5 seam).
+    continuation_record = json.loads(json.dumps(writer._read_jsonl(base)[-1]))
+    continuation_record.pop(journal_module._REPLAY_ORDER_FIELD, None)
+    continuation_record["sequence"] = continuation_record["sequence"] + 1
+    continuation_record["payload"]["error_message"] = "rolled-over"
+    unchanged_before = {
+        path: path.stat().st_mtime_ns
+        for path in sorted(
+            [
+                *(journal_root / "latest").rglob("*.json"),
+                *(journal_root / "pipeline-jobs").rglob("*.json"),
+            ]
+        )
+    }
+    frozen_base = base.read_bytes()
+
     tight = _tight_repository(journal_root, base, headroom=16)
-    tight.upsert_pipeline_job(_rotation_job(cycle_time, error_message="rolled-over"))
+    with tight._locked_cycle_write(source_id="gfs", cycle_time=cycle_time):
+        tight._append_journal_records_unlocked(
+            source_id="gfs",
+            cycle_time=cycle_time,
+            records=[continuation_record],
+        )
+
+    # Nothing but the new segment changed on disk.
+    continuation = journal_root / "journal" / "gfs" / f"{format_cycle_time(cycle_time)}.1.jsonl"
+    assert continuation.exists()
+    assert base.read_bytes() == frozen_base
+    assert unchanged_before
+    assert {path: path.stat().st_mtime_ns for path in unchanged_before} == unchanged_before
 
     assert reader._cycle_rows(
         source_id="gfs", cycle_time=cycle_time, model_id="model_a"
