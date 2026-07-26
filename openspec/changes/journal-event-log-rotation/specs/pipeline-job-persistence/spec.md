@@ -54,8 +54,14 @@ When appending a record (or record batch) to a per-cycle journal event log would
   invalid-cycle-time error and no silently skipped segment records —
   replay and inventory backfill arbitrate records in segment order
   (never lexicographic path order), genuinely unparseable file names
-  keep today's behavior, and an orphan (gapped) segment fails closed
-  with the same answer from every reader
+  keep today's behavior, and an orphan (gapped) segment WITHIN the
+  bounded probe window (indices up to the segment cap) fails closed
+  with the same answer from every reader; an orphan BEYOND the probe
+  window — unreachable by the writer, producible only by external
+  corruption — still fails closed in the enumeration walkers and
+  inventory backfill, while the cycle-level exact-path reader cannot
+  observe it (no-globbing hot-path constraint), an asymmetry that is
+  pinned by test and documented where operators diagnose it
 
 #### Scenario: Latest-view precedence survives segmented replay order
 

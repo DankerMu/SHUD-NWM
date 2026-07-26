@@ -229,8 +229,12 @@ accepted-submit reconcile authority。
 （base + 2 continuation，48 MiB，低于 64 MiB read-cache 预算）。语义不变：append-only、
 不重写历史、不删除；base segment 滚动后即冻结，新行只落最后一个 segment；replay 按
 segment 顺序拼接，等价于单文件。超出 3 段以 `file_journal_segment_limit_exceeded` fail
-closed，缺失前序 segment（如只有 `<cycle>.5.jsonl`）以 `file_journal_segment_gap` fail
-closed。运维不要手工创建、改名或删除 segment 文件；`pipeline-events/` 只读容忍同一布局
+closed；窗口内缺失前序 segment（例如存在 `<cycle>.2.jsonl` 却没有 `<cycle>.1.jsonl`）以
+`file_journal_segment_gap` fail closed，且 cycle 级读者与递归 walker 给出同一答案。
+注意边界：cycle 级读者按固定窗口（index 0..3）精确探针、不做目录扫描，因此 index ≥ 4 的
+孤儿 segment（只可能来自外部损坏或人工误操作）在 walker / reconcile-inventory backfill 侧
+fail closed，但对 cycle 级读者不可见——诊断这类损坏时以 walker 侧报错为准。
+运维不要手工创建、改名或删除 segment 文件；`pipeline-events/` 只读容忍同一布局
 （本仓库不写该 surface）。
 
 版本化 accepted-submit master 的 reserve/commit/reject/accounting-bind 只按确定的

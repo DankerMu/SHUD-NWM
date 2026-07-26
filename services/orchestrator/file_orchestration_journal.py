@@ -6268,11 +6268,15 @@ class FileOrchestrationJournalRepository:
     def _cycle_segment_paths(self, directory: Path, cycle_segment: str) -> list[Path]:
         """Ordered existing segment paths of one cycle event log.
 
-        Exact-path probing over the bounded segment window, never a directory
-        scan: this runs per candidate read while a source directory holds one
-        entry per cycle.  The returned prefix stops at the first gap; a
-        segment beyond that gap, or past the cap, is an integrity fault rather
-        than a silently ignored file.
+        Exact-path probing over the bounded segment window (index 0 through
+        ``MAX_FILE_JOURNAL_CYCLE_SEGMENTS``), never a directory scan: this
+        runs per candidate read while a source directory holds one entry per
+        cycle.  The returned prefix stops at the first gap; within the window
+        a segment beyond that gap, or past the cap, is an integrity fault
+        rather than a silently ignored file.  Past the window the exact-path
+        reader cannot observe the file at all — a stray ``<cycle>.9.jsonl``
+        stays invisible here and the recursive walkers and the
+        reconcile-inventory backfill remain its only detecting readers.
         """
         paths: list[Path] = []
         gapped = False
@@ -9308,9 +9312,12 @@ def _journal_segment_name(cycle_segment: str, segment_index: int) -> str:
 def _journal_segment_names(cycle_segment: str) -> tuple[str, ...]:
     """Every segment slot a cycle may own, plus the first illegal one.
 
-    The extra probe keeps an over-cap segment visible to enumeration and to
-    the cache fingerprint instead of being read by the recursive walkers but
-    ignored by the cycle-level readers.
+    The extra probe narrows — it does not eliminate — the asymmetry between
+    the recursive walkers and the cycle-level readers: it pulls the first
+    over-cap segment into enumeration and the cache fingerprint, so the
+    asymmetry is pushed out to the window boundary.  An index beyond
+    ``MAX_FILE_JOURNAL_CYCLE_SEGMENTS`` is still walker-detected only,
+    because widening the window further would mean globbing the directory.
     """
     return tuple(
         _journal_segment_name(cycle_segment, index)

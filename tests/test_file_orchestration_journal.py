@@ -6004,10 +6004,13 @@ def test_file_journal_oversized_record_never_rolls_a_non_empty_segment_over(
     """2.4 (non-empty base) — an oversized payload must not trigger rollover.
 
     A fresh cycle short-circuits the rollover branch on ``existing`` alone, so
-    the geometry that actually exercises the ``len(pending) <= max_bytes``
-    guard is a near-full NON-EMPTY segment: the append must still fail with
-    the byte-limit reason, write nothing, and leave no empty continuation
-    file behind.
+    the geometry that reaches the ``len(pending) <= max_bytes`` guard at all
+    is a near-full NON-EMPTY segment.  What this leg pins is the observable
+    outcome: the byte-limit reason, an untouched base, and no empty
+    continuation file.  It does not by itself prove the guard is load-bearing
+    — dropping the guard still raises the same reason here, because the
+    byte-limit check runs before any write.  The reason-distinguishing kill
+    lives in the segment-cap sibling below.
     """
     cycle_time = _dt("2026-06-28T00:00:00Z")
     cycle_segment = format_cycle_time(cycle_time)
@@ -6506,9 +6509,10 @@ def test_file_journal_segment_bound_fails_closed_at_the_cap(tmp_path: Path) -> N
 def test_file_journal_segment_containment_and_foreign_names(tmp_path: Path) -> None:
     """2.12 — containment, foreign names and gapped segments.
 
-    A gapped segment is an integrity fault, and the cycle-level enumeration and
-    the recursive walkers must agree on it instead of one ignoring what the
-    other reads.
+    A gapped segment is an integrity fault.  Inside the probe window the
+    cycle-level enumeration and the recursive walkers must agree on it instead
+    of one ignoring what the other reads; outside the window only the walkers
+    can see the file, and that residual asymmetry is pinned here too.
     """
     cycle_time = _dt("2026-06-28T00:00:00Z")
     cycle_segment = format_cycle_time(cycle_time)
@@ -6525,7 +6529,11 @@ def test_file_journal_segment_containment_and_foreign_names(tmp_path: Path) -> N
     ] == "file_journal_invalid_cycle_time"
     assert foreign._cycle_source_ids(cycle_time=cycle_time) == []
 
-    # An orphan segment fails closed with the same answer from every reader.
+    # An out-of-window orphan segment fails closed in every reader that walks
+    # the directory.  The cycle-level reader probes exact paths only (index 0
+    # through MAX_FILE_JOURNAL_CYCLE_SEGMENTS) and therefore cannot see index
+    # 5 at all -- the disclosed bounded-window residual.  Both halves are
+    # pinned so a future silent flip in either direction goes red.
     orphan_root = tmp_path / "orphan"
     _write_jsonl(
         orphan_root / "journal" / "gfs" / f"{cycle_segment}.jsonl",
@@ -6542,6 +6550,28 @@ def test_file_journal_segment_containment_and_foreign_names(tmp_path: Path) -> N
     with pytest.raises(FileOrchestrationJournalError) as discovery_caught:
         orphan._cycle_source_ids(cycle_time=cycle_time)
     assert discovery_caught.value.reason == "file_journal_segment_gap"
+    orphan_rows = orphan._cycle_rows(source_id="gfs", cycle_time=cycle_time, model_id=None)
+    assert sorted(orphan_rows.pipeline_jobs) == ["job_base"]
+
+    # A hole at the last in-window slot hides an out-of-window segment behind
+    # it: the cycle-level reader returns the (0, 1, 2) prefix silently while
+    # the walkers still reject the cycle, this time on the cap rule.
+    over_cap_root = tmp_path / "over_cap"
+    for index, job_id in ((0, "job_base"), (1, "job_s1"), (2, "job_s2"), (4, "job_s4")):
+        suffix = "" if index == 0 else f".{index}"
+        _write_jsonl(
+            over_cap_root / "journal" / "gfs" / f"{cycle_segment}{suffix}.jsonl",
+            [_segment_job_record(cycle_time, job_id=job_id, sequence=index + 1)],
+        )
+    over_cap = FileOrchestrationJournalRepository(over_cap_root)
+    over_cap_rows = over_cap._cycle_rows(source_id="gfs", cycle_time=cycle_time, model_id=None)
+    assert sorted(over_cap_rows.pipeline_jobs) == ["job_base", "job_s1", "job_s2"]
+    assert over_cap.query_pipeline_jobs_by_cycle(cycle_id_for("gfs", cycle_time))[0][
+        "file_journal"
+    ]["reason"] == "file_journal_segment_limit_exceeded"
+    with pytest.raises(FileOrchestrationJournalError) as over_cap_caught:
+        over_cap._cycle_source_ids(cycle_time=cycle_time)
+    assert over_cap_caught.value.reason == "file_journal_segment_limit_exceeded"
 
     # The same rule applies to the cycle-level exact-path enumeration.
     gapped_root = tmp_path / "gapped"
@@ -6581,9 +6611,11 @@ def test_file_journal_latest_view_still_wins_ties_in_the_last_segment(
 ) -> None:
     """2.14 — the latest-view sentinel stays above every reachable segment line.
 
-    A naive cumulative offset would push segment >= 2 journal lines past the
-    old sentinel (100_001) and silently invert latest-view precedence; the
-    single-segment byte-identity test can never catch that.
+    The fixed stride puts a segment-2 line at 200_001, above the pre-rotation
+    sentinel (100_001).  This pins that the sentinel was raised in lockstep
+    with the stride: leave it at the old value and the journal line outranks
+    the latest view, silently inverting precedence.  A single-segment
+    byte-identity test can never reach that ordering.
     """
     cycle_time = _dt("2026-06-28T00:00:00Z")
     cycle_segment = format_cycle_time(cycle_time)
