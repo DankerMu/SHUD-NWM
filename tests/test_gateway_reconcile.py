@@ -2435,9 +2435,9 @@ def test_file_cohort_batch_projection_bounds_lock_append_and_materialization(
         calls["sequence_scan"] += 1
         return original_sequence_scan(**kwargs)
 
-    def counted_read_jsonl(path: Any) -> Any:
+    def counted_read_jsonl(path: Any, *, segment_index: int = 0) -> Any:
         calls["read_jsonl"] += 1
-        return original_read_jsonl(path)
+        return original_read_jsonl(path, segment_index=segment_index)
 
     def counted_latest_paths(*args: Any, **kwargs: Any) -> Any:
         calls["latest_enumerations"] += 1
@@ -2604,9 +2604,9 @@ def test_terminal_runtime_identity_uses_one_cycle_snapshot_from_reconcile_entry(
     original_read_jsonl = repository._read_jsonl
     original_latest_paths = repository._latest_paths
 
-    def counted_read_jsonl(path: Any) -> Any:
+    def counted_read_jsonl(path: Any, *, segment_index: int = 0) -> Any:
         calls["read_jsonl"] += 1
-        return original_read_jsonl(path)
+        return original_read_jsonl(path, segment_index=segment_index)
 
     def counted_latest_paths(*args: Any, **kwargs: Any) -> Any:
         calls["latest_enumerations"] += 1
@@ -5682,8 +5682,8 @@ def test_round11_migration_disappearance_fails_without_marker_and_reopens_after_
     elif surface == "journal":
         original_read = repository._read_jsonl
 
-        def disappear_after_journal_read(path: Any) -> list[dict[str, Any]]:
-            records = original_read(path)
+        def disappear_after_journal_read(path: Any, *, segment_index: int = 0) -> list[dict[str, Any]]:
+            records = original_read(path, segment_index=segment_index)
             if path == target:
                 target.unlink()
             return records
@@ -8077,10 +8077,10 @@ def test_round21_rollback_query_skips_100001_historical_terminal_records(
 
     real_read_jsonl = repository._read_jsonl
 
-    def bounded_read(path: Any) -> Any:
+    def bounded_read(path: Any, *, segment_index: int = 0) -> Any:
         if path == historical:
             raise AssertionError("rollback query consumed 100001 historical terminal records")
-        return real_read_jsonl(path)
+        return real_read_jsonl(path, segment_index=segment_index)
 
     monkeypatch.setattr(repository, "_read_jsonl", bounded_read)
     assert [job.job_id for job in repository.query_rollback_unsettled_jobs()] == [job_id]
@@ -8438,8 +8438,8 @@ def test_round21_rollforward_authority_disappearance_is_zero_mutation(
         method_name = "_read_jsonl" if cut.startswith("journal") else "_read_optional_json"
         real_method = getattr(FileOrchestrationJournalRepository, method_name)
 
-        def disappear_after_read(self: Any, path: Any) -> Any:
-            payload = real_method(self, path)
+        def disappear_after_read(self: Any, path: Any, **kwargs: Any) -> Any:
+            payload = real_method(self, path, **kwargs)
             selected = anchor if cut == "inventory_read" else target
             if path == selected and selected.exists():
                 if "replace" in cut:

@@ -28368,3 +28368,216 @@ def test_normal_acquire_release_cycle_and_release_cas_noop(tmp_path: Path) -> No
     assert lease2.acquire(pass_id="p2", started_at=_dt("2026-05-21T12:00:00Z"))["acquired"] is True
     lease2.release(pass_id="p2")
     assert not lock_path.exists()
+
+
+# --- #1165 journal rotation + restart-reconcile quarantine -----------------
+
+
+def _rotation_pad_job(cycle_time: datetime, *, error_message: str) -> dict[str, Any]:
+    return {
+        "job_id": "job_rotation_pad",
+        "run_id": f"fcst_gfs_{format_cycle_time(cycle_time)}_model_a",
+        "cycle_id": cycle_id_for("gfs", cycle_time),
+        "job_type": "run_shud_forecast_array",
+        "model_id": "model_a",
+        "status": "succeeded",
+        "stage": "forecast",
+        "idempotency_key": "gfs:gfs_2026052106:model_a:pad",
+        "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:pad",
+        "error_message": error_message,
+    }
+
+
+def test_scheduler_run_once_rotates_a_full_cycle_journal_instead_of_parking(
+    tmp_path: Path,
+) -> None:
+    """2.2 — the live node-22 incident geometry, end to end.
+
+    A reserved-unbound forecast row whose cycle log sits just under the byte
+    limit used to abort restart reconcile on every pass
+    (``restart_reconcile_unknown``); the reconcile write now rolls the cycle
+    log over to a continuation segment and the pass proceeds.
+    """
+    from services.orchestrator.reconcile import SacctRecord
+    from services.orchestrator.reservation import slurm_comment_for
+
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    cycle_segment = format_cycle_time(cycle_time)
+    key = "gfs:gfs_2026052106:basin_a:forecast"
+    journal_root = tmp_path / "journal"
+    repository = scheduler_module.FileOrchestrationJournalRepository(journal_root)
+    repository.reserve_pipeline_job(
+        {
+            "job_id": "job_capacity_reserved",
+            "run_id": f"fcst_gfs_{cycle_segment}_model_a",
+            "cycle_id": cycle_id_for("gfs", cycle_time),
+            "job_type": "run_shud_forecast_array",
+            "model_id": "model_a",
+            "status": "reserved",
+            "stage": "forecast",
+            "idempotency_key": key,
+            "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+        }
+    )
+    for index in range(3):
+        repository.upsert_pipeline_job(_rotation_pad_job(cycle_time, error_message=f"pad-{index}"))
+
+    base = journal_root / "journal" / "gfs" / f"{cycle_segment}.jsonl"
+    frozen_base = base.read_bytes()
+    # The incident file was 727 bytes under the limit: any further event line
+    # overflows, so the reconcile write must roll over to keep the pass alive.
+    tight = scheduler_module.FileOrchestrationJournalRepository(
+        journal_root,
+        max_bytes=base.stat().st_size + 16,
+    )
+
+    def accounting(_identity: str) -> SacctRecord:
+        return SacctRecord(
+            slurm_job_id="3001",
+            raw_state="RUNNING",
+            job_name="nhms_forecast",
+            comment=slurm_comment_for(key),
+        )
+
+    scheduler = _RealProductionScheduler(
+        _config(
+            tmp_path,
+            dry_run=False,
+            scheduler_journal_backend="file",
+            scheduler_journal_root=journal_root,
+            database_url=None,
+            database_url_configured=False,
+        ),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [])},
+        active_repository=tight,
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        reconcile_store=tight,
+        reconcile_comment_query=accounting,
+        reconcile_sacct_query=accounting,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "restart_reconciled"
+    reconcile_evidence = result.evidence["restart_reconcile"]
+    assert reconcile_evidence["status"] == "completed"
+    assert "reserved_unbound_error" not in reconcile_evidence
+    assert reconcile_evidence["reserved_unbound"]["outcomes"][0]["action"] == "bound"
+    continuation = journal_root / "journal" / "gfs" / f"{cycle_segment}.1.jsonl"
+    assert continuation.exists()
+    assert base.read_bytes() == frozen_base
+    job = tight.get_pipeline_job("job_capacity_reserved")
+    assert job is not None
+    assert job["slurm_job_id"] == "3001"
+
+
+def test_restart_reconcile_quarantines_a_journal_error_row_and_resolves_the_rest(
+    tmp_path: Path,
+) -> None:
+    """2.9 — one poisoned cycle must not abort the whole reserved-unbound pass."""
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
+    from services.orchestrator.reconcile import SacctRecord
+    from services.orchestrator.reservation import slurm_comment_for
+
+    poisoned_key = "gfs:gfs_2026052106:model_a:poisoned"
+    healthy_key = "gfs:gfs_2026052106:model_a:healthy"
+
+    class _ReservedRow:
+        def __init__(self, job_id: str, idempotency_key: str) -> None:
+            self.job_id = job_id
+            self.idempotency_key = idempotency_key
+            self.status = "reserved"
+            self.slurm_job_id = None
+            self.stage = "forecast"
+            self.job_type = "run_shud_forecast_array"
+
+    bound_calls: list[tuple[str, str]] = []
+
+    class _PoisonedCycleStore:
+        def query_reserved_unbound_jobs(self) -> list[Any]:
+            if bound_calls:
+                return []
+            return [
+                _ReservedRow("job_poisoned", poisoned_key),
+                _ReservedRow("job_healthy", healthy_key),
+            ]
+
+        def query_inflight_jobs(self) -> list[Any]:
+            return []
+
+        def bind_reservation(self, idem: str, *, slurm_job_id: str, status: str = "submitted") -> Any:
+            if idem == poisoned_key:
+                raise FileOrchestrationJournalError(
+                    "file_journal_byte_limit_exceeded",
+                    field="journal/gfs/2026052106.jsonl",
+                )
+            bound_calls.append((idem, slurm_job_id))
+            return {"idempotency_key": idem, "slurm_job_id": slurm_job_id, "status": status}
+
+        def update_job_status(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+    def _comment_query(idem: str) -> SacctRecord:
+        return SacctRecord(
+            slurm_job_id="3001" if idem == healthy_key else "3002",
+            raw_state="RUNNING",
+            job_name="nhms_forecast",
+            comment=slurm_comment_for(idem),
+        )
+
+    scheduler = _RealProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [])},
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        reconcile_store=_PoisonedCycleStore(),
+        reconcile_comment_query=_comment_query,
+        reconcile_sacct_query=lambda _slurm_job_id: None,
+    )
+
+    result = scheduler.run_once()
+
+    reconcile_evidence = result.evidence["restart_reconcile"]
+    assert reconcile_evidence["status"] == "completed"
+    assert "reserved_unbound_error" not in reconcile_evidence
+    outcomes = reconcile_evidence["reserved_unbound"]["outcomes"]
+    assert [outcome["action"] for outcome in outcomes] == ["journal_quarantined", "bound"]
+    # Exactly one outcome for the quarantined row, carrying reason and file.
+    assert [outcome["job_id"] for outcome in outcomes] == ["job_poisoned", "job_healthy"]
+    assert outcomes[0]["quarantine_reason"] == "file_journal_byte_limit_exceeded"
+    assert outcomes[0]["quarantine_field"] == "journal/gfs/2026052106.jsonl"
+    assert outcomes[0]["status"] == "reserved"
+    assert outcomes[1]["quarantine_reason"] is None
+    assert bound_calls == [(healthy_key, "3001")]
+    assert result.status != "restart_reconcile_unknown"
+    assert result.status == "restart_reconciled"
+
+
+def test_restart_reconcile_error_message_names_the_redacted_offending_file() -> None:
+    """2.10 — journal error evidence must say WHICH file is poisoned."""
+    from services.orchestrator import scheduler_runtime
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
+
+    relative = scheduler_runtime._restart_reconcile_error_message(
+        FileOrchestrationJournalError(
+            "file_journal_byte_limit_exceeded",
+            field="journal/IFS/2026072000.jsonl",
+        )
+    )
+    assert relative == "file_journal_byte_limit_exceeded field=journal/IFS/2026072000.jsonl"
+
+    absolute = scheduler_runtime._restart_reconcile_error_message(
+        FileOrchestrationJournalError(
+            "file_journal_unreadable",
+            field="/srv/nhms/journal/IFS/2026072000.jsonl",
+        )
+    )
+    assert absolute == "file_journal_unreadable field=[local-path]"
+    assert "/srv" not in absolute
+
+    # Errors without a field keep today's message byte-identically.
+    assert scheduler_runtime._restart_reconcile_error_message(RuntimeError("durable bind failed")) == (
+        "durable bind failed"
+    )

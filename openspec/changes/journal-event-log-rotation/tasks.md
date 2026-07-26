@@ -12,7 +12,7 @@ across segments, reconcile per-row quarantine, error `field` plumbing.
 
 ## 1. Implementation
 
-- [ ] 1.1 Canonical segment model in `file_orchestration_journal.py`:
+- [x] 1.1 Canonical segment model in `file_orchestration_journal.py`:
       (a) a segment-name parser that maps `<cycle>.jsonl` → (cycle, 0)
       and `<cycle>.<n>.jsonl` (n ≥ 1, consecutive integers, no gaps) →
       (cycle, n), rejecting anything else exactly as today; (b) a
@@ -22,7 +22,7 @@ across segments, reconcile per-row quarantine, error `field` plumbing.
       last segment, or the next fresh segment when the pending write
       would exceed `max_bytes`. Safe-segment/containment discipline
       unchanged.
-- [ ] 1.2 Route the REAL readers/writers through the helper (the
+- [x] 1.2 Route the REAL readers/writers through the helper (the
       verified direct-construction inventory, not just `_journal_path`
       callers): `_cycle_rows` (`:3411`/`:3419`),
       `_cycle_rows_by_model_unlocked` (`:3482`/`:3488`),
@@ -38,7 +38,7 @@ across segments, reconcile per-row quarantine, error `field` plumbing.
       their base cycle, not skipped). After the sweep, no direct
       `f"{cycle_segment}.jsonl"` construction remains outside the
       helper/parser.
-- [ ] 1.3 Enumeration-reader tolerance (the fail-closed trap):
+- [x] 1.3 Enumeration-reader tolerance (the fail-closed trap):
       `_journal_identity_from_path` (`:9097`) and
       `_iter_migration_journal_paths` (`:4928`) use the canonical
       parser so continuation segments resolve to their base cycle
@@ -54,7 +54,7 @@ across segments, reconcile per-row quarantine, error `field` plumbing.
       `_read_jsonl` results via `_replay_order_key` and rely only on
       cross-segment sequence uniqueness (1.5) — no cumulative offset
       awareness in these walkers.
-- [ ] 1.3b Backfill segment-order arbitration (N1): `_backfill_
+- [x] 1.3b Backfill segment-order arbitration (N1): `_backfill_
       reconcile_inventory_unlocked` (`:4866-4890`) currently builds a
       fresh `_CycleRows()` per path and its sync (`:5087-5104`) is
       last-write-wins with no replay arbitration, while
@@ -63,14 +63,14 @@ across segments, reconcile per-row quarantine, error `field` plumbing.
       replay each cycle's segments IN SEGMENT ORDER through one
       `_CycleRows`, then sync once; any walker ordering derives from
       parser (source, cycle, segment_index), never bare path sort.
-- [ ] 1.4 Rollover semantics: single append rolls to a fresh segment
+- [x] 1.4 Rollover semantics: single append rolls to a fresh segment
       when `existing + line` would exceed the limit; batch append rolls
       when `existing + batch` would; an oversized single record/batch
       alone still raises `file_journal_byte_limit_exceeded` and writes
       nothing (no empty segment file left behind). Per-segment
       `_require_within_byte_limit` on read and write; atomic write and
       `_apply_record_to_cycle_rows_cache` unchanged per record.
-- [ ] 1.5 Cross-segment ordering and uniqueness (decided scheme, N2):
+- [x] 1.5 Cross-segment ordering and uniqueness (decided scheme, N2):
       `_REPLAY_ORDER_FIELD` = `segment_index * MAX_FILE_JOURNAL_RECORDS
       + line_number` (fixed stride, strictly monotonic, segment 0
       byte-identical to today); raise
@@ -84,7 +84,7 @@ across segments, reconcile per-row quarantine, error `field` plumbing.
       unlocked` floors computed over ALL segments so `sequence`/
       `event_id` never reuse (reuse is silent state corruption).
       Single-segment cycles byte-identical.
-- [ ] 1.6 Reconcile per-row quarantine (`reconcile.py` loop from
+- [x] 1.6 Reconcile per-row quarantine (`reconcile.py` loop from
       `:1340`): wrap each row's WHOLE body — all journal write points
       (~`:1372, :1388, :1419, :1447, :1468, :1484, :1509, :1553`),
       including `:1419` inside the existing `ReconcileQueryUnavailable`
@@ -95,7 +95,7 @@ across segments, reconcile per-row quarantine, error `field` plumbing.
       (`:1274-1293`) with optional reason/field carriers; forward them
       in the hand-written projection `scheduler_runtime.py:1513-1528`.
       `ReconcileQueryUnavailable` semantics byte-identical.
-- [ ] 1.7 Segment bound (decided, N3/N5): module constant = **3 total
+- [x] 1.7 Segment bound (decided, N3/N5): module constant = **3 total
       segments per cycle** (base + 2 continuations; 48 MiB worst case,
       under the 64 MiB read-cache budget `:128` with headroom — N=4
       would evict the whole cache per replay). Exceeding it fails
@@ -108,76 +108,76 @@ across segments, reconcile per-row quarantine, error `field` plumbing.
       cycle-level enumeration and recursive walkers (N4) — never
       ignored by one reader and read by another; non-numeric suffixes
       keep today's behavior.
-- [ ] 1.8 Error observability: include the error's `field` (redacted
+- [x] 1.8 Error observability: include the error's `field` (redacted
       via the existing `_restart_reconcile_error_token` discipline) in
       `_restart_reconcile_error_message` (`scheduler_runtime.py:
       1635-1638`).
-- [ ] 1.9 Docs: update `docs/runbooks/qhh-22-business-bringup.md:222,
+- [x] 1.9 Docs: update `docs/runbooks/qhh-22-business-bringup.md:222,
       228` for the segmented layout (base + bounded continuation
       segments, same append-only audit semantics).
 
 ## 2. Tests (requirement-driven; red-before where marked)
 
-- [ ] 2.1 (red) Append rollover: fill a cycle log to just under
+- [x] 2.1 (red) Append rollover: fill a cycle log to just under
       `max_bytes` (inject a small `max_bytes` via the constructor param
       `:435`, existing `max_bytes=32` test precedent — production
       default untouched), append one more event → continuation segment
       created, both under limit, replay yields identical rows/order to
       a single-file oracle. Red today: raises
       `file_journal_byte_limit_exceeded`.
-- [ ] 2.2 (red) End-to-end incident geometry: journal state with a
+- [x] 2.2 (red) End-to-end incident geometry: journal state with a
       reserved-unbound forecast row whose cycle log is at capacity →
       scheduler pass restart reconcile resolves the row (post-rotation)
       instead of `restart_reconcile_unknown`; pass proceeds to
       candidate processing.
-- [ ] 2.3 Single-segment byte-identity: cycles that never overflow
+- [x] 2.3 Single-segment byte-identity: cycles that never overflow
       produce byte-identical reads, `_REPLAY_ORDER_FIELD` values, and
       event ids vs master.
-- [ ] 2.4 Oversized single record/batch still fails closed with the
+- [x] 2.4 Oversized single record/batch still fails closed with the
       same error, writes nothing, and leaves NO empty segment file.
-- [ ] 2.5 Batch rollover: batch that fits a fresh segment but not the
+- [x] 2.5 Batch rollover: batch that fits a fresh segment but not the
       current one lands entirely in the next segment; cache/replay
       consistent.
-- [ ] 2.6 Cross-segment uniqueness and ordering: after rollover,
+- [x] 2.6 Cross-segment uniqueness and ordering: after rollover,
       `_next_sequence_unlocked` and `_next_accepted_submit_event_id_
       unlocked` are strictly increasing (floors read all segments);
       last-writer-wins replay across segments matches the
       single-file oracle.
-- [ ] 2.7 Cache invalidation across segments: after rollover, a new
+- [x] 2.7 Cache invalidation across segments: after rollover, a new
       append to the continuation segment invalidates the cycle rows
       cache (`_cycle_rows_source_fingerprint` observes all segments) —
       no stale rows from the frozen base segment.
-- [ ] 2.8 Enumeration tolerance (AC-level, red without 1.3): with a
+- [x] 2.8 Enumeration tolerance (AC-level, red without 1.3): with a
       continuation segment present, `query_pipeline_jobs_by_cycle/
       _by_run/_by_slurm_id`, rollback-scope iteration, and
       reconcile-inventory backfill neither raise
       `file_journal_invalid_cycle_time` nor skip segment records; the
       cycle source discovery (`:3335-3346`) sees segment content.
-- [ ] 2.9 (red) Reconcile quarantine: two reserved-unbound rows, first
+- [x] 2.9 (red) Reconcile quarantine: two reserved-unbound rows, first
       one's journal write forced to raise `FileOrchestrationJournal
       Error` → first row quarantined with reason+field in evidence
       (single outcome, no duplicate), second row resolved, pass status
       not `restart_reconcile_unknown`.
-- [ ] 2.10 (red) Error message includes redacted `field`; no raw
+- [x] 2.10 (red) Error message includes redacted `field`; no raw
       absolute path leaks (today `str(error)` is the bare reason —
       `FileOrchestrationJournalError.__init__` `:284`).
-- [ ] 2.11 Segment bound: cycle at the cap (3) fails the next rollover
+- [x] 2.11 Segment bound: cycle at the cap (3) fails the next rollover
       closed with reason `file_journal_segment_limit_exceeded`; bound
       value and its read-cache rationale pinned.
-- [ ] 2.12 Containment + unified foreign-file rule: segment paths honor
+- [x] 2.12 Containment + unified foreign-file rule: segment paths honor
       no-follow/root confinement; non-numeric suffixes
       (`<cycle>.x.jsonl`) keep today's identity-parsing behavior
       byte-identically; gapped segments (`<cycle>.5.jsonl` without
       predecessors) fail closed with `file_journal_segment_gap` from
       BOTH the cycle-level enumeration and the recursive walkers (same
       answer from every reader).
-- [ ] 2.13 (red without 1.3b) Backfill ordering: base + continuation
+- [x] 2.13 (red without 1.3b) Backfill ordering: base + continuation
       segments where the continuation terminates a job that the base
       leaves `reserved` → `_backfill_reconcile_inventory_unlocked`
       neither resurrects the reserved anchor nor deletes a live one;
       inventory reflects segment-order replay (kill the lexicographic
       `sorted()` geometry: `<cycle>.1.jsonl` before `<cycle>.jsonl`).
-- [ ] 2.14 Latest-view sentinel invariance: same-`sequence` tie between
+- [x] 2.14 Latest-view sentinel invariance: same-`sequence` tie between
       a latest-view row and a journal record in segment ≥ 2 still
       resolves to the latest view (sentinel raised in lockstep with
       the bound); explicit regression for the naive-cumulative-offset
@@ -195,7 +195,7 @@ across segments, reconcile per-row quarantine, error `field` plumbing.
 
 ## 4. Spec delta
 
-- [ ] 4.1 `specs/pipeline-job-persistence/spec.md` ADDED requirement +
+- [x] 4.1 `specs/pipeline-job-persistence/spec.md` ADDED requirement +
       scenarios (authored with fixture; includes enumeration-tolerance
       and bounded-segments scenarios).
 
