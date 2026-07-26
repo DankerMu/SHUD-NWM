@@ -1275,6 +1275,303 @@ def test_env_override_does_not_admit_missing_predecessor(
     )
 
 
+def test_env_override_blocks_predecessor_pending_without_earlier_history(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """#1150: env=false + ``block_predecessor_pending`` and NO strictly-earlier
+    usable history → §8 still blocks with
+    ``state_snapshot_index_prior_checkpoint_missing_after_history``.
+
+    Fixture = T15(b) with ONE state-index change: the single
+    current-generation entry sits at ``valid_time`` 2026-05-22T00Z, strictly
+    LATER than the 12Z candidate cycle (``cycle_id`` = gfs_2026052112,
+    ``lead_hours`` = 12).  That splits the two history predicates: the
+    generation-scoped matrix signal (``state_manager.py``
+    ``generation_scoped_history_signal``, valid_time-agnostic) still sees
+    current-generation history → branch (e) → ``block_predecessor_pending``,
+    while the gate's fallback probe ``usable_state_history_evidence``
+    (strictly earlier than the candidate cycle) reports
+    ``history_exists=False``.  Pre-fix, ``scheduler_generation_gate.py``
+    returned ``None`` on that probe result regardless of decision, and
+    ``scheduler_candidates.py`` read ``None`` as "no warm gate" → the blocked
+    candidate was ADMITTED with empty evidence.  The passthrough is now
+    warm_continue-only, so the block survives.
+    """
+    from services.orchestrator import scheduler as scheduler_module
+    from services.orchestrator.scheduler import ProductionSchedulerConfig
+    from tests.test_production_scheduler import (
+        FakeRegistry,
+        ProductionScheduler,
+        _gfs_default_forecast_hours,
+        _old_generation_state_entry,
+        _set_db_free_scheduler_env,
+        _write_db_free_file_provider_fixtures,
+        _write_db_free_state_index_fixture,
+    )
+    from tests.test_production_scheduler import (
+        _dt as _pdt,
+    )
+    from workers.data_adapters.base import CycleDiscovery
+
+    roots, paths = _set_db_free_scheduler_env(
+        monkeypatch, tmp_path / "db-free-local-root"
+    )
+    cycle_time = _pdt("2026-05-21T12:00:00Z")
+    generated_at = _pdt("2026-05-21T18:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    candidate_checksum = (
+        fixture["package_checksum"]
+        if _looks_like_hex64(fixture["package_checksum"])
+        else "b" * 64
+    )
+    # Current-generation history strictly AFTER the candidate cycle: the
+    # strictly-earlier probe sees nothing while the generation-scoped signal
+    # still counts this entry.  NOT at valid_time == candidate cycle — that
+    # shape settles on ``state_snapshot_index_cycle_id_mismatch`` instead
+    # (lead_hours still matches; the expected cycle_id gfs_2026052100 does
+    # not) and never reaches the branch under test.
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=candidate_checksum,
+        generated_at=generated_at,
+        entries=[
+            _old_generation_state_entry(
+                roots,
+                old_package_checksum=candidate_checksum,
+                state_id="state_current_gen_later_history",
+                valid_time="2026-05-22T00:00:00Z",
+                cycle_id="gfs_2026052112",
+                lead_hours=12,
+            )
+        ],
+    )
+    # Valid, in-window declaration — identical to T15(b) so the only variable
+    # is the state-index geometry.
+    declaration_path = tmp_path / "cutover-declaration.json"
+    declaration_path.write_text(
+        json.dumps(
+            {
+                "schema_version": generation.CUTOVER_DECLARATION_SCHEMA_VERSION,
+                "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
+                "generation": generation.derive_generation(candidate_checksum),
+                "entries": [
+                    {
+                        "model_id": "model_a",
+                        "old_checksum": "a" * 64,
+                        "new_checksum": candidate_checksum,
+                        "effective_cycle_utc": "2026-05-21T00:00:00Z",
+                        "transition_mode": "replace",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        generation.CUTOVER_DECLARATION_ENV, str(declaration_path)
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": candidate_checksum,
+        },
+    }
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(
+            now=generated_at, allowed_cycle_hours_utc=(0, 12)
+        ),
+        registry=FakeRegistry([model]),
+        adapters={},
+        orchestrator_factory=lambda _source_id: pytest.fail(
+            "predecessor-pending cutover must not build orchestrator"
+        ),
+    )
+    candidates, blocked, _skipped, _dup, _slurm = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(model)],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052112",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=12,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+    # The fail-open regression: pre-fix this candidate was admitted.
+    assert candidates == []
+    assert len(blocked) == 1
+    # R1-A4 invariant: single-value pin, no OR-set. See
+    # .workplans/1081/review/review-failure-retro-round3.md.
+    assert (
+        blocked[0].reason
+        == "state_snapshot_index_prior_checkpoint_missing_after_history"
+    )
+    state_evidence = blocked[0].state_evidence
+    assert (
+        state_evidence.get("registry_cutover_transition", {}).get("decision")
+        == "block_predecessor_pending"
+    )
+    # Pin the split predicate itself: the block fires even though the gate's
+    # strictly-earlier history probe found nothing.
+    assert state_evidence.get("state_history", {}).get("history_exists") is False
+
+
+def test_strict_warm_start_env_blocks_predecessor_pending_without_earlier_history(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """#1150 non-regression: the same no-earlier-history fixture under
+    ``NHMS_REQUIRE_FORECAST_WARM_START=true`` still blocks with the unchanged
+    strict reason ``state_snapshot_index_exact_checkpoint_missing``.
+
+    env=true short-circuits in ``scheduler_generation_gate.py`` at the
+    ``_db_free_strict_warm_start_required_for`` return, well before the
+    history-probe branch the sibling test guards — so this pins that the
+    #1150 split did not move the strict leg's typed reason.  The decision
+    pin below only shows the blocked evidence reached the
+    ``block_predecessor_pending`` split; the no-earlier-history geometry
+    itself is pinned by the env=false sibling (that short-circuit attaches
+    no ``state_history`` evidence).
+    """
+    from services.orchestrator import scheduler as scheduler_module
+    from services.orchestrator.scheduler import ProductionSchedulerConfig
+    from tests.test_production_scheduler import (
+        FakeRegistry,
+        ProductionScheduler,
+        _gfs_default_forecast_hours,
+        _old_generation_state_entry,
+        _set_db_free_scheduler_env,
+        _write_db_free_file_provider_fixtures,
+        _write_db_free_state_index_fixture,
+    )
+    from tests.test_production_scheduler import (
+        _dt as _pdt,
+    )
+    from workers.data_adapters.base import CycleDiscovery
+
+    roots, paths = _set_db_free_scheduler_env(
+        monkeypatch, tmp_path / "db-free-local-root"
+    )
+    cycle_time = _pdt("2026-05-21T12:00:00Z")
+    generated_at = _pdt("2026-05-21T18:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    candidate_checksum = (
+        fixture["package_checksum"]
+        if _looks_like_hex64(fixture["package_checksum"])
+        else "b" * 64
+    )
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=candidate_checksum,
+        generated_at=generated_at,
+        entries=[
+            _old_generation_state_entry(
+                roots,
+                old_package_checksum=candidate_checksum,
+                state_id="state_current_gen_later_history",
+                valid_time="2026-05-22T00:00:00Z",
+                cycle_id="gfs_2026052112",
+                lead_hours=12,
+            )
+        ],
+    )
+    declaration_path = tmp_path / "cutover-declaration.json"
+    declaration_path.write_text(
+        json.dumps(
+            {
+                "schema_version": generation.CUTOVER_DECLARATION_SCHEMA_VERSION,
+                "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
+                "generation": generation.derive_generation(candidate_checksum),
+                "entries": [
+                    {
+                        "model_id": "model_a",
+                        "old_checksum": "a" * 64,
+                        "new_checksum": candidate_checksum,
+                        "effective_cycle_utc": "2026-05-21T00:00:00Z",
+                        "transition_mode": "replace",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        generation.CUTOVER_DECLARATION_ENV, str(declaration_path)
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": candidate_checksum,
+        },
+    }
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(
+            now=generated_at, allowed_cycle_hours_utc=(0, 12)
+        ),
+        registry=FakeRegistry([model]),
+        adapters={},
+        orchestrator_factory=lambda _source_id: pytest.fail(
+            "predecessor-pending cutover must not build orchestrator"
+        ),
+    )
+    candidates, blocked, _skipped, _dup, _slurm = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(model)],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052112",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=12,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+    assert candidates == []
+    assert len(blocked) == 1
+    # R1-A4 invariant: single-value pin, no OR-set.
+    assert blocked[0].reason == "state_snapshot_index_exact_checkpoint_missing"
+    # The strict leg still carries the predecessor-pending split decision.
+    state_evidence = blocked[0].state_evidence
+    assert (
+        state_evidence.get("registry_cutover_transition", {}).get("decision")
+        == "block_predecessor_pending"
+    )
+
+
 def test_env_override_does_not_admit_stale_declaration(
     monkeypatch: Any,
     tmp_path: Path,

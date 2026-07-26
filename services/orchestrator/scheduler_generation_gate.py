@@ -442,16 +442,24 @@ def strict_warm_start_evidence(
         history["mode"] = "db_free_state_continuity"
         history["registry_cutover_transition"] = transition_evidence
         return history
-    # NOTE: In warm_continue, current-generation history exists by
-    # definition — the exact predecessor was just observed by the
-    # generation-scoped history signal.  If ``strict_warm_start_evidence``
-    # then says the exact match is missing, it means the object failed
-    # verification (checksum / usable_flag / lineage) — we fall through
-    # to the same block-with-prior-checkpoint reason as before so the
-    # public reason string stays stable.
-    if not bool(history.get("history_exists")):
-        # Should not happen for warm_continue; keep the existing
-        # cold-seed passthrough as a defensive fallback for other paths.
+    # NOTE: both warm_continue and block_predecessor_pending reach here.
+    # In warm_continue, current-generation history exists by definition —
+    # the exact predecessor was just observed by the generation-scoped
+    # history signal.  If ``strict_warm_start_evidence`` then says the
+    # exact match is missing, it means the object failed verification
+    # (checksum / usable_flag / lineage) — we fall through to the same
+    # block-with-prior-checkpoint reason as before so the public reason
+    # string stays stable.
+    if (
+        not bool(history.get("history_exists"))
+        and transition.decision == _generation.TransitionDecision.WARM_CONTINUE
+    ):
+        # #1150: cold-seed passthrough for warm_continue ONLY.  This probe
+        # counts strictly-earlier entries while the matrix history signal
+        # counts any usable current-generation entry, so the two can
+        # disagree; warm_continue has no block to overturn, every other
+        # decision (block_predecessor_pending included) falls through to
+        # the blocked evidence below.  Positive predicate = fail CLOSED.
         return None
     producer_cycle_time = _scheduler._ensure_utc(candidate.cycle_time_utc) - _scheduler.timedelta(
         hours=required_lead_hours
