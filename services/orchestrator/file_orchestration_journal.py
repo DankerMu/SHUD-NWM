@@ -118,6 +118,13 @@ FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION = "nhms.scheduler.file_orchestration_la
 FILE_ORCHESTRATION_PRIVATE_RECOVERY_SCHEMA_VERSION = "nhms.scheduler.file_orchestration_private_recovery.v1"
 MAX_FILE_JOURNAL_JSON_BYTES = 16 * 1024 * 1024
 MAX_FILE_JOURNAL_RECORDS = 100_000
+#: Total per-cycle event-log segments (base ``<cycle>.jsonl`` plus continuation
+#: ``<cycle>.<n>.jsonl``).  Bounded at 3 because a replay reads every segment:
+#: 3 x MAX_FILE_JOURNAL_JSON_BYTES = 48 MiB stays under
+#: MAX_FILE_JOURNAL_READ_CACHE_BYTES (64 MiB) with headroom for other cycles,
+#: while a 4th segment would evict the whole process read cache on every
+#: replay.  The retry cap (#1163) remains the primary growth guard.
+MAX_FILE_JOURNAL_CYCLE_SEGMENTS = 3
 MAX_FILE_JOURNAL_DISCOVERED_FILES = 100_000
 MAX_FILE_JOURNAL_SCAN_DEPTH = 32
 MAX_FILE_JOURNAL_JSON_DEPTH = 64
@@ -148,9 +155,14 @@ _RECONCILE_MIGRATION_TEMP_RE = re.compile(
     rf"{re.escape(_RECONCILE_INVENTORY_ROLLBACK_PREP_RECEIPT)}|"
     rf"{re.escape(_RECONCILE_INVENTORY_ROLLFORWARD_RECEIPT)})\.{_ATOMIC_TEMP_NONCE_RE}\.tmp$"
 )
-_LATEST_REPLAY_ORDER_SENTINEL = MAX_FILE_JOURNAL_RECORDS + 1
+# Journal replay order is a fixed stride of MAX_FILE_JOURNAL_RECORDS per
+# segment, so the latest view must sit above every reachable journal line to
+# keep winning same-sequence ties in _replay_order_key.  Raised in lockstep
+# with MAX_FILE_JOURNAL_CYCLE_SEGMENTS.
+_LATEST_REPLAY_ORDER_SENTINEL = MAX_FILE_JOURNAL_CYCLE_SEGMENTS * MAX_FILE_JOURNAL_RECORDS + 1
 _UNSET = object()
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_JOURNAL_SEGMENT_INDEX_RE = re.compile(r"[1-9][0-9]*")
 _FORECAST_RUN_ID_RE = re.compile(r"^fcst_([^_]+)_(\d{10})_(.+)$")
 _CYCLE_RUN_ID_RE = re.compile(r"^cycle_([^_]+)_(\d{10})$")
 _CYCLE_COHORT_RUN_ID_RE = re.compile(r"^cycle_([^_]+)_(\d{10})(?:_.+)?$")
@@ -769,7 +781,7 @@ class FileOrchestrationJournalRepository:
                 )
             else:
                 rows = _CycleRows()
-                for record in self._read_jsonl(self._journal_path(source_id=source_id, cycle_time=cycle_time)):
+                for record in self._cycle_journal_records(source_id=source_id, cycle_time=cycle_time):
                     self._apply_journal_record(
                         rows,
                         record,
@@ -808,9 +820,7 @@ class FileOrchestrationJournalRepository:
         canonical_source = _normalize_file_source_id(source_id, field="source_id")
         direct = self._direct_pipeline_job_record(expected_job_id)
         rows = _CycleRows()
-        for record in self._read_jsonl(
-            self._journal_path(source_id=canonical_source, cycle_time=cycle_time)
-        ):
+        for record in self._cycle_journal_records(source_id=canonical_source, cycle_time=cycle_time):
             self._apply_journal_record(
                 rows,
                 record,
@@ -3342,9 +3352,21 @@ class FileOrchestrationJournalRepository:
                 )
             ):
                 parts = path.relative_to(self.root).parts
-                if len(parts) == 3 and parts[0] == surface and Path(parts[2]).stem == cycle_segment:
-                    source = _cycle_source_discovery_from_segment(parts[1])
-                    _merge_cycle_source_discovery(sources, source)
+                if len(parts) != 3 or parts[0] != surface:
+                    continue
+                # A continuation segment belongs to its base cycle; skipping it
+                # would hide the newest content of an overflowed cycle.
+                segment_cycle, segment_index = _split_journal_segment_stem(Path(parts[2]).stem)
+                if segment_cycle != cycle_segment:
+                    continue
+                _require_journal_segment_lineage(
+                    path,
+                    root=self.root,
+                    cycle_segment=segment_cycle,
+                    segment_index=segment_index,
+                )
+                source = _cycle_source_discovery_from_segment(parts[1])
+                _merge_cycle_source_discovery(sources, source)
         file_source_ids = set(sources)
         for job in self._iter_direct_pipeline_job_records():
             if _format_utc(_cycle_time_from_job(job)) == _format_utc(cycle_time):
@@ -3408,7 +3430,7 @@ class FileOrchestrationJournalRepository:
                         cycle_time=cycle_time,
                         expected_model_id=_safe_segment(path.stem),
                     )
-            for record in self._read_jsonl(self.root / "journal" / source_segment / f"{cycle_segment}.jsonl"):
+            for record in self._read_cycle_segments(self.root / "journal" / source_segment, cycle_segment):
                 self._apply_journal_record(
                     rows,
                     record,
@@ -3416,7 +3438,9 @@ class FileOrchestrationJournalRepository:
                     cycle_time=cycle_time,
                     expected_model_id=model_id,
                 )
-            for record in self._read_jsonl(self.root / "pipeline-events" / source_segment / f"{cycle_segment}.jsonl"):
+            for record in self._read_cycle_segments(
+                self.root / "pipeline-events" / source_segment, cycle_segment
+            ):
                 self._apply_journal_record(
                     rows,
                     record,
@@ -3479,13 +3503,13 @@ class FileOrchestrationJournalRepository:
                     )
             self._apply_records_to_model_rows(
                 rows_by_model,
-                self._read_jsonl(self.root / "journal" / source_segment / f"{cycle_segment}.jsonl"),
+                self._read_cycle_segments(self.root / "journal" / source_segment, cycle_segment),
                 source_id=source_id,
                 cycle_time=cycle_time,
             )
             self._apply_records_to_model_rows(
                 rows_by_model,
-                self._read_jsonl(self.root / "pipeline-events" / source_segment / f"{cycle_segment}.jsonl"),
+                self._read_cycle_segments(self.root / "pipeline-events" / source_segment, cycle_segment),
                 source_id=source_id,
                 cycle_time=cycle_time,
                 expected_record_type="pipeline_event",
@@ -3613,8 +3637,8 @@ class FileOrchestrationJournalRepository:
         reflects the on-disk state.
         """
         latest_entries: list[tuple[str, str, tuple[int, int, int] | None]] = []
-        journal_signatures: list[tuple[str, tuple[int, int, int] | None]] = []
-        event_signatures: list[tuple[str, tuple[int, int, int] | None]] = []
+        journal_signatures: list[tuple[str, Any]] = []
+        event_signatures: list[tuple[str, Any]] = []
         direct_partition_signatures: list[tuple[str, tuple[int, int, int] | None]] = []
         for source_segment in source_segments:
             try:
@@ -3637,13 +3661,15 @@ class FileOrchestrationJournalRepository:
             journal_signatures.append(
                 (
                     source_segment,
-                    _stat_signature(self.root / "journal" / source_segment / f"{cycle_segment}.jsonl"),
+                    self._cycle_segment_signatures(self.root / "journal" / source_segment, cycle_segment),
                 )
             )
             event_signatures.append(
                 (
                     source_segment,
-                    _stat_signature(self.root / "pipeline-events" / source_segment / f"{cycle_segment}.jsonl"),
+                    self._cycle_segment_signatures(
+                        self.root / "pipeline-events" / source_segment, cycle_segment
+                    ),
                 )
             )
             direct_partition_signatures.append(
@@ -3900,7 +3926,15 @@ class FileOrchestrationJournalRepository:
         self._read_bytes_cache_mark_validated(str(path), content)
         return payload
 
-    def _read_jsonl(self, path: Path) -> list[dict[str, Any]]:
+    def _read_jsonl(self, path: Path, *, segment_index: int = 0) -> list[dict[str, Any]]:
+        """Decode one cycle event-log segment with segment-offset replay order.
+
+        The offset is a FIXED stride (``segment_index * MAX_FILE_JOURNAL_
+        RECORDS``), not a cumulative line count: it stays strictly monotonic
+        across segments while remaining bounded by the segment cap, so the
+        latest-view sentinel keeps winning same-``sequence`` ties.  Segment 0
+        is byte-identical to the pre-rotation numbering.
+        """
         try:
             content, prevalidated = self._read_bytes_limited_cached(path)
         except FileNotFoundError:
@@ -3930,7 +3964,7 @@ class FileOrchestrationJournalRepository:
                     max_nodes=self.max_json_nodes,
                     max_depth=self.max_json_depth,
                 )
-            record[_REPLAY_ORDER_FIELD] = line_number
+            record[_REPLAY_ORDER_FIELD] = segment_index * MAX_FILE_JOURNAL_RECORDS + line_number
             records.append(record)
         if not prevalidated:
             self._read_bytes_cache_mark_validated(str(path), content)
@@ -4045,7 +4079,8 @@ class FileOrchestrationJournalRepository:
                 root=self.root,
                 max_files=self.max_files,
                 max_depth=self.max_depth,
-            )
+            ),
+            key=lambda candidate: _journal_segment_sort_key(candidate, root=self.root, surface="journal"),
         ):
             source_id, cycle_time = _journal_identity_from_path(path, root=self.root, surface="journal")
             for record in self._read_jsonl(path):
@@ -4871,20 +4906,29 @@ class FileOrchestrationJournalRepository:
             self._sync_reconcile_inventory_for_row_unlocked(job)
         for job in self._iter_legacy_active_reconcile_records():
             self._sync_reconcile_inventory_for_row_unlocked(job)
+        # Every segment of one cycle replays through a SINGLE _CycleRows in
+        # segment order: the inventory sync below is last-write-wins with no
+        # replay arbitration, so a per-path _CycleRows would let the frozen
+        # base segment resurrect anchors a continuation segment terminated
+        # (or delete anchors it still owns).
+        segments_by_cycle: dict[tuple[str, datetime], list[tuple[int, Path]]] = {}
         for path in self._iter_migration_journal_paths():
-            source_id, cycle_time = _journal_identity_from_path(
+            source_id, cycle_time, segment_index = _journal_segment_identity_from_path(
                 path,
                 root=self.root,
                 surface="journal",
             )
+            segments_by_cycle.setdefault((source_id, cycle_time), []).append((segment_index, path))
+        for (source_id, cycle_time), segments in segments_by_cycle.items():
             rows = _CycleRows()
-            for record in self._read_migration_jsonl(path):
-                self._apply_journal_record(
-                    rows,
-                    record,
-                    source_id=source_id,
-                    cycle_time=cycle_time,
-                )
+            for segment_index, path in sorted(segments):
+                for record in self._read_migration_jsonl(path, segment_index=segment_index):
+                    self._apply_journal_record(
+                        rows,
+                        record,
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                    )
             for job in rows.pipeline_jobs.values():
                 self._sync_reconcile_inventory_for_row_unlocked(job)
 
@@ -4930,6 +4974,12 @@ class FileOrchestrationJournalRepository:
         *,
         expected_root_signature: Any = _UNSET,
     ) -> list[Path]:
+        """Journal paths in parsed (source, cycle, segment) order.
+
+        Never bare path order: lexicographically ``<cycle>.1.jsonl`` sorts
+        BEFORE ``<cycle>.jsonl``, so a path-sorted replay would let the frozen
+        base segment overwrite terminal states a continuation segment recorded.
+        """
         return sorted(
             _iter_discovered_files(
                 self.root / "journal",
@@ -4940,11 +4990,12 @@ class FileOrchestrationJournalRepository:
                 max_depth=self.max_depth,
                 strict_disappearance=True,
                 expected_root_signature=expected_root_signature,
-            )
+            ),
+            key=lambda path: _journal_segment_sort_key(path, root=self.root, surface="journal"),
         )
 
-    def _read_migration_jsonl(self, path: Path) -> list[dict[str, Any]]:
-        records = self._read_jsonl(path)
+    def _read_migration_jsonl(self, path: Path, *, segment_index: int = 0) -> list[dict[str, Any]]:
+        records = self._read_jsonl(path, segment_index=segment_index)
         try:
             mode = stat_no_follow(path, containment_root=self.root).st_mode
         except (FileNotFoundError, OSError, SafeFilesystemError) as error:
@@ -5027,7 +5078,12 @@ class FileOrchestrationJournalRepository:
                 / f"{job_id}.json"
             )
         legacy_path = self.root / _LEGACY_ACTIVE_RECONCILE_DIRECTORY / f"{_safe_segment(job_id)}.json"
-        journal_path = self._journal_path(source_id=source_id, cycle_time=cycle_time)
+        # Watch every segment slot, present or not: a rollover appears as a new
+        # file while the previously watched base stops changing.
+        journal_directory = self._journal_directory(source_id=source_id)
+        journal_paths = tuple(
+            journal_directory / name for name in _journal_segment_names(format_cycle_time(cycle_time))
+        )
         latest_directory = self.root / "latest" / _safe_segment(source_id) / format_cycle_time(cycle_time)
         latest_paths = (
             self._latest_paths(
@@ -5038,7 +5094,7 @@ class FileOrchestrationJournalRepository:
             if strict_disappearance
             else []
         )
-        watched_paths = (*direct_paths, legacy_path, journal_path, *latest_paths)
+        watched_paths = (*direct_paths, legacy_path, *journal_paths, *latest_paths)
         signatures = {path: _stat_signature(path) for path in watched_paths}
         latest_directory_signature = _stat_signature(latest_directory)
         direct = self._direct_pipeline_job_record(job_id)
@@ -5061,7 +5117,7 @@ class FileOrchestrationJournalRepository:
                 cycle_time=cycle_time,
                 expected_model_id=_safe_segment(latest_path.stem),
             )
-        for record in self._read_jsonl(journal_path):
+        for record in self._cycle_journal_records(source_id=source_id, cycle_time=cycle_time):
             self._apply_journal_record(rows, record, source_id=source_id, cycle_time=cycle_time)
         if strict_disappearance and (
             any(signature != _stat_signature(path) for path, signature in signatures.items())
@@ -5795,11 +5851,14 @@ class FileOrchestrationJournalRepository:
         sequences: list[int] = []
         for source_segment in source_segments:
             for surface in ("journal", "pipeline-events"):
-                path = self.root / surface / source_segment / f"{cycle_segment}.jsonl"
-                if not self._sequence_regular_file_exists(path):
-                    continue
-                records = self._read_jsonl(path)
-                sequences.extend((_optional_replay_sequence(record) or 0) for record in records)
+                # The floor must span ALL segments: a sequence reused across a
+                # rollover boundary is silent state corruption.
+                segment_paths = self._cycle_segment_paths(self.root / surface / source_segment, cycle_segment)
+                for segment_index, path in enumerate(segment_paths):
+                    if not self._sequence_regular_file_exists(path):
+                        continue
+                    records = self._read_jsonl(path, segment_index=segment_index)
+                    sequences.extend((_optional_replay_sequence(record) or 0) for record in records)
         sequences.extend(
             self._latest_replay_sequences_unlocked(
                 source_id=source_id,
@@ -5887,8 +5946,8 @@ class FileOrchestrationJournalRepository:
             source_segment_override=None,
         ):
             for surface in ("journal", "pipeline-events"):
-                for record in self._read_jsonl(
-                    self.root / surface / source_segment / f"{cycle_segment}.jsonl"
+                for record in self._read_cycle_segments(
+                    self.root / surface / source_segment, cycle_segment
                 ):
                     self._apply_journal_record(
                         rows,
@@ -5906,25 +5965,12 @@ class FileOrchestrationJournalRepository:
         cycle_time: datetime,
         record: Mapping[str, Any],
     ) -> None:
-        path = self._journal_path(source_id=source_id, cycle_time=cycle_time)
-        try:
-            existing = read_bytes_limited_no_follow(path, max_bytes=self.max_bytes, containment_root=self.root)
-        except FileNotFoundError:
-            existing = b""
-        except (OSError, SafeFilesystemError) as error:
-            raise OrchestratorError(
-                "FILE_JOURNAL_WRITE_FAILED",
-                "failed to read existing file journal before append",
-                {"error_type": type(error).__name__},
-            ) from error
-        self._require_within_byte_limit(existing, path)
-        line = _json_bytes(record)
-        content = existing
-        if content and not content.endswith(b"\n"):
-            content += b"\n"
-        content += line
-        self._require_within_byte_limit(content, path)
-        self._atomic_write_bytes_unlocked(path, content)
+        self._append_journal_bytes_unlocked(
+            source_id=source_id,
+            cycle_time=cycle_time,
+            pending=_json_bytes(record),
+            read_failure="failed to read existing file journal before append",
+        )
         self._apply_record_to_cycle_rows_cache(source_id=source_id, cycle_time=cycle_time, record=record)
 
     def _append_journal_records_unlocked(
@@ -5937,7 +5983,34 @@ class FileOrchestrationJournalRepository:
         """Append a validated record batch with one bounded journal rewrite."""
         if not records:
             return
-        path = self._journal_path(source_id=source_id, cycle_time=cycle_time)
+        self._append_journal_bytes_unlocked(
+            source_id=source_id,
+            cycle_time=cycle_time,
+            pending=b"\n".join(_json_bytes(record).rstrip(b"\n") for record in records) + b"\n",
+            read_failure="failed to read existing file journal before batch append",
+        )
+        for record in records:
+            self._apply_record_to_cycle_rows_cache(source_id=source_id, cycle_time=cycle_time, record=record)
+
+    def _append_journal_bytes_unlocked(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        pending: bytes,
+        read_failure: str,
+    ) -> None:
+        """Append pending bytes to the cycle log, rolling over when they do not fit.
+
+        Rotation only decides where NEW lines land — frozen segments are never
+        rewritten.  A payload that cannot fit an empty segment by itself still
+        fails closed with ``file_journal_byte_limit_exceeded`` and writes
+        nothing, so no empty segment file is ever left behind.
+        """
+        directory = self._journal_directory(source_id=source_id)
+        cycle_segment = format_cycle_time(cycle_time)
+        segments = self._cycle_segment_paths(directory, cycle_segment)
+        path = segments[-1] if segments else directory / _journal_segment_name(cycle_segment, 0)
         try:
             existing = read_bytes_limited_no_follow(path, max_bytes=self.max_bytes, containment_root=self.root)
         except FileNotFoundError:
@@ -5945,17 +6018,27 @@ class FileOrchestrationJournalRepository:
         except (OSError, SafeFilesystemError) as error:
             raise OrchestratorError(
                 "FILE_JOURNAL_WRITE_FAILED",
-                "failed to read existing file journal before batch append",
+                read_failure,
                 {"error_type": type(error).__name__},
             ) from error
+        self._require_within_byte_limit(existing, path)
         content = existing
         if content and not content.endswith(b"\n"):
             content += b"\n"
-        content += b"\n".join(_json_bytes(record).rstrip(b"\n") for record in records) + b"\n"
+        content += pending
+        if existing and len(content) > self.max_bytes and len(pending) <= self.max_bytes:
+            if len(segments) >= MAX_FILE_JOURNAL_CYCLE_SEGMENTS:
+                raise FileOrchestrationJournalError(
+                    "file_journal_segment_limit_exceeded",
+                    field=str(
+                        _relative_evidence(directory / _journal_segment_name(cycle_segment, 0), self.root)
+                    ),
+                    evidence={"segments": len(segments)},
+                )
+            path = directory / _journal_segment_name(cycle_segment, len(segments))
+            content = pending
         self._require_within_byte_limit(content, path)
         self._atomic_write_bytes_unlocked(path, content)
-        for record in records:
-            self._apply_record_to_cycle_rows_cache(source_id=source_id, cycle_time=cycle_time, record=record)
 
     def _apply_record_to_cycle_rows_cache(
         self,
@@ -6179,8 +6262,91 @@ class FileOrchestrationJournalRepository:
             finally:
                 self._reconcile_inventory_lock_depth = 0
 
-    def _journal_path(self, *, source_id: str, cycle_time: datetime) -> Path:
-        return self.root / "journal" / _safe_segment(source_id) / f"{format_cycle_time(cycle_time)}.jsonl"
+    def _journal_directory(self, *, source_id: str, surface: str = "journal") -> Path:
+        return self.root / surface / _safe_segment(source_id)
+
+    def _cycle_segment_paths(self, directory: Path, cycle_segment: str) -> list[Path]:
+        """Ordered existing segment paths of one cycle event log.
+
+        Exact-path probing over the bounded segment window (index 0 through
+        ``MAX_FILE_JOURNAL_CYCLE_SEGMENTS``), never a directory scan: this
+        runs per candidate read while a source directory holds one entry per
+        cycle.  The returned prefix stops at the first gap; within the window
+        a segment beyond that gap, or past the cap, is an integrity fault
+        rather than a silently ignored file.  Past the window the exact-path
+        reader cannot observe the file at all — a stray ``<cycle>.9.jsonl``
+        stays invisible here and the recursive walkers and the
+        reconcile-inventory backfill remain its only detecting readers.
+        """
+        paths: list[Path] = []
+        gapped = False
+        for index, name in enumerate(_journal_segment_names(cycle_segment)):
+            path = directory / name
+            if not self._journal_segment_exists(path):
+                gapped = True
+                continue
+            if gapped:
+                raise FileOrchestrationJournalError(
+                    "file_journal_segment_gap",
+                    field=str(_relative_evidence(path, self.root)),
+                )
+            if index >= MAX_FILE_JOURNAL_CYCLE_SEGMENTS:
+                raise FileOrchestrationJournalError(
+                    "file_journal_segment_limit_exceeded",
+                    field=str(_relative_evidence(path, self.root)),
+                )
+            paths.append(path)
+        return paths
+
+    def _journal_segment_exists(self, path: Path) -> bool:
+        """Probe a segment slot without hiding a non-regular occupant.
+
+        A symlinked or otherwise unsafe segment counts as present so the
+        hardened reader stays the sole authority for that failure, exactly as
+        it is for an unsegmented cycle log today.
+        """
+        try:
+            os.stat(path, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_unreadable",
+                field=str(_relative_evidence(path, self.root)),
+                evidence={"error_type": type(error).__name__},
+            ) from error
+        return True
+
+    def _cycle_segment_signatures(self, directory: Path, cycle_segment: str) -> tuple[Any, ...]:
+        """Stat identity of every segment slot a cycle log may occupy.
+
+        Absent slots are included as ``None``: rollover freezes the previous
+        segment forever, so a fingerprint that only watched the base file
+        would serve stale rows for the rest of the cycle's life.
+        """
+        return tuple(
+            (name, _stat_signature(directory / name)) for name in _journal_segment_names(cycle_segment)
+        )
+
+    def _read_cycle_segments(self, directory: Path, cycle_segment: str) -> list[dict[str, Any]]:
+        """Replay every segment of one cycle event log in segment order."""
+
+        records: list[dict[str, Any]] = []
+        for segment_index, path in enumerate(self._cycle_segment_paths(directory, cycle_segment)):
+            records.extend(self._read_jsonl(path, segment_index=segment_index))
+        return records
+
+    def _cycle_journal_records(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        surface: str = "journal",
+    ) -> list[dict[str, Any]]:
+        return self._read_cycle_segments(
+            self._journal_directory(source_id=source_id, surface=surface),
+            format_cycle_time(cycle_time),
+        )
 
     def _ensure_root_unlocked(self) -> None:
         try:
@@ -9095,6 +9261,25 @@ def _latest_identity_from_path(path: Path, *, root: Path) -> tuple[str, datetime
 
 
 def _journal_identity_from_path(path: Path, *, root: Path, surface: str) -> tuple[str, datetime]:
+    source_id, cycle_time, _segment_index = _journal_segment_identity_from_path(
+        path,
+        root=root,
+        surface=surface,
+    )
+    return source_id, cycle_time
+
+
+def _journal_segment_identity_from_path(
+    path: Path,
+    *,
+    root: Path,
+    surface: str,
+) -> tuple[str, datetime, int]:
+    """Resolve (source, cycle, segment index) for one cycle event-log file.
+
+    Continuation segments belong to their base cycle; genuinely unparseable
+    names keep raising ``file_journal_invalid_cycle_time`` exactly as before.
+    """
     parts = path.relative_to(root).parts
     if len(parts) != 3 or parts[0] != surface:
         raise FileOrchestrationJournalError(
@@ -9102,8 +9287,99 @@ def _journal_identity_from_path(path: Path, *, root: Path, surface: str) -> tupl
             field=str(_relative_evidence(path, root)),
         )
     source_id = _normalize_file_source_id(parts[1], field="source_id")
-    cycle_segment = _safe_segment(Path(parts[2]).stem)
-    return source_id, _parse_cycle_segment(cycle_segment, field=str(_relative_evidence(path, root)))
+    cycle_stem, segment_index = _split_journal_segment_stem(Path(parts[2]).stem)
+    cycle_time = _parse_cycle_segment(
+        _safe_segment(cycle_stem),
+        field=str(_relative_evidence(path, root)),
+    )
+    _require_journal_segment_lineage(
+        path,
+        root=root,
+        cycle_segment=cycle_stem,
+        segment_index=segment_index,
+    )
+    return source_id, cycle_time, segment_index
+
+
+def _journal_segment_name(cycle_segment: str, segment_index: int) -> str:
+    """Canonical file name of one per-cycle event-log segment."""
+
+    if segment_index <= 0:
+        return f"{cycle_segment}.jsonl"
+    return f"{cycle_segment}.{segment_index}.jsonl"
+
+
+def _journal_segment_names(cycle_segment: str) -> tuple[str, ...]:
+    """Every segment slot a cycle may own, plus the first illegal one.
+
+    The extra probe narrows — it does not eliminate — the asymmetry between
+    the recursive walkers and the cycle-level readers: it pulls the first
+    over-cap segment into enumeration and the cache fingerprint, so the
+    asymmetry is pushed out to the window boundary.  An index beyond
+    ``MAX_FILE_JOURNAL_CYCLE_SEGMENTS`` is still walker-detected only,
+    because widening the window further would mean globbing the directory.
+    """
+    return tuple(
+        _journal_segment_name(cycle_segment, index)
+        for index in range(MAX_FILE_JOURNAL_CYCLE_SEGMENTS + 1)
+    )
+
+
+def _split_journal_segment_stem(stem: str) -> tuple[str, int]:
+    """Split a journal file stem into (cycle segment, segment index).
+
+    ``<cycle>`` is segment 0 and ``<cycle>.<n>`` (n >= 1) is segment n.
+    Anything else — a non-numeric suffix, or an explicit ``.0`` — is returned
+    unchanged as segment 0, so foreign names keep today's parsing behaviour
+    byte-identically.
+    """
+    base, dot, suffix = stem.rpartition(".")
+    if dot and base and _JOURNAL_SEGMENT_INDEX_RE.fullmatch(suffix):
+        return base, int(suffix)
+    return stem, 0
+
+
+def _require_journal_segment_lineage(
+    path: Path,
+    *,
+    root: Path,
+    cycle_segment: str,
+    segment_index: int,
+) -> None:
+    """Fail closed on orphan, gapped or over-cap continuation segments.
+
+    One rule for the cycle-level enumeration and every recursive walker, so a
+    corrupt segment gets the same answer from every reader rather than being
+    ignored by one and read by another.
+    """
+    if segment_index <= 0:
+        return
+    directory = path.parent
+    for index in range(min(segment_index, MAX_FILE_JOURNAL_CYCLE_SEGMENTS)):
+        if _stat_signature(directory / _journal_segment_name(cycle_segment, index)) is None:
+            raise FileOrchestrationJournalError(
+                "file_journal_segment_gap",
+                field=str(_relative_evidence(path, root)),
+            )
+    if segment_index >= MAX_FILE_JOURNAL_CYCLE_SEGMENTS:
+        raise FileOrchestrationJournalError(
+            "file_journal_segment_limit_exceeded",
+            field=str(_relative_evidence(path, root)),
+        )
+
+
+def _journal_segment_sort_key(path: Path, *, root: Path, surface: str) -> tuple[str, str, int]:
+    """Order journal paths by parsed identity, never by raw path name.
+
+    Lexicographic order puts ``<cycle>.1.jsonl`` before ``<cycle>.jsonl``
+    (``'1' < 'j'``), which would replay a continuation segment ahead of the
+    base it continues.
+    """
+    parts = path.relative_to(root).parts if path.is_relative_to(root) else ()
+    if len(parts) != 3 or parts[0] != surface:
+        return (str(path), "", 0)
+    cycle_segment, segment_index = _split_journal_segment_stem(Path(parts[2]).stem)
+    return (parts[1], cycle_segment, segment_index)
 
 
 def _parse_cycle_segment(value: str, *, field: str) -> datetime:

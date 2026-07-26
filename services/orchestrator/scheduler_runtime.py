@@ -1523,6 +1523,12 @@ def _run_restart_reconcile(
                     "reconciliation_reason_class": o.reconciliation_reason_class,
                     "durable_write_kind": o.durable_write_kind,
                     "durable_write_count": o.durable_write_count,
+                    "quarantine_reason": o.quarantine_reason,
+                    "quarantine_field": (
+                        _restart_reconcile_error_token(o.quarantine_field)
+                        if o.quarantine_field
+                        else o.quarantine_field
+                    ),
                     **_restart_reconcile_attempt_evidence(store, o.job_id),
                 }
                 for o in reserved
@@ -1633,10 +1639,21 @@ def _restart_reconcile_attempt_evidence(store: Any, job_id: str) -> dict[str, An
 
 
 def _restart_reconcile_error_message(error: Exception) -> str:
-    """Redact credentials and replace absolute filesystem tokens in evidence."""
+    """Redact credentials and replace absolute filesystem tokens in evidence.
+
+    Journal errors stringify to a bare five-word reason, which tells an
+    operator nothing about WHICH file is poisoned; their ``field`` is appended
+    through the same token redaction so no absolute path can leak.
+    """
 
     redacted = str(redact_payload(str(error)))
-    return " ".join(_restart_reconcile_error_token(token) for token in redacted.split())
+    message = " ".join(_restart_reconcile_error_token(token) for token in redacted.split())
+    field = getattr(error, "field", None)
+    if isinstance(field, str) and field.strip():
+        redacted_field = str(redact_payload(field.strip()))
+        safe_field = "_".join(_restart_reconcile_error_token(token) for token in redacted_field.split())
+        message = f"{message} field={safe_field}"
+    return message
 
 
 def _restart_reconcile_error_token(token: str) -> str:

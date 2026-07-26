@@ -224,8 +224,22 @@ model-scoped materialized view；不得通过删除 journal 来控制 direct-fil
 `by-cycle/` 搬回 flat namespace。marker-free legacy flat rows 保持只读兼容，不自动升级为
 accepted-submit reconcile authority。
 
+单个 cycle event log 超过 16 MiB 单文件上限时（#1165）会滚动到 continuation segment
+`journal/<source>/<cycle>.<n>.jsonl`（n 从 1 起、必须连续），每 cycle **最多 3 个 segment**
+（base + 2 continuation，48 MiB，低于 64 MiB read-cache 预算）。语义不变：append-only、
+不重写历史、不删除；base segment 滚动后即冻结，新行只落最后一个 segment；replay 按
+segment 顺序拼接，等价于单文件。超出 3 段以 `file_journal_segment_limit_exceeded` fail
+closed；窗口内缺失前序 segment（例如存在 `<cycle>.2.jsonl` 却没有 `<cycle>.1.jsonl`）以
+`file_journal_segment_gap` fail closed，且 cycle 级读者与递归 walker 给出同一答案。
+注意边界：cycle 级读者按固定窗口（index 0..3）精确探针、不做目录扫描，因此 index ≥ 4 的
+孤儿 segment（只可能来自外部损坏或人工误操作）在 walker / reconcile-inventory backfill 侧
+fail closed，但对 cycle 级读者不可见——诊断这类损坏时以 walker 侧报错为准。
+运维不要手工创建、改名或删除 segment 文件；`pipeline-events/` 只读容忍同一布局
+（本仓库不写该 surface）。
+
 版本化 accepted-submit master 的 reserve/commit/reject/accounting-bind 只按确定的
-`pipeline_job_id` 读取 flat direct 与对应 `journal/<source>/<cycle>.jsonl`，不会为了匹配
+`pipeline_job_id` 读取 flat direct 与对应 `journal/<source>/<cycle>.jsonl`（含其
+continuation segment），不会为了匹配
 idempotency key 枚举无关历史 `latest/`、journal 或 direct 文件。exact-comment `sacct`
 仍固定查询七天、按 12 小时分页；零结果只有在查询覆盖从当前
 `submission_attempt_started_at` 一直到冻结的 query end 时才是权威 absence。attempt 早于
