@@ -5760,3 +5760,28 @@ def test_completed_pipeline_init_state_id_ignores_superseded_hydro_placeholder(
         )
         is None
     )
+
+
+def test_next_current_master_retry_identity_is_stable_after_helper_consolidation() -> None:
+    from services.orchestrator.file_orchestration_journal import _next_current_master_retry_identity
+
+    assert _next_current_master_retry_identity({"job_id": "job_forecast", "retry_count": 0}) == (
+        "job_forecast_retry_1",
+        1,
+    )
+    assert _next_current_master_retry_identity({"job_id": "job_forecast_retry_2", "retry_count": 0}) == (
+        "job_forecast_retry_3",
+        3,
+    )
+    assert _next_current_master_retry_identity({"job_id": "job_forecast_retry_1_retry_2"}) == (
+        "job_forecast_retry_1_retry_3",
+        3,
+    )
+    assert _next_current_master_retry_identity({"job_id": "job_forecast", "retry_count": 5}) == (
+        "job_forecast_retry_6",
+        6,
+    )
+    assert _next_current_master_retry_identity({"job_id": "job_retry_x", "retry_count": 0}) == (
+        "job_retry_x_retry_1",
+        1,
+    )

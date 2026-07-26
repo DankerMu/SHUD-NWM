@@ -2500,6 +2500,45 @@ def test_workspace_failure_marks_run_failed(tmp_path: Path) -> None:
     assert repository.failures[0][0] == "ARTIFACT_NOT_FOUND"
 
 
+def test_workspace_failure_writes_task_outcome_receipt_and_mirrors_it(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_package(object_root)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _manifest()
+    run_id = manifest["run_id"]
+
+    with pytest.raises(SHUDRuntimeError, match="Object storage artifact not found"):
+        runtime.execute(manifest)
+
+    workspace_receipt = tmp_path / "workspace" / "runs" / run_id / "logs" / "task_outcome.json"
+    assert workspace_receipt.is_file()
+    payload = json.loads(workspace_receipt.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "nhms.shud_task_outcome.v1"
+    assert payload["run_id"] == run_id
+    assert payload["error_code"] == "ARTIFACT_NOT_FOUND"
+    assert 0 < len(payload["error_message"]) <= 512
+    assert payload["failed_at"].endswith("Z")
+
+    # The receipt MUST be written before ``upload_logs`` or the object-store
+    # mirror -- accounting's only trust root -- never carries it.
+    mirrored_receipt = object_root / "runs" / run_id / "logs" / "task_outcome.json"
+    assert mirrored_receipt.is_file()
+    assert json.loads(mirrored_receipt.read_text(encoding="utf-8")) == payload
+
+
+def test_task_outcome_receipt_truncates_long_error_messages(tmp_path: Path) -> None:
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    log_dir = tmp_path / "workspace" / "runs" / "run-a" / "logs"
+    log_dir.mkdir(parents=True)
+
+    runtime._write_task_outcome_receipt(log_dir, "run-a", SHUDRuntimeError("ARTIFACT_NOT_FOUND", "x" * 900))
+
+    payload = json.loads((log_dir / "task_outcome.json").read_text(encoding="utf-8"))
+    assert payload["error_message"] == "x" * 512
+
+
 @pytest.mark.parametrize(
     ("field_path", "value"),
     [

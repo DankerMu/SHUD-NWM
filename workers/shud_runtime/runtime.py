@@ -55,6 +55,12 @@ EXPECTED_PRCP_UNIT = "mm/day"
 # the read generously and tolerate-skip (never hard-fail) if a multi-station
 # manifest exceeds the cap.
 MAX_PACKAGE_MANIFEST_BYTES = 16 * 1024 * 1024
+# DB-free per-task failure classifier channel: the runtime writes this receipt
+# into ``logs/`` so it rides the existing log mirror to the object store, where
+# array accounting reads it instead of stamping a generic ``NODE_FAILURE``.
+TASK_OUTCOME_SCHEMA_VERSION = "nhms.shud_task_outcome.v1"
+TASK_OUTCOME_RECEIPT_FILENAME = "task_outcome.json"
+TASK_OUTCOME_MESSAGE_MAX_LENGTH = 512
 MAX_DIRECT_GRID_TSD_FORC_BYTES = 8 * 1024 * 1024
 MAX_DIRECT_GRID_FORCING_CSV_BYTES = 8 * 1024 * 1024
 MAX_DIRECT_GRID_SP_ATT_BYTES = 32 * 1024 * 1024
@@ -400,6 +406,9 @@ class SHUDRuntime:
         except Exception as error:
             runtime_error = _as_runtime_error(error)
             self._write_failure_log(log_dir, runtime_error)
+            # MUST stay before ``upload_logs`` so the object-store mirror carries
+            # the receipt; array accounting has no other channel to the classifier.
+            self._write_task_outcome_receipt(log_dir, run_id, runtime_error)
             log_uri = None
             try:
                 log_uri = self.upload_logs(run_id, log_dir)
@@ -1556,6 +1565,21 @@ class SHUDRuntime:
         _write_text_no_follow(
             log_dir / "runtime_error.log",
             f"{error.error_code}: {error.message}\n",
+            containment_root=log_dir,
+        )
+
+    def _write_task_outcome_receipt(self, log_dir: Path, run_id: str, error: SHUDRuntimeError) -> None:
+        _ensure_directory(log_dir)
+        payload = {
+            "schema_version": TASK_OUTCOME_SCHEMA_VERSION,
+            "run_id": run_id,
+            "error_code": error.error_code,
+            "error_message": error.message[:TASK_OUTCOME_MESSAGE_MAX_LENGTH],
+            "failed_at": _format_time(datetime.now(UTC)),
+        }
+        _write_text_no_follow(
+            log_dir / TASK_OUTCOME_RECEIPT_FILENAME,
+            json.dumps(payload, indent=2, sort_keys=True),
             containment_root=log_dir,
         )
 

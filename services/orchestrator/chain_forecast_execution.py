@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from services.orchestrator import chain as _chain
+from services.orchestrator.retry_identity import effective_retry_attempt
 from services.orchestrator.run_tree_copyback import RunTreeCopybackError, copyback_run_trees
 from services.orchestrator.scheduler_timing import (
     current_scheduler_pass_timing,
@@ -386,7 +387,10 @@ def _retry_job_for_stage_result(self, result: StageRunResult) -> PipelineJob | N
         status=str(record.get("status") or result.status),
         stage=record.get("stage") or result.stage,
     )
-    job.retry_count = int(record.get("retry_count") or 0)
+    # Read side only: the journal's clean-reservation invariant zeroes the stored
+    # count on master rows, so the durable attempt lives in the job-id suffix.
+    # This value is never persisted back onto a reservation.
+    job.retry_count = effective_retry_attempt(job.job_id, record.get("retry_count"))
     job.error_code = record.get("error_code") or result.error_code
     job.error_message = record.get("error_message") or result.error_message
     return job

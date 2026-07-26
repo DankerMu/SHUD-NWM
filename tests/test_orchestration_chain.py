@@ -1367,6 +1367,240 @@ def test_chain_array_accounting_module_parses_sacct_and_legacy_chain_wrapper_mat
     assert legacy.task_results[2].log_uri == "s3://nhms/runs/cycle_gfs_2026050100/logs/4000_2.out"
 
 
+def _task_outcome_receipt_context(run_id: str = "run_reindexed_0") -> CycleOrchestrationContext:
+    # The cohort member's own ``run_id`` -- deliberately different from
+    # ``context.run_id`` -- is the receipt key (re-indexed cohort caveat).
+    basin = {
+        "task_id": 0,
+        "run_id": run_id,
+        "model_id": "model_0",
+        "basin_id": "basin_0",
+    }
+    return CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        cycle_id="gfs_2026050100",
+        run_id="cycle_gfs_2026050100",
+        all_basins=[dict(basin)],
+        active_basins=[dict(basin)],
+    )
+
+
+def _write_task_outcome_receipt(
+    object_store: LocalObjectStore,
+    run_id: str,
+    *,
+    error_code: str = "ARTIFACT_NOT_FOUND",
+    schema_version: str = "nhms.shud_task_outcome.v1",
+) -> None:
+    payload = {
+        "schema_version": schema_version,
+        "run_id": run_id,
+        "error_code": error_code,
+        "error_message": "Object storage artifact not found",
+        "failed_at": "2026-05-01T00:10:00Z",
+    }
+    object_store.write_bytes_atomic(
+        f"runs/{run_id}/logs/task_outcome.json",
+        json.dumps(payload).encode("utf-8"),
+    )
+
+
+def test_array_accounting_honors_task_outcome_receipt_on_both_provider_paths(tmp_path: Path) -> None:
+    from services.orchestrator import chain_array_accounting
+
+    context = _task_outcome_receipt_context()
+    object_store = LocalObjectStore(tmp_path / "objects", object_store_prefix="s3://nhms")
+    _write_task_outcome_receipt(object_store, "run_reindexed_0")
+
+    stdout_aggregation = chain_array_accounting.parse_sacct_array_results(
+        "4000_0|FAILED|1:0|00:02:00",
+        "4000",
+        context=context,
+        object_store=object_store,
+    )
+    dict_aggregation = chain_array_accounting.coerce_array_aggregation(
+        [{"task_id": 0, "status": "failed", "exit_code": 1}],
+        "4000",
+        context=context,
+        object_store=object_store,
+    )
+
+    for aggregation in (stdout_aggregation, dict_aggregation):
+        assert aggregation.task_results[0].error_code == "ARTIFACT_NOT_FOUND"
+        assert chain_array_accounting.aggregation_error_code(aggregation) == "ARTIFACT_NOT_FOUND"
+
+
+def test_array_accounting_falls_back_to_node_failure_without_a_receipt(tmp_path: Path) -> None:
+    from services.orchestrator import chain_array_accounting
+
+    context = _task_outcome_receipt_context()
+    object_store = LocalObjectStore(tmp_path / "objects", object_store_prefix="s3://nhms")
+
+    stdout_aggregation = chain_array_accounting.parse_sacct_array_results(
+        "4000_0|FAILED|1:0|00:02:00",
+        "4000",
+        context=context,
+        object_store=object_store,
+    )
+    dict_aggregation = chain_array_accounting.coerce_array_aggregation(
+        [{"task_id": 0, "status": "failed", "exit_code": 1}],
+        "4000",
+        context=context,
+        object_store=object_store,
+    )
+
+    for aggregation in (stdout_aggregation, dict_aggregation):
+        assert aggregation.task_results[0].error_code == "NODE_FAILURE"
+
+
+def test_array_accounting_falls_back_when_the_receipt_schema_is_unknown(tmp_path: Path) -> None:
+    from services.orchestrator import chain_array_accounting
+
+    context = _task_outcome_receipt_context()
+    object_store = LocalObjectStore(tmp_path / "objects", object_store_prefix="s3://nhms")
+    _write_task_outcome_receipt(object_store, "run_reindexed_0", schema_version="nhms.shud_task_outcome.v99")
+
+    aggregation = chain_array_accounting.parse_sacct_array_results(
+        "4000_0|FAILED|1:0|00:02:00",
+        "4000",
+        context=context,
+        object_store=object_store,
+    )
+
+    assert aggregation.task_results[0].error_code == "NODE_FAILURE"
+
+
+def test_gateway_supplied_error_code_still_wins_over_the_task_outcome_receipt(tmp_path: Path) -> None:
+    from services.orchestrator import chain_array_accounting
+
+    context = _task_outcome_receipt_context()
+    object_store = LocalObjectStore(tmp_path / "objects", object_store_prefix="s3://nhms")
+    _write_task_outcome_receipt(object_store, "run_reindexed_0")
+
+    aggregation = chain_array_accounting.coerce_array_aggregation(
+        [{"task_id": 0, "status": "failed", "exit_code": 1, "error_code": "OUT_OF_MEMORY"}],
+        "4000",
+        context=context,
+        object_store=object_store,
+    )
+
+    assert aggregation.task_results[0].error_code == "OUT_OF_MEMORY"
+
+
+def test_array_accounting_without_context_or_object_store_falls_back_without_raising(tmp_path: Path) -> None:
+    from services.orchestrator import chain_array_accounting
+
+    object_store = LocalObjectStore(tmp_path / "objects", object_store_prefix="s3://nhms")
+    _write_task_outcome_receipt(object_store, "run_reindexed_0")
+
+    no_context = chain_array_accounting.parse_sacct_array_results(
+        "4000_0|FAILED|1:0|00:02:00",
+        "4000",
+        context=None,
+        object_store=object_store,
+    )
+    no_store = chain_array_accounting.coerce_array_aggregation(
+        [{"task_id": 0, "status": "failed", "exit_code": 1}],
+        "4000",
+        context=_task_outcome_receipt_context(),
+        object_store=None,
+    )
+
+    assert no_context.task_results[0].error_code == "NODE_FAILURE"
+    assert no_store.task_results[0].error_code == "NODE_FAILURE"
+
+
+class _DbFreeRetryGateService(RetryService):
+    """RetryService without a SQL store: the DB-free forecast-cohort gate shape."""
+
+    def __init__(self, *, max_retries: int = 3) -> None:
+        super().__init__(None, RetryConfig(max_retries=max_retries, backoff_schedule=[0]))  # type: ignore[arg-type]
+
+
+def _db_free_forecast_master_record(job_id: str, *, retry_count: Any) -> dict[str, Any]:
+    run_id = "cycle_gfs_2026050100"
+    return {
+        "job_id": job_id,
+        "run_id": run_id,
+        "cycle_id": "gfs_2026050100",
+        "candidate_id": run_id,
+        "model_id": None,
+        "job_type": "run_shud_forecast_array",
+        "stage": "forecast",
+        "status": "failed",
+        "slurm_job_id": None,
+        "retry_count": retry_count,
+        "error_code": "NODE_FAILURE",
+        "error_message": "array tasks failed",
+        "accepted_submit_contract_version": "nhms.accepted_submit.v1",
+    }
+
+
+def _forecast_stage_run_result(job_id: str) -> StageRunResult:
+    return StageRunResult(
+        stage="forecast",
+        job_type="run_shud_forecast_array",
+        pipeline_job_id=job_id,
+        slurm_job_id="4000",
+        status="failed",
+        error_code="NODE_FAILURE",
+    )
+
+
+def test_forecast_retry_gate_honors_job_id_suffix_when_recorded_count_is_absent(tmp_path: Path) -> None:
+    from services.orchestrator import chain_forecast_execution
+
+    job_id = "job_cycle_gfs_2026050100_forecast_retry_65"
+    repository = FakeCycleRepository()
+    repository.jobs[job_id] = _db_free_forecast_master_record(job_id, retry_count=None)
+    retry_service = _DbFreeRetryGateService(max_retries=3)
+    orchestrator = _orchestrator(tmp_path, repository, FakeCycleSlurmClient(), retry_service=retry_service)
+    result = _forecast_stage_run_result(job_id)
+
+    job = chain_forecast_execution._retry_job_for_stage_result(orchestrator, result)
+
+    assert job is not None
+    assert job.retry_count == 65
+    assert retry_service.should_auto_retry(job) is False
+    assert orchestrator._schedule_cycle_stage_retry(result, 1) is None
+
+
+def test_forecast_retry_gate_reads_the_last_stacked_retry_suffix(tmp_path: Path) -> None:
+    from services.orchestrator import chain_forecast_execution
+
+    job_id = "job_cycle_gfs_2026050100_forecast_retry_1_retry_2"
+    repository = FakeCycleRepository()
+    repository.jobs[job_id] = _db_free_forecast_master_record(job_id, retry_count=None)
+    retry_service = _DbFreeRetryGateService(max_retries=3)
+    orchestrator = _orchestrator(tmp_path, repository, FakeCycleSlurmClient(), retry_service=retry_service)
+
+    job = chain_forecast_execution._retry_job_for_stage_result(
+        orchestrator,
+        _forecast_stage_run_result(job_id),
+    )
+
+    assert job is not None
+    assert job.retry_count == 2
+    assert retry_service.should_auto_retry(job) is True
+
+
+def test_shared_retry_identity_helper_matches_the_production_id_shapes() -> None:
+    from services.orchestrator.retry_identity import effective_retry_attempt, split_retry_job_identity
+
+    assert split_retry_job_identity("job_cycle_gfs_2026050100_forecast") == (
+        "job_cycle_gfs_2026050100_forecast",
+        0,
+    )
+    assert split_retry_job_identity(
+        "job_cycle_gfs_2026050100_convert_model_0_forecast_retry_1_retry_2_retry_3"
+    ) == ("job_cycle_gfs_2026050100_convert_model_0_forecast_retry_1_retry_2", 3)
+    assert split_retry_job_identity("job_a_retry_notanumber") == ("job_a_retry_notanumber", 0)
+    assert effective_retry_attempt("job_a_retry_2", None) == 2
+    assert effective_retry_attempt("job_a_retry_2", 7) == 7
+    assert effective_retry_attempt(None, None) == 0
+
+
 def test_cycle_stage_manifest_forwards_db_free_file_provider_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

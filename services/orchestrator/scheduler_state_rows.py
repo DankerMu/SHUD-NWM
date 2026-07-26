@@ -10,6 +10,7 @@ from services.orchestrator.production_contract import (
     PRODUCTION_EVIDENCE_CORRELATION_FIELDS,
     PRODUCTION_IDENTITY_FIELDS,
 )
+from services.orchestrator.retry_identity import effective_retry_attempt
 from services.orchestrator.scheduler_state_common import (
     _coerce_int,
     _coerce_optional_nonnegative_int,
@@ -25,6 +26,7 @@ from services.orchestrator.scheduler_state_types import (
     DEFAULT_CANDIDATE_STATE_EVENT_LIMIT,
     DEFAULT_CANDIDATE_STATE_JOB_LIMIT,
     DOWNSTREAM_RESTART_STAGES,
+    DOWNSTREAM_STAGE_ALIASES,
     FAILED_PIPELINE_STATUSES,
     STATE_CANDIDATE_SCOPED_PROOF_FIELDS,
     STATE_M23_COMPARISON_FIELDS,
@@ -412,15 +414,46 @@ def _state_job_limit(state: Mapping[str, Any]) -> int:
 def _state_event_limit(state: Mapping[str, Any]) -> int:
     return max(_coerce_int(state.get("event_limit"), default=DEFAULT_CANDIDATE_STATE_EVENT_LIMIT), 1)
 
-def _state_retry_attempt(state: Mapping[str, Any]) -> int:
+def _canonical_downstream_stage(stage: str | None) -> str | None:
+    if stage is None:
+        return None
+    normalized = DOWNSTREAM_STAGE_ALIASES.get(stage)
+    if normalized in DOWNSTREAM_RESTART_STAGES:
+        return normalized
+    return None
+
+def _state_retry_attempt(state: Mapping[str, Any], *, stage: str | None = None) -> int:
+    """Return the retry attempt recorded for ``state``, scoped to ``stage`` when given.
+
+    Stage identity comes from the job projection's authoritative ``stage`` field —
+    never from job-id substrings, because production ids embed several stage
+    tokens (``..._convert_model_0_forecast_retry_1_retry_2``).  Only jobs whose
+    stage matches contribute their durable ``_retry_<n>`` suffix attempt, so a
+    completed ``forcing`` retry cannot exhaust the forecast budget.
+    """
+
     for key in ("retry_attempt", "attempt", "retry_count"):
         value = state.get(key)
         if value not in (None, ""):
             return _coerce_int(value, default=0)
     jobs = _state_jobs(state)
-    if jobs:
-        return max(_coerce_int(job.get("retry_count"), default=0) for job in jobs)
-    return 0
+    if not jobs:
+        return 0
+    canonical_stage = _canonical_downstream_stage(stage)
+    return max(_job_retry_attempt(job, canonical_stage) for job in jobs)
+
+def _job_retry_attempt(job: Mapping[str, Any], canonical_stage: str | None) -> int:
+    recorded = _coerce_int(job.get("retry_count"), default=0)
+    if canonical_stage is None or _canonical_downstream_stage(_job_stage_name(job)) != canonical_stage:
+        return recorded
+    return effective_retry_attempt(job.get("job_id"), recorded)
+
+def _job_stage_name(job: Mapping[str, Any]) -> str | None:
+    for key in ("stage", "job_type"):
+        value = job.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return None
 
 def _state_retry_limit(state: Mapping[str, Any]) -> int | None:
     for key in ("retry_limit", "max_retries"):

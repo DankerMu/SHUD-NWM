@@ -32,7 +32,7 @@ issue's recommended option, with L2 the load-bearing layer.
 
 ## 1. Implementation (implementer)
 
-- [ ] 1.1 **L1 writer** `workers/shud_runtime/runtime.py`: in the
+- [x] 1.1 **L1 writer** `workers/shud_runtime/runtime.py`: in the
   `execute()` except hook (`:400-414`, alongside `_write_failure_log`
   `:1554-1560`), write `logs/task_outcome.json`:
   `{"schema_version": "nhms.shud_task_outcome.v1", "run_id",
@@ -44,7 +44,7 @@ issue's recommended option, with L2 the load-bearing layer.
   mirror never carries it and AC1 silently dies in production). Both
   the log and the JSON ride the existing `upload_logs` mirror
   (`:820-823`) — no new upload call.
-- [ ] 1.2 **L1 reader** `services/orchestrator/chain_array_accounting.py`:
+- [x] 1.2 **L1 reader** `services/orchestrator/chain_array_accounting.py`:
   one resolver (e.g. `_resolve_task_error_code(object_store, basin,
   fallback="NODE_FAILURE")`) that reads
   `runs/<basin_run_id>/logs/task_outcome.json` from the object store,
@@ -63,7 +63,7 @@ issue's recommended option, with L2 the load-bearing layer.
   (stdout path, currently no honor branch) and `:655-658` (dict path
   — gateway-supplied `error_code` keeps priority, resolver is the new
   middle preference, `NODE_FAILURE` last).
-- [ ] 1.3 **L2 guard** `services/orchestrator/scheduler_state_decision.py`
+- [x] 1.3 **L2 guard** `services/orchestrator/scheduler_state_decision.py`
   — guard consulted AT the emitting return points, never as an
   unconditional pre-pass (fixture-review P1-1). Build one lazy local
   (e.g. closure `_missing_forcing_block()` that computes
@@ -100,7 +100,7 @@ issue's recommended option, with L2 the load-bearing layer.
   repair-eligible instead of retrying — fail-closed by design.
   The three existing guard call sites (`:210-221,:249-260,:269-280`)
   stay byte-identical. No new helper that duplicates guard logic.
-- [ ] 1.4 **L3 shared helper + both sides**: add ONE suffix-aware
+- [x] 1.4 **L3 shared helper + both sides**: add ONE suffix-aware
   helper (location: `services/orchestrator/retry.py` or a small
   neighbor — implementer picks, no third copy left behind):
   `effective_retry_attempt(job_id, recorded_count) -> int` using
@@ -135,7 +135,7 @@ issue's recommended option, with L2 the load-bearing layer.
   `scheduler_state_evidence_owner.py:110`,
   `scheduler_state_manual_retry.py:53` `default_attempt=+1`) are
   pinned by tests, not silently shifted.
-- [ ] 1.5 Constraints: `blocked_missing_upstream_artifact` evidence
+- [x] 1.5 Constraints: `blocked_missing_upstream_artifact` evidence
   shape unchanged (`_artifact_blocker_evidence`
   `scheduler_state_failure.py:427-468`);
   `_decision_is_stable_missing_forcing_blocker` passes for the newly
@@ -145,7 +145,7 @@ issue's recommended option, with L2 the load-bearing layer.
 
 ## 2. Tests (implementer; red-provable; seams upstream-declared)
 
-- [ ] 2.1 **AC4 core red tests — BOTH geometries** (seam:
+- [x] 2.1 **AC4 core red tests — BOTH geometries** (seam:
   `scheduler_module._candidate_state_decision(candidate, state)` +
   `run_once()`, factories `_scheduler_candidate_fixture` /
   `_production_identity_fixture` / `_config` / `RawCandidateStateRepository`
@@ -163,7 +163,7 @@ issue's recommended option, with L2 the load-bearing layer.
   `evidence["restart_stage"]=="forecast"`, AND
   `_decision_is_stable_missing_forcing_blocker(decision)` is True;
   `run_once()` submits nothing (`orchestrator.calls == []`).
-- [ ] 2.1.1 **Non-regression pins for guard activation (P1-1;
+- [x] 2.1.1 **Non-regression pins for guard activation (P1-1;
   reshaped per round-2 P2-A — a `pipeline_status="running"` state
   never reaches the fallback region, it returns
   `("skip", "active_duplicate_pipeline")` at `:153-164`)**:
@@ -178,13 +178,13 @@ issue's recommended option, with L2 the load-bearing layer.
   intact; existing coverage at `tests/test_production_scheduler.py:
   13747,:14253,:14390` may be reused/extended). Both green BEFORE
   and AFTER the change.
-- [ ] 2.2 **L1-ordering trap test** (kills the coupling): same missing
+- [x] 2.2 **L1-ordering trap test** (kills the coupling): same missing
   forcing state but `error_code="ARTIFACT_NOT_FOUND"` (post-L1 shape,
   permanent) → MUST still be `("blocked",
   "missing_forcing_package_uri")` (repair-eligible), NOT
   `permanent_failure_guard`. Red-provable against a guard wired only
   at `:320`.
-- [ ] 2.3 **L1 writer test** (seam: `tests/test_shud_runtime.py`
+- [x] 2.3 **L1 writer test** (seam: `tests/test_shud_runtime.py`
   `test_workspace_failure_marks_run_failed` region `:2489-2500`;
   harness `LocalObjectStore` `:202-215`): drive the
   `ARTIFACT_NOT_FOUND` failure, assert `logs/task_outcome.json`
@@ -192,7 +192,7 @@ issue's recommended option, with L2 the load-bearing layer.
   (P2-2, kills the write-after-upload mutation) that the object-store
   mirror `object-store/runs/<run_id>/logs/task_outcome.json` exists
   with identical content. RED today (file absent both sides).
-- [ ] 2.4 **L1 reader tests** (seam: `tests/test_orchestration_chain.py`
+- [x] 2.4 **L1 reader tests** (seam: `tests/test_orchestration_chain.py`
   fakes — `FakeCycleSlurmClient.get_array_task_results` `_task_field`
   pattern `:122-157`, harness `_orchestrator` `:8038`, `_basins`
   `:8213`): (a) receipt present in fake object store under the
@@ -212,7 +212,7 @@ issue's recommended option, with L2 the load-bearing layer.
   in the fix commit, not just these) — no silent weakening: `:4631`'s
   redaction assertion keeps asserting redaction, only the code value
   changes if its fixture gains a receipt.
-- [ ] 2.5 **L3 tests**: (a) gate honors suffix — DB-free job built
+- [x] 2.5 **L3 tests**: (a) gate honors suffix — DB-free job built
   from a journal record with id `..._forecast_retry_65`,
   `retry_count=None` → `should_retry` False (limit 3) and no
   resubmission; RED today (spins). (b) stacked suffix
@@ -235,11 +235,11 @@ issue's recommended option, with L2 the load-bearing layer.
   keep passing unmodified). (e) manual-retry semantics pin (P2-1):
   `scheduler_state_manual_retry.py:53` `default_attempt` unchanged
   for states without stage-matching retry suffixes.
-- [ ] 2.6 **Copyback-half activation test** (L2 disclosed coupling):
+- [x] 2.6 **Copyback-half activation test** (L2 disclosed coupling):
   failed candidate whose state requires a copyback source that is
   missing → now `("blocked", "missing_copyback_source")` instead of
   retry; assert fail-closed direction and record as intended.
-- [ ] 2.7 Red proof capture: 2.1(a), 2.1(b), 2.2, 2.3, 2.5(a),
+- [x] 2.7 Red proof capture: 2.1(a), 2.1(b), 2.2, 2.3, 2.5(a),
   2.5(c) each demonstrably red on pre-change code for the right
   reason (captured output → PR body). 2.1.1 and the 2.5(c)
   cross-stage pin are green-before-and-after pins, not red proofs.
@@ -251,17 +251,17 @@ issue's recommended option, with L2 the load-bearing layer.
 
 ## 3. Verification (orchestrator)
 
-- [ ] 3.1 `uv run pytest -q tests/test_production_scheduler.py
+- [x] 3.1 `uv run pytest -q tests/test_production_scheduler.py
   tests/test_orchestration_chain.py tests/test_shud_runtime.py
   tests/test_file_orchestration_journal.py tests/test_gateway_reconcile.py`
   green locally (authoritative backend oracle is node-27 per CLAUDE.md).
-- [ ] 3.2 `uv run ruff check .` clean.
-- [ ] 3.3 `openspec validate scheduler-missing-forcing-retry-demotion
+- [x] 3.2 `uv run ruff check .` clean.
+- [x] 3.3 `openspec validate scheduler-missing-forcing-retry-demotion
   --strict --no-interactive` valid.
 
 ## 4. Spec delta (orchestrator, this fixture)
 
-- [ ] 4.1 ADDED requirement (new title) in `job-retry-mechanism`
+- [x] 4.1 ADDED requirement (new title) in `job-retry-mechanism`
   covering: stable classifier survives the DB-free path; failure-state
   decisions demote to the stable missing-forcing blocker (both
   fallback and permanent branches); durable attempt derivation caps
