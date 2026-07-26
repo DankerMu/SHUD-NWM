@@ -162,7 +162,9 @@ evidence exists):
   context field), tests.
 - Must preserve: matching-token and no-judgement shapes skip exactly as
   before; `active_duplicate_pipeline` untouched; env=true strict comparator
-  path untouched; stub repositories unchanged; journal files byte-identical
+  logic untouched (fix round 1 additionally routes the strict/successor
+  "complete" exit through the identity choke point — pure tightening, no
+  behavior change on strict-ready selections, see tasks §6.1); stub repositories unchanged; journal files byte-identical
   after scans; `has_completed_pipeline` semantics unchanged for
   `chain_forecast_trigger.py:378` and `scheduler_generation_gate.py:95-124`;
   `cycle_completion_status`'s only consumer is backfill gap selection
