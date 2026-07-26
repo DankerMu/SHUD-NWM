@@ -61,12 +61,16 @@ no pass can reach submission — node-22 is parked. Aggravator: the error's
   DISTINCT reason `file_journal_segment_limit_exceeded` (naming the
   cycle file), so segment exhaustion is distinguishable from an
   oversized single record in evidence and in quarantine outcomes.
-  Orphan/gapped segments (`<cycle>.5.jsonl` without predecessors) are
-  a fail-closed integrity error (distinct reason, e.g.
-  `file_journal_segment_gap`) under ONE unified rule for BOTH the
-  cycle-level enumeration and the recursive walkers — never "ignored
-  by one reader, read by another"; non-numeric suffixes
-  (`<cycle>.x.jsonl`) keep today's behavior byte-identically.
+  Orphan/gapped segments WITHIN the bounded probe window (indices up
+  to the cap) are a fail-closed integrity error (distinct reason
+  `file_journal_segment_gap`) with the same answer from the
+  cycle-level enumeration and the recursive walkers; an orphan BEYOND
+  the window (index ≥ 4 — writer-unreachable, external corruption
+  only) still fails closed in the walkers and inventory backfill while
+  the exact-path cycle reader cannot observe it (no-globbing hot-path
+  constraint) — a disclosed, both-directions-pinned asymmetry, with
+  operator diagnosis anchored on the walker-side error; non-numeric
+  suffixes (`<cycle>.x.jsonl`) keep today's behavior byte-identically.
 - **Existing directory-enumeration readers must tolerate segments
   (fail-closed trap)**: three recursive `.jsonl` enumerators exist today
   and would otherwise fail-close or silently skip on segment names —

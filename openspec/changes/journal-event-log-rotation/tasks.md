@@ -103,11 +103,13 @@ across segments, reconcile per-row quarantine, error `field` plumbing.
       `file_journal_segment_limit_exceeded` (naming the cycle file),
       so segment exhaustion is distinguishable from an oversized
       record in evidence and quarantine outcomes. Orphan/gapped
-      segments are a fail-closed integrity error with distinct reason
-      (e.g. `file_journal_segment_gap`) under ONE rule for BOTH
-      cycle-level enumeration and recursive walkers (N4) — never
-      ignored by one reader and read by another; non-numeric suffixes
-      keep today's behavior.
+      segments WITHIN the probe window are a fail-closed integrity
+      error (`file_journal_segment_gap`) with the same answer from
+      cycle-level enumeration and recursive walkers (N4); BEYOND the
+      window (index ≥ 4, writer-unreachable) walkers/backfill still
+      fail closed while the exact-path cycle reader is blind — the
+      adjudicated bounded-window asymmetry, pinned both directions
+      (round-2 ruling); non-numeric suffixes keep today's behavior.
 - [x] 1.8 Error observability: include the error's `field` (redacted
       via the existing `_restart_reconcile_error_token` discipline) in
       `_restart_reconcile_error_message` (`scheduler_runtime.py:
@@ -164,13 +166,18 @@ across segments, reconcile per-row quarantine, error `field` plumbing.
 - [x] 2.11 Segment bound: cycle at the cap (3) fails the next rollover
       closed with reason `file_journal_segment_limit_exceeded`; bound
       value and its read-cache rationale pinned.
-- [x] 2.12 Containment + unified foreign-file rule: segment paths honor
-      no-follow/root confinement; non-numeric suffixes
+- [x] 2.12 Containment + bounded-window foreign-file rule: segment
+      paths honor no-follow/root confinement; non-numeric suffixes
       (`<cycle>.x.jsonl`) keep today's identity-parsing behavior
-      byte-identically; gapped segments (`<cycle>.5.jsonl` without
-      predecessors) fail closed with `file_journal_segment_gap` from
-      BOTH the cycle-level enumeration and the recursive walkers (same
-      answer from every reader).
+      byte-identically; IN-WINDOW gapped segments (e.g. `<cycle>.2`
+      without `.1`) fail closed with `file_journal_segment_gap` from
+      BOTH the cycle-level enumeration and the recursive walkers;
+      OUT-OF-WINDOW orphans (`<cycle>.5.jsonl` without predecessors,
+      writer-unreachable) fail closed in walkers/backfill while the
+      exact-path cycle reader returns base-only rows silently — the
+      adjudicated asymmetry, pinned from BOTH reader sides (`.5` and
+      `(0,1,2,4)` geometries) so silent flips in either direction go
+      red.
 - [x] 2.13 (red without 1.3b) Backfill ordering: base + continuation
       segments where the continuation terminates a job that the base
       leaves `reserved` → `_backfill_reconcile_inventory_unlocked`
