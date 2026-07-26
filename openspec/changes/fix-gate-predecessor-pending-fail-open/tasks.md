@@ -40,8 +40,9 @@ trust-boundary change.
   `effective=2026-05-21T00Z` (matches the spec scenario's WHEN preconditions;
   the matrix takes the current-generation branch (e) where the declaration is
   not consulted). Do NOT place the entry at `valid_time == candidate cycle`: that
-  shape hits `state_snapshot_index_lead_hours_mismatch` earlier and misses
-  the target branch.
+  shape hits `state_snapshot_index_cycle_id_mismatch` earlier (lead_hours
+  matches, expected cycle_id `gfs_2026052100` does not; verifier-probed) and
+  misses the target branch.
 - [x] 2.2 Assertions (env=false leg): `candidates == []`, `len(blocked) == 1`,
   single-value reason pin
   `state_snapshot_index_prior_checkpoint_missing_after_history` (no OR-set,
@@ -72,7 +73,7 @@ trust-boundary change.
   `specs/file-state-snapshot-index/spec.md` (this fixture): heading
   byte-identical, both existing scenarios preserved verbatim, +1 scenario for
   the no-earlier-history shape.
-- [ ] 4.2 PR body records the disposition of the legacy sibling
+- [x] 4.2 PR body records the disposition of the legacy sibling
   `scheduler_generation_gate.py:239-240` (untouched: no transition decision
   on that path, cold-seed is design intent) — issue AC requires this.
 
@@ -80,6 +81,12 @@ trust-boundary change.
 
 - AC red-provable test → 2.1/2.2/2.4
 - AC env=true non-regression → 2.3
-- AC warm_continue non-regression → 3.4
+- AC warm_continue non-regression → holds by construction: the added
+  predicate conjunct is a no-op on the WARM_CONTINUE path, and
+  `warm_continue` + `state_snapshot_index_exact_checkpoint_missing` is
+  unreachable with the real provider (both sides derive the identity key via
+  `_state_index_identity_key` with identical inputs; verifier-proven, incl.
+  no-TOCTOU via the memoized snapshot provider). 3.4's guards cover adjacent
+  behavior, not this branch.
 - AC four-suite green + ruff → 3.1/3.2
 - AC legacy-sibling disposition in PR → 4.2

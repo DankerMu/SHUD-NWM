@@ -79,5 +79,12 @@ pending → BLOCK" while the probe says "no history → cold-seed passthrough".
   `tests/test_scheduler_generation.py:1120` (T15(b)); env=true behavior;
   COLD_DECLARED_CUTOVER admits; legacy no-checksum/no-declaration path
   (`:231-240`); D8.9 preflight cases (`tests/test_scheduler_generation.py:1721+`, T17 section).
+- Downstream surface: the §8.6 predecessor-backfill emitter
+  (`scheduler_backfill_predecessor.py`) now sees the newly-blocked
+  population (blocked evidence carries `selected_predecessor`); for the
+  no-earlier-history geometry the emitted predecessor itself re-blocks
+  under the same rule, so the gap cannot self-heal — operator-signal
+  decision, env-wired emitter test, and runbook entry deferred to #1152
+  (verifier-confirmed P3, pre-existing in kind).
 - Non-goals: §8.7 journal-side quarantine (#1107); generic
   `usable_state_history_evidence` refactor; legacy path hardening.

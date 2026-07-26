@@ -1335,8 +1335,9 @@ def test_env_override_blocks_predecessor_pending_without_earlier_history(
     # Current-generation history strictly AFTER the candidate cycle: the
     # strictly-earlier probe sees nothing while the generation-scoped signal
     # still counts this entry.  NOT at valid_time == candidate cycle — that
-    # shape settles on ``state_snapshot_index_lead_hours_mismatch`` instead
-    # and never reaches the branch under test.
+    # shape settles on ``state_snapshot_index_cycle_id_mismatch`` instead
+    # (lead_hours still matches; the expected cycle_id gfs_2026052100 does
+    # not) and never reaches the branch under test.
     _write_db_free_state_index_fixture(
         roots,
         paths,
@@ -1444,7 +1445,11 @@ def test_strict_warm_start_env_blocks_predecessor_pending_without_earlier_histor
     env=true short-circuits in ``scheduler_generation_gate.py`` at the
     ``_db_free_strict_warm_start_required_for`` return, well before the
     history-probe branch the sibling test guards — so this pins that the
-    #1150 split did not move the strict leg's typed reason.
+    #1150 split did not move the strict leg's typed reason.  The decision
+    pin below only shows the blocked evidence reached the
+    ``block_predecessor_pending`` split; the no-earlier-history geometry
+    itself is pinned by the env=false sibling (that short-circuit attaches
+    no ``state_history`` evidence).
     """
     from services.orchestrator import scheduler as scheduler_module
     from services.orchestrator.scheduler import ProductionSchedulerConfig
@@ -1559,6 +1564,12 @@ def test_strict_warm_start_env_blocks_predecessor_pending_without_earlier_histor
     assert len(blocked) == 1
     # R1-A4 invariant: single-value pin, no OR-set.
     assert blocked[0].reason == "state_snapshot_index_exact_checkpoint_missing"
+    # The strict leg still carries the predecessor-pending split decision.
+    state_evidence = blocked[0].state_evidence
+    assert (
+        state_evidence.get("registry_cutover_transition", {}).get("decision")
+        == "block_predecessor_pending"
+    )
 
 
 def test_env_override_does_not_admit_stale_declaration(
