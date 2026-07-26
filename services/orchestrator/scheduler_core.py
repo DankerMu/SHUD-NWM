@@ -514,6 +514,7 @@ class ProductionScheduler:
             successor_state_for_candidate=self._successor_warm_start_state_for_candidate,
             discover_source_window_provider=self._discover_source_window,
             cycle_completion_status_provider=self._cycle_completion_status,
+            required_lead_hours_for_candidate=self._required_warm_start_lead_hours,
         )
 
     def _cycle_completion_status(
@@ -879,6 +880,7 @@ class ProductionScheduler:
             candidate_state_scoped_retry_detector=_scheduler._candidate_state_is_candidate_scoped_retry,
             repaired_state_audit_evidence_builder=_scheduler._candidate_repaired_state_audit_evidence,
             successor_state_for_candidate=self._successor_warm_start_state_for_candidate,
+            required_lead_hours_for_candidate=self._required_warm_start_lead_hours,
             max_candidates=_scheduler.MAX_CANDIDATES,
         )
 

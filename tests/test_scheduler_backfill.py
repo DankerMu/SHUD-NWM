@@ -2,14 +2,20 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from packages.common.state_manager import state_snapshot_id
 from services.orchestrator import cli
 from services.orchestrator import scheduler as scheduler_module
+from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+# Reuse the project's existing journal-seeding pattern verbatim.
+from tests.test_file_orchestration_journal import _latest_view as _journal_latest_view
+from tests.test_file_orchestration_journal import _write_json as _journal_write_json
 
 # Reuse the project's existing fixtures/builders rather than re-inventing them.
 from tests.test_production_scheduler import (
@@ -22,6 +28,7 @@ from tests.test_production_scheduler import (
     _model,
     _write_db_free_raw_manifest_fixture,
 )
+from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 
 class CompletionByCycleRepository(FakeActiveRepository):
@@ -1210,6 +1217,242 @@ def test_plan_production_lookback_cli_arg_overrides_env(tmp_path: Path, monkeypa
     )
 
     assert captured["lookback_hours"] == 12
+
+
+# ---------------------------------------------------------------------------
+# §8.7 / #1107: journal-recorded predecessor identity quarantine.
+#
+# Seam: ``cycle_completion_status`` (completed-provider-only branch) ->
+# ``_select_backfill_source_cycles``.  A completed cycle-T journal entry whose
+# recorded ``init_state_id`` shares T's expected base key but carries a
+# different lineage suffix must NOT count as complete and must NOT suppress
+# backfill, while the entry itself stays byte-identical on disk.
+# ---------------------------------------------------------------------------
+
+_IDENTITY_NOW = "2026-05-21T18:00:00Z"
+_IDENTITY_CYCLE_TIMES = (
+    "2026-05-21T12:00:00Z",
+    "2026-05-21T06:00:00Z",
+    "2026-05-21T00:00:00Z",
+)
+#: Oldest discovered cycle — the one seeded as "completed" in these tests.
+_IDENTITY_TARGET_CYCLE = "2026-05-21T00:00:00Z"
+#: Cadence of ``allowed_cycle_hours_utc=(0, 6, 12, 18)`` -> lead 6h for T.
+_IDENTITY_REQUIRED_LEAD_HOURS = 6
+
+
+def _init_state_id_for(
+    cycle_time: str,
+    *,
+    lead_hours: int,
+    model_id: str = "model_a",
+    source_id: str = "gfs",
+) -> str:
+    """Compose an ``init_state_id`` exactly the way the write side does.
+
+    Independent source of truth for the expected token: this mirrors
+    ``packages.common.state_cli`` -> ``state_manager.save_state_snapshot``
+    (``state_snapshot_id`` + ``cycle_id_for(source, valid_time - lead)``)
+    rather than calling the scheduler helper under test.
+    """
+    valid_time = _dt(cycle_time)
+    return state_snapshot_id(
+        model_id,
+        valid_time,
+        source_id=source_id,
+        cycle_id=cycle_id_for(source_id, valid_time - timedelta(hours=lead_hours)),
+        lead_hours=lead_hours,
+    )
+
+
+def _seed_completed_journal_cycle(
+    journal_root: Path,
+    *,
+    cycle_time: str,
+    init_state_id: str | None,
+    model_id: str = "model_a",
+) -> Path:
+    """Write a completed latest-view entry, optionally pinning ``init_state_id``."""
+    parsed = _dt(cycle_time)
+    latest = _journal_latest_view(cycle_time=parsed, model_id=model_id, hydro_status="complete")
+    if init_state_id is not None:
+        latest["hydro_run"]["init_state_id"] = init_state_id
+    path = journal_root / "latest" / "gfs" / format_cycle_time(parsed) / f"{model_id}.json"
+    _journal_write_json(path, latest)
+    return path
+
+
+def _journal_backed_scheduler(tmp_path: Path, journal_root: Path) -> ProductionScheduler:
+    return _build_scheduler(
+        tmp_path,
+        now=_dt(_IDENTITY_NOW),
+        cycle_times=list(_IDENTITY_CYCLE_TIMES),
+        backfill_enabled=True,
+        max_cycles_per_source=len(_IDENTITY_CYCLE_TIMES),
+        active_repository=FileOrchestrationJournalRepository(journal_root),
+    )
+
+
+def _completion_status(scheduler: ProductionScheduler, cycle_time: str) -> str:
+    adapter = scheduler.adapters["gfs"]
+    discovery = _discovery_for_time(adapter, cycle_time)
+    return scheduler._cycle_completion_status(
+        discovery,
+        scheduler._discover_models()[0],
+        horizon=scheduler_module._source_horizon_metadata(discovery, adapter),
+    )
+
+
+def _selected_backfill_cycles(scheduler: ProductionScheduler) -> list[str]:
+    return _source_cycle_times(scheduler, _dt(_IDENTITY_NOW), scheduler._discover_models()[0])
+
+
+def test_stale_lineage_journal_entry_does_not_suppress_backfill(tmp_path: Path) -> None:
+    """§8.7: same base key + wrong lineage suffix -> not complete, backfill stands."""
+    journal_root = tmp_path / "journal"
+    stale_id = _init_state_id_for(_IDENTITY_TARGET_CYCLE, lead_hours=12)
+    expected_id = _init_state_id_for(
+        _IDENTITY_TARGET_CYCLE, lead_hours=_IDENTITY_REQUIRED_LEAD_HOURS
+    )
+    # Same base key (source/model/valid_time=T), different lineage suffix.
+    assert stale_id != expected_id
+    assert stale_id.startswith("state_gfs_model_a_2026052100_")
+    entry_path = _seed_completed_journal_cycle(
+        journal_root,
+        cycle_time=_IDENTITY_TARGET_CYCLE,
+        init_state_id=stale_id,
+    )
+    before = entry_path.read_bytes()
+    scheduler = _journal_backed_scheduler(tmp_path, journal_root)
+
+    status = _completion_status(scheduler, _IDENTITY_TARGET_CYCLE)
+    selected = _selected_backfill_cycles(scheduler)
+
+    assert status == "gap"
+    # T is head-of-line in the gap set, i.e. backfill is not suppressed.
+    assert selected == [_IDENTITY_TARGET_CYCLE]
+    # Immutable audit entry: the scoring pass never rewrites the journal.
+    assert entry_path.read_bytes() == before
+
+
+def test_matching_lineage_journal_entry_still_skips_completed_cycle(tmp_path: Path) -> None:
+    """The expected token keeps the pre-#1107 completed skip exactly as before."""
+    journal_root = tmp_path / "journal"
+    entry_path = _seed_completed_journal_cycle(
+        journal_root,
+        cycle_time=_IDENTITY_TARGET_CYCLE,
+        init_state_id=_init_state_id_for(
+            _IDENTITY_TARGET_CYCLE, lead_hours=_IDENTITY_REQUIRED_LEAD_HOURS
+        ),
+    )
+    before = entry_path.read_bytes()
+    scheduler = _journal_backed_scheduler(tmp_path, journal_root)
+
+    status = _completion_status(scheduler, _IDENTITY_TARGET_CYCLE)
+    selected = _selected_backfill_cycles(scheduler)
+
+    assert status == "complete"
+    assert selected == ["2026-05-21T06:00:00Z"]
+    assert entry_path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("leg", "recorded_init_state_id"),
+    [
+        # (a) no recorded identity at all.
+        ("absent", None),
+        # (b) suffix-less legacy id equal to the expected base prefix.
+        ("suffix_less_legacy", "state_gfs_model_a_2026052100"),
+        # (c) DIFFERENT base key: an earlier-valid_time fallback warm start,
+        # legally selected under NHMS_REQUIRE_FORECAST_WARM_START=false.
+        ("earlier_valid_time_fallback", None),
+    ],
+)
+def test_no_judgement_shapes_preserve_completed_skip(
+    tmp_path: Path,
+    leg: str,
+    recorded_init_state_id: str | None,
+) -> None:
+    """Every non-mismatch shape keeps legacy skip behavior (P1-3 false-positive pin)."""
+    journal_root = tmp_path / "journal"
+    if leg == "earlier_valid_time_fallback":
+        recorded_init_state_id = _init_state_id_for("2026-05-20T18:00:00Z", lead_hours=6)
+        assert not recorded_init_state_id.startswith("state_gfs_model_a_2026052100")
+    if leg == "suffix_less_legacy":
+        assert recorded_init_state_id == "state_gfs_model_a_2026052100"
+    _seed_completed_journal_cycle(
+        journal_root,
+        cycle_time=_IDENTITY_TARGET_CYCLE,
+        init_state_id=recorded_init_state_id,
+    )
+    scheduler = _journal_backed_scheduler(tmp_path, journal_root)
+
+    assert _completion_status(scheduler, _IDENTITY_TARGET_CYCLE) == "complete"
+    assert _selected_backfill_cycles(scheduler) == ["2026-05-21T06:00:00Z"]
+
+
+def test_quarantined_cycle_exits_quarantine_after_rerun_records_expected_identity(
+    tmp_path: Path,
+) -> None:
+    """3.5(a): one re-run that records the expected token leaves the quarantine."""
+    journal_root = tmp_path / "journal"
+    _seed_completed_journal_cycle(
+        journal_root,
+        cycle_time=_IDENTITY_TARGET_CYCLE,
+        init_state_id=_init_state_id_for(_IDENTITY_TARGET_CYCLE, lead_hours=12),
+    )
+    scheduler = _journal_backed_scheduler(tmp_path, journal_root)
+    assert _completion_status(scheduler, _IDENTITY_TARGET_CYCLE) == "gap"
+    assert _selected_backfill_cycles(scheduler) == [_IDENTITY_TARGET_CYCLE]
+
+    # The re-run rewrites the latest view with the correct predecessor.
+    _seed_completed_journal_cycle(
+        journal_root,
+        cycle_time=_IDENTITY_TARGET_CYCLE,
+        init_state_id=_init_state_id_for(
+            _IDENTITY_TARGET_CYCLE, lead_hours=_IDENTITY_REQUIRED_LEAD_HOURS
+        ),
+    )
+
+    assert _completion_status(scheduler, _IDENTITY_TARGET_CYCLE) == "complete"
+    assert _selected_backfill_cycles(scheduler) == ["2026-05-21T06:00:00Z"]
+
+
+def test_rerun_reselecting_same_wrong_suffix_state_stays_quarantined(
+    tmp_path: Path,
+) -> None:
+    """3.5(b) ACCEPTED RESIDUAL: a re-run that re-selects the same wrong-suffix
+    state stays quarantined forever and keeps occupying the source's single
+    oldest-first backfill slot.
+
+    This is the deterministic env=false base-key re-selection class
+    (``chain_forecast_state.py`` exact lookup with no cycle_id/lead_hours ->
+    ``state_manager`` ``min(state_id)`` over the base key).  It is pinned here
+    on purpose: the loop is operator-visible via the typed retry reason and is
+    bounded to one slot per source (see the proposal's Design decisions), so
+    the shape is accepted rather than silently discovered in production.
+    """
+    journal_root = tmp_path / "journal"
+    wrong_suffix_id = _init_state_id_for(_IDENTITY_TARGET_CYCLE, lead_hours=12)
+    _seed_completed_journal_cycle(
+        journal_root,
+        cycle_time=_IDENTITY_TARGET_CYCLE,
+        init_state_id=wrong_suffix_id,
+    )
+    scheduler = _journal_backed_scheduler(tmp_path, journal_root)
+    assert _completion_status(scheduler, _IDENTITY_TARGET_CYCLE) == "gap"
+    assert _selected_backfill_cycles(scheduler) == [_IDENTITY_TARGET_CYCLE]
+
+    # Re-run re-selects the SAME wrong-suffix state.
+    _seed_completed_journal_cycle(
+        journal_root,
+        cycle_time=_IDENTITY_TARGET_CYCLE,
+        init_state_id=wrong_suffix_id,
+    )
+
+    assert _completion_status(scheduler, _IDENTITY_TARGET_CYCLE) == "gap"
+    # Still head-of-line (``available_gaps[:1]``) -> resubmitted once per round.
+    assert _selected_backfill_cycles(scheduler) == [_IDENTITY_TARGET_CYCLE]
 
 
 class _StubScheduler:

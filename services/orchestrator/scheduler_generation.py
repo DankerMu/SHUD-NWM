@@ -63,6 +63,14 @@ import jsonschema
 
 from packages.common.safe_fs import SafeFilesystemError, read_bytes_limited_no_follow
 
+# ``cycle_id_for`` is deliberately taken from ``state_manager``'s module
+# surface (it re-exports the adapter helper) rather than from
+# ``workers.data_adapters.base``: this module must stay importable from the
+# scheduler without pulling the adapter package in directly, and the expected
+# token has to be composed by exactly the same functions the write side uses
+# (``packages.common.state_cli`` → ``state_manager.save_state_snapshot``).
+from packages.common.state_manager import cycle_id_for, state_snapshot_id
+
 __all__ = (
     "CUTOVER_DECLARATION_ENV",
     "CUTOVER_DECLARATION_SCHEMA_VERSION",
@@ -73,7 +81,9 @@ __all__ = (
     "TransitionEvaluation",
     "derive_generation",
     "evaluate_transition_decision",
+    "expected_journal_init_state_tokens",
     "generation_evidence",
+    "journal_init_state_lineage_matches_expected",
     "load_cutover_declaration",
     "match_declaration_entry",
 )
@@ -869,3 +879,111 @@ def generation_evidence(evaluation: TransitionEvaluation) -> dict[str, Any]:
         "cold_start_reason": evaluation.cold_start_reason,
         "declaration": evaluation.declaration_evidence,
     }
+
+
+# ---------------------------------------------------------------------------
+# §8.7 journal-recorded predecessor identity (Issue #1107)
+# ---------------------------------------------------------------------------
+
+
+#: Error classes treated as "no judgement" by the §8.7 identity surface.
+#: ``ValueError``/``TypeError`` are the contracted token-construction errors;
+#: ``AttributeError`` is added so a caller passing a non-datetime
+#: ``candidate_valid_time`` still yields no judgement instead of breaking the
+#: TOTAL guarantee inside the scheduler's candidate loop.
+JOURNAL_IDENTITY_INPUT_ERRORS = (AttributeError, TypeError, ValueError)
+
+
+def expected_journal_init_state_tokens(
+    *,
+    source_id: str,
+    model_id: str,
+    candidate_valid_time: datetime,
+    required_lead_hours: int,
+) -> tuple[str, str]:
+    """Return ``(expected_base_prefix, expected_token)`` for cycle ``T``.
+
+    Both values are composed by ``state_manager.state_snapshot_id`` so the
+    base prefix can never drift from how the write side builds the full
+    token: the prefix is literally the same call with no lineage inputs.
+    The expected predecessor sits ``required_lead_hours`` before ``T`` while
+    the state's ``valid_time`` is ``T`` itself (a checkpoint is named by the
+    cycle it initialises, mirroring
+    ``state_manager._expected_state_index_cycle_id`` /
+    ``scheduler_generation_gate.evaluate_transition_decision``).
+
+    Raises for unusable inputs (see ``JOURNAL_IDENTITY_INPUT_ERRORS``) —
+    callers on the judgement path go through
+    :func:`journal_init_state_lineage_matches_expected`, which is total.
+    """
+    expected_base = state_snapshot_id(model_id, candidate_valid_time, source_id=source_id)
+    expected_cycle_id = cycle_id_for(
+        source_id,
+        candidate_valid_time - timedelta(hours=int(required_lead_hours)),
+    )
+    expected_token = state_snapshot_id(
+        model_id,
+        candidate_valid_time,
+        source_id=source_id,
+        cycle_id=expected_cycle_id,
+        lead_hours=int(required_lead_hours),
+    )
+    return expected_base, expected_token
+
+
+def journal_init_state_lineage_matches_expected(
+    recorded_init_state_id: str | None,
+    *,
+    source_id: str,
+    model_id: str,
+    candidate_valid_time: datetime,
+    required_lead_hours: int,
+) -> bool | None:
+    """Judge a journal-recorded ``init_state_id`` against cycle ``T``'s expected one.
+
+    Three-valued and TOTAL (never raises).  The name states the ``True``
+    polarity on purpose, so ``if not helper(...)`` cannot be written by
+    accident:
+
+    - ``True``  — the recorded id equals the expected predecessor token.
+    - ``False`` — POSITIVE MISMATCH: the recorded id shares the expected
+      BASE key (same source / model / ``valid_time`` = ``T``) but carries a
+      DIFFERENT non-empty lineage suffix, i.e. the §8.7 "right state slot,
+      wrong predecessor cycle or lead" class.  This is the only quarantine
+      trigger.
+    - ``None``  — NO JUDGEMENT: missing/empty id, a suffix-less legacy id
+      equal to the base prefix, a different base key (notably the legal
+      earlier-``valid_time`` fallback warm start selected under
+      ``NHMS_REQUIRE_FORECAST_WARM_START=false``), a malformed string, or
+      any token-construction error (``JOURNAL_IDENTITY_INPUT_ERRORS`` are
+      caught: ``ValueError``/``TypeError`` per the §8.7 contract, plus
+      ``AttributeError`` so a non-datetime argument cannot break totality).
+
+    The narrow ``False`` criterion is deliberate: full-token inequality
+    would quarantine well-formed fallback warm starts en masse.
+    """
+    if recorded_init_state_id is None:
+        return None
+    try:
+        recorded = str(recorded_init_state_id).strip()
+    except JOURNAL_IDENTITY_INPUT_ERRORS:
+        return None
+    if not recorded:
+        return None
+    try:
+        expected_base, expected_token = expected_journal_init_state_tokens(
+            source_id=source_id,
+            model_id=model_id,
+            candidate_valid_time=candidate_valid_time,
+            required_lead_hours=required_lead_hours,
+        )
+    except JOURNAL_IDENTITY_INPUT_ERRORS:
+        return None
+    if recorded == expected_token:
+        return True
+    # Same base key + a non-empty, different lineage suffix.  A recorded id
+    # equal to the base prefix (legacy, suffix-less) does not start with
+    # ``base + "_"`` and therefore stays a no-judgement shape.
+    if recorded.startswith(f"{expected_base}_"):
+        return False
+    return None

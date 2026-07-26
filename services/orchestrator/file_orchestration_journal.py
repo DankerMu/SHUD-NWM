@@ -510,6 +510,48 @@ class FileOrchestrationJournalRepository:
             return True
         return has_terminal_completion
 
+    def completed_pipeline_init_state_id(
+        self, *, source_id: str, cycle_time: datetime, model_id: str
+    ) -> str | None:
+        """Return the completed hydro run's recorded ``init_state_id`` for a cycle.
+
+        Read-only companion to :meth:`has_completed_pipeline`, serving the
+        same memoized ``_cycle_rows`` latest-view rows so a completion probe
+        plus an identity probe cost one cycle read, not two.  Returns
+        ``None`` — never raises — when the identity cannot be read:
+
+        - no journal rows / unreadable rows (same fail-shape as
+          ``has_completed_pipeline``),
+        - no matching ``hydro_run`` row for the candidate (includes the
+          ``state_save_qc`` terminal mode, where completion is decided from
+          pipeline jobs and ``hydro_run`` may be ``None``),
+        - the row records no ``init_state_id`` / ``initial_state_id``.
+
+        No run-manifest reads: this reports what the JOURNAL recorded.
+
+        Scheduler wiring consumes this via ``getattr(repo, ..., None)`` (repo
+        convention, cf. ``scheduler_backfill_predecessor.py:226``), so it is
+        intentionally absent from the ``ActiveCandidateRepository`` Protocol;
+        repositories without it simply yield no identity judgement.
+        """
+        try:
+            canonical_source_id = _normalize_file_source_id(source_id, field="source_id")
+            rows = self._cycle_rows(source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
+            hydro_run = rows.hydro_run
+            if not _row_matches_candidate(
+                hydro_run,
+                source_id=canonical_source_id,
+                cycle_time=cycle_time,
+                model_id=model_id,
+            ):
+                return None
+        except FileOrchestrationJournalError:
+            return None
+        recorded = hydro_run.get("init_state_id") or hydro_run.get("initial_state_id")
+        if recorded in (None, ""):
+            return None
+        return str(recorded).strip() or None
+
     def active_slurm_jobs(
         self,
         *,
