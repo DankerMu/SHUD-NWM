@@ -5712,3 +5712,47 @@ def test_completed_pipeline_init_state_id_returns_none_for_unjudgeable_rows(
         )
         is None
     )
+
+
+def test_completed_pipeline_init_state_id_ignores_superseded_hydro_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The judged identity must be the COMPLETED run's row.
+
+    ``state_save_qc`` terminal mode decides completion from the pipeline job,
+    while the ``hydro_run`` row is still a ``created`` placeholder that the
+    write side already populated with an ``init_state_id``.  That placeholder
+    does not describe the run that completed, so the accessor declines rather
+    than handing the scheduler an identity to quarantine on.
+    """
+    monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "state_save_qc")
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    cycle_stamp = format_cycle_time(cycle_time)
+    journal_root = tmp_path / "journal"
+    terminal_job = _active_job(cycle_time)
+    terminal_job.update(
+        {
+            "job_id": f"job_cycle_gfs_{cycle_stamp}_state_save_qc",
+            "idempotency_key": f"cycle_gfs_{cycle_stamp}:state_save_qc",
+            "run_id": f"fcst_gfs_{cycle_stamp}_model_a",
+            "stage": "state_save_qc",
+            "status": "succeeded",
+            "finished_at": "2026-06-28T00:05:00Z",
+        }
+    )
+    latest = _latest_view(cycle_time=cycle_time, hydro_status="created", jobs=[terminal_job])
+    latest["hydro_run"]["init_state_id"] = "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+    _write_json(journal_root / "latest/gfs/2026062800/model_a.json", latest)
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    # The cycle IS complete — completion and identity are decided separately.
+    assert repository.has_completed_pipeline(
+        source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+    ) is True
+    assert (
+        repository.completed_pipeline_init_state_id(
+            source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+        )
+        is None
+    )

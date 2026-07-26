@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.state_manager import state_snapshot_id
 from services.orchestrator import cli
 from services.orchestrator import scheduler as scheduler_module
@@ -26,7 +27,9 @@ from tests.test_production_scheduler import (
     _config,
     _dt,
     _model,
+    _set_db_free_scheduler_env,
     _write_db_free_raw_manifest_fixture,
+    _write_db_free_state_index_fixture,
 )
 from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
@@ -1307,6 +1310,126 @@ def _selected_backfill_cycles(scheduler: ProductionScheduler) -> list[str]:
     return _source_cycle_times(scheduler, _dt(_IDENTITY_NOW), scheduler._discover_models()[0])
 
 
+#: Package checksum shared by the db-free state index entries and the
+#: registered model's resource profile (the successor strict-warm-start probe
+#: fails closed without a candidate-side checksum).
+_DB_FREE_PACKAGE_CHECKSUM = "sha256:" + "a" * 64
+
+
+def _db_free_state_index_entry(
+    roots: Mapping[str, Path],
+    *,
+    valid_time: datetime,
+    producer_cycle_time: datetime,
+    model_id: str = "model_a",
+) -> dict[str, Any]:
+    """One published state-snapshot-index row, composed like the write side."""
+    store = LocalObjectStore(roots["object_store_root"], "s3://nhms")
+    content = f"state-fixture-{format_cycle_time(valid_time)}\n".encode()
+    state_uri = store.write_bytes_atomic(
+        f"states/gfs/{model_id}/{format_cycle_time(valid_time)}/state.cfg.ic",
+        content,
+    )
+    producer_cycle_id = cycle_id_for("gfs", producer_cycle_time)
+    lead_hours = int(round((valid_time - producer_cycle_time).total_seconds() / 3600.0))
+    return {
+        "state_id": (
+            f"state_gfs_{model_id}_{format_cycle_time(valid_time)}"
+            f"_{producer_cycle_id}_f{lead_hours:03d}"
+        ),
+        "model_id": model_id,
+        "run_id": f"analysis_{producer_cycle_id}_{model_id}",
+        "source_id": "gfs",
+        "valid_time": valid_time.isoformat().replace("+00:00", "Z"),
+        "state_uri": state_uri,
+        "checksum": f"sha256:{sha256_bytes(content)}",
+        "usable_flag": True,
+        "cycle_id": producer_cycle_id,
+        "lead_hours": lead_hours,
+        "model_package_version": f"s3://nhms/models/{model_id}/package/",
+        "model_package_checksum": _DB_FREE_PACKAGE_CHECKSUM,
+    }
+
+
+def _db_free_strict_branch_scheduler(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    journal_root: Path,
+) -> ProductionScheduler:
+    """Scheduler in the PRODUCTION db-free shape for cycle T.
+
+    ``NHMS_SCHEDULER_DB_FREE_REQUIRED=true`` + ``NHMS_REQUIRE_FORECAST_WARM_START
+    =false`` is the regime where ``cycle_completion_status``'s strict/successor
+    branch preempts the completed-provider branch: the D8.9 compat leg nulls
+    the strict warm start for a journal-completed cycle, while the successor
+    checkpoint at T+6h is ready, so that branch reaches its OWN
+    ``return "complete"``.  The post-#1107 identity gate has to cover that exit
+    too, which is what the two tests below pin.
+    """
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=_dt(_IDENTITY_TARGET_CYCLE),
+        package_checksum=_DB_FREE_PACKAGE_CHECKSUM,
+        generated_at=_dt(_IDENTITY_NOW),
+        entries=[
+            _db_free_state_index_entry(
+                roots,
+                valid_time=_dt(_IDENTITY_TARGET_CYCLE),
+                producer_cycle_time=_dt("2026-05-20T18:00:00Z"),
+            ),
+            # Successor checkpoint at T+6h -> the successor probe is ready, so
+            # the strict/successor branch does not bail out early.
+            _db_free_state_index_entry(
+                roots,
+                valid_time=_dt("2026-05-21T06:00:00Z"),
+                producer_cycle_time=_dt(_IDENTITY_TARGET_CYCLE),
+            ),
+        ],
+    )
+    scheduler = _build_scheduler(
+        tmp_path,
+        now=_dt(_IDENTITY_NOW),
+        cycle_times=list(_IDENTITY_CYCLE_TIMES),
+        backfill_enabled=True,
+        max_cycles_per_source=len(_IDENTITY_CYCLE_TIMES),
+        active_repository=FileOrchestrationJournalRepository(journal_root),
+        models=[
+            _model(
+                "model_a",
+                "basin_a",
+                resource_profile={
+                    "runnable": True,
+                    "memory_gb": 8,
+                    "display_capabilities": {"tiles": True},
+                    "package_checksum": _DB_FREE_PACKAGE_CHECKSUM,
+                },
+            )
+        ],
+    )
+    _assert_strict_branch_decides_completion(scheduler)
+    return scheduler
+
+
+def _assert_strict_branch_decides_completion(scheduler: ProductionScheduler) -> None:
+    """Fixture guard: the strict/successor branch — not the completed-provider
+    branch — is the one that reaches ``return "complete"`` for cycle T."""
+    assert scheduler.config.db_free_required is True
+    adapter = scheduler.adapters["gfs"]
+    discovery = _discovery_for_time(adapter, _IDENTITY_TARGET_CYCLE)
+    horizon = dict(scheduler_module._source_horizon_metadata(discovery, adapter))
+    model = scheduler._discover_models()[0][0]
+    candidate = scheduler_module._candidate_for(discovery=discovery, model=model, horizon=horizon)
+    cycle = scheduler_module.SchedulerSourceCycle(discovery=discovery, horizon=horizon)
+    assert scheduler._strict_warm_start_for_candidate(candidate, cycle) is None
+    successor = scheduler._successor_warm_start_state_for_candidate(candidate, cycle)
+    assert successor is not None
+    assert successor["ready"] is True
+
+
 def test_stale_lineage_journal_entry_does_not_suppress_backfill(tmp_path: Path) -> None:
     """§8.7: same base key + wrong lineage suffix -> not complete, backfill stands."""
     journal_root = tmp_path / "journal"
@@ -1347,6 +1470,55 @@ def test_matching_lineage_journal_entry_still_skips_completed_cycle(tmp_path: Pa
     )
     before = entry_path.read_bytes()
     scheduler = _journal_backed_scheduler(tmp_path, journal_root)
+
+    status = _completion_status(scheduler, _IDENTITY_TARGET_CYCLE)
+    selected = _selected_backfill_cycles(scheduler)
+
+    assert status == "complete"
+    assert selected == ["2026-05-21T06:00:00Z"]
+    assert entry_path.read_bytes() == before
+
+
+def test_db_free_strict_branch_stale_lineage_does_not_suppress_backfill(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """§8.7 under PRODUCTION db-free config: the strict/successor branch of
+    ``cycle_completion_status`` preempts the completed-provider branch, so the
+    identity gate must sit on that exit too (fix round 1, task 6.1)."""
+    journal_root = tmp_path / "journal"
+    entry_path = _seed_completed_journal_cycle(
+        journal_root,
+        cycle_time=_IDENTITY_TARGET_CYCLE,
+        init_state_id=_init_state_id_for(_IDENTITY_TARGET_CYCLE, lead_hours=12),
+    )
+    before = entry_path.read_bytes()
+    scheduler = _db_free_strict_branch_scheduler(monkeypatch, tmp_path, journal_root)
+
+    status = _completion_status(scheduler, _IDENTITY_TARGET_CYCLE)
+    selected = _selected_backfill_cycles(scheduler)
+
+    assert status == "gap"
+    assert selected == [_IDENTITY_TARGET_CYCLE]
+    assert entry_path.read_bytes() == before
+
+
+def test_db_free_strict_branch_matching_lineage_still_reports_complete(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Control for task 6.1: the hoisted gate is additive tightening only —
+    the expected token still completes on the strict/successor exit."""
+    journal_root = tmp_path / "journal"
+    entry_path = _seed_completed_journal_cycle(
+        journal_root,
+        cycle_time=_IDENTITY_TARGET_CYCLE,
+        init_state_id=_init_state_id_for(
+            _IDENTITY_TARGET_CYCLE, lead_hours=_IDENTITY_REQUIRED_LEAD_HOURS
+        ),
+    )
+    before = entry_path.read_bytes()
+    scheduler = _db_free_strict_branch_scheduler(monkeypatch, tmp_path, journal_root)
 
     status = _completion_status(scheduler, _IDENTITY_TARGET_CYCLE)
     selected = _selected_backfill_cycles(scheduler)
@@ -1413,6 +1585,10 @@ def test_quarantined_cycle_exits_quarantine_after_rerun_records_expected_identit
             _IDENTITY_TARGET_CYCLE, lead_hours=_IDENTITY_REQUIRED_LEAD_HOURS
         ),
     )
+    # Fresh repository + scheduler for the second probe: the next scheduler
+    # pass really re-reads the journal, so this must not depend on the
+    # per-repository memo being invalidated by mtime_ns granularity.
+    scheduler = _journal_backed_scheduler(tmp_path, journal_root)
 
     assert _completion_status(scheduler, _IDENTITY_TARGET_CYCLE) == "complete"
     assert _selected_backfill_cycles(scheduler) == ["2026-05-21T06:00:00Z"]
@@ -1449,6 +1625,8 @@ def test_rerun_reselecting_same_wrong_suffix_state_stays_quarantined(
         cycle_time=_IDENTITY_TARGET_CYCLE,
         init_state_id=wrong_suffix_id,
     )
+    # Fresh repository + scheduler: the second probe is a real second read.
+    scheduler = _journal_backed_scheduler(tmp_path, journal_root)
 
     assert _completion_status(scheduler, _IDENTITY_TARGET_CYCLE) == "gap"
     # Still head-of-line (``available_gaps[:1]``) -> resubmitted once per round.

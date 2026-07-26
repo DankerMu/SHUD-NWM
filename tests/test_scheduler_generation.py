@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -2260,14 +2261,69 @@ def _state_index_entry(
     }
 
 
-def test_build_candidates_quarantines_stale_journal_predecessor_identity(
+def _running_forecast_job(cycle_time: datetime) -> dict[str, Any]:
+    """A pipeline job that is running but carries no real Slurm binding.
+
+    No ``slurm_job_id``/``array_task_id`` keeps ``_state_active_jobs`` empty,
+    so the decision is ``active_duplicate_pipeline`` rather than the
+    ``active_slurm_job`` skip that the else-leg excludes outright.
+    """
+    from workers.data_adapters.base import cycle_id_for, format_cycle_time
+
+    stamp = format_cycle_time(cycle_time)
+    return {
+        "job_id": f"job_cycle_gfs_{stamp}_forecast",
+        "idempotency_key": f"cycle_gfs_{stamp}:forecast",
+        "run_id": f"fcst_gfs_{stamp}_model_a",
+        "cycle_id": cycle_id_for("gfs", cycle_time),
+        "job_type": "run_shud_forecast_array",
+        "model_id": "model_a",
+        "stage": "forecast",
+        "status": "running",
+        "created_at": "2026-05-21T12:00:00Z",
+        "submitted_at": "2026-05-21T12:01:00Z",
+    }
+
+
+def _terminal_state_save_qc_job(cycle_time: datetime) -> dict[str, Any]:
+    """A candidate-scoped terminal pipeline success for cycle T."""
+    from workers.data_adapters.base import cycle_id_for, format_cycle_time
+
+    stamp = format_cycle_time(cycle_time)
+    return {
+        "job_id": f"job_cycle_gfs_{stamp}_state_save_qc",
+        "idempotency_key": f"cycle_gfs_{stamp}:state_save_qc",
+        "run_id": f"fcst_gfs_{stamp}_model_a",
+        "cycle_id": cycle_id_for("gfs", cycle_time),
+        "job_type": "state_save_qc",
+        "model_id": "model_a",
+        "stage": "state_save_qc",
+        "status": "succeeded",
+        "created_at": "2026-05-21T12:00:00Z",
+        "finished_at": "2026-05-21T12:05:00Z",
+    }
+
+
+def _run_wiring_a_build_candidates(
     monkeypatch: Any,
     tmp_path: Path,
-) -> None:
-    """§8.7 Wiring A: a completed journal entry with a same-base-key /
-    wrong-suffix ``init_state_id`` must NOT be skipped as a terminal
-    duplicate; the skip decision is REPLACED by a typed retry carrying both
-    tokens in evidence (env=false, D8.9 preflight nulls strict warm start)."""
+    *,
+    recorded_init_state_id: str | None,
+    hydro_status: str | None = "complete",
+    jobs: Sequence[Mapping[str, Any]] | None = None,
+) -> tuple[list[Any], list[Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Drive ``_build_candidates`` over one journal-recognised completed cycle T.
+
+    ``NHMS_REQUIRE_FORECAST_WARM_START=false`` plus a journal-completed
+    pipeline puts the D8.9 compat regime in force, so the strict warm start is
+    nulled and the terminal-skip else-leg carrying the §8.7 identity filter is
+    the live gate.  The successor checkpoint at T+6h and the run manifest are
+    seeded so the pre-existing
+    ``strict_warm_start_successor_checkpoint_missing`` /
+    ``terminal_run_manifest_missing`` legs cannot fire first.
+
+    Returns ``_build_candidates``' full 5-tuple.
+    """
     from services.orchestrator import scheduler as scheduler_module
     from services.orchestrator.scheduler import ProductionSchedulerConfig
     from tests.test_file_orchestration_journal import _latest_view, _write_json
@@ -2330,12 +2386,16 @@ def test_build_candidates_quarantines_stale_journal_predecessor_identity(
     # is nulled, so the terminal-skip else-leg is the live gate.
     monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
 
-    recorded_init_state_id = _wrong_suffix_init_state_id()
     cycle_segment = format_cycle_time(cycle_time)
     run_id = f"fcst_gfs_{cycle_segment}_model_a"
     journal_root = Path(paths["NHMS_SCHEDULER_JOURNAL_ROOT"])
-    latest = _latest_view(cycle_time=cycle_time, hydro_status="complete")
-    latest["hydro_run"]["init_state_id"] = recorded_init_state_id
+    latest = _latest_view(
+        cycle_time=cycle_time,
+        hydro_status=hydro_status,
+        jobs=[dict(job) for job in (jobs or [])],
+    )
+    if hydro_status is not None and recorded_init_state_id is not None:
+        latest["hydro_run"]["init_state_id"] = recorded_init_state_id
     _write_json(journal_root / "latest" / "gfs" / cycle_segment / "model_a.json", latest)
     # The run manifest keeps the pre-existing ``terminal_run_manifest_missing``
     # leg from firing first, so the else-leg under test is reached.
@@ -2352,10 +2412,10 @@ def test_build_candidates_quarantines_stale_journal_predecessor_identity(
         adapters={},
         active_repository=scheduler_module.FileOrchestrationJournalRepository(journal_root),
         orchestrator_factory=lambda _source_id: pytest.fail(
-            "quarantined candidate must not build an orchestrator in this seam"
+            "this seam must not build an orchestrator"
         ),
     )
-    candidates, blocked, skipped, duplicate_exclusions, slurm_sync = scheduler._build_candidates(
+    return scheduler._build_candidates(
         models=[scheduler_module._coerce_registered_model(model)],
         cycles=[
             scheduler_module.SchedulerSourceCycle(
@@ -2372,13 +2432,31 @@ def test_build_candidates_quarantines_stale_journal_predecessor_identity(
         ],
     )
 
+
+def test_build_candidates_quarantines_stale_journal_predecessor_identity(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """§8.7 Wiring A: a completed journal entry with a same-base-key /
+    wrong-suffix ``init_state_id`` must NOT be skipped as a terminal
+    duplicate; the skip decision is REPLACED by a typed retry carrying both
+    tokens in evidence (env=false, D8.9 preflight nulls strict warm start)."""
+    recorded_init_state_id = _wrong_suffix_init_state_id()
+
+    candidates, blocked, skipped, duplicate_exclusions, slurm_sync = _run_wiring_a_build_candidates(
+        monkeypatch,
+        tmp_path,
+        recorded_init_state_id=recorded_init_state_id,
+    )
+
     # Not skipped as a terminal duplicate — that is the whole point.
     assert skipped == []
     assert duplicate_exclusions == []
     assert slurm_sync == []
-    assert len(candidates) + len(blocked) == 1
-    quarantined = (candidates + blocked)[0]
-    state_evidence = quarantined.state_evidence
+    # Action pin: the quarantine must ADMIT the candidate, not block it.
+    assert blocked == []
+    assert len(candidates) == 1
+    state_evidence = candidates[0].state_evidence
     assert state_evidence["reason"] == "journal_predecessor_identity_mismatch"
     assert state_evidence["decision"] == "retry_journal_predecessor_identity_mismatch"
     identity = state_evidence["journal_predecessor_identity"]
@@ -2388,112 +2466,90 @@ def test_build_candidates_quarantines_stale_journal_predecessor_identity(
     assert identity["quarantined_skip_reason"] == "terminal_hydro_success"
 
 
-def test_build_candidates_keeps_terminal_skip_for_matching_journal_identity(
+@pytest.mark.parametrize(
+    "leg",
+    ["matching", "suffix_less_legacy", "earlier_valid_time_fallback"],
+)
+def test_build_candidates_keeps_terminal_skip_for_no_judgement_journal_identity(
     monkeypatch: Any,
     tmp_path: Path,
+    leg: str,
 ) -> None:
-    """Control leg for Wiring A: the expected token still skips as before."""
-    from services.orchestrator import scheduler as scheduler_module
-    from services.orchestrator.scheduler import ProductionSchedulerConfig
-    from tests.test_file_orchestration_journal import _latest_view, _write_json
-    from tests.test_production_scheduler import (
-        FakeRegistry,
-        ProductionScheduler,
-        _gfs_default_forecast_hours,
-        _set_db_free_scheduler_env,
-        _write_db_free_file_provider_fixtures,
-        _write_db_free_state_index_fixture,
-    )
-    from tests.test_production_scheduler import (
-        _dt as _pdt,
-    )
-    from workers.data_adapters.base import CycleDiscovery, format_cycle_time
+    """Control + no-judgement pins for Wiring A: the matching token and every
+    non-mismatch shape keep the pre-#1107 terminal skip exactly as before."""
+    if leg == "matching":
+        recorded_init_state_id = _expected_init_state_id()
+    elif leg == "suffix_less_legacy":
+        # Suffix-less legacy id equal to T's expected base prefix.
+        recorded_init_state_id = "state_gfs_model_a_2026052112"
+        assert _expected_init_state_id().startswith(f"{recorded_init_state_id}_")
+    else:
+        # DIFFERENT base key: an earlier-valid_time fallback warm start, the
+        # legal selection under NHMS_REQUIRE_FORECAST_WARM_START=false.
+        recorded_init_state_id = _write_side_init_state_id(
+            source_id="gfs",
+            model_id="model_a",
+            valid_time=_dt("2026-05-21T06:00:00Z"),
+            lead_hours=6,
+        )
+        assert not recorded_init_state_id.startswith("state_gfs_model_a_2026052112")
 
-    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
-    cycle_time = _pdt("2026-05-21T12:00:00Z")
-    generated_at = _pdt("2026-05-21T18:00:00Z")
-    fixture = _write_db_free_file_provider_fixtures(
+    candidates, blocked, skipped, _duplicate_exclusions, _slurm_sync = _run_wiring_a_build_candidates(
         monkeypatch,
-        roots,
-        paths,
-        cycle_time=cycle_time,
-        forecast_hours=_gfs_default_forecast_hours(),
-        generated_at=generated_at,
-    )
-    _write_db_free_state_index_fixture(
-        roots,
-        paths,
-        cycle_time=cycle_time,
-        package_checksum=fixture["package_checksum"],
-        generated_at=generated_at,
-        entries=[
-            _state_index_entry(
-                roots,
-                valid_time=cycle_time,
-                producer_cycle_time=_pdt("2026-05-21T06:00:00Z"),
-                package_checksum=fixture["package_checksum"],
-            ),
-            _state_index_entry(
-                roots,
-                valid_time=generated_at,
-                producer_cycle_time=cycle_time,
-                package_checksum=fixture["package_checksum"],
-            ),
-        ],
-    )
-    model = {
-        **fixture["model"],
-        "resource_profile": {
-            **dict(fixture["model"]["resource_profile"]),
-            "package_checksum": fixture["package_checksum"],
-        },
-    }
-    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
-
-    recorded_init_state_id = _expected_init_state_id()
-    cycle_segment = format_cycle_time(cycle_time)
-    run_id = f"fcst_gfs_{cycle_segment}_model_a"
-    journal_root = Path(paths["NHMS_SCHEDULER_JOURNAL_ROOT"])
-    latest = _latest_view(cycle_time=cycle_time, hydro_status="complete")
-    latest["hydro_run"]["init_state_id"] = recorded_init_state_id
-    _write_json(journal_root / "latest" / "gfs" / cycle_segment / "model_a.json", latest)
-    run_manifest = Path(roots["object_store_root"]) / "runs" / run_id / "input" / "manifest.json"
-    run_manifest.parent.mkdir(parents=True, exist_ok=True)
-    run_manifest.write_text(
-        json.dumps({"initial_state": {"quality": "fresh", "state_id": recorded_init_state_id}}),
-        encoding="utf-8",
-    )
-
-    scheduler = ProductionScheduler(
-        ProductionSchedulerConfig(now=generated_at, allowed_cycle_hours_utc=(0, 6, 12, 18)),
-        registry=FakeRegistry([model]),
-        adapters={},
-        active_repository=scheduler_module.FileOrchestrationJournalRepository(journal_root),
-        orchestrator_factory=lambda _source_id: pytest.fail(
-            "skipped candidate must not build an orchestrator"
-        ),
-    )
-    candidates, blocked, skipped, _duplicate_exclusions, _slurm_sync = scheduler._build_candidates(
-        models=[scheduler_module._coerce_registered_model(model)],
-        cycles=[
-            scheduler_module.SchedulerSourceCycle(
-                discovery=CycleDiscovery(
-                    cycle_id=f"gfs_{cycle_segment}",
-                    source_id="gfs",
-                    cycle_time=cycle_time,
-                    cycle_hour=12,
-                    available=True,
-                    status="discovered",
-                ),
-                horizon={},
-            )
-        ],
+        tmp_path,
+        recorded_init_state_id=recorded_init_state_id,
     )
 
     assert candidates == []
     assert blocked == []
     assert len(skipped) == 1
     assert skipped[0]["reason"] == "terminal_hydro_success"
+
+
+def test_build_candidates_never_quarantines_active_duplicate_pipeline_skip(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """Whitelist pin: an ACTIVE skip is never quarantined, even when the
+    recorded id is a positive same-base-key mismatch — resubmitting over a
+    running pipeline is exactly what the whitelist exists to prevent."""
+    from tests.test_production_scheduler import _dt as _pdt
+
+    candidates, blocked, skipped, _duplicate_exclusions, _slurm_sync = _run_wiring_a_build_candidates(
+        monkeypatch,
+        tmp_path,
+        recorded_init_state_id=_wrong_suffix_init_state_id(),
+        jobs=[_running_forecast_job(_pdt("2026-05-21T12:00:00Z"))],
+    )
+
+    assert candidates == []
+    assert blocked == []
+    assert len(skipped) == 1
+    assert skipped[0]["reason"] == "active_duplicate_pipeline"
+
+
+def test_build_candidates_declines_judgement_on_superseded_hydro_placeholder(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """The judged identity must be the COMPLETED run's row: a
+    ``created`` placeholder superseded by a terminal pipeline job also carries
+    an ``init_state_id``, but it does not describe the completing run, so a
+    stale value there declines judgement instead of quarantining."""
+    from tests.test_production_scheduler import _dt as _pdt
+
+    candidates, blocked, skipped, _duplicate_exclusions, _slurm_sync = _run_wiring_a_build_candidates(
+        monkeypatch,
+        tmp_path,
+        recorded_init_state_id=_wrong_suffix_init_state_id(),
+        hydro_status="created",
+        jobs=[_terminal_state_save_qc_job(_pdt("2026-05-21T12:00:00Z"))],
+    )
+
+    assert candidates == []
+    assert blocked == []
+    assert len(skipped) == 1
+    assert skipped[0]["reason"] == "terminal_pipeline_success"
 
 
 # ---------------------------------------------------------------------------

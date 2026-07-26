@@ -16,6 +16,7 @@ from services.orchestrator.chain_source_cycle import (
 )
 from services.orchestrator.scheduler_file_providers import _public_raw_manifest_evidence
 from services.orchestrator.scheduler_state import (
+    DURABLE_HYDRO_SUCCESS_STATUSES,
     CandidateStateDecision,
     _bounded_active_slurm_jobs,
     _call_active_slurm_jobs_provider,
@@ -1972,8 +1973,9 @@ def _journal_predecessor_identity_quarantine(
     recorded ``init_state_id`` shares cycle T's expected base key but carries
     a different lineage suffix.  Returns ``None`` (leave the skip alone) for
     every other shape: a non-completed skip reason, a missing lead-hours
-    provider, no recorded identity, a matching token, a suffix-less legacy
-    id, or a different base key (the legal env=false fallback warm start).
+    provider, a ``hydro_run`` row that is not itself completed, no recorded
+    identity, a matching token, a suffix-less legacy id, or a different base
+    key (the legal env=false fallback warm start).
 
     The surface can only DECLINE to skip, never admit a skip, so a
     no-judgement outcome keeps the pre-#1107 behavior byte-identical.
@@ -1984,7 +1986,16 @@ def _journal_predecessor_identity_quarantine(
     if not callable(lead_hours_provider):
         return None
     hydro_run = raw_candidate_state.get("hydro_run") if isinstance(raw_candidate_state, Mapping) else None
-    recorded_init_state_id = _state_field(hydro_run, "state_id") if isinstance(hydro_run, Mapping) else None
+    if not isinstance(hydro_run, Mapping):
+        return None
+    if str(hydro_run.get("status") or "") not in DURABLE_HYDRO_SUCCESS_STATUSES:
+        # The judged identity must be the COMPLETED run's row.  A
+        # created/staged/submitted placeholder superseded by a pipeline
+        # terminal also carries an ``init_state_id``, but it does not describe
+        # the run that produced the completion — decline judgement instead of
+        # quarantining on it.
+        return None
+    recorded_init_state_id = _state_field(hydro_run, "state_id")
     if recorded_init_state_id in (None, ""):
         return None
     try:

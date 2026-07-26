@@ -86,7 +86,10 @@ acceptable; no trust boundary.
   criterion) — record it in the report.
 - [x] 2.2 Wiring B — `services/orchestrator/scheduler_discovery.py`
   `cycle_completion_status` completed-provider-only branch (`:184-198`)
-  ONLY (the same-shape fallback `:224-233` is dead code — NOT wired): a
+  (the same-shape fallback `:224-233` is dead code — NOT wired; fix round
+  1 corrected the original "ONLY" scoping: the strict/successor branch
+  preempts under production `NHMS_SCHEDULER_DB_FREE_REQUIRED=true`, so
+  the gate is hoisted to cover every `"complete"` verdict — see §6): a
   model counts toward "complete" only if the helper does not return
   `False` for its recorded id. Add optional field
   `required_lead_hours_for_candidate: Callable[..., int] | None = None`
@@ -175,6 +178,46 @@ acceptable; no trust boundary.
   backfill not suppressed + entry immutable), matching-id skip preserved,
   missing-id legacy skip preserved, different-base-key fallback NOT
   quarantined.
+
+## 6. Fix round 1 (post cross-review; verified findings)
+
+- [x] 6.1 (P1 CONFIRMED) Wiring B gate unreachable under production
+  db-free config: the strict/successor branch of `cycle_completion_status`
+  (`scheduler_discovery.py:148-191`) sets `checked=True` and returns
+  `"complete"` before the completed-provider gate. Hoist
+  `_journal_predecessor_identity_is_stale` to a single choke point every
+  `"complete"` verdict passes (additive tightening on the strict-ready
+  leg; no-judgement shapes unchanged). Tests: Wiring-B stale + matching
+  control legs under `NHMS_SCHEDULER_DB_FREE_REQUIRED=true` + env=false
+  with ready successor evidence — stale → `"gap"` and T retained in
+  backfill gaps; matching → `"complete"`.
+- [x] 6.2 (P2 PLAUSIBLE) Judged identity must come from the COMPLETED
+  run's row (spec chapeau: "the completed journal entry's recorded
+  `init_state_id`"): guard both surfaces — accessor returns the id only
+  when the hydro_run row's status is completed-type
+  (`COMPLETED_HYDRO_STATUSES`), else `None`; Wiring A judges only when
+  the `raw_candidate_state` hydro_run row is completed-type. Placeholder
+  (`created`/`staged`/`submitted`) rows superseded by pipeline terminals
+  → no judgement → legacy skip (this keeps the gate alive under
+  `state_save_qc` happy path where hydro_run is `succeeded`, and declines
+  judgement instead of quarantining on placeholder shapes). Tests:
+  accessor leg (state_save_qc terminal + `created` row carrying id →
+  `None`); Wiring A leg (placeholder row + stale id + pipeline terminal →
+  skip preserved).
+- [x] 6.3 (P2 CONFIRMED) 3.4 action pin: tighten to `blocked == []` and
+  `len(candidates) == 1` (mutation "retry"→"blocked" must go red).
+- [x] 6.4 (P2 CONFIRMED) Wiring A no-judgement pins: parametrize the
+  matching-control test with (a) suffix-less legacy id, (b)
+  earlier-valid_time fallback token → skip preserved (mutation None→False
+  at Wiring A must go red).
+- [x] 6.5 (P2 CONFIRMED) Whitelist pin: leg with `active_duplicate_pipeline`
+  + same-base-key wrong-suffix recorded id → skip preserved with reason
+  `active_duplicate_pipeline`, `candidates == []` (whitelist-removal
+  mutation must go red).
+- [x] 6.6 (P2 CONFIRMED) 3.5(a) mtime flake: rebuild a fresh
+  `FileOrchestrationJournalRepository`/scheduler for the second probe in
+  3.5(a) and 3.5(b) (real second read; no reliance on mtime_ns
+  granularity).
 
 ## Evidence mapping (issue AC → tasks)
 

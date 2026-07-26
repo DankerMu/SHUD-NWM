@@ -525,6 +525,11 @@ class FileOrchestrationJournalRepository:
         - no matching ``hydro_run`` row for the candidate (includes the
           ``state_save_qc`` terminal mode, where completion is decided from
           pipeline jobs and ``hydro_run`` may be ``None``),
+        - the matching ``hydro_run`` row is not itself completed — a
+          ``created``/``staged``/``submitted`` placeholder superseded by a
+          pipeline terminal records an ``init_state_id`` too
+          (``:1179``/``:1184``), and the judged identity must be the COMPLETED
+          run's row,
         - the row records no ``init_state_id`` / ``initial_state_id``.
 
         No run-manifest reads: this reports what the JOURNAL recorded.
@@ -546,6 +551,8 @@ class FileOrchestrationJournalRepository:
             ):
                 return None
         except FileOrchestrationJournalError:
+            return None
+        if str(hydro_run.get("status") or "") not in COMPLETED_HYDRO_STATUSES:
             return None
         recorded = hydro_run.get("init_state_id") or hydro_run.get("initial_state_id")
         if recorded in (None, ""):

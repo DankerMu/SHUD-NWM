@@ -134,9 +134,41 @@ def cycle_completion_status(
 ) -> str:
     """Return 'complete' if every model's full pipeline is done for this cycle, else 'gap'."""
 
+    scoped_models = _models_in_completion_scope(context, discovery, models)
+    verdict = _cycle_completion_verdict(context, discovery, scoped_models, horizon=horizon)
+    if verdict != "complete":
+        return verdict
+    # §8.7 (#1107) single choke point: EVERY "complete" verdict must clear the
+    # journal predecessor identity filter, not just the completed-provider
+    # branch.  Under production ``NHMS_SCHEDULER_DB_FREE_REQUIRED=true`` the
+    # strict/successor branch preempts and used to return "complete" without
+    # any identity check.  No-judgement shapes leave the verdict untouched, so
+    # legacy behavior is byte-identical outside a positive mismatch.
+    for model in scoped_models:
+        if _journal_predecessor_identity_is_stale(context, discovery, model, horizon=horizon):
+            return "gap"
+    return "complete"
+
+
+def _models_in_completion_scope(
+    context: SchedulerDiscoveryContext,
+    discovery: CycleDiscovery,
+    models: Sequence[SchedulerModelLike],
+) -> tuple[SchedulerModelLike, ...]:
     source_scope_filter = context.model_source_is_out_of_scope
     if callable(source_scope_filter):
-        models = tuple(model for model in models if not source_scope_filter(model, discovery))
+        return tuple(model for model in models if not source_scope_filter(model, discovery))
+    return tuple(models)
+
+
+def _cycle_completion_verdict(
+    context: SchedulerDiscoveryContext,
+    discovery: CycleDiscovery,
+    models: Sequence[SchedulerModelLike],
+    *,
+    horizon: Mapping[str, Any] | None = None,
+) -> str:
+    """Pre-#1107 completion scoring: source scope already applied, no identity gate."""
 
     state_provider = (
         getattr(context.active_repository, "candidate_state", None)
@@ -205,13 +237,6 @@ def cycle_completion_status(
             ):
                 all_completed = False
                 break
-            if _journal_predecessor_identity_is_stale(context, discovery, model, horizon=horizon):
-                # §8.7 (#1107): a completed entry whose recorded lineage is
-                # stale makes the cycle not-canonical-ready outright.  Return
-                # rather than fall through: the candidate-state branch below
-                # re-reads the SAME journal rows and would report the cycle
-                # complete again, silently undoing the quarantine.
-                return "gap"
         if all_completed:
             return "complete"
 
