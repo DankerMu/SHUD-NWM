@@ -341,15 +341,19 @@ def test_product_archive_coverage_reads_and_rejects_tampered_tar_members(tmp_pat
 
 
 @pytest.mark.parametrize(
-    ("case", "subject_end"),
-    [("equal", END), ("superset", END - timedelta(hours=3))],
+    ("case", "subject_start", "subject_end"),
+    [
+        ("equal", START, END),
+        ("superset_end", START, END - timedelta(hours=3)),
+        ("superset_start", START + timedelta(hours=3), END),
+    ],
 )
 def test_product_archive_producer_window_containing_db_window_completes(
-    tmp_path: Path, case: str, subject_end: datetime
+    tmp_path: Path, case: str, subject_start: datetime, subject_end: datetime
 ) -> None:
     """A producer window equal to or wider than the DB window is verified coverage."""
     config, forcing_subject, _run_subject = _write_forcing_and_run_product_archives(tmp_path)
-    subject = replace(forcing_subject, end=subject_end)
+    subject = replace(forcing_subject, start=subject_start, end=subject_end)
     assert audit.verify_product_archive(
         subject, config.archive_root, config.object_store_prefix, config.zstd_path
     ) == audit.Coverage("product-archive", ("member-verified product archive present",))
@@ -376,6 +380,13 @@ def test_product_archive_producer_window_missing_db_coverage_blocks(tmp_path: Pa
         (
             "start_time",
             "2026-05-01T03:00:00Z",
+            "product archive producer window does not contain DB inventory window for forcing-a",
+        ),
+        # Unparseable producer window: blocks with the sanitized subject-level window
+        # message, never leaking the raw `_parse_time` value.
+        (
+            "start_time",
+            "not-a-time",
             "product archive producer window does not contain DB inventory window for forcing-a",
         ),
         ("model_id", "other-model", "producer|schema"),
