@@ -430,16 +430,33 @@ def _state_retry_attempt(state: Mapping[str, Any], *, stage: str | None = None) 
     tokens (``..._convert_model_0_forecast_retry_1_retry_2``).  Only jobs whose
     stage matches contribute their durable ``_retry_<n>`` suffix attempt, so a
     completed ``forcing`` retry cannot exhaust the forecast budget.
+
+    A real projected state ALWAYS carries a top-level ``retry_count`` (the
+    journal's clean-reservation invariant pins it to 0), so the flat value can
+    never short-circuit the stage-scoped derivation: with ``stage`` supplied the
+    two are combined with ``max``.  Without ``stage`` the flat-first order is
+    preserved byte-for-byte for the evidence-owner / manual-retry consumers.
     """
 
+    flat = _state_flat_retry_attempt(state)
+    canonical_stage = _canonical_downstream_stage(stage)
+    if canonical_stage is None:
+        if flat is not None:
+            return flat
+        return _state_job_retry_attempt(state, None)
+    return max(flat or 0, _state_job_retry_attempt(state, canonical_stage))
+
+def _state_flat_retry_attempt(state: Mapping[str, Any]) -> int | None:
     for key in ("retry_attempt", "attempt", "retry_count"):
         value = state.get(key)
         if value not in (None, ""):
             return _coerce_int(value, default=0)
+    return None
+
+def _state_job_retry_attempt(state: Mapping[str, Any], canonical_stage: str | None) -> int:
     jobs = _state_jobs(state)
     if not jobs:
         return 0
-    canonical_stage = _canonical_downstream_stage(stage)
     return max(_job_retry_attempt(job, canonical_stage) for job in jobs)
 
 def _job_retry_attempt(job: Mapping[str, Any], canonical_stage: str | None) -> int:

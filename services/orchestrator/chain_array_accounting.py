@@ -28,7 +28,10 @@ class _ObjectStoreLike(Protocol):
 
 # DB-free per-task failure classifier channel (see ``workers/shud_runtime/runtime.py``).
 # The compute task writes ``logs/task_outcome.json`` into its workspace log dir and the
-# existing log mirror uploads it to ``runs/<run_id>/logs/`` in the object store.
+# existing log mirror uploads it to ``runs/<run_id>/logs/`` in the object store.  The
+# ``run_id`` key is cycle-stable and the mirrored copy outlives the attempt that wrote
+# it, so every receipt also carries the attempt binding (Slurm array master job id +
+# array task id) this module verifies before trusting the classifier.
 TASK_OUTCOME_SCHEMA_VERSION = "nhms.shud_task_outcome.v1"
 TASK_OUTCOME_RECEIPT_FILENAME = "task_outcome.json"
 TASK_OUTCOME_MAX_BYTES = 16 * 1024
@@ -610,7 +613,12 @@ def parse_sacct_array_results(
                 error_code=(
                     None
                     if task_status == "succeeded"
-                    else _resolve_task_error_code(object_store, basins_by_task.get(task_id))
+                    else _resolve_task_error_code(
+                        object_store,
+                        basins_by_task.get(task_id),
+                        master_job_id=master_job_id,
+                        task_id=task_id,
+                    )
                 ),
                 log_uri=deps.context_array_log_uri(context, object_store, master_job_id, task_id),
                 accounting=extras,
@@ -675,7 +683,12 @@ def coerce_array_aggregation(
                         else (
                             None
                             if status == "succeeded"
-                            else _resolve_task_error_code(object_store, basins_by_task.get(task_id))
+                            else _resolve_task_error_code(
+                                object_store,
+                                basins_by_task.get(task_id),
+                                master_job_id=master_job_id,
+                                task_id=task_id,
+                            )
                         )
                     ),
                     error_message=str(item_dict.get("error_message"))
@@ -854,12 +867,14 @@ def _resolve_task_error_code(
     object_store: _ObjectStoreLike | None,
     basin: Mapping[str, Any] | None,
     *,
+    master_job_id: str | None = None,
+    task_id: int | None = None,
     fallback: str = DEFAULT_TASK_ERROR_CODE,
 ) -> str:
     """Return the task-produced failure classifier, or ``fallback`` (fail-safe).
 
-    Absent, unreadable, malformed, or schema-mismatched receipts degrade to the
-    generic fallback; this resolver never raises.
+    Absent, unreadable, malformed, schema-mismatched, or attempt-mismatched
+    receipts degrade to the generic fallback; this resolver never raises.
     """
 
     receipt = _read_task_outcome_receipt(object_store, basin)
@@ -867,10 +882,41 @@ def _resolve_task_error_code(
         return fallback
     if str(receipt.get("schema_version") or "") != TASK_OUTCOME_SCHEMA_VERSION:
         return fallback
+    if not _receipt_matches_attempt(receipt, master_job_id=master_job_id, task_id=task_id):
+        return fallback
     error_code = receipt.get("error_code")
     if not isinstance(error_code, str) or not error_code.strip():
         return fallback
     return error_code.strip()
+
+
+def _receipt_matches_attempt(
+    receipt: Mapping[str, Any],
+    *,
+    master_job_id: str | None,
+    task_id: int | None,
+) -> bool:
+    """Return whether the receipt was written by the attempt being accounted.
+
+    ``run_id`` is cycle-stable and the object-store copy survives a retry, so a
+    receipt left by an earlier attempt would otherwise be re-read and stamped as
+    the classifier for a task that was killed before its runtime hook ever ran
+    (CANCELLED / OOM / preempt).  The Slurm array master id plus the array task
+    id is the only identity both the writer and this reader observe per attempt;
+    an unbound receipt (no identity recorded) is never trusted.
+    """
+
+    recorded_job_id = str(receipt.get("slurm_job_id") or "").strip()
+    current_job_id = str(master_job_id or "").strip()
+    if not recorded_job_id or not current_job_id or recorded_job_id != current_job_id:
+        return False
+    recorded_task_id = receipt.get("array_task_id")
+    if recorded_task_id in (None, "") or task_id is None:
+        return False
+    try:
+        return int(recorded_task_id) == int(task_id)
+    except (TypeError, ValueError):
+        return False
 
 
 def _read_task_outcome_receipt(

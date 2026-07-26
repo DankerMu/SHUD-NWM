@@ -1570,9 +1570,16 @@ class SHUDRuntime:
 
     def _write_task_outcome_receipt(self, log_dir: Path, run_id: str, error: SHUDRuntimeError) -> None:
         _ensure_directory(log_dir)
+        slurm_job_id, array_task_id = _task_outcome_attempt_identity()
         payload = {
             "schema_version": TASK_OUTCOME_SCHEMA_VERSION,
             "run_id": run_id,
+            # Attempt binding: ``run_id`` is cycle-stable, so a receipt left by an
+            # earlier attempt would otherwise be re-read by the next one.  The
+            # Slurm array master id + task id are the identity both this writer
+            # and array accounting observe for THIS attempt.
+            "slurm_job_id": slurm_job_id,
+            "array_task_id": array_task_id,
             "error_code": error.error_code,
             "error_message": error.message[:TASK_OUTCOME_MESSAGE_MAX_LENGTH],
             "failed_at": _format_time(datetime.now(UTC)),
@@ -1582,6 +1589,24 @@ class SHUDRuntime:
             json.dumps(payload, indent=2, sort_keys=True),
             containment_root=log_dir,
         )
+
+
+def _task_outcome_attempt_identity() -> tuple[str | None, int | None]:
+    """Return ``(slurm master job id, array task id)`` for the running attempt.
+
+    ``SLURM_ARRAY_JOB_ID`` is the array master id array accounting keys on;
+    ``SLURM_JOB_ID`` covers the non-array submission.  Anything unset or
+    unparsable stays ``None`` so the reader treats the receipt as unbound and
+    falls back instead of trusting it.
+    """
+
+    master = (os.getenv("SLURM_ARRAY_JOB_ID") or "").strip() or (os.getenv("SLURM_JOB_ID") or "").strip()
+    raw_task_id = (os.getenv("SLURM_ARRAY_TASK_ID") or "").strip()
+    try:
+        task_id = int(raw_task_id) if raw_task_id else None
+    except ValueError:
+        task_id = None
+    return (master or None, task_id)
 
 
 def _ensure_directory(path: Path, *, containment_root: Path | None = None) -> Path:

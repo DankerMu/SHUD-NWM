@@ -6325,6 +6325,69 @@ def test_permanently_classified_missing_forcing_stays_repair_eligible(tmp_path: 
     _assert_stable_missing_forcing_blocker(decision, artifact_uri=None)
 
 
+def test_model_package_refresh_retry_still_blocks_on_missing_forcing_provenance() -> None:
+    # The refresh branch returns BEFORE the permanent/fallback branches, so it
+    # needs its own guard consult: without it a package refresh would re-issue
+    # the forecast retry the missing-forcing demotion exists to stop.
+    candidate = _scheduler_candidate_fixture()
+    state = _forecast_failure_state(
+        candidate,
+        error_code="ARTIFACT_NOT_FOUND",
+        run_manifest_model_package={
+            "source": "run_manifest",
+            "status": "superseded",
+            "model_package_uri_sha256": "0" * 64,
+        },
+    )
+    assert "forcing_package_uri" not in state
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    _assert_stable_missing_forcing_blocker(decision, artifact_uri=None)
+    assert decision.evidence["artifact_guard"]["planned_retry_reason"] == "retry_failed_candidate"
+
+
+def test_policy_blocked_forecast_without_forcing_provenance_keeps_the_true_cause_visible() -> None:
+    # Endorsed consequence of the demotion ruling: the stable repair-eligible
+    # blocker replaces the surfaced decision, but the real classifier stays in
+    # the evidence so operators are never told a policy block was a data gap.
+    from services.orchestrator.scheduler_candidates import _decision_is_stable_missing_forcing_blocker
+
+    candidate = _scheduler_candidate_fixture()
+    state = _forecast_failure_state(
+        candidate,
+        error_code="POLICY_BLOCKED",
+        error_message="submission blocked by policy",
+        retry_count=3,
+        retry_limit=3,
+        pipeline_jobs=[
+            {
+                "job_id": "job_cycle_gfs_2026052106_model_a_forecast_retry_3",
+                "run_id": candidate.run_id,
+                "model_id": candidate.model_id,
+                "candidate_id": candidate.candidate_id,
+                "cycle_id": candidate.cycle_id,
+                "stage": "forecast",
+                "job_type": "run_shud_forecast_array",
+                "status": "failed",
+                "retry_count": 3,
+                "error_code": "POLICY_BLOCKED",
+                "error_message": "submission blocked by policy",
+            }
+        ],
+    )
+    assert "forcing_package_uri" not in state
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "missing_forcing_package_uri")
+    assert decision.evidence["error_code"] == "FORCING_PACKAGE_URI_MISSING"
+    assert _decision_is_stable_missing_forcing_blocker(decision) is True
+    assert [job["error_code"] for job in decision.evidence["pipeline_jobs"]] == ["POLICY_BLOCKED"]
+    assert decision.evidence["retry_policy"]["attempt"] == 3
+
+
 def test_healthy_candidate_reaching_failure_fallback_region_keeps_none_decision(
     tmp_path: Path,
 ) -> None:
@@ -6443,6 +6506,8 @@ def _state_with_forecast_retry_jobs(candidate: Any, jobs: list[dict[str, Any]]) 
 
 
 def test_state_retry_attempt_honors_forecast_retry_suffix_and_exhausts_the_limit() -> None:
+    """Unit leg: hand-built state, no top-level ``retry_count``."""
+
     from services.orchestrator import scheduler_state_failure
 
     candidate = _scheduler_candidate_fixture()
@@ -6468,11 +6533,64 @@ def test_state_retry_attempt_honors_forecast_retry_suffix_and_exhausts_the_limit
     assert failure["retryable"] is False
 
 
-def test_state_retry_attempt_ignores_retry_suffix_of_another_stage() -> None:
+def test_projected_state_retry_attempt_honors_forecast_suffix_despite_flat_retry_count() -> None:
+    """Projection leg: a REAL state always carries a top-level ``retry_count``.
+
+    ``candidate_state_from_rows`` writes ``retry_count`` unconditionally (0 when
+    the journal's clean-reservation invariant reset it), so a flat-value
+    short-circuit would make the stage-scoped derivation unreachable on every
+    production state -- exactly the live #1160 geometry.
+    """
+
     from services.orchestrator import scheduler_state_failure
 
     candidate = _scheduler_candidate_fixture()
-    state = _state_with_forecast_retry_jobs(
+    state = chain_repository_state_module.candidate_state_from_rows(
+        source_id=candidate.source_id,
+        cycle_time=candidate.cycle_time_utc,
+        model_id=candidate.model_id,
+        run_id=candidate.run_id,
+        forcing_version_id=candidate.forcing_version_id,
+        candidate_id=candidate.candidate_id,
+        hydro_run={"run_id": candidate.run_id, "status": "failed"},
+        pipeline_jobs=[
+            {
+                "job_id": "job_cycle_gfs_2026052106_model_a_forecast_retry_65",
+                "run_id": candidate.run_id,
+                "cycle_id": candidate.cycle_id,
+                "model_id": candidate.model_id,
+                "candidate_id": candidate.candidate_id,
+                "status": "failed",
+                "stage": "forecast",
+                "job_type": "run_shud_forecast_array",
+                "slurm_job_id": "4065",
+                "retry_count": 0,
+                "error_code": "NODE_FAILURE",
+                "error_message": "array tasks failed",
+                "updated_at": "2026-05-21T06:45:00Z",
+            }
+        ],
+        pipeline_events=[],
+        forcing_version=None,
+        forecast_cycle=None,
+        retry_limit=3,
+    )
+
+    assert state is not None
+    assert state["retry_count"] == 0
+    assert state["failed_stage"] == "forecast"
+
+    assert scheduler_state_failure._state_retry_attempt(state, stage="forecast") == 65
+
+    failure = scheduler_state_failure._failure_policy_payload(state)
+
+    assert failure["attempt"] == 65
+    assert failure["limit_exhausted"] is True
+    assert failure["retryable"] is False
+
+
+def _cross_stage_retry_suffix_state(candidate: Any) -> dict[str, Any]:
+    return _state_with_forecast_retry_jobs(
         candidate,
         [
             {
@@ -6503,7 +6621,14 @@ def test_state_retry_attempt_ignores_retry_suffix_of_another_stage() -> None:
         ],
     )
 
-    assert scheduler_state_failure._state_retry_attempt(state, stage="forecast") == 0
+
+def test_cross_stage_retry_suffix_does_not_exhaust_the_forecast_budget() -> None:
+    """Unchanged-behavior pin: green before AND after #1160 (no new kwarg used)."""
+
+    from services.orchestrator import scheduler_state_failure
+
+    candidate = _scheduler_candidate_fixture()
+    state = _cross_stage_retry_suffix_state(candidate)
 
     failure = scheduler_state_failure._failure_policy_payload(state)
 
@@ -6516,10 +6641,38 @@ def test_state_retry_attempt_ignores_retry_suffix_of_another_stage() -> None:
     assert (decision.action, decision.reason) == ("retry", "retry_failed_candidate")
 
 
+def test_state_retry_attempt_ignores_retry_suffix_of_another_stage() -> None:
+    """New-seam coverage: the ``stage=`` scoping introduced by #1160."""
+
+    from services.orchestrator import scheduler_state_failure
+
+    candidate = _scheduler_candidate_fixture()
+    state = _cross_stage_retry_suffix_state(candidate)
+
+    assert scheduler_state_failure._state_retry_attempt(state, stage="forecast") == 0
+
+
 def test_manual_retry_default_attempt_unchanged_without_stage_matching_suffix() -> None:
+    """Unchanged-behavior pin: green before AND after #1160 (no new kwarg used)."""
+
     from services.orchestrator import scheduler_state_rows
 
-    state = {
+    assert scheduler_state_rows._state_retry_attempt(_forcing_retry_suffix_state()) == 0
+
+
+def test_stage_scoped_retry_attempt_derives_only_the_matching_stage_suffix() -> None:
+    """New-seam coverage: the ``stage=`` scoping introduced by #1160."""
+
+    from services.orchestrator import scheduler_state_rows
+
+    state = _forcing_retry_suffix_state()
+
+    assert scheduler_state_rows._state_retry_attempt(state, stage="forecast") == 0
+    assert scheduler_state_rows._state_retry_attempt(state, stage="forcing") == 3
+
+
+def _forcing_retry_suffix_state() -> dict[str, Any]:
+    return {
         "pipeline_jobs": [
             {
                 "job_id": "job_cycle_gfs_2026052106_model_a_forcing_retry_3",
@@ -6529,10 +6682,6 @@ def test_manual_retry_default_attempt_unchanged_without_stage_matching_suffix() 
             }
         ]
     }
-
-    assert scheduler_state_rows._state_retry_attempt(state) == 0
-    assert scheduler_state_rows._state_retry_attempt(state, stage="forecast") == 0
-    assert scheduler_state_rows._state_retry_attempt(state, stage="forcing") == 3
 
 
 def _missing_forcing_repair_direct_grid_profile(source_id: str = "gfs") -> dict[str, Any]:
@@ -26673,13 +26822,59 @@ def test_scheduler_run_once_reconciles_real_file_journal_reservation(tmp_path: P
     assert job["status"] == "running"
 
 
+def _record_journal_forcing_provenance(
+    root: Path,
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    model_id: str,
+    forcing_package_uri: str,
+) -> None:
+    """Append the forcing_version row the forcing stage would have durably recorded.
+
+    The fixture cohort is reconciled straight from sacct, so nothing ever writes
+    forcing provenance for its members; this restores the ordinary geometry in
+    which a failed forecast member DOES have a recorded, existing forcing package.
+    """
+
+    cycle_segment = format_cycle_time(cycle_time)
+    journal_paths = sorted((root / "journal").glob(f"*/{cycle_segment}.jsonl"))
+    assert journal_paths, "fixture journal must already hold the cycle's records"
+    payload = {
+        "forcing_version_id": f"forc_{source_id.lower()}_{cycle_segment}_{model_id}",
+        "forcing_package_uri": forcing_package_uri,
+        "source_id": source_id,
+        "cycle_time": cycle_time.isoformat(),
+        "model_id": model_id,
+        "status": "ready",
+    }
+    record = {
+        "schema_version": file_orchestration_journal_module.FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
+        "record_type": "forcing_version",
+        "source_id": source_id,
+        "cycle_time": cycle_time.isoformat(),
+        "model_id": model_id,
+        "payload": payload,
+    }
+    with journal_paths[0].open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
+
+
 @pytest.mark.parametrize("source_id", ["gfs", "IFS"])
+@pytest.mark.parametrize("forcing_recorded", [True, False])
 def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     source_id: str,
+    forcing_recorded: bool,
 ) -> None:
-    """Highest public seam: submit ambiguity -> bind/tasks -> state-save resume."""
+    """Highest public seam: submit ambiguity -> bind/tasks -> state-save resume.
+
+    ``forcing_recorded`` toggles the failed member's forcing provenance: with it
+    the member is re-forecast exactly as before #1160; without it (the live
+    incident geometry, ``forcing_version: null``) the missing-forcing guard
+    demotes it to the stable repair-eligible blocker.
+    """
     from services.orchestrator import chain_forecast_execution
     from services.orchestrator.chain import OrchestratorError
     from services.orchestrator.reconcile import SacctRecord
@@ -27006,6 +27201,18 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
         )
         assert len(completed_event_ids) == 1
 
+    if forcing_recorded:
+        _record_journal_forcing_provenance(
+            root,
+            source_id=source_id,
+            cycle_time=_dt("2026-05-21T06:00:00Z"),
+            model_id=str(failed_member["model_id"]),
+            forcing_package_uri=(
+                f"s3://nhms/forcing/{source_id.lower()}/2026052106/"
+                f"{failed_member['model_id']}/forcing_package.json"
+            ),
+        )
+
     monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast_state_save_qc")
     resumed_repository = scheduler_module.FileOrchestrationJournalRepository(root)
     state_save_client = ImmediateTerminalSlurmClient()
@@ -27041,33 +27248,53 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
         for candidate in resumed_result.evidence["candidates"]
     ]
     submitted_stages = [submission["stage"] for submission in state_save_client.submissions]
-    # Since #1160 the single failed member is NOT forecast-resubmitted: this
-    # journal records no forcing provenance for it (``forcing_version: null`` --
-    # the live incident geometry), so the missing-forcing guard demotes it to the
-    # stable repair-eligible blocker instead of spinning the forecast cohort.
-    # The 17 verified members still resume straight into state_save_qc.
-    assert submitted_stages.count("state_save_qc") == 1
-    assert submitted_stages.count("forecast") == 0
-    blocked_failed_member = next(
-        candidate
-        for candidate in resumed_result.evidence["blocked_candidates"]
-        if str(candidate.get("model_id")) == str(failed_member["model_id"])
-    )
-    assert blocked_failed_member["reason"] == "missing_forcing_package_uri"
-    assert blocked_failed_member["state_evidence"]["classifier"] == "missing_upstream_artifact"
-    assert blocked_failed_member["state_evidence"]["restart_stage"] == "forecast"
-    assert blocked_failed_member["state_evidence"]["artifact_guard"]["artifact_exists"] is False
+    forecast_submissions = [
+        submission for submission in state_save_client.submissions if submission["stage"] == "forecast"
+    ]
+    if forcing_recorded:
+        # Recorded + existing forcing provenance: exactly the failed member is
+        # re-forecast, and the 17 verified members resume into state_save_qc.
+        assert submitted_stages.count("state_save_qc") == 2
+        assert submitted_stages.count("forecast") == 1
+        assert {task["model_id"] for task in forecast_submissions[0]["tasks"]} == {
+            str(failed_member["model_id"])
+        }
+        assert not [
+            candidate
+            for candidate in resumed_result.evidence["blocked_candidates"]
+            if candidate.get("reason") == "missing_forcing_package_uri"
+        ]
+    else:
+        # Since #1160 the single failed member is NOT forecast-resubmitted: this
+        # journal records no forcing provenance for it (``forcing_version: null``
+        # -- the live incident geometry), so the missing-forcing guard demotes it
+        # to the stable repair-eligible blocker instead of spinning the forecast
+        # cohort.  The 17 verified members still resume straight into state_save_qc.
+        assert submitted_stages.count("state_save_qc") == 1
+        assert submitted_stages.count("forecast") == 0
+        blocked_failed_member = next(
+            candidate
+            for candidate in resumed_result.evidence["blocked_candidates"]
+            if str(candidate.get("model_id")) == str(failed_member["model_id"])
+        )
+        assert blocked_failed_member["reason"] == "missing_forcing_package_uri"
+        assert blocked_failed_member["state_evidence"]["classifier"] == "missing_upstream_artifact"
+        assert blocked_failed_member["state_evidence"]["restart_stage"] == "forecast"
+        assert blocked_failed_member["state_evidence"]["artifact_guard"]["artifact_exists"] is False
     state_save_submissions = [
         submission
         for submission in state_save_client.submissions
         if submission["stage"] == "state_save_qc"
     ]
-    assert sorted(len(submission["tasks"]) for submission in state_save_submissions) == [17]
+    assert sorted(len(submission["tasks"]) for submission in state_save_submissions) == (
+        [1, 17] if forcing_recorded else [17]
+    )
+    resumed_members = reserved.cohort_members if forcing_recorded else reserved.cohort_members[:17]
     assert {
         str(task["model_id"])
         for submission in state_save_submissions
         for task in submission["tasks"]
-    } == {str(member["model_id"]) for member in reserved.cohort_members[:17]}
+    } == {str(member["model_id"]) for member in resumed_members}
     state_save_submission = next(
         submission
         for submission in state_save_client.submissions
@@ -27168,11 +27395,14 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
     reopened_hydro = resumed_repository._hydro_run_for(success_run_id)
     assert reopened_hydro["run_id"] == success_manifest["run_id"]
     assert reopened_hydro["candidate_id"] == success_manifest["candidate_id"]
-    # No forecast cohort was resubmitted at all, so no verified member can have
-    # been dragged back into a forecast rerun.
-    assert not [
-        submission for submission in state_save_client.submissions if submission["stage"] == "forecast"
-    ]
+    if forcing_recorded:
+        # A verified member must never be dragged back into the failed member's
+        # forecast rerun.
+        assert success_model_id not in {task["model_id"] for task in forecast_submissions[0]["tasks"]}
+    else:
+        # No forecast cohort was resubmitted at all, so no verified member can
+        # have been dragged back into a forecast rerun.
+        assert forecast_submissions == []
     assert len(resumed_repository.get_pipeline_job(reserved.job_id)["candidate_projections"]) == 18
 
 

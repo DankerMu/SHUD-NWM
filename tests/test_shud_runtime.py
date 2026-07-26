@@ -2539,6 +2539,65 @@ def test_task_outcome_receipt_truncates_long_error_messages(tmp_path: Path) -> N
     assert payload["error_message"] == "x" * 512
 
 
+def test_task_outcome_receipt_binds_the_slurm_array_attempt_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The reader keys the receipt on the cycle-stable ``run_id``; only this
+    # binding lets it tell attempt N's leftover receipt from attempt N+1's.
+    monkeypatch.setenv("SLURM_ARRAY_JOB_ID", "4000")
+    monkeypatch.setenv("SLURM_ARRAY_TASK_ID", "7")
+    monkeypatch.setenv("SLURM_JOB_ID", "4007")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    log_dir = tmp_path / "workspace" / "runs" / "run-a" / "logs"
+    log_dir.mkdir(parents=True)
+
+    runtime._write_task_outcome_receipt(log_dir, "run-a", SHUDRuntimeError("ARTIFACT_NOT_FOUND", "boom"))
+
+    payload = json.loads((log_dir / "task_outcome.json").read_text(encoding="utf-8"))
+    assert payload["slurm_job_id"] == "4000"
+    assert payload["array_task_id"] == 7
+
+
+def test_task_outcome_receipt_identity_falls_back_to_the_non_array_job_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SLURM_ARRAY_JOB_ID", raising=False)
+    monkeypatch.delenv("SLURM_ARRAY_TASK_ID", raising=False)
+    monkeypatch.setenv("SLURM_JOB_ID", "9100")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    log_dir = tmp_path / "workspace" / "runs" / "run-a" / "logs"
+    log_dir.mkdir(parents=True)
+
+    runtime._write_task_outcome_receipt(log_dir, "run-a", SHUDRuntimeError("ARTIFACT_NOT_FOUND", "boom"))
+
+    payload = json.loads((log_dir / "task_outcome.json").read_text(encoding="utf-8"))
+    assert payload["slurm_job_id"] == "9100"
+    assert payload["array_task_id"] is None
+
+
+def test_task_outcome_receipt_identity_is_null_without_slurm_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for key in ("SLURM_ARRAY_JOB_ID", "SLURM_JOB_ID"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("SLURM_ARRAY_TASK_ID", "not-a-number")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    log_dir = tmp_path / "workspace" / "runs" / "run-a" / "logs"
+    log_dir.mkdir(parents=True)
+
+    runtime._write_task_outcome_receipt(log_dir, "run-a", SHUDRuntimeError("ARTIFACT_NOT_FOUND", "boom"))
+
+    payload = json.loads((log_dir / "task_outcome.json").read_text(encoding="utf-8"))
+    assert payload["slurm_job_id"] is None
+    assert payload["array_task_id"] is None
+
+
 @pytest.mark.parametrize(
     ("field_path", "value"),
     [

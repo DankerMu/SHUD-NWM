@@ -51,8 +51,13 @@ must land together, and why a naive L1-only or L2-only fix fails):
 - **L1 classifier channel (DB-free, file-based)**: the runtime's
   existing failure hook (`runtime.py:402`, `_write_failure_log`) also
   emits a machine-parsable `logs/task_outcome.json`
-  (`schema, run_id, error_code, error_message, failed_at`) under the
-  same containment discipline; array accounting resolves per-task codes
+  (`schema, run_id, error_code, error_message, failed_at`, plus the
+  attempt-identity binding `slurm_job_id`/`array_task_id` from the
+  Slurm environment — fix-round F3: receipts whose binding is absent
+  or does not match the current attempt are rejected by the reader,
+  degrading to the fail-safe, so a stale receipt from a prior attempt
+  of the same cycle-stable `run_id` can never misclassify a later
+  cancelled/killed attempt) under the same containment discipline; array accounting resolves per-task codes
   through ONE new resolver (object-store read keyed on the re-indexed
   cohort member's `run_id`, NOT `context.run_id`), falling back to
   `NODE_FAILURE` only when the receipt is absent/unreadable (fail-safe
@@ -144,6 +149,19 @@ must land together, and why a naive L1-only or L2-only fix fails):
   three-way table maintenance, maskable by wrapper layers).
 
 ## Known risks / disclosed residuals
+
+- Recorded consequence of the URI-absent ruling (verifier-adjudicated,
+  endorsed): a forecast-stage failure with NO recorded forcing
+  provenance is demoted to the repair-eligible missing-forcing blocker
+  even when its own failure code is a non-forcing permanent cause
+  (e.g. `POLICY_BLOCKED`, `INVALID_MANIFEST`) — the top-level
+  classification and `manual_retry_required` flag are replaced, while
+  the true per-job `error_code` stays visible in
+  `evidence["pipeline_jobs"]`. Scope is bounded to forecast restart
+  stage (probe: convert/parse/publish/forcing permanent failures keep
+  their original blockers). Repair still requires the operator's
+  exact-cycle `--repair-missing-forcing`; `manual_retry_requested` is
+  evaluated before the guard. Pinned by a green test.
 
 - The copyback half of the guard newly fires for failed candidates
   with missing copyback sources — same fail-closed direction,

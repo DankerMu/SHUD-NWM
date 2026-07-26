@@ -1392,10 +1392,16 @@ def _write_task_outcome_receipt(
     *,
     error_code: str = "ARTIFACT_NOT_FOUND",
     schema_version: str = "nhms.shud_task_outcome.v1",
+    slurm_job_id: str | None = "4000",
+    array_task_id: int | None = 0,
 ) -> None:
+    # ``run_id`` is cycle-stable, so the receipt also carries the attempt binding
+    # the runtime observes (Slurm array master id + array task id).
     payload = {
         "schema_version": schema_version,
         "run_id": run_id,
+        "slurm_job_id": slurm_job_id,
+        "array_task_id": array_task_id,
         "error_code": error_code,
         "error_message": "Object storage artifact not found",
         "failed_at": "2026-05-01T00:10:00Z",
@@ -1509,6 +1515,86 @@ def test_array_accounting_without_context_or_object_store_falls_back_without_rai
 
     assert no_context.task_results[0].error_code == "NODE_FAILURE"
     assert no_store.task_results[0].error_code == "NODE_FAILURE"
+
+
+def test_stale_receipt_from_a_previous_attempt_is_not_stamped_on_a_cancelled_task(tmp_path: Path) -> None:
+    # ``run_id`` is cycle-stable and nothing invalidates the object-store copy,
+    # so attempt N+1 -- killed before the runtime's except hook ever ran
+    # (CANCELLED / OOM / preempt) -- would otherwise inherit attempt N's
+    # permanent classifier and be demoted to a non-retryable failure forever.
+    from services.orchestrator import chain_array_accounting
+
+    context = _task_outcome_receipt_context()
+    object_store = LocalObjectStore(tmp_path / "objects", object_store_prefix="s3://nhms")
+    _write_task_outcome_receipt(object_store, "run_reindexed_0", slurm_job_id="4000", array_task_id=0)
+
+    stdout_aggregation = chain_array_accounting.parse_sacct_array_results(
+        "5001_0|CANCELLED|0:15|00:02:00",
+        "5001",
+        context=context,
+        object_store=object_store,
+    )
+    dict_aggregation = chain_array_accounting.coerce_array_aggregation(
+        [{"task_id": 0, "status": "cancelled", "exit_code": 0}],
+        "5001",
+        context=context,
+        object_store=object_store,
+    )
+
+    for aggregation in (stdout_aggregation, dict_aggregation):
+        assert aggregation.task_results[0].status == "cancelled"
+        assert aggregation.task_results[0].error_code == "NODE_FAILURE"
+
+
+def test_receipt_bound_to_the_current_attempt_is_honored_after_a_retry(tmp_path: Path) -> None:
+    from services.orchestrator import chain_array_accounting
+
+    context = _task_outcome_receipt_context()
+    object_store = LocalObjectStore(tmp_path / "objects", object_store_prefix="s3://nhms")
+    _write_task_outcome_receipt(object_store, "run_reindexed_0", slurm_job_id="5001", array_task_id=0)
+
+    aggregation = chain_array_accounting.parse_sacct_array_results(
+        "5001_0|FAILED|1:0|00:02:00",
+        "5001",
+        context=context,
+        object_store=object_store,
+    )
+
+    assert aggregation.task_results[0].error_code == "ARTIFACT_NOT_FOUND"
+
+
+def test_receipt_from_another_array_task_of_the_same_attempt_is_rejected(tmp_path: Path) -> None:
+    from services.orchestrator import chain_array_accounting
+
+    context = _task_outcome_receipt_context()
+    object_store = LocalObjectStore(tmp_path / "objects", object_store_prefix="s3://nhms")
+    _write_task_outcome_receipt(object_store, "run_reindexed_0", slurm_job_id="4000", array_task_id=7)
+
+    aggregation = chain_array_accounting.parse_sacct_array_results(
+        "4000_0|FAILED|1:0|00:02:00",
+        "4000",
+        context=context,
+        object_store=object_store,
+    )
+
+    assert aggregation.task_results[0].error_code == "NODE_FAILURE"
+
+
+def test_unbound_receipt_without_attempt_identity_is_never_trusted(tmp_path: Path) -> None:
+    from services.orchestrator import chain_array_accounting
+
+    context = _task_outcome_receipt_context()
+    object_store = LocalObjectStore(tmp_path / "objects", object_store_prefix="s3://nhms")
+    _write_task_outcome_receipt(object_store, "run_reindexed_0", slurm_job_id=None, array_task_id=None)
+
+    aggregation = chain_array_accounting.parse_sacct_array_results(
+        "4000_0|FAILED|1:0|00:02:00",
+        "4000",
+        context=context,
+        object_store=object_store,
+    )
+
+    assert aggregation.task_results[0].error_code == "NODE_FAILURE"
 
 
 class _DbFreeRetryGateService(RetryService):

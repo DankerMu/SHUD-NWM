@@ -16,6 +16,19 @@ When a candidate carries a failure signal and the forcing package its forecast s
   satisfying the structural contract required by the explicit
   missing-forcing repair policy, and no forecast work is submitted
 
+#### Scenario: Failure-state candidate with no recorded forcing provenance blocks the same way
+
+- **WHEN** a candidate has a failure signal, its restart stage is the
+  forecast stage, and NO forcing package reference is recorded in its
+  state at all (the incident geometry: forcing was never produced, the
+  journal records null provenance)
+- **THEN** the decision is the same stable missing-forcing blocker
+  (artifact reference null in the guard evidence), regardless of the
+  recorded failure code — including permanently-classified codes such
+  as policy or manifest failures, whose original cause remains
+  visible in the per-job evidence — and a manual retry request, which
+  is evaluated before the guard, remains the operator escape hatch
+
 #### Scenario: Permanently-classified failure with missing forcing remains repair-eligible
 
 - **WHEN** the recorded failure code is non-transient (for example
