@@ -8,6 +8,7 @@ from typing import Any, Protocol
 
 from packages.common.redaction import redact_payload
 from packages.common.source_identity import normalize_source_id
+from services.orchestrator import scheduler_generation as _scheduler_generation
 from services.orchestrator.scheduler_state import _ensure_utc, _evidence_safe, _format_utc
 from workers.data_adapters.base import CycleDiscovery, cycle_id_for
 
@@ -114,6 +115,14 @@ class SchedulerDiscoveryContext:
     ] | None = None
     discover_source_window_provider: DiscoverSourceWindowProvider | None = None
     cycle_completion_status_provider: CycleCompletionStatusProvider | None = None
+    # §8.7 (#1107): required warm-start lead hours for a candidate, used only
+    # to compose the EXPECTED predecessor identity token for the journal
+    # identity filter.  Optional — ``None`` means no judgement (legacy
+    # behavior), and no second copy of the lead derivation lives here.
+    required_lead_hours_for_candidate: Callable[
+        [SchedulerCandidateLike, SchedulerSourceCycle],
+        int,
+    ] | None = None
 
 
 def cycle_completion_status(
@@ -125,9 +134,41 @@ def cycle_completion_status(
 ) -> str:
     """Return 'complete' if every model's full pipeline is done for this cycle, else 'gap'."""
 
+    scoped_models = _models_in_completion_scope(context, discovery, models)
+    verdict = _cycle_completion_verdict(context, discovery, scoped_models, horizon=horizon)
+    if verdict != "complete":
+        return verdict
+    # §8.7 (#1107) single choke point: EVERY "complete" verdict must clear the
+    # journal predecessor identity filter, not just the completed-provider
+    # branch.  Under production ``NHMS_SCHEDULER_DB_FREE_REQUIRED=true`` the
+    # strict/successor branch preempts and used to return "complete" without
+    # any identity check.  No-judgement shapes leave the verdict untouched, so
+    # legacy behavior is byte-identical outside a positive mismatch.
+    for model in scoped_models:
+        if _journal_predecessor_identity_is_stale(context, discovery, model, horizon=horizon):
+            return "gap"
+    return "complete"
+
+
+def _models_in_completion_scope(
+    context: SchedulerDiscoveryContext,
+    discovery: CycleDiscovery,
+    models: Sequence[SchedulerModelLike],
+) -> tuple[SchedulerModelLike, ...]:
     source_scope_filter = context.model_source_is_out_of_scope
     if callable(source_scope_filter):
-        models = tuple(model for model in models if not source_scope_filter(model, discovery))
+        return tuple(model for model in models if not source_scope_filter(model, discovery))
+    return tuple(models)
+
+
+def _cycle_completion_verdict(
+    context: SchedulerDiscoveryContext,
+    discovery: CycleDiscovery,
+    models: Sequence[SchedulerModelLike],
+    *,
+    horizon: Mapping[str, Any] | None = None,
+) -> str:
+    """Pre-#1107 completion scoring: source scope already applied, no identity gate."""
 
     state_provider = (
         getattr(context.active_repository, "candidate_state", None)
@@ -187,14 +228,16 @@ def cycle_completion_status(
         else None
     )
     if callable(completed_provider) and models:
-        if all(
-            completed_provider(
+        all_completed = True
+        for model in models:
+            if not completed_provider(
                 source_id=discovery.source_id,
                 cycle_time=discovery.cycle_time,
                 model_id=model.model_id,
-            )
-            for model in models
-        ):
+            ):
+                all_completed = False
+                break
+        if all_completed:
             return "complete"
 
     if callable(state_provider) and models:
@@ -231,6 +274,55 @@ def cycle_completion_status(
         ):
             return "gap"
     return "complete"
+
+
+def _journal_predecessor_identity_is_stale(
+    context: SchedulerDiscoveryContext,
+    discovery: CycleDiscovery,
+    model: SchedulerModelLike,
+    *,
+    horizon: Mapping[str, Any] | None,
+) -> bool:
+    """Whether the journal's completed entry for this model has a stale lineage (§8.7, #1107).
+
+    ``True`` only for a POSITIVE identity mismatch (same expected base key,
+    different lineage suffix), which disqualifies the model from counting
+    toward cycle completion so the cycle stays eligible for backfill.  Every
+    other shape — no accessor on the repository, no lead-hours provider, no
+    recorded identity, matching token, suffix-less legacy id, different base
+    key (legal fallback warm start) — yields ``False``: no judgement, legacy
+    behavior.  Read-only: no journal mutation, no run-manifest read.
+    """
+    lead_hours_provider = context.required_lead_hours_for_candidate
+    identity_provider = (
+        getattr(context.active_repository, "completed_pipeline_init_state_id", None)
+        if context.active_repository is not None
+        else None
+    )
+    if not callable(lead_hours_provider) or not callable(identity_provider):
+        return False
+    recorded_init_state_id = identity_provider(
+        source_id=discovery.source_id,
+        cycle_time=discovery.cycle_time,
+        model_id=model.model_id,
+    )
+    if recorded_init_state_id in (None, ""):
+        return False
+    cycle_horizon = dict(horizon or {})
+    candidate = context.candidate_factory(discovery=discovery, model=model, horizon=cycle_horizon)
+    source_cycle = SchedulerSourceCycle(discovery=discovery, horizon=cycle_horizon)
+    try:
+        required_lead_hours = int(lead_hours_provider(candidate, source_cycle))
+    except _scheduler_generation.JOURNAL_IDENTITY_INPUT_ERRORS:
+        return False
+    matches = _scheduler_generation.journal_init_state_lineage_matches_expected(
+        str(recorded_init_state_id),
+        source_id=candidate.source_id,
+        model_id=candidate.model_id,
+        candidate_valid_time=candidate.cycle_time_utc,
+        required_lead_hours=required_lead_hours,
+    )
+    return matches is False
 
 
 def _terminal_decision_matches_strict_warm_start(

@@ -9,12 +9,14 @@ from typing import Any, Protocol
 
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator import scheduler_discovery as _scheduler_discovery
+from services.orchestrator import scheduler_generation as _scheduler_generation
 from services.orchestrator.chain_source_cycle import (
     RAW_MANIFEST_READY_CYCLE_STATUSES,
     _raw_manifest_uri_matches_source_cycle,
 )
 from services.orchestrator.scheduler_file_providers import _public_raw_manifest_evidence
 from services.orchestrator.scheduler_state import (
+    DURABLE_HYDRO_SUCCESS_STATUSES,
     CandidateStateDecision,
     _bounded_active_slurm_jobs,
     _call_active_slurm_jobs_provider,
@@ -57,6 +59,17 @@ CANDIDATE_CONSTRUCTION_TERMINAL_PIPELINE_STATUSES = {
     "permanently_failed",
 }
 _STRICT_WARM_START_TERMINAL_SKIP_REASONS = {"terminal_hydro_success", "terminal_pipeline_success"}
+
+#: Completed-type terminal skip reasons that the §8.7 journal predecessor
+#: identity filter may quarantine (Issue #1107).  ``terminal_completed_cycle``
+#: is included deliberately: it is the only completed-type skip reachable with
+#: ``NHMS_REQUIRE_FORECAST_WARM_START=true`` that never had an identity gate.
+#: ``active_duplicate_pipeline`` and every other non-completed reason are
+#: EXCLUDED — quarantining an active pipeline would resubmit over a running
+#: run.
+_JOURNAL_IDENTITY_QUARANTINE_SKIP_REASONS = frozenset(
+    {"terminal_hydro_success", "terminal_pipeline_success", "terminal_completed_cycle"}
+)
 
 SchedulerResourceLimitError = _scheduler_discovery.SchedulerResourceLimitError
 _source_discovery_evidence_safe = _scheduler_discovery._source_discovery_evidence_safe
@@ -145,6 +158,13 @@ class SchedulerCandidateConstructionContext:
     successor_state_for_candidate: Callable[
         [SchedulerCandidateLike, SchedulerSourceCycleLike],
         Mapping[str, Any] | None,
+    ] | None = None
+    # §8.7 (#1107): required warm-start lead hours for a candidate, used only
+    # to compose the EXPECTED predecessor identity token.  Optional so
+    # non-production contexts keep legacy behavior (None → no judgement).
+    required_lead_hours_for_candidate: Callable[
+        [SchedulerCandidateLike, SchedulerSourceCycleLike],
+        int,
     ] | None = None
     max_candidates: int = MAX_CANDIDATES
 
@@ -449,14 +469,28 @@ def build_candidates(
                         _terminal_run_manifest_retry_evidence(state_decision.evidence),
                     )
                 else:
-                    skipped.append(
-                        {
-                            **candidate.to_dict(),
-                            "reason": state_decision.reason,
-                            "state_evidence": _evidence_safe(state_decision.evidence),
-                        }
+                    identity_quarantine = _journal_predecessor_identity_quarantine(
+                        context,
+                        candidate,
+                        cycle,
+                        state_decision,
+                        raw_candidate_state,
                     )
-                    continue
+                    if identity_quarantine is not None:
+                        # REPLACE the skip decision (do not merely drop the
+                        # append): the generic skip re-check further down
+                        # would otherwise re-skip this candidate, and the
+                        # retry evidence must reach the candidate.
+                        state_decision = identity_quarantine
+                    else:
+                        skipped.append(
+                            {
+                                **candidate.to_dict(),
+                                "reason": state_decision.reason,
+                                "state_evidence": _evidence_safe(state_decision.evidence),
+                            }
+                        )
+                        continue
             state_decision = _upgrade_retry_for_strict_warm_start_manifest(
                 state_decision,
                 strict_warm_start,
@@ -1923,6 +1957,103 @@ def _upgrade_retry_for_strict_warm_start_manifest(
             state_decision.evidence,
             strict_evidence,
         ),
+    )
+
+
+def _journal_predecessor_identity_quarantine(
+    context: SchedulerCandidateConstructionContext,
+    candidate: SchedulerCandidateLike,
+    cycle: SchedulerSourceCycleLike,
+    state_decision: CandidateStateDecision,
+    raw_candidate_state: Mapping[str, Any] | None,
+) -> CandidateStateDecision | None:
+    """Quarantine a completed-type skip whose journal lineage is stale (§8.7, #1107).
+
+    Returns a ``retry`` decision ONLY for a positive identity mismatch — the
+    recorded ``init_state_id`` shares cycle T's expected base key but carries
+    a different lineage suffix.  Returns ``None`` (leave the skip alone) for
+    every other shape: a non-completed skip reason, a missing lead-hours
+    provider, a ``hydro_run`` row that is not itself completed, no recorded
+    identity, a matching token, a suffix-less legacy id, or a different base
+    key (the legal env=false fallback warm start).
+
+    The surface can only DECLINE to skip, never admit a skip, so a
+    no-judgement outcome keeps the pre-#1107 behavior byte-identical.
+    """
+    if state_decision.reason not in _JOURNAL_IDENTITY_QUARANTINE_SKIP_REASONS:
+        return None
+    lead_hours_provider = context.required_lead_hours_for_candidate
+    if not callable(lead_hours_provider):
+        return None
+    hydro_run = raw_candidate_state.get("hydro_run") if isinstance(raw_candidate_state, Mapping) else None
+    if not isinstance(hydro_run, Mapping):
+        return None
+    if str(hydro_run.get("status") or "") not in DURABLE_HYDRO_SUCCESS_STATUSES:
+        # The judged identity must be the COMPLETED run's row.  A
+        # created/staged/submitted placeholder superseded by a pipeline
+        # terminal also carries an ``init_state_id``, but it does not describe
+        # the run that produced the completion — decline judgement instead of
+        # quarantining on it.
+        return None
+    recorded_init_state_id = _state_field(hydro_run, "state_id")
+    if recorded_init_state_id in (None, ""):
+        return None
+    try:
+        required_lead_hours = int(lead_hours_provider(candidate, cycle))
+        _expected_base, expected_init_state_id = _scheduler_generation.expected_journal_init_state_tokens(
+            source_id=candidate.source_id,
+            model_id=candidate.model_id,
+            candidate_valid_time=candidate.cycle_time_utc,
+            required_lead_hours=required_lead_hours,
+        )
+    except _scheduler_generation.JOURNAL_IDENTITY_INPUT_ERRORS:
+        return None
+    matches = _scheduler_generation.journal_init_state_lineage_matches_expected(
+        str(recorded_init_state_id),
+        source_id=candidate.source_id,
+        model_id=candidate.model_id,
+        candidate_valid_time=candidate.cycle_time_utc,
+        required_lead_hours=required_lead_hours,
+    )
+    if matches is not False:
+        return None
+    return CandidateStateDecision(
+        "retry",
+        "journal_predecessor_identity_mismatch",
+        _journal_predecessor_identity_retry_evidence(
+            state_decision.evidence,
+            recorded_init_state_id=str(recorded_init_state_id),
+            expected_init_state_id=expected_init_state_id,
+            required_lead_hours=required_lead_hours,
+            skipped_reason=str(state_decision.reason or ""),
+        ),
+    )
+
+
+def _journal_predecessor_identity_retry_evidence(
+    terminal_evidence: Mapping[str, Any],
+    *,
+    recorded_init_state_id: str,
+    expected_init_state_id: str,
+    required_lead_hours: int,
+    skipped_reason: str,
+) -> dict[str, Any]:
+    return _evidence_safe(
+        {
+            **dict(terminal_evidence),
+            "decision": "retry_journal_predecessor_identity_mismatch",
+            "reason": "journal_predecessor_identity_mismatch",
+            "restart_stage": "forecast",
+            "restart_from_stage": "forecast",
+            "native_shud_resubmitted": True,
+            "durable_output_reused": False,
+            "journal_predecessor_identity": {
+                "recorded_init_state_id": recorded_init_state_id,
+                "expected_init_state_id": expected_init_state_id,
+                "required_lead_hours": required_lead_hours,
+                "quarantined_skip_reason": skipped_reason,
+            },
+        }
     )
 
 

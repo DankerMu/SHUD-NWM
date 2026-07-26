@@ -5637,3 +5637,126 @@ def test_file_orchestration_journal_malformed_latest_fails_closed(tmp_path: Path
     assert state["pipeline_status"] == "running"
     assert state["file_journal"]["status"] == "blocked"
     assert state["file_journal"]["reason"] == "file_journal_malformed_json"
+
+
+# ---------------------------------------------------------------------------
+# §8.7 / #1107: read-only accessor for the completed run's recorded identity.
+# ---------------------------------------------------------------------------
+
+
+def test_completed_pipeline_init_state_id_returns_recorded_identity(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    latest = _latest_view(cycle_time=cycle_time, hydro_status="complete")
+    latest["hydro_run"]["init_state_id"] = "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+    _write_json(journal_root / "latest/gfs/2026062800/model_a.json", latest)
+    repository = FileOrchestrationJournalRepository(journal_root)
+    before = (journal_root / "latest/gfs/2026062800/model_a.json").read_bytes()
+
+    assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
+    assert (
+        repository.completed_pipeline_init_state_id(
+            source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+        )
+        == "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+    )
+    # Read-only invariant: the accessor never rewrites the audit entry.
+    assert (journal_root / "latest/gfs/2026062800/model_a.json").read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "leg",
+    ["no_journal", "no_recorded_id", "hydro_run_absent", "other_model"],
+)
+def test_completed_pipeline_init_state_id_returns_none_for_unjudgeable_rows(
+    tmp_path: Path,
+    leg: str,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    cycle_stamp = format_cycle_time(cycle_time)
+    journal_root = tmp_path / "journal"
+    if leg == "no_recorded_id":
+        # Completed run that recorded no init_state_id at all.
+        _write_json(
+            journal_root / "latest/gfs/2026062800/model_a.json",
+            _latest_view(cycle_time=cycle_time, hydro_status="complete"),
+        )
+    elif leg == "hydro_run_absent":
+        # Completion is carried by a terminal pipeline job with no hydro_run
+        # row at all, so there is no identity to read.  No terminal-stage env
+        # is set: this leg holds under the default stage as well as under
+        # ``forecast_state_save_qc`` (that mode is pinned separately below).
+        terminal_job = _active_job(cycle_time)
+        terminal_job.update(
+            {
+                "job_id": f"job_cycle_gfs_{cycle_stamp}_state_save_qc",
+                "idempotency_key": f"cycle_gfs_{cycle_stamp}:state_save_qc",
+                "run_id": f"fcst_gfs_{cycle_stamp}_model_a",
+                "stage": "state_save_qc",
+                "status": "succeeded",
+                "finished_at": "2026-06-28T00:05:00Z",
+            }
+        )
+        _write_json(
+            journal_root / "latest/gfs/2026062800/model_a.json",
+            _latest_view(cycle_time=cycle_time, hydro_status=None, jobs=[terminal_job]),
+        )
+    elif leg == "other_model":
+        latest = _latest_view(cycle_time=cycle_time, model_id="model_b", hydro_status="complete")
+        latest["hydro_run"]["init_state_id"] = "state_gfs_model_b_2026062800_gfs_2026062712_f012"
+        _write_json(journal_root / "latest/gfs/2026062800/model_b.json", latest)
+
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert (
+        repository.completed_pipeline_init_state_id(
+            source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+        )
+        is None
+    )
+
+
+def test_completed_pipeline_init_state_id_ignores_superseded_hydro_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The judged identity must be the COMPLETED run's row.
+
+    Under the ``forecast_state_save_qc`` terminal stage (the value
+    ``chain_repository_state._compute_state_save_qc_terminal_enabled`` compares
+    against) completion is decided from the pipeline job alone, while the
+    ``hydro_run`` row is still a ``created`` placeholder that the write side
+    already populated with an ``init_state_id``.  That placeholder does not
+    describe the run that completed, so the accessor declines rather than
+    handing the scheduler an identity to quarantine on.
+    """
+    monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast_state_save_qc")
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    cycle_stamp = format_cycle_time(cycle_time)
+    journal_root = tmp_path / "journal"
+    terminal_job = _active_job(cycle_time)
+    terminal_job.update(
+        {
+            "job_id": f"job_cycle_gfs_{cycle_stamp}_state_save_qc",
+            "idempotency_key": f"cycle_gfs_{cycle_stamp}:state_save_qc",
+            "run_id": f"fcst_gfs_{cycle_stamp}_model_a",
+            "stage": "state_save_qc",
+            "status": "succeeded",
+            "finished_at": "2026-06-28T00:05:00Z",
+        }
+    )
+    latest = _latest_view(cycle_time=cycle_time, hydro_status="created", jobs=[terminal_job])
+    latest["hydro_run"]["init_state_id"] = "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+    _write_json(journal_root / "latest/gfs/2026062800/model_a.json", latest)
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    # The cycle IS complete — completion and identity are decided separately.
+    assert repository.has_completed_pipeline(
+        source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+    ) is True
+    assert (
+        repository.completed_pipeline_init_state_id(
+            source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+        )
+        is None
+    )
