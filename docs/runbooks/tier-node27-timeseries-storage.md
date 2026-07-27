@@ -1460,7 +1460,15 @@ tuples include, sampled within or older than that window:
   window; PLUS
 - ≥1 `db-export` selector whenever verified salvage objects cover any
   part of the drop window, AND the UNION of the drill's
-  `source=db-export` tuples must likewise cover the drop window.
+  `source=db-export` tuples must cover each salvage-backed window
+  intersected with the drop window — judged per window, NOT over the
+  whole drop window. Salvage-backed windows are the completeness
+  subjects with `coverage=db-export` AND `verdict=complete` that overlap
+  the drop window (same derivation as [§8.7](#87-salvage-backed-windows));
+  the rest of the drop window is product-archive-backed and has no
+  db-export package to demand. A db-export subject that overlaps the drop
+  window but derives no salvage-backed window (verdict not `complete`)
+  is treated as unsatisfied, never as satisfied.
 
 The drill EMIT contract is per-cycle: each verified product manifest
 contributes one 24 h coverage tuple sampled within or older than the
@@ -1472,13 +1480,22 @@ tuples; retention union-checks them against the candidate drop window).
 
 The drill declares its tuples faithfully; the retention runner (#855)
 evaluates their UNION against its candidate drop window. A FAIL receipt,
-a stale receipt, or a PASS receipt whose per-source UNION does not
-cover the drop window blocks retention enforcement. See §8.2 wire-code
-`DRILL_COVERAGE_FORCING_MISSING` / `DRILL_COVERAGE_RUNS_MISSING` /
-`DRILL_COVERAGE_DB_EXPORT_MISSING` for the code emitted when the union
-does not cover; see
+a stale receipt, or a PASS receipt whose `forcing` / `runs` UNION does
+not cover the drop window — or whose `db-export` UNION does not cover
+some salvage-backed window intersected with the drop window — blocks
+retention enforcement. See §8.2 wire-code
+`DRILL_COVERAGE_FORCING_MISSING` / `DRILL_COVERAGE_RUNS_MISSING` (whole
+drop window) and `DRILL_COVERAGE_DB_EXPORT_MISSING` (salvage-backed
+windows only) for the code emitted when the union does not cover; see
 `openspec/changes/tier-node27-timeseries-storage/design.md` #855
 fixture block H2 pin for the canonical statement.
+
+Ops consequence: the `--salvage-manifest` arguments passed to the drill
+(§7.3) MUST cover every db-export subject window appearing in the drop
+window, not just one of them — each such window is judged on its own, so
+a missing salvage manifest for any one of them makes the gate refuse
+(correctly). Re-run the drill with the full set of salvage manifests
+rather than narrowing the drop window.
 
 ### 7.6 Recovery (post-fault operator playbook)
 
@@ -1606,8 +1623,12 @@ surfaces in the same commit.
 - `DRILL_COVERAGE_RUNS_MISSING` — no set of `source=runs` coverage tuples
   whose UNION covers the drop window.
 - `DRILL_COVERAGE_DB_EXPORT_MISSING` — completeness has `coverage=db-export`
-  subject overlap but no set of drill `source=db-export` tuples whose
-  UNION covers the drop window.
+  subject overlap but the UNION of the drill's `source=db-export` tuples
+  fails to cover at least one salvage-backed window intersected with the
+  drop window (per-window judgement, NOT the whole drop window — see
+  [§7.5](#75-how-the-coverage-rule-maps-to-the-retention-gate)); also
+  emitted when the overlapping db-export subject derives no salvage-backed
+  window at all (fail-closed).
 - `RETENTION_CONFIG_INVALID` — absolute-path / positive-int / env-parse
   failure before any DB call. Emitted to stderr as a single JSON line
   `{status: "failed", code: "RETENTION_CONFIG_INVALID", reason: <detail>}`;
