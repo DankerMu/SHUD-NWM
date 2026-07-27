@@ -39,7 +39,7 @@ Issue: #1162
 
 ## 4. Ops oracle(node-27 实机,评审 clean 后合并前)
 
-- [ ] 4.1 node-27 经临时 git worktree(主工作树保持 master)checkout PR 分支,同 cutoff 重跑 retention `--dry-run`,**先读数再分支**:
+- [x] 4.1 node-27 经临时 git worktree(主工作树保持 master)checkout PR 分支,同 cutoff 重跑 retention `--dry-run`,**先读数再分支**——**实际结局(2026-07-27,分支 B 走通)**:①`dryrun-1162-branchB-20260727.json` 正确拒绝(claimed 窗尾无 drill 证据);②首次补跑 drill 误加 IFS 选择器(已覆盖窗)仍拒 `dryrun-1162-branchB-pass-20260727.json`,诊断出缺的是 `forc_gfs_2026061406`(drill 白名单与 gate 需求集无交叉校验 → #1177);③补对选择器复跑 drill(48 flags,PASS)后 `dryrun-1162-green-20260727.json` **全门通过**(outcome=dry-run,2 candidate + 2 deferred chunks)。未放宽任何判定;timer 未启用。receipt 详见 PR #1174 评论。原分支预案:
   - 前置读数:当前 inventory-audit receipt 中与 drop window 相交的 db-export subject 窗的最大 end,与实机 drill receipt db-export 并集右端(现为 `2026-06-21T00:00:00Z`,`first-live-pass-20260725T053420Z.json`)比对。
   - 分支 A:目标窗全部被 drill 覆盖 → receipt 不再 `DRILL_COVERAGE_DB_EXPORT_MISSING`,贴路径进 PR。
   - 分支 B(依现有 receipt 更可能:最后一个 salvage 窗 `[2026-06-14T06Z, 2026-06-21T06Z]` 尾部 6h 无 drill 覆盖):仍拒且 shortfall 落在该窗尾部 → **这是正确拒绝,不是本次修复的缺陷**。处置 = 补跑 archive-rebuild-drill 并把覆盖该 forcing_version 的 `--salvage-manifest` 一并传入,产出新 drill receipt 后复跑;**严禁**通过放宽 clip / 改成"任一窗覆盖即可" / 跳过退化窗让 dry-run 变绿。两个 receipt(拒绝 + 重跑通过)都贴进 PR。
