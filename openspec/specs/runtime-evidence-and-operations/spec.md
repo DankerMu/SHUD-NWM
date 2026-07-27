@@ -88,7 +88,7 @@ When the scheduler pass evidence payload exceeds the configured size bound and t
 #### Scenario: restart-reconcile incident evidence survives the fallback compactly
 
 - WHEN the source evidence payload carries a `restart_reconcile` block and the bounded fallback payload is constructed
-- THEN the fallback retains a compact `restart_reconcile` block exposing its status, `reserved_unbound_error`, `inflight_error`, and per-outcome summary rows limited to job identity, action, status, reconciliation reason class, `quarantine_reason`, and `quarantine_field`
+- THEN the fallback retains a compact `restart_reconcile` block exposing its status, `reserved_unbound_error`, `inflight_error`, and per-outcome summary rows limited to job identity, action, status, reconciliation reason class, `identity_blocked_streak`, `quarantine_reason`, and `quarantine_field`
 - AND when the source payload has no `restart_reconcile` block the fallback omits the key.
 
 #### Scenario: within-limit evidence is byte-identical to the pre-change contract
@@ -100,4 +100,13 @@ When the scheduler pass evidence payload exceeds the configured size bound and t
 
 - WHEN even the summarized-and-dropped payload exceeds the bound and the existing terminal limit-compaction tier rewrites the `limit` block to its reason-only form
 - THEN `limit.pre_limit_status` and `limit.candidate_lists` are permitted to disappear with the rest of the compacted `limit` block, preserving the pre-existing fail-closed behavior unchanged.
+
+### Requirement: No-progress convergence facts SHALL be readable from scheduler evidence
+
+Scheduler evidence SHALL expose, for each reserved-unbound reconcile outcome, the identity-blocked consecutive-pass counter and the `identity_mismatch_released` action when a release occurs, in both the full-fidelity `restart_reconcile` block and the bounded (size-limited) compaction of that block. The reconcile proof aggregation SHALL count a release as a reserved-status durable write. The budget-demoted decision `blocked_strict_warm_start_init_state_mismatch` SHALL remain readable from the bounded candidate summary through the existing `decision` key. These are per-job convergence facts; cross-reason no-progress aggregation and alerting remain out of scope (tracked separately).
+
+#### Scenario: Convergence facts survive bounded-evidence compaction
+
+- **WHEN** a pass records identity-blocked outcomes (or a release) and the evidence payload exceeds the size limit so the bounded compaction applies
+- **THEN** the compact `restart_reconcile` outcome rows still carry the consecutive-pass counter and the release action, and demoted candidates still show `blocked_strict_warm_start_init_state_mismatch` under the `decision` key
 
