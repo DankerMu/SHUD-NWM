@@ -9642,6 +9642,27 @@ def test_bounded_evidence_retains_compact_restart_reconcile_incident_block() -> 
     assert _BOUNDED_INCIDENT_VERBOSE_MARKER not in rendered
 
 
+def test_bounded_constructor_compacts_restart_reconcile_without_fit_tier_help() -> None:
+    """Production runs a 5MB budget, so the constructor is the sole reconcile compactor."""
+
+    payload = _incident_scheduler_evidence_payload("scheduler_2026072612_constructor_reconcile")
+
+    bounded = scheduler_module._bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=100_000,
+    )
+    rendered = json.dumps(bounded, separators=(",", ":"), sort_keys=True)
+
+    # The budget is an order of magnitude above the constructed payload, so
+    # `_fit_bounded_evidence_payload` returns at its first fit check and none of its
+    # degradation tiers (including the summary tier, which also compacts
+    # `restart_reconcile`) can contribute — mirroring the production 5MB regime.
+    assert len(rendered.encode("utf-8")) < 100_000 // 10
+    assert bounded["restart_reconcile"] == _expected_bounded_restart_reconcile()
+    assert _BOUNDED_INCIDENT_VERBOSE_MARKER not in rendered
+
+
 def test_bounded_evidence_retains_inflight_error_when_only_the_inflight_segment_failed() -> None:
     """The inflight segment records its own failure key (`scheduler_runtime.py:1572`)."""
 
@@ -9701,6 +9722,30 @@ def test_bounded_evidence_drops_candidate_lists_when_summaries_still_exceed_limi
         assert bounded[field_name] == []
     # restart_reconcile is a mapping field: the droppable tier empties it to {}, never [].
     assert bounded["restart_reconcile"] == {}
+
+
+def test_bounded_evidence_drops_candidate_lists_before_restart_reconcile() -> None:
+    """`_DROPPABLE_BOUNDED_EVIDENCE_FIELDS` order decides which incident block survives."""
+
+    payload = _incident_scheduler_evidence_payload("scheduler_2026072612_droppable_order")
+
+    # Measured for this payload (budget scan 2_300..7_000 step 10): 5_230-5_680 is the
+    # contiguous band where the drop loop stops after `candidates`, so `blocked_candidates`
+    # keeps its summary row and `restart_reconcile` keeps its compact block. 5_400 is an
+    # interior point of that band.
+    bounded = scheduler_module._bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=5_400,
+    )
+    rendered = json.dumps(bounded, separators=(",", ":"), sort_keys=True)
+
+    assert len(rendered.encode("utf-8")) <= 5_400
+    assert bounded["limit"]["candidate_lists"] == "dropped"
+    assert bounded["candidates"] == []
+    assert bounded["blocked_candidates"] == [_expected_bounded_blocked_candidate_summary()]
+    assert bounded["restart_reconcile"] == _expected_bounded_restart_reconcile()
+    assert _BOUNDED_INCIDENT_VERBOSE_MARKER not in rendered
 
 
 def test_bounded_evidence_pops_the_emptied_restart_reconcile_shell_below_the_droppable_tier() -> None:
