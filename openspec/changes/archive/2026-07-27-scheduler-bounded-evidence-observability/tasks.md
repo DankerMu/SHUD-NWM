@@ -38,4 +38,4 @@ Issue: #1168
 
 ## 4. Post-merge ops(非合并门)
 
-- [ ] 4.1 node-22 拉取后跑一次满编 `--plan` pass,确认超限产物 candidate 摘要行非空、`limit.pre_limit_status` 在场、`restart_reconcile` 紧凑块可读(issue Verification 第 3 条 live receipt)。
+- [x] 4.1 node-22 拉取后跑一次满编 `--plan` pass,确认超限产物 candidate 摘要行非空、`limit.pre_limit_status` 在场、`restart_reconcile` 紧凑块可读(issue Verification 第 3 条 live receipt)。——2026-07-27 由 timer 自然满编超限 pass 直接兑现:`scheduler_2026072707_bde4b623aee0.json`(`pre_limit_status=submission_failed`、36 摘要行、紧凑 reconcile 2 outcome 行);receipt 见 PR #1169 评论。
