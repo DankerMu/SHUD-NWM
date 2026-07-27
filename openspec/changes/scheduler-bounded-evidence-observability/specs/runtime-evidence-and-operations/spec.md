@@ -24,7 +24,7 @@ When the scheduler pass evidence payload exceeds the configured size bound and t
 #### Scenario: restart-reconcile incident evidence survives the fallback compactly
 
 - WHEN the source evidence payload carries a `restart_reconcile` block and the bounded fallback payload is constructed
-- THEN the fallback retains a compact `restart_reconcile` block exposing its status, `reserved_unbound_error`, and per-outcome summary rows limited to action, reason, `quarantine_reason`, and `quarantine_field`
+- THEN the fallback retains a compact `restart_reconcile` block exposing its status, `reserved_unbound_error`, `inflight_error`, and per-outcome summary rows limited to job identity, action, status, reconciliation reason class, `quarantine_reason`, and `quarantine_field`
 - AND when the source payload has no `restart_reconcile` block the fallback omits the key.
 
 #### Scenario: within-limit evidence is byte-identical to the pre-change contract

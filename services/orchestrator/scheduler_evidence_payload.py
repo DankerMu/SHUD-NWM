@@ -29,10 +29,15 @@ _BOUNDED_CANDIDATE_STATE_EVIDENCE_KEYS: tuple[tuple[str, tuple[str, ...]], ...] 
     ("quarantined_skip_reason", ("journal_predecessor_identity", "quarantined_skip_reason")),
 )
 _UNRECOGNIZED_CANDIDATE_SUMMARY_ERROR = "unrecognized_candidate_shape"
-_BOUNDED_RESTART_RECONCILE_KEYS = ("status", "reserved_unbound_error")
+# Both reconcile segments record their own failure key (scheduler_runtime.py:1542,1572)
+# and either can be the only one present, so the compact block must keep both.
+_BOUNDED_RESTART_RECONCILE_KEYS = ("status", "reserved_unbound_error", "inflight_error")
+# Producer key set: scheduler_runtime.py:1515-1538 (sole writer of outcome rows).
 _BOUNDED_RESTART_RECONCILE_OUTCOME_KEYS = (
+    "job_id",
     "action",
-    "reason",
+    "status",
+    "reconciliation_reason_class",
     "quarantine_reason",
     "quarantine_field",
 )

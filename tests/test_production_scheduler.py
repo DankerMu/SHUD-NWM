@@ -26,6 +26,7 @@ from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator import scheduler_candidates as scheduler_candidates_module
 from services.orchestrator import scheduler_discovery as scheduler_discovery_module
 from services.orchestrator import scheduler_evidence as scheduler_evidence_module
+from services.orchestrator import scheduler_evidence_payload as scheduler_evidence_payload_module
 from services.orchestrator import scheduler_execution as scheduler_execution_module
 from services.orchestrator import scheduler_file_providers as scheduler_file_providers_module
 from services.orchestrator import scheduler_lease as scheduler_lease_module
@@ -9575,13 +9576,55 @@ def test_bounded_evidence_summary_rows_are_idempotent_under_a_second_fallback() 
         reason="evidence_size_limit_exceeded",
         max_evidence_bytes=8_000,
     )
-    resummarized = scheduler_evidence_module._fit_bounded_evidence_payload(
-        bounded,
+
+    # `_fit_bounded_evidence_payload` returns at its first fit check for an already
+    # fitting payload, so the summary tier has to be driven directly to be observed.
+    once = json.loads(json.dumps(bounded))
+    scheduler_evidence_payload_module._summarize_bounded_candidate_lists(once)
+    twice = json.loads(json.dumps(once))
+    scheduler_evidence_payload_module._summarize_bounded_candidate_lists(twice)
+
+    assert once == bounded
+    assert twice == once
+    # Fields whose second pass reads back this helper's own output.
+    assert once["candidates"] == [_expected_bounded_selected_candidate_summary()]
+    assert once["blocked_candidates"] == [_expected_bounded_blocked_candidate_summary()]
+    assert once["skipped_candidates"] == _expected_bounded_skipped_candidate_summaries()
+    assert once["skipped_candidates"][-1] == {"summary_error": "unrecognized_candidate_shape"}
+    assert once["restart_reconcile"] == _expected_bounded_restart_reconcile()
+    assert once["limit"]["candidate_lists"] == "summarized"
+
+
+def test_fit_summary_tier_summarizes_injected_unsummarized_bounded_payload() -> None:
+    """The `_fit` summary tier is load-bearing on a bounded payload that skipped it."""
+
+    payload = _incident_scheduler_evidence_payload("scheduler_2026072612_fit_summary_tier")
+    bounded = scheduler_module._bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
         max_evidence_bytes=8_000,
     )
 
+    unsummarized = json.loads(json.dumps(bounded))
     for field_name in ("candidates", "blocked_candidates", "skipped_candidates", "restart_reconcile"):
-        assert resummarized[field_name] == bounded[field_name]
+        unsummarized[field_name] = json.loads(json.dumps(payload[field_name]))
+    # No `candidate_lists` marker yet, so the tier's own marking is what must supply it.
+    unsummarized["limit"] = {key: value for key, value in bounded["limit"].items() if key != "candidate_lists"}
+    assert len(json.dumps(unsummarized, separators=(",", ":"), sort_keys=True).encode("utf-8")) > 8_000
+
+    fitted = scheduler_evidence_module._fit_bounded_evidence_payload(
+        unsummarized,
+        max_evidence_bytes=8_000,
+    )
+    rendered = json.dumps(fitted, separators=(",", ":"), sort_keys=True)
+
+    assert len(rendered.encode("utf-8")) <= 8_000
+    assert fitted["candidates"] == [_expected_bounded_selected_candidate_summary()]
+    assert fitted["blocked_candidates"] == [_expected_bounded_blocked_candidate_summary()]
+    assert fitted["skipped_candidates"] == _expected_bounded_skipped_candidate_summaries()
+    assert fitted["restart_reconcile"] == _expected_bounded_restart_reconcile()
+    assert fitted["limit"]["candidate_lists"] == "summarized"
+    assert _BOUNDED_INCIDENT_VERBOSE_MARKER not in rendered
 
 
 def test_bounded_evidence_retains_compact_restart_reconcile_incident_block() -> None:
@@ -9596,6 +9639,34 @@ def test_bounded_evidence_retains_compact_restart_reconcile_incident_block() -> 
 
     assert len(rendered.encode("utf-8")) <= 8_000
     assert bounded["restart_reconcile"] == _expected_bounded_restart_reconcile()
+    assert _BOUNDED_INCIDENT_VERBOSE_MARKER not in rendered
+
+
+def test_bounded_evidence_retains_inflight_error_when_only_the_inflight_segment_failed() -> None:
+    """The inflight segment records its own failure key (`scheduler_runtime.py:1572`)."""
+
+    payload = _incident_scheduler_evidence_payload("scheduler_2026072612_inflight_error")
+    payload["restart_reconcile"] = {
+        "status": "error",
+        "inflight_error": "OperationalError: reconcile sacct session unavailable",
+        "inflight": {
+            "count": 1,
+            "outcomes": [{"job_id": "job_healthy", "detail": _bounded_incident_verbose_text("inflight")}],
+        },
+    }
+
+    bounded = scheduler_module._bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=8_000,
+    )
+    rendered = json.dumps(bounded, separators=(",", ":"), sort_keys=True)
+
+    assert len(rendered.encode("utf-8")) <= 8_000
+    assert bounded["restart_reconcile"] == {
+        "status": "error",
+        "inflight_error": "OperationalError: reconcile sacct session unavailable",
+    }
     assert _BOUNDED_INCIDENT_VERBOSE_MARKER not in rendered
 
 
@@ -9627,8 +9698,30 @@ def test_bounded_evidence_drops_candidate_lists_when_summaries_still_exceed_limi
     assert bounded["limit"]["candidate_lists"] == "dropped"
     assert bounded["limit"]["pre_limit_status"] == "submission_failed"
     for field_name in ("candidates", "blocked_candidates", "skipped_candidates"):
-        assert not bounded.get(field_name)
-    assert not bounded.get("restart_reconcile")
+        assert bounded[field_name] == []
+    # restart_reconcile is a mapping field: the droppable tier empties it to {}, never [].
+    assert bounded["restart_reconcile"] == {}
+
+
+def test_bounded_evidence_pops_the_emptied_restart_reconcile_shell_below_the_droppable_tier() -> None:
+    """Once emptied to `{}` the key must be popped, not left as an empty shell."""
+
+    payload = _incident_scheduler_evidence_payload("scheduler_2026072612_drop_empty")
+
+    # 1_800 sits below the droppable tier (which only empties the key to `{}`) and
+    # above the terminal `_compact_limit` tier (which would erase the whole limit block).
+    bounded = scheduler_module._bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=1_800,
+    )
+    rendered = json.dumps(bounded, separators=(",", ":"), sort_keys=True)
+
+    assert len(rendered.encode("utf-8")) <= 1_800
+    assert "restart_reconcile" not in bounded
+    assert bounded["status"] == "resource_limit_blocked"
+    assert bounded["limit"]["pre_limit_status"] == "submission_failed"
+    assert bounded["limit"]["candidate_lists"] == "dropped"
 
 
 def test_write_evidence_still_fails_closed_when_no_degradation_tier_fits(tmp_path: Path) -> None:
@@ -9711,12 +9804,16 @@ def test_write_evidence_summarizes_injected_bounded_candidate_lists_before_dropp
         reason: str,
         max_evidence_bytes: int,
     ) -> dict[str, Any]:
+        """A custom bounded shape that skipped every summary/compaction the tier owns."""
+
         bounded = scheduler_evidence.bounded_evidence_payload(
             payload,
             reason=reason,
             max_evidence_bytes=max_evidence_bytes,
         )
-        bounded["candidates"] = [dict(row) for row in payload["candidates"]]
+        for field_name in ("candidates", "blocked_candidates", "skipped_candidates", "restart_reconcile"):
+            bounded[field_name] = json.loads(json.dumps(payload[field_name]))
+        bounded["limit"] = {key: value for key, value in bounded["limit"].items() if key != "candidate_lists"}
         return bounded
 
     context = scheduler_evidence.SchedulerEvidenceWriteContext(
@@ -9732,10 +9829,16 @@ def test_write_evidence_summarizes_injected_bounded_candidate_lists_before_dropp
     evidence = _incident_scheduler_evidence_payload(pass_id)
 
     artifact_path = scheduler_evidence.write_evidence(context, pass_id, evidence)
-    persisted = json.loads(Path(artifact_path or "").read_text(encoding="utf-8"))
+    serialized = Path(artifact_path or "").read_bytes()
+    persisted = json.loads(serialized.decode("utf-8"))
 
+    assert len(serialized) <= 8_000
     assert persisted["candidates"] == [_expected_bounded_selected_candidate_summary()]
+    assert persisted["blocked_candidates"] == [_expected_bounded_blocked_candidate_summary()]
+    assert persisted["skipped_candidates"] == _expected_bounded_skipped_candidate_summaries()
+    assert persisted["restart_reconcile"] == _expected_bounded_restart_reconcile()
     assert persisted["limit"]["candidate_lists"] == "summarized"
+    assert _BOUNDED_INCIDENT_VERBOSE_MARKER not in serialized.decode("utf-8")
 
 
 def test_bounded_evidence_fallback_status_keeps_production_contract_mapping() -> None:
@@ -20366,24 +20469,59 @@ def _incident_scheduler_evidence_payload(
         "status": "error",
         "reserved_unbound_error": "OperationalError: reconcile store unavailable",
         "reserved_unbound": {
-            "count": 2,
+            "count": 3,
             "absence_window_seconds": 900,
+            # Rows mirror the sole producer (scheduler_runtime.py:1515-1538): every key is
+            # emitted per row, None where the ReservationReconcileOutcome field is unset.
+            # Actions/values are producer-verified — journal_quarantined is the only
+            # producer of quarantine_reason/quarantine_field (reconcile.py:1713-1722, oracle
+            # values from the real-scheduler assertions at :29101-29102); query_unavailable
+            # is the producer of reconciliation_reason_class (reconcile.py:1448-1452 with
+            # ReconcileQueryUnavailable.reason_class at :128); bound is reconcile.py:1692-1704.
             "outcomes": [
                 {
-                    "job_id": "job-1",
+                    "job_id": "job_poisoned",
                     "idempotency_key": _bounded_incident_verbose_text("outcome-key"),
-                    "action": "quarantined",
+                    "action": "journal_quarantined",
                     "status": "reserved",
-                    "quarantine_reason": "journal_identity_conflict",
-                    "quarantine_field": "run_id",
+                    "slurm_job_id": None,
+                    "reconciliation_source": None,
+                    "reconciliation_decision": None,
+                    "matched_slurm_job_id": None,
+                    "match_count": None,
+                    "reconciliation_reason_class": None,
+                    "durable_write_kind": None,
+                    "durable_write_count": 0,
+                    "quarantine_reason": "file_journal_byte_limit_exceeded",
+                    "quarantine_field": "journal/gfs/2026052106.jsonl",
                 },
                 {
-                    "job_id": "job-2",
-                    "action": "rebound",
-                    "reason": "reservation_absent",
+                    "job_id": "job_unavailable",
+                    "idempotency_key": _bounded_incident_verbose_text("outcome-unavailable-key"),
+                    "action": "query_unavailable",
+                    "status": "reserved",
+                    "reconciliation_source": "slurm_exact_comment",
+                    "reconciliation_decision": "accounting_unavailable",
+                    "reconciliation_reason_class": "process_unavailable",
+                    "durable_write_kind": "pipeline_job_reconciliation",
+                    "durable_write_count": 1,
                     "quarantine_reason": None,
                     "quarantine_field": None,
                     "attempt_evidence": {"detail": _bounded_incident_verbose_text("outcome-attempt")},
+                },
+                {
+                    "job_id": "job_healthy",
+                    "idempotency_key": _bounded_incident_verbose_text("outcome-bound-key"),
+                    "action": "bound",
+                    "status": "submitted",
+                    "slurm_job_id": "3001",
+                    "reconciliation_source": "slurm_exact_comment",
+                    "reconciliation_decision": "matched_bound",
+                    "reconciliation_reason_class": None,
+                    "durable_write_kind": "reservation_bind",
+                    "durable_write_count": 1,
+                    "quarantine_reason": None,
+                    "quarantine_field": None,
                 },
             ],
         },
@@ -20452,11 +20590,19 @@ def _expected_bounded_restart_reconcile() -> dict[str, Any]:
         "reserved_unbound": {
             "outcomes": [
                 {
-                    "action": "quarantined",
-                    "quarantine_reason": "journal_identity_conflict",
-                    "quarantine_field": "run_id",
+                    "job_id": "job_poisoned",
+                    "action": "journal_quarantined",
+                    "status": "reserved",
+                    "quarantine_reason": "file_journal_byte_limit_exceeded",
+                    "quarantine_field": "journal/gfs/2026052106.jsonl",
                 },
-                {"action": "rebound", "reason": "reservation_absent"},
+                {
+                    "job_id": "job_unavailable",
+                    "action": "query_unavailable",
+                    "status": "reserved",
+                    "reconciliation_reason_class": "process_unavailable",
+                },
+                {"job_id": "job_healthy", "action": "bound", "status": "submitted"},
             ]
         },
     }
