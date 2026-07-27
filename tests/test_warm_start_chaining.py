@@ -1704,3 +1704,70 @@ def _assert_no_cycle_mutation(
     assert client.submissions == []
     assert not (tmp_path / "workspace" / "runs").exists()
     assert not (tmp_path / "object-store" / "runs" / run_id / "input" / "manifest.json").exists()
+
+
+def test_budget_blocked_strict_warm_start_decision_is_outside_both_force_whitelists() -> None:
+    """tasks 2.8 -- the demoted decision must not inherit forced resubmission.
+
+    Both whitelists match the ``state_evidence["decision"]`` string literally, so
+    the new blocked decision drops out of them by construction. Pin the member
+    sets so a later "just add it to the list" edit is a red test, not a silent
+    duplicate submission.
+    """
+
+    from types import SimpleNamespace
+
+    from services.orchestrator import chain_runtime_utils
+    from services.orchestrator.chain_forecast_orchestrator_cycle import (
+        _FORCE_TERMINAL_RESUBMIT_DECISIONS,
+        _terminal_stage_needs_forced_resubmit,
+    )
+
+    assert _FORCE_TERMINAL_RESUBMIT_DECISIONS == {
+        "retry_repair_missing_forcing",
+        "retry_missing_forecast_output",
+        "retry_strict_warm_start_terminal_init_state_mismatch",
+        "retry_strict_warm_start_terminal_run_manifest_missing",
+        "retry_strict_warm_start_retry_run_manifest_mismatch",
+        "retry_terminal_run_manifest_missing",
+    }
+
+    def basin(decision: str) -> dict[str, Any]:
+        return {
+            "model_id": "demo_model",
+            "basin_id": "demo_basin",
+            "candidate_id": "GFS:2026-05-01T12:00:00Z:demo_model:forecast_gfs_deterministic",
+            "orchestration_run_id": "cycle_gfs_2026050112",
+            "state_evidence": {
+                "decision": decision,
+                "restart_stage": "forecast",
+                "restart_from_stage": "forecast",
+            },
+        }
+
+    retry_decision = "retry_strict_warm_start_terminal_init_state_mismatch"
+    blocked_decision = "blocked_strict_warm_start_init_state_mismatch"
+
+    assert chain_runtime_utils._replacement_retry_scoped_cycle_execution([basin(retry_decision)]) is True
+    assert chain_runtime_utils._replacement_retry_scoped_cycle_execution([basin(blocked_decision)]) is False
+
+    terminal_job = {
+        "job_id": "job_cycle_gfs_2026050112_forecast",
+        "status": "succeeded",
+        "stage": "forecast",
+        "job_type": "run_shud_forecast_array",
+    }
+    assert (
+        _terminal_stage_needs_forced_resubmit(
+            SimpleNamespace(active_basins=[basin(retry_decision)], restart_stage="forecast"),
+            terminal_job,
+        )
+        is True
+    )
+    assert (
+        _terminal_stage_needs_forced_resubmit(
+            SimpleNamespace(active_basins=[basin(blocked_decision)], restart_stage="forecast"),
+            terminal_job,
+        )
+        is False
+    )

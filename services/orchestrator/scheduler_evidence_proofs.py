@@ -458,10 +458,13 @@ def restart_reconcile_proof(restart_reconcile_evidence: Mapping[str, Any] | None
         for outcome in reserved_outcomes
         if isinstance(outcome, Mapping) and str(outcome.get("action") or "") == "bound"
     )
+    # Legacy fallback shape only (outcomes without an explicit durable write
+    # count): both actions are reserved-row status writes.
     reserved_status_update_count = sum(
         1
         for outcome in reserved_outcomes
-        if isinstance(outcome, Mapping) and str(outcome.get("action") or "") == "reservation_lost"
+        if isinstance(outcome, Mapping)
+        and str(outcome.get("action") or "") in {"reservation_lost", "identity_mismatch_released"}
     )
     inflight_status_update_count = sum(
         1

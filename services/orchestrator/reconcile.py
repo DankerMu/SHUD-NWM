@@ -77,6 +77,10 @@ RESERVATION_ABSENCE_GRACE = timedelta(seconds=120)
 # than RESERVATION_ABSENCE_GRACE: deliberately NOT demoted this pass.
 ABSENCE_UNCONFIRMED_ACTION = "absence_unconfirmed"
 
+# Typed action/decision for a reserved-unbound row abandoned after the
+# configured number of consecutive identity-mismatch passes.
+IDENTITY_MISMATCH_RELEASED_ACTION = "identity_mismatch_released"
+
 # Typed action for a reserved-unbound row whose journal surface raised a
 # capacity or integrity fault: the row is left untouched (fail-closed locally)
 # and its reason/offending file are recorded, while the remaining rows and the
@@ -1302,6 +1306,9 @@ class ReservationReconcileOutcome:
     # offending file it named, so evidence says which cycle log is poisoned.
     quarantine_reason: str | None = None
     quarantine_field: str | None = None
+    # Consecutive identity-mismatch passes recorded on the row, including this
+    # one. Only the identity-mismatch outcomes carry it.
+    identity_blocked_streak: int | None = None
 
 
 def reconcile_reserved_unbound_jobs(
@@ -1310,6 +1317,7 @@ def reconcile_reserved_unbound_jobs(
     comment_query: CommentSacctQuerier,
     grace: timedelta = RESERVATION_ABSENCE_GRACE,
     accepted_submit_grace: timedelta | None = None,
+    identity_blocked_streak_limit: int | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> list[ReservationReconcileOutcome]:
     """Reconcile the submit-crash window: reserved rows with no slurm_job_id.
@@ -1345,6 +1353,15 @@ def reconcile_reserved_unbound_jobs(
     prove youth, or one already older than ``grace``, keeps the old behavior and
     demotes to ``reservation_lost`` so liveness never regresses. ``now`` is
     injectable for deterministic tests.
+
+    ``identity_blocked_streak_limit`` converges the third failure mode: a
+    reserved-unbound row whose identity can never be verified was recorded
+    ``identity_mismatch_blocked`` every pass while STAYING ``reserved``, so the
+    cycle kept failing with ``PIPELINE_ALREADY_ACTIVE``. With a positive limit,
+    the durable consecutive-blocked counter (reset by any other accounting
+    transition) releases the row into ``reservation_lost`` once it reaches the
+    limit and the attempt is past its grace. ``None``/``<= 0`` disables the
+    exit and preserves today's behaviour exactly.
     """
 
     outcomes: list[ReservationReconcileOutcome] = []
@@ -1385,17 +1402,15 @@ def reconcile_reserved_unbound_jobs(
                 )
                 continue
             if file_forecast_cohort and not accepted_submit_reconcile:
-                write_count = _record_file_reconciliation(store, job, "identity_mismatch_blocked")
                 outcomes.append(
-                    ReservationReconcileOutcome(
-                        job_id=job.job_id,
+                    _identity_blocked_outcome(
+                        store,
+                        job,
                         idempotency_key=str(idempotency_key),
-                        action="identity_mismatch_blocked",
-                        status=str(job.status),
-                        reconciliation_source="slurm_exact_comment",
-                        reconciliation_decision="identity_mismatch_blocked",
-                        durable_write_kind="pipeline_job_reconciliation" if write_count else None,
-                        durable_write_count=write_count,
+                        identity_blocked_streak_limit=identity_blocked_streak_limit,
+                        grace=grace,
+                        accepted_submit_grace=accepted_submit_grace,
+                        now=now,
                     )
                 )
                 continue
@@ -1497,18 +1512,16 @@ def reconcile_reserved_unbound_jobs(
                 )
                 continue
             if accepted_submit_reconcile and proof.kind == "foreign_collision":
-                write_count = _record_file_reconciliation(store, job, "identity_mismatch_blocked")
                 outcomes.append(
-                    ReservationReconcileOutcome(
-                        job_id=job.job_id,
+                    _identity_blocked_outcome(
+                        store,
+                        job,
                         idempotency_key=str(idempotency_key),
-                        action="identity_mismatch_blocked",
-                        status=str(job.status),
-                        reconciliation_source="slurm_exact_comment",
-                        reconciliation_decision="identity_mismatch_blocked",
                         match_count=min(len(proof.records), MAX_EXACT_COMMENT_MATCHES + 1),
-                        durable_write_kind="pipeline_job_reconciliation" if write_count else None,
-                        durable_write_count=write_count,
+                        identity_blocked_streak_limit=identity_blocked_streak_limit,
+                        grace=grace,
+                        accepted_submit_grace=accepted_submit_grace,
+                        now=now,
                     )
                 )
                 continue
@@ -1522,18 +1535,16 @@ def reconcile_reserved_unbound_jobs(
                 and record is not None
                 and not _reserved_record_identity_matches(store, record, job, str(idempotency_key))
             ):
-                write_count = _record_file_reconciliation(store, job, "identity_mismatch_blocked")
                 outcomes.append(
-                    ReservationReconcileOutcome(
-                        job_id=job.job_id,
+                    _identity_blocked_outcome(
+                        store,
+                        job,
                         idempotency_key=str(idempotency_key),
-                        action="identity_mismatch_blocked",
-                        status=str(job.status),
-                        reconciliation_source="slurm_exact_comment",
-                        reconciliation_decision="identity_mismatch_blocked",
                         match_count=1,
-                        durable_write_kind="pipeline_job_reconciliation" if write_count else None,
-                        durable_write_count=write_count,
+                        identity_blocked_streak_limit=identity_blocked_streak_limit,
+                        grace=grace,
+                        accepted_submit_grace=accepted_submit_grace,
+                        now=now,
                     )
                 )
                 continue
@@ -1995,6 +2006,7 @@ def _record_file_reconciliation(
     decision: str,
     *,
     reason_class: str | None = None,
+    identity_blocked_streak: int = 0,
 ) -> int:
     return _transition_file_reconciliation(
         store,
@@ -2003,7 +2015,120 @@ def _record_file_reconciliation(
             decision,
             submit_outcome="submit_result_ambiguous",
             reconciliation_reason_class=reason_class,
+            identity_blocked_streak=identity_blocked_streak,
         ),
+    )
+
+
+def _job_identity_blocked_streak(job: Any) -> int:
+    try:
+        return max(int(getattr(job, "identity_blocked_streak", 0) or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _identity_blocked_release_anchor(job: Any) -> datetime | None:
+    """Return the release grace anchor for one reserved-unbound row.
+
+    The counter's own writes refresh ``updated_at`` every pass, so anchoring the
+    release on ``updated_at`` would push the exit out forever. The attempt start
+    is immutable for the attempt; ``created_at`` is the only fallback.
+    """
+
+    anchor = _strict_utc_datetime(getattr(job, "submission_attempt_started_at", None))
+    if anchor is not None:
+        return anchor
+    return _as_utc_datetime(getattr(job, "created_at", None))
+
+
+def _identity_blocked_outcome(
+    store: Any,
+    job: Any,
+    *,
+    idempotency_key: str,
+    match_count: int | None = None,
+    identity_blocked_streak_limit: int | None,
+    grace: timedelta,
+    accepted_submit_grace: timedelta | None,
+    now: Callable[[], datetime],
+) -> ReservationReconcileOutcome:
+    """Record one identity-mismatch pass and release the row once it converges.
+
+    Shared by all three reserved-unbound identity-mismatch writer sites so the
+    counter, the threshold and the outcome shape have exactly one definition.
+    Branch conditions and their order at the call sites are unchanged.
+    """
+
+    limit = identity_blocked_streak_limit
+    exit_enabled = type(limit) is int and limit > 0
+    current = _job_identity_blocked_streak(job)
+    # Saturate: once the counter has reached the limit (or the exit is
+    # disabled) further passes must not append unbounded journal growth.
+    streak = min(current + 1, limit) if exit_enabled else current
+    write_count = _record_file_reconciliation(
+        store,
+        job,
+        "identity_mismatch_blocked",
+        identity_blocked_streak=streak,
+    )
+    if exit_enabled and streak >= limit:
+        anchor = _identity_blocked_release_anchor(job)
+        release_grace = accepted_submit_grace if accepted_submit_grace is not None else grace
+        if anchor is not None and now() - anchor >= release_grace:
+            release_write_count = _release_identity_blocked_reservation(
+                store,
+                job,
+                identity_blocked_streak=streak,
+            )
+            if release_write_count:
+                return ReservationReconcileOutcome(
+                    job_id=job.job_id,
+                    idempotency_key=idempotency_key,
+                    action=IDENTITY_MISMATCH_RELEASED_ACTION,
+                    status=RESERVATION_LOST_STATUS,
+                    reconciliation_source="slurm_exact_comment",
+                    reconciliation_decision=IDENTITY_MISMATCH_RELEASED_ACTION,
+                    match_count=match_count,
+                    durable_write_kind="identity_blocked_release",
+                    durable_write_count=write_count + release_write_count,
+                    identity_blocked_streak=streak,
+                )
+    return ReservationReconcileOutcome(
+        job_id=job.job_id,
+        idempotency_key=idempotency_key,
+        action="identity_mismatch_blocked",
+        status=str(job.status),
+        reconciliation_source="slurm_exact_comment",
+        reconciliation_decision="identity_mismatch_blocked",
+        match_count=match_count,
+        durable_write_kind="pipeline_job_reconciliation" if write_count else None,
+        durable_write_count=write_count,
+        identity_blocked_streak=streak,
+    )
+
+
+def _release_identity_blocked_reservation(store: Any, job: Any, *, identity_blocked_streak: int) -> int:
+    releaser = getattr(store, "release_identity_blocked_reservation", None)
+    if not callable(releaser):
+        return 0
+    for name in (
+        "accepted_submit_contract_version",
+        "expected_submission_attempt_started_at",
+        "identity_blocked_streak",
+    ):
+        if not _callable_accepts_keyword(releaser, name):
+            return 0
+    return int(
+        releaser(
+            job.job_id,
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=_job_submission_attempt(job),
+            expected_submission_attempt_started_at=_strict_utc_datetime(
+                getattr(job, "submission_attempt_started_at", None)
+            ),
+            expected_status=str(job.status),
+            identity_blocked_streak=identity_blocked_streak,
+        )
     )
 
 

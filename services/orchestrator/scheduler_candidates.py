@@ -29,6 +29,8 @@ from services.orchestrator.scheduler_state import (
     _ensure_utc,
     _evidence_safe,
     _format_utc,
+    _state_retry_attempt,
+    _state_retry_limit,
 )
 from services.orchestrator.source_cycle_raw_manifest import (
     NFS_RAW_MANIFEST_READY_SOURCE,
@@ -59,6 +61,9 @@ CANDIDATE_CONSTRUCTION_TERMINAL_PIPELINE_STATUSES = {
     "permanently_failed",
 }
 _STRICT_WARM_START_TERMINAL_SKIP_REASONS = {"terminal_hydro_success", "terminal_pipeline_success"}
+#: Restart stage the strict warm-start terminal mismatch retry would re-run, and
+#: therefore the stage whose retry budget governs it (Issue #1173).
+_STRICT_WARM_START_TERMINAL_RESTART_STAGE = "forecast"
 
 #: Completed-type terminal skip reasons that the §8.7 journal predecessor
 #: identity filter may quarantine (Issue #1107).  ``terminal_completed_cycle``
@@ -444,10 +449,10 @@ def build_candidates(
                             )
                             continue
                     else:
-                        state_decision = CandidateStateDecision(
-                            "retry",
-                            "strict_warm_start_terminal_init_state_mismatch",
-                            _strict_warm_start_terminal_retry_evidence(state_decision.evidence, strict_warm_start),
+                        state_decision = _strict_warm_start_terminal_mismatch_decision(
+                            state_decision.evidence,
+                            strict_warm_start,
+                            raw_candidate_state,
                         )
                 elif (
                     successor_state is not None
@@ -2071,6 +2076,74 @@ def _terminal_run_manifest_retry_evidence(
             "durable_output_reused": False,
         }
     )
+
+
+def _strict_warm_start_terminal_mismatch_decision(
+    terminal_evidence: Mapping[str, Any],
+    strict_evidence: Mapping[str, Any],
+    raw_candidate_state: Mapping[str, Any] | None,
+) -> CandidateStateDecision:
+    """Emit the terminal-mismatch retry, or a stable blocked decision once spent.
+
+    Without a budget this decision re-selected every already-completed candidate
+    of the cycle on every pass. The demoted decision uses ``action="blocked"`` so
+    the candidate lands in the blocked list instead of the submission set, and it
+    is deliberately absent from both force-resubmit whitelists (they match the
+    decision string literally), so no replacement submission can revive it.
+    """
+
+    state = raw_candidate_state if isinstance(raw_candidate_state, Mapping) else {}
+    attempt = _state_retry_attempt(state, stage=_STRICT_WARM_START_TERMINAL_RESTART_STAGE)
+    retry_limit = _state_retry_limit(state)
+    if retry_limit is not None and attempt >= retry_limit:
+        return CandidateStateDecision(
+            "blocked",
+            "strict_warm_start_retry_budget_exhausted",
+            _strict_warm_start_terminal_blocked_evidence(
+                terminal_evidence,
+                strict_evidence,
+                attempt=attempt,
+                retry_limit=retry_limit,
+            ),
+        )
+    return CandidateStateDecision(
+        "retry",
+        "strict_warm_start_terminal_init_state_mismatch",
+        _strict_warm_start_terminal_retry_evidence(terminal_evidence, strict_evidence),
+    )
+
+
+def _strict_warm_start_terminal_blocked_evidence(
+    terminal_evidence: Mapping[str, Any],
+    strict_evidence: Mapping[str, Any],
+    *,
+    attempt: int,
+    retry_limit: int,
+) -> dict[str, Any]:
+    payload = {
+        **dict(terminal_evidence),
+        "decision": "blocked_strict_warm_start_init_state_mismatch",
+        "reason": "strict_warm_start_retry_budget_exhausted",
+        "restart_stage": _STRICT_WARM_START_TERMINAL_RESTART_STAGE,
+        "restart_from_stage": _STRICT_WARM_START_TERMINAL_RESTART_STAGE,
+        "strict_warm_start": _evidence_safe(dict(strict_evidence)),
+        "native_shud_resubmitted": False,
+        "replacement_submitted": False,
+        "durable_output_reused": False,
+        "retry_policy": {
+            "automatic_retry_allowed": False,
+            "manual_retry_required": True,
+            "attempt": attempt,
+            "retry_limit": retry_limit,
+        },
+    }
+    selected = strict_evidence.get("candidate_state")
+    if isinstance(selected, Mapping):
+        payload["candidate_state"] = _evidence_safe(dict(selected))
+    index = strict_evidence.get("state_snapshot_index")
+    if isinstance(index, Mapping):
+        payload["state_snapshot_index"] = _evidence_safe(dict(index))
+    return _evidence_safe(payload)
 
 
 def _strict_warm_start_terminal_retry_evidence(

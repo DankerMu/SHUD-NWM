@@ -213,6 +213,13 @@ class ProductionSchedulerConfig:
     restart_reconcile_absence_seconds: int = field(
         default_factory=lambda: _scheduler._env_int("NHMS_SCHEDULER_RECONCILE_ABSENCE_SECONDS", 300)
     )
+    # Consecutive identity-mismatch reconcile passes tolerated before a
+    # reserved-unbound row is released to ``reservation_lost``. ``<= 0``
+    # disables the exit and keeps today's (wedging) behaviour: a bad value must
+    # never turn into "release immediately".
+    identity_blocked_streak_limit: int = field(
+        default_factory=lambda: _scheduler._env_int("NHMS_SCHEDULER_IDENTITY_BLOCKED_STREAK_LIMIT", 3)
+    )
     candidate_state_job_limit: int = field(
         default_factory=lambda: _scheduler._env_int(
             "NHMS_CANDIDATE_STATE_JOB_LIMIT",
@@ -498,6 +505,11 @@ class ProductionSchedulerConfig:
                 "production scheduler restart_reconcile_absence_seconds must be between 30 and 3600"
             )
         object.__setattr__(self, "restart_reconcile_absence_seconds", absence_seconds)
+        object.__setattr__(
+            self,
+            "identity_blocked_streak_limit",
+            int(self.identity_blocked_streak_limit),
+        )
         object.__setattr__(self, "candidate_state_job_limit", max(int(self.candidate_state_job_limit), 1))
         object.__setattr__(self, "candidate_state_event_limit", max(int(self.candidate_state_event_limit), 1))
         object.__setattr__(self, "lock_ttl_seconds", max(int(self.lock_ttl_seconds), 1))

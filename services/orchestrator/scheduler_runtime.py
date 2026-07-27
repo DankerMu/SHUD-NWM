@@ -1506,10 +1506,16 @@ def _run_restart_reconcile(
             store,
             comment_query=comment_query,
             accepted_submit_grace=timedelta(seconds=self.config.restart_reconcile_absence_seconds),
+            identity_blocked_streak_limit=int(
+                getattr(self.config, "identity_blocked_streak_limit", 0) or 0
+            ),
         )
         evidence["reserved_unbound"] = {
             "count": len(reserved),
             "absence_window_seconds": self.config.restart_reconcile_absence_seconds,
+            "identity_blocked_streak_limit": int(
+                getattr(self.config, "identity_blocked_streak_limit", 0) or 0
+            ),
             "accepted_submit_absence_window_seconds": self.config.restart_reconcile_absence_seconds,
             "legacy_absence_window_seconds": int(RESERVATION_ABSENCE_GRACE.total_seconds()),
             "outcomes": [
@@ -1524,6 +1530,7 @@ def _run_restart_reconcile(
                     "matched_slurm_job_id": o.matched_slurm_job_id,
                     "match_count": o.match_count,
                     "reconciliation_reason_class": o.reconciliation_reason_class,
+                    "identity_blocked_streak": o.identity_blocked_streak,
                     "durable_write_kind": o.durable_write_kind,
                     "durable_write_count": o.durable_write_count,
                     "quarantine_reason": o.quarantine_reason,
