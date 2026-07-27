@@ -63,10 +63,12 @@ Every drill receipt SHALL declare the validated (source, time window)
 tuples. A drill PASS receipt covers a candidate retention drop window only
 when its declared tuples include, sampled from within or older than that
 drop window: at least one product-derived cycle for each timeseries-bearing
-source lane (`forcing/`, `runs/`) that has DB rows in the drop window, plus
-at least one `db-export` selector whenever verified salvage objects cover
-any part of the drop window. The retention gate SHALL evaluate coverage
-against these declared tuples.
+source lane (`forcing/`, `runs/`) that has DB rows in the drop window, plus,
+whenever verified salvage objects cover any part of the drop window,
+`db-export` selectors whose union covers each salvage-backed window (the
+windows of complete `coverage = db-export` completeness subjects intersected
+with the drop window) — not the whole drop window. The retention gate SHALL
+evaluate coverage against these declared tuples.
 
 #### Scenario: Declared coverage does not include the drop window
 

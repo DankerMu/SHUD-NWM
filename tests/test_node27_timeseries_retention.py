@@ -909,6 +909,587 @@ def test_drill_coverage_db_export_not_required_without_completeness_overlap(
 
 
 # ---------------------------------------------------------------------------
+# #1162 — the db-export leg is salvage-window-scoped: drill `db-export`
+# coverage is required only over each salvage-backed window (completeness
+# `coverage=db-export` + `verdict=complete` subject overlapping the drop
+# window) intersected with the drop window, evaluated per window. The
+# forcing / runs legs keep whole-drop-window UNION semantics.
+# ---------------------------------------------------------------------------
+
+
+def _db_export_subject(
+    start: datetime,
+    end: datetime,
+    *,
+    version: str = "fv-salvage",
+    verdict: str = "complete",
+) -> dict[str, Any]:
+    return {
+        "lane": "forcing",
+        "subject": {"forcing_version_id": version},
+        "window": {"start": _iso(start), "end": _iso(end)},
+        "coverage": "db-export",
+        "verdict": verdict,
+    }
+
+
+def _product_archive_subject(
+    start: datetime, end: datetime, *, version: str = "fv-product"
+) -> dict[str, Any]:
+    return {
+        "lane": "forcing",
+        "subject": {"forcing_version_id": version},
+        "window": {"start": _iso(start), "end": _iso(end)},
+        "coverage": "product-archive",
+        "verdict": "complete",
+    }
+
+
+def _db_export_tuples(start: datetime, end: datetime) -> list[dict[str, Any]]:
+    """Per-cycle 24 h `db-export` tuples spanning ``[start, end]``."""
+    return _daily_coverage_tuples(start, end, "db-export")
+
+
+def _run_dry(tmp_path: Path, completeness: Mapping[str, Any], drill: Mapping[str, Any],
+             chunk: retention.ChunkRow) -> dict[str, Any]:
+    """Drive the full runner in dry-run so the gate verdict is observable."""
+    _write_json(tmp_path / "completeness.json", completeness)
+    _write_json(tmp_path / "drill.json", drill)
+    config = _build_config(tmp_path)
+    stub = _StubRunner([chunk])
+    return retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+    )
+
+
+def test_drill_db_export_scoped_to_salvage_window_admits_mixed_drop_window(
+    tmp_path: Path,
+) -> None:
+    """#1162 regression anchor: a drop window straddling the salvage-era
+    boundary is admissible.
+
+    The salvage-backed sub-window sits at the head of the drop window and the
+    drill's `db-export` union covers exactly that sub-window; the remainder is
+    product-archive-backed and has (and should have) no db-export package.
+    The whole-drop-window db-export requirement deadlocked this shape.
+    """
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    salvage_end = _NOW - timedelta(days=70)
+    completeness = _completeness_receipt(
+        subjects=[
+            _db_export_subject(drop_start, salvage_end),
+            _product_archive_subject(salvage_end, drop_end),
+        ]
+    )
+    drill = _drill_receipt(db_export_tuples=_db_export_tuples(drop_start, salvage_end))
+    chunk = _chunk(
+        "met", "forcing_station_timeseries", "chk-mixed", delta_days=60, duration_days=14
+    )
+
+    receipt = _run_dry(tmp_path, completeness, drill, chunk)
+
+    assert receipt.get("refusal_reason") is None
+    assert receipt["outcome"] == "dry-run"
+    assert receipt["candidate_chunks"] == [chunk.qualified_name]
+
+
+def test_drill_db_export_gap_inside_salvage_window_still_refuses(tmp_path: Path) -> None:
+    """#1162: narrowing the span must not weaken the check — a hole inside the
+    salvage-backed window (∩ drop window) still refuses."""
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    salvage_end = _NOW - timedelta(days=70)
+    completeness = _completeness_receipt(
+        subjects=[
+            _db_export_subject(drop_start, salvage_end),
+            _product_archive_subject(salvage_end, drop_end),
+        ]
+    )
+    # Union covers [74 d, 72 d] and [71 d, 70 d] — a 24 h hole at [72 d, 71 d].
+    drill = _drill_receipt(
+        db_export_tuples=(
+            _db_export_tuples(drop_start, _NOW - timedelta(days=72))
+            + _db_export_tuples(_NOW - timedelta(days=71), salvage_end)
+        )
+    )
+    chunk = _chunk(
+        "met", "forcing_station_timeseries", "chk-gap", delta_days=60, duration_days=14
+    )
+
+    receipt = _run_dry(tmp_path, completeness, drill, chunk)
+
+    assert receipt["refusal_reason"] == retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING
+
+
+def test_drill_db_export_multiple_salvage_windows_each_must_be_covered(
+    tmp_path: Path,
+) -> None:
+    """#1162: two non-adjacent salvage windows are judged INDEPENDENTLY —
+    covering only one refuses (this is the per-window vs. any-window and
+    per-window vs. hull discriminator; the space between the two windows is
+    product-archive-backed and is never required)."""
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    first_end = _NOW - timedelta(days=72)
+    second_start = _NOW - timedelta(days=68)
+    second_end = _NOW - timedelta(days=66)
+    completeness = _completeness_receipt(
+        subjects=[
+            _db_export_subject(drop_start, first_end, version="fv-salvage-a"),
+            _db_export_subject(second_start, second_end, version="fv-salvage-b"),
+            _product_archive_subject(first_end, second_start, version="fv-product-mid"),
+            _product_archive_subject(second_end, drop_end, version="fv-product-tail"),
+        ]
+    )
+    drill = _drill_receipt(db_export_tuples=_db_export_tuples(drop_start, first_end))
+    chunk = _chunk(
+        "met", "forcing_station_timeseries", "chk-multi-partial", delta_days=60, duration_days=14
+    )
+
+    receipt = _run_dry(tmp_path, completeness, drill, chunk)
+
+    assert receipt["refusal_reason"] == retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING
+
+
+def test_drill_db_export_multiple_salvage_windows_all_covered_admits(
+    tmp_path: Path,
+) -> None:
+    """#1162: both salvage windows covered → admitted even though the drill's
+    db-export union has a hole BETWEEN them (that stretch is product-archive
+    backed, so a hull/whole-window reading would wrongly refuse)."""
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    first_end = _NOW - timedelta(days=72)
+    second_start = _NOW - timedelta(days=68)
+    second_end = _NOW - timedelta(days=66)
+    completeness = _completeness_receipt(
+        subjects=[
+            _db_export_subject(drop_start, first_end, version="fv-salvage-a"),
+            _db_export_subject(second_start, second_end, version="fv-salvage-b"),
+            _product_archive_subject(first_end, second_start, version="fv-product-mid"),
+            _product_archive_subject(second_end, drop_end, version="fv-product-tail"),
+        ]
+    )
+    drill = _drill_receipt(
+        db_export_tuples=(
+            _db_export_tuples(drop_start, first_end)
+            + _db_export_tuples(second_start, second_end)
+        )
+    )
+    chunk = _chunk(
+        "met", "forcing_station_timeseries", "chk-multi-full", delta_days=60, duration_days=14
+    )
+
+    receipt = _run_dry(tmp_path, completeness, drill, chunk)
+
+    assert receipt.get("refusal_reason") is None
+    assert receipt["outcome"] == "dry-run"
+
+
+def test_drill_db_export_empty_salvage_derivation_refuses_fail_closed() -> None:
+    """#1162 D2 (function-level, defence in depth): a `coverage=db-export`
+    subject that overlaps the drop window but is NOT `verdict=complete`
+    derives ZERO salvage-backed windows — the drill leg must treat that as
+    unsatisfied, never as satisfied, even when the drill's db-export union
+    covers the whole drop window.
+
+    This shape is intercepted twice upstream: the completeness receipt schema
+    rejects `db-export` + `pending-archive` at load
+    (`coverage_verdict_contract`,
+    `schemas/archive_completeness_receipt.schema.json:159-183`), and the
+    completeness gate refuses in-window `pending-archive` subjects before the
+    drill gate ever runs. It is therefore driven at function level with a
+    hand-built completeness dict — the `run_retention` / `_write_json`
+    end-to-end path cannot carry it. The case locks the drill leg's own
+    fail-closed behaviour, not an observable production path.
+    """
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    completeness = {
+        "schema_version": "1.1",
+        "generated_at": _iso(_NOW - timedelta(hours=1)),
+        "outcome": "incomplete",
+        "coverage_bounds": {
+            "start": _iso(_NOW - timedelta(days=365)),
+            "end": _iso(_NOW),
+        },
+        "windows": [
+            _db_export_subject(drop_start, drop_end, verdict="pending-archive")
+        ],
+        "salvage_selectors": [],
+    }
+    drill = _drill_receipt(db_export_tuples=_db_export_tuples(drop_start, drop_end))
+
+    reasons = retention.check_drill_gate(
+        drill,
+        completeness_receipt=completeness,
+        drop_window=retention.DropWindow(start=drop_start, end=drop_end),
+        max_age_days=30,
+        now=_NOW,
+    )
+
+    assert reasons == [retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING]
+
+
+def test_drill_db_export_salvage_window_clipped_at_drop_window_start(
+    tmp_path: Path,
+) -> None:
+    """#1162 clip (left): a salvage subject starting BEFORE the drop window is
+    required only over the intersection — the drill covers nothing older than
+    `drop.start` and is still admitted."""
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    salvage_end = _NOW - timedelta(days=70)
+    completeness = _completeness_receipt(
+        subjects=[
+            _db_export_subject(_NOW - timedelta(days=80), salvage_end),
+            _product_archive_subject(salvage_end, drop_end),
+        ]
+    )
+    drill = _drill_receipt(db_export_tuples=_db_export_tuples(drop_start, salvage_end))
+    chunk = _chunk(
+        "met", "forcing_station_timeseries", "chk-clip-left", delta_days=60, duration_days=14
+    )
+
+    receipt = _run_dry(tmp_path, completeness, drill, chunk)
+
+    assert receipt.get("refusal_reason") is None
+    assert receipt["outcome"] == "dry-run"
+
+
+def test_drill_db_export_salvage_window_clipped_at_drop_window_end(
+    tmp_path: Path,
+) -> None:
+    """#1162 clip (right): a salvage subject running PAST the drop window end
+    (the live shape — 7 d forcing_version windows routinely overrun a chunk
+    boundary) is required only over the intersection."""
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    salvage_start = _NOW - timedelta(days=64)
+    completeness = _completeness_receipt(
+        subjects=[
+            _db_export_subject(salvage_start, _NOW - timedelta(days=50)),
+            _product_archive_subject(drop_start, salvage_start),
+        ]
+    )
+    drill = _drill_receipt(db_export_tuples=_db_export_tuples(salvage_start, drop_end))
+    chunk = _chunk(
+        "met", "forcing_station_timeseries", "chk-clip-right", delta_days=60, duration_days=14
+    )
+
+    receipt = _run_dry(tmp_path, completeness, drill, chunk)
+
+    assert receipt.get("refusal_reason") is None
+    assert receipt["outcome"] == "dry-run"
+
+
+def _drill_gate_reasons(
+    completeness: Mapping[str, Any],
+    drill: Mapping[str, Any],
+    drop_window: retention.DropWindow,
+) -> list[str]:
+    """Call the H2 gate directly so the db-export leg's FULL verdict list is
+    observable.
+
+    The runner collapses the gate to a single `refusal_reason`, which cannot
+    distinguish "refused once" from "refused once per salvage window" — the
+    clip-edge cases below assert on the exact reason LIST.
+    """
+    return retention.check_drill_gate(
+        drill,
+        completeness_receipt=completeness,
+        drop_window=drop_window,
+        max_age_days=30,
+        now=_NOW,
+    )
+
+
+def test_drill_db_export_shortfall_at_clipped_window_end_refuses() -> None:
+    """#1162 right-edge oracle: a 6 h db-export shortfall at the END of each
+    salvage window (∩ drop window) refuses.
+
+    Two salvage windows are in scope — one wholly inside the drop window, one
+    overhanging `drop.end` (the live shape) — and the drill's db-export union
+    stops 6 h short of BOTH clipped ends. A clip that is even one day loose on
+    the right would admit this receipt; the single-element reason list also
+    pins that the leg early-returns on the FIRST shortfall rather than
+    accumulating one code per uncovered window.
+    """
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    inner_start = _NOW - timedelta(days=72)
+    inner_end = _NOW - timedelta(days=70)
+    overhang_start = _NOW - timedelta(days=64)
+    completeness = _completeness_receipt(
+        subjects=[
+            _db_export_subject(inner_start, inner_end, version="fv-salvage-inner"),
+            # Runs 10 d past drop.end → clipped to [64 d, drop.end].
+            _db_export_subject(
+                overhang_start, _NOW - timedelta(days=50), version="fv-salvage-overhang"
+            ),
+        ]
+    )
+    drill = _drill_receipt(
+        db_export_tuples=(
+            _db_export_tuples(inner_start, _NOW - timedelta(days=70, hours=6))
+            + _db_export_tuples(overhang_start, _NOW - timedelta(days=60, hours=6))
+        )
+    )
+
+    reasons = _drill_gate_reasons(
+        completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
+    )
+
+    assert reasons == [retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING]
+
+
+def test_drill_db_export_shortfall_at_clipped_window_start_refuses() -> None:
+    """#1162 left-edge oracle: a 6 h db-export shortfall at the START of each
+    salvage window (∩ drop window) refuses.
+
+    Mirror of the right-edge case — one salvage window overhangs `drop.start`
+    and one sits wholly inside, and the drill's db-export union begins 6 h too
+    late for BOTH clipped starts. A clip that is loose on the left would admit
+    this receipt.
+    """
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    overhang_end = _NOW - timedelta(days=70)
+    inner_start = _NOW - timedelta(days=66)
+    inner_end = _NOW - timedelta(days=64)
+    completeness = _completeness_receipt(
+        subjects=[
+            # Starts 6 d before drop.start → clipped to [drop.start, 70 d].
+            _db_export_subject(
+                _NOW - timedelta(days=80), overhang_end, version="fv-salvage-overhang"
+            ),
+            _db_export_subject(inner_start, inner_end, version="fv-salvage-inner"),
+        ]
+    )
+    drill = _drill_receipt(
+        db_export_tuples=(
+            _db_export_tuples(_NOW - timedelta(days=73, hours=18), overhang_end)
+            + _db_export_tuples(_NOW - timedelta(days=65, hours=18), inner_end)
+        )
+    )
+
+    reasons = _drill_gate_reasons(
+        completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
+    )
+
+    assert reasons == [retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING]
+
+
+def test_drill_db_export_zero_length_clipped_window_is_still_evaluated() -> None:
+    """#1162: a salvage window whose end exactly TOUCHES `drop.start` clips to
+    a zero-length target, and that target is still judged (tasks 1.1) — it is
+    not silently skipped as "nothing to cover".
+
+    The drill carries real db-export tuples that stop strictly before
+    `drop.start`, so the refusal comes from the zero-length target genuinely
+    not being covered, not from the empty-tuple path.
+    """
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    completeness = _completeness_receipt(
+        subjects=[_db_export_subject(_NOW - timedelta(days=81), drop_start)]
+    )
+    drill = _drill_receipt(
+        db_export_tuples=_db_export_tuples(
+            _NOW - timedelta(days=81), _NOW - timedelta(days=75)
+        )
+    )
+
+    reasons = _drill_gate_reasons(
+        completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
+    )
+
+    assert reasons == [retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING]
+
+
+def test_drill_db_export_zero_length_clipped_window_covered_admits() -> None:
+    """#1162 admit half of the zero-length oracle: the same touching-endpoint
+    subject ADMITS once the drill's db-export union actually contains that
+    instant.
+
+    Paired with the refuse case above this pins the fail-closed guard to
+    `end < start` (genuinely inverted) rather than `end <= start`: a guard
+    that also tripped on a zero-length target would refuse this receipt even
+    though the required instant is covered, i.e. it would fail OPEN-closed on
+    a live shape (a 7 d forcing_version window ending exactly on a chunk
+    boundary).
+    """
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    completeness = _completeness_receipt(
+        subjects=[_db_export_subject(_NOW - timedelta(days=81), drop_start)]
+    )
+    drill = _drill_receipt(
+        db_export_tuples=_db_export_tuples(_NOW - timedelta(days=81), drop_start)
+    )
+
+    reasons = _drill_gate_reasons(
+        completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
+    )
+
+    assert reasons == []
+
+
+def test_drill_db_export_inverted_subject_window_refuses_fail_closed() -> None:
+    """#1162: an INVERTED completeness subject window (`end` before `start`)
+    clips to an inverted target, which is refused fail-closed.
+
+    Without the guard the inverted interval is vacuously "covered" by any
+    tuple straddling it — here a single 1 s db-export tuple — so a corrupt
+    receipt would ADMIT the drop. Symmetric with the inverted-tuple defence
+    in `_tuples_cover_window`.
+    """
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    inverted_start = _NOW - timedelta(days=64)  # LATER than the window `end`
+    inverted_end = _NOW - timedelta(days=70)
+    completeness = _completeness_receipt(
+        subjects=[_db_export_subject(inverted_start, inverted_end)]
+    )
+    drill = _drill_receipt(
+        db_export_tuples=[
+            {
+                "source": "db-export",
+                "window": {
+                    "start": _iso(inverted_end),
+                    "end": _iso(inverted_end + timedelta(seconds=1)),
+                },
+            }
+        ]
+    )
+
+    reasons = _drill_gate_reasons(
+        completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
+    )
+
+    assert reasons == [retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING]
+
+
+def test_drill_db_export_inverted_target_after_a_covered_target_refuses() -> None:
+    """#1162: the inverted-clip guard is applied to EVERY target, not just the
+    first one the loop happens to visit.
+
+    Targets are sorted ascending, so the valid subject ([72 d, 69 d], fully
+    covered by the drill) is judged first and the corrupt inverted subject
+    second. The drill's db-export union is deliberately chosen to straddle the
+    inverted interval, so a guard that only defended the first target would
+    hand `[64 d, 70 d]` to `_drill_covers`, get a vacuous True, and ADMIT the
+    drop on a corrupt receipt.
+    """
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    valid_start = _NOW - timedelta(days=72)
+    valid_end = _NOW - timedelta(days=69)
+    completeness = _completeness_receipt(
+        subjects=[
+            _db_export_subject(valid_start, valid_end, version="fv-salvage-valid"),
+            # `start` is LATER than `end` → clips to an inverted target.
+            _db_export_subject(
+                _NOW - timedelta(days=64),
+                _NOW - timedelta(days=70),
+                version="fv-salvage-inverted",
+            ),
+        ]
+    )
+    # Union [72 d, 69 d] straddles the inverted interval [64 d, 70 d]:
+    # union.start <= 64 d and union.end >= 70 d, so `_tuples_cover_window`
+    # would vacuously accept it.
+    drill = _drill_receipt(db_export_tuples=_db_export_tuples(valid_start, valid_end))
+
+    reasons = _drill_gate_reasons(
+        completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
+    )
+
+    assert reasons == [retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING]
+
+
+def test_drill_db_export_salvage_subject_outside_drop_window_is_not_a_target() -> None:
+    """#1162: only salvage-backed windows that OVERLAP the drop window become
+    db-export targets.
+
+    A long-past `coverage=db-export` subject ([200 d, 193 d]) sits far outside
+    the [74 d, 60 d] drop window; the drill's db-export union covers only the
+    in-window subject. Requiring drill coverage for out-of-window salvage
+    subjects would refuse this admissible drop — the ancient subject clips to
+    an inverted interval, which the fail-closed guard then rejects — so the
+    gate would be unsatisfiable for any historical salvage era.
+    """
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    in_window_start = _NOW - timedelta(days=70)
+    in_window_end = _NOW - timedelta(days=66)
+    completeness = _completeness_receipt(
+        subjects=[
+            _db_export_subject(
+                _NOW - timedelta(days=200),
+                _NOW - timedelta(days=193),
+                version="fv-salvage-ancient",
+            ),
+            _db_export_subject(
+                in_window_start, in_window_end, version="fv-salvage-in-window"
+            ),
+        ]
+    )
+    drill = _drill_receipt(
+        db_export_tuples=_db_export_tuples(in_window_start, in_window_end)
+    )
+
+    reasons = _drill_gate_reasons(
+        completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
+    )
+
+    assert reasons == []
+
+
+def test_enforced_receipt_echoes_unclipped_salvage_subject_windows(tmp_path: Path) -> None:
+    """#1162 tasks 1.4: `salvage_backed_windows[]` echoes the RAW completeness
+    subject windows; only the GATE clips them to the drop window.
+
+    The subject overhangs the drop window on both sides ([80 d, 50 d] vs. a
+    [74 d, 60 d] drop window), so a receipt that reported the clipped interval
+    would be visibly different — and would misreport the operator's manual
+    `COPY FROM` recovery scope (runbook §3.2) as narrower than it is.
+    """
+    subject_start = _NOW - timedelta(days=80)
+    subject_end = _NOW - timedelta(days=50)
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    _write_json(
+        tmp_path / "completeness.json",
+        _completeness_receipt(subjects=[_db_export_subject(subject_start, subject_end)]),
+    )
+    _write_json(
+        tmp_path / "drill.json",
+        _drill_receipt(db_export_tuples=_db_export_tuples(drop_start, drop_end)),
+    )
+    config = _build_config(tmp_path, enforce=True)
+    # A single 14 d chunk whose range is exactly the drop window.
+    chunk = _chunk(
+        "met", "forcing_station_timeseries", "chk-overhang", delta_days=60, duration_days=14
+    )
+    stub = _StubRunner([chunk])
+
+    receipt = retention.run_retention(
+        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
+    )
+
+    assert receipt["outcome"] == "enforced"
+    assert receipt["salvage_backed_windows"] == [
+        {"start": _iso(subject_start), "end": _iso(subject_end)}
+    ]
+
+
+# ---------------------------------------------------------------------------
 # H2 UNION-of-tuples semantics (A2 — same-class:fake-oracle-in-tests fix
 # for #854 R1). The drill emits per-cycle 24 h coverage tuples; the runner
 # refuses only when the UNION does not cover the drop window.
