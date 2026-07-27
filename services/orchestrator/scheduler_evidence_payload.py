@@ -138,11 +138,14 @@ def _fit_bounded_evidence_payload(
     for field_name in _scheduler_evidence._DROPPABLE_BOUNDED_EVIDENCE_FIELDS:
         if field_name not in bounded_payload:
             continue
+        emptied_non_empty = bool(bounded_payload[field_name])
         if field_name in _scheduler_evidence._EMPTY_MAPPING_DROPPABLE_BOUNDED_EVIDENCE_FIELDS:
             bounded_payload[field_name] = {}
         else:
             bounded_payload[field_name] = []
-        if field_name in _scheduler_evidence._BOUNDED_CANDIDATE_LIST_FIELDS:
+        # Only a candidate list that actually lost rows makes the marker "dropped";
+        # emptying an already-empty list drops nothing, so the marker stays "summarized".
+        if field_name in _scheduler_evidence._BOUNDED_CANDIDATE_LIST_FIELDS and emptied_non_empty:
             _mark_bounded_candidate_lists(bounded_payload, "dropped")
         if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
             return bounded_payload
@@ -217,6 +220,8 @@ def _fit_bounded_evidence_payload(
 def _summarize_bounded_candidate_lists(payload: dict[str, Any]) -> None:
     """Degrade candidate detail to fixed-key summary rows before dropping the lists.
 
+    Three duties: summarize the candidate lists, compact ``restart_reconcile``, and mark
+    ``limit.candidate_lists`` as ``summarized`` unless the lists were already dropped.
     Idempotent: a payload whose lists already hold summary rows is unchanged, so the
     tier is safe on payloads that already went through ``bounded_evidence_payload``.
     """
