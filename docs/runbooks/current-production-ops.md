@@ -1377,6 +1377,17 @@ Values outside 30–3600 seconds fail closed at scheduler configuration time.
 `NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT` must match the `sacct` owner of jobs
 submitted by node-22; an owner, comment, master, task-prefix, stage, or cohort
 identity mismatch remains reconciling and cannot project candidate state.
+`NHMS_SCHEDULER_IDENTITY_BLOCKED_STREAK_LIMIT` (default 3, `<= 0` disables)
+bounds how many consecutive `identity_mismatch_blocked` passes such a
+reserved-unbound row may accumulate before it is released to
+`reservation_lost` / `identity_mismatch_released`. When disabled (`<= 0`) the
+`identity_blocked_streak` counter freezes at its current value instead of
+counting (`0` only for rows that never counted; a row that reached `2` under an
+enabled exit keeps reporting `2`), so read no-progress off the repeated
+`identity_mismatch_blocked` outcome rows for the same `job_id`, not off the
+counter; see
+[`failed-basin-retry.md`](failed-basin-retry.md) for the disposition of released
+rows and of `blocked_strict_warm_start_init_state_mismatch` candidates.
 
 Symptoms:
 

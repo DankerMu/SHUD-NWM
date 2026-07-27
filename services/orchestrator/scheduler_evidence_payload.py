@@ -38,6 +38,9 @@ _BOUNDED_RESTART_RECONCILE_OUTCOME_KEYS = (
     "action",
     "status",
     "reconciliation_reason_class",
+    # The no-progress counter is the whole point of the compact block under
+    # evidence pressure; dropping it would hide the wedge it exists to expose.
+    "identity_blocked_streak",
     "quarantine_reason",
     "quarantine_field",
 )

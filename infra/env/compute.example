@@ -113,6 +113,16 @@ NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND=32
 # no retry is released; there is intentionally no acknowledgement override.
 # Both config probes are drained under byte, row, and wall-time bounds.
 NHMS_SCHEDULER_RECONCILE_ABSENCE_SECONDS=300
+# Consecutive identity-mismatch reconcile passes tolerated before a
+# reserved-unbound forecast master is released to `reservation_lost`
+# (decision `identity_mismatch_released`). `<= 0` disables the exit and keeps
+# the historical behaviour where such a row wedges the cycle with
+# PIPELINE_ALREADY_ACTIVE forever; when disabled the durable
+# `identity_blocked_streak` counter also freezes at its current value (0 only
+# for rows that never counted; a row that reached 2 under an enabled exit keeps
+# reporting 2), so no-progress must be read from the repeated
+# `identity_mismatch_blocked` evidence rows instead.
+NHMS_SCHEDULER_IDENTITY_BLOCKED_STREAK_LIMIT=3
 NHMS_SCHEDULER_RECONCILE_SLURM_USER=frd_muziyao
 NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT=replace-with-node22-slurm-account
 NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true

@@ -25,9 +25,19 @@ ACCEPTED_RECONCILIATION_DECISIONS = frozenset(
         "absence_deferred",
         "absence_retry_permitted",
         "identity_mismatch_blocked",
+        # Convergence exit for a reserved-unbound row whose identity stayed
+        # unverifiable for the configured number of consecutive reconcile
+        # passes: the reservation is abandoned instead of wedging the cycle.
+        "identity_mismatch_released",
         "matched_bound",
         "multiple_matches_blocked",
     }
+)
+IDENTITY_MISMATCH_BLOCKED_DECISION = "identity_mismatch_blocked"
+IDENTITY_MISMATCH_RELEASED_DECISION = "identity_mismatch_released"
+#: The only decisions allowed to carry a non-zero consecutive-blocked counter.
+_IDENTITY_STREAK_DECISIONS = frozenset(
+    {IDENTITY_MISMATCH_BLOCKED_DECISION, IDENTITY_MISMATCH_RELEASED_DECISION}
 )
 ACCEPTED_RECONCILIATION_REASON_CLASSES = frozenset(
     {
@@ -116,6 +126,7 @@ ACCEPTED_SUBMIT_MASTER_ORDINARY_UPSERT_FIELDS = (
     "matched_slurm_job_id",
     "candidate_projections",
     "cancellation_receipt_recorded",
+    "identity_blocked_streak",
 )
 
 _MEMBER_FIELDS = (
@@ -160,6 +171,10 @@ class AcceptedSubmitTransition:
 
     Every transition replaces the accounting tuple as a unit. A ``None`` tuple
     therefore means CLEAR, never "leave the previous attempt unchanged".
+
+    ``identity_blocked_streak`` rides the same atomic replacement: it defaults to
+    zero so every non-blocked transition (bind, absence retry, a new reserved
+    attempt) resets the consecutive-blocked counter without a scattered clear.
     """
 
     submit_outcome: str | None
@@ -168,8 +183,11 @@ class AcceptedSubmitTransition:
     matched_slurm_job_id: str | None = None
     reconciliation_reason_class: str | None = None
     status: str | None = None
+    identity_blocked_streak: int = 0
 
     def __post_init__(self) -> None:
+        if type(self.identity_blocked_streak) is not int or self.identity_blocked_streak < 0:
+            raise ValueError("identity blocked streak must be a non-negative integer")
         if self.submit_outcome is None:
             if (
                 self.reconciliation_source is not None
@@ -177,6 +195,7 @@ class AcceptedSubmitTransition:
                 or self.matched_slurm_job_id is not None
                 or self.reconciliation_reason_class is not None
                 or self.status != "reserved"
+                or self.identity_blocked_streak != 0
             ):
                 raise ValueError("pre-outcome transition must begin one reserved attempt")
             return
@@ -200,6 +219,10 @@ class AcceptedSubmitTransition:
                 raise ValueError("matched accounting transition requires a Slurm job id")
         elif self.matched_slurm_job_id is not None:
             raise ValueError("blocked accounting transition cannot carry a matched Slurm job id")
+        if decision == IDENTITY_MISMATCH_RELEASED_DECISION and self.status != "reservation_lost":
+            raise ValueError("identity released transition must abandon the reservation")
+        if decision not in _IDENTITY_STREAK_DECISIONS and self.identity_blocked_streak != 0:
+            raise ValueError("identity blocked streak belongs to identity-mismatch transitions")
         reason_class = self.reconciliation_reason_class
         if reason_class is not None:
             if decision != "accounting_unavailable":
@@ -232,6 +255,7 @@ class AcceptedSubmitTransition:
         matched_slurm_job_id: str | None = None,
         reconciliation_reason_class: str | None = None,
         status: str | None = None,
+        identity_blocked_streak: int = 0,
     ) -> AcceptedSubmitTransition:
         return cls(
             submit_outcome=submit_outcome,
@@ -240,6 +264,7 @@ class AcceptedSubmitTransition:
             matched_slurm_job_id=matched_slurm_job_id,
             reconciliation_reason_class=reconciliation_reason_class,
             status=status,
+            identity_blocked_streak=identity_blocked_streak,
         )
 
 
@@ -256,6 +281,7 @@ def apply_accepted_submit_transition(
             "reconciliation_decision": transition.reconciliation_decision,
             "matched_slurm_job_id": transition.matched_slurm_job_id,
             "reconciliation_reason_class": transition.reconciliation_reason_class,
+            "identity_blocked_streak": transition.identity_blocked_streak,
         }
     )
     if transition.status is not None:
@@ -491,6 +517,12 @@ def normalize_accepted_submit_evidence(row: Mapping[str, Any]) -> dict[str, Any]
             "file_journal_evidence_type_invalid", field="cancellation_receipt_recorded"
         )
     normalized["cancellation_receipt_recorded"] = cancellation_receipt_recorded
+    identity_blocked_streak = normalized.get("identity_blocked_streak", 0)
+    if type(identity_blocked_streak) is not int or identity_blocked_streak < 0:
+        raise AcceptedSubmitEvidenceError(
+            "file_journal_evidence_type_invalid", field="identity_blocked_streak"
+        )
+    normalized["identity_blocked_streak"] = identity_blocked_streak
     submission_attempt = normalized.get("submission_attempt")
     if type(submission_attempt) is not int or submission_attempt < 1:
         raise AcceptedSubmitEvidenceError(
@@ -513,6 +545,10 @@ def normalize_accepted_submit_evidence(row: Mapping[str, Any]) -> dict[str, Any]
             raise AcceptedSubmitEvidenceError(
                 "file_journal_evidence_invariant_invalid", field="reconciliation_decision"
             )
+        if identity_blocked_streak != 0:
+            raise AcceptedSubmitEvidenceError(
+                "file_journal_evidence_invariant_invalid", field="identity_blocked_streak"
+            )
     else:
         if outcome is None:
             raise AcceptedSubmitEvidenceError(
@@ -534,6 +570,14 @@ def normalize_accepted_submit_evidence(row: Mapping[str, Any]) -> dict[str, Any]
         elif matched_id is not None:
             raise AcceptedSubmitEvidenceError(
                 "file_journal_evidence_invariant_invalid", field="matched_slurm_job_id"
+            )
+        if decision == IDENTITY_MISMATCH_RELEASED_DECISION and status != "reservation_lost":
+            raise AcceptedSubmitEvidenceError(
+                "file_journal_evidence_invariant_invalid", field="reconciliation_decision"
+            )
+        if decision not in _IDENTITY_STREAK_DECISIONS and identity_blocked_streak != 0:
+            raise AcceptedSubmitEvidenceError(
+                "file_journal_evidence_invariant_invalid", field="identity_blocked_streak"
             )
         if reason_class is not None:
             if decision != "accounting_unavailable":
@@ -795,6 +839,8 @@ __all__ = (
     "AcceptedSubmitCommitResult",
     "AcceptedSubmitEvidenceError",
     "FORECAST_COHORT_STAGE_ALIASES",
+    "IDENTITY_MISMATCH_BLOCKED_DECISION",
+    "IDENTITY_MISMATCH_RELEASED_DECISION",
     "MAX_FORECAST_COHORT_MEMBERS",
     "accepted_submit_pipeline_job_model_id",
     "accepted_submit_contract_is_current",

@@ -1704,3 +1704,190 @@ def _assert_no_cycle_mutation(
     assert client.submissions == []
     assert not (tmp_path / "workspace" / "runs").exists()
     assert not (tmp_path / "object-store" / "runs" / run_id / "input" / "manifest.json").exists()
+
+
+def test_budget_blocked_strict_warm_start_decision_is_outside_both_force_whitelists() -> None:
+    """tasks 2.8 -- the demoted decision must not inherit forced resubmission.
+
+    Both whitelists match the ``state_evidence["decision"]`` string literally, so
+    the new blocked decision drops out of them by construction. Pin the member
+    sets so a later "just add it to the list" edit is a red test, not a silent
+    duplicate submission.
+    """
+
+    from types import SimpleNamespace
+
+    from services.orchestrator import chain_runtime_utils
+    from services.orchestrator.chain_forecast_orchestrator_cycle import (
+        _FORCE_TERMINAL_RESUBMIT_DECISIONS,
+        _terminal_stage_needs_forced_resubmit,
+    )
+
+    assert _FORCE_TERMINAL_RESUBMIT_DECISIONS == {
+        "retry_repair_missing_forcing",
+        "retry_missing_forecast_output",
+        "retry_strict_warm_start_terminal_init_state_mismatch",
+        "retry_strict_warm_start_terminal_run_manifest_missing",
+        "retry_strict_warm_start_retry_run_manifest_mismatch",
+        "retry_terminal_run_manifest_missing",
+    }
+
+    def basin(decision: str) -> dict[str, Any]:
+        return {
+            "model_id": "demo_model",
+            "basin_id": "demo_basin",
+            "candidate_id": "GFS:2026-05-01T12:00:00Z:demo_model:forecast_gfs_deterministic",
+            "orchestration_run_id": "cycle_gfs_2026050112",
+            "state_evidence": {
+                "decision": decision,
+                "restart_stage": "forecast",
+                "restart_from_stage": "forecast",
+            },
+        }
+
+    retry_decision = "retry_strict_warm_start_terminal_init_state_mismatch"
+    blocked_decision = "blocked_strict_warm_start_init_state_mismatch"
+
+    assert chain_runtime_utils._replacement_retry_scoped_cycle_execution([basin(retry_decision)]) is True
+    assert chain_runtime_utils._replacement_retry_scoped_cycle_execution([basin(blocked_decision)]) is False
+
+    terminal_job = {
+        "job_id": "job_cycle_gfs_2026050112_forecast",
+        "status": "succeeded",
+        "stage": "forecast",
+        "job_type": "run_shud_forecast_array",
+    }
+    assert (
+        _terminal_stage_needs_forced_resubmit(
+            SimpleNamespace(active_basins=[basin(retry_decision)], restart_stage="forecast"),
+            terminal_job,
+        )
+        is True
+    )
+    assert (
+        _terminal_stage_needs_forced_resubmit(
+            SimpleNamespace(active_basins=[basin(blocked_decision)], restart_stage="forecast"),
+            terminal_job,
+        )
+        is False
+    )
+
+
+def _released_identity_blocked_master(
+    *,
+    job_id: str,
+    run_id: str,
+    idempotency_key: str,
+) -> dict[str, Any]:
+    """The row `identity_mismatch_released` leaves behind: terminal and unbound."""
+
+    return {
+        "job_id": job_id,
+        "run_id": run_id,
+        "cycle_id": "gfs_2026050100",
+        "job_type": "run_shud_forecast_array",
+        "model_id": "model_0",
+        "stage": "forecast",
+        "status": "reservation_lost",
+        "slurm_job_id": None,
+        "idempotency_key": idempotency_key,
+        "submit_outcome": "submit_result_ambiguous",
+        "reconciliation_source": "slurm_exact_comment",
+        "reconciliation_decision": "identity_mismatch_released",
+        "matched_slurm_job_id": None,
+        "identity_blocked_streak": 3,
+        "retry_count": 0,
+        "submitted_at": "2026-05-01T00:00:00Z",
+        "error_code": "SLURM_RESERVATION_LOST",
+    }
+
+
+@pytest.mark.parametrize("with_higher_attempt_retry_row", [True, False])
+def test_released_reservation_reenters_only_through_a_higher_attempt_retry_row(
+    tmp_path: Path,
+    with_higher_attempt_retry_row: bool,
+) -> None:
+    """Runbook precondition oracle for manual re-entry after `identity_mismatch_released`.
+
+    ``_terminal_stage_needs_manual_retry`` short-circuits on a released
+    (``reservation_lost`` + unbound) master and answers with the reclaim shortcut,
+    which is ``False`` for that decision. So raising the retry budget only re-opens
+    the ladder when ``_stage_job_sort_key`` picks a DIFFERENT row for the stage:
+    a higher-attempt ``*_forecast_retry_<N>`` row (the real ``2026072000`` geometry).
+    In a flat geometry that holds only the released row, the chain resumes the
+    terminal and submits nothing.
+    """
+
+    from tests.test_orchestration_chain import (
+        FakeCycleRepository,
+        FakeCycleSlurmClient,
+        _basins,
+        _orchestrator,
+    )
+
+    run_id = "cycle_gfs_2026050100_forecast_model_0"
+    base_job_id = f"job_{run_id}_forecast"
+    repository = FakeCycleRepository()
+    repository.jobs[base_job_id] = _released_identity_blocked_master(
+        job_id=base_job_id,
+        run_id=run_id,
+        idempotency_key=f"{run_id}:forecast",
+    )
+    if with_higher_attempt_retry_row:
+        repository.jobs[f"{base_job_id}_retry_2"] = {
+            "job_id": f"{base_job_id}_retry_2",
+            "run_id": run_id,
+            "cycle_id": "gfs_2026050100",
+            "job_type": "run_shud_forecast_array",
+            "model_id": "model_0",
+            "stage": "forecast",
+            "status": "failed",
+            "slurm_job_id": "7002",
+            "idempotency_key": f"{run_id}:forecast:retry_2",
+            "retry_count": 2,
+            "submitted_at": "2026-05-01T01:00:00Z",
+            "finished_at": "2026-05-01T01:30:00Z",
+            "error_code": "SLURM_JOB_TIMEOUT",
+        }
+
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basins = _basins(1)
+    basins[0]["orchestration_run_id"] = run_id
+    basins[0]["restart_stage"] = "forecast"
+    basins[0]["state_evidence"] = {
+        # The budget was raised above the recorded attempt, so the candidate ladder
+        # emits the retry decision again instead of the blocked one.
+        "decision": "retry_strict_warm_start_terminal_init_state_mismatch",
+        "restart_stage": "forecast",
+        "restart_from_stage": "forecast",
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    forecast_submissions = [
+        submission for submission in client.submissions if submission.get("stage") == "forecast"
+    ]
+    if with_higher_attempt_retry_row:
+        retry_job_id = f"{base_job_id}_retry_3"
+        assert result.status == "complete"
+        assert retry_job_id in repository.jobs
+        assert repository.jobs[retry_job_id]["idempotency_key"] == f"{run_id}:forecast:retry_3"
+        assert repository.jobs[retry_job_id]["status"] == "succeeded"
+        assert [stage.pipeline_job_id for stage in result.stages if stage.stage == "forecast"] == [
+            retry_job_id
+        ]
+        assert len(forecast_submissions) == 1
+    else:
+        # Flat geometry: the released row itself represents the stage, the manual
+        # retry evaluation short-circuits, and nothing is re-submitted.
+        assert f"{base_job_id}_retry_1" not in repository.jobs
+        assert forecast_submissions == []
+        # The chain DID reach the forecast stage; it just resumed the released row.
+        assert [(stage.stage, stage.pipeline_job_id, stage.status) for stage in result.stages] == [
+            ("forecast", base_job_id, "reservation_lost")
+        ]
+        assert result.status == "failed"
+    # Either way the released row itself is never revived under its spent key.
+    assert repository.jobs[base_job_id]["status"] == "reservation_lost"
+    assert repository.jobs[base_job_id]["reconciliation_decision"] == "identity_mismatch_released"

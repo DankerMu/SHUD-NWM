@@ -29410,3 +29410,444 @@ def test_restart_reconcile_error_message_names_the_redacted_offending_file() -> 
     assert scheduler_runtime._restart_reconcile_error_message(RuntimeError("durable bind failed")) == (
         "durable bind failed"
     )
+
+
+def _reserve_wedged_identity_blocked_master(journal_root: Path) -> tuple[Any, dict[str, Any]]:
+    """Reserve the production wedge geometry: reserved-unbound versioned master.
+
+    The cohort has no runtime hydro rows, so restart reconcile classifies it on
+    the deterministic ``identity_mismatch_blocked`` writer site and -- before this
+    change -- left it ``reserved`` forever, which keeps
+    ``_active_orchestration_conflicts`` true and wedges the cycle with
+    ``PIPELINE_ALREADY_ACTIVE``.
+    """
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        AcceptedSubmitTransition,
+    )
+
+    row = _accepted_submit_reserved_cohort_row()
+    record = dict(vars(row))
+    repository = scheduler_module.FileOrchestrationJournalRepository(journal_root)
+    repository.reserve_pipeline_job(record)
+    repository.transition_pipeline_job_submit_evidence(
+        record["job_id"],
+        AcceptedSubmitTransition.timeout(),
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=1,
+        expected_statuses=("reserved",),
+        require_unbound=True,
+    )
+    return repository, record
+
+
+def test_identity_blocked_release_unwedges_pipeline_already_active(tmp_path: Path) -> None:
+    """tasks 2.4 -- the released row leaves the active set, so submission unwedges."""
+
+    from services.orchestrator import chain_runtime_utils
+    from tests.test_orchestration_chain import ImmediateTerminalSlurmClient
+
+    repository, record = _reserve_wedged_identity_blocked_master(tmp_path / "journal")
+    run_id = str(record["run_id"])
+    cycle_time = _dt("2026-07-12T00:00:00Z")
+    # The production wedge needs a candidate that survives the pass-level
+    # duplicate-pipeline skip, i.e. a candidate-scoped retry: a retryable failed
+    # forecast member with recorded forcing provenance. Without it the pass never
+    # reaches ``orchestrate_cycle`` and the unwedge assertions are vacuous.
+    _record_journal_forcing_provenance(
+        tmp_path / "journal",
+        source_id="GFS",
+        cycle_time=cycle_time,
+        model_id="model_a",
+        forcing_package_uri="s3://nhms/runs/fcst_gfs_2026071200_model_a/forcing/package.tar",
+    )
+    repository.upsert_pipeline_job(
+        {
+            "job_id": "job_fcst_gfs_2026071200_model_a_forecast",
+            "run_id": "fcst_gfs_2026071200_model_a",
+            "cycle_id": "gfs_2026071200",
+            "job_type": "run_shud_forecast",
+            "stage": "forecast",
+            "model_id": "model_a",
+            "status": "failed",
+            "slurm_job_id": "9001",
+            "error_code": "SLURM_JOB_TIMEOUT",
+            "error_message": "forecast task timed out",
+            "retry_count": 0,
+            "finished_at": "2026-07-12T03:00:00Z",
+        }
+    )
+    basins = [
+        {
+            "model_id": "model_0",
+            "basin_id": "basin_0",
+            "candidate_id": record["cohort_members"][0]["candidate_id"],
+            "orchestration_run_id": run_id,
+        }
+    ]
+
+    def wedged() -> bool:
+        return chain_runtime_utils._active_orchestration_conflicts(
+            repository,
+            source_id="GFS",
+            cycle_time=cycle_time,
+            cycle_id="gfs_2026071200",
+            run_id=run_id,
+            basins=basins,
+        )
+
+    assert wedged() is True
+
+    # A discoverable cycle for the wedged cycle time: without it the pass never
+    # reaches orchestrate_cycle and the unwedge assertions are vacuous.
+    def scheduler() -> Any:
+        return _RealProductionScheduler(
+            _config(
+                tmp_path,
+                dry_run=False,
+                now=_dt("2026-07-12T12:00:00Z"),
+                identity_blocked_streak_limit=3,
+                scheduler_journal_backend="file",
+                scheduler_journal_root=tmp_path / "journal",
+                database_url=None,
+                database_url_configured=False,
+            ),
+            registry=FakeRegistry([_model("model_a", "basin_a")]),
+            adapters={"gfs": FakeAdapter("gfs", [("2026-07-12T00:00:00Z", True)])},
+            active_repository=repository,
+            canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+            orchestrator_factory=lambda _source: scheduler_module.ForecastOrchestrator(
+                config=OrchestratorConfig(
+                    workspace_root=tmp_path / "chain-workspace",
+                    object_store_root=tmp_path / "chain-object-store",
+                    object_store_prefix="s3://nhms",
+                    poll_interval_seconds=0,
+                    job_timeout_seconds=5,
+                    source_id="gfs",
+                ),
+                repository=repository,
+                slurm_client=ImmediateTerminalSlurmClient(),
+                object_store=LocalObjectStore(tmp_path / "chain-object-store", "s3://nhms"),
+            ),
+            reconcile_store=repository,
+            reconcile_comment_query=lambda _key: None,
+            reconcile_sacct_query=lambda _job: None,
+        )
+
+    actions: list[str] = []
+    streaks: list[Any] = []
+    pass_statuses: list[str] = []
+    wedge_error_codes: list[str] = []
+    released_outcome: dict[str, Any] | None = None
+    for _ in range(3):
+        result = scheduler().run_once()
+        reserved_unbound = result.evidence["restart_reconcile"]["reserved_unbound"]
+        # tasks 2.4/1.4: the streak limit is readable straight off the block.
+        assert reserved_unbound["identity_blocked_streak_limit"] == 3
+        outcomes = reserved_unbound["outcomes"]
+        actions.extend(str(outcome["action"]) for outcome in outcomes)
+        streaks.extend(outcome["identity_blocked_streak"] for outcome in outcomes)
+        for outcome in outcomes:
+            if outcome["action"] == "identity_mismatch_released":
+                released_outcome = dict(outcome)
+        pass_statuses.append(str(result.evidence["timing"]["pass"]["status"]))
+        wedge_error_codes.extend(
+            str(item.get("error_code"))
+            for item in result.evidence["model_run_evidence"]
+            if item.get("status") == "submission_failed"
+        )
+
+    assert actions == [
+        "identity_mismatch_blocked",
+        "identity_mismatch_blocked",
+        "identity_mismatch_released",
+    ]
+    # The evidence PRODUCER is the oracle here: streak trajectory and the release
+    # write kind come from the real pass payload, not from a hand-written dict.
+    assert streaks == [1, 2, 3]
+    assert released_outcome is not None
+    assert released_outcome["identity_blocked_streak"] == 3
+    assert released_outcome["durable_write_kind"] == "identity_blocked_release"
+    assert released_outcome["status"] == "reservation_lost"
+
+    # Pre-release passes really are wedged; the release pass reconciles first and
+    # the same pass submits.
+    assert pass_statuses[:2] == ["submission_failed", "submission_failed"]
+    assert pass_statuses[2] == "submitted"
+    assert set(wedge_error_codes) == {"PIPELINE_ALREADY_ACTIVE"}
+    assert len(wedge_error_codes) == 2
+
+    released = repository.get_pipeline_job(str(record["job_id"]))
+    assert released["status"] == "reservation_lost"
+    assert released["reconciliation_decision"] == "identity_mismatch_released"
+    assert wedged() is False
+
+
+def test_db_free_strict_warm_start_terminal_mismatch_blocks_when_budget_exhausted(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """tasks 2.5 -- the retry decision is demoted once the stage budget is spent."""
+
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    generated_at = _dt("2026-05-21T12:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=fixture["package_checksum"],
+        generated_at=generated_at,
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": fixture["package_checksum"],
+        },
+    }
+
+    class CompletedColdStartRepository(FakeCandidateStateRepository):
+        def has_completed_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+            del source_id, cycle_time, model_id
+            return True
+
+    run_id = "fcst_gfs_2026052106_model_a"
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+
+    def build(retry_count: int) -> tuple[list[Any], list[Any]]:
+        repository = CompletedColdStartRepository(
+            {
+                "hydro_status": "published",
+                "retry_count": retry_count,
+                "hydro_run": {
+                    "run_id": run_id,
+                    "status": "published",
+                    "init_state_id": None,
+                    "output_uri": f"s3://nhms/runs/{run_id}/output/",
+                },
+            }
+        )
+        scheduler = ProductionScheduler(
+            ProductionSchedulerConfig(now=generated_at),
+            registry=FakeRegistry([model]),
+            adapters={},
+            active_repository=repository,
+            orchestrator_factory=lambda _source_id: pytest.fail(
+                "candidate construction must not build orchestrator"
+            ),
+        )
+        candidates, blocked, _skipped, _duplicates, _sync = scheduler._build_candidates(
+            models=[scheduler_module._coerce_registered_model(model)],
+            cycles=[
+                scheduler_module.SchedulerSourceCycle(
+                    discovery=CycleDiscovery(
+                        cycle_id="gfs_2026052106",
+                        source_id="gfs",
+                        cycle_time=cycle_time,
+                        cycle_hour=6,
+                        available=True,
+                        status="discovered",
+                    ),
+                    horizon={},
+                )
+            ],
+        )
+        return candidates, blocked
+
+    below_candidates, below_blocked = build(2)
+    assert below_blocked == []
+    assert len(below_candidates) == 1
+    below_evidence = below_candidates[0].state_evidence
+    assert below_evidence["decision"] == "retry_strict_warm_start_terminal_init_state_mismatch"
+    assert below_evidence["reason"] == "strict_warm_start_terminal_init_state_mismatch"
+    assert "retry_policy" not in below_evidence
+
+    exhausted_candidates, exhausted_blocked = build(3)
+    assert exhausted_candidates == []
+    assert len(exhausted_blocked) == 1
+    evidence = exhausted_blocked[0].state_evidence
+    assert exhausted_blocked[0].status == "blocked"
+    assert exhausted_blocked[0].reason == "strict_warm_start_retry_budget_exhausted"
+    assert evidence["decision"] == "blocked_strict_warm_start_init_state_mismatch"
+    assert evidence["reason"] == "strict_warm_start_retry_budget_exhausted"
+    assert evidence["retry_policy"] == {
+        "automatic_retry_allowed": False,
+        "manual_retry_required": True,
+        "attempt": 3,
+        "retry_limit": 3,
+    }
+    assert evidence["native_shud_resubmitted"] is False
+    assert evidence["replacement_submitted"] is False
+    assert evidence["strict_warm_start"]["ready"] is True
+
+
+def test_strict_warm_start_budget_binds_on_the_truncated_production_geometry() -> None:
+    """tasks 2.6 -- the wedge geometry keeps its retry-suffixed row after truncation.
+
+    Production master rows are ``reserved`` with ``retry_count=0``; the only
+    record of attempt N is the ``*_forecast_retry_N`` job id. The candidate-state
+    provider truncates ``pipeline_jobs`` to ``candidate_state_job_limit``, so the
+    budget is only real if the retry-suffixed row survives that bound.
+    """
+
+    from services.orchestrator import scheduler_candidates as scheduler_candidates_module
+    from services.orchestrator.scheduler_state_rows import _state_retry_attempt, _state_retry_limit
+
+    cycle_time = _dt("2026-07-20T00:00:00Z")
+    base = _dt("2026-07-20T01:00:00Z")
+    cycle_run_id = "cycle_gfs_2026072000"
+    job_limit = 5
+    jobs: list[dict[str, Any]] = [
+        {
+            "job_id": f"job_{cycle_run_id}_convert_{index}",
+            "run_id": cycle_run_id,
+            "cycle_id": "gfs_2026072000",
+            "job_type": "convert_canonical",
+            "stage": "convert",
+            "status": "succeeded",
+            "retry_count": 0,
+            "created_at": base + timedelta(minutes=index),
+            "finished_at": base + timedelta(minutes=index),
+        }
+        for index in range(job_limit * 2 + 1)
+    ]
+    jobs.append(
+        {
+            "job_id": f"job_{cycle_run_id}_forecast",
+            "run_id": cycle_run_id,
+            "cycle_id": "gfs_2026072000",
+            "job_type": "run_shud_forecast_array",
+            "stage": "forecast",
+            "status": "reserved",
+            "retry_count": 0,
+            "created_at": base + timedelta(minutes=30),
+        }
+    )
+    jobs.append(
+        {
+            "job_id": f"job_{cycle_run_id}_forecast_retry_87",
+            "run_id": cycle_run_id,
+            "cycle_id": "gfs_2026072000",
+            "job_type": "run_shud_forecast_array",
+            "stage": "forecast",
+            "status": "failed",
+            "retry_count": 0,
+            "created_at": base + timedelta(minutes=40),
+            "finished_at": base + timedelta(minutes=41),
+        }
+    )
+    run_id = "fcst_gfs_2026072000_model_a"
+    state = chain_repository_state_module.candidate_state_from_rows(
+        source_id="GFS",
+        cycle_time=cycle_time,
+        model_id="model_a",
+        run_id=run_id,
+        forcing_version_id="forc_gfs_2026072000_model_a",
+        candidate_id="GFS:2026-07-20T00:00:00Z:model_a:forecast_gfs_deterministic",
+        hydro_run={"run_id": run_id, "status": "published", "init_state_id": None},
+        pipeline_jobs=jobs,
+        pipeline_events=[],
+        forcing_version=None,
+        forecast_cycle=None,
+        retry_limit=3,
+        job_limit=job_limit,
+        event_limit=job_limit,
+    )
+
+    assert state is not None
+    assert len(jobs) > job_limit
+    assert len(state["pipeline_jobs"]) == job_limit
+    assert state["retry_count"] == 0
+    assert _state_retry_attempt(state, stage="forecast") == 87
+    assert _state_retry_limit(state) == 3
+
+    decision = scheduler_candidates_module._strict_warm_start_terminal_mismatch_decision(
+        {"terminal_source": "pipeline_job", "terminal_status": "succeeded"},
+        {"ready": True, "candidate_state": {"init_state_id": "state_a"}},
+        state,
+    )
+
+    assert decision.action == "blocked"
+    assert decision.reason == "strict_warm_start_retry_budget_exhausted"
+    assert decision.evidence["decision"] == "blocked_strict_warm_start_init_state_mismatch"
+    assert decision.evidence["retry_policy"]["attempt"] == 87
+    assert decision.evidence["retry_policy"]["retry_limit"] == 3
+
+
+def test_identity_blocked_convergence_facts_survive_bounded_evidence_and_proofs() -> None:
+    """tasks 2.7 -- both evidence fidelities and both proof shapes stay readable."""
+
+    from services.orchestrator import scheduler_evidence_payload, scheduler_evidence_proofs
+
+    reserved_unbound = {
+        "count": 2,
+        "outcomes": [
+            {
+                "job_id": "job_cycle_gfs_2026072000_forecast",
+                "idempotency_key": "cycle_gfs_2026072000:forecast",
+                "action": "identity_mismatch_blocked",
+                "status": "reserved",
+                "reconciliation_decision": "identity_mismatch_blocked",
+                "identity_blocked_streak": 2,
+                "durable_write_kind": "pipeline_job_reconciliation",
+                "durable_write_count": 1,
+            },
+            {
+                "job_id": "job_cycle_ifs_2026072000_forecast",
+                "idempotency_key": "cycle_ifs_2026072000:forecast",
+                "action": "identity_mismatch_released",
+                "status": "reservation_lost",
+                "reconciliation_decision": "identity_mismatch_released",
+                "identity_blocked_streak": 3,
+                "durable_write_kind": "identity_blocked_release",
+                "durable_write_count": 2,
+            },
+        ],
+    }
+    restart_reconcile = {"status": "completed", "reserved_unbound": reserved_unbound}
+
+    compact = scheduler_evidence_payload._compact_bounded_restart_reconcile(restart_reconcile)
+    compact_outcomes = compact["reserved_unbound"]["outcomes"]
+    assert [outcome["action"] for outcome in compact_outcomes] == [
+        "identity_mismatch_blocked",
+        "identity_mismatch_released",
+    ]
+    assert [outcome["identity_blocked_streak"] for outcome in compact_outcomes] == [2, 3]
+
+    explicit_proof = scheduler_evidence_proofs.restart_reconcile_proof(restart_reconcile)
+    assert explicit_proof["pipeline_status_write_count"] == 3
+    assert explicit_proof["pipeline_status_writes"] is True
+    assert explicit_proof["mutation_occurred"] is True
+
+    legacy_release = {
+        key: value
+        for key, value in reserved_unbound["outcomes"][1].items()
+        if key not in {"durable_write_kind", "durable_write_count"}
+    }
+    legacy_proof = scheduler_evidence_proofs.restart_reconcile_proof(
+        {"status": "completed", "reserved_unbound": {"count": 1, "outcomes": [legacy_release]}}
+    )
+    assert "durable_write_count" not in legacy_release
+    assert legacy_proof["pipeline_status_write_count"] == 1
+    assert legacy_proof["reserved_unbound_mutation_count"] == 1
+    assert legacy_proof["mutation_occurred"] is True
+
+    summary = scheduler_evidence_payload._bounded_candidate_summary(
+        {
+            "candidate_id": "GFS:2026-07-20T00:00:00Z:model_a:forecast_gfs_deterministic",
+            "model_id": "model_a",
+            "status": "blocked",
+            "reason": "strict_warm_start_retry_budget_exhausted",
+            "state_evidence": {"decision": "blocked_strict_warm_start_init_state_mismatch"},
+        }
+    )
+    assert summary["decision"] == "blocked_strict_warm_start_init_state_mismatch"

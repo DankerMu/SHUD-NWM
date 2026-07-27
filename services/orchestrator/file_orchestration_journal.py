@@ -32,6 +32,7 @@ from services.orchestrator.accepted_submit_identity import (
     ACCEPTED_PROJECTION_FIELDS,
     ACCEPTED_SUBMIT_CONTRACT_VERSION,
     ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD,
+    IDENTITY_MISMATCH_RELEASED_DECISION,
     MAX_FORECAST_COHORT_MEMBERS,
     AcceptedSubmitCommitResult,
     AcceptedSubmitEvidenceError,
@@ -205,6 +206,7 @@ _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS = (
     "matched_slurm_job_id",
     "candidate_projections",
     "cancellation_receipt_recorded",
+    "identity_blocked_streak",
     "native_shud_resubmitted",
 )
 _RUNTIME_ROOT_EVENT_CANDIDATE_PATHS = (
@@ -1930,6 +1932,9 @@ class FileOrchestrationJournalRepository:
                 "reconciliation_decision",
                 "reconciliation_reason_class",
                 "matched_slurm_job_id",
+                # Without this the consecutive-blocked counter's increment would
+                # be judged idempotent and silently never reach the journal.
+                "identity_blocked_streak",
                 "status",
                 "started_at",
                 "finished_at",
@@ -2511,6 +2516,84 @@ class FileOrchestrationJournalRepository:
                     include_direct_jobs=False,
                 )
             return len(records)
+
+    def release_identity_blocked_reservation(
+        self,
+        job_id: str,
+        *,
+        accepted_submit_contract_version: str | None = None,
+        expected_submission_attempt: int | None = None,
+        expected_submission_attempt_started_at: datetime | None = None,
+        expected_status: str = "reserved",
+        identity_blocked_streak: int = 0,
+    ) -> int:
+        """Abandon one reservation whose identity stayed unverifiable for too long.
+
+        Dedicated typed API on purpose: the generic evidence transition may not
+        change master status and its decision whitelist stays closed. The CAS
+        discipline mirrors :meth:`permit_pipeline_job_retry` (expected attempt,
+        attempt anchor, expected status, unbound required), so a concurrently
+        advanced attempt loses the race and the caller keeps its blocked outcome.
+
+        The released row is a deliberate non-reclaimable terminal: reclaim only
+        accepts ``absence_retry_permitted``, so this idempotency key is spent.
+        Liveness comes from the next attempt minting a retry-suffixed key.
+        """
+
+        if accepted_submit_contract_version != ACCEPTED_SUBMIT_CONTRACT_VERSION:
+            raise FileOrchestrationJournalError(
+                "file_journal_evidence_enum_invalid",
+                field=ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD,
+            )
+        if type(expected_submission_attempt) is not int or expected_submission_attempt < 1:
+            raise FileOrchestrationJournalError(
+                "file_journal_evidence_type_invalid", field="expected_submission_attempt"
+            )
+        if type(identity_blocked_streak) is not int or identity_blocked_streak < 1:
+            raise FileOrchestrationJournalError(
+                "file_journal_evidence_type_invalid", field="identity_blocked_streak"
+            )
+        source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._accepted_submit_job_for_id_unlocked(
+                job_id,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            if existing is None or str(existing.get("status") or "") != expected_status:
+                return 0
+            if (
+                not accepted_submit_contract_is_current(existing)
+                or accepted_submit_row_kind(existing) != "master"
+            ):
+                return 0
+            if expected_submission_attempt_started_at is None:
+                return 0
+            try:
+                anchor_matches = _accepted_submit_attempt_anchor(
+                    existing.get("submission_attempt_started_at")
+                ) == _accepted_submit_attempt_anchor(expected_submission_attempt_started_at)
+            except FileOrchestrationJournalError:
+                return 0
+            if not anchor_matches:
+                return 0
+            if existing.get("submission_attempt") != expected_submission_attempt:
+                return 0
+            if existing.get("slurm_job_id") not in (None, ""):
+                return 0
+            row = apply_accepted_submit_transition(
+                existing,
+                AcceptedSubmitTransition.accounting(
+                    IDENTITY_MISMATCH_RELEASED_DECISION,
+                    submit_outcome="submit_result_ambiguous",
+                    status="reservation_lost",
+                    identity_blocked_streak=identity_blocked_streak,
+                ),
+            )
+            row["updated_at"] = _format_utc(_utcnow())
+            model_id = _optional_safe_identity(row, "model_id")
+            written = self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
+            return 1 if written is not None else 0
 
     def project_forecast_cohort_tasks(
         self,
@@ -5530,6 +5613,7 @@ class FileOrchestrationJournalRepository:
             "matched_slurm_job_id": record.get("matched_slurm_job_id"),
             "candidate_projections": _bounded_candidate_projections(record.get("candidate_projections")),
             "cancellation_receipt_recorded": record.get("cancellation_receipt_recorded", False),
+            "identity_blocked_streak": record.get("identity_blocked_streak", 0),
             "native_shud_resubmitted": record.get("native_shud_resubmitted"),
             "created_at": _optional_format_datetime(record.get("created_at"), field="created_at") or now,
             "updated_at": _optional_format_datetime(record.get("updated_at"), field="updated_at") or now,
