@@ -1391,10 +1391,13 @@ def run_once(self) -> SchedulerPassResult:
             # Populate timing.pass BEFORE the write so the on-disk artifact
             # carries the block (Phase 4.5 C6). Use ``pass_status`` (pre-write
             # planned status) here; the evidence-size-fallback path can
-            # rewrite ``evidence["status"]`` inside ``_write_evidence`` when
-            # the payload exceeds ``MAX_EVIDENCE_BYTES``, and the final
-            # SchedulerPassResult.status must reflect that post-write value
-            # so the pass-result / on-disk / CLI statuses agree.
+            # rewrite ``evidence["status"]`` to ``resource_limit_blocked``
+            # inside ``_write_evidence`` when the payload exceeds
+            # ``MAX_EVIDENCE_BYTES``, and the final SchedulerPassResult.status
+            # must reflect that post-write value so the pass-result / on-disk /
+            # CLI statuses agree. That fallback keeps the pre-fallback status
+            # readable as ``limit.pre_limit_status`` on the artifact, so the
+            # overwrite loses no diagnosis (issue #1168).
             _finalize_timing_into_evidence(evidence, collector, pass_status)
             try:
                 artifact_path = self._write_evidence(pass_id, evidence)

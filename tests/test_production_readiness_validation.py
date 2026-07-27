@@ -4207,6 +4207,63 @@ def _validate_scheduler_payload_with_matching_live_proof(
     return _summary(root), scheduler_item, live_item
 
 
+def _bounded_size_limited_scheduler_payload() -> dict[str, object]:
+    from services.orchestrator import scheduler_evidence
+
+    payload = _scheduler_evidence_payload(status="submitted", execution_mode="production_orchestration")
+    bulky_state_evidence = {"decision": "select", "canonical_readiness": {"detail": "d" * 4_000}}
+    payload["counts"] = {
+        "candidate_count": 3,
+        "blocked_candidate_count": 1,
+        "skipped_candidate_count": 1,
+        "submitted_count": 0,
+        "failed_count": 0,
+        "partial_count": 0,
+    }
+    payload["candidates"][0]["state_evidence"] = dict(bulky_state_evidence)
+    payload["blocked_candidates"] = [
+        {
+            "candidate_id": "gfs:2026-05-21T06:00:00Z:model_b:forecast_gfs_deterministic",
+            "source_id": "gfs",
+            "cycle_time_utc": "2026-05-21T06:00:00Z",
+            "model_id": "model_b",
+            "scenario_id": "forecast_gfs_deterministic",
+            "status": "blocked",
+            "reason": "missing_forcing_package_uri",
+            "state_evidence": dict(bulky_state_evidence),
+        }
+    ]
+    payload["skipped_candidates"][0]["state_evidence"] = dict(bulky_state_evidence)
+    return scheduler_evidence.bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=4_000,
+    )
+
+
+def test_bounded_scheduler_evidence_summary_rows_keep_identity_reader_baseline(tmp_path: Path) -> None:
+    bounded = _bounded_size_limited_scheduler_payload()
+
+    assert bounded["limit"]["candidate_lists"] == "summarized"
+    assert bounded["limit"]["pre_limit_status"] == "submitted"
+
+    summary, scheduler_item, _live_item = _validate_scheduler_payload_with_matching_live_proof(tmp_path, bounded)
+    acceptance_errors = scheduler_item["details"]["acceptance_errors"]
+
+    assert scheduler_item["status"] == "blocked"
+    assert sorted(acceptance_errors) == [
+        "missing_failed_count",
+        "missing_partial_count",
+        "missing_submitted_count",
+    ]
+    for collection in ("candidates", "blocked_candidates", "skipped_candidates"):
+        for field in ("candidate_id", "source_id", "cycle_identity", "model_id", "scenario_id"):
+            assert f"{collection}_missing_{field}" not in acceptance_errors
+    assert "candidates_missing_run_id" not in acceptance_errors
+    assert "candidates_missing_forcing_version_id" not in acceptance_errors
+    assert summary["final_production_readiness_claimed"] is False
+
+
 def _live_scheduler_payload(
     *,
     status: str = "submitted",

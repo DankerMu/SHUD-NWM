@@ -58,6 +58,18 @@ _DROPPABLE_BOUNDED_EVIDENCE_FIELDS = (
     "candidates",
     "blocked_candidates",
     "skipped_candidates",
+    "restart_reconcile",
+)
+_BOUNDED_CANDIDATE_LIST_FIELDS = (
+    "candidates",
+    "blocked_candidates",
+    "skipped_candidates",
+)
+_EMPTY_MAPPING_DROPPABLE_BOUNDED_EVIDENCE_FIELDS = frozenset(
+    (
+        "model_discovery",
+        "restart_reconcile",
+    )
 )
 _OPTIONAL_BOUNDED_EVIDENCE_DROP_FIELDS = (
     "finished_at",

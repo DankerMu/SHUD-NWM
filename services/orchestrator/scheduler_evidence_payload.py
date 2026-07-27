@@ -7,6 +7,41 @@ from typing import Any
 
 from services.orchestrator import scheduler_evidence as _scheduler_evidence
 
+_BOUNDED_CANDIDATE_SUMMARY_KEYS = (
+    "candidate_id",
+    "source",
+    "source_id",
+    "cycle_time",
+    "cycle_time_utc",
+    "scenario_id",
+    "run_id",
+    "forcing_version_id",
+    "basin_id",
+    "model_id",
+    "status",
+    "reason",
+    # Retained so an already-summarized row survives a second summary pass.
+    "summary_error",
+)
+_BOUNDED_CANDIDATE_STATE_EVIDENCE_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("decision", ("decision",)),
+    ("missing_forcing_repair_status", ("missing_forcing_repair", "status")),
+    ("quarantined_skip_reason", ("journal_predecessor_identity", "quarantined_skip_reason")),
+)
+_UNRECOGNIZED_CANDIDATE_SUMMARY_ERROR = "unrecognized_candidate_shape"
+# Both reconcile segments record their own failure key (scheduler_runtime.py:1542,1572)
+# and either can be the only one present, so the compact block must keep both.
+_BOUNDED_RESTART_RECONCILE_KEYS = ("status", "reserved_unbound_error", "inflight_error")
+# Producer key set: scheduler_runtime.py:1515-1538 (sole writer of outcome rows).
+_BOUNDED_RESTART_RECONCILE_OUTCOME_KEYS = (
+    "job_id",
+    "action",
+    "status",
+    "reconciliation_reason_class",
+    "quarantine_reason",
+    "quarantine_field",
+)
+
 
 def _serialize_evidence_json(payload: Any, *, compact: bool = False) -> str:
     if compact:
@@ -96,10 +131,22 @@ def _fit_bounded_evidence_payload(
     if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
         return bounded_payload
 
+    _summarize_bounded_candidate_lists(bounded_payload)
+    if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+        return bounded_payload
+
     for field_name in _scheduler_evidence._DROPPABLE_BOUNDED_EVIDENCE_FIELDS:
         if field_name not in bounded_payload:
             continue
-        bounded_payload[field_name] = {} if field_name == "model_discovery" else []
+        emptied_non_empty = bool(bounded_payload[field_name])
+        if field_name in _scheduler_evidence._EMPTY_MAPPING_DROPPABLE_BOUNDED_EVIDENCE_FIELDS:
+            bounded_payload[field_name] = {}
+        else:
+            bounded_payload[field_name] = []
+        # Only a candidate list that actually lost rows makes the marker "dropped";
+        # emptying an already-empty list drops nothing, so the marker stays "summarized".
+        if field_name in _scheduler_evidence._BOUNDED_CANDIDATE_LIST_FIELDS and emptied_non_empty:
+            _mark_bounded_candidate_lists(bounded_payload, "dropped")
         if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
             return bounded_payload
 
@@ -168,6 +215,90 @@ def _fit_bounded_evidence_payload(
             return bounded_payload
 
     return bounded_payload
+
+
+def _summarize_bounded_candidate_lists(payload: dict[str, Any]) -> None:
+    """Degrade candidate detail to fixed-key summary rows before dropping the lists.
+
+    Three duties: summarize the candidate lists, compact ``restart_reconcile``, and mark
+    ``limit.candidate_lists`` as ``summarized`` unless the lists were already dropped.
+    Idempotent: a payload whose lists already hold summary rows is unchanged, so the
+    tier is safe on payloads that already went through ``bounded_evidence_payload``.
+    """
+
+    summarized = False
+    for field_name in _scheduler_evidence._BOUNDED_CANDIDATE_LIST_FIELDS:
+        if field_name not in payload:
+            continue
+        payload[field_name] = _bounded_candidate_summary_rows(payload[field_name])
+        summarized = True
+    if "restart_reconcile" in payload:
+        payload["restart_reconcile"] = _compact_bounded_restart_reconcile(payload["restart_reconcile"])
+    if summarized and _bounded_candidate_lists_state(payload) != "dropped":
+        _mark_bounded_candidate_lists(payload, "summarized")
+
+
+def _bounded_candidate_summary_rows(value: Any) -> list[Any]:
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
+        return []
+    return [_bounded_candidate_summary(row) for row in value]
+
+
+def _bounded_candidate_summary(row: Any) -> dict[str, Any]:
+    if not isinstance(row, Mapping):
+        return {"summary_error": _UNRECOGNIZED_CANDIDATE_SUMMARY_ERROR}
+    summary = _present_bounded_summary_keys(row, _BOUNDED_CANDIDATE_SUMMARY_KEYS)
+    state_evidence = row.get("state_evidence")
+    already_summarized = not isinstance(state_evidence, Mapping)
+    for summary_key, path in _BOUNDED_CANDIDATE_STATE_EVIDENCE_KEYS:
+        # Row-level incident keys have no candidate producer, so reading them back
+        # only re-reads this helper's own output (idempotency).
+        value = row.get(summary_key) if already_summarized else _nested_mapping_value(state_evidence, path)
+        if value is not None:
+            summary[summary_key] = value
+    return summary
+
+
+def _compact_bounded_restart_reconcile(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    compact = _present_bounded_summary_keys(value, _BOUNDED_RESTART_RECONCILE_KEYS)
+    reserved_unbound = value.get("reserved_unbound")
+    outcomes = reserved_unbound.get("outcomes") if isinstance(reserved_unbound, Mapping) else None
+    if isinstance(outcomes, Sequence) and not isinstance(outcomes, str | bytes | bytearray):
+        compact["reserved_unbound"] = {
+            "outcomes": [
+                _present_bounded_summary_keys(outcome, _BOUNDED_RESTART_RECONCILE_OUTCOME_KEYS)
+                if isinstance(outcome, Mapping)
+                else {}
+                for outcome in outcomes
+            ]
+        }
+    return compact
+
+
+def _present_bounded_summary_keys(value: Mapping[str, Any], keys: Sequence[str]) -> dict[str, Any]:
+    return {key: value[key] for key in keys if value.get(key) is not None}
+
+
+def _nested_mapping_value(value: Any, path: Sequence[str]) -> Any:
+    for key in path:
+        if not isinstance(value, Mapping):
+            return None
+        value = value.get(key)
+    return value
+
+
+def _bounded_candidate_lists_state(payload: Mapping[str, Any]) -> Any:
+    limit = payload.get("limit")
+    return limit.get("candidate_lists") if isinstance(limit, Mapping) else None
+
+
+def _mark_bounded_candidate_lists(payload: dict[str, Any], state: str) -> None:
+    limit = payload.get("limit")
+    if not isinstance(limit, Mapping):
+        return
+    payload["limit"] = {**limit, "candidate_lists": state}
 
 
 def _compact_required_bounded_fields(payload: dict[str, Any]) -> None:
@@ -268,6 +399,7 @@ def _drop_empty_optional_bounded_fields(payload: dict[str, Any]) -> None:
         "blocked_candidates",
         "skipped_candidates",
         "duplicate_exclusions",
+        "restart_reconcile",
     ):
         if payload.get(field_name) in (None, "", [], {}):
             payload.pop(field_name, None)
@@ -756,6 +888,25 @@ def _call_bounded_evidence_payload(
     )
 
 
+def _bounded_limit_block(
+    payload: Mapping[str, Any],
+    *,
+    reason: str,
+    max_evidence_bytes: int,
+) -> dict[str, Any]:
+    """Limit block for the fallback shape: fail-closed reason plus observability keys."""
+
+    limit: dict[str, Any] = {
+        "reason": reason,
+        "max_evidence_bytes": max_evidence_bytes,
+        "candidate_lists": "summarized",
+    }
+    pre_limit_status = payload.get("status")
+    if pre_limit_status is not None:
+        limit["pre_limit_status"] = pre_limit_status
+    return limit
+
+
 def bounded_evidence_payload(
     payload: Mapping[str, Any],
     *,
@@ -793,16 +944,16 @@ def bounded_evidence_payload(
                 "can_claim_final_production_readiness": False,
             },
         ),
-        "limit": {"reason": reason, "max_evidence_bytes": max_evidence_bytes},
+        "limit": _bounded_limit_block(payload, reason=reason, max_evidence_bytes=max_evidence_bytes),
         "counts": payload.get("counts", _scheduler_evidence.empty_counts()),
         "resolved_runtime_roots": payload.get("resolved_runtime_roots"),
         "runtime_config": payload.get("runtime_config"),
         "db_free_runtime": payload.get("db_free_runtime"),
         "root_preflight": payload.get("root_preflight"),
         "evidence_pre_execution": payload.get("evidence_pre_execution"),
-        "candidates": [],
-        "blocked_candidates": [],
-        "skipped_candidates": [],
+        "candidates": _bounded_candidate_summary_rows(payload.get("candidates")),
+        "blocked_candidates": _bounded_candidate_summary_rows(payload.get("blocked_candidates")),
+        "skipped_candidates": _bounded_candidate_summary_rows(payload.get("skipped_candidates")),
         "duplicate_exclusions": payload.get("duplicate_exclusions", []),
         "source_cycles": [],
         "model_discovery": _scheduler_evidence.empty_model_discovery(),
@@ -812,6 +963,7 @@ def bounded_evidence_payload(
         "slurm_status_sync_proof": payload.get("slurm_status_sync_proof"),
         "slurm_cancellation_proof": payload.get("slurm_cancellation_proof"),
         "restart_reconcile_proof": payload.get("restart_reconcile_proof"),
+        "restart_reconcile": _compact_bounded_restart_reconcile(payload.get("restart_reconcile")),
         "no_mutation_proof": payload.get("no_mutation_proof", _scheduler_evidence.no_mutation_proof()),
         "retention": payload.get("retention"),
         "timing": payload.get("timing"),
@@ -822,14 +974,21 @@ def bounded_evidence_payload(
         bounded_payload.pop("retention", None)
     if "restart_reconcile_proof" not in payload:
         bounded_payload.pop("restart_reconcile_proof", None)
+    if "restart_reconcile" not in payload:
+        bounded_payload.pop("restart_reconcile", None)
     if "timing" not in payload:
         bounded_payload.pop("timing", None)
     return _fit_bounded_evidence_payload(bounded_payload, max_evidence_bytes=max_evidence_bytes)
 
 
 __all__ = [
+    "_bounded_candidate_lists_state",
+    "_bounded_candidate_summary",
+    "_bounded_candidate_summary_rows",
+    "_bounded_limit_block",
     "_bounded_retained_field_summary",
     "_call_bounded_evidence_payload",
+    "_compact_bounded_restart_reconcile",
     "_compact_counts",
     "_compact_limit",
     "_compact_mapping",
@@ -846,10 +1005,14 @@ __all__ = [
     "_fit_bounded_evidence_payload",
     "_is_required_bounded_field",
     "_mapping_status",
+    "_mark_bounded_candidate_lists",
     "_minimal_bounded_retained_field_summary",
+    "_nested_mapping_value",
     "_payload_fits",
+    "_present_bounded_summary_keys",
     "_serialized_evidence_within_limit",
     "_serialize_evidence_json",
     "_serialize_evidence_json_if_within_limit",
+    "_summarize_bounded_candidate_lists",
     "bounded_evidence_payload",
 ]
