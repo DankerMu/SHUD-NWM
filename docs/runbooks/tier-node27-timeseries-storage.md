@@ -1746,7 +1746,8 @@ Receipts match `schemas/timeseries_retention_receipt.schema.json`
   dropped chunk with its pre-drop `freed_bytes` (H4 — measured BEFORE
   `drop_chunks`); `deferred_remainder[]` records the beyond-bound
   chunks; `salvage_backed_windows[]` records the completeness-derived
-  db-export windows that fell inside the drop window (H9). A verified
+  db-export windows that OVERLAP the drop window (H9 — overlap, not
+  containment; see [§8.7](#87-salvage-backed-windows)). A verified
   db-export tuple also participates in the forcing recovery union for the
   same historical interval; it never fabricates a missing product archive.
 
@@ -1794,6 +1795,14 @@ Each entry names a `{start, end}` interval whose post-drop recovery
 lane is the manual `COPY FROM` procedure documented in [§3.2](#32-salvage-restore-is-manual--no-automated-restore-lane);
 the drill's coverage rule that permits dropping such windows is
 [§7.5](#75-how-the-coverage-rule-maps-to-the-retention-gate).
+
+Entries record the UNCLIPPED completeness subject windows — a subject
+routinely overruns the drop window on either side, and the receipt names
+the operator's full recovery scope, not the slice that was dropped this
+tick. The retention gate is scoped differently on purpose: it evaluates
+each subject window's INTERSECTION with the drop window (#1162), so the
+drill is never asked for db-export coverage outside the interval actually
+being retired.
 
 ## Rollback (unit-level, not data-level)
 

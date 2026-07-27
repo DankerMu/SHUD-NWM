@@ -691,9 +691,14 @@ def check_drill_gate(
             reasons.append(CODE_DRILL_COVERAGE_DB_EXPORT_MISSING)
             return reasons
         for target in targets:
+            clipped = _clip_to_drop(target, drop_window)
             # Zero-length intersections (subject endpoint exactly touching a
-            # drop boundary, closed-interval `_overlaps`) stay in scope.
-            if not _drill_covers(coverage, "db-export", _clip_to_drop(target, drop_window)):
+            # drop boundary, closed-interval `_overlaps`) stay in scope; an
+            # INVERTED clip (`end < start`, only reachable from an inverted
+            # subject window) is refused fail-closed instead of being handed
+            # to `_drill_covers`, which would vacuously "cover" it — see
+            # `_clip_to_drop`.
+            if clipped.end < clipped.start or not _drill_covers(coverage, "db-export", clipped):
                 reasons.append(CODE_DRILL_COVERAGE_DB_EXPORT_MISSING)
                 return reasons
     return reasons
@@ -705,8 +710,14 @@ def _clip_to_drop(window: Mapping[str, str], drop_window: DropWindow) -> DropWin
     Subject windows overrun the drop window on BOTH sides in practice (7 d
     forcing_version windows vs. chunk boundaries). Inputs come from
     :func:`derive_salvage_backed_windows`, which only yields subjects whose
-    window parsed and overlapped, so the intersection is always non-empty
-    (possibly zero-length) and parsing is total here.
+    window parsed and overlapped, so parsing is total here and the result is
+    normally non-empty (possibly zero-length, which stays in scope).
+
+    An INVERTED subject window (``end`` before ``start``) is the one shape
+    that yields ``end < start`` here; the caller refuses fail-closed on it.
+    Symmetric with the inverted-tuple defence in :func:`_tuples_cover_window`
+    (``if end < start: continue``, `:739-740`) — a nonsense interval never
+    counts as evidence.
     """
     start = max(_parse_iso(window["start"]), drop_window.start)
     end = min(_parse_iso(window["end"]), drop_window.end)
