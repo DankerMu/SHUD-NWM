@@ -29,10 +29,10 @@ Issue: #1173
 
 ## 3. Verification(合并门)
 
-- [ ] 3.1 `uv run pytest -q tests/test_gateway_reconcile.py tests/test_production_scheduler.py tests/test_warm_start_chaining.py`
-- [ ] 3.2 `uv run pytest -q`(全量,防跨面回归)
-- [ ] 3.3 `uv run ruff check .`
-- [ ] 3.4 `openspec validate scheduler-identity-blocked-convergence --strict --no-interactive`
+- [x] 3.1 `uv run pytest -q tests/test_gateway_reconcile.py tests/test_production_scheduler.py tests/test_warm_start_chaining.py`(1557 passed @ 6897c724;implementer/round-2/Phase-7 三方各自独立复跑)
+- [x] 3.2 `uv run pytest -q`(全量)——11175 passed @ 2ce690b5(11 failed 经 base 树逐条比对确认为预存在 macOS 环境失败:BSD stat/-c、/scratch 只读、slurm 模板 CLI 期望;与本 PR 代码面零交集);round-1 修复 delta 仅测试/文档,另有相邻契约面抽查 test_file_orchestration_journal+test_orchestration_chain+test_source_scoped_dispatch 476+458 passed @ 6897c724
+- [x] 3.3 `uv run ruff check .`(通过)
+- [x] 3.4 `openspec validate scheduler-identity-blocked-convergence --strict --no-interactive`(valid,含 round-1 增补的 MODIFIED delta)
 
 ## 4. Ops oracle(node-22 实机,合并部署后)
 

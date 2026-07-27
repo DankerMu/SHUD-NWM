@@ -41,10 +41,12 @@ measured from `submission_attempt_started_at`, never from `updated_at` — recon
 migrates the row to `reservation_lost` with `reconciliation_decision =
 identity_mismatch_released`.
 
-When the exit is disabled (`<= 0`), the counter is not merely unused: it stays pinned at
-`0` (the increment is gated on the exit being enabled), so the streak is **not** a
-no-progress diagnostic in that mode. Count the repeated `identity_mismatch_blocked`
-action rows across passes instead.
+When the exit is disabled (`<= 0`), the counter is not merely unused: it freezes at its
+**current** value (`reconcile.py:2067` writes `streak = current` when the exit is off, so
+it reads `0` only for rows that never counted — a row that reached `2` while the exit was
+enabled keeps reporting `2` after disabling), so the streak is **not** a no-progress
+diagnostic in that mode. Count the repeated `identity_mismatch_blocked` action rows across
+passes instead.
 
 ### Finding the rows
 
@@ -52,9 +54,11 @@ action rows across passes instead.
   `action`, `identity_blocked_streak` and `durable_write_count`. The counter survives the
   bounded (size-limited) evidence compaction, so it is readable even on a pass that hit
   the evidence byte limit. **With the exit disabled (`NHMS_SCHEDULER_IDENTITY_BLOCKED_STREAK_LIMIT
-  <= 0`) `identity_blocked_streak` stays `0` on every pass**; in that mode measure
-  no-progress by counting consecutive passes whose outcome `action` is
-  `identity_mismatch_blocked` for the same `job_id`, not by the counter.
+  <= 0`) `identity_blocked_streak` freezes at whatever value it already held** (`0` only
+  for rows that never counted; a row that counted to `2` under an enabled exit keeps
+  reporting `2`) instead of advancing; in that mode measure no-progress by counting
+  consecutive passes whose outcome `action` is `identity_mismatch_blocked` for the same
+  `job_id`, not by the counter.
 - Journal: the master row of the wedged cycle
   (`job_cycle_<source>_<cycle>_forecast[...]`) shows `status=reservation_lost`,
   `reconciliation_decision=identity_mismatch_released`,
@@ -102,6 +106,12 @@ Manual re-entry, in order:
 3. To re-open the ladder, raise `NHMS_SCHEDULER_RETRY_LIMIT` above the recorded `attempt`
    and restart the scheduler service. Below-budget behaviour is byte-identical to the old
    retry decision, so the candidate is selected again.
+   **`NHMS_SCHEDULER_RETRY_LIMIT` is one GLOBAL budget shared by every retry decision
+   family in the deployment** (`scheduler_config.py` `retry_limit` is injected into every
+   `scheduler_candidates.py` state provider, not per-decision), so raise it only
+   temporarily and restore the previous value immediately after the re-entry lands —
+   otherwise every failure family gains the inflated budget, which is exactly the
+   unbounded-spin class #1160 guarded against.
    **Precondition — this only produces a new submission when a higher-attempt
    `*_forecast_retry_<N>` row outranks the released base row for the stage.** For a
    released master (`reservation_lost` + unbound), `_terminal_stage_needs_manual_retry`
@@ -118,7 +128,7 @@ Manual re-entry, in order:
      needs a new candidate identity (a new cycle/run), not a budget change.
 4. Never lower `NHMS_SCHEDULER_IDENTITY_BLOCKED_STREAK_LIMIT` to `0` as a "fix": that only
    restores the wedge (no release, `PIPELINE_ALREADY_ACTIVE` every pass) and silently
-   pins `identity_blocked_streak` to `0`.
+   freezes `identity_blocked_streak` at its current value.
 
 Verified by:
 

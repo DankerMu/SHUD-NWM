@@ -61,7 +61,7 @@ issue 原文说 reservation "楔死提交通道",实际闭环是:
 | 风险 | 保护 |
 |---|---|
 | release 造成重复提交(真实任务仍在跑) | streak≥3(连续,任何异质结局清零)+ 过 grace(锚 `submission_attempt_started_at`)才放行;require_unbound CAS;released key **不可 reclaim**(F1);本 family 被 L2 预算挡住重选 |
-| released ghost 封死后续合法提交 | 每次 attempt 铸新 idempotency key,ghost 只封自己的 key;`reservation_lost` 终态不再触发 `PIPELINE_ALREADY_ACTIVE`;人工重入走 manual retry API(runbook) |
+| released ghost 封死后续合法提交 | 每次 attempt 铸新 idempotency key,ghost 只封自己的 key;`reservation_lost` 终态不再触发 `PIPELINE_ALREADY_ACTIVE`;人工重入按 runbook 已验证步骤(全局预算临时抬升 + retry-row 几何前置条件) |
 | streak 写被幂等闭集静默吞掉(假绿) | `changed_fields`/`AcceptedSubmitTransition`/normalize 三处贯通列入 tasks 1.1;tasks 2.0 新增 reconcile 路径写断言 |
 | 出口不可达时 journal 无上限增长 | streak 饱和(≥limit 或禁用即停增);禁用稳态零写断言(tasks 2.3) |
 | 陈旧 streak 击穿"连续"语义(absence-retry→reclaim→一次即放行) | streak 随 accounting tuple 原子替换,`begin_attempt` 强制清零;tasks 2.2 场景钉死 |
