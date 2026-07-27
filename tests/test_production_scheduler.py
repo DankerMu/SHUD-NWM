@@ -9748,6 +9748,33 @@ def test_bounded_evidence_drops_candidate_lists_before_restart_reconcile() -> No
     assert _BOUNDED_INCIDENT_VERBOSE_MARKER not in rendered
 
 
+def test_bounded_evidence_keeps_restart_reconcile_after_every_candidate_list_is_dropped() -> None:
+    """`restart_reconcile` is last: the loop must stop between it and `skipped_candidates`."""
+
+    payload = _incident_scheduler_evidence_payload("scheduler_2026072612_droppable_band_interior")
+
+    # Measured for this payload (budget scan 3_000..7_000 step 1): 4_450-4_784 is the
+    # contiguous band where the drop loop stops right after emptying `skipped_candidates`,
+    # so all three candidate lists are gone while `restart_reconcile` still carries its
+    # compact incident block. 4_600 is an interior point of that band.
+    bounded = scheduler_module._bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=4_600,
+    )
+    rendered = json.dumps(bounded, separators=(",", ":"), sort_keys=True)
+
+    assert len(rendered.encode("utf-8")) <= 4_600
+    assert bounded["limit"]["candidate_lists"] == "dropped"
+    assert bounded["candidates"] == []
+    assert bounded["blocked_candidates"] == []
+    # skipped_candidates emptied while restart_reconcile survives pins the loop stop
+    # between droppable positions 5 and 6 — the reconcile block is ordered last.
+    assert bounded["skipped_candidates"] == []
+    assert bounded["restart_reconcile"] == _expected_bounded_restart_reconcile()
+    assert _BOUNDED_INCIDENT_VERBOSE_MARKER not in rendered
+
+
 def test_bounded_evidence_keeps_summarized_marker_when_only_model_discovery_is_dropped() -> None:
     """A non-candidate droppable field must not flip `candidate_lists` to `dropped`."""
 

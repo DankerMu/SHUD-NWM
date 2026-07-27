@@ -18,7 +18,8 @@ When the scheduler pass evidence payload exceeds the configured size bound and t
 - WHEN the bounded fallback payload is constructed
 - THEN `candidates`, `blocked_candidates`, and `skipped_candidates` are populated row-for-row with fixed-key summary rows carrying candidate identity (including the readiness-reader identity keys `source_id`, `cycle_time_utc`, `scenario_id`, and for admitted candidates `run_id` and `forcing_version_id`), status, reason, and the incident-critical candidate state-evidence subset (scheduler decision, missing-forcing repair status, journal-predecessor quarantined skip reason), each value passed through from the already-redacted source payload with keys absent from a row when the source value is absent or null
 - AND `limit.candidate_lists` is `summarized`
-- AND only if the summarized payload still exceeds the bound are the lists emptied by the existing droppable tier, with `limit.candidate_lists` set to `dropped`
+- AND only if the summarized payload still exceeds the bound does the existing droppable tier empty the lists, progressively in field order and stopping as soon as the payload fits, so a partial drop can leave the later lists as summaries
+- AND `limit.candidate_lists` is set to `dropped` only when that tier empties a candidate list that still held rows; emptying an already-empty candidate list drops nothing and the marker stays `summarized`
 - AND the artifact never exceeds `max_evidence_bytes`, and a payload that cannot fit even after all degradation tiers still fails closed with the existing write error.
 
 #### Scenario: restart-reconcile incident evidence survives the fallback compactly
