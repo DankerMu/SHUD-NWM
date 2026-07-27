@@ -13,6 +13,7 @@ Issue: #1162
   - §7.5 增一句 ops 后果:drill 运行时传入的 `--salvage-manifest` 必须覆盖 drop window 内出现的每一个 db-export subject 窗,否则 gate 正确拒绝。
   - 全部编辑保持 wire-code ALL_CAPS token 原样(`tests/test_node27_timeseries_retention.py:355-361`、`:404-413` 双向消费 runbook §8.2 与 design.md 的 token)。
 - [x] 1.4 forcing/runs 腿、检查顺序、wire code 常量、receipt 形状(`salvage_backed_windows[]` 保持**未 clip** 原始 subject 窗;gate 判定用 clip 窗,差异刻意)零改动(diff 不触碰)。
+- [x] 1.5 **评审偏离记录(round-1 已接受)**:1.1 的 clip 判定在 `check_drill_gate` 调用点新增一条 **inverted-clipped-target fail-closed 守卫**(`clipped.end < clipped.start` → `CODE_DRILL_COVERAGE_DB_EXPORT_MISSING`)。动机:被 clip 的 subject 窗若本身 `end` 早于 `start`(corrupt receipt),交集是无意义倒置区间,`_tuples_cover_window` 会被任一横跨它的 tuple 空洞地判为"已覆盖"从而**放行**;守卫与 `_tuples_cover_window` 内的 inverted-tuple 防御对称。守卫写在调用点,`_drill_covers`/`derive_salvage_backed_windows`/`_completeness_has_db_export_overlap`/`_tuples_cover_window` 仍零字节改动。该腿第三种发出原因已同步进 runbook §8.2、design.md #855 块与本 change 的 spec delta 需求体。配套 oracle 测试(`tests/test_node27_timeseries_retention.py`):round-1 五条 —— clip 右缘 6h 缺口拒、clip 左缘 6h 缺口拒、零长交集不覆盖拒、enforced receipt 回显**未 clip** 原始 subject 窗、inverted subject 窗 fail-closed 拒;round-2 三条 —— 零长交集**已覆盖则放行**(把守卫钉死在 `<` 而非 `<=`)、inverted 目标窗排在已覆盖目标窗**之后**仍拒(守卫作用于每个目标窗,非仅首个)、drop window **之外**的 db-export subject 不成为目标窗(`derive_salvage_backed_windows` 的 overlap 过滤是 gate 可判定行为)。
 
 ## 2. Tests(requirement-driven,`tests/test_node27_timeseries_retention.py`)
 

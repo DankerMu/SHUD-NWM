@@ -1628,7 +1628,9 @@ surfaces in the same commit.
   drop window (per-window judgement, NOT the whole drop window — see
   [§7.5](#75-how-the-coverage-rule-maps-to-the-retention-gate)); also
   emitted when the overlapping db-export subject derives no salvage-backed
-  window at all (fail-closed).
+  window at all (fail-closed), and when a salvage-backed window's
+  intersection with the drop window is inverted (a corrupt subject window
+  whose `end` precedes its `start`; fail-closed guard, #1162).
 - `RETENTION_CONFIG_INVALID` — absolute-path / positive-int / env-parse
   failure before any DB call. Emitted to stderr as a single JSON line
   `{status: "failed", code: "RETENTION_CONFIG_INVALID", reason: <detail>}`;

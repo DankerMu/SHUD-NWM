@@ -1312,6 +1312,34 @@ def test_drill_db_export_zero_length_clipped_window_is_still_evaluated() -> None
     assert reasons == [retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING]
 
 
+def test_drill_db_export_zero_length_clipped_window_covered_admits() -> None:
+    """#1162 admit half of the zero-length oracle: the same touching-endpoint
+    subject ADMITS once the drill's db-export union actually contains that
+    instant.
+
+    Paired with the refuse case above this pins the fail-closed guard to
+    `end < start` (genuinely inverted) rather than `end <= start`: a guard
+    that also tripped on a zero-length target would refuse this receipt even
+    though the required instant is covered, i.e. it would fail OPEN-closed on
+    a live shape (a 7 d forcing_version window ending exactly on a chunk
+    boundary).
+    """
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    completeness = _completeness_receipt(
+        subjects=[_db_export_subject(_NOW - timedelta(days=81), drop_start)]
+    )
+    drill = _drill_receipt(
+        db_export_tuples=_db_export_tuples(_NOW - timedelta(days=81), drop_start)
+    )
+
+    reasons = _drill_gate_reasons(
+        completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
+    )
+
+    assert reasons == []
+
+
 def test_drill_db_export_inverted_subject_window_refuses_fail_closed() -> None:
     """#1162: an INVERTED completeness subject window (`end` before `start`)
     clips to an inverted target, which is refused fail-closed.
@@ -1345,6 +1373,82 @@ def test_drill_db_export_inverted_subject_window_refuses_fail_closed() -> None:
     )
 
     assert reasons == [retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING]
+
+
+def test_drill_db_export_inverted_target_after_a_covered_target_refuses() -> None:
+    """#1162: the inverted-clip guard is applied to EVERY target, not just the
+    first one the loop happens to visit.
+
+    Targets are sorted ascending, so the valid subject ([72 d, 69 d], fully
+    covered by the drill) is judged first and the corrupt inverted subject
+    second. The drill's db-export union is deliberately chosen to straddle the
+    inverted interval, so a guard that only defended the first target would
+    hand `[64 d, 70 d]` to `_drill_covers`, get a vacuous True, and ADMIT the
+    drop on a corrupt receipt.
+    """
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    valid_start = _NOW - timedelta(days=72)
+    valid_end = _NOW - timedelta(days=69)
+    completeness = _completeness_receipt(
+        subjects=[
+            _db_export_subject(valid_start, valid_end, version="fv-salvage-valid"),
+            # `start` is LATER than `end` → clips to an inverted target.
+            _db_export_subject(
+                _NOW - timedelta(days=64),
+                _NOW - timedelta(days=70),
+                version="fv-salvage-inverted",
+            ),
+        ]
+    )
+    # Union [72 d, 69 d] straddles the inverted interval [64 d, 70 d]:
+    # union.start <= 64 d and union.end >= 70 d, so `_tuples_cover_window`
+    # would vacuously accept it.
+    drill = _drill_receipt(db_export_tuples=_db_export_tuples(valid_start, valid_end))
+
+    reasons = _drill_gate_reasons(
+        completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
+    )
+
+    assert reasons == [retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING]
+
+
+def test_drill_db_export_salvage_subject_outside_drop_window_is_not_a_target() -> None:
+    """#1162: only salvage-backed windows that OVERLAP the drop window become
+    db-export targets.
+
+    A long-past `coverage=db-export` subject ([200 d, 193 d]) sits far outside
+    the [74 d, 60 d] drop window; the drill's db-export union covers only the
+    in-window subject. Requiring drill coverage for out-of-window salvage
+    subjects would refuse this admissible drop — the ancient subject clips to
+    an inverted interval, which the fail-closed guard then rejects — so the
+    gate would be unsatisfiable for any historical salvage era.
+    """
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    in_window_start = _NOW - timedelta(days=70)
+    in_window_end = _NOW - timedelta(days=66)
+    completeness = _completeness_receipt(
+        subjects=[
+            _db_export_subject(
+                _NOW - timedelta(days=200),
+                _NOW - timedelta(days=193),
+                version="fv-salvage-ancient",
+            ),
+            _db_export_subject(
+                in_window_start, in_window_end, version="fv-salvage-in-window"
+            ),
+        ]
+    )
+    drill = _drill_receipt(
+        db_export_tuples=_db_export_tuples(in_window_start, in_window_end)
+    )
+
+    reasons = _drill_gate_reasons(
+        completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
+    )
+
+    assert reasons == []
 
 
 def test_enforced_receipt_echoes_unclipped_salvage_subject_windows(tmp_path: Path) -> None:

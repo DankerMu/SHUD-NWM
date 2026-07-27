@@ -716,8 +716,8 @@ def _clip_to_drop(window: Mapping[str, str], drop_window: DropWindow) -> DropWin
     An INVERTED subject window (``end`` before ``start``) is the one shape
     that yields ``end < start`` here; the caller refuses fail-closed on it.
     Symmetric with the inverted-tuple defence in :func:`_tuples_cover_window`
-    (``if end < start: continue``, `:739-740`) — a nonsense interval never
-    counts as evidence.
+    (``if end < start: continue``) — a nonsense interval never counts as
+    evidence.
     """
     start = max(_parse_iso(window["start"]), drop_window.start)
     end = min(_parse_iso(window["end"]), drop_window.end)

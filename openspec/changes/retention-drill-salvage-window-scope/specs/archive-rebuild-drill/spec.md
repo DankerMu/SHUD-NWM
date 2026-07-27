@@ -4,7 +4,7 @@
 
 ### Requirement: db-export drill coverage is salvage-window-scoped
 
-When the completeness receipt reports any `coverage = db-export` subject overlapping the candidate drop window, the retention gate SHALL require drill `db-export` coverage only over the salvage-backed windows — the windows of `coverage = db-export` subjects with `verdict = complete` that overlap the drop window, each intersected with the drop window — evaluating the drill's `db-export` tuple union against each such window independently. The gate SHALL NOT treat an empty derivation as satisfying the requirement. The gate SHALL NOT require `db-export` coverage over portions of the drop window backed by product archives, and the `forcing` and `runs` coverage legs SHALL retain their whole-drop-window union semantics unchanged.
+When the completeness receipt reports any `coverage = db-export` subject overlapping the candidate drop window, the retention gate SHALL require drill `db-export` coverage only over the salvage-backed windows — the windows of `coverage = db-export` subjects with `verdict = complete` that overlap the drop window, each intersected with the drop window — evaluating the drill's `db-export` tuple union against each such window independently. The gate SHALL NOT treat an empty derivation as satisfying the requirement. A nonsense (inverted) intersection is never treated as satisfied. The gate SHALL NOT require `db-export` coverage over portions of the drop window backed by product archives, and the `forcing` and `runs` coverage legs SHALL retain their whole-drop-window union semantics unchanged.
 
 #### Scenario: Drop window spanning the salvage-era boundary is admissible
 
