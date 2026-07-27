@@ -11389,6 +11389,125 @@ def test_identity_blocked_release_cas_failure_keeps_the_blocked_outcome(tmp_path
     assert persisted["identity_blocked_streak"] == 2
 
 
+def _journal_bytes(repository: Any) -> dict[str, bytes]:
+    return {
+        str(path.relative_to(repository.root)): path.read_bytes()
+        for path in repository.root.rglob("*")
+        if path.is_file()
+    }
+
+
+def test_release_identity_blocked_reservation_refuses_a_concurrently_bound_row(tmp_path: Any) -> None:
+    """Direct CAS oracle -- the unbound gate is the last guard before abandoning a live job.
+
+    Reconcile only ever calls the release API on a row it has just seen as
+    reserved-unbound, so the gate itself needs a direct caller. ``expected_status``
+    is set to the bound row's own status on purpose: the unbound check is then the
+    only gate that can refuse the write.
+    """
+
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+    from services.orchestrator.reconcile import SacctRecord, reconcile_reserved_unbound_jobs
+
+    started_at = datetime(2026, 7, 12, tzinfo=UTC)
+    repository = _file_cohort_repository(tmp_path / "bound", created_at=started_at, member_count=1)
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    exact = SacctRecord(
+        "17667",
+        "RUNNING",
+        "nhms_forecast",
+        comment=f"nhms_idem:{key}",
+        run_id="cycle_gfs_2026071200_forecast_fixture",
+        stage="forecast",
+        pipeline_job_id=job_id,
+    )
+    assert reconcile_reserved_unbound_jobs(repository, comment_query=lambda _key: exact)[0].action == "bound"
+    bound = repository.get_pipeline_job(job_id)
+    assert bound["slurm_job_id"] == "17667"
+    before_files = _journal_bytes(repository)
+
+    assert repository.release_identity_blocked_reservation(
+        job_id,
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=int(bound["submission_attempt"]),
+        expected_submission_attempt_started_at=bound["submission_attempt_started_at"],
+        expected_status=str(bound["status"]),
+        identity_blocked_streak=3,
+    ) == 0
+    assert _journal_bytes(repository) == before_files
+    assert repository.get_pipeline_job(job_id) == bound
+
+
+def test_release_identity_blocked_reservation_refuses_a_row_that_left_reserved(tmp_path: Any) -> None:
+    """Direct CAS oracle -- an absence-released (reclaimable) row must not be re-decided.
+
+    ``absence_retry_permitted`` also parks the row on ``reservation_lost`` while
+    unbound, with the same attempt and anchor. Only the expected-status gate keeps
+    the release API from overwriting that reclaimable decision with the
+    non-reclaimable ``identity_mismatch_released`` one.
+    """
+
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+    from services.orchestrator.reconcile import reconcile_reserved_unbound_jobs
+
+    started_at = datetime(2026, 7, 12, tzinfo=UTC)
+    repository = _file_cohort_repository(tmp_path / "advanced", created_at=started_at, member_count=1)
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    permitted = reconcile_reserved_unbound_jobs(
+        repository,
+        comment_query=_authoritative_absence_query,
+        accepted_submit_grace=timedelta(seconds=300),
+        identity_blocked_streak_limit=3,
+        now=lambda: started_at + timedelta(hours=1),
+    )[0]
+    assert permitted.action == "absence_retry_permitted"
+    advanced = repository.get_pipeline_job(job_id)
+    assert advanced["status"] == "reservation_lost"
+    assert advanced["reconciliation_decision"] == "absence_retry_permitted"
+    assert advanced["slurm_job_id"] in (None, "")
+    before_files = _journal_bytes(repository)
+
+    assert repository.release_identity_blocked_reservation(
+        job_id,
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=int(advanced["submission_attempt"]),
+        expected_submission_attempt_started_at=advanced["submission_attempt_started_at"],
+        identity_blocked_streak=3,
+    ) == 0
+    assert _journal_bytes(repository) == before_files
+    assert repository.get_pipeline_job(job_id) == advanced
+
+
+def test_release_identity_blocked_reservation_refuses_a_mismatched_attempt_anchor(tmp_path: Any) -> None:
+    """Direct CAS oracle -- a reclaimed attempt (new anchor, same number) loses the race."""
+
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    started_at = datetime(2026, 7, 12, tzinfo=UTC)
+    repository = _identity_blocked_master(tmp_path, "anchor", started_at=started_at)
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    reserved = repository.get_pipeline_job(job_id)
+    before_files = _journal_bytes(repository)
+
+    assert repository.release_identity_blocked_reservation(
+        job_id,
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=int(reserved["submission_attempt"]),
+        expected_submission_attempt_started_at=started_at + timedelta(hours=2),
+        identity_blocked_streak=3,
+    ) == 0
+    assert repository.release_identity_blocked_reservation(
+        job_id,
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=int(reserved["submission_attempt"]) + 1,
+        expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+        identity_blocked_streak=3,
+    ) == 0
+    assert _journal_bytes(repository) == before_files
+    assert repository.get_pipeline_job(job_id) == reserved
+
+
 def test_identity_mismatch_released_row_is_a_non_reclaimable_terminal(tmp_path: Any) -> None:
     """Runbook oracle -- the released idempotency key can never be revived."""
 

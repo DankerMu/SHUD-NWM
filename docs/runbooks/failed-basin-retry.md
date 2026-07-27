@@ -41,12 +41,20 @@ measured from `submission_attempt_started_at`, never from `updated_at` — recon
 migrates the row to `reservation_lost` with `reconciliation_decision =
 identity_mismatch_released`.
 
+When the exit is disabled (`<= 0`), the counter is not merely unused: it stays pinned at
+`0` (the increment is gated on the exit being enabled), so the streak is **not** a
+no-progress diagnostic in that mode. Count the repeated `identity_mismatch_blocked`
+action rows across passes instead.
+
 ### Finding the rows
 
 - Scheduler pass evidence: `restart_reconcile.reserved_unbound.outcomes[]` carries
   `action`, `identity_blocked_streak` and `durable_write_count`. The counter survives the
   bounded (size-limited) evidence compaction, so it is readable even on a pass that hit
-  the evidence byte limit.
+  the evidence byte limit. **With the exit disabled (`NHMS_SCHEDULER_IDENTITY_BLOCKED_STREAK_LIMIT
+  <= 0`) `identity_blocked_streak` stays `0` on every pass**; in that mode measure
+  no-progress by counting consecutive passes whose outcome `action` is
+  `identity_mismatch_blocked` for the same `job_id`, not by the counter.
 - Journal: the master row of the wedged cycle
   (`job_cycle_<source>_<cycle>_forecast[...]`) shows `status=reservation_lost`,
   `reconciliation_decision=identity_mismatch_released`,
@@ -83,36 +91,87 @@ so it can never trigger a forced terminal resubmission or replacement retry.
 Manual re-entry, in order:
 
 1. Read the pass evidence: `candidates[].state_evidence.retry_policy.attempt` and
-   `.retry_limit`. `attempt` is derived stage-scoped from the `*_forecast_retry_<N>` job
-   ids, so a `reserved` master with `retry_count=0` still reports the real attempt count.
+   `.retry_limit`. Stage-scoped `attempt` is `max(flat retry_count, suffix-derived
+   attempt of the stage-matching job rows)` (`scheduler_state_rows.py:425-453`): only
+   rows whose authoritative `stage` matches contribute their `*_retry_<N>` suffix, so a
+   `reserved` master with `retry_count=0` still reports the real attempt count as long as
+   a `*_forecast_retry_<N>` row survives the candidate-state job-limit truncation.
 2. Decide whether re-running is actually correct. If the init-state identity mismatch is a
    data defect, fix the data first — the budget is protecting you from re-submitting the
    same mismatch forever.
 3. To re-open the ladder, raise `NHMS_SCHEDULER_RETRY_LIMIT` above the recorded `attempt`
    and restart the scheduler service. Below-budget behaviour is byte-identical to the old
-   retry decision, so the candidate is selected again and the chain mints the next
-   `*_retry_<N+1>` job id / idempotency key.
+   retry decision, so the candidate is selected again.
+   **Precondition — this only produces a new submission when a higher-attempt
+   `*_forecast_retry_<N>` row outranks the released base row for the stage.** For a
+   released master (`reservation_lost` + unbound), `_terminal_stage_needs_manual_retry`
+   (`chain_forecast_orchestrator_cycle.py:154-158`) short-circuits to the reclaim
+   shortcut, which is `False` for `identity_mismatch_released`; which row represents the
+   stage is decided by `_stage_job_sort_key` (highest attempt among the non-active
+   matches). So:
+   - **Retry-row geometry** (the real `2026072000` journal, which holds `retry_87` /
+     `retry_117` rows): the retry row wins the sort, the forced-resubmit path applies, and
+     the chain mints `*_retry_<N+1>` with idempotency key `<run_id>:forecast:retry_<N+1>`.
+   - **Flat geometry** (only the released base row, `retry_count=0`, no retry-suffixed
+     row): the released row itself represents the stage, the chain resumes that terminal,
+     and **no submission happens no matter how high the budget is raised**. Re-entry then
+     needs a new candidate identity (a new cycle/run), not a budget change.
 4. Never lower `NHMS_SCHEDULER_IDENTITY_BLOCKED_STREAK_LIMIT` to `0` as a "fix": that only
-   restores the wedge (no release, `PIPELINE_ALREADY_ACTIVE` every pass).
+   restores the wedge (no release, `PIPELINE_ALREADY_ACTIVE` every pass) and silently
+   pins `identity_blocked_streak` to `0`.
 
-Verified by `tests/test_gateway_reconcile.py::test_identity_mismatch_released_row_is_a_non_reclaimable_terminal`
-(non-reclaimable terminal + retry-suffixed key still reserves),
-`tests/test_production_scheduler.py::test_identity_blocked_release_unwedges_pipeline_already_active`
-(the released row leaves the active set) and
-`tests/test_production_scheduler.py::test_db_free_strict_warm_start_terminal_mismatch_blocks_when_budget_exhausted`
-(below-budget vs exhausted decisions).
+Verified by:
 
-### Cycle `2026072000` disposition
+- `tests/test_gateway_reconcile.py::test_identity_mismatch_released_row_is_a_non_reclaimable_terminal`
+  — the released row is not reclaimable and a retry-suffixed key still reserves.
+- `tests/test_warm_start_chaining.py::test_released_reservation_reenters_only_through_a_higher_attempt_retry_row`
+  — the step-3 precondition, both directions: with a higher-attempt retry row the chain
+  mints `*_retry_<N+1>` and submits; in the flat geometry it resumes the released terminal
+  and submits nothing.
+- `tests/test_production_scheduler.py::test_identity_blocked_release_unwedges_pipeline_already_active`
+  — three real scheduler passes: the first two record `submission_failed` /
+  `PIPELINE_ALREADY_ACTIVE`, the release pass submits.
+- `tests/test_production_scheduler.py::test_db_free_strict_warm_start_terminal_mismatch_blocks_when_budget_exhausted`
+  — below-budget vs exhausted decisions.
 
-The wedged `2026072000` forecast pair needed no manual action: after the fix is deployed,
-three natural passes drive the streak to the limit and release both rows, the cycle stops
-recording `submission_failed`, and the 36 already-completed candidates settle on
+Not yet proven on the real cluster: end-to-end manual re-entry against the production
+`2026072000` journal (which rows the scheduler actually picks after the release). That is
+tasks 4.1 in `openspec/changes/scheduler-identity-blocked-convergence/tasks.md` and is
+still open — see the disposition note below.
+
+### Cycle `2026072000` disposition (expected behaviour — receipt pending)
+
+**Status: predicted, not yet observed.** The only oracle for this section is the node-22
+receipt from tasks 4.1 (`openspec/changes/scheduler-identity-blocked-convergence/tasks.md`),
+which is still open. Do not read the paragraph below as an observation.
+
+Expectation for the wedged `2026072000` forecast pair, with no manual action: after the
+fix is deployed, three natural passes should drive the streak to the limit and release
+both rows, the cycle should stop recording `submission_failed`, and the 36
+already-completed candidates should settle on
 `blocked_strict_warm_start_init_state_mismatch` (their forecast-stage attempts, 87 and
-117, are far past the retry limit) instead of being re-selected every pass. The residual
-risk accepted here is that a released reservation whose Slurm job was in fact alive would
-have been abandoned; that is bounded by the three consecutive-pass requirement, the grace
-window, the unbound compare-and-swap, and by the retry budget refusing to mint a competing
-submission for the same family.
+117, are far past the retry limit) instead of being re-selected every pass.
+
+Receipt (fill in when tasks 4.1 lands): `artifact path: <TBD>` · `observed on: <TBD>` ·
+`released rows + streak trajectory: <TBD>` · `post-release direction of the (run_id,
+forecast) pair: <TBD>`. If the observation deviates, record it verbatim here and reopen
+the finding rather than relaxing this section.
+
+The residual risk accepted here is that a released reservation whose Slurm job was in fact
+alive would have been abandoned; that is bounded by the three consecutive-pass
+requirement, the grace window, the unbound compare-and-swap, and by the retry budget
+refusing to mint a competing submission for the same family. To triage an
+abandoned-but-alive suspicion, take the `idempotency_key` from the evidence row and query
+accounting by the submission comment convention
+(`services/orchestrator/reservation.py:40-43`):
+
+```bash
+sacct -a --comment "nhms_idem:<idempotency_key>"
+```
+
+On this cluster accounting does not store job comments (#1116), so that query normally
+returns nothing; fall back to `sacct -a --name nhms_forecast` narrowed to the reservation's
+`submission_attempt_started_at` window and match by user/account and submit time.
 
 ## Residual Risks
 

@@ -29445,10 +29445,38 @@ def test_identity_blocked_release_unwedges_pipeline_already_active(tmp_path: Pat
     """tasks 2.4 -- the released row leaves the active set, so submission unwedges."""
 
     from services.orchestrator import chain_runtime_utils
+    from tests.test_orchestration_chain import ImmediateTerminalSlurmClient
 
     repository, record = _reserve_wedged_identity_blocked_master(tmp_path / "journal")
     run_id = str(record["run_id"])
     cycle_time = _dt("2026-07-12T00:00:00Z")
+    # The production wedge needs a candidate that survives the pass-level
+    # duplicate-pipeline skip, i.e. a candidate-scoped retry: a retryable failed
+    # forecast member with recorded forcing provenance. Without it the pass never
+    # reaches ``orchestrate_cycle`` and the unwedge assertions are vacuous.
+    _record_journal_forcing_provenance(
+        tmp_path / "journal",
+        source_id="GFS",
+        cycle_time=cycle_time,
+        model_id="model_a",
+        forcing_package_uri="s3://nhms/runs/fcst_gfs_2026071200_model_a/forcing/package.tar",
+    )
+    repository.upsert_pipeline_job(
+        {
+            "job_id": "job_fcst_gfs_2026071200_model_a_forecast",
+            "run_id": "fcst_gfs_2026071200_model_a",
+            "cycle_id": "gfs_2026071200",
+            "job_type": "run_shud_forecast",
+            "stage": "forecast",
+            "model_id": "model_a",
+            "status": "failed",
+            "slurm_job_id": "9001",
+            "error_code": "SLURM_JOB_TIMEOUT",
+            "error_message": "forecast task timed out",
+            "retry_count": 0,
+            "finished_at": "2026-07-12T03:00:00Z",
+        }
+    )
     basins = [
         {
             "model_id": "model_0",
@@ -29470,11 +29498,14 @@ def test_identity_blocked_release_unwedges_pipeline_already_active(tmp_path: Pat
 
     assert wedged() is True
 
+    # A discoverable cycle for the wedged cycle time: without it the pass never
+    # reaches orchestrate_cycle and the unwedge assertions are vacuous.
     def scheduler() -> Any:
         return _RealProductionScheduler(
             _config(
                 tmp_path,
                 dry_run=False,
+                now=_dt("2026-07-12T12:00:00Z"),
                 identity_blocked_streak_limit=3,
                 scheduler_journal_backend="file",
                 scheduler_journal_root=tmp_path / "journal",
@@ -29482,27 +29513,70 @@ def test_identity_blocked_release_unwedges_pipeline_already_active(tmp_path: Pat
                 database_url_configured=False,
             ),
             registry=FakeRegistry([_model("model_a", "basin_a")]),
-            adapters={"gfs": FakeAdapter("gfs", [])},
+            adapters={"gfs": FakeAdapter("gfs", [("2026-07-12T00:00:00Z", True)])},
             active_repository=repository,
             canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+            orchestrator_factory=lambda _source: scheduler_module.ForecastOrchestrator(
+                config=OrchestratorConfig(
+                    workspace_root=tmp_path / "chain-workspace",
+                    object_store_root=tmp_path / "chain-object-store",
+                    object_store_prefix="s3://nhms",
+                    poll_interval_seconds=0,
+                    job_timeout_seconds=5,
+                    source_id="gfs",
+                ),
+                repository=repository,
+                slurm_client=ImmediateTerminalSlurmClient(),
+                object_store=LocalObjectStore(tmp_path / "chain-object-store", "s3://nhms"),
+            ),
             reconcile_store=repository,
             reconcile_comment_query=lambda _key: None,
             reconcile_sacct_query=lambda _job: None,
         )
 
     actions: list[str] = []
+    streaks: list[Any] = []
+    pass_statuses: list[str] = []
+    wedge_error_codes: list[str] = []
+    released_outcome: dict[str, Any] | None = None
     for _ in range(3):
         result = scheduler().run_once()
-        assert result.status != "submission_failed"
-        assert result.evidence["timing"]["pass"]["status"] != "submission_failed"
-        outcomes = result.evidence["restart_reconcile"]["reserved_unbound"]["outcomes"]
+        reserved_unbound = result.evidence["restart_reconcile"]["reserved_unbound"]
+        # tasks 2.4/1.4: the streak limit is readable straight off the block.
+        assert reserved_unbound["identity_blocked_streak_limit"] == 3
+        outcomes = reserved_unbound["outcomes"]
         actions.extend(str(outcome["action"]) for outcome in outcomes)
+        streaks.extend(outcome["identity_blocked_streak"] for outcome in outcomes)
+        for outcome in outcomes:
+            if outcome["action"] == "identity_mismatch_released":
+                released_outcome = dict(outcome)
+        pass_statuses.append(str(result.evidence["timing"]["pass"]["status"]))
+        wedge_error_codes.extend(
+            str(item.get("error_code"))
+            for item in result.evidence["model_run_evidence"]
+            if item.get("status") == "submission_failed"
+        )
 
     assert actions == [
         "identity_mismatch_blocked",
         "identity_mismatch_blocked",
         "identity_mismatch_released",
     ]
+    # The evidence PRODUCER is the oracle here: streak trajectory and the release
+    # write kind come from the real pass payload, not from a hand-written dict.
+    assert streaks == [1, 2, 3]
+    assert released_outcome is not None
+    assert released_outcome["identity_blocked_streak"] == 3
+    assert released_outcome["durable_write_kind"] == "identity_blocked_release"
+    assert released_outcome["status"] == "reservation_lost"
+
+    # Pre-release passes really are wedged; the release pass reconciles first and
+    # the same pass submits.
+    assert pass_statuses[:2] == ["submission_failed", "submission_failed"]
+    assert pass_statuses[2] == "submitted"
+    assert set(wedge_error_codes) == {"PIPELINE_ALREADY_ACTIVE"}
+    assert len(wedge_error_codes) == 2
+
     released = repository.get_pipeline_job(str(record["job_id"]))
     assert released["status"] == "reservation_lost"
     assert released["reconciliation_decision"] == "identity_mismatch_released"

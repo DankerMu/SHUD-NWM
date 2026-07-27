@@ -24,7 +24,7 @@ node-22 生产调度器被一对 reserved-unbound forecast cohort 楔死:reconci
 - 不做 #1116(comment accounting 能力探测/保守匹配放行绑定)——本 change 的出口是放弃 reservation,不是替它找回绑定。
 - 不做 #1118(跨 reason 的 no-progress 断路器/告警)——streak 是 per-(job,outcome) 收敛计数,不是全局断路器;两者字段不共享、不互斥。
 - 不修 cycle `2026072000` 的 init-state 身份不一致(数据侧)。
-- 不动 bounded-evidence 摘要行为本身(#1171/#1172)。
+- 不动 #1171/#1172 的 bounded-evidence **摘要行为**(降级分层顺序、`limit.candidate_lists` 标记、terminal 压缩兜底、fail-closed 大小门)。**在范围内的是 key 白名单扩张**:`_BOUNDED_RESTART_RECONCILE_OUTCOME_KEYS` 增 `identity_blocked_streak`,并同步修订 `runtime-evidence-and-operations` 中"restart-reconcile 摘要行 key 封闭枚举"那条既有 requirement(见 spec delta 的 `MODIFIED Requirements`)——否则归档后 capability spec 自相矛盾。
 - 不动另外三处同名 decision 的写入路径(`reconcile.py:1018-1029` in-flight 零写、`file_orchestration_journal.py:2554-2569` projection 延迟、`chain_array_accounting.py:389-404` in-band 延迟)。
 - 不改 `_STRICT_WARM_START_TERMINAL_SKIP_REASONS` 语义、不弱化 strict warm-start 判定本身。
 
