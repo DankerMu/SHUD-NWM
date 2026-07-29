@@ -8,7 +8,7 @@ Issue #1183(p1)。node-22 生产 backfill 链卡死在 cycle 2026072000:该 cycl
 
 - **completion verdict 容缺严冲突**:终态成功 **且** successor state ready(index 在册且 usable)时,init-state 记录**缺失**不再阻断 `complete`;记录**存在但冲突**仍判 `gap`(严格性零回退)。
 - **cohort 行前向补账(预约期)**:accepted-submit cohort forecast 在**预约期**把 init-state 身份落账为 master 行新字段(digest 输入集之外),终态构行时从 master 行读取;旧行不回填、不改写(零 migration)。
-- **比对语义统一(仅 init 身份段)**:discovery 侧与 candidate 侧的 init 身份比对收敛到单一**逐在场字段**helper(absent/match/conflict 三态);candidate 侧特例分支保留在其 wrapper 内不上提;candidate 准入梯子其余段不动。
+- **三态比对 helper(verdict 侧专用,cross-review C1 修订)**:verdict 侧消费单一**逐在场字段**helper(absent/match/conflict 三态);candidate 侧 wrapper 的 `hydro_run` 腿**保留 selected-驱动严格比对逐字节不变**(observed-驱动会把 legacy id-only 行翻成 match,绕过 #1173 预算路由),特例分支保留在其 wrapper 内不上提;candidate 准入梯子其余段不动。
 - 运维文档:`docs/runbooks/failed-basin-retry.md` 增"缺账 vs 错账"判读与本次 072000 处置结论。
 
 ## Impact

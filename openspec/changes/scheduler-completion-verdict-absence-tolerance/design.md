@@ -3,7 +3,7 @@
 ## Risk triage
 
 - **Fixture level: expanded**(生产调度正确性 + 水文血统保护;错放宽 = 血统污染,错收紧 = 断产)。
-- 风险轴:①判定放宽的边界必须精确——只容"缺",不容"错";②cohort 行新增字段不得破坏 accepted-submit 不变量闸(8 处 `__post_init__`/normalize 门,见 #1180);③两侧比对统一后字段集合的选择影响既有 pass 行为。
+- 风险轴:①判定放宽的边界必须精确——只容"缺",不容"错";②cohort 行新增字段不得破坏 accepted-submit 不变量闸(8 处 `__post_init__`/normalize 门,见 #1180);③verdict 侧比对语义改造的字段集合选择影响既有 pass 行为(candidate 侧比对不换向,见 Seams C1 修订)。
 
 ## Must-preserve(不得回退的既有行为)
 
