@@ -144,28 +144,33 @@ Verified by:
 - `tests/test_production_scheduler.py::test_db_free_strict_warm_start_terminal_mismatch_blocks_when_budget_exhausted`
   — below-budget vs exhausted decisions.
 
-Not yet proven on the real cluster: end-to-end manual re-entry against the production
-`2026072000` journal (which rows the scheduler actually picks after the release). That is
-tasks 4.1 in `openspec/changes/scheduler-identity-blocked-convergence/tasks.md` and is
-still open — see the disposition note below.
+### Cycle `2026072000` disposition (observed 2026-07-29 — tasks 4.1 receipt)
 
-### Cycle `2026072000` disposition (expected behaviour — receipt pending)
+**Status: observed on the production node-22 scheduler.** Fix deployed at `5ed81a36`
+(2026-07-29T12:19Z); four natural timer passes with zero manual scheduler action. The
+prediction held on every clause: the streak climbed 1 → 2 → 3 (= limit) across three
+passes with both jobs in lockstep, the release pass
+(`scheduler_2026072913_d459e00da10b`, 13:02–13:09Z) recorded
+`identity_mismatch_released, identity_blocked_streak=3, status=reservation_lost` for
+both `…retry_87` and `…retry_117`, and the next pass
+(`scheduler_2026072913_e2b9cd8dc6e0`) showed `reserved_unbound.outcomes: []` with
+`timing.pass.status` flipping `restart_reconciled → planned`. No pass in the window
+recorded `submission_failed` / `PIPELINE_ALREADY_ACTIVE`, and all 36 candidates settled
+on `blocked_strict_warm_start_init_state_mismatch` every pass instead of being
+re-selected for submission.
 
-**Status: predicted, not yet observed.** The only oracle for this section is the node-22
-receipt from tasks 4.1 (`openspec/changes/scheduler-identity-blocked-convergence/tasks.md`),
-which is still open. Do not read the paragraph below as an observation.
-
-Expectation for the wedged `2026072000` forecast pair, with no manual action: after the
-fix is deployed, three natural passes should drive the streak to the limit and release
-both rows, the cycle should stop recording `submission_failed`, and the 36
-already-completed candidates should settle on
-`blocked_strict_warm_start_init_state_mismatch` (their forecast-stage attempts, 87 and
-117, are far past the retry limit) instead of being re-selected every pass.
-
-Receipt (fill in when tasks 4.1 lands): `artifact path: <TBD>` · `observed on: <TBD>` ·
-`released rows + streak trajectory: <TBD>` · `post-release direction of the (run_id,
-forecast) pair: <TBD>`. If the observation deviates, record it verbatim here and reopen
-the finding rather than relaxing this section.
+Receipt: `artifact path:
+/scratch/frd_muziyao/nhms-prod/workspace/scheduler/evidence/scheduler_2026072913_d459e00da10b.json`
+(release; predecessors `scheduler_2026072912_9cb232b2a0e4`, `…_c40f23d2454a`, successor
+`…_e2b9cd8dc6e0`) · `observed on: 2026-07-29T12:41Z–13:19Z` · `released rows + streak
+trajectory: …retry_87 (attempt 88, anchor submission_attempt_started_at
+2026-07-27T01:39:13Z, streak 1→2→3, released 13:02:24Z) and …retry_117 (attempt 118,
+anchor 2026-07-27T01:39:15Z, streak 1→2→3, released 13:02:33Z); anchors were never
+self-refreshed by streak writes` · `post-release direction of the (run_id, forecast)
+pair: stable stop — no new *_retry_N minted (max suffix unchanged at 87/117),
+error_code=null invariant held, journal status distribution for the cycle
+failed=202/succeeded=8/reservation_lost=4 (2 pre-fix supersession losses + these 2
+releases)`. Full receipt: PR #1178 / issue #1173 comments (2026-07-29).
 
 The residual risk accepted here is that a released reservation whose Slurm job was in fact
 alive would have been abandoned; that is bounded by the three consecutive-pass
