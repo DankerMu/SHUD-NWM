@@ -15,8 +15,8 @@
 
 ## 3. 评审
 
-- [ ] 3.1 fixture review(只读)→ 修复 → validate。
-- [ ] 3.2 实现后 risk-adaptive cross-review(≥2 lane)+ verifier 批次;round ledger 记账。
+- [x] 3.1 fixture review(只读)→ 修复 → validate。(2.5 轮,6+ 机制级缺陷实现前拦截)
+- [x] 3.2 实现后 risk-adaptive cross-review(≥2 lane)+ verifier 批次;round ledger 记账。(r1 not-clean 4+1discard → 0f617268 修复;r2 闭环+1 spec-drift → d164ef84;r3 Phase7 GO;ledger 3 行)
 
 ## 4. Evidence Floor(实机 oracle,merge 后)
 
