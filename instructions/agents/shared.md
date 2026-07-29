@@ -144,25 +144,30 @@ openspec validate <change-name> --strict --no-interactive
 
 ### CI 成本纪律（避免重复跑 / 单一终态推送）
 
-`.github/workflows/ci.yml` 触发于 push master + 所有 PR 事件。**2026-06-07 起改为按路径 scope + draft 快速通道**（见下"CI 范围与门控"），不再每推全跑 7 个 job。提交纪律仍然适用：
+`.github/workflows/ci.yml` 触发于 push master + PR 的 opened/synchronize/reopened（`on.pull_request` 无 `types:`，见下"draft -> ready 不触发新 run"）。**2026-06-07 起改为按路径 scope + PR 定向测试**（见下"CI 范围与门控"），不再每推全跑 7 个 job。提交纪律仍然适用：
 
 - **文档/规格更新必须并入触发合并门 CI 的最后一次 push** —— worklog、`openspec/**`、`*.md` 等随活儿一起 commit，或在最后一次代码推送之前推完。
 - **不得在等 CI 绿期间再补 docs-only 的尾随 commit**（如"补个 worklog"）——那会重置合并门、白跑 CI。
 - 一个 PR 的"最后一推"应已是完整终态；该推之后只等 CI 与 merge，不再追加任何 commit。
 - 注：openspec/ **不可** gitignore——它是规格源 + `openspec validate` 对象 + 双端同步内容，忽略它会破坏 spec-driven 工作流（治错了病）。成本问题用上面的提交纪律解决。
 
-### CI 范围与门控（路径 scope + draft 快速通道）
+### CI 范围与门控（路径 scope + PR 定向测试）
 
 CI 是**人工合并门**（master 无 branch protection / required checks），不是机器强制；下面是"哪个改动触发哪个 job"的约定：
 
-- **按路径 scope**：`changes` job（`dorny/paths-filter`）先判改动区，下游 job 仅在相关路径变化时跑。纯前端 / 纯 docs PR **不跑** 16min 后端 pytest；纯后端 PR 不跑前端构建。
-  - 后端门（`unit-test` 全量 pytest、`real-db-integration` 起 TimescaleDB）：`**/*.py`、`pyproject.toml`、`tests/**`、`packages/**`、`apps/api/**`、`services/**`、`workers/**`、`schemas/**`、`db/**`。
+- **按路径 scope**：`changes` job（`dorny/paths-filter`）先判改动区，下游 job 仅在相关路径变化时跑。纯前端 / 纯 docs PR **不跑**后端 pytest；纯后端 PR 不跑前端构建。
+  - `backend` filter（喂 `unit-test` / `unit-test-targeted`）：`**/*.py`、`pyproject.toml`、`uv.lock`、`tests/**`、`packages/**`、`apps/api/**`、`services/**`、`workers/**`、`infra/**`、`schemas/**`、`db/**`、`scripts/validate_*.py`。
+  - `database` filter（喂 `real-db-integration`，**独立于 `backend` 且窄得多**）：
+    - `db/**`、`packages/common/migrate.py`、`scripts/node27_timeseries_decompression_replay.py`、`pyproject.toml`、`uv.lock`、`tests/conftest.py`、`tests/integration_helpers.py`、`tests/*integration*.py`、`tests/**/*integration*.py`，外加一小串显式真实-DB 测试文件。
+    - 只改 `apps/api/**` 之类的后端 PR 命中 `backend` 但不命中 `database`，**永不**起 TimescaleDB，转不转 ready 都一样。
   - 前端门（`frontend-build`）：`apps/frontend/**`、`openapi/**`。
   - lint 门：`markdown-lint`<-`docs/**`、`openapi-validate`<-`openapi/**`、`json-schema-validate`<-`schemas/**`。
-- **draft = 快速定向通道，ready = 全量合并门**：
-  - PR 标为 **draft** 时，后端只跑 `unit-test-fast`（仅本 PR 改动到的 test 文件 + collect-only 冒烟），迭代快；真实快速反馈仍以 **node-27 真实 DB** 为准（CI 不是迭代 oracle）。
-  - PR 标为 **ready-for-review**（或 push 到 master）时，跑全量 `unit-test` + `real-db-integration` 作为合并门。**合并前务必把 PR 转 ready** 以触发全量。
-  - **Fail-safe**：忘记标 draft -> 默认走全量门，只会多跑、绝不漏测。
+- **PR 上后端只跑定向测试，与 draft/ready 无关**：
+  - 命中 `backend` filter 的**所有** PR（draft 或 ready 一视同仁），后端单测一律只有 `unit-test-targeted`（显示名 **"Unit Tests"**，timeout 35min）：由 `scripts/select_ci_tests.py` 按本 PR diff 选出测试文件再 `pytest -q`；选不出文件时降级为 `pytest tests/ -q --collect-only` 冒烟——只验 import/语法，**不执行任何断言**。
+  - 全量 `unit-test`（显示名 **"Unit Tests (full)"**，`-m "not e2e and not grib and not integration"`）**只在 push master（即 merge 之后）或手动 `workflow_dispatch` 跑**，`pull_request` 事件下永不触发。
+  - `real-db-integration`（显示名 **"SQL Migration Dry Run"**）在 PR/push 上需同时满足：命中上面那个窄 `database` filter **且** 非 draft（push 视同非 draft）。draft 状态只影响这一个 job。例外：手动 `workflow_dispatch` **绕过 filter 无条件跑**——这是显式的真实-DB dry-run 逃生门。
+- **PR 上的 CI 绿 ≠ 全量 pytest 通过**：PR 只证明"被选中的那几个测试文件通过"；全量回归要到 merge 后的 master run（或手动 `workflow_dispatch`）才跑，回归是**事后**发现的。真实快速反馈仍以 **node-27 真实 DB** 为准（CI 不是迭代 oracle）。
+- **draft -> ready 不触发新 run**：`on.pull_request` 没写 `types:`，只监听 opened/synchronize/reopened，转 ready 不产生任何 CI run。若要让 `real-db-integration` 在转 ready 后真的跑起来，必须**再推一个 commit** 或 close/reopen PR。
 - **`concurrency: cancel-in-progress`**：同一 PR 连推多次，自动取消被取代的旧 run。
 - **M15 visual evidence 已从自动 CI 移出**：历史 M15 Playwright 视觉证据现在只通过 `.github/workflows/m15-visual-evidence.yml` 手动触发，运行 `test:e2e:m15-visual` / `mocked-regression-chromium`，并校验输入 SHA；它是历史 mocked 视觉证据，不是 node-27 live display proof。
 
