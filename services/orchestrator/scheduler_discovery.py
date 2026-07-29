@@ -9,6 +9,12 @@ from typing import Any, Protocol
 from packages.common.redaction import redact_payload
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator import scheduler_generation as _scheduler_generation
+from services.orchestrator.scheduler_init_state_match import (
+    TERMINAL_INIT_STATE_ABSENT,
+    TERMINAL_INIT_STATE_CONFLICT,
+    init_state_field,
+    terminal_init_state_match,
+)
 from services.orchestrator.scheduler_state import _ensure_utc, _evidence_safe, _format_utc
 from workers.data_adapters.base import CycleDiscovery, cycle_id_for
 
@@ -214,11 +220,14 @@ def _cycle_completion_verdict(
                 "terminal_pipeline_success",
             }:
                 return "gap"
-            if strict_evidence is not None and not _terminal_decision_matches_strict_warm_start(
-                decision.evidence,
-                strict_evidence,
-            ):
-                return "gap"
+            if strict_evidence is not None:
+                init_state_verdict = _terminal_init_state_verdict(decision.evidence, strict_evidence)
+                if init_state_verdict == TERMINAL_INIT_STATE_CONFLICT:
+                    return "gap"
+                if init_state_verdict == TERMINAL_INIT_STATE_ABSENT and not _successor_state_proves_continuity(
+                    successor_evidence
+                ):
+                    return "gap"
         if checked:
             return "complete"
 
@@ -325,19 +334,33 @@ def _journal_predecessor_identity_is_stale(
     return matches is False
 
 
-def _terminal_decision_matches_strict_warm_start(
+def _terminal_init_state_verdict(
     terminal_evidence: Mapping[str, Any],
     strict_evidence: Mapping[str, Any],
-) -> bool:
+) -> str:
+    """Classify the terminal row's recorded init state for the cycle verdict.
+
+    A strict resolution that names no state (the cold-start generation shapes
+    ``COLD_NEW_MODEL`` / ``COLD_DECLARED_CUTOVER``, ``scheduler_generation_gate
+    .py:349-376``) carries nothing to compare against: the verdict path skips
+    the shared helper and keeps today's gap, which ``conflict`` expresses here.
+    """
+
     selected = strict_evidence.get("candidate_state")
-    selected_id = selected.get("init_state_id") if isinstance(selected, Mapping) else None
-    if selected_id in (None, ""):
-        return False
-    hydro_run = terminal_evidence.get("hydro_run")
-    if not isinstance(hydro_run, Mapping):
-        return False
-    terminal_init_state_id = hydro_run.get("init_state_id") or hydro_run.get("initial_state_id")
-    return str(terminal_init_state_id or "") == str(selected_id)
+    if not isinstance(selected, Mapping) or init_state_field(selected, "state_id") in (None, ""):
+        return TERMINAL_INIT_STATE_CONFLICT
+    return terminal_init_state_match(selected, terminal_evidence.get("hydro_run"))
+
+
+def _successor_state_proves_continuity(successor_evidence: Mapping[str, Any] | None) -> bool:
+    """Whether the successor checkpoint is a physical continuity proof.
+
+    ``None`` is the third state — "no verdict was reached" (db-free disabled,
+    no next allowed cycle, outside the strict window; ``scheduler_core.py:
+    773-803``).  Silence is not proof, so absence tolerance stays disengaged.
+    """
+
+    return successor_evidence is not None and bool(successor_evidence.get("ready"))
 
 
 def discover_cycles(

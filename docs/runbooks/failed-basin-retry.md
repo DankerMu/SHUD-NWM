@@ -188,6 +188,63 @@ On this cluster accounting does not store job comments (#1116), so that query no
 returns nothing; fall back to `sacct -a --name nhms_forecast` narrowed to the reservation's
 `submission_attempt_started_at` window and match by user/account and submit time.
 
+## Missing accounting vs wrong accounting (缺账 vs 错账)
+
+A cycle whose whole cohort ran to `succeeded` can still be judged `gap` forever. When the
+backfill audit keeps naming the same oldest cycle pass after pass while its successor
+cycles never even produce candidates, read the completion verdict inputs before touching
+anything — the two failure classes look identical in the pass evidence and have opposite
+dispositions.
+
+| | 缺账 (missing accounting / `absent`) | 错账 (wrong accounting / `conflict`) |
+|---|---|---|
+| Terminal row | records **no** `init_state*` / `hydro_run` identity at all | records an identity that **disagrees** with the strict warm-start resolution |
+| Typical producer | accepted-submit cohort rows reserved before #1183 | a run genuinely started from a stale or repaired checkpoint |
+| Verdict since #1183 | `complete` **iff** the successor state is in the snapshot index with `usable_flag=true`; otherwise still `gap` | `gap`, always — strictness is not relaxed here |
+| Disposition | none: the chain converges by itself on the next natural pass | investigate the lineage; re-run the cycle, never widen the judgement |
+
+How to tell them apart:
+
+1. Take the oldest gap from `backfill.audit[]` / `source_cycles[]` in the pass evidence.
+2. Read that cycle's terminal journal rows (`query_pipeline_jobs_by_cycle`, or the
+   `latest/<source>/<cycle>/<model>.json` view). No `init_state_id` anywhere in the
+   terminal row or its `hydro_run` means 缺账; a present-but-different `init_state_id` /
+   checksum / `valid_time` means 错账.
+3. Confirm the continuity proof independently: the successor cycle's state must be in the
+   state snapshot index with `usable_flag=true`. Absence tolerance requires that proof —
+   a missing or unusable successor state keeps the verdict at `gap`, and a successor
+   evaluation that reached no verdict at all (outside the strict window, no next allowed
+   cycle) is silence, not proof.
+
+Cycles reserved after #1183 book their per-model init-state identity on the cohort master
+row at reservation time, and each per-model terminal row copies its own entry, so new
+cycles land in the 匹配 or 冲突 columns rather than in 缺账. Historical rows are never
+rewritten — no migration, no backfill.
+
+### Cycle `2026072000` disposition (accounting-absence class)
+
+`2026072000` ran its whole chain to `succeeded` (state_save_qc terminal, +12h checkpoint in
+the index with `usable_flag=true`), but its accepted-submit cohort terminal rows carry no
+init-state identity, so the pre-#1183 verdict judged the unaccounted rows exactly like
+conflicting ones. `available_gaps[:1]` therefore pointed at `2026072000` on every pass and
+`2026072012`…`2026072900` never became candidates even though their raw/manifest/warm
+inputs were ready.
+
+**Disposition: no manual action.** The change
+`openspec/changes/scheduler-completion-verdict-absence-tolerance` (issue #1183) makes
+absence-with-proven-continuity `complete`, so after deploying it the next natural pass
+retires `2026072000` from the oldest-gap slot and the chain advances cycle by cycle on its
+own. Do **not** hand-edit the journal, do not re-run `2026072000`, and do not raise
+`NHMS_SCHEDULER_RETRY_LIMIT` for it: the retry budget is not what is holding this cycle.
+If a cycle still gaps after the deploy, it is 错账 (or its successor state is missing) —
+re-read the two inputs above rather than relaxing the judgement.
+
 ## Residual Risks
 
 Repeated basin failures may indicate model input defects. Do not publish affected downstream frequency or tile outputs until QC is accepted.
+
+Absence tolerance accepts one named lineage risk: the successor-state proof shows that a
+usable checkpoint exists for the next cycle, not that the run which produced it used a
+canonical warm init. A cold-seed-admitted run registers under the same cycle id, so that
+lineage break is now judged `complete` where it used to gap. The conflict path is
+unchanged, so a wrong recorded identity is still caught.

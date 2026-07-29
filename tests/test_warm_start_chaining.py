@@ -1891,3 +1891,99 @@ def test_released_reservation_reenters_only_through_a_higher_attempt_retry_row(
     # Either way the released row itself is never revived under its spent key.
     assert repository.jobs[base_job_id]["status"] == "reservation_lost"
     assert repository.jobs[base_job_id]["reconciliation_decision"] == "identity_mismatch_released"
+
+
+def test_cohort_reservation_records_each_models_warm_start_identity(tmp_path: Path) -> None:
+    """#1183 task 1.3: the accepted-submit master row books the warm start it planned.
+
+    Reservation is the only point on the cohort path that still sees the
+    per-basin warm-start selection (``chain_forecast_orchestrator_cycle.py:
+    509-527`` reads ``context.active_basins``); the reconcile-side terminal
+    write has Slurm accounting only.  The 18 models each initialise from their
+    OWN checkpoint, so the booked evidence is a per-``array_task_id`` map — a
+    single scalar would misattribute 17 of 18 lineages.
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from tests.test_orchestration_chain import FakeCycleSlurmClient, _basins, _orchestrator
+
+    cycle = "2026050100"
+    basins = _basins(3)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_{cycle}_model_{index}",
+                "candidate_id": f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic",
+                "orchestration_run_id": f"cycle_gfs_{cycle}_forecast_cohort_fixture",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+                "init_state_id": f"state_gfs_model_{index}_2026050100_gfs_2026043012_f012",
+                "init_state_uri": f"s3://nhms/states/gfs/model_{index}/2026050100/state.cfg.ic",
+                "init_state_checksum": f"sha256:state-{index}",
+                "init_state_valid_time": "2026-05-01T00:00:00Z",
+            }
+        )
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    orchestrator = _orchestrator(tmp_path, repository, FakeCycleSlurmClient())
+
+    result = orchestrator.orchestrate_cycle("gfs", cycle, basins)
+
+    assert result.status == "complete"
+    reopened = FileOrchestrationJournalRepository(repository.root)
+    master = next(
+        row
+        for row in reopened.query_pipeline_jobs_by_cycle("gfs_2026050100")
+        if row.get("stage") == "forecast" and row.get("model_id") is None
+    )
+    assert master["init_state_identities"] == [
+        {
+            "array_task_id": index,
+            "model_id": f"model_{index}",
+            "init_state_id": f"state_gfs_model_{index}_2026050100_gfs_2026043012_f012",
+            "init_state_checksum": f"sha256:state-{index}",
+            # Object URIs are placeholder-sanitized on every public read.
+            "init_state_uri": "[object-uri]",
+            "init_state_valid_time": "2026-05-01T00:00:00Z",
+        }
+        for index in range(3)
+    ]
+    # Digest inputs are untouched, so the cohort identity still validates.
+    assert len(master["cohort_digest"]) == 64
+    assert [member["model_id"] for member in master["cohort_members"]] == [
+        f"model_{index}" for index in range(3)
+    ]
+
+
+def test_cold_seeded_cohort_basins_book_no_init_state_identity(tmp_path: Path) -> None:
+    """Cold-seeded basins resolve no warm start, so nothing is booked for them.
+
+    Absence stays absence: a cold-start basin must not be recorded with an
+    empty-valued identity that a later reader could mistake for a claim.
+    """
+
+    from services.orchestrator.accepted_submit_identity import (
+        canonical_forecast_cohort_init_state_identities,
+    )
+
+    identities = canonical_forecast_cohort_init_state_identities(
+        basins=[
+            {"task_id": 0, "model_id": "model_0", "init_state_id": None, "init_state_uri": None},
+            {
+                "task_id": 1,
+                "model_id": "model_1",
+                "init_state_id": "state_gfs_model_1_2026050100_gfs_2026043012_f012",
+                "init_state_checksum": "sha256:state-1",
+            },
+        ]
+    )
+
+    assert identities == (
+        {
+            "array_task_id": 1,
+            "model_id": "model_1",
+            "init_state_id": "state_gfs_model_1_2026050100_gfs_2026043012_f012",
+            "init_state_checksum": "sha256:state-1",
+        },
+    )
