@@ -144,7 +144,7 @@ openspec validate <change-name> --strict --no-interactive
 
 ### CI 成本纪律（避免重复跑 / 单一终态推送）
 
-`.github/workflows/ci.yml` 触发于 push master + 所有 PR 事件。**2026-06-07 起改为按路径 scope + PR 定向测试**（见下"CI 范围与门控"），不再每推全跑 7 个 job。提交纪律仍然适用：
+`.github/workflows/ci.yml` 触发于 push master + PR 的 opened/synchronize/reopened（`on.pull_request` 无 `types:`，见下"draft -> ready 不触发新 run"）。**2026-06-07 起改为按路径 scope + PR 定向测试**（见下"CI 范围与门控"），不再每推全跑 7 个 job。提交纪律仍然适用：
 
 - **文档/规格更新必须并入触发合并门 CI 的最后一次 push** —— worklog、`openspec/**`、`*.md` 等随活儿一起 commit，或在最后一次代码推送之前推完。
 - **不得在等 CI 绿期间再补 docs-only 的尾随 commit**（如"补个 worklog"）——那会重置合并门、白跑 CI。
@@ -163,9 +163,9 @@ CI 是**人工合并门**（master 无 branch protection / required checks），
   - 前端门（`frontend-build`）：`apps/frontend/**`、`openapi/**`。
   - lint 门：`markdown-lint`<-`docs/**`、`openapi-validate`<-`openapi/**`、`json-schema-validate`<-`schemas/**`。
 - **PR 上后端只跑定向测试，与 draft/ready 无关**：
-  - 命中 `backend` filter 的**所有** PR（draft 或 ready 一视同仁）只跑 `unit-test-targeted`（显示名 **"Unit Tests"**，timeout 35min）：由 `scripts/select_ci_tests.py` 按本 PR diff 选出测试文件再 `pytest -q`；选不出文件时降级为 `pytest tests/ -q --collect-only` 冒烟——只验 import/语法，**不执行任何断言**。
+  - 命中 `backend` filter 的**所有** PR（draft 或 ready 一视同仁），后端单测一律只有 `unit-test-targeted`（显示名 **"Unit Tests"**，timeout 35min）：由 `scripts/select_ci_tests.py` 按本 PR diff 选出测试文件再 `pytest -q`；选不出文件时降级为 `pytest tests/ -q --collect-only` 冒烟——只验 import/语法，**不执行任何断言**。
   - 全量 `unit-test`（显示名 **"Unit Tests (full)"**，`-m "not e2e and not grib and not integration"`）**只在 push master（即 merge 之后）或手动 `workflow_dispatch` 跑**，`pull_request` 事件下永不触发。
-  - `real-db-integration`（显示名 **"SQL Migration Dry Run"**）需同时满足：命中上面那个窄 `database` filter **且** 非 draft（或 push / `workflow_dispatch`）。draft 状态只影响这一个 job。
+  - `real-db-integration`（显示名 **"SQL Migration Dry Run"**）在 PR/push 上需同时满足：命中上面那个窄 `database` filter **且** 非 draft（push 视同非 draft）。draft 状态只影响这一个 job。例外：手动 `workflow_dispatch` **绕过 filter 无条件跑**——这是显式的真实-DB dry-run 逃生门。
 - **PR 上的 CI 绿 ≠ 全量 pytest 通过**：PR 只证明"被选中的那几个测试文件通过"；全量回归要到 merge 后的 master run（或手动 `workflow_dispatch`）才跑，回归是**事后**发现的。真实快速反馈仍以 **node-27 真实 DB** 为准（CI 不是迭代 oracle）。
 - **draft -> ready 不触发新 run**：`on.pull_request` 没写 `types:`，只监听 opened/synchronize/reopened，转 ready 不产生任何 CI run。若要让 `real-db-integration` 在转 ready 后真的跑起来，必须**再推一个 commit** 或 close/reopen PR。
 - **`concurrency: cancel-in-progress`**：同一 PR 连推多次，自动取消被取代的旧 run。
