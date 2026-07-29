@@ -24236,6 +24236,135 @@ def test_candidate_special_branches_stay_out_of_the_completion_verdict() -> None
         )
 
 
+def test_candidate_wrapper_keeps_selected_driven_compare_for_id_only_terminal_rows() -> None:
+    """C1: the candidate wrapper's ``hydro_run`` leg must stay selected-driven.
+
+    The strict resolution's ``candidate_state`` always carries a checksum while
+    legacy ``hydro_run`` rows record only ``init_state_id``. Under the
+    observed-driven verdict helper that shape classifies as ``match``, which
+    would silently reroute the budgeted
+    ``strict_warm_start_terminal_init_state_mismatch`` decision (#1173) onto the
+    unbudgeted run-manifest gate. The wrapper must answer not-match here.
+    """
+
+    selected = dict(_ABSENCE_TOLERANCE_SELECTED_STATE)
+    strict_evidence = {"ready": True, "candidate_state": selected}
+    terminal_evidence = {
+        "terminal_source": "pipeline_job",
+        "terminal_status": "succeeded",
+        "hydro_run": {
+            "run_id": "fcst_gfs_2026072000_model_a",
+            "status": "published",
+            "init_state_id": selected["init_state_id"],
+        },
+    }
+
+    assert (
+        scheduler_candidates_module._terminal_decision_matches_strict_warm_start(
+            terminal_evidence,
+            strict_evidence,
+        )
+        is False
+    )
+    # The shared verdict-side helper deliberately answers differently on the very
+    # same pair; that difference is why the wrapper may not consume it.
+    from services.orchestrator.scheduler_init_state_match import terminal_init_state_match
+
+    assert terminal_init_state_match(selected, terminal_evidence["hydro_run"]) == "match"
+
+
+def test_db_free_id_only_terminal_row_keeps_the_budgeted_mismatch_decision(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """C1 ladder-level: id-only terminal rows keep routing through the budget.
+
+    Same shape as the cold-start resubmit test below, except the terminal
+    ``hydro_run`` records the selected state id (and nothing else). The decision
+    must remain ``strict_warm_start_terminal_init_state_mismatch`` — never the
+    unbudgeted ``strict_warm_start_terminal_run_manifest_missing``.
+    """
+
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    generated_at = _dt("2026-05-21T12:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    state_fixture = _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=fixture["package_checksum"],
+        generated_at=generated_at,
+    )
+    selected_state_id = str(state_fixture["entries"][0]["state_id"])
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": fixture["package_checksum"],
+        },
+    }
+
+    class CompletedLegacyRepository(FakeCandidateStateRepository):
+        def has_completed_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+            del source_id, cycle_time, model_id
+            return True
+
+    run_id = "fcst_gfs_2026052106_model_a"
+    repository = CompletedLegacyRepository(
+        {
+            "hydro_status": "published",
+            "hydro_run": {
+                "run_id": run_id,
+                "status": "published",
+                # Legacy shape: the id is recorded, the checksum never was.
+                "init_state_id": selected_state_id,
+                "output_uri": f"s3://nhms/runs/{run_id}/output/",
+            },
+        }
+    )
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at),
+        registry=FakeRegistry([model]),
+        adapters={},
+        active_repository=repository,
+        orchestrator_factory=lambda _source_id: pytest.fail("candidate construction must not build orchestrator"),
+    )
+
+    candidates, blocked, skipped, _duplicate_exclusions, _slurm_sync = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(model)],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052106",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=6,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+
+    assert blocked == []
+    assert skipped == []
+    assert len(candidates) == 1
+    evidence = candidates[0].state_evidence
+    assert evidence["reason"] == "strict_warm_start_terminal_init_state_mismatch"
+    assert evidence["decision"] == "retry_strict_warm_start_terminal_init_state_mismatch"
+    assert evidence["candidate_state"]["init_state_id"] == selected_state_id
+
+
 def test_db_free_strict_warm_start_resubmits_completed_cold_start_terminal(
     monkeypatch: Any,
     tmp_path: Path,

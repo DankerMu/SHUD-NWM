@@ -17,9 +17,7 @@ from services.orchestrator.chain_source_cycle import (
 from services.orchestrator.scheduler_file_providers import _public_raw_manifest_evidence
 from services.orchestrator.scheduler_init_state_match import (
     EVIDENCE_REDACTION_PLACEHOLDERS,
-    TERMINAL_INIT_STATE_MATCH,
     init_state_field,
-    terminal_init_state_match,
 )
 from services.orchestrator.scheduler_state import (
     DURABLE_HYDRO_SUCCESS_STATUSES,
@@ -1849,13 +1847,20 @@ def _terminal_decision_matches_strict_warm_start(
     terminal_evidence: Mapping[str, Any],
     strict_evidence: Mapping[str, Any],
 ) -> bool:
-    """Candidate-side wrapper: two special branches, then the shared helper.
+    """Candidate-side admission check: two special branches, then strict compare.
 
     The ``candidate_state`` terminal-source branch and the
     ``COLD_START_QUARANTINED`` escape prove currency from evidence other than
-    the recorded init-state identity, so they short-circuit AHEAD of
-    :func:`terminal_init_state_match` and stay candidate-side — the completion
-    verdict must never inherit them (#1183).
+    the recorded init-state identity, so they short-circuit first and stay
+    candidate-side — the completion verdict must never inherit them (#1183).
+
+    The final ``hydro_run`` leg keeps :func:`_warm_state_record_matches`
+    (selected-driven: a field present on the selected state but absent on the
+    observed record is a mismatch). The verdict side's observed-driven
+    ``terminal_init_state_match`` MUST NOT be substituted here: legacy id-only
+    ``hydro_run`` rows would flip from mismatch to match and reroute the
+    budgeted ``strict_warm_start_terminal_init_state_mismatch`` decision (#1173)
+    onto the unbudgeted run-manifest-missing path.
     """
 
     selected = strict_evidence.get("candidate_state")
@@ -1880,7 +1885,7 @@ def _terminal_decision_matches_strict_warm_start(
         and hydro_run.get("error_code") == "COLD_START_QUARANTINED"
     ):
         return True
-    return terminal_init_state_match(selected, hydro_run) == TERMINAL_INIT_STATE_MATCH
+    return _warm_state_record_matches(selected, hydro_run)
 
 
 def _terminal_decision_has_run_manifest(terminal_evidence: Mapping[str, Any]) -> bool:

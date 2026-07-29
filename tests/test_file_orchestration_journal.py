@@ -6813,6 +6813,101 @@ def test_cohort_terminal_rows_carry_their_own_reservation_time_init_state(
     )
 
 
+def test_sparse_cohort_map_stamps_only_its_own_task_not_the_list_position(
+    tmp_path: Path,
+) -> None:
+    """A mixed warm/cold cohort: lookup is BY task id, never by list position.
+
+    Only task 2 resolved a warm start, so the master's map has a single entry
+    whose ``array_task_id`` is 2 while its list position is 0. A positional
+    read would stamp task 0 with task 2's lineage — the exact silent
+    mis-attribution the per-task lookup exists to prevent (#1183).
+    """
+
+    member_count = 3
+    warm_task_id = 2
+    repository, record = _reserved_cohort_master(
+        tmp_path,
+        member_count=member_count,
+        init_state_identities=[_cohort_init_state_identity(warm_task_id)],
+    )
+    reserved = repository.reserve_pipeline_job(record)
+    assert reserved is not None
+    expected_entry = {
+        **_cohort_init_state_identity(warm_task_id),
+        "init_state_uri": "[object-uri]",
+    }
+    assert reserved["init_state_identities"] == [expected_entry]
+    assert reserved["init_state_identities"][0]["array_task_id"] == warm_task_id
+
+    _bind_and_project_cohort(repository, record, member_count=member_count)
+
+    for index in range(member_count):
+        terminal = repository.get_pipeline_job(
+            f"job_fcst_gfs_2026072000_model_{index}_forecast_reconciled_17667_{index}"
+        )
+        assert terminal is not None
+        if index == warm_task_id:
+            assert terminal["init_state_identities"] == [expected_entry]
+        else:
+            assert terminal["init_state_identities"] == []
+
+
+def test_candidate_row_rejects_init_state_identity_bound_to_another_task(
+    tmp_path: Path,
+) -> None:
+    """A per-model terminal row's single entry must name ITS task and model.
+
+    Without the expected-task/model binding, a mis-copied entry would persist a
+    foreign basin's warm-start lineage on this row and read back as a valid
+    continuity claim (#1183).
+    """
+
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    candidate_row = {
+        "job_id": "job_fcst_gfs_2026072000_model_0_forecast_reconciled_17667_0",
+        "run_id": "fcst_gfs_2026072000_model_0",
+        "cycle_id": "gfs_2026072000",
+        "job_type": "run_shud_forecast_array",
+        "slurm_job_id": "17667_0",
+        "array_task_id": 0,
+        "model_id": "model_0",
+        "status": "succeeded",
+        "stage": "forecast",
+        "candidate_id": "gfs:2026-07-20T00:00:00Z:model_0:forecast_gfs_deterministic",
+        "submit_outcome": "accepted",
+        "accepted_submit_contract_version": ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        "restart_stage": "forecast",
+        "native_shud_resubmitted": False,
+    }
+
+    # Its own entry is accepted verbatim.
+    own = repository._pipeline_job_row(
+        {**candidate_row, "init_state_identities": [_cohort_init_state_identity(0)]}
+    )
+    assert own["init_state_identities"] == [_cohort_init_state_identity(0)]
+
+    with pytest.raises(FileOrchestrationJournalError) as foreign_task:
+        repository._pipeline_job_row(
+            {
+                **candidate_row,
+                "init_state_identities": [{**_cohort_init_state_identity(0), "array_task_id": 2}],
+            }
+        )
+    assert foreign_task.value.field == "init_state_identities.array_task_id"
+
+    with pytest.raises(FileOrchestrationJournalError) as foreign_model:
+        repository._pipeline_job_row(
+            {
+                **candidate_row,
+                "init_state_identities": [{**_cohort_init_state_identity(0), "model_id": "model_2"}],
+            }
+        )
+    assert foreign_model.value.field == "init_state_identities.model_id"
+
+
 @pytest.mark.parametrize(
     ("payload", "expected_field"),
     [
@@ -6871,6 +6966,56 @@ def test_cohort_init_state_identity_invariant_gate_rejects_malformed_payloads(
     assert repository.get_pipeline_job(str(record["job_id"])) is None
 
 
+@pytest.mark.parametrize(
+    ("payload", "expected_field"),
+    [
+        pytest.param("not-a-list", "init_state_identities", id="not_a_sequence"),
+        pytest.param([["array_task_id", 0]], "init_state_identities", id="entry_not_a_mapping"),
+        pytest.param(
+            [{key: value for key, value in _cohort_init_state_identity(0).items() if key != "init_state_id"}],
+            "init_state_identities.init_state_id",
+            id="partial_identity_without_state_id",
+        ),
+        pytest.param(
+            [{**_cohort_init_state_identity(0), "array_task_id": 99}],
+            "init_state_identities.array_task_id",
+            id="task_id_outside_cohort",
+        ),
+        pytest.param(
+            [{**_cohort_init_state_identity(0), "model_id": "model_2"}],
+            "init_state_identities.model_id",
+            id="model_id_not_the_members_model",
+        ),
+    ],
+)
+def test_cohort_init_state_identity_gate_rejects_malformed_ordinary_upsert(
+    tmp_path: Path,
+    payload: Any,
+    expected_field: str,
+) -> None:
+    """The invariant gates must also fire on the ordinary-upsert path (B1).
+
+    Some shapes are sanitized by the durable bounding step into a well-formed
+    but DIVERGENT map; those are refused by the frozen check instead of the
+    shape gate. Either way the write is rejected, never silently dropped.
+    """
+
+    member_count = 3
+    repository, record = _reserved_cohort_master(
+        tmp_path,
+        member_count=member_count,
+        init_state_identities=[_cohort_init_state_identity(index) for index in range(member_count)],
+    )
+    assert repository.reserve_pipeline_job(record) is not None
+    durable = repository.get_pipeline_job(str(record["job_id"]))
+
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.upsert_pipeline_job({**durable, "init_state_identities": payload})
+
+    assert error.value.field in {expected_field, "init_state_identities"}
+    assert repository.get_pipeline_job(str(record["job_id"])) == durable
+
+
 def test_cohort_digest_and_member_projection_ignore_init_state_identity(tmp_path: Path) -> None:
     """F3: historical rows' digest validation must be bit-for-bit unaffected."""
 
@@ -6925,16 +7070,33 @@ def test_cohort_init_state_identity_is_frozen_and_out_of_the_cycle_scope_project
     assert reserved is not None
     durable = repository.get_pipeline_job(str(record["job_id"]))
 
-    forged = repository.upsert_pipeline_job(
+    with pytest.raises(FileOrchestrationJournalError) as forged_error:
+        repository.upsert_pipeline_job(
+            {
+                **durable,
+                "init_state_identities": [
+                    {**_cohort_init_state_identity(0), "init_state_id": "state_forged"}
+                ],
+            }
+        )
+
+    # Reject, never silently keep: a rewrite attempt is an authority violation,
+    # and a merge that never copies the incoming value would compare the
+    # persisted map against itself and pass (#1183 cross-review B1).
+    assert forged_error.value.reason == "file_journal_evidence_invariant_invalid"
+    assert forged_error.value.field == "init_state_identities"
+    assert repository.get_pipeline_job(str(record["job_id"])) == durable
+
+    # An exact replay of the reserved map is still an idempotent read.
+    replayed = repository.upsert_pipeline_job(
         {
             **durable,
             "init_state_identities": [
-                {**_cohort_init_state_identity(0), "init_state_id": "state_forged"}
+                _cohort_init_state_identity(index) for index in range(member_count)
             ],
         }
     )
-
-    assert forged["init_state_identities"] == durable["init_state_identities"]
+    assert replayed["init_state_identities"] == durable["init_state_identities"]
     assert repository.get_pipeline_job(str(record["job_id"])) == durable
 
     _bind_and_project_cohort(repository, record, member_count=member_count)

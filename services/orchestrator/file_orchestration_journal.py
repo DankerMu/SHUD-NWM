@@ -196,6 +196,12 @@ _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS = (
     "slurm_comment",
     "cohort_members",
     "cohort_digest",
+    # Merged like its cohort siblings so a divergent incoming map actually
+    # REACHES the frozen ordinary-upsert check below and is rejected (#1183).
+    # Omitting it here would make the merge keep the persisted value and the
+    # frozen check compare persisted-against-persisted — a silent drop instead
+    # of the required ``file_journal_evidence_invariant_invalid``.
+    INIT_STATE_IDENTITY_FIELD,
     "restart_stage",
     "submission_attempt",
     "submission_attempt_started_at",
