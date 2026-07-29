@@ -23899,6 +23899,472 @@ def test_db_free_strict_warm_start_discovery_reopens_completed_cold_start_termin
     assert status == "gap"
 
 
+_ABSENCE_TOLERANCE_SELECTED_STATE = {
+    "state_id": "state_gfs_model_a_2026072000_gfs_2026071912_f012",
+    "init_state_id": "state_gfs_model_a_2026072000_gfs_2026071912_f012",
+    "init_state_checksum": "sha256:" + "d" * 64,
+    "init_state_uri": "s3://nhms/states/gfs/model_a/2026072000/state.cfg.ic",
+    "init_state_valid_time": "2026-07-20T00:00:00Z",
+}
+
+
+def _absence_tolerance_scheduler(
+    monkeypatch: Any,
+    tmp_path: Path,
+    *,
+    hydro_run: dict[str, Any],
+    successor_state: dict[str, Any] | None,
+    repository_factory: Any | None = None,
+) -> tuple[Any, CycleDiscovery, list[Any]]:
+    """Cycle-completion verdict seam with the strict/successor providers pinned.
+
+    The verdict's four AND conditions (`scheduler_discovery.py:180-223`) are
+    exercised directly: a terminal-success candidate state, a ready strict
+    resolution naming one warm-start state, and the successor-state evidence
+    under test (ready / not ready / no verdict at all).
+    """
+
+    model = _model("model_a", "basin_a")
+    factory = repository_factory or FakeCandidateStateRepository
+    repository = factory(
+        {
+            "hydro_status": "published",
+            "hydro_run": hydro_run,
+        }
+    )
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-07-20T12:00:00Z")),
+        registry=FakeRegistry([model]),
+        adapters={},
+        active_repository=repository,
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_strict_warm_start_for_candidate",
+        lambda _candidate, _cycle: {
+            "status": "ready",
+            "ready": True,
+            "candidate_state": dict(_ABSENCE_TOLERANCE_SELECTED_STATE),
+        },
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_successor_warm_start_state_for_candidate",
+        lambda _candidate, _cycle: dict(successor_state) if successor_state is not None else None,
+    )
+    discovery = CycleDiscovery(
+        cycle_id="gfs_2026072000",
+        source_id="gfs",
+        cycle_time=_dt("2026-07-20T00:00:00Z"),
+        cycle_hour=0,
+        available=True,
+        status="discovered",
+    )
+    return scheduler, discovery, [scheduler_module._coerce_registered_model(model)]
+
+
+def test_cycle_completion_verdict_tolerates_absent_init_state_record_with_ready_successor(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """#1183: absence is not conflict when the successor checkpoint proves continuity.
+
+    The accepted-submit cohort terminal row records no init-state identity at
+    all; before this change that unaccounted row was judged exactly like a
+    conflicting one, so cycle 2026072000 could never leave ``gap`` and the
+    backfill chain stalled on it forever.
+    """
+
+    scheduler, discovery, models = _absence_tolerance_scheduler(
+        monkeypatch,
+        tmp_path,
+        hydro_run={
+            "run_id": "fcst_gfs_2026072000_model_a",
+            "status": "published",
+            "output_uri": "s3://nhms/runs/fcst_gfs_2026072000_model_a/output/",
+        },
+        successor_state={"ready": True, "status": "ready"},
+    )
+
+    assert scheduler._cycle_completion_status(discovery, models, horizon={}) == "complete"
+
+
+_ABSENT_INIT_STATE_HYDRO_RUN = {
+    "run_id": "fcst_gfs_2026072000_model_a",
+    "status": "published",
+    "output_uri": "s3://nhms/runs/fcst_gfs_2026072000_model_a/output/",
+}
+_MATCHING_INIT_STATE_HYDRO_RUN = {
+    **_ABSENT_INIT_STATE_HYDRO_RUN,
+    "init_state_id": _ABSENCE_TOLERANCE_SELECTED_STATE["init_state_id"],
+}
+_CONFLICTING_INIT_STATE_HYDRO_RUN = {
+    **_ABSENT_INIT_STATE_HYDRO_RUN,
+    "init_state_id": "state_gfs_model_a_2026072000_gfs_2026071900_f024",
+}
+
+
+@pytest.mark.parametrize(
+    ("hydro_run", "successor_state", "expected_status"),
+    [
+        pytest.param(_ABSENT_INIT_STATE_HYDRO_RUN, {"ready": True}, "complete", id="absent_successor_ready"),
+        pytest.param(_ABSENT_INIT_STATE_HYDRO_RUN, {"ready": False}, "gap", id="absent_successor_unusable"),
+        pytest.param(_ABSENT_INIT_STATE_HYDRO_RUN, None, "gap", id="absent_successor_no_verdict"),
+        pytest.param(
+            _CONFLICTING_INIT_STATE_HYDRO_RUN, {"ready": True}, "gap", id="conflict_successor_ready"
+        ),
+        pytest.param(
+            _CONFLICTING_INIT_STATE_HYDRO_RUN, None, "gap", id="conflict_successor_no_verdict"
+        ),
+        pytest.param(
+            _MATCHING_INIT_STATE_HYDRO_RUN, {"ready": True}, "complete", id="match_successor_ready"
+        ),
+        pytest.param(_MATCHING_INIT_STATE_HYDRO_RUN, None, "complete", id="match_successor_no_verdict"),
+    ],
+)
+def test_cycle_completion_verdict_init_state_record_truth_table(
+    monkeypatch: Any,
+    tmp_path: Path,
+    hydro_run: dict[str, Any],
+    successor_state: dict[str, Any] | None,
+    expected_status: str,
+) -> None:
+    """#1183 decision table: tolerate absence, never tolerate conflict.
+
+    ``successor_state=None`` is the third state — the successor evaluation
+    reached no verdict at all — and silence must not stand in for a continuity
+    proof, so the absence branch stays disengaged there.  A legacy row that
+    records a MATCHING id keeps completing exactly as before, with or without a
+    successor verdict.
+    """
+
+    scheduler, discovery, models = _absence_tolerance_scheduler(
+        monkeypatch,
+        tmp_path,
+        hydro_run=dict(hydro_run),
+        successor_state=successor_state,
+    )
+
+    assert scheduler._cycle_completion_status(discovery, models, horizon={}) == expected_status
+
+
+def test_cycle_completion_verdict_keeps_legacy_id_only_rows_completing(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """0718/0719 geometry: per-basin ``hydro_run`` rows record the id and nothing else.
+
+    ``create_hydro_run`` writes ``init_state_id`` alone
+    (``file_orchestration_journal.py:1203/1234``), while the strict resolution
+    always names four fields.  Comparing per PRESENT field is what keeps those
+    cycles complete; demanding all four would gap every historical cycle.
+    """
+
+    scheduler, discovery, models = _absence_tolerance_scheduler(
+        monkeypatch,
+        tmp_path,
+        hydro_run={
+            "run_id": "fcst_gfs_2026072000_model_a",
+            "status": "published",
+            "init_state_id": _ABSENCE_TOLERANCE_SELECTED_STATE["init_state_id"],
+        },
+        successor_state=None,
+    )
+
+    assert scheduler._cycle_completion_status(discovery, models, horizon={}) == "complete"
+
+
+def test_cycle_completion_verdict_gaps_when_strict_resolution_names_no_state(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """Cold-start strict shapes carry no ``candidate_state`` (N3).
+
+    ``COLD_NEW_MODEL`` / ``COLD_DECLARED_CUTOVER`` resolutions are ready but
+    name no warm-start state, so there is nothing for the shared helper to
+    compare; the verdict path bypasses it and keeps today's gap even though the
+    successor checkpoint exists.
+    """
+
+    scheduler, discovery, models = _absence_tolerance_scheduler(
+        monkeypatch,
+        tmp_path,
+        hydro_run=dict(_ABSENT_INIT_STATE_HYDRO_RUN),
+        successor_state={"ready": True},
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_strict_warm_start_for_candidate",
+        lambda _candidate, _cycle: {
+            "status": "ready",
+            "ready": True,
+            "mode": "db_free_cold_new_model",
+        },
+    )
+
+    assert scheduler._cycle_completion_status(discovery, models, horizon={}) == "gap"
+
+
+def test_cycle_completion_verdict_still_gates_on_journal_predecessor_identity(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """§8.7 (#1107) choke point is untouched by absence tolerance (F5).
+
+    A cycle that now reaches ``complete`` through the absence branch must still
+    clear the journal predecessor identity filter; a positive lineage mismatch
+    keeps it a gap exactly as before this change.
+    """
+
+    class StaleLineageRepository(FakeCandidateStateRepository):
+        def completed_pipeline_init_state_id(
+            self, *, source_id: str, cycle_time: datetime, model_id: str
+        ) -> str | None:
+            del source_id, cycle_time, model_id
+            # Same expected base key for cycle 2026072000, different lineage
+            # suffix -> the §8.7 positive mismatch class.
+            return "state_gfs_model_a_2026072000_gfs_2026071900_f024"
+
+    scheduler, discovery, models = _absence_tolerance_scheduler(
+        monkeypatch,
+        tmp_path,
+        hydro_run=dict(_ABSENT_INIT_STATE_HYDRO_RUN),
+        successor_state={"ready": True},
+        repository_factory=StaleLineageRepository,
+    )
+
+    assert scheduler._cycle_completion_status(discovery, models, horizon={}) == "gap"
+
+
+def test_terminal_init_state_match_helper_separates_absence_from_conflict() -> None:
+    """The one shared comparison both scheduler paths consume (#1183 task 1.1)."""
+
+    from services.orchestrator.scheduler_init_state_match import terminal_init_state_match
+
+    selected = dict(_ABSENCE_TOLERANCE_SELECTED_STATE)
+    state_id = selected["init_state_id"]
+
+    # Absence: no identity fields at all, and the missing-record shape.
+    assert terminal_init_state_match(selected, None) == "absent"
+    assert terminal_init_state_match(selected, {}) == "absent"
+    assert terminal_init_state_match(selected, {"run_id": "fcst_gfs_2026072000_model_a"}) == "absent"
+    assert terminal_init_state_match(selected, {"init_state_id": None}) == "absent"
+
+    # Match: legacy id-only rows and fully recorded rows alike.
+    assert terminal_init_state_match(selected, {"init_state_id": state_id}) == "match"
+    assert terminal_init_state_match(selected, {"initial_state_id": state_id}) == "match"
+    assert (
+        terminal_init_state_match(
+            selected,
+            {
+                "state_id": state_id,
+                "checksum": selected["init_state_checksum"],
+                "ic_file_uri": selected["init_state_uri"],
+                "valid_time": selected["init_state_valid_time"],
+            },
+        )
+        == "match"
+    )
+
+    # Conflict: any present field disagreeing, and identity fragments with no id.
+    assert terminal_init_state_match(selected, {"init_state_id": "state_other"}) == "conflict"
+    assert (
+        terminal_init_state_match(
+            selected,
+            {"init_state_id": state_id, "init_state_checksum": "sha256:" + "e" * 64},
+        )
+        == "conflict"
+    )
+    assert (
+        terminal_init_state_match(selected, {"init_state_checksum": selected["init_state_checksum"]})
+        == "conflict"
+    )
+
+    # Redaction placeholders mean "withheld", not "different", on either side.
+    assert (
+        terminal_init_state_match(
+            selected,
+            {"init_state_id": state_id, "init_state_uri": "[object-uri]"},
+        )
+        == "match"
+    )
+    assert (
+        terminal_init_state_match(
+            {**selected, "init_state_checksum": "sha256:[redacted]"},
+            {"init_state_id": state_id, "init_state_checksum": "sha256:" + "e" * 64},
+        )
+        == "match"
+    )
+
+
+def test_candidate_special_branches_stay_out_of_the_completion_verdict() -> None:
+    """N2: the two candidate-side escapes never become verdict short-circuits.
+
+    Both shapes record no usable init-state identity, so the verdict path must
+    keep classifying them through the shared helper (``absent``) — i.e. they
+    complete only when the successor checkpoint proves continuity, never on the
+    escape itself.
+    """
+
+    from services.orchestrator import scheduler_discovery as scheduler_discovery_module
+
+    selected = dict(_ABSENCE_TOLERANCE_SELECTED_STATE)
+    strict_evidence = {"ready": True, "candidate_state": selected}
+    candidate_state_branch = {
+        "terminal_source": "pipeline_job",
+        "terminal_status": "succeeded",
+        "candidate_state": dict(selected),
+    }
+    cold_start_quarantined_branch = {
+        "terminal_source": "pipeline_job",
+        "terminal_status": "succeeded",
+        "hydro_run": {
+            "status": "failed",
+            "init_state_id": None,
+            "error_code": "COLD_START_QUARANTINED",
+        },
+    }
+
+    for terminal_evidence in (candidate_state_branch, cold_start_quarantined_branch):
+        assert scheduler_candidates_module._terminal_decision_matches_strict_warm_start(
+            terminal_evidence,
+            strict_evidence,
+        )
+        assert (
+            scheduler_discovery_module._terminal_init_state_verdict(terminal_evidence, strict_evidence)
+            == "absent"
+        )
+
+
+def test_candidate_wrapper_keeps_selected_driven_compare_for_id_only_terminal_rows() -> None:
+    """C1: the candidate wrapper's ``hydro_run`` leg must stay selected-driven.
+
+    The strict resolution's ``candidate_state`` always carries a checksum while
+    legacy ``hydro_run`` rows record only ``init_state_id``. Under the
+    observed-driven verdict helper that shape classifies as ``match``, which
+    would silently reroute the budgeted
+    ``strict_warm_start_terminal_init_state_mismatch`` decision (#1173) onto the
+    unbudgeted run-manifest gate. The wrapper must answer not-match here.
+    """
+
+    selected = dict(_ABSENCE_TOLERANCE_SELECTED_STATE)
+    strict_evidence = {"ready": True, "candidate_state": selected}
+    terminal_evidence = {
+        "terminal_source": "pipeline_job",
+        "terminal_status": "succeeded",
+        "hydro_run": {
+            "run_id": "fcst_gfs_2026072000_model_a",
+            "status": "published",
+            "init_state_id": selected["init_state_id"],
+        },
+    }
+
+    assert (
+        scheduler_candidates_module._terminal_decision_matches_strict_warm_start(
+            terminal_evidence,
+            strict_evidence,
+        )
+        is False
+    )
+    # The shared verdict-side helper deliberately answers differently on the very
+    # same pair; that difference is why the wrapper may not consume it.
+    from services.orchestrator.scheduler_init_state_match import terminal_init_state_match
+
+    assert terminal_init_state_match(selected, terminal_evidence["hydro_run"]) == "match"
+
+
+def test_db_free_id_only_terminal_row_keeps_the_budgeted_mismatch_decision(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """C1 ladder-level: id-only terminal rows keep routing through the budget.
+
+    Same shape as the cold-start resubmit test below, except the terminal
+    ``hydro_run`` records the selected state id (and nothing else). The decision
+    must remain ``strict_warm_start_terminal_init_state_mismatch`` — never the
+    unbudgeted ``strict_warm_start_terminal_run_manifest_missing``.
+    """
+
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    generated_at = _dt("2026-05-21T12:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    state_fixture = _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=fixture["package_checksum"],
+        generated_at=generated_at,
+    )
+    selected_state_id = str(state_fixture["entries"][0]["state_id"])
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": fixture["package_checksum"],
+        },
+    }
+
+    class CompletedLegacyRepository(FakeCandidateStateRepository):
+        def has_completed_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+            del source_id, cycle_time, model_id
+            return True
+
+    run_id = "fcst_gfs_2026052106_model_a"
+    repository = CompletedLegacyRepository(
+        {
+            "hydro_status": "published",
+            "hydro_run": {
+                "run_id": run_id,
+                "status": "published",
+                # Legacy shape: the id is recorded, the checksum never was.
+                "init_state_id": selected_state_id,
+                "output_uri": f"s3://nhms/runs/{run_id}/output/",
+            },
+        }
+    )
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at),
+        registry=FakeRegistry([model]),
+        adapters={},
+        active_repository=repository,
+        orchestrator_factory=lambda _source_id: pytest.fail("candidate construction must not build orchestrator"),
+    )
+
+    candidates, blocked, skipped, _duplicate_exclusions, _slurm_sync = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(model)],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052106",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=6,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+
+    assert blocked == []
+    assert skipped == []
+    assert len(candidates) == 1
+    evidence = candidates[0].state_evidence
+    assert evidence["reason"] == "strict_warm_start_terminal_init_state_mismatch"
+    assert evidence["decision"] == "retry_strict_warm_start_terminal_init_state_mismatch"
+    assert evidence["candidate_state"]["init_state_id"] == selected_state_id
+
+
 def test_db_free_strict_warm_start_resubmits_completed_cold_start_terminal(
     monkeypatch: Any,
     tmp_path: Path,

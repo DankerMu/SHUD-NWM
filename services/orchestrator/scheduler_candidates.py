@@ -15,6 +15,10 @@ from services.orchestrator.chain_source_cycle import (
     _raw_manifest_uri_matches_source_cycle,
 )
 from services.orchestrator.scheduler_file_providers import _public_raw_manifest_evidence
+from services.orchestrator.scheduler_init_state_match import (
+    EVIDENCE_REDACTION_PLACEHOLDERS,
+    init_state_field,
+)
 from services.orchestrator.scheduler_state import (
     DURABLE_HYDRO_SUCCESS_STATUSES,
     CandidateStateDecision,
@@ -1843,6 +1847,22 @@ def _terminal_decision_matches_strict_warm_start(
     terminal_evidence: Mapping[str, Any],
     strict_evidence: Mapping[str, Any],
 ) -> bool:
+    """Candidate-side admission check: two special branches, then strict compare.
+
+    The ``candidate_state`` terminal-source branch and the
+    ``COLD_START_QUARANTINED`` escape prove currency from evidence other than
+    the recorded init-state identity, so they short-circuit first and stay
+    candidate-side — the completion verdict must never inherit them (#1183).
+
+    The final ``hydro_run`` leg keeps :func:`_warm_state_record_matches`
+    (selected-driven: a field present on the selected state but absent on the
+    observed record is a mismatch). The verdict side's observed-driven
+    ``terminal_init_state_match`` MUST NOT be substituted here: legacy id-only
+    ``hydro_run`` rows would flip from mismatch to match and reroute the
+    budgeted ``strict_warm_start_terminal_init_state_mismatch`` decision (#1173)
+    onto the unbudgeted run-manifest-missing path.
+    """
+
     selected = strict_evidence.get("candidate_state")
     if not isinstance(selected, Mapping) or _state_field(selected, "state_id") in (None, ""):
         return False
@@ -1887,22 +1907,7 @@ def _terminal_decision_run_manifest_matches_strict_warm_start(
 
 
 def _state_field(record: Mapping[str, Any], field: str) -> Any:
-    aliases = {
-        "state_id": ("init_state_id", "initial_state_id", "state_id"),
-        "checksum": ("init_state_checksum", "initial_state_checksum", "checksum"),
-        "uri": ("init_state_uri", "initial_state_uri", "ic_file_uri", "state_uri"),
-        "valid_time": ("init_state_valid_time", "initial_state_valid_time", "valid_time"),
-    }
-    for key in aliases[field]:
-        value = record.get(key)
-        if value not in (None, ""):
-            return value
-    return None
-
-
-_EVIDENCE_REDACTION_PLACEHOLDERS = frozenset(
-    {"[object-uri]", "[uri]", "[local-path]", "[redacted]", "sha256:[redacted]"}
-)
+    return init_state_field(record, field)
 
 
 def _warm_state_record_matches(selected: Mapping[str, Any], observed: Mapping[str, Any]) -> bool:
@@ -1922,10 +1927,10 @@ def _warm_state_record_matches(selected: Mapping[str, Any], observed: Mapping[st
         expected = _state_field(selected, field)
         if expected in (None, ""):
             continue
-        if str(expected) in _EVIDENCE_REDACTION_PLACEHOLDERS:
+        if str(expected) in EVIDENCE_REDACTION_PLACEHOLDERS:
             continue
         actual = _state_field(observed, field)
-        if str(actual or "") in _EVIDENCE_REDACTION_PLACEHOLDERS:
+        if str(actual or "") in EVIDENCE_REDACTION_PLACEHOLDERS:
             continue
         if str(actual or "") != str(expected):
             return False

@@ -33,6 +33,7 @@ from services.orchestrator.accepted_submit_identity import (
     ACCEPTED_SUBMIT_CONTRACT_VERSION,
     ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD,
     IDENTITY_MISMATCH_RELEASED_DECISION,
+    INIT_STATE_IDENTITY_FIELD,
     MAX_FORECAST_COHORT_MEMBERS,
     AcceptedSubmitCommitResult,
     AcceptedSubmitEvidenceError,
@@ -43,6 +44,7 @@ from services.orchestrator.accepted_submit_identity import (
     accepted_submit_master_ordinary_upsert_state,
     accepted_submit_row_kind,
     apply_accepted_submit_transition,
+    init_state_identity_for_task,
     normalize_accepted_submit_attempt_anchor,
     normalize_accepted_submit_evidence,
     normalize_candidate_projections,
@@ -194,6 +196,12 @@ _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS = (
     "slurm_comment",
     "cohort_members",
     "cohort_digest",
+    # Merged like its cohort siblings so a divergent incoming map actually
+    # REACHES the frozen ordinary-upsert check below and is rejected (#1183).
+    # Omitting it here would make the merge keep the persisted value and the
+    # frozen check compare persisted-against-persisted — a silent drop instead
+    # of the required ``file_journal_evidence_invariant_invalid``.
+    INIT_STATE_IDENTITY_FIELD,
     "restart_stage",
     "submission_attempt",
     "submission_attempt_started_at",
@@ -2803,6 +2811,15 @@ class FileOrchestrationJournalRepository:
                 task_status = str(projection["array_task_outcome"])
                 task_status = "succeeded" if task_status == "succeeded" else "failed"
                 candidate_job_id = f"job_{run_id}_forecast_reconciled_{master_slurm_job_id}_{task_id}"
+                # Forward accounting (#1183): the master row captured every
+                # task's warm-start identity at reservation time, when the
+                # planning context still existed.  This accounting pass owns no
+                # planning context, so it copies this task's entry verbatim;
+                # pre-change masters recorded none and yield an empty map.
+                task_init_state_identity = init_state_identity_for_task(
+                    existing.get(INIT_STATE_IDENTITY_FIELD),
+                    task_id,
+                )
                 candidate_job = self._pipeline_job_row(
                     {
                         "job_id": candidate_job_id,
@@ -2818,6 +2835,9 @@ class FileOrchestrationJournalRepository:
                         "error_code": None if task_status == "succeeded" else projection.get("error_code"),
                         "submit_outcome": "accepted",
                         "accepted_submit_contract_version": ACCEPTED_SUBMIT_CONTRACT_VERSION,
+                        INIT_STATE_IDENTITY_FIELD: (
+                            [task_init_state_identity] if task_init_state_identity is not None else []
+                        ),
                         "restart_stage": projection.get("restart_stage"),
                         "native_shud_resubmitted": False,
                     }
@@ -5599,6 +5619,12 @@ class FileOrchestrationJournalRepository:
             "slurm_comment": record.get("slurm_comment"),
             "cohort_members": _bounded_cohort_members(record.get("cohort_members")),
             "cohort_digest": record.get("cohort_digest"),
+            # Explicit member of the closed constructor (#1183): a key absent
+            # here is silently dropped from the reservation write, and the
+            # later frozen-value check would then raise on the phantom change.
+            INIT_STATE_IDENTITY_FIELD: _bounded_init_state_identities(
+                record.get(INIT_STATE_IDENTITY_FIELD)
+            ),
             "restart_stage": record.get("restart_stage"),
             "submission_attempt": record.get("submission_attempt", 1),
             "submission_attempt_started_at": _optional_format_datetime(
@@ -7614,6 +7640,36 @@ def _bounded_cohort_members(value: Any) -> list[dict[str, Any]]:
     return result
 
 
+def _bounded_init_state_identities(value: Any) -> list[dict[str, Any]]:
+    """Return the durable per-model init-state identity map (#1183).
+
+    Unlike the member map, identity fields are optional per entry: only the
+    keys actually recorded are kept, so an unrecorded checksum stays absent
+    instead of becoming a null-valued claim.
+    """
+
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in value[:MAX_FORECAST_COHORT_MEMBERS]:
+        if not isinstance(item, Mapping):
+            continue
+        entry = {
+            key: item[key]
+            for key in (
+                "array_task_id",
+                "model_id",
+                "init_state_id",
+                "init_state_checksum",
+                "init_state_uri",
+                "init_state_valid_time",
+            )
+            if key in item and item[key] is not None
+        }
+        result.append(entry)
+    return result
+
+
 def _bounded_candidate_projections(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
         return []
@@ -8309,6 +8365,11 @@ def _current_terminal_jobs(jobs: Iterable[Mapping[str, Any]]) -> list[Mapping[st
     return [job for job in jobs if chain_repository_state._record_allowed_for_compute_state_terminal(job)]
 
 
+# Deliberately WITHOUT ``init_state_identities`` (#1183): the master row's map
+# holds one entry per cohort member, and this projection is replicated into
+# every candidate state of the cycle — carrying it here would multiply the
+# whole cohort's identity map by 18 for no reader.  Each per-model terminal row
+# carries its own single entry instead.
 _CYCLE_SCOPE_JOB_PROJECTION_KEYS = (
     "job_id",
     "run_id",

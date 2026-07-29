@@ -80,6 +80,24 @@ ACCEPTED_PROJECTION_FIELDS = frozenset(
     }
 )
 
+INIT_STATE_IDENTITY_FIELD = "init_state_identities"
+INIT_STATE_IDENTITY_ENTRY_FIELDS = frozenset(
+    {
+        "array_task_id",
+        "model_id",
+        "init_state_id",
+        "init_state_checksum",
+        "init_state_uri",
+        "init_state_valid_time",
+    }
+)
+_INIT_STATE_IDENTITY_REQUIRED_FIELDS = ("model_id", "init_state_id")
+_INIT_STATE_IDENTITY_OPTIONAL_FIELDS = (
+    "init_state_checksum",
+    "init_state_uri",
+    "init_state_valid_time",
+)
+
 ACCEPTED_SUBMIT_MASTER_IMMUTABLE_FIELDS = (
     ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD,
     "job_id",
@@ -127,8 +145,15 @@ ACCEPTED_SUBMIT_MASTER_ORDINARY_UPSERT_FIELDS = (
     "candidate_projections",
     "cancellation_receipt_recorded",
     "identity_blocked_streak",
+    # Captured once at reservation time and never rewritten afterwards
+    # (#1183), so the frozen ordinary-upsert table owns it like the rest of
+    # the master's durable authority state.
+    INIT_STATE_IDENTITY_FIELD,
 )
 
+# Deliberately WITHOUT the init-state identity: member projection feeds
+# ``forecast_cohort_digest``, and adding a field there would recompute every
+# historical row's digest into a mismatch (#1183 F3).
 _MEMBER_FIELDS = (
     "array_task_id",
     "candidate_id",
@@ -492,6 +517,11 @@ def normalize_accepted_submit_evidence(row: Mapping[str, Any]) -> dict[str, Any]
             raise AcceptedSubmitEvidenceError(
                 "file_journal_evidence_required", field="candidate_id"
             )
+        normalized[INIT_STATE_IDENTITY_FIELD] = normalize_init_state_identities(
+            normalized.get(INIT_STATE_IDENTITY_FIELD),
+            expected_array_task_id=normalized.get("array_task_id"),
+            expected_model_id=normalized.get("model_id"),
+        )
         return normalized
     if normalized.get("model_id") not in (None, ""):
         raise AcceptedSubmitEvidenceError(
@@ -534,6 +564,10 @@ def normalize_accepted_submit_evidence(row: Mapping[str, Any]) -> dict[str, Any]
 
     normalized["candidate_projections"] = normalize_candidate_projections(
         normalized.get("candidate_projections"),
+        cohort_members=normalized.get("cohort_members"),
+    )
+    normalized[INIT_STATE_IDENTITY_FIELD] = normalize_init_state_identities(
+        normalized.get(INIT_STATE_IDENTITY_FIELD),
         cohort_members=normalized.get("cohort_members"),
     )
     decision = normalized.get("reconciliation_decision")
@@ -685,6 +719,158 @@ def normalize_candidate_projections(
             )
         normalized.append(projection)
     return normalized
+
+
+def normalize_init_state_identities(
+    value: Any,
+    *,
+    cohort_members: Any = None,
+    expected_array_task_id: Any = None,
+    expected_model_id: Any = None,
+) -> list[dict[str, Any]]:
+    """Return the bounded per-model init-state identity map (#1183).
+
+    Forward-only accounting: every pre-change row records nothing, which is a
+    legal empty map and never an error.  A row that DOES record an identity
+    must record a complete, correctly keyed one — a partial or mis-keyed entry
+    is corruption, not evidence, so it is rejected rather than persisted.
+
+    ``cohort_members`` binds a master row's entries to its member map;
+    ``expected_array_task_id``/``expected_model_id`` bind a per-model terminal
+    row's single entry to the task it belongs to.
+    """
+
+    if value is None:
+        return []
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
+        raise AcceptedSubmitEvidenceError(
+            "file_journal_evidence_type_invalid", field=INIT_STATE_IDENTITY_FIELD
+        )
+    if len(value) > MAX_FORECAST_COHORT_MEMBERS:
+        raise AcceptedSubmitEvidenceError(
+            "file_journal_evidence_limit_exceeded", field=INIT_STATE_IDENTITY_FIELD
+        )
+    members_by_task: dict[Any, Mapping[str, Any]] | None = None
+    if cohort_members is not None:
+        members_by_task = {
+            member.get("array_task_id"): member for member in ordered_cohort_members(cohort_members)
+        }
+    if expected_array_task_id is not None and len(value) > 1:
+        raise AcceptedSubmitEvidenceError(
+            "file_journal_evidence_invariant_invalid", field=INIT_STATE_IDENTITY_FIELD
+        )
+    normalized: list[dict[str, Any]] = []
+    seen_task_ids: set[int] = set()
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise AcceptedSubmitEvidenceError(
+                "file_journal_evidence_type_invalid", field=INIT_STATE_IDENTITY_FIELD
+            )
+        extras = set(item) - INIT_STATE_IDENTITY_ENTRY_FIELDS
+        if extras:
+            raise AcceptedSubmitEvidenceError(
+                "file_journal_evidence_field_not_allowed",
+                field=f"{INIT_STATE_IDENTITY_FIELD}.{sorted(extras)[0]}",
+            )
+        task_id = item.get("array_task_id")
+        if type(task_id) is not int:
+            raise AcceptedSubmitEvidenceError(
+                "file_journal_evidence_type_invalid",
+                field=f"{INIT_STATE_IDENTITY_FIELD}.array_task_id",
+            )
+        if task_id in seen_task_ids:
+            raise AcceptedSubmitEvidenceError(
+                "file_journal_evidence_invariant_invalid",
+                field=f"{INIT_STATE_IDENTITY_FIELD}.array_task_id",
+            )
+        seen_task_ids.add(task_id)
+        entry: dict[str, Any] = {"array_task_id": task_id}
+        for field_name in _INIT_STATE_IDENTITY_REQUIRED_FIELDS:
+            entry[field_name] = _init_state_identity_text(item.get(field_name), field_name)
+        for field_name in _INIT_STATE_IDENTITY_OPTIONAL_FIELDS:
+            field_value = item.get(field_name)
+            if field_value is None:
+                continue
+            entry[field_name] = _init_state_identity_text(field_value, field_name)
+        if members_by_task is not None:
+            member = members_by_task.get(task_id)
+            if member is None:
+                raise AcceptedSubmitEvidenceError(
+                    "file_journal_evidence_invariant_invalid",
+                    field=f"{INIT_STATE_IDENTITY_FIELD}.array_task_id",
+                )
+            if str(member.get("model_id") or "") != entry["model_id"]:
+                raise AcceptedSubmitEvidenceError(
+                    "file_journal_evidence_invariant_invalid",
+                    field=f"{INIT_STATE_IDENTITY_FIELD}.model_id",
+                )
+        if expected_array_task_id is not None and task_id != expected_array_task_id:
+            raise AcceptedSubmitEvidenceError(
+                "file_journal_evidence_invariant_invalid",
+                field=f"{INIT_STATE_IDENTITY_FIELD}.array_task_id",
+            )
+        if expected_model_id is not None and entry["model_id"] != str(expected_model_id):
+            raise AcceptedSubmitEvidenceError(
+                "file_journal_evidence_invariant_invalid",
+                field=f"{INIT_STATE_IDENTITY_FIELD}.model_id",
+            )
+        normalized.append(entry)
+    return normalized
+
+
+def _init_state_identity_text(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise AcceptedSubmitEvidenceError(
+            "file_journal_evidence_required",
+            field=f"{INIT_STATE_IDENTITY_FIELD}.{field_name}",
+        )
+    if len(value) > MAX_ACCEPTED_SUBMIT_TEXT_LENGTH:
+        raise AcceptedSubmitEvidenceError(
+            "file_journal_evidence_limit_exceeded",
+            field=f"{INIT_STATE_IDENTITY_FIELD}.{field_name}",
+        )
+    return value
+
+
+def canonical_forecast_cohort_init_state_identities(
+    *, basins: Sequence[Mapping[str, Any]]
+) -> tuple[dict[str, Any], ...]:
+    """Project the reservation-time warm-start selection onto the master row.
+
+    One entry per basin that actually resolved a warm-start state; cold-seeded
+    basins resolve none and are simply not recorded (absent, not empty-valued).
+    Keying stays identical to :func:`canonical_forecast_cohort_members` so the
+    terminal per-model row can find its own entry by ``array_task_id``.
+    """
+
+    identities: list[dict[str, Any]] = []
+    for index, basin in enumerate(basins):
+        init_state_id = basin.get("init_state_id")
+        model_id = str(basin.get("model_id") or "")
+        if init_state_id in (None, "") or not model_id:
+            continue
+        entry = {
+            "array_task_id": int(basin.get("task_id", index)),
+            "model_id": model_id,
+            "init_state_id": str(init_state_id),
+        }
+        for field_name in _INIT_STATE_IDENTITY_OPTIONAL_FIELDS:
+            value = basin.get(field_name)
+            if value not in (None, ""):
+                entry[field_name] = str(value)
+        identities.append(entry)
+    return tuple(identities)
+
+
+def init_state_identity_for_task(value: Any, array_task_id: Any) -> dict[str, Any] | None:
+    """Return one task's recorded identity from a master row's map, if any."""
+
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
+        return None
+    for item in value:
+        if isinstance(item, Mapping) and item.get("array_task_id") == array_task_id:
+            return dict(item)
+    return None
 
 
 def canonical_forecast_stage(value: Any) -> str | None:
@@ -841,6 +1027,8 @@ __all__ = (
     "FORECAST_COHORT_STAGE_ALIASES",
     "IDENTITY_MISMATCH_BLOCKED_DECISION",
     "IDENTITY_MISMATCH_RELEASED_DECISION",
+    "INIT_STATE_IDENTITY_ENTRY_FIELDS",
+    "INIT_STATE_IDENTITY_FIELD",
     "MAX_FORECAST_COHORT_MEMBERS",
     "accepted_submit_pipeline_job_model_id",
     "accepted_submit_contract_is_current",
@@ -849,13 +1037,16 @@ __all__ = (
     "accepted_submit_master_ordinary_upsert_state",
     "accepted_submit_row_kind",
     "apply_accepted_submit_transition",
+    "canonical_forecast_cohort_init_state_identities",
     "canonical_forecast_cohort_members",
     "canonical_forecast_stage",
     "forecast_cohort_digest",
     "forecast_cohort_identity_is_valid",
+    "init_state_identity_for_task",
     "is_forecast_cohort_stage_name",
     "normalize_accepted_submit_attempt_anchor",
     "normalize_accepted_submit_evidence",
     "normalize_candidate_projections",
+    "normalize_init_state_identities",
     "ordered_cohort_members",
 )

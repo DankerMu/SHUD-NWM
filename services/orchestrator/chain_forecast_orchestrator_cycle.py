@@ -5,9 +5,11 @@ from datetime import UTC, datetime
 from services.orchestrator import chain as _chain
 from services.orchestrator.accepted_submit_identity import (
     ACCEPTED_SUBMIT_CONTRACT_VERSION,
+    INIT_STATE_IDENTITY_FIELD,
     accepted_submit_contract_is_current,
     accepted_submit_pipeline_job_model_id,
     accepted_submit_row_kind,
+    canonical_forecast_cohort_init_state_identities,
     canonical_forecast_cohort_members,
     forecast_cohort_digest,
     forecast_cohort_identity_is_valid,
@@ -511,12 +513,21 @@ class ForecastOrchestratorCycleMixin:
                 cycle_time=context.cycle_time,
                 basins=context.active_basins,
             )
+            # #1183: reservation time is the only point on the accepted-submit
+            # path that still holds the warm-start selection.  Terminal
+            # accounting (reconcile side) sees Slurm facts only, so the
+            # identity is captured here, per model, and read back when the
+            # per-model terminal rows are built.
+            init_state_identities = canonical_forecast_cohort_init_state_identities(
+                basins=context.active_basins,
+            )
             expected_user = self.config.reconcile_slurm_user
             expected_account = self.config.reconcile_slurm_account
             reservation_evidence = {
                 "accepted_submit_contract_version": ACCEPTED_SUBMIT_CONTRACT_VERSION,
                 "slurm_comment": _chain.slurm_comment_for(idempotency_key),
                 "cohort_members": list(members),
+                INIT_STATE_IDENTITY_FIELD: list(init_state_identities),
                 "restart_stage": "forecast",
                 "submission_attempt": submission_attempt,
                 "submission_attempt_started_at": datetime.now(UTC),
