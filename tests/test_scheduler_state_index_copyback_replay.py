@@ -9,8 +9,10 @@ from typing import Any
 
 import pytest
 
+from packages.common import provider_atomic, state_manager
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.provider_atomic import ProviderAtomicError
+from packages.common.safe_fs import SafeFilesystemError
 from packages.common.state_manager import publish_state_snapshot_index
 from scripts import scheduler_state_index_copyback_replay as replay
 
@@ -325,6 +327,232 @@ def test_replay_reports_destination_entries_lost_across_the_merge(
     assert [entry["state_id"] for entry in published] == ["fresh-state"]
 
 
+def test_replay_merge_commit_uncertainty_runs_committed_tail_without_refusing(
+    fixture: Fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # `os.replace` succeeded and the directory fsync failed: the shared index
+    # already holds the new bytes, so reporting a refusal (rc 2, "index unchanged")
+    # would lie to the operator and skip the whole committed evidence chain.
+    _apply_env(monkeypatch, fixture)
+    _fail_index_fsync_after_replace(monkeypatch, fixture)
+
+    exit_code = replay.main(["--cycle", "gfs_2026072000", "--enforce"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 3
+    summary = json.loads(captured.out.strip().splitlines()[-1])
+    error = json.loads(captured.err.strip().splitlines()[-1])
+    assert error["reason"] == "merge_commit_uncertain"
+    assert error["status"] == "merge_committed_incomplete"
+    assert error["status"] != "refused"
+    assert error["error_reason"] == "provider_replace_uncertain"
+    assert error["resolved_run_ids"] == [AUTHORITATIVE_RUN]
+    # The committed tail ran: read-back, superset guard and receipt.
+    assert summary["destination_entry_count_after"] == 2
+    assert summary["destination_entries_lost_count"] == 0
+    assert summary["merge_commit_state"] == "uncertain"
+    assert summary["merge_error_reason"] == "provider_replace_uncertain"
+    # No merge return value exists on this path, so its evidence stays null.
+    assert summary["merge"] is None
+    assert summary["checkpoint_copied_count"] is None
+    assert summary["checkpoint_reused_count"] is None
+    assert summary["checkpoint_replaced_count"] is None
+    receipt = json.loads((fixture.receipt_root / "latest.json").read_text(encoding="utf-8"))
+    assert receipt["merge"] is None
+    assert receipt["merge_commit_state"] == "uncertain"
+    assert receipt["merge_error_reason"] == "provider_replace_uncertain"
+    assert receipt["destination_entry_count_after"] == 2
+    assert receipt["destination_entries_lost_count"] == 0
+    # The mutation really is on disk, which is exactly why rc 2 is forbidden here.
+    published = json.loads(fixture.destination_index.read_text(encoding="utf-8"))["entries"]
+    assert [entry["state_id"] for entry in published] == ["archived-state", "fresh-state"]
+    assert fixture.new_shared_object.read_bytes() == fixture.fresh_content
+
+
+def test_replay_lost_entry_verdict_outranks_merge_commit_uncertainty(
+    fixture: Fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Compound disaster: the index vanishes in the guard-to-lock window (so the
+    # merge bootstraps a shrunken index) and the commit is uncertain on top.  The
+    # loss verdict must survive -- rerunning enforce against the shrunken index
+    # would otherwise freeze the data loss behind a green receipt.
+    _apply_env(monkeypatch, fixture)
+    real_merge = replay.merge_state_snapshot_index_copyback
+
+    def vanishing_merge(**kwargs: Any) -> Any:
+        fixture.destination_index.unlink()
+        return real_merge(**kwargs)
+
+    monkeypatch.setattr(replay, "merge_state_snapshot_index_copyback", vanishing_merge)
+    _fail_index_fsync_after_replace(monkeypatch, fixture)
+
+    exit_code = replay.main(["--cycle", "gfs_2026072000", "--enforce"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 3
+    summary = json.loads(captured.out.strip().splitlines()[-1])
+    error = json.loads(captured.err.strip().splitlines()[-1])
+    assert error["reason"] == "destination_entries_lost_after_merge"
+    assert error["status"] != "refused"
+    assert error["lost_entry_count"] == 1
+    assert error["failure_reasons"] == [
+        "destination_entries_lost_after_merge",
+        "merge_commit_uncertain",
+    ]
+    assert error["merge_commit_uncertain"] is True
+    assert error["merge_error_reason"] == "provider_replace_uncertain"
+    assert summary["destination_entries_lost_count"] == 1
+    receipt = json.loads((fixture.receipt_root / "latest.json").read_text(encoding="utf-8"))
+    assert receipt["destination_entries_lost_count"] == 1
+    assert receipt["merge_commit_state"] == "uncertain"
+    published = json.loads(fixture.destination_index.read_text(encoding="utf-8"))["entries"]
+    assert [entry["state_id"] for entry in published] == ["fresh-state"]
+
+
+def test_replay_lost_entry_verdict_outranks_receipt_write_failure(
+    fixture: Fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Both failures in one run, and the runbook routes them in opposite
+    # directions: a receipt failure says "rerun enforce", a loss says "stop and
+    # rebuild".  The reported reason must therefore be the loss (#1189 r3 D2).
+    _apply_env(monkeypatch, fixture)
+    real_merge = replay.merge_state_snapshot_index_copyback
+
+    def vanishing_merge(**kwargs: Any) -> Any:
+        fixture.destination_index.unlink()
+        return real_merge(**kwargs)
+
+    monkeypatch.setattr(replay, "merge_state_snapshot_index_copyback", vanishing_merge)
+    real_write = replay.atomic_write_bytes_no_follow
+
+    def failing_receipt_write(path: Path, content: bytes, **kwargs: Any) -> Any:
+        if Path(path).parent == fixture.receipt_root:
+            raise OSError("receipt volume is read-only")
+        return real_write(path, content, **kwargs)
+
+    monkeypatch.setattr(replay, "atomic_write_bytes_no_follow", failing_receipt_write)
+
+    exit_code = replay.main(["--cycle", "gfs_2026072000", "--enforce"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 3
+    summary = json.loads(captured.out.strip().splitlines()[-1])
+    error = json.loads(captured.err.strip().splitlines()[-1])
+    assert error["reason"] == "destination_entries_lost_after_merge"
+    assert error["status"] != "refused"
+    assert error["lost_entry_count"] == 1
+    assert error["failure_reasons"] == [
+        "destination_entries_lost_after_merge",
+        "receipt_write_failed_after_merge",
+    ]
+    # Nothing observed is dropped: the receipt failure rides in the details.
+    assert error["receipt_write_failed"] is True
+    assert error["receipt_failure_reason"] == "receipt_write_failed"
+    # The operator's only surviving evidence is the stdout summary.
+    assert summary["destination_entries_lost_count"] == 1
+    assert summary["destination_entry_count_before"] == 1
+    assert not (fixture.receipt_root / "latest.json").exists()
+
+
+def test_replay_provider_postread_failure_is_commit_uncertain(
+    fixture: Fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # `provider_postread_failed` is raised at phase="replace_uncertain" after the
+    # compare-and-swap wrote the new bytes, so it is not a refusal either.
+    _apply_env(monkeypatch, fixture)
+    real_replace = state_manager.atomic_replace_provider_bytes
+
+    def replace_then_fail_postread(path: Path, content: bytes, **kwargs: Any) -> Any:
+        committed = real_replace(path, content, **kwargs)
+        if Path(path) == fixture.destination_index:
+            raise ProviderAtomicError("provider_postread_failed", phase="replace_uncertain")
+        return committed
+
+    monkeypatch.setattr(state_manager, "atomic_replace_provider_bytes", replace_then_fail_postread)
+
+    exit_code = replay.main(["--cycle", "gfs_2026072000", "--enforce"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 3
+    summary = json.loads(captured.out.strip().splitlines()[-1])
+    error = json.loads(captured.err.strip().splitlines()[-1])
+    assert error["reason"] == "merge_commit_uncertain"
+    assert error["status"] != "refused"
+    assert error["error_reason"] == "provider_postread_failed"
+    assert summary["destination_entry_count_after"] == 2
+    assert summary["destination_entries_lost_count"] == 0
+    assert summary["merge"] is None
+    receipt = json.loads((fixture.receipt_root / "latest.json").read_text(encoding="utf-8"))
+    assert receipt["merge_error_reason"] == "provider_postread_failed"
+    published = json.loads(fixture.destination_index.read_text(encoding="utf-8"))["entries"]
+    assert [entry["state_id"] for entry in published] == ["archived-state", "fresh-state"]
+
+
+def test_replay_pre_commit_allowlisted_merge_failure_still_refuses(
+    fixture: Fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The allowlist must not creep: `provider_preimage_changed` is raised before
+    # the compare-and-swap writes anything (provider_atomic.py:305-307), so "index
+    # unchanged" holds and rc 2 remains correct.
+    _apply_env(monkeypatch, fixture)
+    assert "provider_preimage_changed" in replay.MERGE_PRE_COMMIT_REFUSAL_REASONS
+    index_before = fixture.destination_index.read_bytes()
+    real_replace = state_manager.atomic_replace_provider_bytes
+
+    def refuse_replace(path: Path, content: bytes, **kwargs: Any) -> Any:
+        if Path(path) == fixture.destination_index:
+            raise ProviderAtomicError("provider_preimage_changed", phase="precommit")
+        return real_replace(path, content, **kwargs)
+
+    monkeypatch.setattr(state_manager, "atomic_replace_provider_bytes", refuse_replace)
+
+    exit_code = replay.main(["--cycle", "gfs_2026072000", "--enforce"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    error = json.loads(captured.err.strip().splitlines()[-1])
+    assert error["status"] == "refused"
+    assert error["reason"] == "merge_failed"
+    assert error["error_reason"] == "provider_preimage_changed"
+    assert fixture.destination_index.read_bytes() == index_before
+    assert not (fixture.receipt_root / "latest.json").exists()
+
+
+def test_replay_source_object_checksum_divergence_refuses_before_any_commit(
+    fixture: Fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A natural (uninjected) pre-commit refusal: the source-side full-index object
+    # verification fails closed, long before the destination compare-and-swap.
+    _apply_env(monkeypatch, fixture)
+    private_fresh_object = fixture.reference_root / "states/gfs/model_a/fresh/state.cfg.ic"
+    private_fresh_object.write_bytes(_valid_state_bytes(b"tampered"))
+    index_before = fixture.destination_index.read_bytes()
+
+    exit_code = replay.main(["--cycle", "gfs_2026072000", "--enforce"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    error = json.loads(captured.err.strip().splitlines()[-1])
+    assert error["status"] == "refused"
+    assert error["reason"] == "merge_failed"
+    assert error["error_reason"] == "state_snapshot_index_object_checksum_mismatch"
+    assert error["error_reason"] in replay.MERGE_PRE_COMMIT_REFUSAL_REASONS
+    assert fixture.destination_index.read_bytes() == index_before
+    assert not fixture.new_shared_object.exists()
+
+
 def test_replay_run_ids_selection_requires_source_index_entries(
     fixture: Fixture,
     monkeypatch: pytest.MonkeyPatch,
@@ -556,6 +784,33 @@ def _apply_env(monkeypatch: pytest.MonkeyPatch, fixture: Fixture) -> None:
     monkeypatch.setenv(replay.DESTINATION_ROOT_ENV, str(fixture.destination_root))
     monkeypatch.setenv(replay.OBJECT_STORE_PREFIX_ENV, PREFIX)
     monkeypatch.setenv(replay.RECEIPT_ROOT_ENV, str(fixture.receipt_root))
+
+
+def _fail_index_fsync_after_replace(monkeypatch: pytest.MonkeyPatch, fixture: Fixture) -> None:
+    """Fail the destination index CAS the way a post-``os.replace`` fsync does.
+
+    ``safe_fs.atomic_write_bytes_no_follow`` marks exactly this window
+    ``kind="indeterminate"`` (safe_fs.py:109-123) because the replace already
+    happened, and ``provider_atomic.atomic_replace_provider_bytes:317-320`` turns
+    that into ``provider_replace_uncertain``.  The real bytes are written first, so
+    the shared index genuinely holds the new content.  Only the index CAS goes
+    through this seam; checkpoint object copies use ``state_manager``'s own import.
+    """
+
+    real_write = provider_atomic.atomic_write_bytes_no_follow
+
+    def write_then_fail_directory_fsync(path: Path, content: bytes, **kwargs: Any) -> Any:
+        written = real_write(path, content, **kwargs)
+        if Path(path) == fixture.destination_index:
+            raise SafeFilesystemError(
+                f"Atomic replacement for {path} completed but directory fsync failed",
+                kind="indeterminate",
+            )
+        return written
+
+    monkeypatch.setattr(
+        provider_atomic, "atomic_write_bytes_no_follow", write_then_fail_directory_fsync
+    )
 
 
 def _entry(

@@ -1620,18 +1620,22 @@ uv run python -m scripts.scheduler_state_index_copyback_replay \
   `destination_entries_lost_after_merge`（见下面的退出码表）。
 - receipt 落在 `NHMS_SCHEDULER_COPYBACK_REPLAY_RECEIPT_ROOT`（0700 目录、0600 文件，
   含 `latest.json`），字段含 mode、resolved run ids、前后 entry 数、copied/reused/replaced、
-  `destination_index_existed`/`allow_bootstrap`；enforce 模式未设该 env 直接拒绝执行。
+  `destination_index_existed`/`allow_bootstrap`、`merge_commit_state`（`committed` /
+  `uncertain` / `dry_run`）与 `merge_error_reason`；enforce 模式未设该 env 直接拒绝执行。
 - 工具只碰 state-index：不写 journal、不动 registry / canonical-readiness、不改 pipeline 行。
 
-退出码判读（exit 2 与 exit 3 的区别是"index 有没有被改"，别混着看）：
+退出码判读（exit 2 与 exit 3 的区别是"index 有没有被改/可能被改"，别混着看）：
 
 | exit | stderr `status` | 含义 | 处置 |
 |---|---|---|---|
 | 0 | —（stdout 是 receipt） | 成功 | 存档 receipt |
-| 2 | `refused` | merge 提交**之前**判定的拒绝（`destination_index_missing`、`cycles_absent_from_source_index`、`run_ids_empty`、`roots_identical`/`roots_overlap`、`receipt_root_*`、`index_*`、`merge_failed` 等）。shared index **未改**；`merge_failed` 时 index 仍未提交，但胜出 entry 的对象可能已拷到 shared root，幂等重跑安全 | 按 reason 修根/修输入/修 receipt 目录后重跑 |
-| 3 | `merge_committed_incomplete` | merge **已提交**，尾段没跑干净。stdout 一定带已知部分的 merge 摘要 | 先留存 stdout 摘要作 4.1 证据，再按下表分支 |
+| 2 | `refused` | 只用于**可证明未提交**的拒绝（`destination_index_missing`、`cycles_absent_from_source_index`、`run_ids_empty`、`roots_identical`/`roots_overlap`、`receipt_root_*`、`index_*`，以及 `merge_failed`）。`merge_failed` **仅当** merge 抛出的 `error_reason` 属工具内的 pre-commit allowlist（`scripts/scheduler_state_index_copyback_replay.py` 的 `MERGE_PRE_COMMIT_REFUSAL_REASONS`：`provider_preimage_changed`/锁类/校验类/`state_snapshot_index_copyback_conflict` 等，raise 点均在 destination CAS 之前）——此时 shared index **未改**，但胜出 entry 的对象可能已拷到 shared root，幂等重跑安全。allowlist 之外（含未来新增 reason）工具已归为 commit-uncertain，走 exit 3 `merge_commit_uncertain`，**不会**出现在 exit 2 里 | 按 reason 修根/修输入/修 receipt 目录后重跑 |
+| 3 | `merge_committed_incomplete` | merge **已提交或不能证明未提交**，尾段没跑干净。stdout 一定带已知部分的 merge 摘要 | 先留存 stdout 摘要作 4.1 证据，再按下表分支 |
 
-exit 3 的四个 reason（逐字与代码一致）：
+exit 3 的五个 reason（逐字与代码一致）。一次运行可能同时命中多个，stderr 的 `reason`
+按严重度取最重的那个（`destination_entries_lost_after_merge` > `post_merge_readback_failed`
+\> `merge_commit_uncertain` > `receipt_write_failed_after_merge`），其余折进 details 并在
+`failure_reasons` 列全：
 
 - `post_merge_readback_failed`：merge 已提交，但提交后重读 destination index 失败
   （NFS EIO/ESTALE、并发 preimage 变化、字节损坏）。receipt **照样写**，只是
@@ -1646,9 +1650,20 @@ exit 3 的四个 reason（逐字与代码一致）：
   （`OBJECT_STORE_ROOT` 下那份，永不剪枝）重建 shared index。receipt 里
   `destination_entries_lost_count` 是丢失的身份数，stderr 的 `lost_entry_identities`
   给前 20 个身份元组。
+- `merge_commit_uncertain`：merge 自己抛错，但 `error_reason` **不在** pre-commit
+  allowlist 上（如 `provider_replace_uncertain`：`os.replace` 已成功、父目录 fsync 失败；
+  `provider_postread_failed`：CAS 写完后校验读失败；或任何未来新增的未知 reason）。
+  **按"已提交"对待**：工具照样跑完提交后证据链（读回 + 超集守卫 + receipt），只是
+  merge 返回值不存在，所以 receipt 的 `merge` 与 `checkpoint_*_count` 为 `null`，
+  `merge_commit_state` 为 `uncertain`、`merge_error_reason` 记原始 reason。处置：
+  先看 stdout 摘要/receipt 的 `destination_entry_count_after` 与
+  `destination_entries_lost_count` —— **非 0 就转下面的 lost 分支停手**；为 0 且计数符合
+  预期则幂等重跑 enforce 拿一份干净 receipt。
 - `receipt_write_failed_after_merge`：index 变更已提交但 receipt 写不下去，
-  `receipt_failure_reason` 是底层原因。处置：留存 stdout 摘要作证据，修好 receipt
-  目录后重跑 enforce（幂等）补上 receipt。
+  `receipt_failure_reason` 是底层原因。处置：**重跑前先看 stdout 摘要的
+  `destination_entries_lost_count`——非 0 就按上面的 lost 分支停手，绝不重跑**（按严重度
+  排序，lost 会直接顶掉本 reason，但 receipt 没写下来时 stdout 摘要是唯一现场证据）；
+  为 0 才留存 stdout 摘要作证据、修好 receipt 目录后重跑 enforce（幂等）补上 receipt。
 - `post_merge_unexpected_error`：兜底——merge 已提交、尾段抛了上面三类之外的异常
   （`error_type`/`error` 记下原文）。当 index 已变更处理：先核对 shared index entry 数，
   再重跑 enforce。

@@ -16,6 +16,8 @@
 
 - [x] 2.6 **r2 修复轮补锁**(cross-review r2,verifier 裁定):C1 post-merge 尾段统一 committed 语义——merge 调用后的任何失败(读回失败、receipt 失败)均 rc 3 + 独立原因 + stdout 摘要,`refused`(rc 2)严格 pre-merge;读回失败注入测(rc 3、`status != refused`、stdout 含 merge 摘要);docstring "decided before merge" 限定修正。C2 读回护栏杀死测试——注入 destination 读回字节异于写入 → `state_snapshot_index_object_checksum_mismatch`;变异红证:只剥 `state_manager.py` 读回护栏 → 该测试红。C4 enforce 后置超集守卫——post-merge 读回 entry key 集 ⊇ 前置守卫读到的 destination entry key 集,违反 → rc 3 `destination_entries_lost_after_merge`;注入测(守卫后删 destination index → 非零退出而非绿 receipt)。(实测:四文件门 1174 passed = 1171 + 3 新测;红证:C1 `assert 2 == 3`、C4 `assert 0 == 3`、C2 仅剥读回护栏 → `DID NOT RAISE`,变异体已恢复、stash 清空、state_manager.py 与 HEAD 逐字节一致。)
 
+- [x] 2.7 **r3 修复轮补锁**(cross-review r3,retro-round3 不变量闭环):D1 三态分类——merge 异常按 reason 分流,pre-commit allowlist 之外(`provider_replace_uncertain`/`provider_postread_failed`/未知)→ commit-uncertain rc 3 `merge_commit_uncertain` + 完整 committed 尾段(读回/超集守卫/receipt,merge 字段 null);注入测:post-`os.replace` 父目录 fsync 失败 → rc 3 非 refused + 尾段执行;复合灾难态(vanishing index + fsync 失败)→ rc 3 且携带 lost 判决;`provider_postread_failed` 一例。D2 lost 优先——lost + receipt 双失败 → stderr reason 为 `destination_entries_lost_after_merge`,details 含 receipt 失败原因;复合注入测。runbook exit-2 行"index 未改"限定 allowlist、reason 表补行、receipt 分支加 lost 前置检查。design.md:38 `merge_failed` 措辞同步诚实化。(实测:四文件门 1180 passed = 1174 + 6 新测(replay 文件 15→21);allowlist 39 reason 逐条附 raise 点 file:line,`provider_replace_failed` 核对后纳入、`state_snapshot_index_lock_unavailable` 有疑义排除;红证:分类改回无差别 `merge_failed` → 3 测红 `assert 2 == 3`,优先级改回 receipt 先 → 1 测红;变异体已恢复。)
+
 ## 3. 评审
 
 - [x] 3.1 fixture review(只读)→ 修复 → validate。(第 1 轮:15 findings(5 P1/6 P2/4 P3)已全部修入 fixture,validate 通过)

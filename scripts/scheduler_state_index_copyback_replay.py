@@ -20,11 +20,13 @@ refuses to run when the derived destination index does not exist (a wrong
 destination root would otherwise bootstrap a fake canonical index) unless
 ``--allow-bootstrap`` is passed.
 
-Exit codes: ``0`` success, ``2`` refusal decided before the merge commits
-(nothing published), ``3`` the merge committed but the run could not finish
-cleanly -- a failed destination read-back, destination entries lost across the
-merge, or an unwritable receipt.  A ``3`` always prints the merge summary as far
-as it is known on stdout and never claims refusal.
+Exit codes: ``0`` success, ``2`` a refusal that provably left the shared index
+uncommitted, ``3`` the merge committed -- or may have committed -- and the run
+could not finish cleanly.  Merge failures are classified by commit state: only a
+reason on :data:`MERGE_PRE_COMMIT_REFUSAL_REASONS` is a refusal, everything else
+(including reasons added in the future) is reported as commit-uncertain.  A ``3``
+always runs the post-merge evidence chain as far as it can, prints the merge
+summary as far as it is known on stdout, and never claims refusal.
 """
 
 from __future__ import annotations
@@ -69,18 +71,148 @@ MAX_LOST_IDENTITY_SAMPLE = 20
 # The merge's entry identity: (model_id, source_id, valid_time, cycle_id, lead_hours).
 IdentityKey = tuple[str, str, str, str, str]
 
+# Provider-level merge failure reasons whose raise point is provably upstream of
+# the one destination compare-and-swap the merge performs
+# (`state_manager._write_state_index_bytes:2699-2708` ->
+# `provider_atomic.atomic_replace_provider_bytes:295-320`, whose `os.replace`
+# happens inside `safe_fs.atomic_write_bytes_no_follow:107`).  All of these carry
+# `phase="precommit"` and are raised before that write is attempted:
+#   provider_already_running            provider_atomic.py:182,:223
+#   provider_destination_access_invalid provider_atomic.py:298
+#   provider_destination_missing        provider_atomic.py:133
+#   provider_destination_not_regular    provider_atomic.py:97
+#   provider_destination_size_limit_exceeded provider_atomic.py:103
+#   provider_destination_unreadable     provider_atomic.py:101,:137
+#   provider_destination_unsafe         provider_atomic.py:95
+#   provider_lock_changed               provider_atomic.py:218,:226
+#   provider_lock_not_regular           provider_atomic.py:215
+#   provider_lock_parent_unsafe         provider_atomic.py:210
+#   provider_lock_unavailable           provider_atomic.py:243
+#   provider_preimage_changed           provider_atomic.py:144,:305,:307
+#   provider_replace_failed             provider_atomic.py:319, reached only when
+#       the SafeFilesystemError kind is not "indeterminate", which safe_fs.py:138
+#       raises only while `replaced` is False -- i.e. `os.replace` never ran.
+# Deliberately absent (raise points are past `os.replace`, so the shared index may
+# already hold the new bytes): provider_replace_uncertain (provider_atomic.py:320),
+# provider_postread_failed (:329,:332,:348,:354), provider_restored_previous (:355).
+_PRE_COMMIT_PROVIDER_REASONS = frozenset(
+    {
+        "provider_already_running",
+        "provider_destination_access_invalid",
+        "provider_destination_missing",
+        "provider_destination_not_regular",
+        "provider_destination_size_limit_exceeded",
+        "provider_destination_unreadable",
+        "provider_destination_unsafe",
+        "provider_lock_changed",
+        "provider_lock_not_regular",
+        "provider_lock_parent_unsafe",
+        "provider_lock_unavailable",
+        "provider_preimage_changed",
+        "provider_replace_failed",
+    }
+)
+
+# Index-level merge failure reasons raised while reading/validating either index,
+# resolving merge collisions, or copying checkpoint objects -- all strictly before
+# the destination compare-and-swap.  Raise points (packages/common/state_manager.py):
+#   state_snapshot_index_unreadable        :1925 (source), :1983,:1987 (destination)
+#   state_snapshot_index_not_object        :1927
+#   state_snapshot_index_copyback_conflict :2013
+#   state_snapshot_index_schema_unsupported :2192
+#   state_snapshot_index_entries_invalid   :2162,:2164,:2203
+#   state_snapshot_index_entry_not_object  :2168,:2214
+#   state_snapshot_index_entry_limit_exceeded :2206
+#   state_snapshot_index_required_field_missing :2271,:2277
+#   state_snapshot_index_duplicate_identity :2233
+#   state_snapshot_index_duplicate_state_id :2246
+#   state_snapshot_index_checksum_missing  :3040
+#   state_snapshot_index_checksum_mismatch :3042
+#   state_snapshot_index_generated_at_future :2982
+#   state_snapshot_index_stale             :2985 (freshness enforcement only; the
+#       merge's own reads pass enforce_freshness=False, listed for completeness)
+#   state_snapshot_index_time_invalid      :2998
+#   state_snapshot_index_source_id_invalid :3005
+#   state_snapshot_index_int_invalid       :3012-:3027
+#   state_snapshot_index_usable_flag_invalid :3033
+#   state_snapshot_index_json_node_limit_exceeded :3120
+#   state_snapshot_index_json_depth_exceeded :3126
+#   state_snapshot_index_size_limit_exceeded :1823 (publish), :2677
+#   state_snapshot_index_object_missing    :2547,:2550
+#   state_snapshot_index_object_unreadable :2127,:2551,:2553
+#   state_snapshot_index_object_checksum_mismatch :2093,:2103,:2120,:2556
+#   state_snapshot_index_object_unsafe_uri :2087,:2089,:2137,:2578,:2582,:2653,:2655,:2743
+#   state_snapshot_index_object_unsupported_uri :2602,:2604,:2819
+#   state_snapshot_index_write_failed      :2711-:2718, a remap that fires only for
+#       the five precommit provider reasons listed there.
+# Object copies happen before the index commit, so a refusal here still means
+# "index unchanged, some winning objects may already be on the shared root".
+_PRE_COMMIT_INDEX_REASONS = frozenset(
+    {
+        "state_snapshot_index_checksum_mismatch",
+        "state_snapshot_index_checksum_missing",
+        "state_snapshot_index_copyback_conflict",
+        "state_snapshot_index_duplicate_identity",
+        "state_snapshot_index_duplicate_state_id",
+        "state_snapshot_index_entries_invalid",
+        "state_snapshot_index_entry_limit_exceeded",
+        "state_snapshot_index_entry_not_object",
+        "state_snapshot_index_generated_at_future",
+        "state_snapshot_index_int_invalid",
+        "state_snapshot_index_json_depth_exceeded",
+        "state_snapshot_index_json_node_limit_exceeded",
+        "state_snapshot_index_not_object",
+        "state_snapshot_index_object_checksum_mismatch",
+        "state_snapshot_index_object_missing",
+        "state_snapshot_index_object_unreadable",
+        "state_snapshot_index_object_unsafe_uri",
+        "state_snapshot_index_object_unsupported_uri",
+        "state_snapshot_index_required_field_missing",
+        "state_snapshot_index_schema_unsupported",
+        "state_snapshot_index_size_limit_exceeded",
+        "state_snapshot_index_source_id_invalid",
+        "state_snapshot_index_stale",
+        "state_snapshot_index_time_invalid",
+        "state_snapshot_index_unreadable",
+        "state_snapshot_index_usable_flag_invalid",
+        "state_snapshot_index_write_failed",
+    }
+)
+
+#: The only merge failures that may be reported as a refusal (exit 2).  Anything
+#: else -- an empty reason, an unknown reason, a reason added to the merge later --
+#: is classified commit-uncertain (exit 3) and takes the committed tail, because
+#: only an audited pre-commit raise point proves the shared index is unchanged
+#: (#1189 r3 D1).  Same direction as
+#: `scripts/scheduler_file_provider_refresh.py:504-529`, which likewise treats
+#: only explicitly-uncommitted outcomes as uncommitted.
+MERGE_PRE_COMMIT_REFUSAL_REASONS = _PRE_COMMIT_PROVIDER_REASONS | _PRE_COMMIT_INDEX_REASONS
+
+# Reported-failure precedence for the committed/uncertain tail, most severe first.
+# The runbook routes these in opposite directions -- a confirmed loss means stop
+# and rebuild, a receipt failure means rerun -- so the reported reason must be the
+# most severe verdict of the run, not the last one detected (#1189 r3 D2).
+_POST_MERGE_FAILURE_PRECEDENCE = (
+    "destination_entries_lost_after_merge",
+    "post_merge_readback_failed",
+    "merge_commit_uncertain",
+    "receipt_write_failed_after_merge",
+)
+
 
 class ReplayError(RuntimeError):
-    """Structured refusal raised before the merge commits the shared index.
+    """Structured refusal for a run that provably left the shared index unchanged.
 
     Every refusal on this class is decided before
     ``merge_state_snapshot_index_copyback`` is invoked, with one narrow
-    exception: ``merge_failed`` means the merge itself raised, so its
-    compare-and-swap never committed and the shared index is unchanged --
+    exception: ``merge_failed`` means the merge itself raised with a reason on
+    :data:`MERGE_PRE_COMMIT_REFUSAL_REASONS`, whose audited raise point precedes
+    the destination compare-and-swap, so the shared index is unchanged --
     checkpoint objects of winning entries may already have been copied to the
-    shared root, and an idempotent rerun is the recovery.  Any failure once the
-    merge has committed uses :class:`ReplayPostMergeError` instead, which must
-    not claim refusal.
+    shared root, and an idempotent rerun is the recovery.  A merge failure whose
+    reason is *not* on that allowlist is commit-uncertain, not a refusal, and
+    every committed or commit-uncertain outcome uses
+    :class:`ReplayPostMergeError` instead.
     """
 
     def __init__(self, reason: str, details: Mapping[str, Any] | None = None) -> None:
@@ -93,14 +225,15 @@ class ReplayError(RuntimeError):
 
 
 class ReplayPostMergeError(ReplayError):
-    """The merge already committed but the run could not be completed cleanly.
+    """The merge committed -- or may have committed -- and the run did not finish.
 
-    The index mutation stands (a repeated enforce run is idempotent and can
-    re-record the receipt), so the status is not a refusal and the merge
-    summary -- as far as it is known -- is still handed to the operator on
-    stdout.  Every failure past the merge's commit funnels through here: a
-    destination read-back failure, a lost-entry verdict, a receipt write
-    failure, or anything unexpected in the same tail.
+    The index mutation stands, or cannot be proven not to (a repeated enforce run
+    is idempotent and can re-record the receipt), so the status is not a refusal
+    and the merge summary -- as far as it is known -- is still handed to the
+    operator on stdout.  Every committed or commit-uncertain outcome funnels
+    through here: a merge failure off the pre-commit allowlist, a destination
+    read-back failure, a lost-entry verdict, a receipt write failure, or anything
+    unexpected in the same tail.
     """
 
     def __init__(
@@ -227,10 +360,14 @@ def replay_state_index_copyback(
         "checkpoint_replaced_count": None,
         "post_merge_readback_reason": None,
         "destination_entries_lost_count": None,
+        # "committed" or "uncertain" once the merge has been attempted; a receipt
+        # is only ever written after that, so the null never reaches disk.
+        "merge_commit_state": None if enforce else "dry_run",
+        "merge_error_reason": None,
         "merge": None,
     }
-    merge_committed = False
     merge: Mapping[str, Any] | None = None
+    merge_uncertain: tuple[str, str] | None = None
     keys_before: frozenset[IdentityKey] = frozenset()
     if enforce:
         # Keyed before the merge, so a destination index that vanishes inside
@@ -248,30 +385,46 @@ def replay_state_index_copyback(
                 authoritative_run_ids=sorted(resolved_run_ids),
             )
         except (StateManagerError, ProviderAtomicError) as error:
-            # The merge raised, so its compare-and-swap never committed and the
-            # shared index is unchanged: this is still a pre-commit refusal.
-            raise ReplayError(
-                "merge_failed",
-                {
-                    "error_reason": str(getattr(error, "reason", "") or ""),
-                    "error": str(error),
-                    "resolved_run_ids": sorted(resolved_run_ids),
-                },
-            ) from error
-        merge_committed = True
+            error_reason = str(getattr(error, "reason", "") or "")
+            if error_reason not in MERGE_PRE_COMMIT_REFUSAL_REASONS:
+                # Off the audited pre-commit allowlist: the compare-and-swap may
+                # already have replaced the shared index (a durable-replace or
+                # post-read uncertainty), and an unknown reason proves nothing at
+                # all.  Fail safe as commit-uncertain and take the committed tail
+                # -- read-back, superset guard, receipt -- with the merge evidence
+                # fields left null (#1189 r3 D1).
+                merge_uncertain = (error_reason, str(error))
+            else:
+                # An audited pre-commit raise point: the shared index is unchanged.
+                # Winning entries' checkpoint objects may already be on the shared
+                # root, so the recovery is an idempotent rerun.
+                raise ReplayError(
+                    "merge_failed",
+                    {
+                        "error_reason": error_reason,
+                        "error": str(error),
+                        "resolved_run_ids": sorted(resolved_run_ids),
+                    },
+                ) from error
 
+    index_may_be_committed = merge is not None or merge_uncertain is not None
     # Everything below runs after the mutation may already stand, so no failure
-    # here may be reported as a refusal (#1189 r2 C1).
+    # here may be reported as a refusal (#1189 r2 C1, r3 D1).
     try:
+        if merge is not None:
+            receipt["merge_commit_state"] = "committed"
+            _record_merge_evidence(receipt, merge=merge)
+        if merge_uncertain is not None:
+            receipt["merge_commit_state"] = "uncertain"
+            receipt["merge_error_reason"] = merge_uncertain[0] or None
         post_merge_failure = (
-            _record_committed_merge(
+            _verify_committed_destination(
                 receipt,
-                merge=merge,
                 destination_index=destination_index,
                 destination_root=destination,
                 keys_before=keys_before,
             )
-            if merge is not None
+            if index_may_be_committed
             else None
         )
         receipt["completed_at"] = _format_time(datetime.now(tz=UTC))
@@ -280,26 +433,26 @@ def replay_state_index_copyback(
             try:
                 _write_receipt(receipt_root, receipt)
             except ReplayError as error:
-                if not merge_committed:
+                if not index_may_be_committed:
                     raise
                 receipt_failure = error
             else:
                 receipt["receipt_root"] = str(receipt_root)
-        if receipt_failure is not None:
-            raise ReplayPostMergeError(
-                "receipt_write_failed_after_merge",
-                {**receipt_failure.details, "receipt_failure_reason": receipt_failure.reason},
-                summary=receipt,
-            ) from receipt_failure
-        if post_merge_failure is not None:
-            # The receipt is on disk first: keeping the evidence beats reporting
-            # cleanly, because the index mutation is already committed.
-            reason, details = post_merge_failure
+        # The receipt is written first: keeping the evidence beats reporting
+        # cleanly, because the index mutation may already be committed.
+        failure = _reported_post_merge_failure(
+            post_merge_failure=post_merge_failure,
+            merge_uncertain=merge_uncertain,
+            receipt_failure=receipt_failure,
+            resolved_run_ids=sorted(resolved_run_ids),
+        )
+        if failure is not None:
+            reason, details = failure
             raise ReplayPostMergeError(reason, details, summary=receipt)
     except ReplayPostMergeError:
         raise
     except Exception as error:
-        if not merge_committed:
+        if not index_may_be_committed:
             raise
         raise ReplayPostMergeError(
             "post_merge_unexpected_error",
@@ -309,21 +462,75 @@ def replay_state_index_copyback(
     return receipt
 
 
-def _record_committed_merge(
-    receipt: dict[str, Any],
+def _reported_post_merge_failure(
     *,
-    merge: Mapping[str, Any],
-    destination_index: Path,
-    destination_root: Path,
-    keys_before: frozenset[IdentityKey],
+    post_merge_failure: tuple[str, dict[str, Any]] | None,
+    merge_uncertain: tuple[str, str] | None,
+    receipt_failure: ReplayError | None,
+    resolved_run_ids: list[str],
 ) -> tuple[str, dict[str, Any]] | None:
-    """Record a committed merge's evidence; return its post-merge failure, if any.
+    """Pick the reported failure by severity and fold the others into its details.
 
-    The index mutation already stands, so a destination read-back that fails
-    (NFS EIO/ESTALE, a concurrent preimage change, malformed bytes) degrades the
-    receipt -- ``destination_entry_count_after`` becomes null and the reason is
-    recorded -- rather than losing the receipt entirely.  Callers still write the
-    receipt and then exit non-zero on the returned reason.
+    One run can hit several of these at once, and the runbook routes them in
+    opposite directions: a confirmed entry loss means stop and rebuild, while a
+    receipt failure means rerun.  So the reported reason is the most severe
+    verdict of the run (:data:`_POST_MERGE_FAILURE_PRECEDENCE`), never the last
+    one detected, and nothing observed is dropped (#1189 r3 D2).
+    """
+
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    if post_merge_failure is not None:
+        candidates.append(post_merge_failure)
+    if merge_uncertain is not None:
+        error_reason, message = merge_uncertain
+        candidates.append(
+            (
+                "merge_commit_uncertain",
+                {
+                    "error_reason": error_reason,
+                    "error": message,
+                    "resolved_run_ids": resolved_run_ids,
+                },
+            )
+        )
+    if receipt_failure is not None:
+        candidates.append(
+            (
+                "receipt_write_failed_after_merge",
+                {**receipt_failure.details, "receipt_failure_reason": receipt_failure.reason},
+            )
+        )
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda item: (
+            _POST_MERGE_FAILURE_PRECEDENCE.index(item[0])
+            if item[0] in _POST_MERGE_FAILURE_PRECEDENCE
+            else len(_POST_MERGE_FAILURE_PRECEDENCE)
+        )
+    )
+    reason, primary = candidates[0]
+    details = dict(primary)
+    details["failure_reasons"] = [candidate for candidate, _ in candidates]
+    for other_reason, other_details in candidates[1:]:
+        if other_reason == "merge_commit_uncertain":
+            details.setdefault("merge_commit_uncertain", True)
+            details.setdefault("merge_error_reason", other_details.get("error_reason"))
+            details.setdefault("merge_error", other_details.get("error"))
+        elif other_reason == "receipt_write_failed_after_merge":
+            details.setdefault("receipt_write_failed", True)
+            details.setdefault("receipt_failure_reason", other_details.get("receipt_failure_reason"))
+        else:  # pragma: no cover - defensive: only the two foldables above exist
+            details.setdefault("secondary_failure_reason", other_reason)
+    return reason, details
+
+
+def _record_merge_evidence(receipt: dict[str, Any], *, merge: Mapping[str, Any]) -> None:
+    """Copy a returned merge summary into the receipt.
+
+    Only a merge that returned has a summary: on the commit-uncertain path there
+    is no return value, so these fields stay null and the receipt's
+    ``merge_commit_state``/``merge_error_reason`` carry the verdict instead.
     """
 
     receipt.update(
@@ -341,6 +548,25 @@ def _record_committed_merge(
             },
         }
     )
+
+
+def _verify_committed_destination(
+    receipt: dict[str, Any],
+    *,
+    destination_index: Path,
+    destination_root: Path,
+    keys_before: frozenset[IdentityKey],
+) -> tuple[str, dict[str, Any]] | None:
+    """Run the post-commit evidence chain; return its failure verdict, if any.
+
+    Used for both a committed merge and a commit-uncertain one, because in both
+    cases the index mutation may already stand.  A destination read-back that
+    fails (NFS EIO/ESTALE, a concurrent preimage change, malformed bytes) degrades
+    the receipt -- ``destination_entry_count_after`` becomes null and the reason is
+    recorded -- rather than losing the receipt entirely.  Callers still write the
+    receipt and then exit non-zero on the returned reason.
+    """
+
     try:
         after_entries = (
             _read_index_entries(
