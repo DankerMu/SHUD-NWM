@@ -1069,7 +1069,20 @@ def _assert_resume_receipt_scope_covers(
     pass's ``resumed_receipt`` priors, the real pre-image would be destroyed by
     the replay, and the key-consistency assertion would still pass because both
     sources share a river network (round-4 B4-2).  A model SUBSET is legitimate
-    -- that is exactly a narrowed resume -- so only a missing model refuses.
+    -- that is exactly a narrowed resume -- so only a model whose pre-image the
+    receipt does not hold refuses.
+
+    Coverage is therefore read off the ROWS, unioned with the declared
+    ``model_ids`` (round-5 B5-1).  The declared field records the WRITING pass's
+    own scope (``:349``), and since the full-row carry those two diverge: a
+    narrowed pass declares only its narrowed models while carrying every model's
+    rows verbatim.  Judging by the declaration alone refused the widen-back hop
+    of the runbook's own ``forcing_source_absent`` recovery (narrow, fix, widen,
+    always resuming from "上一份") even though the widened model's pre-image sat
+    in the very receipt being refused -- and the workaround, resuming from an
+    older receipt, is the B4-1 pre-image loss all over again.  The union keeps
+    the declaration meaningful for a receipt that legitimately carries no rows
+    yet (a pass refused or halted before its first cycle).
     """
 
     recorded_source = str(payload.get("source_id") or "")
@@ -1080,6 +1093,12 @@ def _assert_resume_receipt_scope_covers(
         payload_source = ""
     config_source = normalize_source_id(config.source_id)
     payload_models = {str(model_id) for model_id in (payload.get("model_ids") or [])}
+    payload_models.update(
+        str(row.get("model_id") or "")
+        for row in (payload.get("rows") or [])
+        if isinstance(row, Mapping)
+    )
+    payload_models.discard("")
     missing_models = sorted({str(model_id) for model_id in config.model_ids} - payload_models)
     if payload_source == config_source and not missing_models:
         return

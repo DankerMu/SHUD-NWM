@@ -335,10 +335,17 @@ bootstrap 断言未 violated)、且当前索引中对应 state 在场且 checksu
 `resume_from {path, sha256}` 记录来源),只有**本次 pass 真正跑出**该 (cycle, model)
 行时才替换结转值,所以无论中间那次是"窗口收窄只跑了一段"还是"跑到一半停机",链条
 都不会断;但若跳过中间那份、直接拿更早/更晚的 receipt 续跑,就可能拿不到某些 cycle
-的旧半,那些 cycle 会从**已被回放覆盖**的 run 树重采,旧半从此失真。resume receipt
-必须是**同一 (source, models) scope** 的:源不符、或本次 model 集合不被 receipt 覆盖
-(子集合法,超集不合法)一律 `resume_receipt_scope_mismatch` 拒跑(exit 2,零提交)——
-IFS/GFS 的行键 `(cycle, model)` 完全重合,串源续跑会把另一源的旧半冒充本源的。
+的旧半,那些 cycle 会从**已被回放覆盖**的 run 树重采,旧半从此失真。**因 forcing 缺失
+等原因临时把某个模型移出 scope、修好后再加回来时,同样续"上一份"**:收窄那一跳虽然
+只跑了窄 scope,它的 receipt 仍逐字结转着被移出模型的行,加回的那一跳照样能拿到原始
+旧半。
+
+resume receipt 必须是**同一 source** 的,且必须真的持有本次每个 model 的行:源不符、
+或某个 model 的行在该 receipt 里根本不存在,才 `resume_receipt_scope_mismatch` 拒跑
+(exit 2,零提交)。覆盖判定看 receipt **实际持有的行**(并上顶层 `model_ids` 声明),
+不看声明本身——收窄 pass 的声明是窄的,行却是全的,所以上面那种"加回 scope"的续跑
+不会被误拒。串源才是真正要拦的:IFS/GFS 的行键 `(cycle, model)` 完全重合,串源续跑
+会把另一源的旧半冒充本源的。
 
 顶层 `outcome` 是**本 pass** 的结论,不是全窗口的:`completed` 只说明这一次调用把它
 要跑的 cycle 跑完了,rows 里仍可能有从上一份结转过来的 `halted` 行。判断"整个窗口是否

@@ -77,9 +77,14 @@
 
 - [x] 4R4.1 钳保护集按消费者推导(A4-1,design D3.5 v7):`_REPLAY_RESUBMIT_CLAMPED_KEYS` 补 `decision` + `durable_shud_output_reused`,`_REPLAY_REPAIR_CLAMPED_KEYS` 补 `decision`(值仍从生效证据捕获,无第二份字面量)。**消费者 oracle**:post-sync clobber 用例断言 `decision=="replay_resubmit"` 并直接驱动 `chain_forecast_orchestrator_cycle._terminal_stage_needs_forced_resubmit`(succeeded forecast job)为 True;`retry_downstream` 形态用例断言钳把 `durable_shud_output_reused` 复位且 `scheduler_candidate_manifest` 不反转 `native_shud_resubmitted`;repair 腿断言 `retry_repair_missing_forcing` 存活。审计 allowlist 注释写明 "upstream of clamp" 只是位置断言。
 - [x] 4R4.2 receipt rows 改键控映射(B4-1,design D5 v7):`_ReceiptRows` 以 resume **全部**行按原序播种,仅本 pass 实际产出的键替换;`_halt`/逐 cycle checkpoint/pre-flight 共用同一序列化(单一 owner),`carried_rows()` 静态 in-scope 排除法废止。**消费者 oracle**:三跳 halt 用例——attempt-2 全窗口跑但停在 cycle 1,断言其 receipt 仍含 attempt-1 的 cycle-2 行逐字不变,attempt-3 该行 `prior_source=="resumed_receipt"` 且 `prior.run_manifest_sha256` 等于 attempt-1 原值。runbook §3 同步 `outcome` 为**本 pass** 语义。
-- [x] 4R4.3 resume receipt scope 校验(B4-2):`_resume_plan` schema 校验后,payload `source_id`(规范化)≠ config 源、或 config `model_ids` ⊄ payload `model_ids` → `resume_receipt_scope_mismatch` 拒跑(exit 2,零提交,details 含两侧 source_id 与缺失 model);子集(窗口/模型收窄)仍放行。测试:IFS receipt 喂 GFS pass 拒跑 + 缺模型拒跑 + 收窄正例仍跑通。
+- [x] 4R4.3 resume receipt scope 校验(B4-2):`_resume_plan` schema 校验后,payload `source_id`(规范化)≠ config 源、或本次 `model_ids` 未被该 receipt 覆盖(覆盖判据见 4R5.1)→ `resume_receipt_scope_mismatch` 拒跑(exit 2,零提交,details 含两侧 source_id 与缺失 model);子集(窗口/模型收窄)仍放行。测试:IFS receipt 喂 GFS pass 拒跑 + 缺模型拒跑 + 收窄正例仍跑通。
 - [x] 4R4.4 runbook exit-4 段落改写(C4-2,doc-only):exit 4 = **可能**已变更(删过文件**或** DELETE scope 已进事务),先看 `failure.reason` 定分支,`unlinked_file_cache_paths` 只是 `_after_file_unlink` 族的权威清单(空列表 ≠ DB 未变);补 `failure: null` + exit 4 时读 stderr `failure_reason=receipt_write_failed_after_commit`;补 dry-run / 未进删除 scope 的中断不写 receipt。附:`interrupted_delete_scope_uncertain` 分支补单测(KeyboardInterrupt 于 DELETE 已 staged、无 unlink 时:receipt 落盘、`deleted_rows: null`、`unlinked_file_cache_paths: []`、异常原样再抛)。
 - [x] 4R4.5 复验:定向 pytest 绿 + ruff 绿 + openspec strict 绿 + `test_production_scheduler` 附带回归绿 + 新 oracle 对 base 的 red-proof(6 失败)。
+
+## 4R5. Round-5 local-repair rider(head 1d790d8a 的 1 项裁决,见 `.workplans/issue-1164-change2/review/round5-verdicts.md`)
+
+- [x] 4R5.1 resume scope 覆盖判据改运行时(B5-1,design D5 v7.1):`_assert_resume_receipt_scope_covers` 按 `rows[].model_id` ∪ 顶层 `model_ids` 判覆盖,不再单看顶层声明(声明记的是写 receipt 那个 pass 的 scope,全行结转后二者发散);source 检查原样不动(B4-2 由它独自承载);拒绝 reason/details 字段名不变。修既有缺模型 fixture:同时收窄声明**与**行,使其名副其实。**consumer oracle**:full→收窄→加回三跳,断言第三跳不被拒、真跑,且加回模型的行 `prior_source=resumed_receipt` + `prior.run_manifest_sha256` 等于首跳原值。runbook §3 去自相矛盾(收窄后加回同样续"上一份";拒跑只在真缺行或错源时发生)。
+- [x] 4R5.2 复验:定向 pytest 绿(replay driver/admission/tiles/reset/warm-start)+ ruff 绿 + openspec strict 绿 + 加回用例对 1d790d8a 的 red-proof(1 失败,拒跑于旧判据)。
 
 ## 5. node-22 实机执行(merge 后,timer 保持停机)
 

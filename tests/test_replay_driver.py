@@ -1570,10 +1570,20 @@ def test_a_resume_receipt_from_the_other_source_is_refused(site: _Site) -> None:
 
 
 def test_a_resume_receipt_missing_one_of_this_passs_models_is_refused(site: _Site) -> None:
-    """A model this pass replays but the receipt never covered has no pre-image."""
+    """A model this pass replays but the receipt never covered has no pre-image.
+
+    "Never covered" means the ROWS are absent, not merely that the declared
+    ``model_ids`` field is narrow: since the full-row carry a narrowed pass
+    still carries every model's rows, and refusing on the declaration alone
+    rejects a receipt that holds the pre-image (round-5 B5-1).
+    """
 
     first = _completed_run(site)
-    narrowed = {**first, "model_ids": [MODELS[0]]}
+    narrowed = {
+        **first,
+        "model_ids": [MODELS[0]],
+        "rows": [row for row in first["rows"] if row["model_id"] != MODELS[1]],
+    }
     resume_from = site.root / "narrow-receipt.json"
     _write_json(resume_from, narrowed)
 
@@ -1617,6 +1627,75 @@ def test_a_narrowed_model_resume_from_a_superset_receipt_still_runs(site: _Site)
     assert [row for row in receipt["rows"] if row["model_id"] == MODELS[1]] == [
         row for row in first["rows"] if row["model_id"] == MODELS[1]
     ]
+
+
+def test_widening_the_model_set_back_resumes_from_the_narrowed_pass(site: _Site) -> None:
+    """B5-1: narrow -> fix -> widen back is the runbook's own recovery path.
+
+    §3 tells the operator to drop a model from the scope when its forcing is
+    absent, and to resume from "上一份" every time.  The narrowed pass's receipt
+    DECLARES only the narrowed model while carrying every model's rows verbatim
+    (that is the whole point of the full-row carry), so judging coverage by the
+    declaration refused the widen-back hop -- with the pre-image sitting in the
+    receipt it just refused.  The only way past a refusal is resuming from an
+    older receipt, which is exactly the pre-image loss B4-1 closed.
+    """
+
+    first = _completed_run(site)
+    original_priors = {
+        (row["cycle"], row["model_id"]): row["prior"]["run_manifest_sha256"] for row in first["rows"]
+    }
+    hop_1 = site.root / "widen-hop-1.json"
+    _write_json(hop_1, first)
+
+    # hop 2: the narrowed pass, exactly as the runbook prescribes
+    hop_2 = site.root / "widen-hop-2.json"
+    second = run_replay(
+        site.config(
+            execute=True,
+            model_ids=(MODELS[0],),
+            resume_from=hop_1,
+            receipt_path=hop_2,
+        ),
+        submit_pass=_refuse_to_submit,
+        journal_probe=_original_terminals_only,
+        clock=_Clock(),
+        sleep=lambda _seconds: None,
+    )
+    # the premise: declared scope is narrow, carried rows are not
+    assert second["model_ids"] == [MODELS[0]]
+    assert {row["model_id"] for row in second["rows"]} == set(MODELS)
+
+    # the dropped model's forcing has been restored, so hop 3 widens back; the
+    # live state drifted meanwhile, so both cycles genuinely re-run
+    entries = site.index_entries()
+    for entry in entries:
+        entry["checksum"] = "sha256:index-drifted"
+    site._write_index(entries)
+    submit = _SubmitRecorder(site)
+
+    third = run_replay(
+        site.config(
+            execute=True,
+            resume_from=hop_2,
+            receipt_path=site.root / "widen-hop-3.json",
+        ),
+        submit_pass=submit,
+        journal_probe=submit.journal,
+        clock=_Clock(),
+        sleep=lambda _seconds: None,
+    )
+
+    jsonschema.validate(third, _SCHEMA)
+    assert third["outcome"] == "completed"
+    assert [_cycle_from_argv(argv) for argv, _env in submit.calls] == list(site.cycles)
+    widened_rows = [row for row in third["rows"] if row["model_id"] == MODELS[1]]
+    assert len(widened_rows) == len(site.cycles)
+    for row in widened_rows:
+        assert row["status"] == "completed"
+        # the pre-image travelled through the narrowed hop untouched
+        assert row["prior"]["prior_source"] == "resumed_receipt"
+        assert row["prior"]["run_manifest_sha256"] == original_priors[(row["cycle"], row["model_id"])]
 
 
 def test_a_run_without_resume_records_no_resume_source(site: _Site) -> None:
