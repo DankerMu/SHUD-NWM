@@ -47,7 +47,7 @@ When replay admission is active, the scheduler SHALL replace the strict-warm-sta
 
 ### Requirement: Replay cycle admission without a raw manifest requires full forcing evidence
 
-When replay admission is active and the pinned cycle has no NFS raw manifest, the scheduler SHALL admit the cycle only if the direct-grid forcing package for every model in the replay set is present and non-empty under a bounded no-follow check. If any forcing package is missing, empty, or the check cannot be completed, the whole cycle SHALL be rejected with a typed reason and nothing SHALL be submitted; the scheduler SHALL NOT fall back to ordinary discovery or attempt raw conversion for that cycle. When the raw manifest is present, the pre-existing admission gate applies unchanged.
+When replay admission is active and the pinned cycle has no NFS raw manifest, the scheduler SHALL admit the cycle only if the direct-grid forcing package for every model in the replay set is present and non-empty under a bounded no-follow check. If any forcing package is missing, empty, or the check cannot be completed, the whole cycle SHALL be rejected with a typed reason and nothing SHALL be submitted; an uncompletable probe SHALL be reported as undeterminable, never folded into a proven-missing result. The scheduler SHALL NOT fall back to ordinary discovery or attempt raw conversion for that cycle. When the raw manifest is present, the pre-existing admission gate applies unchanged. Admission SHALL survive downstream candidate assembly: when canonical readiness evaluates to a fresh zero-row result for the pinned cycle, a candidate carrying the replay override SHALL NOT be blocked by the raw-manifest-required gate regardless of the raw-manifest-required flag — the replay forcing evidence stands in for the absent raw manifest.
 
 #### Scenario: Historical cycle admitted on forcing evidence
 
@@ -58,6 +58,11 @@ When replay admission is active and the pinned cycle has no NFS raw manifest, th
 
 - **WHEN** the pinned cycle has no raw manifest and at least one replay-set model's forcing package is missing or unreadable
 - **THEN** the pass records a typed rejection for the cycle and submits nothing
+
+#### Scenario: Canonical-incomplete raw-less cycle still yields submitted replay candidates
+
+- **WHEN** a replay pass pins a raw-less cycle whose canonical readiness evaluates to a fresh zero-row result and all replay-set forcing packages are present
+- **THEN** the replay candidates survive candidate assembly with the `replay_resubmit` decision and a forecast-stage restart, and no raw-manifest-required block is emitted for them
 
 ### Requirement: Replay candidates restart from the forecast stage
 
@@ -72,6 +77,11 @@ The `replay_resubmit` decision SHALL be a member of the chain's force-terminal-r
 
 - **WHEN** the state index holds no entry for the replay candidate's model and source and the packaged IC qualifies
 - **THEN** the decision is `PACKAGED_IC_BOOTSTRAP` and the resulting run manifest records `init_mode=3` with `quality=packaged_calibrated_state`
+
+#### Scenario: Raw-manifest-ready cycle keeps the forecast-stage restart
+
+- **WHEN** a replay candidate's cycle has a ready raw manifest but canonical readiness evaluates to a fresh zero-row result, so raw-manifest restart evidence would otherwise apply a convert-stage restart
+- **THEN** the `replay_resubmit` decision retains its forecast-stage restart and the succeeded convert and forcing journal records remain reused rather than resubmitted
 
 ### Requirement: Scoped state-chain reset is archived, dual-lane, and fail-closed
 
@@ -122,7 +132,7 @@ The replay driver SHALL refuse to start unless the effective environment disable
 
 ### Requirement: node-27 refresh serves replayed results
 
-Before re-ingest, compressed TimescaleDB chunks intersecting the replay window SHALL be surveyed and decompressed via the existing decompression-replay surface, with a receipt; otherwise the parser's replacement delete fails closed against compressed chunks. After replay, the node-27 pipeline SHALL re-ingest every replayed run, and map-tile cache entries scoped to the affected sources and the replay valid-time window SHALL be invalidated so that the display API and frontend serve only replay-derived data for the affected scopes. Verification SHALL assert: database rows reference the new manifests with first-cycle rows in bootstrap shape; each replayed (run, variable) series carries a single river-network-version/variable key set with no stale-key remnants; and database rows for out-of-scope basins are unchanged.
+Before re-ingest, compressed TimescaleDB chunks intersecting the replay window SHALL be surveyed and decompressed via the existing decompression-replay surface, with a receipt; otherwise the parser's replacement delete fails closed against compressed chunks. After replay, the node-27 pipeline SHALL re-ingest every replayed run, and map-tile cache entries scoped to the replayed run sources **and the national aggregate layer** SHALL be invalidated over a valid-time window that extends through the last replayed cycle plus the full forecast display horizon, so that the display API and frontend serve only replay-derived data for the affected scopes. Verification SHALL assert: database rows reference the new manifests with first-cycle rows in bootstrap shape; each replayed (run, variable) series carries a single river-network-version/variable key set with no stale-key remnants; and database rows for out-of-scope basins are unchanged.
 
 #### Scenario: Compressed chunks are cleared before re-ingest
 
@@ -131,7 +141,7 @@ Before re-ingest, compressed TimescaleDB chunks intersecting the replay window S
 
 #### Scenario: Stale tiles are not served after invalidation
 
-- **WHEN** re-ingest completes and the tile invalidation tool runs scoped to the affected sources and replay valid-time window
+- **WHEN** re-ingest completes and the tile invalidation tool runs scoped to the replayed run sources plus the national aggregate layer over the full display-horizon window
 - **THEN** subsequent tile requests in that scope are rebuilt from replayed data rather than served from pre-replay cache rows
 
 #### Scenario: Out-of-scope basins unchanged
