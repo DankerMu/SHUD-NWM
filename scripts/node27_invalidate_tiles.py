@@ -308,6 +308,18 @@ def invalidate_tiles(
     deletable_keys: list[str] = []
     deleted_rows: int | None = 0
 
+    def mutation_may_be_in_flight() -> bool:
+        """True when this run could already have changed something.
+
+        Either file-cache entries are gone, or a DELETE scope was staged for a
+        transaction that is being torn down with an unknown fate (round-3 C3-3).
+        A DRY RUN never qualifies: it stages a scope for the report and issues
+        nothing, so its failures stay bare re-raises rather than a receipt
+        claiming a mutation that could not have happened.
+        """
+
+        return bool(unlinked_paths) or bool(execute and deletable_keys)
+
     def partial_mutation(
         reason: str,
         *,
@@ -399,7 +411,7 @@ def invalidate_tiles(
                     deleted_rows = int(getattr(cursor, "rowcount", 0) or 0)
         except Exception as error:
             _rollback(connection)
-            if not unlinked_paths and not deletable_keys:
+            if not mutation_may_be_in_flight():
                 raise
             # Something may already be in flight: file-cache entries are gone,
             # or a DELETE scope was staged/issued for this transaction.  Emit a
@@ -419,7 +431,7 @@ def invalidate_tiles(
                 connection.commit()
             except Exception as error:
                 _rollback(connection)
-                if not unlinked_paths and not deletable_keys:
+                if not mutation_may_be_in_flight():
                     raise
                 raise partial_mutation(
                     "db_commit_uncertain_after_file_unlink" if unlinked_paths else "db_commit_uncertain",
@@ -436,7 +448,7 @@ def invalidate_tiles(
         # with no file cache) is just as uncertain, so it gets a receipt too
         # (round-3 C3-3) -- under a reason that does not claim an unlink.
         _rollback(connection)
-        if not unlinked_paths and not deletable_keys:
+        if not mutation_may_be_in_flight():
             raise
         failure = partial_mutation(
             "interrupted_after_file_unlink" if unlinked_paths else "interrupted_delete_scope_uncertain",

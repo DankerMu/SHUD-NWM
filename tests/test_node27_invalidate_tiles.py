@@ -625,20 +625,23 @@ def test_a_delete_failure_with_no_file_cache_still_leaves_a_receipt(tmp_path: Pa
     assert _key(1) in connection.cache_keys()
 
 
+class _CandidateQueryFailingConnection(_FakeConnection):
+    """The candidate SELECT fails: nothing was staged, let alone mutated."""
+
+    def cursor(self) -> _FakeCursor:
+        connection = self
+
+        class _Cursor(_FakeCursor):
+            def execute(self, statement: str, params: Mapping[str, Any] | None = None) -> None:
+                if statement == tool.CANDIDATE_SQL:
+                    raise RuntimeError("server closed the connection unexpectedly")
+                super().execute(statement, params)
+
+        return _Cursor(connection)
+
+
 def test_a_failure_before_any_delete_scope_is_never_dressed_up_as_a_mutation(tmp_path: Path) -> None:
     """The widened guard must not turn a read-side failure into a mutation claim."""
-
-    class _CandidateQueryFailingConnection(_FakeConnection):
-        def cursor(self) -> _FakeCursor:
-            connection = self
-
-            class _Cursor(_FakeCursor):
-                def execute(self, statement: str, params: Mapping[str, Any] | None = None) -> None:
-                    if statement == tool.CANDIDATE_SQL:
-                        raise RuntimeError("server closed the connection unexpectedly")
-                    super().execute(statement, params)
-
-            return _Cursor(connection)
 
     _connection, _cache_dir, receipt_path = _site(tmp_path)
     connection = _CandidateQueryFailingConnection(_connection.rows)
@@ -648,6 +651,40 @@ def test_a_failure_before_any_delete_scope_is_never_dressed_up_as_a_mutation(tmp
 
     assert not receipt_path.exists()
     assert connection.rolled_back is True
+
+
+def test_a_dry_run_failure_never_claims_a_partial_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dry run stages a delete scope for the report and issues nothing.
+
+    The widened guard reads that scope, so it must also read ``execute``:
+    otherwise a read-only rehearsal that trips over a broken probe files a
+    ``failed_partial_mutation`` receipt for a mutation that cannot have happened.
+    """
+
+    connection, cache_dir, receipt_path = _two_in_scope_site(tmp_path)
+    real_probe = tool.probe_file_cache
+    calls: list[str] = []
+
+    def _probe_then_fail(root: Path | None, cache_key: str) -> dict[str, Any]:
+        calls.append(cache_key)
+        if len(calls) > 1:
+            raise RuntimeError("stat storm")
+        return real_probe(root, cache_key)
+
+    monkeypatch.setattr(tool, "probe_file_cache", _probe_then_fail)
+
+    # the first key is already in the delete scope when the second probe blows
+    # up -- but this is a dry run, so nothing was issued and nothing was unlinked
+    with pytest.raises(RuntimeError, match="stat storm"):
+        _run(connection, cache_dir, receipt_path, execute=False)
+
+    assert not receipt_path.exists()
+    assert connection.rolled_back is True
+    assert connection.committed is False
+    assert all((cache_dir / _key(seed)[:2] / f"{_key(seed)}.pbf").is_file() for seed in (1, 5))
 
 
 def _two_in_scope_site(tmp_path: Path) -> tuple[_FakeConnection, Path, Path]:
