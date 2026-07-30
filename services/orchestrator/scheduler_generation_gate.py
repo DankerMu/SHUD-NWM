@@ -35,6 +35,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from services.orchestrator import scheduler as _scheduler
+from services.orchestrator import scheduler_file_providers as _file_providers
 from services.orchestrator import scheduler_generation as _generation
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -46,10 +47,12 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: the same identity when checking cache freshness.
 CUTOVER_DECLARATION_UNLOADED: object = object()
 
-#: Bounded read guard for a model package manifest (#1164 D1).  Mirrors
-#: ``scheduler_file_providers.MAX_MODEL_PACKAGE_MANIFEST_BYTES`` so a corrupt /
-#: oversized manifest cannot exhaust scheduler memory during planning.
-MAX_PACKAGE_MANIFEST_BYTES = 16 * 1024 * 1024
+#: Bounded read guard for a model package manifest (#1164 D1).  Bound to
+#: ``scheduler_file_providers.MAX_MODEL_PACKAGE_MANIFEST_BYTES`` (the cap the
+#: registry loader already applies, so nothing larger can reach the gate) rather
+#: than restating a number that could drift out of sync — a corrupt / oversized
+#: manifest must not exhaust scheduler memory during planning.
+MAX_PACKAGE_MANIFEST_BYTES = _file_providers.MAX_MODEL_PACKAGE_MANIFEST_BYTES
 
 #: Candidate ``state_evidence.mode`` emitted for an admitted packaged-IC
 #: bootstrap.  Re-exported from ``scheduler_generation`` so gate callers keep a
