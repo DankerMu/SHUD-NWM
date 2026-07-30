@@ -8,8 +8,11 @@ admissible knife is ``(source_id, valid_time inside the replay window)``:
 * ``source_id`` -- for hydro layers this column carries the RUN id
   (``apps/api/routes/hydro_display.py:313-321`` passes ``source_id=run_id``), so
   the scope is given either as explicit ``--source-id`` values or harvested from
-  a replacement receipt's ``rows[].run_id`` (``--from-replacement-receipt``).
-  Nothing is ever matched by prefix or wildcard.
+  a replacement receipt's ``rows[].run_id`` (``--from-replacement-receipt``,
+  REPEATABLE -- the replay writes one receipt per source per phase and the run-id
+  sets are unioned; a receipt whose ``outcome`` is not ``completed`` is refused
+  because it names only the cycles that finished).  Nothing is ever matched by
+  prefix or wildcard.
 * ``valid_time`` -- inclusive window; rows with a NULL ``valid_time`` (the
   river-network / station layers) are never in scope.
 
@@ -288,74 +291,19 @@ def invalidate_tiles(
             )
 
     unlinked_paths: list[str] = []
-    connection = connect(database_url)
-    try:
-        with connection.cursor() as cursor:
-            cursor.execute(f"SET statement_timeout = {STATEMENT_TIMEOUT_MS}")
-            cursor.execute(f"SET lock_timeout = {LOCK_TIMEOUT_MS}")
-            cursor.execute(TABLE_PRESENT_SQL)
-            table = cursor.fetchone()
-            if table is None or (table[0] if not isinstance(table, Mapping) else table.get("to_regclass")) is None:
-                raise TileInvalidationRefused("tile_cache_table_absent")
-            candidates = _candidate_rows(
-                cursor,
-                source_ids=resolved_sources,
-                window_start=window_start,
-                window_end=window_end,
-            )
+    candidates: list[dict[str, Any]] = []
+    entries: list[dict[str, Any]] = []
+    blocked: list[dict[str, Any]] = []
+    deleted_rows: int | None = 0
 
-            entries: list[dict[str, Any]] = []
-            deletable_keys: list[str] = []
-            blocked: list[dict[str, Any]] = []
-            for row in candidates:
-                cache_key = str(row.get("cache_key") or "")
-                probe = probe_file_cache(file_cache_dir, cache_key)
-                entry = {
-                    "cache_key": cache_key,
-                    "layer_id": row.get("layer_id"),
-                    "source_id": row.get("source_id"),
-                    "valid_time": _iso_value(row.get("valid_time")),
-                    "tile": [row.get("z"), row.get("x"), row.get("y")],
-                    "file_cache": probe,
-                    "file_cache_action": "planned" if execute else "none",
-                    "row_action": "planned" if execute else "none",
-                }
-                if probe["status"] == PROBE_UNDETERMINABLE:
-                    # Fail closed: leave BOTH tiers so the key stays re-runnable.
-                    entry["file_cache_action"] = "blocked"
-                    entry["row_action"] = "blocked"
-                    blocked.append(entry)
-                    entries.append(entry)
-                    continue
-                if execute:
-                    if probe["status"] == PROBE_PRESENT:
-                        removed, detail = _unlink_file_cache(Path(str(probe["path"])))
-                        if not removed:
-                            entry["file_cache_action"] = "blocked"
-                            entry["row_action"] = "blocked"
-                            entry["file_cache"] = {**probe, "detail": detail}
-                            blocked.append(entry)
-                            entries.append(entry)
-                            continue
-                        entry["file_cache_action"] = "deleted"
-                        unlinked_paths.append(str(probe["path"]))
-                    else:
-                        entry["file_cache_action"] = "absent"
-                deletable_keys.append(cache_key)
-                entries.append(entry)
+    def partial_mutation(
+        reason: str,
+        *,
+        error: BaseException,
+        rows_deleted: int | None,
+    ) -> TileInvalidationPartialMutation:
+        """Receipt-first record of a mutation that already happened."""
 
-            deleted_rows = 0
-            if execute and deletable_keys:
-                cursor.execute(DELETE_SQL, {"cache_keys": deletable_keys})
-                deleted_rows = int(getattr(cursor, "rowcount", 0) or 0)
-        if execute:
-            connection.commit()
-    except Exception as error:
-        _rollback(connection)
-        if not unlinked_paths:
-            raise
-        # File-cache entries are already gone and the rows are not: emit a
-        # receipt naming them instead of dying with a bare traceback.
         receipt = _receipt_payload(
             outcome="failed_partial_mutation",
             executed=execute,
@@ -367,17 +315,121 @@ def invalidate_tiles(
             candidates=candidates,
             entries=entries,
             blocked=blocked,
-            deleted_rows=0,
+            deleted_rows=rows_deleted,
             unlinked_paths=unlinked_paths,
-            failure={"reason": "db_delete_failed_after_file_unlink", "detail": str(error)},
+            failure={"reason": reason, "detail": str(error)},
         )
         written, write_error = _try_write_receipt(receipt_path, receipt)
-        raise TileInvalidationPartialMutation(
-            "db_delete_failed_after_file_unlink",
+        return TileInvalidationPartialMutation(
+            reason,
             receipt=receipt,
             receipt_written=written,
             detail=str(error) if written else f"{error}; receipt write failed: {write_error}",
-        ) from error
+        )
+
+    connection = connect(database_url)
+    try:
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(f"SET statement_timeout = {STATEMENT_TIMEOUT_MS}")
+                cursor.execute(f"SET lock_timeout = {LOCK_TIMEOUT_MS}")
+                cursor.execute(TABLE_PRESENT_SQL)
+                table = cursor.fetchone()
+                if table is None or (table[0] if not isinstance(table, Mapping) else table.get("to_regclass")) is None:
+                    raise TileInvalidationRefused("tile_cache_table_absent")
+                candidates = _candidate_rows(
+                    cursor,
+                    source_ids=resolved_sources,
+                    window_start=window_start,
+                    window_end=window_end,
+                )
+
+                deletable_keys: list[str] = []
+                for row in candidates:
+                    cache_key = str(row.get("cache_key") or "")
+                    probe = probe_file_cache(file_cache_dir, cache_key)
+                    entry = {
+                        "cache_key": cache_key,
+                        "layer_id": row.get("layer_id"),
+                        "source_id": row.get("source_id"),
+                        "valid_time": _iso_value(row.get("valid_time")),
+                        "tile": [row.get("z"), row.get("x"), row.get("y")],
+                        "file_cache": probe,
+                        "file_cache_action": "planned" if execute else "none",
+                        "row_action": "planned" if execute else "none",
+                    }
+                    if probe["status"] == PROBE_UNDETERMINABLE:
+                        # Fail closed: leave BOTH tiers so the key stays re-runnable.
+                        entry["file_cache_action"] = "blocked"
+                        entry["row_action"] = "blocked"
+                        blocked.append(entry)
+                        entries.append(entry)
+                        continue
+                    if execute:
+                        if probe["status"] == PROBE_PRESENT:
+                            removed, detail = _unlink_file_cache(Path(str(probe["path"])))
+                            if not removed:
+                                entry["file_cache_action"] = "blocked"
+                                entry["row_action"] = "blocked"
+                                entry["file_cache"] = {**probe, "detail": detail}
+                                blocked.append(entry)
+                                entries.append(entry)
+                                continue
+                            entry["file_cache_action"] = "deleted"
+                            unlinked_paths.append(str(probe["path"]))
+                        else:
+                            entry["file_cache_action"] = "absent"
+                    deletable_keys.append(cache_key)
+                    entries.append(entry)
+
+                deleted_rows = 0
+                if execute and deletable_keys:
+                    cursor.execute(DELETE_SQL, {"cache_keys": deletable_keys})
+                    deleted_rows = int(getattr(cursor, "rowcount", 0) or 0)
+        except Exception as error:
+            _rollback(connection)
+            if not unlinked_paths:
+                raise
+            # File-cache entries are already gone and the rows are not: emit a
+            # receipt naming them instead of dying with a bare traceback.  The
+            # DELETE never committed, so zero rows is a fact here.
+            raise partial_mutation(
+                "db_delete_failed_after_file_unlink",
+                error=error,
+                rows_deleted=0,
+            ) from error
+        if execute:
+            # The commit is its OWN failure class: once it has been issued the
+            # transaction's fate is genuinely unknown (the server may have
+            # committed and lost the connection before answering).  Reporting
+            # `deleted_rows: 0` here would state a negative nobody verified.
+            try:
+                connection.commit()
+            except Exception as error:
+                _rollback(connection)
+                if not unlinked_paths:
+                    raise
+                raise partial_mutation(
+                    "db_commit_uncertain_after_file_unlink",
+                    error=error,
+                    rows_deleted=None,
+                ) from error
+    except TileInvalidationPartialMutation:
+        raise
+    except BaseException as error:
+        # KeyboardInterrupt / SystemExit in the middle of the unlink loop escape
+        # every `except Exception` above; without this arm the files are gone and
+        # a bare traceback is the only record (round-2 C2-6).
+        _rollback(connection)
+        if not unlinked_paths:
+            raise
+        failure = partial_mutation(
+            "interrupted_after_file_unlink",
+            error=error,
+            rows_deleted=None,
+        )
+        print(json.dumps(failure.receipt, ensure_ascii=False, sort_keys=True, default=str))
+        raise
     finally:
         _close(connection)
 
@@ -432,7 +484,7 @@ def _receipt_payload(
     candidates: Sequence[Mapping[str, Any]],
     entries: Sequence[Mapping[str, Any]],
     blocked: Sequence[Mapping[str, Any]],
-    deleted_rows: int,
+    deleted_rows: int | None,
     unlinked_paths: Sequence[str],
     failure: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
@@ -460,7 +512,12 @@ def _receipt_payload(
             "blocked_keys": len(blocked),
         },
         "blocked_cache_keys": [entry["cache_key"] for entry in blocked][:MAX_RECEIPT_ENTRIES],
+        # Every list in this receipt is bounded, so every list says whether it
+        # was cut: the runbook treats the unlinked-path list as the authoritative
+        # record of what was removed (round-2 C2-3).
+        "blocked_cache_keys_truncated": len(blocked) > MAX_RECEIPT_ENTRIES,
         "unlinked_file_cache_paths": list(unlinked_paths)[:MAX_RECEIPT_ENTRIES],
+        "unlinked_file_cache_paths_truncated": len(unlinked_paths) > MAX_RECEIPT_ENTRIES,
         "failure": dict(failure) if failure is not None else None,
         "entries": list(entries)[:MAX_RECEIPT_ENTRIES],
         "entries_truncated": len(entries) > MAX_RECEIPT_ENTRIES,
@@ -518,6 +575,28 @@ def parse_time(token: str) -> datetime:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
+REPLACEMENT_RECEIPT_SCHEMA_VERSION = "nhms.production_replay_replacement.v1"
+#: The only replacement outcome whose run-id set is the WHOLE replayed scope; an
+#: ``in_progress``/``halted`` receipt names the cycles that finished before the
+#: interruption and would silently narrow the invalidation (round-2 C2-1).
+REPLACEMENT_RECEIPT_COMPLETED_OUTCOME = "completed"
+
+
+def source_ids_from_replacement_receipts(paths: Sequence[Path]) -> list[str]:
+    """Union of the replaced run ids across every replacement receipt.
+
+    The replay produces one receipt per source per phase (four in total for the
+    six-basin window), and every one of them names a disjoint slice of the
+    replayed runs: invalidating with a single receipt leaves the rest of the
+    replayed run ids serving tiles rendered from the pre-replay data.
+    """
+
+    resolved: set[str] = set()
+    for path in paths:
+        resolved.update(source_ids_from_replacement_receipt(path))
+    return sorted(resolved)
+
+
 def source_ids_from_replacement_receipt(path: Path) -> list[str]:
     """Harvest the exact replaced run ids from a replacement receipt."""
 
@@ -529,8 +608,14 @@ def source_ids_from_replacement_receipt(path: Path) -> list[str]:
         payload = json.loads(content)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise TileInvalidationRefused("replacement_receipt_unreadable", {"path": str(path)}) from error
-    if not isinstance(payload, Mapping) or payload.get("schema_version") != "nhms.production_replay_replacement.v1":
+    if not isinstance(payload, Mapping) or payload.get("schema_version") != REPLACEMENT_RECEIPT_SCHEMA_VERSION:
         raise TileInvalidationRefused("replacement_receipt_schema_unsupported", {"path": str(path)})
+    outcome = str(payload.get("outcome") or "")
+    if outcome != REPLACEMENT_RECEIPT_COMPLETED_OUTCOME:
+        raise TileInvalidationRefused(
+            "replacement_receipt_not_completed",
+            {"path": str(path), "outcome": outcome or None},
+        )
     run_ids = sorted(
         {
             str(row.get("run_id"))
@@ -554,9 +639,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--from-replacement-receipt",
+        action="append",
         type=Path,
-        default=None,
-        help="Harvest the source ids from a replacement receipt's rows[].run_id.",
+        default=[],
+        dest="from_replacement_receipts",
+        help=(
+            "Harvest the source ids from a replacement receipt's rows[].run_id (repeatable; "
+            "the run-id sets are unioned, so one invocation covers every phase's receipt)."
+        ),
     )
     parser.add_argument("--window-start", required=True)
     parser.add_argument("--window-end", required=True)
@@ -597,8 +687,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
         source_ids = list(args.source_ids)
-        if args.from_replacement_receipt is not None:
-            source_ids.extend(source_ids_from_replacement_receipt(args.from_replacement_receipt))
+        source_ids.extend(source_ids_from_replacement_receipts(list(args.from_replacement_receipts)))
         receipt = invalidate_tiles(
             source_ids=source_ids,
             window_start=parse_time(args.window_start),

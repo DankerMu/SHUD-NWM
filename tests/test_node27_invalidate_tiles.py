@@ -342,6 +342,7 @@ def test_source_ids_are_harvested_from_a_replacement_receipt(tmp_path: Path) -> 
         json.dumps(
             {
                 "schema_version": "nhms.production_replay_replacement.v1",
+                "outcome": "completed",
                 "rows": [
                     {"run_id": IN_SCOPE_SOURCE},
                     {"run_id": IN_SCOPE_SOURCE},
@@ -356,6 +357,87 @@ def test_source_ids_are_harvested_from_a_replacement_receipt(tmp_path: Path) -> 
         IN_SCOPE_SOURCE,
         "fcst_ifs_2026070512_dg_alpha",
     ]
+
+
+def _replacement_receipt(
+    path: Path,
+    *,
+    run_ids: Sequence[str],
+    outcome: str = "completed",
+) -> Path:
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "nhms.production_replay_replacement.v1",
+                "outcome": outcome,
+                "rows": [{"run_id": run_id} for run_id in run_ids],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_every_replacement_receipt_contributes_to_one_union(tmp_path: Path) -> None:
+    """C2-1: the replay writes four receipts; one invalidation must cover them all.
+
+    Harvesting a single receipt leaves the run ids of the other three phases
+    serving tiles rendered from the pre-replay data.
+    """
+
+    ifs_phase1 = _replacement_receipt(
+        tmp_path / "ifs-replay-phase1.json",
+        run_ids=[IN_SCOPE_SOURCE, "fcst_ifs_2026070512_dg_alpha"],
+    )
+    gfs_phase2 = _replacement_receipt(
+        tmp_path / "gfs-replay-phase2.json",
+        run_ids=["fcst_gfs_2026071900_dg_alpha", IN_SCOPE_SOURCE],
+    )
+
+    assert tool.source_ids_from_replacement_receipts([ifs_phase1, gfs_phase2]) == [
+        "fcst_gfs_2026071900_dg_alpha",
+        IN_SCOPE_SOURCE,
+        "fcst_ifs_2026070512_dg_alpha",
+    ]
+
+
+def test_the_cli_unions_repeated_replacement_receipts_with_explicit_source_ids(tmp_path: Path) -> None:
+    args = tool._build_parser().parse_args(
+        [
+            "--source-id",
+            "hydro-national",
+            "--from-replacement-receipt",
+            str(tmp_path / "a.json"),
+            "--from-replacement-receipt",
+            str(tmp_path / "b.json"),
+            "--window-start",
+            "2026-07-05T00:00Z",
+            "--window-end",
+            "2026-07-28T00:00Z",
+            "--receipt-path",
+            str(tmp_path / "receipt.json"),
+        ]
+    )
+
+    assert args.source_ids == ["hydro-national"]
+    assert args.from_replacement_receipts == [tmp_path / "a.json", tmp_path / "b.json"]
+
+
+@pytest.mark.parametrize("outcome", ["in_progress", "halted"])
+def test_a_replacement_receipt_that_did_not_complete_is_refused(tmp_path: Path, outcome: str) -> None:
+    """A half-finished receipt names only the cycles that finished."""
+
+    receipt_file = _replacement_receipt(
+        tmp_path / "partial.json",
+        run_ids=[IN_SCOPE_SOURCE],
+        outcome=outcome,
+    )
+
+    with pytest.raises(TileInvalidationRefused) as excinfo:
+        tool.source_ids_from_replacement_receipts([receipt_file])
+
+    assert excinfo.value.reason == "replacement_receipt_not_completed"
+    assert excinfo.value.details["outcome"] == outcome
 
 
 def test_a_foreign_receipt_is_refused_rather_than_read_loosely(tmp_path: Path) -> None:
@@ -418,8 +500,13 @@ def test_an_unprobeable_file_cache_root_refuses(tmp_path: Path, monkeypatch: pyt
     assert not receipt_path.exists()
 
 
-def test_a_db_failure_after_file_unlinks_still_emits_a_receipt(tmp_path: Path) -> None:
-    """C-F3: a partial mutation may not surface as a bare traceback."""
+def test_a_commit_failure_after_file_unlinks_is_uncertain_never_zero(tmp_path: Path) -> None:
+    """C-F3 + round-2 C2-5: a partial mutation may not surface as a bare traceback.
+
+    The commit is its own failure class: once issued, the transaction's fate is
+    unknown, so the receipt states ``deleted_rows: null`` instead of claiming a
+    zero nobody verified.
+    """
 
     connection, cache_dir, receipt_path = _site(tmp_path)
     unlinked_path = cache_dir / _key(1)[:2] / f"{_key(1)}.pbf"
@@ -432,18 +519,146 @@ def test_a_db_failure_after_file_unlinks_still_emits_a_receipt(tmp_path: Path) -
     with pytest.raises(tool.TileInvalidationPartialMutation) as excinfo:
         _run(connection, cache_dir, receipt_path, execute=True)
 
-    assert excinfo.value.reason == "db_delete_failed_after_file_unlink"
+    assert excinfo.value.reason == "db_commit_uncertain_after_file_unlink"
     assert excinfo.value.receipt_written is True
     receipt = excinfo.value.receipt
     assert receipt["outcome"] == "failed_partial_mutation"
     assert receipt["unlinked_file_cache_paths"] == [str(unlinked_path)]
-    assert receipt["failure"]["reason"] == "db_delete_failed_after_file_unlink"
-    assert receipt["totals"]["deleted_rows"] == 0
+    assert receipt["failure"]["reason"] == "db_commit_uncertain_after_file_unlink"
+    # Three-way: a commit that never answered did not "delete 0 rows" -- nobody
+    # knows how many it deleted (round-2 C2-5).
+    assert receipt["totals"]["deleted_rows"] is None
     # the file really is gone and the row really did survive
     assert not unlinked_path.exists()
     assert _key(1) in connection.cache_keys()
     assert connection.rolled_back is True
     assert json.loads(receipt_path.read_text(encoding="utf-8"))["outcome"] == "failed_partial_mutation"
+
+
+class _DeleteFailingConnection(_FakeConnection):
+    """The DELETE statement itself fails: the transaction never reached commit."""
+
+    def cursor(self) -> _FakeCursor:
+        connection = self
+
+        class _Cursor(_FakeCursor):
+            def execute(self, statement: str, params: Mapping[str, Any] | None = None) -> None:
+                if statement == tool.DELETE_SQL:
+                    raise RuntimeError("server closed the connection unexpectedly")
+                super().execute(statement, params)
+
+        return _Cursor(connection)
+
+
+def test_a_delete_failure_after_file_unlinks_reports_zero_deleted_rows(tmp_path: Path) -> None:
+    """The complement of the commit case: an un-issued delete really did delete 0."""
+
+    _connection, cache_dir, receipt_path = _site(tmp_path)
+    connection = _DeleteFailingConnection(_connection.rows)
+    unlinked_path = cache_dir / _key(1)[:2] / f"{_key(1)}.pbf"
+
+    with pytest.raises(tool.TileInvalidationPartialMutation) as excinfo:
+        _run(connection, cache_dir, receipt_path, execute=True)
+
+    assert excinfo.value.reason == "db_delete_failed_after_file_unlink"
+    receipt = excinfo.value.receipt
+    assert receipt["failure"]["reason"] == "db_delete_failed_after_file_unlink"
+    assert receipt["totals"]["deleted_rows"] == 0
+    assert receipt["unlinked_file_cache_paths"] == [str(unlinked_path)]
+    assert not unlinked_path.exists()
+    assert connection.committed is False
+    assert connection.rolled_back is True
+    assert _key(1) in connection.cache_keys()
+
+
+def _two_in_scope_site(tmp_path: Path) -> tuple[_FakeConnection, Path, Path]:
+    rows = [
+        _row(cache_key=_key(1), source_id=IN_SCOPE_SOURCE, valid_time=WINDOW_START + timedelta(hours=6)),
+        _row(cache_key=_key(5), source_id=IN_SCOPE_SOURCE, valid_time=WINDOW_START + timedelta(hours=18)),
+    ]
+    cache_dir = tmp_path / "tile-file-cache"
+    for seed in (1, 5):
+        key = _key(seed)
+        path = cache_dir / key[:2] / f"{key}.pbf"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(f"tile-{seed}".encode())
+    return _FakeConnection(rows), cache_dir, tmp_path / "receipt.json"
+
+
+def test_an_interrupt_mid_unlink_still_leaves_a_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: Any,
+) -> None:
+    """C2-6: ``KeyboardInterrupt`` escapes every ``except Exception``.
+
+    The first entry is already unlinked when the operator hits Ctrl-C; without a
+    ``BaseException`` arm the only record of that deletion is a traceback.
+    """
+
+    connection, cache_dir, receipt_path = _two_in_scope_site(tmp_path)
+    first_path = cache_dir / _key(1)[:2] / f"{_key(1)}.pbf"
+    real_unlink = tool._unlink_file_cache
+    calls: list[Path] = []
+
+    def _unlink_then_interrupt(path: Path) -> tuple[bool, str | None]:
+        calls.append(path)
+        if len(calls) > 1:
+            raise KeyboardInterrupt
+        return real_unlink(path)
+
+    monkeypatch.setattr(tool, "_unlink_file_cache", _unlink_then_interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        _run(connection, cache_dir, receipt_path, execute=True)
+
+    assert not first_path.exists()
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "failed_partial_mutation"
+    assert receipt["failure"]["reason"] == "interrupted_after_file_unlink"
+    assert receipt["unlinked_file_cache_paths"] == [str(first_path)]
+    assert receipt["totals"]["deleted_rows"] is None
+    assert connection.committed is False
+    assert connection.rolled_back is True
+    # the same record is echoed for an operator watching the terminal
+    assert json.loads(capsys.readouterr().out.strip())["failure"]["reason"] == "interrupted_after_file_unlink"
+
+
+def test_every_bounded_receipt_list_declares_whether_it_was_cut(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C2-3: the runbook treats the unlinked-path list as authoritative."""
+
+    connection, cache_dir, receipt_path = _two_in_scope_site(tmp_path)
+    # key 5's cache entry is a directory: an undeterminable probe blocks that key
+    blocked_entry = cache_dir / _key(5)[:2] / f"{_key(5)}.pbf"
+    blocked_entry.unlink()
+    blocked_entry.mkdir()
+    monkeypatch.setattr(tool, "MAX_RECEIPT_ENTRIES", 0)
+
+    with pytest.raises(TileInvalidationIncomplete) as excinfo:
+        _run(connection, cache_dir, receipt_path, execute=True)
+
+    receipt = excinfo.value.receipt
+    assert receipt["totals"]["file_cache_deleted"] == 1
+    assert receipt["totals"]["blocked_keys"] == 1
+    assert receipt["entries"] == []
+    assert receipt["entries_truncated"] is True
+    assert receipt["unlinked_file_cache_paths"] == []
+    assert receipt["unlinked_file_cache_paths_truncated"] is True
+    assert receipt["blocked_cache_keys"] == []
+    assert receipt["blocked_cache_keys_truncated"] is True
+
+
+def test_untruncated_receipt_lists_say_so(tmp_path: Path) -> None:
+    connection, cache_dir, receipt_path = _two_in_scope_site(tmp_path)
+
+    receipt = _run(connection, cache_dir, receipt_path, execute=True)
+
+    assert receipt["unlinked_file_cache_paths_truncated"] is False
+    assert receipt["blocked_cache_keys_truncated"] is False
+    assert receipt["entries_truncated"] is False
 
 
 def test_a_receipt_write_failure_after_commit_is_a_declared_exit_not_a_traceback(tmp_path: Path) -> None:
@@ -517,7 +732,7 @@ def test_the_cli_exit_codes_are_declared_for_every_outcome(tmp_path: Path, capsy
     assert emitted["outcome"] == "failed_partial_mutation"
     assert emitted["unlinked_file_cache_paths"]
     assert json.loads(captured.err.strip().splitlines()[-1])["failure_reason"] == (
-        "db_delete_failed_after_file_unlink"
+        "db_commit_uncertain_after_file_unlink"
     )
     assert "4" in tool.__doc__ and "failed AFTER" in tool.__doc__
 
