@@ -101,8 +101,9 @@ D1 覆写发生在终态分支(:413-502),但候选随后仍经 canonical-readine
   1. 预捕获(在该 cycle 提交**之前**,旧 run 树此时仍完整):该 cycle 6 模型旧 run manifest sha256 + 输出清单 sha256 →替换 receipt 行(旧半,state 字段见 0b);旧 run 缺失(GFS 070712 五流域)如实记 `no_prior_run`。**无条件**记录该 cycle 每模型的 forcing 包 manifest checksum 与模型包 checksum(用户指令"输入 checksum"的字面承载,r1 P2-8)。
   2. 预 stage:scratch 缺该 cycle forcing 时从 NFS 复制(sha256 校验后写,receipt 记录);模型包在 `models/`(非 retention 域)无需 stage。
   3. 提交:`plan-production --cycle-time <T> --source <s> --model-id×6 --disable-backfill --submit`(单 pass 语义;`--max-passes` 仅 `--continuous` 下有意义,不传,r1 P3-12)。070712 切 repair 参数组。
-  4. 等待:journal 出现 6 模型新 forecast 终态 + 新 cohort `state_save_qc` succeeded + NFS 索引出现 6 条 (valid_time=T+12h) 新条目(created_at > pass 开始);超时(默认 90min/cycle)或任一失败 → **立即停**,receipt 记录中断点,不自动重试不跳过。
-  5. 后捕获:新 manifest sha256、新 state checksum、init_mode/quality(070500 行必须 `init_mode=3`+`quality=packaged_calibrated_state`+`packaged_ic_checksum` 非空,否则视为失败停机);同时断言新 run 的 `river_network_version_id` 与 variable 键集合与旧半一致(r1 P2-6,见 R3)→ receipt 行(新半)。
+  4. 等待(round-1 B-P1-1/B-P2-7 修正,两条腿都不用时间戳):每模型出现**pass 前基线之外的新终态 job id**(旧 run 的终态 journal 记录在清场后留存,布尔"有无完成"恒真)+ NFS 索引 (valid_time=T+12h) 后继条目的 checksum 与 reset receipt `removed_entries` 归档值**不同**(生产索引条目 `created_at` 恒为 null,since-gate 不可满足);索引不可读 = 不可判定,永不算收敛并以 `state_index_undeterminable` 停机。超时(默认 90min/cycle)或任一失败 → **立即停**,receipt 记录中断点,不自动重试不跳过。
+  5. 后捕获:新 manifest sha256、新 state checksum、init_mode/quality(回放序列原点行——`--origin-cycle`,默认 2026070500,非本次调用的 `cycles[0]`,round-1 B-P1-2——必须 `init_mode=3`+`quality=packaged_calibrated_state`+`packaged_ic_checksum` 非空,否则视为失败停机);同时断言新 run 与旧半的键一致:`river_network_version_id` + 输出段数 + 输出文件清单(round-1 B-P1-3:实机 manifest 无 `outputs.variables`,原断言恒不执行;见 R3)→ receipt 行(新半)。
+  6. 每 cycle 结束后原子重写替换 receipt(未完成时 `outcome=in_progress`),中途崩溃保留已完成行(round-1 B-P1-4)。
 - 串行序:先 IFS 全序列后 GFS(或反之,单序执行,不并行两源——控变量、控 Slurm 负载、失败面清晰)。
 - 全局 receipt `nhms.production_replay_replacement.v1`:rows[] 66×6 行 + per-source reset receipt 引用 + 中断/恢复记录(驱动器可从 receipt 断点续跑:已完成 cycle 经完成校验后跳过——校验=新 state 在场且 checksum 与 receipt 一致,非盲跳)。
 
@@ -132,7 +133,7 @@ D1 覆写发生在终态分支(:413-502),但候选随后仍经 canonical-readine
 
 - R1 双 lane 清场与 copyback 并发:timer 停机 + 驱动器单进程串行下无并发写者;若外部违规启动 pass,NFS 后清顺序保证错误方向为 bootstrap 不可达(fail-closed)。
 - R2 GFS 070712 repair 与 replay 常规分支同 pass 共存(huai_main forcing 在场):分 cohort 机制已核实(`scheduler_execution.py:836-880`),风险降级;保留共存测试,driver 仍支持模型子集参数作为逃生门。
-- R3 键漂移残留(取代原窗口断言,r1 P2-6):parser 删除并集窗口,无窗口残留;若新 run 的 `river_network_version_id` 或 variable 集合与旧不同,旧键下的行不在删除条件内而残留。驱动器步骤 5 + node-27 验证双重断言键一致;破则人工介入(不自动删旧键行——避免误删无关数据)。
+- R3 键漂移残留(取代原窗口断言,r1 P2-6;断言轴按 round-1 B-P1-3 改为实机可得证据):parser 删除并集窗口,无窗口残留;若新 run 的 `river_network_version_id`、输出段数或输出文件清单与旧不同,旧键下的行不在删除条件内而残留。驱动器步骤 5 + node-27 验证双重断言键一致;破则人工介入(不自动删旧键行——避免误删无关数据)。
 - R4 回放结果与旧结果物理量差异显著(初值不同,本就是目的):display 侧无平滑处理,切换即生效;记录于验证 receipt,无需额外动作。
 - R5 `state` (单数) 目录在 scratch root 存在(勘察见 `state/` 与 `states/` 并存):实现时确认其归属,清场工具只动 `states/` 域。
 
@@ -145,4 +146,5 @@ D1 覆写发生在终态分支(:413-502),但候选随后仍经 canonical-readine
 - v1(2026-07-30):初稿,基于两轮 node-22 只读勘察 + 变更 1 审计 receipt。
 - v2(2026-07-30,fixture review r1 修订):P1-1 旁路座从不可达的 `completed_duplicate_pipeline` 重定位为 strict-warm-start 终态分支整体覆写(`replay_resubmit`);P1-2 覆写显式压过 successor-retry(`state_save_qc` 重启=复用错初值输出,必须消除);P1-3 chain `_FORCE_TERMINAL_RESUBMIT_DECISIONS` 白名单入 Impact;P1-4 retry budget 不消费;P1-5 node-27 压缩块前置;P2-6 R3 改键漂移断言(parser 删并集窗口);P2-7 旧半 state 字段来源=reset receipt;P2-8 forcing/模型包 checksum 无条件入 receipt;P2-9 tile 失效收窄 (source, valid_time 窗口);P3-10 re-ingest 触发修正(32/33 走 init_state_id 分支);P3-11 R2 降级(分 cohort 已核实);P3-12 去 `--max-passes`;P3-13 存量现场核定。
 - v3(2026-07-30,fixture review r2 修订):R1 覆写触发 token 修正——实机形态是 `terminal_hydro_success`(hydro-success 分支先于 pipeline-success),触发条件改为完成型终态族 `_STRICT_WARM_START_TERMINAL_SKIP_REASONS`,`terminal_completed_cycle` 显式不覆写(通用 skip → 驱动器超时停);R4 evidence 形态对齐 mismatch retry(`native_shud_resubmitted=True` 等,防 `_upgrade_retry_for_strict_warm_start_manifest` 改标丢 token);R2 tasks 4.1/4.2 tile 收窄同步;R3 proposal 3/5 同步;R5 tasks 重编号;R6 proposal 作用面两处。
+- v4.1(2026-07-30,4R 修复落地后的正文对齐):D5 步骤 4/5/6 与 R3 按实现后的 oracle 改写(收敛判定去 created_at、完成判定基线为旧终态 job id、首时次绑定 `--origin-cycle`、键一致断言轴改为 river-network 版本 + 输出段数 + 输出文件清单、receipt 逐 cycle 落盘);spec "Replacement traceability receipt" 同步同一措辞。行为口径以 tasks 4R 与实现为准,本条只是消除正文 stale。
 - v4(2026-07-30,round-1 实现评审修订,verifier 全裁决 head 4293b474):新增 D3.5——canonical-readiness fresh-zero-row 合并点是第三道生产门(A-P1-1 raw-less 腿无条件 block 不看 `required`;A-P1-2 raw-ready 腿 merge 把 restart 降为 convert),guard site `scheduler_candidates.py:775-793`,proposal 作用面两处 → 三处;D3 首时次形态澄清(journal 留存 ⇒ 070500 仍 `terminal_hydro_success` 被覆写,零介入指 bootstrap 证据原样存活,A-P2-4);D6.2 重写——deviation 1(source_id=run_id)裁 ACCEPT,scope 补 `hydro-national`(C-F1),窗口上界改末次 cycle+168h=2026-07-28T00Z(C-F2),v2 收窄论证废止(C-F6);spec 同步新增两 scenario(raw-less 存活装配、raw-ready 保持 forecast restart)并修 node-27 措辞;C-F5 由 D3.5 + spec 修订承载(candidate 级门与两相位 env 姿态入 design 正文)。

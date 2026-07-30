@@ -31,21 +31,21 @@
 
 ## 4R. Round-1 评审修复(head 4293b474 的 20 项裁决,见 `.workplans/issue-1164-change2/review/round1-verdicts.md`)
 
-- [ ] 4R.1 canonical-readiness guard(A-P1-1/A-P1-2,design D3.5):`scheduler_candidates.py:775-793` 对 decision=`replay_resubmit` 候选——raw-less 腿不 block `nfs_raw_manifest_required`(replay forcing evidence 作替代证据,typed);raw-ready 腿 merge 不降 `restart_stage`/`restart_from_stage`/`fresh_ingestion`;replay 缺省 byte-identical。
-- [ ] 4R.2 `scheduler_replay.py:348-349` undeterminable 不折叠为 missing(A-P2-5,#1190 invariant)。
-- [ ] 4R.3 测试:harness readiness 参数化 + fresh-zero-row 两腿用例(A-P2-3;弃 `object_store_root` 误因);首时次用例改真实形态 `terminal_hydro_success` + bootstrap strict payload,断言覆写发生且证据存活(A-P2-4)。
-- [ ] 4R.4 driver 收敛 oracle 去 created_at(B-P1-1):per (model,source,valid_time=T+12h) 以 reset receipt `removed_entries` checksum 对账判"新条目"。
-- [ ] 4R.5 driver 首时次绑定回放序列原点 2026070500(B-P1-2,非 `cycles[0]`)。
-- [ ] 4R.6 键一致断言改真实 manifest 形态(B-P1-3:无 `outputs.variables`,用输出文件名集/段计数)。
-- [ ] 4R.7 替换 receipt 逐 cycle 原子落盘(B-P1-4)。
-- [ ] 4R.8 staging 结果门(A-P2-6/B-P2-5 合并):`verified is not True` → typed halt;`source_absent` 仅 REPAIR_CYCLES 豁免;reason 入 receipt schema enum。
-- [ ] 4R.9 完成判定 baseline=旧终态 job id(B-P2-7);frontier 枚举去界(B-P2-8)。
-- [ ] 4R.10 `replay_capture` reset-receipt loader 校验 `outcome=="completed"`(B-P2-11 后半:拒绝 commit_uncertain/refused)。
-- [ ] 4R.11 reset 锁探针递归 `.locks/<source>/<cycle>.lock`(B-P2-6)。
-- [ ] 4R.12 tiles:root 三分预检(C-F4→refused exit 2);全路径 receipt+显式退出码(C-F3);两者补测试。
-- [ ] 4R.13 runbook:tile 命令补 `--source-id hydro-national` + `--window-end 2026-07-28T00:00Z` + national digest 前提 note(C-F1/C-F2);6.0 普查 SQL+逐 chunk 调用模板+终止条件+交叉引用(C-F7);`reset-receipt.json` 文件名(B-P2-10);去 `| tee` 改重定向+rc 捕获(B-P2-11 前半);中断表补 `PIPELINE_ALREADY_ACTIVE` 处置行(A-P2-7);两相位姿态与 `--start-cycle 2026070712` 口径一致。
-- [ ] 4R.14 `compute.replay.env.example:61` `nhms-production`→`nhms-prod`(B-P2-9)。
-- [ ] 4R.15 复验:定向 pytest 绿 + ruff 绿 + openspec strict 绿。
+- [x] 4R.1 canonical-readiness guard(A-P1-1/A-P1-2,design D3.5):`scheduler_candidates.py:775-793` 对 decision=`replay_resubmit` 候选——raw-less 腿不 block `nfs_raw_manifest_required`(replay forcing evidence 作替代证据,typed);raw-ready 腿 merge 不降 `restart_stage`/`restart_from_stage`/`fresh_ingestion`;replay 缺省 byte-identical。
+- [x] 4R.2 `scheduler_replay.py:348-349` undeterminable 不折叠为 missing(A-P2-5,#1190 invariant)。
+- [x] 4R.3 测试:harness readiness 参数化 + fresh-zero-row 两腿用例(A-P2-3;弃 `object_store_root` 误因);首时次用例改真实形态 `terminal_hydro_success` + bootstrap strict payload,断言覆写发生且证据存活(A-P2-4)。
+- [x] 4R.4 driver 收敛 oracle 去 created_at(B-P1-1):per (model,source,valid_time=T+12h) 以 reset receipt `removed_entries` checksum 对账判"新条目"。
+- [x] 4R.5 driver 首时次绑定回放序列原点 2026070500(B-P1-2,非 `cycles[0]`)。
+- [x] 4R.6 键一致断言改真实 manifest 形态(B-P1-3:无 `outputs.variables`,用输出文件名集/段计数)。
+- [x] 4R.7 替换 receipt 逐 cycle 原子落盘(B-P1-4)。
+- [x] 4R.8 staging 结果门(A-P2-6/B-P2-5 合并):`verified is not True` → typed halt;`source_absent` 仅 REPAIR_CYCLES 豁免;reason 入 receipt schema enum。
+- [x] 4R.9 完成判定 baseline=旧终态 job id(B-P2-7);frontier 枚举去界(B-P2-8)。
+- [x] 4R.10 `replay_capture` reset-receipt loader 校验 `outcome=="completed"`(B-P2-11 后半:拒绝 commit_uncertain/refused)。
+- [x] 4R.11 reset 锁探针递归 `.locks/<source>/<cycle>.lock`(B-P2-6)。
+- [x] 4R.12 tiles:root 三分预检(C-F4→refused exit 2);全路径 receipt+显式退出码(C-F3);两者补测试。
+- [x] 4R.13 runbook:tile 命令补 `--source-id hydro-national` + `--window-end 2026-07-28T00:00Z` + national digest 前提 note(C-F1/C-F2);6.0 普查 SQL+逐 chunk 调用模板+终止条件+交叉引用(C-F7);`reset-receipt.json` 文件名(B-P2-10);去 `| tee` 改重定向+rc 捕获(B-P2-11 前半);中断表补 `PIPELINE_ALREADY_ACTIVE` 处置行(A-P2-7);两相位姿态与 `--start-cycle 2026070712` 口径一致。
+- [x] 4R.14 `compute.replay.env.example:61` `nhms-production`→`nhms-prod`(B-P2-9)。
+- [x] 4R.15 复验:定向 pytest 绿 + ruff 绿 + openspec strict 绿。
 
 ## 5. node-22 实机执行(merge 后,timer 保持停机)
 
