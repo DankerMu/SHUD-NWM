@@ -4,7 +4,7 @@
 
 - Suggested fixture level: **expanded**(生产数据受控覆盖 + 调度器准入面改动 + 双端运维执行)。
 - 风险轴:生产数据不可逆覆盖(最高)、调度器准入语义(高,env-gated 默认关)、双 lane 索引一致性(高)、node-27 展示正确性(中)、运维执行序(中)。
-- Minimal mergeable slice:代码 + 测试 + schema + 驱动器(tasks 1-4)可独立合并;实机执行(tasks 5-7)为 merge 后运维,以 receipt 验收。
+- Minimal mergeable slice:代码 + 测试 + schema + 驱动器(tasks 1-4)可独立合并;实机执行(tasks 5-7)为评审通过 + 执行授权后的运维,以 receipt 验收。(用户裁定:本变更 branch-only 执行、永不合并 master,分支保留作审计记录——执行前置是 Phase 7 终审通过,不是 merge;与 runbook §6 口径一致。)
 
 ## 生产拓扑事实基座(node-22 实机,2026-07-30 两轮只读勘察)
 

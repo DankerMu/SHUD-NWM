@@ -86,14 +86,14 @@
 - [x] 4R5.1 resume scope 覆盖判据改运行时(B5-1,design D5 v7.1):`_assert_resume_receipt_scope_covers` 按 `rows[].model_id` ∪ 顶层 `model_ids` 判覆盖,不再单看顶层声明(声明记的是写 receipt 那个 pass 的 scope,全行结转后二者发散);source 检查原样不动(B4-2 由它独自承载);拒绝 reason/details 字段名不变。修既有缺模型 fixture:同时收窄声明**与**行,使其名副其实。**consumer oracle**:full→收窄→加回三跳,断言第三跳不被拒、真跑,且加回模型的行 `prior_source=resumed_receipt` + `prior.run_manifest_sha256` 等于首跳原值。runbook §3 去自相矛盾(收窄后加回同样续"上一份";拒跑只在真缺行或错源时发生)。
 - [x] 4R5.2 复验:定向 pytest 绿(replay driver/admission/tiles/reset/warm-start)+ ruff 绿 + openspec strict 绿 + 加回用例对 1d790d8a 的 red-proof(1 失败,拒跑于旧判据)。
 
-## 5. node-22 实机执行(merge 后,timer 保持停机)
+## 5. node-22 实机执行(执行授权后;本分支不合并,直接从分支执行——见 runbook §6,timer 保持停机)
 
 - [ ] 5.1 部署 + replay env 落盘;`replay_state_scope_reset.py` dry-run → 人审输出 → `--enforce`(IFS 6 scope);reset receipt 归档。
 - [ ] 5.2 IFS 串行回放 070500→072100(33 cycle);首时次 receipt 行确认 `init_mode=3`/`packaged_calibrated_state`/`packaged_ic_checksum`;全序列替换 receipt。
 - [ ] 5.3 GFS 同序(清场→回放,070712 走 repair);替换 receipt。
 - [ ] 5.4 负验证:六流域外 12 模型 run/索引条目抽样 sha256 回放前后一致,入 receipt。
 
-## 6. node-27 实机验证(merge 后)
+## 6. node-27 实机验证(node-22 回放完成后;同样从分支执行)
 
 - [ ] 6.0 TimescaleDB 压缩块普查(回放窗口 × 受影响 run);命中则 `scripts/node27_timeseries_decompression_replay.py` 解压;普查+解压 receipt(P1-5)。
 - [ ] 6.1 确认 autopipe re-ingest 全部 12 scope × 33 cycle(32/33 走 init_state_id 分支,首时次走 mtime 分支;`--force` 仅首时次兜底并记录);ingest receipt。
