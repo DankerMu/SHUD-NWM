@@ -1,0 +1,148 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NHMS First-Cycle Initial-State Audit Receipt",
+  "description": "Read-only reconciliation of packaged calibrated-IC qualification against the earliest business run's initial-state evidence, per registered model x forecast source (#1164).",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "generated_at", "outcome", "inputs", "limits", "totals", "rows"],
+      "properties": {
+        "schema_version": { "const": "nhms.first_cycle_initial_state_audit.v1" },
+        "generated_at": { "type": "string", "format": "date-time" },
+        "outcome": { "const": "completed" },
+        "inputs": { "$ref": "#/definitions/inputs" },
+        "limits": { "$ref": "#/definitions/limits" },
+        "totals": { "$ref": "#/definitions/totals" },
+        "rows": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/row" }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "generated_at", "outcome", "refusal_reason"],
+      "properties": {
+        "schema_version": { "const": "nhms.first_cycle_initial_state_audit.v1" },
+        "generated_at": { "type": "string", "format": "date-time" },
+        "outcome": { "const": "blocked" },
+        "refusal_reason": {
+          "type": "string",
+          "enum": ["CONFIG_INVALID", "REGISTRY_UNREADABLE", "RESOURCE_BOUND_EXCEEDED", "RECEIPT_INVALID"]
+        },
+        "detail": { "type": "string", "maxLength": 512 }
+      }
+    }
+  ],
+  "definitions": {
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["registry_manifest", "object_store_prefix", "sources", "registered_model_count"],
+      "properties": {
+        "registry_manifest": { "type": "string", "minLength": 1 },
+        "object_store_prefix": { "type": "string" },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "registered_model_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "inventory_tier_package_objects_rehashed",
+        "probe_tier_max_object_bytes",
+        "run_evidence_lanes",
+        "note"
+      ],
+      "properties": {
+        "inventory_tier_package_objects_rehashed": { "const": false },
+        "probe_tier_max_object_bytes": { "type": "integer", "minimum": 1 },
+        "run_evidence_lanes": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["workspace_runs", "object_store_runs"] }
+        },
+        "note": { "type": "string", "minLength": 1 }
+      }
+    },
+    "totals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rows",
+        "consumed_package_ic",
+        "cold_start_with_qualified_ic",
+        "cold_start_no_ic",
+        "undetermined"
+      ],
+      "properties": {
+        "rows": { "type": "integer", "minimum": 0 },
+        "consumed_package_ic": { "type": "integer", "minimum": 0 },
+        "cold_start_with_qualified_ic": { "type": "integer", "minimum": 0 },
+        "cold_start_no_ic": { "type": "integer", "minimum": 0 },
+        "undetermined": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model_id",
+        "source",
+        "ic_qualified",
+        "ic_status",
+        "ic_sha256",
+        "ic_relative_path",
+        "ic_qualification_source",
+        "first_cycle",
+        "first_run_id",
+        "first_run_quality",
+        "first_run_init_mode",
+        "first_run_evidence_lane",
+        "first_run_evidence_complete",
+        "verdict"
+      ],
+      "properties": {
+        "model_id": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "minLength": 1 },
+        "ic_qualified": { "type": ["boolean", "null"] },
+        "ic_status": { "type": "string", "enum": ["qualified", "unqualified", "unreadable", "absent"] },
+        "ic_sha256": { "type": ["string", "null"] },
+        "ic_relative_path": { "type": ["string", "null"] },
+        "ic_qualification_source": {
+          "type": ["string", "null"],
+          "enum": ["inventory", "object_probe", null],
+          "description": "Which qualification tier decided this row: the package manifest inventory (recorded digest) or a bounded probe of the canonical packaged-IC object (probed digest). Null when no tier ran (absent or unreadable manifest)."
+        },
+        "first_cycle": { "type": ["string", "null"] },
+        "first_run_id": { "type": ["string", "null"] },
+        "first_run_quality": { "type": ["string", "null"] },
+        "first_run_init_mode": { "type": ["integer", "null"] },
+        "first_run_evidence_lane": {
+          "type": ["string", "null"],
+          "enum": ["workspace_runs", "object_store_runs", null]
+        },
+        "first_run_evidence_complete": {
+          "type": "boolean",
+          "description": "False when the run-evidence sweep could not be completed for this row: a lane could not be enumerated (symlinked/non-directory lane root, EACCES, IO error, or a listing past the audit bound) or an earlier cycle's manifest was present but unparseable. The reported first_cycle is then not provably the earliest, so the verdict is forced to 'undetermined' rather than claiming a defect or a clean cold start."
+        },
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "consumed_package_ic",
+            "cold_start_with_qualified_ic",
+            "cold_start_no_ic",
+            "undetermined"
+          ]
+        },
+        "detail": { "type": "string", "maxLength": 512 }
+      }
+    }
+  }
+}

@@ -21281,7 +21281,18 @@ def _db_free_model_manifest_fixture(
     model: Mapping[str, Any],
     *,
     package_checksum: str = "package-model-a",
+    packaged_ic_sha256: str | None = None,
+    packaged_ic_size_bytes: int = 131072,
 ) -> tuple[dict[str, Any], str]:
+    """Publish a model package manifest + registry row for the DB-free fixtures.
+
+    The manifest carries an ``included_files`` inventory with a non-empty
+    ``*.cfg.ic`` entry because that is what every real Basins package manifest
+    publishes (``workers/model_registry/basins_package.py``).  #1164 makes that
+    inventory load-bearing: the scheduler qualifies a first cycle's packaged
+    calibrated IC from these two fields, so a fixture without them would be
+    testing a shape production never emits.
+    """
     store = LocalObjectStore(roots["object_store_root"], "s3://nhms")
     model_id = str(model["model_id"])
     manifest_key = f"models/{model_id}/manifest.json"
@@ -21292,6 +21303,14 @@ def _db_free_model_manifest_fixture(
                 "schema_version": "nhms.model_package_manifest.v1",
                 "model_id": model_id,
                 "package_checksum": package_checksum,
+                "included_files": [
+                    {
+                        "relative_path": f"{model_id}.cfg.ic",
+                        "role": "shud_input",
+                        "size_bytes": packaged_ic_size_bytes,
+                        "sha256": packaged_ic_sha256 or sha256_bytes(f"{model_id}-cfg-ic".encode()),
+                    }
+                ],
             },
             sort_keys=True,
         ).encode("utf-8"),
@@ -25842,6 +25861,26 @@ def test_db_free_from_env_raw_ready_canonical_zero_submits_convert_without_downl
     submitted_basin = orchestrator.calls[0]["basins"][0]
     assert submitted_basin["state_evidence"]["restart_stage"] == "convert"
     assert submitted_basin["orchestration_run_id"] == "cycle_gfs_2026052112_convert_model_a"
+    # #1164 lock: this first-cycle fixture publishes a non-empty packaged calibrated
+    # IC, so the submitted candidate must carry the packaged-IC bootstrap decision
+    # (and its digest) rather than a labeled cold start.  Asserted here because the
+    # fake orchestrator ends the flow before any run manifest is assembled.
+    expected_ic_sha256 = sha256_bytes(b"model_a-cfg-ic")
+    assert state_evidence["mode"] == "db_free_packaged_ic_bootstrap"
+    assert state_evidence["packaged_ic_checksum"] == expected_ic_sha256
+    assert state_evidence["cold_start_reason"] is None
+    transition = state_evidence["registry_cutover_transition"]
+    assert transition["decision"] == "packaged_ic_bootstrap"
+    assert transition["packaged_initial_condition"] == {
+        "status": "qualified",
+        "ic_relative_path": "model_a.cfg.ic",
+        "ic_sha256": expected_ic_sha256,
+        "ic_size_bytes": 131072,
+        # #1164 round 2: the tier that decided is recorded so an auditor can tell
+        # a manifest-recorded digest from a probed one.
+        "qualification_source": "inventory",
+    }
+    assert submitted_basin["state_evidence"]["mode"] == "db_free_packaged_ic_bootstrap"
     assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is True
     rendered_submission = json.dumps(
         {"evidence": result.evidence},
@@ -26339,6 +26378,20 @@ def test_db_free_scheduler_fake_slurm_submission_writes_file_journal_without_dat
     assert state is not None
     assert state["pipeline_jobs"]
     assert any(event["event_type"] == "status_change" for event in state["pipeline_events"])
+    # #1164 lock: the fixture's model package publishes a non-empty calibrated IC,
+    # so the run manifest this submission actually wrote must consume it — the
+    # packaged bootstrap decision has to survive all the way to init_mode/quality
+    # instead of degrading to a silent cold start.
+    run_manifest = json.loads(
+        (
+            roots["workspace_root"] / "runs" / "fcst_gfs_2026052112_model_a" / "input" / "manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert run_manifest["runtime"]["init_mode"] == 3
+    assert run_manifest["initial_state"]["quality"] == "packaged_calibrated_state"
+    assert run_manifest["initial_state"]["state_id"] is None
+    assert run_manifest["initial_state"]["packaged_ic_checksum"] == sha256_bytes(b"model_a-cfg-ic")
+    assert state["hydro_run"]["quality"] == "packaged_calibrated_state"
     assert "download_source_cycle" not in rendered
     assert str(roots["object_store_root"]) not in rendered
 

@@ -3116,3 +3116,480 @@ def test_shared_preflight_reports_missing_libraries_safely(monkeypatch: pytest.M
     import json as _json
 
     assert "password=" not in _json.dumps(result.blockers)
+
+
+# ---------------------------------------------------------------------------
+# #1164: packaged-IC consumption is fail-closed.
+#
+# A manifest declaring ``quality=packaged_calibrated_state`` MUST consume the
+# packaged ``*.cfg.ic`` staged from the model package or raise
+# ``PACKAGED_IC_CONSUMPTION_FAILED``.  Two declaration forms exist:
+#   * scheduler-produced: no ``state_id``, ``packaged_ic_checksum`` recorded;
+#   * legacy manual manifest (``scripts/create_qhh_shud_manifest.py``):
+#     a ``state_id`` and NO recorded packaged digest.
+#
+# Deliberate non-goal (design D4): packaged ICs are timeless calibration
+# products, so warm-start three-way time-consistency verification and IC time
+# shifting are NOT applied here — there is no snapshot ``valid_time`` to agree
+# with.  (In ``shud_project`` mode the pre-existing project-forcing preparation
+# still re-stamps the header to the forcing start; that is untouched.)
+# ---------------------------------------------------------------------------
+
+
+PACKAGED_IC_CONTENT = b"2\t1\t29626560.000000\n1\t0.1\t0.2\t0.3\t0.4\n2\t0.1\t0.2\t0.3\t0.4\n1\t0.0\n"
+
+
+def _cfg_init_mode(cfg_path: Path) -> str | None:
+    """Return the INIT_MODE token from a generated ``.cfg.para``.
+
+    ``shud_project`` mode writes ``INIT_MODE\t<value>`` while the legacy style
+    writes ``INIT_MODE = <value>``; parse tokens so the assertion is style-blind.
+    """
+    for line in cfg_path.read_text(encoding="utf-8").splitlines():
+        tokens = [token for token in line.replace("=", " ").split() if token]
+        if tokens and tokens[0] == "INIT_MODE" and len(tokens) >= 2:
+            return tokens[1]
+    return None
+
+
+def _write_packaged_ic(
+    object_root: Path,
+    content: bytes = PACKAGED_IC_CONTENT,
+    *,
+    name: str = "alias-a.cfg.ic",
+) -> str:
+    package = object_root / "models" / "basins_basin_a_shud" / "vbasins-test" / "package"
+    (package / name).write_bytes(content)
+    return sha256_bytes(content)
+
+
+def _packaged_manifest(
+    checksums: dict[str, str],
+    *,
+    state_id: str | None = None,
+    packaged_ic_checksum: str | None = None,
+) -> dict[str, Any]:
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    initial_state: dict[str, Any] = {
+        "state_id": state_id,
+        "ic_file_uri": None,
+        "valid_time": None,
+        "checksum": None,
+        "quality": "packaged_calibrated_state",
+    }
+    if packaged_ic_checksum is not None:
+        initial_state["packaged_ic_checksum"] = packaged_ic_checksum
+    manifest["initial_state"] = initial_state
+    manifest["runtime"]["init_mode"] = 3
+    return manifest
+
+
+def test_packaged_ic_is_consumed_with_init_mode_3_when_checksum_matches(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    ic_sha256 = _write_packaged_ic(object_root)
+    checksums = _write_standard_shud_forcing(object_root)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _packaged_manifest(checksums, packaged_ic_checksum=ic_sha256)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    output_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "output"
+    input_dir.mkdir(parents=True)
+    output_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+    cfg_path = runtime.generate_cfg_para(manifest, input_dir, output_dir)
+
+    assert (input_dir / "alias-a" / "alias-a.cfg.ic").is_file()
+    assert _cfg_init_mode(cfg_path) == "3"
+    assert manifest["runtime"]["init_mode"] == 3
+    assert manifest["initial_state"]["quality"] == "packaged_calibrated_state"
+    assert manifest["initial_state"]["checksum"] == ic_sha256
+    packaged_evidence = manifest["runtime"]["packaged_initial_state"]
+    assert packaged_evidence["checksum_verified"] is True
+    assert packaged_evidence["relative_path"].endswith("alias-a.cfg.ic")
+    assert packaged_evidence.get("warnings") in (None, [])
+
+
+def test_packaged_ic_legacy_manifest_form_records_skipped_checksum_warning(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    _write_packaged_ic(object_root)
+    checksums = _write_standard_shud_forcing(object_root)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    # ``create_qhh_shud_manifest.py`` shape: state_id set, checksum None.
+    manifest = _packaged_manifest(checksums, state_id="qhh_packaged_calibrated_state")
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    output_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "output"
+    input_dir.mkdir(parents=True)
+    output_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+    cfg_path = runtime.generate_cfg_para(manifest, input_dir, output_dir)
+
+    assert _cfg_init_mode(cfg_path) == "3"
+    packaged_evidence = manifest["runtime"]["packaged_initial_state"]
+    assert packaged_evidence["checksum_verified"] is False
+    assert any(
+        "checksum" in str(warning).lower() for warning in packaged_evidence.get("warnings") or []
+    )
+
+
+def test_packaged_ic_negative_residuals_are_normalized_before_execution(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    # Bounded residuals: the domain-mean unsat correction must stay under the
+    # 0.2 mm ceiling, otherwise the shared policy refuses the state outright.
+    residual_content = (
+        b"2\t1\t29626560.000000\n1\t0.1\t0.2\t0.3\t-0.0001\n2\t0.1\t0.2\t0.3\t-0.0002\n1\t0.0\n"
+    )
+    ic_sha256 = _write_packaged_ic(object_root, residual_content)
+    checksums = _write_standard_shud_forcing(object_root)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _packaged_manifest(checksums, packaged_ic_checksum=ic_sha256)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    normalization = manifest["runtime"]["initial_state_normalization"]
+    assert normalization["accepted"] is True
+    assert normalization["normalized_value_count"] == 2
+    materialized = (input_dir / "alias-a" / "alias-a.cfg.ic").read_text(encoding="utf-8")
+    assert "-0.0001" not in materialized
+    assert "-0.0002" not in materialized
+
+
+@pytest.mark.parametrize("state_id", [None, "qhh_packaged_calibrated_state"], ids=["scheduler_form", "legacy_form"])
+def test_packaged_ic_missing_file_fails_closed_without_init_mode_1(
+    tmp_path: Path, state_id: str | None
+) -> None:
+    """Behavioral negative lock: BOTH declaration forms must raise, never cold-start."""
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)  # NOTE: no packaged *.cfg.ic in the package.
+    checksums = _write_standard_shud_forcing(object_root)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    packaged_ic_checksum = sha256_bytes(PACKAGED_IC_CONTENT) if state_id is None else None
+    manifest = _packaged_manifest(
+        checksums, state_id=state_id, packaged_ic_checksum=packaged_ic_checksum
+    )
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    output_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "output"
+    input_dir.mkdir(parents=True)
+    output_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as excinfo:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert excinfo.value.error_code == "PACKAGED_IC_CONSUMPTION_FAILED"
+    # Behavioral lock: no INIT_MODE 1 execution is reachable after the failure.
+    assert manifest["runtime"]["init_mode"] == 3
+    assert manifest["initial_state"]["quality"] == "packaged_calibrated_state"
+    cfg_path = runtime.generate_cfg_para(manifest, input_dir, output_dir)
+    assert _cfg_init_mode(cfg_path) != "1"
+
+
+def test_packaged_ic_zero_byte_file_fails_closed(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    _write_packaged_ic(object_root, b"")
+    checksums = _write_standard_shud_forcing(object_root)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    manifest = _packaged_manifest(checksums, packaged_ic_checksum=sha256_bytes(b""))
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as excinfo:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert excinfo.value.error_code == "PACKAGED_IC_CONSUMPTION_FAILED"
+    assert manifest["runtime"]["init_mode"] == 3
+
+
+def test_packaged_ic_checksum_mismatch_fails_closed(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    _write_packaged_ic(object_root)
+    checksums = _write_standard_shud_forcing(object_root)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    manifest = _packaged_manifest(checksums, packaged_ic_checksum="a" * 64)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as excinfo:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert excinfo.value.error_code == "PACKAGED_IC_CONSUMPTION_FAILED"
+    assert manifest["runtime"]["init_mode"] == 3
+
+
+def test_packaged_ic_unparseable_header_fails_closed(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    bad_header = b"mesh\triver\n1\t0.1\n"
+    ic_sha256 = _write_packaged_ic(object_root, bad_header)
+    checksums = _write_standard_shud_forcing(object_root)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    manifest = _packaged_manifest(checksums, packaged_ic_checksum=ic_sha256)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as excinfo:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert excinfo.value.error_code == "PACKAGED_IC_CONSUMPTION_FAILED"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"\xff\xfe\x00\x01 2 1 29626560.0\n1\t0.1\t0.2\t0.3\t0.4\n",
+        bytes(range(256)) * 4,
+    ],
+    ids=["binary_header", "fully_binary"],
+)
+def test_packaged_ic_non_utf8_file_fails_closed(tmp_path: Path, content: bytes) -> None:
+    """A binary packaged IC is a typed consumption failure, not an untyped RUNTIME_ERROR."""
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    ic_sha256 = _write_packaged_ic(object_root, content)
+    checksums = _write_standard_shud_forcing(object_root)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    manifest = _packaged_manifest(checksums, packaged_ic_checksum=ic_sha256)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as excinfo:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert excinfo.value.error_code == "PACKAGED_IC_CONSUMPTION_FAILED"
+    assert manifest["runtime"]["init_mode"] == 3
+
+
+def test_packaged_ic_reprepare_is_idempotent_when_package_ic_is_renamed(tmp_path: Path) -> None:
+    """A re-prepared cycle-stable workspace must converge, not wedge (#1164 idempotence).
+
+    The package ships its IC under a NON-canonical basename, so attempt 1
+    materializes ``<project>.cfg.ic`` and unlinks the staged source.  Attempt 2
+    clears every staged ``*.cfg.ic`` BEFORE re-staging, so the candidate set is
+    again exactly what this staging produced — one file — instead of the two
+    (previous materialization + restored source) that would wedge the run.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    ic_sha256 = _write_packaged_ic(object_root, name="calibrated.cfg.ic")
+    checksums = _write_standard_shud_forcing(object_root)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    first_manifest = _packaged_manifest(checksums, packaged_ic_checksum=ic_sha256)
+    input_dir = tmp_path / "workspace" / "runs" / first_manifest["run_id"] / "input"
+    output_dir = tmp_path / "workspace" / "runs" / first_manifest["run_id"] / "output"
+    input_dir.mkdir(parents=True)
+    output_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(first_manifest, input_dir)
+    materialized = input_dir / "alias-a" / "alias-a.cfg.ic"
+    first_bytes = materialized.read_bytes()
+    first_initial_state = deepcopy(first_manifest["initial_state"])
+    first_evidence = deepcopy(first_manifest["runtime"]["packaged_initial_state"])
+    assert (input_dir / "alias-a" / "calibrated.cfg.ic").exists() is False
+
+    second_manifest = _packaged_manifest(checksums, packaged_ic_checksum=ic_sha256)
+    runtime.prepare_workspace(second_manifest, input_dir)
+    cfg_path = runtime.generate_cfg_para(second_manifest, input_dir, output_dir)
+
+    assert second_manifest["initial_state"] == first_initial_state
+    assert second_manifest["runtime"]["packaged_initial_state"] == first_evidence
+    assert materialized.read_bytes() == first_bytes
+    assert sorted(path.name for path in (input_dir / "alias-a").glob("*.cfg.ic")) == ["alias-a.cfg.ic"]
+    assert _cfg_init_mode(cfg_path) == "3"
+
+
+def test_packaged_ic_subdirectory_candidate_still_fails_the_exactly_one_check(tmp_path: Path) -> None:
+    """A package that STAGES two ICs is ambiguous and must fail closed.
+
+    The clear-before-stage invariant only removes what a PREVIOUS preparation
+    left behind; a single staging that produces two candidates is genuinely
+    ambiguous input and still raises.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    ic_sha256 = _write_packaged_ic(object_root)
+    package = object_root / "models" / "basins_basin_a_shud" / "vbasins-test" / "package"
+    (package / "CALIB").mkdir(parents=True, exist_ok=True)
+    (package / "CALIB" / "stray.cfg.ic").write_bytes(PACKAGED_IC_CONTENT)
+    checksums = _write_standard_shud_forcing(object_root)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    manifest = _packaged_manifest(checksums, packaged_ic_checksum=ic_sha256)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as excinfo:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert excinfo.value.error_code == "PACKAGED_IC_CONSUMPTION_FAILED"
+    assert "exactly one is required" in excinfo.value.message
+
+
+def test_packaged_ic_reprepare_converges_when_the_package_ic_lives_in_a_subdirectory(
+    tmp_path: Path,
+) -> None:
+    """C2: re-preparing a subdirectory-IC package converges instead of wedging.
+
+    Attempt 1 materializes ``CALIB/calibrated.cfg.ic`` to the top-level
+    ``<project>.cfg.ic``; attempt 2 re-stages the source from the package.  The
+    convergence requirement is unconditional — it must not depend on the two
+    candidates happening to be siblings.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    package = object_root / "models" / "basins_basin_a_shud" / "vbasins-test" / "package"
+    (package / "CALIB").mkdir(parents=True, exist_ok=True)
+    (package / "CALIB" / "calibrated.cfg.ic").write_bytes(PACKAGED_IC_CONTENT)
+    ic_sha256 = sha256_bytes(PACKAGED_IC_CONTENT)
+    checksums = _write_standard_shud_forcing(object_root)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    first_manifest = _packaged_manifest(checksums, packaged_ic_checksum=ic_sha256)
+    input_dir = tmp_path / "workspace" / "runs" / first_manifest["run_id"] / "input"
+    output_dir = tmp_path / "workspace" / "runs" / first_manifest["run_id"] / "output"
+    input_dir.mkdir(parents=True)
+    output_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(first_manifest, input_dir)
+    materialized = input_dir / "alias-a" / "alias-a.cfg.ic"
+    first_initial_state = deepcopy(first_manifest["initial_state"])
+    first_evidence = deepcopy(first_manifest["runtime"]["packaged_initial_state"])
+
+    second_manifest = _packaged_manifest(checksums, packaged_ic_checksum=ic_sha256)
+    runtime.prepare_workspace(second_manifest, input_dir)
+    cfg_path = runtime.generate_cfg_para(second_manifest, input_dir, output_dir)
+
+    assert second_manifest["initial_state"] == first_initial_state
+    assert second_manifest["runtime"]["packaged_initial_state"] == first_evidence
+    assert materialized.read_bytes() == PACKAGED_IC_CONTENT
+    assert sorted(str(path.relative_to(input_dir)) for path in input_dir.rglob("*.cfg.ic")) == [
+        "alias-a/alias-a.cfg.ic"
+    ]
+    assert _cfg_init_mode(cfg_path) == "3"
+
+
+def _write_two_top_level_packaged_ics(object_root: Path) -> tuple[str, bytes]:
+    """Publish a package holding TWO top-level ``*.cfg.ic`` files.
+
+    Returns the canonical file's digest and the stray file's content, so a test
+    can prove which one (if any) the runtime consumed.
+    """
+    canonical_sha256 = _write_packaged_ic(object_root)
+    stray_content = b"9\t9\t11111111.000000\n1\t9.9\t9.9\t9.9\t9.9\n"
+    _write_packaged_ic(object_root, stray_content, name="stray.cfg.ic")
+    return canonical_sha256, stray_content
+
+
+def test_packaged_ic_two_top_level_siblings_fail_closed_without_deleting_the_canonical(
+    tmp_path: Path,
+) -> None:
+    """C1: a package that legitimately ships two top-level ICs is ambiguous.
+
+    The round-1 sibling-drop heuristic deleted the canonical file and consumed
+    the stray one here.  Exactly-one must fire instead, and the staged canonical
+    IC must still be on disk afterwards.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    canonical_sha256, _stray = _write_two_top_level_packaged_ics(object_root)
+    checksums = _write_standard_shud_forcing(object_root)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    manifest = _packaged_manifest(checksums, packaged_ic_checksum=canonical_sha256)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as excinfo:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert excinfo.value.error_code == "PACKAGED_IC_CONSUMPTION_FAILED"
+    assert "exactly one is required" in excinfo.value.message
+    # The canonical staged IC must survive the refusal — nothing may be dropped
+    # on a guess about which candidate is stale.
+    assert (input_dir / "alias-a" / "alias-a.cfg.ic").is_file()
+    assert (input_dir / "alias-a" / "stray.cfg.ic").is_file()
+
+
+def test_packaged_ic_legacy_form_with_two_siblings_raises_instead_of_consuming_a_stray(
+    tmp_path: Path,
+) -> None:
+    """C1, legacy form: without a recorded digest nothing catches a wrong pick."""
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    _canonical_sha256, stray_content = _write_two_top_level_packaged_ics(object_root)
+    checksums = _write_standard_shud_forcing(object_root)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    manifest = _packaged_manifest(checksums, state_id="qhh_packaged_calibrated_state")
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as excinfo:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert excinfo.value.error_code == "PACKAGED_IC_CONSUMPTION_FAILED"
+    assert "exactly one is required" in excinfo.value.message
+    assert (input_dir / "alias-a" / "alias-a.cfg.ic").read_bytes() == PACKAGED_IC_CONTENT
+    assert (input_dir / "alias-a" / "stray.cfg.ic").read_bytes() == stray_content
+    assert "packaged_initial_state" not in manifest.get("runtime", {})
+
+
+def test_packaged_ic_unclearable_staged_states_are_a_typed_consumption_failure(
+    tmp_path: Path,
+) -> None:
+    """The pre-staging clear fails closed under the packaged-IC code, not silently.
+
+    A symlink inside the staged model input makes the recursive clear refuse
+    (``ARTIFACT_UNSAFE``).  "The clear could not be completed" must never be read
+    as "there was nothing to clear", because that is exactly what would let a
+    previous attempt's materialization survive into the exactly-one search.
+
+    This also pins the reason ``_consume_packaged_initial_state``'s pre-tail
+    candidate search needs no wrapper of its own: the clear walks the SAME
+    directory first, with the same no-follow enumerator and under the same
+    declaration predicate, so a staged tree the search could not enumerate is
+    already refused here — under the packaged-IC error code.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    ic_sha256 = _write_packaged_ic(object_root)
+    checksums = _write_standard_shud_forcing(object_root)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    manifest = _packaged_manifest(checksums, packaged_ic_checksum=ic_sha256)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    model_input_dir = input_dir / "alias-a"
+    model_input_dir.mkdir(parents=True)
+    (model_input_dir / "stale-link.cfg.ic").symlink_to(tmp_path / "object-store")
+
+    with pytest.raises(SHUDRuntimeError) as excinfo:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert excinfo.value.error_code == "PACKAGED_IC_CONSUMPTION_FAILED"
+    assert "could not be cleared" in excinfo.value.message
+
+
+def test_undeclared_packaged_ic_path_keeps_cold_start_regression(tmp_path: Path) -> None:
+    """Runs that do NOT declare packaged-IC bootstrap keep byte-identical behavior."""
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    _write_packaged_ic(object_root)
+    checksums = _write_standard_shud_forcing(object_root)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    manifest["initial_state"] = {"state_id": None, "ic_file_uri": None}
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    output_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "output"
+    input_dir.mkdir(parents=True)
+    output_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+    cfg_path = runtime.generate_cfg_para(manifest, input_dir, output_dir)
+
+    assert manifest["initial_state"]["quality"] == "cold_start_no_state"
+    assert manifest["runtime"]["init_mode"] == 1
+    assert _cfg_init_mode(cfg_path) == "1"

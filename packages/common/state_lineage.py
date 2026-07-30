@@ -35,7 +35,23 @@ WARM_START_SUCCESSOR_CHECKPOINT_MISSING = "warm_start_successor_checkpoint_missi
 WARM_START_SUCCESSOR_CHECKPOINT_UNUSABLE = "warm_start_successor_checkpoint_unusable"
 WARM_START_LINEAGE_MISMATCH = "warm_start_lineage_mismatch"
 
+# #1164: run-manifest ``initial_state.quality`` value declaring that the run's
+# initial condition is the calibrated ``*.cfg.ic`` shipped INSIDE its model
+# package (a first-cycle bootstrap), not a state snapshot and not a cold start.
+# Defined here — the shared leaf — because the scheduler decision layer, the
+# manifest assembler, and the SHUD runtime consume gate must agree on the exact
+# token; a drift between them silently re-opens #1164.
+PACKAGED_IC_QUALITY = "packaged_calibrated_state"
 
+# #1164: fail-closed runtime error raised when a run that DECLARES
+# ``PACKAGED_IC_QUALITY`` cannot verify and consume the staged packaged IC.
+# Never degrades to a cold start; there is no INIT_MODE 1 fall-through.
+PACKAGED_IC_CONSUMPTION_FAILED = "PACKAGED_IC_CONSUMPTION_FAILED"
+
+
+# NOTE: ``PACKAGED_IC_*`` above are deliberately NOT rejection codes — they are
+# a manifest-quality token and a runtime error code — so they stay out of this
+# set, which downstream readers treat as "state candidate was rejected".
 REJECTION_CODES = frozenset(
     {
         LINEAGE_SOURCE_MISMATCH,

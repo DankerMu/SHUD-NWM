@@ -14,6 +14,10 @@ from services.orchestrator.chain_types import (
     OrchestratorError,
     StageDefinition,
 )
+from services.orchestrator.scheduler_generation import (
+    PACKAGED_IC_BOOTSTRAP_MODE,
+    PACKAGED_IC_QUALITY,
+)
 from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 __all__ = (
@@ -22,6 +26,7 @@ __all__ = (
     "find_existing_stage_job",
     "job_matches_stage",
     "job_needs_submission",
+    "mark_packaged_ic_bootstrap_basins",
     "normalize_cycle_basins",
     "query_pipeline_jobs_by_cycle",
     "query_pipeline_jobs_for_cycle_context",
@@ -184,6 +189,12 @@ def apply_cohort_warm_start(
     """Select each basin's warm-start state so all three manifest faces agree."""
 
     strict_required = self.config.strict_forecast_warm_start_required_for(cycle_time)
+    # #1164: mark packaged-IC bootstrap basins BEFORE any mode-dependent branch.
+    # The marker must not depend on ``strict_required`` and must be written
+    # before the non-strict early return below, otherwise a non-strict cycle
+    # falls through to ``chain_forecast_state`` and degrades the decision to
+    # ``cold_start_no_state`` (silent zeroed cold start — the #1164 defect).
+    mark_packaged_ic_bootstrap_basins(basins)
     if self.state_manager is None:
         if strict_required:
             raise OrchestratorError(
@@ -207,6 +218,17 @@ def apply_cohort_warm_start(
         model_id = str(basin.get("model_id") or "")
         if not model_id:
             continue
+        if basin.get("packaged_ic_selected"):
+            # #1164: the scheduler already decided this first cycle consumes the
+            # package's calibrated IC.  No state snapshot participates in the
+            # decision under EITHER mode, so no selection query runs: the
+            # manifest assembler is the last writer of ``quality`` and turns
+            # this into ``init_mode=3`` + ``packaged_calibrated_state``.
+            _apply_initial_state_selection_to_basin(
+                basin,
+                InitialStateSelection(None, None, None, None, PACKAGED_IC_QUALITY),
+            )
+            continue
         if strict_required and _cold_seed_admitted(basin):
             _apply_initial_state_selection_to_basin(
                 basin,
@@ -227,9 +249,50 @@ def apply_cohort_warm_start(
             basin["init_state_rejection_code"] = selection.rejection_code
 
 
+def mark_packaged_ic_bootstrap_basins(basins: Sequence[dict[str, Any]]) -> None:
+    """Stamp the #1164 packaged-IC bootstrap decision onto each basin.
+
+    Mode-independent by contract: whichever warm-start mode the cycle runs in,
+    a basin whose candidate evidence carries
+    ``mode=db_free_packaged_ic_bootstrap`` gets ``packaged_ic_selected`` plus the
+    scheduler-recorded IC digest.  A missing digest is preserved as ``None``
+    rather than dropping the marker: the run then takes the legacy declaration
+    form and the runtime verifies non-emptiness + header parseability instead of
+    a checksum — still fail-closed, never a silent cold start.
+
+    A basin that already carries a prefilled initial state is left alone: an
+    explicitly selected (and, in strict mode, revalidated) state must never be
+    discarded in favour of a bootstrap decision taken before it existed.
+    """
+    for basin in basins:
+        if _basin_has_prefilled_initial_state(basin):
+            continue
+        evidence = _packaged_ic_bootstrap_evidence(basin)
+        if evidence is None:
+            continue
+        checksum = str(evidence.get("packaged_ic_checksum") or "").strip()
+        basin["packaged_ic_selected"] = True
+        basin["packaged_ic_checksum"] = checksum or None
+
+
+def _packaged_ic_bootstrap_evidence(basin: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    for evidence in _state_evidence_layers(basin):
+        if evidence.get("mode") == PACKAGED_IC_BOOTSTRAP_MODE:
+            return evidence
+    return None
+
+
 def _cold_seed_admitted(basin: Mapping[str, Any]) -> bool:
     return any(
-        evidence.get("mode") in {"db_free_cold_new_model", "db_free_cold_declared_cutover"}
+        evidence.get("mode")
+        in {
+            "db_free_cold_new_model",
+            "db_free_cold_declared_cutover",
+            # #1164: without this member a packaged-IC bootstrap candidate would
+            # fall into ``_select_strict_forecast_initial_state`` and hard-fail
+            # with WARM_START_SUCCESSOR_CHECKPOINT_MISSING under strict mode.
+            PACKAGED_IC_BOOTSTRAP_MODE,
+        }
         for evidence in _state_evidence_layers(basin)
     )
 

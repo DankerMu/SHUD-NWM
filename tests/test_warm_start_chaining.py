@@ -1987,3 +1987,135 @@ def test_cold_seeded_cohort_basins_book_no_init_state_identity(tmp_path: Path) -
             "init_state_checksum": "sha256:state-1",
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# #1164: packaged-IC bootstrap carrier — the scheduler decision must reach the
+# runtime manifest under BOTH warm-start modes.  Strict must not hard-fail the
+# cohort, non-strict must not degrade the basin to ``cold_start_no_state``.
+# ---------------------------------------------------------------------------
+
+
+PACKAGED_IC_SHA256 = "b" * 64
+
+
+def _packaged_ic_bootstrap_basin(*, checksum: str | None = PACKAGED_IC_SHA256) -> dict[str, Any]:
+    strict_layer: dict[str, Any] = {
+        "mode": "db_free_packaged_ic_bootstrap",
+        "ready": True,
+        "status": "ready",
+        "cold_start_reason": None,
+    }
+    if checksum is not None:
+        strict_layer["packaged_ic_checksum"] = checksum
+    return {
+        "model_id": "new_model",
+        "basin_id": "new_model",
+        "basin_version_id": "basin_v01",
+        "river_network_version_id": "river_v01",
+        "segment_count": 2,
+        "model_package_uri": "models/new_model/package/",
+        "source_id": "gfs",
+        "state_evidence": {
+            "decision": "submit",
+            "strict_warm_start": strict_layer,
+        },
+    }
+
+
+@pytest.mark.parametrize("require_forecast_warm_start", [True, False], ids=["strict", "non_strict"])
+def test_packaged_ic_bootstrap_reaches_runtime_manifest_in_both_modes(
+    tmp_path: Path, require_forecast_warm_start: bool
+) -> None:
+    from services.orchestrator.chain import CycleOrchestrationContext
+
+    cycle_time = _dt("2026-07-05T00:00:00Z")
+    orchestrator = _cohort_orchestrator(
+        tmp_path,
+        FakeStateManager([]),
+        require_forecast_warm_start=require_forecast_warm_start,
+    )
+    basins = orchestrator._normalize_cycle_basins(
+        [_packaged_ic_bootstrap_basin()], "gfs", cycle_time
+    )
+
+    orchestrator._apply_cohort_warm_start(basins, "gfs", cycle_time)
+
+    record = basins[0]
+    assert record["packaged_ic_selected"] is True
+    assert record["packaged_ic_checksum"] == PACKAGED_IC_SHA256
+    # ``init_state_id`` stays absent: the cohort identity map must not book a
+    # packaged bootstrap as a warm-start claim (#1183/#1184 semantics).
+    assert record["init_state_id"] is None
+    assert record["init_state_uri"] is None
+
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_id="gfs_2026070500",
+        run_id="cycle_run",
+        all_basins=basins,
+        active_basins=list(basins),
+        restart_stage=None,
+    )
+    runtime_manifest = orchestrator._build_forecast_runtime_manifest(context, record)
+
+    assert runtime_manifest["runtime"]["init_mode"] == 3
+    assert runtime_manifest["initial_state"]["quality"] == "packaged_calibrated_state"
+    assert runtime_manifest["initial_state"]["state_id"] is None
+    assert runtime_manifest["initial_state"]["ic_file_uri"] is None
+    assert runtime_manifest["initial_state"]["packaged_ic_checksum"] == PACKAGED_IC_SHA256
+    # No exact-warm-start policy: there is no selected state to be exact about.
+    assert "warm_start_policy" not in runtime_manifest["runtime"]
+
+
+def test_packaged_ic_bootstrap_cohort_books_no_init_state_identity(tmp_path: Path) -> None:
+    from services.orchestrator.accepted_submit_identity import (
+        canonical_forecast_cohort_init_state_identities,
+    )
+
+    cycle_time = _dt("2026-07-05T00:00:00Z")
+    orchestrator = _cohort_orchestrator(
+        tmp_path, FakeStateManager([]), require_forecast_warm_start=True
+    )
+    basins = orchestrator._normalize_cycle_basins(
+        [_packaged_ic_bootstrap_basin()], "gfs", cycle_time
+    )
+    orchestrator._apply_cohort_warm_start(basins, "gfs", cycle_time)
+
+    assert canonical_forecast_cohort_init_state_identities(basins=basins) == ()
+
+
+def test_packaged_ic_bootstrap_without_recorded_checksum_still_bootstraps(tmp_path: Path) -> None:
+    """Legacy/degenerate form: the mode is present but no digest was recorded.
+
+    The run must still take the packaged path (fail-closed verification then
+    happens in the runtime against a non-empty parseable IC) rather than
+    silently falling back to a zeroed cold start.
+    """
+    from services.orchestrator.chain import CycleOrchestrationContext
+
+    cycle_time = _dt("2026-07-05T00:00:00Z")
+    orchestrator = _cohort_orchestrator(
+        tmp_path, FakeStateManager([]), require_forecast_warm_start=True
+    )
+    basins = orchestrator._normalize_cycle_basins(
+        [_packaged_ic_bootstrap_basin(checksum=None)], "gfs", cycle_time
+    )
+    orchestrator._apply_cohort_warm_start(basins, "gfs", cycle_time)
+    record = basins[0]
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_id="gfs_2026070500",
+        run_id="cycle_run",
+        all_basins=basins,
+        active_basins=list(basins),
+        restart_stage=None,
+    )
+
+    runtime_manifest = orchestrator._build_forecast_runtime_manifest(context, record)
+
+    assert runtime_manifest["runtime"]["init_mode"] == 3
+    assert runtime_manifest["initial_state"]["quality"] == "packaged_calibrated_state"
+    assert runtime_manifest["initial_state"]["packaged_ic_checksum"] is None

@@ -30,6 +30,7 @@ from packages.common.safe_fs import (
     unlink_no_follow,
 )
 from packages.common.shud_preflight import check_shud_executable
+from packages.common.state_lineage import PACKAGED_IC_CONSUMPTION_FAILED, PACKAGED_IC_QUALITY
 from packages.common.state_manager import PsycopgStateSnapshotRepository, StateManager, StateSnapshot, assess_freshness
 from packages.common.state_qc import (
     cfg_ic_header_minute_index,
@@ -426,6 +427,17 @@ class SHUDRuntime:
         _ensure_directory(input_dir)
         model_input_dir = _model_input_dir(manifest, input_dir, self.config.command_style)
         _ensure_directory(model_input_dir, containment_root=input_dir)
+        # #1164 invariant: packaged 候选集恒等于本次 staging 产物;禁止事后猜测.
+        # A manifest that declares a packaged IC clears every staged ``*.cfg.ic``
+        # BEFORE the package is re-staged, so the exactly-one search below sees
+        # exactly what THIS staging produced — never a previous attempt's
+        # materialization.  That makes re-preparation converge for every package
+        # shape (renamed IC, subdirectory IC) while leaving a genuinely ambiguous
+        # package (two ICs in one staging) to fail closed.  The warm path keeps
+        # its own clear at its existing call site; a cold path that declares
+        # nothing is untouched.
+        if _declares_packaged_initial_condition(manifest):
+            self._clear_packaged_initial_states(model_input_dir)
         self._stage_artifact(manifest["model"]["model_package_uri"], model_input_dir)
         forcing_context = self._prepare_forcing_package_context(manifest)
         self._stage_artifact(
@@ -838,20 +850,17 @@ class SHUDRuntime:
         self.object_store.write_bytes_atomic(run_manifest_uri, content.encode("utf-8"))
 
     def _stage_initial_state(self, manifest: dict[str, Any], input_dir: Path) -> None:
+        # #1164: a manifest that DECLARES a packaged-IC bootstrap is handled by a
+        # single consume-or-raise gate, in BOTH declaration forms (scheduler-
+        # produced without a ``state_id``, and hand-written diagnostic manifests
+        # that carry a ``state_id`` and no recorded digest).  Neither form falls
+        # through to the
+        # cold-start assignments below, so a declared packaged run can no longer
+        # silently zero the model state.
+        if _declares_packaged_initial_condition(manifest):
+            self._consume_packaged_initial_state(manifest, input_dir)
+            return
         if not _initial_state_id(manifest) and not _initial_state_uri(manifest):
-            if str(manifest.get("runtime", {}).get("init_mode", "")) == "3":
-                packaged_states = _find_regular_files(input_dir, pattern="*.cfg.ic", non_empty=True)
-                if packaged_states:
-                    manifest["initial_state"] = {
-                        "state_id": manifest.get("runtime", {}).get("packaged_init_state_id", "packaged_initial_state"),
-                        "ic_file_uri": None,
-                        "valid_time": manifest.get("start_time"),
-                        "checksum": sha256_bytes(_read_staged_bytes(packaged_states[0], root=input_dir)),
-                        "quality": _initial_state_quality(manifest) or "packaged_calibrated_state",
-                    }
-                    _set_runtime_init_mode(manifest, 3)
-                    self._sync_init_state_id(manifest)
-                    return
             if _exact_warm_start_required(manifest):
                 raise SHUDRuntimeError(
                     "WARM_START_REQUIRED",
@@ -860,19 +869,6 @@ class SHUDRuntime:
             _set_cold_start_initial_state(manifest, quality=_initial_state_quality(manifest) or "cold_start_no_state")
             self._sync_init_state_id(manifest)
             return
-        if str(manifest.get("runtime", {}).get("init_mode", "")) == "3" and not _initial_state_uri(manifest):
-            packaged_states = _find_regular_files(input_dir, pattern="*.cfg.ic", non_empty=True)
-            if packaged_states:
-                manifest["initial_state"] = {
-                    "state_id": _initial_state_id(manifest) or "packaged_initial_state",
-                    "ic_file_uri": None,
-                    "valid_time": manifest.get("start_time"),
-                    "checksum": sha256_bytes(_read_staged_bytes(packaged_states[0], root=input_dir)),
-                    "quality": _initial_state_quality(manifest) or "packaged_calibrated_state",
-                }
-                _set_runtime_init_mode(manifest, 3)
-                self._sync_init_state_id(manifest)
-                return
 
         rejected_state_ids: set[str] = set()
         before_time = _parse_time(manifest.get("cycle_time") or manifest["start_time"])
@@ -938,6 +934,194 @@ class SHUDRuntime:
                 next_state,
                 quality=assess_freshness(next_state.valid_time, before_time),
             )
+
+    def _consume_packaged_initial_state(self, manifest: dict[str, Any], input_dir: Path) -> None:
+        """Consume the packaged calibrated ``*.cfg.ic`` or raise (#1164).
+
+        Fail-closed contract for a run whose manifest declares
+        ``initial_state.quality = packaged_calibrated_state``:
+
+        - exactly one non-empty ``*.cfg.ic`` must be present in the staged model
+          input (it arrives with the model package);
+        - when the manifest records ``initial_state.packaged_ic_checksum`` the
+          staged file's SHA-256 must equal it (end-to-end integrity from the
+          package manifest the scheduler qualified);
+        - when it does NOT (legacy manual-manifest form) only non-emptiness and
+          header parseability are verified and a warning is recorded in run
+          evidence, so the manual path stays usable without a recorded digest;
+        - the standard negative-residual normalization is applied;
+        - ANY failure raises ``PACKAGED_IC_CONSUMPTION_FAILED``.  There is no
+          fall-through: the cold-start assignments in ``_stage_initial_state``
+          are unreachable from here, which is the whole point of #1164.
+
+        Deliberately NOT applied (design D4): ``_verify_ic_time_consistency``
+        and ``_shift_cfg_ic_time``.  Both encode warm-start ``valid_time``
+        semantics — a state snapshot recorded at a specific cycle.  A packaged
+        calibrated IC is a timeless calibration product with no snapshot
+        ``valid_time`` to agree with, so there is nothing to verify and nothing
+        to re-stamp against.  (In ``shud_project`` mode the pre-existing
+        project-forcing preparation still aligns the header with the forcing
+        start; that behavior is untouched.)
+        """
+
+        expected_checksum = _packaged_ic_checksum(manifest)
+        # The candidate set is exactly what ``prepare_workspace`` just staged:
+        # the pre-staging clear guarantees no earlier attempt's materialization
+        # is in scope, so this search needs no heuristics.
+        matches = _find_regular_files(input_dir, pattern="*.cfg.ic", non_empty=True)
+        if not matches:
+            raise SHUDRuntimeError(
+                PACKAGED_IC_CONSUMPTION_FAILED,
+                "Manifest declares a packaged calibrated initial condition but no non-empty "
+                "*.cfg.ic was staged from the model package.",
+            )
+        if len(matches) > 1:
+            raise SHUDRuntimeError(
+                PACKAGED_IC_CONSUMPTION_FAILED,
+                "Manifest declares a packaged calibrated initial condition but the staged model "
+                f"input holds {len(matches)} candidate *.cfg.ic files; exactly one is required.",
+            )
+        staged_path = matches[0]
+        # Design D4: "any failure -> PACKAGED_IC_CONSUMPTION_FAILED".  Everything
+        # from here to the end of normalization is wrapped, so a non-UTF-8/binary
+        # packaged IC (``UnicodeDecodeError``), an unsafe-path refusal
+        # (``SafeFilesystemError``), an IO error, or the shared residual-policy
+        # refusal (``WARM_START_STATE_RESIDUALS_EXCEED_POLICY``, raised by the
+        # helper this path deliberately reuses) can no longer escape as an
+        # untyped ``RUNTIME_ERROR``.  The original error code / reason is kept in
+        # the message so the residual-policy diagnosis is not lost.
+        try:
+            content = _read_staged_bytes(staged_path, root=input_dir)
+            actual_checksum = sha256_bytes(content)
+            warnings: list[str] = []
+            if expected_checksum:
+                if not _checksum_matches(expected_checksum, actual_checksum):
+                    raise SHUDRuntimeError(
+                        PACKAGED_IC_CONSUMPTION_FAILED,
+                        "Packaged calibrated initial condition checksum mismatch: manifest recorded "
+                        f"{_checksum_value(expected_checksum)}, staged file is {actual_checksum}.",
+                    )
+            else:
+                warnings.append(
+                    "packaged initial condition consumed without a recorded checksum "
+                    "(manifest declares packaged_calibrated_state with no packaged_ic_checksum); "
+                    "only non-emptiness and header parseability were verified"
+                )
+
+            target = self._materialize_packaged_ic_to_project_name(manifest, staged_path, input_dir)
+            header_minute_time = _read_cfg_ic_header_minute(target)
+            if header_minute_time is None:
+                raise SHUDRuntimeError(
+                    PACKAGED_IC_CONSUMPTION_FAILED,
+                    "Packaged calibrated initial condition header is not parseable: the first line "
+                    "carries no <counts...> <minute-time> pair.",
+                )
+            normalize_staged_ic_negative_residuals(manifest, target, input_dir)
+        except SHUDRuntimeError as error:
+            if error.error_code == PACKAGED_IC_CONSUMPTION_FAILED:
+                raise
+            raise SHUDRuntimeError(
+                PACKAGED_IC_CONSUMPTION_FAILED,
+                f"Packaged calibrated initial condition could not be consumed ({error.error_code}): "
+                f"{error.message}",
+            ) from error
+        except (SafeFilesystemError, OSError, ValueError) as error:
+            # Fail-LOUD, no two-way branch: every caught failure is re-raised as
+            # ``PACKAGED_IC_CONSUMPTION_FAILED``, so nothing here can fall
+            # through to the cold-start assignments in ``_stage_initial_state``.
+            # ``UnicodeDecodeError`` is a ``ValueError``: a binary packaged IC is a
+            # consumption failure, not an internal error.
+            raise SHUDRuntimeError(
+                PACKAGED_IC_CONSUMPTION_FAILED,
+                "Packaged calibrated initial condition could not be consumed "
+                f"({type(error).__name__}): {error}",
+            ) from error
+
+        manifest["initial_state"] = {
+            # Preserve whichever state_id the declaration carried: the
+            # scheduler-produced form has none (so nothing is booked into the
+            # cohort identity map) while the legacy manual manifest names one.
+            "state_id": _initial_state_id(manifest),
+            "ic_file_uri": None,
+            "valid_time": None,
+            "checksum": actual_checksum,
+            "quality": PACKAGED_IC_QUALITY,
+        }
+        if expected_checksum:
+            manifest["initial_state"]["packaged_ic_checksum"] = expected_checksum
+        runtime = manifest.setdefault("runtime", {})
+        runtime["packaged_initial_state"] = {
+            "relative_path": _relative_to_or_name(target, input_dir),
+            "checksum": actual_checksum,
+            "checksum_verified": bool(expected_checksum),
+            "header_minute_time": header_minute_time,
+            "time_consistency_verified": False,
+            "warnings": warnings,
+        }
+        _set_runtime_init_mode(manifest, 3)
+        self._sync_init_state_id(manifest)
+
+    def _clear_packaged_initial_states(self, model_input_dir: Path) -> None:
+        """Clear staged ``*.cfg.ic`` files before a packaged model package is staged.
+
+        Mirrors :meth:`_clear_staged_initial_states` (recursive, no-follow
+        deletion under the staged model input) but reports failures with the
+        packaged-IC error code, because for a declared packaged run this clear is
+        part of consumption: it is what makes the candidate set identical to the
+        current staging.
+
+        Carries the "candidate set == this staging" contract and honours it
+        fail-LOUD: there is no two-way branch here.  ``_clear_staged_initial_states``
+        enumerates via ``_find_regular_files`` (which raises
+        ``WORKSPACE_PATH_UNSAFE`` / ``ARTIFACT_UNSAFE`` rather than returning a
+        short list) and deletes via ``unlink_no_follow``; every failure escapes
+        as a typed error, re-coded here.  A clear that cannot be completed
+        therefore fails the run instead of leaving a stale ``*.cfg.ic`` in scope.
+        """
+
+        try:
+            self._clear_staged_initial_states(model_input_dir)
+        except SHUDRuntimeError as error:
+            raise SHUDRuntimeError(
+                PACKAGED_IC_CONSUMPTION_FAILED,
+                "Previously staged packaged initial conditions could not be cleared "
+                f"({error.error_code}): {error.message}",
+            ) from error
+
+    def _materialize_packaged_ic_to_project_name(
+        self,
+        manifest: dict[str, Any],
+        staged_path: Path,
+        input_dir: Path,
+    ) -> Path:
+        """Place the packaged IC at ``<project_name>.cfg.ic`` and return the target.
+
+        Basins packages already ship the IC under the canonical project name
+        (``basins_registry_import`` enforces ``<shud_input_name>.cfg.ic``), so
+        this is normally a no-op path computation; the copy exists so a package
+        that ships a differently-named IC still lands where SHUD reads it.
+        """
+
+        model_input_dir = _materialized_model_input_dir(manifest, input_dir, self.config.command_style)
+        target = model_input_dir / f"{_project_name(manifest)}.cfg.ic"
+        if staged_path.resolve() == target.resolve():
+            return target
+        content = _read_staged_bytes(staged_path, root=input_dir)
+        _ensure_directory(model_input_dir)
+        atomic_write_bytes_no_follow(target, content, containment_root=input_dir, temp_suffix="part")
+        try:
+            unlink_no_follow(staged_path, containment_root=input_dir, missing_ok=True)
+        except SafeFilesystemError:
+            # Best-effort tidy-up of the source copy, and the ONLY swallowed
+            # failure on this path.  It carries no completeness contract: the
+            # candidate set was already fixed by the pre-staging clear and read
+            # above, ``target`` already holds the verified bytes whose digest is
+            # recorded, SHUD reads only ``<project_name>.cfg.ic``, and the next
+            # preparation re-clears every ``*.cfg.ic`` before staging — so a
+            # surviving source copy can neither be preferred nor silently
+            # consumed later.
+            pass
+        return target
 
     def _state_snapshot(self, state_id: str | None) -> StateSnapshot | None:
         if state_id is None or self.state_manager is None:
@@ -1011,21 +1195,7 @@ class SHUDRuntime:
         start_time = _parse_time(manifest["start_time"])
         native_header_minute = _read_cfg_ic_header_minute(target)
         self._verify_ic_time_consistency(manifest, native_header_minute)
-        content = _read_staged_bytes(target, root=input_dir).decode("utf-8")
-        normalization = normalize_state_negative_residuals(content)
-        if not normalization.accepted:
-            raise SHUDRuntimeError(
-                "WARM_START_STATE_RESIDUALS_EXCEED_POLICY",
-                f"Warm-start state residual normalization rejected: {normalization.reason}",
-            )
-        if normalization.normalized_value_count:
-            atomic_write_bytes_no_follow(
-                target,
-                normalization.content.encode("utf-8"),
-                containment_root=input_dir,
-                temp_suffix="part",
-            )
-            manifest.setdefault("runtime", {})["initial_state_normalization"] = normalization.evidence()
+        normalize_staged_ic_negative_residuals(manifest, target, input_dir)
         _shift_cfg_ic_time(target, start_time)
 
     def _verify_ic_time_consistency(
@@ -2885,6 +3055,66 @@ def _initial_state_quality(manifest: dict[str, Any]) -> str | None:
     initial_state = manifest.get("initial_state") or {}
     quality = initial_state.get("quality") or manifest.get("init_state_quality")
     return str(quality) if quality else None
+
+
+def _declares_packaged_initial_condition(manifest: Mapping[str, Any]) -> bool:
+    """Return True when the manifest declares a packaged-IC bootstrap (#1164).
+
+    The declaration is the ``initial_state.quality`` value alone, so BOTH forms
+    qualify: the scheduler-produced form (no ``state_id``) and the legacy manual
+    manifest form (``state_id`` set, no recorded digest).
+    """
+    initial_state = manifest.get("initial_state") or {}
+    if not isinstance(initial_state, Mapping):
+        return False
+    quality = initial_state.get("quality") or manifest.get("init_state_quality")
+    return str(quality or "") == PACKAGED_IC_QUALITY
+
+
+def _packaged_ic_checksum(manifest: Mapping[str, Any]) -> str | None:
+    initial_state = manifest.get("initial_state") or {}
+    if not isinstance(initial_state, Mapping):
+        return None
+    checksum = initial_state.get("packaged_ic_checksum")
+    text = str(checksum or "").strip()
+    return text or None
+
+
+def _relative_to_or_name(path: Path, root: Path) -> str:
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return path.name
+
+
+def normalize_staged_ic_negative_residuals(
+    manifest: dict[str, Any],
+    target: Path,
+    input_dir: Path,
+) -> None:
+    """Apply the bounded negative-residual normalization to a staged ``.cfg.ic``.
+
+    Extracted from ``_materialize_ic_to_project_name`` so the packaged-IC
+    consume path (#1164) applies the identical policy — including the
+    ``WARM_START_STATE_RESIDUALS_EXCEED_POLICY`` refusal and the
+    ``runtime.initial_state_normalization`` evidence block — instead of
+    reimplementing it.  Behavior for the warm path is unchanged.
+    """
+    content = _read_staged_bytes(target, root=input_dir).decode("utf-8")
+    normalization = normalize_state_negative_residuals(content)
+    if not normalization.accepted:
+        raise SHUDRuntimeError(
+            "WARM_START_STATE_RESIDUALS_EXCEED_POLICY",
+            f"Warm-start state residual normalization rejected: {normalization.reason}",
+        )
+    if normalization.normalized_value_count:
+        atomic_write_bytes_no_follow(
+            target,
+            normalization.content.encode("utf-8"),
+            containment_root=input_dir,
+            temp_suffix="part",
+        )
+        manifest.setdefault("runtime", {})["initial_state_normalization"] = normalization.evidence()
 
 
 def _forcing_checksum_entries(manifest: dict[str, Any]) -> list[dict[str, str]]:

@@ -31,9 +31,12 @@ Contents
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import TYPE_CHECKING, Any
 
 from services.orchestrator import scheduler as _scheduler
+from services.orchestrator import scheduler_file_providers as _file_providers
 from services.orchestrator import scheduler_generation as _generation
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -46,6 +49,25 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: read it from the leaf, because importing this module first leaves it only
 #: partially initialized while the ``scheduler`` import cycle runs.
 CUTOVER_DECLARATION_UNLOADED: object = _generation.CUTOVER_DECLARATION_UNLOADED
+
+#: Bounded read guard for a model package manifest (#1164 D1).  Bound to
+#: ``scheduler_file_providers.MAX_MODEL_PACKAGE_MANIFEST_BYTES`` (the cap the
+#: registry loader already applies, so nothing larger can reach the gate) rather
+#: than restating a number that could drift out of sync — a corrupt / oversized
+#: manifest must not exhaust scheduler memory during planning.
+MAX_PACKAGE_MANIFEST_BYTES = _file_providers.MAX_MODEL_PACKAGE_MANIFEST_BYTES
+
+#: Bounded read guard for the tier-(b) canonical packaged-IC object probe
+#: (#1164 D1).  Defined next to the qualification policy it belongs to
+#: (``scheduler_generation``) and re-exported here so the gate's IO reads one
+#: constant.
+MAX_PACKAGED_IC_PROBE_BYTES = _generation.MAX_PACKAGED_IC_PROBE_BYTES
+
+#: Candidate ``state_evidence.mode`` emitted for an admitted packaged-IC
+#: bootstrap.  Re-exported from ``scheduler_generation`` so gate callers keep a
+#: local name while the constant has a single definition site (the cohort
+#: carrier in ``chain_forecast_cycle`` reads it from there).
+PACKAGED_IC_BOOTSTRAP_MODE = _generation.PACKAGED_IC_BOOTSTRAP_MODE
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +113,17 @@ def forecast_warm_start_env_enabled(scheduler: ProductionScheduler) -> bool:
     try:
         return bool(_scheduler.OrchestratorConfig.from_env().require_forecast_warm_start)
     except Exception:
+        # Carries no completeness / qualification / verdict contract: this is the
+        # D8.9 compat toggle only.  ``False`` here does ENABLE the terminal-skip
+        # shortcut at the call site (``not env_enabled and already_complete``), so
+        # the two-way collapse is not fail-closed by itself; it is acceptable
+        # because the shortcut also requires ``candidate_pipeline_already_complete``
+        # to be affirmatively True — that probe IS fail-CLOSED (missing provider or
+        # probe error returns False), so the skip demands a positive journal read of
+        # a durably-complete pipeline.  For such a cycle admitting or blocking a
+        # cutover is equally a no-op, so no admission hole opens; the real cost is
+        # the loss of §8 (and with it #1164 packaged-IC) auditability evidence on
+        # that pass.
         return False
 
 
@@ -123,6 +156,147 @@ def candidate_pipeline_already_complete(
         # Expected probe-error surface: journal file missing / unreadable /
         # containment root moved.  §8 gating still runs.
         return False
+
+
+# ---------------------------------------------------------------------------
+# #1164: packaged calibrated-IC qualification (all IO for D1 lives here)
+# ---------------------------------------------------------------------------
+
+
+def _package_manifest_reader(scheduler: ProductionScheduler) -> Any | None:
+    """Return an object-store reader for model package manifests, or ``None``.
+
+    Prefers an ``object_store`` the scheduler already carries (tests and future
+    callers can inject one) and otherwise builds a filesystem-backed store from
+    the same config knobs ``_db_free_state_manager_from_config`` uses, so the
+    manifest read resolves ``s3://<prefix>/<key>`` exactly like every other
+    DB-free object read.  Cached per scheduler lifetime: the registry manifest
+    is itself bound at planning time, so the store cannot need re-resolution
+    mid-pass.
+    """
+    cached = getattr(scheduler, "_package_manifest_store_cache", None)
+    if cached is not None:
+        return cached
+    store = getattr(scheduler, "object_store", None)
+    if store is None:
+        from packages.common.object_store import LocalObjectStore, ObjectStoreError
+
+        config = getattr(scheduler, "config", None)
+        root = getattr(config, "object_store_root", None) or getattr(config, "workspace_root", None)
+        if not root:
+            return None
+        try:
+            store = LocalObjectStore(root, _scheduler.os.getenv("OBJECT_STORE_PREFIX") or "")
+        except (ObjectStoreError, OSError, TypeError, ValueError):
+            # Two-way, fail-CLOSED: ``None`` (here and for a missing root above)
+            # is mapped by ``packaged_initial_condition_signal`` to
+            # ``PACKAGED_IC_UNREADABLE`` / ``package_manifest_reader_unavailable``,
+            # which blocks the candidate.  It never degrades to "the package
+            # ships no IC", so no qualification contract rides on separating a
+            # bad root from a bad prefix.
+            return None
+    try:
+        scheduler._package_manifest_store_cache = store
+    except AttributeError:  # pragma: no cover - defensive; scheduler is mutable
+        pass
+    return store
+
+
+def _canonical_packaged_ic_probe(reader: Any, object_uri: str) -> _generation.PackagedIcObjectProbe:
+    """Bounded no-follow stat + digest probe of ONE canonical packaged-IC object.
+
+    Tier (b) of the D1 qualification: used only when the referenced package
+    manifest carries no ``included_files`` inventory (the direct-grid variant
+    shape), and only on the first-cycle branch.  A probe that cannot complete
+    (unsafe/oversized/unsupported reference, IO error) reports
+    ``unreadable_detail`` so the caller fails CLOSED; a probe that completes and
+    finds no object reports plain non-existence.
+    """
+    try:
+        if not reader.exists(object_uri):
+            # Confirmed absence — the reader completed and found nothing.
+            return _generation.PackagedIcObjectProbe(exists=False)
+    except Exception:
+        # THREE-way, not two: this branch is "the existence check could not be
+        # completed", and ``unreadable_detail`` (evaluated before ``exists`` by
+        # ``_classify_packaged_ic_by_object_probe``) keeps it distinct from the
+        # confirmed absence above.  Carries the qualification contract and
+        # honours it.
+        return _generation.PackagedIcObjectProbe(
+            exists=False,
+            unreadable_detail="packaged_initial_condition_object_probe_failed",
+        )
+    try:
+        content = reader.read_bytes_limited(object_uri, max_bytes=MAX_PACKAGED_IC_PROBE_BYTES)
+    except Exception:
+        # THREE-way: ``exists=True`` + ``unreadable_detail`` is neither the
+        # confirmed absence above nor a completed digest.  Includes the oversize
+        # refusal: an IC larger than the cap is unreadable for qualification
+        # purposes, never "the package ships no IC".
+        return _generation.PackagedIcObjectProbe(
+            exists=True,
+            unreadable_detail="packaged_initial_condition_object_probe_failed",
+        )
+    return _generation.PackagedIcObjectProbe(
+        exists=True,
+        size_bytes=len(content),
+        sha256=hashlib.sha256(content).hexdigest(),
+    )
+
+
+def packaged_initial_condition_signal(
+    scheduler: ProductionScheduler,
+    candidate: _scheduler.SchedulerCandidate,
+) -> _generation.PackagedIcSignal | None:
+    """Return the #1164 packaged-IC qualification signal for ``candidate``.
+
+    ``None`` means "no published package-manifest reference" — the legacy
+    carve-out that keeps ``cold_new_model`` intact.  Every other outcome is a
+    signal: a manifest that is referenced but unreachable / malformed is
+    ``UNREADABLE`` (fail closed), never "no IC".
+
+    The manifest read is unconditional; ONE package object is additionally
+    probed only for the inventory-less direct-grid variant shape (D1 tier (b)),
+    which is the only shape whose qualification cannot be decided from published
+    metadata.  Callers reach this function on the first-cycle branch only, so
+    the warm path still performs zero object IO.
+    """
+    resource_profile = getattr(candidate, "resource_profile", None) or {}
+    manifest_uri = resource_profile.get("manifest_uri")
+    if manifest_uri in (None, ""):
+        return None
+    reader = _package_manifest_reader(scheduler)
+    if reader is None:
+        return _generation.PackagedIcSignal(
+            status=_generation.PACKAGED_IC_UNREADABLE,
+            detail="package_manifest_reader_unavailable",
+        )
+    try:
+        content = reader.read_bytes_limited(
+            str(manifest_uri), max_bytes=MAX_PACKAGE_MANIFEST_BYTES
+        )
+    except Exception:
+        # Bounded reader surface (object store errors, unsafe path, oversize,
+        # unsupported reference shape): the manifest is referenced but we cannot
+        # read it, which fails closed rather than degrading to "no IC".  The
+        # "no manifest reference at all" case never reaches here — it returned
+        # ``None`` above — so absence and undecidability stay distinct.
+        return _generation.PackagedIcSignal(
+            status=_generation.PACKAGED_IC_UNREADABLE,
+            detail="package_manifest_read_failed",
+        )
+    try:
+        payload = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        return _generation.PackagedIcSignal(
+            status=_generation.PACKAGED_IC_UNREADABLE,
+            detail="package_manifest_malformed_json",
+        )
+    return _generation.classify_packaged_initial_condition(
+        payload,
+        resource_profile=resource_profile,
+        canonical_object_probe=lambda object_uri: _canonical_packaged_ic_probe(reader, object_uri),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +358,15 @@ def evaluate_transition_decision(
             history_signal_evidence.get("wrong_generation_predecessor_checksum") or ""
         ),
     )
+    # #1164: the packaged-IC qualification signal is only meaningful on the
+    # first-cycle branch, so the manifest read is scoped to candidates with no
+    # history in ANY generation.  Warm / cutover candidates therefore incur no
+    # additional object IO and cannot be blocked by a package-manifest read.
+    packaged_signal = (
+        packaged_initial_condition_signal(scheduler, candidate)
+        if not signal.exists_any_generation
+        else None
+    )
     return _generation.evaluate_transition_decision(
         model_id=candidate.model_id,
         package_checksum=package_checksum,
@@ -192,6 +375,7 @@ def evaluate_transition_decision(
         required_lead_hours=required_lead_hours,
         history=signal,
         declaration=declaration,
+        packaged_initial_condition=packaged_signal,
     )
 
 
@@ -348,6 +532,51 @@ def strict_warm_start_evidence(
         )
     transition_evidence = _generation.generation_evidence(transition)
 
+    if transition.decision == _generation.TransitionDecision.PACKAGED_IC_BOOTSTRAP:
+        # #1164: admitted first cycle that MUST consume the calibrated IC
+        # shipped in its model package.  ``packaged_ic_checksum`` is the
+        # carrier that reaches the run manifest and, from there, the runtime's
+        # consume-or-raise verification.
+        return _scheduler._evidence_safe(
+            {
+                "status": "ready",
+                "ready": True,
+                "reason": None,
+                "mode": PACKAGED_IC_BOOTSTRAP_MODE,
+                "model_id": candidate.model_id,
+                "source_id": candidate.source_id,
+                "generation": transition.generation,
+                "cold_start_reason": None,
+                "packaged_ic_checksum": transition.packaged_ic_checksum,
+                "registry_cutover_transition": transition_evidence,
+            }
+        )
+    if (
+        transition.decision
+        == _generation.TransitionDecision.BLOCK_FIRST_CYCLE_INITIAL_STATE_UNDECIDED
+    ):
+        # #1164 fail-closed: the package's calibrated IC is unqualified or its
+        # manifest is unreadable.  Nothing is submitted — a first cycle never
+        # silently zeroes the model state.
+        return _scheduler._evidence_safe(
+            {
+                "status": "blocked",
+                "ready": False,
+                "reason": transition.typed_reason,
+                "mode": "db_free_first_cycle_initial_state_undecided",
+                "model_id": candidate.model_id,
+                "source_id": candidate.source_id,
+                "generation": transition.generation,
+                "registry_cutover_transition": transition_evidence,
+                "failure": {
+                    "classifier": "first_cycle_initial_state_undecided",
+                    "reason_code": (transition.typed_reason or "").upper(),
+                    "dependency": "model_package_initial_condition",
+                    "retryable": False,
+                    "permanent": False,
+                },
+            }
+        )
     if transition.decision == _generation.TransitionDecision.COLD_NEW_MODEL:
         return _scheduler._evidence_safe(
             {

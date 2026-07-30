@@ -16,11 +16,13 @@ running the whole test file plus the existing DB-free tests together.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -2656,3 +2658,991 @@ def test_journal_init_state_lineage_helper_matches_write_side_source_casing() ->
         )
         is None
     )
+
+
+# ---------------------------------------------------------------------------
+# T14 (#1164): first-cycle packaged-IC decision table (design D1/D2).
+#
+# The pure evaluator gains ONE optional qualification-signal parameter.  Its
+# default (``None``) is what keeps every pre-#1164 fixture — including the
+# 13/6 histogram above — on the legacy ``cold_new_model`` path with zero
+# rebaselining, so each row below states which signal it injects.
+# ---------------------------------------------------------------------------
+
+
+PACKAGE_IC_SHA256 = _hex("d")
+EMPTY_FILE_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+
+def _package_manifest(
+    *,
+    ic_sha256: str | None = PACKAGE_IC_SHA256,
+    ic_size_bytes: int | None = 131072,
+    ic_relative_path: str = "alias-a.cfg.ic",
+    include_ic: bool = True,
+    included_files: list[dict[str, Any]] | None = None,
+    shud_input_name: str | None = None,
+    extra_ic_entries: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Return a Basins package manifest shaped like ``basins_package.py`` writes."""
+    files: list[dict[str, Any]] = [
+        {
+            "relative_path": "alias-a.sp.mesh",
+            "role": "shud_input",
+            "size_bytes": 4096,
+            "sha256": _hex("e"),
+        }
+    ]
+    # ``basins_package.py`` sorts ``included_files`` by ``(role, relative_path)``,
+    # so ``calibration`` (``CALIB/…``) entries land BEFORE the canonical
+    # ``runtime_input`` IC — the ordering that made a first-match classifier read
+    # the wrong entry.
+    files.extend(extra_ic_entries or [])
+    if include_ic:
+        entry: dict[str, Any] = {"relative_path": ic_relative_path, "role": "shud_input"}
+        if ic_size_bytes is not None:
+            entry["size_bytes"] = ic_size_bytes
+        if ic_sha256 is not None:
+            entry["sha256"] = ic_sha256
+        files.append(entry)
+    manifest: dict[str, Any] = {
+        "schema_version": "nhms.basins_package_manifest.v1",
+        "model_id": "model_new",
+        "version": "vbasins-test",
+        "package_checksum": NEW_CHECKSUM,
+        "included_files": included_files if included_files is not None else files,
+    }
+    if shud_input_name is not None:
+        manifest["shud_input_name"] = shud_input_name
+    return manifest
+
+
+def _calib_ic_entry(*, sha256: str = _hex("c"), size_bytes: int = 4096) -> dict[str, Any]:
+    """A stray calibration-directory ``*.cfg.ic`` entry (never the canonical IC)."""
+    return {
+        "relative_path": "CALIB/alias-a.cfg.ic",
+        "role": "calibration",
+        "size_bytes": size_bytes,
+        "sha256": sha256,
+    }
+
+
+def _first_cycle_evaluation(signal: Any) -> Any:
+    return generation.evaluate_transition_decision(
+        model_id="model_new",
+        package_checksum=NEW_CHECKSUM,
+        source_id="gfs",
+        candidate_cycle_time_utc=_dt("2026-07-06T12:00:00Z"),
+        required_lead_hours=12,
+        history=_signal(exists_any=False, exists_current=False),
+        declaration=None,
+        packaged_initial_condition=signal,
+    )
+
+
+def test_packaged_ic_manifest_with_nonempty_cfg_ic_qualifies() -> None:
+    signal = generation.classify_packaged_initial_condition(_package_manifest())
+    assert signal.status == generation.PACKAGED_IC_QUALIFIED
+    assert signal.ic_sha256 == PACKAGE_IC_SHA256
+    assert signal.ic_relative_path == "alias-a.cfg.ic"
+    assert signal.ic_size_bytes == 131072
+
+
+def test_packaged_ic_manifest_classification_rejects_empty_digest_and_zero_size() -> None:
+    # Empty-file digest -> unqualified even though the entry exists.
+    empty_digest = generation.classify_packaged_initial_condition(
+        _package_manifest(ic_sha256=EMPTY_FILE_SHA256)
+    )
+    assert empty_digest.status == generation.PACKAGED_IC_UNQUALIFIED
+    # Zero size_bytes -> unqualified even with a non-empty-looking digest.
+    zero_size = generation.classify_packaged_initial_condition(_package_manifest(ic_size_bytes=0))
+    assert zero_size.status == generation.PACKAGED_IC_UNQUALIFIED
+    # No ``*.cfg.ic`` entry at all -> unqualified.
+    missing_entry = generation.classify_packaged_initial_condition(_package_manifest(include_ic=False))
+    assert missing_entry.status == generation.PACKAGED_IC_UNQUALIFIED
+    # Not a manifest object at all -> unreadable, never "no IC".
+    assert (
+        generation.classify_packaged_initial_condition(None).status
+        == generation.PACKAGED_IC_UNREADABLE
+    )
+    assert (
+        generation.classify_packaged_initial_condition(["not", "an", "object"]).status
+        == generation.PACKAGED_IC_UNREADABLE
+    )
+
+
+def test_packaged_ic_classification_blocks_ambiguous_inventories() -> None:
+    """A stray ``CALIB/*.cfg.ic`` must never qualify a package by sort order.
+
+    Gate/runtime symmetry: the runtime searches the staged tree recursively and
+    refuses anything but exactly one candidate, so a package whose inventory
+    lists two ``*.cfg.ic`` entries is blocked at planning time instead of being
+    submitted into a run doomed to ``PACKAGED_IC_CONSUMPTION_FAILED``.  Neither
+    the stray digest nor a stray 0-byte placeholder may decide the verdict.
+    """
+    non_empty_calib = generation.classify_packaged_initial_condition(
+        _package_manifest(extra_ic_entries=[_calib_ic_entry()])
+    )
+    assert non_empty_calib.status == generation.PACKAGED_IC_UNQUALIFIED
+    assert non_empty_calib.detail == "packaged_initial_condition_ambiguous"
+    # The wrong entry's digest must not leak into the signal the runtime verifies.
+    assert non_empty_calib.ic_sha256 == ""
+
+    zero_byte_calib = generation.classify_packaged_initial_condition(
+        _package_manifest(extra_ic_entries=[_calib_ic_entry(sha256=EMPTY_FILE_SHA256, size_bytes=0)])
+    )
+    assert zero_byte_calib.status == generation.PACKAGED_IC_UNQUALIFIED
+    assert zero_byte_calib.detail == "packaged_initial_condition_ambiguous"
+
+
+def test_packaged_ic_classification_requires_the_canonical_entry() -> None:
+    """Only the canonical top-level ``<shud_input_name>.cfg.ic`` can qualify."""
+    calib_only = generation.classify_packaged_initial_condition(
+        _package_manifest(include_ic=False, extra_ic_entries=[_calib_ic_entry()])
+    )
+    assert calib_only.status == generation.PACKAGED_IC_UNQUALIFIED
+    assert calib_only.detail == "packaged_initial_condition_not_canonical"
+    assert calib_only.ic_sha256 == ""
+
+    # When the manifest names the SHUD input directory the basename must match it.
+    named_mismatch = generation.classify_packaged_initial_condition(
+        _package_manifest(shud_input_name="alias-a", ic_relative_path="other.cfg.ic")
+    )
+    assert named_mismatch.status == generation.PACKAGED_IC_UNQUALIFIED
+    assert named_mismatch.detail == "packaged_initial_condition_not_canonical"
+
+    named_match = generation.classify_packaged_initial_condition(
+        _package_manifest(shud_input_name="alias-a")
+    )
+    assert named_match.status == generation.PACKAGED_IC_QUALIFIED
+    assert named_match.ic_sha256 == PACKAGE_IC_SHA256
+    assert named_match.ic_relative_path == "alias-a.cfg.ic"
+
+
+# ---------------------------------------------------------------------------
+# T14b (#1164 round 2): tier-(b) qualification for the INVENTORY-LESS
+# direct-grid variant manifest — the shape 36/36 production registry rows carry.
+#
+# ``provision_direct_grid_scheduler_registry.py`` publishes
+# ``resource_profile.manifest_uri = f"{variant_uri}manifest.json"`` and
+# ``model_package_uri = variant_uri`` (WITH a trailing '/'), while the variant
+# manifest written by ``workers/mapping_builder`` has exactly ONE top-level key:
+# ``direct_grid_forcing``.  There is no ``included_files`` and no
+# ``shud_input_name`` in that manifest, so qualification must fall back to the
+# canonical object probe or every production first cycle blocks.
+# ---------------------------------------------------------------------------
+
+
+DG_PACKAGE_KEY = "models/direct_grid_variants/basins_dth_ls_shud/dg-gfs-9f1c2b3d4e5a/package"
+DG_PACKAGE_URI = f"s3://nhms/{DG_PACKAGE_KEY}/"
+DG_MANIFEST_KEY = f"{DG_PACKAGE_KEY}/manifest.json"
+DG_SHUD_INPUT_NAME = "dth_ls"
+DG_CANONICAL_IC_URI = f"{DG_PACKAGE_URI}{DG_SHUD_INPUT_NAME}.cfg.ic"
+DG_IC_CONTENT = b"2\t1\t29626560.000000\n1\t0.1\t0.2\t0.3\t0.4\n"
+
+
+def _direct_grid_variant_manifest() -> dict[str, Any]:
+    """Return a manifest shaped like ``DirectGridManifest.to_resource_profile_dict``."""
+    return {
+        "direct_grid_forcing": {
+            "forcing_mapping_mode": "direct_grid",
+            "binding_uri": f"{DG_PACKAGE_URI}direct_grid_binding.json",
+            "binding_checksum": _hex("b"),
+            "model_input_package_id": "dg-input-9f1c2b3d4e5a",
+            "sp_att_path": f"{DG_SHUD_INPUT_NAME}.sp.att",
+            "sp_att_checksum": _hex("a"),
+            "applicable_source_ids": ["gfs"],
+            "grid_id": "gfs_0p25",
+            "grid_signature": _hex("f"),
+            "coordinate_reference_system": "EPSG:4326",
+            "z_policy": {"mode": "surface"},
+            "station_bindings": [],
+        }
+    }
+
+
+def _dg_resource_profile(
+    *,
+    model_package_uri: str | None = DG_PACKAGE_URI,
+    shud_input_name: str | None = DG_SHUD_INPUT_NAME,
+) -> dict[str, Any]:
+    profile: dict[str, Any] = {
+        "package_checksum": NEW_CHECKSUM,
+        "manifest_uri": f"s3://nhms/{DG_MANIFEST_KEY}",
+        "lineage": "direct_grid_variant_registration",
+        "forcing_mapping_mode": "direct_grid",
+    }
+    if model_package_uri is not None:
+        profile["model_package_uri"] = model_package_uri
+    if shud_input_name is not None:
+        profile["shud_input_name"] = shud_input_name
+    return profile
+
+
+class _RecordingProbe:
+    """Deterministic tier-(b) probe stub that records the uri it was handed."""
+
+    def __init__(self, result: Any) -> None:
+        self.result = result
+        self.uris: list[str] = []
+
+    def __call__(self, object_uri: str) -> Any:
+        self.uris.append(object_uri)
+        return self.result
+
+
+def test_variant_manifest_qualifies_from_the_canonical_object_probe() -> None:
+    """Tier (b): inventory-less manifest + a present non-empty canonical object."""
+    probe = _RecordingProbe(
+        generation.PackagedIcObjectProbe(
+            exists=True, size_bytes=len(DG_IC_CONTENT), sha256=PACKAGE_IC_SHA256
+        )
+    )
+    signal = generation.classify_packaged_initial_condition(
+        _direct_grid_variant_manifest(),
+        resource_profile=_dg_resource_profile(),
+        canonical_object_probe=probe,
+    )
+
+    assert signal.status == generation.PACKAGED_IC_QUALIFIED
+    assert signal.ic_sha256 == PACKAGE_IC_SHA256
+    assert signal.ic_size_bytes == len(DG_IC_CONTENT)
+    assert signal.ic_relative_path == f"{DG_SHUD_INPUT_NAME}.cfg.ic"
+    assert signal.qualification_source == generation.PACKAGED_IC_SOURCE_OBJECT_PROBE
+    # Exactly ONE object is probed, at the canonical uri derived from the row.
+    assert probe.uris == [DG_CANONICAL_IC_URI]
+    assert signal.evidence()["qualification_source"] == "object_probe"
+
+
+def test_canonical_object_uri_joining_tolerates_a_missing_trailing_slash() -> None:
+    """Production rows end with '/', but the join must not depend on it."""
+    assert (
+        generation.canonical_packaged_ic_object_uri(
+            model_package_uri=DG_PACKAGE_URI, shud_input_name=DG_SHUD_INPUT_NAME
+        )
+        == DG_CANONICAL_IC_URI
+    )
+    assert (
+        generation.canonical_packaged_ic_object_uri(
+            model_package_uri=DG_PACKAGE_URI.rstrip("/"), shud_input_name=DG_SHUD_INPUT_NAME
+        )
+        == DG_CANONICAL_IC_URI
+    )
+    # Unusable rows produce no uri at all (never a guessed sibling key).
+    assert generation.canonical_packaged_ic_object_uri(model_package_uri="", shud_input_name="x") is None
+    assert (
+        generation.canonical_packaged_ic_object_uri(
+            model_package_uri=DG_PACKAGE_URI, shud_input_name=None
+        )
+        is None
+    )
+    assert (
+        generation.canonical_packaged_ic_object_uri(
+            model_package_uri=DG_PACKAGE_URI, shud_input_name="../escape"
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("probe_kwargs", "expected_status", "expected_detail"),
+    [
+        (
+            {"exists": False},
+            generation.PACKAGED_IC_UNQUALIFIED,
+            "packaged_initial_condition_object_missing",
+        ),
+        (
+            {"exists": True, "size_bytes": 0, "sha256": EMPTY_FILE_SHA256},
+            generation.PACKAGED_IC_UNQUALIFIED,
+            "packaged_initial_condition_object_empty",
+        ),
+        (
+            {"exists": True, "unreadable_detail": "probe_failed"},
+            generation.PACKAGED_IC_UNREADABLE,
+            "probe_failed",
+        ),
+    ],
+    ids=["object_missing", "object_empty", "probe_read_failure"],
+)
+def test_variant_manifest_probe_outcomes_are_distinguished(
+    probe_kwargs: dict[str, Any], expected_status: str, expected_detail: str
+) -> None:
+    """A failed probe is UNREADABLE; a completed probe that found nothing is not."""
+    signal = generation.classify_packaged_initial_condition(
+        _direct_grid_variant_manifest(),
+        resource_profile=_dg_resource_profile(),
+        canonical_object_probe=_RecordingProbe(generation.PackagedIcObjectProbe(**probe_kwargs)),
+    )
+
+    assert signal.status == expected_status
+    assert signal.detail == expected_detail
+    assert signal.ic_sha256 == ""
+    assert signal.qualification_source == generation.PACKAGED_IC_SOURCE_OBJECT_PROBE
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        _dg_resource_profile(shud_input_name=None),
+        _dg_resource_profile(model_package_uri=None),
+        _dg_resource_profile(shud_input_name=""),
+    ],
+    ids=["no_shud_input_name", "no_model_package_uri", "blank_shud_input_name"],
+)
+def test_variant_manifest_without_registry_fields_is_unqualified_without_probing(
+    profile: dict[str, Any],
+) -> None:
+    """A row that cannot locate its IC is unqualified with its own reason."""
+    probe = _RecordingProbe(
+        generation.PackagedIcObjectProbe(exists=True, size_bytes=4096, sha256=PACKAGE_IC_SHA256)
+    )
+    signal = generation.classify_packaged_initial_condition(
+        _direct_grid_variant_manifest(), resource_profile=profile, canonical_object_probe=probe
+    )
+
+    assert signal.status == generation.PACKAGED_IC_UNQUALIFIED
+    assert signal.detail == "packaged_initial_condition_registry_fields_absent"
+    assert probe.uris == []
+
+
+def test_inventory_tier_never_probes_and_absent_probe_keeps_the_legacy_reason() -> None:
+    """Tier (a) wins when an inventory exists; without a probe tier (b) cannot run."""
+    probe = _RecordingProbe(generation.PackagedIcObjectProbe(exists=False))
+    inventory = generation.classify_packaged_initial_condition(
+        _package_manifest(), resource_profile=_dg_resource_profile(), canonical_object_probe=probe
+    )
+    assert inventory.status == generation.PACKAGED_IC_QUALIFIED
+    assert inventory.qualification_source == generation.PACKAGED_IC_SOURCE_INVENTORY
+    assert probe.uris == []
+
+    no_probe = generation.classify_packaged_initial_condition(_direct_grid_variant_manifest())
+    assert no_probe.status == generation.PACKAGED_IC_UNQUALIFIED
+    assert no_probe.detail == "package_manifest_included_files_absent"
+
+
+def test_first_cycle_variant_probe_signal_admits_packaged_ic_bootstrap() -> None:
+    """判定表 row 1 via tier (b): the probed digest reaches the decision."""
+    evaluation = _first_cycle_evaluation(
+        generation.classify_packaged_initial_condition(
+            _direct_grid_variant_manifest(),
+            resource_profile=_dg_resource_profile(),
+            canonical_object_probe=_RecordingProbe(
+                generation.PackagedIcObjectProbe(
+                    exists=True, size_bytes=131072, sha256=PACKAGE_IC_SHA256
+                )
+            ),
+        )
+    )
+
+    assert evaluation.decision == generation.TransitionDecision.PACKAGED_IC_BOOTSTRAP
+    assert evaluation.packaged_ic_checksum == PACKAGE_IC_SHA256
+    evidence = generation.generation_evidence(evaluation)
+    assert evidence["packaged_initial_condition"]["qualification_source"] == "object_probe"
+
+
+def test_first_cycle_qualified_signal_admits_packaged_ic_bootstrap() -> None:
+    """判定表 row 1: QUALIFIED -> PACKAGED_IC_BOOTSTRAP carrying the IC digest."""
+    evaluation = _first_cycle_evaluation(
+        generation.classify_packaged_initial_condition(_package_manifest())
+    )
+    assert evaluation.decision == generation.TransitionDecision.PACKAGED_IC_BOOTSTRAP
+    assert evaluation.decision in generation.TransitionDecision.ADMIT
+    assert evaluation.typed_reason is None
+    assert evaluation.packaged_ic_checksum == PACKAGE_IC_SHA256
+    assert evaluation.cold_start_reason is None
+    evidence = generation.generation_evidence(evaluation)
+    assert evidence["decision"] == "packaged_ic_bootstrap"
+    assert evidence["packaged_initial_condition"]["status"] == generation.PACKAGED_IC_QUALIFIED
+    assert evidence["packaged_initial_condition"]["ic_sha256"] == PACKAGE_IC_SHA256
+
+
+@pytest.mark.parametrize(
+    "signal_factory",
+    [
+        lambda: generation.classify_packaged_initial_condition(_package_manifest(include_ic=False)),
+        lambda: generation.classify_packaged_initial_condition(
+            _package_manifest(ic_sha256=EMPTY_FILE_SHA256)
+        ),
+        lambda: generation.classify_packaged_initial_condition(_package_manifest(ic_size_bytes=0)),
+        lambda: generation.classify_packaged_initial_condition(
+            _package_manifest(extra_ic_entries=[_calib_ic_entry()])
+        ),
+        lambda: generation.classify_packaged_initial_condition(
+            _package_manifest(include_ic=False, extra_ic_entries=[_calib_ic_entry()])
+        ),
+    ],
+    ids=["missing_entry", "empty_digest", "zero_size", "ambiguous_entries", "non_canonical_entry"],
+)
+def test_first_cycle_unqualified_signal_blocks_with_typed_reason(signal_factory: Any) -> None:
+    """判定表 row 3: UNQUALIFIED -> fail-closed block, never a silent cold start."""
+    evaluation = _first_cycle_evaluation(signal_factory())
+    assert (
+        evaluation.decision
+        == generation.TransitionDecision.BLOCK_FIRST_CYCLE_INITIAL_STATE_UNDECIDED
+    )
+    assert evaluation.decision in generation.TransitionDecision.BLOCK
+    assert evaluation.typed_reason == "first_cycle_initial_state_undecided"
+    assert evaluation.cold_start_reason is None
+    assert evaluation.packaged_ic_checksum is None
+
+
+def test_first_cycle_unreadable_manifest_blocks_rather_than_reading_as_no_ic() -> None:
+    """判定表 row 4: UNREADABLE -> the same fail-closed block (never UNQUALIFIED)."""
+    evaluation = _first_cycle_evaluation(
+        generation.PackagedIcSignal(
+            status=generation.PACKAGED_IC_UNREADABLE,
+            detail="package_manifest_malformed_json",
+        )
+    )
+    assert (
+        evaluation.decision
+        == generation.TransitionDecision.BLOCK_FIRST_CYCLE_INITIAL_STATE_UNDECIDED
+    )
+    assert evaluation.typed_reason == "first_cycle_initial_state_undecided"
+
+
+def test_first_cycle_absent_signal_keeps_legacy_labeled_cold_start() -> None:
+    """判定表 row 5 (carve-out): no signal -> byte-identical legacy behavior."""
+    evaluation = _first_cycle_evaluation(None)
+    assert evaluation.decision == generation.TransitionDecision.COLD_NEW_MODEL
+    assert evaluation.cold_start_reason == "no_prior_history"
+    assert evaluation.typed_reason is None
+    assert evaluation.packaged_ic_checksum is None
+    # The parameter is OPTIONAL: omitting it entirely is the same carve-out.
+    omitted = generation.evaluate_transition_decision(
+        model_id="model_new",
+        package_checksum=NEW_CHECKSUM,
+        source_id="gfs",
+        candidate_cycle_time_utc=_dt("2026-07-06T12:00:00Z"),
+        required_lead_hours=12,
+        history=_signal(exists_any=False, exists_current=False),
+        declaration=None,
+    )
+    assert omitted.decision == generation.TransitionDecision.COLD_NEW_MODEL
+
+
+def test_qualified_signal_never_overrides_an_existing_history_decision() -> None:
+    """F9 guard: the signal is only consulted on the empty-history branch."""
+    qualified = generation.classify_packaged_initial_condition(_package_manifest())
+    warm = generation.evaluate_transition_decision(
+        model_id="model_a",
+        package_checksum=NEW_CHECKSUM,
+        source_id="gfs",
+        candidate_cycle_time_utc=_dt("2026-07-06T12:00:00Z"),
+        required_lead_hours=12,
+        history=_signal(
+            exists_any=True,
+            exists_current=True,
+            has_exact_predecessor=True,
+            latest_any_checksum=NEW_CHECKSUM,
+        ),
+        declaration=None,
+        packaged_initial_condition=qualified,
+    )
+    assert warm.decision == generation.TransitionDecision.WARM_CONTINUE
+    cutover_boundary = generation.evaluate_transition_decision(
+        model_id="model_a",
+        package_checksum=NEW_CHECKSUM,
+        source_id="gfs",
+        candidate_cycle_time_utc=_dt("2026-07-06T12:00:00Z"),
+        required_lead_hours=12,
+        history=_signal(exists_any=True, exists_current=False, latest_any_checksum=OLD_CHECKSUM),
+        declaration=None,
+        packaged_initial_condition=qualified,
+    )
+    assert cutover_boundary.decision == generation.TransitionDecision.BLOCK_DECLARATION_MISSING
+
+
+# ---------------------------------------------------------------------------
+# T15 (#1164): gate-level qualification IO + the two named bypass carve-outs.
+#
+# These drive ``scheduler_generation_gate.strict_warm_start_evidence`` through a
+# minimal scheduler stub so the manifest read, the new evidence mode, and the
+# bypass carve-outs are exercised without a full DB-free scheduler pass.
+# ---------------------------------------------------------------------------
+
+
+class _StubStateIndex:
+    def __init__(
+        self,
+        *,
+        signal_ready: bool = True,
+        exists_any: bool = False,
+        exists_current: bool = False,
+    ) -> None:
+        self.signal_ready = signal_ready
+        self.exists_any = exists_any
+        self.exists_current = exists_current
+        self.history_signal_calls = 0
+
+    def generation_scoped_history_signal(self, **_kwargs: Any) -> dict[str, Any]:
+        self.history_signal_calls += 1
+        return {
+            "ready": self.signal_ready,
+            "history_exists_current_generation": self.exists_current,
+            "history_exists_any_generation": self.exists_any,
+            "latest_current_generation_checkpoint": None,
+            "latest_any_generation_checkpoint": None,
+            "wrong_generation_predecessor_present": False,
+            "wrong_generation_predecessor_checksum": "",
+        }
+
+    def strict_warm_start_evidence(self, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "status": "blocked",
+            "ready": False,
+            "reason": "state_snapshot_index_exact_checkpoint_missing",
+            "mode": "db_free_legacy_probe",
+        }
+
+    def usable_state_history_evidence(self, **_kwargs: Any) -> dict[str, Any]:
+        return {"ready": True, "history_exists": False}
+
+
+class _StubScheduler:
+    def __init__(self, *, index: _StubStateIndex, object_store_root: Path) -> None:
+        from services.orchestrator.scheduler_generation_gate import CUTOVER_DECLARATION_UNLOADED
+
+        self._index = index
+        self.config = SimpleNamespace(
+            now=NOW,
+            object_store_root=object_store_root,
+            workspace_root=object_store_root,
+        )
+        self._cutover_declaration_cache = CUTOVER_DECLARATION_UNLOADED
+
+    def _required_warm_start_lead_hours(self, _candidate: Any, _cycle: Any) -> int:
+        return 12
+
+    def _db_free_state_index_provider(self) -> _StubStateIndex:
+        return self._index
+
+    def _db_free_strict_warm_start_required_for(self, _candidate: Any) -> bool:
+        return True
+
+
+def _stub_candidate(*, resource_profile: dict[str, Any]) -> Any:
+    return SimpleNamespace(
+        model_id="model_new",
+        source_id="gfs",
+        cycle_time_utc=_dt("2026-07-06T12:00:00Z"),
+        resource_profile=resource_profile,
+        model_package_uri="s3://nhms/models/model_new/package/",
+        run_id="fcst_gfs_2026070612_model_new",
+    )
+
+
+def _write_package_manifest(object_root: Path, payload: Any, *, key: str = "models/model_new/manifest.json") -> str:
+    from packages.common.object_store import LocalObjectStore
+
+    store = LocalObjectStore(object_root, "s3://nhms")
+    content = payload if isinstance(payload, bytes) else json.dumps(payload, sort_keys=True).encode("utf-8")
+    store.write_bytes_atomic(key, content)
+    return f"s3://nhms/{key}"
+
+
+def test_gate_emits_packaged_ic_bootstrap_evidence_for_qualified_first_cycle(tmp_path: Path) -> None:
+    from services.orchestrator import scheduler_generation_gate as gate
+
+    object_root = tmp_path / "object-store"
+    manifest_uri = _write_package_manifest(object_root, _package_manifest())
+    index = _StubStateIndex(exists_any=False, exists_current=False)
+    scheduler = _StubScheduler(index=index, object_store_root=object_root)
+    candidate = _stub_candidate(
+        resource_profile={"package_checksum": NEW_CHECKSUM, "manifest_uri": manifest_uri}
+    )
+
+    evidence = gate.strict_warm_start_evidence(scheduler, candidate, cycle=None)
+
+    assert evidence is not None
+    assert evidence["mode"] == "db_free_packaged_ic_bootstrap"
+    assert evidence["ready"] is True
+    assert evidence["status"] == "ready"
+    assert evidence["packaged_ic_checksum"] == PACKAGE_IC_SHA256
+    assert evidence["registry_cutover_transition"]["decision"] == "packaged_ic_bootstrap"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [_package_manifest(include_ic=False), _package_manifest(ic_size_bytes=0)],
+    ids=["missing_entry", "zero_size"],
+)
+def test_gate_blocks_first_cycle_when_package_ic_is_unqualified(tmp_path: Path, payload: Any) -> None:
+    from services.orchestrator import scheduler_generation_gate as gate
+
+    object_root = tmp_path / "object-store"
+    manifest_uri = _write_package_manifest(object_root, payload)
+    scheduler = _StubScheduler(index=_StubStateIndex(), object_store_root=object_root)
+    candidate = _stub_candidate(
+        resource_profile={"package_checksum": NEW_CHECKSUM, "manifest_uri": manifest_uri}
+    )
+
+    evidence = gate.strict_warm_start_evidence(scheduler, candidate, cycle=None)
+
+    assert evidence is not None
+    assert evidence["status"] == "blocked"
+    assert evidence["ready"] is False
+    assert evidence["reason"] == "first_cycle_initial_state_undecided"
+    assert evidence["registry_cutover_transition"]["decision"] == (
+        "block_first_cycle_initial_state_undecided"
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [b"{not-json", b""],
+    ids=["malformed_json", "empty_object"],
+)
+def test_gate_blocks_first_cycle_when_package_manifest_is_unreadable(
+    tmp_path: Path, payload: bytes
+) -> None:
+    from services.orchestrator import scheduler_generation_gate as gate
+
+    object_root = tmp_path / "object-store"
+    manifest_uri = _write_package_manifest(object_root, payload)
+    scheduler = _StubScheduler(index=_StubStateIndex(), object_store_root=object_root)
+    candidate = _stub_candidate(
+        resource_profile={"package_checksum": NEW_CHECKSUM, "manifest_uri": manifest_uri}
+    )
+
+    evidence = gate.strict_warm_start_evidence(scheduler, candidate, cycle=None)
+
+    assert evidence is not None
+    assert evidence["status"] == "blocked"
+    assert evidence["reason"] == "first_cycle_initial_state_undecided"
+
+
+def test_gate_blocks_first_cycle_when_referenced_package_manifest_is_absent(tmp_path: Path) -> None:
+    from services.orchestrator import scheduler_generation_gate as gate
+
+    object_root = tmp_path / "object-store"
+    object_root.mkdir(parents=True, exist_ok=True)
+    scheduler = _StubScheduler(index=_StubStateIndex(), object_store_root=object_root)
+    candidate = _stub_candidate(
+        resource_profile={
+            "package_checksum": NEW_CHECKSUM,
+            "manifest_uri": "s3://nhms/models/model_new/manifest.json",
+        }
+    )
+
+    evidence = gate.strict_warm_start_evidence(scheduler, candidate, cycle=None)
+
+    assert evidence is not None
+    assert evidence["status"] == "blocked"
+    assert evidence["reason"] == "first_cycle_initial_state_undecided"
+
+
+def _write_dg_variant_package(object_root: Path, *, ic_content: bytes | None = DG_IC_CONTENT) -> None:
+    """Publish a production-shaped direct-grid variant package under ``object_root``."""
+    from packages.common.object_store import LocalObjectStore
+
+    store = LocalObjectStore(object_root, "s3://nhms")
+    store.write_bytes_atomic(
+        DG_MANIFEST_KEY, json.dumps(_direct_grid_variant_manifest(), sort_keys=True).encode("utf-8")
+    )
+    store.write_bytes_atomic(f"{DG_PACKAGE_KEY}/{DG_SHUD_INPUT_NAME}.sp.mesh", b"mesh\n")
+    if ic_content is not None:
+        store.write_bytes_atomic(f"{DG_PACKAGE_KEY}/{DG_SHUD_INPUT_NAME}.cfg.ic", ic_content)
+
+
+def test_gate_qualifies_inventory_less_variant_package_via_the_object_probe(tmp_path: Path) -> None:
+    """The production 36/36 shape: no ``included_files``, IC decided by the probe."""
+    from services.orchestrator import scheduler_generation_gate as gate
+
+    object_root = tmp_path / "object-store"
+    _write_dg_variant_package(object_root)
+    scheduler = _StubScheduler(index=_StubStateIndex(), object_store_root=object_root)
+    candidate = _stub_candidate(resource_profile=_dg_resource_profile())
+
+    evidence = gate.strict_warm_start_evidence(scheduler, candidate, cycle=None)
+
+    assert evidence is not None
+    assert evidence["mode"] == "db_free_packaged_ic_bootstrap"
+    assert evidence["ready"] is True
+    assert evidence["packaged_ic_checksum"] == hashlib.sha256(DG_IC_CONTENT).hexdigest()
+    packaged = evidence["registry_cutover_transition"]["packaged_initial_condition"]
+    assert packaged["qualification_source"] == "object_probe"
+    assert packaged["ic_relative_path"] == f"{DG_SHUD_INPUT_NAME}.cfg.ic"
+
+
+@pytest.mark.parametrize(
+    "ic_content", [None, b""], ids=["canonical_object_missing", "canonical_object_empty"]
+)
+def test_gate_blocks_variant_package_without_a_usable_canonical_ic_object(
+    tmp_path: Path, ic_content: bytes | None
+) -> None:
+    from services.orchestrator import scheduler_generation_gate as gate
+
+    object_root = tmp_path / "object-store"
+    _write_dg_variant_package(object_root, ic_content=ic_content)
+    scheduler = _StubScheduler(index=_StubStateIndex(), object_store_root=object_root)
+    candidate = _stub_candidate(resource_profile=_dg_resource_profile())
+
+    evidence = gate.strict_warm_start_evidence(scheduler, candidate, cycle=None)
+
+    assert evidence is not None
+    assert evidence["status"] == "blocked"
+    assert evidence["reason"] == "first_cycle_initial_state_undecided"
+    packaged = evidence["registry_cutover_transition"]["packaged_initial_condition"]
+    assert packaged["status"] == "unqualified"
+    assert packaged["qualification_source"] == "object_probe"
+
+
+def test_gate_blocks_variant_package_whose_row_names_no_shud_input(tmp_path: Path) -> None:
+    from services.orchestrator import scheduler_generation_gate as gate
+
+    object_root = tmp_path / "object-store"
+    _write_dg_variant_package(object_root)
+    scheduler = _StubScheduler(index=_StubStateIndex(), object_store_root=object_root)
+    candidate = _stub_candidate(resource_profile=_dg_resource_profile(shud_input_name=None))
+
+    evidence = gate.strict_warm_start_evidence(scheduler, candidate, cycle=None)
+
+    assert evidence is not None
+    assert evidence["status"] == "blocked"
+    assert evidence["registry_cutover_transition"]["packaged_initial_condition"]["detail"] == (
+        "packaged_initial_condition_registry_fields_absent"
+    )
+
+
+def test_gate_reports_an_unreadable_canonical_ic_object_as_unreadable(tmp_path: Path) -> None:
+    """A probe that cannot complete blocks as UNREADABLE, never as "no IC"."""
+    from services.orchestrator import scheduler_generation_gate as gate
+
+    object_root = tmp_path / "object-store"
+    _write_dg_variant_package(object_root, ic_content=None)
+    # A DIRECTORY at the canonical IC key: it stats (exists) but cannot be read.
+    (object_root / DG_PACKAGE_KEY / f"{DG_SHUD_INPUT_NAME}.cfg.ic").mkdir(parents=True)
+    scheduler = _StubScheduler(index=_StubStateIndex(), object_store_root=object_root)
+    candidate = _stub_candidate(resource_profile=_dg_resource_profile())
+
+    evidence = gate.strict_warm_start_evidence(scheduler, candidate, cycle=None)
+
+    assert evidence is not None
+    assert evidence["status"] == "blocked"
+    packaged = evidence["registry_cutover_transition"]["packaged_initial_condition"]
+    assert packaged["status"] == "unreadable"
+    assert packaged["detail"] == "packaged_initial_condition_object_probe_failed"
+
+
+def test_gate_keeps_cold_new_model_when_registry_has_no_package_manifest_reference(
+    tmp_path: Path,
+) -> None:
+    """carve-out: registered model without a published manifest reference."""
+    from services.orchestrator import scheduler_generation_gate as gate
+
+    object_root = tmp_path / "object-store"
+    object_root.mkdir(parents=True, exist_ok=True)
+    scheduler = _StubScheduler(index=_StubStateIndex(), object_store_root=object_root)
+    candidate = _stub_candidate(resource_profile={"package_checksum": NEW_CHECKSUM})
+
+    evidence = gate.strict_warm_start_evidence(scheduler, candidate, cycle=None)
+
+    assert evidence is not None
+    assert evidence["mode"] == "db_free_cold_new_model"
+    assert evidence["cold_start_reason"] == "no_prior_history"
+    assert evidence["registry_cutover_transition"]["decision"] == "cold_new_model"
+
+
+def test_gate_bypass_without_package_checksum_and_declaration_stays_legacy(tmp_path: Path) -> None:
+    """Named bypass #1 (``scheduler_generation_gate.py:322-328``).
+
+    A QUALIFIED package manifest sits on disk, but the candidate carries no
+    registry ``package_checksum`` and no declaration is configured — the legacy
+    path must answer, with no packaged signal and no §8 transition evidence.
+    """
+    from services.orchestrator import scheduler_generation_gate as gate
+
+    object_root = tmp_path / "object-store"
+    manifest_uri = _write_package_manifest(object_root, _package_manifest())
+    index = _StubStateIndex()
+    scheduler = _StubScheduler(index=index, object_store_root=object_root)
+    candidate = _stub_candidate(resource_profile={"manifest_uri": manifest_uri})
+
+    evidence = gate.strict_warm_start_evidence(scheduler, candidate, cycle=None)
+
+    assert evidence is not None
+    assert evidence["mode"] != "db_free_packaged_ic_bootstrap"
+    assert "registry_cutover_transition" not in evidence
+    assert index.history_signal_calls == 0
+
+
+def test_gate_bypass_with_unavailable_state_index_stays_legacy(tmp_path: Path) -> None:
+    """Named bypass #2 (``scheduler_generation_gate.py:336-346``).
+
+    The history signal is not ready, so §8 (and the #1164 first-cycle decision
+    that rides it) must defer to the legacy path even though a QUALIFIED
+    package manifest is readable.
+    """
+    from services.orchestrator import scheduler_generation_gate as gate
+
+    object_root = tmp_path / "object-store"
+    manifest_uri = _write_package_manifest(object_root, _package_manifest())
+    index = _StubStateIndex(signal_ready=False)
+    scheduler = _StubScheduler(index=index, object_store_root=object_root)
+    candidate = _stub_candidate(
+        resource_profile={"package_checksum": NEW_CHECKSUM, "manifest_uri": manifest_uri}
+    )
+
+    evidence = gate.strict_warm_start_evidence(scheduler, candidate, cycle=None)
+
+    assert evidence is not None
+    assert index.history_signal_calls == 1
+    assert evidence["mode"] != "db_free_packaged_ic_bootstrap"
+    assert "registry_cutover_transition" not in evidence
+
+
+def test_gate_does_not_read_package_manifest_when_history_exists(tmp_path: Path) -> None:
+    """No new object IO on the warm path: qualification is a first-cycle probe."""
+    from services.orchestrator import scheduler_generation_gate as gate
+
+    object_root = tmp_path / "object-store"
+    object_root.mkdir(parents=True, exist_ok=True)
+    index = _StubStateIndex(exists_any=True, exists_current=True)
+    scheduler = _StubScheduler(index=index, object_store_root=object_root)
+    # ``manifest_uri`` points at an object that does NOT exist: if the gate read
+    # it on the existing-history path this would fail closed and block.
+    candidate = _stub_candidate(
+        resource_profile={
+            "package_checksum": NEW_CHECKSUM,
+            "manifest_uri": "s3://nhms/models/model_new/manifest.json",
+        }
+    )
+
+    evidence = gate.strict_warm_start_evidence(scheduler, candidate, cycle=None)
+
+    assert evidence is not None
+    assert evidence["reason"] != "first_cycle_initial_state_undecided"
+
+
+# ---------------------------------------------------------------------------
+# T16 (#1164): end-to-end through the real candidate builder.
+#
+# The gate-stub tests above pin the decision surface; these two pin the WIRING —
+# that a first-cycle candidate actually reaches ``blocked`` with the typed reason
+# (fail-closed) and that an admitted packaged bootstrap carries the digest the
+# cohort carrier needs.  Without these, a correct gate could still be bypassed
+# by the candidate builder.
+# ---------------------------------------------------------------------------
+
+
+def _db_free_first_cycle_pass(
+    monkeypatch: Any,
+    tmp_path: Path,
+    *,
+    package_manifest: Any,
+    manifest_key: str = "models/model_a/package_manifest.json",
+) -> tuple[list[Any], list[Any]]:
+    """Run one real DB-free candidate pass for an empty-history model_a.
+
+    Returns ``(candidates, blocked)``.  The registry row's
+    ``resource_profile.manifest_uri`` points at ``package_manifest`` so the
+    #1164 qualification read is exercised through the production seam.
+    """
+    from packages.common.object_store import LocalObjectStore
+    from services.orchestrator import scheduler as scheduler_module
+    from services.orchestrator.scheduler import ProductionSchedulerConfig
+    from tests.test_production_scheduler import (
+        FakeRegistry,
+        ProductionScheduler,
+        _gfs_default_forecast_hours,
+        _set_db_free_scheduler_env,
+        _write_db_free_file_provider_fixtures,
+    )
+    from tests.test_production_scheduler import (
+        _dt as _pdt,
+    )
+    from workers.data_adapters.base import CycleDiscovery
+
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _pdt("2026-05-21T12:00:00Z")
+    generated_at = _pdt("2026-05-21T18:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    # Empty state index (published by the fixture helper) == first cycle.
+    store = LocalObjectStore(roots["object_store_root"], "s3://nhms")
+    content = (
+        package_manifest
+        if isinstance(package_manifest, bytes)
+        else json.dumps(package_manifest, sort_keys=True).encode("utf-8")
+    )
+    store.write_bytes_atomic(manifest_key, content)
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": fixture["package_checksum"],
+            "manifest_uri": f"s3://nhms/{manifest_key}",
+        },
+    }
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at, allowed_cycle_hours_utc=(0, 12)),
+        registry=FakeRegistry([model]),
+        adapters={},
+        orchestrator_factory=lambda _source_id: pytest.fail(
+            "first-cycle decision must not build an orchestrator in this pass"
+        ),
+    )
+    candidates, blocked, _skipped, _duplicates, _slurm_sync = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(model)],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052112",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=12,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+    return candidates, blocked
+
+
+def test_first_cycle_unqualified_package_blocks_the_real_candidate_pass(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    candidates, blocked = _db_free_first_cycle_pass(
+        monkeypatch,
+        tmp_path,
+        package_manifest=_package_manifest(ic_size_bytes=0),
+    )
+
+    assert candidates == []
+    assert len(blocked) == 1
+    assert blocked[0].reason == "first_cycle_initial_state_undecided"
+    assert (
+        blocked[0].state_evidence["registry_cutover_transition"]["decision"]
+        == "block_first_cycle_initial_state_undecided"
+    )
+
+
+def test_first_cycle_qualified_package_admits_candidate_carrying_the_ic_digest(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    candidates, blocked = _db_free_first_cycle_pass(
+        monkeypatch,
+        tmp_path,
+        package_manifest=_package_manifest(),
+    )
+
+    assert blocked == []
+    assert len(candidates) == 1
+    # An admitted candidate carries the gate evidence as its top-level
+    # ``state_evidence`` (the nested ``strict_warm_start`` layer is a retry/
+    # blocked shape).  ``chain_forecast_cycle._state_evidence_layers`` reads both.
+    evidence = candidates[0].state_evidence
+    assert evidence["mode"] == "db_free_packaged_ic_bootstrap"
+    assert evidence["ready"] is True
+    assert evidence["packaged_ic_checksum"] == PACKAGE_IC_SHA256
+    assert evidence["cold_start_reason"] is None

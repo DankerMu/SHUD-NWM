@@ -61,6 +61,10 @@ WARM_START_QUALITY_VALUES = (
     "degraded_stale_init_state",
     "cold_start_no_state",
     "cold_start_stale_state",
+    # #1164 (APPEND-ONLY): a first-cycle run that consumed the calibrated
+    # ``*.cfg.ic`` shipped in its model package.  The four values above are
+    # unchanged so historical receipts keep validating.
+    "packaged_calibrated_state",
 )
 RECEIPT_SECTIONS = frozenset(
     {"baseline", "gateway", "warm_start", "concurrency", "multibasin", "daemon"}

@@ -330,3 +330,20 @@ def test_write_receipt_redacts_dsn(tmp_path):
     path = write_receipt(receipt, root=tmp_path)
     raw = path.read_text()
     assert "secretpw" not in raw
+
+
+def test_packaged_calibrated_state_quality_is_accepted_without_disturbing_existing_values():
+    """#1164: the quality enum gained one APPEND-ONLY value.
+
+    The four pre-existing values must keep validating so historical receipts do
+    not have to be rewritten, and the new packaged-IC bootstrap quality must be
+    accepted rather than rejected as an unknown enum member.
+    """
+    validate_receipt(_base_receipt(warm_start_quality="packaged_calibrated_state"))
+    for quality in (
+        "fresh",
+        "degraded_stale_init_state",
+        "cold_start_no_state",
+        "cold_start_stale_state",
+    ):
+        validate_receipt(_base_receipt(warm_start_quality=quality))
