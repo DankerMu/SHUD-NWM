@@ -40,7 +40,7 @@ from typing import Any
 import jsonschema
 import pytest
 
-from scripts import replay_driver
+from scripts import replay_capture, replay_driver
 from scripts.replay_capture import ReplayDriverRefused
 from scripts.replay_driver import (
     REPAIR_CYCLE_ENV,
@@ -237,7 +237,11 @@ class _Site:
         *,
         removed: Sequence[Mapping[str, Any]] | None = None,
         outcome: str = "completed",
+        scopes: Sequence[Mapping[str, Any]] | None = None,
+        source: str = SOURCE,
     ) -> None:
+        if scopes is None:
+            scopes = [{"model_id": model_id, "source_id": source} for model_id in MODELS]
         if removed is None:
             removed = [
                 {
@@ -257,6 +261,7 @@ class _Site:
                 "schema_version": "nhms.replay_state_scope_reset.v1",
                 "outcome": outcome,
                 "enforced": True,
+                "scopes": [dict(scope) for scope in scopes],
                 "lanes": [
                     {"lane": "scratch", "removed_entries": [dict(entry) for entry in removed]},
                     {"lane": "nfs", "removed_entries": [dict(entry) for entry in removed]},
@@ -724,7 +729,12 @@ def test_the_receipt_is_written_after_every_cycle(site: _Site) -> None:
         sleep=lambda _seconds: None,
     )
 
-    assert on_disk_at_submission[0] is None  # nothing completed yet
+    # The pre-flight receipt is on disk before the first submission (round-2
+    # B2-2), carrying no rows yet.
+    preflight = on_disk_at_submission[0]
+    jsonschema.validate(preflight, _SCHEMA)
+    assert preflight["outcome"] == "in_progress"
+    assert preflight["rows"] == []
     checkpoint = on_disk_at_submission[1]
     jsonschema.validate(checkpoint, _SCHEMA)
     assert checkpoint["outcome"] == "in_progress"
@@ -814,7 +824,8 @@ def test_the_repair_cycle_tolerates_an_absent_forcing_source(tmp_path: Path) -> 
                 "checksum": f"sha256:old-{model_id}",
             }
             for model_id in MODELS
-        ]
+        ],
+        source="gfs",
     )
     config = ReplayDriverConfig(**{**fixture.config(execute=True).__dict__, "source_id": "gfs"})
     journal = _JournalTerminals()
@@ -1180,6 +1191,107 @@ def test_resume_reruns_a_cycle_whose_state_entry_disappeared(site: _Site) -> Non
     assert len(submit.calls) == len(site.cycles)
 
 
+def test_resume_keeps_the_interrupted_cycle_prior_from_the_resume_receipt(site: _Site) -> None:
+    """B2-1: the run trees have no archive; a re-captured prior is the replay itself.
+
+    Attempt 1 overwrites cycle 2's run tree and then halts before convergence,
+    so its rows are ``halted`` -- the pre-change loader dropped exactly those,
+    and attempt 2 re-captured the prior half from the already-replayed tree.
+    """
+
+    original_manifest_sha256 = hashlib.sha256(
+        (site.run_root(CYCLE_2, MODELS[0]) / "input" / "manifest.json").read_bytes()
+    ).hexdigest()
+    journal = _JournalTerminals()
+
+    def _submit_but_only_publish_cycle_1(argv: Sequence[str], env: Mapping[str, str]) -> dict[str, Any]:
+        cycle = _cycle_from_argv(argv)
+        for model_id in MODELS:
+            site.write_run(cycle, model_id, _manifest(marker="replayed"))
+        if cycle == CYCLE_1:
+            site.add_state_entries(cycle, checksum_prefix="new")
+            journal.record_replay_terminal(cycle)
+        return {"returncode": 0}
+
+    with pytest.raises(ReplayHalted) as excinfo:
+        run_replay(
+            site.config(execute=True, cycle_timeout_seconds=0),
+            submit_pass=_submit_but_only_publish_cycle_1,
+            journal_probe=journal,
+            clock=_Clock(),
+            sleep=lambda _seconds: None,
+        )
+    first = excinfo.value.receipt
+    assert first["interruption"]["cycle"] == CYCLE_2.strftime("%Y%m%d%H")
+    halted_rows = [row for row in first["rows"] if row["cycle"] == CYCLE_2.strftime("%Y%m%d%H")]
+    assert {row["status"] for row in halted_rows} == {"halted"}
+    assert {row["prior"]["run_manifest_sha256"] for row in halted_rows} == {original_manifest_sha256}
+    assert {row["prior"]["prior_source"] for row in halted_rows} == {"captured"}
+
+    # attempt 1's receipt is the resume source and must survive attempt 2 intact
+    resume_from = site.receipt_path
+    resume_bytes_before = resume_from.read_bytes()
+    # the cycle-2 tree on disk is now the interrupted replay, not the pre-image
+    assert (
+        hashlib.sha256((site.run_root(CYCLE_2, MODELS[0]) / "input" / "manifest.json").read_bytes()).hexdigest()
+        != original_manifest_sha256
+    )
+
+    submit = _SubmitRecorder(site, journal=journal)
+    receipt = run_replay(
+        site.config(
+            execute=True,
+            resume_from=resume_from,
+            receipt_path=site.root / "attempt-2-receipt.json",
+        ),
+        submit_pass=submit,
+        journal_probe=journal,
+        clock=_Clock(),
+        sleep=lambda _seconds: None,
+    )
+
+    assert receipt["outcome"] == "completed"
+    resumed_rows = [row for row in receipt["rows"] if row["cycle"] == CYCLE_2.strftime("%Y%m%d%H")]
+    assert len(resumed_rows) == len(MODELS)
+    for row in resumed_rows:
+        assert row["status"] == "completed"
+        assert row["prior"]["prior_source"] == "resumed_receipt"
+        # the ONLY pre-image that ever existed, not a re-read of the replayed tree
+        assert row["prior"]["run_manifest_sha256"] == original_manifest_sha256
+    # cycle 1 was verified-skipped from the same receipt
+    assert {row["status"] for row in receipt["rows"] if row["cycle"] == CYCLE_1.strftime("%Y%m%d%H")} == {
+        "verified_skip"
+    }
+    assert resume_from.read_bytes() == resume_bytes_before
+    jsonschema.validate(receipt, _SCHEMA)
+
+
+def test_writing_the_receipt_to_the_resume_source_refuses(site: _Site) -> None:
+    """B2-1: the first per-cycle write would overwrite the only pre-image record."""
+
+    first = _completed_run(site)
+    resume_from = site.root / "first-receipt.json"
+    _write_json(resume_from, first)
+    before = resume_from.read_bytes()
+    (site.root / "sub").mkdir()
+
+    with pytest.raises(ReplayDriverRefused) as excinfo:
+        run_replay(
+            site.config(
+                execute=True,
+                resume_from=resume_from,
+                receipt_path=site.root / "sub" / ".." / "first-receipt.json",
+            ),
+            submit_pass=_refuse_to_submit,
+            journal_probe=_original_terminals_only,
+            clock=_Clock(),
+            sleep=lambda _seconds: None,
+        )
+
+    assert excinfo.value.reason == "receipt_path_is_resume_source"
+    assert resume_from.read_bytes() == before
+
+
 def test_an_unreadable_resume_receipt_refuses(site: _Site) -> None:
     resume_from = site.root / "not-a-receipt.json"
     resume_from.write_text("{}", encoding="utf-8")
@@ -1194,6 +1306,106 @@ def test_an_unreadable_resume_receipt_refuses(site: _Site) -> None:
         )
 
     assert excinfo.value.reason == "resume_receipt_unreadable"
+
+
+# ---------------------------------------------------------------------------
+# receipt resilience (round-2 B2-2) and reset-receipt scope (round-2 B2-4)
+# ---------------------------------------------------------------------------
+
+
+def test_an_unwritable_receipt_path_refuses_before_any_submission(site: _Site) -> None:
+    """B2-2: the write must be attempted BEFORE the first cycle is overwritten."""
+
+    locked_dir = site.root / "locked"
+    locked_dir.mkdir()
+    locked_dir.chmod(0o500)
+    try:
+        with pytest.raises(ReplayDriverRefused) as excinfo:
+            run_replay(
+                site.config(execute=True, receipt_path=locked_dir / "receipt.json"),
+                submit_pass=_refuse_to_submit,
+                journal_probe=_original_terminals_only,
+                clock=_Clock(),
+                sleep=lambda _seconds: None,
+            )
+    finally:
+        locked_dir.chmod(0o700)
+
+    assert excinfo.value.reason == "receipt_path_unwritable"
+    assert not (locked_dir / "receipt.json").exists()
+
+
+def test_a_mid_run_receipt_write_failure_halts_instead_of_printing(site: _Site) -> None:
+    """B2-2: a swallowed write left the sequence running with no receipt at all."""
+
+    receipt_dir = site.root / "receipts"
+    receipt_dir.mkdir()
+    submit = _SubmitRecorder(site)
+
+    def _submit_then_lock(argv: Sequence[str], env: Mapping[str, str]) -> dict[str, Any]:
+        result = submit(argv, env)
+        receipt_dir.chmod(0o500)
+        return result
+
+    try:
+        with pytest.raises(ReplayHalted) as excinfo:
+            run_replay(
+                site.config(execute=True, receipt_path=receipt_dir / "receipt.json"),
+                submit_pass=_submit_then_lock,
+                journal_probe=submit.journal,
+                clock=_Clock(),
+                sleep=lambda _seconds: None,
+            )
+    finally:
+        receipt_dir.chmod(0o700)
+
+    assert excinfo.value.reason == "receipt_write_failed"
+    assert excinfo.value.receipt["outcome"] == "in_progress"
+    # exactly one cycle was submitted before the halt; the sequence stopped
+    assert len(submit.calls) == 1
+
+
+def test_a_reset_receipt_scoped_to_another_source_refuses(site: _Site) -> None:
+    """B2-4: a globally non-empty receipt from the wrong scope is not evidence.
+
+    Every ``prior.state`` would be null and ``replaced_successor_entries`` would
+    then treat an empty prior checksum as "any checksum counts as replaced" --
+    the convergence oracle silently collapses to its journal leg over a scope
+    that was never cleared.
+    """
+
+    site.write_reset_receipt(scopes=[{"model_id": model_id, "source_id": "ifs"} for model_id in MODELS])
+    config = ReplayDriverConfig(**{**site.config(execute=True).__dict__, "source_id": "gfs"})
+
+    with pytest.raises(ReplayDriverRefused) as excinfo:
+        run_replay(
+            config,
+            submit_pass=_refuse_to_submit,
+            journal_probe=_original_terminals_only,
+            clock=_Clock(),
+            sleep=lambda _seconds: None,
+        )
+
+    assert excinfo.value.reason == "reset_receipt_scope_mismatch"
+    assert excinfo.value.details["uncovered_scopes"] == [
+        {"model_id": model_id, "source_id": "gfs"} for model_id in sorted(MODELS)
+    ]
+
+
+def test_a_reset_receipt_missing_one_model_scope_refuses(site: _Site) -> None:
+    site.write_reset_receipt(scopes=[{"model_id": MODELS[0], "source_id": SOURCE}])
+
+    with pytest.raises(ReplayDriverRefused) as excinfo:
+        run_replay(
+            site.config(execute=True),
+            submit_pass=_refuse_to_submit,
+            journal_probe=_original_terminals_only,
+            clock=_Clock(),
+            sleep=lambda _seconds: None,
+        )
+
+    assert excinfo.value.reason == "reset_receipt_scope_mismatch"
+    assert excinfo.value.details["uncovered_scopes"] == [{"model_id": MODELS[1], "source_id": SOURCE}]
 
 
 # ---------------------------------------------------------------------------
@@ -1275,7 +1487,8 @@ def test_the_repair_env_reaches_the_submitted_pass_for_that_cycle_only(tmp_path:
             }
             for cycle in fixture.cycles
             for model_id in MODELS
-        ]
+        ],
+        source="gfs",
     )
 
     run_replay(
@@ -1287,6 +1500,117 @@ def test_the_repair_env_reaches_the_submitted_pass_for_that_cycle_only(tmp_path:
     )
 
     assert calls == [("2026070712", "1"), ("2026070800", "false")]
+
+
+# ---------------------------------------------------------------------------
+# terminal completion probe shape (round-2 B2-6)
+# ---------------------------------------------------------------------------
+
+
+def test_cohort_terminal_job_is_attributed_to_every_requested_model() -> None:
+    """Production shape: the completion record is cohort scoped, ``model_id`` null."""
+
+    jobs = [
+        {
+            "job_id": "job_cycle_ifs_2026070500_state_save_qc_cohort_abc123_state_save_qc",
+            "run_id": "cycle_ifs_2026070500_state_save_qc_cohort_abc123",
+            "model_id": None,
+            "status": "succeeded",
+            "stage": "state_save_qc",
+        }
+    ]
+
+    assert replay_capture.terminal_completion_job_ids(jobs, model_ids=MODELS) == {
+        model_id: ["job_cycle_ifs_2026070500_state_save_qc_cohort_abc123_state_save_qc"]
+        for model_id in MODELS
+    }
+
+
+def test_a_model_scoped_terminal_job_is_attributed_to_that_model_only() -> None:
+    jobs = [
+        {"job_id": "job-alpha", "model_id": MODELS[0], "status": "succeeded", "stage": "state_save_qc"},
+    ]
+
+    assert replay_capture.terminal_completion_job_ids(jobs, model_ids=MODELS) == {
+        MODELS[0]: ["job-alpha"],
+        MODELS[1]: [],
+    }
+
+
+@pytest.mark.parametrize(
+    "job",
+    [
+        pytest.param(
+            {"job_id": "job-running", "model_id": None, "status": "running", "stage": "state_save_qc"},
+            id="non-terminal-status",
+        ),
+        pytest.param(
+            {"job_id": "job-forecast", "model_id": None, "status": "succeeded", "stage": "forecast"},
+            id="non-terminal-stage",
+        ),
+        pytest.param(
+            {"job_id": "", "model_id": None, "status": "succeeded", "stage": "state_save_qc"},
+            id="empty-job-id",
+        ),
+        pytest.param(
+            {"job_id": "job-other", "model_id": "dg_not_in_scope", "status": "succeeded", "stage": "state_save_qc"},
+            id="out-of-scope-model",
+        ),
+    ],
+)
+def test_non_terminal_or_out_of_scope_jobs_are_not_completion_evidence(job: Mapping[str, Any]) -> None:
+    assert replay_capture.terminal_completion_job_ids([job], model_ids=MODELS) == {
+        model_id: [] for model_id in MODELS
+    }
+
+
+def test_duplicate_terminal_job_ids_are_deduped_and_sorted() -> None:
+    jobs = [
+        {"job_id": "job-b", "model_id": None, "status": "succeeded", "stage": "state_save_qc"},
+        {"job_id": "job-b", "model_id": MODELS[0], "status": "published", "stage": "publish"},
+        {"job_id": "job-a", "model_id": None, "status": "complete", "stage": "parse"},
+    ]
+
+    assert replay_capture.terminal_completion_job_ids(jobs, model_ids=MODELS) == {
+        model_id: ["job-a", "job-b"] for model_id in MODELS
+    }
+
+
+def test_default_journal_probe_reads_a_real_cohort_record(site: _Site) -> None:
+    """End-to-end: the probe's shape assumption is pinned against the real writer."""
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from workers.data_adapters.base import cycle_id_for
+
+    repository = FileOrchestrationJournalRepository(str(site.journal_root))
+    cycle_id = cycle_id_for(SOURCE, CYCLE_1)
+    stamp = CYCLE_1.strftime("%Y%m%d%H")
+    cohort_run_id = f"cycle_{SOURCE.lower()}_{stamp}_forecast_cohort_abc123"
+    repository.upsert_pipeline_job(
+        {
+            "job_id": f"job_{cohort_run_id}_state_save_qc",
+            "idempotency_key": f"{SOURCE.lower()}:{cycle_id}:cohort:state_save_qc:abc123",
+            "run_id": cohort_run_id,
+            "cycle_id": cycle_id,
+            "source_id": SOURCE.lower(),
+            "cycle_time": _format_time(CYCLE_1),
+            "job_type": "run_state_save_qc",
+            "slurm_job_id": "7002",
+            "model_id": None,
+            "status": "succeeded",
+            "stage": "state_save_qc",
+            "submitted_at": _format_time(CYCLE_1),
+            "created_at": _format_time(CYCLE_1),
+        }
+    )
+
+    probe = replay_driver.default_journal_probe(site.config(), CYCLE_1)
+
+    assert set(probe) == set(MODELS)
+    for model_id in MODELS:
+        assert probe[model_id] == [f"job_{cohort_run_id}_state_save_qc"]
+    # a cycle with no records is empty, not "done"
+    assert replay_driver.default_journal_probe(site.config(), CYCLE_2) == {model_id: [] for model_id in MODELS}
 
 
 # ---------------------------------------------------------------------------

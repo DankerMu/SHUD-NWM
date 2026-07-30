@@ -48,9 +48,14 @@ very historical cycles being replayed.
 
 Resumption (``--resume-from <receipt>``) never blind-skips: a cycle is skipped
 only when the state index still holds the recorded new state entry AND its
-checksum matches the receipt row.  The replacement receipt is rewritten
-atomically after every cycle, so an interrupted sequence leaves the completed
-rows on disk.
+checksum matches the receipt row.  A resumed row's PRIOR half is reused verbatim
+whatever its status (``halted`` included): the run trees carry no archive, so
+re-capturing the prior from a tree the interrupted attempt already replayed
+would destroy the only pre-image that ever existed (round-2 B2-1).  For the same
+reason the driver refuses to write its receipt to the path it resumes from.  The
+replacement receipt is rewritten atomically after every cycle, so an interrupted
+sequence leaves the completed rows on disk; an ``in_progress`` receipt is written
+BEFORE the first submission, which doubles as the writability pre-flight.
 
 Exit codes: ``0`` success (or dry run), ``2`` refusal before any submission,
 ``3`` halted mid-sequence with the interruption recorded.
@@ -127,6 +132,16 @@ REPAIR_CYCLES: frozenset[tuple[str, str]] = frozenset({("gfs", "2026070712")})
 #: packaged-IC first cycle and halt on an assertion that cannot hold
 #: (round-1 B-P1-2).
 DEFAULT_REPLAY_ORIGIN_CYCLE = datetime(2026, 7, 5, 0, tzinfo=UTC)
+
+class ReceiptWriteError(RuntimeError):
+    """The replacement receipt could not be written.
+
+    Never swallowed: before the first submission it is a refusal (exit 2), and
+    mid-sequence it is a typed halt (exit 3).  A sequence that keeps submitting
+    with no receipt on disk is exactly the untraceable overwrite this driver
+    exists to prevent (round-2 B2-2).
+    """
+
 
 class ReplayHalted(RuntimeError):
     """The sequence stopped mid-flight; the receipt records the interruption."""
@@ -258,7 +273,15 @@ def run_replay(
 ) -> dict[str, Any]:
     started_at = clock()
     _assert_retention_disabled(config)
-    removed_entries = load_reset_removed_entries(config.reset_receipt)
+    # BEFORE any receipt write: writing the in-progress receipt over the resume
+    # source would destroy the only record of the interrupted attempt's prior
+    # half (round-2 B2-1).
+    _assert_receipt_path_is_not_the_resume_source(config)
+    removed_entries = load_reset_removed_entries(
+        config.reset_receipt,
+        source_id=config.source_id,
+        model_ids=config.model_ids,
+    )
     resumed_rows = _load_resume_rows(config)
 
     receipt: dict[str, Any] = {
@@ -284,11 +307,22 @@ def run_replay(
         "interruption": None,
     }
 
+    # Writability pre-flight: the first receipt write happens BEFORE the first
+    # submission, so an unwritable path is a refusal with zero submissions
+    # instead of a discovery made after the first cycle is already overwritten.
+    try:
+        _write_receipt(config.receipt_path, receipt)
+    except ReceiptWriteError as error:
+        raise ReplayDriverRefused(
+            "receipt_path_unwritable",
+            {"path": str(config.receipt_path), "error": str(error)},
+        ) from error
+
     for cycle_time in config.cycles:
         verified = _verified_resume_skip(config, cycle_time, resumed_rows)
         if verified is not None:
             receipt["rows"].extend(verified)
-            _write_receipt(config.receipt_path, receipt)
+            _checkpoint_receipt(config, receipt, cycle_time)
             continue
         prior_probe = dict(journal_probe(config, cycle_time))
         prior_terminal_jobs = {
@@ -302,6 +336,7 @@ def run_replay(
                 model_id,
                 removed_entries=removed_entries,
                 prior_terminal_job_ids=prior_terminal_jobs[model_id],
+                resumed_row=resumed_rows.get((cycle_time.strftime("%Y%m%d%H"), model_id)),
             )
             for model_id in config.model_ids
         ]
@@ -311,7 +346,7 @@ def run_replay(
             for row in rows:
                 row["status"] = "planned"
             receipt["rows"].extend(rows)
-            _write_receipt(config.receipt_path, receipt)
+            _checkpoint_receipt(config, receipt, cycle_time)
             continue
 
         staging_halt = _staging_halt(config, cycle_time, rows)
@@ -369,12 +404,52 @@ def run_replay(
         receipt["rows"].extend(rows)
         # Atomic per-cycle checkpoint: a crash on the next cycle keeps every row
         # finished so far, instead of losing the whole sequence.
-        _write_receipt(config.receipt_path, receipt)
+        _checkpoint_receipt(config, receipt, cycle_time)
 
     receipt["outcome"] = "completed"
     receipt["finished_at"] = _format_time(clock())
-    _write_receipt(config.receipt_path, receipt)
+    _checkpoint_receipt(config, receipt, None)
     return receipt
+
+
+def _checkpoint_receipt(
+    config: ReplayDriverConfig,
+    receipt: dict[str, Any],
+    cycle_time: datetime | None,
+) -> None:
+    """Write the receipt; a failure halts the sequence instead of printing."""
+
+    try:
+        _write_receipt(config.receipt_path, receipt)
+    except ReceiptWriteError as error:
+        raise ReplayHalted(
+            "receipt_write_failed",
+            receipt=receipt,
+            details={
+                "cycle": cycle_time.strftime("%Y%m%d%H") if cycle_time is not None else None,
+                "path": str(config.receipt_path),
+                "error": str(error),
+            },
+        ) from error
+
+
+def _assert_receipt_path_is_not_the_resume_source(config: ReplayDriverConfig) -> None:
+    if config.resume_from is None:
+        return
+    receipt_path = _resolved_path(config.receipt_path)
+    resume_path = _resolved_path(config.resume_from)
+    if receipt_path == resume_path:
+        raise ReplayDriverRefused(
+            "receipt_path_is_resume_source",
+            {"receipt_path": str(receipt_path), "resume_from": str(resume_path)},
+        )
+
+
+def _resolved_path(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError):  # pragma: no cover - defensive
+        return path.absolute()
 
 
 def _halt(
@@ -397,8 +472,15 @@ def _halt(
         "recorded_at": _format_time(datetime.now(tz=UTC)),
     }
     receipt["finished_at"] = _format_time(datetime.now(tz=UTC))
-    _write_receipt(config.receipt_path, receipt)
-    raise ReplayHalted(reason, receipt=receipt, details={"cycle": cycle_time.strftime("%Y%m%d%H")})
+    details: dict[str, Any] = {"cycle": cycle_time.strftime("%Y%m%d%H")}
+    try:
+        _write_receipt(config.receipt_path, receipt)
+    except ReceiptWriteError as error:
+        # The halt still stands and still exits non-zero; the operator is told
+        # the receipt could not be persisted rather than left to assume it was.
+        details["receipt_write_error"] = str(error)
+        details["receipt_path"] = str(config.receipt_path)
+    raise ReplayHalted(reason, receipt=receipt, details=details)
 
 
 def _assert_retention_disabled(config: ReplayDriverConfig) -> None:
@@ -463,6 +545,7 @@ def _pre_capture_row(
     *,
     removed_entries: Mapping[tuple[str, str, str], Mapping[str, Any]],
     prior_terminal_job_ids: Sequence[str],
+    resumed_row: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     run_id = run_id_for(config.source_id, cycle_time, model_id)
     capture = run_capture(config.nfs_root, run_id)
@@ -477,7 +560,7 @@ def _pre_capture_row(
         cycle_time=cycle_time,
         model_id=model_id,
     )
-    return {
+    row: dict[str, Any] = {
         "cycle": cycle_time.strftime("%Y%m%d%H"),
         "cycle_time": _format_time(cycle_time),
         "source_id": normalize_source_id(config.source_id),
@@ -485,6 +568,7 @@ def _pre_capture_row(
         "run_id": run_id,
         "status": "planned",
         "prior": {
+            "prior_source": "captured",
             "run_manifest_sha256": capture["manifest_sha256"],
             "output_inventory": capture["output_inventory"],
             "no_prior_run": bool(capture["no_prior_run"]),
@@ -512,6 +596,35 @@ def _pre_capture_row(
         "key_consistency": None,
         "bootstrap_assertion": None,
     }
+    return _with_resumed_prior(row, resumed_row)
+
+
+def _with_resumed_prior(
+    row: dict[str, Any],
+    resumed_row: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Keep the interrupted attempt's pre-image instead of re-capturing it.
+
+    The run trees have no archive: once a cycle has been submitted the prior
+    manifest and outputs are gone, so a resumed attempt that re-captures its
+    prior half records the replayed tree as the "prior" and the key-consistency
+    assertion degenerates into replay-versus-replay.  Any resume-receipt row for
+    this (cycle, model) therefore wins, whatever its status -- the interrupted
+    cycle's rows are precisely the ``halted`` ones (round-2 B2-1).
+    """
+
+    if not isinstance(resumed_row, Mapping):
+        return row
+    resumed_prior = resumed_row.get("prior")
+    if not isinstance(resumed_prior, Mapping):
+        return row
+    row["prior"] = {**dict(resumed_prior), "prior_source": "resumed_receipt"}
+    resumed_inputs = resumed_row.get("inputs")
+    if isinstance(resumed_inputs, Mapping):
+        # The input checksums belong to the same pre-image half; the forcing
+        # package may have been re-staged since.
+        row["inputs"] = dict(resumed_inputs)
+    return row
 
 
 def _model_package_dir(config: ReplayDriverConfig, model_id: str) -> Path | None:
@@ -782,6 +895,15 @@ def _row_assertion_failure(row: Mapping[str, Any]) -> str | None:
 
 
 def _load_resume_rows(config: ReplayDriverConfig) -> dict[tuple[str, str], dict[str, Any]]:
+    """Index EVERY row of the resume receipt by (cycle, model).
+
+    Completed rows drive the verified skip; non-completed rows (``halted``,
+    ``planned``) are indexed too, for their ``prior``/``inputs`` half only --
+    that half is the sole surviving pre-image of the cycle the interrupted
+    attempt had already begun to overwrite (round-2 B2-1).  A later row for the
+    same key wins, matching the receipt's append order.
+    """
+
     if config.resume_from is None:
         return {}
     payload = _read_json(config.resume_from, max_bytes=MAX_RECEIPT_BYTES)
@@ -789,7 +911,7 @@ def _load_resume_rows(config: ReplayDriverConfig) -> dict[tuple[str, str], dict[
         raise ReplayDriverRefused("resume_receipt_unreadable", {"path": str(config.resume_from)})
     rows: dict[tuple[str, str], dict[str, Any]] = {}
     for row in payload.get("rows") or []:
-        if not isinstance(row, Mapping) or row.get("status") != "completed":
+        if not isinstance(row, Mapping):
             continue
         rows[(str(row.get("cycle") or ""), str(row.get("model_id") or ""))] = dict(row)
     return rows
@@ -841,8 +963,8 @@ def _write_receipt(path: Path, receipt: Mapping[str, Any]) -> None:
     try:
         ensure_directory_no_follow(path.parent)
         atomic_write_bytes_no_follow(path, content, mode=0o600)
-    except (OSError, SafeFilesystemError) as error:  # pragma: no cover - operator-visible best effort
-        print(f"receipt write failed: {error}", file=sys.stderr)
+    except (OSError, SafeFilesystemError) as error:
+        raise ReceiptWriteError(str(error)) from error
 
 
 def _format_time(value: datetime) -> str:

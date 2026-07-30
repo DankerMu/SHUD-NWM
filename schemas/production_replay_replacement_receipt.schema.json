@@ -160,11 +160,17 @@
             "no_prior_run",
             "state",
             "state_source",
+            "prior_source",
             "river_network_version_id",
             "output_segment_count",
             "terminal_job_ids"
           ],
           "properties": {
+            "prior_source": {
+              "type": "string",
+              "enum": ["captured", "resumed_receipt"],
+              "description": "Provenance of this pre-image half. 'resumed_receipt' means the row was recovered from the receipt this run resumes from, because the run tree it describes has already been overwritten by the interrupted attempt (round-2 B2-1); re-capturing it would record a replay as its own pre-image."
+            },
             "run_manifest_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
             "output_inventory": { "$ref": "#/definitions/digest" },
             "no_prior_run": { "type": "boolean" },

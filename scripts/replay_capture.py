@@ -350,13 +350,26 @@ def key_consistency(prior: Mapping[str, Any], new: Mapping[str, Any]) -> dict[st
 # ---------------------------------------------------------------------------
 
 
-def load_reset_removed_entries(path: Path) -> dict[tuple[str, str, str], dict[str, Any]]:
+def load_reset_removed_entries(
+    path: Path,
+    *,
+    source_id: str,
+    model_ids: Sequence[str],
+) -> dict[tuple[str, str, str], dict[str, Any]]:
     """Index the reset receipt's removed entries by (model, source, valid_time).
 
     This is the ONLY admissible source for the prior state fields: the scope was
     cleared before the replay started, so the live index is empty by
     construction and a "read it back" implementation would silently record
     nulls.
+
+    The receipt's own ``scopes[]`` must cover every (model, source) this run
+    replays (round-2 B2-4).  A globally non-empty receipt from the OTHER source
+    passes a mere non-emptiness check while supplying no entry for any key of
+    this run: every ``prior.state`` would be null and
+    :func:`replaced_successor_entries` would treat an empty prior checksum as
+    "any checksum counts as replaced", collapsing the convergence oracle to its
+    journal leg over an un-cleared scope.
     """
 
     payload = _read_json(path, max_bytes=MAX_RECEIPT_BYTES)
@@ -374,6 +387,7 @@ def load_reset_removed_entries(path: Path) -> dict[tuple[str, str, str], dict[st
             "reset_receipt_not_completed",
             {"path": str(path), "outcome": outcome or None},
         )
+    _assert_reset_receipt_scope_covers(path, payload, source_id=source_id, model_ids=model_ids)
     lanes = payload.get("lanes")
     if not isinstance(lanes, Sequence) or not lanes:
         raise ReplayDriverRefused("reset_receipt_lanes_missing", {"path": str(path)})
@@ -402,6 +416,46 @@ def load_reset_removed_entries(path: Path) -> dict[tuple[str, str, str], dict[st
     if not resolved:
         raise ReplayDriverRefused("reset_receipt_has_no_removed_entries", {"path": str(path)})
     return resolved
+
+
+def _assert_reset_receipt_scope_covers(
+    path: Path,
+    payload: Mapping[str, Any],
+    *,
+    source_id: str,
+    model_ids: Sequence[str],
+) -> None:
+    """Refuse a reset receipt whose ``scopes[]`` does not cover this run."""
+
+    scopes = payload.get("scopes")
+    covered: set[tuple[str, str]] = set()
+    if isinstance(scopes, Sequence) and not isinstance(scopes, str | bytes):
+        for scope in scopes:
+            if not isinstance(scope, Mapping):
+                continue
+            scope_model = str(scope.get("model_id") or "").strip()
+            scope_source = str(scope.get("source_id") or "").strip()
+            if not scope_model or not scope_source:
+                continue
+            covered.add((scope_model, normalize_source_id(scope_source)))
+    canonical_source = normalize_source_id(source_id)
+    required = {(str(model_id), canonical_source) for model_id in model_ids}
+    missing = sorted(required - covered)
+    if missing:
+        raise ReplayDriverRefused(
+            "reset_receipt_scope_mismatch",
+            {
+                "path": str(path),
+                "source_id": canonical_source,
+                "uncovered_scopes": [
+                    {"model_id": model_id, "source_id": scope_source} for model_id, scope_source in missing
+                ],
+                "receipt_scopes": [
+                    {"model_id": model_id, "source_id": scope_source}
+                    for model_id, scope_source in sorted(covered)
+                ],
+            },
+        )
 
 
 def read_state_index_entries(path: Path) -> list[dict[str, Any]]:
@@ -492,8 +546,9 @@ def terminal_completion_job_ids(
     """Terminal completion job ids per model, cohort jobs included.
 
     The production completion record is cohort scoped (``model_id`` null, run id
-    ``cycle_<src>_<stamp>_convert_cohort_*``) and matches every candidate of the
+    ``cycle_<src>_<stamp>_forecast_cohort_*``) and matches every candidate of the
     cycle, so a model-less terminal job is attributed to all requested models.
+    A job that names a model is attributed to that model only.
     """
 
     resolved: dict[str, list[str]] = {model_id: [] for model_id in model_ids}
