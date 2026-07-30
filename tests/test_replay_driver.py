@@ -1,19 +1,31 @@
 """Tests for the serial six-basin replay driver (#1164 change 2, tasks.md 3.3).
 
+Fixtures are production-shaped on the three points round 1 got wrong:
+
+* state-index entries carry ``created_at: null`` (1753/1753 on node-22), so the
+  convergence oracle is checksum-vs-reset-receipt, never a since-gate;
+* the journal keeps the ORIGINAL run's terminal completion record across the
+  state-scope reset, so the completion probe baselines job ids pre-pass;
+* run manifests carry no ``outputs.variables``; key consistency is asserted over
+  ``river_network_version_id``, the output segment count and the output file
+  inventory.
+
 Covered, one test per required property:
 
 * receipt row completeness -- the forcing/model package checksums are recorded
   UNCONDITIONALLY, including on a row with no prior run;
-* the first replayed cycle's new half must be the packaged-IC bootstrap shape,
-  otherwise the driver halts;
-* key drift (``river_network_version_id`` / variable key set) halts the driver;
-* the wait condition really is "state index entry created after this pass
-  started" -- a stale entry with the right ``valid_time`` does not satisfy it;
+* the replay-sequence ORIGIN cycle's new half must be the packaged-IC bootstrap
+  shape, otherwise the driver halts -- and a resumed mid-window run does not
+  mistake its first cycle for the origin;
+* key drift halts the driver;
+* convergence needs a new terminal job id AND a replaced successor checksum;
+* the receipt is on disk after every cycle, not only at the end;
+* an unverified staging result halts before submission (repair cycles excepted);
 * resumption never blind-skips: a recorded row is skipped only when the live
   index still carries the recorded checksum;
 * the repair parameter set is switched on for GFS 2026070712 and nothing else;
 * the prior state fields come from the reset receipt; a receipt that cannot
-  supply them is a refusal, never a silent null.
+  supply them, or that did not complete, is a refusal, never a silent null.
 """
 
 from __future__ import annotations
@@ -73,23 +85,37 @@ def _manifest(
     quality: str = "packaged_calibrated_state",
     packaged_ic_checksum: str = "sha256:ic",
     river_network_version_id: str = "rn-2026a",
-    variables: Sequence[str] = ("discharge", "stage"),
+    output_segment_count: int = 412,
     marker: str = "prior",
 ) -> dict[str, Any]:
+    """The real forecast run manifest shape (``chain_manifests``).
+
+    There is deliberately NO ``outputs.variables`` key: none of the 36 sampled
+    production manifests has one, which is exactly why the old key-consistency
+    assertion never fired (round-1 B-P1-3).
+    """
+
     return {
         "marker": marker,
+        "run_type": "forecast",
         "model": {
             "river_network_version_id": river_network_version_id,
             "model_package_checksum": "sha256:model",
+            "segment_count": output_segment_count,
+            "output_segment_count": output_segment_count,
         },
-        "runtime": {"init_mode": init_mode},
+        "runtime": {"init_mode": init_mode, "output_interval_minutes": 60},
         "initial_state": {
             "state_id": f"state-{marker}",
             "checksum": f"sha256:{marker}",
             "quality": quality,
             "packaged_ic_checksum": packaged_ic_checksum,
         },
-        "outputs": {"variables": {name: {"unit": "m3/s"} for name in variables}},
+        "outputs": {
+            "output_uri": "s3://nhms/runs/output",
+            "output_segment_count": output_segment_count,
+            "gis_segment_count": output_segment_count,
+        },
     }
 
 
@@ -116,19 +142,33 @@ class _Site:
         run_id = f"fcst_{SOURCE.lower()}_{cycle.strftime('%Y%m%d%H')}_{model_id}"
         return self.nfs_root / "runs" / run_id
 
-    def write_run(self, cycle: datetime, model_id: str, manifest: Mapping[str, Any]) -> None:
+    def write_run(
+        self,
+        cycle: datetime,
+        model_id: str,
+        manifest: Mapping[str, Any],
+        *,
+        output_files: Sequence[str] = ("discharge.csv", "stage.csv"),
+    ) -> None:
         root = self.run_root(cycle, model_id)
         _write_json(root / "input" / "manifest.json", manifest)
-        (root / "output").mkdir(parents=True, exist_ok=True)
-        (root / "output" / "discharge.csv").write_text(
-            f"{manifest.get('marker')},{cycle.isoformat()},{model_id}\n", encoding="utf-8"
-        )
+        output_root = root / "output"
+        if output_root.exists():
+            for existing in sorted(output_root.iterdir()):
+                existing.unlink()
+        output_root.mkdir(parents=True, exist_ok=True)
+        for name in output_files:
+            # A replay legitimately rewrites every output byte; the file SET is
+            # what must not drift.
+            (output_root / name).write_text(
+                f"{manifest.get('marker')},{cycle.isoformat()},{model_id}\n", encoding="utf-8"
+            )
 
-    def write_forcing(self, cycle: datetime, model_id: str) -> Path:
+    def write_forcing(self, cycle: datetime, model_id: str, *, source: str = SOURCE) -> Path:
         package = (
             self.nfs_root
             / "forcing"
-            / SOURCE.lower()
+            / source.lower()
             / cycle.strftime("%Y%m%d%H")
             / BASIN_VERSION
             / model_id
@@ -160,16 +200,30 @@ class _Site:
         payload = json.loads(self.state_index.read_text(encoding="utf-8"))
         return list(payload["entries"])
 
-    def add_state_entries(self, cycle: datetime, *, created_at: datetime, checksum_prefix: str) -> None:
-        entries = self.index_entries()
+    def add_state_entries(self, cycle: datetime, *, checksum_prefix: str) -> None:
+        """Upsert one successor entry per model, production shape.
+
+        ``created_at`` is ``None``: the state-index writer never sets it (1753 of
+        1753 entries in both node-22 lanes), which is why the convergence oracle
+        may not use a since-gate (round-1 B-P1-1).
+        """
+
         valid_time = cycle + timedelta(hours=12)
+        entries = [
+            entry
+            for entry in self.index_entries()
+            if not (
+                str(entry.get("model_id")) in MODELS
+                and str(entry.get("valid_time")) == _format_time(valid_time)
+            )
+        ]
         for model_id in MODELS:
             entries.append(
                 {
                     "model_id": model_id,
                     "source_id": SOURCE,
                     "valid_time": _format_time(valid_time),
-                    "created_at": _format_time(created_at),
+                    "created_at": None,
                     "state_id": f"{checksum_prefix}-{model_id}-{cycle.strftime('%Y%m%d%H')}",
                     "checksum": f"sha256:{checksum_prefix}-{model_id}-{cycle.strftime('%Y%m%d%H')}",
                 }
@@ -178,7 +232,12 @@ class _Site:
 
     # -- reset receipt -----------------------------------------------------
 
-    def write_reset_receipt(self, *, removed: Sequence[Mapping[str, Any]] | None = None) -> None:
+    def write_reset_receipt(
+        self,
+        *,
+        removed: Sequence[Mapping[str, Any]] | None = None,
+        outcome: str = "completed",
+    ) -> None:
         if removed is None:
             removed = [
                 {
@@ -196,7 +255,7 @@ class _Site:
             self.reset_receipt,
             {
                 "schema_version": "nhms.replay_state_scope_reset.v1",
-                "outcome": "completed",
+                "outcome": outcome,
                 "enforced": True,
                 "lanes": [
                     {"lane": "scratch", "removed_entries": [dict(entry) for entry in removed]},
@@ -235,6 +294,35 @@ class _Clock:
         return current
 
 
+class _JournalTerminals:
+    """Journal completion probe: terminal job ids per cycle.
+
+    The state-scope reset does not touch the journal, so the ORIGINAL run's
+    terminal completion record is present before the replay pass starts — a
+    boolean "has a completion" probe is therefore true from the outset
+    (round-1 B-P2-7).  ``record_replay_terminal`` is what a real replayed cycle
+    adds: a NEW job id alongside the original one.
+    """
+
+    def __init__(self, *, original_terminal: bool = True) -> None:
+        self.original_terminal = original_terminal
+        self.replayed: dict[str, str] = {}
+
+    def __call__(self, config: ReplayDriverConfig, cycle_time: datetime) -> dict[str, list[str]]:
+        token = cycle_time.strftime("%Y%m%d%H")
+        ids: list[str] = []
+        if self.original_terminal:
+            ids.append(f"job-original-{token}")
+        replayed = self.replayed.get(token)
+        if replayed is not None:
+            ids.append(replayed)
+        return {model_id: list(ids) for model_id in config.model_ids}
+
+    def record_replay_terminal(self, cycle_time: datetime) -> None:
+        token = cycle_time.strftime("%Y%m%d%H")
+        self.replayed[token] = f"job-replay-{token}"
+
+
 class _SubmitRecorder:
     """Fake pass: records the invocation and mutates the site like a real pass."""
 
@@ -243,15 +331,19 @@ class _SubmitRecorder:
         site: _Site,
         *,
         new_manifest: Mapping[str, Any] | None = None,
-        entry_created_at: datetime | None = None,
+        new_output_files: Sequence[str] = ("discharge.csv", "stage.csv"),
         returncode: int = 0,
         publish_entries: bool = True,
+        publish_terminal: bool = True,
+        journal: _JournalTerminals | None = None,
     ) -> None:
         self.site = site
         self.new_manifest = new_manifest
-        self.entry_created_at = entry_created_at
+        self.new_output_files = tuple(new_output_files)
         self.returncode = returncode
         self.publish_entries = publish_entries
+        self.publish_terminal = publish_terminal
+        self.journal = journal if journal is not None else _JournalTerminals()
         self.calls: list[tuple[list[str], dict[str, str]]] = []
 
     def __call__(self, argv: Sequence[str], env: Mapping[str, str]) -> dict[str, Any]:
@@ -260,13 +352,11 @@ class _SubmitRecorder:
         if self.returncode == 0:
             manifest = dict(self.new_manifest or _manifest(marker="replayed"))
             for model_id in MODELS:
-                self.site.write_run(cycle, model_id, manifest)
+                self.site.write_run(cycle, model_id, manifest, output_files=self.new_output_files)
             if self.publish_entries:
-                self.site.add_state_entries(
-                    cycle,
-                    created_at=self.entry_created_at or (BASE_TIME + timedelta(hours=1)),
-                    checksum_prefix="new",
-                )
+                self.site.add_state_entries(cycle, checksum_prefix="new")
+            if self.publish_terminal:
+                self.journal.record_replay_terminal(cycle)
         return {"returncode": self.returncode, "stdout_tail": "", "stderr_tail": ""}
 
 
@@ -275,8 +365,10 @@ def _cycle_from_argv(argv: Sequence[str]) -> datetime:
     return datetime.fromisoformat(str(argv[index + 1]).replace("Z", "+00:00"))
 
 
-def _all_terminal(config: ReplayDriverConfig, cycle_time: datetime) -> dict[str, bool]:
-    return dict.fromkeys(config.model_ids, True)
+def _original_terminals_only(config: ReplayDriverConfig, cycle_time: datetime) -> dict[str, list[str]]:
+    """Pre-pass journal: only the original run's terminal record exists."""
+
+    return _JournalTerminals()(config, cycle_time)
 
 
 def _refuse_to_submit(argv: Sequence[str], env: Mapping[str, str]) -> dict[str, Any]:
@@ -299,7 +391,7 @@ def test_dry_run_plans_every_row_submits_nothing_and_matches_the_schema(site: _S
     receipt = run_replay(
         site.config(),
         submit_pass=_refuse_to_submit,
-        journal_probe=_all_terminal,
+        journal_probe=_original_terminals_only,
         clock=_Clock(),
         sleep=lambda _seconds: None,
     )
@@ -334,7 +426,7 @@ def test_input_checksums_are_recorded_even_on_a_row_with_no_prior_run(tmp_path: 
     receipt = run_replay(
         fixture.config(registry_manifest=registry),
         submit_pass=_refuse_to_submit,
-        journal_probe=_all_terminal,
+        journal_probe=_original_terminals_only,
         clock=_Clock(),
         sleep=lambda _seconds: None,
     )
@@ -354,18 +446,46 @@ def test_inventory_census_is_taken_on_site(site: _Site) -> None:
     receipt = run_replay(
         site.config(),
         submit_pass=_refuse_to_submit,
-        journal_probe=_all_terminal,
+        journal_probe=_original_terminals_only,
         clock=_Clock(),
         sleep=lambda _seconds: None,
     )
 
     census = receipt["inventory_census"]
+    assert census["enumeration_status"] == "present"
     assert census["frontier_cycle"] == CYCLE_2.strftime("%Y%m%d%H")
     assert {scope["model_id"] for scope in census["scopes"]} == set(MODELS)
     for scope in census["scopes"]:
         assert scope["run_cycles"] == [cycle.strftime("%Y%m%d%H") for cycle in site.cycles]
         # the scope was cleared before the replay: the live index holds nothing
         assert scope["state_index_entry_count"] == 0
+
+
+def test_inventory_census_enumeration_is_not_truncated_to_the_requested_window(site: _Site) -> None:
+    """B-P2-8: the census is on-site, so a run past the requested range shows up.
+
+    A frontier that advanced after the survey must be visible in the receipt
+    rather than silently clipped to ``--end-cycle``.
+    """
+
+    advanced = datetime(2026, 7, 21, 12, tzinfo=UTC)
+    for model_id in MODELS:
+        site.write_run(advanced, model_id, _manifest(marker="post-survey"))
+
+    receipt = run_replay(
+        site.config(),
+        submit_pass=_refuse_to_submit,
+        journal_probe=_original_terminals_only,
+        clock=_Clock(),
+        sleep=lambda _seconds: None,
+    )
+
+    census = receipt["inventory_census"]
+    assert census["frontier_cycle"] == "2026072112"
+    assert census["requested_frontier_cycle"] == CYCLE_2.strftime("%Y%m%d%H")
+    for scope in census["scopes"]:
+        assert "2026072112" in scope["run_cycles"]
+        assert scope["run_cycle_count"] == len(site.cycles) + 1
 
 
 # ---------------------------------------------------------------------------
@@ -377,7 +497,7 @@ def test_prior_state_comes_from_the_reset_receipt_not_the_cleared_index(site: _S
     receipt = run_replay(
         site.config(),
         submit_pass=_refuse_to_submit,
-        journal_probe=_all_terminal,
+        journal_probe=_original_terminals_only,
         clock=_Clock(),
         sleep=lambda _seconds: None,
     )
@@ -397,12 +517,37 @@ def test_a_reset_receipt_without_removed_entries_refuses_instead_of_recording_nu
         run_replay(
             site.config(),
             submit_pass=_refuse_to_submit,
-            journal_probe=_all_terminal,
+            journal_probe=_original_terminals_only,
             clock=_Clock(),
             sleep=lambda _seconds: None,
         )
 
     assert excinfo.value.reason == "reset_receipt_has_no_removed_entries"
+    assert not site.receipt_path.exists()
+
+
+@pytest.mark.parametrize("outcome", ["commit_uncertain", "refused"])
+def test_a_reset_receipt_that_did_not_complete_refuses(site: _Site, outcome: str) -> None:
+    """B-P2-11: an irreversible replacement may not start off a half-committed reset.
+
+    ``commit_uncertain`` means the reset's own read-back could not confirm the
+    write; proceeding would overwrite production runs on top of a state scope
+    whose content is unknown.
+    """
+
+    site.write_reset_receipt(outcome=outcome)
+
+    with pytest.raises(ReplayDriverRefused) as excinfo:
+        run_replay(
+            site.config(),
+            submit_pass=_refuse_to_submit,
+            journal_probe=_original_terminals_only,
+            clock=_Clock(),
+            sleep=lambda _seconds: None,
+        )
+
+    assert excinfo.value.reason == "reset_receipt_not_completed"
+    assert excinfo.value.details["outcome"] == outcome
     assert not site.receipt_path.exists()
 
 
@@ -413,7 +558,7 @@ def test_a_missing_reset_receipt_refuses(site: _Site) -> None:
         run_replay(
             site.config(),
             submit_pass=_refuse_to_submit,
-            journal_probe=_all_terminal,
+            journal_probe=_original_terminals_only,
             clock=_Clock(),
             sleep=lambda _seconds: None,
         )
@@ -426,7 +571,7 @@ def test_retention_must_be_disabled_before_anything_runs(site: _Site) -> None:
         run_replay(
             site.config(env={"NHMS_RETENTION_ENABLED": "true"}),
             submit_pass=_refuse_to_submit,
-            journal_probe=_all_terminal,
+            journal_probe=_original_terminals_only,
             clock=_Clock(),
             sleep=lambda _seconds: None,
         )
@@ -446,7 +591,7 @@ def test_execute_stages_forcing_and_completes_every_row(site: _Site) -> None:
     receipt = run_replay(
         site.config(execute=True),
         submit_pass=submit,
-        journal_probe=_all_terminal,
+        journal_probe=submit.journal,
         clock=_Clock(),
         sleep=lambda _seconds: None,
     )
@@ -483,7 +628,7 @@ def test_first_cycle_without_the_bootstrap_shape_halts_the_driver(site: _Site) -
         run_replay(
             site.config(execute=True),
             submit_pass=submit,
-            journal_probe=_all_terminal,
+            journal_probe=submit.journal,
             clock=_Clock(),
             sleep=lambda _seconds: None,
         )
@@ -498,6 +643,222 @@ def test_first_cycle_without_the_bootstrap_shape_halts_the_driver(site: _Site) -
     assert json.loads(site.receipt_path.read_text(encoding="utf-8"))["outcome"] == "halted"
 
 
+def test_a_resumed_mid_window_run_does_not_treat_its_first_cycle_as_the_origin(tmp_path: Path) -> None:
+    """B-P1-2: the bootstrap assertion is bound to 2026070500, not ``cycles[0]``.
+
+    Phase 2 resumes from a later ``--start-cycle``; its first cycle is a WARM
+    cycle (``init_mode=3``, ``quality=fresh``, no packaged IC), which the
+    old ``cycles[0]`` binding would have failed on an assertion that cannot hold.
+    """
+
+    warm_cycles = (datetime(2026, 7, 7, 12, tzinfo=UTC), datetime(2026, 7, 8, 0, tzinfo=UTC))
+    fixture = _Site(tmp_path, cycles=warm_cycles)
+    fixture.populate()
+    warm_manifest = _manifest(
+        marker="replayed",
+        init_mode=3,
+        quality="fresh",
+        packaged_ic_checksum="",
+    )
+    submit = _SubmitRecorder(fixture, new_manifest=warm_manifest)
+
+    receipt = run_replay(
+        fixture.config(execute=True),
+        submit_pass=submit,
+        journal_probe=submit.journal,
+        clock=_Clock(),
+        sleep=lambda _seconds: None,
+    )
+
+    jsonschema.validate(receipt, _SCHEMA)
+    assert receipt["outcome"] == "completed"
+    assert {row["bootstrap_assertion"]["status"] for row in receipt["rows"]} == {"not_required"}
+    assert all(row["bootstrap_assertion"]["required"] is False for row in receipt["rows"])
+
+
+def test_the_origin_cycle_keeps_its_bootstrap_assertion_when_it_is_not_first(tmp_path: Path) -> None:
+    """The origin is asserted wherever it appears in the requested range."""
+
+    fixture = _Site(tmp_path, cycles=(datetime(2026, 7, 4, 12, tzinfo=UTC), CYCLE_1))
+    fixture.populate()
+    submit = _SubmitRecorder(
+        fixture,
+        new_manifest=_manifest(marker="replayed", init_mode=1, quality="cold_start", packaged_ic_checksum=""),
+    )
+
+    with pytest.raises(ReplayHalted) as excinfo:
+        run_replay(
+            fixture.config(execute=True),
+            submit_pass=submit,
+            journal_probe=submit.journal,
+            clock=_Clock(),
+            sleep=lambda _seconds: None,
+        )
+
+    receipt = excinfo.value.receipt
+    assert receipt["interruption"]["reason"] == "first_cycle_bootstrap_assertion_failed"
+    assert receipt["interruption"]["cycle"] == CYCLE_1.strftime("%Y%m%d%H")
+    # the earlier cycle ran through untouched by the origin assertion
+    assert len(submit.calls) == 2
+
+
+def test_the_receipt_is_written_after_every_cycle(site: _Site) -> None:
+    """B-P1-4: a crash mid-sequence must not lose the completed rows."""
+
+    submit = _SubmitRecorder(site)
+    on_disk_at_submission: list[Any] = []
+
+    def _observing_submit(argv: Sequence[str], env: Mapping[str, str]) -> dict[str, Any]:
+        on_disk_at_submission.append(
+            json.loads(site.receipt_path.read_text(encoding="utf-8"))
+            if site.receipt_path.exists()
+            else None
+        )
+        return submit(argv, env)
+
+    receipt = run_replay(
+        site.config(execute=True),
+        submit_pass=_observing_submit,
+        journal_probe=submit.journal,
+        clock=_Clock(),
+        sleep=lambda _seconds: None,
+    )
+
+    assert on_disk_at_submission[0] is None  # nothing completed yet
+    checkpoint = on_disk_at_submission[1]
+    jsonschema.validate(checkpoint, _SCHEMA)
+    assert checkpoint["outcome"] == "in_progress"
+    assert checkpoint["finished_at"] is None
+    assert {row["cycle"] for row in checkpoint["rows"]} == {CYCLE_1.strftime("%Y%m%d%H")}
+    assert {row["status"] for row in checkpoint["rows"]} == {"completed"}
+    assert receipt["outcome"] == "completed"
+    assert json.loads(site.receipt_path.read_text(encoding="utf-8"))["outcome"] == "completed"
+
+
+# ---------------------------------------------------------------------------
+# staging gate
+# ---------------------------------------------------------------------------
+
+
+def test_an_absent_forcing_source_halts_before_submission(site: _Site) -> None:
+    """A-P2-6/B-P2-5: an unstaged package must never reach a submission."""
+
+    package = (
+        site.nfs_root
+        / "forcing"
+        / SOURCE.lower()
+        / CYCLE_1.strftime("%Y%m%d%H")
+        / BASIN_VERSION
+        / MODELS[1]
+    )
+    for path in sorted(package.iterdir()):
+        path.unlink()
+    package.rmdir()
+    submit = _SubmitRecorder(site)
+
+    with pytest.raises(ReplayHalted) as excinfo:
+        run_replay(
+            site.config(execute=True),
+            submit_pass=submit,
+            journal_probe=submit.journal,
+            clock=_Clock(),
+            sleep=lambda _seconds: None,
+        )
+
+    receipt = excinfo.value.receipt
+    jsonschema.validate(receipt, _SCHEMA)
+    assert receipt["interruption"]["reason"] == "forcing_source_absent"
+    assert receipt["interruption"]["detail"]["rows"][0]["model_id"] == MODELS[1]
+    assert submit.calls == []
+    assert {row["status"] for row in receipt["rows"]} == {"halted"}
+
+
+def test_a_failed_staging_copy_halts_before_submission(site: _Site) -> None:
+    (site.scratch_root / "forcing").write_text("not a directory", encoding="utf-8")
+    submit = _SubmitRecorder(site)
+
+    with pytest.raises(ReplayHalted) as excinfo:
+        run_replay(
+            site.config(execute=True),
+            submit_pass=submit,
+            journal_probe=submit.journal,
+            clock=_Clock(),
+            sleep=lambda _seconds: None,
+        )
+
+    receipt = excinfo.value.receipt
+    jsonschema.validate(receipt, _SCHEMA)
+    assert receipt["interruption"]["reason"] == "forcing_staging_unverified"
+    assert {row["status"] for row in receipt["interruption"]["detail"]["rows"]} == {"stage_failed"}
+    assert submit.calls == []
+
+
+def test_the_repair_cycle_tolerates_an_absent_forcing_source(tmp_path: Path) -> None:
+    """GFS 2026070712 legitimately has no NFS forcing; the repair set rebuilds it."""
+
+    repair_cycle = datetime(2026, 7, 7, 12, tzinfo=UTC)
+    fixture = _Site(tmp_path, cycles=(repair_cycle,))
+    for model_id in MODELS:
+        run_id = f"fcst_gfs_{repair_cycle.strftime('%Y%m%d%H')}_{model_id}"
+        _write_json(fixture.nfs_root / "runs" / run_id / "input" / "manifest.json", _manifest())
+        (fixture.nfs_root / "runs" / run_id / "output").mkdir(parents=True, exist_ok=True)
+        (fixture.nfs_root / "runs" / run_id / "output" / "discharge.csv").write_text("prior\n", encoding="utf-8")
+    fixture.write_reset_receipt(
+        removed=[
+            {
+                "model_id": model_id,
+                "source_id": "gfs",
+                "valid_time": _format_time(repair_cycle + timedelta(hours=12)),
+                "created_at": None,
+                "state_id": f"old-{model_id}",
+                "checksum": f"sha256:old-{model_id}",
+            }
+            for model_id in MODELS
+        ]
+    )
+    config = ReplayDriverConfig(**{**fixture.config(execute=True).__dict__, "source_id": "gfs"})
+    journal = _JournalTerminals()
+
+    def _submit(argv: Sequence[str], env: Mapping[str, str]) -> dict[str, Any]:
+        cycle = _cycle_from_argv(argv)
+        for model_id in MODELS:
+            run_id = f"fcst_gfs_{cycle.strftime('%Y%m%d%H')}_{model_id}"
+            _write_json(
+                fixture.nfs_root / "runs" / run_id / "input" / "manifest.json",
+                _manifest(marker="replayed"),
+            )
+        entries = fixture.index_entries()
+        for model_id in MODELS:
+            entries.append(
+                {
+                    "model_id": model_id,
+                    "source_id": "gfs",
+                    "valid_time": _format_time(cycle + timedelta(hours=12)),
+                    "created_at": None,
+                    "state_id": f"new-{model_id}",
+                    "checksum": f"sha256:new-{model_id}",
+                }
+            )
+        fixture._write_index(entries)
+        journal.record_replay_terminal(cycle)
+        return {"returncode": 0}
+
+    receipt = run_replay(
+        config,
+        submit_pass=_submit,
+        journal_probe=journal,
+        clock=_Clock(),
+        sleep=lambda _seconds: None,
+    )
+
+    jsonschema.validate(receipt, _SCHEMA)
+    assert receipt["outcome"] == "completed"
+    for row in receipt["rows"]:
+        assert row["staging"]["status"] == "source_absent"
+        assert row["staging"]["repair_cycle_exemption"] is True
+        assert row["submission"]["repair_parameter_set"] is True
+
+
 def test_key_drift_halts_the_driver(site: _Site) -> None:
     submit = _SubmitRecorder(
         site,
@@ -508,7 +869,7 @@ def test_key_drift_halts_the_driver(site: _Site) -> None:
         run_replay(
             site.config(execute=True),
             submit_pass=submit,
-            journal_probe=_all_terminal,
+            journal_probe=submit.journal,
             clock=_Clock(),
             sleep=lambda _seconds: None,
         )
@@ -521,22 +882,72 @@ def test_key_drift_halts_the_driver(site: _Site) -> None:
     assert len(submit.calls) == 1
 
 
-def test_variable_key_drift_also_halts_the_driver(site: _Site) -> None:
+def test_output_inventory_drift_halts_the_driver(site: _Site) -> None:
+    """B-P1-3: the assertion runs on evidence the run tree really carries."""
+
+    submit = _SubmitRecorder(site, new_output_files=("discharge.csv",))
+
+    with pytest.raises(ReplayHalted) as excinfo:
+        run_replay(
+            site.config(execute=True),
+            submit_pass=submit,
+            journal_probe=submit.journal,
+            clock=_Clock(),
+            sleep=lambda _seconds: None,
+        )
+
+    receipt = excinfo.value.receipt
+    assert receipt["interruption"]["reason"] == "key_consistency_drift"
+    drifted = [row for row in receipt["rows"] if (row["key_consistency"] or {}).get("status") == "drift"]
+    assert drifted
+    assert drifted[0]["key_consistency"]["drifted_axes"] == ["output_file_names"]
+    assert drifted[0]["key_consistency"]["prior_output_file_names"] == ["discharge.csv", "stage.csv"]
+    assert drifted[0]["key_consistency"]["new_output_file_names"] == ["discharge.csv"]
+
+
+def test_output_segment_count_drift_halts_the_driver(site: _Site) -> None:
     submit = _SubmitRecorder(
         site,
-        new_manifest=_manifest(marker="replayed", variables=("discharge",)),
+        new_manifest=_manifest(marker="replayed", output_segment_count=999),
     )
 
     with pytest.raises(ReplayHalted) as excinfo:
         run_replay(
             site.config(execute=True),
             submit_pass=submit,
-            journal_probe=_all_terminal,
+            journal_probe=submit.journal,
             clock=_Clock(),
             sleep=lambda _seconds: None,
         )
 
-    assert excinfo.value.receipt["interruption"]["reason"] == "key_consistency_drift"
+    receipt = excinfo.value.receipt
+    assert receipt["interruption"]["reason"] == "key_consistency_drift"
+    drifted = next(row for row in receipt["rows"] if (row["key_consistency"] or {}).get("status") == "drift")
+    assert drifted["key_consistency"]["drifted_axes"] == ["output_segment_count"]
+    assert drifted["prior"]["output_segment_count"] == 412
+    assert drifted["new"]["output_segment_count"] == 999
+
+
+def test_key_consistency_compares_real_manifest_axes_only(site: _Site) -> None:
+    """The consistent case names the axes it compared -- no dead ``variables`` key."""
+
+    submit = _SubmitRecorder(site)
+    receipt = run_replay(
+        site.config(execute=True),
+        submit_pass=submit,
+        journal_probe=submit.journal,
+        clock=_Clock(),
+        sleep=lambda _seconds: None,
+    )
+
+    consistency = receipt["rows"][0]["key_consistency"]
+    assert consistency["status"] == "consistent"
+    assert consistency["compared_axes"] == [
+        "output_file_names",
+        "output_segment_count",
+        "river_network_version_id",
+    ]
+    assert consistency["drifted_axes"] == []
 
 
 def test_submission_failure_halts_with_the_interruption_recorded(site: _Site) -> None:
@@ -546,7 +957,7 @@ def test_submission_failure_halts_with_the_interruption_recorded(site: _Site) ->
         run_replay(
             site.config(execute=True),
             submit_pass=submit,
-            journal_probe=_all_terminal,
+            journal_probe=submit.journal,
             clock=_Clock(),
             sleep=lambda _seconds: None,
         )
@@ -564,17 +975,21 @@ def test_submission_failure_halts_with_the_interruption_recorded(site: _Site) ->
 # ---------------------------------------------------------------------------
 
 
-def test_convergence_requires_index_entries_created_after_the_pass_started(site: _Site) -> None:
-    """A pre-existing entry with the right valid_time must NOT satisfy the wait."""
+def test_convergence_rejects_a_successor_the_reset_receipt_already_recorded(site: _Site) -> None:
+    """B-P1-1: freshness is checksum-vs-reset-receipt, not ``created_at``.
 
-    site.add_state_entries(CYCLE_1, created_at=BASE_TIME - timedelta(days=1), checksum_prefix="stale")
+    The entry below carries the very checksum the reset receipt archived and
+    ``created_at: null`` (the production shape).  It must not satisfy the wait.
+    """
+
+    site.add_state_entries(CYCLE_1, checksum_prefix="old")
     submit = _SubmitRecorder(site, publish_entries=False)
 
     with pytest.raises(ReplayHalted) as excinfo:
         run_replay(
             site.config(execute=True, cycle_timeout_seconds=0),
             submit_pass=submit,
-            journal_probe=_all_terminal,
+            journal_probe=submit.journal,
             clock=_Clock(),
             sleep=lambda _seconds: None,
         )
@@ -582,21 +997,22 @@ def test_convergence_requires_index_entries_created_after_the_pass_started(site:
     receipt = excinfo.value.receipt
     jsonschema.validate(receipt, _SCHEMA)
     assert receipt["interruption"]["reason"] == "convergence_timeout"
-    # the journal was terminal and the entry exists -- only its age blocked it
+    # a new terminal job id DID appear; only the unchanged state entry blocked it
     assert receipt["interruption"]["detail"]["journal_terminal"] == sorted(MODELS)
     assert receipt["interruption"]["detail"]["state_entries"] == []
-    assert len(site.index_entries()) == len(MODELS)
+    assert receipt["interruption"]["detail"]["unreplaced_successors"] == sorted(MODELS)
+    assert [entry["created_at"] for entry in site.index_entries()] == [None] * len(MODELS)
     assert all(row["convergence"]["state_entry_present"] is False for row in receipt["rows"])
 
 
-def test_convergence_accepts_entries_created_after_the_pass_started(site: _Site) -> None:
-    site.add_state_entries(CYCLE_1, created_at=BASE_TIME - timedelta(days=1), checksum_prefix="stale")
-    submit = _SubmitRecorder(site, entry_created_at=BASE_TIME + timedelta(hours=1))
+def test_convergence_accepts_a_successor_whose_checksum_differs_from_the_reset_receipt(site: _Site) -> None:
+    site.add_state_entries(CYCLE_1, checksum_prefix="old")
+    submit = _SubmitRecorder(site)
 
     receipt = run_replay(
         site.config(execute=True, cycle_timeout_seconds=0),
         submit_pass=submit,
-        journal_probe=_all_terminal,
+        journal_probe=submit.journal,
         clock=_Clock(),
         sleep=lambda _seconds: None,
     )
@@ -605,13 +1021,74 @@ def test_convergence_accepts_entries_created_after_the_pass_started(site: _Site)
     first_cycle_rows = [row for row in receipt["rows"] if row["cycle"] == CYCLE_1.strftime("%Y%m%d%H")]
     assert all(row["convergence"]["state_entry_present"] is True for row in first_cycle_rows)
     assert all(row["new"]["state_checksum"].startswith("sha256:new-") for row in first_cycle_rows)
+    assert all(row["convergence"]["state_index_status"] == "present" for row in first_cycle_rows)
+
+
+def test_a_pre_existing_terminal_record_alone_does_not_count_as_completion(site: _Site) -> None:
+    """B-P2-7: the ORIGINAL run's terminal record survives the state-scope reset.
+
+    The pass publishes the new state entries but never records a new terminal
+    job; the probe still reports the original completion, and the driver must
+    keep waiting rather than declare the cycle done.
+    """
+
+    submit = _SubmitRecorder(site, publish_terminal=False)
+
+    with pytest.raises(ReplayHalted) as excinfo:
+        run_replay(
+            site.config(execute=True, cycle_timeout_seconds=0),
+            submit_pass=submit,
+            journal_probe=submit.journal,
+            clock=_Clock(),
+            sleep=lambda _seconds: None,
+        )
+
+    receipt = excinfo.value.receipt
+    jsonschema.validate(receipt, _SCHEMA)
+    assert receipt["interruption"]["reason"] == "convergence_timeout"
+    assert receipt["interruption"]["detail"]["journal_terminal"] == []
+    assert receipt["interruption"]["detail"]["prior_terminal_job_ids"] == {
+        model_id: [f"job-original-{CYCLE_1.strftime('%Y%m%d%H')}"] for model_id in MODELS
+    }
+    for row in receipt["rows"]:
+        assert row["prior"]["terminal_job_ids"] == [f"job-original-{CYCLE_1.strftime('%Y%m%d%H')}"]
+        assert row["convergence"]["journal_terminal"] is False
+        assert row["convergence"]["new_terminal_job_ids"] == []
+
+
+def test_an_unreadable_state_index_halts_with_its_own_typed_reason(site: _Site) -> None:
+    """Three-way: an index that cannot be read is undecidable, never converged."""
+
+    submit = _SubmitRecorder(site, publish_entries=False)
+    site.state_index.write_text("{not json", encoding="utf-8")
+
+    with pytest.raises(ReplayHalted) as excinfo:
+        run_replay(
+            site.config(execute=True, cycle_timeout_seconds=0),
+            submit_pass=submit,
+            journal_probe=submit.journal,
+            clock=_Clock(),
+            sleep=lambda _seconds: None,
+        )
+
+    receipt = excinfo.value.receipt
+    jsonschema.validate(receipt, _SCHEMA)
+    assert receipt["interruption"]["reason"] == "state_index_undeterminable"
+    assert receipt["interruption"]["detail"]["state_index_detail"] == "state_index_unreadable"
+    assert all(row["convergence"]["state_index_status"] == "undeterminable" for row in receipt["rows"])
 
 
 def test_a_non_terminal_journal_halts_even_when_the_index_is_fresh(site: _Site) -> None:
     submit = _SubmitRecorder(site)
 
-    def _one_model_pending(config: ReplayDriverConfig, cycle_time: datetime) -> dict[str, bool]:
-        return {MODELS[0]: True, MODELS[1]: False}
+    def _one_model_pending(config: ReplayDriverConfig, cycle_time: datetime) -> dict[str, list[str]]:
+        token = cycle_time.strftime("%Y%m%d%H")
+        original = [f"job-original-{token}"]
+        # only the first model records a new terminal job after the submission
+        return {
+            MODELS[0]: original + ([f"job-replay-{token}"] if submit.calls else []),
+            MODELS[1]: list(original),
+        }
 
     with pytest.raises(ReplayHalted) as excinfo:
         run_replay(
@@ -631,10 +1108,11 @@ def test_a_non_terminal_journal_halts_even_when_the_index_is_fresh(site: _Site) 
 
 
 def _completed_run(site: _Site) -> dict[str, Any]:
+    submit = _SubmitRecorder(site)
     return run_replay(
         site.config(execute=True),
-        submit_pass=_SubmitRecorder(site),
-        journal_probe=_all_terminal,
+        submit_pass=submit,
+        journal_probe=submit.journal,
         clock=_Clock(),
         sleep=lambda _seconds: None,
     )
@@ -649,7 +1127,7 @@ def test_resume_skips_only_cycles_whose_state_evidence_still_matches(site: _Site
     receipt = run_replay(
         site.config(execute=True, resume_from=resume_from),
         submit_pass=submit,
-        journal_probe=_all_terminal,
+        journal_probe=submit.journal,
         clock=_Clock(),
         sleep=lambda _seconds: None,
     )
@@ -674,7 +1152,7 @@ def test_resume_reruns_a_cycle_whose_recorded_checksum_no_longer_matches(site: _
     receipt = run_replay(
         site.config(execute=True, resume_from=resume_from),
         submit_pass=submit,
-        journal_probe=_all_terminal,
+        journal_probe=submit.journal,
         clock=_Clock(),
         sleep=lambda _seconds: None,
     )
@@ -693,7 +1171,7 @@ def test_resume_reruns_a_cycle_whose_state_entry_disappeared(site: _Site) -> Non
     receipt = run_replay(
         site.config(execute=True, resume_from=resume_from),
         submit_pass=submit,
-        journal_probe=_all_terminal,
+        journal_probe=submit.journal,
         clock=_Clock(),
         sleep=lambda _seconds: None,
     )
@@ -710,7 +1188,7 @@ def test_an_unreadable_resume_receipt_refuses(site: _Site) -> None:
         run_replay(
             site.config(execute=True, resume_from=resume_from),
             submit_pass=_refuse_to_submit,
-            journal_probe=_all_terminal,
+            journal_probe=_original_terminals_only,
             clock=_Clock(),
             sleep=lambda _seconds: None,
         )
@@ -755,8 +1233,10 @@ def test_the_repair_env_reaches_the_submitted_pass_for_that_cycle_only(tmp_path:
             _write_json(root / "input" / "manifest.json", _manifest())
             (root / "output").mkdir(parents=True, exist_ok=True)
             (root / "output" / "discharge.csv").write_text("prior\n", encoding="utf-8")
+            fixture.write_forcing(cycle, model_id, source="gfs")
 
     calls: list[tuple[str, str | None]] = []
+    journal = _JournalTerminals()
 
     def _submit(argv: Sequence[str], env: Mapping[str, str]) -> dict[str, Any]:
         cycle = _cycle_from_argv(argv)
@@ -774,12 +1254,13 @@ def test_the_repair_env_reaches_the_submitted_pass_for_that_cycle_only(tmp_path:
                     "model_id": model_id,
                     "source_id": "gfs",
                     "valid_time": _format_time(cycle + timedelta(hours=12)),
-                    "created_at": _format_time(BASE_TIME + timedelta(hours=1)),
+                    "created_at": None,
                     "state_id": f"new-{model_id}",
                     "checksum": f"sha256:new-{model_id}",
                 }
             )
         fixture._write_index(entries)
+        journal.record_replay_terminal(cycle)
         return {"returncode": 0}
 
     fixture.write_reset_receipt(
@@ -788,7 +1269,7 @@ def test_the_repair_env_reaches_the_submitted_pass_for_that_cycle_only(tmp_path:
                 "model_id": model_id,
                 "source_id": "gfs",
                 "valid_time": _format_time(cycle + timedelta(hours=12)),
-                "created_at": _format_time(cycle),
+                "created_at": None,
                 "state_id": f"old-{model_id}",
                 "checksum": f"sha256:old-{model_id}",
             }
@@ -800,7 +1281,7 @@ def test_the_repair_env_reaches_the_submitted_pass_for_that_cycle_only(tmp_path:
     run_replay(
         config,
         submit_pass=_submit,
-        journal_probe=_all_terminal,
+        journal_probe=journal,
         clock=_Clock(),
         sleep=lambda _seconds: None,
     )
@@ -829,7 +1310,7 @@ def test_staging_verifies_every_copied_file(site: _Site) -> None:
     run_replay(
         site.config(execute=True),
         submit_pass=submit,
-        journal_probe=_all_terminal,
+        journal_probe=submit.journal,
         clock=_Clock(),
         sleep=lambda _seconds: None,
     )

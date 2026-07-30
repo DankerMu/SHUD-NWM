@@ -27,6 +27,9 @@ from packages.common.safe_fs import (
 from packages.common.source_identity import normalize_source_id
 
 RESET_RECEIPT_SCHEMA_VERSION = "nhms.replay_state_scope_reset.v1"
+#: The only reset outcome a replacement may be built on; ``commit_uncertain``
+#: and ``refused`` are typed refusals for the driver.
+RESET_RECEIPT_COMPLETED_OUTCOME = "completed"
 
 MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 MAX_INDEX_BYTES = 64 * 1024 * 1024
@@ -34,10 +37,24 @@ MAX_RECEIPT_BYTES = 32 * 1024 * 1024
 MAX_DIGEST_FILES = 20_000
 MAX_DIGEST_FILE_BYTES = 512 * 1024 * 1024
 MAX_DIRECTORY_ENTRIES = 20_000
+#: The census enumerates the WHOLE ``runs/`` directory, not a window slice, so it
+#: needs a much wider bound than a single package listing.  Hitting the bound is
+#: reported as ``undeterminable``; the census never silently truncates.
+MAX_CENSUS_DIRECTORY_ENTRIES = 500_000
 
 PROBE_PRESENT = "present"
 PROBE_ABSENT = "absent"
 PROBE_UNDETERMINABLE = "undeterminable"
+
+#: Journal statuses/stages that carry a cycle's terminal completion record.  The
+#: journal narrows the stage set to ``state_save_qc`` when the compute-state
+#: terminal mode is enabled (the node-22 posture) and otherwise accepts
+#: ``parse``/``publish``; the driver keeps the union because convergence also
+#: requires a new state-index entry, which only ``state_save_qc`` writes.  A mode
+#: difference can therefore only make the driver wait and halt, never declare a
+#: cycle finished early.
+TERMINAL_SUCCESS_STATUSES = frozenset({"succeeded", "complete", "published"})
+TERMINAL_COMPLETION_STAGES = frozenset({"state_save_qc", "parse", "publish"})
 
 
 class ReplayDriverRefused(RuntimeError):
@@ -94,8 +111,14 @@ class _DigestUndeterminable(RuntimeError):
     pass
 
 
-def directory_digest(root: Path | None, *, label: str) -> dict[str, Any]:
-    """Three-way content digest of a directory tree (sorted relpath + sha256)."""
+def directory_digest(root: Path | None, *, label: str, include_file_names: bool = False) -> dict[str, Any]:
+    """Three-way content digest of a directory tree (sorted relpath + sha256).
+
+    ``include_file_names`` additionally records the sorted relative file names.
+    The run OUTPUT inventory needs them: a replay legitimately changes every
+    output byte, so the only key-stability signal a run tree carries is which
+    files exist, not what is in them.
+    """
 
     record: dict[str, Any] = {
         "label": label,
@@ -104,6 +127,7 @@ def directory_digest(root: Path | None, *, label: str) -> dict[str, Any]:
         "file_count": None,
         "total_bytes": None,
         "sha256": None,
+        "files": None,
         "detail": None,
     }
     if root is None:
@@ -141,6 +165,8 @@ def directory_digest(root: Path | None, *, label: str) -> dict[str, Any]:
     record["file_count"] = len(files)
     record["total_bytes"] = total
     record["sha256"] = digest.hexdigest()
+    if include_file_names:
+        record["files"] = [path.relative_to(root).as_posix() for path in files]
     return record
 
 
@@ -189,7 +215,7 @@ def run_capture(object_store_root: Path, run_id: str) -> dict[str, Any]:
         "run_root": str(root),
         "manifest_sha256": None,
         "manifest": None,
-        "output_inventory": directory_digest(root / "output", label="run_output"),
+        "output_inventory": directory_digest(root / "output", label="run_output", include_file_names=True),
         "no_prior_run": False,
     }
     try:
@@ -204,6 +230,16 @@ def run_capture(object_store_root: Path, run_id: str) -> dict[str, Any]:
 
 
 def manifest_summary(manifest: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Project the fields a real run manifest actually carries.
+
+    Shape source: ``chain_manifests.build_forecast_run_manifest`` and 36 sampled
+    node-22 production manifests.  There is NO ``outputs.variables`` key — the
+    key-consistency assertion used to hang off it and was therefore dead code
+    (round-1 B-P1-3).  What is always there is
+    ``model.river_network_version_id`` and the output segment count, both of
+    which the timeseries rows are keyed by.
+    """
+
     if manifest is None:
         return {
             "state_id": None,
@@ -212,19 +248,12 @@ def manifest_summary(manifest: Mapping[str, Any] | None) -> dict[str, Any]:
             "quality": None,
             "packaged_ic_checksum": None,
             "river_network_version_id": None,
-            "variable_keys": [],
+            "output_segment_count": None,
         }
     initial_state = manifest.get("initial_state") if isinstance(manifest.get("initial_state"), Mapping) else {}
     runtime = manifest.get("runtime") if isinstance(manifest.get("runtime"), Mapping) else {}
     model = manifest.get("model") if isinstance(manifest.get("model"), Mapping) else {}
     outputs = manifest.get("outputs") if isinstance(manifest.get("outputs"), Mapping) else {}
-    variables = outputs.get("variables")
-    if isinstance(variables, Mapping):
-        variable_keys = sorted(str(key) for key in variables)
-    elif isinstance(variables, Sequence) and not isinstance(variables, str | bytes):
-        variable_keys = sorted(str(item) for item in variables)
-    else:
-        variable_keys = []
     init_mode = runtime.get("init_mode")
     return {
         "state_id": initial_state.get("state_id"),
@@ -233,34 +262,86 @@ def manifest_summary(manifest: Mapping[str, Any] | None) -> dict[str, Any]:
         "quality": initial_state.get("quality"),
         "packaged_ic_checksum": initial_state.get("packaged_ic_checksum"),
         "river_network_version_id": model.get("river_network_version_id"),
-        "variable_keys": variable_keys,
+        "output_segment_count": _optional_int(
+            model.get("output_segment_count"),
+            outputs.get("output_segment_count"),
+            model.get("segment_count"),
+        ),
     }
+
+
+def _optional_int(*values: Any) -> int | None:
+    for value in values:
+        if isinstance(value, bool) or value in (None, ""):
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _inventory_file_names(inventory: Any) -> list[str] | None:
+    if not isinstance(inventory, Mapping):
+        return None
+    if str(inventory.get("status") or "") != PROBE_PRESENT:
+        return None
+    files = inventory.get("files")
+    if not isinstance(files, Sequence) or isinstance(files, str | bytes):
+        return None
+    return sorted(str(item) for item in files)
 
 
 def key_consistency(prior: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
     """R3: a replay must not leave rows under a drifted key set behind.
 
-    The parser deletes the union window, so window residue is not the risk;
-    a changed ``river_network_version_id`` or variable key set is, because those
-    rows are outside the delete predicate.
+    The parser deletes the union window, so window residue is not the risk; a
+    changed ``river_network_version_id``, a changed output segment count or a
+    changed output file inventory is, because those rows fall outside the delete
+    predicate.  Every axis compared here is one a real manifest / run tree
+    carries (round-1 B-P1-3 replaced the ``outputs.variables`` axis, which no
+    production manifest has, with these).
+
+    Comparison is per axis and loud: an axis present on the prior half but
+    missing or different on the new half is ``drift``.  ``undeterminable`` is
+    reserved for the one honest case -- no comparable prior evidence at all
+    (the GFS 070712 rows with no prior run).
     """
 
-    if prior.get("river_network_version_id") in (None, "") or not prior.get("variable_keys"):
-        return {
-            "status": PROBE_UNDETERMINABLE,
-            "detail": "prior run evidence does not carry a comparable key set",
-            "prior_river_network_version_id": prior.get("river_network_version_id"),
-            "new_river_network_version_id": new.get("river_network_version_id"),
-        }
-    same_network = str(prior.get("river_network_version_id")) == str(new.get("river_network_version_id"))
-    same_variables = list(prior.get("variable_keys") or []) == list(new.get("variable_keys") or [])
-    return {
-        "status": "consistent" if (same_network and same_variables) else "drift",
-        "detail": None if (same_network and same_variables) else "river network version or variable key set changed",
+    axes: dict[str, tuple[Any, Any]] = {
+        "river_network_version_id": (
+            prior.get("river_network_version_id"),
+            new.get("river_network_version_id"),
+        ),
+        "output_segment_count": (prior.get("output_segment_count"), new.get("output_segment_count")),
+        "output_file_names": (
+            _inventory_file_names(prior.get("output_inventory")),
+            _inventory_file_names(new.get("output_inventory")),
+        ),
+    }
+    comparable = {name: pair for name, pair in axes.items() if pair[0] not in (None, "")}
+    record: dict[str, Any] = {
         "prior_river_network_version_id": prior.get("river_network_version_id"),
         "new_river_network_version_id": new.get("river_network_version_id"),
-        "prior_variable_keys": list(prior.get("variable_keys") or []),
-        "new_variable_keys": list(new.get("variable_keys") or []),
+        "prior_output_segment_count": prior.get("output_segment_count"),
+        "new_output_segment_count": new.get("output_segment_count"),
+        "prior_output_file_names": axes["output_file_names"][0],
+        "new_output_file_names": axes["output_file_names"][1],
+        "compared_axes": sorted(comparable),
+    }
+    if not comparable:
+        return {
+            **record,
+            "status": PROBE_UNDETERMINABLE,
+            "detail": "prior run evidence does not carry a comparable key set",
+            "drifted_axes": [],
+        }
+    drifted = sorted(name for name, (prior_value, new_value) in comparable.items() if prior_value != new_value)
+    return {
+        **record,
+        "status": "drift" if drifted else "consistent",
+        "detail": None if not drifted else f"key drift on: {', '.join(drifted)}",
+        "drifted_axes": drifted,
     }
 
 
@@ -283,6 +364,16 @@ def load_reset_removed_entries(path: Path) -> dict[tuple[str, str, str], dict[st
         raise ReplayDriverRefused("reset_receipt_unreadable", {"path": str(path)})
     if payload.get("schema_version") != RESET_RECEIPT_SCHEMA_VERSION:
         raise ReplayDriverRefused("reset_receipt_schema_unsupported", {"path": str(path)})
+    outcome = str(payload.get("outcome") or "")
+    if outcome != RESET_RECEIPT_COMPLETED_OUTCOME:
+        # ``commit_uncertain`` (exit 3) means the reset's own read-back could not
+        # confirm the write, and ``refused`` means it never ran.  Starting an
+        # irreversible replacement off either would overwrite production runs on
+        # top of a state scope whose actual content is unknown.
+        raise ReplayDriverRefused(
+            "reset_receipt_not_completed",
+            {"path": str(path), "outcome": outcome or None},
+        )
     lanes = payload.get("lanes")
     if not isinstance(lanes, Sequence) or not lanes:
         raise ReplayDriverRefused("reset_receipt_lanes_missing", {"path": str(path)})
@@ -341,9 +432,14 @@ def successor_state_entries(
     source_id: str,
     model_ids: Sequence[str],
     valid_time: datetime,
-    since: datetime | None,
 ) -> dict[str, dict[str, Any]]:
-    """Fresh successor entries per model (``valid_time`` match + ``created_at`` gate)."""
+    """Successor entries per model at ``valid_time`` -- no ``created_at`` gate.
+
+    Production never sets ``created_at`` on state-index entries (1753/1753 null
+    in both lanes), so a since-gate can only ever be unsatisfiable; freshness is
+    decided by :func:`replaced_successor_entries` against the reset receipt
+    instead (round-1 B-P1-1).
+    """
 
     canonical_source = normalize_source_id(source_id)
     found: dict[str, dict[str, Any]] = {}
@@ -356,9 +452,113 @@ def successor_state_entries(
         entry_valid_time = _parse_time(entry.get("valid_time"))
         if entry_valid_time is None or entry_valid_time != valid_time:
             continue
-        if since is not None:
-            created_at = _parse_time(entry.get("created_at"))
-            if created_at is None or created_at <= since:
-                continue
         found[model_id] = dict(entry)
     return found
+
+
+def replaced_successor_entries(
+    successors: Mapping[str, Mapping[str, Any]],
+    *,
+    prior_entries: Mapping[str, Mapping[str, Any] | None],
+) -> dict[str, dict[str, Any]]:
+    """Successor entries that are demonstrably NOT the pre-replay ones.
+
+    An entry counts as replaced when the reset receipt recorded no removed entry
+    for that (model, source, valid_time) key, or when its checksum differs from
+    the removed entry's checksum.  A successor whose checksum cannot be read, or
+    whose checksum equals the removed entry's, is not counted: the driver then
+    keeps waiting and finally halts rather than declaring convergence on the
+    strength of an entry the replay may not have written.
+    """
+
+    replaced: dict[str, dict[str, Any]] = {}
+    for model_id, entry in successors.items():
+        checksum = str(entry.get("checksum") or "").strip()
+        if not checksum:
+            continue
+        prior = prior_entries.get(model_id)
+        prior_checksum = str((prior or {}).get("checksum") or "").strip()
+        if prior_checksum and checksum == prior_checksum:
+            continue
+        replaced[model_id] = dict(entry)
+    return replaced
+
+
+def terminal_completion_job_ids(
+    jobs: Sequence[Mapping[str, Any]],
+    *,
+    model_ids: Sequence[str],
+) -> dict[str, list[str]]:
+    """Terminal completion job ids per model, cohort jobs included.
+
+    The production completion record is cohort scoped (``model_id`` null, run id
+    ``cycle_<src>_<stamp>_convert_cohort_*``) and matches every candidate of the
+    cycle, so a model-less terminal job is attributed to all requested models.
+    """
+
+    resolved: dict[str, list[str]] = {model_id: [] for model_id in model_ids}
+    for job in jobs:
+        if str(job.get("status") or "") not in TERMINAL_SUCCESS_STATUSES:
+            continue
+        if str(job.get("stage") or "") not in TERMINAL_COMPLETION_STAGES:
+            continue
+        job_id = str(job.get("job_id") or "").strip()
+        if not job_id:
+            continue
+        job_model_id = str(job.get("model_id") or "").strip()
+        for model_id in resolved:
+            if job_model_id in ("", model_id) and job_id not in resolved[model_id]:
+                resolved[model_id].append(job_id)
+    return {model_id: sorted(ids) for model_id, ids in resolved.items()}
+
+
+_RUN_ID_CYCLE_TOKEN_LENGTH = 10
+
+
+def census_run_cycles(
+    object_store_root: Path,
+    *,
+    source_id: str,
+    model_ids: Sequence[str],
+) -> dict[str, Any]:
+    """Enumerate every run tree on disk for these scopes -- no window slice.
+
+    The census is the driver's on-site inventory (design D5 step 0a), so it must
+    not be an echo of the requested cycle range: a frontier that moved after the
+    survey, or a run outside the requested window, has to show up here.
+    """
+
+    runs_root = object_store_root / "runs"
+    census: dict[str, Any] = {
+        "runs_root": str(runs_root),
+        "status": PROBE_UNDETERMINABLE,
+        "detail": None,
+        "cycles_by_model": {model_id: [] for model_id in model_ids},
+    }
+    try:
+        names = list_directory_no_follow_limited(runs_root, max_entries=MAX_CENSUS_DIRECTORY_ENTRIES)
+    except FileNotFoundError:
+        census["status"] = PROBE_ABSENT
+        census["detail"] = "runs directory absent"
+        return census
+    except (OSError, SafeFilesystemError) as error:
+        census["detail"] = f"runs directory unreadable: {error}"
+        return census
+    if len(names) >= MAX_CENSUS_DIRECTORY_ENTRIES:
+        census["detail"] = "runs directory fan-out exceeds the census bound"
+        return census
+    prefix = f"fcst_{normalize_source_id(source_id).lower()}_"
+    for name in names:
+        if not name.startswith(prefix):
+            continue
+        remainder = name[len(prefix) :]
+        cycle_token, separator, model_id = remainder.partition("_")
+        if not separator or len(cycle_token) != _RUN_ID_CYCLE_TOKEN_LENGTH or not cycle_token.isdigit():
+            continue
+        if model_id in census["cycles_by_model"] and cycle_token not in census["cycles_by_model"][model_id]:
+            census["cycles_by_model"][model_id].append(cycle_token)
+    census["status"] = PROBE_PRESENT
+    census["cycles_by_model"] = {
+        model_id: sorted(cycles) for model_id, cycles in census["cycles_by_model"].items()
+    }
+    return census

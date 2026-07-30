@@ -21,7 +21,7 @@
   ],
   "properties": {
     "schema_version": { "const": "nhms.production_replay_replacement.v1" },
-    "outcome": { "type": "string", "enum": ["completed", "halted"] },
+    "outcome": { "type": "string", "enum": ["in_progress", "completed", "halted"] },
     "pass_id": { "type": "string", "minLength": 1 },
     "executed": { "type": "boolean" },
     "source_id": { "type": "string", "minLength": 1 },
@@ -41,11 +41,23 @@
     "inventory_census": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["state_index", "scopes", "frontier_cycle"],
-      "description": "Start-time on-site census; never a frozen survey count.",
+      "required": [
+        "state_index",
+        "runs_root",
+        "enumeration_status",
+        "enumeration_detail",
+        "scopes",
+        "frontier_cycle",
+        "requested_frontier_cycle"
+      ],
+      "description": "Start-time on-site census; never a frozen survey count. The run enumeration walks the whole runs/ directory (no window truncation) so frontier_cycle is what is on disk, with the requested range recorded beside it.",
       "properties": {
         "state_index": { "type": "string", "minLength": 1 },
+        "runs_root": { "type": "string", "minLength": 1 },
+        "enumeration_status": { "type": "string", "enum": ["present", "absent", "undeterminable"] },
+        "enumeration_detail": { "type": ["string", "null"] },
         "frontier_cycle": { "type": ["string", "null"], "pattern": "^[0-9]{10}$" },
+        "requested_frontier_cycle": { "type": ["string", "null"], "pattern": "^[0-9]{10}$" },
         "scopes": {
           "type": "array",
           "items": {
@@ -77,8 +89,11 @@
             "reason": {
               "type": "string",
               "enum": [
+                "forcing_source_absent",
+                "forcing_staging_unverified",
                 "submission_failed",
                 "convergence_timeout",
+                "state_index_undeterminable",
                 "first_cycle_bootstrap_assertion_failed",
                 "key_consistency_drift"
               ]
@@ -94,7 +109,7 @@
     "digest": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["label", "path", "status", "file_count", "total_bytes", "sha256", "detail"],
+      "required": ["label", "path", "status", "file_count", "total_bytes", "sha256", "files", "detail"],
       "properties": {
         "label": { "type": "string", "minLength": 1 },
         "path": { "type": ["string", "null"] },
@@ -102,6 +117,11 @@
         "file_count": { "type": ["integer", "null"], "minimum": 0 },
         "total_bytes": { "type": ["integer", "null"], "minimum": 0 },
         "sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "files": {
+          "type": ["array", "null"],
+          "description": "Sorted relative file names; recorded for run output inventories, whose byte content legitimately changes across a replay while the file set must not.",
+          "items": { "type": "string" }
+        },
         "detail": { "type": ["string", "null"] }
       }
     },
@@ -141,7 +161,8 @@
             "state",
             "state_source",
             "river_network_version_id",
-            "variable_keys"
+            "output_segment_count",
+            "terminal_job_ids"
           ],
           "properties": {
             "run_manifest_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
@@ -165,7 +186,12 @@
             },
             "state_source": { "const": "reset_receipt" },
             "river_network_version_id": { "type": ["string", "null"] },
-            "variable_keys": { "type": "array", "items": { "type": "string" } }
+            "output_segment_count": { "type": ["integer", "null"], "minimum": 0 },
+            "terminal_job_ids": {
+              "type": "array",
+              "description": "Pre-pass baseline of the journal's terminal completion job ids: the original run's records survive the state-scope reset, so completion is 'a NEW id appeared', not 'an id exists'.",
+              "items": { "type": "string" }
+            }
           }
         },
         "inputs": {
@@ -200,6 +226,10 @@
                 },
                 "copied_files": { "type": "integer", "minimum": 0 },
                 "verified": { "type": "boolean" },
+                "repair_cycle_exemption": {
+                  "type": "boolean",
+                  "description": "Set only when an absent forcing source is tolerated because the cycle runs through the repair parameter set (GFS 2026070712)."
+                },
                 "detail": { "type": ["string", "null"] }
               }
             }
@@ -226,10 +256,26 @@
             {
               "type": "object",
               "additionalProperties": false,
-              "required": ["journal_terminal", "state_entry_present", "waited_seconds"],
+              "required": [
+                "journal_terminal",
+                "prior_terminal_job_ids",
+                "new_terminal_job_ids",
+                "state_entry_present",
+                "state_index_status",
+                "waited_seconds"
+              ],
               "properties": {
-                "journal_terminal": { "type": "boolean" },
-                "state_entry_present": { "type": "boolean" },
+                "journal_terminal": {
+                  "type": "boolean",
+                  "description": "True only when a terminal completion job id appeared that was absent from the pre-pass baseline."
+                },
+                "prior_terminal_job_ids": { "type": "array", "items": { "type": "string" } },
+                "new_terminal_job_ids": { "type": "array", "items": { "type": "string" } },
+                "state_entry_present": {
+                  "type": "boolean",
+                  "description": "True only when the successor entry's checksum differs from the reset receipt's removed entry."
+                },
+                "state_index_status": { "type": "string", "enum": ["present", "absent", "undeterminable"] },
                 "waited_seconds": { "type": "number", "minimum": 0 }
               }
             }
@@ -250,7 +296,7 @@
                 "quality",
                 "packaged_ic_checksum",
                 "river_network_version_id",
-                "variable_keys"
+                "output_segment_count"
               ],
               "properties": {
                 "run_manifest_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
@@ -261,7 +307,7 @@
                 "quality": { "type": ["string", "null"] },
                 "packaged_ic_checksum": { "type": ["string", "null"] },
                 "river_network_version_id": { "type": ["string", "null"] },
-                "variable_keys": { "type": "array", "items": { "type": "string" } }
+                "output_segment_count": { "type": ["integer", "null"], "minimum": 0 }
               }
             }
           ]

@@ -18,18 +18,25 @@ Per cycle, in this order:
    a default.
 2. **Pre-stage**: copy the NFS forcing package into the scratch object store
    when the scratch copy is missing, verifying every file's sha256 after write.
+   A staging result that is not verified halts the cycle before submission;
+   ``source_absent`` is tolerated only for the repair cycles.
 3. **Submit**: ``plan-production --cycle-time <T> --source <s> --model-id x6
    --disable-backfill --submit`` (single-pass semantics; ``--max-passes`` is
    meaningless without ``--continuous`` and is never passed).  The GFS
    2026-07-07T12 cycle switches to the pre-existing repair parameter set.
-4. **Wait**: the cycle is complete only when the journal shows terminal success
-   for every replay model AND the NFS state index holds one fresh successor
-   entry (``valid_time == T + 12h``, ``created_at`` after the pass started) per
-   model.  Timeout or failure halts the sequence with the interruption recorded;
-   nothing is skipped automatically.
+4. **Wait**: the cycle is complete only when the journal records a terminal
+   completion job id that was NOT in the pre-pass baseline for every replay
+   model AND the NFS state index holds a successor entry
+   (``valid_time == T + 12h``) whose checksum differs from the one the reset
+   receipt archived.  Neither leg uses a timestamp: production state entries
+   carry ``created_at: null`` and the original run's terminal record survives
+   the reset.  Timeout, an undecidable index, or failure halts the sequence with
+   the interruption recorded; nothing is skipped automatically.
 5. **Post-capture**: new manifest sha256, new state checksum, ``init_mode`` /
-   ``quality`` / ``packaged_ic_checksum``, plus the river-network-version and
-   variable key-consistency assertion.  The first replayed cycle MUST show
+   ``quality`` / ``packaged_ic_checksum``, plus the key-consistency assertion
+   over ``river_network_version_id``, the output segment count and the output
+   file inventory.  The replay-sequence ORIGIN cycle (``--origin-cycle``,
+   2026070500 -- not merely the first cycle of this invocation) MUST show
    ``init_mode=3`` + ``quality=packaged_calibrated_state`` + a non-empty
    ``packaged_ic_checksum``; anything else halts the driver.
 
@@ -41,7 +48,9 @@ very historical cycles being replayed.
 
 Resumption (``--resume-from <receipt>``) never blind-skips: a cycle is skipped
 only when the state index still holds the recorded new state entry AND its
-checksum matches the receipt row.
+checksum matches the receipt row.  The replacement receipt is rewritten
+atomically after every cycle, so an interrupted sequence leaves the completed
+rows on disk.
 
 Exit codes: ``0`` success (or dry run), ``2`` refusal before any submission,
 ``3`` halted mid-sequence with the interruption recorded.
@@ -73,21 +82,24 @@ from scripts.replay_capture import (
     MAX_DIGEST_FILE_BYTES,
     MAX_RECEIPT_BYTES,
     PROBE_PRESENT,
+    PROBE_UNDETERMINABLE,
     ReplayDriverRefused,
     _DigestUndeterminable,
     _iter_files,
     _object_key,
     _read_json,
-    _run_root,
     _sha256_file,
+    census_run_cycles,
     directory_digest,
     key_consistency,
     load_reset_removed_entries,
     manifest_summary,
     read_state_index_entries,
+    replaced_successor_entries,
     run_capture,
     run_id_for,
     successor_state_entries,
+    terminal_completion_job_ids,
 )
 from services.orchestrator.scheduler_replay import find_forcing_package_dir
 
@@ -108,6 +120,13 @@ DEFAULT_POLL_SECONDS = 60.0
 #: The one cycle whose forcing packages are gone while its raw manifest is not:
 #: it runs through the pre-existing repair surface instead of the replay branch.
 REPAIR_CYCLES: frozenset[tuple[str, str]] = frozenset({("gfs", "2026070712")})
+
+#: Origin of the replay sequence for the six-basin scope.  The bootstrap
+#: assertion is bound to THIS cycle, never to ``cycles[0]``: a Phase-2 resume
+#: that starts mid-window would otherwise classify a warm cycle as the
+#: packaged-IC first cycle and halt on an assertion that cannot hold
+#: (round-1 B-P1-2).
+DEFAULT_REPLAY_ORIGIN_CYCLE = datetime(2026, 7, 5, 0, tzinfo=UTC)
 
 class ReplayHalted(RuntimeError):
     """The sequence stopped mid-flight; the receipt records the interruption."""
@@ -135,6 +154,7 @@ class ReplayDriverConfig:
     receipt_path: Path
     registry_manifest: Path | None = None
     object_store_prefix: str = ""
+    origin_cycle: datetime = DEFAULT_REPLAY_ORIGIN_CYCLE
     execute: bool = False
     cycle_timeout_seconds: int = DEFAULT_CYCLE_TIMEOUT_SECONDS
     poll_seconds: float = DEFAULT_POLL_SECONDS
@@ -196,20 +216,31 @@ def submit_env(config: ReplayDriverConfig, cycle_time: datetime) -> dict[str, st
     return env
 
 
-def default_journal_probe(config: ReplayDriverConfig, cycle_time: datetime) -> dict[str, bool]:
-    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+def default_journal_probe(config: ReplayDriverConfig, cycle_time: datetime) -> dict[str, list[str]]:
+    """Terminal completion job ids per model, read-only, never a boolean.
+
+    ``has_completed_pipeline`` is already True before the replay pass starts --
+    the reset clears the state index, not the journal, so the ORIGINAL run's
+    terminal record survives.  A boolean probe therefore degenerates into "done
+    immediately" (round-1 B-P2-7).  The driver baselines the recorded terminal
+    job ids before submitting and treats the cycle as complete only once an id
+    appears that was not in that baseline.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+    from workers.data_adapters.base import cycle_id_for
 
     repository = FileOrchestrationJournalRepository(str(config.journal_root))
-    return {
-        model_id: bool(
-            repository.has_completed_pipeline(
-                source_id=config.source_id,
-                cycle_time=cycle_time,
-                model_id=model_id,
-            )
-        )
-        for model_id in config.model_ids
-    }
+    try:
+        jobs = repository.query_pipeline_jobs_by_cycle(cycle_id_for(config.source_id, cycle_time))
+    except (FileOrchestrationJournalError, OSError, ValueError):
+        # Unreadable journal is not evidence of completion; the driver keeps
+        # waiting and halts on the timeout with the empty probe recorded.
+        jobs = []
+    return terminal_completion_job_ids(jobs, model_ids=config.model_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +252,7 @@ def run_replay(
     config: ReplayDriverConfig,
     *,
     submit_pass: Callable[[Sequence[str], Mapping[str, str]], dict[str, Any]] = default_submit_pass,
-    journal_probe: Callable[[ReplayDriverConfig, datetime], Mapping[str, bool]] = default_journal_probe,
+    journal_probe: Callable[[ReplayDriverConfig, datetime], Mapping[str, Sequence[str]]] = default_journal_probe,
     clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
     sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
@@ -232,7 +263,10 @@ def run_replay(
 
     receipt: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
-        "outcome": "completed",
+        # Flipped to ``completed`` only after the last cycle; every per-cycle
+        # write below leaves an honest in-progress receipt behind so a crash
+        # mid-sequence preserves the rows already finished (round-1 B-P1-4).
+        "outcome": "in_progress",
         "pass_id": f"replay-{normalize_source_id(config.source_id).lower()}-{started_at.strftime('%Y%m%dT%H%M%SZ')}",
         "executed": bool(config.execute),
         "source_id": normalize_source_id(config.source_id),
@@ -254,9 +288,21 @@ def run_replay(
         verified = _verified_resume_skip(config, cycle_time, resumed_rows)
         if verified is not None:
             receipt["rows"].extend(verified)
+            _write_receipt(config.receipt_path, receipt)
             continue
+        prior_probe = dict(journal_probe(config, cycle_time))
+        prior_terminal_jobs = {
+            model_id: sorted(str(job_id) for job_id in (prior_probe.get(model_id) or []))
+            for model_id in config.model_ids
+        }
         rows = [
-            _pre_capture_row(config, cycle_time, model_id, removed_entries=removed_entries)
+            _pre_capture_row(
+                config,
+                cycle_time,
+                model_id,
+                removed_entries=removed_entries,
+                prior_terminal_job_ids=prior_terminal_jobs[model_id],
+            )
             for model_id in config.model_ids
         ]
         for row in rows:
@@ -265,7 +311,12 @@ def run_replay(
             for row in rows:
                 row["status"] = "planned"
             receipt["rows"].extend(rows)
+            _write_receipt(config.receipt_path, receipt)
             continue
+
+        staging_halt = _staging_halt(config, cycle_time, rows)
+        if staging_halt is not None:
+            _halt(receipt, config, rows, cycle_time, reason=staging_halt[0], detail=staging_halt[1])
 
         pass_started_at = clock()
         submission = submit_pass(submit_argv(config, cycle_time), submit_env(config, cycle_time))
@@ -282,18 +333,31 @@ def run_replay(
             config,
             cycle_time,
             since=pass_started_at,
+            prior_terminal_jobs=prior_terminal_jobs,
+            removed_entries=removed_entries,
             journal_probe=journal_probe,
             clock=clock,
             sleep=sleep,
         )
         for row in rows:
+            model_id = row["model_id"]
             row["convergence"] = {
-                "journal_terminal": bool(convergence["journal"].get(row["model_id"])),
-                "state_entry_present": row["model_id"] in convergence["state_entries"],
+                "journal_terminal": bool(convergence["new_terminal_jobs"].get(model_id)),
+                "prior_terminal_job_ids": list(prior_terminal_jobs.get(model_id) or []),
+                "new_terminal_job_ids": list(convergence["new_terminal_jobs"].get(model_id) or []),
+                "state_entry_present": model_id in convergence["state_entries"],
+                "state_index_status": convergence["state_index_status"],
                 "waited_seconds": convergence["waited_seconds"],
             }
         if not convergence["converged"]:
-            _halt(receipt, config, rows, cycle_time, reason="convergence_timeout", detail=convergence["detail"])
+            _halt(
+                receipt,
+                config,
+                rows,
+                cycle_time,
+                reason=convergence["halt_reason"],
+                detail=convergence["detail"],
+            )
 
         for row in rows:
             _post_capture_row(config, cycle_time, row, state_entry=convergence["state_entries"].get(row["model_id"]))
@@ -303,7 +367,11 @@ def run_replay(
                 _halt(receipt, config, [], cycle_time, reason=failure, detail={"model_id": row["model_id"]})
             row["status"] = "completed"
         receipt["rows"].extend(rows)
+        # Atomic per-cycle checkpoint: a crash on the next cycle keeps every row
+        # finished so far, instead of losing the whole sequence.
+        _write_receipt(config.receipt_path, receipt)
 
+    receipt["outcome"] = "completed"
     receipt["finished_at"] = _format_time(clock())
     _write_receipt(config.receipt_path, receipt)
     return receipt
@@ -343,19 +411,22 @@ def _assert_retention_disabled(config: ReplayDriverConfig) -> None:
 
 
 def _inventory_census(config: ReplayDriverConfig) -> dict[str, Any]:
-    """On-site inventory at start time -- never a frozen survey count."""
+    """On-site inventory at start time -- never a frozen survey count.
+
+    The run enumeration walks the whole ``runs/`` directory rather than probing
+    the requested cycles one by one, so a frontier that advanced after the
+    survey (or any in-scope run outside the requested window) is visible in the
+    receipt instead of being truncated away (round-1 B-P2-8).
+    """
 
     try:
         index_entries = read_state_index_entries(config.state_index)
     except ReplayDriverRefused:
         index_entries = []
+    census = census_run_cycles(config.nfs_root, source_id=config.source_id, model_ids=config.model_ids)
     per_scope: list[dict[str, Any]] = []
     for model_id in config.model_ids:
-        run_cycles = sorted(
-            cycle.strftime("%Y%m%d%H")
-            for cycle in config.cycles
-            if _run_root(config.nfs_root, run_id_for(config.source_id, cycle, model_id)).is_dir()
-        )
+        run_cycles = list(census["cycles_by_model"].get(model_id) or [])
         entries = [
             entry
             for entry in index_entries
@@ -371,10 +442,17 @@ def _inventory_census(config: ReplayDriverConfig) -> dict[str, Any]:
                 "state_index_entry_count": len(entries),
             }
         )
+    observed = sorted({cycle for scope in per_scope for cycle in scope["run_cycles"]})
     return {
         "state_index": str(config.state_index),
+        "runs_root": census["runs_root"],
+        "enumeration_status": census["status"],
+        "enumeration_detail": census["detail"],
         "scopes": per_scope,
-        "frontier_cycle": config.cycles[-1].strftime("%Y%m%d%H") if config.cycles else None,
+        # On-site frontier: the newest run actually on disk, not an echo of the
+        # requested range (which is recorded next to it for comparison).
+        "frontier_cycle": observed[-1] if observed else None,
+        "requested_frontier_cycle": config.cycles[-1].strftime("%Y%m%d%H") if config.cycles else None,
     }
 
 
@@ -384,6 +462,7 @@ def _pre_capture_row(
     model_id: str,
     *,
     removed_entries: Mapping[tuple[str, str, str], Mapping[str, Any]],
+    prior_terminal_job_ids: Sequence[str],
 ) -> dict[str, Any]:
     run_id = run_id_for(config.source_id, cycle_time, model_id)
     capture = run_capture(config.nfs_root, run_id)
@@ -412,7 +491,10 @@ def _pre_capture_row(
             "state": dict(prior_state) if prior_state is not None else None,
             "state_source": "reset_receipt",
             "river_network_version_id": prior_summary["river_network_version_id"],
-            "variable_keys": prior_summary["variable_keys"],
+            "output_segment_count": prior_summary["output_segment_count"],
+            # Baseline for the completion probe: the ORIGINAL run's terminal
+            # records survive the state-scope reset (the journal is untouched).
+            "terminal_job_ids": list(prior_terminal_job_ids),
         },
         # Unconditional per the user instruction ("input checksums"): recorded
         # for every row, including rows with no prior run.
@@ -501,53 +583,146 @@ def _stage_forcing(config: ReplayDriverConfig, cycle_time: datetime, model_id: s
     }
 
 
+def _staging_halt(
+    config: ReplayDriverConfig,
+    cycle_time: datetime,
+    rows: Sequence[dict[str, Any]],
+) -> tuple[str, dict[str, Any]] | None:
+    """Typed halt for any row whose forcing package is not verifiably staged.
+
+    A partially copied package still satisfies the scheduler's presence probe,
+    so an unverified staging result must never reach a submission
+    (round-1 A-P2-6/B-P2-5).  ``source_absent`` is exempt for the repair cycles
+    only: GFS 2026070712 genuinely has no NFS forcing for five basins and is
+    submitted through the repair parameter set, which rebuilds it.
+    """
+
+    token = cycle_time.strftime("%Y%m%d%H")
+    repair_cycle = (normalize_source_id(config.source_id).lower(), token) in REPAIR_CYCLES
+    offenders: list[dict[str, Any]] = []
+    for row in rows:
+        staging = dict(row.get("staging") or {})
+        if staging.get("verified") is True:
+            continue
+        status = str(staging.get("status") or "unknown")
+        if status == "source_absent" and repair_cycle:
+            staging["repair_cycle_exemption"] = True
+            row["staging"] = staging
+            continue
+        offenders.append(
+            {
+                "model_id": row["model_id"],
+                "status": status,
+                "detail": staging.get("detail"),
+                "copied_files": staging.get("copied_files"),
+            }
+        )
+    if not offenders:
+        return None
+    reason = (
+        "forcing_source_absent"
+        if all(offender["status"] == "source_absent" for offender in offenders)
+        else "forcing_staging_unverified"
+    )
+    return reason, {"cycle": token, "repair_cycle": repair_cycle, "rows": offenders}
+
+
 def _wait_for_convergence(
     config: ReplayDriverConfig,
     cycle_time: datetime,
     *,
     since: datetime,
-    journal_probe: Callable[[ReplayDriverConfig, datetime], Mapping[str, bool]],
+    prior_terminal_jobs: Mapping[str, Sequence[str]],
+    removed_entries: Mapping[tuple[str, str, str], Mapping[str, Any]],
+    journal_probe: Callable[[ReplayDriverConfig, datetime], Mapping[str, Sequence[str]]],
     clock: Callable[[], datetime],
     sleep: Callable[[float], None],
 ) -> dict[str, Any]:
+    """Wait for a NEW terminal job id plus a REPLACED successor state entry.
+
+    Neither leg uses a wall-clock gate: production state-index entries carry
+    ``created_at: null`` and the journal's completion record for the original
+    run survives the reset, so both "is it new?" questions are answered by
+    identity instead -- a terminal job id absent from the pre-pass baseline, and
+    a successor checksum different from the one the reset receipt archived
+    (round-1 B-P1-1 / B-P2-7).  An unreadable index is undecidable: it never
+    counts as converged and halts with its own typed reason.
+    """
+
     successor_valid_time = cycle_time + timedelta(hours=SUCCESSOR_LEAD_HOURS)
+    canonical_source = normalize_source_id(config.source_id)
+    prior_state_entries = {
+        model_id: removed_entries.get((model_id, canonical_source, _format_time(successor_valid_time)))
+        for model_id in config.model_ids
+    }
     deadline = since + timedelta(seconds=config.cycle_timeout_seconds)
-    journal: Mapping[str, bool] = {}
-    state_entries: dict[str, dict[str, Any]] = {}
     while True:
-        journal = dict(journal_probe(config, cycle_time))
+        probe = dict(journal_probe(config, cycle_time))
+        new_terminal_jobs = {
+            model_id: sorted(
+                set(str(job_id) for job_id in (probe.get(model_id) or []))
+                - set(str(job_id) for job_id in (prior_terminal_jobs.get(model_id) or []))
+            )
+            for model_id in config.model_ids
+        }
+        state_index_status = PROBE_PRESENT
+        state_index_detail: str | None = None
         try:
             entries = read_state_index_entries(config.state_index)
-        except ReplayDriverRefused:
+        except ReplayDriverRefused as error:
             entries = []
-        state_entries = successor_state_entries(
+            state_index_status = PROBE_UNDETERMINABLE
+            state_index_detail = error.reason
+        successors = successor_state_entries(
             entries,
             source_id=config.source_id,
             model_ids=config.model_ids,
             valid_time=successor_valid_time,
-            since=since,
         )
-        converged = all(journal.get(model_id) for model_id in config.model_ids) and set(state_entries) == set(
-            config.model_ids
+        state_entries = (
+            replaced_successor_entries(successors, prior_entries=prior_state_entries)
+            if state_index_status == PROBE_PRESENT
+            else {}
+        )
+        converged = (
+            state_index_status == PROBE_PRESENT
+            and all(new_terminal_jobs[model_id] for model_id in config.model_ids)
+            and set(state_entries) == set(config.model_ids)
         )
         now = clock()
         if converged:
             return {
                 "converged": True,
-                "journal": journal,
+                "halt_reason": None,
+                "new_terminal_jobs": new_terminal_jobs,
                 "state_entries": state_entries,
+                "state_index_status": state_index_status,
                 "waited_seconds": (now - since).total_seconds(),
                 "detail": None,
             }
         if now >= deadline:
             return {
                 "converged": False,
-                "journal": journal,
+                "halt_reason": (
+                    "state_index_undeterminable"
+                    if state_index_status == PROBE_UNDETERMINABLE
+                    else "convergence_timeout"
+                ),
+                "new_terminal_jobs": new_terminal_jobs,
                 "state_entries": state_entries,
+                "state_index_status": state_index_status,
                 "waited_seconds": (now - since).total_seconds(),
                 "detail": {
-                    "journal_terminal": sorted(model for model, done in journal.items() if done),
+                    "journal_terminal": sorted(
+                        model_id for model_id, ids in new_terminal_jobs.items() if ids
+                    ),
+                    "prior_terminal_job_ids": {
+                        model_id: list(ids) for model_id, ids in prior_terminal_jobs.items()
+                    },
                     "state_entries": sorted(state_entries),
+                    "unreplaced_successors": sorted(set(successors) - set(state_entries)),
+                    "state_index_status": state_index_status,
+                    "state_index_detail": state_index_detail,
                     "successor_valid_time": _format_time(successor_valid_time),
                 },
             }
@@ -572,10 +747,10 @@ def _post_capture_row(
         "quality": summary["quality"],
         "packaged_ic_checksum": summary["packaged_ic_checksum"],
         "river_network_version_id": summary["river_network_version_id"],
-        "variable_keys": summary["variable_keys"],
+        "output_segment_count": summary["output_segment_count"],
     }
     row["key_consistency"] = key_consistency(row["prior"], row["new"])
-    is_first_cycle = bool(config.cycles) and cycle_time == config.cycles[0]
+    is_first_cycle = cycle_time == config.origin_cycle
     if not is_first_cycle:
         row["bootstrap_assertion"] = {"required": False, "status": "not_required", "detail": None}
         return
@@ -642,7 +817,6 @@ def _verified_resume_skip(
         source_id=config.source_id,
         model_ids=config.model_ids,
         valid_time=cycle_time + timedelta(hours=SUCCESSOR_LEAD_HOURS),
-        since=None,
     )
     verified: list[dict[str, Any]] = []
     for row in rows:
@@ -703,6 +877,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-id", action="append", required=True, dest="model_ids")
     parser.add_argument("--start-cycle", default="2026070500")
     parser.add_argument("--end-cycle", default="2026072100")
+    parser.add_argument(
+        "--origin-cycle",
+        default=DEFAULT_REPLAY_ORIGIN_CYCLE.strftime("%Y%m%d%H"),
+        help=(
+            "Replay-sequence origin whose row must show the packaged-IC bootstrap shape. "
+            "Stays 2026070500 when resuming from a later --start-cycle."
+        ),
+    )
     parser.add_argument("--nfs-root", type=Path, required=True)
     parser.add_argument("--scratch-root", type=Path, required=True)
     parser.add_argument("--state-index", type=Path, required=True)
@@ -737,6 +919,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             receipt_path=args.receipt_path,
             registry_manifest=args.registry_manifest,
             object_store_prefix=args.object_store_prefix,
+            origin_cycle=_parse_cycle_token(args.origin_cycle),
             execute=bool(args.execute),
             cycle_timeout_seconds=int(args.cycle_timeout_seconds),
             poll_seconds=float(args.poll_seconds),
