@@ -97,6 +97,32 @@ _REPLAY_SUPPRESSED_RESTART_KEYS = (
     "fresh_ingestion",
 )
 
+#: Post-assembly invariant clamp (#1164 change 2, design D3.5 v6).  Three review
+#: rounds found the same invariant broken on four different evidence-merge legs,
+#: so the guard is no longer per-leg: after every merge, the clamp re-imposes the
+#: replay-critical keys on each admitted candidate and RECORDS what it had to
+#: repair under this key.  A future unguarded merge is therefore self-healing and
+#: visible instead of silently shipping the wrong restart stage.
+_REPLAY_INVARIANT_CLAMP_KEY = "replay_invariant_clamp_applied"
+#: Clamp modes: the replay terminal override's forecast restart, and the
+#: replay-window authorized repair's convert restart.
+_REPLAY_CLAMP_MODE_RESUBMIT = "replay_resubmit"
+_REPLAY_CLAMP_MODE_REPAIR_CONVERT = "replay_repair_convert_restart"
+#: Evidence keys each clamp mode owns.  Values are captured from the decision /
+#: evidence that was actually applied, so the clamp restores what this pass
+#: decided rather than a second copy of the literals.
+_REPLAY_RESUBMIT_CLAMPED_KEYS = (
+    "restart_stage",
+    "restart_from_stage",
+    "native_shud_resubmitted",
+    "durable_output_reused",
+)
+_REPLAY_REPAIR_CLAMPED_KEYS = (
+    "restart_stage",
+    "restart_from_stage",
+    "fresh_ingestion",
+)
+
 #: Completed-type terminal skip reasons that the §8.7 journal predecessor
 #: identity filter may quarantine (Issue #1107).  ``terminal_completed_cycle``
 #: is included deliberately: it is the only completed-type skip reachable with
@@ -226,6 +252,10 @@ def build_candidates(
     duplicate_exclusions: list[dict[str, Any]] = []
     slurm_status_sync_evidence: list[dict[str, Any]] = []
     seen_candidate_ids: set[str] = set()
+    # Replay-critical keys per candidate id, recorded where the admission
+    # decision fixes them and re-imposed once at the end (design D3.5 v6).
+    # Empty whenever replay admission is absent, which makes the clamp inert.
+    replay_invariants: dict[str, _ReplayInvariantExpectation] = {}
     active_orchestration_provider = (
         getattr(context.active_repository, "has_active_orchestration", None)
         if context.active_repository is not None
@@ -457,6 +487,9 @@ def build_candidates(
                     # retry-budget downgrade alike.  It runs BEFORE any of them
                     # so the persisted retry budget is never consulted.
                     state_decision = replay_override
+                    resubmit_invariant = _replay_resubmit_invariant(replay_override)
+                    if resubmit_invariant is not None:
+                        replay_invariants[candidate.candidate_id] = resubmit_invariant
                 elif (
                     strict_warm_start is not None
                     and state_decision.reason in _STRICT_WARM_START_TERMINAL_SKIP_REASONS
@@ -787,6 +820,9 @@ def build_candidates(
                         # own keys; re-merging it below would restore the `forcing`
                         # restart this leg deliberately lowered.
                         raw_manifest_restart_applied = True
+                        repair_invariant = _replay_repair_convert_invariant(replay_repair_evidence)
+                        if repair_invariant is not None:
+                            replay_invariants[candidate.candidate_id] = repair_invariant
                     else:
                         blocked.append(
                             _blocked_candidate(
@@ -1147,6 +1183,9 @@ def build_candidates(
         _bf.attach_emission_summary_to_blocked(
             blocked, predecessor_emission_evidence
         )
+    # LAST statement before the return: every merge above (§8.6's predecessor
+    # emission included) is upstream of the clamp (design D3.5 v6).
+    _clamp_replay_invariants(candidates, replay_invariants)
     return candidates, blocked, skipped, duplicate_exclusions, slurm_status_sync_evidence
 
 
@@ -1967,15 +2006,22 @@ def _replay_repair_raw_restart_evidence(
     ``_verified_repair_raw_manifest`` already proved present.
 
     Returns ``None`` (caller keeps the pre-change block) when replay does not
-    cover this candidate or when no raw-manifest restart evidence exists — with
-    the replay triple absent this is always ``None`` and the leg is
-    byte-identical (must-preserve 3).
+    cover this candidate, when canonical readiness is not a genuine zero-row
+    evaluation, or when no raw-manifest restart evidence exists — with the replay
+    triple absent this is always ``None`` and the leg is byte-identical
+    (must-preserve 3).
     """
 
     admission = getattr(config, "replay_admission", None)
     if not isinstance(admission, ReplayAdmission):
         return None
     if not admission.covers(model_id=candidate.model_id, cycle_time=candidate.cycle_time_utc):
+        return None
+    if not _canonical_evidence_is_fresh_zero_row(canonical_readiness):
+        # Round-3 A3-2: only "retention purged the canonical products" authorizes
+        # a rebuild.  ``canonical_unavailable`` means the dependency state is
+        # UNKNOWN and ``no_expected_leads`` is a horizon/policy config defect;
+        # both keep the pre-change typed block instead of restarting at convert.
         return None
     if not isinstance(raw_manifest_restart, Mapping):
         return None
@@ -2065,6 +2111,110 @@ def _nfs_raw_manifest_matches_source_cycle(
         if _format_utc(parsed_cycle_time) != _format_utc(candidate.cycle_time_utc):
             return False
     return True
+
+
+@dataclass(frozen=True)
+class _ReplayInvariantExpectation:
+    """What a replay-window candidate's evidence must still say at return time.
+
+    ``required`` maps a top-level ``state_evidence`` key to the value the
+    admission decision fixed for it.  A ``Mapping`` value is compared (and
+    repaired) sub-key by sub-key so an unrelated sibling key inside it survives.
+    """
+
+    mode: str
+    required: Mapping[str, Any]
+
+
+def _replay_resubmit_invariant(decision: CandidateStateDecision) -> _ReplayInvariantExpectation | None:
+    """Record the override's forecast restart + native/durable keys (leg a)."""
+
+    evidence = decision.evidence
+    if not isinstance(evidence, Mapping):
+        return None
+    required = {key: evidence[key] for key in _REPLAY_RESUBMIT_CLAMPED_KEYS if key in evidence}
+    if not required:
+        return None
+    return _ReplayInvariantExpectation(mode=_REPLAY_CLAMP_MODE_RESUBMIT, required=required)
+
+
+def _replay_repair_convert_invariant(
+    applied_evidence: Mapping[str, Any],
+) -> _ReplayInvariantExpectation | None:
+    """Record the repair leg's convert restart + raw-reuse ingestion mode (leg b)."""
+
+    required = {key: applied_evidence[key] for key in _REPLAY_REPAIR_CLAMPED_KEYS if key in applied_evidence}
+    if not required:
+        return None
+    return _ReplayInvariantExpectation(mode=_REPLAY_CLAMP_MODE_REPAIR_CONVERT, required=required)
+
+
+def _clamp_replay_invariants(
+    candidates: list[SchedulerCandidateLike],
+    expectations: Mapping[str, _ReplayInvariantExpectation],
+) -> None:
+    """Final enforcement pass over the admitted set (design D3.5 v6).
+
+    Runs AFTER every evidence assembly and merge in :func:`build_candidates` —
+    including the post-Slurm-sync rebuild merge, which re-derives the candidate
+    state decision from the journal and would otherwise put the repair
+    candidate's ``forcing`` restart back (round-3 A3-1).  That merge still
+    happens: its ``slurm_state_sync`` audit evidence must reach the candidate;
+    the clamp restores the replay keys behind it.
+
+    With no replay admission in the pass, ``expectations`` is empty and this is a
+    pure no-op — not one candidate is rebuilt (must-preserve 3).
+    """
+
+    if not expectations:
+        return
+    for index, candidate in enumerate(candidates):
+        expectation = expectations.get(candidate.candidate_id)
+        if expectation is None:
+            continue
+        clamped = _clamped_replay_candidate(candidate, expectation)
+        if clamped is not None:
+            candidates[index] = clamped
+
+
+def _clamped_replay_candidate(
+    candidate: SchedulerCandidateLike,
+    expectation: _ReplayInvariantExpectation,
+) -> SchedulerCandidateLike | None:
+    """Repair a clobbered replay candidate, or return ``None`` when it is intact."""
+
+    evidence = candidate.state_evidence if isinstance(candidate.state_evidence, Mapping) else {}
+    pre_clamp: dict[str, Any] = {}
+    restored: dict[str, Any] = {}
+    for key, required in expectation.required.items():
+        observed = evidence.get(key)
+        if isinstance(required, Mapping):
+            if isinstance(observed, Mapping) and all(observed.get(name) == value for name, value in required.items()):
+                continue
+            restored[key] = {
+                **(dict(observed) if isinstance(observed, Mapping) else {}),
+                **dict(required),
+            }
+        else:
+            if key in evidence and observed == required:
+                continue
+            restored[key] = required
+        pre_clamp[key] = observed
+    if not restored:
+        return None
+    return _candidate_with_state_evidence(
+        candidate,
+        {
+            **restored,
+            _REPLAY_INVARIANT_CLAMP_KEY: {
+                "mode": expectation.mode,
+                "candidate_id": candidate.candidate_id,
+                "clobbered_keys": sorted(restored),
+                "pre_clamp": _evidence_safe(pre_clamp),
+                "restored": _evidence_safe(restored),
+            },
+        },
+    )
 
 
 def _blocked_candidate(

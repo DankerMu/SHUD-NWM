@@ -27,6 +27,7 @@ active AND ``model_id`` in the closed set AND cycle inside the replay window.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 from collections.abc import Mapping, Sequence
@@ -54,6 +55,7 @@ from services.orchestrator.scheduler_replay import (
 )
 from services.orchestrator.scheduler_state import CandidateStateDecision
 from services.orchestrator.scheduler_types import SchedulerCandidate
+from workers.canonical_converter.converter import evaluate_canonical_readiness
 from workers.data_adapters.base import CycleDiscovery, cycle_id_for
 
 REPLAY_MODEL_ID = "dg_dth_ls_gfs"
@@ -134,10 +136,22 @@ class _FakeCycle:
 
 
 class _FakeRepository:
-    """Minimal active repository: a candidate-state provider and nothing active."""
+    """Minimal active repository: a candidate-state provider and nothing active.
 
-    def __init__(self, raw_state: Mapping[str, Any] | None) -> None:
+    ``slurm_jobs_script`` scripts successive ``active_slurm_jobs`` answers so a
+    pass can reproduce the production shape where a job is active on the first
+    probe and has gone terminal by the post-sync re-probe (round-3 A3-1).
+    """
+
+    def __init__(
+        self,
+        raw_state: Mapping[str, Any] | None,
+        *,
+        slurm_jobs_script: Sequence[Sequence[Mapping[str, Any]]] | None = None,
+    ) -> None:
         self._raw_state = dict(raw_state or {})
+        self._slurm_jobs_script = [list(answer) for answer in (slurm_jobs_script or [])]
+        self.slurm_jobs_calls = 0
 
     def candidate_state(self, **kwargs: Any) -> dict[str, Any]:
         return dict(self._raw_state)
@@ -152,7 +166,23 @@ class _FakeRepository:
         return True
 
     def active_slurm_jobs(self, **kwargs: Any) -> list[dict[str, Any]]:
+        index = self.slurm_jobs_calls
+        self.slurm_jobs_calls += 1
+        if index < len(self._slurm_jobs_script):
+            return [dict(job) for job in self._slurm_jobs_script[index]]
         return []
+
+
+class _SyncingOrchestrator:
+    """node-22 orchestrator stub exposing only ``sync_cycle_statuses``."""
+
+    def __init__(self, updates: Sequence[Mapping[str, Any]]) -> None:
+        self._updates = [dict(update) for update in updates]
+        self.calls: list[str] = []
+
+    def sync_cycle_statuses(self, cycle_id: str) -> list[dict[str, Any]]:
+        self.calls.append(cycle_id)
+        return [dict(update) for update in self._updates]
 
 
 def _candidate_factory(
@@ -217,6 +247,10 @@ def _build(
     discovery_evidence: Mapping[str, Any] | None = None,
     config_overrides: Mapping[str, Any] | None = None,
     resource_profiles: Mapping[str, Mapping[str, Any]] | None = None,
+    decider: Any | None = None,
+    repository: Any | None = None,
+    orchestrator: Any | None = None,
+    allow_slurm_status_sync: bool = False,
 ) -> tuple[list[Any], list[Any], list[dict[str, Any]]]:
     discovery = CycleDiscovery(
         cycle_id=cycle_id_for("gfs", cycle_time),
@@ -230,16 +264,22 @@ def _build(
     )
     context = scheduler_candidates_module.SchedulerCandidateConstructionContext(
         config=_FakeConfig(replay_admission=admission, **dict(config_overrides or {})),
-        active_repository=_FakeRepository(raw_state),
+        active_repository=repository if repository is not None else _FakeRepository(raw_state),
         canonical_readiness_for_candidate=lambda candidate, cycle: (
             dict(canonical_readiness) if canonical_readiness is not None else None
         ),
         strict_warm_start_for_candidate=lambda candidate, cycle: (
             dict(strict_warm_start) if strict_warm_start is not None else None
         ),
-        orchestrator_for=lambda source_id: pytest.fail("candidate construction must not build an orchestrator"),
+        orchestrator_for=(
+            (lambda source_id: orchestrator)
+            if orchestrator is not None
+            else (lambda source_id: pytest.fail("candidate construction must not build an orchestrator"))
+        ),
         candidate_factory=_candidate_factory,
-        candidate_state_decider=lambda candidate, state: (
+        candidate_state_decider=decider
+        if decider is not None
+        else lambda candidate, state: (
             decisions_by_model.get(candidate.model_id)
             if decisions_by_model is not None
             else decision
@@ -258,6 +298,7 @@ def _build(
             for model_id in model_ids
         ],
         cycles=[_FakeCycle(discovery=discovery)],
+        allow_slurm_status_sync=allow_slurm_status_sync,
     )
     return candidates, blocked, skipped
 
@@ -1292,6 +1333,449 @@ def test_raw_less_leg_blocks_a_replay_candidate_from_another_discovery_provenanc
     # The guard never claims a substitute it does not have.
     assert "replay_forcing_evidence" not in guard
     assert guard["nfs_raw_manifest"]["status"] == "missing"
+
+
+# --------------------------------------------------------------------------
+# 1.2d post-assembly invariant clamp + merge-site audit
+# (round-3 gate retro, design D3.5 v6: A3-1, A3-2)
+# --------------------------------------------------------------------------
+
+#: The production active-job row shape the candidate-state repository returns.
+ACTIVE_SLURM_JOB: dict[str, Any] = {
+    "job_id": "998877",
+    "state": "RUNNING",
+    "stage": "forecast",
+    "submitted_at": "2026-07-07T12:05:00Z",
+}
+#: What ``sync_cycle_statuses`` reports once that job has gone terminal.
+TERMINAL_SYNC_UPDATE: dict[str, Any] = {
+    "job_id": "998877",
+    "status": "succeeded",
+    "stage": "forecast",
+    "pipeline_run_id": "pipe-2026070712",
+}
+
+
+def _post_sync_retry_decision() -> CandidateStateDecision:
+    """The ordinary ``retry_failed`` decision the journal yields after a sync.
+
+    Shape copied from ``scheduler_state_failure._retry_failed_evidence``: the
+    restart stage is TOP-LEVEL (which is what clobbers the replay keys at the
+    post-sync rebuild merge) while the reuse flags sit under ``reuse``.
+    """
+
+    return CandidateStateDecision(
+        "retry",
+        "retry_failed_candidate",
+        {
+            "decision": "retry_failed",
+            "reason": "retry_failed_candidate",
+            "stage": "convert",
+            "restart_stage": "convert",
+            "restart_from_stage": "convert",
+            "failure": {
+                "classifier": "chain_stage_failed",
+                "retryable": True,
+                "permanent": False,
+                "attempt": 1,
+                "retry_limit": 3,
+            },
+            "retry_policy": {
+                "automatic_retry_allowed": True,
+                "manual_retry_required": False,
+                "attempt": 1,
+                "retry_limit": 3,
+            },
+            "reuse": {"successful_sibling_outputs_reused": False, "durable_output_reused": False},
+        },
+    )
+
+
+class _DecisionSequence:
+    """Candidate-state decider whose answer changes between journal reads."""
+
+    def __init__(self, decisions: Sequence[CandidateStateDecision | None]) -> None:
+        self._decisions = list(decisions)
+        self.calls = 0
+
+    def __call__(self, candidate: Any, state: Mapping[str, Any] | None) -> CandidateStateDecision | None:
+        index = min(self.calls, len(self._decisions) - 1)
+        self.calls += 1
+        return self._decisions[index]
+
+
+def test_post_sync_rebuild_cannot_clobber_the_repair_convert_restart(tmp_path: Path) -> None:
+    """A3-1: the post-Slurm-sync rebuild merge (``:1013``) is a sibling clobber point.
+
+    The 070712 repair candidate has an active Slurm job on the first probe; the
+    sync reports it terminal, the driver re-reads the journal and re-authorizes
+    the repair — whose restart is ``forcing`` — and the rebuild merge puts that
+    back over the ``convert`` restart the canonical gate deliberately lowered.
+    The clamp restores it AFTER every merge, and the ``slurm_state_sync`` audit
+    evidence that merge carries still lands on the candidate.
+    """
+
+    _write_raw_manifest(tmp_path, cycle_time=REPAIR_CYCLE)
+    model_id = REPAIR_MODEL_IDS[0]
+    repository = _FakeRepository(
+        _repair_raw_state(REPAIR_CYCLE),
+        slurm_jobs_script=[[ACTIVE_SLURM_JOB]],
+    )
+    orchestrator = _SyncingOrchestrator([TERMINAL_SYNC_UPDATE])
+
+    candidates, blocked, skipped = _build(
+        admission=_repair_admission((model_id,)),
+        decision=None,
+        decisions_by_model={model_id: _missing_forcing_blocked_decision()},
+        strict_warm_start=_repair_warm_state(REPAIR_CYCLE),
+        canonical_readiness=FRESH_ZERO_ROW_READINESS,
+        cycle_time=REPAIR_CYCLE,
+        model_ids=(model_id,),
+        raw_state=_repair_raw_state(REPAIR_CYCLE),
+        resource_profiles={model_id: _direct_grid_profile()},
+        config_overrides={
+            "repair_missing_forcing": True,
+            "repair_missing_forcing_cycle_time": REPAIR_CYCLE,
+            "require_direct_grid": True,
+            "nfs_raw_manifest_root": tmp_path,
+            "nfs_raw_manifest_prefix": "s3://nhms",
+        },
+        repository=repository,
+        orchestrator=orchestrator,
+        allow_slurm_status_sync=True,
+    )
+
+    assert blocked == []
+    assert skipped == []
+    assert [candidate.model_id for candidate in candidates] == [model_id]
+    evidence = candidates[0].state_evidence
+    # the invariant: the repair rebuilds canonical from raw, at `convert`
+    assert evidence["restart_stage"] == "convert"
+    assert evidence["restart_from_stage"] == "convert"
+    assert evidence["fresh_ingestion"]["mode"] == "reuse_raw_then_convert"
+    # the merge itself is NOT skipped: its audit evidence is the point of it
+    assert orchestrator.calls == [cycle_id_for("gfs", REPAIR_CYCLE)]
+    assert evidence["slurm_state_sync"]["status"] == "synced"
+    assert evidence["slurm_state_sync"]["terminal_updates"] == [TERMINAL_SYNC_UPDATE]
+    # ... and the repair is visible, not silently healed
+    clamp = evidence["replay_invariant_clamp_applied"]
+    assert clamp["mode"] == "replay_repair_convert_restart"
+    assert clamp["candidate_id"] == candidates[0].candidate_id
+    assert clamp["clobbered_keys"] == ["fresh_ingestion", "restart_from_stage", "restart_stage"]
+    assert clamp["pre_clamp"]["restart_stage"] == "forcing"
+    assert clamp["pre_clamp"]["restart_from_stage"] == "forcing"
+    assert clamp["pre_clamp"]["fresh_ingestion"]["mode"] == "repair_missing_forcing"
+    assert clamp["restored"]["restart_stage"] == "convert"
+
+
+def test_post_sync_rebuild_cannot_clobber_the_replay_resubmit_forecast_restart() -> None:
+    """Same sibling merge, leg (a): a post-sync retry lowers the forecast restart.
+
+    Once the sync reports the job terminal the journal is re-read, and the
+    ordinary ``retry_failed`` decision it now yields carries a ``convert``
+    restart.  Merging it is right for its own evidence and wrong for the replay
+    keys: re-running convert/forcing would rebuild inputs the replay window
+    already has.  The clamp puts ``forecast`` back and names what it repaired.
+    """
+
+    decider = _DecisionSequence([_replay_terminal_decision(), _post_sync_retry_decision()])
+    repository = _FakeRepository(RAW_MANIFEST_READY_STATE, slurm_jobs_script=[[ACTIVE_SLURM_JOB]])
+    orchestrator = _SyncingOrchestrator([TERMINAL_SYNC_UPDATE])
+
+    candidates, blocked, skipped = _build(
+        admission=_admission(),
+        decision=None,
+        strict_warm_start={"ready": True, "candidate_state": dict(SELECTED_STATE)},
+        canonical_readiness=FRESH_ZERO_ROW_READINESS,
+        decider=decider,
+        repository=repository,
+        orchestrator=orchestrator,
+        allow_slurm_status_sync=True,
+    )
+
+    assert blocked == []
+    assert skipped == []
+    assert decider.calls == 2
+    evidence = candidates[0].state_evidence
+    assert evidence["restart_stage"] == "forecast"
+    assert evidence["restart_from_stage"] == "forecast"
+    # the override's own keys were never clobbered and stay exactly as decided
+    assert evidence["native_shud_resubmitted"] is True
+    assert evidence["durable_output_reused"] is False
+    assert evidence["slurm_state_sync"]["status"] == "synced"
+    clamp = evidence["replay_invariant_clamp_applied"]
+    assert clamp["mode"] == "replay_resubmit"
+    assert clamp["clobbered_keys"] == ["restart_from_stage", "restart_stage"]
+    assert clamp["pre_clamp"] == {"restart_stage": "convert", "restart_from_stage": "convert"}
+
+
+def test_the_clamp_restores_every_replay_resubmit_key_a_future_merge_could_clobber() -> None:
+    """The backstop itself: all four owned keys, whatever clobbered them.
+
+    Stands in for the merge leg nobody has written yet — the retro's whole point
+    is that the invariant must not depend on enumerating those legs.
+    """
+
+    candidates, _blocked, _skipped = _build(
+        admission=_admission(),
+        decision=_replay_terminal_decision(),
+        strict_warm_start={"ready": True, "candidate_state": dict(SELECTED_STATE)},
+        canonical_readiness=FRESH_ZERO_ROW_READINESS,
+        raw_state=RAW_MANIFEST_READY_STATE,
+    )
+    admitted = candidates[0]
+    assert admitted.state_evidence["restart_stage"] == "forecast"
+    assert "replay_invariant_clamp_applied" not in admitted.state_evidence
+
+    override = scheduler_candidates_module._replay_terminal_override_decision(
+        _FakeConfig(replay_admission=_admission()),
+        admitted,
+        _replay_terminal_decision(),
+        strict_warm_start={"ready": True, "candidate_state": dict(SELECTED_STATE)},
+        successor_state=None,
+    )
+    assert override is not None
+    expectation = scheduler_candidates_module._replay_resubmit_invariant(override)
+    assert expectation is not None
+
+    clobbered = scheduler_candidates_module._candidate_with_state_evidence(
+        admitted,
+        {
+            "restart_stage": "convert",
+            "restart_from_stage": "convert",
+            "native_shud_resubmitted": False,
+            "durable_output_reused": True,
+        },
+    )
+    clamped = [clobbered]
+    scheduler_candidates_module._clamp_replay_invariants(clamped, {clobbered.candidate_id: expectation})
+
+    evidence = clamped[0].state_evidence
+    assert evidence["restart_stage"] == "forecast"
+    assert evidence["restart_from_stage"] == "forecast"
+    assert evidence["native_shud_resubmitted"] is True
+    assert evidence["durable_output_reused"] is False
+    clamp = evidence["replay_invariant_clamp_applied"]
+    assert clamp["clobbered_keys"] == [
+        "durable_output_reused",
+        "native_shud_resubmitted",
+        "restart_from_stage",
+        "restart_stage",
+    ]
+    assert clamp["pre_clamp"]["native_shud_resubmitted"] is False
+    assert clamp["pre_clamp"]["durable_output_reused"] is True
+
+
+def test_the_clamp_is_a_pure_no_op_without_replay_admission() -> None:
+    """must-preserve 3: with no replay in the pass the clamp rebuilds nothing.
+
+    Both halves: the same post-sync rebuild pass keeps its pre-change evidence
+    (the ``convert`` restart the retry decision asked for, no clamp key), and the
+    clamp leaves the candidate objects themselves untouched by identity.
+    """
+
+    decider = _DecisionSequence([_replay_terminal_decision(), _post_sync_retry_decision()])
+    repository = _FakeRepository(RAW_MANIFEST_READY_STATE, slurm_jobs_script=[[ACTIVE_SLURM_JOB]])
+    orchestrator = _SyncingOrchestrator([TERMINAL_SYNC_UPDATE])
+
+    candidates, blocked, skipped = _build(
+        admission=None,
+        decision=None,
+        strict_warm_start={"ready": True, "candidate_state": dict(SELECTED_STATE)},
+        canonical_readiness=FRESH_ZERO_ROW_READINESS,
+        decider=decider,
+        repository=repository,
+        orchestrator=orchestrator,
+        allow_slurm_status_sync=True,
+    )
+
+    # Pre-change shape, unchanged: outside replay the terminal skip degrades to
+    # the ordinary mismatch retry, the raw-ready canonical leg lowers the restart
+    # to `convert`, and the post-sync rebuild merge keeps it there.  Nothing
+    # clamps it back up.
+    assert blocked == []
+    assert skipped == []
+    evidence = candidates[0].state_evidence
+    assert evidence["restart_stage"] == "convert"
+    assert evidence["restart_from_stage"] == "convert"
+    assert evidence["slurm_state_sync"]["status"] == "synced"
+    assert "replay_invariant_clamp_applied" not in evidence
+    assert "replay_canonical_readiness_guard" not in evidence
+
+    unrelated = [_candidate_factory(
+        discovery=CycleDiscovery(
+            cycle_id=cycle_id_for("gfs", IN_WINDOW_CYCLE),
+            source_id="gfs",
+            cycle_time=IN_WINDOW_CYCLE,
+            cycle_hour=IN_WINDOW_CYCLE.hour,
+            available=True,
+            status="discovered",
+        ),
+        model=_FakeModel(model_id=REPLAY_MODEL_ID),
+        horizon={},
+    )]
+    before = list(unrelated)
+    scheduler_candidates_module._clamp_replay_invariants(unrelated, {})
+    assert unrelated[0] is before[0]
+
+
+def test_replay_window_repair_needs_a_genuine_zero_row_canonical_evaluation(tmp_path: Path) -> None:
+    """A3-2: unknown dependency state is not an authorization to rebuild.
+
+    ``canonical_unavailable`` (the readiness query itself failed) and
+    ``no_expected_leads`` (a broken horizon/policy config) both report a
+    not-ready canonical, and neither means "retention purged the products".  The
+    repair leg must fall back to the pre-change typed block.
+    """
+
+    _write_raw_manifest(tmp_path, cycle_time=REPAIR_CYCLE)
+    model_id = REPAIR_MODEL_IDS[0]
+    unavailable = {
+        "source": "gfs",
+        "source_id": "gfs",
+        "cycle_id": cycle_id_for("gfs", REPAIR_CYCLE),
+        "cycle_time": "2026-07-07T12:00:00Z",
+        "status": "canonical_unavailable",
+        "ready": False,
+        "reason": "canonical_products_query_failed",
+        "expected_leads": [0, 12, 24],
+        "dependency": {"name": "canonical_products", "status": "unavailable", "retryable": True},
+        "failure": {
+            "classifier": "dependency_unavailable",
+            "reason_code": "CANONICAL_PRODUCTS_QUERY_FAILED",
+            "dependency": "canonical_products",
+            "retryable": True,
+            "permanent": False,
+        },
+    }
+    broken_horizon = evaluate_canonical_readiness(
+        source_id="gfs",
+        cycle_time=REPAIR_CYCLE,
+        products=[],
+        forecast_hours=(),
+        canonical_product_id="canonical_gfs_2026070712",
+        model_id=model_id,
+        basin_id=model_id.replace("dg_", "basin_"),
+    ).evidence
+    assert broken_horizon["candidate_row_count"] == 0
+    assert not broken_horizon["expected_leads"]
+
+    for readiness in (unavailable, broken_horizon):
+        candidates, blocked, skipped = _build(
+            admission=_repair_admission((model_id,)),
+            decision=None,
+            decisions_by_model={model_id: _missing_forcing_blocked_decision()},
+            strict_warm_start=_repair_warm_state(REPAIR_CYCLE),
+            canonical_readiness=readiness,
+            cycle_time=REPAIR_CYCLE,
+            model_ids=(model_id,),
+            raw_state=_repair_raw_state(REPAIR_CYCLE),
+            resource_profiles={model_id: _direct_grid_profile()},
+            config_overrides={
+                "repair_missing_forcing": True,
+                "repair_missing_forcing_cycle_time": REPAIR_CYCLE,
+                "require_direct_grid": True,
+                "nfs_raw_manifest_root": tmp_path,
+                "nfs_raw_manifest_prefix": "s3://nhms",
+            },
+        )
+        assert candidates == []
+        assert skipped == []
+        assert blocked[0].reason == "missing_forcing_package_uri"
+        evidence = blocked[0].state_evidence
+        assert evidence["missing_forcing_repair"]["status"] == "rejected"
+        assert evidence["missing_forcing_repair"]["reason"] == "canonical_not_ready"
+        assert evidence["restart_stage"] == "forecast"
+        assert "replay_canonical_readiness_guard" not in evidence
+        assert "replay_invariant_clamp_applied" not in evidence
+
+
+#: Every ``_merge_state_evidence`` / ``_candidate_with_state_evidence`` call site
+#: in ``scheduler_candidates.py``, keyed by (enclosing function, callee, nth call
+#: in that function) and classified.  The retro's finding is that this surface
+#: keeps growing new clobber points, so a NEW call site fails this test by
+#: construction and its author has to say which class it is:
+#:
+#: * ``upstream of clamp`` -- inside ``build_candidates`` before the final
+#:   ``_clamp_replay_invariants`` call, which re-imposes the replay keys after it;
+#: * ``self-guarded`` -- outside the admitted-candidate path (blocked/skipped
+#:   entries, decision-level evidence, or the clamp's own repair merge), so the
+#:   clamp neither can nor needs to cover it.
+MERGE_CALL_SITE_ALLOWLIST: dict[tuple[str, str, int], str] = {
+    ("build_candidates", "_merge_state_evidence", 1): "self-guarded (skipped entry, not a candidate)",
+    ("build_candidates", "_candidate_with_state_evidence", 1): "upstream of clamp (strict warm start)",
+    ("build_candidates", "_candidate_with_state_evidence", 2): "upstream of clamp (post-sync retry, active-job leg)",
+    ("build_candidates", "_candidate_with_state_evidence", 3): "upstream of clamp (post-sync repaired audit)",
+    ("build_candidates", "_candidate_with_state_evidence", 4): "upstream of clamp (nfs raw manifest gate)",
+    ("build_candidates", "_candidate_with_state_evidence", 5): "upstream of clamp (replay repair leg)",
+    ("build_candidates", "_candidate_with_state_evidence", 6): "upstream of clamp (fresh-zero-row leg)",
+    ("build_candidates", "_candidate_with_state_evidence", 7): "upstream of clamp (canonical readiness ready)",
+    ("build_candidates", "_candidate_with_state_evidence", 8): "upstream of clamp (retry decision evidence)",
+    ("build_candidates", "_candidate_with_state_evidence", 9): "upstream of clamp (repaired state audit)",
+    ("build_candidates", "_candidate_with_state_evidence", 10): "upstream of clamp (post-sync rebuild, A3-1)",
+    ("build_candidates", "_candidate_with_state_evidence", 11): "upstream of clamp (post-sync repaired audit)",
+    ("_candidate_warm_admission_decision", "_merge_state_evidence", 1): "self-guarded (blocked candidate evidence)",
+    ("_clamped_replay_candidate", "_candidate_with_state_evidence", 1): "self-guarded (the clamp's own repair)",
+    ("_blocked_candidate", "_merge_state_evidence", 1): "self-guarded (blocked candidate evidence)",
+    ("_candidate_with_state_evidence", "_merge_state_evidence", 1): "self-guarded (the merge helper itself)",
+}
+MERGE_CALL_SITE_CLASSES = ("upstream of clamp", "self-guarded")
+
+
+def _merge_call_sites() -> dict[tuple[str, str, int], int]:
+    """(enclosing function, callee, ordinal) -> line, straight from the source."""
+
+    source_path = Path(scheduler_candidates_module.__file__)
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    tracked = {"_merge_state_evidence", "_candidate_with_state_evidence"}
+    found: list[tuple[str, str, int]] = []
+
+    def visit(node: ast.AST, scope: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                visit(child, child.name)
+                continue
+            if isinstance(child, ast.Call) and isinstance(child.func, ast.Name) and child.func.id in tracked:
+                found.append((scope, child.func.id, child.lineno))
+            visit(child, scope)
+
+    visit(tree, "<module>")
+    sites: dict[tuple[str, str, int], int] = {}
+    ordinals: dict[tuple[str, str], int] = {}
+    for scope, callee, lineno in sorted(found, key=lambda item: item[2]):
+        ordinals[(scope, callee)] = ordinals.get((scope, callee), 0) + 1
+        sites[(scope, callee, ordinals[(scope, callee)])] = lineno
+    return sites
+
+
+def test_every_state_evidence_merge_site_is_classified_against_the_clamp() -> None:
+    """Invariant audit (round-3 retro): new merge sites fail by construction."""
+
+    found = _merge_call_sites()
+    assert set(found) == set(MERGE_CALL_SITE_ALLOWLIST), (
+        "state-evidence merge sites changed; classify each new site as "
+        f"{MERGE_CALL_SITE_CLASSES} in MERGE_CALL_SITE_ALLOWLIST. "
+        f"added={sorted(set(found) - set(MERGE_CALL_SITE_ALLOWLIST))} "
+        f"removed={sorted(set(MERGE_CALL_SITE_ALLOWLIST) - set(found))}"
+    )
+    for key, classification in MERGE_CALL_SITE_ALLOWLIST.items():
+        assert classification.startswith(MERGE_CALL_SITE_CLASSES), key
+
+    # "upstream of clamp" is a claim about position, so assert it: every such
+    # site is in ``build_candidates`` and lexically before the clamp call.
+    clamp_lines = [
+        node.lineno
+        for node in ast.walk(ast.parse(Path(scheduler_candidates_module.__file__).read_text(encoding="utf-8")))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_clamp_replay_invariants"
+    ]
+    assert clamp_lines, "build_candidates must call the invariant clamp"
+    for key, classification in MERGE_CALL_SITE_ALLOWLIST.items():
+        if not classification.startswith("upstream of clamp"):
+            continue
+        assert key[0] == "build_candidates"
+        assert found[key] < max(clamp_lines)
 
 
 # --------------------------------------------------------------------------
