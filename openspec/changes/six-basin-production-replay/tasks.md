@@ -64,14 +64,14 @@
 
 ## 4R3. Round-3 gate retro 纠正动作(head 4b01348b 的 7 项裁决 + 深度形态收口,见 `.workplans/issue-1164-change2/review/{round-ledger.log,review-failure-retro-r3.md}`)
 
-- [ ] 4R3.1 后装配不变量钳(retro 主动作,design D3.5 v6):`build_candidates` 全部 merge(含 post-sync 重建 `:1013`)之后统一终检强制 replay 关键键;偏差修复且记 `replay_invariant_clamp_applied`(列被覆写键与原值);replay 缺省纯 no-op。测试:A3-1 复现场景(`allow_slurm_status_sync=True`,repair 候选 sync 后)经钳恢复 convert;`replay_resubmit` 候选被人为 clobber 后经钳恢复 forecast;`slurm_state_sync` 审计证据保留(不整段跳过 `:1013` merge)。
-- [ ] 4R3.2 merge 点审计测试:枚举 `scheduler_candidates.py` 全部 `_merge_state_evidence`/`_candidate_with_state_evidence` 调用点,断言各点在钳上游或自带 guard;新增点按构造失败。
-- [ ] 4R3.3 repair 腿 fresh-zero-row 前提(A3-2):`_replay_repair_raw_restart_evidence` 开头 `_canonical_evidence_is_fresh_zero_row` 不满足 → None 落回 pre-change typed block;测试 `canonical_unavailable` 与 `no_expected_leads` 两形态。
-- [ ] 4R3.4 续跑语义集中化(B3-1/B3-2,design D5 v6):单一函数定行处置——resume receipt 全行结转;`status ∈ {completed, verified_skip}` ∧ 无断言失败才可 verified-skip 复核;其余重跑沿用结转 prior;receipt 顶层 `resume_from {path, sha256}`(schema 显式加属性)。测试:末位模型 drift 续跑必重跑再停(非 skip);三跳链断裂 cycle 行结转保原始 prior;`resume_from` 在场。
-- [ ] 4R3.5 替换 receipt mode 0644(C3-1):`replay_driver.py` receipt 写路 mode 参数化为 0o644(reset receipt 等不变);runbook §2.3.2 增 node-27 `test -r` 前置与失败处置;design 措辞已改。
-- [ ] 4R3.6 tiles 守卫放宽(C3-3):`if not unlinked_paths and not deletable_keys` 两处;commit 期间中断纳入;reason 命名不带 `after_file_unlink` 误义;测试 `--no-file-cache` + commit 失败 → typed receipt。
-- [ ] 4R3.7 文档口径(C3-2):runbook §2.3.2 + 模块 docstring 注明信号中断按信号默认退出码(SIGINT=130)、receipt 为权威记录。
-- [ ] 4R3.8 复验:定向 pytest 绿 + ruff 绿 + openspec strict 绿 + `test_production_scheduler` 附带回归绿。
+- [x] 4R3.1 后装配不变量钳(retro 主动作,design D3.5 v6):`build_candidates` 全部 merge(含 post-sync 重建 `:1013`)之后统一终检强制 replay 关键键;偏差修复且记 `replay_invariant_clamp_applied`(列被覆写键与原值);replay 缺省纯 no-op。测试:A3-1 复现场景(`allow_slurm_status_sync=True`,repair 候选 sync 后)经钳恢复 convert;`replay_resubmit` 候选被人为 clobber 后经钳恢复 forecast;`slurm_state_sync` 审计证据保留(不整段跳过 `:1013` merge)。
+- [x] 4R3.2 merge 点审计测试:枚举 `scheduler_candidates.py` 全部 `_merge_state_evidence`/`_candidate_with_state_evidence` 调用点,断言各点在钳上游或自带 guard;新增点按构造失败。
+- [x] 4R3.3 repair 腿 fresh-zero-row 前提(A3-2):`_replay_repair_raw_restart_evidence` 开头 `_canonical_evidence_is_fresh_zero_row` 不满足 → None 落回 pre-change typed block;测试 `canonical_unavailable` 与 `no_expected_leads` 两形态。
+- [x] 4R3.4 续跑语义集中化(B3-1/B3-2,design D5 v6):单一函数定行处置——resume receipt 全行结转;`status ∈ {completed, verified_skip}` ∧ 无断言失败才可 verified-skip 复核;其余重跑沿用结转 prior;receipt 顶层 `resume_from {path, sha256}`(schema 显式加属性)。测试:末位模型 drift 续跑必重跑再停(非 skip);三跳链断裂 cycle 行结转保原始 prior;`resume_from` 在场。
+- [x] 4R3.5 替换 receipt mode 0644(C3-1):`replay_driver.py` receipt 写路 mode 参数化为 0o644(reset receipt 等不变);runbook §2.3.2 增 node-27 `test -r` 前置与失败处置;design 措辞已改。
+- [x] 4R3.6 tiles 守卫放宽(C3-3):`if not unlinked_paths and not deletable_keys` 两处;commit 期间中断纳入;reason 命名不带 `after_file_unlink` 误义;测试 `--no-file-cache` + commit 失败 → typed receipt。
+- [x] 4R3.7 文档口径(C3-2):runbook §2.3.2 + 模块 docstring 注明信号中断按信号默认退出码(SIGINT=130)、receipt 为权威记录。
+- [x] 4R3.8 复验:定向 pytest 绿 + ruff 绿 + openspec strict 绿 + `test_production_scheduler` 附带回归绿。
 
 ## 5. node-22 实机执行(merge 后,timer 保持停机)
 
