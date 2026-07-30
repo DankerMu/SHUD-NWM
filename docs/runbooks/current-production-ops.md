@@ -1659,10 +1659,11 @@ exit 3 的五个 reason（逐字与代码一致）。一次运行可能同时命
   merge 抛出的是**未分类异常**（不带 reason 的裸异常，如 CAS 之后 provider 锁释放段的
   `OSError`）时同样归到本 reason，此时 `merge_error_reason` 是合成标识
   `merge_unexpected_exception:<异常类型>`（如 `merge_unexpected_exception:OSError`），
-  原文在 stderr/receipt 的 `error` 字段。处置：
+  异常原文在 stderr 的 `error` 字段（receipt 只记 `merge_error_reason`，无 `error` 键）。处置：
   先看 stdout 摘要/receipt 的 `destination_entry_count_after` 与
-  `destination_entries_lost_count` —— **非 0 就转下面的 lost 分支停手**；为 0 且计数符合
-  预期则幂等重跑 enforce 拿一份干净 receipt。
+  `destination_entries_lost_count` —— **`destination_entries_lost_count` 非 0 就转下面的
+  lost 分支停手**；为 0 且 `destination_entry_count_after` 符合预期则幂等重跑 enforce
+  拿一份干净 receipt。
 - `receipt_write_failed_after_merge`：index 变更已提交但 receipt 写不下去，
   `receipt_failure_reason` 是底层原因。处置：**重跑前先看 stdout 摘要的
   `destination_entries_lost_count`——非 0 就按上面的 lost 分支停手，绝不重跑**（按严重度
