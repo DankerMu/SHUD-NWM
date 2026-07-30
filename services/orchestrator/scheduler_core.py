@@ -6,9 +6,12 @@ from services.orchestrator import scheduler_generation_gate as _generation_gate
 
 # Issue #1081 §8.1: sentinel that separates "declaration not yet loaded" from
 # "loaded and returned ``None``" (env unset — no declaration configured).
-# Re-exported from :mod:`scheduler_generation_gate` so the extraction stays
-# a single-source-of-truth (see A5 split under PR #1105 round-1 review).
-_CUTOVER_DECLARATION_UNLOADED = _generation_gate.CUTOVER_DECLARATION_UNLOADED
+# Read from the leaf module :mod:`scheduler_generation` (single source of
+# truth; the gate re-exports the same object).  Reading it from
+# ``scheduler_generation_gate`` would race the import cycle: when the gate is
+# imported first, this module executes while the gate is only partially
+# initialized and the attribute does not exist yet (#1194 review finding).
+_CUTOVER_DECLARATION_UNLOADED = _generation.CUTOVER_DECLARATION_UNLOADED
 
 
 def _db_free_file_registry_from_config(config: _scheduler.ProductionSchedulerConfig) -> _scheduler.ModelRegistryReader:
