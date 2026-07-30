@@ -6,11 +6,27 @@ two independent facts and writes a schema-versioned receipt:
 
 1. **Packaged-IC qualification** — read from the model package manifest
    referenced by the registry row (``resource_profile.manifest_uri``) using the
-   same criteria the scheduler gate applies at planning time
+   SAME two-tier criteria the scheduler gate applies at planning time
    (``services.orchestrator.scheduler_generation.classify_packaged_initial_condition``):
-   an ``included_files`` entry whose ``relative_path`` ends with ``.cfg.ic``,
-   whose ``sha256`` is not the empty-file digest, and whose ``size_bytes`` is
-   positive.
+
+   a. *inventory tier* — when the manifest carries an ``included_files``
+      inventory, qualification needs exactly ONE ``*.cfg.ic`` entry anywhere in
+      the inventory (a second one, e.g. a stray ``CALIB/*.cfg.ic``, is ambiguous
+      and disqualifies), that entry must be the CANONICAL one
+      (``<shud_input_name>.cfg.ic`` when the manifest names the SHUD input
+      directory, otherwise a top-level path), its ``sha256`` must differ from the
+      empty-file digest and its ``size_bytes`` must be positive.  No package
+      object is opened.
+   b. *object-probe tier* — when the manifest is readable but carries NO
+      ``included_files`` inventory (the direct-grid variant shape, whose only
+      top-level key is ``direct_grid_forcing``), the registry row's
+      ``resource_profile.shud_input_name`` and ``model_package_uri`` derive the
+      single canonical IC object ``{model_package_uri}{shud_input_name}.cfg.ic``
+      and a bounded no-follow stat + sha256 read of THAT object decides:
+      present and non-empty qualifies (carrying the probed digest), missing or
+      empty does not, and a failed read stays unreadable rather than "no IC".
+
+   Each row records which tier produced its verdict (``ic_qualification_source``).
 2. **What the earliest business run actually did** — the earliest cycle's run
    manifest ``initial_state.quality`` and ``runtime.init_mode``, discovered from
    the workspace lane (``{workspace_root}/runs/``) and the object-store lane
@@ -35,15 +51,18 @@ bounded directory listing, and the ONLY thing written is the receipt at
 ``--receipt-path``.  No production state, package, index, or journal content is
 modified.
 
-Limits recorded in the receipt: package objects are NOT re-hashed — qualification
-trusts the digests recorded in the package manifest (NFS IO budget).  A package
-manifest whose recorded digest disagrees with the object on disk is caught at run
-time by the runtime's end-to-end checksum verification, not here.
+Limits recorded in the receipt: inventory-tier package objects are NOT re-hashed
+— qualification trusts the digests recorded in the package manifest (NFS IO
+budget), and a manifest whose recorded digest disagrees with the object on disk
+is caught at run time by the runtime's end-to-end checksum verification, not
+here.  Object-probe-tier rows DO hash one object (the canonical
+``<shud_input_name>.cfg.ic``) because that shape publishes no digest to trust.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -66,10 +85,12 @@ from packages.common.safe_fs import (
 )
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.scheduler_generation import (
+    MAX_PACKAGED_IC_PROBE_BYTES,
     PACKAGED_IC_QUALIFIED,
     PACKAGED_IC_QUALITY,
     PACKAGED_IC_UNQUALIFIED,
     PACKAGED_IC_UNREADABLE,
+    PackagedIcObjectProbe,
     classify_packaged_initial_condition,
 )
 
@@ -233,17 +254,75 @@ def load_registered_models(registry_manifest: Path) -> list[dict[str, Any]]:
         if not model_id:
             continue
         resource_profile = model.get("resource_profile")
-        manifest_uri = ""
-        if isinstance(resource_profile, Mapping):
-            manifest_uri = str(resource_profile.get("manifest_uri") or "").strip()
+        profile = resource_profile if isinstance(resource_profile, Mapping) else {}
+        manifest_uri = str(profile.get("manifest_uri") or "").strip()
         if not manifest_uri:
             manifest_uri = str(model.get("manifest_uri") or "").strip()
-        rows.append({"model_id": model_id, "manifest_uri": manifest_uri})
+        # ``model_package_uri`` / ``shud_input_name`` feed the tier-(b) canonical
+        # object probe; the row-level fallback exists because the scheduler
+        # registry publishes ``model_package_uri`` at both levels.
+        model_package_uri = str(profile.get("model_package_uri") or "").strip()
+        if not model_package_uri:
+            model_package_uri = str(model.get("model_package_uri") or "").strip()
+        shud_input_name = str(profile.get("shud_input_name") or "").strip()
+        if not shud_input_name:
+            shud_input_name = str(model.get("shud_input_name") or "").strip()
+        rows.append(
+            {
+                "model_id": model_id,
+                "manifest_uri": manifest_uri,
+                "model_package_uri": model_package_uri,
+                "shud_input_name": shud_input_name,
+            }
+        )
     return sorted(rows, key=lambda row: row["model_id"])
 
 
+def _canonical_ic_object_probe(
+    object_uri: str,
+    *,
+    object_store_root: Path,
+    object_store_prefix: str,
+) -> PackagedIcObjectProbe:
+    """Bounded no-follow stat + sha256 probe of ONE canonical packaged-IC object.
+
+    The audit's tier-(b) mirror of the gate probe.  Still read-only: a bounded
+    ``read_bytes_limited_no_follow`` under the object-store containment root.
+    A probe that cannot complete reports ``unreadable_detail`` so the row stays
+    ``undetermined`` instead of being reported as a clean cold start.
+    """
+    key = _safe_relative_key(_object_key(object_uri, object_store_prefix))
+    if key is None:
+        return PackagedIcObjectProbe(
+            exists=False,
+            unreadable_detail="packaged initial condition object escapes the object-store root",
+        )
+    path = object_store_root / key
+    if not _is_regular_file(path, containment_root=object_store_root):
+        return PackagedIcObjectProbe(exists=False)
+    try:
+        content = read_bytes_limited_no_follow(
+            path, max_bytes=MAX_PACKAGED_IC_PROBE_BYTES, containment_root=object_store_root
+        )
+    except (OSError, SafeFilesystemError):
+        return PackagedIcObjectProbe(
+            exists=True,
+            unreadable_detail="packaged initial condition object could not be read",
+        )
+    if len(content) > MAX_PACKAGED_IC_PROBE_BYTES:
+        return PackagedIcObjectProbe(
+            exists=True,
+            unreadable_detail="packaged initial condition object exceeds the bounded probe limit",
+        )
+    return PackagedIcObjectProbe(
+        exists=True,
+        size_bytes=len(content),
+        sha256=hashlib.sha256(content).hexdigest(),
+    )
+
+
 def packaged_ic_qualification(
-    manifest_uri: str,
+    model: Mapping[str, Any],
     *,
     object_store_root: Path,
     object_store_prefix: str,
@@ -255,34 +334,29 @@ def packaged_ic_qualification(
     ``unreadable`` when the reference cannot be read or parsed, and otherwise
     the classifier's own verdict.  ``ic_qualified`` is tri-state: ``None`` means
     "cannot tell", which the verdict table refuses to collapse into either
-    defect or clean.
+    defect or clean.  ``ic_qualification_source`` names the tier that decided
+    (``inventory`` / ``object_probe``) and is ``None`` when no tier ran.
     """
+    manifest_uri = str(model.get("manifest_uri") or "").strip()
+    unknown: dict[str, Any] = {
+        "ic_status": PACKAGED_IC_UNREADABLE,
+        "ic_qualified": None,
+        "ic_sha256": None,
+        "ic_relative_path": None,
+        "ic_qualification_source": None,
+    }
     if not manifest_uri:
         return {
+            **unknown,
             "ic_status": "absent",
-            "ic_qualified": None,
-            "ic_sha256": None,
-            "ic_relative_path": None,
             "detail": "registry row publishes no package manifest reference",
         }
     key = _safe_relative_key(_object_key(manifest_uri, object_store_prefix))
     if key is None:
-        return {
-            "ic_status": PACKAGED_IC_UNREADABLE,
-            "ic_qualified": None,
-            "ic_sha256": None,
-            "ic_relative_path": None,
-            "detail": "package manifest reference escapes the object-store root",
-        }
+        return {**unknown, "detail": "package manifest reference escapes the object-store root"}
     path = object_store_root / key
     if not _is_regular_file(path, containment_root=object_store_root):
-        return {
-            "ic_status": PACKAGED_IC_UNREADABLE,
-            "ic_qualified": None,
-            "ic_sha256": None,
-            "ic_relative_path": None,
-            "detail": "package manifest object is missing or not a regular file",
-        }
+        return {**unknown, "detail": "package manifest object is missing or not a regular file"}
     try:
         payload = _read_json_no_follow(
             path, max_bytes=MAX_PACKAGE_MANIFEST_BYTES, containment_root=object_store_root
@@ -295,14 +369,19 @@ def packaged_ic_qualification(
         json.JSONDecodeError,
         RecursionError,
     ):
-        return {
-            "ic_status": PACKAGED_IC_UNREADABLE,
-            "ic_qualified": None,
-            "ic_sha256": None,
-            "ic_relative_path": None,
-            "detail": "package manifest could not be read or parsed",
-        }
-    signal = classify_packaged_initial_condition(payload)
+        return {**unknown, "detail": "package manifest could not be read or parsed"}
+    signal = classify_packaged_initial_condition(
+        payload,
+        resource_profile={
+            "model_package_uri": model.get("model_package_uri"),
+            "shud_input_name": model.get("shud_input_name"),
+        },
+        canonical_object_probe=lambda object_uri: _canonical_ic_object_probe(
+            object_uri,
+            object_store_root=object_store_root,
+            object_store_prefix=object_store_prefix,
+        ),
+    )
     qualified: bool | None
     if signal.status == PACKAGED_IC_QUALIFIED:
         qualified = True
@@ -315,6 +394,7 @@ def packaged_ic_qualification(
         "ic_qualified": qualified,
         "ic_sha256": signal.ic_sha256 or None,
         "ic_relative_path": signal.ic_relative_path or None,
+        "ic_qualification_source": signal.qualification_source or None,
     }
     if signal.detail:
         view["detail"] = signal.detail
@@ -446,7 +526,7 @@ def build_receipt(
     rows: list[dict[str, Any]] = []
     for model in models:
         qualification = packaged_ic_qualification(
-            model["manifest_uri"],
+            model,
             object_store_root=object_store_root,
             object_store_prefix=object_store_prefix,
         )
@@ -464,6 +544,7 @@ def build_receipt(
                 "ic_status": qualification["ic_status"],
                 "ic_sha256": qualification["ic_sha256"],
                 "ic_relative_path": qualification["ic_relative_path"],
+                "ic_qualification_source": qualification["ic_qualification_source"],
                 **evidence,
                 "verdict": classify_verdict(
                     ic_qualified=qualification["ic_qualified"],
@@ -489,14 +570,19 @@ def build_receipt(
             "registered_model_count": len(models),
         },
         "limits": {
-            "package_objects_rehashed": False,
+            "inventory_tier_package_objects_rehashed": False,
+            "probe_tier_max_object_bytes": MAX_PACKAGED_IC_PROBE_BYTES,
             "run_evidence_lanes": (
                 [OBJECT_STORE_LANE, WORKSPACE_LANE] if workspace_root is not None else [OBJECT_STORE_LANE]
             ),
             "note": (
-                "Packaged-IC qualification trusts the sha256/size_bytes recorded in each package "
-                "manifest; package objects are not re-hashed. End-to-end digest verification "
-                "happens at run time in the SHUD runtime, not in this audit."
+                "Every row records ic_qualification_source. 'inventory' rows trust the "
+                "sha256/size_bytes recorded in the package manifest and re-hash no package "
+                "object; end-to-end digest verification for them happens at run time in the "
+                "SHUD runtime, not in this audit. 'object_probe' rows (inventory-less "
+                "direct-grid variant manifests) carry the sha256 of a bounded no-follow read "
+                "of the single canonical <shud_input_name>.cfg.ic object, and their inventory "
+                "is not enumerable, so package-level IC ambiguity is not detectable for them."
             ),
         },
         "totals": totals,

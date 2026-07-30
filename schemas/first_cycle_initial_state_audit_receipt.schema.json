@@ -55,9 +55,15 @@
     "limits": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["package_objects_rehashed", "run_evidence_lanes", "note"],
+      "required": [
+        "inventory_tier_package_objects_rehashed",
+        "probe_tier_max_object_bytes",
+        "run_evidence_lanes",
+        "note"
+      ],
       "properties": {
-        "package_objects_rehashed": { "const": false },
+        "inventory_tier_package_objects_rehashed": { "const": false },
+        "probe_tier_max_object_bytes": { "type": "integer", "minimum": 1 },
         "run_evidence_lanes": {
           "type": "array",
           "items": { "type": "string", "enum": ["workspace_runs", "object_store_runs"] }
@@ -93,6 +99,7 @@
         "ic_status",
         "ic_sha256",
         "ic_relative_path",
+        "ic_qualification_source",
         "first_cycle",
         "first_run_id",
         "first_run_quality",
@@ -107,6 +114,11 @@
         "ic_status": { "type": "string", "enum": ["qualified", "unqualified", "unreadable", "absent"] },
         "ic_sha256": { "type": ["string", "null"] },
         "ic_relative_path": { "type": ["string", "null"] },
+        "ic_qualification_source": {
+          "type": ["string", "null"],
+          "enum": ["inventory", "object_probe", null],
+          "description": "Which qualification tier decided this row: the package manifest inventory (recorded digest) or a bounded probe of the canonical packaged-IC object (probed digest). Null when no tier ran (absent or unreadable manifest)."
+        },
         "first_cycle": { "type": ["string", "null"] },
         "first_run_id": { "type": ["string", "null"] },
         "first_run_quality": { "type": ["string", "null"] },

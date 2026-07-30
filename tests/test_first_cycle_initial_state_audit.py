@@ -131,6 +131,56 @@ class _Fixture:
             }
         )
 
+    def add_direct_grid_variant_model(
+        self,
+        model_id: str,
+        *,
+        shud_input_name: str,
+        ic_content: bytes | None,
+    ) -> None:
+        """Register a production-shaped direct-grid variant row.
+
+        The variant manifest carries ONLY ``direct_grid_forcing`` (no
+        ``included_files``), so qualification can only come from the tier-(b)
+        probe of ``{model_package_uri}{shud_input_name}.cfg.ic``.  This is the
+        shape all 36 production registry rows currently have.
+        """
+        package_key = f"models/direct_grid_variants/{model_id}/dg-gfs-abcdef123456/package"
+        manifest_key = f"{package_key}/manifest.json"
+        _write_json(
+            self.object_store_root / manifest_key,
+            {
+                "direct_grid_forcing": {
+                    "forcing_mapping_mode": "direct_grid",
+                    "binding_uri": f"s3://nhms/{package_key}/direct_grid_binding.json",
+                    "model_input_package_id": "dg-input-abcdef123456",
+                    "applicable_source_ids": ["gfs", "IFS"],
+                    "grid_id": "gfs_0p25",
+                    "station_bindings": [],
+                }
+            },
+        )
+        if ic_content is not None:
+            ic_path = self.object_store_root / package_key / f"{shud_input_name}.cfg.ic"
+            ic_path.parent.mkdir(parents=True, exist_ok=True)
+            ic_path.write_bytes(ic_content)
+        self._models.append(
+            {
+                "model_id": model_id,
+                "basin_id": model_id,
+                "model_package_uri": f"s3://nhms/{package_key}/",
+                "manifest_uri": f"s3://nhms/{manifest_key}",
+                "package_checksum": _sha256(f"package-{model_id}".encode()),
+                "resource_profile": {
+                    "lineage": "direct_grid_variant_registration",
+                    "manifest_uri": f"s3://nhms/{manifest_key}",
+                    "model_package_uri": f"s3://nhms/{package_key}/",
+                    "shud_input_name": shud_input_name,
+                    "package_checksum": _sha256(f"package-{model_id}".encode()),
+                },
+            }
+        )
+
     def add_object_store_run(self, manifest: dict[str, Any]) -> None:
         _write_json(
             self.object_store_root / "runs" / str(manifest["run_id"]) / "input" / "manifest.json",
@@ -325,16 +375,82 @@ def test_audit_picks_the_earliest_cycle_across_workspace_and_object_store(tmp_pa
     assert row["verdict"] == "cold_start_with_qualified_ic"
 
 
-def test_audit_receipt_declares_manifest_digest_only_limits(tmp_path: Path) -> None:
+def test_audit_qualifies_a_direct_grid_variant_row_through_the_object_probe(tmp_path: Path) -> None:
+    """The production 36/36 shape: no inventory, qualification from the IC object.
+
+    Without tier (b) this row reads as ``cold_start_no_ic`` — a false negative on
+    every production model, which is exactly what task 5.1 will hit on node-22.
+    """
+    fixture = _Fixture(tmp_path)
+    ic_content = b"2\t1\t29626560.000000\n1\t0.1\t0.2\t0.3\t0.4\n"
+    fixture.add_direct_grid_variant_model(
+        "dth_ls_dg_gfs", shud_input_name="dth_ls", ic_content=ic_content
+    )
+    fixture.add_object_store_run(
+        _run_manifest(
+            run_id="fcst_gfs_2026070500_dth_ls_dg_gfs",
+            model_id="dth_ls_dg_gfs",
+            source_id="GFS",
+            cycle_time="2026-07-05T00:00:00Z",
+            quality="cold_start_no_state",
+            init_mode=1,
+        )
+    )
+    fixture.publish_registry()
+
+    assert audit.main(fixture.argv("--sources", "gfs")) == 0
+
+    row = _row(fixture.receipt(), "dth_ls_dg_gfs", "gfs")
+    assert row["verdict"] == "cold_start_with_qualified_ic"
+    assert row["ic_qualified"] is True
+    assert row["ic_qualification_source"] == "object_probe"
+    assert row["ic_sha256"] == _sha256(ic_content)
+    assert row["ic_relative_path"] == "dth_ls.cfg.ic"
+
+
+@pytest.mark.parametrize("ic_content", [None, b""], ids=["object_missing", "object_empty"])
+def test_audit_variant_row_without_a_usable_ic_object_is_not_qualified(
+    tmp_path: Path, ic_content: bytes | None
+) -> None:
+    fixture = _Fixture(tmp_path)
+    fixture.add_direct_grid_variant_model(
+        "empty_dg", shud_input_name="empty_basin", ic_content=ic_content
+    )
+    fixture.add_object_store_run(
+        _run_manifest(
+            run_id="fcst_gfs_2026070500_empty_dg",
+            model_id="empty_dg",
+            source_id="GFS",
+            cycle_time="2026-07-05T00:00:00Z",
+            quality="cold_start_no_state",
+            init_mode=1,
+        )
+    )
+    fixture.publish_registry()
+
+    assert audit.main(fixture.argv("--sources", "gfs")) == 0
+
+    row = _row(fixture.receipt(), "empty_dg", "gfs")
+    assert row["verdict"] == "cold_start_no_ic"
+    assert row["ic_qualified"] is False
+    assert row["ic_qualification_source"] == "object_probe"
+    assert row["ic_sha256"] is None
+
+
+def test_audit_receipt_declares_per_row_qualification_source_limits(tmp_path: Path) -> None:
     fixture = _Fixture(tmp_path)
     fixture.add_model("dth_ls", _package_manifest("dth_ls"))
     fixture.publish_registry()
 
     assert audit.main(fixture.argv("--sources", "gfs")) == 0
 
-    limits = fixture.receipt()["limits"]
-    assert limits["package_objects_rehashed"] is False
-    assert "manifest" in str(limits["note"]).lower()
+    receipt = fixture.receipt()
+    limits = receipt["limits"]
+    assert limits["inventory_tier_package_objects_rehashed"] is False
+    assert limits["probe_tier_max_object_bytes"] == audit.MAX_PACKAGED_IC_PROBE_BYTES
+    note = str(limits["note"]).lower()
+    assert "inventory" in note and "object_probe" in note
+    assert _row(receipt, "dth_ls", "gfs")["ic_qualification_source"] == "inventory"
 
 
 def test_audit_writes_nothing_outside_the_receipt_path(tmp_path: Path) -> None:
