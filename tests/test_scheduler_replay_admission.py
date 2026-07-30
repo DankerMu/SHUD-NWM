@@ -3,11 +3,26 @@
 Decision-shape table under test (design D1 v3).  "covered" = replay admission
 active AND ``model_id`` in the closed set AND cycle inside the replay window.
 
-| ``state_decision.reason``      | not covered (pre-change ladder)                                                                                                                                       | covered                                                                                                     |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| ``terminal_hydro_success``     | mismatch retry ``retry_strict_warm_start_terminal_init_state_mismatch`` (budget-consulted) / ``blocked`` ``strict_warm_start_retry_budget_exhausted`` once the budget is spent / successor retry ``retry_strict_warm_start_successor_checkpoint_missing`` with ``restart_stage="state_save_qc"`` / plain terminal skip | ``retry`` reason ``replay_terminal_override``, evidence ``decision="replay_resubmit"``, restart_stage = restart_from_stage = ``forecast``, ``native_shud_resubmitted=True``, ``durable_output_reused=False``, retry budget never consulted |
-| ``terminal_pipeline_success``  | same ladder                                                                                                                                                             | same override                                                                                                |
-| ``terminal_completed_cycle``   | generic skip (``scheduler_candidates.py:495-502``)                                                                                                                      | UNCHANGED generic skip — no override, nothing submitted; the driver surfaces it as a convergence-timeout halt |
+``terminal_hydro_success`` (the observed production token)
+  * not covered -- the pre-change ladder, unchanged: mismatch retry
+    ``retry_strict_warm_start_terminal_init_state_mismatch`` (budget-consulted),
+    degrading to ``blocked`` ``strict_warm_start_retry_budget_exhausted`` once the
+    budget is spent, or successor retry
+    ``retry_strict_warm_start_successor_checkpoint_missing`` with
+    ``restart_stage="state_save_qc"``, or the plain terminal skip.
+  * covered -- ``retry`` with reason ``replay_terminal_override`` and evidence
+    ``decision="replay_resubmit"``, ``restart_stage`` = ``restart_from_stage`` =
+    ``forecast``, ``native_shud_resubmitted=True``,
+    ``durable_output_reused=False``; the retry budget is never consulted.
+
+``terminal_pipeline_success``
+  * not covered -- same ladder as above.
+  * covered -- same override as above.
+
+``terminal_completed_cycle``
+  * not covered -- generic skip (``scheduler_candidates.py:495-502``).
+  * covered -- UNCHANGED generic skip: no override, nothing submitted; the driver
+    surfaces it as a convergence-timeout halt rather than silently resubmitting.
 """
 
 from __future__ import annotations
@@ -107,7 +122,9 @@ class _FakeRepository:
         return []
 
 
-def _candidate_factory(*, discovery: CycleDiscovery, model: _FakeModel, horizon: Mapping[str, Any]) -> SchedulerCandidate:
+def _candidate_factory(
+    *, discovery: CycleDiscovery, model: _FakeModel, horizon: Mapping[str, Any]
+) -> SchedulerCandidate:
     compact = discovery.cycle_time.strftime("%Y%m%d%H")
     return SchedulerCandidate(
         candidate_id=f"cand_{model.model_id}_{compact}",
